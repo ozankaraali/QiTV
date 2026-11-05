@@ -7527,6 +7527,19 @@ class BorrowedTests(LiveSessionCase):
         self.assertIsNone(self.live.park())  # it stops, given back, nothing parked
         self.assertEqual((self.engine.parks, self.given), ([], [True]))
 
+    def test_it_never_reaches_past_its_buffer_with_a_second_stream(self):
+        # The channel's server keeps a day, but a part or an archive would be a stream of the
+        # channel beside the recording's, which no budget slot counts.
+        self.borrow()
+        self.engine.buffer(
+            self.LENT, segments(0, 16), open_seq=16, live_edge=32.0, hls=True, window=86400.0
+        )
+        self.assertEqual(self.live.server_window(), 0.0)
+        build = lambda moment: ("http://example.test/archive.m3u8", moment)  # noqa: E731
+        self.assertFalse(self.live.play_archive(1.0, build, lambda kind: False))
+        self.live.seek_to(-600.0)  # ← past the buffer: within it, no part
+        self.assertEqual(self.engine.opened, [])
+
     def test_a_new_start_gives_the_last_one_back(self):
         self.borrow()
         self.start()  # another channel, opened as usual

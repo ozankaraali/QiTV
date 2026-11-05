@@ -71,7 +71,7 @@ from PySide6.QtCore import QEvent, QObject, QPoint, Qt, QTimer, QUrl, Signal
 from PySide6.QtGui import QPixmap, QWheelEvent
 from PySide6.QtWidgets import QAbstractScrollArea
 
-from services import external_players, favorites, recording
+from services import external_players, favorites, recording, recording_schedule
 from services.budgeted_stream import HeldSlot
 from services.casting import CastDevices
 from services.catalog import ALL_GROUP_ID, PROVIDER_LOADING_MESSAGE, shown_label
@@ -1746,16 +1746,13 @@ class TVController(QObject):
 
     def _listed(self, kept: dict) -> dict:
         """The live list's channel that `kept` (a scheduled recording's copy) is: by its
-        provider and id, else its name; `kept` itself when the list has none."""
+        provider, then its address, id or name (`recording_schedule.is_listed`); `kept` itself
+        when the list has none."""
         provider = str(kept.get("_provider") or "")
         for channel in self._all_live():
             if provider and item_provider.provider_name(self.catalog, channel) != provider:
                 continue
-            a, b = kept.get("id"), channel.get("id")
-            if a not in (None, "") and b not in (None, ""):
-                if str(a) == str(b):
-                    return channel
-            elif kept.get("name") and kept.get("name") == channel.get("name"):
+            if recording_schedule.is_listed(kept, channel):
                 return channel
         return kept
 

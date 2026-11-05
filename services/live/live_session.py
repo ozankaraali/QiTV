@@ -1306,8 +1306,9 @@ class LiveSession(QObject):
         """How many seconds the channel's own server keeps beyond the buffer (2.7): its HLS
         playlist's window back from now, less the time since the buffer's start (a kept
         buffer's gaps included: they have no width on the timeline), when that is
-        `WINDOW_MIN_S` or more; else 0.0."""
-        if self._phase is not _Phase.PIPELINE:
+        `WINDOW_MIN_S` or more; else 0.0. 2.9.7: 0.0 on a borrowed session: a part would be a
+        stream of the channel beside the recording's, which no budget slot counts."""
+        if self._phase is not _Phase.PIPELINE or self._borrowed is not None:
             return 0.0
         snapshot = self._snapshot()
         window = _number(snapshot.get("window_s"))
@@ -1339,10 +1340,11 @@ class LiveSession(QObject):
         provider with one stream the live upstream parks first. A first part that does not
         play has `fallback(kind)` play the address directly (catch-up, as before). False,
         doing nothing, when the buffer does not play, the moment is not before it, or its
-        one stream records."""
+        one stream records (2.9.7: or it plays a recording's borrowed session: its parts would
+        be streams no budget slot counts)."""
         if self._phase is not _Phase.PIPELINE or self._sid is None:
             return False
-        if self._one_stream and self._recording is not None:
+        if self._one_stream and self._recording is not None or self._borrowed is not None:
             return False
         snapshot = self._snapshot()
         parts = live_parts.from_state(snapshot.get("parts"))

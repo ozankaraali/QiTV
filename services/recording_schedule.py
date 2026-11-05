@@ -23,6 +23,7 @@ from datetime import date, datetime, time as clock_time, timedelta, tzinfo
 import json
 import logging
 import os
+import re
 import threading
 import time
 from typing import Any, Callable, Iterable, Mapping, Optional
@@ -203,6 +204,28 @@ def _timer_slots(item: dict, now: float, zone: Optional[tzinfo]) -> list[tuple[f
         for day in (today - timedelta(days=1), today, today + timedelta(days=1))
         if day.weekday() in days
     ]
+
+
+def is_listed(kept: dict, channel: dict) -> bool:
+    """2.9.7: a channel the schedule keeps (its address without the provider's account) is
+    `channel`, a list's: by their addresses when both have one, the account's place in it
+    standing for any account (an M3U's ids are its list's places, and its names may repeat
+    in other groups), http or https alike; else by id; else by name."""
+    a, b = str(kept.get("cmd") or "").strip(), str(channel.get("cmd") or "").strip()
+    if a and b:
+        pattern = re.escape(_bare(a))
+        for token in (_USER_Q, _PASSWORD_Q, _USER, _PASSWORD):
+            pattern = pattern.replace(re.escape(token), "[^/]+")
+        return re.fullmatch(pattern, _bare(b)) is not None
+    if kept.get("id") not in (None, "") and channel.get("id") not in (None, ""):
+        return str(kept.get("id")) == str(channel.get("id"))
+    name = str(kept.get("name") or "")
+    return bool(name) and name == str(channel.get("name") or "")
+
+
+def _bare(address: str) -> str:
+    """An address without its scheme."""
+    return address.split("://", 1)[-1]
 
 
 def same_channel(a: dict, b: dict) -> bool:

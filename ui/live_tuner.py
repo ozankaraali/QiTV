@@ -373,6 +373,8 @@ class LiveTuner(QObject):
             stream.start(**kwargs)
         except Exception as error:  # the stream gave its slot back and stopped the session
             logger.warning("Could not start the live channel (%s)", type(error).__name__)
+            if borrowed is not None:
+                borrowed.give_back()  # 2.9.7: its owner has it back (a second time: nothing)
             self._pause = False
             self.startFailed.emit(str(error))
             return

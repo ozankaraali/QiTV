@@ -508,7 +508,13 @@ class LiveControls(QObject):
             self._tuner.purpose,
             "the scheduled recording's stream" if borrowed is not None else "a stream of its own",
         )
-        self._tuner.tune(self.live_start(target, url), name, self.limit(target.item), borrowed)
+        try:
+            start, limit = self.live_start(target, url), self.limit(target.item)
+        except Exception:
+            if borrowed is not None:
+                borrowed.give_back()  # 2.9.7: never started: its owner has it back
+            raise
+        self._tuner.tune(start, name, limit, borrowed)
         return True
 
     def refuse_over_limit(self, target: Target) -> bool:
