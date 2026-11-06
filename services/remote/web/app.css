@@ -85,18 +85,21 @@ body[data-shown="guide"] .top .where, body[data-shown="library"] .top .where { d
 .now { flex: 1; min-width: 0; display: flex; align-items: center; gap: 12px; padding: 12px; border-radius: 18px; text-align: left; background: var(--raised); box-shadow: inset 0 0 0 1px var(--line); }
 .now.pressed { background: var(--raised-2); }
 /* Channels: the remote's middle (sections, arrows, Back/Search/More) becomes the channel list. */
-.resume { display: flex; align-items: center; justify-content: center; gap: 8px; width: 100%; padding: 11px 14px; border-radius: 16px; font-size: 15px; font-weight: 600; color: var(--text); background: var(--accent-fill); box-shadow: inset 0 0 0 1px var(--accent); }
+/* 2.9.7: Resume a raised button (its icon orange); the REC line the TV's warm row, its red tag */
+.resume { display: flex; align-items: center; justify-content: center; gap: 8px; width: 100%; padding: 11px 14px; border-radius: 12px; font-size: 15px; font-weight: 600; color: var(--text); background: var(--raised); box-shadow: inset 0 0 0 1px var(--line); }
+.resume svg { color: var(--accent); }
 .resume[hidden] { display: none; }
 .resume svg { width: 18px; height: 18px; }
 .resume span { min-width: 0; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .remote.on-phone > .resume { display: none; }
 /* 2.6: what records in the background, under the now-playing card; a tap: go back or stop. */
-.recline { display: flex; align-items: center; gap: 8px; width: 100%; padding: 10px 14px; border-radius: 16px; font-size: 15px; font-weight: 600; color: var(--text); background: rgba(214, 69, 58, 0.10); box-shadow: inset 0 0 0 1px rgba(214, 69, 58, 0.45); white-space: nowrap; overflow: hidden; }
+.recline { display: flex; align-items: center; gap: 10px; width: 100%; padding: 10px 12px; border-radius: 12px; font-size: 15px; font-weight: 600; color: var(--text); background: var(--warm-fill); box-shadow: inset 0 0 0 1px var(--warm-edge); white-space: nowrap; overflow: hidden; }
 .recline[hidden] { display: none; }
-.recline i { flex: none; width: 10px; height: 10px; border-radius: 50%; background: var(--live); }
-.recline .rec { flex: none; color: var(--live); font-weight: 700; }
+.recline i { display: none; }
+.recline .rec { flex: none; font-size: 10px; font-weight: 700; letter-spacing: 0.08em; padding: 2px 6px; border-radius: 5px; background: var(--live); color: #fff; }
+.recline .rec::before { content: "● "; }
 .recline .name { min-width: 0; overflow: hidden; text-overflow: ellipsis; }
-.recline .time { flex: none; margin-left: auto; color: var(--muted); font-variant-numeric: tabular-nums; }
+.recline .time { flex: none; margin-inline-start: auto; font-size: 16px; font-weight: 300; color: var(--muted); font-variant-numeric: tabular-nums; }
 .recline.pressed { background: var(--raised-2); }
 /* 2.9.7: the channel list's button: an icon in the top line, on the Remote only, lit while open */
 .top .lister { display: none; margin-inline-start: auto; }
@@ -157,27 +160,25 @@ body[data-shown="remote"] .top .lister { display: grid; }
 .pad {
   position: relative; min-height: 140px; max-height: var(--pad); aspect-ratio: 1; align-self: center; border-radius: 50%; overflow: hidden;
   container-type: size; /* OK's word grows and shrinks with the pad */
-  background:
-    linear-gradient(45deg, transparent calc(50% - 0.5px), rgba(238, 242, 246, 0.07) 50%, transparent calc(50% + 0.5px)),
-    linear-gradient(-45deg, transparent calc(50% - 0.5px), rgba(238, 242, 246, 0.07) 50%, transparent calc(50% + 0.5px)),
-    radial-gradient(circle at 50% 30%, #1d252f, #11161d 72%);
-  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.07), 0 0 0 1px var(--line), 0 18px 36px rgba(0, 0, 0, 0.4);
+  /* 2.9.7: flat, as the TV's raised pieces: no moulded gloss or drop shadow */
+  background: var(--raised); box-shadow: inset 0 0 0 1px var(--line);
 }
 .wedge { position: absolute; inset: 0; color: var(--muted); transition: background 0.06s, color 0.06s; }
 .wedge.up { clip-path: polygon(50% 50%, 0 0, 100% 0); }
 .wedge.right { clip-path: polygon(50% 50%, 100% 0, 100% 100%); }
 .wedge.down { clip-path: polygon(50% 50%, 100% 100%, 0 100%); }
 .wedge.left { clip-path: polygon(50% 50%, 0 100%, 0 0); }
-.wedge svg { position: absolute; width: 28px; height: 28px; stroke-width: 2.4; }
-.wedge.up svg { top: 9%; left: calc(50% - 14px); }
-.wedge.down svg { bottom: 9%; left: calc(50% - 14px); }
-.wedge.left svg { left: 9%; top: calc(50% - 14px); }
-.wedge.right svg { right: 9%; top: calc(50% - 14px); }
+.wedge svg { position: absolute; width: 24px; height: 24px; stroke-width: 2; }
+.wedge.up svg { top: 9%; left: calc(50% - 12px); }
+.wedge.down svg { bottom: 9%; left: calc(50% - 12px); }
+.wedge.left svg { left: 9%; top: calc(50% - 12px); }
+.wedge.right svg { right: 9%; top: calc(50% - 12px); }
 .wedge.pressed { background: var(--accent-fill); color: var(--accent); }
 .ok {
   position: absolute; left: 50%; top: 50%; width: 41%; height: 41%; transform: translate(-50%, -50%); border-radius: 50%; z-index: 2;
-  font-size: 18px; font-size: min(18px, 10cqw); font-weight: 700; color: var(--text); white-space: nowrap; /* "Tamam" fits a small pad */
-  background: radial-gradient(circle at 50% 28%, #2b3440, #1b222b); box-shadow: 0 0 0 1px rgba(255, 255, 255, 0.08), 0 8px 18px rgba(0, 0, 0, 0.5);
+  font-size: 18px; font-size: min(18px, 10cqw); font-weight: 600; letter-spacing: 0.04em; color: var(--text); white-space: nowrap;
+  /* 2.9.7: OK as a remote prints it, in every language (a screen reader says the language's) */
+  background: var(--raised-2); box-shadow: inset 0 0 0 1px var(--line);
 }
 .ok.pressed { background: var(--accent); color: #1a0f0a; }
 /* The touchpad: a trackpad as wide as the screen, not the round pad, so its hint has room. */

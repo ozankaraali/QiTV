@@ -742,6 +742,7 @@ def scenario_screen_reader(rig: Rig) -> None:
         for selector, english in (
             ("#menuButton", "Menu"),
             ("[data-key=up]", "Up"),
+            ("[data-key=ok]", "OK"),  # its face says OK, as a remote's; its name is the language's
             ("[data-key=volup]", "Volume up"),
             ("[data-key=pp]", "Play or pause"),
             ("[data-key=chdown]", "Channel down"),
@@ -1940,6 +1941,15 @@ def scenario_small_screens(rig: Rig) -> None:
     lines = {**STATE, "back": "20:10", "rec": [{"id": "b1", "name": "Quayside", "since": since}]}
     rig.hub.send(sid, lines)
     rig.page.locator("#recLine").wait_for()
+    # 2.9.7: flat, as the TV's pieces (no moulded gloss): OK printed as a remote prints it,
+    # Resume a raised button, the REC line the warm row with its red tag
+    look = rig.page.evaluate(
+        """() => { const css = (s, p) => getComputedStyle(document.querySelector(s))[p];
+        return [css('.pad', 'backgroundImage'), css('.ok', 'backgroundImage'),
+                document.querySelector('.ok').textContent, css('.resume', 'backgroundColor'),
+                css('#recLine .rec', 'backgroundColor')]; }"""
+    )
+    assert look == ["none", "none", "OK", "rgb(21, 27, 35)", "rgb(214, 69, 58)"], look
     for width, height in ((320, 568), (375, 667), (390, 844), (667, 375), (844, 390)):
         rig.page.set_viewport_size({"width": width, "height": height})
         rig.page.wait_for_timeout(200)
