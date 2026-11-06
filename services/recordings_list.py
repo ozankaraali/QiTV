@@ -238,6 +238,7 @@ class RecordingsList(QObject):
     changed = Signal()
     places_changed = Signal()  # 2.9.7: a place's free space or reachability (files unchanged)
     delete_failed = Signal(str)  # why a recording's file stayed, in the active language
+    deleted = Signal(str)  # the path of a recording's file that went (review M7: its picture)
     # (signature, (items, places)), from the reading thread
     _scanned = Signal(object, object)
     # (its path, why it stayed: None when it went), from the deleting thread
@@ -324,6 +325,8 @@ class RecordingsList(QObject):
         name = os.path.basename(path)
         if failure is None and self._index is not None:  # 2.9.7: its entry goes with it
             self._index.forget(path)
+        if failure is None:
+            self.deleted.emit(path)
         if failure is not None:
             if getattr(failure, "winerror", None) in _IN_USE_WINERRORS:
                 self.delete_failed.emit(translate(DELETE_IN_USE, name=name))

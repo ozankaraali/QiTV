@@ -154,6 +154,7 @@ class TVPages(QObject):
             picture=self.thumbnails.url,
         )
         self.thumbnails.ready.connect(self._on_thumbnail)
+        self.recordings.deleted.connect(self.thumbnails.forget)  # its picture goes with it
         window.library_page.grid_posters.logoReady.connect(
             lambda _url: window.library_page.home.update()  # a frame loaded: the shelf shows it
         )

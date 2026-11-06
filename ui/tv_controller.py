@@ -2335,8 +2335,11 @@ class TVController(QObject):
         return sorted(recordings, key=lambda entry: entry[2])
 
     def scheduled_changed(self) -> None:
-        """What records on schedule changed (2.8): the REC sign follows."""
+        """What records on schedule changed (2.8): the REC sign follows, and a background
+        player kept for a next programme that did not start on it lets go (2.9.7)."""
         if not self._closed:
+            if self.sessions is not None:
+                self.sessions.recheck_aside()
             self._refresh_rec_sign()
 
     def asks_before_quit(self, then: Callable[[], object]) -> bool:
@@ -2376,7 +2379,14 @@ class TVController(QObject):
         name = self.scheduled_host(name) or name  # 2.9.7: one a player records: that player
         if sessions.large().name == name:
             return  # it shows large already
-        slot = next((s for s in sessions.background() if s.name == name), None)
+        background = sessions.background()
+        if all(s.name != name for s in background):  # release review M2: one that shows
+            if self.multiview_shown():
+                self.focus_tile(name)  # a tile: it takes the focus
+            elif sessions.pip_open() and getattr(sessions.small(), "name", None) == name:
+                self.swap()  # the small picture: it plays large
+            return
+        slot = next((s for s in background if s.name == name), None)
         if slot is None or slot.channel is None:
             return  # gone meanwhile (a phone's stale REC line)
         self.leave_multiview()  # the grid's tiles never show a background player
@@ -2495,8 +2505,11 @@ class TVController(QObject):
                 return True  # a tile has no background to record on in
         gives_way = self._external_launcher() is not None
         provider = item_provider.provider_name(self.catalog, channel)
-        if not gives_way and self.lendable_scheduled(channel, provider):
-            return False  # 2.9.7: its recording's session plays it: no stream to free
+        # 2.9.7: its recording's session plays it: no stream to free. Not in a tile, which
+        # opens a stream of its own (release review M1).
+        lends = not gives_way and not self.multiview_shown()
+        if lends and self.lendable_scheduled(channel, provider):
+            return False
         return self._ask_for_stream(channel, self._tuner.purpose, again, gives_way=gives_way)
 
     def _confirm_tile(self, name: str, then: Callable[[], None]) -> bool:
