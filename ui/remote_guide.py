@@ -32,7 +32,7 @@ from services.navigation import NavModel, NavNode, item_key, section_title
 from services.provider_ids import ALL_PROVIDERS, ALL_PROVIDERS_TITLE, mixed_group_id, provider_of
 from services.text_fold import fold
 from services.zapping import ZapContext
-from ui.remote_snapshots import Handles, find_page, programme_dict, stable_key
+from ui.remote_snapshots import Handles, find_page, programme_dict, stable_key, tint
 
 GROUPS_PAGE = 100
 GUIDE_PAGE = 50
@@ -192,6 +192,7 @@ class PhoneGuide(QObject):
             "id": handle,
             "name": str(channel.get("name") or "")[:TITLE_CHARS],
             "num": controller.channel_number(channel),
+            "tint": tint(str(channel.get("name") or "")),  # 2.9.7
             "rows": rows,
         }
         if getattr(self._window, "scheduler", None) is not None:
@@ -466,6 +467,7 @@ class PhoneGuide(QObject):
             "id": self.handles.issue("channel", (channel, group or "", channels or [])),
             "num": controller.channel_number(channel),
             "name": str(channel.get("name") or "")[:TITLE_CHARS],
+            "tint": tint(str(channel.get("name") or "")),  # 2.9.7: its tile's, as the TV's
             "playing": playing is not None and ZapContext.same(channel, playing),
         }
         if not self._bare:

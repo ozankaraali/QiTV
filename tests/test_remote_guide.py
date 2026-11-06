@@ -172,6 +172,15 @@ class PhoneGuideTests(WindowCase):
         self.assertAlmostEqual(on["start"], listed[0].start.timestamp())
         self.assertNotIn("loading", table)
 
+    def test_rows_and_the_timetable_carry_the_tvs_tile_colour(self):  # 2.9.7
+        from ui.remote_snapshots import tint
+
+        self.start()
+        rows = self.last()["rows"]
+        self.assertEqual([r["tint"] for r in rows], [tint(r["name"]) for r in rows])
+        self.guide.timetable(rows[0]["id"])
+        self.assertEqual(self.last("timetable")["tint"], tint("Channel 1"))
+
     def test_an_empty_timetable_says_when_the_guide_is_still_loading(self):
         self.start()
         channel = self.last()["rows"][0]["id"]

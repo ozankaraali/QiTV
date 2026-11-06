@@ -277,6 +277,14 @@ class PhoneLibraryTests(unittest.TestCase):
         [found] = self.last("genres")["titles"]
         self.assertNotIn("plays", found)
 
+    def test_a_films_card_carries_its_hue(self):  # 2.9.7: the Library's generated card
+        from ui.library.poster_grid import card_hue
+
+        film = {"id": "m1", "name": "Salt Roads"}
+        self.assertEqual(
+            self.library._title_row(film, None, "movie")["hue"], round(card_hue("Salt Roads"), 3)
+        )
+
     def test_a_recording_plays_on_the_phone_one_to_come_not(self):
         """2.8: a recording plays where the phone watches (from QiTV's home door); a scheduled
         one is still to come."""
@@ -592,6 +600,19 @@ class PhoneRecordingsTests(unittest.TestCase):  # 2.9.7: the phone's Recordings 
         self.assertEqual(first["badge"], {"text": "NEW", "tone": "accent"})
         self.assertEqual(first["len"], "45 min")
         self.assertEqual(first["ch"], "Northwind News")
+
+    def test_cards_carry_their_hue_and_tiles_their_tint(self):  # 2.9.7
+        from ui.library.poster_grid import card_hue
+        from ui.remote_snapshots import tint
+
+        keys = {r["title"]: r["id"] for r in self.rows()["rows"]}
+        self.library.titles("recordings", keys["Northwind News"], 0, "")
+        first = self.last("library")["items"][0]
+        self.assertEqual(first["tint"], tint("Northwind News"))
+        self.assertEqual(first["hue"], round(card_hue("Northwind News"), 3))
+        self.library.titles("recordings", keys["Coming up"], 0, "")
+        late = self.last("library")["items"][1]
+        self.assertEqual(late["tint"], tint("Harbor News 24"))
 
     def test_a_find_narrows_the_channels_and_finds_recordings(self):
         message = self.rows("night")

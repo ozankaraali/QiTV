@@ -30,7 +30,8 @@ from services.navigation import item_key
 from services.provider_ids import ALL_PROVIDERS, provider_of
 from services.search import Hit
 from services.text_fold import fold
-from ui.remote_snapshots import Handles, find_page, stable_key
+from ui.library.poster_grid import card_hue
+from ui.remote_snapshots import Handles, find_page, stable_key, tint
 
 GENRES_PAGE = 100
 LIBRARY_PAGE = 50
@@ -237,6 +238,7 @@ class PhoneLibrary(QObject):
             "title": title_of(item)[:TITLE_CHARS],
             "sub": str(item.get("year") or item.get("series_name") or recorded or "")[:TITLE_CHARS],
         }
+        row["hue"] = round(card_hue(title_of(item)), 3)  # 2.9.7: the Library's generated card
         progress = model.progress(item) if kind == model.item_kind(item) else None
         if progress is not None:  # (a series found on Continue has none of its own)
             row["progress"] = round(progress, 3)
@@ -388,6 +390,8 @@ class PhoneLibrary(QObject):
             "sub": under[:TITLE_CHARS],
             "plays": True,
             "ch": str(item.get("_channel") or "")[:TITLE_CHARS],  # its tile's colour
+            "tint": tint(str(item.get("_channel") or "")),  # 2.9.7: as the TV's
+            "hue": round(card_hue(str(item.get("_channel") or "")), 3),  # its card's
         }
         if library is not None:  # the desktop tile's badges: its length, NEW
             length, new = library.badges(item)[:2]
@@ -416,6 +420,7 @@ class PhoneLibrary(QObject):
             "sub": " · ".join(part for part in (when, entry.channel) if part)[:TITLE_CHARS],
             "acts": acts,
             "ch": entry.channel[:TITLE_CHARS],  # its tile's colour
+            "tint": tint(entry.channel),  # 2.9.7: as the TV's
         }
         if self._rec_library is not None and entry.status:  # the desktop tile's status badge
             _when, text, tone = self._rec_library.badges(rl.desk_tile(entry))
