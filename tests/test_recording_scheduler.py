@@ -196,6 +196,15 @@ class SchedulerTests(unittest.TestCase):
         self.engine.recordingEnded.emit(rid, ENDED, path, 1_000)
         self.assertEqual(self.index.get(path)["stop"], self.now)
 
+    def test_quitting_mid_recording_notes_where_its_file_ends(self):  # release review
+        self.scheduled_now()
+        sid = self.engine.opened[0][0]
+        self.engine.sessionReady.emit(sid)
+        rid, _sid, path, *_ = self.engine.recordings[0]
+        self.now = (T0 + timedelta(minutes=50)).timestamp()  # twenty minutes in
+        self.scheduler.shutdown()  # its end (recordingEnded) may come after QiTV is gone
+        self.assertEqual(self.index.get(path)["stop"], self.now)
+
     def test_a_portal_that_answered_only_over_http_records_over_http(self):  # 2.8.1
         memory = mock.patch.object(provider_api, "_http_only", set())
         memory.start()
@@ -672,6 +681,23 @@ class SchedulerTests(unittest.TestCase):
         self.assertEqual(self.engine.closed, [sid])
         self.engine.sessionClosed.emit(sid)
         self.assertEqual(self.budget.holders("P"), [])
+
+    def test_a_recording_that_breaks_while_watched_records_the_rest_meanwhile(self):  # release
+        sid, rid, path = self.lent()
+        borrowed = self.scheduler.lend(self.LISTED, "P", "main")  # watched behind live
+        self.now = (T0 + timedelta(minutes=40)).timestamp()
+        self.engine.sessionFailed.emit(sid, "http", "HTTP 502")  # the provider's stream broke
+        self.engine.recordingEnded.emit(rid, "stopped", path, 9_000)
+        self.pump()
+        self.assertEqual(self.engine.closed, [])  # the viewer keeps what is buffered
+        self.assertEqual(self.budget.holders("P"), [])  # no stream of it is open any more
+        self.assertFalse(self.scheduler.lendable(self.LISTED, "P"))  # nobody borrows it now
+        self.at(41, 10)  # without waiting for the viewer to catch up or leave
+        self.assertEqual(len(self.catalogs.asked), 2)  # the rest records on a stream of its own
+        borrowed.give_back()
+        self.assertEqual(self.engine.closed, [sid])
+        self.engine.sessionClosed.emit(sid)
+        self.scheduler.shutdown()
 
     def test_the_next_programme_records_on_a_session_kept_for_a_viewer(self):
         sid, rid, path = self.lent()

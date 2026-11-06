@@ -181,6 +181,7 @@ class _Run:
     handing: Optional[_Run] = None  # the next programme it hands its session to
     covers: list[rs.Job] = field(default_factory=list)  # the jobs within it, in its file
     serving: bool = False  # 2.9.7: its recording ended; its session stays for a viewer
+    gone: bool = False  # 2.9.7: ... its stream broke: the viewer's buffer alone, lent no more
     host: Any = None  # 2.9.7: the player's LiveSession it records on (no session of its own)
     host_name: str = ""  # ... that player's name ("main", "pip", "b1" …)
 
@@ -311,7 +312,7 @@ class RecordingScheduler(QObject):
                 self._said_busy.discard(key)
                 self._said(attempt.job, attempt.state, attempt.why)
         self._missed_meanwhile(now)
-        busy = {job.key for run in self._runs for job in (run.job, *run.covers)}
+        busy = {job.key for run in self._runs if not run.gone for job in (run.job, *run.covers)}
         due = self.schedule.due(now, self._guide)
         for job in sorted(due, key=lambda job: (job.start, -job.stop)):  # the longest first
             if job.key in busy:
@@ -331,7 +332,7 @@ class RecordingScheduler(QObject):
     def _missed_meanwhile(self, now: float) -> None:
         """One-time programmes whose window passed while QiTV ran without a try (the computer
         slept through it): said missed now, not as closed at the next start."""
-        busy = {job.key for run in self._runs for job in (run.job, *run.covers)}
+        busy = {job.key for run in self._runs if not run.gone for job in (run.job, *run.covers)}
         missed = self.schedule.missed_before(now, why="asleep", busy=busy | set(self._tries))
         if missed:
             titles = ", ".join(str(m.get("title") or "") for m in missed)
@@ -586,6 +587,7 @@ class RecordingScheduler(QObject):
             if (
                 run.sid
                 and (recording or run.serving)
+                and not run.gone
                 and run.job.provider == provider
                 and _same_channel(run.job.channel, channel)
             ):
@@ -654,6 +656,8 @@ class RecordingScheduler(QObject):
                 self._stop(run)
             if recording and not run.ended:  # its end did not come at once
                 run.ended = True
+                if self._index is not None:  # 2.9.7: what the file holds (its tile's length)
+                    self._index.ended(run.path, self._clock())
                 self.schedule.noted(run.job, rs.RECORDED, path=run.path)
                 self.schedule.unstarted(run.job)
         self._closed = True
@@ -668,6 +672,7 @@ class RecordingScheduler(QObject):
                 for r in self._runs
                 if r.serving
                 and r.sid
+                and not r.gone  # its stream broke: a new one records
                 and r.job.provider == job.provider
                 and rs.same_channel(r.job.channel, job.channel)
             ),
@@ -949,6 +954,17 @@ class RecordingScheduler(QObject):
             self._release(run)
             return
         if run.sid and self._lent.get(run.sid):
+            if run.retry is not None and not run.user_stopped:
+                # 2.9.7: its stream broke while a player watches it (behind live, from the
+                # buffer): the viewer keeps the buffer, and the rest is tried again now, not
+                # when they catch up or leave. Nothing reads from the provider any more: its
+                # stream goes back, and the session is lent no more.
+                state, why = run.retry
+                self._tries[run.job.key] = _Try(run.job, self._clock() + RETRY_S, state, why)
+                run.retry, run.gone = None, True
+                if run.ticket != DENIED:
+                    self._budget.release(run.ticket)
+                    run.ticket = DENIED
             self._serve(run)  # 2.9.7: a player watches it: it stays open for them
             return
         self._engine.close_session(run.sid)

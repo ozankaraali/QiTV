@@ -1058,6 +1058,15 @@ class KeptTests(LiveSessionCase):
         """As SessionManager does for a recording in the background (Stage C review I2)."""
         self.live.recordingChanged.connect(lambda recording: recording or self.live.stop())
 
+    def test_a_recording_names_its_file_while_it_records(self):  # 2.9.7: its end, at quit
+        self.ready([], open_seq=4, live_edge=3.0)
+        self.playback.set_state(PlaybackState.PLAYING)
+        self.assertIsNone(self.live.recording_path())
+        self.assertTrue(self.live.start_recording("/Movies/QiTV/One.ts"))
+        self.assertEqual(self.live.recording_path(), "/Movies/QiTV/One.ts")
+        self.live.stop_recording()
+        self.assertIsNone(self.live.recording_path())
+
     def test_a_stop_at_the_recordings_end_in_a_fall_back_plays_nothing(self):
         sid = self.ready([], open_seq=4, live_edge=3.0)
         self.playback.set_state(PlaybackState.PLAYING)

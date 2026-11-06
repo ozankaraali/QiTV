@@ -154,6 +154,23 @@ class RecordTimerDialogTests(unittest.TestCase):
         self.assertIs(dialog.chosen_channel(), channels[2])
         self.assertTrue(dialog.schedule_button.isEnabled())
 
+    def test_of_two_channels_with_one_name_the_one_chosen_is_scheduled(self):  # 2.9.7
+        channels = [{"name": "Films HD", "id": 1}, {"name": "News"}, {"name": "Films HD", "id": 2}]
+        dialog = self.dialog(channels=channels, chosen=channels[2])
+        self.assertIs(dialog.chosen_channel(), channels[2])  # the one playing, not its namesake
+        dialog.channel_choice.setCurrentIndex(0)
+        self.assertIs(dialog.chosen_channel(), channels[0])
+
+    def test_every_providers_channels_open_at_once(self):  # 2.9.7: 200,000 across providers
+        import time
+
+        channels = [{"name": f"Channel {k}"} for k in range(200_000)]
+        started = time.monotonic()
+        dialog = self.dialog(channels=channels, chosen=channels[-1])
+        dialog.adjustSize()  # the dialog sized as it shows
+        self.assertLess(time.monotonic() - started, 2.0)
+        self.assertIs(dialog.chosen_channel(), channels[-1])
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -16,7 +16,7 @@ from dataclasses import dataclass, field
 from datetime import date, datetime, timedelta, tzinfo
 from typing import Callable, Optional
 
-from PySide6.QtCore import QDate, QLocale, Qt, QTime
+from PySide6.QtCore import QDate, QLocale, QStringListModel, Qt, QTime
 from PySide6.QtWidgets import (
     QComboBox,
     QCompleter,
@@ -26,6 +26,7 @@ from PySide6.QtWidgets import (
     QHBoxLayout,
     QLabel,
     QLineEdit,
+    QListView,
     QPushButton,
     QTimeEdit,
     QWidget,
@@ -227,15 +228,24 @@ class RecordTimerDialog(QDialog):
         """The channels by name (with their provider's when they come from several), typed
         to find one anywhere in its name."""
         providers = {str(c.get("_provider") or "") for c in channels}
-        box = QComboBox(self)
-        box.setEditable(True)
-        box.setInsertPolicy(QComboBox.InsertPolicy.NoInsert)
-        box.setMaxVisibleItems(15)
+        names = []
         for channel in channels:
             name = str(channel.get("name") or "")
             if len(providers) > 1 and channel.get("_provider"):
                 name = f"{name} · {channel.get('_provider')}"
-            box.addItem(name)
+            names.append(name)
+        box = QComboBox(self)
+        box.setEditable(True)
+        box.setInsertPolicy(QComboBox.InsertPolicy.NoInsert)
+        box.setMaxVisibleItems(15)
+        # every provider's channels (200,000 and more): one model, rows of one height and the
+        # box as wide as a name needs, so no row is measured (one by one, they froze the window)
+        box.setModel(QStringListModel(names, box))
+        box.setSizeAdjustPolicy(QComboBox.SizeAdjustPolicy.AdjustToMinimumContentsLengthWithIcon)
+        box.setMinimumContentsLength(28)
+        view = box.view()
+        if isinstance(view, QListView):
+            view.setUniformItemSizes(True)
         completer = QCompleter(box.model(), box)
         completer.setCaseSensitivity(Qt.CaseSensitivity.CaseInsensitive)
         completer.setFilterMode(Qt.MatchFlag.MatchContains)
@@ -255,5 +265,9 @@ class RecordTimerDialog(QDialog):
         box = self.channel_choice
         if box is None or self._channels is None:
             return None
-        index = box.findText(box.currentText(), Qt.MatchFlag.MatchExactly)
+        # the row chosen, while its name is what shows (names repeat: a provider's groups, two
+        # providers); else the first by the name typed
+        text, index = box.currentText(), box.currentIndex()
+        if not (0 <= index < box.count() and box.itemText(index) == text):
+            index = box.findText(text, Qt.MatchFlag.MatchExactly)
         return self._channels[index] if 0 <= index < len(self._channels) else None

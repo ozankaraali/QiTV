@@ -224,6 +224,15 @@ class RecordingAsideTests(_RecordCase):
         self.assertEqual(seen, [False])
         self.assertIn(("stop_recording",), self.since_recording(recording))
 
+    def test_quitting_notes_where_each_recording_ends(self):  # release review: its length
+        ended = []
+        self.controller.note_recording_end = ended.append
+        recording = self.record_large(0)
+        self.leave_for(1)
+        self.controller.stop_live()  # its end (recordingEnded) may come after QiTV is gone
+        (path,) = [call[1] for call in recording.calls if call[0] == "start_recording"]
+        self.assertEqual(ended, [path])
+
     def test_quitting_stops_the_recordings_in_the_background(self):
         recording = self.record_large(0)
         self.leave_for(1)

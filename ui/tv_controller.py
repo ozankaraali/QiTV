@@ -816,6 +816,9 @@ class TVController(QObject):
         if self.sessions is None and large is not None and self._large_records():
             recording.append(large)
         for live in recording:
+            path = live.recording_path()
+            if path:  # 2.9.7: its end may come after QiTV is gone: its tile's length is now
+                self.note_recording_end(path)
             live.stop_recording()
         self._resume = self._current if self._has_media() else None
         self.leave_multiview(keep_pip=False)

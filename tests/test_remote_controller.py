@@ -1042,6 +1042,15 @@ class WatchHereTests(WindowCase):
         self.assertEqual(pressed, [("airing:x@1", "skip")])
         self.assertIs(library._rec_library, self.window.screens.recordings_library)
 
+    def test_the_phones_recordings_follow_the_schedule_with_the_page_hidden(self):  # release
+        remote = self.window.remote
+        library = remote._library("s3")
+        self.addCleanup(remote._libraries.pop, "s3", None)
+        library.genres("recordings", 0, "")  # the phone shows its Recordings
+        library._settle.stop()
+        self.window._schedule_changed()  # a recording started, waits or failed
+        self.assertTrue(library._settle.isActive())  # it comes again, as the TV's page would
+
     def test_a_search_result_plays_on_the_phone(self):
         self.connect()
         remote = self.window.remote

@@ -683,6 +683,7 @@ class LiveSession(QObject):
         # every recording started whose end the engine has not told yet.
         self._recording: Optional[str] = None
         self._recording_since: Optional[float] = None
+        self._recording_path: Optional[str] = None  # 2.9.7: its file
         self._recordings: set[str] = set()
         # 2.6, kept buffers: a parked session to take back at the next begin (`start(kept=)`),
         # its resume on its way, what was kept playing without its stream (the resume
@@ -1491,6 +1492,11 @@ class LiveSession(QObject):
         """When the recording under way started (this object's clock); None without one."""
         return self._recording_since if self._recording is not None else None
 
+    def recording_path(self) -> Optional[str]:
+        """2.9.7: the file the recording under way writes; None without one (at QiTV's quit,
+        its end is noted from here: the helper's own word may come too late)."""
+        return self._recording_path if self._recording is not None else None
+
     def recording_id(self) -> Optional[str]:
         """2.9.7: the helper's id of the recording under way (its `recordingEnded` names it);
         None without one."""
@@ -1524,6 +1530,7 @@ class LiveSession(QObject):
         if not rid:
             return False
         self._recording, self._recording_since = rid, self._clock()
+        self._recording_path = path
         self._recordings.add(rid)
         self.recordingChanged.emit(True)
         return True
