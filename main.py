@@ -301,6 +301,11 @@ if __name__ == "__main__":
     from services.vlc_bundle import use_bundled_vlc
 
     use_bundled_vlc()
+    # And before anything connects: a computer without the authorities where the bundle's
+    # OpenSSL looks (a Mac without Homebrew) trusts certifi's, which the bundle carries.
+    from services.authorities import use_bundled_authorities
+
+    use_bundled_authorities()
     smoke = smoke_arguments(sys.argv, os.environ)
     if smoke is not None:
         from scripts.smoke_tv import main as smoke_main
