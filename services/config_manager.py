@@ -145,8 +145,11 @@ class ConfigManager:
     LIVE_LATENCY_CHOICES = ("auto", "low", "normal", "stable")
     # Bumped by each one-time change of the latency default (`update_patcher`).
     LATENCY_DEFAULTS_VERSION = 1
-    DEFAULT_OPTION_MOUSE_WHEEL = "channel"
+    # 2.9.7: the wheel over the picture changes the volume (over the channel list, channels);
+    # every saved choice is moved to it once (`update_patcher`), a choice made later stays.
+    DEFAULT_OPTION_MOUSE_WHEEL = "volume"
     MOUSE_WHEEL_CHOICES = ("channel", "volume")
+    WHEEL_DEFAULTS_VERSION = 1
     DEFAULT_OPTION_START_WITH_LAST_CHANNEL = True
     DEFAULT_OPTION_TIMESHIFT_ENABLED = False
     # 2.1: hardware again (a frozen picture falls back to software: services.picture_watch);
@@ -342,6 +345,17 @@ class ConfigManager:
             self.config["latency_defaults_version"] = ConfigManager.LATENCY_DEFAULTS_VERSION
             need_update = True
 
+        # 2.9.7: the wheel over the picture changes the volume. Every config saved "channel"
+        # as the default, so a choice and the old default look alike: everyone is moved
+        # once, and a choice made afterwards stays. Older 2.x builds ignore the key and read
+        # "volume" as one of their choices.
+        wheel_defaults = self._defaults_version("wheel_defaults_version")
+        if wheel_defaults < 1:
+            self.config["mouse_wheel_action"] = "volume"
+        if wheel_defaults < ConfigManager.WHEEL_DEFAULTS_VERSION:
+            self.config["wheel_defaults_version"] = ConfigManager.WHEEL_DEFAULTS_VERSION
+            need_update = True
+
         if need_update:
             self._save_at_start()
 
@@ -508,6 +522,17 @@ class ConfigManager:
     # system's Movies (Videos) folder's QiTV (services.recording).
     recordings_dir = _config_property(
         "recordings_dir", "", coerce=lambda value: value if isinstance(value, str) else ""
+    )
+    # 2.9.7, optional (older builds ignore it): more folders whose recordings the Library and
+    # the Recordings page list (where new recordings go is `recordings_dir`'s).
+    recording_places = _config_property(
+        "recording_places",
+        [],
+        coerce=lambda value: (
+            [v for v in value if isinstance(v, str) and v.strip()]
+            if isinstance(value, list)
+            else []
+        ),
     )
     # 2.8, optional (older builds ignore it): Jellyfin and Emby. Which version of a title plays
     # ("screen": the 4K one on a 4K screen, or when it's the only one; "always", "never"); the

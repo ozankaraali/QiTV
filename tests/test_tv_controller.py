@@ -821,6 +821,7 @@ class FakeLiveSession(QObject):
         self.resizes = []  # the memory buffer sizes the multiview gave it
         self.background = False  # a multiview tile without the focus
         self.recorded_since = None  # recording since (a clock reading), else None
+        self.recorded_path = None
 
     def recordable(self):
         return self.running and self.mode == "pipeline"
@@ -831,11 +832,14 @@ class FakeLiveSession(QObject):
     def recording_since(self):
         return self.recorded_since
 
+    def recording_path(self):
+        return self.recorded_path if self.recording() else None
+
     def start_recording(self, path, **kwargs):
         if not self.recordable() or self.recording():
             return False
         self.calls.append(("start_recording", path))
-        self.recorded_since = 100.0
+        self.recorded_since, self.recorded_path = 100.0, path
         self.recordingChanged.emit(True)
         return True
 

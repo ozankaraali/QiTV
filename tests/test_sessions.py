@@ -11,6 +11,7 @@ from timer_fixtures import elapse
 
 from services.budgeted_stream import RELEASE_CAP_MS, BudgetedStream
 from services.connection_budget import ConnectionBudget
+from services.live.live_session import Borrowed
 from services.live.source import STREAM_LIMIT, STREAM_REFUSED
 from services.sessions import MAIN_LEVEL, PIP_FAILED, PIP_LEVEL, SessionManager, Slot, limit_message
 
@@ -336,6 +337,42 @@ class SessionManagerTests(_Fixture):
         self.main.live.timelineChanged.emit({"lag": 0.0})
         self.pip.live.timelineChanged.emit({"lag": 200.0})
         self.assertEqual(self.timelines, [("main", {"lag": 0.0}), ("pip", {"lag": 200.0})])
+
+
+class BorrowedPipTests(_Fixture):  # 2.9.7: the small picture of a channel recording on schedule
+    def borrowed(self):
+        self.given = []
+        return Borrowed("lent1", lambda: self.given.append(True))
+
+    def test_it_opens_on_the_recordings_session_with_no_slot_even_at_the_limit(self):
+        ticket = self.hold_main(1)  # the provider's one stream is taken
+        lent = self.borrowed()
+        self.manager.open_pip(
+            B,
+            provider=provider(1),
+            xtream_max=None,
+            start_kwargs=dict(start_kwargs(B), borrowed=lent),
+        )
+        self.pump()
+        self.assertEqual(self.denied, [])
+        self.assertIn(("live", "start", B["cmd"]), self.calls("pip"))
+        self.assertIs(self.pip.live.kwargs["borrowed"], lent)
+        self.assertFalse(self.pip.live.kwargs["one_stream"])
+        self.assertTrue(self.manager.pip_open())
+        self.assertEqual(self.budget.holders(PROVIDER), ["main"])  # no slot of its own
+        self.budget.release(ticket)
+
+    def test_one_closed_before_it_started_goes_back(self):
+        self.pip.live.auto_release = False  # the small picture's last stream still closes
+        self.open_granted(A)
+        self.manager.open_pip(
+            B,
+            provider=provider(2),
+            xtream_max=None,
+            start_kwargs=dict(start_kwargs(B), borrowed=self.borrowed()),
+        )
+        self.manager.close_pip()
+        self.assertEqual(self.given, [True])
 
 
 class RoleTests(_Fixture):
@@ -1027,6 +1064,17 @@ class SetAsideTests(_Fixture):
         self.main.live.recordingChanged.emit(False)
         self.assertEqual(self.manager.background(), [])
         self.assertEqual(self.main_tuner.stops, 1)  # it leaves its channel as any player does
+
+    def test_one_the_scheduler_still_wants_stays_on_its_channel(self):  # 2.9.7 review 2
+        """The next programme on its channel takes over on it (back to back): it stays."""
+        self.manager.wanted = lambda live: live is self.main.live
+        self.manager.set_aside("main")
+        self.main.live.recordingChanged.emit(False)
+        self.assertEqual([s.name for s in self.manager.background()], ["main"])
+        self.assertEqual(self.main_tuner.stops, 0)
+        self.manager.wanted = lambda live: False  # the next one's end: now it goes
+        self.main.live.recordingChanged.emit(False)
+        self.assertEqual(self.manager.background(), [])
 
     def test_not_while_the_grid_shows(self):
         self.manager.enter_grid()

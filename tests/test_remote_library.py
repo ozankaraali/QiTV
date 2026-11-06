@@ -277,6 +277,14 @@ class PhoneLibraryTests(unittest.TestCase):
         [found] = self.last("genres")["titles"]
         self.assertNotIn("plays", found)
 
+    def test_a_films_card_carries_its_hue(self):  # 2.9.7: the Library's generated card
+        from ui.library.poster_grid import card_hue
+
+        film = {"id": "m1", "name": "Salt Roads"}
+        self.assertEqual(
+            self.library._title_row(film, None, "movie")["hue"], round(card_hue("Salt Roads"), 3)
+        )
+
     def test_a_recording_plays_on_the_phone_one_to_come_not(self):
         """2.8: a recording plays where the phone watches (from QiTV's home door); a scheduled
         one is still to come."""
@@ -477,3 +485,249 @@ def titles(message):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+def rec_file(path, channel, title, start):
+    return {
+        "id": f"recording:{path.rsplit('/', 1)[-1]}",
+        "name": title,
+        "path": path,
+        "added": str(int(start)),
+        "_recording": True,
+        "_title": title,
+        "_channel": channel,
+        "_provider": "Demo TV",
+        "_logo": "",
+        "_start": start,
+        "_stop": start + 2700,
+        "_size": 10,
+    }
+
+
+class PhoneRecordingsTests(unittest.TestCase):  # 2.9.7: the phone's Recordings section
+    def setUp(self):
+        from services import recording_desk as desk
+        from services.recordings_library import RecordingsLibrary
+
+        self.desk = desk
+        self.config = make_config()
+        self.sent = []
+        files = [
+            rec_file("/r/c.ts", "Harbor Sports", "Night Match", 3_000.0),
+            rec_file("/r/b.ts", "Northwind News", "Evening News", 2_000.0),
+            rec_file("/r/a.ts", "Northwind News", "Kitchen Stories", 1_000.0),
+        ]
+        self.entries = [
+            desk.Entry(
+                "rec:sched:x",
+                desk.NOW,
+                "Evening News",
+                tone=desk.REC,
+                status="REC",
+                buttons=(desk.button(desk.WATCH), desk.button(desk.STOP, desk.DANGER)),
+                channel="Northwind News",
+            ),
+            desk.Entry(
+                "airing:t@100000",
+                desk.COMING,
+                "Late film",
+                buttons=(desk.button(desk.EDIT), desk.button(desk.SKIP)),
+                start=100_000.0,
+                channel="Harbor News 24",
+            ),
+            desk.Entry("add:coming", desk.COMING, "", buttons=(desk.button(desk.ADD_TIMER),)),
+            desk.Entry("rule:s", desk.RULES, "Kitchen Stories"),
+        ]
+        rec_library = RecordingsLibrary(
+            lambda: files, lambda: {}, WatchState(self.config), self.config
+        )
+        self.library = PhoneLibrary(
+            catalog_with(),
+            self.config,
+            WatchState(self.config),
+            self.sent.append,
+            rec_library=rec_library,
+            rec_entries=lambda: list(self.entries),
+        )
+        self.addCleanup(self.library.deleteLater)
+
+    def last(self, kind):
+        return [m for m in self.sent if m["t"] == kind][-1]
+
+    def rows(self, find=""):
+        self.library.genres("recordings", 0, find)
+        return self.last("genres")
+
+    def test_its_rows_are_coming_up_all_and_each_channel(self):
+        rows = [(r["title"], r.get("count")) for r in self.rows()["rows"]]
+        self.assertEqual(
+            rows,
+            [("Coming up", 2), ("All", 3), ("Northwind News", 2), ("Harbor Sports", 1)],
+        )
+        self.assertEqual(self.last("genres")["section"], "recordings")
+
+    def test_a_channels_recordings_play_and_say_when(self):
+        keys = {r["title"]: r["id"] for r in self.rows()["rows"]}
+        self.library.titles("recordings", keys["Northwind News"], 0, "")
+        page = self.last("library")
+        self.assertEqual([i["title"] for i in page["items"]], ["Evening News", "Kitchen Stories"])
+        self.assertTrue(all(i["plays"] for i in page["items"]))
+        self.assertTrue(page["items"][0]["sub"].startswith("Northwind News · "))
+        kind, (item, item_kind, _items) = self.library.handles.get(page["items"][0]["id"])
+        self.assertEqual((kind, item_kind, item["path"]), ("title", "recording", "/r/b.ts"))
+
+    def test_coming_up_lists_airings_with_their_own_actions(self):
+        keys = {r["title"]: r["id"] for r in self.rows()["rows"]}
+        self.library.titles("recordings", keys["Coming up"], 0, "")
+        items = self.last("library")["items"]
+        self.assertEqual([i["title"] for i in items], ["Evening News", "Late film"])
+        self.assertNotIn("plays", items[0])
+        self.assertEqual(  # Watch (on the TV) and Stop, as the desktop's row
+            items[0]["acts"],
+            [
+                {"do": "watch", "label": "Watch", "danger": False},
+                {"do": "stop", "label": "Stop", "danger": True},
+            ],
+        )
+        self.assertEqual(items[1]["acts"], [{"do": "skip", "label": "Skip", "danger": False}])
+        self.assertEqual(
+            self.library.handles.get(items[1]["id"]), ("desk", ("airing:t@100000", ("skip",)))
+        )
+
+    def test_coming_up_rows_are_the_homes_what_records_now_with_its_end(self):  # 2.9.7
+        keys = {r["title"]: r["id"] for r in self.rows()["rows"]}
+        self.library.titles("recordings", keys["Coming up"], 0, "")
+        now, late = self.last("library")["items"]
+        self.assertEqual(late["channel"], "Harbor News 24")
+        self.assertRegex(late["time"], r"^\d\d:\d\d$")  # a thin numeral, the day under it
+        self.assertTrue(late["day"])
+        self.assertNotIn("until", late)
+        self.assertEqual(now["channel"], "Northwind News")
+        self.assertIn("until", now)  # the warm row's line
+        self.assertIn("elapsed_s", now)
+
+    def test_rows_carry_the_desktops_badges_and_their_channel(self):  # 2.9.7: one look
+        keys = {r["title"]: r["id"] for r in self.rows()["rows"]}
+        self.library.titles("recordings", keys["Coming up"], 0, "")
+        now, late = self.last("library")["items"]
+        self.assertEqual(now["badge"], {"text": "REC", "tone": "live"})
+        self.assertEqual(now["ch"], "Northwind News")
+        self.assertNotIn("badge", late)  # no status of its own: none
+        self.library.titles("recordings", keys["Northwind News"], 0, "")
+        first = self.last("library")["items"][0]
+        self.assertEqual(first["badge"], {"text": "NEW", "tone": "accent"})
+        self.assertEqual(first["len"], "45 min")
+        self.assertEqual(first["ch"], "Northwind News")
+
+    def test_cards_carry_their_hue_and_tiles_their_tint(self):  # 2.9.7
+        from ui.library.poster_grid import card_hue
+        from ui.remote_snapshots import tint
+
+        keys = {r["title"]: r["id"] for r in self.rows()["rows"]}
+        self.library.titles("recordings", keys["Northwind News"], 0, "")
+        first = self.last("library")["items"][0]
+        self.assertEqual(first["tint"], tint("Northwind News"))
+        self.assertEqual(first["hue"], round(card_hue("Northwind News"), 3))
+        self.library.titles("recordings", keys["Coming up"], 0, "")
+        late = self.last("library")["items"][1]
+        self.assertEqual(late["tint"], tint("Harbor News 24"))
+
+    def home(self):
+        return self.rows()["home"]
+
+    def test_the_home_has_what_records_the_next_airings_and_the_latest(self):  # 2.9.7
+        keys = {r["title"]: r["id"] for r in self.rows()["rows"]}
+        home = self.home()
+        self.assertEqual([n["title"] for n in home["now"]], ["Evening News"])
+        self.assertEqual([a["do"] for a in home["now"][0]["acts"]], ["watch", "stop"])
+        (late,) = home["coming"]
+        self.assertEqual((late["title"], late["channel"]), ("Late film", "Harbor News 24"))
+        self.assertRegex(late["time"], r"^\d\d:\d\d$")
+        self.assertTrue(late["day"])
+        self.assertEqual(
+            [r["title"] for r in home["recent"]], ["Night Match", "Evening News", "Kitchen Stories"]
+        )
+        self.assertEqual((home["recorded"], home["more"]), (3, 0))
+        self.assertEqual(home["coming_key"], keys["Coming up"])
+
+    def test_a_recording_now_shows_once(self):
+        desk = self.desk
+        self.entries[0] = desk.Entry(
+            "rec:sched:t@100000", desk.NOW, "Late film", status="REC", channel="Harbor News 24"
+        )
+        home = self.home()
+        self.assertEqual([n["title"] for n in home["now"]], ["Late film"])
+        self.assertEqual(home["coming"], [])  # its airing isn't repeated below it
+
+    def test_many_recording_now_are_compact_rows_four_at_most(self):
+        desk = self.desk
+        now = [
+            desk.Entry(f"rec:b{k}", desk.NOW, f"Channel {k}", channel=f"Channel {k}")
+            for k in range(6)
+        ]
+        self.entries[:1] = now
+        home = self.home()
+        self.assertEqual(len(home["now"]), 4)
+        # the rest stay as rows, at Coming up's head, each with its end (its Stop reachable)
+        titles = [c["title"] for c in home["coming"]]
+        self.assertEqual(titles, ["Channel 4", "Channel 5", "Late film"])
+        self.assertIn("until", home["coming"][0])
+
+    def test_a_recording_waiting_for_a_stream_is_no_rec_and_shows_once(self):  # 2.9.7
+        desk = self.desk
+        self.entries.insert(
+            1,
+            desk.Entry(
+                "wait:t@100000",
+                desk.NOW,
+                "Late film",
+                tone=desk.WARN,
+                status="Waiting",
+                buttons=(desk.button(desk.TRY_NOW, desk.ACCENT), desk.button(desk.SKIP)),
+                channel="Harbor News 24",
+            ),
+        )
+        home = self.home()
+        self.assertEqual([n["title"] for n in home["now"]], ["Evening News"])  # it doesn't record
+        (waiting,) = home["coming"]  # at Coming up's head; its airing isn't listed again
+        self.assertEqual(waiting["kind"], "WAITING")
+        self.assertEqual(waiting["badge"]["tone"], "warn")
+        self.assertEqual([a["do"] for a in waiting["acts"]], ["try_now", "skip"])
+
+    def test_coming_up_lists_a_recording_now_once(self):  # 2.9.7: as the home
+        desk = self.desk
+        self.entries[0] = desk.Entry(
+            "rec:sched:t@100000", desk.NOW, "Late film", status="REC", channel="Harbor News 24"
+        )
+        keys = {r["title"]: (r["id"], r.get("count")) for r in self.rows()["rows"]}
+        self.assertEqual(keys["Coming up"][1], 1)
+        self.library.titles("recordings", keys["Coming up"][0], 0, "")
+        self.assertEqual([i["title"] for i in self.last("library")["items"]], ["Late film"])
+
+    def test_a_push_with_nothing_new_issues_no_handles(self):  # 2.9.7: the phone's stay good
+        self.rows()
+        issued = len(self.library.handles._items)
+        for _ in range(3):  # the desk refreshes every 2 s while the TV shows it
+            self.library._push()
+        self.assertEqual(len(self.library.handles._items), issued)
+
+    def test_a_push_resends_the_home_when_its_actions_change(self):  # 2.9.7
+        import dataclasses
+
+        desk = self.desk
+        self.rows()
+        sent = len(self.sent)
+        self.entries[0] = dataclasses.replace(
+            self.entries[0], buttons=(desk.button(desk.STOP, desk.DANGER),)
+        )
+        self.library._push()
+        self.assertEqual(len(self.sent), sent + 1)
+        self.assertEqual([a["do"] for a in self.home()["now"][0]["acts"]], ["stop"])
+
+    def test_a_find_sends_no_home(self):
+        self.assertNotIn("home", self.rows("night"))
+
+    def test_a_find_narrows_the_channels_and_finds_recordings(self):
+        message = self.rows("night")
+        self.assertEqual([t["title"] for t in message["titles"]], ["Night Match"])
+        self.assertTrue(message["titles"][0]["plays"])

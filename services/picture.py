@@ -11,6 +11,11 @@ they are set again (`services.playback`). A live channel's choice is kept for it
 a small file of its own, `picture.json` beside the config (`ChannelPictures`, as
 `services.sound_sync` keeps the sound's sync); a film's stays with its player while it plays.
 
+The shape the picture shows in (`shown_ratio`: the stream's own from its size and its pixels'
+aspect, `display_ratio`, or the 16:9 or 4:3 chosen) is the shape a box holding it small takes,
+so it shows no bars: the picture in picture's, in the window and floating (`box_size`: as
+large as the 16:9 box was).
+
 Deinterlacing (`DEINTERLACING`, the config's `deinterlace`): Auto is libVLC's own: pictures the
 decoder marks interlaced are deinterlaced (VLC's `deinterlace=-1`, its "auto" method, X); On
 deinterlaces every picture (yadif) and Off none. libVLC 3 can set only on or off
@@ -81,6 +86,10 @@ _CODECS = {
     "lpcm": "PCM",
 }
 KBPS_PER_UNIT = 8000  # libVLC's bitrates are bytes per microsecond
+# A picture's shape (width / height), for the boxes that hold it small (the PiP's).
+WIDE_RATIO, STANDARD_RATIO = 16 / 9, 4 / 3
+MIN_RATIO, MAX_RATIO = 1 / 3, 3.0  # beyond these a box shows bars rather than a sliver
+SAME_SHAPE = 0.01  # ratios this close (relatively) are one shape
 
 
 def shape_args(aspect: str, width: int, height: int) -> tuple[Optional[str], Optional[str]]:
@@ -92,6 +101,61 @@ def shape_args(aspect: str, width: int, height: int) -> tuple[Optional[str], Opt
         common = math.gcd(width, height)
         return None, f"{width // common}:{height // common}"
     return None, None
+
+
+def display_ratio(
+    width: int, height: int, sar: tuple[int, int] = (1, 1), rotated: bool = False
+) -> Optional[float]:
+    """The shape (width / height) a `width` × `height` picture shows in, its pixels' own aspect
+    (`sar`, numerator and denominator; 0 for either: square pixels) counted, and turned a
+    quarter for a `rotated` stream (libVLC turns it upright); None while its size is unknown.
+    Kept between MIN_RATIO and MAX_RATIO: a box shaped like a sliver shows nothing."""
+    if width <= 0 or height <= 0:
+        return None
+    num, den = sar
+    ratio = width * num / (height * den) if num > 0 and den > 0 else width / height
+    ratio = 1 / ratio if rotated else ratio
+    return max(MIN_RATIO, min(MAX_RATIO, ratio))
+
+
+def shown_ratio(aspect: str, stream_ratio: Optional[float]) -> Optional[float]:
+    """The shape the picture shows in with `aspect` chosen: 16:9 or 4:3, which stretch it, the
+    stream's own (`stream_ratio`; None while unknown) with Auto, and None with Fill, which crops
+    it to whatever shape its surface has."""
+    if aspect == WIDE:
+        return WIDE_RATIO
+    if aspect == STANDARD:
+        return STANDARD_RATIO
+    if aspect == FILL:
+        return None
+    return stream_ratio
+
+
+def same_shape(a: float, b: float) -> bool:
+    """Two ratios no box would tell apart (a 1% difference shows as a pixel or two of bar)."""
+    return abs(a - b) <= SAME_SHAPE * max(a, b)
+
+
+def box_ratio(ratio: Optional[float]) -> float:
+    """The shape a box takes for a picture of `ratio`: 16:9 when it is unknown or as good as
+    16:9, so a 16:9 box stays exactly the size it always was."""
+    if ratio is None or ratio <= 0 or same_shape(ratio, WIDE_RATIO):
+        return WIDE_RATIO
+    return max(MIN_RATIO, min(MAX_RATIO, ratio))
+
+
+def box_height(width: int, ratio: float) -> int:
+    """The height of a box `width` wide in `ratio`'s shape (`box_ratio`'s)."""
+    return round(width * 9 / 16) if ratio == WIDE_RATIO else round(width / ratio)
+
+
+def box_size(wide_width: float, ratio: Optional[float]) -> tuple[int, int]:
+    """A box (width, height) as large as a 16:9 one `wide_width` wide, in the shape of a
+    picture of `ratio`: a 4:3 or an upright picture gets as much of the screen as a 16:9
+    one, not a sliver or a tower of it."""
+    shape = box_ratio(ratio)
+    width = round(wide_width * math.sqrt(shape / WIDE_RATIO))
+    return width, box_height(width, shape)
 
 
 def aspect_name(aspect: str) -> str:

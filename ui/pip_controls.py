@@ -140,6 +140,7 @@ class PipControls(QObject):
         sound: Optional[Callable[[Any, dict], None]] = None,
         explain: Callable[[dict, str], None] = lambda item, title: None,
         needs_stream: Callable[[dict, str, Callable[[], None]], bool] = lambda *_: False,
+        borrow: Callable[[dict, str, str], Any] = lambda item, provider, purpose: None,
         parent: Optional[QObject] = None,
     ) -> None:
         """`frame` is the PipFrame and `label` the PipLabel (None in tests without them).
@@ -178,6 +179,7 @@ class PipControls(QObject):
         self._sound = sound
         self._explain = explain  # why a failure happened, at the item's provider
         self._needs_stream = needs_stream
+        self._borrow = borrow  # 2.9.7: a scheduled recording's session, to watch small
         self._views: dict[str, SlotView] = {}
         self._wanted: Optional[tuple[Target, ZapContext]] = None  # its link is on its way
         self._link: Optional[Target] = None  # the one link request in flight
@@ -384,6 +386,8 @@ class PipControls(QObject):
             self._show_background(background.name, context)
             return
         purpose = str(getattr(self.sessions.other().tuner, "purpose", ""))
+        if self._open_borrowed(channel, context, purpose):
+            return  # 2.9.7: it records on schedule: its recording's session plays small
         if self._needs_stream(channel, purpose, lambda: self.open_channel(channel, context)):
             return  # no stream is free while a recording holds one: asked
         if self._limit_reached(channel):
@@ -396,6 +400,24 @@ class PipControls(QObject):
         target = Target(channel, "live", title, group_key=group, source=source)
         self._wanted = (target, context if context is not None else ZapContext())
         self._request(target)
+
+    def _open_borrowed(self, channel: dict, context: Optional[ZapContext], purpose: str) -> bool:
+        """2.9.7: `channel` records on schedule: the small picture plays that recording's
+        session (no link, no stream of its own, nothing to ask). False: none records it."""
+        provider = item_provider.provider_name(self.catalog, channel)
+        borrowed = self._borrow(channel, provider, purpose)
+        if borrowed is None:
+            return False
+        self._wanted = None  # a link on its way is for nothing now
+        title = str(channel.get("name") or "")
+        group = context.group_key if context is not None else ""
+        source = (context.source if context is not None else "") or item_provider.pick_source(
+            self.catalog, channel, group
+        )
+        target = Target(channel, "live", title, group_key=group, source=source)
+        url = str(channel.get("cmd") or "")  # the session reads it already: never opened
+        self._open(target, context if context is not None else ZapContext(), url, borrowed)
+        return True
 
     def _refused(self) -> bool:
         """A movie plays, or channels play in an external player: no PiP (toasted)."""
@@ -613,7 +635,7 @@ class PipControls(QObject):
         elif wanted is not None:
             self._request(wanted[0])
 
-    def _open(self, target: Target, context: ZapContext, url: str) -> None:
+    def _open(self, target: Target, context: ZapContext, url: str, borrowed: Any = None) -> None:
         sessions = self.sessions
         self._set_small_aside()  # 2.6: a small picture that records records on
         slot = sessions.other()
@@ -626,6 +648,8 @@ class PipControls(QObject):
         self._cancel_reopen()
         # The small picture keeps its time-shift in memory: one disk ring at most.
         kwargs = start_kwargs(self._live_start(target, url), self.config, disk=False)
+        if borrowed is not None:
+            kwargs["borrowed"] = borrowed  # 2.9.7: no slot of its own (SessionManager)
         sessions.open_pip(
             target.item,
             provider=item_provider.provider_dict(self.catalog, target.item),
@@ -855,8 +879,8 @@ class PipControls(QObject):
     def _state_text(self, slot: Slot, *, live: bool = True) -> str:
         if not live:  # a movie, an episode or an archive swapped small: its title alone
             return FINISHED_TEXT if slot.name in self._ended else ""
-        if slot.live.recording():
-            return REC  # its recording goes on small (2.2)
+        if slot.live.recording() or lender_records(slot.live):
+            return REC  # its recording goes on small (2.2; 2.9.7: one on schedule too)
         mode = slot.live.mode
         timeline = self._timelines.get(slot.name)
         if mode == "pipeline" and timeline is not None:
@@ -867,3 +891,9 @@ class PipControls(QObject):
         if mode == "direct" or (direct is not None and direct()):
             return LIVE
         return CONNECTING
+
+
+def lender_records(live: Any) -> bool:
+    """2.9.7: `live` plays a scheduled recording's session that still records."""
+    check = getattr(live, "lender_records", None)
+    return bool(check()) if callable(check) else False

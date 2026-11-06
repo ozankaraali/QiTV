@@ -508,6 +508,7 @@ class TVWindowTests(WindowCase):
                 ("Series", "Ctrl+3"),
                 ("Multiview", "Ctrl+4"),
                 ("Restore Last Multiview", ""),
+                ("Recordings", "Ctrl+5"),  # 2.9.7: the Library's Recordings page
                 ("Search", "Ctrl+F"),
                 ("Refresh Channels and Guide", "Ctrl+R"),
                 ("Refresh Films and Series", "Ctrl+Shift+R"),  # 2.8: the Library's
@@ -543,6 +544,7 @@ class TVWindowTests(WindowCase):
             "Movies",
             "Series",
             "Multiview",
+            "Recordings",  # 2.9.7
             "Search",
             "Refresh Channels and Guide",
             "Refresh Films and Series",
@@ -1183,6 +1185,264 @@ class StuckWorkerExitTests(unittest.TestCase):
 
 
 FAR_LIST = 11_000  # one provider's live channels, numbered 1 to 11,000
+
+
+class RecordingsIndexWindowTests(WindowCase):  # 2.9.7
+    def test_a_recording_started_with_r_is_noted_in_the_index(self):
+        channel = {"name": "Northwind News", "id": "7", "logo": "http://logos.test/7.png"}
+        self.window.controller.note_recording("/r/x.ts", channel, "Evening News", 1_000.0)
+        entry = self.window.recordings_index.get("/r/x.ts")
+        self.assertEqual((entry["title"], entry["channel"]), ("Evening News", "Northwind News"))
+        self.assertEqual(
+            (entry["logo"], entry["start"], entry["stop"]), (channel["logo"], 1_000.0, None)
+        )
+        self.assertIs(self.window.screens.recordings._index, self.window.recordings_index)
+        self.window.controller.note_recording_end("/r/x.ts")  # R again: it stops now
+        self.assertGreater(self.window.recordings_index.get("/r/x.ts")["stop"], 1_000.0)
+
+
+class SkipAiringWindowTests(WindowCase):  # 2.9.7
+    def test_the_guide_cancel_on_a_series_airing_skips_it_and_the_series_stays(self):
+        from datetime import datetime, timedelta
+
+        from services.epg_view import Programme
+
+        channel = {"name": "Northwind News", "id": "7", "_provider": "P"}
+        start = datetime.now().astimezone() + timedelta(hours=2)
+        airing = Programme("Evening News", start, start + timedelta(hours=1), "", None)
+        schedule = self.window.recording_schedule
+        item = schedule.add_series(channel, "Evening News")
+        self.window.cancel_programme(channel, airing)
+        self.assertEqual([i["id"] for i in schedule.items()], [item["id"]])
+        self.assertTrue(schedule.is_skipped(item["id"], start.timestamp()))
+
+    def test_the_guide_cancel_on_a_series_airing_goes_through_the_scheduler(self):
+        from datetime import datetime, timedelta
+        from types import SimpleNamespace
+
+        from services.epg_view import Programme
+
+        channel = {"name": "Northwind News", "id": "7", "_provider": "P"}
+        start = datetime.now().astimezone() - timedelta(minutes=5)
+        airing = Programme("Evening News", start, start + timedelta(hours=1), "", None)
+        item = self.window.recording_schedule.add_series(channel, "Evening News")
+        asked = []
+        self.window.scheduler = SimpleNamespace(
+            skip_airing=lambda item_id, at: asked.append((item_id, at)) or "stopped"
+        )
+        self.addCleanup(setattr, self.window, "scheduler", None)
+        notes = []
+        self.window.screens.notify = lambda text, *a, **k: notes.append(text)
+        self.window.cancel_programme(channel, airing)
+        self.assertEqual(asked, [(item["id"], start.timestamp())])
+        self.assertIn("stopped recording", notes[-1])  # it was recording: said so
+
+    def test_record_series_on_a_skipped_airing_brings_it_back(self):  # review
+        from datetime import datetime, timedelta
+
+        from services.epg_view import Programme
+
+        channel = {"name": "Northwind News", "id": "7", "_provider": "P"}
+        start = datetime.now().astimezone() + timedelta(hours=2)
+        airing = Programme("Evening News", start, start + timedelta(hours=1), "", None)
+        schedule = self.window.recording_schedule
+        item = schedule.add_series(channel, "Evening News")
+        schedule.skip(item["id"], start.timestamp())
+        self.window.schedule_programme(channel, airing, True)
+        self.assertFalse(schedule.is_skipped(item["id"], start.timestamp()))
+        self.assertTrue(schedule.is_scheduled(channel, airing))
+
+    def test_the_guide_cancel_on_a_one_time_recording_cancels_it(self):
+        from datetime import datetime, timedelta
+
+        from services.epg_view import Programme
+
+        channel = {"name": "Northwind News", "id": "7", "_provider": "P"}
+        start = datetime.now().astimezone() + timedelta(hours=2)
+        once = Programme("Evening News", start, start + timedelta(hours=1), "", None)
+        schedule = self.window.recording_schedule
+        schedule.add_once(channel, once)
+        self.window.cancel_programme(channel, once)
+        self.assertEqual(schedule.items(), [])
+
+
+class RecorderHomeWindowTests(WindowCase):  # 2.9.7: the Recordings tab's home, wired
+    def channel_and_airing(self, hours=2):
+        from datetime import datetime, timedelta
+
+        from services.epg_view import Programme
+
+        channel = {"name": "Northwind News", "id": "7", "_provider": "P"}
+        start = datetime.now().astimezone() + timedelta(hours=hours)
+        return channel, Programme("Evening News", start, start + timedelta(hours=1), "", None)
+
+    def test_the_homes_guide_records_and_cancels_through_the_window(self):
+        guide = self.window.library_page.home.guide
+        channel, airing = self.channel_and_airing()
+        guide.recordRequested.emit(channel, airing, True)
+        schedule = self.window.recording_schedule
+        (item,) = schedule.items()
+        self.assertEqual(item["kind"], "series")
+        self.assertEqual(guide._mark(channel, airing), "series")
+        guide.skipRequested.emit(channel, airing)
+        self.assertTrue(schedule.is_skipped(item["id"], airing.start.timestamp()))
+        guide.cancelSeriesRequested.emit(channel, airing)
+        self.assertEqual(schedule.items(), [])
+
+    def test_a_timer_shows_as_a_band_on_its_channel(self):
+        channel, _airing = self.channel_and_airing()
+        self.window.recording_schedule.add_timer(channel, begin=21 * 60, minutes=90, days=range(7))
+        bands = self.window.library_page.home.guide._bands(channel)
+        self.assertTrue(bands)
+        start, stop, _name = bands[0]
+        self.assertEqual(stop - start, 90 * 60)
+
+    def test_the_home_follows_the_desk(self):
+        home = self.window.library_page.home
+        channel, airing = self.channel_and_airing(hours=1)
+        self.window.recording_schedule.add_once(channel, airing)
+        self.window.screens.recordings_desk.refresh()
+        self.assertEqual(home._hero.next.title, "Evening News")
+
+    def test_the_guide_follows_lists_that_load_later_unless_a_source_was_chosen(self):
+        pages = self.window.screens
+        guide = self.window.library_page.home.guide
+        loaded = [{"id": "1", "name": "Northwind News"}]
+        self.window.nav.all_live_items = lambda: loaded
+        self.window.nav.favorite_items = lambda: []
+        self.window.nav.recent_items = lambda: []
+        self.window.nav.live_version = lambda: ("loaded",)  # the lists loaded
+        pages.recordings_desk.refresh()
+        self.assertEqual([c["name"] for c in guide.channels()], ["Northwind News"])
+        pages._choose_guide_source("@favorites")
+        pages.recordings_desk.refresh()
+        self.assertEqual(guide.channels(), [])  # the viewer's choice stays
+
+    def test_the_guides_channels_are_rebuilt_only_when_the_lists_change(self):  # review 7
+        pages = self.window.screens
+        nav = self.window.nav
+        walks, version = [], ["one"]
+        nav.favorite_items = lambda: []
+        nav.recent_items = lambda: []
+        nav.all_live_items = lambda: walks.append(True) or [{"id": "1", "name": "One"}]
+        nav.live_version = lambda: tuple(version)
+        pages.recordings_desk.refresh()
+        walks.clear()
+        for _ in range(3):  # the desk's two-second refreshes
+            pages.recordings_desk.refresh()
+        self.assertEqual(walks, [])
+        version[0] = "two"  # a list loaded
+        pages.recordings_desk.refresh()
+        self.assertEqual(len(walks), 1)
+
+    def test_the_homes_guide_reads_a_guide_that_loads_and_follows_the_clock(self):
+        pages = self.window.screens
+        guide = self.window.library_page.home.guide
+        guide._cache[("P", "7", 0.0)] = ["stale"]
+        self.window.catalog.epgReady.emit()
+        self.assertEqual(guide._cache, {})
+        followed = []
+        guide.follow_now = lambda: followed.append(True)
+        pages.recordings_desk.refresh()
+        self.assertTrue(followed)
+
+    def test_the_home_names_providers_only_with_two_and_avoids_the_corner_player(self):
+        pages = self.window.screens
+        home = self.window.library_page.home
+        catalog = self.window.library_catalog
+        catalog.provider_names = lambda: ["Demo TV"]
+        pages.recordings_desk.refresh()
+        self.assertFalse(home._name_providers)
+        catalog.provider_names = lambda: ["Demo TV", "Harbor IPTV"]
+        pages.recordings_desk.refresh()
+        self.assertTrue(home._name_providers)
+        self.assertIs(home._avoid, self.window.player_page)
+
+    def test_back_from_a_recording_the_tab_follows_again(self):  # review 5
+        pages = self.window.screens
+        pages.open_recordings()
+        self.assertTrue(pages.recordings_desk.shown())
+        pages._show_page(self.window.player_page)  # a recording plays
+        self.assertFalse(pages.recordings_desk.shown())
+        pages._show_page(self.window.library_page)  # ‹ Library, Esc
+        self.assertTrue(pages.recordings_desk.shown())
+
+    def test_the_homes_guide_reaches_as_far_as_the_guide_list(self):  # final review 2
+        self.window.config_manager.epg_list_window_hours = 24
+        self.window.screens.recordings_desk.refresh()
+        guide = self.window.library_page.home.guide
+        self.assertEqual(guide._reach, 24.0)
+        self.window.config_manager.epg_list_window_hours = 0
+        self.window.screens.recordings_desk.refresh()
+        self.assertEqual(guide._reach, 0.0)
+
+    def test_the_rails_find_reads_the_guides_channels_first_then_every_channel(self):
+        pages = self.window.screens
+        ctl = pages.library_controller
+        near = [{"id": "1", "name": "Northwind News"}]
+        wide = [{"id": "1", "name": "Northwind News"}, {"id": "2", "name": "Harbor Sports"}]
+        self.window.library_page.home.guide.set_channels(near)
+        self.window.nav.all_live_items = lambda: wide
+        self.assertEqual(ctl.find_sources()[:2], [near, wide])
+        self.assertEqual(list(ctl.find_sources()[2]), [])  # one provider: no wider reach
+        channel, airing = self.channel_and_airing()
+        ctl.record_found(channel, airing, False)
+        self.assertEqual([i["kind"] for i in self.window.recording_schedule.items()], ["once"])
+
+    def two_providers(self):
+        """A second provider, ready, with one live channel."""
+        from types import SimpleNamespace
+
+        other = {"id": "9", "name": "Southgate One", "_provider": "Harbor IPTV"}
+        group = SimpleNamespace(id="g", title="News", header=False)
+        catalog = SimpleNamespace(
+            groups=lambda section: [group], items=lambda section, gid: [other]
+        )
+        catalogs = self.window.catalogs
+        names = [self.window.library_catalog.provider_names()[0], "Harbor IPTV"]
+        self.window.library_catalog.provider_names = lambda: names
+        catalogs.names = lambda: names
+        catalogs.is_ready = lambda name: name == "Harbor IPTV"
+        real = catalogs.catalog
+        catalogs.catalog = lambda name: catalog if name == "Harbor IPTV" else real(name)
+        return other
+
+    def test_with_two_providers_the_find_reaches_every_providers_channels(self):  # review 4
+        other = self.two_providers()
+        sources = self.window.screens.library_controller.find_sources()
+        self.assertIn(other, [c for source in sources for c in source])
+
+    def test_another_providers_hidden_channels_stay_hidden_while_locked(self):  # review 4
+        from types import SimpleNamespace
+
+        from services import parental
+
+        other = self.two_providers()
+        guard = parental.Parental(SimpleNamespace(parental=None, save_config=lambda: None))
+        guard.set_pin("1234")
+        guard.hide_item("live", dict(other))
+        previous = parental.installed()
+        parental.install(guard)
+        self.addCleanup(parental.install, previous)
+        sources = self.window.screens.library_controller.find_sources()
+        self.assertNotIn(other, [c for source in sources for c in source])
+        pages = self.window.screens
+        pages._choose_guide_source(dict(pages.guide_sources())["Harbor IPTV"])
+        self.assertEqual(self.window.library_page.home.guide.channels(), [])
+
+    def test_with_two_providers_the_guide_can_show_another_providers_channels(self):
+        other = self.two_providers()
+        pages = self.window.screens
+        labels = dict(pages.guide_sources())
+        self.assertIn("Harbor IPTV", labels)
+        pages._choose_guide_source(labels["Harbor IPTV"])
+        self.assertEqual(self.window.library_page.home.guide.channels(), [other])
+        pages.recordings_desk._shown = True  # the tab shows: its guide's providers are read
+        self.assertIn("Harbor IPTV", self.window.controller.guides_in_use())
+
+    def test_the_guides_source_menu_lists_favorites_recent_and_all(self):
+        labels = [label for label, _key in self.window.screens.guide_sources()]
+        self.assertEqual(labels[:3], ["★ Favorites", "Recent", "All channels"])
 
 
 class FarChannelWindowTests(WindowCase):

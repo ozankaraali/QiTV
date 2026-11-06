@@ -101,6 +101,8 @@ HEALTHY_S = 60.0  # a stream that played this long before it ended has its reope
 RECONNECTING_TEXT = N_("Reconnecting…")
 # i18n: a toast: R or the record button was pressed while the channel is still opening
 NOT_YET_TEXT = N_("Recording can start once the channel plays")
+# i18n: a toast: R on a channel that already records on schedule (2.9.7)
+ON_SCHEDULE_TEXT = N_("This channel is recording on schedule already.")
 _PIPELINE_SCHEMES = ("http", "https")  # what the pipeline's source can read
 # Never opened again: on-demand content, and a file listed as a channel ends for good.
 NOT_REOPENED = (PlayKind.VOD_FILE, PlayKind.VOD_STREAM, PlayKind.LIVE_PIPELINE)
@@ -179,6 +181,7 @@ class LiveControls(QObject):
         closed: Callable[[], bool],
         programmes: Callable[[dict, datetime, int], list[Programme]],
         now_title: Callable[[dict], Optional[tuple[str, float]]],
+        noted: Optional[Callable[[str, dict, str, float], None]] = None,
         toast: Callable[..., None],
         error: Callable[[str], None],
         request: Callable[[Target], None],
@@ -195,6 +198,7 @@ class LiveControls(QObject):
         runner: Any = None,
         back_notice: Callable[[], Any] = lambda: None,
         on_sizes: Callable[[], None] = lambda: None,
+        borrow: Callable[[dict, str, str], Any] = lambda item, provider, purpose: None,
         parent: Optional[QObject] = None,
     ) -> None:
         """`explain(item, title)` asks why the failure just toasted happened at the item's
@@ -210,6 +214,7 @@ class LiveControls(QObject):
         sizes came, or an archive started or ended (2.8: the ⚙ may show or go)."""
         super().__init__(parent)
         self._on_sizes = on_sizes
+        self._borrow = borrow  # 2.9.7: a scheduled recording's session, to watch
         self._gave_up = gave_up
         # 2.8: each channel's picture sizes as last seen this run (by its key), and whether the
         # next place offered is played on at once (a size chosen in the ⚙).
@@ -235,6 +240,8 @@ class LiveControls(QObject):
         self._closed = closed
         self._programmes = programmes
         self._now_title = now_title
+        # 2.9.7: a recording started with R: (its file, the channel, the programme on now, when)
+        self._noted = noted
         self._toast = toast
         self._error = error
         self._request = request
@@ -485,10 +492,32 @@ class LiveControls(QObject):
         False when the provider's limit is taken by other streams (picture in picture, say):
         the toast says so and the running channel goes on.
         """
-        if self.refuse_over_limit(target):
-            return False
         name = item_provider.provider_name(self.catalog, target.item)
-        self._tuner.tune(self.live_start(target, url), name, self.limit(target.item))
+        # 2.9.7: a channel recording on schedule plays its recording's session: no stream of
+        # its own, so no limit to refuse it.
+        borrowed = self._borrow(target.item, name, self._tuner.purpose)
+        if borrowed is None and self.refuse_over_limit(target):
+            logger.info(
+                "Not tuning %s (%s): its provider has no stream to spare.",
+                _log_name(target.item),
+                name,
+            )
+            return False
+        # 2.9.7: each tune named in the log (no address): what was watched, and how.
+        logger.info(
+            "Tuning %s (%s) in the %s player: %s.",
+            _log_name(target.item),
+            name,
+            self._tuner.purpose,
+            "the scheduled recording's stream" if borrowed is not None else "a stream of its own",
+        )
+        try:
+            start, limit = self.live_start(target, url), self.limit(target.item)
+        except Exception:
+            if borrowed is not None:
+                borrowed.give_back()  # 2.9.7: never started: its owner has it back
+            raise
+        self._tuner.tune(start, name, limit, borrowed)
         return True
 
     def refuse_over_limit(self, target: Target) -> bool:
@@ -791,6 +820,10 @@ class LiveControls(QObject):
         if self.catchup.active():
             self._toast(translate(NO_RECORDING_TEXT))
             return
+        lender = getattr(live, "lender_records", None)  # 2.9.7: it records already, on schedule
+        if callable(lender) and lender():
+            self._toast(translate(ON_SCHEDULE_TEXT))
+            return
         if live is None or not live.recordable() or not self.pipeline_live():
             if live is not None and self._tuner.opening():
                 self._toast(translate(NOT_YET_TEXT))
@@ -800,7 +833,11 @@ class LiveControls(QObject):
                 self._toast(translate(NO_RECORDING))
             return
         when = self._now().astimezone()
-        if live.start_recording(recording.path_for(self.config, current.title, when)):
+        path = recording.path_for(self.config, current.title, when)
+        if live.start_recording(path):
+            if self._noted is not None:
+                on_now = self._now_title(current.item)
+                self._noted(path, current.item, on_now[0] if on_now else "", when.timestamp())
             self._show_transport()
 
     def _nothing_plays(self) -> bool:
@@ -965,3 +1002,8 @@ class LiveControls(QObject):
             timeline = self.catchup.extend(timeline, target)  # into an archive, if any
             self._ticks = self._programme_ticks(target.item, timeline)
             transport.update_timeline(timeline, self._ticks)
+
+
+def _log_name(item: Optional[dict]) -> str:
+    """A channel's name for the log (2.9.7), quoted; never its address."""
+    return f"“{str((item or {}).get('name') or '?')[:80]}”"

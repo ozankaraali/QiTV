@@ -14,6 +14,7 @@ from services.navigation import (
     FREE_CHANNELS_ROW,
     OPEN_FILE_ROW,
     RECENT_GROUP,
+    RECORDINGS_ROW,
     SETTINGS_ROW,
     NavModel,
     NavNode,
@@ -156,6 +157,7 @@ class NavModelTests(unittest.TestCase):
                 ("action", ADD_PROVIDER_ROW, "Add provider"),
                 ("action", FREE_CHANNELS_ROW, "Free channels…"),
                 ("action", OPEN_FILE_ROW, "Open file"),
+                ("action", RECORDINGS_ROW, "Recordings"),  # 2.9.7: the Recordings page
             ],
         )
         self.assertFalse(any(self.nav.is_playable(n) or self.nav.needs_setup(n) for n in rows[3:]))

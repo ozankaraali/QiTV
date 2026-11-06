@@ -71,7 +71,7 @@ from PySide6.QtCore import QEvent, QObject, QPoint, Qt, QTimer, QUrl, Signal
 from PySide6.QtGui import QPixmap, QWheelEvent
 from PySide6.QtWidgets import QAbstractScrollArea
 
-from services import external_players, favorites, recording
+from services import external_players, favorites, recording, recording_schedule
 from services.budgeted_stream import HeldSlot
 from services.casting import CastDevices
 from services.catalog import ALL_GROUP_ID, PROVIDER_LOADING_MESSAGE, shown_label
@@ -329,6 +329,7 @@ class TVController(QObject):
             closed=lambda: self._closed,
             programmes=self._programmes,
             now_title=self.now_title,
+            noted=lambda path, item, title, start: self.note_recording(path, item, title, start),
             toast=self._toast,
             error=self._error,
             request=self._request,
@@ -342,6 +343,7 @@ class TVController(QObject):
             back_notice=lambda: self.overlays.back_notice,
             archive_allowed=self._archive_allowed,
             beside_recording=self._archive_beside_recording,
+            borrow=lambda item, provider, purpose: self.lend_scheduled(item, provider, purpose),
             gave_up=self._fail_focused_tile,
             on_sizes=self._offer_live_quality,
             parent=self,
@@ -505,9 +507,25 @@ class TVController(QObject):
         self._media = media_reporter
         # 2.8: the providers scheduled recordings record from (their guides stay loaded).
         self.extra_guides: Callable[[], set[str]] = set
+        # 2.9.7: the guides a page beside the TV shows (the Recordings home's rows)
+        self.view_guides: Callable[[], set[str]] = set
         # 2.8: what records on schedule now (RecordingScheduler.recording_now) and its Stop.
         self.scheduled_now: Callable[[], list[tuple[str, str, float, dict]]] = list
         self.stop_scheduled: Callable[[str], None] = lambda name: None
+        # 2.9.7: a scheduled recording's session to watch with no stream of its own
+        # (RecordingScheduler.lend and lendable; none while QiTV records nothing on schedule).
+        self.lend_scheduled: Callable[[dict, str, str], Any] = lambda item, provider, use: None
+        # 2.9.7: a recording started with R, for the recordings index: (its file, the
+        # channel, the programme on now, its start, unix); the window's
+        self.note_recording: Callable[[str, dict, str, float], None] = lambda *_args: None
+        # 2.9.7: a recording ended (R, its stream, its limit): the index keeps where
+        self.note_recording_end: Callable[[str], None] = lambda _path: None
+        # 2.9.7: the user stops a player's recording: a scheduled one hosted there is done
+        # (the scheduler's `stopped_by_user`), not a broken stream to record again
+        self.recording_user_stop: Callable[[Any], None] = lambda _live: None
+        # 2.9.7: the player a scheduled recording records on (by its REC name), if one does
+        self.scheduled_host: Callable[[str], Optional[str]] = lambda _name: None
+        self.lendable_scheduled: Callable[[dict, str], bool] = lambda item, provider: False
         # 2.8: "Record at a time…" for a channel (the window's, once QiTV records)
         self.record_at: Optional[Callable[[dict], None]] = None
         # 2.8: parental controls (services.parental.Parental; None: none): what they hide never
@@ -576,6 +594,7 @@ class TVController(QObject):
                 sound=self._prepare_small,
                 explain=self._explain_item,
                 needs_stream=self._ask_for_stream,
+                borrow=lambda item, provider, purpose: self.lend_scheduled(item, provider, purpose),
                 parent=self,
             )
             self._pip.changed.connect(self._mixer.refresh)
@@ -797,6 +816,9 @@ class TVController(QObject):
         if self.sessions is None and large is not None and self._large_records():
             recording.append(large)
         for live in recording:
+            path = live.recording_path()
+            if path:  # 2.9.7: its end may come after QiTV is gone: its tile's length is now
+                self.note_recording_end(path)
             live.stop_recording()
         self._resume = self._current if self._has_media() else None
         self.leave_multiview(keep_pip=False)
@@ -1738,6 +1760,19 @@ class TVController(QObject):
     def _all_live(self) -> list[dict]:
         return list(self.catalog.items("live", ALL_GROUP_ID) or [])
 
+    def _listed(self, kept: dict) -> dict:
+        """The live list's channel that `kept` (a scheduled recording's copy) is: by its
+        provider, then its address, id or name (`recording_schedule.is_listed`); `kept` itself
+        when the list has none."""
+        provider = str(kept.get("_provider") or "")
+        listed = recording_schedule.listed_matcher(kept)  # its pattern built once
+        for channel in self._all_live():
+            if provider and item_provider.provider_name(self.catalog, channel) != provider:
+                continue
+            if listed(channel):
+                return channel
+        return kept
+
     def _request(self, target: Target) -> None:
         self._forget_stopped()  # 2.6: a newer choice than what Stop stopped
         self._give_back_later = False  # the large picture has a newer choice
@@ -1954,6 +1989,7 @@ class TVController(QObject):
             self._current, self._cid = kept
             target = replace(target, archive_at=None, archive_until=None)
         if target.live and self.multiview_shown():
+            logger.info("Tuning “%s” (%s) in a multiview tile.", _log_name(item), provider_name)
             self._open_in_tile(target, url, previous, provider_name)
             if self.overlays.transport.isVisible():
                 self._live_controls.show_live_transport(target)
@@ -1977,6 +2013,11 @@ class TVController(QObject):
                 target = replace(target, max_height=None)  # 2.8: asked once (see above)
                 self._current, self._cid = target, None
                 session = self.session  # the large picture's, whatever swaps before it opens
+                logger.info(
+                    "Tuning “%s” (%s) in the big picture: played directly, without the buffer.",
+                    _log_name(item),
+                    provider_name,
+                )
 
                 def play_direct() -> None:
                     self._prepare(session, target, previous)
@@ -2326,10 +2367,15 @@ class TVController(QObject):
         scheduled = next((s for s in self.scheduled_now() if s[0] == name), None)
         if scheduled is not None:  # 2.8: a scheduled recording's channel, live
             self.leave_multiview()
-            self.tune_live(scheduled[3], ALL_GROUP_ID, self._all_live())
+            # 2.9.7: the list's own channel (the schedule keeps its address without the
+            # account); it plays the recording's session, with no stream of its own.
+            self.tune_live(self._listed(scheduled[3]), ALL_GROUP_ID, self._all_live())
             return
         if sessions is None:
             return
+        name = self.scheduled_host(name) or name  # 2.9.7: one a player records: that player
+        if sessions.large().name == name:
+            return  # it shows large already
         slot = next((s for s in sessions.background() if s.name == name), None)
         if slot is None or slot.channel is None:
             return  # gone meanwhile (a phone's stale REC line)
@@ -2351,7 +2397,28 @@ class TVController(QObject):
             return
         for slot in sessions.background():
             if slot.name == name:
-                slot.live.stop_recording()
+                self.stop_player_recording(slot.live)
+
+    def stop_player_recording(self, live: Any) -> None:
+        """2.9.7: the user stops the recording on player `live`: said to the scheduler first
+        (a scheduled recording hosted there ends as the user's stop), then stopped."""
+        self.recording_user_stop(live)
+        live.stop_recording()
+
+    def players_showing(self) -> list[tuple[str, str, dict, Any]]:
+        """2.9.7: each player showing a live channel: (its name, the channel's provider, the
+        channel, its LiveSession), for a scheduled recording to record on (no stream of its
+        own)."""
+        sessions = self.sessions
+        if sessions is None or self._closed:
+            return []
+        found = []
+        for slot in sessions.slots():
+            channel = slot.channel
+            if channel:
+                provider = item_provider.provider_name(self.catalog, channel)
+                found.append((slot.name, provider, channel, slot.live))
+        return found
 
     def _recordings(self) -> list[Slot]:
         """Every player that records, the oldest recording first."""
@@ -2427,6 +2494,9 @@ class TVController(QObject):
             if self._question.confirm(sessions.large(), again):
                 return True  # a tile has no background to record on in
         gives_way = self._external_launcher() is not None
+        provider = item_provider.provider_name(self.catalog, channel)
+        if not gives_way and self.lendable_scheduled(channel, provider):
+            return False  # 2.9.7: its recording's session plays it: no stream to free
         return self._ask_for_stream(channel, self._tuner.purpose, again, gives_way=gives_way)
 
     def _confirm_tile(self, name: str, then: Callable[[], None]) -> bool:
@@ -2444,7 +2514,7 @@ class TVController(QObject):
             return
         sessions = self.sessions
         background = sessions is not None and slot in sessions.background()
-        slot.live.stop_recording()
+        self.stop_player_recording(slot.live)
         if replaced or background or sessions is None:
             return
         if sessions.small() is slot and self._pip is not None:
@@ -3014,6 +3084,8 @@ class TVController(QObject):
     def _on_recording_ended(self, reason: str, path: str, written: int) -> None:
         if self._closed:
             return
+        if path:
+            self.note_recording_end(path)  # 2.9.7: its tile's length is what the file holds
         text, kind = recording.ended_text(reason, path, written)
         self._toast(text, kind, ERROR_MS if kind == "error" else RECORDING_MS)
 
@@ -3207,6 +3279,7 @@ class TVController(QObject):
         names.update(provider_of(item) for item in items if item)
         names.update(self._phone_guides)  # the channels the phone remote lists
         names.update(self.extra_guides())  # 2.8: a scheduled series follows its channel's guide
+        names.update(self.view_guides())  # 2.9.7: the Recordings home's rows
         source = self.catalog.current_provider_name()
         if source != ALL_PROVIDERS:
             names.add(source)
@@ -4241,3 +4314,8 @@ class TVController(QObject):
         logger.warning("Could not %s: %s (%s)", what, scrub(error), type(error).__name__)
         # The frames only: the exception's text can carry a provider URL with credentials.
         logger.debug("Could not %s:\n%s", what, safe_traceback(error))
+
+
+def _log_name(item: Optional[dict]) -> str:
+    """A channel's name for the log (2.9.7); never its address."""
+    return str((item or {}).get("name") or "?")[:80]

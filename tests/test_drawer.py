@@ -21,6 +21,7 @@ from services.navigation import (
     FREE_CHANNELS_ROW,
     OPEN_FILE_ROW,
     RECENT_GROUP,
+    RECORDINGS_ROW,
     SETTINGS_ROW,
     NavModel,
     item_key,
@@ -687,6 +688,7 @@ class DrawerTests(unittest.TestCase):
                 ("Add provider", "plus"),
                 ("Free channels…", "plus"),
                 ("Open file", "file"),  # Ctrl/⌘+O without the menu bar (2.0.1)
+                ("Recordings", "record"),  # 2.9.7: the Library's Recordings page
             ],
         )
         self.assertEqual(self.drawer.highlighted().key, "Home")
@@ -721,7 +723,7 @@ class DrawerTests(unittest.TestCase):
         column = self.open_on_the_sources()
         self.assertEqual(
             [n.key for n in column.nodes[3:]],
-            [SETTINGS_ROW, ADD_PROVIDER_ROW, FREE_CHANNELS_ROW, OPEN_FILE_ROW],
+            [SETTINGS_ROW, ADD_PROVIDER_ROW, FREE_CHANNELS_ROW, OPEN_FILE_ROW, RECORDINGS_ROW],
         )
         self.drawer._on_row_clicked("left", 5)
         self.assertEqual(self.actions, [FREE_CHANNELS_ROW])

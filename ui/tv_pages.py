@@ -15,23 +15,33 @@ overlay host, and its toast, hide with the player page.
 from __future__ import annotations
 
 from contextlib import contextmanager
+from functools import partial
 import logging
 import os
+import time
 from typing import Any, Callable, Iterator, Optional
 
 from PySide6.QtCore import QObject, QPoint, QThread
 from PySide6.QtWidgets import QFileDialog, QMenu, QMessageBox, QWidget
 
-from services import system_open
+from services import parental, recording_desk as desk, recordings_library as rl, system_open
+from services.catalog import ALL_GROUP_ID
 from services.exporter import ExportKind
 from services.failure_reasons import shown_message
-from services.i18n import tr
+from services.i18n import tr, translate
 from services.library import LibraryModel
+from services.navigation import FAVORITES_GROUP, RECENT_GROUP
+from services.provider_ids import provider_of
+from services.recording_desk import COMING, NOW, RECORDED
+from services.recording_thumbs import FOLDER as THUMBS_FOLDER, Thumbnails
+from services.recordings_library import RecordingsLibrary
 from services.recordings_list import RecordingsList
 from ui.keymap import Action
 from ui.library_controller import LibraryController
+from ui.overlays.rec_sign import MANAGE_TEXT
 from ui.page_stack import PageStack
 from ui.pointer import SecondClickGuard
+from ui.recordings_desk import RecordingsDesk
 from ui.tmdb_fill import TmdbFill
 from ui.tv_controller import ERROR_MS, INFO_MS, scrub
 
@@ -76,6 +86,7 @@ class TVPages(QObject):
             titles=schedule.title_of if schedule is not None else None,
             # one still written can't be deleted (2.8)
             writing=(lambda: set(writing())) if writing is not None else None,
+            index=getattr(window, "recordings_index", None),  # 2.9.7
         )
         # A recording's file another program holds (Windows) stays: the user is told why.
         self.recordings.delete_failed.connect(lambda text: self.notify(text, "error", ERROR_MS))
@@ -120,8 +131,260 @@ class TVPages(QObject):
         )
         window.library_catalog.providerFailed.connect(self._on_provider_failed)
         window.overlays.drawer.libraryRequested.connect(self.open_from_list)
+        # 2.9.7: the Library's Recordings page, its tab's dot, and the REC signs' way to it.
+        self.recordings_desk = RecordingsDesk(
+            window, window.library_page.recordings, self.recordings, parent=self
+        )
+        self.recordings_desk.markChanged.connect(
+            lambda mark: window.library_page.nav.set_mark("recordings", mark)
+        )
+        self.library_controller.set_recordings_desk(self.recordings_desk)
+        # 2.9.7: the Recordings tab's rail and tiles, and what its strip's buttons do; a
+        # frame of each recording as its tile's picture (read once, on a worker)
+        self.thumbnails = Thumbnails(
+            os.path.join(window.config_manager.get_config_dir(), "cache", THUMBS_FOLDER),
+            parent=self,
+        )
+        self.recordings_library = RecordingsLibrary(
+            self.recordings.files,
+            self._recordings_counts,
+            window.watch,
+            window.config_manager,
+            mixed=lambda: len(window.library_catalog.provider_names()) > 1,
+            picture=self.thumbnails.url,
+        )
+        self.thumbnails.ready.connect(self._on_thumbnail)
+        window.library_page.grid_posters.logoReady.connect(
+            lambda _url: window.library_page.home.update()  # a frame loaded: the shelf shows it
+        )
+        self.library_controller.set_recordings_library(self.recordings_library)
+        self.library_controller.delete_recording = self.delete_recording
+        self.library_controller.show_recording_folder = lambda item: system_open.open_folder(
+            os.path.dirname(str(item.get("path") or ""))
+        )
+        self.recordings.changed.connect(self.library_controller.recordings_changed)
+        self._wire_home()  # 2.9.7: the Recordings tab's home
+        window.library_page.recordings.avoid(window.player_page)  # the corner player
+        window.library_page.home.avoid(window.player_page)
+        for sign in (window.overlays.rec_sign, getattr(window.overlays, "library_rec_sign", None)):
+            if sign is not None:
+                sign.manageRequested.connect(lambda: self.open_recordings(NOW))
 
-    # ---- pages --------------------------------------------------------------------------------
+    # ---- 2.9.7: the Recordings tab's home ------------------------------------------------------
+
+    def _wire_home(self) -> None:
+        window = self._window
+        home = window.library_page.home
+        guide = home.guide
+        catalog = window.catalog
+        guide.set_programmes(
+            lambda channel, start, limit: catalog.programmes(channel, start, limit=limit)
+        )
+        catalog.epgReady.connect(guide.refresh)  # a guide loaded: its rows read it again
+        guide.set_mark_provider(self._home_mark)
+        guide.set_band_provider(self._home_bands)
+        guide.recordRequested.connect(
+            lambda channel, programme, series: self._schedule_from_home(channel, programme, series)
+        )
+        guide.skipRequested.connect(
+            lambda channel, programme: window.cancel_programme(channel, programme)
+        )
+        guide.cancelRequested.connect(
+            lambda channel, programme: window.cancel_programme(channel, programme)
+        )
+        guide.cancelSeriesRequested.connect(self._cancel_series_from_home)
+        guide.tuneRequested.connect(lambda channel: self.tune_live(channel))
+        guide.sourceRequested.connect(self._guide_source_menu)
+        home.watchRequested.connect(self.watch_recording)
+        home.stopRequested.connect(self.recordings_desk.stop)
+        home.editRequested.connect(self.recordings_desk.edit)
+        home.addRequested.connect(self.recordings_desk.record_at)
+        self.recordings_desk.refreshed.connect(self._refresh_home)
+        # the rail's find: the home guide's channels first, then every channel
+        controller = self.library_controller
+        controller.find_sources = lambda: [
+            guide.channels(),
+            window.nav.all_live_items(),
+            self._every_provider(),  # two providers or more: theirs too, walked as it goes
+        ]
+        controller.find_programmes = lambda channel, now, limit: catalog.programmes(
+            channel, now, limit=limit
+        )
+        controller.record_found = self._schedule_from_home
+        window.controller.view_guides = self._home_guides  # its rows' guides are loaded
+        self._guide_source = ""
+        self._guide_chosen = False  # the viewer chose the guide's channels (else: the default)
+        self._guide_version: Any = None  # the lists' version its channels were built from
+        self._set_guide_source(self._default_guide_source())
+
+    def _schedule_from_home(self, channel: dict, programme: Any, series: bool) -> None:
+        self._window.schedule_programme(channel, programme, series)
+        self.recordings_desk.refresh()
+
+    def _cancel_series_from_home(self, channel: dict, programme: Any) -> None:
+        window = self._window
+        item = window.recording_schedule.scheduled_item(channel, programme)
+        if item is not None:
+            window.cancel_scheduled(str(item.get("id") or ""))
+        self.recordings_desk.refresh()
+
+    def _home_mark(self, channel: dict, programme: Any) -> str:
+        """The home guide's mark of `programme`: "recording", "once", "series" or ""."""
+        schedule = self._window.recording_schedule
+        item = schedule.scheduled_item(channel, programme)
+        if item is None or schedule.is_skipped(str(item.get("id")), programme.start.timestamp()):
+            return ""
+        scheduler = self._window.scheduler
+        recording = (
+            {d[5] for d in scheduler.recording_details()} if scheduler is not None else set()
+        )
+        now = time.time()
+        if (
+            item.get("id") in recording
+            and programme.start.timestamp() <= now < programme.stop.timestamp()
+        ):
+            return "recording"
+        return "once" if item.get("kind") == "once" else "series"
+
+    def _home_bands(self, channel: dict) -> list[tuple[float, float, str]]:
+        """The clock timers of `channel` this week: (start, stop, name)."""
+        from services import recording_schedule as rs
+
+        bands = []
+        now = time.time()
+        for item in self._window.recording_schedule.items():
+            if item.get("kind") != rs.TIMER or not rs.is_listed(item.get("channel") or {}, channel):
+                continue
+            title = str(item.get("title") or "") or rs.slot_text(
+                int(item.get("begin") or 0), int(item.get("minutes") or 0)
+            )
+            for start, stop in desk.airings(item, now):
+                bands.append((start, stop, title))
+        return bands
+
+    def _refresh_home(self) -> None:
+        window = self._window
+        home = window.library_page.home
+        home.set_name_providers(len(window.library_catalog.provider_names()) > 1)
+        home.set_hero(self.recordings_desk.hero())
+        library = self.recordings_library
+        home.set_shelf(library.items(rl.ALL)[:8], library.badges, self._shelf_picture)
+        version = window.nav.live_version()
+        if version != self._guide_version:  # a list loaded or changed: the guide's channels
+            key = self._guide_source if self._guide_chosen else self._default_guide_source()
+            channels = self._guide_channels(key)
+            if key != self._guide_source or _channel_keys(home.guide.channels()) != _channel_keys(
+                channels
+            ):
+                self._set_guide_source(key)  # lists loaded meanwhile, or another default
+            self._guide_version = version
+        home.guide.set_reach(window.config_manager.epg_list_window_hours)  # Settings' window
+        window.controller.update_guides()  # its rows' providers' guides, as they show
+        home.guide.follow_now()
+        home.guide.update()
+
+    def guide_sources(self) -> list[tuple[str, str]]:
+        """The home guide's channel sources: (its label, its key)."""
+        # i18n: the Recordings home guide's channels: the favourites
+        sources = [(tr("★ Favorites"), FAVORITES_GROUP)]
+        # i18n: the Recordings home guide's channels: those watched last
+        sources.append((tr("Recent"), RECENT_GROUP))
+        # i18n: the Recordings home guide's channels: every live channel
+        sources.append((tr("All channels"), ALL_GROUP_ID))
+        try:
+            groups = list(self._window.catalog.groups("live") or [])
+        except Exception:  # a catalog loading: the three above
+            groups = []
+        for group in groups[:60]:
+            gid = str(getattr(group, "id", "") or "")
+            if gid and gid not in (ALL_GROUP_ID, FAVORITES_GROUP, RECENT_GROUP):
+                sources.append((str(getattr(group, "title", gid)), gid))
+        for name in self._mixed_providers():  # two providers or more: each one's channels
+            sources.append((name, PROVIDER_SOURCE + name))
+        return sources
+
+    def _mixed_providers(self) -> list[str]:
+        """The providers, when there are two or more (one: none named, as in 2.0)."""
+        names = [str(n) for n in self._window.library_catalog.provider_names()]
+        return names if len(names) > 1 else []
+
+    def _provider_channels(self, name: str) -> Iterator[dict]:
+        """A ready provider's live channels, walked as they are asked for."""
+        catalogs = self._window.catalogs
+        if not catalogs.is_ready(name):
+            return
+        catalog = catalogs.catalog(name)
+        guard = parental.installed()  # the raw catalog: what parental controls hide, skipped
+        for group in catalog.groups("live") or []:
+            if getattr(group, "header", False):
+                continue
+            for item in catalog.items("live", group.id) or []:
+                if guard is None or not guard.hides_item("live", item):
+                    yield item
+
+    def _every_provider(self) -> Iterator[dict]:
+        """The rail's find's widest reach: every provider's channels (with two or more)."""
+        for name in self._mixed_providers():
+            yield from self._provider_channels(name)
+
+    def _home_guides(self) -> set[str]:
+        """The providers whose guides the Recordings home's rows show, while it shows."""
+        if not self.recordings_desk.shown():
+            return set()
+        guide = self._window.library_page.home.guide
+        return {provider_of(c) for c in guide.shown_channels()} - {""}
+
+    def _default_guide_source(self) -> str:
+        nav = self._window.nav
+        if nav.favorite_items():
+            return FAVORITES_GROUP
+        if nav.recent_items():
+            return RECENT_GROUP
+        return ALL_GROUP_ID
+
+    def _guide_channels(self, key: str) -> list[dict]:
+        nav = self._window.nav
+        if key == FAVORITES_GROUP:
+            return list(nav.favorite_items())
+        if key == RECENT_GROUP:
+            return list(nav.recent_items())
+        if key == ALL_GROUP_ID:
+            return list(nav.all_live_items())
+        if key.startswith(PROVIDER_SOURCE):
+            return list(self._provider_channels(key[len(PROVIDER_SOURCE) :]))
+        return list(self._window.catalog.items("live", key) or [])
+
+    def _set_guide_source(self, key: str) -> None:
+        self._guide_source = key
+        self._guide_version = self._window.nav.live_version()
+        guide = self._window.library_page.home.guide
+        label = next((label for label, k in self.guide_sources() if k == key), "")
+        guide.set_source_label(label)
+        guide.set_channels(self._guide_channels(key))
+
+    def _choose_guide_source(self, key: str) -> None:
+        self._guide_chosen = True
+        self._set_guide_source(key)
+
+    def _guide_source_menu(self, at: Any) -> None:
+        menu = QMenu(self._window.library_page)
+        for label, key in self.guide_sources():
+            action = menu.addAction(label, partial(self._choose_guide_source, key))
+            action.setCheckable(True)
+            action.setChecked(key == self._guide_source)
+        menu.popup(at)
+
+    def _recordings_counts(self) -> dict[str, int]:
+        """2.9.7: the Recordings tab's rail counts: the rows of each list (rows of buttons
+        alone not counted), from the page's entries as last worked out."""
+        counts: dict[str, int] = {}
+        entries = self.recordings_desk.last_entries()
+        for row, section in rl.SECTIONS.items():
+            if section == desk.SETTINGS:
+                continue
+            wanted = section if isinstance(section, tuple) else (section,)
+            counts[row] = sum(1 for e in entries if e.title and e.section in wanted)
+        return counts
 
     def library_shown(self) -> bool:
         """The Library is the page in front (also while the player sits in its corner)."""
@@ -139,9 +402,12 @@ class TVPages(QObject):
             return
         if self.library_shown() and not library:
             self.library_controller.leave()  # a play waiting for its provider is dropped
+        self.recordings_desk.track_mark(library)  # 2.9.7: the Recordings tab's dot
         self._second_click.disarm()  # it kept a click off the page shown before
         if library:
             stack.show_library(corner=corner)
+            if self.library_controller.mode == "recordings" and not self.recordings_desk.shown():
+                self.recordings_desk.show()  # 2.9.7: back on the Recordings tab: it follows
         else:
             if stack.mode() == PageStack.CORNER:
                 window.controller.leave_library_playing()
@@ -174,6 +440,25 @@ class TVPages(QObject):
         """The window closes: the guard, which filters the whole application, lets go now
         (another window's next click is not this one's second click)."""
         self._second_click.disarm()
+        self.thumbnails.shutdown()  # 2.9.7: no recording's frame read any more
+
+    def _shelf_picture(self, item: dict) -> Any:
+        """2.9.7: a recording's frame for the home's shelf, from the Library's poster cache
+        (asked for once it exists; None meanwhile)."""
+        url = self.thumbnails.url(item)
+        if not url:
+            return None
+        posters = self._window.library_page.grid_posters
+        pixmap = posters.pixmap(url)
+        if pixmap is None:
+            posters.request([url])
+        return pixmap
+
+    def _on_thumbnail(self, _url: str) -> None:
+        """2.9.7: a recording's picture was made: the tiles shown ask for it."""
+        page = self._window.library_page
+        page.rec_grid.viewport().update()
+        page.home.update()
 
     def back_to_player(self) -> None:
         """⤢, a click on the corner player: the player page again, what plays as it was.
@@ -211,6 +496,25 @@ class TVPages(QObject):
         self._enter_library()
         self.library_controller.open(section)
         self._guard_second_click()
+
+    def open_recordings(self, section: Optional[str] = None) -> None:
+        """2.9.7: the Library's Recordings page (View → Recordings, the channel list's row, the
+        REC sign's Manage Recordings…), on `section`'s chip when one is given."""
+        if self._window.closing():
+            return
+        self._enter_library()
+        self.library_controller.open_recordings(section)
+        self._guard_second_click()
+
+    def watch_recording(self, name: str) -> None:
+        """2.9.7: the Recordings page's Watch: the recording's channel plays large, as the REC
+        sign's Go back."""
+        window = self._window
+        if window.closing():
+            return
+        self._show_page(window.player_page)
+        self._set_return_to_library(False)
+        window.controller.go_back_to_recording(name)
 
     def open_from_list(self, section: str) -> None:
         """The channel list's Movies or Series row: the Library of the provider the list shows
@@ -370,6 +674,12 @@ class TVPages(QObject):
             item_id = str(item.get("_item_id") or "")
             # i18n: a scheduled recording's right-click menu entry: it will not be recorded
             menu.addAction(tr("Cancel Recording"), lambda: window.cancel_scheduled(item_id))
+            scheduled = window.recording_schedule.item(item_id) or {}
+            if scheduled.get("kind") in ("once", "timer"):  # 2.9.7: its time, days or name
+                edit = translate(desk.BUTTON_TEXTS[desk.EDIT])
+                action = menu.addAction(edit, lambda: self.recordings_desk.edit(item_id))
+                action.setEnabled(not self.recordings_desk.records_now(item_id))
+            self._manage_entry(menu, COMING)
             menu.popup(global_pos)
             return
         window.controller.show_library_menu(item, section, global_pos, window.library_page)
@@ -383,14 +693,21 @@ class TVPages(QObject):
         # i18n: a recording's right-click menu entry: opens the folder that holds its file
         menu.addAction(tr("Show in Folder"), lambda: self._show_in_folder(path))
         # i18n: a recording's right-click menu entry: deletes its file (asks first)
-        delete = menu.addAction(tr("Delete Recording…"), lambda: self._delete_recording(item))
+        delete = menu.addAction(tr("Delete Recording…"), lambda: self.delete_recording(item))
         delete.setEnabled(not self.recordings.is_writing(path))  # one still written stays
+        self._manage_entry(menu, RECORDED)
         menu.popup(global_pos)
+
+    def _manage_entry(self, menu: QMenu, section: str) -> None:
+        """2.9.7: a recording's right-click ends with the Recordings page, on its section."""
+        menu.addSeparator()
+        menu.addAction(translate(MANAGE_TEXT), lambda: self.open_recordings(section))
 
     def _show_in_folder(self, path: str) -> None:
         system_open.open_folder(os.path.dirname(path))
 
-    def _delete_recording(self, item: dict) -> None:
+    def delete_recording(self, item: dict) -> None:
+        """A recording's file deleted, asked first (its right-click's, the Recordings page's)."""
         window = self._window
         name = os.path.basename(str(item.get("path") or ""))
         answer = QMessageBox.question(
@@ -452,3 +769,11 @@ class TVPages(QObject):
             if name:
                 message = tr("{name}: {message}", name=name, message=message)
             self._window.library_toast.show_message(scrub(message), "error", ERROR_MS)
+
+
+PROVIDER_SOURCE = "@provider:"  # 2.9.7: the home guide's channels: one provider's, all
+
+
+def _channel_keys(channels: list[dict]) -> list[tuple[str, str]]:
+    """2.9.7: a channel list as the Recordings home's guide tells two apart."""
+    return [(provider_of(c), str(c.get("id") or c.get("name") or "")) for c in channels]

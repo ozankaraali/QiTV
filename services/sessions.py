@@ -178,6 +178,12 @@ class _Open:
     limit: Optional[int]
     start_kwargs: dict[str, Any]
 
+    def give_back(self) -> None:
+        """2.9.7: dropped before it started: a borrowed session goes back to its owner."""
+        borrowed = self.start_kwargs.get("borrowed")
+        if borrowed is not None:
+            borrowed.give_back()
+
 
 class SessionManager(QObject):
     largeChanged = Signal(str, str)  # the slot that is large now, and the one that was
@@ -240,6 +246,9 @@ class SessionManager(QObject):
         self._tile_opens: dict[str, _Open] = {}  # tiles waiting for a release or a slot
         self._aside: list[str] = []  # 2.6: recording slots in the background, oldest first
         self._make_slot: Optional[Callable[[str], Optional[Slot]]] = None
+        # 2.9.7: a background player whose recording ended but which the scheduler still
+        # wants (the next programme on its channel takes over there): it stays on its channel
+        self.wanted: Callable[[Any], bool] = lambda _live: False
         self._add(main, PIP_LEVEL, muted=False)
         self._add(pip, PIP_LEVEL, muted=True)
         # A wanted level makes PlaybackSession apply it on every media it opens; without one
@@ -418,6 +427,12 @@ class SessionManager(QObject):
             return None
         self._aside.append(name)
         self._set_background(slot, True)
+        logger.info(
+            "The %s player records “%s” on in the background; the %s player takes its place.",
+            name,
+            str((slot.channel or {}).get("name") or "?")[:80],
+            fresh.name,
+        )
         if slot is self._large:
             users_mute = self._muted[name]
             self._large = fresh
@@ -437,6 +452,11 @@ class SessionManager(QObject):
         if self._grid or name not in self._aside:
             return None
         slot, old = self._slot(name), self._large
+        logger.info(
+            "The %s player recording “%s” in the background is the big picture again.",
+            name,
+            str((slot.channel or {}).get("name") or "?")[:80],
+        )
         self._aside.remove(name)
         self._set_background(slot, False)
         users_mute = self._muted[old.name]
@@ -457,10 +477,15 @@ class SessionManager(QObject):
         slot's channel stops first. False when `name` is not in the background."""
         if self._grid or name not in self._aside:
             return False
-        self._pending = None
+        self._drop_pending()
         old = self._small
         self._stop(old)
         slot = self._slot(name)
+        logger.info(
+            "The %s player recording “%s” in the background shows small.",
+            name,
+            str((slot.channel or {}).get("name") or "?")[:80],
+        )
         self._aside.remove(name)
         self._set_background(slot, False)
         self._small = slot
@@ -511,6 +536,8 @@ class SessionManager(QObject):
 
     def _on_recording_changed(self, name: str, recording: bool) -> None:
         if recording or name not in self._aside:
+            return
+        if self.wanted(self._slot(name).live):  # 2.9.7: the next programme records on it
             return
         self._aside.remove(name)  # its recording ended: it leaves its channel (kept)
         slot = self._slot(name)
@@ -740,25 +767,44 @@ class SessionManager(QObject):
         """Open `channel` small, or change the channel of the small picture.
 
         `start_kwargs` go to `LiveSession.start()` once the budget grants the slot and the
-        streams the small slot played before are released.
+        streams the small slot played before are released. 2.9.7: with `borrowed` in them
+        (a scheduled recording's session) it starts once they are released, with no slot of
+        its own; dropped before that, the session goes back.
         """
         slot = self.other()
         self._stop(slot)
         slot.channel = channel
         limit = self._budget.limit_for(provider, xtream_max)
         name = str(provider.get("name", ""))
+        logger.info(  # 2.9.7: each tune named in the log (no address)
+            "Opening “%s” (%s) small in the %s player: %s.",
+            str(channel.get("name") or "?")[:80],
+            name,
+            slot.name,
+            (
+                "the scheduled recording's stream"
+                if start_kwargs.get("borrowed") is not None
+                else "a stream of its own"
+            ),
+        )
+        self._drop_pending()
         self._pending = _Open(slot.name, name, limit, dict(start_kwargs))
         self._proceed()
 
     def close_pip(self) -> None:
         """Stop the small slot; the large one plays on. Its tickets go back on release."""
-        self._pending = None
+        self._drop_pending()
         slot = self.other()
         self._stop(slot)
         slot.channel = slot.group_key = None
         if self._open:
             self._open = False
             self.pipStateChanged.emit(False)
+
+    def _drop_pending(self) -> None:
+        pending, self._pending = self._pending, None
+        if pending is not None:
+            pending.give_back()
 
     def _stop(self, slot: Slot) -> None:
         tuner = self._tuners[slot.name]
@@ -792,6 +838,9 @@ class SessionManager(QObject):
         stream = tuner.stream
         if stream is None or tuner.releasing() or stream.ticket is not None:
             return
+        if pending.start_kwargs.get("borrowed") is not None:
+            self._start_pending()  # 2.9.7: another's session: no stream of its own to ask for
+            return
         ticket = stream.request(pending.provider, pending.limit, queue=False)
         slot.ticket = stream.ticket
         if ticket == DENIED:  # only a limit denies, so it is a number
@@ -814,6 +863,18 @@ class SessionManager(QObject):
         stream = self._tuners[slot.name].stream
         if stream is None or not stream.is_granted() or stream.running():
             return  # another stream's grant
+        self._start_pending()
+
+    def _start_pending(self) -> None:
+        """The pending small picture starts: on its granted slot, or (2.9.7) on a borrowed
+        session, with none of its own."""
+        pending = self._pending
+        if pending is None:
+            return
+        slot = self._slot(pending.slot)
+        stream = self._tuners[slot.name].stream
+        if stream is None:
+            return
         self._pending = None
         opening = not self._open
         if opening:
@@ -824,7 +885,9 @@ class SessionManager(QObject):
         # _stop) and PlaybackSession applies this within ~30 ms of it opening.
         self._set_mute(slot, self._muted[slot.name])
         self._limit = pending.limit
-        kwargs = dict(pending.start_kwargs, one_stream=pending.limit is not None)  # as a tile's
+        borrowed = pending.start_kwargs.get("borrowed") is not None
+        one_stream = pending.limit is not None and not borrowed  # as a tile's
+        kwargs = dict(pending.start_kwargs, one_stream=one_stream)
         try:
             stream.start(**kwargs)
         except Exception as error:  # the stream gave its slot back and stopped the session

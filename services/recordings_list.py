@@ -4,15 +4,20 @@ Each `.ts` file of the Recordings folder (`services.recording.folder`) is a titl
 and start from its name ("<channel> <YYYY-MM-DD HH.MM>[ (n)].ts", as QiTV names them), else
 the file's own name and time. They are listed newest first. The folder is read on a thread of
 its own (`RecordingsList.refresh`); the list changes, and says so, only when the files did.
+
+2.9.7: the Recordings page adds places, other folders listed too (`services.recording.places`);
+each read notes their disks' free space and whether they could be reached (`places`).
 """
 
 from __future__ import annotations
 
+from dataclasses import dataclass
 from datetime import datetime
 import logging
 import os
 from pathlib import Path
 import re
+import shutil
 import threading
 from typing import Any, Callable, Optional
 
@@ -157,6 +162,7 @@ def recording_item(path: Path, size: int, mtime: float, writing: bool = False) -
         "_recording": True,
         "_writing": writing,
         "_channel": channel,  # the name may become the programme's (titles)
+        "_size": size,  # 2.9.7: the Recordings page adds up each place's
     }
 
 
@@ -183,12 +189,46 @@ def _entries(folder: str) -> list[tuple[Path, int, float, int]]:
 
 def scan(folder: str, writing: frozenset[str] = frozenset()) -> list[dict[str, Any]]:
     """The recordings in `folder`, newest first (none when it cannot be read)."""
+    return _listed(_entries(folder), writing)
+
+
+def _listed(
+    entries: list[tuple[Path, int, float, int]], writing: frozenset[str]
+) -> list[dict[str, Any]]:
     items = [
         recording_item(path, size, mtime, str(path) in writing)
-        for path, size, mtime, _ns in _entries(folder)
+        for path, size, mtime, _ns in entries
     ]
     items.sort(key=lambda item: int(item["added"]), reverse=True)
     return items
+
+
+@dataclass(frozen=True)
+class PlaceState:
+    """2.9.7: a folder recordings are listed from, as last read: whether it could be, and its
+    disk's free bytes (None: not known)."""
+
+    path: str
+    reachable: bool
+    free: Optional[int]
+
+
+def _place_state(folder: str, default: bool) -> PlaceState:
+    """`folder`'s state. Where recordings go may not exist yet (the first recording makes
+    it): its disk counts then, from the nearest folder above it that exists."""
+    if os.path.isdir(folder):
+        probe: Optional[str] = folder
+    elif default:
+        probe = os.path.dirname(os.path.abspath(folder))
+        while probe and not os.path.isdir(probe) and os.path.dirname(probe) != probe:
+            probe = os.path.dirname(probe)
+    else:
+        return PlaceState(folder, False, None)
+    try:
+        free = shutil.disk_usage(probe).free if probe else None
+    except OSError:
+        free = None
+    return PlaceState(folder, True, free)
 
 
 class RecordingsList(QObject):
@@ -196,9 +236,11 @@ class RecordingsList(QObject):
     `writing()` names the files recordings are writing now (marked `_writing`)."""
 
     changed = Signal()
+    places_changed = Signal()  # 2.9.7: a place's free space or reachability (files unchanged)
     delete_failed = Signal(str)  # why a recording's file stayed, in the active language
-    _scanned = Signal(object, object)  # (signature, items), from the reading thread
-    # (name, why it stayed: "" when it went), from the deleting thread
+    # (signature, (items, places)), from the reading thread
+    _scanned = Signal(object, object)
+    # (its path, why it stayed: None when it went), from the deleting thread
     _deleted = Signal(str, object)
 
     def __init__(
@@ -207,14 +249,19 @@ class RecordingsList(QObject):
         writing: Optional[Callable[[], set[str]]] = None,
         parent: Optional[QObject] = None,
         titles: Optional[Callable[[str], str]] = None,
+        index: Any = None,
     ) -> None:
-        """`titles(path)` (2.8): the programme a scheduled recording's file holds ("": none)."""
+        """`titles(path)` (2.8): the programme a scheduled recording's file holds ("": none).
+        `index` (2.9.7, services.recordings_index): what each file holds, its programme,
+        channel, provider, logo and times first."""
         super().__init__(parent)
         self._config = config
         self._writing = writing or (lambda: set())
         self._titles = titles or (lambda path: "")
+        self._index = index
         self._scheduled: list[dict[str, Any]] = []  # 2.8: still to come, listed first
         self._items: list[dict[str, Any]] = []
+        self._places: list[PlaceState] = []  # 2.9.7: as last read
         self._signature: Optional[tuple] = None
         self._reading = False
         self._again = False
@@ -224,6 +271,14 @@ class RecordingsList(QObject):
 
     def items(self) -> list[dict[str, Any]]:
         return self._scheduled + self._items
+
+    def files(self) -> list[dict[str, Any]]:
+        """2.9.7: the recordings' files alone (newest first)."""
+        return list(self._items)
+
+    def places(self) -> list[PlaceState]:
+        """2.9.7: the folders listed from, as last read (where recordings go first)."""
+        return list(self._places)
 
     def set_scheduled(self, entries: list[dict]) -> None:
         """The schedule's items (2.8), listed before the recordings, soonest first."""
@@ -261,11 +316,14 @@ class RecordingsList(QObject):
         except OSError as e:
             logger.warning("A recording could not be deleted: %s", type(e).__name__)
             failure = e
-        self._deleted.emit(os.path.basename(path), failure)
+        self._deleted.emit(path, failure)
 
-    def _on_deleted(self, name: str, failure: Optional[OSError]) -> None:
+    def _on_deleted(self, path: str, failure: Optional[OSError]) -> None:
         """A file went, or could not (the user is told why); either way the folder is read
         again."""
+        name = os.path.basename(path)
+        if failure is None and self._index is not None:  # 2.9.7: its entry goes with it
+            self._index.forget(path)
         if failure is not None:
             if getattr(failure, "winerror", None) in _IN_USE_WINERRORS:
                 self.delete_failed.emit(translate(DELETE_IN_USE, name=name))
@@ -274,42 +332,66 @@ class RecordingsList(QObject):
                 self.delete_failed.emit(translate(DELETE_FAILED, name=name, error=reason))
         self.refresh()
 
+    def _noted(self, item: dict[str, Any]) -> dict[str, Any]:
+        """2.9.7: what the index says of `item`'s file, set on the item (`_channel`,
+        `_provider`, `_logo`, `_start`, `_stop`; the name's channel and start without one)."""
+        entry = self._index.get(item.get("path", "")) if self._index is not None else None
+        entry = entry or {}
+        if entry.get("channel"):
+            item["_channel"] = str(entry["channel"])
+        item["_provider"] = str(entry.get("provider") or "")
+        item["_logo"] = str(entry.get("logo") or "")
+        start = entry.get("start")
+        item["_start"] = float(start) if isinstance(start, (int, float)) else float(item["added"])
+        stop = entry.get("stop")
+        item["_stop"] = float(stop) if isinstance(stop, (int, float)) else None
+        return entry
+
     def refresh(self) -> None:
         """Read the folder again (once more after a reading under way, when asked meanwhile)."""
         if self._reading:
             self._again = True
             return
         self._reading = True
-        folder = recording.folder(self._config)
+        folders = tuple(recording.places(self._config))  # 2.9.7: where they go, and the others
         try:
             writing = frozenset(self._writing())
         except Exception as e:  # the list never fails for it
             logger.debug("Recordings being written unknown: %s", type(e).__name__)
             writing = frozenset()
         threading.Thread(
-            target=self._read, args=(folder, writing), name="recordings-list", daemon=True
+            target=self._read, args=(folders, writing), name="recordings-list", daemon=True
         ).start()
 
-    def _read(self, folder: str, writing: frozenset[str]) -> None:
+    def _read(self, folders: tuple[str, ...], writing: frozenset[str]) -> None:
+        places: Optional[list[PlaceState]] = None
         try:
-            entries = _entries(folder)
+            entries = [entry for folder in folders for entry in _entries(folder)]
             signature = (
-                folder,
+                folders,
                 tuple(sorted((str(p), s, ns) for p, s, _m, ns in entries)),
                 writing,
             )
-            items = scan(folder, writing)
+            items = _listed(entries, writing)
+            places = [_place_state(folder, k == 0) for k, folder in enumerate(folders)]
         except Exception as e:  # pragma: no cover - the list stays as it was
             logger.warning("The recordings could not be listed: %s", type(e).__name__)
             signature, items = None, None
-        self._scanned.emit(signature, items)
+        self._scanned.emit(signature, (items, places))
 
-    def _on_scanned(self, signature: Optional[tuple], items: Optional[list]) -> None:
+    def _on_scanned(self, signature: Optional[tuple], read: tuple) -> None:
         self._reading = False
+        items, places = read
+        if places is not None and places != self._places:
+            self._places = places
+            if signature == self._signature:  # the files did not change: the places did
+                self.places_changed.emit()
         if items is not None and signature != self._signature:
             self._signature = signature
             for item in items:  # 2.8: a scheduled recording is named by its programme
-                title = self._titles(item.get("path", ""))
+                entry = self._noted(item)
+                title = str(entry.get("title") or "") or self._titles(item.get("path", ""))
+                item["_title"] = title
                 if title and title != item["name"]:
                     item["description"] = f"{item['name']} · {item['description']}"
                     item["name"] = title

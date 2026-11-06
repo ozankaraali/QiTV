@@ -23,6 +23,7 @@ from datetime import date, datetime, time as clock_time, timedelta, tzinfo
 import json
 import logging
 import os
+import re
 import threading
 import time
 from typing import Any, Callable, Iterable, Mapping, Optional
@@ -43,7 +44,17 @@ DONE = 400  # the series airings already taken, kept to never record one twice
 ONCE, SERIES, TIMER = "once", "series", "timer"
 DAY_MINUTES = 24 * 60  # a timer's longest, and its start's bound (minutes after midnight)
 RECORDED, MISSED, FAILED = "recorded", "missed", "failed"
-_CHANNEL_KEYS = ("id", "name", "number", "cmd", "xmltv_id", "_provider", "user_agent", "referrer")
+_CHANNEL_KEYS = (
+    "id",
+    "name",
+    "number",
+    "cmd",
+    "xmltv_id",
+    "_provider",
+    "user_agent",
+    "referrer",
+    "logo",  # 2.9.7: the Recordings tab shows it (older builds ignore it)
+)
 
 
 @dataclass(frozen=True)
@@ -205,6 +216,43 @@ def _timer_slots(item: dict, now: float, zone: Optional[tzinfo]) -> list[tuple[f
     ]
 
 
+def is_listed(kept: dict, channel: dict) -> bool:
+    """2.9.7: a channel the schedule keeps (its address without the provider's account) is
+    `channel`, a list's: by their addresses when both have one, the account's place in it
+    standing for any account (an M3U's ids are its list's places, and its names may repeat
+    in other groups), http or https alike; else by id; else by name."""
+    return listed_matcher(kept)(channel)
+
+
+def listed_matcher(kept: dict) -> Callable[[dict], bool]:
+    """`is_listed(kept, channel)` for many channels: its address pattern built once (a
+    provider's list may hold 50,000 channels and more)."""
+    a = str(kept.get("cmd") or "").strip()
+    compiled = None
+    if a:
+        pattern = re.escape(_bare(a))
+        for token in (_USER_Q, _PASSWORD_Q, _USER, _PASSWORD):
+            pattern = pattern.replace(re.escape(token), "[^/]+")
+        compiled = re.compile(pattern)
+    kept_id = kept.get("id")
+    name = str(kept.get("name") or "")
+
+    def listed(channel: dict) -> bool:
+        b = str(channel.get("cmd") or "").strip()
+        if compiled is not None and b:
+            return compiled.fullmatch(_bare(b)) is not None
+        if kept_id not in (None, "") and channel.get("id") not in (None, ""):
+            return str(kept_id) == str(channel.get("id"))
+        return bool(name) and name == str(channel.get("name") or "")
+
+    return listed
+
+
+def _bare(address: str) -> str:
+    """An address without its scheme."""
+    return address.split("://", 1)[-1]
+
+
 def same_channel(a: dict, b: dict) -> bool:
     if a.get("_provider") != b.get("_provider"):
         return False
@@ -238,6 +286,8 @@ class Schedule:
         self._zone = zone  # the clock timers keep (None: this computer's)
         self._items: list[dict] = []
         self._done: list[str] = []  # job keys started (series airings never twice)
+        # 2.9.7: the airings skipped (their keys are in `done` too: an older QiTV skips them)
+        self._skipped: list[str] = []
         self._outcomes: list[dict] = []
         self._load()
 
@@ -257,6 +307,9 @@ class Schedule:
         items, done, outcomes = data.get("items"), data.get("done"), data.get("outcomes")
         self._items = [i for i in (items if isinstance(items, list) else []) if _valid(i)]
         self._done = [str(k) for k in (done if isinstance(done, list) else [])][-DONE:]
+        skipped = data.get("skipped")
+        kept_skips = [str(k) for k in (skipped if isinstance(skipped, list) else [])]
+        self._skipped = [k for k in kept_skips if k in self._done]
         kept = outcomes if isinstance(outcomes, list) else []
         self._outcomes = [o for o in kept if isinstance(o, dict)][-OUTCOMES:]
 
@@ -267,6 +320,8 @@ class Schedule:
             "done": self._done[-DONE:],
             "outcomes": self._outcomes[-OUTCOMES:],
         }
+        if self._skipped:  # 2.9.7: optional, an older QiTV ignores it
+            data["skipped"] = [k for k in self._skipped if k in self._done[-DONE:]]
         self._write(self._path, json.loads(json.dumps(data)))  # a copy for the writing thread
 
     # ---- what is scheduled -----------------------------------------------------------------
@@ -418,6 +473,68 @@ class Schedule:
         if len(self._items) != before:
             self._save()
 
+    def edit(
+        self,
+        item_id: str,
+        *,
+        title: str,
+        start: Optional[float] = None,
+        stop: Optional[float] = None,
+        begin: Optional[int] = None,
+        minutes: Optional[int] = None,
+        days: Optional[Iterable[int]] = None,
+    ) -> Optional[dict]:
+        """The Recordings page's Edit (2.9.7): a one-time recording or a timer changed in
+        place (its id, channel and provider kept): once from `start` to `stop` (unix), or
+        with `days` a timer from `begin` (minutes after midnight) for `minutes` on them. The
+        item as it is now; None when it is gone, a series, or the change makes no recording
+        (once: its time is over)."""
+        item = next((i for i in self._items if i.get("id") == item_id), None)
+        if item is None or item.get("kind") not in (ONCE, TIMER):
+            return None
+        kept = {key: item[key] for key in ("id", "provider", "channel", "created") if key in item}
+        if days:
+            changed = dict(
+                kept,
+                kind=TIMER,
+                title=title.strip(),
+                begin=int(begin or 0),
+                minutes=int(minutes or 0),
+                days=sorted({int(day) for day in days}),
+            )
+        else:
+            if start is None or stop is None or stop <= max(start, self._clock()):
+                return None
+            changed = dict(kept, kind=ONCE, title=title.strip(), start=start, stop=stop)
+        if not _valid(changed):
+            return None
+        self._items = [changed if i is item else i for i in self._items]
+        self._save()
+        return dict(changed)
+
+    # ---- what became of them (2.9.7: the Recordings page lists the problems) -------------------
+
+    def dismiss(self, at: float) -> None:
+        """The outcome noted at `at` is listed no more (kept, marked seen: an older QiTV
+        ignores the mark)."""
+        changed = False
+        for outcome in self._outcomes:
+            if float(outcome.get("at") or 0) == at and not outcome.get("seen"):
+                outcome["seen"] = True
+                changed = True
+        if changed:
+            self._save()
+
+    def dismiss_all(self) -> None:
+        """Every missed or failed recording is listed no more."""
+        changed = False
+        for outcome in self._outcomes:
+            if outcome.get("state") in (MISSED, FAILED) and not outcome.get("seen"):
+                outcome["seen"] = True
+                changed = True
+        if changed:
+            self._save()
+
     def _once_of(self, channel: dict, programme: Programme) -> Optional[dict]:
         start = programme.start.timestamp()
         for item in self._items:
@@ -444,7 +561,34 @@ class Schedule:
         return None
 
     def is_scheduled(self, channel: dict, programme: Programme) -> bool:
-        return self.scheduled_item(channel, programme) is not None
+        """`programme` records (its airing not skipped, 2.9.7)."""
+        item = self.scheduled_item(channel, programme)
+        return item is not None and not self.is_skipped(item["id"], programme.start.timestamp())
+
+    # ---- 2.9.7: one airing skipped ----------------------------------------------------------
+
+    def skip(self, item_id: str, start: float) -> None:
+        """The airing of item `item_id` starting at `start` (unix) is not recorded; the item
+        goes on. One already started is left as it is."""
+        key = f"{item_id}@{int(start)}"
+        if key in self._done:
+            return
+        self._done.append(key)
+        self._done = self._done[-DONE:]
+        self._skipped.append(key)
+        self._save()
+
+    def unskip(self, item_id: str, start: float) -> None:
+        """A skipped airing records again (never one that started)."""
+        key = f"{item_id}@{int(start)}"
+        if key not in self._skipped:
+            return
+        self._skipped.remove(key)
+        self._done = [k for k in self._done if k != key]
+        self._save()
+
+    def is_skipped(self, item_id: str, start: float) -> bool:
+        return f"{item_id}@{int(start)}" in self._skipped
 
     # ---- what is due -----------------------------------------------------------------------
 

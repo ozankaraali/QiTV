@@ -81,6 +81,28 @@ class RecordingTests(LiveSessionCase):
         self.live.start_recording(PATH)
         self.assertEqual(self.engine.recordings[-1][1:4], (sid, PATH, 4))
 
+    def test_a_scheduled_programme_records_from_its_start_in_the_buffer(self):  # 2.9.7
+        sid = self.playing()  # segments of 2 s, 0-20 s; the newest ends about now
+        self.live._wall = lambda: 1000.0
+        self.assertTrue(self.live.start_recording(PATH, since=1000.0 - 13.0))  # at 7 s
+        self.assertEqual(self.engine.recordings[-1][1:4], (sid, PATH, 3))  # its clean start
+        self.assertEqual(self.live.recording_id(), self.engine.recordings[-1][0])
+        self.live.stop_recording()
+        self.assertIsNone(self.live.recording_id())
+
+    def test_a_programme_that_began_before_the_buffer_records_all_of_it(self):  # 2.9.7
+        sid = self.playing()
+        self.live._wall = lambda: 1000.0
+        self.live.start_recording(PATH, since=1000.0 - 3600.0)
+        self.assertEqual(self.engine.recordings[-1][1:4], (sid, PATH, 0))
+
+    def test_a_programme_still_to_come_records_from_the_live_edge(self):  # 2.9.7
+        sid = self.ready([], open_seq=4, live_edge=3.0)
+        self.playback.set_state(PlaybackState.PLAYING)
+        self.live._wall = lambda: 1000.0
+        self.live.start_recording(PATH, since=1060.0)
+        self.assertEqual(self.engine.recordings[-1][1:4], (sid, PATH, 4))
+
     def test_a_stop_ends_it_and_its_end_is_told(self):
         sid = self.playing()
         self.live.start_recording(PATH)

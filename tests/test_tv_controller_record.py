@@ -19,6 +19,7 @@ from test_tv_pip import MOVIE, PipCase
 from timer_fixtures import wait_until
 
 from services.connection_budget import DENIED
+from services.live.live_session import Borrowed
 from services.sessions import Slot
 from services.vlc_profile import PlayKind
 from ui.keymap import Action
@@ -62,6 +63,60 @@ class _RecordCase(PipCase):
 
     def since_recording(self, live):
         return live.calls[live.calls.index(("start_recording", "/tmp/x.ts")) :]
+
+
+class RecordingNotedTests(_RecordCase):  # 2.9.7: the recordings index
+    def test_r_notes_what_the_recording_holds(self):
+        self.start_large(0)
+        noted = []
+        self.controller.note_recording = lambda path, item, title, start: noted.append(
+            (path, item["name"], title, start)
+        )
+        self.controller.handle(Action.RECORD)
+        live = self.controller.live
+        (path,) = [call[1] for call in live.calls if call[0] == "start_recording"]
+        ((noted_path, channel, title, start),) = noted
+        self.assertEqual((noted_path, channel), (path, CHANNELS[0]["name"]))
+        self.assertIsInstance(title, str)
+        self.assertGreater(start, 0)
+
+
+class RecordingEndNotedTests(_RecordCase):  # final review 5: its length is the file's
+    def test_an_r_recordings_end_is_noted(self):
+        self.start_large(0)
+        ended = []
+        self.controller.note_recording_end = ended.append
+        self.controller.handle(Action.RECORD)
+        live = self.controller.live
+        (path,) = [call[1] for call in live.calls if call[0] == "start_recording"]
+        live.recordingEnded.emit("stopped", path, 1_000)
+        self.assertEqual(ended, [path])
+
+
+class UserStopTests(_RecordCase):  # review 1: a scheduled one hosted there is the user's stop
+    def test_every_stop_of_a_background_recording_says_it_is_the_users(self):
+        told = []
+        self.controller.recording_user_stop = told.append
+        recording = self.record_large(0)
+        self.leave_for(1)
+        self.controller.stop_background_recording("main")
+        self.assertEqual(told, [recording])
+        self.assertIn(("stop_recording",), recording.calls)
+        told.clear()
+        self.controller.stop_player_recording(recording)  # the Recordings page's Stop
+        self.assertEqual(told, [recording])
+
+
+class WatchHostedTests(_RecordCase):  # review 3: Watch on a scheduled one a player hosts
+    def test_go_back_finds_the_player_a_scheduled_recording_records_on(self):
+        from unittest import mock
+
+        self.record_large(0)
+        self.leave_for(1)  # the player recording channel 0 goes to the background
+        self.controller.scheduled_host = lambda name: "main" if name == "sched:x@1" else None
+        with mock.patch.object(self.controller, "tune_live") as tune:
+            self.controller.go_back_to_recording("sched:x@1")
+        self.assertEqual(tune.call_args.args[0]["name"], CHANNELS[0]["name"])
 
 
 class RecordingAsideTests(_RecordCase):
@@ -168,6 +223,15 @@ class RecordingAsideTests(_RecordCase):
         self.controller.stop_live()
         self.assertEqual(seen, [False])
         self.assertIn(("stop_recording",), self.since_recording(recording))
+
+    def test_quitting_notes_where_each_recording_ends(self):  # release review: its length
+        ended = []
+        self.controller.note_recording_end = ended.append
+        recording = self.record_large(0)
+        self.leave_for(1)
+        self.controller.stop_live()  # its end (recordingEnded) may come after QiTV is gone
+        (path,) = [call[1] for call in recording.calls if call[0] == "start_recording"]
+        self.assertEqual(ended, [path])
 
     def test_quitting_stops_the_recordings_in_the_background(self):
         recording = self.record_large(0)
@@ -581,6 +645,20 @@ class ScheduledRecordingQuestionTests(_RecordCase):
         self.controller.handle(Action.OK)
         self.scheduler_lets_go()
         self.assertEqual(self.requested()[-1], "Three")
+
+    def test_go_back_to_it_watches_its_recordings_session_asking_nothing(self):  # 2.9.7
+        lent = []
+        self.controller.lendable_scheduled = lambda channel, provider: True
+        self.controller.lend_scheduled = lambda channel, provider, purpose: lent.append(
+            purpose
+        ) or Borrowed("lent1", lambda: None)
+        self.controller.go_back_to_recording(SCHEDULED)
+        self.assertFalse(self.question.isVisibleTo(self.host))
+        self.assertEqual(self.stopped, [])
+        self.assertEqual(self.requested()[-1], "Three")
+        self.assertEqual(self.catalog.links[-1][1], CHANNELS[2])  # the list's, not the kept copy
+        self.ready("http://stream/3")
+        self.assertEqual(lent, ["main"])
 
     def test_quit_asks_and_leaves_it_to_the_scheduler(self):
         quits = []

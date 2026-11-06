@@ -102,6 +102,7 @@ from services.recording_schedule import (
     flush_writes as recording_schedule_flush,
     slot_text,
 )
+from services.recordings_index import FILE_NAME as RECORDINGS_INDEX_FILE, RecordingsIndex
 from services.recordings_list import timer_text
 from services.redact import safe_message, safe_traceback
 from services.sessions import SessionManager, Slot
@@ -112,7 +113,7 @@ from services.track_memory import FILE_NAME as TRACKS_FILE, TrackMemory
 from services.update_checker import call_before_update, set_quit_note
 from services.watch_state import WatchState
 from services.zapping import ZapController
-from ui import macos_window, provider_drop, quit_reason
+from ui import item_provider, macos_window, provider_drop, quit_reason
 from ui.bottom_band import BottomBand
 from ui.captions_controller import CaptionsController
 from ui.desktop_pip import DesktopPip, corner_rect
@@ -574,6 +575,10 @@ class TVWindow(QMainWindow):
         self.recording_schedule = Schedule(
             os.path.join(config_manager.get_config_dir(), SCHEDULE_FILE)
         )
+        # 2.9.7: what each recording holds (its programme, channel and logo), by its file
+        self.recordings_index = RecordingsIndex(
+            os.path.join(config_manager.get_config_dir(), RECORDINGS_INDEX_FILE)
+        )
         self.scheduler: Optional[RecordingScheduler] = None
         self._timer_dialog: Optional[RecordTimerDialog] = None  # "Record at a time", last open
         self.overlays = Overlays(
@@ -592,6 +597,7 @@ class TVWindow(QMainWindow):
                 deepest_window=deepest_window,
                 # 2.8: QiTV records programmes at their time (with the time-shift helper)
                 scheduled=self._programme_scheduled if self._instance is not None else None,
+                repeating=self._programme_repeats,  # 2.9.7: its Cancel skips the airing
             ),
             next_card=NextCard(host),
             welcome=WelcomeCard(host),
@@ -619,6 +625,7 @@ class TVWindow(QMainWindow):
         )
         # 2.8.12: the REC sign showed through the channel list, the guide and the grid's tiles.
         self.rec_sign.cover_with(self.overlays.drawer, self.overlays.guide, self.grid_tiles)
+        self.rec_sign.follow_hud(self.overlays.transport)  # 2.9.7: up with the controls
         for listing in (self.overlays.column, self.overlays.drawer, self.overlays.guide):
             listing.set_playing(playing)
         # Bottom to top. The PiP label sits over the transport, whose bottom band covers a
@@ -670,7 +677,14 @@ class TVWindow(QMainWindow):
         self.captions_overlay.follow(self.overlays.transport)
         # After the window's surface filters: the frame takes the small surface's left button
         # before the window (its mini-player drag) and the surface (the drawer) see it.
-        self.pip_frame = PipFrame(self.player_page, self.surface, self.pip_surface, config_manager)
+        # Each small picture takes the shape its player's picture shows in (no bars).
+        self.pip_frame = PipFrame(
+            self.player_page,
+            self.surface,
+            self.pip_surface,
+            config_manager,
+            shape_of=self._picture_shape,
+        )
         # Desktop picture in picture (macOS): while the fullscreen window's desktop is not the
         # one shown, the large picture floats in a small window on every desktop.
         self.desktop_pip = DesktopPip(
@@ -682,6 +696,7 @@ class TVWindow(QMainWindow):
             place=self._floating_rect,
             join_all_spaces=macos_window.join_all_spaces,
             remember=self._remember_floating_rect,
+            shape=self.pip_frame.lent_shape,
             parent=self,
         )
         # i18n: shown on the fullscreen player while its picture floats on another desktop
@@ -776,9 +791,12 @@ class TVWindow(QMainWindow):
                     config=config_manager,
                     toast=lambda text, kind="info", ms=INFO_MS: self.screens.notify(text, kind, ms),
                     parent=self,
+                    index=self.recordings_index,
                 )
             )
         controller.parental = self.parental  # what it protects never enters the history
+        controller.note_recording = self.note_recording  # 2.9.7: the recordings index
+        controller.note_recording_end = self.note_recording_end
         controller.hidden_groups = self.hidden_groups
         self.overlays.guide.recordRequested.connect(self.schedule_programme)
         self.overlays.guide.recordCancelled.connect(self.cancel_programme)
@@ -911,7 +929,9 @@ class TVWindow(QMainWindow):
         schedule = self.recording_schedule
         name = str(channel.get("name") or "")
         if series:
-            schedule.add_series(channel, programme.title, account=self._account_of(channel))
+            item = schedule.add_series(channel, programme.title, account=self._account_of(channel))
+            # 2.9.7: this airing records again if it was skipped
+            schedule.unskip(str(item.get("id") or ""), programme.start.timestamp())
             # i18n: a toast: every airing of the programme on the channel will be recorded
             text = tr(
                 "Every “{title}” on {channel} will be recorded.",
@@ -975,10 +995,39 @@ class TVWindow(QMainWindow):
             self.scheduler.tick()  # one on now starts at once
         return text
 
-    def cancel_programme(self, channel: dict, programme: Programme) -> None:
+    def _programme_repeats(self, channel: dict, programme: Programme) -> bool:
+        """2.9.7: `programme` records as an airing of a series (its Cancel skips it)."""
         item = self.recording_schedule.scheduled_item(channel, programme)
-        if item is not None:
+        return item is not None and item.get("kind") != "once"
+
+    def cancel_programme(self, channel: dict, programme: Programme) -> None:
+        """The guide's Cancel: a one-time recording is cancelled; an airing of a series is
+        skipped, the series going on (2.9.7)."""
+        item = self.recording_schedule.scheduled_item(channel, programme)
+        if item is None:
+            return
+        if item.get("kind") == "once":
             self.cancel_scheduled(str(item.get("id") or ""))
+            return
+        item_id, start = str(item.get("id") or ""), programme.start.timestamp()
+        if self.scheduler is not None:  # it ends a wait, or stops the airing that records
+            done = self.scheduler.skip_airing(item_id, start)
+        else:
+            self.recording_schedule.skip(item_id, start)
+            done = "skipped"
+        time = programme.start.astimezone().strftime("%H:%M")
+        if done == "stopped":
+            # i18n: a toast: one airing of a series stopped recording ({title}: its own)
+            text = tr("“{title}” stopped recording; the series goes on.", title=programme.title)
+        else:
+            # i18n: a toast: one airing of a series won't be recorded ({title}, {time}: its own)
+            text = tr(
+                "“{title}” at {time} won't be recorded; the series goes on.",
+                title=programme.title,
+                time=time,
+            )
+        self.screens.notify(text)
+        self._schedule_changed()
 
     def cancel_scheduled(self, item_id: str) -> None:
         """A scheduled recording is cancelled (the guide's, the Library's right-click)."""
@@ -988,6 +1037,11 @@ class TVWindow(QMainWindow):
             self.recording_schedule.cancel(item_id)
         # i18n: a toast: a scheduled recording was cancelled
         self.screens.notify(tr("Recording cancelled."))
+        self._schedule_changed()
+
+    def schedule_changed(self) -> None:
+        """2.9.7: the schedule was changed without the scheduler (the Recordings page's Edit
+        when QiTV can't record): as its own change."""
         self._schedule_changed()
 
     def _schedule_changed(self) -> None:
@@ -1012,6 +1066,25 @@ class TVWindow(QMainWindow):
             self._relock.start(int(remaining * 1000) + 250)
         else:
             self._relock.stop()
+        # 2.9.7: the Recordings tab hides a hidden channel's recordings while locked
+        self.screens.library_controller.recordings_changed()
+
+    def note_recording(self, path: str, channel: dict, title: str, start: float) -> None:
+        """2.9.7: a recording started with R: what its file holds, in the recordings index."""
+        self.recordings_index.note(
+            path,
+            title=title,
+            channel=str(channel.get("name") or ""),
+            provider=item_provider.provider_name(self.catalog, channel),
+            channel_id=str(channel.get("id") or ""),
+            logo=str(channel.get("logo") or ""),
+            start=start,
+            stop=None,
+        )
+
+    def note_recording_end(self, path: str) -> None:
+        """2.9.7: a player's recording ended now: its file holds until here."""
+        self.recordings_index.ended(path, time.time())
 
     def attach_scheduler(self, scheduler: Any) -> None:
         """The scheduled recordings (2.8): the Library and the guides follow them; what records
@@ -1020,9 +1093,17 @@ class TVWindow(QMainWindow):
         controller = self.controller
         scheduler.changed.connect(self._schedule_changed)
         scheduler.changed.connect(controller.scheduled_changed)
+        self.screens.recordings_desk.follow_scheduler(scheduler)  # 2.9.7: the Recordings page
         controller.extra_guides = scheduler.providers
+        controller.recording_user_stop = scheduler.stopped_by_user  # 2.9.7: hosted runs
+        controller.scheduled_host = scheduler.host_of
+        if controller.sessions is not None:  # 2.9.7: a background player the next one wants
+            controller.sessions.wanted = scheduler.wants
         controller.scheduled_now = scheduler.recording_now
         controller.stop_scheduled = scheduler.stop_now
+        controller.lend_scheduled = scheduler.lend  # 2.9.7: watched with no second stream
+        controller.lendable_scheduled = scheduler.lendable
+        scheduler.players = controller.players_showing  # 2.9.7: records what a player shows
         controller.record_at = self.record_at  # a channel's right-click: Record at a time
 
     def _stop_scheduler(self) -> None:
@@ -1088,6 +1169,14 @@ class TVWindow(QMainWindow):
         for name, player in self._players():
             if self.surfaces.get(name) is surface:
                 player.set_video_size(surface.width(), surface.height())
+
+    def _picture_shape(self, name: str) -> Optional[float]:
+        """The shape (width / height) slot `name`'s picture shows in (None: not known yet, or
+        it fits any): the picture in picture's boxes take it."""
+        for slot_name, player in self._players():
+            if slot_name == name:
+                return player.picture_ratio()
+        return None
 
     def _players(self) -> list[tuple[str, Session]]:
         """Every player by its slot's name (the main one alone without libVLC)."""

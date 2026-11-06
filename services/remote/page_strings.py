@@ -22,10 +22,19 @@ PAGE_STRINGS: dict[str, str] = {
     "live": N_("LIVE"),
     # i18n: the phone remote's now-playing card when nothing plays
     "nothing_playing": N_("Nothing playing"),
+    # i18n: the phone remote's now-playing banner: the programme on now (as the TV's banner)
+    "now": N_("Now"),
     # i18n: the phone remote: the button that goes back to live TV (short)
     "tv": N_("TV"),
     "movies": N_("Movies"),  # i18n: the phone remote: a section button
     "series": N_("Series"),  # i18n: the phone remote: a section button
+    "recordings": N_("Recordings"),  # i18n: the phone remote: a section button (2.9.7)
+    # i18n: the phone remote's Recordings: the latest recordings' heading (2.9.7)
+    "recently_recorded": N_("Recently recorded"),
+    # i18n: the phone remote's Recordings: the link to every recording (2.9.7)
+    "all_recordings": N_("All recordings ›"),
+    # i18n: the phone remote's Recordings: the airings to come (2.9.7)
+    "coming_up": N_("Coming up"),
     "guide": N_("Guide"),  # i18n: the phone remote: a section button and a tab
     "ok": N_("OK"),  # i18n: the phone remote: the middle of the arrows (Enter)
     # i18n: the phone remote's touchpad, small, under it

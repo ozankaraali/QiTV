@@ -1102,6 +1102,45 @@ video.m3u8
             self.assertEqual(source_module._HTTPS_FAILED, set())
             self.assertEqual(server.counts["/user/secret.ts"], 1)
 
+    def test_https_first_keeps_a_plain_refusal_of_an_https_address(self):  # 2.9.7
+        # The provider's own HTTPS address refused the stream (407: its one stream, the
+        # closed one still counted): asked over HTTP it would add a request and lose the why.
+        source_module._HTTPS_FAILED.clear()
+        with self.tls_context() as context:
+            server = self.server({"/user/secret.ts": (407, {}, b"")}, tls=context)
+            with insecure(), self.assertRaises(SourceError) as failure:
+                open_source(
+                    server.url + "/user/secret.ts",
+                    headers={},
+                    verify_ssl=False,
+                    stop=threading.Event(),
+                    https_first=True,
+                )
+            self.assertEqual(str(failure.exception), STREAM_REFUSED)
+            self.assertEqual(failure.exception.status, 407)
+            self.assertEqual(server.counts["/user/secret.ts"], 1)
+
+    def test_an_https_address_whose_http_has_nothing_says_what_https_answered(self):  # 2.9.7
+        # Over HTTP the host had nothing at that address (another server at port 80): the
+        # HTTPS server's answer is why the channel did not open, not that 404.
+        def opened(url, **_kwargs):
+            if url.startswith("https://"):
+                raise SourceError("http", status=451)
+            raise SourceError("http", status=404)
+
+        with patch.object(source_module, "_open_url", opened), source_logs() as logs:
+            with self.assertRaises(SourceError) as failure:
+                open_source(
+                    "https://panel.test/live/u/p/7.ts",
+                    headers={},
+                    verify_ssl=True,
+                    stop=threading.Event(),
+                    https_first=True,
+                )
+        self.assertEqual(failure.exception.status, 451)
+        self.assertTrue(any("HTTP 451" in line for line in logs))  # the log says which
+        self.assertFalse(any("panel.test" in line for line in logs))
+
     def test_https_first_keeps_https_after_a_plain_403_over_it(self):
         # A plain 403 over HTTPS may be the channel's own refusal: this open tries HTTP, but
         # the host keeps HTTPS; another server's 404 at its port marks it (as before).
@@ -2075,6 +2114,7 @@ video.m3u8
 
         cases = {
             "/403.ts": (answer(403), STREAM_REFUSED),  # also a forbidden channel: said softer
+            "/407.ts": (answer(407), STREAM_REFUSED),  # 2.9.7: a panel's one stream too many
             "/403-text.ts": (answer(403, b"Too many connections"), True),
             "/429.ts": (answer(429), True),
             "/458.ts": (answer(458), True),

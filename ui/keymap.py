@@ -394,6 +394,7 @@ SHORTCUTS: dict[str, list[tuple[str, str]]] = {
         ("Ctrl+F", N_("Search")),
         ("/", N_("Search, or type it in the search")),
         ("Ctrl+D", N_("Add to or remove from My list")),
+        ("Delete", N_("Delete the recording (it asks first)")),  # 2.9.7: the Recordings tab
         ("F11, Ctrl+Meta+F", N_("Fullscreen")),
         ("Esc", N_("Back; from the genres, back to live TV")),
     ],
@@ -412,6 +413,7 @@ SHORTCUTS: dict[str, list[tuple[str, str]]] = {
         ("Ctrl+2", N_("Movies")),
         ("Ctrl+3", N_("Series")),
         ("Ctrl+4", N_("Multiview")),
+        ("Ctrl+5", N_("Recordings")),  # i18n: what a key does: the Library's Recordings page
         ("Ctrl+O", N_("Open a file")),
         ("Ctrl+,", N_("Settings")),
         ("Ctrl+R", N_("Refresh channels and guide")),

@@ -16,7 +16,7 @@ from PySide6.QtWidgets import QAbstractItemView, QStyle, QStyledItemDelegate, QW
 
 from services import i18n
 from services.i18n import tr
-from services.library import CONTINUE, MY_LIST, NEW, RECORDINGS, Genre
+from services.library import CONTINUE, MY_LIST, NEW, Genre
 from ui.overlays.channel_rows import ChannelListView, CutTexts, paint_hover
 from ui.overlays.painting import Units, draw_field_icon, draw_icon, elided, fill_round, ui_units
 from ui.text_edit import SELECTION_ALPHA, Dragging, TextEdit, edit_key, paint_edit
@@ -33,7 +33,9 @@ DEFAULT_HOST_WIDTH = 1280
 KindRole = Qt.UserRole + 20
 CountRole = Qt.UserRole + 21
 IdRole = Qt.UserRole + 22
-PINNED_ICONS = {CONTINUE: "clock", NEW: "sparkle", MY_LIST: "star", RECORDINGS: "record"}
+IconRole = Qt.UserRole + 23  # 2.9.7: a row's icon (draw_icon's name), else None
+DEFAULT_CAPTION = object()  # the Library's own caption ("PINNED", "GENRES · n")
+PINNED_ICONS = {CONTINUE: "clock", NEW: "sparkle", MY_LIST: "star"}
 ICON_SCALE = 1.2  # icon box / cap height: the glyphs sit inside a padded unit box
 ICON_GAP_U = 0.7
 HEADER = "header"
@@ -50,19 +52,29 @@ class _GenreModel(QAbstractListModel):
     def __init__(self, parent=None) -> None:
         super().__init__(parent)
         self._rows: list[tuple[str, str, int | None, str | None]] = []
+        # 2.9.7: the captions above the pinned rows and the others (None: none), and icons
+        self.captions: tuple[object, object] = (DEFAULT_CAPTION, DEFAULT_CAPTION)
+        self.icons: dict[str, str] = {}
 
     def set_genres(self, genres: list[Genre]) -> None:
         pinned = [g for g in genres if g.pinned]
         rest = [g for g in genres if not g.pinned]
         rows: list[tuple[str, str, int | None, str | None]] = []
+        pinned_caption, rest_caption = self.captions
         if pinned:
-            # i18n: header above the Library's shelves (Continue, New, My list); shown in capitals
-            rows.append((HEADER, i18n.upper(tr("Pinned")), None, None))
+            if pinned_caption is DEFAULT_CAPTION:
+                # i18n: header above the Library's shelves (Continue, New, My list); in capitals
+                rows.append((HEADER, i18n.upper(tr("Pinned")), None, None))
+            elif isinstance(pinned_caption, str):
+                rows.append((HEADER, pinned_caption, None, None))
             rows += [(GENRE, g.title, g.count, g.id) for g in pinned]
         if rest:
             count = sum(1 for g in rest if not g.header)
-            # i18n: header above the Library's genres, with their number; shown in capitals
-            rows.append((HEADER, i18n.upper(tr("Genres · {n}", n=count)), None, None))
+            if rest_caption is DEFAULT_CAPTION:
+                # i18n: header above the Library's genres, with their number; in capitals
+                rows.append((HEADER, i18n.upper(tr("Genres · {n}", n=count)), None, None))
+            elif isinstance(rest_caption, str):
+                rows.append((HEADER, rest_caption, None, None))
             # All providers: each provider's name heads its genres (a row that cannot be chosen)
             rows += [
                 (HEADER, g.title, None, None) if g.header else (GENRE, g.title, g.count, g.id)
@@ -87,6 +99,8 @@ class _GenreModel(QAbstractListModel):
             return count
         if role == IdRole:
             return genre_id
+        if role == IconRole:
+            return PINNED_ICONS.get(genre_id) or self.icons.get(genre_id or "")
         return None
 
     def flags(self, index):
@@ -153,7 +167,7 @@ class _GenreDelegate(CutTexts, QStyledItemDelegate):
         p.setFont(units.font(1.15))
         p.setPen(qcolor(PALETTE.text))
         left = rect.x() + pad
-        icon = PINNED_ICONS.get(index.data(IdRole))
+        icon = index.data(IconRole)
         if icon:
             size = QFontMetricsF(p.font()).capHeight() * ICON_SCALE
             color = qcolor(PALETTE.accent) if icon == "star" else qcolor(PALETTE.text)
@@ -188,6 +202,7 @@ class GenreList(QWidget):
         self._current: str | None = None
         self._ids: list[str] = []
         self._genres: list[Genre] | None = None  # what set_genres last showed
+        self._placeholder = ""  # 2.9.7: the find's own words ("": the genre filter's)
         self._rows_by_id: dict[str, int] = {}
         self._model = _GenreModel(self)
         self._view = ChannelListView(self)
@@ -220,6 +235,29 @@ class GenreList(QWidget):
 
     def current_id(self) -> str | None:
         return self._current
+
+    def placeholder(self) -> str:
+        """What the find says while empty: "Find a genre…", or the rail's own (2.9.7)."""
+        # i18n: placeholder of the Library's genre filter
+        return self._placeholder or tr("Find a genre…")
+
+    def set_placeholder(self, text: str) -> None:
+        self._placeholder = text
+        self.update()
+
+    def set_captions(
+        self, pinned: object = DEFAULT_CAPTION, others: object = DEFAULT_CAPTION
+    ) -> None:
+        """2.9.7: the captions over the pinned rows and the others: the Library's own by
+        default, a text, or None (no caption: a rail whose header rows are its captions)."""
+        self._model.captions = (pinned, others)
+        if self._genres is not None:
+            self._model.set_genres(self._genres)
+
+    def set_icons(self, icons: dict[str, str]) -> None:
+        """2.9.7: rows' icons by their id (draw_icon's names), beside the pinned shelves'."""
+        self._model.icons = dict(icons)
+        self._view.viewport().update()
 
     def set_genres(self, genres: list[Genre]) -> None:
         if genres != self._genres:  # the same genres again (a genre switch): keep the list
@@ -455,7 +493,7 @@ class GenreList(QWidget):
                 p.drawText(below, Qt.AlignLeft | Qt.AlignTop | Qt.TextWordWrap, nothing)
         else:
             tone = qcolor(PALETTE.text, PALETTE.text_muted_alpha)
-            text = tr("Find a genre…")  # i18n: placeholder of the Library's genre filter
+            text = self.placeholder()
             inner = draw_field_icon(p, inner, tone)
             p.setPen(tone)
             p.drawText(inner, Qt.AlignLeft | Qt.AlignVCenter, elided(p, text, inner.width()))

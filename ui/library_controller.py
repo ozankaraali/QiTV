@@ -22,6 +22,10 @@ bar's search, which shows what they find; only once the genre filter is chosen (
 or ↑ from the first genre: it shows its ring and caret then) do they filter the genres. The A–Z
 rail jumps to a letter.
 
+Recordings (2.9.7): the top bar's last tab (once the shell gives it its page) opens the
+Recordings page (`ui.library.recordings_view`, filled by `ui.recordings_desk`): the keys go to
+it (zone "recordings"), ↑ from its chips to the top bar, Esc from its chips back to live TV.
+
 A right-click on a film's poster or an episode row asks the shell for its menu (Play in VLC,
 Play in MPV, Copy stream link: `context_menu(item, section, global position)`, section "movies"
 or "series"). Links are asked of the provider QiTV is on, so a title of another provider, or
@@ -30,15 +34,17 @@ any title during a provider switch, has no menu; nor has a series or a channel.
 
 from __future__ import annotations
 
+from datetime import datetime
 import logging
-from typing import Callable, Optional
+from typing import Any, Callable, Optional
 
-from PySide6.QtCore import QObject, QPoint, Signal
+from PySide6.QtCore import QObject, QPoint, Qt, Signal
 from PySide6.QtWidgets import QMenu
 
-from services import i18n
+from services import i18n, recording_desk, recordings_library as rl
 from services.catalog import PROVIDER_LOADING_MESSAGE
 from services.failure_reasons import SIGN_IN_AGAIN_MESSAGE, shown_message
+from services.guide_search import GuideSearch
 from services.i18n import N_, tr, tr_n, translate
 from services.library import (
     PINNED_TITLES,
@@ -69,6 +75,7 @@ from ui.library.library_screen import LibraryScreen
 from ui.library.poster_grid import poster_url
 from ui.library.search_session import DEBOUNCE_MS, SearchSession
 from ui.library.top_nav import REFRESH_TEXT
+from ui.overlays.guide import day_label
 from ui.text_edit import edit_key
 from ui.tick_menu import TickMenu
 
@@ -108,6 +115,17 @@ _MOVES = {
     Action.NAV_RIGHT: (1, 0),
     Action.NAV_UP: (0, -1),
     Action.NAV_DOWN: (0, 1),
+}
+
+
+# 2.9.7: the 2.9.7 page's sections (the REC sign's Manage Recordings…) as the rail's rows
+_REC_ROWS = {
+    recording_desk.NOW: rl.COMING,
+    recording_desk.COMING: rl.COMING,
+    recording_desk.ATTENTION: rl.ATTENTION,
+    recording_desk.PLACES: rl.SETTINGS,
+    recording_desk.RULES: rl.RULES,
+    recording_desk.RECORDED: rl.ALL,  # a tile's right-click Manage Recordings…
 }
 
 
@@ -151,6 +169,26 @@ class LibraryController(QObject):
         `cancel_scheduled(id)` cancels a scheduled recording (its strip's Cancel, 2.8.12)."""
         super().__init__(parent)
         self._cancel_scheduled = cancel_scheduled
+        self._desk: Optional[Any] = None  # 2.9.7: the Recordings page's (`set_recordings_desk`)
+        # 2.9.7: the Recordings tab's rail and tiles (`set_recordings_library`), its row shown,
+        # and what its strip's Delete… and Show in Folder do (the pages')
+        self._rec_library: Optional[Any] = None
+        self._rec_row = rl.TONIGHT
+        self.delete_recording: Callable[[dict], None] = lambda item: None
+        # 2.9.7: the rail's find in the guide: its channels (nearest first), the programmes,
+        # and what records one found (the pages')
+        self.find_sources: Callable[[], list[list[dict]]] = lambda: []
+        self.find_programmes: Callable[[dict, Any, int], list] = lambda c, now, n: []
+        self.record_found: Callable[[dict, Any, bool], None] = lambda c, p, series: None
+        self._found: list[tuple[dict, Any]] = []
+        self._guide_search = GuideSearch(
+            lambda channel, now, limit: self.find_programmes(channel, now, limit),
+            lambda: datetime.now().astimezone(),
+            self,
+        )
+        self._guide_search.found.connect(self._on_found)
+        self.show_recording_folder: Callable[[dict], object] = lambda item: None
+        self._search_from = ""  # 2.9.7: "recordings" while the search was opened from that page
         self._config = config
         self._tmdb = tmdb
         self._catalog = catalog
@@ -169,6 +207,7 @@ class LibraryController(QObject):
         self._mode = "browse"
         self._zone = "grid"
         self._genre_field = False  # 2.9.3: the keys type in the genre filter (it was chosen)
+        self._rec_field = False  # 2.9.7: the keys type in the Recordings rail's find
         self._nav_return = "grid"  # the zone ↓ returns to from the top nav
         self._section: Optional[str] = None  # the Movies/Series section last opened
         self._opened: Optional[tuple[str, str]] = None  # (provider, section) the model shows
@@ -241,6 +280,29 @@ class LibraryController(QObject):
         series.backRequested.connect(self._leave_series)
         series.episodeContextRequested.connect(self._on_episode_context)
         nav.tabRequested.connect(self._on_tab)
+        screen.recordings.upEdge.connect(lambda: self._focus("nav"))  # 2.9.7
+        rec_rail, rec_grid = screen.rec_rail, screen.rec_grid  # 2.9.7: the Recordings tab
+        rec_rail.genreSelected.connect(self._show_rec_row)
+        rec_rail.fieldClicked.connect(lambda: self._focus("rec_rail", field=True))
+        rec_rail.genreActivated.connect(lambda _id: self._focus("rec_content"))
+        rec_rail.filterChanged.connect(self._on_rec_find)
+        rec_grid.activated.connect(self._on_tile_activated)
+        rec_grid.buttonRequested.connect(self._on_tile_button)
+        rec_grid.startOverRequested.connect(lambda i: self._play_recording(i, start_over=True))
+        rec_grid.deleteRequested.connect(lambda i: self._recording_action(i, self.delete_recording))
+        rec_grid.folderRequested.connect(
+            lambda i: self._recording_action(i, self.show_recording_folder)
+        )
+        rec_grid.leftEdge.connect(lambda: self._focus("rec_rail"))
+        rec_grid.upEdge.connect(lambda: self._focus("nav"))
+        rec_grid.contextRequested.connect(self._on_recording_context)
+        home = screen.home  # 2.9.7: the Recordings tab's home
+        home.upEdge.connect(lambda: self._focus("nav"))
+        home.leftEdge.connect(lambda: self._focus("rec_rail"))
+        home.allRequested.connect(self._open_all_recordings)
+        home.playRequested.connect(
+            lambda item: self._play(item, "recording", _context(start_over=False))
+        )
         nav.searchRequested.connect(self.open_search)
         nav.sourceRequested.connect(self._show_source_menu)
         genres.genreMenuRequested.connect(self._show_genre_menu)
@@ -314,6 +376,278 @@ class LibraryController(QObject):
     def leave(self) -> None:
         """The window left the Library: nothing waiting for a provider plays any more."""
         self._pending.cancel()
+        self._guide_search.cancel()  # 2.9.7: the rail's find stops looking
+        if self._desk is not None:
+            self._desk.hide()
+
+    # ---- 2.9.7: the Recordings page ----------------------------------------------------------
+
+    def set_recordings_desk(self, desk: Any) -> None:
+        """The Recordings page's controller (`ui.recordings_desk`): its tab shows from now on."""
+        self._desk = desk
+        self._screen.nav.set_tabs(self._tabs())
+        refreshed = getattr(desk, "refreshed", None)
+        if refreshed is not None:  # 2.9.7: the recorder's tiles follow the page
+            refreshed.connect(self._on_desk_refreshed)
+
+    def set_recordings_library(self, library: Any) -> None:
+        """2.9.7: the Recordings tab's rail and tiles (services.recordings_library)."""
+        self._rec_library = library
+
+    def open_recordings(self, row: Optional[str] = None) -> None:
+        """The Recordings tab on its rail's `row` (its home, Tonight, by default). A section
+        of the 2.9.7 page names its row ("now" and "coming": Coming up; "attention";
+        "places": Folders & streams), as the REC sign's Manage Recordings… does."""
+        if self._closed or self._desk is None:
+            return
+        self._series = None
+        self._set_mode("recordings")
+        self._sync_nav("recordings")
+        self._desk.show()
+        self._show_rec_row(_REC_ROWS.get(row or "", row or rl.TONIGHT))
+        self._focus("rec_content")
+
+    def recordings_changed(self) -> None:
+        """2.9.7: the recordings or the schedule changed: the rail's counts and the tiles."""
+        if self._mode == "recordings":
+            self._refresh_recordings()
+
+    def _refresh_recordings(self) -> None:
+        library = self._rec_library
+        if library is None:
+            return
+        rail = self._screen.rec_rail
+        rows = library.rail(rail.filter_text)
+        rail.set_genres(rows)
+        if self._rec_row.startswith(rl.CHANNEL_PREFIX) and self._rec_row not in {
+            g.id for g in rows
+        }:
+            self._show_rec_row(rl.ALL)  # its last recording went: All
+            return
+        rail.set_current(self._rec_row)
+        if self._screen.recordings_content == "grid":
+            self._fill_rec_grid()
+
+    def _show_rec_row(self, row: str, *, rebuild: bool = True) -> None:
+        """The view of the rail's `row`: the home, the tiles of All or a channel, or a list;
+        `rebuild`: the rail's rows worked out again (not for a plain move along them)."""
+        library = self._rec_library
+        self._rec_row = row
+        screen = self._screen
+        self._guide_search.cancel()  # a row's view: the find's walk stops
+        if library is not None and rebuild:
+            rail = screen.rec_rail
+            rail.set_genres(library.rail(rail.filter_text))
+            rail.set_current(row)
+        if row == rl.TONIGHT:
+            screen.set_recordings_content("home")
+        elif row == rl.SETTINGS:  # its folders and streams: a list
+            screen.set_recordings_content("list")
+            screen.recordings.set_section(rl.SECTIONS[row])
+        else:  # the recordings, or the recorder's lists, as tiles
+            screen.set_recordings_content("grid")
+            self._fill_rec_grid(keep=False)
+
+    def _on_desk_refreshed(self) -> None:
+        """The recorder's page was worked out again: its tiles shown follow."""
+        screen = self._screen
+        if self._mode == "recordings" and screen.recordings_content == "grid":
+            if self._rec_row in rl.SECTIONS and self._rec_row != rl.SETTINGS:
+                self._fill_rec_grid()
+
+    # ---- 2.9.7: the rail's find ------------------------------------------------------------
+
+    def _on_rec_find(self, text: str) -> None:
+        """The rail's find: its rows narrow; from two letters on, the recordings and the
+        programmes still to come whose title holds it (the guide's channels, then wider)."""
+        self._refresh_recordings()
+        query = text.strip()
+        if len(query) < 2:
+            self._guide_search.cancel()
+            if self._screen.recordings_content == "find":
+                self._show_rec_row(self._rec_row)
+            return
+        self._found = []
+        self._screen.set_recordings_content("find")
+        # its first tile once per query: what a slice finds later keeps the tile the keys are on
+        self._fill_rec_grid(keep=False)
+        self._guide_search.start(query, self.find_sources())
+
+    def _on_found(self, hits: list) -> None:
+        if self._screen.recordings_content == "find":
+            self._found += hits
+            self._fill_rec_grid()
+
+    def _found_sections(self, library: Any) -> list[tuple[str, list[dict]]]:
+        """The rail's find as tiles: the recordings whose title or channel holds it, then
+        the programmes still to come (each its own airing to record)."""
+        text = self._screen.rec_rail.filter_text
+        recorded = library.items(rl.ALL, text)
+        found = []
+        for k, (channel, programme) in enumerate(self._found):
+            start, stop = programme.start.timestamp(), programme.stop.timestamp()
+            entry = recording_desk.Entry(
+                key=f"found:{k}",
+                section=recording_desk.FOUND,
+                title=programme.title,
+                detail=f"{recording_desk.short_when(start)}–{recording_desk.clock(stop)} · "
+                f"{channel.get('name') or ''}",
+                buttons=(
+                    recording_desk.button(recording_desk.RECORD, recording_desk.ACCENT),
+                    recording_desk.button(recording_desk.RECORD_SERIES),
+                ),
+                sort=start,
+                start=start,
+                channel=str(channel.get("name") or ""),
+                logo=str(channel.get("logo") or ""),
+            )
+            found.append(rl.desk_tile(entry))
+        recorded_title = translate(recording_desk.SECTION_TITLES[recording_desk.RECORDED])
+        found_title = translate(recording_desk.SECTION_TITLES[recording_desk.FOUND])
+        return [
+            (f"{recorded_title}  ·  {i18n.number(len(recorded))}", recorded),
+            (f"{found_title}  ·  {i18n.number(len(found))}", found),
+        ]
+
+    def _open_all_recordings(self) -> None:
+        self._show_rec_row(rl.ALL)
+        self._focus("rec_content")
+
+    def _fill_rec_grid(self, keep: bool = True) -> None:
+        """The tiles of the rail's row: its recordings (All, a channel's), the recorder's
+        list (Coming up by day, Series & timers, Needs attention) or what the find found;
+        `keep`: the tile the keys are on stays (a refresh), else the first."""
+        library = self._rec_library
+        if library is None:
+            return
+        grid = self._screen.rec_grid
+        grid.set_details_provider(library.details)
+        grid.set_progress_provider(library.progress)
+        grid.set_key_provider(library.identity)
+        grid.set_badge_provider(library.badges)
+        grid.set_caption_provider(library.caption)
+        grid.set_poster_url_provider(self._tile_picture)
+        grid.set_tile_provider(lambda item: library.picture(item)[1])  # a channel's logo
+        row = self._rec_row
+        if self._screen.recordings_content == "find":
+            sections = self._found_sections(library)
+            title = f"“{self._screen.rec_rail.filter_text.strip()}”"
+        elif row in rl.SECTIONS:  # the recorder's lists
+            wanted = rl.SECTIONS[row]
+            wanted = wanted if isinstance(wanted, tuple) else (wanted,)
+            entries = [e for e in self._desk_entries() if e.section in wanted]
+            sections = library.desk_sections(entries, _day_of)
+            title = translate(recording_desk.SECTION_TITLES[wanted[-1]])
+        else:
+            items = library.items(row, self._screen.rec_rail.filter_text)
+            sections = [("", items)]
+            if row.startswith(rl.CHANNEL_PREFIX):  # its channel, without asking the rail
+                title = row[len(rl.CHANNEL_PREFIX) :]
+            else:
+                title = translate(recording_desk.ALL_TEXT)
+        count = sum(
+            1
+            for _title, items in sections
+            for item in items
+            if not (isinstance(item.get("_desk"), recording_desk.Entry) and not item["_desk"].title)
+        )
+        grid.set_header(title, i18n.number(count), [], "")
+        grid.set_sections(sections, keep_current=keep)
+
+    def _desk_entries(self) -> list[Any]:
+        last = getattr(self._desk, "last_entries", None)
+        return list(last()) if callable(last) else []
+
+    def _tile_picture(self, item: dict) -> str:
+        """A tile's picture url as the grid's cache asks for it (a logo through its cache)."""
+        library = self._rec_library
+        if library is None:
+            return ""
+        url, logo = library.picture(item)
+        return self._screen.grid_posters.logo_key(url) if url and logo else url
+
+    # ---- 2.9.7: the recorder's tiles ------------------------------------------------------
+
+    def _on_tile_activated(self, index: int) -> None:
+        """Enter or a click on the current tile: a recording plays; a row's tile offers its
+        buttons as a menu (the keys reach each)."""
+        item = self._rec_item(index)
+        if item is None or self._closed:
+            return
+        if isinstance(item.get("_desk"), recording_desk.Entry):
+            self._show_tile_menu(index, None)
+        else:
+            self._play(item, "recording", _context(start_over=False))
+
+    def _on_tile_button(self, index: int, name: str) -> None:
+        item = self._rec_item(index)
+        entry = item.get("_desk") if item is not None else None
+        if isinstance(entry, recording_desk.Entry):
+            self._tile_action(entry, name)()
+
+    def _tile_action(self, entry: Any, name: str) -> Callable[[], None]:
+        """Button `name` of the row `entry`, bound to that row (its key; a programme found,
+        to that programme): a menu left open while the tiles refresh acts on its own row."""
+        key = entry.key
+        found: Optional[tuple] = None
+        kind, _, value = key.partition(":")
+        if kind == "found" and value.isdigit() and int(value) < len(self._found):
+            found = self._found[int(value)]
+
+        def act() -> None:
+            if self._closed:
+                return
+            if found is not None:
+                channel, programme = found
+                self.record_found(channel, programme, name == recording_desk.RECORD_SERIES)
+            elif kind != "found" and self._desk is not None:
+                self._desk.press(key, name)
+
+        return act
+
+    def _show_tile_menu(self, index: int, at: Any) -> None:
+        library = self._rec_library
+        item = self._rec_item(index)
+        if library is None or item is None:
+            return
+        grid = self._screen.rec_grid
+        menu = QMenu(grid)
+        menu.setAttribute(Qt.WidgetAttribute.WA_DeleteOnClose)
+        entry = item.get("_desk")
+        if not isinstance(entry, recording_desk.Entry):
+            return
+        for name, label, style in library.details(item).buttons:
+            action = menu.addAction(label, self._tile_action(entry, name))
+            action.setEnabled(style != "off")
+        self._tile_menu = menu
+        if at is None:  # the keys: beside the tile
+            at = grid.viewport().mapToGlobal(grid.item_rect(index).center())
+        menu.popup(at)
+
+    def tile_menu(self) -> Optional[QMenu]:
+        """The last tile menu shown (tests)."""
+        return getattr(self, "_tile_menu", None)
+
+    def _rec_item(self, index: int) -> Optional[dict]:
+        item = self._screen.rec_grid.item(index)
+        return item if isinstance(item, dict) else None
+
+    def _play_recording(self, index: int, *, start_over: bool) -> None:
+        item = self._rec_item(index)
+        if item is not None and not self._closed and "_desk" not in item:
+            self._play(item, "recording", _context(start_over=start_over))
+
+    def _recording_action(self, index: int, action: Callable[[dict], object]) -> None:
+        item = self._rec_item(index)
+        if item is not None and not self._closed and "_desk" not in item:  # a recording's
+            action(item)
+
+    def _on_recording_context(self, index: int, pos: Any) -> None:
+        item = self._rec_item(index)
+        if item is not None and "_desk" in item:  # a row's tile: its buttons
+            self._show_tile_menu(index, pos)
+        elif item is not None and self._context_menu is not None:
+            self._context_menu(item, "recording", pos)
 
     # ---- state --------------------------------------------------------------------------------
 
@@ -341,9 +675,14 @@ class LibraryController(QObject):
             self._nav_return = self._zone
         self._zone = zone
         self._genre_field = field and zone == "genres"
+        self._rec_field = field and zone == "rec_rail"  # 2.9.7: the Recordings rail's find
         self._screen.genres.set_focused(zone == "genres", field=self._genre_field)
         self._screen.nav.set_focused(zone == "nav")
         self._screen.grid.set_focused(zone == "grid")
+        self._screen.recordings.set_focused(zone == "rec_content")
+        self._screen.rec_rail.set_focused(zone == "rec_rail", field=self._rec_field)  # 2.9.7
+        self._screen.rec_grid.set_focused(zone == "rec_content")
+        self._screen.home.set_focused(zone == "rec_content")
         self._sync_search_focus()
 
     def _sync_search_focus(self) -> None:
@@ -356,17 +695,21 @@ class LibraryController(QObject):
     def _set_mode(self, mode: str) -> None:
         self._mode = mode
         self._screen.set_mode(mode)
+        if mode != "recordings":
+            self._guide_search.cancel()  # 2.9.7: the rail's find stops looking
+            if self._desk is not None:
+                self._desk.hide()  # 2.9.7: the page stops looking while it is hidden
 
     def _tabs(self) -> list[str]:
-        """The provider's sections, and Movies for the recordings when it has no films (2.8);
+        """The provider's sections (2.9.7: recordings have their own tab, not Movies);
         2.9.3: with two providers or more, Movies and Series while any of them has them (the
         tab shows the one that has: `_source_for`)."""
         tabs = list(self._catalog.sections())
-        if "movies" not in tabs and self._model.lists_recordings():
-            tabs.append("movies")
         for section in ("movies", "series"):
             if section not in tabs and self._others_with(section):
                 tabs.append(section)
+        if self._desk is not None:
+            tabs.append("recordings")  # 2.9.7: whatever the providers have
         return tabs
 
     def _others_with(self, section: str) -> list[str]:
@@ -392,6 +735,7 @@ class LibraryController(QObject):
 
     def _sync_nav(self, active: str) -> None:
         nav = self._screen.nav
+        nav.set_source_visible(active != "recordings")  # 2.9.7: it covers every provider
         nav.set_tabs(self._tabs())
         nav.set_source_name(self._source_title())
         nav.set_active(active)
@@ -418,8 +762,12 @@ class LibraryController(QObject):
     # ---- opening ------------------------------------------------------------------------------
 
     def open(self, section: str) -> None:
-        """Show Movies or Series. Re-opening the section on screen keeps its genre and title."""
+        """Show Movies or Series. Re-opening the section on screen keeps its genre and title.
+        2.9.7: "recordings" is the Recordings page."""
         if self._closed:
+            return
+        if section == "recordings":
+            self.open_recordings()
             return
         self._source_for(section)
         self._section = section
@@ -488,6 +836,8 @@ class LibraryController(QObject):
             self._search.run_now()
         if self._grid_content == "browse":  # the series view keeps its series current
             self._restore_item = self._current_item()
+        if self._mode != "search":  # 2.9.7: Esc from the search goes back to that page
+            self._search_from = "recordings" if self._mode == "recordings" else ""
         self._series = None
         self._set_mode("search")
         self._sync_nav("search")
@@ -550,6 +900,8 @@ class LibraryController(QObject):
             "grid": self._handle_grid,
             "series": self._handle_series,
             "search": self._handle_search,
+            "rec_rail": self._handle_rec_rail,  # 2.9.7
+            "rec_content": self._handle_rec_content,
         }[self._zone]
         return handler(action, payload)
 
@@ -643,6 +995,10 @@ class LibraryController(QObject):
             back = self._nav_return
             if back == "genres" and self._mode != "browse":
                 back = "grid"
+            if self._mode == "recordings":  # 2.9.7: its content (its rail if it was there)
+                back = "rec_rail" if back == "rec_rail" else "rec_content"
+            elif back in ("rec_rail", "rec_content"):
+                back = "grid"
             self._focus(back if back != "nav" else "grid")
         elif action is Action.ESCAPE:
             self._go_back_to_tv()
@@ -662,6 +1018,115 @@ class LibraryController(QObject):
             series.escape()  # backRequested
         elif action in (Action.NAV_TEXT, Action.PASTE):
             return self._type_in_search(action, payload)  # 2.9.3: typing searches
+        else:
+            return False
+        return True
+
+    def _handle_rec_rail(self, action: Action, payload: str) -> bool:
+        """2.9.7: the Recordings tab's rail, as the genre column: ↑↓ choose a row (its view
+        shows; ↑ on the first, its find), → or Enter go to it, Esc back to the TV."""
+        rail = self._screen.rec_rail
+        if self._rec_field:
+            if rail.field_key(action, payload):
+                return True  # its caret, selection and clipboard
+            if action in (Action.NAV_DOWN, Action.NAV_ACTIVATE):
+                self._focus("rec_rail")  # its rows, the find kept
+                return True
+            if action is Action.NAV_UP:
+                self._focus("nav")
+                return True
+        if action is Action.NAV_UP and rail.current_id() == rl.TONIGHT:
+            self._focus("rec_rail", field=True)  # ↑ on the first row: its find, as Movies'
+        elif action in (Action.NAV_UP, Action.NAV_DOWN):
+            rail.move_by(-1 if action is Action.NAV_UP else 1)
+            if rail.current_id():
+                self._show_rec_row(str(rail.current_id()), rebuild=False)
+        elif action in (Action.NAV_PAGE_UP, Action.NAV_PAGE_DOWN):
+            rail.page(-1 if action is Action.NAV_PAGE_UP else 1)
+        elif action in (Action.NAV_RIGHT, Action.NAV_ACTIVATE):
+            self._focus("rec_content")
+        elif action is Action.ESCAPE:
+            if not rail.escape():
+                self._go_back_to_tv()
+        elif action in (Action.NAV_TEXT, Action.NAV_BACKSPACE, Action.PASTE):
+            return self._type_in_search(action, payload)
+        else:
+            return False
+        return True
+
+    def _handle_rec_content(self, action: Action, payload: str) -> bool:
+        """2.9.7: the Recordings tab's view: its tiles as the Library's grid, a list as the
+        2.9.7 page; Esc goes to the rail."""
+        kind = self._screen.recordings_content
+        if kind in ("grid", "find"):  # tiles: the recordings, the lists, what was found
+            if action is Action.ESCAPE:
+                self._focus("rec_rail")
+                return True
+            grid = self._screen.rec_grid
+            if action in _MOVES:
+                if grid.current_index() < 0:
+                    if action is Action.NAV_LEFT:
+                        self._focus("rec_rail")
+                    elif action is Action.NAV_UP:
+                        self._focus("nav")
+                    return True
+                grid.move_by(*_MOVES[action])
+            elif action in (Action.NAV_PAGE_UP, Action.NAV_PAGE_DOWN):
+                grid.page(-1 if action is Action.NAV_PAGE_UP else 1)
+            elif action is Action.NAV_HOME:
+                grid.home()
+            elif action is Action.NAV_END:
+                grid.end()
+            elif action is Action.NAV_ACTIVATE:
+                grid.activate()
+            elif action is Action.NAV_DELETE:  # its strip's Delete… (asks first)
+                self._recording_action(grid.current_index(), self.delete_recording)
+            elif action in (Action.NAV_TEXT, Action.NAV_BACKSPACE, Action.PASTE):
+                return self._type_in_search(action, payload)
+            else:
+                return False
+            return True
+        if kind == "home":
+            home = self._screen.home
+            if action in _MOVES:
+                home.move_by(*_MOVES[action])  # its edges: upEdge, leftEdge
+            elif action is Action.NAV_ACTIVATE:
+                home.activate()
+            elif action in (Action.NAV_PAGE_UP, Action.NAV_PAGE_DOWN):
+                home.page(-1 if action is Action.NAV_PAGE_UP else 1)
+            elif action is Action.RECORD:
+                return home.record_key()
+            elif action is Action.ESCAPE:
+                if not home.escape():
+                    self._focus("rec_rail")
+            elif action in (Action.NAV_TEXT, Action.NAV_BACKSPACE, Action.PASTE):
+                return self._type_in_search(action, payload)
+            else:
+                return False
+            return True
+        return self._handle_recordings(action, payload)
+
+    def _handle_recordings(self, action: Action, payload: str, page: Any = None) -> bool:
+        """2.9.7: a list of the Recordings tab: its entries' buttons; Esc goes to the rail."""
+        page = page if page is not None else self._screen.recordings
+        if action is Action.NAV_LEFT and page.at_left_edge():
+            self._focus("rec_rail")
+            return True
+        if action in _MOVES:
+            page.move_by(*_MOVES[action])
+        elif action in (Action.NAV_PAGE_UP, Action.NAV_PAGE_DOWN):
+            page.page(-1 if action is Action.NAV_PAGE_UP else 1)
+        elif action is Action.NAV_HOME:
+            page.home()
+        elif action is Action.NAV_END:
+            page.end()
+        elif action is Action.NAV_ACTIVATE:
+            page.activate()
+        elif action is Action.ESCAPE:
+            if not page.escape():
+                self._focus("rec_rail")
+        elif action in (Action.NAV_TEXT, Action.NAV_BACKSPACE, Action.PASTE):
+            return self._type_in_search(action, payload)  # typing searches, as elsewhere
         else:
             return False
         return True
@@ -721,7 +1186,10 @@ class LibraryController(QObject):
             self.open(tab)
 
     def _leave_search(self) -> None:
-        if self._section is None:
+        if self._search_from == "recordings" and self._desk is not None:
+            self._search_from = ""
+            self.open_recordings()  # 2.9.7: the page the search came from
+        elif self._section is None:
             self._go_back_to_tv()
         else:
             self.open(self._section)
@@ -1146,7 +1614,8 @@ class LibraryController(QObject):
             and not (ran and self._series_provider == name)
         ):
             self._leave_series()
-        self._sync_nav("search" if self._mode == "search" else self._model.section)
+        active = {"search": "search", "recordings": "recordings"}.get(self._mode)
+        self._sync_nav(active or self._model.section)  # 2.9.7: Recordings stays as it is
         if self._grid_content == "search":
             self._search.rerun()
 
@@ -1337,3 +1806,8 @@ class LibraryController(QObject):
         # genre's says its titles.
         query = self._search.query.strip()
         grid.set_header(f"“{query}”" if query else "", self._search.count_text(), [], "")
+
+
+def _day_of(moment: float) -> str:
+    """2.9.7: an airing's day as the guide names it (Today, Tomorrow, a weekday)."""
+    return day_label(datetime.fromtimestamp(moment).astimezone(), datetime.now().astimezone())

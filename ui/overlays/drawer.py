@@ -86,6 +86,7 @@ from services.navigation import (
     LIBRARY_SECTIONS,
     OPEN_FILE_ROW,
     RECENT_GROUP,
+    RECORDINGS_ROW,
     SETTINGS_ROW,
     NavModel,
     NavNode,
@@ -179,6 +180,7 @@ _ACTION_ICONS = {
     ADD_PROVIDER_ROW: "plus",
     FREE_CHANNELS_ROW: "plus",
     OPEN_FILE_ROW: "file",
+    RECORDINGS_ROW: "record",  # 2.9.7
 }
 _HEADER_TOOLTIPS = {  # the header's buttons: what they do, and their key (see _hint)
     # 2.9.3: the Library's search, said as its field says it (the Find box finds in the list)

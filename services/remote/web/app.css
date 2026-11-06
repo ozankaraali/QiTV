@@ -13,6 +13,11 @@
   --live: #d6453a;
   --ok: #5fbf7a;
   --warn: #e0b24a;
+  /* 2.9.7: the TV app's own pieces (ui/library, ui/overlays): its chosen row's warmth, the
+     switch's track */
+  --warm-fill: rgba(224, 138, 95, 0.10);
+  --warm-edge: rgba(224, 138, 95, 0.45);
+  --track: #3a414b;
   --pad: min(64vw, 300px); /* at most: the pad takes what the rows around it leave */
   color-scheme: dark;
 }
@@ -46,7 +51,11 @@ button { font: inherit; color: inherit; border: 0; background: none; padding: 0;
 
 /* ---- header ---- */
 .top { flex: none; display: flex; align-items: center; justify-content: space-between; padding: 10px 20px 4px; }
-.conn { display: flex; align-items: center; gap: 8px; font-size: 14px; color: var(--muted); min-height: 32px; }
+.conn { display: flex; align-items: center; gap: 8px; min-width: 0; font-size: 14px; color: var(--muted); min-height: 32px; }
+.conn span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+/* 2.9.7: the top line's switch shows on the Guide and the Library only */
+.top .where { display: none; margin-inline-end: 6px; }
+body[data-shown="guide"] .top .where, body[data-shown="library"] .top .where { display: flex; }
 .conn i { width: 8px; height: 8px; border-radius: 50%; background: var(--faint); }
 .conn.online i { background: var(--ok); box-shadow: 0 0 0 3px rgba(95, 191, 122, 0.18); }
 .conn.relay i { background: var(--accent); box-shadow: 0 0 0 3px rgba(224, 138, 95, 0.18); }
@@ -76,21 +85,27 @@ button { font: inherit; color: inherit; border: 0; background: none; padding: 0;
 .now { flex: 1; min-width: 0; display: flex; align-items: center; gap: 12px; padding: 12px; border-radius: 18px; text-align: left; background: var(--raised); box-shadow: inset 0 0 0 1px var(--line); }
 .now.pressed { background: var(--raised-2); }
 /* Channels: the remote's middle (sections, arrows, Back/Search/More) becomes the channel list. */
-.resume { display: flex; align-items: center; justify-content: center; gap: 8px; width: 100%; padding: 11px 14px; border-radius: 16px; font-size: 15px; font-weight: 600; color: var(--text); background: var(--accent-fill); box-shadow: inset 0 0 0 1px var(--accent); }
+/* 2.9.7: Resume a raised button (its icon orange); the REC line the TV's warm row, its red tag */
+.resume { display: flex; align-items: center; justify-content: center; gap: 8px; width: 100%; padding: 11px 14px; border-radius: 12px; font-size: 15px; font-weight: 600; color: var(--text); background: var(--raised); box-shadow: inset 0 0 0 1px var(--line); }
+.resume svg { color: var(--accent); }
 .resume[hidden] { display: none; }
 .resume svg { width: 18px; height: 18px; }
 .resume span { min-width: 0; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .remote.on-phone > .resume { display: none; }
 /* 2.6: what records in the background, under the now-playing card; a tap: go back or stop. */
-.recline { display: flex; align-items: center; gap: 8px; width: 100%; padding: 10px 14px; border-radius: 16px; font-size: 15px; font-weight: 600; color: var(--text); background: var(--raised); box-shadow: inset 0 0 0 1px rgba(214, 69, 58, 0.45); white-space: nowrap; overflow: hidden; }
+.recline { display: flex; align-items: center; gap: 10px; width: 100%; padding: 10px 12px; border-radius: 12px; font-size: 15px; font-weight: 600; color: var(--text); background: var(--warm-fill); box-shadow: inset 0 0 0 1px var(--warm-edge); white-space: nowrap; overflow: hidden; }
 .recline[hidden] { display: none; }
-.recline i { flex: none; width: 10px; height: 10px; border-radius: 50%; background: var(--live); }
-.recline .rec { flex: none; color: var(--live); font-weight: 700; }
+.recline i { display: none; }
+.recline .rec { flex: none; font-size: 10px; font-weight: 700; letter-spacing: 0.08em; padding: 2px 6px; border-radius: 5px; background: var(--live); color: #fff; }
+.recline .rec::before { content: "● "; }
 .recline .name { min-width: 0; overflow: hidden; text-overflow: ellipsis; }
-.recline .time { flex: none; margin-left: auto; color: var(--muted); font-variant-numeric: tabular-nums; }
+.recline .time { flex: none; margin-inline-start: auto; font-size: 16px; font-weight: 300; color: var(--muted); font-variant-numeric: tabular-nums; }
 .recline.pressed { background: var(--raised-2); }
-.lister { flex: none; width: 70px; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 5px; border-radius: 18px; font-size: 11px; font-weight: 600; color: var(--muted); background: var(--raised); box-shadow: inset 0 0 0 1px var(--line); }
-.lister.on { color: var(--accent); background: var(--accent-fill); box-shadow: none; }
+/* 2.9.7: the channel list's button: an icon in the top line, on the Remote only, lit while open */
+.top .lister { display: none; margin-inline-start: auto; }
+body[data-shown="remote"] .top .lister { display: grid; }
+body[data-shown="remote"][data-watching] .top .lister { display: none; } /* watching here: the list stays */
+.lister.on { color: var(--accent); background: var(--accent-fill); }
 .lister.pressed { background: var(--raised-2); }
 .remote.zapping { justify-content: flex-start; }
 .remote.zapping > .seg, .remote.zapping > .pad, .remote.zapping > .trio { display: none; }
@@ -102,9 +117,13 @@ button { font: inherit; color: inherit; border: 0; background: none; padding: 0;
 .player-cap .name { overflow: hidden; text-overflow: ellipsis; }
 .player-cap.why { white-space: normal; font-size: 14px; font-weight: 500; color: var(--muted); }
 .player-out { margin: 0 20px; height: 40px; border-radius: 12px; font-size: 14px; font-weight: 600; color: var(--accent); background: var(--raised); box-shadow: inset 0 0 0 1px var(--line); }
-.where { margin-left: auto; flex: none; display: flex; gap: 2px; padding: 3px; border-radius: 11px; background: var(--raised); box-shadow: inset 0 0 0 1px var(--line); }
-.where button { height: 28px; padding: 0 11px; border-radius: 8px; font-size: 13px; font-weight: 600; color: var(--muted); }
-.where button.on { background: var(--accent-fill); color: var(--text); }
+.where { margin-inline-start: auto; flex: none; display: flex; align-items: center; gap: 8px; font-size: 13px; font-weight: 600; color: var(--muted); }
+/* 2.9.7: the TV | Phone switch, as the owner asked: an orange knob in a grey track; on: a tap
+   plays on the phone */
+.switch { position: relative; flex: none; width: 44px; height: 26px; padding: 0; border-radius: 13px; background: var(--track); }
+.switch .knob { position: absolute; top: 3px; inset-inline-start: 3px; width: 20px; height: 20px; border-radius: 50%; background: var(--accent); box-shadow: 0 1px 3px rgba(0, 0, 0, 0.45); transition: inset-inline-start 0.15s ease; }
+.switch[aria-checked="true"] .knob { inset-inline-start: 21px; }
+.switch[aria-checked="true"] + .where-label { color: var(--text); }
 .zap { flex: 1 1 auto; min-height: 0; display: flex; flex-direction: column; gap: 10px; }
 .zap > * { flex: none; }
 .zap-head { display: flex; align-items: center; gap: 10px; min-height: 34px; }
@@ -120,16 +139,21 @@ button { font: inherit; color: inherit; border: 0; background: none; padding: 0;
 .line { display: flex; align-items: center; gap: 8px; font-size: 16px; font-weight: 600; white-space: nowrap; overflow: hidden; }
 .line .name { overflow: hidden; text-overflow: ellipsis; }
 .live { flex: none; font-size: 10px; font-weight: 700; letter-spacing: 0.08em; padding: 2px 6px; border-radius: 5px; background: var(--live); color: #fff; }
+.tag { flex: none; font-size: 10px; font-weight: 700; letter-spacing: 0.06em; padding: 2px 6px; border-radius: 5px; background: var(--raised-2); color: var(--text); }
+.tag.live { background: var(--live); color: #fff; }
+.tag.accent { background: var(--accent); color: #1a0f0a; }
+.tag.warn { background: var(--warn); color: #1a0f0a; }
 .live.behind { background: rgba(238, 242, 246, 0.14); color: var(--text); }
 .num { flex: none; color: var(--muted); font-variant-numeric: tabular-nums; }
 .sub { margin-top: 2px; font-size: 13px; color: var(--muted); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .prog { position: relative; height: 3px; margin-top: 9px; border-radius: 2px; background: rgba(238, 242, 246, 0.12); overflow: hidden; }
 .prog i { position: absolute; left: 0; top: 0; bottom: 0; width: 0; border-radius: 2px; background: var(--accent); }
 
-.seg { display: grid; grid-template-columns: repeat(4, 1fr); gap: 4px; padding: 4px; border-radius: 15px; background: var(--raised); box-shadow: inset 0 0 0 1px var(--line); }
-.seg button { height: 38px; border-radius: 11px; font-size: 14px; font-weight: 600; color: var(--muted); }
-.seg button.on { background: var(--accent-fill); color: var(--text); }
-.seg button.pressed { background: rgba(238, 242, 246, 0.08); }
+/* 2.9.7: the sections as the TV Library's tabs: words, the one shown underlined in orange */
+.seg { display: flex; gap: 22px; padding: 0 4px; }
+.seg button { height: 36px; padding: 0; font-size: 15px; font-weight: 600; color: var(--muted); box-shadow: inset 0 -2px transparent; }
+.seg button.on { color: var(--text); box-shadow: inset 0 -2px var(--accent); }
+.seg button.pressed { color: var(--text); }
 
 /* The pad grows into the height the other rows leave (up to --pad), so the rockers never reach
    the tabs: a short screen, or a browser's own bars around the page, gets a smaller pad. */
@@ -137,27 +161,25 @@ button { font: inherit; color: inherit; border: 0; background: none; padding: 0;
 .pad {
   position: relative; min-height: 140px; max-height: var(--pad); aspect-ratio: 1; align-self: center; border-radius: 50%; overflow: hidden;
   container-type: size; /* OK's word grows and shrinks with the pad */
-  background:
-    linear-gradient(45deg, transparent calc(50% - 0.5px), rgba(238, 242, 246, 0.07) 50%, transparent calc(50% + 0.5px)),
-    linear-gradient(-45deg, transparent calc(50% - 0.5px), rgba(238, 242, 246, 0.07) 50%, transparent calc(50% + 0.5px)),
-    radial-gradient(circle at 50% 30%, #1d252f, #11161d 72%);
-  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.07), 0 0 0 1px var(--line), 0 18px 36px rgba(0, 0, 0, 0.4);
+  /* 2.9.7: flat, as the TV's raised pieces: no moulded gloss or drop shadow */
+  background: var(--raised); box-shadow: inset 0 0 0 1px var(--line);
 }
 .wedge { position: absolute; inset: 0; color: var(--muted); transition: background 0.06s, color 0.06s; }
 .wedge.up { clip-path: polygon(50% 50%, 0 0, 100% 0); }
 .wedge.right { clip-path: polygon(50% 50%, 100% 0, 100% 100%); }
 .wedge.down { clip-path: polygon(50% 50%, 100% 100%, 0 100%); }
 .wedge.left { clip-path: polygon(50% 50%, 0 100%, 0 0); }
-.wedge svg { position: absolute; width: 28px; height: 28px; stroke-width: 2.4; }
-.wedge.up svg { top: 9%; left: calc(50% - 14px); }
-.wedge.down svg { bottom: 9%; left: calc(50% - 14px); }
-.wedge.left svg { left: 9%; top: calc(50% - 14px); }
-.wedge.right svg { right: 9%; top: calc(50% - 14px); }
+.wedge svg { position: absolute; width: 24px; height: 24px; stroke-width: 2; }
+.wedge.up svg { top: 9%; left: calc(50% - 12px); }
+.wedge.down svg { bottom: 9%; left: calc(50% - 12px); }
+.wedge.left svg { left: 9%; top: calc(50% - 12px); }
+.wedge.right svg { right: 9%; top: calc(50% - 12px); }
 .wedge.pressed { background: var(--accent-fill); color: var(--accent); }
 .ok {
   position: absolute; left: 50%; top: 50%; width: 41%; height: 41%; transform: translate(-50%, -50%); border-radius: 50%; z-index: 2;
-  font-size: 18px; font-size: min(18px, 10cqw); font-weight: 700; color: var(--text); white-space: nowrap; /* "Tamam" fits a small pad */
-  background: radial-gradient(circle at 50% 28%, #2b3440, #1b222b); box-shadow: 0 0 0 1px rgba(255, 255, 255, 0.08), 0 8px 18px rgba(0, 0, 0, 0.5);
+  font-size: 18px; font-size: min(18px, 10cqw); font-weight: 600; letter-spacing: 0.04em; color: var(--text); white-space: nowrap;
+  /* 2.9.7: OK as a remote prints it, in every language (a screen reader says the language's) */
+  background: var(--raised-2); box-shadow: inset 0 0 0 1px var(--line);
 }
 .ok.pressed { background: var(--accent); color: #1a0f0a; }
 /* The touchpad: a trackpad as wide as the screen, not the round pad, so its hint has room. */
@@ -244,12 +266,11 @@ button { font: inherit; color: inherit; border: 0; background: none; padding: 0;
 .list { gap: 12px; padding: 2px 16px 0; }
 .list > * { flex: none; }
 /* Show on TV, under the search: the TV's own search shows it too (else the phone's alone). */
-.tvtoggle { align-self: flex-start; height: 32px; padding: 0 14px; border-radius: 16px; font-size: 13px; font-weight: 600; color: var(--muted); background: var(--raised); box-shadow: inset 0 0 0 1px var(--line); }
-.tvtoggle.on { color: var(--text); background: var(--accent-fill); box-shadow: none; }
+/* 2.9.7: Search's Show on TV: the same switch as the TV | Phone one */
+.tvswitch { align-self: flex-start; display: flex; align-items: center; gap: 8px; min-height: 44px; font-size: 13px; font-weight: 600; color: var(--muted); }
 .list-head { position: relative; }
-.list-head h1 { font-size: 30px; font-weight: 700; letter-spacing: -0.01em; margin: 2px 128px 0 0; }
-.list-head .where { position: absolute; right: 0; bottom: 2px; }
-.field { width: 100%; height: 40px; padding: 0 12px; border-radius: 12px; border: 0; background: var(--raised); color: var(--text); font: inherit; font-size: 16px; outline: none; -webkit-user-select: text; user-select: text; }
+.list-head h1 { font-size: 26px; font-weight: 700; letter-spacing: -0.01em; margin: 2px 0 0; }
+.field { width: 100%; height: 40px; padding: 0 12px; border-radius: 12px; border: 0; background: transparent; box-shadow: inset 0 0 0 1px rgba(238, 242, 246, 0.14); color: var(--text); font: inherit; font-size: 16px; outline: none; -webkit-user-select: text; user-select: text; }
 .field::placeholder { color: var(--faint); }
 /* A find box's own name, unseen: AutoFill takes the text before a box for its label otherwise. */
 .sr { position: absolute; width: 1px; height: 1px; margin: -1px; padding: 0; overflow: hidden; clip: rect(0 0 0 0); white-space: nowrap; border: 0; }
@@ -270,9 +291,13 @@ button { font: inherit; color: inherit; border: 0; background: none; padding: 0;
 .row.branch svg { flex: none; width: 18px; height: 18px; color: var(--faint); }
 .row.branch.on .title { color: var(--accent); }
 .rows { flex: 1 1 auto; min-height: 0; overflow-y: auto; overflow-anchor: none; margin: 0 -16px; padding-bottom: 12px; -webkit-overflow-scrolling: touch; }
-.group { margin: 14px 16px 4px; font-size: 13px; font-weight: 600; color: var(--muted); }
-.row { width: 100%; display: flex; gap: 12px; align-items: center; padding: 11px 16px; border-bottom: 1px solid var(--line); text-align: left; }
-.row.playing { background: rgba(224, 138, 95, 0.08); box-shadow: inset 3px 0 0 var(--accent); }
+.group { margin: 16px 16px 4px; font-size: 11px; font-weight: 700; letter-spacing: 0.14em; text-transform: uppercase; color: var(--faint); }
+.row { width: calc(100% - 16px); margin: 0 8px; display: flex; gap: 12px; align-items: center; padding: 10px 8px; border-radius: 12px; text-align: left; }
+/* 2.9.7: the channel playing (what's on now) as the TV's chosen row: warm, with a soft edge;
+   every row is inset alike, so the warm one's numbers line up with the others' */
+.row.playing { background: var(--warm-fill); box-shadow: inset 0 0 0 1px var(--warm-edge); }
+.rnum { flex: none; min-width: 26px; font-size: 19px; color: var(--muted); text-align: end; }
+.rnum:empty { display: none; }
 .row.pressed { background: var(--raised); }
 .row .logo { width: 40px; height: 40px; border-radius: 10px; font-size: 13px; }
 .row .poster { width: 38px; height: 54px; flex: none; border-radius: 6px; display: grid; place-items: center; font-size: 12px; font-weight: 700; color: #fff; }
@@ -285,8 +310,8 @@ button { font: inherit; color: inherit; border: 0; background: none; padding: 0;
 .row-next { margin-top: 5px; font-size: 12px; color: var(--faint); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .empty { margin: 32px 24px; text-align: center; color: var(--muted); font-size: 15px; line-height: 1.5; }
 .row.split { padding: 0; }
-.row-tap { flex: 1; min-width: 0; display: flex; gap: 12px; align-items: center; padding: 11px 0 11px 16px; text-align: left; }
-.row .side { flex: none; align-self: stretch; width: 60px; display: grid; place-items: center; color: var(--accent); }
+.row-tap { flex: 1; min-width: 0; display: flex; gap: 12px; align-items: center; padding: 11px 0 11px 8px; text-align: left; border-radius: 12px; }
+.row .side { flex: none; align-self: stretch; width: 52px; display: grid; place-items: center; color: var(--accent); border-radius: 12px; }
 .row .side svg { width: 22px; height: 22px; }
 .row .side.pressed, .row-tap.pressed { background: var(--raised); }
 .tt-head { display: grid; grid-template-columns: 1fr auto; align-items: center; gap: 6px 12px; }
@@ -295,14 +320,15 @@ button { font: inherit; color: inherit; border: 0; background: none; padding: 0;
 .tt-head h1 .num { margin-right: 8px; color: var(--muted); }
 .tt-head .again { margin-top: 0; }
 .slot { align-items: flex-start; }
-.slot-time { flex: none; min-width: 48px; padding-top: 1px; white-space: nowrap; font-size: 14px; font-weight: 600; color: var(--muted); font-variant-numeric: tabular-nums; }
+.slot-time { flex: none; min-width: 48px; padding-top: 1px; white-space: nowrap; font-size: 16px; color: var(--muted); font-variant-numeric: tabular-nums; }
 .slot.still { opacity: 0.55; }
 .slot .about { margin-top: 3px; font-size: 13px; line-height: 1.35; color: var(--muted); display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; }
 /* 2.8: a programme to come records at its time (once, or a series), or a scheduled one cancels */
 .slot .sched { display: flex; gap: 8px; margin-top: 7px; }
-.slot .chip { font: inherit; font-size: 13px; font-weight: 600; min-height: 30px; padding: 0 12px; border-radius: 15px; border: 1px solid var(--line); background: var(--raised); color: var(--text); }
-.slot .chip.rec { background: var(--live); border-color: var(--live); color: #fff; }
-.slot .chip.on { border-color: var(--live); color: var(--live); }
+/* 2.9.7: the TV's raised buttons; a cancel in live red */
+.slot .chip { font: inherit; font-size: 13px; font-weight: 700; min-height: 32px; padding: 0 12px; border-radius: 10px; border: 0; background: var(--raised-2); box-shadow: inset 0 0 0 1px var(--line); color: var(--text); }
+.slot .chip.rec { color: var(--text); }
+.slot .chip.danger { color: #ff7a6e; }
 /* 2.8: Record at a time, on a channel's timetable (guide or not) */
 .timer-bar { display: flex; align-items: center; gap: 10px; margin-top: 10px; min-height: 30px; }
 .timer-bar .chip { flex: none; white-space: nowrap; }
@@ -325,9 +351,11 @@ button { font: inherit; color: inherit; border: 0; background: none; padding: 0;
 mark { background: none; color: var(--accent); font-weight: 600; }
 
 /* ---- tab bar ---- */
-.tabs { flex: none; display: grid; grid-template-columns: repeat(3, 1fr); padding: 9px 14px calc(8px + env(safe-area-inset-bottom)); border-top: 1px solid var(--line); background: #0d1218; }
-.tabs button { display: flex; flex-direction: column; align-items: center; gap: 4px; font-size: 11px; font-weight: 600; color: var(--faint); }
-.tabs button.on { color: var(--accent); }
+/* 2.9.7: the tabs as the TV's own: words, the one open lit, an orange bar over it */
+.tabs { flex: none; display: grid; grid-template-columns: repeat(3, 1fr); padding: 0 14px env(safe-area-inset-bottom); border-top: 1px solid var(--line); background: var(--canvas); }
+.tabs button { position: relative; display: flex; align-items: center; justify-content: center; min-height: 52px; font-size: 13px; font-weight: 600; color: var(--faint); }
+.tabs button.on { color: var(--text); font-weight: 700; }
+.tabs button.on::before { content: ""; position: absolute; top: -1px; left: 50%; width: 24px; height: 2px; transform: translateX(-50%); border-radius: 1px; background: var(--accent); }
 
 /* ---- sheets ---- */
 /* 2.8.10: a swipe on the veil or on a sheet that cannot scroll went through to the page under it
@@ -393,3 +421,91 @@ body.sheet-open .remote, body.sheet-open .rows, body.sheet-open .chips { overflo
 .ask-buttons button { height: 52px; border-radius: 16px; font-size: 16px; font-weight: 600; padding: 0 8px; }
 .ask-buttons .keep { background: var(--accent); color: #0b0f14; }
 .ask-buttons .stop { background: var(--raised); color: var(--live); box-shadow: inset 0 0 0 1px var(--line); }
+
+/* ---- 2.9.7: the TV app's pieces ------------------------------------------------------------- */
+/* The HUD banner: what plays, as the TV's channel banner (its big thin number, its tile, the
+   name and LIVE, "Now" in orange with the programme, the progress line). */
+.hud .num.thin { flex: none; min-width: 26px; font-size: 28px; font-weight: 300; color: var(--text); text-align: center; font-variant-numeric: tabular-nums; }
+.hud .num.thin:empty { display: none; }
+.hud .line { gap: 8px; }
+.hud .sub { font-size: 13px; color: var(--muted); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.nowword { color: var(--accent); font-weight: 600; margin-inline-end: 5px; }
+.prog[hidden] { display: none; }
+.thin { font-weight: 300; font-variant-numeric: tabular-nums; }
+/* The chosen row: the TV's warm panel with a soft coral edge. */
+.warm { background: var(--warm-fill) !important; box-shadow: inset 0 0 0 1px var(--warm-edge) !important; }
+/* Captions in small capitals with their count at the right, as the TV Library's rail. */
+.capt { display: flex; justify-content: space-between; padding: 14px 2px 4px; font-size: 11px; font-weight: 700; letter-spacing: 0.14em; text-transform: uppercase; color: var(--faint); }
+/* The TV's buttons: raised grey, the one main action orange, a destructive one in live red. */
+.btn { flex: none; height: 36px; padding: 0 14px; border-radius: 10px; font-size: 14px; font-weight: 700; color: var(--text); background: var(--raised-2); box-shadow: inset 0 0 0 1px var(--line); }
+.btn.accent { background: var(--accent); color: #1a0f0a; box-shadow: none; }
+.btn.danger { color: #ff7a6e; }
+.btn.pressed { filter: brightness(1.15); }
+#timetableName { display: flex; align-items: center; gap: 10px; min-width: 0; }
+#timetableName .num.thin { font-size: 26px; font-weight: 300; }
+#timetableName .logo { width: 36px; height: 36px; border-radius: 9px; font-size: 12px; }
+#timetableName .tname { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+/* The Library's tabs: as the Remote's sections; Refresh an icon at their end. */
+.libtabs { align-items: center; }
+.libtabs .icon { margin-inline-start: auto; width: 36px; height: 36px; display: grid; place-items: center; color: var(--muted); box-shadow: none; }
+.libtabs .icon svg { width: 20px; height: 20px; }
+/* A genre's titles as the TV Library's generated cards, two to a row. */
+.rows.cards { display: flex; flex-wrap: wrap; align-content: flex-start; gap: 12px; padding: 4px 16px 12px; }
+.rows.cards > :not(.card) { flex: 1 0 100%; }
+.card.row { position: relative; display: block; flex: none; width: calc(50% - 6px); margin: 0; padding: 0; border-radius: 12px; overflow: hidden; text-align: start; box-shadow: inset 0 0 0 1px rgba(255, 255, 255, 0.06); }
+/* its shape as in-flow height (a button's aspect-ratio doesn't size its grid row): 2:3, a
+   recording's 16:10 */
+.card.row::before { content: ""; display: block; padding-top: 150%; }  /* of its own width */
+.card.landscape::before { padding-top: 62.5%; }
+.card .card-title { position: absolute; inset-inline: 10px; bottom: 14px; font-size: 14px; font-weight: 700; line-height: 1.25; color: #fff; display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; text-shadow: 0 1px 2px rgba(0, 0, 0, 0.45); }
+.card.landscape .card-title { bottom: 26px; -webkit-line-clamp: 1; }
+.card .card-sub { position: absolute; inset-inline: 10px; bottom: 10px; font-size: 11px; color: rgba(255, 255, 255, 0.75); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.card .prog { position: absolute; inset-inline: 10px; bottom: 6px; margin: 0; }
+.card .badge { position: absolute; top: 7px; font-size: 10px; font-weight: 800; letter-spacing: 0.04em; padding: 2px 6px; border-radius: 5px; }
+.card .badge.len { inset-inline-start: 7px; background: rgba(11, 15, 20, 0.75); color: var(--text); }
+.card .badge.accent { inset-inline-end: 7px; background: var(--accent); color: #1a0f0a; }
+.card .badge.live { inset-inline-end: 7px; background: var(--live); color: #fff; }
+.card .badge.quiet, .card .badge.warn { inset-inline-end: 7px; background: rgba(11, 15, 20, 0.75); color: var(--text); }
+.card.pressed { filter: brightness(1.15); }
+/* Recordings' home, as the desktop's Tonight: what records now in one banner (a compact row
+   each, Watch and Stop), the next airings as rows, the latest recordings as wide cards. */
+.rows > .capt { padding-inline: 18px; }
+.rechud { margin: 8px 16px 2px; padding: 12px; border-radius: 14px; background: rgba(214, 69, 58, 0.1); box-shadow: inset 0 0 0 1px rgba(214, 69, 58, 0.35); }
+.rec-now + .rec-now { margin-top: 12px; padding-top: 12px; border-top: 1px solid rgba(214, 69, 58, 0.22); }
+.rec-top { display: flex; align-items: center; gap: 12px; }
+.rec-top .logo { width: 40px; height: 40px; border-radius: 10px; font-size: 13px; }
+.rec-now .line { font-size: 15px; font-weight: 700; }
+.rec-now .sub { margin-top: 2px; font-size: 13px; color: var(--muted); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.rec-now .prog { margin-top: 7px; }
+.rec-btns { display: flex; gap: 8px; margin-top: 10px; }
+.rec-btns:empty { display: none; }
+.rec-now .btn { display: inline-flex; align-items: center; gap: 7px; }
+.rec-now .btn svg { width: 14px; height: 14px; }
+.rec-now .btn.icon { width: 44px; height: 44px; padding: 0; justify-content: center; border-radius: 12px; }
+.rec-now .btn.icon svg { width: 16px; height: 16px; }
+.row.coming .when { display: flex; flex-direction: column; align-items: flex-end; min-width: 44px; font-size: 16px; line-height: 1.15; }
+.row.coming .when small { font-size: 9.5px; font-weight: 700; letter-spacing: 0.1em; color: var(--faint); }
+.row.coming .row-now { color: var(--muted); opacity: 1; }
+.cardrow { display: flex; flex-wrap: wrap; gap: 12px; padding: 6px 16px 2px; }
+.more { display: block; min-height: 44px; margin-inline-start: auto; padding: 10px 18px; font-size: 14px; font-weight: 600; color: var(--muted); text-align: end; }
+.more.pressed { color: var(--text); }
+/* The sheets in the same pieces: the title bold; the items raised, as the More sheet's keys;
+   a destructive one in live red; the More sheet's section names as captions. */
+.sh { font-size: 17px; font-weight: 700; color: var(--text); }
+#moreSheet .sh { font-size: 11px; letter-spacing: 0.14em; text-transform: uppercase; color: var(--faint); }
+.menu-list { gap: 6px; }
+.menu-list > button, .menu-list .stepped { padding: 13px 14px; border-bottom: 0; border-radius: 12px; background: var(--raised); box-shadow: inset 0 0 0 1px var(--line); }
+.menu-list .stepped > .choice { padding: 0 0 2px; }
+.menu-list > button.pressed, .menu-list .choice.pressed { background: var(--raised-2); }
+.menu-list > button.danger { color: #ff7a6e; }
+.menu-list > button.choice.up { padding-inline: 2px; background: none; box-shadow: none; }
+.menu-list .step { padding: 4px 2px; border-bottom: 0; }
+/* The Remote's banner, calm: alone across the screen, LIVE at its end, its line across its foot */
+.now.hud { flex-wrap: wrap; row-gap: 10px; }
+.now.hud .live { margin-inline-start: auto; }
+.now.hud > .prog { flex: 1 0 100%; margin-top: 0; }
+/* A finger's 44 px around the small controls, their look unchanged. */
+.menu, .libtabs .icon { position: relative; width: 44px; }
+.menu::after, .libtabs .icon::after, .switch::after { content: ""; position: absolute; inset: -6px 0; }
+.libtabs .icon::after { inset: -4px 0; }
+.switch::after { inset: -9px 0; }

@@ -460,6 +460,36 @@ class ShapeArgsTests(unittest.TestCase):
         self.assertEqual(picture.shape_args(FILL, 0, 720), (None, None))  # no size yet
 
 
+class PictureShapeTests(unittest.TestCase):
+    """The shape a picture shows in, which the picture in picture's boxes take (no bars)."""
+
+    def test_a_stream_shows_in_its_size_and_its_pixels_aspect(self):
+        self.assertAlmostEqual(picture.display_ratio(1920, 1080, (1, 1)), 16 / 9)
+        self.assertAlmostEqual(picture.display_ratio(1920, 1080, (0, 0)), 16 / 9)  # not said
+        self.assertAlmostEqual(picture.display_ratio(720, 576, (16, 15)), 4 / 3)  # PAL 4:3
+        self.assertAlmostEqual(picture.display_ratio(720, 576, (64, 45)), 16 / 9)  # PAL wide
+        self.assertAlmostEqual(picture.display_ratio(1440, 1080, (4, 3)), 16 / 9)
+        self.assertAlmostEqual(picture.display_ratio(1920, 1080, rotated=True), 9 / 16)
+        self.assertIsNone(picture.display_ratio(0, 576))  # its size is not known yet
+        self.assertEqual(picture.display_ratio(4000, 100), picture.MAX_RATIO)  # no sliver
+
+    def test_a_chosen_aspect_is_the_shape_and_fill_fits_any(self):
+        self.assertAlmostEqual(picture.shown_ratio(WIDE, 4 / 3), 16 / 9)
+        self.assertAlmostEqual(picture.shown_ratio(STANDARD, 16 / 9), 4 / 3)
+        self.assertIsNone(picture.shown_ratio(FILL, 4 / 3))
+        self.assertAlmostEqual(picture.shown_ratio(picture.AUTO, 4 / 3), 4 / 3)
+        self.assertIsNone(picture.shown_ratio(picture.AUTO, None))
+
+    def test_a_box_of_another_shape_is_as_large_as_the_16_by_9_one(self):
+        self.assertEqual(picture.box_size(320, None), (320, 180))
+        self.assertEqual(picture.box_size(320, 16 / 9), (320, 180))
+        self.assertEqual(picture.box_size(320, 1.78), (320, 180))  # as good as 16:9
+        width, height = picture.box_size(320, 4 / 3)
+        self.assertEqual((width, height), (277, 208))
+        self.assertAlmostEqual(width * height, 320 * 180, delta=320 * 180 * 0.01)
+        self.assertEqual(picture.box_size(320, 9 / 16), (180, 320))  # upright: turned
+
+
 class StatsTextTests(unittest.TestCase):
     STATS = {
         "video_codec": "h264",

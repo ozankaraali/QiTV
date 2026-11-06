@@ -78,6 +78,9 @@ export function phoneName() {
 
 export function show(name) {
   for (const section of document.querySelectorAll("[data-screen]")) section.hidden = section.dataset.screen !== name;
+  // 2.9.7: the top line's switch shows on the Guide and the Library (data-shown: data-screen
+  // marks the screens themselves)
+  document.body.dataset.shown = name;
   const tabbed = ["remote", "guide", "timetable", "library", "search"].includes(name);
   $("tabs").hidden = !tabbed;
   const under = name === "timetable" ? "guide" : name; // a channel's timetable is the Guide's

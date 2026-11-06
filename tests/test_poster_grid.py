@@ -16,7 +16,9 @@ from services.library import Details
 from ui.keymap import key_hint
 from ui.library.poster_grid import (
     CANCEL,
+    DELETE,
     FAVORITE,
+    FOLDER,
     HOVER_DWELL_MS,
     PLAY,
     REQUEST_DELAY_MS,
@@ -382,12 +384,114 @@ class PosterGridTests(unittest.TestCase):
         self.grid.set_current_index(1)
         self.assertEqual([n for n, _ in self.grid.button_labels()], [FAVORITE, PLAY])
 
-    def test_a_recording_has_no_star(self):
+    def test_a_recordings_strip_offers_delete_and_folder_before_play(self):  # 2.9.7
         self.grid.set_sections([("", titles(3))])
         self.grid.set_details_provider(lambda item: details("recording", None))
-        self.assertEqual(self.grid.button_labels(), [(PLAY, "Play")])
+        self.assertEqual(
+            self.grid.button_labels(),
+            [(DELETE, "Delete…"), (FOLDER, "Show in Folder"), (PLAY, "Play")],
+        )  # no star
         self.grid.set_details_provider(lambda item: details("recording", 60_000))
-        self.assertEqual([n for n, _ in self.grid.button_labels()], [START_OVER, PLAY])
+        self.assertEqual(
+            [n for n, _ in self.grid.button_labels()], [DELETE, FOLDER, START_OVER, PLAY]
+        )
+
+    def test_its_delete_and_folder_buttons_emit_their_signals(self):  # 2.9.7
+        self.grid.set_sections([("", titles(3))])
+        self.grid.set_details_provider(lambda item: details("recording", None))
+        deleted, shown = [], []
+        self.grid.deleteRequested.connect(deleted.append)
+        self.grid.folderRequested.connect(shown.append)
+        self.grid.set_current_index(1)
+        buttons = dict(self.buttons())
+        QTest.mouseClick(self.grid.viewport(), Qt.LeftButton, Qt.NoModifier, buttons[DELETE])
+        QTest.mouseClick(self.grid.viewport(), Qt.LeftButton, Qt.NoModifier, buttons[FOLDER])
+        self.assertEqual((deleted, shown), ([1], [1]))
+        self.assertEqual(self.named("activated"), [])
+
+    def test_badges_paint_on_the_cards_shown(self):  # 2.9.7
+        self.grid.set_sections([("", titles(200))])
+        asked = []
+
+        def badges(item):
+            asked.append(item["name"])
+            return ("1 h 52", "NEW")
+
+        self.grid.set_badge_provider(badges)
+        self.assertFalse(self.grid.grab().isNull())
+        self.assertTrue(asked)
+        self.assertLess(len(set(asked)), 200)  # only the cards painted are asked
+
+    def test_a_desk_tile_shows_its_own_buttons_and_says_which_is_pressed(self):  # 2.9.7
+        self.grid.set_sections([("Today", titles(3))])
+        desk_details = Details(
+            title="Late film",
+            year="",
+            duration="",
+            genre="",
+            rating="",
+            plot="Two would need 3 of Demo TV's 2 streams at 21:00",
+            resume_ms=None,
+            progress=None,
+            favorite=False,
+            kind="desk",
+            provider="Fri 01:00–02:30 · Harbor News 24",
+            buttons=(
+                ("edit", "Edit…", "raised"),
+                ("cancel", "Cancel Recording", "danger"),
+                ("skip", "Skip", "off"),
+            ),
+        )
+        self.grid.set_details_provider(lambda item: desk_details)
+        pressed = []
+        self.grid.buttonRequested.connect(lambda i, name: pressed.append((i, name)))
+        self.grid.set_current_index(2)
+        self.assertEqual(
+            self.grid.button_labels(),
+            [("edit", "Edit…"), ("cancel", "Cancel Recording"), ("skip", "Skip")],
+        )
+        buttons = dict(self.buttons())
+        for name in ("cancel", "skip", "edit"):
+            QTest.mouseClick(self.grid.viewport(), Qt.LeftButton, Qt.NoModifier, buttons[name])
+        self.assertEqual(pressed, [(2, "cancel"), (2, "edit")])  # Skip is off
+        self.assertEqual(self.named("cancelRequested"), [])  # its own, not the old Cancel's
+        self.assertFalse(self.grid.grab().isNull())
+
+    def test_captions_and_toned_badges_paint_on_tiles(self):  # 2.9.7
+        self.grid.set_sections([("", titles(6))])
+        asked = []
+        self.grid.set_caption_provider(
+            lambda item: asked.append(item["name"]) or (item["name"], "Northwind News")
+        )
+        self.grid.set_badge_provider(lambda item: ("21:00", "REC", "live"))
+        self.assertFalse(self.grid.grab().isNull())
+        self.assertTrue(asked)
+
+    def test_captioned_cards_take_their_channels_colour_and_actions_look_like_buttons(self):
+        items = [
+            {"name": "Record at a time…", "_action": True},  # current: drawn lifted
+            {"name": "Late film", "_channel": "Harbor News 24"},
+            {"name": "Night Match", "_channel": "Harbor News 24"},
+            {"name": "Evening News", "_channel": "Northwind News"},
+            {"name": "Morning Show", "_channel": "Northwind News", "_action": True},
+        ]
+        self.grid.set_sections([("", items)])
+        self.grid.set_caption_provider(lambda item: (item["name"], item.get("_channel", "")))
+        image = self.grid.viewport().grab().toImage()
+
+        def colour(i):
+            rect = self.grid.item_rect(i)
+            return image.pixelColor(rect.center().x(), rect.top() + rect.height() // 5).name()
+
+        self.assertEqual(colour(1), colour(2))  # one channel, one colour
+        self.assertNotEqual(colour(1), colour(3))
+        self.assertNotIn(colour(4), (colour(1), colour(3)))  # an action: no channel's card
+
+    def test_wide_tiles_take_their_shape(self):  # 2.9.7: the Recordings tab's 16:9 tiles
+        self.grid.set_sections([("", titles(8))])
+        self.grid.set_shape(9 / 16, 16.0)
+        rect = self.grid.item_rect(0)
+        self.assertAlmostEqual(rect.height() / rect.width(), 9 / 16, places=2)
 
     def test_clicks_select_then_activate(self):
         self.grid.set_sections([("", titles(30))])

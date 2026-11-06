@@ -45,6 +45,9 @@ const words = {
   opening_here: "Opening on this phone…",
   show_on_tv: "Show on TV",
   phone: "Phone",
+  coming_up: "Coming up",
+  recently_recorded: "Recently recorded",
+  all_recordings: "All recordings ›",
   pick_here: "Pick a channel below to watch it here",
   now_on_tv: "Now playing on the TV",
   open_player: "Open in the phone's player",
@@ -123,10 +126,21 @@ function share(programme, nowS = Date.now() / 1000) {
   return Math.min(1, Math.max(0, (nowS - programme.start) / (programme.stop - programme.start)));
 }
 
-function logoTile(name, className = "logo") {
+function logoTile(name, className = "logo", hue = name, tint = "") {
   const tile = el("div", className, initials(name));
-  tile.style.background = colour(name);
+  // 2.9.7: the TV's own colour when it sends it; else a recording's channel's (`hue`)
+  tile.style.background = tint || colour(hue);
   return tile;
+}
+
+// 2.9.7: a channel's number (or a time) as the TV's menu draws it: thin, in its own column.
+function rowNum(text) {
+  return el("span", "rnum thin", text || "");
+}
+
+// 2.9.7: a recording's or an airing's label, as its tile on the TV says it (REC, ONCE, NEW…)
+function tag(text, tone = "quiet") {
+  return el("span", `tag ${tone}`, text);
 }
 
 function pressable(node) {
@@ -273,6 +287,8 @@ function drawNow() {
     name.textContent = w("nothing_playing");
     $("nowNum").textContent = "";
     $("nowShow").textContent = "";
+    $("nowWord").hidden = true;
+    $("nowTrack").hidden = true;
     $("nowProg").style.width = "0%";
     live.hidden = true;
     const logo = $("nowLogo");
@@ -283,7 +299,7 @@ function drawNow() {
   name.textContent = now.name || "";
   const logo = $("nowLogo");
   logo.textContent = initials(now.name) || "TV";
-  logo.style.background = colour(now.name);
+  logo.style.background = now.tint || colour(now.name); // 2.9.7: the TV's own tile colour
   if (now.kind === "live") {
     $("nowNum").textContent = now.num || "";
     live.hidden = false;
@@ -292,10 +308,14 @@ function drawNow() {
     toLive.classList.toggle("behind", behind > 0);
     live.textContent = behind > 0 ? `−${Math.floor(behind / 60)}:${String(behind % 60).padStart(2, "0")}` : t("live") === "live" ? "LIVE" : t("live");
     $("nowShow").textContent = now.now ? now.now.title : "";
+    $("nowWord").hidden = !now.now; // "Now", as the TV's banner, when the guide says what's on
+    $("nowTrack").hidden = !now.now; // no programme, no empty line
     $("nowProg").style.width = `${(share(now.now) * 100).toFixed(1)}%`;
   } else {
     $("nowNum").textContent = "";
     live.hidden = true;
+    $("nowWord").hidden = true;
+    $("nowTrack").hidden = !film; // 2.9.7: no length known, no empty line
     $("nowShow").textContent = now.sub || "";
     let pos = film ? film.pos + (film.playing ? Date.now() - film.at : 0) : 0;
     if (film) pos = Math.min(pos, film.len);
@@ -319,9 +339,9 @@ function liveKey(num, name) {
 
 // The Watching mark on the row of the channel the TV shows, on every page loaded.
 function markWatching(row, on) {
-  row.classList.toggle("playing", on);
+  row.classList.toggle("playing", on); // 2.9.7: the warm row (its word for screen readers only)
   const badge = row.querySelector(".row-top em");
-  if (on && !badge) row.querySelector(".row-top").append(el("em", "", w("watching")));
+  if (on && !badge) row.querySelector(".row-top").append(el("em", "sr", w("watching")));
   else if (!on && badge) badge.remove();
 }
 
@@ -330,12 +350,13 @@ function guideRow(row) {
   item.dataset.live = liveKey(row.num, row.name);
   const hit = el("button", "row-tap");
   hit.type = "button";
-  hit.append(logoTile(row.name));
+  // 2.9.7: as the TV's channel menu: the thin number, the tile in the TV's colour, the
+  // channel and what's on with its line (calm: no Next line)
+  hit.append(rowNum(row.num), logoTile(row.name, "logo", row.name, row.tint));
   const main = el("div", "row-main");
   const top = el("div", "row-top");
-  if (row.num) top.append(el("span", "num", row.num));
   top.append(el("span", "title", row.name));
-  if (row.playing) top.append(el("em", "", w("watching")));
+  if (row.playing) top.append(el("em", "sr", w("watching")));
   main.append(top);
   if (row.now) {
     main.append(el("div", "row-now", row.now.title));
@@ -345,7 +366,6 @@ function guideRow(row) {
     bar.append(fill);
     main.append(bar);
   }
-  if (row.next) main.append(el("div", "row-next", `${clock(row.next.start)} ${row.next.title}`));
   hit.append(main);
   pressable(hit);
   hit.addEventListener("click", () => openTimetable(row.id, row.num, row.name));
@@ -362,12 +382,11 @@ function zapRow(row) {
   const item = el("button", `row${row.playing ? " playing" : ""}`);
   item.type = "button";
   item.dataset.live = liveKey(row.num, row.name);
-  item.append(logoTile(row.name));
+  item.append(rowNum(row.num), logoTile(row.name, "logo", row.name, row.tint)); // 2.9.7
   const main = el("div", "row-main");
   const top = el("div", "row-top");
-  if (row.num) top.append(el("span", "num", row.num));
   top.append(el("span", "title", row.name));
-  if (row.playing) top.append(el("em", "", w("watching")));
+  if (row.playing) top.append(el("em", "sr", w("watching")));
   main.append(top);
   item.append(main);
   tapRow(item, row.id, { plays: true, num: row.num, name: row.name }); // the TV, or here
@@ -526,18 +545,23 @@ function bindGuide() {
   $("timetableWatch").addEventListener("click", () => {
     if (navigator.vibrate) navigator.vibrate(8);
     if (!timetableFor) return;
-    if (here) watchHandle(timetableFor, "", $("timetableName").textContent);
+    if (here) watchHandle(timetableFor, "", timetableLabel);
     else send({ t: "open", id: timetableFor });
   });
 }
 
 // ---- a channel's card: its timetable ------------------------------------------------------
 
-function timetableTitle(num, name) {
+let timetableLabel = ""; // the timetable's channel name, as the player's caption says it
+
+function timetableTitle(num, name, tint = "") {
   const title = $("timetableName");
-  title.replaceChildren();
-  if (num) title.append(el("span", "num", num));
-  title.append(name || "");
+  title.replaceChildren(); // 2.9.7: as the TV's banner: the thin number, the tile, the name
+  timetableLabel = name || "";
+  if (num) title.append(el("span", "num thin", num));
+  const tile = logoTile(name, "logo", name, tint);
+  tile.setAttribute("aria-hidden", "true"); // its initials: the name says it
+  title.append(tile, el("span", "tname", name || ""));
 }
 
 let timerOffered = false; // the timetable shown says QiTV records (with its time-shift helper)
@@ -558,7 +582,7 @@ function slotRow(slot, nowS) {
   const past = slot.stop <= nowS;
   const row = el(slot.id ? "button" : "div", `row slot${slot.on ? " playing" : ""}${past && !slot.id ? " still" : ""}`);
   if (slot.id) row.type = "button";
-  row.append(el("div", "slot-time", clock(slot.start)));
+  row.append(el("div", "slot-time thin", clock(slot.start))); // 2.9.7: a thin numeral
   const main = el("div", "row-main");
   const top = el("div", "row-top");
   top.append(el("span", "title", slot.title));
@@ -594,7 +618,7 @@ function schedChips(slot) {
     return button;
   };
   if (slot.rec) {
-    chips.append(chip(`● ${w("cancel_recording")}`, "cancel", "on"));
+    chips.append(chip(`● ${w("cancel_recording")}`, "cancel", "on danger"));
   } else {
     chips.append(chip(`● ${w("record")}`, "once", "rec"), chip(w("record_series"), "series", ""));
   }
@@ -924,7 +948,7 @@ function bindTracks() {
 
 function onTimetable(message) {
   if (message.id !== timetableFor) return;
-  timetableTitle(message.num, message.name);
+  timetableTitle(message.num, message.name, message.tint);
   timerOffered = Boolean(message.timer);
   tvOffset = Number.isInteger(message.tz) ? message.tz : null;
   if ($("timerForm").hidden) $("timerBar").hidden = !timerOffered;
@@ -1071,8 +1095,7 @@ function sendQuery() {
 function useSearchOnTv(on) {
   searchOnTv = on;
   const toggle = $("searchTv");
-  toggle.classList.toggle("on", on);
-  toggle.setAttribute("aria-pressed", String(on));
+  toggle.setAttribute("aria-checked", String(on)); // 2.9.7: a switch, as the TV | Phone one
   store.setSetting("search_tv", on ? "on" : "");
 }
 
@@ -1139,14 +1162,20 @@ function bindSearch() {
 // titles a page at a time; the find box searches the level shown. QiTV browses with the phone's
 // own copy of its Library: the TV stays where it is until a title is tapped.
 
-const library = newList({ section: "movies", level: "genres", genre: "", title: "", total: null });
+// 2.9.7: Recordings opens on its home (`recView` "home"); All recordings › shows its rows
+// ("rows"), from the answer kept (`recMessage`).
+const library = newList({ section: "movies", level: "genres", genre: "", title: "", total: null, recView: "home", recMessage: null });
 let libraryTimer = null;
 
 function showLibraryLevel() {
   const genres = library.level === "genres";
-  $("libraryUp").hidden = genres;
+  if (genres) $("libraryRows").classList.remove("cards");
+  const recRows = genres && library.section === "recordings" && library.recView === "rows"; // 2.9.7
+  $("libraryUp").hidden = genres && !recRows;
+  $("libraryUp").querySelector("span").textContent = w(library.section === "recordings" ? "recordings" : "genres");
   $("libraryChips").hidden = !genres;
   setTitle($("libraryTitle"), genres ? w("library") : library.title, genres ? null : library.total);
+  $("libraryTitle").hidden = genres; // 2.9.7: the tabs say where; a genre's name is its heading
   $("libraryFind").placeholder = genres ? w("find_genre") : w("find_title");
   nameField($("libraryFind"));
 }
@@ -1171,13 +1200,42 @@ function askLibrary(page) {
   else ask(library, { what: "library", section, genre: library.genre, page, find });
 }
 
+// 2.9.7: a title as the TV Library's own generated card: a gradient in its hue (the TV's,
+// else the page's colour), the title at its foot, how far it was watched; a recording's
+// wide, with its length and NEW. A tap does what a row's did.
+function libraryCard(item, wide) {
+  const card = el("button", `row card${wide ? " landscape" : ""}`); // not .wide: the page's wide buttons
+  card.type = "button";
+  if (typeof item.hue === "number") {
+    const hue = Math.round(item.hue * 360);
+    card.style.backgroundImage = `linear-gradient(180deg, hsl(${hue} 40% 36%), hsl(${hue} 44% 16%))`;
+  } else {
+    card.style.backgroundImage = `linear-gradient(180deg, ${colour(item.title)}, #12161c)`;
+  }
+  if (item.len) card.append(el("span", "badge len", item.len));
+  if (item.badge && item.badge.text) card.append(el("span", `badge ${item.badge.tone || "quiet"}`, item.badge.text));
+  card.append(el("span", "card-title", item.title));
+  if (wide && item.sub) card.append(el("span", "card-sub", item.sub));
+  if (typeof item.progress === "number") {
+    const bar = el("div", "prog");
+    const fill = el("i");
+    fill.style.width = `${(item.progress * 100).toFixed(1)}%`;
+    bar.append(fill);
+    card.append(bar);
+  }
+  tapRow(card, item.id, { plays: !!item.plays, name: item.title });
+  return card;
+}
+
 function libraryRow(item) {
   const row = el("button", "row");
   row.type = "button";
-  row.append(logoTile(item.title, "poster"));
+  row.append(logoTile(item.title, "poster", item.ch || item.title));
   const main = el("div", "row-main");
   const top = el("div", "row-top");
   top.append(el("span", "title", item.title));
+  if (item.badge && item.badge.text) top.append(tag(item.badge.text, item.badge.tone || "quiet"));
+  if (item.len) top.append(tag(item.len));
   main.append(top);
   if (item.sub) main.append(el("div", "row-next", item.sub));
   if (typeof item.progress === "number") {
@@ -1188,14 +1246,47 @@ function libraryRow(item) {
     main.append(bar);
   }
   row.append(main);
+  if (Array.isArray(item.acts)) {  // 2.9.7: an airing of Recordings: its own actions, here
+    row.addEventListener("click", () => openActs(item));
+    pressable(row);
+    return row;
+  }
   tapRow(row, item.id, { plays: !!item.plays, name: item.title });
   return row;
+}
+
+// 2.9.7: what an airing (or a recording now) lets the phone do, as QiTV listed it, in its
+// language: each goes back by the row's handle, and the list comes again.
+function openActs(item) {
+  const list = $("menuList");
+  list.replaceChildren();
+  $("menuTitle").textContent = item.title;
+  for (const act of item.acts) {
+    list.append(menuItem(act.label, () => send({ t: "desk", id: item.id, do: act.do }), act.danger ? "danger" : ""));
+  }
+  openSheet("menuSheet");
 }
 
 function onGenres(message) {
   if (library.level !== "genres" || message.section !== library.section || message.find !== library.find) return;
   if (!answers(library, message)) return;
-  const rows = message.rows.map((genre) => branchRow(genre, () => openLibraryAt("titles", genre.id, genre.title)));
+  // 2.9.7: the home is one page; the rows' later pages belong to All recordings ›
+  if (library.section === "recordings" && !library.find && library.recView === "home" && message.page > 0) return;
+  drawGenres(message);
+}
+
+function drawGenres(message) {
+  const home = library.section === "recordings" ? message.home : null;
+  if (home) {
+    library.recMessage = message;
+    if (library.recView !== "rows") {
+      placePage($("libraryRows"), library, message, recHome(home), () => openLibraryAt("genres"));
+      library.pages = 1;
+      return;
+    }
+  }
+  const listed = home ? message.rows.filter((genre) => genre.id !== home.coming_key) : message.rows;
+  const rows = listed.map((genre) => branchRow(genre, () => openLibraryAt("titles", genre.id, genre.title)));
   const titles = message.titles || []; // what the find found in the whole section, below its genres
   if (titles.length && (message.page === 0 || rows.length)) rows.push(el("div", "group", w(library.section))); // where they begin
   rows.push(...titles.map(libraryRow));
@@ -1209,7 +1300,162 @@ function onLibrary(message) {
   Object.assign(library, { genre: message.genre, title: message.title, total: message.count });
   showLibraryLevel();
   const retry = () => openLibraryAt("titles", library.genre, library.title);
-  placePage($("libraryRows"), library, message, message.items.map(libraryRow), retry);
+  // 2.9.7: titles as the TV's cards, two to a row (an airing's row keeps its actions)
+  const cards = !message.items.some((item) => Array.isArray(item.acts));
+  const box = $("libraryRows");
+  box.classList.toggle("cards", cards);
+  const wide = library.section === "recordings";
+  // an airing (it has its time) as the home's row
+  const rows = message.items.map((item) => (cards ? libraryCard(item, wide) : "time" in item ? comingRow(item) : libraryRow(item)));
+  placePage(box, library, message, rows, retry);
+}
+
+// ---- 2.9.7: Recordings' home, as the desktop's Tonight ---------------------------------------
+// What records now (one banner, a compact row each, Watch and Stop), the next airings (a tap:
+// what each allows), the latest recordings as cards, All recordings › for the channels' rows.
+
+function homeCaption(text, count) {
+  const line = el("div", "capt");
+  line.append(el("span", "", text), el("span", "", typeof count === "number" ? count.toLocaleString() : ""));
+  return line;
+}
+
+function moreLink(text, open) {
+  const link = el("button", "more", text);
+  link.type = "button";
+  pressable(link);
+  link.addEventListener("click", open);
+  return link;
+}
+
+function recNowRow(rec, compact) {
+  const line = el("div", "rec-now");
+  const top = el("div", "rec-top");
+  const channel = rec.channel || rec.title;
+  top.append(logoTile(channel, "logo", channel, rec.tint));
+  const main = el("div", "row-main");
+  const name = el("div", "line");
+  name.append(el("span", "name", channel), el("span", "live", `● ${w("rec")}`));
+  main.append(name);
+  const sub = el("div", "sub");
+  if (rec.title && rec.title !== channel) sub.append(el("span", "nowword", w("now")), el("span", "", rec.title));
+  else sub.append(el("span", "recclock", recClock(rec.elapsed_s || 0)));
+  counts(line, rec);
+  main.append(sub);
+  const bar = recProgress(rec);
+  if (bar) main.append(bar);
+  top.append(main);
+  line.append(top);
+  // one recording: ▶ Watch and ■ Stop beneath it; two or more: the desktop's compact rows, the
+  // same buttons as icons at each row's end (their names kept for a screen reader)
+  const buttons = compact ? top : el("div", "rec-btns");
+  for (const act of rec.acts || []) {
+    const icon = REC_ICONS[act.do];
+    const button = el("button", `btn${act.danger ? " danger" : ""}${compact && icon ? " icon" : ""}`);
+    button.type = "button";
+    if (icon) button.insertAdjacentHTML("beforeend", `<svg aria-hidden="true"><use href="#${icon}"/></svg>`);
+    button.append(el("span", compact && icon ? "sr" : "", act.label));
+    pressable(button);
+    button.addEventListener("click", () => send({ t: "desk", id: rec.id, do: act.do }));
+    buttons.append(button);
+  }
+  if (!compact) line.append(buttons);
+  return line;
+}
+
+const REC_ICONS = { watch: "i-play", stop: "i-stop" };
+
+// A recording under way counts on, as the TV's: its start and end kept on its node, its clock
+// and line moved each second (tickRecs).
+function counts(node, rec) {
+  node.dataset.since = String(Date.now() / 1000 - (rec.elapsed_s || 0));
+  if (rec.until > 0) node.dataset.until = String(rec.until);
+}
+
+function tickRecs() {
+  const nowS = Date.now() / 1000;
+  for (const node of document.querySelectorAll("#libraryRows [data-since]")) {
+    const elapsed = Math.max(0, nowS - Number(node.dataset.since));
+    const clock = node.querySelector(".recclock");
+    if (clock) clock.textContent = recClock(elapsed);
+    const until = Number(node.dataset.until || 0);
+    const fill = node.querySelector(".prog i");
+    if (fill && until > 0) fill.style.width = `${((elapsed / (elapsed + Math.max(0, until - nowS))) * 100).toFixed(1)}%`;
+  }
+}
+
+// how far a recording under way has come: its line, from its elapsed time and its end (none
+// without an end: one started with R)
+function recProgress(rec) {
+  const left = rec.until > 0 ? rec.until - Date.now() / 1000 : 0;
+  if (left <= 0) return null;
+  const bar = el("div", "prog");
+  const fill = el("i");
+  const elapsed = rec.elapsed_s || 0;
+  fill.style.width = `${((elapsed / (elapsed + left)) * 100).toFixed(1)}%`;
+  bar.append(fill);
+  return bar;
+}
+
+// an airing as the TV's row: its time a thin numeral with the day under it, the tile, the title
+// and its kind, the channel; the one recording now (in Coming up's full list) the warm row with
+// ● REC and its line
+function comingRow(airing) {
+  const recording = !!(airing.badge && airing.badge.tone === "live");
+  const row = el("button", `row coming${recording ? " playing" : ""}`);
+  row.type = "button";
+  const when = el("span", "rnum thin when");
+  when.append(el("span", "", airing.time || ""), el("small", "", airing.day || ""));
+  const channel = airing.channel || airing.title;
+  row.append(when, logoTile(channel, "logo", channel, airing.tint));
+  const main = el("div", "row-main");
+  const top = el("div", "row-top");
+  top.append(el("span", "title", airing.title));
+  // its kind in its tone on the TV: a clash's or a wait's yellow
+  const tone = recording ? "live" : (airing.badge && airing.badge.tone) || "quiet";
+  if (airing.kind) top.append(tag(recording ? `● ${airing.kind}` : airing.kind, tone));
+  main.append(top, el("div", "row-now", airing.channel || ""));
+  const bar = recording ? recProgress(airing) : null;
+  if (bar) main.append(bar);
+  if (recording) counts(row, airing);
+  row.append(main);
+  pressable(row);
+  row.addEventListener("click", () => openActs(airing));
+  return row;
+}
+
+function recHome(home) {
+  const nodes = [];
+  if (home.now && home.now.length) {
+    const banner = el("div", "rechud");
+    for (const rec of home.now) banner.append(recNowRow(rec, home.now.length > 1));
+    nodes.push(banner);
+  }
+  if (home.coming && home.coming.length) {
+    nodes.push(homeCaption(w("coming_up"), home.coming.length + (home.more || 0)));
+    nodes.push(...home.coming.map(comingRow));
+    if (home.more > 0) {
+      nodes.push(moreLink(`${w("coming_up")} ›`, () => openLibraryAt("titles", home.coming_key, w("coming_up"))));
+    }
+  }
+  if (home.recent && home.recent.length) {
+    nodes.push(homeCaption(w("recently_recorded"), home.recorded));
+    const cards = el("div", "cardrow");
+    cards.append(...home.recent.map((item) => libraryCard(item, true)));
+    nodes.push(cards);
+  }
+  if (!nodes.length) nodes.push(el("div", "empty", w("nothing_here")));
+  nodes.push(moreLink(w("all_recordings"), () => showRecView("rows")));
+  return nodes;
+}
+
+// All recordings › and ‹ back: the answer kept, drawn the other way; no ask
+function showRecView(view) {
+  library.recView = view;
+  showLibraryLevel();
+  if (!library.recMessage) return;
+  library.opening = true;
+  drawGenres(library.recMessage);
 }
 
 function bindLibrary() {
@@ -1217,10 +1463,14 @@ function bindLibrary() {
     chip.addEventListener("click", () => {
       for (const other of document.querySelectorAll("#libraryChips [data-lib]")) other.classList.toggle("on", other === chip);
       library.section = chip.dataset.lib;
+      library.recView = "home"; // 2.9.7: Recordings opens on its home
       openLibraryAt("genres");
     });
   }
-  $("libraryUp").addEventListener("click", () => openLibraryAt("genres"));
+  $("libraryUp").addEventListener("click", () => {
+    if (library.level === "genres" && library.recView === "rows") showRecView("home"); // 2.9.7
+    else openLibraryAt("genres");
+  });
   $("libraryRefresh").addEventListener("click", () => {  // 2.8: as the TV Library's ↻
     send({ t: "refresh" });
     note(w("refreshing")); // QiTV says nothing when it's done: the lists come again as they load
@@ -1357,9 +1607,11 @@ function useHere(on) {
   here = on;
   if (on && !zapping()) useChannelList(true);
   document.querySelector("[data-screen=remote]").classList.toggle("on-phone", on);
+  document.body.toggleAttribute("data-watching", on); // 2.9.7: the top line's Channels hides
+  // meanwhile (an attribute: the class .here is the Watch on this phone button's)
   $("player").hidden = !on;
-  for (const button of document.querySelectorAll(".where [data-where]")) {
-    button.classList.toggle("on", (button.dataset.where === "phone") === on);
+  for (const toggle of document.querySelectorAll(".where .switch")) {
+    toggle.setAttribute("aria-checked", on ? "true" : "false"); // 2.9.7: on, a tap plays here
   }
   if (!on) stopVideo();
 }
@@ -1443,10 +1695,9 @@ function onStop() {
 }
 
 function bindHere() {
-  for (const button of document.querySelectorAll(".where [data-where]")) {
-    button.addEventListener("click", () => {
-      const phone = button.dataset.where === "phone";
-      if (phone === here) return;
+  for (const toggle of document.querySelectorAll(".where .switch")) {
+    toggle.addEventListener("click", () => {
+      const phone = !here; // 2.9.7: the switch: on plays here, off on the TV
       if (phone) {
         startHere();
       } else {
@@ -1550,5 +1801,6 @@ export function install() {
   setInterval(() => {
     if (current && !document.hidden) drawNow();
     if (recordings.length && !document.hidden) drawRec();
+    if (library.section === "recordings" && !document.hidden) tickRecs(); // 2.9.7
   }, 1000);
 }

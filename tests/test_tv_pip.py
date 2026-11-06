@@ -16,7 +16,13 @@ from PySide6.QtWidgets import QMenu
 
 from services.connection_budget import ConnectionBudget
 from services.epg_view import Programme
-from services.live.live_session import CRAWLING, LOADING, RECONNECTING, UNAVAILABLE
+from services.live.live_session import (
+    CRAWLING,
+    LOADING,
+    RECONNECTING,
+    UNAVAILABLE,
+    Borrowed,
+)
 from services.live.refusals import STREAM_LIMIT
 from services.live.tuning import channel_key
 from services.provider_ids import with_provider
@@ -183,6 +189,7 @@ class PagesForTest(TVPages):
         self._second_click = mock.Mock()
         self._keys_level = None
         self.library_controller = mock.Mock()
+        self.recordings_desk = mock.Mock()  # 2.9.7: the Recordings page's
 
 
 class PipCase(ControllerTestCase):
@@ -835,6 +842,51 @@ class PipTests(PipCase):
         self.assertTrue(wait_until(lambda: self.live.named("start")[-1][0] == "http://stream/3"))
         self.controller.handle(Action.SWAP)
         self.assertIs(self.sessions.large(), self.pip_slot)
+
+
+class ScheduledRecordingPipTests(PipCase):  # 2.9.7: P on a channel recording on schedule
+    def test_p_plays_the_recordings_session_small_asking_no_link_and_no_stream(self):
+        self.start_large(0)
+        self.start_large(1)  # One is the previous channel: it records on schedule
+        given, lent = [], []
+
+        def lend(channel, provider, purpose):
+            if channel.get("id") != CHANNELS[0]["id"]:
+                return None
+            lent.append((provider, purpose))
+            return Borrowed("lent1", lambda: given.append(True), recording=lambda: True)
+
+        self.controller.lend_scheduled = lend
+        links = len(self.catalog.links)
+        self.controller.handle(Action.PIP)
+        self.assertTrue(wait_until(lambda: self.pip_live.named("start")))
+        self.assertEqual(len(self.catalog.links), links)  # no link: nothing new opens
+        self.assertEqual(lent, [("Home", "pip")])
+        _url, kwargs = self.pip_live.named("start")[-1]
+        self.assertEqual(kwargs["borrowed"].sid, "lent1")
+        self.assertEqual(sorted(self.budget.holders("Home")), ["main"])  # no slot of its own
+        self.assertTrue(self.sessions.pip_open())
+
+    def test_the_large_picture_tunes_it_on_the_recordings_session_asking_nothing(self):
+        # One stream at the provider, held by the recording: the tune neither asks to stop
+        # it nor is refused, and no slot of its own is taken.
+        self.catalog.current_provider = lambda: {"name": "Home", "type": "STB", "max_streams": 1}
+        recording = self.budget.request("Home", 1, purpose="sched:x@1")
+        lent = []
+
+        def lend(channel, provider, purpose):
+            lent.append(purpose)
+            return Borrowed("lent1", lambda: None, recording=lambda: True)
+
+        self.controller.lend_scheduled = lend
+        self.controller.lendable_scheduled = lambda channel, provider: True
+        self.play(2)
+        self.assertTrue(wait_until(lambda: self.live.named("start")))
+        _url, kwargs = self.live.named("start")[-1]
+        self.assertEqual(kwargs["borrowed"].sid, "lent1")
+        self.assertEqual(lent, ["main"])
+        self.assertEqual(self.budget.holders("Home"), ["sched:x@1"])  # still the one stream
+        self.budget.release(recording)
 
 
 class BrowsingProviderPipTests(PipCase):

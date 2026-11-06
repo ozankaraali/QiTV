@@ -133,8 +133,10 @@ _SEGMENT_FAILURES = 3
 _SKIPPABLE_STATUS = (404, 410)
 # Answers that mean the provider's stream limit is reached (spec 6.9), never retried; any other
 # 4xx counts when its body says so (the first _LIMIT_BODY_BYTES of it are read). A plain 403
-# may be one too, or a channel this account may not watch: STREAM_REFUSED says it softer.
+# may be one too, or a channel this account may not watch: STREAM_REFUSED says it softer; so
+# does a 407 (2.9.7: a panel's answer to one stream too many, its closed one still counted).
 _LIMIT_STATUS = (429, 458, 509)
+_PLAIN_REFUSALS = (403, 407)
 _LIMIT_BODY_BYTES = 4096
 _LIMIT_WORDS = re.compile(
     rb"connections?[\s_-]*limit|limit[\s_-]*of[\s_-]*connections|max(?:imum)?[\s_-]*connections"
@@ -294,7 +296,7 @@ def _refusal(response: Any) -> str | None:
         return None
     if _names_limit(response):
         return STREAM_LIMIT
-    return STREAM_REFUSED if status == 403 else None
+    return STREAM_REFUSED if status in _PLAIN_REFUSALS else None
 
 
 def _names_limit(response: Any) -> bool:
@@ -364,7 +366,10 @@ def _quietly(action: Callable[[], object], what: str) -> None:
 
 
 def _refused(error: Exception) -> bool:
-    """An answer that may mean the provider still counts a connection (`_REFUSED_STATUS`)."""
+    """An answer that may mean the provider still counts a connection (`_REFUSED_STATUS`);
+    2.9.7: also one already said as a refusal (`_refusal`: a 407 is one now)."""
+    if isinstance(error, SourceError):
+        return error.kind == "http" and (error.status or 0) in _REFUSED_STATUS
     if not isinstance(error, requests.exceptions.HTTPError):
         return False
     return (_status(error) or 0) in _REFUSED_STATUS
@@ -591,7 +596,7 @@ class _Http:
                         log.info(
                             "The channel refused the reconnect (HTTP %s): it may still count the"
                             " connection that broke; asking again every %.0f s for %.0f minutes.",
-                            _status(error),  # type: ignore[arg-type]
+                            error.status if isinstance(error, SourceError) else _status(error),  # type: ignore[arg-type]
                             _REFUSED_RETRY_S,
                             _REFUSED_PATIENCE_S / 60,
                         )
@@ -2333,18 +2338,34 @@ def open_source(
                 # No HTTPS there, or another server's answer at its port (a 404): asked over
                 # HTTP from now on. A plain 403 may be the channel's own refusal: it stays.
                 _HTTPS_FAILED.add(host)
-            log.info("The channel did not open over HTTPS (%s); opening it over HTTP.", error.kind)
+            log.info("The channel did not open over HTTPS (%s); opening it over HTTP.", _how(error))
     elif https_first and scheme == "https":
         try:
             return _open_url(url, **opening)
         except SourceError as error:
-            if stop.is_set() or str(error) == STREAM_LIMIT:
-                raise  # 2.8.12: a refusal for the limit stands; asked over HTTP, it adds one
-            log.info("The channel did not open over HTTPS (%s); opening it over HTTP.", error.kind)
+            if stop.is_set() or str(error) in REFUSALS:
+                # 2.8.12: a refusal for the limit stands; asked over HTTP, it adds one. 2.9.7:
+                # so does a plain one (403, 407): the provider's own HTTPS address refused it.
+                raise
+            log.info("The channel did not open over HTTPS (%s); opening it over HTTP.", _how(error))
             plain = urlsplit(url)
             netloc = plain.netloc[: -len(":443")] if plain.netloc.endswith(":443") else plain.netloc
-            return _open_url(urlunsplit(plain._replace(scheme="http", netloc=netloc)), **opening)
+            try:
+                return _open_url(
+                    urlunsplit(plain._replace(scheme="http", netloc=netloc)), **opening
+                )
+            except SourceError as fallback:
+                if error.kind == "http" and fallback.status in _SKIPPABLE_STATUS:
+                    # 2.9.7: nothing at that address over HTTP (another server at its port):
+                    # what the provider's HTTPS server answered is why it did not open.
+                    raise error from None
+                raise
     return _open_url(url, **opening)
+
+
+def _how(error: SourceError) -> str:
+    """How an open failed, for the log: its kind, and an "http" one's status."""
+    return f"{error.kind}, HTTP {error.status}" if error.status is not None else error.kind
 
 
 def _host_key(url: str) -> str:

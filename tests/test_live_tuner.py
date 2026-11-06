@@ -12,6 +12,7 @@ from PySide6.QtWidgets import QApplication
 from timer_fixtures import elapse
 
 from services.connection_budget import ConnectionBudget
+from services.live.live_session import Borrowed
 from ui.live_tuner import LiveStart, LiveTuner, one_disk_ring, start_kwargs, wait_for_each_other
 
 app = QApplication.instance() or QApplication([])
@@ -225,6 +226,39 @@ class DirectSlotTests(unittest.TestCase):
         self.assertEqual(self.budget.holders("Next provider"), [])
         self.tuner.stop()
         self.assertEqual(self.holders(), [])
+
+
+class BorrowedTuneTests(unittest.TestCase):  # 2.9.7: a channel recording on schedule
+    def setUp(self):
+        self.session = FakeSession()
+        self.live = FakeLive()
+        self.budget = ConnectionBudget()
+        config = SimpleNamespace(
+            selected_provider_name=PROVIDER,
+            live_latency="normal",
+            timeshift_enabled=False,
+            timeshift_max_mib=256,
+        )
+        self.tuner = LiveTuner(self.session, config, self.live, self.budget)
+        self.given = []
+        self.lent = Borrowed("s1", lambda: self.given.append(True))
+
+    def test_it_plays_the_recordings_session_with_no_slot_of_its_own(self):
+        held = self.budget.request(PROVIDER, 1, purpose="sched:a@1")  # the recording's
+        self.tuner.tune(LiveStart(URL, "QiTV", True), PROVIDER, 1, self.lent)
+        self.assertEqual(self.live.starts, [URL])  # at once: nothing to wait for
+        self.assertIs(self.live.kwargs[0]["borrowed"], self.lent)
+        self.assertFalse(self.live.kwargs[0]["one_stream"])  # never parks another's upstream
+        self.assertEqual(self.budget.holders(PROVIDER), ["sched:a@1"])
+        self.budget.release(held)
+
+    def test_one_dropped_before_it_starts_goes_back(self):
+        self.tuner.open(lambda: None, direct=True)
+        self.session.holding = True  # the movie's stream is still closing
+        self.tuner.tune(LiveStart(URL, "QiTV", True), PROVIDER, 1, self.lent)
+        self.assertEqual(self.live.starts, [])
+        self.tuner.stop()  # another choice meanwhile
+        self.assertEqual(self.given, [True])
 
 
 class SlotRoleTests(unittest.TestCase):

@@ -14,7 +14,9 @@ starts once the slot is granted and the old stream is released; the old slot goe
 that release. A `BudgetedStream` holds that slot and waits for the release (the PiP slot's
 `SessionManager` uses one too). With a limit of one, the new request waits at the head of
 the queue, so the freed slot goes to it and to no other consumer. A pause or Go live pressed
-during that wait applies once the tune starts.
+during that wait applies once the tune starts. 2.9.7: a tune of a channel recording on schedule
+borrows the recording's session (`tune(..., borrowed)`): no slot of its own, it starts once the
+old stream is released, and one dropped before it started is given back.
 
 A direct play (`open(direct=True)`: a channel the pipeline cannot read, a movie, an
 episode) holds a "main" slot too (a `HeldSlot`, under the provider the caller names: the
@@ -45,7 +47,7 @@ from services.budgeted_stream import BudgetedStream, HeldSlot
 from services.config_manager import ConfigManager
 from services.connection_budget import ConnectionBudget
 from services.live.kept import KeptBuffers
-from services.live.live_session import LiveSession
+from services.live.live_session import Borrowed, LiveSession
 from services.playback import Session
 
 logger = logging.getLogger(__name__)
@@ -172,6 +174,7 @@ class LiveTuner(QObject):
         self._action_provider: Optional[str] = None  # whose slot it holds
         self._action_limit: Optional[int] = None  # within which it is taken (None: always)
         self._pending_limit: Optional[int] = None  # the provider's limit for the pending tune
+        self._pending_borrowed: Optional[Borrowed] = None  # 2.9.7: its borrowed session
         self._peers: list[LiveTuner] = []  # the other pictures' (wait_for_each_other)
         self._input_cap = QTimer(self, singleShot=True, interval=RELEASE_CAP_MS)
         self._input_cap.timeout.connect(self._on_input_cap)
@@ -268,13 +271,25 @@ class LiveTuner(QObject):
         self._action_limit = limit
         self._proceed()
 
-    def tune(self, start: LiveStart, provider: str, limit: Optional[int]) -> None:
-        """Stop what plays and start `start` through the pipeline with a budget slot."""
+    def tune(
+        self,
+        start: LiveStart,
+        provider: str,
+        limit: Optional[int],
+        borrowed: Optional[Borrowed] = None,
+    ) -> None:
+        """Stop what plays and start `start` through the pipeline with a budget slot; 2.9.7:
+        on `borrowed` (a scheduled recording's session) with none of its own, once the old
+        stream is released."""
         assert self._stream is not None
         self.stop(next_channel=start.channel)
         self._pending = start
         self._pending_limit = limit
-        self._stream.request(provider, limit)
+        self._pending_borrowed = borrowed
+        if borrowed is None:
+            self._stream.request(provider, limit)
+        else:
+            self._proceed()
 
     def refused(self, provider: str, limit: Optional[int]) -> bool:
         """Whether other players' streams (picture in picture, tiles) take the whole limit.
@@ -293,6 +308,9 @@ class LiveTuner(QObject):
         `next_channel`: the channel a tune opens next (`BudgetedStream.stop`)."""
         self._action = None
         self._pending = None
+        borrowed, self._pending_borrowed = self._pending_borrowed, None
+        if borrowed is not None:
+            borrowed.give_back()  # 2.9.7: never started: its owner has it back
         self._pause = False
         self.timeline = None
         if self._stream is not None:
@@ -333,24 +351,30 @@ class LiveTuner(QObject):
                     return  # nothing plays: the slot's stream was stopped already
             self._direct = self._action_direct
             action()
-        elif self._pending is not None and stream is not None and stream.is_granted():
-            self._start()
+        elif self._pending is not None and stream is not None:
+            if stream.is_granted() or self._pending_borrowed is not None:
+                self._start()
 
     def _start(self) -> None:
         pending, stream = self._pending, self._stream
         if pending is None or stream is None:
             return
         self._pending = None
+        borrowed, self._pending_borrowed = self._pending_borrowed, None
         self._latency = self.config.live_latency
         try:
             disk = None if self._disk_allowed() else False
             kwargs = start_kwargs(pending, self.config, disk=disk)
             # 2.7: a server part's download is no budget slot of its own: with any limit
             # the live upstream parks while one plays (LiveSession.start's one_stream).
-            kwargs["one_stream"] = self._pending_limit is not None
+            kwargs["one_stream"] = self._pending_limit is not None and borrowed is None
+            if borrowed is not None:
+                kwargs["borrowed"] = borrowed  # 2.9.7: a scheduled recording's session
             stream.start(**kwargs)
         except Exception as error:  # the stream gave its slot back and stopped the session
             logger.warning("Could not start the live channel (%s)", type(error).__name__)
+            if borrowed is not None:
+                borrowed.give_back()  # 2.9.7: its owner has it back (a second time: nothing)
             self._pause = False
             self.startFailed.emit(str(error))
             return
