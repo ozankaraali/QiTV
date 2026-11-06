@@ -246,6 +246,9 @@ class SessionManager(QObject):
         self._tile_opens: dict[str, _Open] = {}  # tiles waiting for a release or a slot
         self._aside: list[str] = []  # 2.6: recording slots in the background, oldest first
         self._make_slot: Optional[Callable[[str], Optional[Slot]]] = None
+        # 2.9.7: a background player whose recording ended but which the scheduler still
+        # wants (the next programme on its channel takes over there): it stays on its channel
+        self.wanted: Callable[[Any], bool] = lambda _live: False
         self._add(main, PIP_LEVEL, muted=False)
         self._add(pip, PIP_LEVEL, muted=True)
         # A wanted level makes PlaybackSession apply it on every media it opens; without one
@@ -533,6 +536,8 @@ class SessionManager(QObject):
 
     def _on_recording_changed(self, name: str, recording: bool) -> None:
         if recording or name not in self._aside:
+            return
+        if self.wanted(self._slot(name).live):  # 2.9.7: the next programme records on it
             return
         self._aside.remove(name)  # its recording ended: it leaves its channel (kept)
         slot = self._slot(name)

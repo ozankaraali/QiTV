@@ -154,6 +154,7 @@ class RecordingsView(TooltipWidget):
         self._section_alone = False  # 2.9.7: one section as a row of the tab's rail
         self._together: tuple[str, ...] = ()  # ... with those shown before it
         self._headed = False  # 2.9.7: the find: each part its own header, no page header
+        self._name_providers = False  # 2.9.7: two providers or more: a stream card names its
         self._shown: list[desk.Entry] = []
         self._blocks: list[_Block] = []
         self._entry_blocks: dict[int, _Block] = {}  # each shown entry's block, by its index
@@ -211,6 +212,11 @@ class RecordingsView(TooltipWidget):
         return self._reserve
 
     # ---- content ----------------------------------------------------------------------------
+
+    def set_name_providers(self, name: bool) -> None:
+        """2.9.7: two providers or more: each streams card names its provider (one: none)."""
+        self._name_providers = name
+        self.update()
 
     def set_content(
         self, entries: list[desk.Entry], streams: list[desk.Streams], summary: str
@@ -760,7 +766,8 @@ class RecordingsView(TooltipWidget):
     def tooltip_at(self, pos: QPointF) -> Optional[str]:
         for streams, rect in zip(self._streams, self.stream_rects()):
             if rect.contains(pos):
-                lines = [streams.provider, desk.streams_text(streams)]
+                lines = [streams.provider] if self._name_providers else []
+                lines.append(desk.streams_text(streams))
                 lines += [f"• {use.label}" for use in streams.uses]
                 free = (streams.limit or 0) - len(streams.uses)
                 lines += [f"• {translate(FREE_STREAM_TEXT)}"] * max(0, free)
@@ -852,7 +859,7 @@ class RecordingsView(TooltipWidget):
             p.drawText(
                 name_rect,
                 Qt.AlignLeft | Qt.AlignVCenter,
-                elided(p, streams.provider, name_rect.width()),
+                elided(p, streams.provider if self._name_providers else "", name_rect.width()),
             )
             bar_top = top.bottom() + 0.6 * u
             slots = max(streams.limit or 0, len(streams.uses), 1)

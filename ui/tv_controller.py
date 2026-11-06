@@ -520,6 +520,11 @@ class TVController(QObject):
         self.note_recording: Callable[[str, dict, str, float], None] = lambda *_args: None
         # 2.9.7: a recording ended (R, its stream, its limit): the index keeps where
         self.note_recording_end: Callable[[str], None] = lambda _path: None
+        # 2.9.7: the user stops a player's recording: a scheduled one hosted there is done
+        # (the scheduler's `stopped_by_user`), not a broken stream to record again
+        self.recording_user_stop: Callable[[Any], None] = lambda _live: None
+        # 2.9.7: the player a scheduled recording records on (by its REC name), if one does
+        self.scheduled_host: Callable[[str], Optional[str]] = lambda _name: None
         self.lendable_scheduled: Callable[[dict, str], bool] = lambda item, provider: False
         # 2.8: "Record at a time…" for a channel (the window's, once QiTV records)
         self.record_at: Optional[Callable[[dict], None]] = None
@@ -1757,10 +1762,11 @@ class TVController(QObject):
         provider, then its address, id or name (`recording_schedule.is_listed`); `kept` itself
         when the list has none."""
         provider = str(kept.get("_provider") or "")
+        listed = recording_schedule.listed_matcher(kept)  # its pattern built once
         for channel in self._all_live():
             if provider and item_provider.provider_name(self.catalog, channel) != provider:
                 continue
-            if recording_schedule.is_listed(kept, channel):
+            if listed(channel):
                 return channel
         return kept
 
@@ -2364,6 +2370,9 @@ class TVController(QObject):
             return
         if sessions is None:
             return
+        name = self.scheduled_host(name) or name  # 2.9.7: one a player records: that player
+        if sessions.large().name == name:
+            return  # it shows large already
         slot = next((s for s in sessions.background() if s.name == name), None)
         if slot is None or slot.channel is None:
             return  # gone meanwhile (a phone's stale REC line)
@@ -2385,7 +2394,13 @@ class TVController(QObject):
             return
         for slot in sessions.background():
             if slot.name == name:
-                slot.live.stop_recording()
+                self.stop_player_recording(slot.live)
+
+    def stop_player_recording(self, live: Any) -> None:
+        """2.9.7: the user stops the recording on player `live`: said to the scheduler first
+        (a scheduled recording hosted there ends as the user's stop), then stopped."""
+        self.recording_user_stop(live)
+        live.stop_recording()
 
     def players_showing(self) -> list[tuple[str, str, dict, Any]]:
         """2.9.7: each player showing a live channel: (its name, the channel's provider, the
@@ -2496,7 +2511,7 @@ class TVController(QObject):
             return
         sessions = self.sessions
         background = sessions is not None and slot in sessions.background()
-        slot.live.stop_recording()
+        self.stop_player_recording(slot.live)
         if replaced or background or sessions is None:
             return
         if sessions.small() is slot and self._pip is not None:

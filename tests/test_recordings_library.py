@@ -119,6 +119,10 @@ class RecordingsLibraryTests(unittest.TestCase):
         self.assertEqual(self.library.details(news).provider, "Demo TV")
         self.watch.resume[news["id"]] = 60_000
         self.assertEqual(self.library.details(news).resume_ms, 60_000)
+        from services.recordings_list import short_when
+
+        # its day and times as the app says them (the app's language), not Python's English
+        self.assertTrue(details.plot.startswith(short_when(2_000.0)), details.plot)
 
     def test_identity_is_the_files_path(self):
         self.assertEqual(self.library.identity(FILES[0]), "/r/c.ts")

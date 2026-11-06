@@ -420,6 +420,35 @@ class RecordingScheduler(QObject):
             if run.rid and not run.ended and not run.stopping
         ]
 
+    def host_of(self, name: str) -> Optional[str]:
+        """2.9.7: the player a scheduled recording (its REC name, "sched:…") records on, or
+        None when it records on a stream of its own (or isn't recording)."""
+        for run in self._runs:
+            if run.host is not None and not run.ended and _purpose(run.job) == name:
+                return run.host_name
+        return None
+
+    def wants(self, live: Any) -> bool:
+        """2.9.7: whether player `live` is still wanted as its recording stops: the next
+        programme on its channel takes over there (a background player stays on its channel
+        for it, rather than leaving and the next opening a stream of its own)."""
+        return any(
+            run.host is live
+            and run.handing is not None
+            and run.handing in self._runs
+            and not run.handing.ended
+            for run in self._runs
+        )
+
+    def stopped_by_user(self, live: Any) -> None:
+        """2.9.7: the user stops the recording on player `live` (the REC sign's Stop, the
+        stream question's, a tile closed): a scheduled one hosted there ends as the user's
+        stop (kept, this airing done), not as a broken stream to record again. Said before
+        the player stops: a background one leaves its channel at once."""
+        for run in self._runs:
+            if run.host is live and not run.ended:
+                run.user_stopped = True
+
     def stop_now(self, name: str) -> None:
         """The REC sign's Stop recording: this airing's recording stops and is kept (a series
         records its next airing)."""

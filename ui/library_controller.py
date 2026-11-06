@@ -35,7 +35,6 @@ any title during a provider switch, has no menu; nor has a series or a channel.
 from __future__ import annotations
 
 from datetime import datetime
-from functools import partial
 import logging
 from typing import Any, Callable, Optional
 
@@ -510,12 +509,6 @@ class LibraryController(QObject):
             (f"{found_title}  ·  {i18n.number(len(found))}", found),
         ]
 
-    def _on_found_button(self, key: str, name: str) -> None:
-        kind, _, value = key.partition(":")
-        if kind == "found" and value.isdigit() and int(value) < len(self._found):
-            channel, programme = self._found[int(value)]
-            self.record_found(channel, programme, name == recording_desk.RECORD_SERIES)
-
     def _open_all_recordings(self) -> None:
         self._show_rec_row(rl.ALL)
         self._focus("rec_content")
@@ -589,12 +582,28 @@ class LibraryController(QObject):
     def _on_tile_button(self, index: int, name: str) -> None:
         item = self._rec_item(index)
         entry = item.get("_desk") if item is not None else None
-        if not isinstance(entry, recording_desk.Entry) or self._closed:
-            return
-        if entry.key.startswith("found:"):
-            self._on_found_button(entry.key, name)
-        elif self._desk is not None:
-            self._desk.press(entry.key, name)
+        if isinstance(entry, recording_desk.Entry):
+            self._tile_action(entry, name)()
+
+    def _tile_action(self, entry: Any, name: str) -> Callable[[], None]:
+        """Button `name` of the row `entry`, bound to that row (its key; a programme found,
+        to that programme): a menu left open while the tiles refresh acts on its own row."""
+        key = entry.key
+        found: Optional[tuple] = None
+        kind, _, value = key.partition(":")
+        if kind == "found" and value.isdigit() and int(value) < len(self._found):
+            found = self._found[int(value)]
+
+        def act() -> None:
+            if self._closed:
+                return
+            if found is not None:
+                channel, programme = found
+                self.record_found(channel, programme, name == recording_desk.RECORD_SERIES)
+            elif kind != "found" and self._desk is not None:
+                self._desk.press(key, name)
+
+        return act
 
     def _show_tile_menu(self, index: int, at: Any) -> None:
         library = self._rec_library
@@ -604,8 +613,11 @@ class LibraryController(QObject):
         grid = self._screen.rec_grid
         menu = QMenu(grid)
         menu.setAttribute(Qt.WidgetAttribute.WA_DeleteOnClose)
+        entry = item.get("_desk")
+        if not isinstance(entry, recording_desk.Entry):
+            return
         for name, label, style in library.details(item).buttons:
-            action = menu.addAction(label, partial(self._on_tile_button, index, name))
+            action = menu.addAction(label, self._tile_action(entry, name))
             action.setEnabled(style != "off")
         self._tile_menu = menu
         if at is None:  # the keys: beside the tile

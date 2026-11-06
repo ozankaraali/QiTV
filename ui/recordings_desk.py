@@ -31,7 +31,13 @@ from typing import Any, Callable, Optional
 from PySide6.QtCore import QObject, Qt, QTimer, Signal
 from PySide6.QtWidgets import QFileDialog
 
-from services import recording, recording_desk as desk, recording_schedule as rs, system_open
+from services import (
+    parental,
+    recording,
+    recording_desk as desk,
+    recording_schedule as rs,
+    system_open,
+)
 from services.catalog import ALL_GROUP_ID
 from services.connection_budget import ConnectionBudget
 from services.i18n import N_, number, tr_n, translate
@@ -336,6 +342,9 @@ class RecordingsDesk(QObject):
         entries += desk.attention_entries(outcomes, failure_reason, self._listed_file)
         entries += desk.recorded_entries(files, many_places=len(places) > 1)
         entries += desk.place_entries(self._places(files, places), os.path.expanduser("~"))
+        # 2.8's rule: a channel parental controls hide shows nothing of its recordings while
+        # locked (a recording knows its channel by name)
+        entries = [e for e in entries if not (e.channel and _hidden(e.channel))]
         return entries
 
     def _mixed(self) -> bool:
@@ -361,7 +370,11 @@ class RecordingsDesk(QObject):
         next airing, and the streams of the providers with a limit or a stream in use."""
         scheduler = self._scheduler()
         recording_ids = [d[5] for d in scheduler.recording_details()] if scheduler else []
-        items = self._schedule().items()
+        items = [  # 2.8's rule: a hidden channel's while locked, none
+            item
+            for item in self._schedule().items()
+            if not _hidden(str((item.get("channel") or {}).get("name") or ""))
+        ]
         upcoming = desk.next_airing(
             items,
             time.time(),
@@ -370,7 +383,8 @@ class RecordingsDesk(QObject):
             recording_ids=recording_ids,
         )
         scheduled = {str(item.get("provider") or "") for item in items}
-        return desk.Hero(tuple(self._recording_now()), upcoming, tuple(self._streams(scheduled)))
+        now = tuple(r for r in self._recording_now() if not _hidden(r.channel))
+        return desk.Hero(now, upcoming, tuple(self._streams(scheduled)))
 
     def _listed_file(self, path: str) -> bool:
         """A part of a failed recording plays while the list has its file (no disk read)."""
@@ -414,6 +428,7 @@ class RecordingsDesk(QObject):
         entries = self.entries()
         self._last_entries = entries  # 2.9.7: the rail's counts read these
         scheduled = {str(item.get("provider") or "") for item in self._schedule().items()}
+        self._view.set_name_providers(self._mixed())  # one provider: none named
         self._view.set_content(entries, self._streams(scheduled), self._summary(entries))
         self.update_mark()
         self.refreshed.emit()
@@ -460,7 +475,7 @@ class RecordingsDesk(QObject):
             sessions = self._sessions()
             for player in sessions.slots() if sessions is not None else []:
                 if player.name == slot and records(player):
-                    player.live.stop_recording()
+                    self._window.controller.stop_player_recording(player.live)
 
     def _waiting_button(self, job_key: str, name: str) -> None:
         scheduler = self._scheduler()
@@ -679,3 +694,9 @@ def _same(a: str, b: str) -> bool:
 
 def _inside(path: str, folder: str) -> bool:
     return bool(path) and _same(os.path.dirname(path), folder)
+
+
+def _hidden(channel: str) -> bool:
+    """2.9.7: whether parental controls hide the channel named `channel` now (locked)."""
+    guard = parental.installed()
+    return guard is not None and guard.hides_recording(channel)

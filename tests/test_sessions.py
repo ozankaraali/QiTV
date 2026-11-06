@@ -1065,6 +1065,17 @@ class SetAsideTests(_Fixture):
         self.assertEqual(self.manager.background(), [])
         self.assertEqual(self.main_tuner.stops, 1)  # it leaves its channel as any player does
 
+    def test_one_the_scheduler_still_wants_stays_on_its_channel(self):  # 2.9.7 review 2
+        """The next programme on its channel takes over on it (back to back): it stays."""
+        self.manager.wanted = lambda live: live is self.main.live
+        self.manager.set_aside("main")
+        self.main.live.recordingChanged.emit(False)
+        self.assertEqual([s.name for s in self.manager.background()], ["main"])
+        self.assertEqual(self.main_tuner.stops, 0)
+        self.manager.wanted = lambda live: False  # the next one's end: now it goes
+        self.main.live.recordingChanged.emit(False)
+        self.assertEqual(self.manager.background(), [])
+
     def test_not_while_the_grid_shows(self):
         self.manager.enter_grid()
         self.assertIsNone(self.manager.set_aside("main"))

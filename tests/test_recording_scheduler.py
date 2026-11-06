@@ -783,6 +783,52 @@ class RecordOnPlayerTests(unittest.TestCase):
         self.assertEqual(self.scheduler.recording_now(), [])  # the player's REC counts it
         self.assertEqual(self.scheduler.hosted_players(), {"main"})
         self.assertEqual(len(self.scheduler.recording_details()), 1)  # the Recordings page
+        ((name, *_rest),) = self.scheduler.recording_details()
+        self.assertEqual(self.scheduler.host_of(name), "main")  # its Watch: that player
+
+    def test_a_stop_on_its_background_player_is_the_users_not_a_break(self):  # review 1
+        """The REC sign's Stop on a player in the background (its slot then leaves the
+        channel before the helper's end arrives): this airing is done, not failed, and no
+        stream of its own records the rest."""
+        self.catalogs.max = 2  # a second stream would be free
+        self.watch()
+        self.schedule.add_once(CHANNEL, programme("The News", 30), account=ACCOUNT)
+        self.scheduler.tick()
+        rid, _sid, path, *_ = self.engine.recordings[0]
+        self.at(40)
+        self.scheduler.stopped_by_user(self.player)
+        self.player.stop_recording()
+        self.player.playing = False  # its slot left the channel
+        self.engine.recordingEnded.emit(rid, "stopped", path, 50_000)
+        (outcome,) = self.schedule.outcomes()
+        self.assertEqual(outcome["state"], rs.RECORDED)
+        self.at(41, 30)
+        self.assertEqual(self.catalogs.asked, [])  # the rest isn't recorded on a stream
+
+    def test_back_to_back_on_its_player_the_player_stays_for_the_next(self):  # review 2
+        """A then B on the channel a player shows: as A stops for B, the player is still
+        wanted (a background one stays on its channel), and B records on it: no stream."""
+        self.watch()
+        self.schedule.add_once(CHANNEL, programme("A", 30), account=ACCOUNT)
+        self.schedule.add_once(CHANNEL, programme("B", 60), account=ACCOUNT)
+        self.scheduler.tick()
+        asked = []
+        stop = self.player.stop_recording
+
+        def stopping():  # the player's slot asks as its recording stops
+            asked.append(self.scheduler.wants(self.player))
+            stop()
+
+        self.player.stop_recording = stopping
+        self.at(59, 30)
+        self.at(60, 31)  # B's handover: A stops
+        rid, _sid, path, *_ = self.engine.recordings[0]
+        self.engine.recordingEnded.emit(rid, "stopped", path, 1_000_000)
+        self.pump()
+        self.assertEqual(asked, [True])
+        self.assertEqual(len(self.player.started), 2)  # B on the same player
+        self.assertEqual(self.catalogs.asked, [])
+        self.assertFalse(self.scheduler.wants(self.player))  # nothing follows B
 
     def test_its_window_end_stops_the_players_recording_and_the_player_plays_on(self):
         self.watch()

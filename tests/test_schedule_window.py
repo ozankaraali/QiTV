@@ -23,9 +23,22 @@ class StandInScheduler(QObject):
         super().__init__()
         self.now = []
         self.stopped, self.gone, self.engines = [], 0, []
+        self.user_stops = []
 
     def recording_now(self):
         return list(self.now)
+
+    def stopped_by_user(self, live):  # 2.9.7 review: a user's stop of a hosted run
+        self.user_stops.append(live)
+
+    def wants(self, live):
+        return False
+
+    def host_of(self, name):
+        return None
+
+    def hosted_players(self):
+        return set()
 
     def tick(self):
         pass
@@ -77,6 +90,14 @@ class ScheduleWindowTests(WindowCase):
         with mock.patch.object(controller, "tune_live") as tune:
             controller.go_back_to_recording("sched:a@1")
         self.assertEqual(tune.call_args.args[0]["name"], "Channel 2")
+
+    def test_hosted_runs_hooks_reach_the_scheduler(self):  # 2.9.7 review 1–3
+        scheduler = self.attach()
+        controller = self.window.controller
+        self.assertEqual(controller.recording_user_stop, scheduler.stopped_by_user)
+        self.assertEqual(controller.scheduled_host, scheduler.host_of)
+        if controller.sessions is not None:
+            self.assertEqual(controller.sessions.wanted, scheduler.wants)
 
     def test_record_at_a_time_schedules_a_timer_or_one_slot(self):  # 2.8 (owner)
         from datetime import date, timedelta

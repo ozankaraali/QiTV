@@ -24,7 +24,7 @@ from typing import Any, Callable, Iterator, Optional
 from PySide6.QtCore import QObject, QPoint, QThread
 from PySide6.QtWidgets import QFileDialog, QMenu, QMessageBox, QWidget
 
-from services import recording_desk as desk, recordings_library as rl, system_open
+from services import parental, recording_desk as desk, recordings_library as rl, system_open
 from services.catalog import ALL_GROUP_ID
 from services.exporter import ExportKind
 from services.failure_reasons import shown_message
@@ -314,10 +314,13 @@ class TVPages(QObject):
         if not catalogs.is_ready(name):
             return
         catalog = catalogs.catalog(name)
+        guard = parental.installed()  # the raw catalog: what parental controls hide, skipped
         for group in catalog.groups("live") or []:
             if getattr(group, "header", False):
                 continue
-            yield from catalog.items("live", group.id) or []
+            for item in catalog.items("live", group.id) or []:
+                if guard is None or not guard.hides_item("live", item):
+                    yield item
 
     def _every_provider(self) -> Iterator[dict]:
         """The rail's find's widest reach: every provider's channels (with two or more)."""
@@ -403,6 +406,8 @@ class TVPages(QObject):
         self._second_click.disarm()  # it kept a click off the page shown before
         if library:
             stack.show_library(corner=corner)
+            if self.library_controller.mode == "recordings" and not self.recordings_desk.shown():
+                self.recordings_desk.show()  # 2.9.7: back on the Recordings tab: it follows
         else:
             if stack.mode() == PageStack.CORNER:
                 window.controller.leave_library_playing()

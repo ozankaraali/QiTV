@@ -221,16 +221,31 @@ def is_listed(kept: dict, channel: dict) -> bool:
     `channel`, a list's: by their addresses when both have one, the account's place in it
     standing for any account (an M3U's ids are its list's places, and its names may repeat
     in other groups), http or https alike; else by id; else by name."""
-    a, b = str(kept.get("cmd") or "").strip(), str(channel.get("cmd") or "").strip()
-    if a and b:
+    return listed_matcher(kept)(channel)
+
+
+def listed_matcher(kept: dict) -> Callable[[dict], bool]:
+    """`is_listed(kept, channel)` for many channels: its address pattern built once (a
+    provider's list may hold 50,000 channels and more)."""
+    a = str(kept.get("cmd") or "").strip()
+    compiled = None
+    if a:
         pattern = re.escape(_bare(a))
         for token in (_USER_Q, _PASSWORD_Q, _USER, _PASSWORD):
             pattern = pattern.replace(re.escape(token), "[^/]+")
-        return re.fullmatch(pattern, _bare(b)) is not None
-    if kept.get("id") not in (None, "") and channel.get("id") not in (None, ""):
-        return str(kept.get("id")) == str(channel.get("id"))
+        compiled = re.compile(pattern)
+    kept_id = kept.get("id")
     name = str(kept.get("name") or "")
-    return bool(name) and name == str(channel.get("name") or "")
+
+    def listed(channel: dict) -> bool:
+        b = str(channel.get("cmd") or "").strip()
+        if compiled is not None and b:
+            return compiled.fullmatch(_bare(b)) is not None
+        if kept_id not in (None, "") and channel.get("id") not in (None, ""):
+            return str(kept_id) == str(channel.get("id"))
+        return bool(name) and name == str(channel.get("name") or "")
+
+    return listed
 
 
 def _bare(address: str) -> str:

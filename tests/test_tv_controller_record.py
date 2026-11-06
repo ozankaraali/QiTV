@@ -93,6 +93,32 @@ class RecordingEndNotedTests(_RecordCase):  # final review 5: its length is the 
         self.assertEqual(ended, [path])
 
 
+class UserStopTests(_RecordCase):  # review 1: a scheduled one hosted there is the user's stop
+    def test_every_stop_of_a_background_recording_says_it_is_the_users(self):
+        told = []
+        self.controller.recording_user_stop = told.append
+        recording = self.record_large(0)
+        self.leave_for(1)
+        self.controller.stop_background_recording("main")
+        self.assertEqual(told, [recording])
+        self.assertIn(("stop_recording",), recording.calls)
+        told.clear()
+        self.controller.stop_player_recording(recording)  # the Recordings page's Stop
+        self.assertEqual(told, [recording])
+
+
+class WatchHostedTests(_RecordCase):  # review 3: Watch on a scheduled one a player hosts
+    def test_go_back_finds_the_player_a_scheduled_recording_records_on(self):
+        from unittest import mock
+
+        self.record_large(0)
+        self.leave_for(1)  # the player recording channel 0 goes to the background
+        self.controller.scheduled_host = lambda name: "main" if name == "sched:x@1" else None
+        with mock.patch.object(self.controller, "tune_live") as tune:
+            self.controller.go_back_to_recording("sched:x@1")
+        self.assertEqual(tune.call_args.args[0]["name"], CHANNELS[0]["name"])
+
+
 class RecordingAsideTests(_RecordCase):
     def test_a_zap_away_from_a_recording_keeps_it(self):
         recording = self.record_large(0)

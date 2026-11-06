@@ -445,3 +445,21 @@ class EditTests(unittest.TestCase):  # 2.9.7: the Recordings page's Edit… and 
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class ListedMatcherTests(unittest.TestCase):  # 2.9.7 review: Go back over 50,000 channels
+    def test_a_kept_channel_is_matched_with_one_pattern_for_the_whole_list(self):
+        kept = {"cmd": "https://panel.test/live/{username}/{password}/7.ts", "id": "7"}
+        listed = rs.listed_matcher(kept)
+        self.assertTrue(listed({"cmd": "http://panel.test/live/u/p/7.ts"}))
+        self.assertFalse(listed({"cmd": "http://panel.test/live/u/p/8.ts"}))
+        by_id = rs.listed_matcher({"id": "7", "name": "News One"})
+        self.assertTrue(by_id({"id": "7"}))
+        by_name = rs.listed_matcher({"name": "News One"})
+        self.assertTrue(by_name({"name": "News One"}))
+        self.assertFalse(by_name({"name": "News Two"}))
+        with mock.patch.object(rs.re, "escape", wraps=rs.re.escape) as escaped:
+            listed = rs.listed_matcher(kept)
+            for n in range(1000):
+                listed({"cmd": f"http://panel.test/live/u/p/{n}.ts"})
+        self.assertLess(escaped.call_count, 10)  # built once, not once per channel

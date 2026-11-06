@@ -146,6 +146,7 @@ class RecordingsViewTests(unittest.TestCase):
             "1 recording now",
         )
         self.view.grab()
+        self.view.set_name_providers(True)  # two providers or more: each card names its own
         self.assertTrue(self.view.tooltip_at(self.view.stream_rects()[0].center()).startswith("P"))
 
     def test_a_mouse_move_over_many_recordings_measures_one_card(self):
@@ -219,6 +220,21 @@ class FindViewTests(unittest.TestCase):  # 2.9.7: the rail's find, each part hea
         view.filterChanged.connect(said.append)
         view.set_section((desk.NOW, desk.COMING))  # a tuple can't cross a str signal
         self.assertEqual(said, [desk.COMING])
+
+
+class OneProviderTests(unittest.TestCase):  # 2.9.7 review: with one provider, none is named
+    def test_the_streams_card_names_its_provider_only_with_two(self):
+        view = RecordingsView()
+        self.addCleanup(view.deleteLater)
+        view.resize(1280, 720)
+        streams = [desk.Streams("Demo TV", 2, (desk.Use("main", "Watching", False),))]
+        view.set_content(ENTRIES, streams, "")
+        view.set_section(desk.SETTINGS)
+        centre = view.stream_rects()[0].center()
+        self.assertNotIn("Demo TV", view.tooltip_at(centre))
+        view.set_name_providers(True)
+        self.assertIn("Demo TV", view.tooltip_at(centre))
+        view.grab()
 
 
 if __name__ == "__main__":

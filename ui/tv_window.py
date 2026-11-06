@@ -1095,6 +1095,10 @@ class TVWindow(QMainWindow):
         scheduler.changed.connect(controller.scheduled_changed)
         self.screens.recordings_desk.follow_scheduler(scheduler)  # 2.9.7: the Recordings page
         controller.extra_guides = scheduler.providers
+        controller.recording_user_stop = scheduler.stopped_by_user  # 2.9.7: hosted runs
+        controller.scheduled_host = scheduler.host_of
+        if controller.sessions is not None:  # 2.9.7: a background player the next one wants
+            controller.sessions.wanted = scheduler.wants
         controller.scheduled_now = scheduler.recording_now
         controller.stop_scheduled = scheduler.stop_now
         controller.lend_scheduled = scheduler.lend  # 2.9.7: watched with no second stream

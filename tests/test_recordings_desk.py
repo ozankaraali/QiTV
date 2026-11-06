@@ -222,6 +222,29 @@ class RecordingsDeskTests(unittest.TestCase):
         self.view.buttonClicked.emit(f"place:{self.folder / 'rec'}", desk.REMOVE)
         self.assertEqual(self.config.recording_places, [])
 
+    def test_a_hidden_channels_schedule_stays_hidden_while_locked(self):  # review 4
+        """2.8's rule, as the Movies shelf kept it: a channel parental controls hide shows
+        nothing of its recordings while locked: not its airings, its series, its problems,
+        nor the home's Next."""
+        from services import parental
+
+        guard = parental.Parental(SimpleNamespace(parental=None, save_config=lambda: None))
+        guard.set_pin("1234")
+        guard.hide_item("live", dict(NEWS))
+        parental.install(guard)
+        self.addCleanup(parental.install, None)
+        self.schedule.add_once(NEWS, self.programme("Late news", 120))
+        shown = self.schedule.add_once(FILMS, self.programme("Film", 150))
+        self.schedule.add_series(NEWS, "Night News")
+        entries = self.desk.entries()
+        titles = [e.title for e in entries if e.title]
+        self.assertIn("Film", titles)
+        self.assertNotIn("Late news", titles)
+        self.assertNotIn("Night News", titles)
+        self.assertEqual(self.desk.hero().next.item_id, shown["id"])
+        guard.unlock("1234")  # unlocked: all of it again
+        self.assertIn("Late news", [e.title for e in self.desk.entries()])
+
     def test_hidden_it_stops_looking(self):
         self.show()
         self.assertTrue(self.desk._timer.isActive())

@@ -17,7 +17,6 @@ is a last tile under "Add a recording".
 
 from __future__ import annotations
 
-from datetime import datetime
 from typing import Any, Callable, Mapping, Optional
 
 from services import i18n, parental, recording_desk as desk
@@ -255,10 +254,9 @@ class RecordingsLibrary:
         stop = item.get("_stop")
         when = ""
         if isinstance(start, (int, float)):
-            began = datetime.fromtimestamp(float(start))
-            when = began.strftime("%a %d %b %H:%M")
+            when = desk.short_when(float(start))  # in the app's language
             if isinstance(stop, (int, float)):
-                when += "–" + datetime.fromtimestamp(float(stop)).strftime("%H:%M")
+                when += "–" + desk.clock(float(stop))
         length = ""
         if isinstance(start, (int, float)) and isinstance(stop, (int, float)) and stop > start:
             length = length_text(stop - start)

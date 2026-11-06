@@ -2160,6 +2160,22 @@ class RecordingsTabTests(unittest.TestCase):  # 2.9.7: the Library's Recordings 
         self.ctl.handle(Action.NAV_DELETE)  # not a recording: nothing to delete
         self.assertEqual(self.deleted, [])
 
+    def test_a_tiles_menu_acts_on_its_own_tile_after_a_refresh(self):  # review 6
+        from services import recording_desk as desk
+
+        self.desk.entries = self.desk_entries()
+        self.ctl.open_recordings(rl.COMING)
+        grid = self.screen.rec_grid
+        grid.set_current_index(1)  # Late film
+        self.ctl.handle(Action.NAV_ACTIVATE)
+        menu = self.ctl.tile_menu()
+        started = desk.Entry("rec:main", desk.NOW, "Harbor Sports", status="REC")
+        self.desk.entries = [started] + self.desk_entries()  # a recording began meanwhile
+        self.desk.refreshed.emit()  # the tiles shift by one
+        menu.actions()[0].trigger()
+        self.assertEqual(self.desk.pressed[-1], ("airing:t@1", "edit"))
+        menu.close()
+
     def test_the_tiles_follow_the_desk(self):
         self.desk.entries = self.desk_entries()
         self.ctl.open_recordings(rl.RULES)

@@ -1358,6 +1358,15 @@ class RecorderHomeWindowTests(WindowCase):  # 2.9.7: the Recordings tab's home, 
         self.assertTrue(home._name_providers)
         self.assertIs(home._avoid, self.window.player_page)
 
+    def test_back_from_a_recording_the_tab_follows_again(self):  # review 5
+        pages = self.window.screens
+        pages.open_recordings()
+        self.assertTrue(pages.recordings_desk.shown())
+        pages._show_page(self.window.player_page)  # a recording plays
+        self.assertFalse(pages.recordings_desk.shown())
+        pages._show_page(self.window.library_page)  # ‹ Library, Esc
+        self.assertTrue(pages.recordings_desk.shown())
+
     def test_the_homes_guide_reaches_as_far_as_the_guide_list(self):  # final review 2
         self.window.config_manager.epg_list_window_hours = 24
         self.window.screens.recordings_desk.refresh()
@@ -1402,6 +1411,24 @@ class RecorderHomeWindowTests(WindowCase):  # 2.9.7: the Recordings tab's home, 
         other = self.two_providers()
         sources = self.window.screens.library_controller.find_sources()
         self.assertIn(other, [c for source in sources for c in source])
+
+    def test_another_providers_hidden_channels_stay_hidden_while_locked(self):  # review 4
+        from types import SimpleNamespace
+
+        from services import parental
+
+        other = self.two_providers()
+        guard = parental.Parental(SimpleNamespace(parental=None, save_config=lambda: None))
+        guard.set_pin("1234")
+        guard.hide_item("live", dict(other))
+        previous = parental.installed()
+        parental.install(guard)
+        self.addCleanup(parental.install, previous)
+        sources = self.window.screens.library_controller.find_sources()
+        self.assertNotIn(other, [c for source in sources for c in source])
+        pages = self.window.screens
+        pages._choose_guide_source(dict(pages.guide_sources())["Harbor IPTV"])
+        self.assertEqual(self.window.library_page.home.guide.channels(), [])
 
     def test_with_two_providers_the_guide_can_show_another_providers_channels(self):
         other = self.two_providers()
