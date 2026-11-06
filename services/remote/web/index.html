@@ -56,9 +56,9 @@
   <header class="top">
     <button class="conn" id="tvButton" type="button"><i id="dot"></i><span id="tvName">QiTV</span></button>
     <!-- 2.9.7: where a tap plays, for the Guide and the Library: in the top line, as the TV's -->
-    <div class="where"><button type="button" class="switch" role="switch" aria-checked="false" data-where="phone" data-tl="phone"><span class="knob"></span></button><span class="where-label" data-t="phone">Phone</span></div>
+    <div class="where"><button type="button" class="switch" role="switch" aria-checked="false" data-where="phone" aria-label="Phone" data-tl="phone"><span class="knob"></span></button><span class="where-label" data-t="phone">Phone</span></div>
     <!-- 2.9.7: the Remote's channel list, an icon in the top line (the banner keeps the width) -->
-    <button class="menu lister" id="listButton" type="button" aria-pressed="false" data-tl="channels"><svg><use href="#i-list"/></svg></button>
+    <button class="menu lister" id="listButton" type="button" aria-pressed="false" aria-label="Channels" data-tl="channels"><svg><use href="#i-list"/></svg></button>
     <button class="menu" id="menuButton" type="button" aria-label="Menu" data-tl="menu"><svg><use href="#i-more"/></svg></button>
   </header>
   <div class="banner" id="banner" hidden></div>
@@ -98,7 +98,7 @@
       <div class="zap-head">
         <button type="button" class="back" id="zapUp" hidden><svg><use href="#i-left"/></svg><span data-t="groups">Groups</span></button>
         <h1 id="zapTitle"></h1>
-        <div class="where"><button type="button" class="switch" role="switch" aria-checked="false" data-where="phone" data-tl="phone"><span class="knob"></span></button><span class="where-label" data-t="phone">Phone</span></div>
+        <div class="where"><button type="button" class="switch" role="switch" aria-checked="false" data-where="phone" aria-label="Phone" data-tl="phone"><span class="knob"></span></button><span class="where-label" data-t="phone">Phone</span></div>
       </div>
       <label class="sr" for="zapFind"></label>
       <input class="field" id="zapFind" type="search" autocomplete="off" autocapitalize="off" enterkeyhint="search">
@@ -115,7 +115,7 @@
       <button type="button" class="wedge right" data-key="right" aria-label="Right" data-tl="right"><svg><use href="#i-right"/></svg></button>
       <button type="button" class="wedge down" data-key="down" aria-label="Down" data-tl="down"><svg><use href="#i-down"/></svg></button>
       <button type="button" class="wedge left" data-key="left" aria-label="Left" data-tl="left"><svg><use href="#i-left"/></svg></button>
-      <button type="button" class="ok" data-key="ok" data-tl="ok">OK</button>
+      <button type="button" class="ok" data-key="ok" aria-label="OK" data-tl="ok">OK</button>
       <div class="touchpad" id="touchpad" hidden><span data-t="touchpad_hint">Swipe to move · tap for OK</span></div>
     </div>
     <div class="trio">
@@ -199,7 +199,7 @@
       <input class="field" id="searchInput" type="search" autocomplete="off" autocapitalize="off" enterkeyhint="search" placeholder="Search channels, movies and series" data-tp="search_hint">
       <button type="button" class="done" id="searchDone" data-t="done">Done</button>
     </div>
-    <div class="tvswitch"><button type="button" class="switch" id="searchTv" role="switch" aria-checked="false" data-tl="show_on_tv"><span class="knob"></span></button><span class="where-label" data-t="show_on_tv">Show on TV</span></div>
+    <div class="tvswitch"><button type="button" class="switch" id="searchTv" role="switch" aria-checked="false" aria-label="Show on TV" data-tl="show_on_tv"><span class="knob"></span></button><span class="where-label" data-t="show_on_tv">Show on TV</span></div>
     <div class="rows" id="searchRows"></div>
   </section>
 
