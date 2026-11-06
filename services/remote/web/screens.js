@@ -123,10 +123,16 @@ function share(programme, nowS = Date.now() / 1000) {
   return Math.min(1, Math.max(0, (nowS - programme.start) / (programme.stop - programme.start)));
 }
 
-function logoTile(name, className = "logo", hue = name) {
+function logoTile(name, className = "logo", hue = name, tint = "") {
   const tile = el("div", className, initials(name));
-  tile.style.background = colour(hue); // 2.9.7: a recording's: its channel's, as on the TV
+  // 2.9.7: the TV's own colour when it sends it; else a recording's channel's (`hue`)
+  tile.style.background = tint || colour(hue);
   return tile;
+}
+
+// 2.9.7: a channel's number (or a time) as the TV's menu draws it: thin, in its own column.
+function rowNum(text) {
+  return el("span", "rnum thin", text || "");
 }
 
 // 2.9.7: a recording's or an airing's label, as its tile on the TV says it (REC, ONCE, NEW…)
@@ -330,9 +336,9 @@ function liveKey(num, name) {
 
 // The Watching mark on the row of the channel the TV shows, on every page loaded.
 function markWatching(row, on) {
-  row.classList.toggle("playing", on);
+  row.classList.toggle("playing", on); // 2.9.7: the warm row (its word for screen readers only)
   const badge = row.querySelector(".row-top em");
-  if (on && !badge) row.querySelector(".row-top").append(el("em", "", w("watching")));
+  if (on && !badge) row.querySelector(".row-top").append(el("em", "sr", w("watching")));
   else if (!on && badge) badge.remove();
 }
 
@@ -341,12 +347,13 @@ function guideRow(row) {
   item.dataset.live = liveKey(row.num, row.name);
   const hit = el("button", "row-tap");
   hit.type = "button";
-  hit.append(logoTile(row.name));
+  // 2.9.7: as the TV's channel menu: the thin number, the tile in the TV's colour, the
+  // channel and what's on with its line (calm: no Next line)
+  hit.append(rowNum(row.num), logoTile(row.name, "logo", row.name, row.tint));
   const main = el("div", "row-main");
   const top = el("div", "row-top");
-  if (row.num) top.append(el("span", "num", row.num));
   top.append(el("span", "title", row.name));
-  if (row.playing) top.append(el("em", "", w("watching")));
+  if (row.playing) top.append(el("em", "sr", w("watching")));
   main.append(top);
   if (row.now) {
     main.append(el("div", "row-now", row.now.title));
@@ -356,7 +363,6 @@ function guideRow(row) {
     bar.append(fill);
     main.append(bar);
   }
-  if (row.next) main.append(el("div", "row-next", `${clock(row.next.start)} ${row.next.title}`));
   hit.append(main);
   pressable(hit);
   hit.addEventListener("click", () => openTimetable(row.id, row.num, row.name));
@@ -373,12 +379,11 @@ function zapRow(row) {
   const item = el("button", `row${row.playing ? " playing" : ""}`);
   item.type = "button";
   item.dataset.live = liveKey(row.num, row.name);
-  item.append(logoTile(row.name));
+  item.append(rowNum(row.num), logoTile(row.name, "logo", row.name, row.tint)); // 2.9.7
   const main = el("div", "row-main");
   const top = el("div", "row-top");
-  if (row.num) top.append(el("span", "num", row.num));
   top.append(el("span", "title", row.name));
-  if (row.playing) top.append(el("em", "", w("watching")));
+  if (row.playing) top.append(el("em", "sr", w("watching")));
   main.append(top);
   item.append(main);
   tapRow(item, row.id, { plays: true, num: row.num, name: row.name }); // the TV, or here
@@ -544,11 +549,11 @@ function bindGuide() {
 
 // ---- a channel's card: its timetable ------------------------------------------------------
 
-function timetableTitle(num, name) {
+function timetableTitle(num, name, tint = "") {
   const title = $("timetableName");
-  title.replaceChildren();
-  if (num) title.append(el("span", "num", num));
-  title.append(name || "");
+  title.replaceChildren(); // 2.9.7: as the TV's banner: the thin number, the tile, the name
+  if (num) title.append(el("span", "num thin", num));
+  title.append(logoTile(name, "logo", name, tint), el("span", "tname", name || ""));
 }
 
 let timerOffered = false; // the timetable shown says QiTV records (with its time-shift helper)
@@ -569,7 +574,7 @@ function slotRow(slot, nowS) {
   const past = slot.stop <= nowS;
   const row = el(slot.id ? "button" : "div", `row slot${slot.on ? " playing" : ""}${past && !slot.id ? " still" : ""}`);
   if (slot.id) row.type = "button";
-  row.append(el("div", "slot-time", clock(slot.start)));
+  row.append(el("div", "slot-time thin", clock(slot.start))); // 2.9.7: a thin numeral
   const main = el("div", "row-main");
   const top = el("div", "row-top");
   top.append(el("span", "title", slot.title));
@@ -605,7 +610,7 @@ function schedChips(slot) {
     return button;
   };
   if (slot.rec) {
-    chips.append(chip(`● ${w("cancel_recording")}`, "cancel", "on"));
+    chips.append(chip(`● ${w("cancel_recording")}`, "cancel", "on danger"));
   } else {
     chips.append(chip(`● ${w("record")}`, "once", "rec"), chip(w("record_series"), "series", ""));
   }
@@ -935,7 +940,7 @@ function bindTracks() {
 
 function onTimetable(message) {
   if (message.id !== timetableFor) return;
-  timetableTitle(message.num, message.name);
+  timetableTitle(message.num, message.name, message.tint);
   timerOffered = Boolean(message.timer);
   tvOffset = Number.isInteger(message.tz) ? message.tz : null;
   if ($("timerForm").hidden) $("timerBar").hidden = !timerOffered;

@@ -607,6 +607,40 @@ def scenario_remote_look(rig: Rig) -> None:
     rig.shot("remote-look-list")
 
 
+def scenario_guide_look(rig: Rig) -> None:
+    """2.9.7: the Guide as the TV's channel menu: a thin number, the tile in the TV's colour,
+    what's on with its line (a row without a programme has none, nor a Next line), the channel
+    the TV plays as the warm row (no orange bar), no grey-filled find box."""
+    sid = paired_sid(rig)
+    rig.hub.send(sid, STATE)
+    mark = rig.events.mark()
+    rig.page.click("[data-tab=guide]")
+    rows = [dict(r) for r in GUIDE["rows"]]
+    rows[0]["tint"] = "#6a5f9e"
+    rows[-1] = {k: v for k, v in rows[-1].items() if k not in ("now", "next")}
+    answer(
+        rig,
+        sid,
+        rig.events.wait(Get, where=lambda e: e.what == "guide", after=mark),
+        {**GUIDE, "rows": rows},
+    )
+    rig.page.wait_for_selector("#guideRows .row >> nth=2")
+    first = rig.page.locator("#guideRows .row").nth(0)
+    assert first.locator(".rnum.thin").inner_text() == rows[0]["num"]
+    colour = first.locator(".logo").evaluate("e => getComputedStyle(e).backgroundColor")
+    assert colour == "rgb(106, 95, 158)", colour
+    assert rig.page.locator("#guideRows .row-next").count() == 0  # calm: no Next lines
+    assert rig.page.locator("#guideRows .row").nth(2).locator(".prog").count() == 0
+    playing = rig.page.locator("#guideRows .row.playing")
+    shadow = playing.evaluate("e => getComputedStyle(e).boxShadow")
+    assert "3px 0px 0px" not in shadow, shadow  # the warm row's edge, not the old orange bar
+    fill = rig.page.evaluate(
+        "getComputedStyle(document.getElementById('guideFind')).backgroundColor"
+    )
+    assert fill in ("rgba(0, 0, 0, 0)", "transparent"), fill  # an outline, not a grey box
+    rig.shot("guide-look")
+
+
 def scenario_screen_reader(rig: Rig) -> None:
     """What a screen reader says on the phone: the icon buttons in QiTV's language, Mute
     pressed while muted, and which bottom tab is open."""
@@ -1969,6 +2003,7 @@ SCENARIOS.update(
         "search-mirror": scenario_search_mirror,
         "library-open": scenario_library_open,
         "remote-look": scenario_remote_look,
+        "guide-look": scenario_guide_look,
         "recordings": scenario_recordings,
         "lists-after-reconnect": scenario_lists_after_reconnect,
         "more-numpad": scenario_more_numpad,

@@ -263,7 +263,7 @@ button { font: inherit; color: inherit; border: 0; background: none; padding: 0;
 .list-head { position: relative; }
 .list-head h1 { font-size: 30px; font-weight: 700; letter-spacing: -0.01em; margin: 2px 128px 0 0; }
 .list-head .where { position: absolute; right: 0; bottom: 2px; }
-.field { width: 100%; height: 40px; padding: 0 12px; border-radius: 12px; border: 0; background: var(--raised); color: var(--text); font: inherit; font-size: 16px; outline: none; -webkit-user-select: text; user-select: text; }
+.field { width: 100%; height: 40px; padding: 0 12px; border-radius: 12px; border: 0; background: transparent; box-shadow: inset 0 0 0 1px rgba(238, 242, 246, 0.14); color: var(--text); font: inherit; font-size: 16px; outline: none; -webkit-user-select: text; user-select: text; }
 .field::placeholder { color: var(--faint); }
 /* A find box's own name, unseen: AutoFill takes the text before a box for its label otherwise. */
 .sr { position: absolute; width: 1px; height: 1px; margin: -1px; padding: 0; overflow: hidden; clip: rect(0 0 0 0); white-space: nowrap; border: 0; }
@@ -285,8 +285,12 @@ button { font: inherit; color: inherit; border: 0; background: none; padding: 0;
 .row.branch.on .title { color: var(--accent); }
 .rows { flex: 1 1 auto; min-height: 0; overflow-y: auto; overflow-anchor: none; margin: 0 -16px; padding-bottom: 12px; -webkit-overflow-scrolling: touch; }
 .group { margin: 14px 16px 4px; font-size: 13px; font-weight: 600; color: var(--muted); }
-.row { width: 100%; display: flex; gap: 12px; align-items: center; padding: 11px 16px; border-bottom: 1px solid var(--line); text-align: left; }
-.row.playing { background: rgba(224, 138, 95, 0.08); box-shadow: inset 3px 0 0 var(--accent); }
+.row { width: calc(100% - 16px); margin: 0 8px; display: flex; gap: 12px; align-items: center; padding: 10px 8px; border-radius: 12px; text-align: left; }
+/* 2.9.7: the channel playing (what's on now) as the TV's chosen row: warm, with a soft edge;
+   every row is inset alike, so the warm one's numbers line up with the others' */
+.row.playing { background: var(--warm-fill); box-shadow: inset 0 0 0 1px var(--warm-edge); }
+.rnum { flex: none; min-width: 26px; font-size: 19px; color: var(--muted); text-align: end; }
+.rnum:empty { display: none; }
 .row.pressed { background: var(--raised); }
 .row .logo { width: 40px; height: 40px; border-radius: 10px; font-size: 13px; }
 .row .poster { width: 38px; height: 54px; flex: none; border-radius: 6px; display: grid; place-items: center; font-size: 12px; font-weight: 700; color: #fff; }
@@ -299,8 +303,8 @@ button { font: inherit; color: inherit; border: 0; background: none; padding: 0;
 .row-next { margin-top: 5px; font-size: 12px; color: var(--faint); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .empty { margin: 32px 24px; text-align: center; color: var(--muted); font-size: 15px; line-height: 1.5; }
 .row.split { padding: 0; }
-.row-tap { flex: 1; min-width: 0; display: flex; gap: 12px; align-items: center; padding: 11px 0 11px 16px; text-align: left; }
-.row .side { flex: none; align-self: stretch; width: 60px; display: grid; place-items: center; color: var(--accent); }
+.row-tap { flex: 1; min-width: 0; display: flex; gap: 12px; align-items: center; padding: 11px 0 11px 8px; text-align: left; border-radius: 12px; }
+.row .side { flex: none; align-self: stretch; width: 52px; display: grid; place-items: center; color: var(--accent); border-radius: 12px; }
 .row .side svg { width: 22px; height: 22px; }
 .row .side.pressed, .row-tap.pressed { background: var(--raised); }
 .tt-head { display: grid; grid-template-columns: 1fr auto; align-items: center; gap: 6px 12px; }
@@ -309,14 +313,15 @@ button { font: inherit; color: inherit; border: 0; background: none; padding: 0;
 .tt-head h1 .num { margin-right: 8px; color: var(--muted); }
 .tt-head .again { margin-top: 0; }
 .slot { align-items: flex-start; }
-.slot-time { flex: none; min-width: 48px; padding-top: 1px; white-space: nowrap; font-size: 14px; font-weight: 600; color: var(--muted); font-variant-numeric: tabular-nums; }
+.slot-time { flex: none; min-width: 48px; padding-top: 1px; white-space: nowrap; font-size: 16px; color: var(--muted); font-variant-numeric: tabular-nums; }
 .slot.still { opacity: 0.55; }
 .slot .about { margin-top: 3px; font-size: 13px; line-height: 1.35; color: var(--muted); display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; }
 /* 2.8: a programme to come records at its time (once, or a series), or a scheduled one cancels */
 .slot .sched { display: flex; gap: 8px; margin-top: 7px; }
-.slot .chip { font: inherit; font-size: 13px; font-weight: 600; min-height: 30px; padding: 0 12px; border-radius: 15px; border: 1px solid var(--line); background: var(--raised); color: var(--text); }
-.slot .chip.rec { background: var(--live); border-color: var(--live); color: #fff; }
-.slot .chip.on { border-color: var(--live); color: var(--live); }
+/* 2.9.7: the TV's raised buttons; a cancel in live red */
+.slot .chip { font: inherit; font-size: 13px; font-weight: 700; min-height: 32px; padding: 0 12px; border-radius: 10px; border: 0; background: var(--raised-2); box-shadow: inset 0 0 0 1px var(--line); color: var(--text); }
+.slot .chip.rec { color: var(--text); }
+.slot .chip.danger { color: #ff7a6e; }
 /* 2.8: Record at a time, on a channel's timetable (guide or not) */
 .timer-bar { display: flex; align-items: center; gap: 10px; margin-top: 10px; min-height: 30px; }
 .timer-bar .chip { flex: none; white-space: nowrap; }
@@ -427,3 +432,7 @@ body.sheet-open .remote, body.sheet-open .rows, body.sheet-open .chips { overflo
 .btn.accent { background: var(--accent); color: #1a0f0a; box-shadow: none; }
 .btn.danger { color: #ff7a6e; }
 .btn.pressed { filter: brightness(1.15); }
+#timetableName { display: flex; align-items: center; gap: 10px; min-width: 0; }
+#timetableName .num.thin { font-size: 26px; font-weight: 300; }
+#timetableName .logo { width: 36px; height: 36px; border-radius: 9px; font-size: 12px; }
+#timetableName .tname { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
