@@ -98,8 +98,10 @@ body[data-shown="guide"] .top .where, body[data-shown="library"] .top .where { d
 .recline .name { min-width: 0; overflow: hidden; text-overflow: ellipsis; }
 .recline .time { flex: none; margin-left: auto; color: var(--muted); font-variant-numeric: tabular-nums; }
 .recline.pressed { background: var(--raised-2); }
-.lister { flex: none; width: 70px; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 5px; border-radius: 18px; font-size: 11px; font-weight: 600; color: var(--muted); background: var(--raised); box-shadow: inset 0 0 0 1px var(--line); }
-.lister.on { color: var(--accent); background: var(--accent-fill); box-shadow: none; }
+/* 2.9.7: the channel list's button: an icon in the top line, on the Remote only, lit while open */
+.top .lister { display: none; margin-inline-start: auto; }
+body[data-shown="remote"] .top .lister { display: grid; }
+.lister.on { color: var(--accent); background: var(--accent-fill); }
 .lister.pressed { background: var(--raised-2); }
 .remote.zapping { justify-content: flex-start; }
 .remote.zapping > .seg, .remote.zapping > .pad, .remote.zapping > .trio { display: none; }
@@ -262,8 +264,8 @@ body[data-shown="guide"] .top .where, body[data-shown="library"] .top .where { d
 .list { gap: 12px; padding: 2px 16px 0; }
 .list > * { flex: none; }
 /* Show on TV, under the search: the TV's own search shows it too (else the phone's alone). */
-.tvtoggle { align-self: flex-start; height: 32px; padding: 0 14px; border-radius: 16px; font-size: 13px; font-weight: 600; color: var(--muted); background: var(--raised); box-shadow: inset 0 0 0 1px var(--line); }
-.tvtoggle.on { color: var(--text); background: var(--accent-fill); box-shadow: none; }
+/* 2.9.7: Search's Show on TV: the same switch as the TV | Phone one */
+.tvswitch { align-self: flex-start; display: flex; align-items: center; gap: 8px; min-height: 44px; font-size: 13px; font-weight: 600; color: var(--muted); }
 .list-head { position: relative; }
 .list-head h1 { font-size: 26px; font-weight: 700; letter-spacing: -0.01em; margin: 2px 0 0; }
 .field { width: 100%; height: 40px; padding: 0 12px; border-radius: 12px; border: 0; background: transparent; box-shadow: inset 0 0 0 1px rgba(238, 242, 246, 0.14); color: var(--text); font: inherit; font-size: 16px; outline: none; -webkit-user-select: text; user-select: text; }
@@ -485,3 +487,18 @@ body.sheet-open .remote, body.sheet-open .rows, body.sheet-open .chips { overflo
 .cardrow { display: flex; flex-wrap: wrap; gap: 12px; padding: 6px 16px 2px; }
 .more { display: block; min-height: 44px; margin-inline-start: auto; padding: 10px 18px; font-size: 14px; font-weight: 600; color: var(--muted); text-align: end; }
 .more.pressed { color: var(--text); }
+/* The sheets in the same pieces: the title bold; the items raised, as the More sheet's keys;
+   a destructive one in live red; the More sheet's section names as captions. */
+.sh { font-size: 17px; font-weight: 700; color: var(--text); }
+#moreSheet .sh { font-size: 11px; letter-spacing: 0.14em; text-transform: uppercase; color: var(--faint); }
+.menu-list { gap: 6px; }
+.menu-list > button, .menu-list .stepped { padding: 13px 14px; border-bottom: 0; border-radius: 12px; background: var(--raised); box-shadow: inset 0 0 0 1px var(--line); }
+.menu-list .stepped > .choice { padding: 0 0 2px; }
+.menu-list > button.pressed, .menu-list .choice.pressed { background: var(--raised-2); }
+.menu-list > button.danger { color: #ff7a6e; }
+.menu-list > button.choice.up { padding-inline: 2px; background: none; box-shadow: none; }
+.menu-list .step { padding: 4px 2px; border-bottom: 0; }
+/* The Remote's banner, calm: alone across the screen, LIVE at its end, its line across its foot */
+.now.hud { flex-wrap: wrap; row-gap: 10px; }
+.now.hud .live { margin-inline-start: auto; }
+.now.hud > .prog { flex: 1 0 100%; margin-top: 0; }

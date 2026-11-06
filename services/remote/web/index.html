@@ -57,6 +57,8 @@
     <button class="conn" id="tvButton" type="button"><i id="dot"></i><span id="tvName">QiTV</span></button>
     <!-- 2.9.7: where a tap plays, for the Guide and the Library: in the top line, as the TV's -->
     <div class="where"><button type="button" class="switch" role="switch" aria-checked="false" data-where="phone" data-tl="phone"><span class="knob"></span></button><span class="where-label" data-t="phone">Phone</span></div>
+    <!-- 2.9.7: the Remote's channel list, an icon in the top line (the banner keeps the width) -->
+    <button class="menu lister" id="listButton" type="button" aria-pressed="false" data-tl="channels"><svg><use href="#i-list"/></svg></button>
     <button class="menu" id="menuButton" type="button" aria-label="Menu" data-tl="menu"><svg><use href="#i-more"/></svg></button>
   </header>
   <div class="banner" id="banner" hidden></div>
@@ -86,10 +88,9 @@
         <div class="now-main">
           <div class="line"><span class="name" id="nowName">Nothing playing</span><span class="live" id="nowLive" hidden data-t="live">LIVE</span></div>
           <div class="sub"><span class="nowword" id="nowWord" data-t="now" hidden>Now</span><span id="nowShow"></span></div>
-          <div class="prog" id="nowTrack"><i id="nowProg"></i></div>
         </div>
+        <div class="prog" id="nowTrack"><i id="nowProg"></i></div>
       </button>
-      <button class="lister" id="listButton" type="button" aria-pressed="false"><svg><use href="#i-list"/></svg><span data-t="channels">Channels</span></button>
     </div>
     <button class="resume" id="backTo" type="button" data-key="back_to" hidden><svg><use href="#i-back"/></svg><span id="backToText"></span></button>
     <button class="recline" id="recLine" type="button" hidden><i aria-hidden="true"></i><span class="rec" data-t="rec">REC</span><span class="name" id="recName"></span><span class="time" id="recTime"></span></button>
@@ -198,7 +199,7 @@
       <input class="field" id="searchInput" type="search" autocomplete="off" autocapitalize="off" enterkeyhint="search" placeholder="Search channels, movies and series" data-tp="search_hint">
       <button type="button" class="done" id="searchDone" data-t="done">Done</button>
     </div>
-    <button type="button" class="tvtoggle" id="searchTv" aria-pressed="false" data-t="show_on_tv">Show on TV</button>
+    <div class="tvswitch"><button type="button" class="switch" id="searchTv" role="switch" aria-checked="false" data-tl="show_on_tv"><span class="knob"></span></button><span class="where-label" data-t="show_on_tv">Show on TV</span></div>
     <div class="rows" id="searchRows"></div>
   </section>
 

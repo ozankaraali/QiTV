@@ -1090,8 +1090,7 @@ function sendQuery() {
 function useSearchOnTv(on) {
   searchOnTv = on;
   const toggle = $("searchTv");
-  toggle.classList.toggle("on", on);
-  toggle.setAttribute("aria-pressed", String(on));
+  toggle.setAttribute("aria-checked", String(on)); // 2.9.7: a switch, as the TV | Phone one
   store.setSetting("search_tv", on ? "on" : "");
 }
 

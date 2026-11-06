@@ -592,6 +592,13 @@ def scenario_remote_look(rig: Rig) -> None:
     assert colour == "rgb(106, 95, 158)", colour
     right = rig.page.evaluate("document.getElementById('listButton').getBoundingClientRect().right")
     assert right <= 320, right
+    # calm: the banner alone across the screen (Channels an icon in the top line), its line
+    # across its foot
+    now = rig.page.locator("#now").bounding_box()
+    assert now is not None and now["width"] >= 320 - 40 - 1, now
+    track = rig.page.locator("#nowTrack").bounding_box()
+    assert track is not None and track["width"] >= now["width"] - 30, (track, now)
+    assert rig.page.locator(".top #listButton").is_visible()
     assert rig.page.locator("#tabs svg").count() == 0  # the tabs as words, as the TV's
     bar = rig.page.evaluate(
         "getComputedStyle(document.querySelector('#tabs .on'), '::before').backgroundColor"
@@ -688,6 +695,38 @@ def scenario_library_look(rig: Rig) -> None:
     assert below is not None and below["y"] >= box["y"] + box["height"], (box, below)  # no overlap
     assert title.is_visible()
     rig.shot("library-look")
+
+
+KNOB_SIDE = """(s) => {
+  const sw = document.querySelector(s);
+  const knob = sw.querySelector('.knob').getBoundingClientRect();
+  const box = sw.getBoundingClientRect();
+  return knob.left + knob.width / 2 > box.left + box.width / 2 ? 'right' : 'left';
+}"""
+
+
+def scenario_rtl_look(rig: Rig) -> None:
+    """2.9.7: right to left (Arabic, Hebrew, Persian, Urdu): a switch that is off has its knob
+    on the inline-start side (the right), the Library's and Search's "Show on TV" alike."""
+    sid = paired_sid(rig)
+    rig.hub.send(sid, STATE)
+    rig.page.evaluate("document.documentElement.dir = 'rtl'")
+    mark = rig.events.mark()
+    rig.page.click("[data-tab=library]")
+    answer(rig, sid, rig.events.wait(Get, where=lambda e: e.what == "genres", after=mark), GENRES)
+    rig.page.wait_for_selector("#libraryRows .row.branch >> nth=1")
+    assert rig.page.get_attribute(".top .where .switch", "aria-checked") == "false"
+    assert rig.page.evaluate(KNOB_SIDE, ".top .where .switch") == "right"
+    rig.shot("rtl-look")
+    rig.page.click("[data-tab=remote]")
+    rig.page.wait_for_selector("[data-screen=remote]:not([hidden])")
+    rig.page.click("#searchButton")
+    rig.page.wait_for_selector("[data-screen=search]:not([hidden])")
+    toggle = rig.page.locator("#searchTv")
+    assert toggle.get_attribute("role") == "switch", toggle.get_attribute("role")
+    assert toggle.get_attribute("aria-checked") == "false"
+    assert rig.page.evaluate(KNOB_SIDE, "#searchTv") == "right"
+    rig.shot("rtl-search")
 
 
 def scenario_screen_reader(rig: Rig) -> None:
@@ -1204,7 +1243,7 @@ def scenario_search_mirror(rig: Rig) -> None:
     rig.page.click("#searchTv")
     rig.events.wait(Press, where=lambda e: e.button == "search" and not e.down, after=mark)
     query = rig.events.wait(Query, where=lambda e: e.text == "harb" and e.tv, after=mark)
-    assert rig.page.locator("#searchTv.on").count() == 1
+    assert rig.page.locator("#searchTv[aria-checked=true]").count() == 1
     mark = rig.events.mark()
     rig.page.focus("#searchInput")
     rig.page.keyboard.press("Enter")
@@ -2178,6 +2217,7 @@ SCENARIOS.update(
         "guide-look": scenario_guide_look,
         "library-look": scenario_library_look,
         "recordings-home": scenario_recordings_home,
+        "rtl-look": scenario_rtl_look,
         "recordings": scenario_recordings,
         "lists-after-reconnect": scenario_lists_after_reconnect,
         "more-numpad": scenario_more_numpad,
