@@ -22,6 +22,8 @@ PAGE_STRINGS: dict[str, str] = {
     "live": N_("LIVE"),
     # i18n: the phone remote's now-playing card when nothing plays
     "nothing_playing": N_("Nothing playing"),
+    # i18n: the phone remote's now-playing banner: the programme on now (as the TV's banner)
+    "now": N_("Now"),
     # i18n: the phone remote: the button that goes back to live TV (short)
     "tv": N_("TV"),
     "movies": N_("Movies"),  # i18n: the phone remote: a section button

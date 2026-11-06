@@ -372,7 +372,7 @@
     "Nothing to play next": "toast after Next (no next episode or movie)",
     "Nothing was missed.": "the Recordings page's Needs attention, with no problem",
     "Nothing was recorded": "a toast: a recording ended before anything was written (no file was kept)",
-    "Now": "the guide's \"Now\" button (2.9.3): the time window back to now; Home is its key; the zapping banner's label before the current programme; the phone remote's timetable: the programme on now (short)",
+    "Now": "the guide's \"Now\" button (2.9.3): the time window back to now; Home is its key; the zapping banner's label before the current programme; the phone remote's now-playing banner: the programme on now (as the TV's banner); the phone remote's timetable: the programme on now (short)",
     "Now playing on the TV": "the phone remote, when the TV took over what the phone played",
     "OK": "a button; the phone remote: the middle of the arrows (Enter)",
     "Off": "the relay's state in Settings → Phone remote; the Subtitles panel's row that shows no subtitles; the phone remote's Subtitles: the row that shows none",

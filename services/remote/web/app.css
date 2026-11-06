@@ -13,6 +13,11 @@
   --live: #d6453a;
   --ok: #5fbf7a;
   --warn: #e0b24a;
+  /* 2.9.7: the TV app's own pieces (ui/library, ui/overlays): its chosen row's warmth, the
+     switch's track */
+  --warm-fill: rgba(224, 138, 95, 0.10);
+  --warm-edge: rgba(224, 138, 95, 0.45);
+  --track: #3a414b;
   --pad: min(64vw, 300px); /* at most: the pad takes what the rows around it leave */
   color-scheme: dark;
 }
@@ -82,7 +87,7 @@ button { font: inherit; color: inherit; border: 0; background: none; padding: 0;
 .resume span { min-width: 0; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .remote.on-phone > .resume { display: none; }
 /* 2.6: what records in the background, under the now-playing card; a tap: go back or stop. */
-.recline { display: flex; align-items: center; gap: 8px; width: 100%; padding: 10px 14px; border-radius: 16px; font-size: 15px; font-weight: 600; color: var(--text); background: var(--raised); box-shadow: inset 0 0 0 1px rgba(214, 69, 58, 0.45); white-space: nowrap; overflow: hidden; }
+.recline { display: flex; align-items: center; gap: 8px; width: 100%; padding: 10px 14px; border-radius: 16px; font-size: 15px; font-weight: 600; color: var(--text); background: rgba(214, 69, 58, 0.10); box-shadow: inset 0 0 0 1px rgba(214, 69, 58, 0.45); white-space: nowrap; overflow: hidden; }
 .recline[hidden] { display: none; }
 .recline i { flex: none; width: 10px; height: 10px; border-radius: 50%; background: var(--live); }
 .recline .rec { flex: none; color: var(--live); font-weight: 700; }
@@ -102,9 +107,13 @@ button { font: inherit; color: inherit; border: 0; background: none; padding: 0;
 .player-cap .name { overflow: hidden; text-overflow: ellipsis; }
 .player-cap.why { white-space: normal; font-size: 14px; font-weight: 500; color: var(--muted); }
 .player-out { margin: 0 20px; height: 40px; border-radius: 12px; font-size: 14px; font-weight: 600; color: var(--accent); background: var(--raised); box-shadow: inset 0 0 0 1px var(--line); }
-.where { margin-left: auto; flex: none; display: flex; gap: 2px; padding: 3px; border-radius: 11px; background: var(--raised); box-shadow: inset 0 0 0 1px var(--line); }
-.where button { height: 28px; padding: 0 11px; border-radius: 8px; font-size: 13px; font-weight: 600; color: var(--muted); }
-.where button.on { background: var(--accent-fill); color: var(--text); }
+.where { margin-inline-start: auto; flex: none; display: flex; align-items: center; gap: 8px; font-size: 13px; font-weight: 600; color: var(--muted); }
+/* 2.9.7: the TV | Phone switch, as the owner asked: an orange knob in a grey track; on: a tap
+   plays on the phone */
+.switch { position: relative; flex: none; width: 44px; height: 26px; padding: 0; border-radius: 13px; background: var(--track); }
+.switch .knob { position: absolute; top: 3px; inset-inline-start: 3px; width: 20px; height: 20px; border-radius: 50%; background: var(--accent); box-shadow: 0 1px 3px rgba(0, 0, 0, 0.45); transition: inset-inline-start 0.15s ease; }
+.switch[aria-checked="true"] .knob { inset-inline-start: 21px; }
+.switch[aria-checked="true"] + .where-label { color: var(--text); }
 .zap { flex: 1 1 auto; min-height: 0; display: flex; flex-direction: column; gap: 10px; }
 .zap > * { flex: none; }
 .zap-head { display: flex; align-items: center; gap: 10px; min-height: 34px; }
@@ -130,10 +139,11 @@ button { font: inherit; color: inherit; border: 0; background: none; padding: 0;
 .prog { position: relative; height: 3px; margin-top: 9px; border-radius: 2px; background: rgba(238, 242, 246, 0.12); overflow: hidden; }
 .prog i { position: absolute; left: 0; top: 0; bottom: 0; width: 0; border-radius: 2px; background: var(--accent); }
 
-.seg { display: grid; grid-template-columns: repeat(4, 1fr); gap: 4px; padding: 4px; border-radius: 15px; background: var(--raised); box-shadow: inset 0 0 0 1px var(--line); }
-.seg button { height: 38px; border-radius: 11px; font-size: 14px; font-weight: 600; color: var(--muted); }
-.seg button.on { background: var(--accent-fill); color: var(--text); }
-.seg button.pressed { background: rgba(238, 242, 246, 0.08); }
+/* 2.9.7: the sections as the TV Library's tabs: words, the one shown underlined in orange */
+.seg { display: flex; gap: 22px; padding: 0 4px; }
+.seg button { height: 36px; padding: 0; font-size: 15px; font-weight: 600; color: var(--muted); box-shadow: inset 0 -2px transparent; }
+.seg button.on { color: var(--text); box-shadow: inset 0 -2px var(--accent); }
+.seg button.pressed { color: var(--text); }
 
 /* The pad grows into the height the other rows leave (up to --pad), so the rockers never reach
    the tabs: a short screen, or a browser's own bars around the page, gets a smaller pad. */
@@ -397,3 +407,23 @@ body.sheet-open .remote, body.sheet-open .rows, body.sheet-open .chips { overflo
 .ask-buttons button { height: 52px; border-radius: 16px; font-size: 16px; font-weight: 600; padding: 0 8px; }
 .ask-buttons .keep { background: var(--accent); color: #0b0f14; }
 .ask-buttons .stop { background: var(--raised); color: var(--live); box-shadow: inset 0 0 0 1px var(--line); }
+
+/* ---- 2.9.7: the TV app's pieces ------------------------------------------------------------- */
+/* The HUD banner: what plays, as the TV's channel banner (its big thin number, its tile, the
+   name and LIVE, "Now" in orange with the programme, the progress line). */
+.hud .num.thin { flex: none; min-width: 26px; font-size: 28px; font-weight: 300; color: var(--text); text-align: center; font-variant-numeric: tabular-nums; }
+.hud .num.thin:empty { display: none; }
+.hud .line { gap: 8px; }
+.hud .sub { font-size: 13px; color: var(--muted); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.nowword { color: var(--accent); font-weight: 600; margin-inline-end: 5px; }
+.prog[hidden] { display: none; }
+.thin { font-weight: 300; font-variant-numeric: tabular-nums; }
+/* The chosen row: the TV's warm panel with a soft coral edge. */
+.warm { background: var(--warm-fill) !important; box-shadow: inset 0 0 0 1px var(--warm-edge) !important; }
+/* Captions in small capitals with their count at the right, as the TV Library's rail. */
+.capt { display: flex; justify-content: space-between; padding: 14px 2px 4px; font-size: 11px; font-weight: 700; letter-spacing: 0.14em; text-transform: uppercase; color: var(--faint); }
+/* The TV's buttons: raised grey, the one main action orange, a destructive one in live red. */
+.btn { flex: none; height: 36px; padding: 0 14px; border-radius: 10px; font-size: 14px; font-weight: 700; color: var(--text); background: var(--raised-2); box-shadow: inset 0 0 0 1px var(--line); }
+.btn.accent { background: var(--accent); color: #1a0f0a; box-shadow: none; }
+.btn.danger { color: #ff7a6e; }
+.btn.pressed { filter: brightness(1.15); }

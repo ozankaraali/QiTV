@@ -278,6 +278,8 @@ function drawNow() {
     name.textContent = w("nothing_playing");
     $("nowNum").textContent = "";
     $("nowShow").textContent = "";
+    $("nowWord").hidden = true;
+    $("nowTrack").hidden = true;
     $("nowProg").style.width = "0%";
     live.hidden = true;
     const logo = $("nowLogo");
@@ -288,7 +290,7 @@ function drawNow() {
   name.textContent = now.name || "";
   const logo = $("nowLogo");
   logo.textContent = initials(now.name) || "TV";
-  logo.style.background = colour(now.name);
+  logo.style.background = now.tint || colour(now.name); // 2.9.7: the TV's own tile colour
   if (now.kind === "live") {
     $("nowNum").textContent = now.num || "";
     live.hidden = false;
@@ -297,10 +299,14 @@ function drawNow() {
     toLive.classList.toggle("behind", behind > 0);
     live.textContent = behind > 0 ? `−${Math.floor(behind / 60)}:${String(behind % 60).padStart(2, "0")}` : t("live") === "live" ? "LIVE" : t("live");
     $("nowShow").textContent = now.now ? now.now.title : "";
+    $("nowWord").hidden = !now.now; // "Now", as the TV's banner, when the guide says what's on
+    $("nowTrack").hidden = !now.now; // no programme, no empty line
     $("nowProg").style.width = `${(share(now.now) * 100).toFixed(1)}%`;
   } else {
     $("nowNum").textContent = "";
     live.hidden = true;
+    $("nowWord").hidden = true;
+    $("nowTrack").hidden = false;
     $("nowShow").textContent = now.sub || "";
     let pos = film ? film.pos + (film.playing ? Date.now() - film.at : 0) : 0;
     if (film) pos = Math.min(pos, film.len);
@@ -1383,8 +1389,8 @@ function useHere(on) {
   if (on && !zapping()) useChannelList(true);
   document.querySelector("[data-screen=remote]").classList.toggle("on-phone", on);
   $("player").hidden = !on;
-  for (const button of document.querySelectorAll(".where [data-where]")) {
-    button.classList.toggle("on", (button.dataset.where === "phone") === on);
+  for (const toggle of document.querySelectorAll(".where .switch")) {
+    toggle.setAttribute("aria-checked", on ? "true" : "false"); // 2.9.7: on, a tap plays here
   }
   if (!on) stopVideo();
 }
@@ -1468,10 +1474,9 @@ function onStop() {
 }
 
 function bindHere() {
-  for (const button of document.querySelectorAll(".where [data-where]")) {
-    button.addEventListener("click", () => {
-      const phone = button.dataset.where === "phone";
-      if (phone === here) return;
+  for (const toggle of document.querySelectorAll(".where .switch")) {
+    toggle.addEventListener("click", () => {
+      const phone = !here; // 2.9.7: the switch: on plays here, off on the TV
       if (phone) {
         startHere();
       } else {
