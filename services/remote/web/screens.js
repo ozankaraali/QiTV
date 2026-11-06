@@ -45,6 +45,9 @@ const words = {
   opening_here: "Opening on this phone…",
   show_on_tv: "Show on TV",
   phone: "Phone",
+  coming_up: "Coming up",
+  recently_recorded: "Recently recorded",
+  all_recordings: "All recordings ›",
   pick_here: "Pick a channel below to watch it here",
   now_on_tv: "Now playing on the TV",
   open_player: "Open in the phone's player",
@@ -1155,13 +1158,16 @@ function bindSearch() {
 // titles a page at a time; the find box searches the level shown. QiTV browses with the phone's
 // own copy of its Library: the TV stays where it is until a title is tapped.
 
-const library = newList({ section: "movies", level: "genres", genre: "", title: "", total: null });
+// 2.9.7: Recordings opens on its home (`recView` "home"); All recordings › shows its rows
+// ("rows"), from the answer kept (`recMessage`).
+const library = newList({ section: "movies", level: "genres", genre: "", title: "", total: null, recView: "home", recMessage: null });
 let libraryTimer = null;
 
 function showLibraryLevel() {
   const genres = library.level === "genres";
   if (genres) $("libraryRows").classList.remove("cards");
-  $("libraryUp").hidden = genres;
+  const recRows = genres && library.section === "recordings" && library.recView === "rows"; // 2.9.7
+  $("libraryUp").hidden = genres && !recRows;
   $("libraryUp").querySelector("span").textContent = w(library.section === "recordings" ? "recordings" : "genres");
   $("libraryChips").hidden = !genres;
   setTitle($("libraryTitle"), genres ? w("library") : library.title, genres ? null : library.total);
@@ -1193,7 +1199,7 @@ function askLibrary(page) {
 // else the page's colour), the title at its foot, how far it was watched; a recording's
 // wide, with its length and NEW. A tap does what a row's did.
 function libraryCard(item, wide) {
-  const card = el("button", `row card${wide ? " wide" : ""}`);
+  const card = el("button", `row card${wide ? " landscape" : ""}`); // not .wide: the page's wide buttons
   card.type = "button";
   if (typeof item.hue === "number") {
     const hue = Math.round(item.hue * 360);
@@ -1259,7 +1265,23 @@ function openActs(item) {
 function onGenres(message) {
   if (library.level !== "genres" || message.section !== library.section || message.find !== library.find) return;
   if (!answers(library, message)) return;
-  const rows = message.rows.map((genre) => branchRow(genre, () => openLibraryAt("titles", genre.id, genre.title)));
+  // 2.9.7: the home is one page; the rows' later pages belong to All recordings ›
+  if (library.section === "recordings" && !library.find && library.recView === "home" && message.page > 0) return;
+  drawGenres(message);
+}
+
+function drawGenres(message) {
+  const home = library.section === "recordings" ? message.home : null;
+  if (home) {
+    library.recMessage = message;
+    if (library.recView !== "rows") {
+      placePage($("libraryRows"), library, message, recHome(home), () => openLibraryAt("genres"));
+      library.pages = 1;
+      return;
+    }
+  }
+  const listed = home ? message.rows.filter((genre) => genre.id !== home.coming_key) : message.rows;
+  const rows = listed.map((genre) => branchRow(genre, () => openLibraryAt("titles", genre.id, genre.title)));
   const titles = message.titles || []; // what the find found in the whole section, below its genres
   if (titles.length && (message.page === 0 || rows.length)) rows.push(el("div", "group", w(library.section))); // where they begin
   rows.push(...titles.map(libraryRow));
@@ -1282,15 +1304,132 @@ function onLibrary(message) {
   placePage(box, library, message, rows, retry);
 }
 
+// ---- 2.9.7: Recordings' home, as the desktop's Tonight ---------------------------------------
+// What records now (one banner, a compact row each, Watch and Stop), the next airings (a tap:
+// what each allows), the latest recordings as cards, All recordings › for the channels' rows.
+
+function homeCaption(text, count) {
+  const line = el("div", "capt");
+  line.append(el("span", "", text), el("span", "", typeof count === "number" ? count.toLocaleString() : ""));
+  return line;
+}
+
+function moreLink(text, open) {
+  const link = el("button", "more", text);
+  link.type = "button";
+  pressable(link);
+  link.addEventListener("click", open);
+  return link;
+}
+
+function recNowRow(rec, compact) {
+  const line = el("div", "rec-now");
+  const top = el("div", "rec-top");
+  const channel = rec.channel || rec.title;
+  top.append(logoTile(channel, "logo", channel, rec.tint));
+  const main = el("div", "row-main");
+  const name = el("div", "line");
+  name.append(el("span", "name", channel), el("span", "live", `● ${w("rec")}`));
+  main.append(name);
+  const sub = el("div", "sub");
+  if (rec.title && rec.title !== channel) sub.append(el("span", "nowword", w("now")), el("span", "", rec.title));
+  else sub.append(el("span", "", recClock(rec.elapsed_s || 0)));
+  main.append(sub);
+  const left = rec.until > 0 ? rec.until - Date.now() / 1000 : 0;
+  if (left > 0) {
+    const bar = el("div", "prog");
+    const fill = el("i");
+    const elapsed = rec.elapsed_s || 0;
+    fill.style.width = `${((elapsed / (elapsed + left)) * 100).toFixed(1)}%`;
+    bar.append(fill);
+    main.append(bar);
+  }
+  top.append(main);
+  line.append(top);
+  // one recording: ▶ Watch and ■ Stop beneath it; two or more: the desktop's compact rows, the
+  // same buttons as icons at each row's end (their names kept for a screen reader)
+  const buttons = compact ? top : el("div", "rec-btns");
+  for (const act of rec.acts || []) {
+    const button = el("button", `btn${act.danger ? " danger" : ""}${compact ? " icon" : ""}`);
+    button.type = "button";
+    const icon = REC_ICONS[act.do];
+    if (icon) button.insertAdjacentHTML("beforeend", `<svg aria-hidden="true"><use href="#${icon}"/></svg>`);
+    button.append(el("span", compact && icon ? "sr" : "", act.label));
+    pressable(button);
+    button.addEventListener("click", () => send({ t: "desk", id: rec.id, do: act.do }));
+    buttons.append(button);
+  }
+  if (!compact) line.append(buttons);
+  return line;
+}
+
+const REC_ICONS = { watch: "i-play", stop: "i-stop" };
+
+function comingRow(airing) {
+  const row = el("button", "row coming");
+  row.type = "button";
+  const when = el("span", "rnum thin when");
+  when.append(el("span", "", airing.time || ""), el("small", "", airing.day || ""));
+  const channel = airing.channel || airing.title;
+  row.append(when, logoTile(channel, "logo", channel, airing.tint));
+  const main = el("div", "row-main");
+  const top = el("div", "row-top");
+  top.append(el("span", "title", airing.title));
+  if (airing.kind) top.append(tag(airing.kind));
+  main.append(top, el("div", "row-now", airing.channel || ""));
+  row.append(main);
+  pressable(row);
+  row.addEventListener("click", () => openActs(airing));
+  return row;
+}
+
+function recHome(home) {
+  const nodes = [];
+  if (home.now && home.now.length) {
+    const banner = el("div", "rechud");
+    for (const rec of home.now) banner.append(recNowRow(rec, home.now.length > 1));
+    nodes.push(banner);
+  }
+  if (home.coming && home.coming.length) {
+    nodes.push(homeCaption(w("coming_up"), home.coming.length + (home.more || 0)));
+    nodes.push(...home.coming.map(comingRow));
+    if (home.more > 0) {
+      nodes.push(moreLink(`${w("coming_up")} ›`, () => openLibraryAt("titles", home.coming_key, w("coming_up"))));
+    }
+  }
+  if (home.recent && home.recent.length) {
+    nodes.push(homeCaption(w("recently_recorded"), home.recorded));
+    const cards = el("div", "cardrow");
+    cards.append(...home.recent.map((item) => libraryCard(item, true)));
+    nodes.push(cards);
+  }
+  if (!nodes.length) nodes.push(el("div", "empty", w("nothing_here")));
+  nodes.push(moreLink(w("all_recordings"), () => showRecView("rows")));
+  return nodes;
+}
+
+// All recordings › and ‹ back: the answer kept, drawn the other way; no ask
+function showRecView(view) {
+  library.recView = view;
+  showLibraryLevel();
+  if (!library.recMessage) return;
+  library.opening = true;
+  drawGenres(library.recMessage);
+}
+
 function bindLibrary() {
   for (const chip of document.querySelectorAll("#libraryChips [data-lib]")) {
     chip.addEventListener("click", () => {
       for (const other of document.querySelectorAll("#libraryChips [data-lib]")) other.classList.toggle("on", other === chip);
       library.section = chip.dataset.lib;
+      library.recView = "home"; // 2.9.7: Recordings opens on its home
       openLibraryAt("genres");
     });
   }
-  $("libraryUp").addEventListener("click", () => openLibraryAt("genres"));
+  $("libraryUp").addEventListener("click", () => {
+    if (library.level === "genres" && library.recView === "rows") showRecView("home"); // 2.9.7
+    else openLibraryAt("genres");
+  });
   $("libraryRefresh").addEventListener("click", () => {  // 2.8: as the TV Library's ↻
     send({ t: "refresh" });
     note(w("refreshing")); // QiTV says nothing when it's done: the lists come again as they load

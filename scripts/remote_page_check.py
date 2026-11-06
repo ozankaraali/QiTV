@@ -1322,6 +1322,129 @@ def scenario_recordings(rig: Rig) -> None:
     assert rig.events.of(OpenItem, after=mark) == []  # an airing doesn't open as a title
 
 
+def scenario_recordings_home(rig: Rig) -> None:
+    """2.9.7: the phone's Recordings opens on one page, as the desktop's Tonight: what records
+    now (one banner, a compact row each, Stop and Watch), the next airings (Coming up › for
+    the rest), the latest recordings as cards, All recordings › for the channels' rows."""
+    from services.remote.protocol import DeskAct
+
+    sid = paired_sid(rig)
+    mark = rig.events.mark()
+    rig.page.click("[data-tab=library]")
+    answer(rig, sid, rig.events.wait(Get, where=lambda e: e.what == "genres", after=mark), GENRES)
+    mark = rig.events.mark()
+    rig.page.click("#libraryChips [data-lib=recordings]")
+    ask = rig.events.wait(
+        Get, where=lambda e: e.what == "genres" and e.section == "recordings", after=mark
+    )
+    stop = {"do": "stop", "label": "Stop", "danger": True}
+    watch = {"do": "watch", "label": "Watch", "danger": False}
+    now = [
+        {
+            "id": f"n{k}",
+            "title": t,
+            "channel": c,
+            "tint": "#6a5f9e",
+            "elapsed_s": 600,
+            "until": time.time() + 1800,
+            "acts": [watch, stop],
+        }
+        for k, (t, c) in enumerate(
+            [
+                ("Evening News", "Northwind News"),
+                ("Night Match", "Harbor Sports"),
+                ("", "Copperline World"),
+            ]
+        )
+    ]
+    skip = {"do": "skip", "label": "Skip", "danger": False}
+    coming = [
+        {
+            "id": "a1",
+            "title": "Late film",
+            "channel": "Harbor News 24",
+            "tint": "#2f6f7a",
+            "time": "01:00",
+            "day": "FRI",
+            "kind": "REPEATS",
+            "acts": [skip],
+        },
+        {
+            "id": "a2",
+            "title": "Kitchen Stories",
+            "channel": "Northwind News",
+            "tint": "#6a5f9e",
+            "time": "20:00",
+            "day": "SAT",
+            "kind": "SERIES",
+            "acts": [skip],
+        },
+    ]
+    recent = [
+        {
+            "id": "r1",
+            "title": "Night Match",
+            "sub": "Harbor Sports · Thu 5 Nov",
+            "hue": 0.7,
+            "len": "1h 52m",
+            "badge": {"text": "NEW", "tone": "accent"},
+            "plays": True,
+        },
+        {
+            "id": "r2",
+            "title": "Morning Show",
+            "sub": "Northwind News · Wed 4 Nov",
+            "hue": 0.1,
+            "len": "52 min",
+            "plays": True,
+        },
+    ]
+    home = {
+        "now": now,
+        "coming": coming,
+        "more": 3,
+        "coming_key": "k1",
+        "recent": recent,
+        "recorded": 4,
+    }
+    rows = [
+        {"id": "k1", "title": "Coming up", "count": 5},
+        {"id": "k2", "title": "All", "count": 4},
+        {"id": "k3", "title": "Northwind News", "count": 2},
+    ]
+    head = {"t": "genres", "section": "recordings", "find": "", "page": 0, "pages": 1}
+    answer(rig, sid, ask, {**head, "rows": rows, "home": home, "loading": False})
+    rig.page.wait_for_selector("#libraryRows .rechud")
+    assert rig.page.locator("#libraryRows .rechud").count() == 1
+    assert rig.page.locator("#libraryRows .rechud .rec-now").count() == 3
+    assert rig.page.locator("#libraryRows .coming").count() == 2
+    assert rig.page.locator("#libraryRows .card").count() == 2
+    rig.shot("recordings-home")
+    card = rig.page.locator("#libraryRows .cardrow .card").first.bounding_box()
+    assert card and card["height"] > card["width"] * 0.55, card  # 16:10, not a 50 px button
+    mark = rig.events.mark()
+    rig.page.locator("#libraryRows .rec-now").nth(0).locator("button", has_text="Stop").click()
+    act = rig.events.wait(DeskAct, after=mark)
+    assert (act.handle, act.do) == ("n0", "stop"), act
+    mark = rig.events.mark()
+    rig.page.locator("#libraryRows .more", has_text="Coming up").click()
+    ask = rig.events.wait(Get, where=lambda e: e.what == "library", after=mark)
+    assert (ask.section, ask.genre) == ("recordings", "k1"), ask
+    mark = rig.events.mark()
+    rig.page.click("#libraryUp")  # back: the home again
+    ask = rig.events.wait(Get, where=lambda e: e.what == "genres", after=mark)
+    answer(rig, sid, ask, {**head, "rows": rows, "home": home, "loading": False})
+    rig.page.wait_for_selector("#libraryRows .rechud")
+    rig.page.locator("#libraryRows .more", has_text="All recordings").click()
+    rig.page.wait_for_selector("#libraryRows .row.branch >> nth=1")
+    titles = rig.page.locator("#libraryRows .row.branch .title").all_inner_texts()
+    assert titles == ["All", "Northwind News"], titles  # Coming up is the home's own
+    assert rig.page.locator("#libraryUp").is_visible()
+    rig.shot("recordings-all")
+    rig.page.click("#libraryUp")  # the home again
+    rig.page.wait_for_selector("#libraryRows .rechud")
+
+
 def scenario_lists_after_reconnect(rig: Rig) -> None:
     """An answer to an earlier ask shows nothing; after a reconnect (the phone slept) the list
     shown comes again, asked by its key, which holds across sessions."""
@@ -2041,6 +2164,7 @@ SCENARIOS.update(
         "remote-look": scenario_remote_look,
         "guide-look": scenario_guide_look,
         "library-look": scenario_library_look,
+        "recordings-home": scenario_recordings_home,
         "recordings": scenario_recordings,
         "lists-after-reconnect": scenario_lists_after_reconnect,
         "more-numpad": scenario_more_numpad,
