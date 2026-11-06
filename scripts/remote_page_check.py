@@ -641,6 +641,42 @@ def scenario_guide_look(rig: Rig) -> None:
     rig.shot("guide-look")
 
 
+def scenario_library_look(rig: Rig) -> None:
+    """2.9.7: the Library as the TV's: its tabs underlined, Refresh an icon, a genre's titles
+    as the Library's generated cards two to a row (the TV's hue), a long title on two lines."""
+    sid = paired_sid(rig)
+    mark = rig.events.mark()
+    rig.page.click("[data-tab=library]")
+    answer(rig, sid, rig.events.wait(Get, where=lambda e: e.what == "genres", after=mark), GENRES)
+    rig.page.wait_for_selector("#libraryRows .row.branch >> nth=1")
+    assert rig.page.locator("#libraryChips.seg").count() == 1
+    assert rig.page.locator("#libraryRefresh svg").count() == 1
+    rig.shot("library-look-genres")
+    mark = rig.events.mark()
+    rig.page.locator("#libraryRows .row.branch", has_text="Drama").click()
+    ask = rig.events.wait(Get, where=lambda e: e.what == "library", after=mark)
+    page = titles_page(0, 6)
+    long = "A Very Long Documentary Title About the Salt Roads of Old"
+    page["items"][1] = {"id": "c2", "title": long, "sub": "2024", "hue": 0.3, "plays": True}
+    answer(rig, sid, ask, page)
+    rig.page.wait_for_selector("#libraryRows .card >> nth=5")
+    assert rig.page.locator("#libraryRows.cards").count() == 1
+    card = rig.page.locator("#libraryRows .card").nth(1)
+    box = card.bounding_box()
+    assert box is not None and 1.4 < box["height"] / box["width"] < 1.6, box  # 2:3, as the TV's
+    background = card.evaluate("e => getComputedStyle(e).backgroundImage")
+    assert "linear-gradient" in background, background
+    title = card.locator(".card-title")
+    lines = title.evaluate(
+        "e => Math.round(e.clientHeight / parseFloat(getComputedStyle(e).lineHeight))"
+    )
+    assert lines <= 2, lines
+    below = rig.page.locator("#libraryRows .card").nth(3).bounding_box()
+    assert below is not None and below["y"] >= box["y"] + box["height"], (box, below)  # no overlap
+    assert title.is_visible()
+    rig.shot("library-look")
+
+
 def scenario_screen_reader(rig: Rig) -> None:
     """What a screen reader says on the phone: the icon buttons in QiTV's language, Mute
     pressed while muted, and which bottom tab is open."""
@@ -2004,6 +2040,7 @@ SCENARIOS.update(
         "library-open": scenario_library_open,
         "remote-look": scenario_remote_look,
         "guide-look": scenario_guide_look,
+        "library-look": scenario_library_look,
         "recordings": scenario_recordings,
         "lists-after-reconnect": scenario_lists_after_reconnect,
         "more-numpad": scenario_more_numpad,

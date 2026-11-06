@@ -27,6 +27,7 @@
   <symbol id="i-search" viewBox="0 0 24 24"><circle cx="11" cy="11" r="7"/><path d="M20 20l-3.6-3.6"/></symbol>
   <symbol id="i-more" viewBox="0 0 24 24"><circle cx="5" cy="12" r="1.7" class="solid"/><circle cx="12" cy="12" r="1.7" class="solid"/><circle cx="19" cy="12" r="1.7" class="solid"/></symbol>
   <symbol id="i-plus" viewBox="0 0 24 24"><path d="M12 5v14M5 12h14"/></symbol>
+  <symbol id="i-refresh" viewBox="0 0 24 24"><path d="M19.5 12a7.5 7.5 0 1 1-2.2-5.3"/><path d="M19.5 4.5v4h-4"/></symbol>
   <symbol id="i-minus" viewBox="0 0 24 24"><path d="M5 12h14"/></symbol>
   <symbol id="i-rew" viewBox="0 0 24 24"><path d="M11 6v12L3 12z" class="solid"/><path d="M21 6v12l-8-6z" class="solid"/></symbol>
   <symbol id="i-fwd" viewBox="0 0 24 24"><path d="M3 6v12l8-6z" class="solid"/><path d="M13 6v12l8-6z" class="solid"/></symbol>
@@ -206,11 +207,11 @@
       <h1 id="libraryTitle">Library</h1>
       <div class="where"><button type="button" class="switch" role="switch" aria-checked="false" data-where="phone" data-tl="phone"><span class="knob"></span></button><span class="where-label" data-t="phone">Phone</span></div>
     </div>
-    <div class="chips" id="libraryChips">
+    <div class="seg libtabs" id="libraryChips">
       <button type="button" class="on" data-lib="movies" data-t="movies">Movies</button>
       <button type="button" data-lib="series" data-t="series">Series</button>
       <button type="button" data-lib="recordings" data-t="recordings">Recordings</button>
-      <button type="button" id="libraryRefresh" data-t="refresh">Refresh</button>
+      <button type="button" class="icon" id="libraryRefresh" data-tl="refresh"><svg><use href="#i-refresh"/></svg></button>
     </div>
     <label class="sr" for="libraryFind"></label>
     <input class="field" id="libraryFind" type="search" autocomplete="off" autocapitalize="off" enterkeyhint="search">

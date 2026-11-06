@@ -1160,6 +1160,7 @@ let libraryTimer = null;
 
 function showLibraryLevel() {
   const genres = library.level === "genres";
+  if (genres) $("libraryRows").classList.remove("cards");
   $("libraryUp").hidden = genres;
   $("libraryUp").querySelector("span").textContent = w(library.section === "recordings" ? "recordings" : "genres");
   $("libraryChips").hidden = !genres;
@@ -1186,6 +1187,33 @@ function askLibrary(page) {
   const { section, find } = library;
   if (library.level === "genres") ask(library, { what: "genres", section, page, find });
   else ask(library, { what: "library", section, genre: library.genre, page, find });
+}
+
+// 2.9.7: a title as the TV Library's own generated card: a gradient in its hue (the TV's,
+// else the page's colour), the title at its foot, how far it was watched; a recording's
+// wide, with its length and NEW. A tap does what a row's did.
+function libraryCard(item, wide) {
+  const card = el("button", `row card${wide ? " wide" : ""}`);
+  card.type = "button";
+  if (typeof item.hue === "number") {
+    const hue = Math.round(item.hue * 360);
+    card.style.backgroundImage = `linear-gradient(180deg, hsl(${hue} 40% 36%), hsl(${hue} 44% 16%))`;
+  } else {
+    card.style.backgroundImage = `linear-gradient(180deg, ${colour(item.title)}, #12161c)`;
+  }
+  if (item.len) card.append(el("span", "badge len", item.len));
+  if (item.badge && item.badge.text) card.append(el("span", `badge ${item.badge.tone || "quiet"}`, item.badge.text));
+  card.append(el("span", "card-title", item.title));
+  if (wide && item.sub) card.append(el("span", "card-sub", item.sub));
+  if (typeof item.progress === "number") {
+    const bar = el("div", "prog");
+    const fill = el("i");
+    fill.style.width = `${(item.progress * 100).toFixed(1)}%`;
+    bar.append(fill);
+    card.append(bar);
+  }
+  tapRow(card, item.id, { plays: !!item.plays, name: item.title });
+  return card;
 }
 
 function libraryRow(item) {
@@ -1245,7 +1273,13 @@ function onLibrary(message) {
   Object.assign(library, { genre: message.genre, title: message.title, total: message.count });
   showLibraryLevel();
   const retry = () => openLibraryAt("titles", library.genre, library.title);
-  placePage($("libraryRows"), library, message, message.items.map(libraryRow), retry);
+  // 2.9.7: titles as the TV's cards, two to a row (an airing's row keeps its actions)
+  const cards = !message.items.some((item) => Array.isArray(item.acts));
+  const box = $("libraryRows");
+  box.classList.toggle("cards", cards);
+  const wide = library.section === "recordings";
+  const rows = message.items.map((item) => (cards ? libraryCard(item, wide) : libraryRow(item)));
+  placePage(box, library, message, rows, retry);
 }
 
 function bindLibrary() {
