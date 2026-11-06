@@ -158,7 +158,7 @@ def _short_id(value: object) -> bool:
 
 LIBRARY_SECTIONS = ("movies", "series", "recordings")  # 2.9.7: the phone's Recordings
 # 2.9.7: what a phone may press on an airing of its Recordings (never Edit: a desktop dialog)
-DESK_ACTIONS = ("stop", "try_now", "skip", "cancel", "remove_rule")
+DESK_ACTIONS = ("stop", "try_now", "skip", "cancel", "remove_rule", "watch")
 
 
 def _int(value: object) -> Optional[int]:

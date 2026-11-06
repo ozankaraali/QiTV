@@ -188,7 +188,7 @@ class MessageTests(unittest.TestCase):
     def test_the_recordings_section_and_an_airings_action(self):  # 2.9.7
         ask = {"t": "get", "what": "genres", "section": "recordings", "page": 0, "find": ""}
         self.assertEqual(parse_phone_message(ask)["section"], "recordings")
-        for do in ("stop", "try_now", "skip", "cancel", "remove_rule"):
+        for do in ("stop", "try_now", "skip", "cancel", "remove_rule", "watch"):
             self.assertEqual(
                 parse_phone_message({"t": "desk", "id": "h4", "do": do}),
                 {"t": "desk", "id": "h4", "do": do},

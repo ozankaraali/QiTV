@@ -219,6 +219,7 @@ class Entry:
     start: float = 0.0
     channel: str = ""
     logo: str = ""
+    stop: float = 0.0  # 2.9.7: its airing's (or the recording's) end, unix; 0 unknown
 
 
 @dataclass(frozen=True)
@@ -490,6 +491,7 @@ def now_entries(recordings: Iterable[Recording], waiting: Iterable[Waiting]) -> 
                 since=rec.since,
                 sort=rec.since,
                 channel=rec.channel,
+                stop=float(rec.until or 0),
             )
         )
     for wait in waiting:
@@ -620,6 +622,7 @@ def _airing_entry(
         start=start,
         channel=channel,
         logo=logo,
+        stop=stop,
     )
 
 

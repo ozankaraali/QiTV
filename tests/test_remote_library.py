@@ -582,7 +582,13 @@ class PhoneRecordingsTests(unittest.TestCase):  # 2.9.7: the phone's Recordings 
         items = self.last("library")["items"]
         self.assertEqual([i["title"] for i in items], ["Evening News", "Late film"])
         self.assertNotIn("plays", items[0])
-        self.assertEqual(items[0]["acts"], [{"do": "stop", "label": "Stop", "danger": True}])
+        self.assertEqual(  # Watch (on the TV) and Stop, as the desktop's row
+            items[0]["acts"],
+            [
+                {"do": "watch", "label": "Watch", "danger": False},
+                {"do": "stop", "label": "Stop", "danger": True},
+            ],
+        )
         self.assertEqual(items[1]["acts"], [{"do": "skip", "label": "Skip", "danger": False}])
         self.assertEqual(
             self.library.handles.get(items[1]["id"]), ("desk", ("airing:t@100000", ("skip",)))
@@ -613,6 +619,45 @@ class PhoneRecordingsTests(unittest.TestCase):  # 2.9.7: the phone's Recordings 
         self.library.titles("recordings", keys["Coming up"], 0, "")
         late = self.last("library")["items"][1]
         self.assertEqual(late["tint"], tint("Harbor News 24"))
+
+    def home(self):
+        return self.rows()["home"]
+
+    def test_the_home_has_what_records_the_next_airings_and_the_latest(self):  # 2.9.7
+        keys = {r["title"]: r["id"] for r in self.rows()["rows"]}
+        home = self.home()
+        self.assertEqual([n["title"] for n in home["now"]], ["Evening News"])
+        self.assertEqual([a["do"] for a in home["now"][0]["acts"]], ["watch", "stop"])
+        (late,) = home["coming"]
+        self.assertEqual((late["title"], late["channel"]), ("Late film", "Harbor News 24"))
+        self.assertRegex(late["time"], r"^\d\d:\d\d$")
+        self.assertTrue(late["day"])
+        self.assertEqual(
+            [r["title"] for r in home["recent"]], ["Night Match", "Evening News", "Kitchen Stories"]
+        )
+        self.assertEqual((home["recorded"], home["more"]), (3, 0))
+        self.assertEqual(home["coming_key"], keys["Coming up"])
+
+    def test_a_recording_now_shows_once(self):
+        desk = self.desk
+        self.entries[0] = desk.Entry(
+            "rec:sched:t@100000", desk.NOW, "Late film", status="REC", channel="Harbor News 24"
+        )
+        home = self.home()
+        self.assertEqual([n["title"] for n in home["now"]], ["Late film"])
+        self.assertEqual(home["coming"], [])  # its airing isn't repeated below it
+
+    def test_many_recording_now_are_compact_rows_four_at_most(self):
+        desk = self.desk
+        now = [
+            desk.Entry(f"rec:b{k}", desk.NOW, f"Channel {k}", channel=f"Channel {k}")
+            for k in range(6)
+        ]
+        self.entries[:1] = now
+        self.assertEqual(len(self.home()["now"]), 4)
+
+    def test_a_find_sends_no_home(self):
+        self.assertNotIn("home", self.rows("night"))
 
     def test_a_find_narrows_the_channels_and_finds_recordings(self):
         message = self.rows("night")

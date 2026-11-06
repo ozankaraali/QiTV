@@ -19,11 +19,13 @@ a desktop dialog), each pressed through its handle ("desk").
 
 from __future__ import annotations
 
+from datetime import datetime
+import time
 from typing import Any, Callable, Optional
 
 from PySide6.QtCore import QObject, QTimer
 
-from services import recording_desk as desk, recordings_library as rl
+from services import i18n, recording_desk as desk, recordings_library as rl
 from services.i18n import translate
 from services.library import Genre, LibraryCache, LibraryModel, title_of
 from services.navigation import item_key
@@ -39,7 +41,9 @@ TITLE_CHARS = 80
 SETTLE_MS = 250  # loads arriving together (several providers) answer once
 RECORDINGS = "recordings"  # 2.9.7: the phone's Recordings section
 # 2.9.7: what an airing's row lets the phone press (Edit… opens a desktop dialog: not offered)
-PHONE_ACTIONS = (desk.STOP, desk.TRY_NOW, desk.SKIP, desk.CANCEL, desk.REMOVE_RULE)
+PHONE_ACTIONS = (desk.WATCH, desk.STOP, desk.TRY_NOW, desk.SKIP, desk.CANCEL, desk.REMOVE_RULE)
+# 2.9.7: the Recordings home's (as the desktop's Tonight): recording now, next airings, latest
+HOME_NOW, HOME_COMING, HOME_RECENT = 4, 5, 4
 
 
 def _pages(count: int, size: int) -> int:
@@ -327,6 +331,7 @@ class PhoneLibrary(QObject):
             if find.strip():
                 found = library.items(rl.ALL, find)
         shown = found[page * LIBRARY_PAGE : (page + 1) * LIBRARY_PAGE]
+        home = self._rec_home() if page == 0 and not find.strip() else None
         message: dict = {
             "t": "genres",
             "section": RECORDINGS,
@@ -339,12 +344,64 @@ class PhoneLibrary(QObject):
             "loading": False,
             "searching": False,
         }
-        signature = (
+        signature: tuple = (
             RECORDINGS,
             tuple((r.get("id"), r["title"], r.get("count")) for r in rows),
             tuple(title_of(i) for i in shown),
         )
+        if home is not None:
+            message["home"] = home
+            signature += (  # what it shows, not its clock (the phone counts the time)
+                tuple(n["title"] for n in home["now"]),
+                tuple((c["title"], c.get("start")) for c in home["coming"]),
+                tuple(r["title"] for r in home["recent"]),
+            )
         return message, signature
+
+    def _rec_home(self) -> dict:
+        """The Recordings home, as the desktop's Tonight: what records now (4 at most, once:
+        its airing isn't listed again), the next airings, the latest recordings."""
+        entries = self._rec_entries()
+        now = [e for e in entries if e.title and e.section == desk.NOW]
+        recording = {e.key[len("rec:sched:") :] for e in now if e.key.startswith("rec:sched:")}
+        coming = [
+            e
+            for e in entries
+            if e.title and e.section == desk.COMING and e.key.partition(":")[2] not in recording
+        ]
+        library = self._rec_library
+        recorded = library.items(rl.ALL) if library is not None else []
+        return {
+            "now": [self._now_row(e) for e in now[:HOME_NOW]],
+            "coming": [self._coming_row(e) for e in coming[:HOME_COMING]],
+            "more": max(0, len(coming) - HOME_COMING),
+            "coming_key": self._key(rl.COMING),
+            "recent": [self._recording_row(i, recorded) for i in recorded[:HOME_RECENT]],
+            "recorded": len(recorded),
+        }
+
+    def _now_row(self, entry: Any) -> dict:
+        """What records now: its row, its channel, how long it has run and its end."""
+        row = self._airing_row(entry)
+        row["channel"] = entry.channel[:TITLE_CHARS]
+        row["elapsed_s"] = round(time.monotonic() - entry.since) if entry.since else 0
+        row["until"] = entry.stop
+        return row
+
+    def _coming_row(self, entry: Any) -> dict:
+        """An airing to come: its time and day apart (the phone draws them as the TV's thin
+        numerals), its kind."""
+        row = self._airing_row(entry)
+        moment = datetime.fromtimestamp(entry.start) if entry.start else None
+        row.update(
+            channel=entry.channel[:TITLE_CHARS],
+            time=moment.strftime("%H:%M") if moment else "",
+            day=i18n.upper(_short_day(moment)) if moment else "",
+            start=entry.start,
+            stop=entry.stop,
+            kind=i18n.upper(entry.status) if entry.status else "",
+        )
+        return row
 
     def _rec_titles_page(self, page: int) -> tuple[dict, tuple]:
         library, find, genre = self._rec_library, self._find(), self._rec_genre
@@ -484,3 +541,10 @@ def _shown(catalog: Any) -> str:
     """The provider `catalog` shows (ALL_PROVIDERS for all of them)."""
     source = getattr(catalog, "source", None)
     return str(source() if callable(source) else catalog.current_provider_name())
+
+
+def _short_day(moment: datetime) -> str:
+    """2.9.7: a day as the app's language shortens it ("Fri")."""
+    from PySide6.QtCore import QLocale
+
+    return str(i18n.app_locale().dayName(moment.isoweekday(), QLocale.FormatType.ShortFormat))
