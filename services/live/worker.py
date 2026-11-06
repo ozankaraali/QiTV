@@ -1267,12 +1267,13 @@ class _Session:
                 guard = self._guard
                 pieces = [item] if guard is None else guard.feed(item)
                 if guard is not None and guard.not_live and guard.last is not None:
-                    media, seconds = guard.last
+                    media, seconds, size = guard.last
                     guard.last = None
                     _LOG.info(
-                        "A connection brought %.0f s of media in %.1f s: a recording, not the"
-                        " channel; dropped.",
+                        "A connection brought %.0f s of media (%.0f kbit/s) in %.1f s: a"
+                        " recording, not the channel; dropped.",
                         media,
+                        size * 8 / 1000 / max(media, 1.0),
                         seconds,
                     )
                     self._not_live += 1
