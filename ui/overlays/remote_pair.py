@@ -46,6 +46,7 @@ class PairOverlay(Overlay):
         self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
         self._url = ""
         self._error = ""
+        self._note = ""
         self._matrix: list[bytes] = []
         self._since = QElapsedTimer()
         self._since.start()
@@ -95,6 +96,16 @@ class PairOverlay(Overlay):
 
     def error_text(self) -> str:
         return self._error
+
+    def set_note(self, text: str) -> None:
+        """Under the code: what the phone should know about it (only this network can use it);
+        "" clears it."""
+        if text != self._note:
+            self._note = text
+            self.update()
+
+    def note_text(self) -> str:
+        return self._note
 
     def module_count(self) -> int:
         return len(self._matrix)
@@ -150,6 +161,11 @@ class PairOverlay(Overlay):
         p.setPen(qcolor(PALETTE.text, PALETTE.text_muted_alpha))
         small = QRectF(0, below + un.px(3.2), self.width(), un.px(2.4))
         p.drawText(small, Qt.AlignmentFlag.AlignCenter, translate(PAIR_ROTATES))
+        if self._note and self._matrix:
+            p.setPen(qcolor(PALETTE.warn))
+            note = QRectF(un.px(2.0), below + un.px(6.0), self.width() - un.px(4.0), un.px(5.0))
+            flags = Qt.AlignmentFlag.AlignHCenter | Qt.AlignmentFlag.AlignTop
+            p.drawText(note, int(flags | Qt.TextFlag.TextWordWrap), self._note)
 
     def _paint_qr(self, p: QPainter, square: QRectF) -> None:
         count = len(self._matrix)
