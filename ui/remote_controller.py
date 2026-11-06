@@ -93,6 +93,11 @@ PHONE_GONE_TEXT = N_("The phone left before the stream reached it")
 START_FAILED_TEXT = N_(
     "The phone remote couldn't start. The log says why: Help → Show the Log File."
 )
+# i18n: under the pairing QR when the relay (remote.qitv.app) can't be reached: the code opens
+# this computer's own address, which only a phone on the same network can open
+HOME_ONLY_TEXT = N_(
+    "Not connected to remote.qitv.app: only a phone on this network can pair with this code"
+)
 
 
 class _PhoneChoice:
@@ -148,6 +153,7 @@ class RemoteController(QObject):
         self._timer.timeout.connect(self._tick)
         self._names: dict[str, str] = {}
         self.status: dict = {"home_url": "", "relay": "off"}
+        self._code_url = ""  # the pairing screen's code, "" while it is closed or starting
         self._guides: dict[str, PhoneGuide] = {}  # each phone's own Guide, by session
         self._libraries: dict[str, PhoneLibrary] = {}  # and its own Library
         self._channel_lists: dict[str, PhoneGuide] = {}  # and the Remote tab's channel list
@@ -431,7 +437,9 @@ class RemoteController(QObject):
             if overlay is not None:
                 overlay.dismiss()  # done: one phone per showing
         elif isinstance(event, Code):
+            self._code_url = event.url
             self.codeChanged.emit(event.url)
+            self._note_home_only()
         elif isinstance(event, Status):
             self.status = {"home_url": event.home_url, "relay": event.relay}
             self.statusChanged.emit(dict(self.status))
@@ -439,6 +447,7 @@ class RemoteController(QObject):
             if overlay is not None:
                 failed = event.relay == "error" and not event.home_url
                 overlay.set_error(translate(START_FAILED_TEXT) if failed else "")
+            self._note_home_only()
 
     # ---- the second screen -----------------------------------------------------------------
 
@@ -1198,6 +1207,16 @@ class RemoteController(QObject):
             logger.error("Phone remote: opening a %s failed: %s", kind, safe_message(error))
         if self._phones:
             self._soon.start(AFTER_PRESS_MS)
+
+    def _note_home_only(self) -> None:
+        """The pairing screen's code opens this computer's own address while the relay is on
+        but out of reach: say that only a phone on this network can use it."""
+        overlay = getattr(self._window, "pair_overlay", None)
+        if overlay is None:
+            return
+        relay = self.status.get("relay", "off")
+        home_only = bool(self._code_url) and relay not in ("off", "online")
+        overlay.set_note(translate(HOME_ONLY_TEXT) if home_only else "")
 
     def _persist(self, data: dict) -> None:
         config = self._window.config_manager

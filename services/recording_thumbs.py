@@ -36,6 +36,7 @@ QUALITY = 82
 SMALLEST = 2 * 1024 * 1024  # bytes: a recording just begun has no picture worth taking yet
 FRAMES = 6  # the frame kept: a few after the seek, past the first (often grey) ones
 TIMEOUT_S = 8.0
+QUIT_WAIT_S = 2.0  # the quit waits this long at most for a frame under way to stop
 STEP_S = 0.1  # how often the reading looks whether the file ended
 INSTANCE_ARGS = (
     "--quiet",
@@ -94,11 +95,13 @@ class Thumbnails(QObject):
         global _folder
         _folder = folder
         self._folder = folder
-        self._grab = grab or grab_frame
+        self._grab = grab or self._read_frame
         self._made: set[str] = set()  # names known to exist
         self._asked: set[str] = set()  # paths asked for (made, failed or under way)
-        self._jobs: "queue.Queue[Optional[tuple[str, float]]]" = queue.Queue()
+        # (path, at): its picture made; (path, None): its picture goes (its recording went)
+        self._jobs: "queue.Queue[Optional[tuple[str, Optional[float]]]]" = queue.Queue()
         self._closed = False
+        self._stopping = threading.Event()  # a frame under way stops (the quit)
         self._worker: Optional[threading.Thread] = None
         self._found.connect(self._on_found)
         self._lost.connect(self._on_lost)
@@ -124,13 +127,28 @@ class Thumbnails(QObject):
             self._start()
         return ""
 
+    def forget(self, path: str) -> None:
+        """Release review M7: the recording at `path` was deleted: its picture goes too (on
+        the worker), and a recording at that path later is read anew."""
+        if not path or self._closed:
+            return
+        self._made.discard(name_of(path))
+        self._asked.discard(path)
+        self._jobs.put((path, None))
+        self._start()
+
     def shutdown(self, wait: bool = False) -> None:
-        """Nothing more is read; `wait`: until the worker is done (tests; a frame under way
-        takes up to TIMEOUT_S, so the app doesn't wait)."""
+        """Nothing more is read: a frame under way stops, and the worker is waited for, at
+        most QUIT_WAIT_S (release review M7: libVLC reading on through the interpreter's
+        shutdown called into Python); `wait` (tests): until it is done."""
         self._closed = True
+        self._stopping.set()
         self._jobs.put(None)
-        if wait and self._worker is not None:
-            self._worker.join(TIMEOUT_S + 2)
+        if self._worker is not None:
+            self._worker.join(TIMEOUT_S + 2 if wait else QUIT_WAIT_S)
+
+    def _read_frame(self, path: str, at: float) -> Optional[QImage]:
+        return grab_frame(path, at, cancelled=self._stopping.is_set)
 
     def _start(self) -> None:
         if self._worker is None:
@@ -157,6 +175,12 @@ class Thumbnails(QObject):
             path, at = job
             name = name_of(path)
             target = os.path.join(self._folder, name)
+            if at is None:  # its recording was deleted
+                try:
+                    os.remove(target)
+                except OSError:
+                    pass  # none was made
+                continue
             try:
                 if os.path.isfile(target):
                     self._found.emit(name)
@@ -182,9 +206,15 @@ class Thumbnails(QObject):
                 self._lost.emit(path)
 
 
-def grab_frame(path: str, at: float, vlc_module: Any = None) -> Optional[QImage]:
+def grab_frame(
+    path: str,
+    at: float,
+    vlc_module: Any = None,
+    cancelled: Optional[Callable[[], bool]] = None,
+) -> Optional[QImage]:
     """A frame of the recording at `path`, `at` seconds in, WIDTH × HEIGHT (None when none
-    came within TIMEOUT_S). Muted and with no window: libVLC draws into memory."""
+    came within TIMEOUT_S, or `cancelled()` said stop). Muted and with no window: libVLC
+    draws into memory."""
     if vlc_module is None:
         try:
             import vlc as bundled
@@ -233,6 +263,8 @@ def grab_frame(path: str, at: float, vlc_module: Any = None) -> Optional[QImage]
             waited += STEP_S
             if player.get_state() in ended:  # past its end, or unreadable: no frame
                 break
+            if cancelled is not None and cancelled():
+                break  # QiTV quits
     finally:
         player.stop()
         player.release()

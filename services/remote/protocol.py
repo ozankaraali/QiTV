@@ -606,4 +606,6 @@ class Code:
 @dataclass(frozen=True)
 class Status:
     home_url: str
-    relay: str  # "off", "connecting", "online", "resting" or "error"
+    # "off", "connecting", "online", "away" (the last try didn't get in), "resting", "replaced"
+    # or "error"
+    relay: str

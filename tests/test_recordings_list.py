@@ -127,6 +127,17 @@ class RecordingsListTests(unittest.TestCase):
         self.assertFalse(path.exists())
         self.assertEqual(shelf.items(), [])
 
+    def test_a_deleted_recording_is_said_for_its_picture_to_go_too(self):  # review M7
+        path = touch(self.folder, "News 2026-10-19 21.30.ts")
+        shelf = RecordingsList(self.config)
+        gone = []
+        shelf.deleted.connect(gone.append)
+        shelf.refresh()
+        self.wait_for(shelf, 0)
+        shelf.delete(str(path))
+        self.wait_for(shelf, 1)
+        self.assertEqual(gone, [str(path)])
+
     def test_a_file_that_cannot_go_says_why_and_stays_listed(self):
         # Windows refuses to delete a file another program (a player) has open.
         path = touch(self.folder, "News 2026-10-19 21.30.ts")

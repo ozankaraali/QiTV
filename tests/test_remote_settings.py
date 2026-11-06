@@ -152,6 +152,8 @@ class ReviewFixSettingsTests(base.WindowCase):
         self.assertEqual(dialog.remote_relay_label.text(), "Connected")
         remote.statusChanged.emit({"home_url": "", "relay": "replaced"})
         self.assertIn("Another QiTV", dialog.remote_relay_label.text())
+        remote.statusChanged.emit({"home_url": "", "relay": "away"})
+        self.assertEqual(dialog.remote_relay_label.text(), "Can't connect; trying again")
 
     def test_phone_list_follows_pairings_while_open(self):
         dialog = self.dialog()
@@ -189,6 +191,27 @@ class ReviewFixSettingsTests(base.WindowCase):
         self.window.remote.bridge.post(Status("", "error"))
         self.assertTrue(overlay.error_text())
         overlay.grab()
+
+    def test_a_code_only_this_network_can_use_says_so(self):
+        # The relay out of reach: the code opens the computer's own address, which a phone on
+        # another network (or a guest Wi-Fi's) never reaches.
+        from services.remote.protocol import Code, Status
+
+        self.show()
+        overlay = self.window.pair_overlay
+        with mock.patch.object(self.window.remote, "set_pairing"):
+            overlay.open()
+        post = self.window.remote.bridge.post
+        post(Status("http://192.168.1.20:5384/", "away"))
+        post(Code(URL))
+        self.assertIn("remote.qitv.app", overlay.note_text())
+        overlay.grab()
+        post(Status("http://192.168.1.20:5384/", "online"))
+        post(Code("https://remote.qitv.app/#1.ROOM.AAAA.BBBB"))
+        self.assertEqual(overlay.note_text(), "")
+        post(Status("http://192.168.1.20:5384/", "off"))  # the relay turned off in Settings
+        post(Code(URL))
+        self.assertEqual(overlay.note_text(), "")
 
 
 class OwnerCheckSettingsTests(base.WindowCase):

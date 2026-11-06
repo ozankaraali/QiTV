@@ -646,16 +646,21 @@ class PipControls(QObject):
         self._reopens.pop(slot.name, None)
         self._playing_since.pop(slot.name, None)  # how long it played counts from its open
         self._cancel_reopen()
-        # The small picture keeps its time-shift in memory: one disk ring at most.
-        kwargs = start_kwargs(self._live_start(target, url), self.config, disk=False)
-        if borrowed is not None:
-            kwargs["borrowed"] = borrowed  # 2.9.7: no slot of its own (SessionManager)
-        sessions.open_pip(
-            target.item,
-            provider=item_provider.provider_dict(self.catalog, target.item),
-            xtream_max=item_provider.max_connections(self.catalog, target.item),
-            start_kwargs=kwargs,
-        )
+        try:
+            # The small picture keeps its time-shift in memory: one disk ring at most.
+            kwargs = start_kwargs(self._live_start(target, url), self.config, disk=False)
+            if borrowed is not None:
+                kwargs["borrowed"] = borrowed  # 2.9.7: no slot of its own (SessionManager)
+            sessions.open_pip(
+                target.item,
+                provider=item_provider.provider_dict(self.catalog, target.item),
+                xtream_max=item_provider.max_connections(self.catalog, target.item),
+                start_kwargs=kwargs,
+            )
+        except Exception:
+            if borrowed is not None:
+                borrowed.give_back()  # never started: its owner has it back (review M3)
+            raise
         if self._sound is not None:  # its old stream stopped: the new one opens with it
             self._sound(slot.playback, target.item)
         slot.group_key = target.group_key

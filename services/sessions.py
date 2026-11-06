@@ -539,6 +539,18 @@ class SessionManager(QObject):
             return
         if self.wanted(self._slot(name).live):  # 2.9.7: the next programme records on it
             return
+        self._let_go_aside(name)
+
+    def recheck_aside(self) -> None:
+        """2.9.7 (release review M4): the schedule changed. A background slot kept for the
+        next programme that did not start on it (refused, or skipped meanwhile) records
+        nothing and is wanted no more: it leaves its channel, as at its recording's end."""
+        for name in list(self._aside):
+            slot = self._slot(name)
+            if not records(slot) and not self.wanted(slot.live):
+                self._let_go_aside(name)
+
+    def _let_go_aside(self, name: str) -> None:
         self._aside.remove(name)  # its recording ended: it leaves its channel (kept)
         slot = self._slot(name)
         self._set_background(slot, False)

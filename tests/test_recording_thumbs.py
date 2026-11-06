@@ -4,7 +4,10 @@ kept as a small picture in the cache; tiles show it through the image cache's ow
 import asyncio
 import os
 import tempfile
+import threading
+import time
 import unittest
+from unittest import mock
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
@@ -138,8 +141,94 @@ class ThumbnailsTests(unittest.TestCase):
         self.assertEqual(thumbs.url(self.item()), "")
         self.assertEqual(self.grabbed, [])
 
+    def test_a_deleted_recordings_picture_goes_with_it(self):  # release review M7
+        thumbs = self.thumbs()
+        thumbs.url(self.item())
+        self.assertTrue(wait(lambda: thumbs.url(self.item())))
+        made = rt.file_of(thumbs.url(self.item()))
+        self.assertTrue(os.path.isfile(made))
+        thumbs.forget(self.recording)
+        self.assertTrue(wait(lambda: not os.path.exists(made)))
+        self.assertEqual(thumbs.url(self.item()), "")  # one at that path again: read anew
+
+    def test_quitting_stops_a_frame_under_way_and_waits_for_it(self):  # release review M7
+        # A daemon reading on through the interpreter's shutdown left libVLC's video thread
+        # calling into Python: the quit stops the reading, and waits the moment it takes.
+        under_way = threading.Event()
+
+        def reading(path, at, cancelled):
+            under_way.set()
+            while not cancelled():
+                time.sleep(0.01)
+            return None
+
+        with mock.patch.object(rt, "grab_frame", reading):
+            thumbs = rt.Thumbnails(self.folder)
+            thumbs.url(self.item())
+            self.assertTrue(under_way.wait(5))
+            thumbs.shutdown()  # the window's: no wait asked
+            self.assertFalse(thumbs._worker.is_alive())
+
+
+class FakeVlc:
+    """libVLC's calls grab_frame makes: a player that plays and shows no frame."""
+
+    class CallbackDecorators:
+        VideoLockCb = VideoUnlockCb = VideoDisplayCb = staticmethod(lambda f: f)
+
+    class State:
+        Playing, Ended, Error, Stopped = range(4)
+
+    class _Media:
+        def add_option(self, option):
+            pass
+
+        def release(self):
+            pass
+
+    class _Player:
+        def video_set_callbacks(self, *callbacks):
+            pass
+
+        def video_set_format(self, *spec):
+            pass
+
+        def set_media(self, media):
+            pass
+
+        def play(self):
+            pass
+
+        def get_state(self):
+            return FakeVlc.State.Playing
+
+        def stop(self):
+            pass
+
+        def release(self):
+            pass
+
+    class Instance:
+        def __init__(self, args):
+            pass
+
+        def media_player_new(self):
+            return FakeVlc._Player()
+
+        def media_new_path(self, path):
+            return FakeVlc._Media()
+
+        def release(self):
+            pass
+
 
 class FrameTests(unittest.TestCase):
+    def test_a_frame_under_way_stops_when_asked(self):  # release review M7
+        started = time.monotonic()
+        image = rt.grab_frame(FIXTURE, 1.0, vlc_module=FakeVlc, cancelled=lambda: True)
+        self.assertIsNone(image)
+        self.assertLess(time.monotonic() - started, 1.0)  # not its 8 s wait for a frame
+
     def test_a_frame_of_a_real_recording_is_read_muted_and_offscreen(self):
         try:
             import vlc  # noqa: F401

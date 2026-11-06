@@ -1076,6 +1076,26 @@ class SetAsideTests(_Fixture):
         self.main.live.recordingChanged.emit(False)
         self.assertEqual(self.manager.background(), [])
 
+    def test_one_kept_for_a_next_programme_that_never_came_goes_on_a_recheck(self):
+        """2.9.7 release review M4: the next programme did not start on it (refused, or
+        skipped meanwhile): it stayed aside, paused on its stream, recording nothing. Looked
+        at again as the schedule changes, it leaves its channel; while it records, it stays."""
+        recording = [False]
+        self.main.live.recording = lambda: recording[0]
+        self.manager.wanted = lambda live: live is self.main.live
+        self.manager.set_aside("main")
+        self.main.live.recordingChanged.emit(False)
+        self.manager.recheck_aside()  # still wanted: it stays
+        self.assertEqual([s.name for s in self.manager.background()], ["main"])
+        self.manager.wanted = lambda live: False
+        recording[0] = True
+        self.manager.recheck_aside()  # the next one records on it: it stays
+        self.assertEqual([s.name for s in self.manager.background()], ["main"])
+        recording[0] = False
+        self.manager.recheck_aside()
+        self.assertEqual(self.manager.background(), [])
+        self.assertEqual(self.main_tuner.stops, 1)
+
     def test_not_while_the_grid_shows(self):
         self.manager.enter_grid()
         self.assertIsNone(self.manager.set_aside("main"))

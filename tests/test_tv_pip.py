@@ -867,6 +867,25 @@ class ScheduledRecordingPipTests(PipCase):  # 2.9.7: P on a channel recording on
         self.assertEqual(sorted(self.budget.holders("Home")), ["main"])  # no slot of its own
         self.assertTrue(self.sessions.pip_open())
 
+    def test_a_small_picture_that_fails_to_open_gives_the_session_back(self):
+        # 2.9.7 release review M3: lent and never opened, the recording's session was served
+        # for nobody, its stream held, after the recording ended.
+        from unittest import mock
+
+        self.start_large(0)
+        self.start_large(1)
+        given = []
+        self.controller.lend_scheduled = lambda channel, provider, purpose: (
+            Borrowed("lent1", lambda: given.append(True), recording=lambda: True)
+            if channel.get("id") == CHANNELS[0]["id"]
+            else None
+        )
+        with mock.patch("ui.pip_controls.start_kwargs", side_effect=RuntimeError("broken")):
+            with self.assertRaises(RuntimeError):
+                self.controller.handle(Action.PIP)
+        self.assertEqual(given, [True])
+        self.assertFalse(self.sessions.pip_open())
+
     def test_the_large_picture_tunes_it_on_the_recordings_session_asking_nothing(self):
         # One stream at the provider, held by the recording: the tune neither asks to stop
         # it nor is refused, and no slot of its own is taken.

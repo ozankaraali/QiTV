@@ -98,8 +98,9 @@ class RelayClient:
         import aiohttp
 
         backoff = MIN_BACKOFF_S
+        away = False  # the last try never got into the room: "away" while it tries again
         while True:
-            self.core.set_relay_state("connecting")
+            self.core.set_relay_state("away" if away else "connecting")
             connector = aiohttp.TCPConnector(family=self._family)
             self._up_since = 0.0
             try:
@@ -137,7 +138,8 @@ class RelayClient:
             except Exception as error:  # nothing may end the loop but stop()
                 logger.error("Phone remote: the relay client failed: %s", error, exc_info=True)
             self._drop_all()
-            self.core.set_relay_state("connecting")
+            away = not self._up_since
+            self.core.set_relay_state("away" if away else "connecting")
             uptime = time.monotonic() - self._up_since if self._up_since else 0.0
             await asyncio.sleep(MIN_BACKOFF_S if uptime >= STABLE_S else backoff)
             backoff = next_backoff(backoff, uptime)
