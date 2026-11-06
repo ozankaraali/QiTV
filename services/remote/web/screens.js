@@ -1300,7 +1300,8 @@ function onLibrary(message) {
   const box = $("libraryRows");
   box.classList.toggle("cards", cards);
   const wide = library.section === "recordings";
-  const rows = message.items.map((item) => (cards ? libraryCard(item, wide) : libraryRow(item)));
+  // an airing (it has its time) as the home's row
+  const rows = message.items.map((item) => (cards ? libraryCard(item, wide) : "time" in item ? comingRow(item) : libraryRow(item)));
   placePage(box, library, message, rows, retry);
 }
 
@@ -1335,15 +1336,8 @@ function recNowRow(rec, compact) {
   if (rec.title && rec.title !== channel) sub.append(el("span", "nowword", w("now")), el("span", "", rec.title));
   else sub.append(el("span", "", recClock(rec.elapsed_s || 0)));
   main.append(sub);
-  const left = rec.until > 0 ? rec.until - Date.now() / 1000 : 0;
-  if (left > 0) {
-    const bar = el("div", "prog");
-    const fill = el("i");
-    const elapsed = rec.elapsed_s || 0;
-    fill.style.width = `${((elapsed / (elapsed + left)) * 100).toFixed(1)}%`;
-    bar.append(fill);
-    main.append(bar);
-  }
+  const bar = recProgress(rec);
+  if (bar) main.append(bar);
   top.append(main);
   line.append(top);
   // one recording: ▶ Watch and ■ Stop beneath it; two or more: the desktop's compact rows, the
@@ -1365,8 +1359,25 @@ function recNowRow(rec, compact) {
 
 const REC_ICONS = { watch: "i-play", stop: "i-stop" };
 
+// how far a recording under way has come: its line, from its elapsed time and its end (none
+// without an end: one started with R)
+function recProgress(rec) {
+  const left = rec.until > 0 ? rec.until - Date.now() / 1000 : 0;
+  if (left <= 0) return null;
+  const bar = el("div", "prog");
+  const fill = el("i");
+  const elapsed = rec.elapsed_s || 0;
+  fill.style.width = `${((elapsed / (elapsed + left)) * 100).toFixed(1)}%`;
+  bar.append(fill);
+  return bar;
+}
+
+// an airing as the TV's row: its time a thin numeral with the day under it, the tile, the title
+// and its kind, the channel; the one recording now (in Coming up's full list) the warm row with
+// ● REC and its line
 function comingRow(airing) {
-  const row = el("button", "row coming");
+  const recording = !!(airing.badge && airing.badge.tone === "live");
+  const row = el("button", `row coming${recording ? " playing" : ""}`);
   row.type = "button";
   const when = el("span", "rnum thin when");
   when.append(el("span", "", airing.time || ""), el("small", "", airing.day || ""));
@@ -1375,8 +1386,10 @@ function comingRow(airing) {
   const main = el("div", "row-main");
   const top = el("div", "row-top");
   top.append(el("span", "title", airing.title));
-  if (airing.kind) top.append(tag(airing.kind));
+  if (airing.kind) top.append(recording ? tag(`● ${airing.kind}`, "live") : tag(airing.kind));
   main.append(top, el("div", "row-now", airing.channel || ""));
+  const bar = recording ? recProgress(airing) : null;
+  if (bar) main.append(bar);
   row.append(main);
   pressable(row);
   row.addEventListener("click", () => openActs(airing));

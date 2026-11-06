@@ -388,6 +388,15 @@ class PhoneLibrary(QObject):
         row["until"] = entry.stop
         return row
 
+    def _listed_airing(self, entry: Any) -> dict:
+        """Coming up's full list: each airing as the home's row; what records now also with how
+        long it has run and its end (the phone's warm row draws its line)."""
+        row = self._coming_row(entry)
+        if entry.section == desk.NOW:
+            row["elapsed_s"] = round(time.monotonic() - entry.since) if entry.since else 0
+            row["until"] = entry.stop
+        return row
+
     def _coming_row(self, entry: Any) -> dict:
         """An airing to come: its time and day apart (the phone draws them as the TV's thin
         numerals), its kind."""
@@ -413,8 +422,8 @@ class PhoneLibrary(QObject):
             title = genre[len(rl.CHANNEL_PREFIX) :] if genre.startswith(rl.CHANNEL_PREFIX) else ""
             title = title or translate(desk.ALL_TEXT)
         shown = listed[page * LIBRARY_PAGE : (page + 1) * LIBRARY_PAGE]
-        if genre == rl.COMING:
-            rows = [self._airing_row(entry) for entry in shown]
+        if genre == rl.COMING:  # 2.9.7: as the home's rows; what records now with its end
+            rows = [self._listed_airing(entry) for entry in shown]
         else:
             rows = [self._recording_row(item, listed) for item in shown]
         message: dict = {

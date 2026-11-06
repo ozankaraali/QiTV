@@ -1482,6 +1482,22 @@ def scenario_recordings_home(rig: Rig) -> None:
     rig.page.locator("#libraryRows .more", has_text="Coming up").click()
     ask = rig.events.wait(Get, where=lambda e: e.what == "library", after=mark)
     assert (ask.section, ask.genre) == ("recordings", "k1"), ask
+    # every airing as the home drew them; what records now the warm row with its line
+    recording = {
+        **now[0],
+        "time": "21:00",
+        "day": "THU",
+        "kind": "REC",
+        "badge": {"text": "REC", "tone": "live"},
+    }
+    page = {"t": "library", "section": "recordings", "genre": "k1", "title": "Coming up"}
+    listed = [recording, *coming]
+    answer(rig, sid, ask, {**page, "count": 3, "find": "", "page": 0, "pages": 1, "items": listed})
+    rig.page.wait_for_selector("#libraryRows .row.coming >> nth=2")
+    assert rig.page.locator("#libraryRows .row.coming.playing").count() == 1
+    assert rig.page.locator("#libraryRows .row.coming.playing .prog").count() == 1
+    assert rig.page.locator("#libraryRows .row.coming.playing .tag.live").count() == 1
+    rig.shot("recordings-coming-all")
     mark = rig.events.mark()
     rig.page.click("#libraryUp")  # back: the home again
     ask = rig.events.wait(Get, where=lambda e: e.what == "genres", after=mark)

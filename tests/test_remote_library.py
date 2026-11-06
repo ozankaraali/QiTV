@@ -594,6 +594,18 @@ class PhoneRecordingsTests(unittest.TestCase):  # 2.9.7: the phone's Recordings 
             self.library.handles.get(items[1]["id"]), ("desk", ("airing:t@100000", ("skip",)))
         )
 
+    def test_coming_up_rows_are_the_homes_what_records_now_with_its_end(self):  # 2.9.7
+        keys = {r["title"]: r["id"] for r in self.rows()["rows"]}
+        self.library.titles("recordings", keys["Coming up"], 0, "")
+        now, late = self.last("library")["items"]
+        self.assertEqual(late["channel"], "Harbor News 24")
+        self.assertRegex(late["time"], r"^\d\d:\d\d$")  # a thin numeral, the day under it
+        self.assertTrue(late["day"])
+        self.assertNotIn("until", late)
+        self.assertEqual(now["channel"], "Northwind News")
+        self.assertIn("until", now)  # the warm row's line
+        self.assertIn("elapsed_s", now)
+
     def test_rows_carry_the_desktops_badges_and_their_channel(self):  # 2.9.7: one look
         keys = {r["title"]: r["id"] for r in self.rows()["rows"]}
         self.library.titles("recordings", keys["Coming up"], 0, "")
