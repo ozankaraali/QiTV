@@ -152,11 +152,12 @@ class ZapBanner(Overlay):
     # ---- internals ----------------------------------------------------------------------
 
     def _reveal(self) -> None:
+        """Shown where the host stacks it (OverlayHost's order), never raised: shown again
+        while a channel opens, it rose over the channel list opened since (2.9.10)."""
         self._anim.stop()
         self._effect.setOpacity(1.0)
         self._layout()
         self.show()
-        self.raise_()
         self.update()
 
     def _fade_out(self) -> None:

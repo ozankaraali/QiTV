@@ -162,6 +162,19 @@ class BannerTest(Base):
         QTest.qWait(10)
         self.assertEqual((b.width(), b.height()), (800, round(400 * 0.48)))
 
+    def test_shown_again_it_stays_under_a_list_opened_over_it(self):
+        # 2.9.10: Enter back to the channel list while the channel opened: the banner, shown
+        # again every few seconds until the picture came, rose over the list each time.
+        b = ZapBanner(self.host)
+        listing = QWidget(self.host)  # added after it: above it (OverlayHost's order)
+        b.show_info(info())
+        listing.show()
+        listing.raise_()
+        b.show_info(info())
+        b.show_digits("1")
+        stack = [c for c in self.host.children() if c in (b, listing)]
+        self.assertEqual(stack, [b, listing])
+
 
 class HiddenHostTest(Base):
     """An overlay shown while its host is hidden lays out again when the host resizes."""
