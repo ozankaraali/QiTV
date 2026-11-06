@@ -55,6 +55,8 @@
 <main id="app">
   <header class="top">
     <button class="conn" id="tvButton" type="button"><i id="dot"></i><span id="tvName">QiTV</span></button>
+    <!-- 2.9.7: where a tap plays, for the Guide and the Library: in the top line, as the TV's -->
+    <div class="where"><button type="button" class="switch" role="switch" aria-checked="false" data-where="phone" data-tl="phone"><span class="knob"></span></button><span class="where-label" data-t="phone">Phone</span></div>
     <button class="menu" id="menuButton" type="button" aria-label="Menu" data-tl="menu"><svg><use href="#i-more"/></svg></button>
   </header>
   <div class="banner" id="banner" hidden></div>
@@ -146,7 +148,6 @@
     <div class="list-head">
       <button type="button" class="back" id="guideUp" hidden><svg><use href="#i-left"/></svg><span data-t="groups">Groups</span></button>
       <h1 id="guideTitle">Guide</h1>
-      <div class="where"><button type="button" class="switch" role="switch" aria-checked="false" data-where="phone" data-tl="phone"><span class="knob"></span></button><span class="where-label" data-t="phone">Phone</span></div>
     </div>
     <label class="sr" for="guideFind"></label>
     <input class="field" id="guideFind" type="search" autocomplete="off" autocapitalize="off" enterkeyhint="search">
@@ -205,7 +206,6 @@
     <div class="list-head">
       <button type="button" class="back" id="libraryUp" hidden><svg><use href="#i-left"/></svg><span data-t="genres">Genres</span></button>
       <h1 id="libraryTitle">Library</h1>
-      <div class="where"><button type="button" class="switch" role="switch" aria-checked="false" data-where="phone" data-tl="phone"><span class="knob"></span></button><span class="where-label" data-t="phone">Phone</span></div>
     </div>
     <div class="seg libtabs" id="libraryChips">
       <button type="button" class="on" data-lib="movies" data-t="movies">Movies</button>
@@ -219,9 +219,9 @@
   </section>
 
   <nav class="tabs" id="tabs" hidden>
-    <button type="button" class="on" data-tab="remote" aria-current="page"><svg><use href="#i-remote"/></svg><span data-t="remote">Remote</span></button>
-    <button type="button" data-tab="guide"><svg><use href="#i-guide"/></svg><span data-t="guide">Guide</span></button>
-    <button type="button" data-tab="library"><svg><use href="#i-lib"/></svg><span data-t="library">Library</span></button>
+    <button type="button" class="on" data-tab="remote" aria-current="page"><span data-t="remote">Remote</span></button>
+    <button type="button" data-tab="guide"><span data-t="guide">Guide</span></button>
+    <button type="button" data-tab="library"><span data-t="library">Library</span></button>
   </nav>
 </main>
 

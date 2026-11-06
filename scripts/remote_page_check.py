@@ -592,6 +592,12 @@ def scenario_remote_look(rig: Rig) -> None:
     assert colour == "rgb(106, 95, 158)", colour
     right = rig.page.evaluate("document.getElementById('listButton').getBoundingClientRect().right")
     assert right <= 320, right
+    assert rig.page.locator("#tabs svg").count() == 0  # the tabs as words, as the TV's
+    bar = rig.page.evaluate(
+        "getComputedStyle(document.querySelector('#tabs .on'), '::before').backgroundColor"
+    )
+    assert bar == "rgb(224, 138, 95)", bar  # the orange bar over the tab open
+    assert not rig.page.locator(".top .where").is_visible()  # the switch: Guide and Library
     rig.shot("remote-look")
     mark = rig.events.mark()
     rig.page.click("#listButton")
@@ -638,6 +644,9 @@ def scenario_guide_look(rig: Rig) -> None:
         "getComputedStyle(document.getElementById('guideFind')).backgroundColor"
     )
     assert fill in ("rgba(0, 0, 0, 0)", "transparent"), fill  # an outline, not a grey box
+    assert rig.page.locator(".top .where .switch").is_visible()  # in the top line
+    size = rig.page.evaluate("getComputedStyle(document.getElementById('guideTitle')).fontSize")
+    assert float(size[:-2]) <= 26, size  # a heading, not a giant title
     rig.shot("guide-look")
 
 
@@ -651,6 +660,10 @@ def scenario_library_look(rig: Rig) -> None:
     rig.page.wait_for_selector("#libraryRows .row.branch >> nth=1")
     assert rig.page.locator("#libraryChips.seg").count() == 1
     assert rig.page.locator("#libraryRefresh svg").count() == 1
+    assert not rig.page.locator("#libraryTitle").is_visible()  # the tabs say where
+    switch = rig.page.locator(".top .where .switch").bounding_box()
+    chips = rig.page.locator("#libraryChips").bounding_box()
+    assert switch and chips and switch["y"] + switch["height"] <= chips["y"], (switch, chips)
     rig.shot("library-look-genres")
     mark = rig.events.mark()
     rig.page.locator("#libraryRows .row.branch", has_text="Drama").click()
@@ -985,7 +998,7 @@ def scenario_watch_here(rig: Rig) -> None:
     answer(rig, sid, rig.events.wait(Get, where=lambda e: e.what == "genres", after=mark), GENRES)
     rig.page.wait_for_selector("#libraryRows .row.branch >> nth=1")
     assert rig.page.locator("#player").is_visible(), "the player went with the tab"
-    assert rig.page.locator("[data-screen=library] .where .switch[aria-checked=true]").count() == 1
+    assert rig.page.locator(".top .where .switch[aria-checked=true]").count() == 1
     mark = rig.events.mark()
     rig.page.locator("#libraryRows .row.branch", has_text="Drama").click()
     ask = rig.events.wait(Get, where=lambda e: e.what == "library", after=mark)

@@ -1171,6 +1171,7 @@ function showLibraryLevel() {
   $("libraryUp").querySelector("span").textContent = w(library.section === "recordings" ? "recordings" : "genres");
   $("libraryChips").hidden = !genres;
   setTitle($("libraryTitle"), genres ? w("library") : library.title, genres ? null : library.total);
+  $("libraryTitle").hidden = genres; // 2.9.7: the tabs say where; a genre's name is its heading
   $("libraryFind").placeholder = genres ? w("find_genre") : w("find_title");
   nameField($("libraryFind"));
 }
