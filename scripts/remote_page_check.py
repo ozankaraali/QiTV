@@ -606,6 +606,11 @@ def scenario_remote_look(rig: Rig) -> None:
     assert bar == "rgb(224, 138, 95)", bar  # the orange bar over the tab open
     assert not rig.page.locator(".top .where").is_visible()  # the switch: Guide and Library
     rig.shot("remote-look")
+    for selector in ("#listButton", "#menuButton"):  # a finger's 44 px
+        assert rig.page.evaluate(HIT_44, selector), selector
+    rig.hub.send(sid, {**STATE, "now": {"kind": "movie", "name": "Harbour Lights", "sub": "2024"}})
+    rig.page.locator("#nowName", has_text="Harbour Lights").wait_for()
+    assert rig.page.locator("#nowTrack").is_hidden()  # no length known: no empty line
     mark = rig.events.mark()
     rig.page.click("#listButton")
     answer(
@@ -667,6 +672,8 @@ def scenario_library_look(rig: Rig) -> None:
     rig.page.wait_for_selector("#libraryRows .row.branch >> nth=1")
     assert rig.page.locator("#libraryChips.seg").count() == 1
     assert rig.page.locator("#libraryRefresh svg").count() == 1
+    for selector in (".top .where .switch", "#libraryRefresh"):  # a finger's 44 px
+        assert rig.page.evaluate(HIT_44, selector), selector
     assert not rig.page.locator("#libraryTitle").is_visible()  # the tabs say where
     switch = rig.page.locator(".top .where .switch").bounding_box()
     chips = rig.page.locator("#libraryChips").bounding_box()
@@ -703,6 +710,67 @@ KNOB_SIDE = """(s) => {
   const box = sw.getBoundingClientRect();
   return knob.left + knob.width / 2 > box.left + box.width / 2 ? 'right' : 'left';
 }"""
+
+
+HIT_44 = """(s) => {
+  const e = document.querySelector(s);
+  const b = e.getBoundingClientRect();
+  const x = b.left + b.width / 2, y = b.top + b.height / 2;
+  return [[x, y - 21], [x, y + 21], [x - 21, y], [x + 21, y]].every(([px, py]) => {
+    const hit = document.elementFromPoint(px, py);
+    return hit !== null && (hit === e || e.contains(hit));
+  });
+}"""
+
+
+def scenario_timetable_here(rig: Rig) -> None:
+    """2.9.7: watching on the phone, a timetable's Watch names the channel above the player:
+    its name alone (not its number and tile's initials run together)."""
+    sid = paired_sid(rig)
+    rig.hub.send(sid, STATE)
+    mark = rig.events.mark()
+    rig.page.click("[data-tab=guide]")
+    answer(rig, sid, rig.events.wait(Get, where=lambda e: e.what == "guide", after=mark), GUIDE)
+    rig.page.wait_for_selector("#guideRows .row >> nth=2")
+    rig.page.click(".top .where .switch")  # on: a tap plays here
+    rig.page.wait_for_selector(".top .where .switch[aria-checked=true]")
+    mark = rig.events.mark()
+    rig.page.locator("#guideRows .row", has_text="Harbourline News").locator(".row-tap").click()
+    rig.events.wait(Get, where=lambda e: e.what == "timetable", after=mark)
+    rig.page.wait_for_selector("[data-screen=timetable]:not([hidden])")
+    assert rig.page.get_attribute("#timetableName .logo", "aria-hidden") == "true"
+    mark = rig.events.mark()
+    rig.page.click("#timetableWatch")
+    rig.events.wait(WatchHere, after=mark)
+    name = rig.page.inner_text("#playerName")
+    assert name == "Harbourline News", name
+
+
+def scenario_library_narrow(rig: Rig) -> None:
+    """2.9.7: the Library's tabs in the longest words (Filipino) on a 320-px phone: on one line,
+    nothing pushed off the screen."""
+    from services import i18n
+
+    i18n.set_language("fil")
+    try:
+        sid = paired_sid(rig)
+    finally:
+        i18n.set_language(None)
+    rig.page.set_viewport_size({"width": 320, "height": 640})
+    mark = rig.events.mark()
+    rig.page.click("[data-tab=library]")
+    answer(rig, sid, rig.events.wait(Get, where=lambda e: e.what == "genres", after=mark), GENRES)
+    rig.page.wait_for_selector("#libraryRows .row.branch >> nth=1")
+    fit = rig.page.evaluate(
+        """() => { const tabs = [...document.querySelectorAll('#libraryChips button')];
+        const tops = new Set(tabs.map((b) => Math.round(b.getBoundingClientRect().top)));
+        const refresh = document.getElementById('libraryRefresh').getBoundingClientRect();
+        return { lines: tops.size, refreshIn: refresh.right <= innerWidth,
+                 page: document.documentElement.scrollWidth <= innerWidth,
+                 tall: tabs.every((b) => b.getBoundingClientRect().height <= 40) }; }"""
+    )
+    rig.shot("library-narrow")
+    assert fit == {"lines": 1, "refreshIn": True, "page": True, "tall": True}, fit
 
 
 def scenario_rtl_look(rig: Rig) -> None:
@@ -1002,6 +1070,7 @@ def scenario_watch_here(rig: Rig) -> None:
     rig.page.wait_for_selector("#zapRows .row >> nth=2")
     assert rig.page.locator("#player").is_visible(), "no player"
     assert rig.page.locator("[data-key=volup]").is_hidden(), "the TV's buttons still show"
+    assert rig.page.locator("#listButton").is_hidden(), "Channels shows while watching here"
     assert rig.page.locator("#zap .where .switch[aria-checked=true]").count() == 1
     rig.hub.send(sid, {"t": "play", "failed": True})  # nothing on the TV: pick one here
     rig.page.locator("#playerName", has_text="below").wait_for(timeout=5000)
@@ -1071,10 +1140,14 @@ def scenario_watch_here(rig: Rig) -> None:
           v.dispatchEvent(new Event('loadedmetadata')); }""")
     assert rig.page.evaluate("document.getElementById('video').currentTime") == 4320
     rig.page.wait_for_timeout(300)
-    assert not rig.events.of(Position, after=mark), "it reported 0 before going on"
+    # nothing before where it goes on (a report at 4320 s, once there, is right: the media
+    # element's own timeupdate may send it)
+    early = [e.position_ms for e in rig.events.of(Position, after=mark) if e.position_ms < 4320000]
+    assert not early, f"it reported {early} before going on"
+    mark = rig.events.mark()
     rig.page.evaluate("""() => { const v = document.getElementById('video');
           v.currentTime = 4381; v.dispatchEvent(new Event('pause')); }""")
-    where = rig.events.wait(Position, after=mark)
+    where = rig.events.wait(Position, where=lambda e: e.position_ms != 4320000, after=mark)
     assert (where.position_ms, where.length_ms) == (4381000, 5400000), where
     # A film no phone plays (its sound, say): QiTV says why, where its name was, in full.
     rig.hub.send(sid, {"t": "play", "failed": True, "why": "sound"})
@@ -1429,7 +1502,8 @@ def scenario_recordings_home(rig: Rig) -> None:
             "tint": "#6a5f9e",
             "time": "20:00",
             "day": "SAT",
-            "kind": "SERIES",
+            "kind": "NO STREAM FREE",
+            "badge": {"text": "NO STREAM FREE", "tone": "warn"},  # a clash: the TV's yellow
             "acts": [skip],
         },
     ]
@@ -1473,6 +1547,11 @@ def scenario_recordings_home(rig: Rig) -> None:
     assert rig.page.locator("#libraryRows .coming").count() == 2
     assert rig.page.locator("#libraryRows .card").count() == 2
     rig.shot("recordings-home")
+    assert rig.page.locator("#libraryRows .row.coming .tag.warn").count() == 1  # as the TV's
+    clock = rig.page.locator("#libraryRows .rec-now").nth(2).locator(".sub")
+    first = clock.inner_text()
+    rig.page.wait_for_timeout(2200)  # two of the page's 1-second ticks
+    assert clock.inner_text() != first, first  # it counts on, as the TV's
     card = rig.page.locator("#libraryRows .cardrow .card").first.bounding_box()
     assert card and card["height"] > card["width"] * 0.55, card  # 16:10, not a 50 px button
     mark = rig.events.mark()
@@ -2244,6 +2323,8 @@ SCENARIOS.update(
         "library-look": scenario_library_look,
         "recordings-home": scenario_recordings_home,
         "rtl-look": scenario_rtl_look,
+        "timetable-here": scenario_timetable_here,
+        "library-narrow": scenario_library_narrow,
         "recordings": scenario_recordings,
         "lists-after-reconnect": scenario_lists_after_reconnect,
         "more-numpad": scenario_more_numpad,

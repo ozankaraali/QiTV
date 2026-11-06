@@ -315,7 +315,7 @@ function drawNow() {
     $("nowNum").textContent = "";
     live.hidden = true;
     $("nowWord").hidden = true;
-    $("nowTrack").hidden = false;
+    $("nowTrack").hidden = !film; // 2.9.7: no length known, no empty line
     $("nowShow").textContent = now.sub || "";
     let pos = film ? film.pos + (film.playing ? Date.now() - film.at : 0) : 0;
     if (film) pos = Math.min(pos, film.len);
@@ -545,18 +545,23 @@ function bindGuide() {
   $("timetableWatch").addEventListener("click", () => {
     if (navigator.vibrate) navigator.vibrate(8);
     if (!timetableFor) return;
-    if (here) watchHandle(timetableFor, "", $("timetableName").textContent);
+    if (here) watchHandle(timetableFor, "", timetableLabel);
     else send({ t: "open", id: timetableFor });
   });
 }
 
 // ---- a channel's card: its timetable ------------------------------------------------------
 
+let timetableLabel = ""; // the timetable's channel name, as the player's caption says it
+
 function timetableTitle(num, name, tint = "") {
   const title = $("timetableName");
   title.replaceChildren(); // 2.9.7: as the TV's banner: the thin number, the tile, the name
+  timetableLabel = name || "";
   if (num) title.append(el("span", "num thin", num));
-  title.append(logoTile(name, "logo", name, tint), el("span", "tname", name || ""));
+  const tile = logoTile(name, "logo", name, tint);
+  tile.setAttribute("aria-hidden", "true"); // its initials: the name says it
+  title.append(tile, el("span", "tname", name || ""));
 }
 
 let timerOffered = false; // the timetable shown says QiTV records (with its time-shift helper)
@@ -1334,7 +1339,8 @@ function recNowRow(rec, compact) {
   main.append(name);
   const sub = el("div", "sub");
   if (rec.title && rec.title !== channel) sub.append(el("span", "nowword", w("now")), el("span", "", rec.title));
-  else sub.append(el("span", "", recClock(rec.elapsed_s || 0)));
+  else sub.append(el("span", "recclock", recClock(rec.elapsed_s || 0)));
+  counts(line, rec);
   main.append(sub);
   const bar = recProgress(rec);
   if (bar) main.append(bar);
@@ -1344,9 +1350,9 @@ function recNowRow(rec, compact) {
   // same buttons as icons at each row's end (their names kept for a screen reader)
   const buttons = compact ? top : el("div", "rec-btns");
   for (const act of rec.acts || []) {
-    const button = el("button", `btn${act.danger ? " danger" : ""}${compact ? " icon" : ""}`);
-    button.type = "button";
     const icon = REC_ICONS[act.do];
+    const button = el("button", `btn${act.danger ? " danger" : ""}${compact && icon ? " icon" : ""}`);
+    button.type = "button";
     if (icon) button.insertAdjacentHTML("beforeend", `<svg aria-hidden="true"><use href="#${icon}"/></svg>`);
     button.append(el("span", compact && icon ? "sr" : "", act.label));
     pressable(button);
@@ -1358,6 +1364,25 @@ function recNowRow(rec, compact) {
 }
 
 const REC_ICONS = { watch: "i-play", stop: "i-stop" };
+
+// A recording under way counts on, as the TV's: its start and end kept on its node, its clock
+// and line moved each second (tickRecs).
+function counts(node, rec) {
+  node.dataset.since = String(Date.now() / 1000 - (rec.elapsed_s || 0));
+  if (rec.until > 0) node.dataset.until = String(rec.until);
+}
+
+function tickRecs() {
+  const nowS = Date.now() / 1000;
+  for (const node of document.querySelectorAll("#libraryRows [data-since]")) {
+    const elapsed = Math.max(0, nowS - Number(node.dataset.since));
+    const clock = node.querySelector(".recclock");
+    if (clock) clock.textContent = recClock(elapsed);
+    const until = Number(node.dataset.until || 0);
+    const fill = node.querySelector(".prog i");
+    if (fill && until > 0) fill.style.width = `${((elapsed / (elapsed + Math.max(0, until - nowS))) * 100).toFixed(1)}%`;
+  }
+}
 
 // how far a recording under way has come: its line, from its elapsed time and its end (none
 // without an end: one started with R)
@@ -1386,10 +1411,13 @@ function comingRow(airing) {
   const main = el("div", "row-main");
   const top = el("div", "row-top");
   top.append(el("span", "title", airing.title));
-  if (airing.kind) top.append(recording ? tag(`● ${airing.kind}`, "live") : tag(airing.kind));
+  // its kind in its tone on the TV: a clash's or a wait's yellow
+  const tone = recording ? "live" : (airing.badge && airing.badge.tone) || "quiet";
+  if (airing.kind) top.append(tag(recording ? `● ${airing.kind}` : airing.kind, tone));
   main.append(top, el("div", "row-now", airing.channel || ""));
   const bar = recording ? recProgress(airing) : null;
   if (bar) main.append(bar);
+  if (recording) counts(row, airing);
   row.append(main);
   pressable(row);
   row.addEventListener("click", () => openActs(airing));
@@ -1579,6 +1607,8 @@ function useHere(on) {
   here = on;
   if (on && !zapping()) useChannelList(true);
   document.querySelector("[data-screen=remote]").classList.toggle("on-phone", on);
+  document.body.toggleAttribute("data-watching", on); // 2.9.7: the top line's Channels hides
+  // meanwhile (an attribute: the class .here is the Watch on this phone button's)
   $("player").hidden = !on;
   for (const toggle of document.querySelectorAll(".where .switch")) {
     toggle.setAttribute("aria-checked", on ? "true" : "false"); // 2.9.7: on, a tap plays here
@@ -1771,5 +1801,6 @@ export function install() {
   setInterval(() => {
     if (current && !document.hidden) drawNow();
     if (recordings.length && !document.hidden) drawRec();
+    if (library.section === "recordings" && !document.hidden) tickRecs(); // 2.9.7
   }, 1000);
 }

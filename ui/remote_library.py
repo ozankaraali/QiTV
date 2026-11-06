@@ -180,11 +180,13 @@ class PhoneLibrary(QObject):
     def _find(self) -> str:
         return str(self._view[-1]) if self._view is not None else ""
 
-    def _answer(self, page: int) -> tuple[dict, tuple]:
+    def _answer(self, page: int, unchanged: Optional[tuple] = None) -> tuple[dict, tuple]:
+        """The view's page and what it shows (its signature); Recordings' builds no rows (and
+        issues no handles) when it shows what `unchanged` did."""
         if self._view is not None and self._view[1] == RECORDINGS:
             if self._view[0] == "genres":
-                return self._rec_genres_page(page)
-            return self._rec_titles_page(page)
+                return self._rec_genres_page(page, unchanged)
+            return self._rec_titles_page(page, unchanged)
         if self._view is not None and self._view[0] == "genres":
             return self._genres_page(page)
         return self._titles_page(page)
@@ -311,14 +313,31 @@ class PhoneLibrary(QObject):
 
     # ---- 2.9.7: the Recordings section ----------------------------------------------------
 
-    def _rec_coming(self) -> list:
-        """Coming up's rows: what records now or waits, then the airings (not the rows of
-        buttons alone)."""
-        return [e for e in self._rec_entries() if e.title and e.section in (desk.NOW, desk.COMING)]
+    def _rec_split(self, entries: list) -> tuple[list, list, list]:
+        """What records now, what waits for a stream, the airings to come (not the rows of
+        buttons alone); an airing that records or waits now isn't listed again (it shows once)."""
+        now = [e for e in entries if e.title and e.section == desk.NOW and e.key.startswith("rec:")]
+        waiting = [
+            e for e in entries if e.title and e.section == desk.NOW and e.key.startswith("wait:")
+        ]
+        taken = {e.key[len("rec:sched:") :] for e in now if e.key.startswith("rec:sched:")}
+        taken |= {e.key[len("wait:") :] for e in waiting}
+        coming = [
+            e
+            for e in entries
+            if e.title and e.section == desk.COMING and e.key.partition(":")[2] not in taken
+        ]
+        return now, waiting, coming
 
-    def _rec_genres_page(self, page: int) -> tuple[dict, tuple]:
+    def _rec_coming(self, entries: Optional[list] = None) -> list:
+        """Coming up's full list: what records now, what waits, then the airings."""
+        now, waiting, coming = self._rec_split(self._rec_entries() if entries is None else entries)
+        return now + waiting + coming
+
+    def _rec_genres_page(self, page: int, unchanged: Optional[tuple] = None) -> tuple[dict, tuple]:
         library, find = self._rec_library, self._find()
-        coming = self._rec_coming()
+        entries = self._rec_entries()
+        coming = self._rec_coming(entries)
         first: dict = {"id": self._key(rl.COMING), "title": translate(rl.COMING_TEXT)}
         if coming:
             first["count"] = len(coming)
@@ -331,7 +350,24 @@ class PhoneLibrary(QObject):
             if find.strip():
                 found = library.items(rl.ALL, find)
         shown = found[page * LIBRARY_PAGE : (page + 1) * LIBRARY_PAGE]
-        home = self._rec_home() if page == 0 and not find.strip() else None
+        with_home = page == 0 and not find.strip()
+        recorded = library.items(rl.ALL) if with_home and library is not None else []
+        # what it shows, from the desk's entries and the files (no rows built, no handles
+        # issued): a push with nothing new costs the phone none of the handles it holds
+        signature: tuple = (
+            RECORDINGS,
+            tuple((r.get("id"), r["title"], r.get("count")) for r in rows),
+            tuple(self._item_mark(i) for i in shown),
+            len(found),
+        )
+        if with_home:  # not its clock: the phone counts the time
+            signature += (
+                tuple(_entry_mark(e) for e in coming),
+                tuple(self._item_mark(i) for i in recorded[:HOME_RECENT]),
+                len(recorded),
+            )
+        if unchanged is not None and signature == unchanged:
+            return {}, signature
         message: dict = {
             "t": "genres",
             "section": RECORDINGS,
@@ -344,37 +380,33 @@ class PhoneLibrary(QObject):
             "loading": False,
             "searching": False,
         }
-        signature: tuple = (
-            RECORDINGS,
-            tuple((r.get("id"), r["title"], r.get("count")) for r in rows),
-            tuple(title_of(i) for i in shown),
-        )
-        if home is not None:
-            message["home"] = home
-            signature += (  # what it shows, not its clock (the phone counts the time)
-                tuple(n["title"] for n in home["now"]),
-                tuple((c["title"], c.get("start")) for c in home["coming"]),
-                tuple(r["title"] for r in home["recent"]),
-            )
+        if with_home:
+            message["home"] = self._rec_home(entries, recorded)
         return message, signature
 
-    def _rec_home(self) -> dict:
-        """The Recordings home, as the desktop's Tonight: what records now (4 at most, once:
-        its airing isn't listed again), the next airings, the latest recordings."""
-        entries = self._rec_entries()
-        now = [e for e in entries if e.title and e.section == desk.NOW]
-        recording = {e.key[len("rec:sched:") :] for e in now if e.key.startswith("rec:sched:")}
-        coming = [
-            e
-            for e in entries
-            if e.title and e.section == desk.COMING and e.key.partition(":")[2] not in recording
-        ]
+    def _item_mark(self, item: dict) -> tuple:
+        """What a recording's row or card shows: its title, its badges (length, NEW), how far it
+        was watched."""
         library = self._rec_library
-        recorded = library.items(rl.ALL) if library is not None else []
+        if library is None:
+            return (title_of(item),)
+        progress = library.progress(item)
+        return (
+            title_of(item),
+            tuple(library.badges(item)[:2]),
+            None if progress is None else round(progress, 3),
+        )
+
+    def _rec_home(self, entries: list, recorded: list) -> dict:
+        """The Recordings home, as the desktop's Tonight: what records now (4 at most, once:
+        its airing isn't listed again; the rest stay as rows at Coming up's head), what waits
+        for a stream and the next airings, the latest recordings."""
+        now, waiting, coming = self._rec_split(entries)
+        rows = now[HOME_NOW:] + waiting + coming
         return {
             "now": [self._now_row(e) for e in now[:HOME_NOW]],
-            "coming": [self._coming_row(e) for e in coming[:HOME_COMING]],
-            "more": max(0, len(coming) - HOME_COMING),
+            "coming": [self._listed_airing(e) for e in rows[:HOME_COMING]],
+            "more": max(0, len(rows) - HOME_COMING),
             "coming_key": self._key(rl.COMING),
             "recent": [self._recording_row(i, recorded) for i in recorded[:HOME_RECENT]],
             "recorded": len(recorded),
@@ -392,7 +424,7 @@ class PhoneLibrary(QObject):
         """Coming up's full list: each airing as the home's row; what records now also with how
         long it has run and its end (the phone's warm row draws its line)."""
         row = self._coming_row(entry)
-        if entry.section == desk.NOW:
+        if entry.key.startswith("rec:"):
             row["elapsed_s"] = round(time.monotonic() - entry.since) if entry.since else 0
             row["until"] = entry.stop
         return row
@@ -412,7 +444,7 @@ class PhoneLibrary(QObject):
         )
         return row
 
-    def _rec_titles_page(self, page: int) -> tuple[dict, tuple]:
+    def _rec_titles_page(self, page: int, unchanged: Optional[tuple] = None) -> tuple[dict, tuple]:
         library, find, genre = self._rec_library, self._find(), self._rec_genre
         if genre == rl.COMING:
             listed: list = self._rec_coming()
@@ -422,6 +454,14 @@ class PhoneLibrary(QObject):
             title = genre[len(rl.CHANNEL_PREFIX) :] if genre.startswith(rl.CHANNEL_PREFIX) else ""
             title = title or translate(desk.ALL_TEXT)
         shown = listed[page * LIBRARY_PAGE : (page + 1) * LIBRARY_PAGE]
+        marks = (  # what it shows, before any row or handle is made (see the genres')
+            tuple(_entry_mark(e) for e in shown)
+            if genre == rl.COMING
+            else tuple(self._item_mark(i) for i in shown)
+        )
+        signature = (RECORDINGS, genre, len(listed), marks)
+        if unchanged is not None and signature == unchanged:
+            return {}, signature
         if genre == rl.COMING:  # 2.9.7: as the home's rows; what records now with its end
             rows = [self._listed_airing(entry) for entry in shown]
         else:
@@ -439,11 +479,6 @@ class PhoneLibrary(QObject):
             "loading": False,
             "searching": False,
         }
-        signature = (
-            RECORDINGS,
-            genre,
-            tuple((r["title"], r.get("sub"), str(r.get("acts"))) for r in rows),
-        )
         return message, signature
 
     def _recording_row(self, item: dict, items: Optional[list]) -> dict:
@@ -540,10 +575,17 @@ class PhoneLibrary(QObject):
         if not recordings and self._view is not None and self._view[0] == "titles" and self._wanted:
             self._choose_wanted()  # the genre asked for is listed now
             self._view = (*self._view[:2], self.model.genre_id, self._view[3])
-        message, signature = self._answer(self._anchor)
+        message, signature = self._answer(self._anchor, unchanged=self._shown)
         if signature != self._shown:
             self._shown = signature
             self._send(message)
+
+
+def _entry_mark(entry: Any) -> tuple:
+    """2.9.7: what a recorder's row shows the phone (its title, time, status, the actions it
+    offers), not its clock."""
+    actions = tuple(b.name for b in entry.buttons if b.enabled and b.name in PHONE_ACTIONS)
+    return (entry.key, entry.title, entry.start, entry.status, actions)
 
 
 def _shown(catalog: Any) -> str:

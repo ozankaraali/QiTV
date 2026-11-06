@@ -666,7 +666,63 @@ class PhoneRecordingsTests(unittest.TestCase):  # 2.9.7: the phone's Recordings 
             for k in range(6)
         ]
         self.entries[:1] = now
-        self.assertEqual(len(self.home()["now"]), 4)
+        home = self.home()
+        self.assertEqual(len(home["now"]), 4)
+        # the rest stay as rows, at Coming up's head, each with its end (its Stop reachable)
+        titles = [c["title"] for c in home["coming"]]
+        self.assertEqual(titles, ["Channel 4", "Channel 5", "Late film"])
+        self.assertIn("until", home["coming"][0])
+
+    def test_a_recording_waiting_for_a_stream_is_no_rec_and_shows_once(self):  # 2.9.7
+        desk = self.desk
+        self.entries.insert(
+            1,
+            desk.Entry(
+                "wait:t@100000",
+                desk.NOW,
+                "Late film",
+                tone=desk.WARN,
+                status="Waiting",
+                buttons=(desk.button(desk.TRY_NOW, desk.ACCENT), desk.button(desk.SKIP)),
+                channel="Harbor News 24",
+            ),
+        )
+        home = self.home()
+        self.assertEqual([n["title"] for n in home["now"]], ["Evening News"])  # it doesn't record
+        (waiting,) = home["coming"]  # at Coming up's head; its airing isn't listed again
+        self.assertEqual(waiting["kind"], "WAITING")
+        self.assertEqual(waiting["badge"]["tone"], "warn")
+        self.assertEqual([a["do"] for a in waiting["acts"]], ["try_now", "skip"])
+
+    def test_coming_up_lists_a_recording_now_once(self):  # 2.9.7: as the home
+        desk = self.desk
+        self.entries[0] = desk.Entry(
+            "rec:sched:t@100000", desk.NOW, "Late film", status="REC", channel="Harbor News 24"
+        )
+        keys = {r["title"]: (r["id"], r.get("count")) for r in self.rows()["rows"]}
+        self.assertEqual(keys["Coming up"][1], 1)
+        self.library.titles("recordings", keys["Coming up"][0], 0, "")
+        self.assertEqual([i["title"] for i in self.last("library")["items"]], ["Late film"])
+
+    def test_a_push_with_nothing_new_issues_no_handles(self):  # 2.9.7: the phone's stay good
+        self.rows()
+        issued = len(self.library.handles._items)
+        for _ in range(3):  # the desk refreshes every 2 s while the TV shows it
+            self.library._push()
+        self.assertEqual(len(self.library.handles._items), issued)
+
+    def test_a_push_resends_the_home_when_its_actions_change(self):  # 2.9.7
+        import dataclasses
+
+        desk = self.desk
+        self.rows()
+        sent = len(self.sent)
+        self.entries[0] = dataclasses.replace(
+            self.entries[0], buttons=(desk.button(desk.STOP, desk.DANGER),)
+        )
+        self.library._push()
+        self.assertEqual(len(self.sent), sent + 1)
+        self.assertEqual([a["do"] for a in self.home()["now"][0]["acts"]], ["stop"])
 
     def test_a_find_sends_no_home(self):
         self.assertNotIn("home", self.rows("night"))

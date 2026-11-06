@@ -104,6 +104,7 @@ body[data-shown="guide"] .top .where, body[data-shown="library"] .top .where { d
 /* 2.9.7: the channel list's button: an icon in the top line, on the Remote only, lit while open */
 .top .lister { display: none; margin-inline-start: auto; }
 body[data-shown="remote"] .top .lister { display: grid; }
+body[data-shown="remote"][data-watching] .top .lister { display: none; } /* watching here: the list stays */
 .lister.on { color: var(--accent); background: var(--accent-fill); }
 .lister.pressed { background: var(--raised-2); }
 .remote.zapping { justify-content: flex-start; }
@@ -503,3 +504,8 @@ body.sheet-open .remote, body.sheet-open .rows, body.sheet-open .chips { overflo
 .now.hud { flex-wrap: wrap; row-gap: 10px; }
 .now.hud .live { margin-inline-start: auto; }
 .now.hud > .prog { flex: 1 0 100%; margin-top: 0; }
+/* A finger's 44 px around the small controls, their look unchanged. */
+.menu, .libtabs .icon { position: relative; width: 44px; }
+.menu::after, .libtabs .icon::after, .switch::after { content: ""; position: absolute; inset: -6px 0; }
+.libtabs .icon::after { inset: -4px 0; }
+.switch::after { inset: -9px 0; }
