@@ -259,6 +259,10 @@ class GridTiles(Overlay):
         """The tile whose strip shows, else None."""
         return self._hover
 
+    def clicking(self) -> str:
+        """The tile of the press whose click waits (the double-click interval), else ""."""
+        return self._pressed
+
     def strip_rect(self, name: str) -> QRectF:
         """Tile `name`'s strip while it shows: what its pills span (empty otherwise)."""
         strip = self._strip_of(name) if name == self._hover else None

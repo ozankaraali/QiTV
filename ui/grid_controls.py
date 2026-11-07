@@ -51,7 +51,9 @@ their tiles, each once its provider is ready, and its focus. A channel dragged f
 channel list onto a tile plays there (`drag_over`, `tile_at`). The
 Library, films, files, the mini player and external players leave the grid first (the shell
 calls `leave`). A smaller layout, and leaving, stop every player but the big picture and the
-PiP, and nothing still on its way for a tile that went opens there.
+PiP, and nothing still on its way for a tile that went opens there; such a tile comes back
+"+", its old channel forgotten (the controls, the banner and the channel list never take it
+up again when it takes the focus).
 """
 
 from __future__ import annotations
@@ -186,10 +188,11 @@ class GridControls(QObject):
         LayoutRow the layout chip opens (None, in tests: the chip steps to the next layout);
         `tile_action(name, control)` is the shell acting on tile `name`'s strip: "play"
         (pause or play it), "live" (go live), "speaker" (mute or unmute it), "close" (the
-        focused tile: its stream stops) and "closed" (a tile without the focus was closed:
-        what it showed is forgotten); `show_controls()` shows the player controls (the
-        layouts' hint is drawn above them); `confirm(name, then)` asks before tile `name`'s
-        recording would stop (2.6): True, asked (`then` follows)."""
+        focused tile: its stream stops) and "closed" (a tile without the focus was closed, or
+        went with a smaller layout or the grid: what it showed is forgotten);
+        `show_controls()` shows the player controls (the layouts' hint is drawn above them);
+        `confirm(name, then)` asks before tile `name`'s recording would stop (2.6): True,
+        asked (`then` follows)."""
         super().__init__(parent)
         self.sessions = sessions
         self.frame = frame
@@ -383,6 +386,7 @@ class GridControls(QObject):
         self._cards.clear()
         self._wanted.clear()
         self._restored = False
+        self._focused_by_press = None
         full, tile = self.ring_sizes()
         sessions.enter_grid(full_bytes=full, tile_bytes=tile)
         self._shown = True
@@ -424,7 +428,7 @@ class GridControls(QObject):
                 continue
             if records(slot) and sessions.keep_recording(slot.name):
                 continue  # 2.6: it records on in the background
-            self._stop(slot.name)
+            self._drop(slot.name)
         if self._forget is not None:
             for name in self._names:  # no link on its way opens a tile any more
                 self._forget(name)
@@ -469,7 +473,7 @@ class GridControls(QObject):
                 names[-1] = large
             for name in self._names:
                 if name not in names:  # it stops, and nothing on its way opens there
-                    self._stop(name)
+                    self._drop(name)
                     self._forget_tile(name)
         self._cells, self._names = cells, names
         if self._previous not in names:
@@ -762,7 +766,13 @@ class GridControls(QObject):
     # ---- the frame's and the overlay's mouse --------------------------------------------
 
     def _on_focus_requested(self, name: str) -> None:
-        if self._shown and self._focus(name):
+        if not self._shown or not self._focus(name):
+            return
+        view = self._tiles_view
+        # Only the overlay's press has a click to follow; a press on a tile's video ends
+        # there, and a mark no click clears would keep the next click on the tile's label
+        # from opening the channel list.
+        if view is None or view.clicking() == name:
             self._focused_by_press = name
 
     def _on_tile_clicked(self, name: str) -> None:
@@ -958,6 +968,14 @@ class GridControls(QObject):
         if slot.channel is None and (idle is None or idle()):
             return
         self.sessions.close_slot(name)
+
+    def _drop(self, name: str) -> None:
+        """Tile `name` goes (a smaller layout, or the grid left without it): its stream stops,
+        and the shell forgets what it showed, as for its ✕: shown again, it takes the focus as
+        "+", never as the channel it played before."""
+        self._stop(name)
+        if self._tile_action is not None:
+            self._tile_action(name, "closed")
 
     def _deny(self, name: str, channel: dict, provider: str) -> None:
         self._cards[name] = _Card(DENIED, channel, no_stream_text(provider))

@@ -906,6 +906,27 @@ class HostedDrawerInputTests(unittest.TestCase):
         self.assertNotIn("doubleClicked", self.events)
         self.assertTrue(self.drawer.isVisible())
 
+    def test_a_double_click_on_a_channel_row_plays_it_and_never_reaches_the_video(self):
+        # The shell closes the list as the row's channel plays: the second click landed on
+        # the video under it (fullscreen; over the multiview, the grid left).
+        played = []
+
+        def play(node, _nodes, _parent):
+            played.append(node.title)
+            self.drawer.close_drawer()
+
+        self.drawer.playRequested.connect(play)
+        view = self.drawer._columns["right"].view
+        rect = view.visualRect(view.model().index(2))
+        point = view.viewport().mapTo(self.host, rect.center())
+        QTest.mouseDClick(self.host.windowHandle(), Qt.MouseButton.LeftButton, pos=point)
+        elapse(QApplication.doubleClickInterval() + 80)
+        self.assertEqual(played, ["Chan 2"])
+        self.assertFalse(self.drawer.isVisible())
+        self.assertEqual(self.events, [])
+        self.click(point)  # only that second click: the next one is the user's own
+        self.assertEqual(self.events, ["clicked"])
+
     def test_a_click_on_the_fade_closes_the_drawer_like_a_click_on_the_video(self):
         self.click(QPoint(780, 360))
         self.assertFalse(self.drawer.isVisible())

@@ -22,11 +22,11 @@ from PySide6.QtCore import (
 from PySide6.QtGui import QMouseEvent, QRegion
 from PySide6.QtTest import QTest
 from PySide6.QtWidgets import QApplication, QWidget
-from timer_fixtures import wait_until
+from timer_fixtures import elapse, wait_until
 
 from services.connection_budget import ConnectionBudget
 from services.live.refusals import STREAM_LIMIT
-from services.navigation import NavNode
+from services.navigation import NavNode, item_key
 from services.sessions import SessionManager, Slot
 from services.zapping import ZapContext
 from tests.test_tv_controller import CHANNELS, FakeLiveSession, FakeSession
@@ -56,6 +56,7 @@ MIB = 1024 * 1024
 HARBOR_NINE = {"id": 9, "name": "Nine", "number": "9", "cmd": "ffrt http://harbor/9"}
 HARBOR_NINE["_provider"] = "Harbor IPTV"
 PAGE = QSize(1280, 720)
+CHANNEL_ROWS = ["Channel 1", "Channel 2"]  # the local fixture provider's
 _OFFSCREEN_NOISE = (
     "This plugin does not support raise()",
     "This plugin does not support setting window masks",
@@ -1035,6 +1036,41 @@ class MultiviewTests(MultiviewCase):
         self.pick_in("t2", HARBOR_NINE, "http://harbor/9")
         self.assertIn("Harbor IPTV", self.controller.guides_in_use())
 
+    def assert_takes_the_focus_as_plus(self, name):
+        """Tile `name` shows "+": a click focuses it as "+", never as a channel it played
+        before; the channel list opens where the focus was, not on that channel."""
+        self.assertEqual(self.grid.state(name), EMPTY)
+        watched, banners = len(self.watch.plays), len(self.banner.named("show_info"))
+        self.grid_frame.tileClicked.emit(name)
+        self.assertEqual(self.sessions.large().name, name)
+        self.assertIsNone(self.controller._current)
+        self.assertIsNone(self.controller.playing_channel())
+        self.assertEqual(len(self.watch.plays), watched)  # never "watched" again
+        self.assertEqual(len(self.banner.named("show_info")), banners)
+        self.assertEqual(self.drawer.named("open_drawer")[-1], (item_key(CHANNELS[0]),))
+
+    def test_a_tile_stopped_by_leaving_comes_back_as_plus_and_forgets_its_channel(self):
+        self.catalog.current_provider = lambda: {"name": "Home", "type": "STB", "max_streams": 4}
+        self.start_large(0)
+        self.v()
+        self.pick_in("t2", CHANNELS[2], "http://stream/3")
+        self.pick_in("t3", CHANNELS[3], "http://stream/4")
+        self.grid_frame.focusRequested.emit("main")
+        self.v()  # t2 stops; t3 plays on as the small picture
+        self.v()  # the grid again: t2 is "+"
+        self.assertEqual(self.grid.names(), ["main", "t3", "pip", "t2"])
+        self.assert_takes_the_focus_as_plus("t2")
+
+    def test_a_tile_a_smaller_layout_stopped_comes_back_as_plus(self):
+        self.catalog.current_provider = lambda: {"name": "Home", "type": "STB", "max_streams": 4}
+        self.start_large(0)
+        self.v()
+        self.pick_in("t3", CHANNELS[2], "http://stream/3")
+        self.grid_frame.focusRequested.emit("main")
+        self.grid.set_cells(2)  # t3 stops
+        self.grid.set_cells(4)
+        self.assert_takes_the_focus_as_plus("t3")
+
 
 class OneStreamMultiviewTests(MultiviewCase):
     """A provider allowing one stream: the tile that would be its second shows the card."""
@@ -1752,6 +1788,80 @@ class MultiviewWindowTests(WindowCase):
         self.assertFalse(window.grid_tiles.isVisible())
         for name in ("main", "pip"):
             self.assertFalse(window.surfaces[name].isVisible(), name)
+
+    def grid_with_the_list_open(self):
+        """The grid, and a click on the focused "+" tile: the channel list opens on the
+        fixture's channels."""
+        self.show()
+        window = self.window
+        drawer = self.wait_for_drawer()
+        QTest.keyClick(window, Qt.Key.Key_Escape)
+        self.assertTrue(wait_until(lambda: not drawer.isVisible()))
+        QTest.keyClick(window, Qt.Key.Key_V)
+        tile = window.grid_tiles.tiles()[0]
+        self.assertTrue(tile.focused)
+        QTest.mouseClick(window.grid_tiles.hits, LEFT, pos=tile.rect.center())
+        self.assertTrue(wait_until(drawer.isVisible))
+        right = drawer._columns["right"]
+        self.assertTrue(wait_until(lambda: [n.title for n in right.nodes][:2] == CHANNEL_ROWS))
+        return window.controller._grid, drawer
+
+    def double_click(self, view, row):
+        """A double-click on `view`'s `row` as the platform delivers it: through the overlay
+        host's window, each click to the widget under the pointer then."""
+        rect = view.visualRect(view.model().index(row))
+        point = view.viewport().mapToGlobal(rect.center())
+        host = self.window.host.windowHandle()
+        QTest.mouseDClick(host, LEFT, pos=host.mapFromGlobal(point))
+
+    def test_a_double_click_on_a_channel_row_plays_it_in_the_tile_and_the_grid_stays(self):
+        # The first click plays the channel and closes the list; the second, on the grid
+        # under it, used to leave the grid (or focus another tile).
+        grid, drawer = self.grid_with_the_list_open()
+        self.double_click(drawer._columns["right"].view, 1)
+        self.assertFalse(drawer.isVisible())
+        self.assertTrue(grid.shown())
+        self.assertEqual(self.window.sessions.large().name, "main")
+        self.assertEqual(self.window.controller.playing_channel()["name"], CHANNEL_ROWS[1])
+
+    def test_a_tile_focused_by_a_press_on_its_video_opens_the_list_at_a_click_on_its_label(self):
+        self.open_first_channel()  # Channel 1 plays large: tile 1
+        window = self.window
+        drawer = window.overlays.drawer
+        self.assertTrue(wait_until(lambda: not drawer.isVisible()))
+        QTest.keyClick(window, Qt.Key.Key_V)
+        grid, hits = window.controller._grid, window.grid_tiles.hits
+        self.assertTrue(wait_until(lambda: grid.state("main") == PLAYING))
+        plus = window.grid_tiles.tiles()[1].rect.center()
+        QTest.mouseClick(hits, LEFT, pos=plus)  # tile 2 takes the focus; the list opens
+        self.assertTrue(wait_until(drawer.isVisible))
+        QTest.keyClick(window, Qt.Key.Key_Escape)
+        self.assertTrue(wait_until(lambda: not drawer.isVisible()))
+        QTest.mouseClick(window.surfaces["main"], LEFT, pos=QPoint(40, 100))  # focus only
+        self.assertEqual(window.sessions.large().name, "main")
+        elapse(QApplication.doubleClickInterval() + 80)
+        self.assertFalse(drawer.isVisible())
+        label = window.grid_tiles.pill_rect("main")
+        self.assertFalse(label.isEmpty())
+        QTest.mouseClick(hits, LEFT, pos=label.center().toPoint())  # the focused tile's
+        self.assertTrue(wait_until(drawer.isVisible))
+
+    def test_a_double_click_on_the_zap_columns_row_tunes_it_and_the_grid_stays(self):
+        grid, drawer = self.grid_with_the_list_open()
+        right = drawer._columns["right"]
+        view = right.view
+        rect = view.visualRect(view.model().index(1))
+        QTest.mouseClick(view.viewport(), LEFT, pos=rect.center())  # one click: it plays
+        self.assertFalse(drawer.isVisible())
+        controller = self.window.controller
+        column = self.window.overlays.column
+        controller.zap.step(-1)
+        controller.zap.step(-1)  # a burst: the column opens
+        self.assertTrue(wait_until(column.isVisible))
+        self.double_click(column._view, 0)
+        self.assertFalse(column.isVisible())
+        self.assertTrue(grid.shown())
+        self.assertEqual(controller.playing_channel()["name"], CHANNEL_ROWS[0])
 
 
 if __name__ == "__main__":
