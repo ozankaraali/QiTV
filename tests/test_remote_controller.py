@@ -1026,6 +1026,31 @@ class WatchHereTests(WindowCase):
         self.assertIs(library._searcher, remote._searcher())
         self.assertIsInstance(remote._searcher(), SearchSession)
 
+    def test_an_airings_action_from_the_phone_reaches_the_recordings_page(self):  # 2.9.7
+        from services.remote.protocol import DeskAct
+
+        remote = self.window.remote
+        library = remote._library("s3")
+        self.addCleanup(remote._libraries.pop, "s3", None)
+        pressed = []
+        desk = self.window.screens.recordings_desk
+        with mock.patch.object(desk, "press", side_effect=lambda k, n: pressed.append((k, n))):
+            handle = library.handles.issue("desk", ("airing:x@1", ("skip",)))
+            remote.bridge.post(DeskAct("s3", handle, "cancel"))  # not offered for it
+            remote.bridge.post(DeskAct("s3", handle, "skip"))
+            self.assertTrue(wait_until(lambda: pressed))
+        self.assertEqual(pressed, [("airing:x@1", "skip")])
+        self.assertIs(library._rec_library, self.window.screens.recordings_library)
+
+    def test_the_phones_recordings_follow_the_schedule_with_the_page_hidden(self):  # release
+        remote = self.window.remote
+        library = remote._library("s3")
+        self.addCleanup(remote._libraries.pop, "s3", None)
+        library.genres("recordings", 0, "")  # the phone shows its Recordings
+        library._settle.stop()
+        self.window._schedule_changed()  # a recording started, waits or failed
+        self.assertTrue(library._settle.isActive())  # it comes again, as the TV's page would
+
     def test_a_search_result_plays_on_the_phone(self):
         self.connect()
         remote = self.window.remote

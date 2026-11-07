@@ -322,6 +322,20 @@ class ReviewFixRelayTests(RelayCase):
 
         self.assertTrue(self.run_async(go()).url.startswith("http://192.168.1.20:"))
 
+    def test_a_relay_out_of_reach_says_so_while_it_tries_again(self):
+        # A Mac whose QiTV trusted no certificate showed "Connecting…" for good.
+        async def go():
+            relay = FakeRelay()
+            base = await relay.start()
+            await relay.stop()  # nothing answers there any more
+            self.hub(base)
+            await self.wait_for(Status, where=lambda e: e.relay == "away")
+            mark = self.events.mark()
+            await asyncio.sleep(0.6)  # a few more tries (MIN_BACKOFF_S is 0.1 here)
+            return [e.relay for e in self.events.events[mark:] if isinstance(e, Status)]
+
+        self.assertNotIn("connecting", self.run_async(go()))
+
     def test_replaced_by_another_qitv_backs_off_and_says_so(self):
         async def go():
             relay = FakeRelay()

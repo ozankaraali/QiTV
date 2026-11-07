@@ -20,7 +20,9 @@ on, in order, once the arrival settled (in the last `_SETTLE_S` of a `_HOLD_MIN_
 least, at most `_SETTLE_RATE` times real time came: a live source after its backlog; the rule
 stay-live's first play waits for, so a tune's start trusts it: `settled`), or after
 `_HOLD_MAX_S`, or once `_HOLD_BYTES` are held. More than `_NOT_LIVE_S` of media ahead of the
-time since the connection opened, before that, is no live channel: everything held is dropped,
+time since the connection opened, before that, is no live channel when it is as light as such a
+clip (under `_CLIP_BYTES_PER_S`; 2.9.7: a full-HD channel answered each connection with its
+backlog of 91 s, in 1.4 s, and was never played): everything held is dropped,
 and so is the rest of that connection (`not_live` says so; the caller has the source connect
 again later). Pure logic: the clock is injected.
 """
@@ -35,6 +37,9 @@ from services.live.ts import PACKET, _pes_start, pts_delta
 
 _CLOCK = 90000
 _NOT_LIVE_S = 90.0  # media this far ahead of the time since the connection is no live channel
+# ... when it is this light: a channel's pictures weigh more (2.9.7: a full-HD channel's
+# backlog of 91 s was dropped). Bytes per second of media, some 380 kbit/s.
+_CLIP_BYTES_PER_S = 48_000
 _HOLD_MIN_S = 1.0  # a connection's bytes are held at least this long ...
 _SETTLE_S = 1.0  # ... until the last this-long brought at most ...
 _SETTLE_RATE = 2.0  # ... this many times as much media (its backlog landed) ...
@@ -51,7 +56,8 @@ class NotLiveGuard:
         self._held: Optional[list[bytes]] = None  # None: bytes pass on as they come
         self._dropping = False
         self.not_live = False  # the connection that is being dropped is no live channel
-        self.last: Optional[tuple[float, float]] = None  # (media, seconds) of the last dropped
+        # (media, seconds, bytes) of the last connection dropped
+        self.last: Optional[tuple[float, float, int]] = None
         # How long the last connection let go was held, when it was let go as its arrival
         # settled (0.0: it was not, or let go for another reason).
         self.settled = 0.0
@@ -131,9 +137,9 @@ class NotLiveGuard:
         marks.append((since, media))
         while len(marks) > 1 and marks[1][0] <= since - _SETTLE_S:
             marks.popleft()
-        if media - since > _NOT_LIVE_S:
+        if media - since > _NOT_LIVE_S and self._bytes < _CLIP_BYTES_PER_S * media:
             self._held, self._dropping, self.not_live = None, True, True
-            self.last = (media, since)
+            self.last = (media, since, self._bytes)
             return []
         earlier = marks[0]
         settled = (

@@ -39,7 +39,7 @@ from datetime import datetime, timedelta
 from itertools import repeat
 import logging
 import math
-from typing import NamedTuple
+from typing import Any, NamedTuple
 
 from PySide6.QtCore import (
     QDate,
@@ -119,6 +119,7 @@ RECORD_TEXT = N_("Record")
 SERIES_TEXT = N_("Record series")
 # i18n: the guide's footer button: the programme is scheduled; this cancels its recording
 CANCEL_TEXT = N_("Cancel recording")
+SKIP_TEXT = N_("Skip")  # i18n: the guide's footer button: this airing of a series isn't recorded
 # i18n: the guide's footer button: record the channel at a time of one's choosing (no guide
 # needed), once or on chosen days
 TIMER_TEXT = N_("Record at a time")
@@ -310,6 +311,7 @@ class Guide(Overlay):
         archive_reach: Callable[[dict], timedelta] | None = None,
         scheduled: Callable[[dict, Programme], bool] | None = None,
         deepest_window: Callable[[list[dict], timedelta], timedelta] | None = None,
+        repeating: Callable[[dict, Programme], bool] | None = None,
     ) -> None:
         """`archive_days(channel)`: the days of the channel's archive that may play now (0:
         none); `archive_reach(channel)` (2.7): how far back its past programmes play, its
@@ -318,10 +320,13 @@ class Guide(Overlay):
         `deepest_window(channels, beyond)`: the longest reach `archive_reach` gives any of the
         channels when longer than `beyond` (their deepest archive), else none: worked out for
         the whole list at once (each channel's reach, when not given: a list of 264,000 took
-        seconds)."""
+        seconds). `repeating(channel, programme)` (2.9.7): a scheduled programme is an airing of a
+        series or a timer, so its footer button skips that airing ("Skip") instead of
+        cancelling."""
         super().__init__(parent)
         self.setFocusPolicy(Qt.NoFocus)
         self.setAttribute(Qt.WA_ShowWithoutActivating, True)
+        self._repeating = repeating
         self._logos = logos
         self._programmes = programmes
         self._now = now
@@ -702,13 +707,20 @@ class Guide(Overlay):
         right = footer.right() - SIDE_U * u
         rects: dict[str, QRectF] = {}
         for name in names:
-            width = fm.horizontalAdvance(self._button_text(name)) + 2.4 * u
+            width = fm.horizontalAdvance(self._button_text(name, self.record_target())) + 2.4 * u
             rects[name] = QRectF(right - width, footer.center().y() - height / 2, width, height)
             right -= width + 0.8 * u
         return rects
 
-    @staticmethod
-    def _button_text(name: str) -> str:
+    def _button_text(self, name: str, target: Any = None) -> str:
+        """A footer button's text; "cancel" on `target` (channel, programme), an airing of a
+        series or a timer (2.9.7), says Skip."""
+        if name == "cancel" and target is not None and self._repeating is not None:
+            channel, programme = target if isinstance(target, tuple) else (None, target)
+            if channel is None:
+                channel = self.current_channel()
+            if channel is not None and self._repeating(channel, programme):
+                return translate(SKIP_TEXT)
         return {
             "live": "▶  " + translate(LIVE_TEXT),
             "watch": "▶  " + translate(WATCH_TEXT),
@@ -1310,7 +1322,7 @@ class Guide(Overlay):
         the start" for a past programme), the others outlined, Record with its red dot."""
         font = units.font(1.05, QFont.Weight.DemiBold)
         p.setFont(font)
-        text = self._button_text(name)
+        text = self._button_text(name, self.record_target())
         if name == "live" or (name == "watch" and self.chosen() is not None):
             fill_round(p, button, qcolor(PALETTE.accent), button.height() / 2)
             p.setPen(qcolor(PALETTE.canvas))

@@ -26,7 +26,7 @@ class TvConfigTests(unittest.TestCase):
     def test_new_install_has_tv_defaults(self):
         config, _ = self._load(None)
         self.assertEqual(config.live_latency, "auto")  # 2.0.2
-        self.assertEqual(config.mouse_wheel_action, "channel")
+        self.assertEqual(config.mouse_wheel_action, "volume")  # 2.9.7
         self.assertTrue(config.start_with_last_channel)
         self.assertIsNone(config.last_live_channel)
         self.assertTrue(config.channel_logos)
@@ -303,6 +303,17 @@ class TvConfigTests(unittest.TestCase):
                 on_disk = json.loads(path.read_text(encoding="utf-8"))
                 self.assertEqual(on_disk["live_latency"], value)
 
+    def test_the_wheel_over_the_picture_changes_the_volume_from_now_on(self):  # 2.9.7
+        # Every config saved "channel" (the old default): each is moved once; a choice made
+        # afterwards stays.
+        config, path = self._load({"mouse_wheel_action": "channel", "tv_defaults_version": 2})
+        self.assertEqual(config.mouse_wheel_action, "volume")
+        on_disk = json.loads(path.read_text(encoding="utf-8"))
+        self.assertEqual(on_disk["wheel_defaults_version"], 1)
+        config.mouse_wheel_action = "channel"  # chosen again in Settings: it stays
+        config.save_config()
+        self.assertEqual(ConfigManager().mouse_wheel_action, "channel")
+
     def test_a_latency_chosen_after_the_switch_is_kept(self):
         for value in ConfigManager.LIVE_LATENCY_CHOICES:
             with self.subTest(value=value):
@@ -322,9 +333,11 @@ class TvConfigTests(unittest.TestCase):
         self.assertEqual(ConfigManager.LIVE_LATENCY_CHOICES[0], "auto")
 
     def test_invalid_choices_fall_back_to_defaults(self):
-        config, _ = self._load({"live_latency": "turbo", "mouse_wheel_action": 3})
+        config, _ = self._load(
+            {"live_latency": "turbo", "mouse_wheel_action": 3, "wheel_defaults_version": 1}
+        )
         self.assertEqual(config.live_latency, "auto")
-        self.assertEqual(config.mouse_wheel_action, "channel")
+        self.assertEqual(config.mouse_wheel_action, "volume")
         config.live_latency = "low"
         self.assertEqual(config.live_latency, "low")
 

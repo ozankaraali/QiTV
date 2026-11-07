@@ -13,6 +13,7 @@ import json
 import os
 import tempfile
 import unittest
+from unittest import mock
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
@@ -21,7 +22,7 @@ from PySide6.QtTest import QTest
 from PySide6.QtWidgets import QApplication, QWidget
 from timer_fixtures import elapse
 
-from services import i18n, picture
+from services import i18n, picture, playback
 from services.picture import FILL, STANDARD, WIDE, ChannelPictures, stats_rows
 from services.playback import PlaybackSession
 from services.sleep_timer import SleepTimer, clock_text
@@ -460,6 +461,36 @@ class ShapeArgsTests(unittest.TestCase):
         self.assertEqual(picture.shape_args(FILL, 0, 720), (None, None))  # no size yet
 
 
+class PictureShapeTests(unittest.TestCase):
+    """The shape a picture shows in, which the picture in picture's boxes take (no bars)."""
+
+    def test_a_stream_shows_in_its_size_and_its_pixels_aspect(self):
+        self.assertAlmostEqual(picture.display_ratio(1920, 1080, (1, 1)), 16 / 9)
+        self.assertAlmostEqual(picture.display_ratio(1920, 1080, (0, 0)), 16 / 9)  # not said
+        self.assertAlmostEqual(picture.display_ratio(720, 576, (16, 15)), 4 / 3)  # PAL 4:3
+        self.assertAlmostEqual(picture.display_ratio(720, 576, (64, 45)), 16 / 9)  # PAL wide
+        self.assertAlmostEqual(picture.display_ratio(1440, 1080, (4, 3)), 16 / 9)
+        self.assertAlmostEqual(picture.display_ratio(1920, 1080, rotated=True), 9 / 16)
+        self.assertIsNone(picture.display_ratio(0, 576))  # its size is not known yet
+        self.assertEqual(picture.display_ratio(4000, 100), picture.MAX_RATIO)  # no sliver
+
+    def test_a_chosen_aspect_is_the_shape_and_fill_fits_any(self):
+        self.assertAlmostEqual(picture.shown_ratio(WIDE, 4 / 3), 16 / 9)
+        self.assertAlmostEqual(picture.shown_ratio(STANDARD, 16 / 9), 4 / 3)
+        self.assertIsNone(picture.shown_ratio(FILL, 4 / 3))
+        self.assertAlmostEqual(picture.shown_ratio(picture.AUTO, 4 / 3), 4 / 3)
+        self.assertIsNone(picture.shown_ratio(picture.AUTO, None))
+
+    def test_a_box_of_another_shape_is_as_large_as_the_16_by_9_one(self):
+        self.assertEqual(picture.box_size(320, None), (320, 180))
+        self.assertEqual(picture.box_size(320, 16 / 9), (320, 180))
+        self.assertEqual(picture.box_size(320, 1.78), (320, 180))  # as good as 16:9
+        width, height = picture.box_size(320, 4 / 3)
+        self.assertEqual((width, height), (277, 208))
+        self.assertAlmostEqual(width * height, 320 * 180, delta=320 * 180 * 0.01)
+        self.assertEqual(picture.box_size(320, 9 / 16), (180, 320))  # upright: turned
+
+
 class StatsTextTests(unittest.TestCase):
     STATS = {
         "video_codec": "h264",
@@ -729,6 +760,32 @@ class PictureSessionTests(unittest.TestCase):
         self.session.set_aspect(WIDE)  # another call: deinterlacing is given again
         self.assertEqual(self.picture_calls()[-1], ("video_set_deinterlace", "yadif"))
 
+    def test_on_leaves_a_picture_taller_than_1080i_alone_and_the_next_media_gets_it(self):
+        # 2.9.10: a 2160p 50 fps channel with On showed 5 of its 50 pictures a second, garbled:
+        # VLC 3 deinterlaces on the CPU. No broadcast taller than 1080i is interlaced.
+        self.player.media = _Media()
+        heights = {"height": 0}
+        with mock.patch.object(playback, "_track_stats", side_effect=lambda _m: dict(heights)):
+            self.session.set_deinterlace(picture.ON)
+            self.play(sessions.A)
+            self.assertEqual(self.picture_calls()[-1], ("video_set_deinterlace", "yadif"))
+            self.player.calls.clear()
+            self.session._tick()  # its size not known yet
+            self.assertEqual(self.picture_calls(), [])
+            heights["height"] = 2160
+            self.session._tick()
+            self.assertEqual(self.picture_calls()[-1], ("video_set_deinterlace", None))
+            self.player.calls.clear()
+            self.session._tick()  # read once per media
+            self.assertEqual(self.picture_calls(), [])
+            self.session.set_aspect(WIDE)  # given again: still none for this picture
+            self.assertEqual(self.picture_calls()[-1], ("video_set_deinterlace", None))
+            heights["height"] = 1080
+            self.play(sessions.B)  # a 1080i channel: deinterlaced again
+            self.runner.finish()
+            self.session._tick()
+            self.assertEqual(self.picture_calls()[-1], ("video_set_deinterlace", "yadif"))
+
     def test_a_fill_crop_waiting_for_a_worker_follows_once_it_let_go(self):
         self.session.set_video_size(1280, 720)
         self.play(sessions.A)
@@ -747,6 +804,7 @@ class _PicturePlayer(sessions._FakePlayer):
     def __init__(self):
         super().__init__()
         self.vouts = 0
+        self.media = None
 
     def video_set_aspect_ratio(self, aspect):
         self._call("video_set_aspect_ratio", aspect)
@@ -762,7 +820,14 @@ class _PicturePlayer(sessions._FakePlayer):
         return self.vouts
 
     def get_media(self):
-        return None
+        return self.media
+
+
+class _Media:
+    """The media a player holds (its tracks are read through playback._track_stats)."""
+
+    def release(self):
+        pass
 
 
 class OverlayTests(PictureCase):

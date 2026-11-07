@@ -1081,7 +1081,8 @@ def recording_title(name="News", when="1761000000"):
 
 
 class RecordingsShelfTests(unittest.TestCase):
-    """Recordings in the Library (2.8): a Recordings shelf in Movies, whatever the provider."""
+    """Recordings in the Library: 2.8's Recordings shelf in Movies left for the Recordings tab
+    (2.9.7); a recording's own kind and details stay (the phone's Library lists them)."""
 
     def model(self, catalog, recordings, section="movies"):
         cfg = make_config()
@@ -1091,43 +1092,21 @@ class RecordingsShelfTests(unittest.TestCase):
             catalog.sectionReady.emit(section)
         return model
 
-    def test_movies_list_the_recordings_after_the_other_shelves(self):
+    def test_movies_have_no_recordings_shelf(self):  # 2.9.7: the Recordings tab has them
         cat = FakeCatalog({"movies": [("1", "Drama", 1)]}, {("movies", "1"): [movie(1)]})
         model = self.model(cat, FakeRecordings([recording_title()]))
-        genres = model.genres()
-        self.assertEqual([g.id for g in genres], [RECORDINGS, "1"])
-        self.assertTrue(genres[0].pinned)
-        self.assertEqual(genres[0].title, "Recordings")
-        model.select_genre(RECORDINGS)
-        self.assertEqual([i["name"] for i in model.items()], ["News"])
+        self.assertEqual([g.id for g in model.genres()], ["1"])
+
+    def test_a_provider_without_movies_has_none_for_its_recordings(self):  # 2.9.7
+        cat = FakeCatalog()
+        cat.section_list = ["live"]  # an M3U playlist
+        model = self.model(cat, FakeRecordings([recording_title()]))
+        self.assertFalse(model.available)
 
     def test_series_have_no_recordings_shelf(self):
         cat = FakeCatalog({"series": [("1", "Drama", 0)]})
         model = self.model(cat, FakeRecordings([recording_title()]), section="series")
         self.assertNotIn(RECORDINGS, [g.id for g in model.genres()])
-
-    def test_a_provider_without_movies_still_shows_its_recordings(self):
-        cat = FakeCatalog()
-        cat.section_list = ["live"]  # an M3U playlist
-        model = self.model(cat, FakeRecordings([recording_title()]))
-        self.assertTrue(model.available)
-        self.assertTrue(model.ready)
-        self.assertEqual(model.genre_id, RECORDINGS)
-        self.assertEqual([i["name"] for i in model.items()], ["News"])
-        self.assertNotIn(("section", "movies"), cat.requests)
-
-    def test_without_recordings_such_a_provider_has_no_movies(self):
-        cat = FakeCatalog()
-        cat.section_list = ["live"]
-        recordings = FakeRecordings()
-        model = self.model(cat, recordings)
-        self.assertFalse(model.available)
-        changes = []
-        model.changed.connect(lambda: changes.append(True))
-        recordings.set([recording_title()])  # the first recording ends
-        self.assertTrue(changes)
-        self.assertTrue(model.available)
-        self.assertEqual(model.genre_id, RECORDINGS)
 
     def test_a_recording_is_its_own_kind_with_its_own_details(self):
         cat = FakeCatalog({"movies": [("1", "Drama", 1)]}, {("movies", "1"): [movie(1)]})

@@ -48,6 +48,9 @@ video output exists they are set again. For the window's shape the shell reports
 size (`set_video_size`), and a crop follows it a moment after a resize stops. `video_stats()`
 reads what the statistics overlay shows. None of them reaches libVLC while a worker ends an
 input (`_player_free`): what is asked for meanwhile is set once the next media opens.
+`picture_ratio()` tells the shape the picture shows in, which the picture in picture's boxes
+take (no bars): the stream's own is read from libVLC's track list only when asked, while a
+picture plays, at most once a second once known.
 
 With hardware decoding (Settings; `hardware`), each tick while a stream plays reads libVLC's
 media statistics: once its picture stood still while its sound played (`FrozenPicture`, which
@@ -115,6 +118,9 @@ def _readable(path: str) -> bool:
 
 _AUDIO_RESTORE_MS = 500
 _SHAPE_SETTLE_MS = 150  # a Fill crop follows the window once a resize stops this long
+_RATIO_READ_MS = 1000  # a known picture's shape is read from libVLC again this often at most
+_RATIO_LOOK_MS = 250  # and one not known yet (no video track: an audio-only channel)
+_FIRST_TURNED = 4  # libVLC's orientations from left_top on are turned a quarter
 _RESTART_DELAY_MS = 300
 _RESUME_GIVE_UP_MS = 3000
 _RESUME_END_MARGIN_MS = 1000
@@ -437,8 +443,17 @@ class PlaybackSession(QObject):
         self._deinterlace_method: Optional[str] = None
         self._picture_due = False  # set again once this media's video output exists
         self._picture_set = False  # libVLC was given a shape or deinterlacing on this player
+        # On leaves a picture taller than 1080i alone (services.picture): its height is read
+        # once per media, as soon as libVLC knows it.
+        self._height_due = False
+        self._too_tall = False  # this media's picture is never interlaced
         self._shape_timer = QTimer(self, singleShot=True, interval=_SHAPE_SETTLE_MS)
         self._shape_timer.timeout.connect(self._apply_shape)
+        # The stream's own shape (`picture_ratio`): the last one read, kept through the next
+        # media's open until its picture is known; read again once _RATIO_READ_MS have passed.
+        self._stream_ratio: Optional[float] = None
+        self._ratio_known = False  # read from this media
+        self._ratio_read = QElapsedTimer()
         # Casting (2.8): a libVLC renderer (a Chromecast) given before each play while casting;
         # libVLC takes it only before a play, so a change applies at the next open (`reopen`).
         self._renderer: Any = None
@@ -686,9 +701,12 @@ class PlaybackSession(QObject):
             self._player.audio_set_delay(self._audio_delay_ms * 1000)
         if self._subtitle_delay_ms:
             self._player.video_set_spu_delay(self._subtitle_delay_ms * 1000)
+        self._height_due, self._too_tall = True, False
         if self._picture_wanted():
             self._apply_picture()  # the player's, for a new video output
             self._picture_due = True  # and again for a kept one, once it is this media's
+        self._ratio_known = False  # (the last media's shape stays until this one's is read)
+        self._ratio_read.invalidate()  # read as soon as its picture plays
         self._spu_files, self._spu_known, self._spu_waiting = {}, set(), []
         self._media_files = set()
         self._files_due = bool(self._subtitle_files)  # added once it plays
@@ -1150,6 +1168,39 @@ class PlaybackSession(QObject):
         self._shape_timer.stop()
         self._set_picture()
 
+    def picture_ratio(self) -> Optional[float]:
+        """The shape (width / height) the picture shows in: 16:9 or 4:3 when stretched to one,
+        the stream's own with Auto (the last media's until this one's picture is known, None
+        before any), None with Fill (cropped to its surface's shape, it fits any). Read from
+        libVLC's track list while a picture plays, at most every _RATIO_READ_MS once known
+        (_RATIO_LOOK_MS before)."""
+        if self._aspect == picture.AUTO:
+            self._read_stream_ratio()
+        return picture.shown_ratio(self._aspect, self._stream_ratio)
+
+    def _read_stream_ratio(self) -> None:
+        if vlc is None or not self._player_free() or not self._has_input:
+            return
+        if not self._ever_played or self._state not in (
+            PlaybackState.PLAYING,
+            PlaybackState.PAUSED,
+        ):
+            return  # no picture yet (or none now): what was read stays
+        clock = self._ratio_read
+        every = _RATIO_READ_MS if self._ratio_known else _RATIO_LOOK_MS
+        if clock.isValid() and clock.elapsed() < every:
+            return
+        clock.start()
+        media = self._player.get_media()
+        if media is None:
+            return
+        try:
+            ratio = _stream_ratio(media)
+        finally:
+            media.release()
+        if ratio is not None:
+            self._stream_ratio, self._ratio_known = ratio, True
+
     def set_video_size(self, width: int, height: int) -> None:
         """The surface this player draws into is `width` × `height`: Fill's crop follows it."""
         if self._released or (width, height) == self._video_size:
@@ -1204,7 +1255,26 @@ class PlaybackSession(QObject):
         self._player.video_set_aspect_ratio(aspect)
         self._player.video_set_crop_geometry(crop)
         if self._deinterlace_set:
-            self._player.video_set_deinterlace(self._deinterlace_method)
+            method = None if self._too_tall else self._deinterlace_method
+            self._player.video_set_deinterlace(method)
+
+    def _check_height(self) -> None:
+        """On, once libVLC knows this media's picture height: a picture taller than 1080i is
+        left alone (services.picture.never_interlaced)."""
+        media = self._player.get_media()
+        if media is None:
+            return
+        try:
+            height = int(_track_stats(media).get("height") or 0)
+        finally:
+            media.release()
+        if height <= 0:
+            return  # not known yet
+        self._height_due = False
+        if picture.never_interlaced(height):
+            logger.info("The picture is %d lines tall: not deinterlaced (never interlaced)", height)
+            self._too_tall = True
+            self._apply_picture()
 
     def video_stats(self) -> dict[str, Any]:
         """What the statistics overlay shows of the media playing ({} when none): its video and
@@ -1320,6 +1390,8 @@ class PlaybackSession(QObject):
         if self._picture_due and int(self._player.has_vout() or 0) > 0:
             self._picture_due = False
             self._apply_picture()
+        if self._height_due and self._deinterlace_method:
+            self._check_height()
         if self._spu_waiting:
             self.subtitle_tracks()  # names the files' tracks once they show
         if state in (PlaybackState.OPENING, PlaybackState.BUFFERING) and not self._ever_played:
@@ -1621,6 +1693,8 @@ class Session(Protocol):
 
     def set_video_size(self, width: int, height: int) -> None: ...
 
+    def picture_ratio(self) -> Optional[float]: ...
+
     def deinterlace(self) -> str: ...
 
     def set_deinterlace(self, choice: str) -> bool: ...
@@ -1806,6 +1880,9 @@ class NullSession(QObject):
     def set_video_size(self, width: int, height: int) -> None:
         pass
 
+    def picture_ratio(self) -> Optional[float]:
+        return None
+
     def deinterlace(self) -> str:
         return picture.AUTO
 
@@ -1839,6 +1916,9 @@ def _track_stats(media: Any) -> dict[str, Any]:
                 if details.value:
                     video = ctypes.cast(details, ctypes.POINTER(vlc.VideoTrack)).contents
                     found["width"], found["height"] = int(video.width), int(video.height)
+                    found["sar"] = (int(video.sar_num), int(video.sar_den))
+                    # left_top and after: the picture's rows are its columns (turned)
+                    found["rotated"] = int(video.orientation.value) >= _FIRST_TURNED
                     if video.frame_rate_den:
                         found["fps"] = video.frame_rate_num / video.frame_rate_den
             elif track.type == vlc.TrackType.audio and "audio_codec" not in found:
@@ -1851,6 +1931,17 @@ def _track_stats(media: Any) -> dict[str, Any]:
             ctypes.cast(tracks, ctypes.POINTER(ctypes.POINTER(vlc.MediaTrack))), count
         )
     return found
+
+
+def _stream_ratio(media: Any) -> Optional[float]:
+    """The shape the media's first video track shows in (None: its size is not known yet)."""
+    found = _track_stats(media)
+    return picture.display_ratio(
+        int(found.get("width") or 0),
+        int(found.get("height") or 0),
+        found.get("sar", (1, 1)),
+        bool(found.get("rotated")),
+    )
 
 
 class _Track(ctypes.Structure):

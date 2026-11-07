@@ -482,6 +482,18 @@ class TopNavTests(unittest.TestCase):
             nav.set_focused(True)
             self.assertFalse(nav.grab().isNull())
 
+    def test_the_provider_pill_hides_on_recordings_and_comes_back(self):  # 2.9.7
+        shown = self.nav._item_rects()
+        self.nav.set_source_visible(False)
+        self.assertNotIn("source", self.nav._order())
+        hidden = self.nav._item_rects()
+        self.assertGreaterEqual(hidden["search"].width(), shown["search"].width())
+        self.assertNotEqual(self.nav._item_at(shown["source"].center()), "source")
+        self.nav.grab()  # paints
+        self.nav.set_source_visible(True)
+        self.assertIn("source", self.nav._order())
+        self.assertEqual(self.nav._item_at(shown["source"].center()), "source")
+
 
 if __name__ == "__main__":
     unittest.main()

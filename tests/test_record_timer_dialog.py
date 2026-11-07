@@ -123,6 +123,54 @@ class RecordTimerDialogTests(unittest.TestCase):
         self.assertEqual(len(accepted), 1)
         self.assertEqual(accepted[0].start(), (NOW + timedelta(minutes=3)).astimezone())
 
+    # ---- 2.9.7: the Recordings page's Edit… and Record at a time… ------------------------------
+
+    def test_edit_opens_filled_in_with_the_timer_and_saves(self):
+        start = datetime(2026, 10, 26, 21, 0)
+        dialog = self.dialog(
+            start=start,
+            stop=start + timedelta(minutes=90),
+            title="Late show",
+            days=(0, 2),
+            save_text="Save",
+        )
+        self.assertEqual(dialog.name.text(), "Late show")
+        self.assertEqual(dialog.repeat.currentData(), DAYS)
+        self.assertEqual([b.isChecked() for b in dialog.day_buttons][:3], [True, False, True])
+        self.assertEqual(dialog.schedule_button.text(), "Save")
+        choice = dialog.choice()
+        self.assertEqual((choice.begin, choice.minutes, choice.days), (21 * 60, 90, (0, 2)))
+        self.assertEqual(self.dialog(days=tuple(range(5))).repeat.currentData(), WEEKDAYS)
+
+    def test_a_channel_is_chosen_from_the_list_by_typing_its_name(self):
+        channels = [{"name": "News One"}, {"name": "Films"}, {"name": "Music"}]
+        dialog = self.dialog(channels=channels, chosen=channels[1])
+        self.assertIs(dialog.chosen_channel(), channels[1])  # the one playing first
+        dialog.channel_choice.setEditText("Nothing like it")
+        self.assertIsNone(dialog.chosen_channel())
+        self.assertFalse(dialog.schedule_button.isEnabled())
+        self.assertEqual(dialog.hint.text(), "Choose a channel from the list.")
+        dialog.channel_choice.setEditText("Music")
+        self.assertIs(dialog.chosen_channel(), channels[2])
+        self.assertTrue(dialog.schedule_button.isEnabled())
+
+    def test_of_two_channels_with_one_name_the_one_chosen_is_scheduled(self):  # 2.9.7
+        channels = [{"name": "Films HD", "id": 1}, {"name": "News"}, {"name": "Films HD", "id": 2}]
+        dialog = self.dialog(channels=channels, chosen=channels[2])
+        self.assertIs(dialog.chosen_channel(), channels[2])  # the one playing, not its namesake
+        dialog.channel_choice.setCurrentIndex(0)
+        self.assertIs(dialog.chosen_channel(), channels[0])
+
+    def test_every_providers_channels_open_at_once(self):  # 2.9.7: 200,000 across providers
+        import time
+
+        channels = [{"name": f"Channel {k}"} for k in range(200_000)]
+        started = time.monotonic()
+        dialog = self.dialog(channels=channels, chosen=channels[-1])
+        dialog.adjustSize()  # the dialog sized as it shows
+        self.assertLess(time.monotonic() - started, 2.0)
+        self.assertIs(dialog.chosen_channel(), channels[-1])
+
 
 if __name__ == "__main__":
     unittest.main()

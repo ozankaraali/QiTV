@@ -1613,5 +1613,105 @@ class NullSessionTests(unittest.TestCase):
         session.release()
 
 
+class _ShapePlayer(_AudioPlayer):
+    """A player whose media read is counted (`get_media`); the picture's shape in it is what
+    the test patches `_stream_ratio` to say."""
+
+    def __init__(self):
+        super().__init__()
+        self.media, self.media_read = None, 0
+
+    def set_media(self, media):
+        super().set_media(media)
+        self.media = media
+
+    def get_media(self):
+        self.media_read += 1
+        return self.media
+
+    def has_vout(self):
+        return 1
+
+    def video_set_aspect_ratio(self, aspect):
+        self._call("video_set_aspect_ratio", aspect)
+
+    def video_set_crop_geometry(self, crop):
+        self._call("video_set_crop_geometry", crop)
+
+
+@unittest.skipIf(vlc is None, "python-vlc's states are needed to poll the player")
+class PictureShapeTests(unittest.TestCase):
+    """The shape the picture shows in (`picture_ratio`), which the picture in picture takes: the
+    stream's own is read from libVLC only when asked, while a picture plays."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.app = QApplication.instance() or QApplication([])
+
+    def setUp(self):
+        self.player = _ShapePlayer()
+        self.runner = _HeldRunner(self.player)
+        self.session = PlaybackSession(
+            _FakeInstance(self.player), runner=self.runner, poll_ms=60_000
+        )
+        self.addCleanup(self.session.release)
+        patcher = mock.patch("services.playback._stream_ratio", return_value=4 / 3)
+        self.stream_ratio = patcher.start()
+        self.addCleanup(patcher.stop)
+
+    def play(self, url, *, playing=True):
+        self.session.play(url, kind=PlayKind.LIVE)
+        if self.runner.jobs:
+            self.runner.finish()
+        self.player.state = vlc.State.Playing if playing else vlc.State.Opening
+        self.session._tick()
+
+    def test_the_streams_shape_is_read_once_a_picture_plays(self):
+        self.assertIsNone(self.session.picture_ratio())  # nothing plays
+        self.play(A, playing=False)
+        self.assertIsNone(self.session.picture_ratio())  # no picture yet
+        self.assertEqual(self.player.media_read, 0)
+        self.play(A)
+        self.assertAlmostEqual(self.session.picture_ratio(), 4 / 3)
+        self.assertEqual(self.player.media_read, 1)
+
+    def test_a_known_shape_is_read_again_at_most_once_a_second(self):
+        self.play(A)
+        self.session.picture_ratio()
+        self.session.picture_ratio()
+        self.assertEqual(self.player.media_read, 1)
+        self.stream_ratio.return_value = 16 / 9  # the stream's shape changed (a programme)
+        with mock.patch("services.playback._RATIO_READ_MS", 0):
+            self.assertAlmostEqual(self.session.picture_ratio(), 16 / 9)
+
+    def test_the_last_shape_stays_until_the_next_medias_is_known(self):
+        self.play(A)
+        self.assertAlmostEqual(self.session.picture_ratio(), 4 / 3)
+        self.stream_ratio.return_value = None  # the next channel's size is not known yet
+        self.play(B, playing=False)
+        self.assertAlmostEqual(self.session.picture_ratio(), 4 / 3)
+        self.player.state = vlc.State.Playing
+        self.session._tick()
+        self.assertAlmostEqual(self.session.picture_ratio(), 4 / 3)
+        self.assertEqual(self.player.media_read, 2)  # read at once for the new media
+        self.stream_ratio.return_value = 16 / 9
+        self.assertAlmostEqual(self.session.picture_ratio(), 4 / 3)  # (read again soon)
+        with mock.patch("services.playback._RATIO_LOOK_MS", 0):
+            self.assertAlmostEqual(self.session.picture_ratio(), 16 / 9)  # not known: read on
+
+    def test_a_chosen_aspect_is_the_shape_and_fill_fits_any(self):
+        self.play(A)
+        self.session.set_aspect("16:9")
+        self.assertAlmostEqual(self.session.picture_ratio(), 16 / 9)
+        self.session.set_aspect("4:3")
+        self.assertAlmostEqual(self.session.picture_ratio(), 4 / 3)
+        self.session.set_aspect("fill")
+        self.assertIsNone(self.session.picture_ratio())
+        self.assertEqual(self.player.media_read, 0)  # none of them reads libVLC
+
+    def test_without_libvlc_nothing_has_a_shape(self):
+        self.assertIsNone(NullSession().picture_ratio())
+
+
 if __name__ == "__main__":
     unittest.main()

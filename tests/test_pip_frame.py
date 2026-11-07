@@ -17,7 +17,7 @@ from services.i18n import translate
 from ui.overlay_host import OverlayHost
 from ui.overlays.painting import MIN_FONT_PX
 from ui.overlays.pip_label import PipLabel
-from ui.pip import LIFT_MS, PipFrame, corner_rect
+from ui.pip import LIFT_MS, SHAPE_POLL_MS, PipFrame, corner_rect
 from ui.video_surface import VideoSurface
 
 # The offscreen platform has no window stacking or window masks; it says so on every raise_()
@@ -53,6 +53,8 @@ NONE = Qt.MouseButton.NoButton
 # 1280 x 720: 25% wide is 320, 16:9 is 180 high, 2u is 26 px (u = 12.8 px)
 BOTTOM_RIGHT = QRect(934, 514, 320, 180)
 TOP_LEFT = QRect(26, 26, 320, 180)
+# A 4:3 picture's, as large: 277 x 208
+BOTTOM_RIGHT_4_3 = QRect(977, 486, 277, 208)
 
 
 class FakeConfig:
@@ -94,7 +96,7 @@ class FrameCase(unittest.TestCase):
     def setUpClass(cls):
         cls.app = QApplication.instance() or QApplication([])
 
-    def make(self, corner=None, size=(1280, 720)):
+    def make(self, corner=None, size=(1280, 720), shape_of=None):
         self.container = QWidget()
         self.container.resize(*size)
         self.main = self.surface_type(self.container)
@@ -102,7 +104,7 @@ class FrameCase(unittest.TestCase):
         for surface in (self.main, self.pip):
             surface.setMouseTracking(True)  # as VideoSurface: moves come without a button too
         self.config = FakeConfig(corner)
-        self.frame = PipFrame(self.container, self.main, self.pip, self.config)
+        self.frame = PipFrame(self.container, self.main, self.pip, self.config, shape_of=shape_of)
         self.container.show()
         self.addCleanup(self.container.close)
         return self.frame
@@ -252,6 +254,78 @@ class PipFrameTests(FrameCase):
         self.assertEqual(frame.small_rect().top(), BOTTOM_RIGHT.top())  # under the cursor
         send(self.pip, QEvent.Type.MouseButtonRelease, start + QPoint(-20, 0), LEFT, NONE)
         self.assertEqual(frame.small_rect(), BOTTOM_RIGHT.translated(0, -100))  # snapped, raised
+
+    def test_the_small_picture_takes_its_pictures_shape(self):
+        shapes = {"pip": 4 / 3}
+        frame = self.make(shape_of=shapes.get)
+        frame.show_pip()
+        self.assertEqual(frame.small_rect(), BOTTOM_RIGHT_4_3)  # no bars beside a 4:3 picture
+        self.assertEqual(self.pip.geometry(), BOTTOM_RIGHT_4_3)
+
+    def test_a_shape_not_known_or_that_fits_any_is_16_by_9(self):
+        frame = self.make(shape_of={}.get)
+        frame.show_pip()
+        self.assertEqual(frame.small_rect(), BOTTOM_RIGHT)
+
+    def test_a_shape_known_later_glides_it_there_while_it_shows(self):
+        shapes = {}
+        frame = self.make(shape_of=shapes.get)
+        frame.show_pip()
+        self.assertEqual(frame.small_rect(), BOTTOM_RIGHT)  # its picture is not known yet
+        shapes["pip"] = 4 / 3  # its first picture came
+        self.assertTrue(wait_until(lambda: frame.small_rect() == BOTTOM_RIGHT_4_3, 2000))
+        shapes["pip"] = 1.34  # as good as 4:3: it stays
+        elapse(SHAPE_POLL_MS + LIFT_MS + 100)
+        self.assertEqual(frame.small_rect(), BOTTOM_RIGHT_4_3)
+
+    def test_a_swap_takes_the_new_small_pictures_shape(self):
+        frame = self.make(shape_of={"main": 4 / 3, "pip": 16 / 9}.get)
+        frame.show_pip()
+        self.assertEqual(frame.small_rect(), BOTTOM_RIGHT)
+        frame.set_large("pip")
+        self.assertEqual(self.main.geometry(), BOTTOM_RIGHT_4_3)
+        self.assertEqual(self.pip.geometry(), self.container.rect())
+
+    def test_a_lift_and_a_drag_keep_the_shape(self):
+        frame = self.make(shape_of={"pip": 4 / 3}.get)
+        frame.show_pip()
+        frame.set_lift(100)
+        raised = BOTTOM_RIGHT_4_3.translated(0, -100)
+        self.assertTrue(wait_until(lambda: frame.small_rect() == raised, 2000))
+        start = centre(self.pip)
+        send(self.pip, QEvent.Type.MouseButtonPress, start)
+        send(self.pip, QEvent.Type.MouseMove, start - QPoint(900, 400))
+        send(self.pip, QEvent.Type.MouseButtonRelease, start - QPoint(900, 400), LEFT, NONE)
+        self.assertEqual(frame.small_rect(), QRect(26, 26, 277, 208))  # top left, 4:3
+
+    def test_an_upright_picture_is_as_large_and_never_over_half_the_player(self):
+        upright = corner_rect(QSize(1280, 720), "br", 9 / 16)
+        self.assertEqual(upright.size(), QSize(180, 320))
+        short = corner_rect(QSize(1280, 400), "br", 9 / 16)
+        self.assertLessEqual(short.height(), 200)
+        self.assertAlmostEqual(short.width() / short.height(), 9 / 16, delta=0.01)
+        self.assertGreaterEqual(short.top(), 0)
+
+    def test_its_shape_is_asked_only_while_it_shows(self):
+        asked = []
+        frame = self.make(shape_of=lambda name: asked.append(name))
+        elapse(SHAPE_POLL_MS * 2 + 100)
+        self.assertEqual(asked, [])  # no picture in picture: no player is asked
+        frame.show_pip()
+        self.assertTrue(wait_until(lambda: len(asked) >= 2, 2000))  # shown, then each poll
+        self.assertEqual(set(asked), {"pip"})
+        frame.hide_pip()
+        asked.clear()
+        elapse(SHAPE_POLL_MS * 2 + 100)
+        self.assertEqual(asked, [])
+
+    def test_the_lent_surface_tells_its_shape(self):
+        frame = self.make(shape_of={"main": 4 / 3}.get)
+        self.assertIsNone(frame.lent_shape())  # none lent
+        surface = frame.lend_large()
+        self.assertAlmostEqual(frame.lent_shape(), 4 / 3)
+        frame.take_back(surface)
+        self.assertIsNone(frame.lent_shape())
 
     def test_drag_to_the_top_left_quadrant_snaps_to_tl_and_saves_it(self):
         frame = self.make()

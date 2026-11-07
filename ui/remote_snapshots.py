@@ -18,6 +18,7 @@ from typing import Any, Optional
 
 from services.epg_view import Programme
 from services.remote.protocol import b64e
+from ui.overlays.painting import badge_color
 
 RESULTS_PER_GROUP = 30
 _SECTIONS = ("live", "movies", "series")
@@ -37,6 +38,12 @@ class Handles:
 
     def get(self, handle: str) -> Optional[tuple[str, object]]:
         return self._items.get(handle)
+
+
+def tint(name: str) -> str:
+    """2.9.7: the colour the TV draws `name`'s generated logo tile in ("#rrggbb"): the phone's
+    tile for it is the same (`ui.overlays.painting.badge_color`)."""
+    return str(badge_color(name).name())
 
 
 def _stamp(when: Optional[datetime]) -> Optional[float]:
@@ -88,6 +95,7 @@ def state(window: Any) -> dict:
         now = {
             "kind": current.section if current.section in ("movies", "series") else "file",
             "name": str(current.title or "")[:TITLE_CHARS],
+            "tint": tint(str(current.title or "")),
             "sub": str(current.subtitle or "")[:TITLE_CHARS],
             "pos_ms": _int(session, "time_ms"),
             "len_ms": _int(session, "length_ms"),
@@ -100,6 +108,7 @@ def state(window: Any) -> dict:
             "kind": "live",
             "num": controller.channel_number(channel),
             "name": str(channel.get("name") or "")[:TITLE_CHARS],
+            "tint": tint(str(channel.get("name") or "")),  # 2.9.7: its tile's, as the TV's
             "now": programme_dict(on),
             "next": programme_dict(upcoming),
             "behind_s": round(behind),

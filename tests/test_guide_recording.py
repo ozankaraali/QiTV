@@ -92,6 +92,15 @@ class GuideRecordingTests(unittest.TestCase):
         self.click(buttons["cancel"])
         self.assertEqual(self.cancelled, ["Show 2"])
 
+    def test_a_scheduled_series_airing_offers_skip(self):  # 2.9.7
+        self.scheduled.add("Show 2")
+        self.guide._repeating = lambda channel, programme: True
+        self.assertEqual(self.guide._button_text("cancel", self.guide.record_target()), "Skip")
+        self.guide._repeating = lambda channel, programme: False
+        self.assertEqual(
+            self.guide._button_text("cancel", self.guide.record_target()), "Cancel recording"
+        )
+
     def test_r_records_the_footers_programme_or_cancels_it(self):
         controller = GuideController(self.guide)
         self.assertTrue(controller.handle(Action.RECORD))

@@ -156,7 +156,9 @@ def _short_id(value: object) -> bool:
 
 # ---- phone messages --------------------------------------------------------------------------
 
-LIBRARY_SECTIONS = ("movies", "series")
+LIBRARY_SECTIONS = ("movies", "series", "recordings")  # 2.9.7: the phone's Recordings
+# 2.9.7: what a phone may press on an airing of its Recordings (never Edit: a desktop dialog)
+DESK_ACTIONS = ("stop", "try_now", "skip", "cancel", "remove_rule", "watch")
 
 
 def _int(value: object) -> Optional[int]:
@@ -204,6 +206,10 @@ def parse_phone_message(obj: object) -> Optional[dict]:
         return None
     if t == "timer":  # 2.8: a timetable's channel recorded at a time (no guide needed)
         return _timer(obj)
+    if t == "desk":  # 2.9.7: an airing's (or a recording's now) action, by its row's handle
+        if _short_id(obj.get("id")) and obj.get("do") in DESK_ACTIONS:
+            return {"t": "desk", "id": obj["id"], "do": obj["do"]}
+        return None
     if t == "watch":  # what the TV plays, or a channel of the phone's list by its handle
         if "id" not in obj:
             return {"t": "watch"}
@@ -538,6 +544,16 @@ class Schedule:
 
 
 @dataclass(frozen=True)
+class DeskAct:
+    """2.9.7: the phone's Recordings: the row `handle`'s action `do` (one of DESK_ACTIONS,
+    and one the row offered)."""
+
+    sid: str
+    handle: str
+    do: str
+
+
+@dataclass(frozen=True)
 class Timer:
     """2.8: the timetable `handle`'s channel recorded from `begin` (minutes after midnight) for
     `minutes`, on the weekdays `days` (Monday 0), or once on `day` (ISO) when there are none."""
@@ -590,4 +606,6 @@ class Code:
 @dataclass(frozen=True)
 class Status:
     home_url: str
-    relay: str  # "off", "connecting", "online", "resting" or "error"
+    # "off", "connecting", "online", "away" (the last try didn't get in), "resting", "replaced"
+    # or "error"
+    relay: str

@@ -4,13 +4,17 @@ A pill in a corner of the page that shows (the player's top right, under the con
 clock; the Library's bottom left): a red dot, REC, the recording channel and how long it has
 recorded ("● REC News 1:02:03"), or how many record ("● REC 2 channels"). A click opens its
 menu: per recording, "Go back to {channel}" (`goBack`) and "Stop recording" (`stop`), each
-naming the recording's player. The big picture's own recording shows on its controls and the
+naming the recording's player, then (2.9.7) "Manage Recordings…", the Library's Recordings
+page (`manageRequested`). The big picture's own recording shows on its controls and the
 small picture's on its label: the shell lists only the recordings in the background
 (`set_recordings`).
 2.8.12: on the player it sat at the top left, over the controls' logo and channel name (it read
 as if the recording channel played beside the one shown, its own REC chip and all); it sits
 under the clock now, and it hides while the drawer, the guide or the multiview's grid covers
 the player (`cover_with`): it showed through them, garbled.
+2.9.7 (the owner: with two recordings it stayed at the top right, clutter): the player's comes
+and goes with the player's controls (`follow_hud`), and shows for a few seconds by itself when
+a recording begins or ends; the Library's, in its corner, stays while recordings go on.
 """
 
 from __future__ import annotations
@@ -41,6 +45,8 @@ from ui.theme import PALETTE, qcolor
 
 # i18n: the REC sign's menu: play the channel that records in the background again
 GO_BACK = N_("Go back to {channel}")
+# i18n: the REC sign's menu (2.9.7): the Library's Recordings page, everything recorded
+MANAGE_TEXT = N_("Manage Recordings…")
 _FALLBACK_HOST_WIDTH = 1280
 _EDGE_U = 2.4  # the Library's: from the page's bottom left corner
 _RIGHT_U = 3.0  # the player's: as the controls' clock's right edge ...
@@ -49,12 +55,14 @@ _HEIGHT_U = 3.2
 _PAD_U = 1.2
 _FONT_U = 1.1
 _NAME_MAX_U = 16.0  # a long channel name is cut
+BRIEF_MS = 4000  # 2.9.7: with the controls hidden, a change shows it this long
 
 
 class RecSign(Overlay):
     accessible_name = N_("Recording")
     goBack = Signal(str)  # the recording's slot name
     stop = Signal(str)
+    manageRequested = Signal()  # 2.9.7: its menu's last entry, the Recordings page
 
     def __init__(
         self,
@@ -73,6 +81,11 @@ class RecSign(Overlay):
         self._bottom = bottom
         self._recordings: list[tuple[str, str, float]] = []
         self._covers: list[QWidget] = []  # while one of them shows, it hides (`cover_with`)
+        self._hud: Optional[QWidget] = None  # 2.9.7: it shows with these controls (`follow_hud`)
+        self._hud_shown = False
+        self._brief = QTimer(self, singleShot=True, interval=BRIEF_MS)
+        self._brief.timeout.connect(self._follow_covers)
+        self._menu_open = False
         self._hover = False
         self._timer = QTimer(self, interval=1000)
         self._timer.timeout.connect(self._tick)
@@ -83,14 +96,33 @@ class RecSign(Overlay):
     def set_recordings(self, recordings: list[tuple[str, str, float]]) -> None:
         """(slot name, channel name, recording since) of each recording in the background,
         the oldest first; none hides the sign."""
+        before = {name for name, _channel, _since in self._recordings}
         self._recordings = list(recordings)
         if not recordings:
             self._timer.stop()
+            self._brief.stop()
             self.hide()
             return
+        if {name for name, _channel, _since in recordings} != before:
+            self._brief.start()  # 2.9.7: one began or ended: said for a moment
         self._layout()
         self._timer.start()
         self._follow_covers()
+
+    def follow_hud(self, hud: QWidget) -> None:
+        """2.9.7 (the owner: two recordings kept it up, clutter): it shows while `hud` (the
+        player's controls) shows, and for BRIEF_MS when a recording begins or ends; hovered or
+        its menu open, it stays. Without one it shows while recordings go on (the Library's)."""
+        self._hud = hud
+        self._hud_shown = hud.isVisible()
+        hud.installEventFilter(self)
+        self._follow_covers()
+
+    def _wanted(self) -> bool:
+        """Shown as far as the controls go (`follow_hud`)."""
+        if self._hud is None:
+            return True
+        return self._hud_shown or self._brief.isActive() or self._hover or self._menu_open
 
     def cover_with(self, *widgets: QWidget) -> None:
         """It hides while one of `widgets` shows (the drawer, the guide, the multiview's tiles:
@@ -108,7 +140,7 @@ class RecSign(Overlay):
         """Shown while recordings go on and nothing covers it; `changed` is a cover being
         shown (`shown`) or hidden, whatever its isVisible() says yet."""
         covered = any(shown if widget is changed else widget.isVisible() for widget in self._covers)
-        if not self._recordings or covered:
+        if not self._recordings or covered or not self._wanted():
             if not self.isHidden():
                 self.hide()
             return
@@ -132,14 +164,25 @@ class RecSign(Overlay):
             back.triggered.connect(lambda _checked=False, n=name: self.goBack.emit(n))
             stop = menu.addAction(translate(STOP_RECORDING))
             stop.triggered.connect(lambda _checked=False, n=name: self.stop.emit(n))
+        if self._recordings:
+            menu.addSeparator()
+        manage = menu.addAction(translate(MANAGE_TEXT))
+        manage.triggered.connect(lambda _checked=False: self.manageRequested.emit())
         return menu
 
     def open_menu(self) -> None:
         menu = self.menu()
         menu.aboutToHide.connect(menu.deleteLater)
+        self._menu_open = True
+        menu.aboutToHide.connect(self._menu_closed)
         below = QPoint(0, self.height() + 4)
         above = QPoint(0, -menu.sizeHint().height() - 4)
         menu.popup(self.mapToGlobal(above if self._bottom else below))
+
+    def _menu_closed(self) -> None:
+        self._menu_open = False
+        self._brief.start()  # it goes a moment later, not from under the pointer
+        self._follow_covers()
 
     # ---- internals ----------------------------------------------------------------------
 
@@ -191,6 +234,9 @@ class RecSign(Overlay):
         elif event.type() in (QEvent.Type.Show, QEvent.Type.Hide) and watched in self._covers:
             cover = watched if isinstance(watched, QWidget) else None
             self._follow_covers(cover, event.type() == QEvent.Type.Show)
+        elif event.type() in (QEvent.Type.Show, QEvent.Type.Hide) and watched is self._hud:
+            self._hud_shown = event.type() == QEvent.Type.Show
+            self._follow_covers()
         return False
 
     def paintEvent(self, event: QPaintEvent) -> None:
@@ -241,3 +287,5 @@ class RecSign(Overlay):
         self._hover = False
         self.update()
         super().leaveEvent(event)
+        if self._hud is not None and not self._hud_shown:
+            self._brief.start()  # 2.9.7: it goes a moment after the pointer left

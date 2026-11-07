@@ -48,6 +48,8 @@ RELAY_STATES = {
     "off": N_("Off"),  # i18n: the relay's state in Settings → Phone remote
     "connecting": N_("Connecting…"),  # i18n: the relay's state in Settings → Phone remote
     "online": N_("Connected"),  # i18n: the relay's state in Settings → Phone remote
+    # i18n: the relay's state in Settings → Phone remote: it couldn't be reached, QiTV retries
+    "away": N_("Can't connect; trying again"),
     # i18n: the relay's state in Settings → Phone remote
     "resting": N_("Resting until 00:00 UTC (its daily limit)"),
     # i18n: the relay's state: a copy of this QiTV's settings runs elsewhere

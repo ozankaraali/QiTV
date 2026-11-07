@@ -7,10 +7,11 @@ from unittest import mock
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
-from PySide6.QtCore import QEvent, QPoint, QPointF, QRect, Qt  # noqa: E402
+from PySide6.QtCore import QEvent, QPoint, QPointF, QRect, QSize, Qt  # noqa: E402
 from PySide6.QtGui import QMouseEvent  # noqa: E402
 from PySide6.QtWidgets import QApplication, QWidget  # noqa: E402
 
+from services import picture  # noqa: E402
 from tests.test_tv_window import WindowCase  # noqa: E402
 from ui import desktop_pip  # noqa: E402
 from ui.desktop_pip import DesktopPip, FloatingPlayer, corner_rect  # noqa: E402
@@ -34,7 +35,7 @@ def mouse(widget, kind, at, buttons=Qt.MouseButton.LeftButton):
     QApplication.sendEvent(widget, event)
 
 
-class DesktopPipTests(unittest.TestCase):
+class PipCase(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
         cls.app = QApplication.instance() or QApplication([])
@@ -72,6 +73,13 @@ class DesktopPipTests(unittest.TestCase):
         self.shown = True
         self.pip.check()
 
+    def drag(self, start, end):
+        mouse(self.main, QEvent.Type.MouseButtonPress, start)
+        mouse(self.main, QEvent.Type.MouseMove, end)
+        mouse(self.main, QEvent.Type.MouseButtonRelease, end, Qt.MouseButton.NoButton)
+
+
+class DesktopPipTests(PipCase):
     def test_another_desktop_floats_the_large_picture_and_its_own_puts_it_back(self):
         self.away()
         floating = self.pip._floating
@@ -209,11 +217,6 @@ class DesktopPipTests(unittest.TestCase):
         self.back()
         self.assertIs(self.main.parentWidget(), self.page)
 
-    def drag(self, start, end):
-        mouse(self.main, QEvent.Type.MouseButtonPress, start)
-        mouse(self.main, QEvent.Type.MouseMove, end)
-        mouse(self.main, QEvent.Type.MouseButtonRelease, end, Qt.MouseButton.NoButton)
-
     def test_a_corner_drag_resizes_it_in_16_by_9_and_the_other_corner_stays(self):
         places = []
         self.pip._remember = None
@@ -307,6 +310,79 @@ class DesktopPipTests(unittest.TestCase):
         self.assertEqual((rect.width(), rect.height()), (480, 270))
         self.assertEqual(rect.right() + 1 + desktop_pip.MARGIN, 1920)
         self.assertEqual(rect.bottom() + 1 + desktop_pip.MARGIN, 25 + 1055)
+
+
+class FloatingShapeTests(PipCase):
+    """The floating window has its picture's shape (no bars), and keeps it as it resizes."""
+
+    def setUp(self):
+        super().setUp()
+        self.screen = QApplication.primaryScreen().availableGeometry()
+        self.ratio = 4 / 3
+        self.pip._shape = lambda: self.ratio
+        self.place = QRect(self.screen.x() + 40, self.screen.y() + 40, 320, 180)  # top left
+        self.pip._place = lambda: self.place
+
+    def test_it_floats_in_its_pictures_shape_as_large_as_it_was(self):
+        self.away()
+        geometry = self.pip._floating.geometry()
+        self.assertEqual(geometry, QRect(self.place.topLeft(), QSize(277, 208)))
+        self.assertEqual(self.main.geometry(), self.pip._floating.rect())  # the picture fills it
+
+    def test_in_the_bottom_right_corner_that_corner_stays(self):
+        width, height = 320, 180
+        self.place = QRect(
+            self.screen.right() + 1 - desktop_pip.MARGIN - width,
+            self.screen.bottom() + 1 - desktop_pip.MARGIN - height,
+            width,
+            height,
+        )
+        self.away()
+        geometry = self.pip._floating.geometry()
+        self.assertEqual(geometry.size(), QSize(277, 208))
+        self.assertEqual(geometry.bottomRight(), self.place.bottomRight())
+
+    def test_a_new_shape_while_it_floats_reshapes_it_at_the_next_check(self):
+        self.ratio = None  # not known yet: it keeps the one it has
+        self.away()
+        floating = self.pip._floating
+        self.assertEqual(floating.geometry(), self.place)
+        self.ratio = 4 / 3  # its first picture came
+        self.pip.check()
+        self.assertEqual(floating.geometry().size(), QSize(277, 208))
+        self.ratio = 16 / 9  # a zap to a 16:9 channel
+        self.pip.check()
+        self.assertEqual(floating.geometry().size(), QSize(320, 180))
+        self.assertTrue(self.pip.floating())
+
+    def test_a_corner_drag_resizes_it_in_its_pictures_shape(self):
+        self.away()
+        floating = self.pip._floating
+        start = floating.geometry()  # 277×208
+        self.drag(QPoint(275, 206), QPoint(275 + 100, 206 + 10))  # the bottom-right corner
+        geometry = floating.geometry()
+        self.assertEqual((geometry.width(), geometry.height()), (377, 283))
+        self.assertEqual(geometry.topLeft(), start.topLeft())
+        self.drag(QPoint(375, 140), QPoint(0, 140))  # the right edge, far to the left
+        self.assertEqual(floating.size(), QSize(*picture.box_size(desktop_pip.MIN_WIDTH, 4 / 3)))
+
+    def test_a_shape_that_comes_during_a_press_waits_for_its_release(self):
+        self.away()
+        floating = self.pip._floating
+        mouse(self.main, QEvent.Type.MouseButtonPress, QPoint(100, 100))
+        self.ratio = 16 / 9
+        self.pip.check()
+        self.assertEqual(floating.size(), QSize(277, 208))  # not under the pointer
+        mouse(self.main, QEvent.Type.MouseButtonRelease, QPoint(100, 100), Qt.MouseButton.NoButton)
+        self.assertEqual(floating.size(), QSize(320, 180))
+
+    def test_it_stays_on_its_screen(self):
+        self.place = QRect(self.screen.x(), self.screen.y(), 320, 180)
+        self.ratio = 9 / 16  # an upright picture, as tall as the 16:9 one is wide
+        self.away()
+        geometry = self.pip._floating.geometry()
+        self.assertTrue(self.screen.contains(geometry), geometry)
+        self.assertAlmostEqual(geometry.width() / geometry.height(), 9 / 16, delta=0.01)
 
 
 class DesktopPipWindowTests(WindowCase):

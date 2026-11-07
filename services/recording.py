@@ -86,6 +86,47 @@ def folder(config: Any) -> str:
     return chosen if isinstance(chosen, str) and chosen.strip() else default_folder()
 
 
+def _same_folder(a: str, b: str) -> bool:
+    return os.path.normcase(os.path.normpath(a)) == os.path.normcase(os.path.normpath(b))
+
+
+def places(config: Any) -> list[str]:
+    """2.9.7: the folders recordings are listed from: where they go (`folder`) first, then the
+    others the Recordings page added (the optional config key `recording_places`), each once."""
+    found = [folder(config)]
+    extra = getattr(config, "recording_places", [])
+    for path in extra if isinstance(extra, list) else []:
+        if isinstance(path, str) and path.strip() and not any(_same_folder(path, f) for f in found):
+            found.append(path)
+    return found
+
+
+def add_place(config: Any, path: str) -> bool:
+    """`path` listed from now on (the caller saves the config); False when it is listed."""
+    if any(_same_folder(path, known) for known in places(config)):
+        return False
+    config.recording_places = [*getattr(config, "recording_places", []), path]
+    return True
+
+
+def remove_place(config: Any, path: str) -> None:
+    """`path` listed no more (never where recordings go; its files stay on the disk)."""
+    kept = [p for p in getattr(config, "recording_places", []) if not _same_folder(p, path)]
+    config.recording_places = kept
+
+
+def use_place(config: Any, path: str) -> None:
+    """New recordings go to `path`; where they went stays listed (its recordings with it)."""
+    before = folder(config)
+    if _same_folder(before, path):
+        return
+    rest = [p for p in getattr(config, "recording_places", []) if not _same_folder(p, path)]
+    if not any(_same_folder(before, p) for p in rest):
+        rest.insert(0, before)
+    config.recording_places = rest
+    config.recordings_dir = "" if _same_folder(path, default_folder()) else path
+
+
 def safe_name(text: str) -> str:
     """`text` as a file name: what file systems refuse is replaced by "_", spaces and dots at
     its ends go, Windows' reserved names get a "_" first, and it is at most NAME_BYTES bytes

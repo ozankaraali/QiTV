@@ -162,6 +162,14 @@ class MainModuleTests(unittest.TestCase):
         self.assertLess(block.index("use_bundled_vlc()"), block.index("smoke_main"))
         self.assertLess(block.index("use_bundled_vlc()"), block.index("main()"))
 
+    def test_the_trusted_authorities_are_chosen_before_anything_connects(self):
+        # aiohttp makes its verifying TLS context when it is imported, from what is set then.
+        source = (REPO / "main.py").read_text(encoding="utf-8")
+        block = source.split('if __name__ == "__main__":', 1)[1]
+        self.assertLess(block.index("freeze_support()"), block.index("use_bundled_authorities()"))
+        self.assertLess(block.index("use_bundled_authorities()"), block.index("smoke_main"))
+        self.assertLess(block.index("use_bundled_authorities()"), block.index("main()"))
+
     def test_the_mac_app_is_one_directory_with_vlc_plugins_where_its_libvlccore_looks(self):
         # libvlccore on macOS loads plugins from <its directory>/vlc/plugins; one directory,
         # so that macOS validates the plugins once, not after every launch's unpacking.

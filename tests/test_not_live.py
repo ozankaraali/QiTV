@@ -9,6 +9,8 @@ from tests import ts_fixtures as fx
 from tests.test_ts_segmenter import pes_starts
 
 FPS = 25
+# 93 s of media in 1.4 s, then real time: 91.6 s ahead, past the bound.
+BURST = lambda m: m * 0.015 if m < 93 else 1.395 + (m - 93)  # noqa: E731
 
 
 class Clock:
@@ -111,7 +113,7 @@ class NotLiveGuardTests(unittest.TestCase):
         self.guard.connected()
         self.assertEqual(self.feed(fx.make_stream(120), lambda m: m / 250, ticks_to=10.0), b"")
         self.assertTrue(self.guard.not_live)
-        media, seconds = self.guard.last
+        media, seconds, _size = self.guard.last
         self.assertGreater(media - seconds, not_live._NOT_LIVE_S)
         self.assertLess(seconds, 1.0)
         self.assertEqual(self.guard.feed(b"\x47" + bytes(187)), [])  # the rest of it too
@@ -129,6 +131,30 @@ class NotLiveGuardTests(unittest.TestCase):
         out = self.feed(data, lambda m: m * 0.001 if m < 60 else 0.06 + (m - 60), ticks_to=80.0)
         self.assertEqual(out, data)
         self.assertFalse(self.guard.not_live)
+
+    def test_a_real_channels_backlog_past_the_bound_is_kept(self):
+        # 2.9.7, the owner's full-HD channel: each connection brought 91 s of the channel in
+        # 1.4 s (over the bound: the log rounds), its pictures whole (a near-empty clip comes
+        # in a tenth of that), and each was dropped as a recording: the channel never played.
+        # What tells a clip is its weight.
+        self.guard.connected()
+        data = fx.make_stream(100, sei=8000)  # some 1.7 Mbit/s: a modest channel's pictures
+        self.assertGreater(len(data) / 100, not_live._CLIP_BYTES_PER_S)
+        out = self.feed(data, BURST, ticks_to=12.0)
+        self.assertEqual(out, data)
+        self.assertFalse(self.guard.not_live)
+
+    def test_a_clip_as_light_as_the_nights_is_dropped_at_a_real_channels_speed(self):
+        # The same burst, but as light as the "connection limit" clip: dropped.
+        self.guard.connected()
+        data = fx.make_stream(100)
+        self.assertLess(len(data) / 100, not_live._CLIP_BYTES_PER_S)
+        out = self.feed(data, BURST, ticks_to=12.0)
+        self.assertEqual(out, b"")
+        self.assertTrue(self.guard.not_live)
+        media, seconds, size = self.guard.last
+        self.assertGreater(media - seconds, not_live._NOT_LIVE_S)
+        self.assertLess(size / media, not_live._CLIP_BYTES_PER_S)
 
     def test_without_readable_timestamps_it_passes_after_the_shortest_hold(self):
         # Nothing to measure: nothing ahead, so nothing held longer than at real time.

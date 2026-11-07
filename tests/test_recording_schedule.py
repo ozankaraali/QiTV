@@ -1,6 +1,7 @@
 """Scheduled recordings (2.8): what is to be recorded, when each is due, and what became of it."""
 
 from datetime import datetime, timedelta, timezone
+import json
 from pathlib import Path
 import shutil
 import tempfile
@@ -77,6 +78,41 @@ class ScheduleTests(unittest.TestCase):
         self.assertEqual(self.schedule.due((T0 + timedelta(minutes=31)).timestamp(), guide), [])
         (second,) = self.schedule.due((T0 + timedelta(minutes=121)).timestamp(), guide)
         self.assertEqual(second.start, airings[2].start.timestamp())
+
+    def test_a_skipped_series_airing_is_not_due_and_the_series_stays(self):  # 2.9.7
+        item = self.schedule.add_series(CHANNEL, "The News")
+        airings = [programme("The News", 30), programme("The News", 120)]
+        guide = lambda channel, since: airings  # noqa: E731
+        self.schedule.skip(item["id"], airings[0].start.timestamp())
+        self.assertTrue(self.schedule.is_skipped(item["id"], airings[0].start.timestamp()))
+        self.assertEqual(self.schedule.due((T0 + timedelta(minutes=30)).timestamp(), guide), [])
+        self.assertFalse(self.schedule.is_scheduled(CHANNEL, airings[0]))
+        self.assertTrue(self.schedule.is_scheduled(CHANNEL, airings[1]))
+        (later,) = self.schedule.due((T0 + timedelta(minutes=121)).timestamp(), guide)
+        self.assertEqual(later.start, airings[1].start.timestamp())
+        self.assertEqual([i["id"] for i in self.schedule.items()], [item["id"]])
+        self.schedule.unskip(item["id"], airings[0].start.timestamp())
+        self.assertTrue(self.schedule.is_scheduled(CHANNEL, airings[0]))
+
+    def test_skip_is_kept_in_the_file_an_older_build_reads(self):  # 2.9.7
+        item = self.schedule.add_series(CHANNEL, "The News")
+        start = programme("The News", 30).start.timestamp()
+        self.schedule.skip(item["id"], start)
+        data = json.loads((self.folder / rs.FILE_NAME).read_text(encoding="utf-8"))
+        self.assertEqual(data["version"], 1)
+        self.assertIn(f"{item['id']}@{int(start)}", data["done"])
+        again = rs.Schedule(str(self.folder / rs.FILE_NAME), write=rs.write_now)
+        self.assertTrue(again.is_skipped(item["id"], start))
+
+    def test_skipping_an_airing_under_way_does_not_unstart_it(self):  # 2.9.7
+        item = self.schedule.add_series(CHANNEL, "The News")
+        airing = programme("The News", 30)
+        guide = lambda channel, since: [airing]  # noqa: E731
+        (job,) = self.schedule.due((T0 + timedelta(minutes=30)).timestamp(), guide)
+        self.schedule.started(job)
+        self.schedule.skip(item["id"], airing.start.timestamp())
+        self.schedule.unskip(item["id"], airing.start.timestamp())  # never undoes a start
+        self.assertEqual(self.schedule.due((T0 + timedelta(minutes=31)).timestamp(), guide), [])
 
     def test_a_series_is_found_among_short_programmes(self):  # 2.8 review M6
         # Five-minute programmes all day: the guide lists 48 at a time from the moment asked;
@@ -263,6 +299,13 @@ class TimerTests(unittest.TestCase):  # 2.8 (owner): a time on chosen days, no g
         (job,) = self.due(local(27, 0, 30))  # Tuesday night, the Monday slot
         self.assertEqual((job.start, job.stop), (local(26, 23, 30), local(27, 1)))
 
+    def test_a_skipped_timer_day_is_not_due_and_the_next_one_is(self):  # 2.9.7
+        item = self.schedule.add_timer(CHANNEL, begin=21 * 60, minutes=90, days=[0, 2])
+        self.schedule.skip(item["id"], local(26, 21))
+        self.assertEqual(self.due(local(26, 21, 30)), [])  # Monday's skipped
+        (wednesday,) = self.due(local(28, 21, 0))
+        self.assertEqual(wednesday.start, local(28, 21))
+
     def test_a_timer_stays_after_it_records_and_records_each_time_once(self):
         item = self.schedule.add_timer(
             CHANNEL, begin=21 * 60, minutes=60, days=range(7), title="Late film"
@@ -339,5 +382,84 @@ class TimerTests(unittest.TestCase):  # 2.8 (owner): a time on chosen days, no g
         self.assertEqual(rs.slot_text(5, 24 * 60), "00:05–00:05")
 
 
+class EditTests(unittest.TestCase):  # 2.9.7: the Recordings page's Edit… and Dismiss
+    def setUp(self):
+        self.folder = Path(tempfile.mkdtemp(prefix="qitv-edits-"))
+        self.addCleanup(shutil.rmtree, self.folder, True)
+        self.path = str(self.folder / rs.FILE_NAME)
+        self.schedule = rs.Schedule(self.path, write=rs.write_now, clock=at(local(26, 12)))
+
+    def test_a_once_recording_moves_and_keeps_its_id_and_channel(self):
+        item = self.schedule.add_once(
+            CHANNEL,
+            Programme(
+                "Film",
+                datetime.fromtimestamp(local(26, 20)).astimezone(),
+                datetime.fromtimestamp(local(26, 22)).astimezone(),
+                "",
+                None,
+            ),
+        )
+        edited = self.schedule.edit(
+            item["id"], title="Late film", start=local(26, 21), stop=local(26, 23)
+        )
+        self.assertEqual(edited["id"], item["id"])
+        self.assertEqual(edited["channel"], item["channel"])
+        self.assertEqual((edited["title"], edited["start"]), ("Late film", local(26, 21)))
+        reread = rs.Schedule(self.path, write=rs.write_now, clock=at(local(26, 12)))
+        self.assertEqual(reread.item(item["id"])["stop"], local(26, 23))
+
+    def test_a_once_recording_becomes_a_timer_and_back(self):
+        item = self.schedule.add_timer(CHANNEL, begin=21 * 60, minutes=60, days=[0])
+        edited = self.schedule.edit(item["id"], title="", begin=20 * 60, minutes=30, days=[4, 0])
+        self.assertEqual(
+            (edited["kind"], edited["days"], edited["begin"]), (rs.TIMER, [0, 4], 1200)
+        )
+        once = self.schedule.edit(item["id"], title="Once", start=local(27, 9), stop=local(27, 10))
+        self.assertEqual(once["kind"], rs.ONCE)
+        self.assertNotIn("days", once)
+        self.assertEqual(len(self.schedule.items()), 1)
+
+    def test_an_edit_into_the_past_or_of_a_series_changes_nothing(self):
+        item = self.schedule.add_timer(CHANNEL, begin=21 * 60, minutes=60, days=[0])
+        self.assertIsNone(
+            self.schedule.edit(item["id"], title="", start=local(26, 9), stop=local(26, 10))
+        )
+        self.assertEqual(self.schedule.item(item["id"])["kind"], rs.TIMER)
+        series = self.schedule.add_series(CHANNEL, "News")
+        self.assertIsNone(self.schedule.edit(series["id"], title="x", begin=0, minutes=5, days=[1]))
+        self.assertIsNone(self.schedule.edit("gone", title="x", begin=0, minutes=5, days=[1]))
+
+    def test_a_problem_dismissed_is_kept_marked_and_an_older_build_reads_the_file(self):
+        job = rs.Job("a", "News", CHANNEL, "P", local(26, 9), local(26, 10))
+        self.schedule.finished(job, rs.MISSED, why="closed")
+        self.schedule.finished(job, rs.FAILED, why="link")
+        first, second = self.schedule.outcomes()
+        self.schedule.dismiss(first["at"])
+        self.assertEqual([bool(o.get("seen")) for o in self.schedule.outcomes()], [True, False])
+        self.schedule.dismiss_all()
+        reread = rs.Schedule(self.path, write=rs.write_now, clock=at(local(26, 12)))
+        self.assertTrue(all(o.get("seen") for o in reread.outcomes()))
+        self.assertEqual(len(reread.outcomes()), 2)  # kept: the Library names files by them
+
+
 if __name__ == "__main__":
     unittest.main()
+
+
+class ListedMatcherTests(unittest.TestCase):  # 2.9.7 review: Go back over 50,000 channels
+    def test_a_kept_channel_is_matched_with_one_pattern_for_the_whole_list(self):
+        kept = {"cmd": "https://panel.test/live/{username}/{password}/7.ts", "id": "7"}
+        listed = rs.listed_matcher(kept)
+        self.assertTrue(listed({"cmd": "http://panel.test/live/u/p/7.ts"}))
+        self.assertFalse(listed({"cmd": "http://panel.test/live/u/p/8.ts"}))
+        by_id = rs.listed_matcher({"id": "7", "name": "News One"})
+        self.assertTrue(by_id({"id": "7"}))
+        by_name = rs.listed_matcher({"name": "News One"})
+        self.assertTrue(by_name({"name": "News One"}))
+        self.assertFalse(by_name({"name": "News Two"}))
+        with mock.patch.object(rs.re, "escape", wraps=rs.re.escape) as escaped:
+            listed = rs.listed_matcher(kept)
+            for n in range(1000):
+                listed({"cmd": f"http://panel.test/live/u/p/{n}.ts"})
+        self.assertLess(escaped.call_count, 10)  # built once, not once per channel

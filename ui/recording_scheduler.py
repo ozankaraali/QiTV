@@ -27,6 +27,21 @@ its window's end (the helper's own limit is only a day's). What records shows on
 question before a recording is stopped for a stream counts it (`ui.stream_question`).
 
 QiTV keeps the computer awake while it runs; a sleeping computer or a closed lid misses them.
+
+Recording what plays (2.9.7): a programme due on a channel a player shows from its buffer (the
+big picture, the small one, a tile, a player recording in the background) records on that
+player, as R does, from the programme's start as far back as its buffer goes: no stream of its
+own, so a provider that allows one stream records the channel watched. The player says REC and
+counts as a recording (the stream question, Quit); leaving its channel sets it aside to record
+on, and the scheduler stops it at its window's end. Its end is the player's to say. One that
+ends early while it airs (its stream failed) is tried again from where it ended.
+
+Watching what records (2.9.7): a player that tunes a channel recording on schedule (the small
+picture, the big one, the REC sign's Go back to, the Recordings page's Watch) borrows the
+recording's session (`lend`, `services.live.live_session.Borrowed`): it plays that buffer, and
+the provider sees no second stream. A recording that ends while it is watched keeps its session
+(and its stream's budget slot, under the viewer's name) open for the viewer, until it is given
+back; the next programme recording on that channel meanwhile records on it.
 """
 
 from __future__ import annotations
@@ -34,6 +49,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field, replace
 from datetime import datetime
 import logging
+import math
 import time
 from typing import Any, Callable, Optional
 
@@ -43,7 +59,16 @@ from services import recording, recording_schedule as rs
 from services.catalog import EMPTY_LINK_MESSAGE, NO_STREAM_MESSAGE, PROVIDER_LOADING_MESSAGE
 from services.connection_budget import DENIED
 from services.i18n import N_, translate
-from services.live.recorder import FAILED, LIMIT, MAX_SECONDS, MIN_FREE_BYTES, STOPPED
+from services.live.live_session import Borrowed
+from services.live.recorder import (
+    ENDED,
+    FAILED,
+    LIMIT,
+    MAX_SECONDS,
+    MIN_FREE_BYTES,
+    SPACE,
+    STOPPED,
+)
 from services.live.refusals import STREAM_LIMIT, STREAM_REFUSED
 from services.provider_api import known_http_only, portal_http_only
 from services.vlc_profile import user_agent_for
@@ -74,6 +99,8 @@ NO_STREAM_YET_TEXT = N_(
 )
 # i18n: a toast: QiTV's time-shift helper is not running, so a scheduled recording can't start
 NO_HELPER = N_("the time-shift helper is not running")
+
+LOST = "lost"  # a recording's end when the helper went (services.live.engine)
 
 # Why a scheduled recording failed, as FAILED_TEXT's {why} says it: by the code the scheduler,
 # the helper (a session's failure kind, the recorder's end) or the catalog gives.
@@ -153,6 +180,10 @@ class _Run:
     waiting_for: Optional[_Run] = None  # the earlier programme on its channel, to hand over
     handing: Optional[_Run] = None  # the next programme it hands its session to
     covers: list[rs.Job] = field(default_factory=list)  # the jobs within it, in its file
+    serving: bool = False  # 2.9.7: its recording ended; its session stays for a viewer
+    gone: bool = False  # 2.9.7: ... its stream broke: the viewer's buffer alone, lent no more
+    host: Any = None  # 2.9.7: the player's LiveSession it records on (no session of its own)
+    host_name: str = ""  # ... that player's name ("main", "pip", "b1" …)
 
 
 @dataclass
@@ -177,9 +208,13 @@ class RecordingScheduler(QObject):
         toast: Callable[..., None],
         clock: Callable[[], float] = time.time,
         parent: Optional[QObject] = None,
+        index: Any = None,
     ) -> None:
+        """`index` (2.9.7, services.recordings_index): each recording's programme, channel and
+        logo are noted there as it starts."""
         super().__init__(parent)
         self.schedule = schedule
+        self._index = index
         self._engine: Any = None
         self._catalogs = catalogs
         self._budget = budget
@@ -188,7 +223,13 @@ class RecordingScheduler(QObject):
         self._clock = clock
         self._runs: list[_Run] = []
         self._tries: dict[str, _Try] = {}
+        # 2.9.7: the budget purposes of the players watching a session (`lend`), one each
+        self._lent: dict[str, list[str]] = {}
         self._said_busy: set[str] = set()  # jobs told once that no stream was free
+        self._cut_at: dict[str, float] = {}  # 2.9.7: when a job's recording on a player broke
+        # 2.9.7: the players showing a channel: (name, provider, channel, LiveSession); the
+        # window's (none: every recording takes a stream of its own).
+        self.players: Callable[[], list[tuple[str, str, dict, Any]]] = list
         self._closed = False
         self._timer = QTimer(self)
         self._timer.setInterval(TICK_MS)
@@ -229,10 +270,12 @@ class RecordingScheduler(QObject):
             if run.rid and not run.ended and not run.state:
                 self.schedule.noted(run.job, rs.FAILED, path=run.path, why="helper")
                 self.schedule.unstarted(run.job)
+                self._cut_at[run.job.key] = now  # 2.9.7: on a player, the rest from here
             if not run.state and not run.user_stopped:
                 self._tries[run.job.key] = _Try(run.job, now, rs.FAILED, translate(NO_HELPER))
             run.sid = ""
             self._release(run)
+        self._lent.clear()  # the players' sessions went with the helper too
         self.changed.emit()
 
     # ---- the clock --------------------------------------------------------------------------
@@ -265,10 +308,11 @@ class RecordingScheduler(QObject):
         for key, attempt in list(self._tries.items()):
             if now >= rs.window(attempt.job)[1]:
                 del self._tries[key]
+                self._cut_at.pop(key, None)
                 self._said_busy.discard(key)
                 self._said(attempt.job, attempt.state, attempt.why)
         self._missed_meanwhile(now)
-        busy = {job.key for run in self._runs for job in (run.job, *run.covers)}
+        busy = {job.key for run in self._runs if not run.gone for job in (run.job, *run.covers)}
         due = self.schedule.due(now, self._guide)
         for job in sorted(due, key=lambda job: (job.start, -job.stop)):  # the longest first
             if job.key in busy:
@@ -288,7 +332,7 @@ class RecordingScheduler(QObject):
     def _missed_meanwhile(self, now: float) -> None:
         """One-time programmes whose window passed while QiTV ran without a try (the computer
         slept through it): said missed now, not as closed at the next start."""
-        busy = {job.key for run in self._runs for job in (run.job, *run.covers)}
+        busy = {job.key for run in self._runs if not run.gone for job in (run.job, *run.covers)}
         missed = self.schedule.missed_before(now, why="asleep", busy=busy | set(self._tries))
         if missed:
             titles = ", ".join(str(m.get("title") or "") for m in missed)
@@ -348,8 +392,63 @@ class RecordingScheduler(QObject):
                 dict(run.job.channel),
             )
             for run in self._runs
+            if run.rid and not run.ended and not run.stopping and run.host is None
+        ]
+
+    def hosted_players(self) -> set[str]:
+        """2.9.7: the players a scheduled recording records on now (the Recordings page lists
+        those as the programme, not twice)."""
+        return {
+            run.host_name
+            for run in self._runs
+            if run.host is not None and run.rid and not run.ended
+        }
+
+    def recording_details(self) -> list[tuple[str, str, str, float, float, str]]:
+        """2.9.7: what records now, for the Recordings page: (its name for `stop_now`, the
+        programme, the channel's name, since when (time.monotonic), its window's end (unix),
+        its schedule item's id)."""
+        return [
+            (
+                _purpose(run.job),
+                run.job.title,
+                str(run.job.channel.get("name") or ""),
+                run.since,
+                rs.window(run.job)[1],
+                run.job.item_id,
+            )
+            for run in self._runs
             if run.rid and not run.ended and not run.stopping
         ]
+
+    def host_of(self, name: str) -> Optional[str]:
+        """2.9.7: the player a scheduled recording (its REC name, "sched:…") records on, or
+        None when it records on a stream of its own (or isn't recording)."""
+        for run in self._runs:
+            if run.host is not None and not run.ended and _purpose(run.job) == name:
+                return run.host_name
+        return None
+
+    def wants(self, live: Any) -> bool:
+        """2.9.7: whether player `live` is still wanted as its recording stops: the next
+        programme on its channel takes over there (a background player stays on its channel
+        for it, rather than leaving and the next opening a stream of its own)."""
+        return any(
+            run.host is live
+            and run.handing is not None
+            and run.handing in self._runs
+            and not run.handing.ended
+            for run in self._runs
+        )
+
+    def stopped_by_user(self, live: Any) -> None:
+        """2.9.7: the user stops the recording on player `live` (the REC sign's Stop, the
+        stream question's, a tile closed): a scheduled one hosted there ends as the user's
+        stop (kept, this airing done), not as a broken stream to record again. Said before
+        the player stops: a background one leaves its channel at once."""
+        for run in self._runs:
+            if run.host is live and not run.ended:
+                run.user_stopped = True
 
     def stop_now(self, name: str) -> None:
         """The REC sign's Stop recording: this airing's recording stops and is kept (a series
@@ -381,6 +480,151 @@ class RecordingScheduler(QObject):
         for attempt in self._tries.values():
             attempt.job = moved(attempt.job)
 
+    def waiting(self) -> list[tuple[rs.Job, str]]:
+        """2.9.7: the scheduled recordings due now that wait to be tried again, and why the
+        last try failed ("stream": no stream was free), the soonest to end first."""
+        trying = {run.job.key for run in self._runs}  # tried again now: not waiting
+        tries = [t for key, t in self._tries.items() if key not in trying]
+        tries.sort(key=lambda attempt: rs.window(attempt.job)[1])
+        return [(attempt.job, attempt.why) for attempt in tries]
+
+    def try_now(self, key: str) -> None:
+        """2.9.7: the Recordings page's Try now: the job `key` waits no more."""
+        attempt = self._tries.get(key)
+        if attempt is not None and not self._closed:
+            attempt.at = self._clock()
+            self.tick()
+            self.changed.emit()
+
+    def skip(self, key: str) -> None:
+        """2.9.7: the Recordings page's Skip: the job `key` is not recorded and waits no more
+        (nothing is noted: it was the user's choice). A one-time one leaves the schedule; a
+        timer or a series records its next airing."""
+        attempt = self._tries.pop(key, None)
+        if attempt is None:
+            return
+        self._said_busy.discard(key)
+        job = attempt.job
+        item = self.schedule.item(job.item_id)
+        if item is not None and item.get("kind") == rs.ONCE:
+            self.schedule.cancel(job.item_id)
+        else:
+            self.schedule.skip(job.item_id, job.start)  # skipped, as the guide's Skip says
+            self.schedule.started(job)  # this airing is never due again
+        self.changed.emit()
+
+    def skip_airing(self, item_id: str, start: float) -> str:
+        """2.9.7: the airing of item `item_id` starting at `start` (unix) is not recorded; the
+        item goes on. One waiting for a stream waits no more and is never said missed; one
+        whose stream or link is on its way is let go; one that records stops (its file kept,
+        as the REC sign's Stop). "stopped" when it recorded, else "skipped"."""
+        key = f"{item_id}@{int(start)}"
+        self._tries.pop(key, None)
+        self._said_busy.discard(key)
+        for run in list(self._runs):
+            if run.job.key != key or run.stopping:
+                continue
+            if run.rid and not run.ended:
+                run.user_stopped = True
+                self._stop(run)
+                self.changed.emit()
+                return "stopped"
+            run.user_stopped = True  # not recording yet: nothing to keep, nothing to say
+            run.link_id = 0
+            if run.sid:
+                run.stopping = True
+                self._engine.close_session(run.sid)  # `_on_closed` releases it
+            else:
+                self._release(run)
+        self.schedule.skip(item_id, start)
+        self.changed.emit()
+        return "skipped"
+
+    def edit(self, item_id: str, **fields: Any) -> Optional[dict]:
+        """2.9.7: the Recordings page's Edit (`Schedule.edit`'s fields): a try under way of
+        the item is dropped (it is due at its new time); what records now is never edited (the
+        page offers no Edit for it)."""
+        item = self.schedule.edit(item_id, **fields)
+        if item is None:
+            return None
+        for key, attempt in list(self._tries.items()):
+            if attempt.job.item_id == item_id:
+                del self._tries[key]
+                self._said_busy.discard(key)
+        self.changed.emit()
+        self.tick()  # one on now starts at once
+        return item
+
+    # ---- 2.9.7: watching what records ----------------------------------------------------------
+
+    def lendable(self, channel: dict, provider: str) -> bool:
+        """A recording (or a session kept for a viewer) reads `channel` of `provider` now: a
+        player can borrow it (`lend`) instead of opening a stream of its own."""
+        return self._lendable_run(channel, provider) is not None
+
+    def lend(self, channel: dict, provider: str, purpose: str) -> Optional[Borrowed]:
+        """The session that reads `channel` of `provider`, for the player whose budget
+        purpose is `purpose` to watch; None when none does. It stays open until given back."""
+        run = self._lendable_run(channel, provider)
+        if run is None or self._closed:
+            return None
+        sid = run.sid
+        self._lent.setdefault(sid, []).append(purpose)
+        if run.serving and run.ticket != DENIED:
+            self._budget.relabel(run.ticket, purpose)  # its stream is the viewer's alone now
+        given = [False]
+
+        def give_back() -> None:
+            if not given[0]:
+                given[0] = True
+                self._give_back(sid, purpose)
+
+        return Borrowed(sid, give_back, recording=lambda: self._records_on(sid))
+
+    def _lendable_run(self, channel: dict, provider: str) -> Optional[_Run]:
+        for run in self._runs:
+            recording = bool(run.rid) and not run.ended and not run.stopping
+            if (
+                run.sid
+                and (recording or run.serving)
+                and not run.gone
+                and run.job.provider == provider
+                and _same_channel(run.job.channel, channel)
+            ):
+                return run
+        return None
+
+    def _records_on(self, sid: str) -> bool:
+        return any(run.sid == sid and run.rid and not run.ended for run in self._runs)
+
+    def _give_back(self, sid: str, purpose: str) -> None:
+        """The player of budget purpose `purpose` let go of `sid`: a session kept for its
+        viewers goes on under the name of one still watching, and closes once none is (its
+        stream goes back with its close; nothing borrows or records on it meanwhile)."""
+        left = self._lent.get(sid, [])
+        if purpose in left:
+            left.remove(purpose)
+        if left:
+            for run in self._runs:
+                if run.serving and run.sid == sid and run.ticket != DENIED:
+                    self._budget.relabel(run.ticket, left[-1])
+            return
+        self._lent.pop(sid, None)
+        for run in self._runs:
+            if run.serving and run.sid == sid:
+                run.serving = False  # closing: neither lent nor recorded on again
+                self._engine.close_session(sid)  # `_on_closed` releases it
+                return
+
+    def _serve(self, run: _Run) -> None:
+        """`run`'s recording ended while a player watches its session: it stays open for
+        them, its stream under their name."""
+        run.serving = run.stopping = True
+        watching = self._lent.get(run.sid)
+        if watching and run.ticket != DENIED:
+            self._budget.relabel(run.ticket, watching[-1])
+        self.changed.emit()
+
     def cancel(self, item_id: str) -> None:
         """A scheduled recording is no longer wanted: off the schedule, and stopped (what it
         recorded is kept) when it records now."""
@@ -402,6 +646,9 @@ class RecordingScheduler(QObject):
         stays to record the rest should QiTV open again while it airs."""
         self._timer.stop()
         for run in list(self._runs):
+            if run.serving and run.sid:
+                self._engine.close_session(run.sid)  # 2.9.7: kept for a viewer: it goes too
+                continue
             run.user_stopped = True
             recording = bool(run.rid and run.path and not run.ended)
             self._settle(run, 1 if recording else 0, run.path)  # the rest of each, on reopening
@@ -409,6 +656,8 @@ class RecordingScheduler(QObject):
                 self._stop(run)
             if recording and not run.ended:  # its end did not come at once
                 run.ended = True
+                if self._index is not None:  # 2.9.7: what the file holds (its tile's length)
+                    self._index.ended(run.path, self._clock())
                 self.schedule.noted(run.job, rs.RECORDED, path=run.path)
                 self.schedule.unstarted(run.job)
         self._closed = True
@@ -417,11 +666,33 @@ class RecordingScheduler(QObject):
 
     def _begin(self, job: rs.Job) -> None:
         run = _Run(job)
+        served = next(
+            (
+                r
+                for r in self._runs
+                if r.serving
+                and r.sid
+                and not r.gone  # its stream broke: a new one records
+                and r.job.provider == job.provider
+                and rs.same_channel(r.job.channel, job.channel)
+            ),
+            None,
+        )
+        if served is not None:  # 2.9.7: a session kept for a viewer: it records on that
+            run.sid, run.ticket = served.sid, served.ticket
+            if run.ticket != DENIED:
+                self._budget.relabel(run.ticket, _purpose(job))
+            served.sid, served.ticket = "", DENIED
+            self._runs.remove(served)
+            self._runs.append(run)
+            self._record(run, rs.window(job)[0])
+            self.changed.emit()
+            return
         same = next(
             (
                 r
                 for r in self._runs
-                if r.sid
+                if (r.sid or r.host is not None)
                 and not r.stopping
                 and r.handing is None
                 and r.waiting_for is None
@@ -438,7 +709,10 @@ class RecordingScheduler(QObject):
         self.changed.emit()
 
     def _attempt(self, run: _Run) -> None:
-        """A stream of the provider first (none free: tried again later), then the link."""
+        """A player showing the channel records it (2.9.7); else a stream of the provider
+        first (none free: tried again later), then the link."""
+        if self._record_on_player(run):
+            return
         job = run.job
         try:
             entry = self._catalogs.provider(job.provider)
@@ -458,11 +732,59 @@ class RecordingScheduler(QObject):
         channel = rs.with_account(job.channel, entry)
         run.link_id = self._catalogs.request_link(channel, section="live")
 
+    def _player_for(self, job: rs.Job) -> Optional[tuple[str, Any]]:
+        """2.9.7: a player that shows `job`'s channel from its buffer and records nothing:
+        (its name, its LiveSession); None when none does."""
+        try:
+            players = list(self.players())
+        except Exception as e:  # a player being made or closed: a stream of its own then
+            logger.debug("The players could not be read: %s", type(e).__name__)
+            return None
+        for name, provider, channel, live in players:
+            if provider != job.provider or not channel:
+                continue
+            if not _same_channel(job.channel, channel):
+                continue
+            if live.recordable() and not live.recording():
+                return name, live
+        return None
+
+    def _record_on_player(self, run: _Run) -> bool:
+        """2.9.7: `run` records on a player that shows its channel (the module docstring):
+        False when none does, or it could not start there."""
+        found = self._player_for(run.job)
+        if found is None:
+            return False
+        host_name, live = found
+        job = run.job
+        name = str(job.channel.get("name") or job.title)
+        path = recording.path_for(self._config, name, datetime.now().astimezone())
+        since = max(rs.window(job)[0], self._cut_at.get(job.key, -math.inf))
+        if not live.start_recording(path, since=since):
+            return False
+        rid = live.recording_id()
+        if not rid:
+            return False
+        run.host, run.host_name, run.rid, run.path = live, host_name, rid, path
+        self._note(run)
+        self.schedule.started(job)
+        self._tries.pop(job.key, None)
+        self._said_busy.discard(job.key)
+        run.since = time.monotonic()
+        logger.info(
+            "A scheduled recording records on the %s player, which shows its channel: no"
+            " stream of its own.",
+            host_name,
+        )
+        self._toast(translate(STARTED_TEXT, title=job.title, channel=name), "info")
+        self.changed.emit()
+        return True
+
     def _hand_over_when_due(self, run: _Run, now: float) -> None:
         earlier = run.waiting_for
         if earlier is None:
             return
-        if earlier not in self._runs or earlier.ended or not earlier.sid:
+        if earlier not in self._runs or earlier.ended or not (earlier.sid or earlier.host):
             run.waiting_for = None  # the earlier one ended meanwhile: this one starts alone
             self._attempt(run)
             return
@@ -552,14 +874,44 @@ class RecordingScheduler(QObject):
         self._tries.pop(run.job.key, None)
         self._said_busy.discard(run.job.key)
         run.since = time.monotonic()
+        self._note(run)
         self._toast(translate(STARTED_TEXT, title=run.job.title, channel=name), "info")
         self.changed.emit()
+
+    def _note(self, run: _Run) -> None:
+        """2.9.7: what `run`'s file holds, in the recordings index."""
+        if self._index is None or not run.path:
+            return
+        job, channel = run.job, run.job.channel
+        self._index.note(
+            run.path,
+            title=job.title,
+            channel=str(channel.get("name") or ""),
+            provider=job.provider,
+            channel_id=str(channel.get("id") or ""),
+            logo=str(channel.get("logo") or ""),
+            start=job.start,
+            stop=job.stop,
+        )
 
     def _on_recorded(self, rid: str, reason: str, path: str, written: int) -> None:
         run = self._run_by(rid=rid)
         if run is None or run.ended:
             return
         run.ended = True
+        if self._index is not None and path and run.path and path != run.path:
+            self._index.moved(run.path, path)  # 2.9.7: the helper saved it under another name
+        if self._index is not None and (path or run.path):
+            self._index.ended(path or run.path, self._clock())  # 2.9.7: what the file holds
+        if run.host is not None and not (run.stopping or run.user_stopped or run.cut):
+            # 2.9.7: a player's recording that ended unasked. One whose player still plays its
+            # buffer was stopped there (R): this airing is done. Else its stream broke (it
+            # ended, the player fell back to direct play or was refused, the helper went): the
+            # rest is recorded again, as a session's own break is.
+            if reason == STOPPED and run.host.recordable():
+                run.user_stopped = True
+            elif reason != SPACE:
+                run.cut = {ENDED: "ended", LOST: "helper"}.get(reason, FAILED)
         cut = run.cut or (reason if reason == FAILED else "")
         self._settle(run, written, path, cut or reason)
         left = rs.window(run.job)[1] - self._clock()
@@ -576,9 +928,10 @@ class RecordingScheduler(QObject):
                 self._finish(run, rs.FAILED, path=path, why=cut)
             else:
                 self._finish(run, rs.FAILED, why=cut or reason or "empty")
-            shown = STOPPED if reason == LIMIT else reason  # its window's end, not a 24 h limit
-            text, kind = recording.ended_text(shown, path, written)
-            self._toast(text, kind)
+            if run.host is None:  # 2.9.7: a player's recording: the player says how it ended
+                shown = STOPPED if reason == LIMIT else reason  # its window's end, not 24 h
+                text, kind = recording.ended_text(shown, path, written)
+                self._toast(text, kind)
         following = run.handing
         if following is not None and following in self._runs and run.sid and not cut:
             # The next programme takes the session (and its stream) over.
@@ -593,6 +946,27 @@ class RecordingScheduler(QObject):
             following.waiting_for = None
             if following in self._runs:
                 self._attempt(following)
+        if run.host is not None:  # 2.9.7: the player's session stays the player's
+            if run.retry is not None and not run.user_stopped:
+                self._cut_at[run.job.key] = self._clock()  # the rest, from where it broke
+                state, why = run.retry
+                self._tries[run.job.key] = _Try(run.job, self._clock() + RETRY_S, state, why)
+            self._release(run)
+            return
+        if run.sid and self._lent.get(run.sid):
+            if run.retry is not None and not run.user_stopped:
+                # 2.9.7: its stream broke while a player watches it (behind live, from the
+                # buffer): the viewer keeps the buffer, and the rest is tried again now, not
+                # when they catch up or leave. Nothing reads from the provider any more: its
+                # stream goes back, and the session is lent no more.
+                state, why = run.retry
+                self._tries[run.job.key] = _Try(run.job, self._clock() + RETRY_S, state, why)
+                run.retry, run.gone = None, True
+                if run.ticket != DENIED:
+                    self._budget.release(run.ticket)
+                    run.ticket = DENIED
+            self._serve(run)  # 2.9.7: a player watches it: it stays open for them
+            return
         self._engine.close_session(run.sid)
 
     def _on_failed(self, sid: str, kind: str, message: str) -> None:
@@ -617,6 +991,10 @@ class RecordingScheduler(QObject):
         """Its window ended (or the REC sign's Stop, a cancel, QiTV closing): the recording
         stops; its end follows."""
         run.stopping = True
+        if run.host is not None and not run.ended:  # 2.9.7: on a player
+            if run.host.recording_id() == run.rid:
+                run.host.stop_recording()
+            return  # its end follows (recordingEnded), with the jobs within it
         if run.sid and run.rid and not run.ended:
             self._engine.stop_recording(run.sid)
             return  # its end follows (recordingEnded), with the jobs within it
@@ -661,6 +1039,12 @@ class RecordingScheduler(QObject):
         if run in self._runs:
             self._runs.remove(run)
             self.changed.emit()
+
+
+def _same_channel(recorded: dict, channel: dict) -> bool:
+    """2.9.7: a recording's channel (as the schedule keeps it) is `channel` (a list's)
+    (`recording_schedule.is_listed`)."""
+    return rs.is_listed(recorded, channel)
 
 
 def _purpose(job: rs.Job) -> str:

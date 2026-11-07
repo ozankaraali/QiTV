@@ -33,6 +33,16 @@ MODELS = {
 
 
 class SnapshotTests(WindowCase):
+    def test_a_tile_colour_is_the_tvs(self):  # 2.9.7: the phone in the TV's language
+        from ui.overlays.painting import badge_color
+        from ui.remote_snapshots import tint
+
+        self.assertEqual(tint("Northwind News"), badge_color("Northwind News").name())
+        self.open_first_channel()
+        self.assertTrue(wait_until(lambda: state(self.window)["now"] is not None))
+        now = state(self.window)["now"]
+        self.assertEqual(now["tint"], tint(now["name"]))
+
     def test_state_has_no_urls_or_credentials(self):
         self.open_first_channel()
         self.assertTrue(wait_until(lambda: state(self.window)["now"] is not None))

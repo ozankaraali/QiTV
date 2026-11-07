@@ -126,7 +126,8 @@ class BudgetedStream(QObject):
         self.disk = self.asked_disk = bool(kwargs.get("disk"))
         channel = kwargs.get("channel")
         taken = None
-        if self.kept is not None and channel and "kept" not in kwargs:
+        borrowed = kwargs.get("borrowed") is not None  # 2.9.7: another's: nothing kept is taken
+        if self.kept is not None and channel and "kept" not in kwargs and not borrowed:
             taken = self.kept.take(str(channel))
             if taken is not None:
                 kwargs["kept"] = taken  # taken back where the user was

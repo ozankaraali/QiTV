@@ -39,7 +39,7 @@
   "epg_list_window_hours": 24,
   "epg_stb_period_hours": 5,
   "live_latency": "auto",
-  "mouse_wheel_action": "channel",
+  "mouse_wheel_action": "volume",
   "start_with_last_channel": true,
   "last_live_channel": null,
   "timeshift_enabled": false,
@@ -54,5 +54,6 @@
   "epg_expiration_value": 2,
   "epg_expiration_unit": "Hours",
   "decoding_defaults_version": 1,
-  "latency_defaults_version": 1
+  "latency_defaults_version": 1,
+  "wheel_defaults_version": 1
 }

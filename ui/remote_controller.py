@@ -41,6 +41,7 @@ from services.remote.protocol import (
     Closed,
     CloseSearch,
     Code,
+    DeskAct,
     Get,
     Held,
     Opened,
@@ -91,6 +92,11 @@ PHONE_GONE_TEXT = N_("The phone left before the stream reached it")
 # the Help menu's "Show the Log File…"
 START_FAILED_TEXT = N_(
     "The phone remote couldn't start. The log says why: Help → Show the Log File."
+)
+# i18n: under the pairing QR when the relay (remote.qitv.app) can't be reached: the code opens
+# this computer's own address, which only a phone on the same network can open
+HOME_ONLY_TEXT = N_(
+    "Not connected to remote.qitv.app: only a phone on this network can pair with this code"
 )
 
 
@@ -147,6 +153,7 @@ class RemoteController(QObject):
         self._timer.timeout.connect(self._tick)
         self._names: dict[str, str] = {}
         self.status: dict = {"home_url": "", "relay": "off"}
+        self._code_url = ""  # the pairing screen's code, "" while it is closed or starting
         self._guides: dict[str, PhoneGuide] = {}  # each phone's own Guide, by session
         self._libraries: dict[str, PhoneLibrary] = {}  # and its own Library
         self._channel_lists: dict[str, PhoneGuide] = {}  # and the Remote tab's channel list
@@ -420,6 +427,8 @@ class RemoteController(QObject):
             self._timer_from_phone(event)
         elif isinstance(event, Schedule):
             self._schedule_from_phone(event.sid, event.handle, event.do)
+        elif isinstance(event, DeskAct):  # 2.9.7: the phone's Recordings
+            self._desk_from_phone(event.sid, event.handle, event.do)
         elif isinstance(event, StoreSaved):
             self._persist(event.data)
         elif isinstance(event, Paired):
@@ -428,7 +437,9 @@ class RemoteController(QObject):
             if overlay is not None:
                 overlay.dismiss()  # done: one phone per showing
         elif isinstance(event, Code):
+            self._code_url = event.url
             self.codeChanged.emit(event.url)
+            self._note_home_only()
         elif isinstance(event, Status):
             self.status = {"home_url": event.home_url, "relay": event.relay}
             self.statusChanged.emit(dict(self.status))
@@ -436,6 +447,7 @@ class RemoteController(QObject):
             if overlay is not None:
                 failed = event.relay == "error" and not event.home_url
                 overlay.set_error(translate(START_FAILED_TEXT) if failed else "")
+            self._note_home_only()
 
     # ---- the second screen -----------------------------------------------------------------
 
@@ -655,8 +667,12 @@ class RemoteController(QObject):
                 self,
                 cache=window.screens.library_model.cache,  # the TV's: a sorted list serves both
                 searcher=self._searcher(),
-                recordings=window.screens.recordings,  # the TV's Recordings shelf (2.8)
+                recordings=window.screens.recordings,  # the recordings' folders (2.8)
+                rec_library=window.screens.recordings_library,  # 2.9.7: the Recordings tab's
+                rec_entries=window.screens.recordings_desk.entries,
             )
+            window.screens.recordings_desk.refreshed.connect(library.recordings_changed)
+            window.screens.recordings.changed.connect(library.recordings_changed)
             self._libraries[sid] = library
         return library
 
@@ -1143,6 +1159,22 @@ class RemoteController(QObject):
         if guide is not None:
             guide.refresh_timetable()
 
+    def _desk_from_phone(self, sid: str, handle: str, do: str) -> None:
+        """2.9.7: an action of the phone's Recordings, as the desktop page's button (only one
+        its row offered); the phones' Recordings come again."""
+        found = self._find_handle(sid, handle)
+        if found is None or found[0] != "desk":
+            return
+        key, allowed = cast(tuple, found[1])
+        if do not in allowed:
+            return
+        try:
+            self._window.screens.recordings_desk.press(key, do)
+        except Exception as error:  # a phone's ask must never take QiTV down
+            logger.error("Phone remote: a Recordings action failed: %s", safe_message(error))
+        for library in self._libraries.values():
+            library.recordings_changed()
+
     def _find_handle(self, sid: str, handle: str) -> Optional[tuple[str, object]]:
         found = self.result_handles.get(handle)
         lists = (self._guides.get(sid), self._channel_lists.get(sid), self._libraries.get(sid))
@@ -1175,6 +1207,16 @@ class RemoteController(QObject):
             logger.error("Phone remote: opening a %s failed: %s", kind, safe_message(error))
         if self._phones:
             self._soon.start(AFTER_PRESS_MS)
+
+    def _note_home_only(self) -> None:
+        """The pairing screen's code opens this computer's own address while the relay is on
+        but out of reach: say that only a phone on this network can use it."""
+        overlay = getattr(self._window, "pair_overlay", None)
+        if overlay is None:
+            return
+        relay = self.status.get("relay", "off")
+        home_only = bool(self._code_url) and relay not in ("off", "online")
+        overlay.set_note(translate(HOME_ONLY_TEXT) if home_only else "")
 
     def _persist(self, data: dict) -> None:
         config = self._window.config_manager

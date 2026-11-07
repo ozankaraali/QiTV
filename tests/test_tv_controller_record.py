@@ -19,6 +19,7 @@ from test_tv_pip import MOVIE, PipCase
 from timer_fixtures import wait_until
 
 from services.connection_budget import DENIED
+from services.live.live_session import Borrowed
 from services.sessions import Slot
 from services.vlc_profile import PlayKind
 from ui.keymap import Action
@@ -64,7 +65,86 @@ class _RecordCase(PipCase):
         return live.calls[live.calls.index(("start_recording", "/tmp/x.ts")) :]
 
 
+class RecordingNotedTests(_RecordCase):  # 2.9.7: the recordings index
+    def test_r_notes_what_the_recording_holds(self):
+        self.start_large(0)
+        noted = []
+        self.controller.note_recording = lambda path, item, title, start: noted.append(
+            (path, item["name"], title, start)
+        )
+        self.controller.handle(Action.RECORD)
+        live = self.controller.live
+        (path,) = [call[1] for call in live.calls if call[0] == "start_recording"]
+        ((noted_path, channel, title, start),) = noted
+        self.assertEqual((noted_path, channel), (path, CHANNELS[0]["name"]))
+        self.assertIsInstance(title, str)
+        self.assertGreater(start, 0)
+
+
+class RecordingEndNotedTests(_RecordCase):  # final review 5: its length is the file's
+    def test_an_r_recordings_end_is_noted(self):
+        self.start_large(0)
+        ended = []
+        self.controller.note_recording_end = ended.append
+        self.controller.handle(Action.RECORD)
+        live = self.controller.live
+        (path,) = [call[1] for call in live.calls if call[0] == "start_recording"]
+        live.recordingEnded.emit("stopped", path, 1_000)
+        self.assertEqual(ended, [path])
+
+
+class UserStopTests(_RecordCase):  # review 1: a scheduled one hosted there is the user's stop
+    def test_every_stop_of_a_background_recording_says_it_is_the_users(self):
+        told = []
+        self.controller.recording_user_stop = told.append
+        recording = self.record_large(0)
+        self.leave_for(1)
+        self.controller.stop_background_recording("main")
+        self.assertEqual(told, [recording])
+        self.assertIn(("stop_recording",), recording.calls)
+        told.clear()
+        self.controller.stop_player_recording(recording)  # the Recordings page's Stop
+        self.assertEqual(told, [recording])
+
+
+class WatchHostedTests(_RecordCase):  # review 3: Watch on a scheduled one a player hosts
+    def test_go_back_finds_the_player_a_scheduled_recording_records_on(self):
+        from unittest import mock
+
+        self.record_large(0)
+        self.leave_for(1)  # the player recording channel 0 goes to the background
+        self.controller.scheduled_host = lambda name: "main" if name == "sched:x@1" else None
+        with mock.patch.object(self.controller, "tune_live") as tune:
+            self.controller.go_back_to_recording("sched:x@1")
+        self.assertEqual(tune.call_args.args[0]["name"], CHANNELS[0]["name"])
+
+    def test_watch_on_one_the_small_picture_records_brings_it_large(self):
+        # 2.9.7 release review M2: Watch showed the player page and changed nothing.
+        self.start_large(0)
+        self.session.stateChanged.emit("playing")
+        self.open_small(CHANNELS[1])
+        self.pip_session.stateChanged.emit("playing")
+        small = self.sessions.small()
+        self.assertIsNotNone(small)
+        self.controller.scheduled_host = lambda name: small.name if name == "sched:x@1" else None
+        self.controller.go_back_to_recording("sched:x@1")
+        self.assertIs(self.sessions.large(), small)
+
+
 class RecordingAsideTests(_RecordCase):
+    def test_a_change_of_the_schedule_lets_go_of_one_kept_for_nothing(self):
+        # 2.9.7 release review M4: kept for the next programme, which never started on it.
+        recording = self.record_large(0)
+        self.leave_for(1)
+        wanted = [True]
+        self.sessions.wanted = lambda live: wanted[0] and live is recording
+        recording.stop_recording()
+        self.assertEqual([s.name for s in self.sessions.background()], ["main"])
+        wanted[0] = False  # the next airing was skipped, or refused on that player
+        self.controller.scheduled_changed()
+        self.assertEqual(self.sessions.background(), [])
+        self.assertEqual(recording.calls[-1], ("stop",))
+
     def test_a_zap_away_from_a_recording_keeps_it(self):
         recording = self.record_large(0)
         self.leave_for(1)
@@ -168,6 +248,15 @@ class RecordingAsideTests(_RecordCase):
         self.controller.stop_live()
         self.assertEqual(seen, [False])
         self.assertIn(("stop_recording",), self.since_recording(recording))
+
+    def test_quitting_notes_where_each_recording_ends(self):  # release review: its length
+        ended = []
+        self.controller.note_recording_end = ended.append
+        recording = self.record_large(0)
+        self.leave_for(1)
+        self.controller.stop_live()  # its end (recordingEnded) may come after QiTV is gone
+        (path,) = [call[1] for call in recording.calls if call[0] == "start_recording"]
+        self.assertEqual(ended, [path])
 
     def test_quitting_stops_the_recordings_in_the_background(self):
         recording = self.record_large(0)
@@ -582,6 +671,20 @@ class ScheduledRecordingQuestionTests(_RecordCase):
         self.scheduler_lets_go()
         self.assertEqual(self.requested()[-1], "Three")
 
+    def test_go_back_to_it_watches_its_recordings_session_asking_nothing(self):  # 2.9.7
+        lent = []
+        self.controller.lendable_scheduled = lambda channel, provider: True
+        self.controller.lend_scheduled = lambda channel, provider, purpose: lent.append(
+            purpose
+        ) or Borrowed("lent1", lambda: None)
+        self.controller.go_back_to_recording(SCHEDULED)
+        self.assertFalse(self.question.isVisibleTo(self.host))
+        self.assertEqual(self.stopped, [])
+        self.assertEqual(self.requested()[-1], "Three")
+        self.assertEqual(self.catalog.links[-1][1], CHANNELS[2])  # the list's, not the kept copy
+        self.ready("http://stream/3")
+        self.assertEqual(lent, ["main"])
+
     def test_quit_asks_and_leaves_it_to_the_scheduler(self):
         quits = []
         self.assertEqual(
@@ -819,6 +922,39 @@ class RecordingTileTests(MultiviewCase):
         self.host.resize(1280, 720)
         self.question = QuestionCard(self.host)
         self.controller.overlays.question = self.question
+
+    def test_a_tile_onto_a_channel_recording_on_schedule_asks_for_its_stream(self):
+        # 2.9.7 release review M1: a tile never plays a recording's session, so it needs a
+        # stream of its own: asked, as in 2.9.6, not "no stream to spare".
+        self.with_question()
+        self.catalog.current_provider = lambda: {"name": "Home", "type": "STB", "max_streams": 1}
+        ticket = self.budget.request("Home", 1, purpose=SCHEDULED, queue=False)
+        self.assertIsNotNone(ticket)
+        self.controller.scheduled_now = lambda: [(SCHEDULED, "Three", 5.0, SCHEDULED_CHANNEL)]
+        self.controller.stop_scheduled = lambda name: None
+        self.controller.lendable_scheduled = lambda channel, provider: True
+        self.v()
+        links = len(self.catalog.links)
+        self.tune(2)
+        self.assertTrue(self.question.isVisibleTo(self.host))
+        self.assertEqual(
+            self.question.question(), "No stream is free: Three is recording. Stop the recording?"
+        )
+        self.assertEqual(len(self.catalog.links), links)
+        self.budget.release(ticket)
+
+    def test_watch_on_one_a_tile_records_gives_that_tile_the_focus(self):
+        # 2.9.7 release review M2: Watch showed the player page and changed nothing.
+        self.catalog.current_provider = lambda: {"name": "Home", "type": "STB", "max_streams": 4}
+        self.start_large(0)
+        self.v()
+        self.pick_in("t2", CHANNELS[2], "http://stream/3")
+        self.grid_frame.focusRequested.emit("main")
+        self.assertEqual(self.sessions.large().name, "main")
+        self.controller.scheduled_host = lambda name: "t2" if name == "sched:x@1" else None
+        self.controller.go_back_to_recording("sched:x@1")
+        self.assertTrue(self.controller.multiview_shown())
+        self.assertEqual(self.sessions.large().name, "t2")
 
     def test_the_small_role_tiles_recording_survives_leaving(self):  # Stage C review I1
         self.catalog.current_provider = lambda: {"name": "Home", "type": "STB", "max_streams": 4}

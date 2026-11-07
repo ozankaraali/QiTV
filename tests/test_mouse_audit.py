@@ -50,7 +50,7 @@ from ui.context_actions import OPEN_PIP_TEXT, REMOVE_RECENT_TEXT, ContextActions
 from ui.keymap import SHORTCUTS
 from ui.library.poster_grid import PosterGrid
 from ui.library.series_view import SeriesView
-from ui.library.top_nav import TopNav
+from ui.library.top_nav import ALL_TABS, TopNav
 from ui.overlay_host import OverlayHost
 from ui.overlays.drawer import Drawer
 from ui.overlays.guide import Guide
@@ -157,6 +157,7 @@ ON_SCREEN: dict[tuple[str, str], tuple[tuple[str, str], ...]] = {
     ("library", "Ctrl+F"): (("library", "search"),),
     ("library", "/"): (("library", "search"),),
     ("library", "Ctrl+D"): (("library", "favorite"),),
+    ("library", "Delete"): (("library", "delete"),),  # 2.9.7: a recording's strip
     ("library", "F11, Ctrl+Meta+F"): (("library", "fullscreen"),),
     # Back to the grid (from a series or the search): its tab, or the series' ‹ (2.9.3); to
     # live TV: Live TV.
@@ -172,6 +173,7 @@ ON_SCREEN: dict[tuple[str, str], tuple[tuple[str, str], ...]] = {
     ("menu", "Ctrl+2"): (("drawer", "Movies"), ("library", "movies")),
     ("menu", "Ctrl+3"): (("drawer", "Series"), ("library", "series")),
     ("menu", "Ctrl+4"): (("transport", "grid"),),
+    ("menu", "Ctrl+5"): (("library", "recordings"), ("drawer", "Recordings")),  # 2.9.7
     ("menu", "Ctrl+O"): (("drawer", "Open file"),),
     ("menu", "Ctrl+,"): (("drawer", "settings"), ("drawer", "Settings")),
     ("menu", "Ctrl+R"): (("drawer", "refresh"),),
@@ -417,6 +419,7 @@ def _guide(host: QWidget) -> set[str]:
 
 def _library(host: QWidget) -> set[str]:
     nav = TopNav(host)
+    nav.set_tabs(ALL_TABS)  # 2.9.7: Recordings shows once the Library has its page
     nav.setGeometry(0, 0, 1280, nav.height())
     found = {n for n, r in nav._item_rects().items() if not r.isEmpty()}
     grid = PosterGrid(FakePosters(), host)
@@ -430,6 +433,12 @@ def _library(host: QWidget) -> set[str]:
     found.update(name for name, _label in grid.button_labels())
     if grid._rail_visible():
         found.add("rail")
+    # 2.9.7: the Recordings tab's tiles: a recording's strip (Delete…, Show in Folder)
+    recordings = PosterGrid(FakePosters(), host)
+    recordings.setGeometry(0, nav.height(), 1280, 720 - nav.height())
+    recordings.set_sections([("", titles(3))])
+    recordings.set_details_provider(lambda item: details("recording", None))
+    found.update(name for name, _label in recordings.button_labels())
     return found
 
 
