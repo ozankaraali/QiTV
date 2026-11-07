@@ -13,6 +13,7 @@ own name ("Türkçe"), as Settings lists QiTV's own languages.
 
 from __future__ import annotations
 
+import re
 from typing import Optional
 
 # Qwen's order: (ISO 639-1 code, else 639-3's; Qwen's English name; the language's own name;
@@ -164,3 +165,69 @@ def iso_code(qwen_name: str) -> str:
     """The language's ISO 639-1 code ("tr"), else its 639-3 one ("yue", "fil"); "" for a name
     that is none of Qwen's."""
     return _CODE.get(qwen_name, "")
+
+
+# 2026-11-07, the owner: IPTV playlists name a channel (or its group) after its country or
+# language, "TR: …", "TR| …", "DE - …": a channel whose captions language is not known yet takes
+# it from there. Country codes (UK is the United Kingdom here, not Ukrainian) and a few language
+# codes; one that could be either of two languages (BE, CA, CH but for German, IN) is left out.
+_ARABIC_COUNTRIES = "AR SA AE EG QA KW BH OM JO LB SY IQ LY TN DZ MA SD YE PS".split()
+_SPANISH_COUNTRIES = "ES MX CO CL PE VE EC UY PY BO CR DO GT HN NI PA SV CU".split()
+_PREFIXES: dict[str, str] = {
+    **dict.fromkeys(_ARABIC_COUNTRIES, "Arabic"),
+    **dict.fromkeys(_SPANISH_COUNTRIES, "Spanish"),
+    **dict.fromkeys(("UK", "GB", "US", "USA", "EN", "IE", "AU", "NZ"), "English"),
+    **dict.fromkeys(("DE", "AT", "CH"), "German"),
+    **dict.fromkeys(("PT", "BR"), "Portuguese"),
+    "TR": "Turkish",
+    "FR": "French",
+    "RU": "Russian",
+    "IT": "Italian",
+    "NL": "Dutch",
+    "PL": "Polish",
+    "GR": "Greek",
+    "CZ": "Czech",
+    "SE": "Swedish",
+    "DK": "Danish",
+    "FI": "Finnish",
+    "HU": "Hungarian",
+    "RO": "Romanian",
+    "MK": "Macedonian",
+    "IR": "Persian",
+    "JP": "Japanese",
+    "KR": "Korean",
+    "CN": "Chinese",
+    "TH": "Thai",
+    "VN": "Vietnamese",
+    "ID": "Indonesian",
+    "MY": "Malay",
+    "PH": "Filipino",
+    "UA": "Ukrainian",
+    "BG": "Bulgarian",
+    "HR": "Croatian",
+    "SK": "Slovak",
+    "SI": "Slovenian",
+    "EE": "Estonian",
+    "LV": "Latvian",
+    "LT": "Lithuanian",
+}
+# three-letter language codes that name a country as often (India, Peru, Chile, Slovenia, …)
+_NOT_LANGUAGES = frozenset({"IND", "PER", "CHI", "SLO", "MAC", "MAY"})
+# a code of two or three capitals at the very start, then ":", "|" or " - "
+_PREFIX = re.compile(r"^\s*([A-Z]{2,3})(?:\s*[:|]| - )")
+
+
+def language_from_title(*names: Optional[str]) -> str:
+    """The language a channel's title (or failing that its group: `names` in that order)
+    names by a clear prefix ("TR: …", "TR| …", "DE - …"), as Qwen's name; "" when none does."""
+    for name in names:
+        match = _PREFIX.match(name or "")
+        if match is None:
+            continue
+        code = match.group(1)
+        language = _PREFIXES.get(code)
+        if language is None and len(code) == 3 and code not in _NOT_LANGUAGES:
+            language = qwen_name(code)  # "TUR", "GER", "ENG": ISO 639-2
+        if language:
+            return language
+    return ""

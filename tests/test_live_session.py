@@ -2356,6 +2356,52 @@ class StayLiveTests(LiveSessionCase):
         self.assertEqual(self.timelines[-1]["mode"], "live")
         self.assertEqual(len(self.playback.plays), 1)
 
+    def test_ai_captions_still_loading_keep_the_picture_waiting_past_their_distance(self):
+        # 2026-11-07, a talk show: the wait ended at the floor while the models still loaded,
+        # the picture played on, and the first 25 s it showed got no captions
+        sid = self.start()
+        feed = Feed(self, sid, burst=0.0, edge=2.5).ready()
+        feed.run(30.0)
+        holds = len(self.playback.holds)
+        self.live.set_caption_ready(False)
+        self.live.set_caption_floor(8.0)
+        feed.run(15.0)
+        self.assertTrue(self.live.caption_waiting())  # at its floor long since, still waiting
+        self.assertGreater(self.timelines[-1]["lag"], 12.0)
+        self.live.set_caption_ready(True)
+        feed.run(1.0)
+        self.assertFalse(self.live.caption_waiting())
+        self.assertEqual(self.playback.holds[holds:], [True, False])
+        feed.run(5.0)
+        self.assertEqual(self.timelines[-1]["mode"], "live")
+
+    def test_ai_captions_that_never_get_ready_let_the_picture_go_after_a_while(self):
+        from services.live.live_session import _CAPTION_READY_MAX_S
+
+        sid = self.start()
+        feed = Feed(self, sid, burst=0.0, edge=2.5).ready()
+        feed.run(30.0)
+        self.live.set_caption_ready(False)
+        self.live.set_caption_floor(8.0)
+        feed.run(_CAPTION_READY_MAX_S - 2.0)
+        self.assertTrue(self.live.caption_waiting())
+        feed.run(4.0)
+        self.assertFalse(self.live.caption_waiting())
+
+    def test_ai_captions_loading_hold_a_picture_already_at_their_distance(self):
+        # captions turned on at the floor already (off and on again): while the model loads,
+        # the picture waits there too, then plays on at once
+        self.live.set_caption_ready(False)
+        self.live.set_caption_floor(8.0)
+        sid = self.start()
+        feed = Feed(self, sid, burst=0.0, edge=2.5).ready()
+        feed.run(20.0)
+        self.assertTrue(self.live.caption_waiting())
+        self.live.set_caption_ready(True)
+        feed.run(1.0)
+        self.assertFalse(self.live.caption_waiting())
+        self.assertEqual(self.playback.holds, [True, False])
+
     def test_ai_captions_off_leave_the_picture_where_it_is_time_shifted(self):
         # 2.9: turned off, nothing catches up by itself: time-shifted as after a pause, the
         # bar and Go live showing; Go live goes back to the latency's target.
@@ -2472,17 +2518,24 @@ class StayLiveTests(LiveSessionCase):
         self.assertFalse(self.live.caption_waiting())  # 20 s behind now: nothing to wait for
         self.assertIs(self.playback.current, PlaybackState.PLAYING)
 
-    def test_ai_captions_read_from_the_segment_that_holds_the_picture(self):
+    def test_ai_captions_read_from_the_segment_before_the_one_that_holds_the_picture(self):
+        # 2026-11-07: from the picture's own segment, a sentence going on there was read from
+        # mid-word ("O beslediği takdirde" lost); from the one before, it is read whole
         self.ready(segments(0, 4), live_edge=8.0)
         self.playback.set_state(PlaybackState.PLAYING)
         self.step(0.25)
         source = self.live.caption_source()
         self.assertIsNotNone(source)
         url, seq, start = source
-        position = self.live.position()
         self.assertIn("/side/", url)
-        self.assertTrue(start <= position < start + 2.0, (start, position))
         self.assertTrue(url.endswith(f"/{seq}.ts"))
+        self.assertEqual(start, 0.0)  # in the first segment: none before it
+        for _ in range(16):
+            self.step(0.25)
+        position = self.live.position()
+        url, seq, start = self.live.caption_source()
+        self.assertGreaterEqual(position, 4.0)
+        self.assertTrue(start + 2.0 <= position < start + 4.0, (start, position))
 
     def test_a_lasting_lag_above_the_band_gets_one_gentle_nudge_then_settles(self):
         # 2.1: not within a tick (2.0 did, and flapped on a public HLS channel): after 15 s outside

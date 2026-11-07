@@ -340,6 +340,10 @@ _EDGE_S = 1.0  # VLC this close to the live edge is at it (a starvation, and its
 _CAPTION_SHORT_S = 1.0
 _CAPTION_REACHED_S = 0.1
 _CAPTION_BACK_S = 3.0  # time-shifted this near their floor when they come on: live again
+# 2026-11-07: while the captions' models still load, the wait goes on past the floor (the picture
+# played away what they could have written: a talk show's first 25 s had no captions), this long
+# at most from its start
+_CAPTION_READY_MAX_S = 30.0
 # 2.7: a channel's own server window (a long HLS playlist) is offered past the buffer when it
 # keeps at least this much more (the bar then shows all of it); a part played without one (a
 # provider archive's) has the bar reach this far past where it plays (as catch-up's).
@@ -685,6 +689,7 @@ class LiveSession(QObject):
         self._caption_floor = 0.0
         self._caption_armed = False
         self._caption_held: Optional[float] = None
+        self._caption_ready = True  # the captions write already (`set_caption_ready`)
         self._part_ready = False
         self._in_part = False  # also while a new part is on its way to replace one VLC played
         self._part_playing = False  # VLC plays `_part` itself
@@ -1360,6 +1365,13 @@ class LiveSession(QObject):
     def caption_floor(self) -> float:
         return self._caption_floor
 
+    def set_caption_ready(self, ready: bool) -> None:
+        """AI captions (2026-11-07): whether they can write yet (their models loaded and warm).
+        While they can't, the picture's wait for their distance goes on past it, for
+        `_CAPTION_READY_MAX_S` from its start at most, and one at the floor already waits too:
+        playing on would pass what they could still write once ready."""
+        self._caption_ready = bool(ready)
+
     def caption_waiting(self) -> bool:
         """The picture waits for the AI captions' distance behind live (`_caption_wait`)."""
         return self._caption_held is not None
@@ -1377,7 +1389,10 @@ class LiveSession(QObject):
         already waits for nothing. A drift later is stay-live's to steer, gently. True while
         it waits: stay-live is not consulted (no rate, no trouble, no landing measured)."""
         if self._caption_held is not None:
-            if lag >= self._caption_floor - _CAPTION_REACHED_S:
+            ready = (
+                self._caption_ready or self._clock() - self._caption_held >= _CAPTION_READY_MAX_S
+            )
+            if lag >= self._caption_floor - _CAPTION_REACHED_S and ready:
                 self._release_caption_wait()
                 return False
             self._reland_edge = self._live_edge(snapshot)  # the wait's growth, no backlog's
@@ -1387,9 +1402,14 @@ class LiveSession(QObject):
         if self._held is not None or self._playback.state() is not PlaybackState.PLAYING:
             return False  # held at the edge, or not playing yet: once it plays
         self._caption_armed = False
-        if lag >= self._caption_floor - _CAPTION_SHORT_S:
+        if lag >= self._caption_floor - _CAPTION_SHORT_S and self._caption_ready:
             return False
-        _LOG.info("AI captions: waiting %.1f s behind live until %.1f s.", lag, self._caption_floor)
+        _LOG.info(
+            "AI captions: waiting %.1f s behind live until %.1f s%s.",
+            lag,
+            self._caption_floor,
+            "" if self._caption_ready else " and they are ready",
+        )
         self._caption_held = self._clock()
         self._land_check = None  # a wait is no landing's error
         self._ask_junction(0.0)  # a restart meanwhile takes nothing of what the wait builds
@@ -1401,16 +1421,24 @@ class LiveSession(QObject):
         held, self._caption_held = self._caption_held, None
         if held is None:
             return
-        _LOG.info("AI captions: waited %.1f s; playing on.", self._clock() - held)
+        _LOG.info(
+            "AI captions: waited %.1f s; playing on%s.",
+            self._clock() - held,
+            "" if self._caption_ready else " (they are not ready yet)",
+        )
+        self._caption_ready = True  # waited for them long enough: no wait for them again
         self._stay.absorb()  # the lag stepped up on purpose: counted afresh from here
         self._playback.hold(False)
 
     def caption_source(self, after: Optional[float] = None) -> Optional[tuple[str, int, float]]:
-        """Where AI captions read the stream (2.9): the helper's side URL from the segment that
-        holds the picture's position, that segment's seq and its start on the timeline; with
-        `after`, from the first segment that starts there or later (past a jump the reader
-        stopped at). None when no pipeline stream plays from the ring (a direct play, the
-        channel's server window or a provider archive, or nothing yet), or no such segment."""
+        """Where AI captions read the stream (2.9): the helper's side URL from the segment
+        before the one that holds the picture's position (2026-11-07: a sentence going on where
+        the picture is was read from mid-word, "O beslediği takdirde" lost; from the segment
+        before, it is read whole and shows for what is left of it), that segment's seq and its
+        start on the timeline; with `after`, from the first segment that starts there or later
+        (past a jump the reader stopped at). None when no pipeline stream plays from the ring (a
+        direct play, the channel's server window or a provider archive, or nothing yet), or no
+        such segment."""
         if self._phase is not _Phase.PIPELINE or self._sid is None:
             return None
         if self._part is not None or self._in_part or self._archive is not None:
@@ -1425,7 +1453,10 @@ class LiveSession(QObject):
             span = found
         else:
             position = self.position()
-            span = next((s for s in reversed(spans) if s.start <= position), spans[0])
+            holds = next(
+                (i for i in range(len(spans) - 1, -1, -1) if spans[i].start <= position), 0
+            )
+            span = spans[max(0, holds - 1)]
         url = self._engine.stream_url(self._sid, span.seq, side=True)
         if not url:
             return None

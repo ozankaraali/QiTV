@@ -41,11 +41,29 @@ class GuardTests(unittest.TestCase):
         self.assertEqual(guards.clean("Altyazı M.K."), "")
         self.assertEqual(guards.clean("İzlediğiniz için teşekkür ederim."), "")
         self.assertEqual(guards.clean("Thanks for watching!"), "")
-        self.assertEqual(guards.clean("Sen öyle. " * 40), "Sen öyle.")
+        self.assertEqual(guards.clean("Sen öyle. " * 40), "")  # a loop over music: none of it said
+        self.assertEqual(guards.clean("Sen öyle. " * 3), "Sen öyle. Sen öyle. Sen öyle.")  # as said
         self.assertEqual(
             guards.clean("Kolay gelsin. Kolay gelsin. Hoş geldin."),
             "Kolay gelsin. Kolay gelsin. Hoş geldin.",
         )  # said twice: kept
+
+    def test_a_loop_over_sung_music_is_not_a_caption(self):
+        # 2026-11-07, the Turkish Moonshine trial over songs: number loops shown as digits
+        self.assertEqual(guards.clean("Bu, " + "iki bin on yedide " * 6), "")
+        self.assertEqual(guards.clean("Bu, " + "bir de bu, " * 10), "")
+        self.assertEqual(guards.clean("Bu, " + "iki, " * 20), "")
+        # the owner's live log: three times, the last with "!" (shown as "2017'de" three times)
+        self.assertEqual(
+            guards.clean("Bu, iki bin on yedide, iki bin on yedide, iki bin on yedide!"), ""
+        )
+        # two words said three times is a shout: it stays as said
+        self.assertEqual(
+            guards.clean("Ne yaptın, ne yaptın, ne yaptın!"), "Ne yaptın, ne yaptın, ne yaptın!"
+        )
+        # people repeat for real (the owner, 2026-11-07): shown as said
+        self.assertEqual(guards.clean("Gol! Gol! Gol! Gol! Gol!"), "Gol! Gol! Gol! Gol! Gol!")
+        self.assertEqual(guards.clean("Hayır hayır hayır, gitme."), "Hayır hayır hayır, gitme.")
         self.assertEqual(guards.clean("  Five others were  injured. "), "Five others were injured.")
 
     def test_the_language_the_model_heard_is_not_part_of_the_caption(self):
@@ -545,6 +563,38 @@ class CutterTests(unittest.TestCase):
 
         return Cutter(lambda window: True, is_voiced)
 
+    def test_the_moonshine_trials_turkish_is_read_in_whole_utterances(self):
+        # 2026-11-07, the owner: right after a tune its 2 s pieces lost "gün" and "iyi"; its
+        # Turkish goes to the growing writer instead (no forced cuts), the rest as before
+        import queue
+
+        from services.captions.growing import GrowingWriter
+        from services.captions.worker import TURKISH, _Run
+
+        for moonshine, language, growing in (
+            (True, TURKISH, True),
+            (False, TURKISH, False),
+            (True, "English", False),
+        ):
+            run = object.__new__(_Run)
+            run.stopped, run.writer, run.blocks = threading.Event(), None, queue.Queue()
+            run.model = SimpleNamespace(
+                moonshine=moonshine,
+                turkish_stream=None,
+                is_speech=lambda window: False,
+                is_voiced=lambda window: False,
+            )
+            run.language, run.viewer, run.rtf = language, [100.0], 0.5
+            run.cutter = Cutter(lambda window: False)
+            with mock.patch("services.captions.worker.threading.Thread"):
+                run._maybe_stream()
+            self.assertEqual(isinstance(run.writer, GrowingWriter), growing, language)
+            run._take(101.0, array("f", bytes(4 * 1600)))  # the picture 1 s behind: a small lead
+            if growing:
+                self.assertEqual(run.blocks.qsize(), 1)  # the sound goes to it whole
+            else:
+                self.assertEqual(run.cutter.max_s, 2.0)  # short pieces, as the lead allows
+
     def test_a_piece_that_reached_its_length_is_cut_at_its_longest_pause(self):
         # 2.9.5: the held detector showed no pause between words: the cut fell anywhere.
         cutter = self.voiced_cutter(lambda t: not (2.5 <= t < 2.6 or 3.2 <= t < 3.45))
@@ -794,6 +844,43 @@ class ControllerTimingTests(unittest.TestCase):
         self.window.live_session.caption_waiting = lambda: False
         self.assertEqual(self.at(10.5), "Merhaba")
         self.assertEqual(changed, [True, True])
+
+    def test_the_picture_waits_while_the_model_loads_and_plays_once_it_is_ready(self):
+        # 2026-11-07, a talk show: the picture played on while the models still loaded, and the
+        # captions began 25 s of it later
+        live = self.window.live_session
+        told = []
+        live.set_caption_ready = told.append
+        self.captions._ready = False
+        self.captions._floored = None
+        self.captions._hold_floor()  # captions on, the model loading
+        self.assertEqual(told, [False])
+        self.assertEqual(self.captions.status_text(), "Preparing…")
+        self.captions._on_ready()
+        self.assertEqual(told[-1], False)  # loaded: it waits on until the run writes past it
+        run = self.captions._run
+        live.position_s = 100.0
+        self.captions._on_progress(run, 108.0, 0.2, 100.5)  # written 0.5 s past the picture
+        self.assertEqual(told[-1], False)
+        self.captions._on_progress(run, 109.0, 0.2, 102.0)
+        self.assertEqual(told[-1], True)
+        self.captions._drop_floor()  # off: nothing left to wait for
+        self.assertEqual(told[-1], True)
+
+    def test_a_first_run_that_writes_nothing_does_not_hold_the_picture_for_long(self):
+        from ui.captions_controller import START_WAIT_S
+
+        live = self.window.live_session
+        told = []
+        live.set_caption_ready = told.append
+        self.captions._ready = False
+        self.captions._floored = None
+        self.captions._hold_floor()
+        self.captions._on_ready()
+        self.assertEqual(told[-1], False)
+        self.captions._starting -= START_WAIT_S  # as if that long ago
+        self.at(5.0)
+        self.assertEqual(told[-1], True)
 
     def test_a_caption_from_a_run_before_is_not_shown(self):
         self.captions._on_caption(self.captions._run - 1, 10.0, 12.0, "old")
@@ -1500,3 +1587,23 @@ class FilmCaptionsTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TrialPieceTests(unittest.TestCase):
+    def test_a_trial_piece_is_kept_as_sound_and_words(self):
+        from array import array
+        import wave
+
+        from services.captions import worker
+
+        folder = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, folder, True)
+        worker.keep_piece(
+            folder, 12.5, 14.0, array("f", [0.0, 0.5, -0.5] * 1000), "Bu  bir\tdeneme."
+        )
+        names = [n for n in os.listdir(folder) if n.endswith(".wav")]
+        self.assertEqual(len(names), 1)
+        with wave.open(os.path.join(folder, names[0])) as w:
+            self.assertEqual((w.getframerate(), w.getnchannels(), w.getnframes()), (16000, 1, 3000))
+        with open(os.path.join(folder, "pieces.tsv"), encoding="utf-8") as listing:
+            self.assertEqual(listing.read(), f"{names[0]}\t12.50\t14.00\tBu bir deneme.\n")

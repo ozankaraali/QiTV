@@ -49,6 +49,11 @@ FILM_AHEAD_S = 6.0  # a film's sound is read from this far past the picture (aft
 # ahead of it is in time (2.9: a 1.7B film's captions 3-6 s ahead, all in time, said so at
 # every dip under the 6 s it starts with).
 LATE_LEAD_S = 1.0
+# 2026-11-07: once the model has loaded, the picture's wait for the captions goes on until the
+# first run has written this far past it (its first words are written, not passed), this long
+# after the model was ready at most
+START_LEAD_S = 1.5
+START_WAIT_S = 6.0
 HOLD_S = 0.6  # a caption stays this long after its words, unless the next one starts
 MIN_SHOW_S = 1.2
 # 2.9, the owner: captions came "a tiny bit" before the words, and went before the next line
@@ -187,8 +192,10 @@ class CaptionsController(QObject):
         self._last: Optional[tuple[float, float]] = None  # (position, monotonic) last tick
         self._was_waiting = False  # the live picture waited for the captions' distance
         self._floored: Any = None  # the live session holding the captions' distance
+        self._starting: Optional[float] = None  # when the model got ready, till the run writes
         self._shown = ""
         self._language: tuple[str, str] = ("", FROM_MODEL)  # (qwen name or "", source)
+        self._guessed = False  # the language is a guess from the channel's title prefix
         self._detected: dict[str, str] = {}  # channel: the language the model's pieces agreed on
         self._routed = ""  # the provider's film last sent through a film relay while on
         self._timer = QTimer(self)
@@ -795,6 +802,8 @@ class CaptionsController(QObject):
     # ---- the process ---------------------------------------------------------------------
     def _on_ready(self) -> None:
         self._loading, self._ready = False, True
+        # the picture waits on until the first run has written past it (`_on_progress`)
+        self._starting = time.monotonic()
         if self._enabled:
             self._start_run()
         self.changed.emit()
@@ -803,6 +812,8 @@ class CaptionsController(QObject):
         was = self._enabled
         logger.warning("AI captions stopped: %s", reason)
         self._loading = self._ready = False
+        self._starting = None
+        self._tell_ready(True)  # nothing to wait for any more
         if reason != "gone":
             self._process.stop()  # it did not load: no child left without a model
         if was:
@@ -847,7 +858,9 @@ class CaptionsController(QObject):
         self._resolve_language()  # the language of the track it reads, as it begins
         self._session_key = url.rsplit("/side/", 1)[0]
         self._newest = self._written = None
-        self._process.send("start", self._run, url, start, self._run_track, self._language[0])
+        self._process.send(
+            "start", self._run, url, start, self._run_track, self._language[0], self._guessed
+        )
         self._process.send("viewer", self._position())
         self._offer_specialist()
 
@@ -914,6 +927,7 @@ class CaptionsController(QObject):
         self._newest, self._rtf = newest, rtf
         self._qwen_writes = qwen_writes  # 2.9.6: only then does a step down help
         self._written = newest if written is None else written
+        self._started()
         # Late, and for the model: a short line ("Yes.") costs the model a fixed while, so a
         # dialogue's speed reads slow while the silences between its lines keep the captions
         # ahead of the picture (2.9: 1.06 while a film's were 3-60 s ahead, all in time). A
@@ -958,6 +972,7 @@ class CaptionsController(QObject):
     def _tick(self) -> None:
         if not self._enabled:
             return
+        self._started()  # (no progress from a run that did not start: the wait ends anyway)
         if self._steps_down():
             self._step_down()
         if self._is_live() and self._live() is not self._floored:
@@ -1250,11 +1265,35 @@ class CaptionsController(QObject):
         if live is not None:
             live.set_caption_floor(LEAD_S.get(self._tier, 8.0))
             self._floored = live
+            self._tell_ready()
 
     def _drop_floor(self, shift: bool = True) -> None:
+        self._starting = None
+        self._tell_ready(True)
         live, self._floored = self._floored, None
         if live is not None:
             live.set_caption_floor(0.0, shift=shift)
+
+    def _tell_ready(self, ready: Optional[bool] = None) -> None:
+        """The session holding the captions' distance learns whether they can write yet
+        (2026-11-07): while the model loads, and its first run has not written past the
+        picture, the picture waits on ("Starting captions…") rather than play away what they
+        could still write (LiveSession.set_caption_ready)."""
+        tell = getattr(self._floored, "set_caption_ready", None)
+        if callable(tell):
+            tell(self._ready and self._starting is None if ready is None else ready)
+
+    def _started(self) -> None:
+        """The first run after the model loaded has written START_LEAD_S past the picture (or
+        START_WAIT_S went by): the picture may play on."""
+        if self._starting is None:
+            return
+        lead = self._lead()
+        if (lead is not None and lead >= START_LEAD_S) or (
+            time.monotonic() - self._starting >= START_WAIT_S
+        ):
+            self._starting = None
+            self._tell_ready()
 
     def _target(self) -> Any:
         controller = getattr(self._window, "controller", None)
@@ -1283,9 +1322,12 @@ class CaptionsController(QObject):
 
     def _resolve_language(self) -> None:
         """The viewer's pick for the channel, else the audio track's, else Settings', else
-        the model's own detection."""
-        from services.captions.languages import qwen_name
+        the model's own detection: what it detected on the channel before, else a guess from a
+        prefix on the channel's title or group ("TR: …", 2026-11-07), which the captions
+        process may still correct (`_guessed`)."""
+        from services.captions.languages import language_from_title, qwen_name
 
+        self._guessed = False
         pick = (self._config_get("ai_captions_picks", {}) or {}).get(self._channel_key())
         if pick:
             self._language = (pick, FROM_VIEWER)
@@ -1298,7 +1340,14 @@ class CaptionsController(QObject):
         if default and default != "auto":
             self._language = (str(qwen_name(default) or default), FROM_DEFAULT)
             return
-        self._language = (self._detected.get(self._channel_key(), ""), FROM_MODEL)
+        detected = self._detected.get(self._channel_key(), "")
+        if not detected:
+            target = self._target()
+            item = getattr(target, "item", None)
+            group = item.get("group") or item.get("category_name") if isinstance(item, dict) else ""
+            detected = language_from_title(getattr(target, "title", ""), group)
+            self._guessed = bool(detected)
+        self._language = (detected, FROM_MODEL)
 
     def _track_language(self) -> str:
         """The language the playing audio track names, as Qwen's name ("" when none). The
