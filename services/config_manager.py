@@ -495,6 +495,10 @@ class ConfigManager:
     desktop_pip = _config_property("desktop_pip", True, coerce=lambda value: value is not False)
     # 2.4.1, optional: where the user moved or resized that window, [x, y, width, height].
     desktop_pip_rect = _config_property("desktop_pip_rect", None)
+    # Optional (older builds ignore it): on macOS, the picture floats in that window too
+    # while the TV window (not fullscreen) is covered by other apps' windows or minimized
+    # (ui/desktop_pip.py, the covered reason). Off by default: only true turns it on.
+    covered_pip = _config_property("covered_pip", False, coerce=lambda value: value is True)
     # 2.8.5, optional (older builds ignore it): the window stays above other apps' windows
     # (View → Keep on Top).
     keep_on_top = _config_property("keep_on_top", False, coerce=lambda value: value is True)

@@ -115,7 +115,7 @@ from services.zapping import ZapController
 from ui import macos_window, provider_drop, quit_reason
 from ui.bottom_band import BottomBand
 from ui.captions_controller import CaptionsController
-from ui.desktop_pip import DesktopPip, corner_rect
+from ui.desktop_pip import COVERED, DESKTOP, DesktopPip, corner_rect
 from ui.export_flow import ExportFlow
 from ui.find_session import FindSession
 from ui.free_channels_menu import show_menu as show_free_channels_menu
@@ -672,7 +672,8 @@ class TVWindow(QMainWindow):
         # before the window (its mini-player drag) and the surface (the drawer) see it.
         self.pip_frame = PipFrame(self.player_page, self.surface, self.pip_surface, config_manager)
         # Desktop picture in picture (macOS): while the fullscreen window's desktop is not the
-        # one shown, the large picture floats in a small window on every desktop.
+        # one shown, the large picture floats in a small window on every desktop; with its own
+        # setting, also while the window (not fullscreen) is covered whole or minimized.
         self.desktop_pip = DesktopPip(
             self,
             on_active_space=macos_window.on_active_space,
@@ -682,8 +683,13 @@ class TVWindow(QMainWindow):
             place=self._floating_rect,
             join_all_spaces=macos_window.join_all_spaces,
             remember=self._remember_floating_rect,
+            seen=macos_window.is_visible,
+            may_float_covered=self._may_float_covered,
+            activate=macos_window.activate_app,
             parent=self,
         )
+        # Covered: QiTV becoming the active app (a click on its Dock icon, ⌘Tab) or leaving it.
+        self.app.applicationStateChanged.connect(self._on_app_state)
         # i18n: shown on the fullscreen player while its picture floats on another desktop
         self.floating_note = QLabel(tr("Playing in the small window"), self.player_page)
         self.floating_note.setAlignment(Qt.AlignmentFlag.AlignCenter)
@@ -856,6 +862,7 @@ class TVWindow(QMainWindow):
         self.menus.build()
         config_manager.apply_window_settings(WINDOW_NAME, self)
         self._apply_keep_on_top()  # before the first show: only the flag
+        self._arm_desktop_pip()
 
     # ---- the players --------------------------------------------------------------------------
 
@@ -1549,6 +1556,24 @@ class TVWindow(QMainWindow):
             return False
         if not getattr(self.config_manager, "desktop_pip", True):
             return False
+        return self._one_picture_plays()
+
+    def _may_float_covered(self) -> bool:
+        """The large picture may float while the window is out of sight: a window shown (not
+        fullscreen, nor on its way there or back, nor the mini player, on top anyway), its
+        setting on, Keep on Top off, and one picture playing on the player page."""
+        if self._closing or not self.isVisible() or self.isFullScreen():
+            return False
+        if self._fs_target is not None or self._mini_restore is not None or self._mini_waiting:
+            return False
+        if not getattr(self.config_manager, "covered_pip", False):
+            return False
+        if getattr(self.config_manager, "keep_on_top", False):
+            return False  # it stays above other apps' windows: never floats
+        return self._one_picture_plays()
+
+    def _one_picture_plays(self) -> bool:
+        """One picture (no multiview grid, no dialog) on the player page, playing or paused."""
         if QApplication.activeModalWidget() is not None:
             return False  # a dialog would block the small window's clicks
         if self.controller.multiview_shown() or self.screens.library_shown():
@@ -1635,14 +1660,38 @@ class TVWindow(QMainWindow):
             bar.setVisible(not self.isFullScreen() and not mini)
         self.overlays.transport.set_window_mode(mini=mini, fullscreen=self.isFullScreen())
 
+    def _desktop_pip_reason(self) -> Optional[str]:
+        """What the desktop picture in picture asks about (macOS): fullscreen, the desktop
+        shown; a window with its setting on, whether it can be seen; else nothing."""
+        if self._closing or not _macos_desktops():
+            return None
+        if self.isFullScreen():
+            return DESKTOP
+        if getattr(self.config_manager, "covered_pip", False):
+            return COVERED
+        return None
+
+    def _arm_desktop_pip(self) -> None:
+        """Ask what is to be asked now (a state change, Settings); another reason, or none,
+        puts a floating picture back first."""
+        reason = self._desktop_pip_reason()
+        self.desktop_pip.arm(reason)
+        if reason == COVERED:
+            self.desktop_pip.nudge()  # minimized, or back from the Dock: asked at once
+
+    def _on_app_state(self, _state: Qt.ApplicationState) -> None:
+        if not self._closing and self.desktop_pip.reason() == COVERED:
+            self.desktop_pip.nudge()
+
     def changeEvent(self, event: QEvent) -> None:
         if event.type() == QEvent.Type.ActivationChange:
             self.desktop_pip.nudge()  # a desktop change takes or gives the focus
         if event.type() == QEvent.Type.WindowStateChange:
             self._update_menu_bar()
-            # Fullscreen: the desktop shown is asked about (the picture may float); else the
-            # picture is back, and nothing is asked.
-            self.desktop_pip.watch(self.isFullScreen() and not self._closing and _macos_desktops())
+            # Fullscreen: the desktop shown is asked about (the picture may float); a window,
+            # whether it can be seen (with its setting); else the picture is back, and nothing
+            # is asked.
+            self._arm_desktop_pip()
             if isinstance(event, QWindowStateChangeEvent):
                 was_fullscreen = event.oldState() & Qt.WindowState.WindowFullScreen
                 if not was_fullscreen and self.isFullScreen() and self._pre_fullscreen is None:
@@ -1717,6 +1766,7 @@ class TVWindow(QMainWindow):
             dialog.exec()
             self.menus.rebuild_providers()
             self.screens.tmdb.settings_changed()  # 2.8: TMDB turned off or on
+            self._arm_desktop_pip()  # the covered window's setting turned on or off
 
     def open_phone_remote(self) -> None:
         """The menu's Phone Remote…: turns the remote on if it is off, then the pairing QR."""
@@ -1743,6 +1793,7 @@ class TVWindow(QMainWindow):
         dialog.exec()
         self.menus.rebuild_providers()
         self.screens.tmdb.settings_changed()  # 2.8: TMDB turned off or on
+        self._arm_desktop_pip()  # the covered window's setting turned on or off
 
     def add_dropped_providers(self, files: list[str], links: list[ProviderLink]) -> None:
         """Playlist files and provider links dropped on the window (2.2) become providers, as

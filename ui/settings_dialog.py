@@ -731,10 +731,25 @@ class OptionsDialog(QDialog):
             )
         )
         self.desktop_pip_checkbox.setChecked(bool(self.config_manager.desktop_pip))
+        # macOS only, off by default: a window covered by another app's, or minimized, floats
+        # its picture (Windows and Linux can't tell QiTV's window is covered).
+        self.covered_pip_checkbox = QCheckBox(
+            tr("Float the picture when another window covers QiTV"), self.settings_tab
+        )
+        self.covered_pip_checkbox.setToolTip(
+            tr(
+                "When QiTV isn't fullscreen and another app's window covers it whole, or you"
+                " minimize it, the picture goes on in a small window above the others; once"
+                " QiTV's window shows again the picture goes back. Not with Keep on Top."
+            )
+        )
+        self.covered_pip_checkbox.setChecked(bool(self.config_manager.covered_pip))
         if sys.platform == "darwin":
             self.settings_layout.addRow(self.desktop_pip_checkbox)
+            self.settings_layout.addRow(self.covered_pip_checkbox)
         else:
             self.desktop_pip_checkbox.hide()
+            self.covered_pip_checkbox.hide()
 
         self.mouse_wheel_combo = QComboBox(self.settings_tab)
         for label, value in (
@@ -1866,6 +1881,7 @@ class OptionsDialog(QDialog):
         self.config_manager.tmdb_token = "".join(self.tmdb_token_input.text().split())
         if sys.platform == "darwin":
             self.config_manager.desktop_pip = self.desktop_pip_checkbox.isChecked()
+            self.config_manager.covered_pip = self.covered_pip_checkbox.isChecked()
         self.config_manager.mouse_wheel_action = self.mouse_wheel_combo.currentData()
         self.config_manager.start_with_last_channel = self.start_last_channel_checkbox.isChecked()
         self.config_manager.play_in_vlc = self.play_in_vlc_checkbox.isChecked()
