@@ -13,13 +13,24 @@ export shows up without a code change:
 
 A folder may also say what it holds in `qitv-model.json` ({"kind": "moonshine", "stream" or
 "ufak", "label": "…", "size": "small" or "medium"}); any folder name will do then. A model
-picked runs as it is, on Turkish: no language detection, no other model. No Qt; `discover`
-reads a folder listing, a few stats and the small manifests (the GUI calls it from a thread).
+picked runs as it is, on Turkish: no language detection, no other model.
+
+With an n-gram over the Moonshine pieces here too, each Moonshine export is offered a second
+time, read with a beam search and the n-gram (services.captions.moon_beam) instead of sherpa-onnx's
+greedy decode: "Moonshine medium · beam + LM · tr-moonm-avg", kept as "tr-moonm-avg+beam-lm".
+
+    tr-lm*/           the n-gram: one .qng file (services.captions.ngram), or the one its
+                      manifest names ({"kind": "lm", "file": "….qng", "tokens_sha256": "…"}:
+                      offered only beside the exports whose tokens.txt has that SHA-256)
+
+No Qt; `discover` reads a folder listing, a few stats, the small manifests and the Moonshine
+exports' tokens.txt (the GUI calls it from a thread).
 """
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
+import hashlib
 import json
 import logging
 import os
@@ -33,6 +44,11 @@ logger = logging.getLogger(__name__)
 ENV = "QITV_TRIAL_MODELS"  # "1": a packaged build offers them too; "0": a source run doesn't
 MANIFEST = "qitv-model.json"
 UFAK, MOONSHINE, STREAM = "ufak", "moonshine", "stream"
+LM = "lm"  # an n-gram over the Moonshine pieces (no model of its own)
+GREEDY, BEAM_LM = "", "beam-lm"  # how a Moonshine export is read: sherpa-onnx's greedy, or ours
+_DECODINGS = {BEAM_LM: "beam + LM"}  # each one's words in the list
+_LM_PREFIX = "tr-lm"
+_LM_SUFFIX = ".qng"
 _KINDS = {
     UFAK: UFAK,
     MOONSHINE: MOONSHINE,
@@ -57,10 +73,12 @@ def enabled(env: Optional[Mapping[str, str]] = None, frozen: Optional[bool] = No
 
 @dataclass(frozen=True)
 class TrialModel:
-    name: str  # its folder's name: what the config keeps
+    name: str  # what the config keeps: its folder's name (+"+beam-lm" for the beam's entry)
     kind: str  # UFAK, MOONSHINE or STREAM
     label: str  # as the list shows it: "Moonshine medium · tr-moonm-avg"
     folder: Path
+    decoding: str = GREEDY  # a Moonshine export's: GREEDY or BEAM_LM
+    lm: Optional[Path] = None  # BEAM_LM's n-gram file
 
 
 def moonshine_files(folder: Path) -> tuple[Path, Path, Path]:
@@ -99,8 +117,72 @@ def _kind_by_name(name: str) -> Optional[str]:
     return None
 
 
+def _decoding_of(name: str) -> tuple[str, str]:
+    """A list entry's folder name and decoding ("tr-moonm-avg+beam-lm": the beam's entry)."""
+    for decoding in _DECODINGS:
+        suffix = f"+{decoding}"
+        if name.endswith(suffix) and len(name) > len(suffix):
+            return name[: -len(suffix)], decoding
+    return name, GREEDY
+
+
+def _sha256(path: Path) -> Optional[str]:
+    try:
+        return hashlib.sha256(path.read_bytes()).hexdigest()
+    except OSError:
+        return None
+
+
+def find_lm(root: Path) -> Optional[tuple[Path, Optional[str]]]:
+    """The n-gram in the AI captions folder `root`, and the SHA-256 of the tokens.txt it was
+    built on when its manifest says (None: any export's); None when there is none."""
+    try:
+        folders = sorted(entry for entry in Path(root).iterdir() if entry.is_dir())
+    except OSError:
+        return None
+    for folder in folders:
+        manifest = _manifest(folder)
+        kind = str(manifest.get("kind", ""))
+        if kind != LM and not (not kind and folder.name.startswith(_LM_PREFIX)):
+            continue
+        named = str(manifest.get("file") or "")
+        if named:
+            files = [folder / Path(named).name]
+        else:
+            try:
+                files = sorted(folder.glob(f"*{_LM_SUFFIX}"))
+            except OSError:
+                files = []
+        if files and files[0].is_file():
+            tokens = manifest.get("tokens_sha256")
+            return files[0], str(tokens).lower() if tokens else None
+    return None
+
+
+def _with_lm(model: TrialModel, lm: tuple[Path, Optional[str]]) -> Optional[TrialModel]:
+    """A Moonshine export's beam + LM entry, when the n-gram was built on its tokens."""
+    file, tokens = lm
+    if model.kind != MOONSHINE or model.decoding != GREEDY:
+        return None
+    if tokens is not None and _sha256(moonshine_files(model.folder)[2]) != tokens:
+        return None
+    words = _DECODINGS[BEAM_LM]
+    label = model.label
+    tail = f" · {model.name}"
+    label = (
+        f"{label[: -len(tail)]} · {words}{tail}" if label.endswith(tail) else f"{label} · {words}"
+    )
+    return replace(model, name=f"{model.name}+{BEAM_LM}", label=label, decoding=BEAM_LM, lm=file)
+
+
 def describe(folder: Path) -> Optional[TrialModel]:
-    """The trial model in `folder`, or None (none, or its files are not all there)."""
+    """The trial model in `folder`, or None (none, or its files are not all there). A beam
+    entry's name ("tr-moonm-avg+beam-lm") names its export's folder, beside the n-gram."""
+    base, decoding = _decoding_of(folder.name)
+    if decoding != GREEDY:
+        model = describe(folder.with_name(base))
+        lm = find_lm(folder.parent)
+        return _with_lm(model, lm) if model is not None and lm is not None else None
     manifest = _manifest(folder)
     kind = _KINDS.get(str(manifest.get("kind", ""))) or _kind_by_name(folder.name)
     if kind is None or not _has(folder, kind):
@@ -121,11 +203,15 @@ def describe(folder: Path) -> Optional[TrialModel]:
 
 
 def discover(root: Path) -> list[TrialModel]:
-    """Every trial model in the AI captions folder `root`: ufak, the Moonshine exports, the
-    streaming ones, each by its folder's name."""
+    """Every trial model in the AI captions folder `root`: ufak, the Moonshine exports (each
+    again with the beam and the n-gram, when one is here), the streaming ones, each by its
+    folder's name."""
     try:
         folders = [entry for entry in Path(root).iterdir() if entry.is_dir()]
     except OSError:
         return []
     found = [model for model in map(describe, folders) if model is not None]
-    return sorted(found, key=lambda m: (_ORDER.index(m.kind), m.name))
+    lm = find_lm(root) if any(model.kind == MOONSHINE for model in found) else None
+    if lm is not None:
+        found += [beam for beam in (_with_lm(model, lm) for model in found) if beam is not None]
+    return sorted(found, key=lambda m: (_ORDER.index(m.kind), m.folder.name, m.decoding))

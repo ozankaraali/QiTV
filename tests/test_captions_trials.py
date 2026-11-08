@@ -1,6 +1,7 @@
 """The Turkish test models a run from source lists (services.captions.trial_models): found by
 their folders' names and files, or a manifest, in the list's order; offered from source only."""
 
+from array import array
 import json
 import os
 from pathlib import Path
@@ -8,13 +9,14 @@ import shutil
 import sys
 import tempfile
 from types import SimpleNamespace
+from typing import Any
 import unittest
 from unittest import mock
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 from services.captions import trial_models
-from services.captions.trial_models import MOONSHINE, STREAM, UFAK
+from services.captions.trial_models import BEAM_LM, MOONSHINE, STREAM, UFAK
 
 MOON_FILES = ("encoder_model_quantized.onnx", "decoder_model_merged_quantized.onnx", "tokens.txt")
 
@@ -96,6 +98,69 @@ class TrialModelsTests(unittest.TestCase):
 
     def test_no_folder_no_models(self):
         self.assertEqual(trial_models.discover(self.root / "missing"), [])
+
+    def test_with_an_n_gram_each_moonshine_is_offered_again_with_the_beam(self):
+        self.folder("tr-moonm-avg", MOON_FILES)
+        self.folder("tr-moon4-avg", MOON_FILES)
+        self.folder("tr-fc-r2", trial_models.TRANSDUCER_FILES)
+        self.folder("ufakzeka-kulak", trial_models.TRANSDUCER_FILES)
+        lm = self.folder("tr-lm-4g", ("p4.qng",))
+        self.assertEqual(
+            self.found(),
+            [
+                ("ufakzeka-kulak", UFAK, "ufak"),
+                ("tr-moon4-avg", MOONSHINE, "Moonshine small · tr-moon4-avg"),
+                (
+                    "tr-moon4-avg+beam-lm",
+                    MOONSHINE,
+                    "Moonshine small · beam + LM · tr-moon4-avg",
+                ),
+                ("tr-moonm-avg", MOONSHINE, "Moonshine medium · tr-moonm-avg"),
+                (
+                    "tr-moonm-avg+beam-lm",
+                    MOONSHINE,
+                    "Moonshine medium · beam + LM · tr-moonm-avg",
+                ),
+                ("tr-fc-r2", STREAM, "FastConformer · tr-fc-r2"),
+            ],
+        )
+        beam = trial_models.discover(self.root)[4]
+        self.assertEqual((beam.decoding, beam.lm), (BEAM_LM, lm / "p4.qng"))
+        self.assertEqual(beam.folder, self.root / "tr-moonm-avg")  # the export itself
+
+    def test_a_beam_entry_s_name_says_its_export_beside_the_n_gram(self):
+        self.folder("tr-moonm-avg", MOON_FILES)
+        described = trial_models.describe(self.root / "tr-moonm-avg+beam-lm")
+        self.assertIsNone(described)  # no n-gram here
+        self.folder("night-lm", ("lm.qng", "other.qng"), {"kind": "lm", "file": "other.qng"})
+        described = trial_models.describe(self.root / "tr-moonm-avg+beam-lm")
+        assert described is not None
+        self.assertEqual(described.name, "tr-moonm-avg+beam-lm")
+        self.assertEqual(described.folder, self.root / "tr-moonm-avg")
+        self.assertEqual(described.lm, self.root / "night-lm" / "other.qng")
+        self.assertIsNone(trial_models.describe(self.root / "tr-moon9-avg+beam-lm"))
+        self.folder("tr-fc5", trial_models.TRANSDUCER_FILES)
+        self.assertIsNone(trial_models.describe(self.root / "tr-fc5+beam-lm"))  # Moonshine only
+        self.assertEqual([m.name for m in trial_models.discover(self.root)][-1], "tr-fc5")
+
+    def test_an_n_gram_built_on_other_pieces_is_offered_beside_none(self):
+        import hashlib
+
+        self.folder("tr-moonm-avg", MOON_FILES)  # its tokens.txt holds b"x"
+        theirs = hashlib.sha256(b"x").hexdigest()
+        lm = self.folder("tr-lm-4g", ("lm.qng",), {"kind": "lm", "tokens_sha256": "0" * 64})
+        self.assertEqual([m.name for m in trial_models.discover(self.root)], ["tr-moonm-avg"])
+        manifest = {"kind": "lm", "tokens_sha256": theirs.upper()}
+        (lm / trial_models.MANIFEST).write_text(json.dumps(manifest), encoding="utf-8")
+        self.assertEqual(
+            [m.name for m in trial_models.discover(self.root)],
+            ["tr-moonm-avg", "tr-moonm-avg+beam-lm"],
+        )
+
+    def test_an_n_gram_folder_without_its_file_offers_nothing(self):
+        self.folder("tr-moonm-avg", MOON_FILES)
+        self.folder("tr-lm-4g", ("README",))
+        self.assertEqual([m.name for m in trial_models.discover(self.root)], ["tr-moonm-avg"])
 
     def test_offered_from_source_unless_turned_off_and_a_packaged_build_only_when_asked(self):
         enabled = trial_models.enabled
@@ -187,11 +252,12 @@ class TrialProcessTests(unittest.TestCase):
             ("tr-moonm-avg", MOON_FILES),
             ("tr-fc-r2", trial_models.TRANSDUCER_FILES),
             ("ufakzeka-kulak", trial_models.TRANSDUCER_FILES),
+            ("tr-lm-4g", ("p4.qng",)),
         ):
             (self.root / name).mkdir()
             for file in files:
                 (self.root / name / file).write_bytes(b"x")
-        self.loaded = []
+        self.loaded: list[str] = []
         sherpa = mock.patch.dict(sys.modules, {"sherpa_onnx": _fake_sherpa(self.loaded)})
         sherpa.start()
         self.addCleanup(sherpa.stop)
@@ -226,6 +292,32 @@ class TrialProcessTests(unittest.TestCase):
         self.assertEqual(self.loaded, ["moonshine"])  # Qwen never loads beside it
         self.assertEqual(model._folders, {})  # nor a specialist
 
+    def test_a_beam_pick_reads_with_our_beam_and_the_n_gram_not_sherpa_s_greedy(self):
+        from services.captions.worker import TURKISH
+
+        made = []
+
+        class Reader:
+            def __init__(self, folder, lm, threads):
+                made.append((Path(folder).name, Path(lm).name, threads))
+                self.warmed = 0
+
+            def warm(self):
+                self.warmed += 1
+
+            def transcribe(self, samples):
+                return " i stanbul'da "
+
+        with mock.patch("services.captions.moon_beam.BeamReader", Reader):
+            model = self.model("tr-moonm-avg+beam-lm")
+        self.assertEqual(made, [("tr-moonm-avg", "p4.qng", 2)])
+        self.assertEqual(self.loaded, [])  # sherpa-onnx loads no model: not Qwen, not greedy
+        self.assertTrue(model.trial and model.moonshine)
+        self.assertIs(model.turkish, model.beam)
+        self.assertEqual(model.beam.warmed, 1)
+        self.assertEqual(model.decode(array("f", bytes(64)), TURKISH), "istanbul'da")
+        self.assertFalse(model.has_qwen())
+
     def test_a_streaming_fastconformer_picked_is_read_as_a_stream(self):
         model = self.model("tr-fc-r2")
         self.assertEqual(self.loaded, ["streaming transducer"])
@@ -258,7 +350,7 @@ class TrialProcessTests(unittest.TestCase):
         from services.captions.worker import TURKISH, _Run
 
         model = self.model("tr-fc-r2")
-        link = SimpleNamespace(send=lambda message: None)
+        link: Any = SimpleNamespace(send=lambda message: None)
         with mock.patch("services.captions.decoder.AudioDecoder"):
             for language, guessed in (("", False), ("English", True), ("Turkish", False)):
                 run = _Run(link, model, 1, "http://x", 0.0, None, language, [0.0], guessed)
@@ -281,16 +373,19 @@ class TrialControllerTests(unittest.TestCase):
         self.window.live_session = _Live()
         self.window.live_session.position_s = 100.0
         self.captions = CaptionsController(self.window, overlay=_Overlay())
-        process = self.captions._process
-        self.sent, self.loaded, self.stopped = [], [], []
+        process: Any = self.captions._process
+        self.sent: list[tuple] = []
+        self.loaded: list[dict] = []
+        self.stopped: list[bool] = []
         process.send = lambda *m: self.sent.append(m)
         process.running = lambda: bool(self.loaded)
         process.stop = lambda: self.stopped.append(True)
         process.start = lambda load, detailed_log=False: self.loaded.append(load)
-        self.config = {}
-        self.captions._config_get = lambda name, default: self.config.get(name, default)
-        self.captions._config_set = self.config.__setitem__
-        self.captions._here = lambda name: True
+        self.config: dict[str, Any] = {}
+        captions: Any = self.captions  # (its methods replaced: the config, the files here)
+        captions._config_get = lambda name, default: self.config.get(name, default)
+        captions._config_set = self.config.__setitem__
+        captions._here = lambda name: True
         self.captions._on_trials_found(
             [
                 trial_models.TrialModel("ufakzeka-kulak", UFAK, "ufak", Path("u")),
@@ -354,6 +449,24 @@ class TrialControllerTests(unittest.TestCase):
         self.assertEqual((self.config, self.loaded), ({}, []))
         self.config["ai_captions_trial_model"] = "tr-fc-old"
         self.assertEqual(self.captions.trial_model(), "")
+
+    def test_a_beam_entry_is_listed_and_picked_by_its_own_name(self):
+        beam = trial_models.TrialModel(
+            "tr-moonm-avg+beam-lm",
+            MOONSHINE,
+            "Moonshine medium · beam + LM",
+            Path("m"),
+            BEAM_LM,
+            Path("lm.qng"),
+        )
+        self.captions._on_trials_found(self.captions._trials + [beam])
+        self.assertEqual(
+            self.captions.trial_choices()[-1],
+            ("tr-moonm-avg+beam-lm", "Moonshine medium · beam + LM"),
+        )
+        self.captions.set_trial_model("tr-moonm-avg+beam-lm")
+        [load] = self.loaded
+        self.assertTrue(load["trial"].endswith("tr-moonm-avg+beam-lm"))
 
     def test_automatic_picked_while_off_changes_only_the_pick(self):
         self.config["ai_captions_trial_model"] = "tr-moonm-avg"

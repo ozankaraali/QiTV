@@ -18,12 +18,15 @@ use_cache_branch false, and gives the cross-attention keys and values once (pres
 each later call takes one token, the previous call's present decoder keys and values and the first
 call's encoder ones, with use_cache_branch true (its own present.*.encoder.* are placeholders).
 They stay onnxruntime's values throughout: nothing is copied into Python but one row of logits.
+`steps` hands the same calls out a hypothesis at a time (each with its own keys and values, one
+call each: the arithmetic of the greedy decode's steps) for services.captions.moon_beam's beam.
 """
 
 from __future__ import annotations
 
 from array import array
 import base64
+from contextlib import contextmanager
 from dataclasses import dataclass, field
 import logging
 from math import exp, inf, log
@@ -31,7 +34,7 @@ import os
 from pathlib import Path
 import struct
 import threading
-from typing import Iterable, Optional, Sequence, Union
+from typing import Iterable, Iterator, Optional, Sequence, Union
 
 from services.captions import onnx_c
 
@@ -354,6 +357,28 @@ class MoonshineOrt:
                 value.release()
         return result
 
+    @contextmanager
+    def steps(self, encoded: Encoded) -> Iterator[Steps]:
+        """One decode a hypothesis at a time (services.captions.moon_beam's beam search): the
+        first call's [BOS] once, then any hypothesis's next token after its own keys and values.
+        The model is held for the decode (the lock); what it gave is released at the end."""
+        if encoded.value is None:
+            raise ValueError("no sound to decode (silence, or the piece was released)")
+        with self._lock:
+            steps = Steps(self, encoded.value)
+            try:
+                yield steps
+            finally:
+                steps.close()
+
+    def _row(self, logits: onnx_c.Value) -> array:
+        """The last row of a call's logits (a copy)."""
+        shape = logits.shape
+        width = shape[-1]
+        if width != self.vocabulary or len(shape) != 3:
+            raise ValueError(f"logits {shape} for a vocabulary of {self.vocabulary}")
+        return logits.floats((shape[-2] - 1) * width, width)
+
     def _pick(self, logits: onnx_c.Value, rows: int) -> tuple[int, float]:
         """The last row's best token (the first of equals, as sherpa-onnx's max_element) and its
         log-softmax."""
@@ -389,6 +414,83 @@ class MoonshineOrt:
             return self.text(self.decode(encoded).tokens)
         finally:
             encoded.release()
+
+
+class Steps:
+    """A decode's calls, one hypothesis at a time (`MoonshineOrt.steps`): `first` is the logits
+    after [BOS] and `start` its keys and values; `step(state, token)` gives a hypothesis's next
+    state and logits. A state is the decoder's own keys and values after a hypothesis's tokens:
+    several hypotheses may step from one (it is only read), and the caller releases each once no
+    hypothesis steps from it any more (`release`; those left are released at the end)."""
+
+    def __init__(self, model: MoonshineOrt, hidden: onnx_c.Value) -> None:
+        self._model = model
+        self._states: dict[int, list[onnx_c.Value]] = {}
+        self._made = 0
+        self._cross: list[onnx_c.Value] = []
+        decoder = model._decoder
+        api = model._api
+        self._feed: list[onnx_c.Value] = [model._false] * len(decoder.inputs)
+        feed = self._feed
+        ids = api.tensor(array("q", [BOS]), (1, 1), onnx_c.INT64)
+        feed[model._ids_at] = ids
+        feed[model._hidden_at] = hidden
+        for index, empty in model._empty.items():
+            feed[index] = empty
+        try:
+            outputs = decoder.run(feed, model._first_out)
+        finally:
+            ids.release()
+        logits, presents = outputs[0], dict(zip(model._past_at, outputs[1:]))
+        self._cross = [presents.pop(index) for index in model._cross_past]
+        self.start = self._keep([presents.pop(index) for index in model._self_past])
+        try:
+            self.first = model._row(logits)
+        except BaseException:
+            self.close()
+            raise
+        finally:
+            logits.release()
+        feed[model._ids_at] = model._step_ids
+        feed[model._cache_at] = model._true
+        for index, value in zip(model._cross_past, self._cross):
+            feed[index] = value
+
+    def _keep(self, values: list[onnx_c.Value]) -> int:
+        self._made += 1
+        self._states[self._made] = values
+        return self._made
+
+    def step(self, state: int, token: int) -> tuple[int, array]:
+        """A hypothesis whose keys and values are `state`, `token` next: its new state and the
+        logits after it."""
+        model = self._model
+        own = self._states[state]
+        model._step_id[0] = token
+        for index, value in zip(model._self_past, own):
+            self._feed[index] = value
+        outputs = model._decoder.run(self._feed, model._step_out)
+        logits = outputs[0]
+        try:
+            row = model._row(logits)
+        except BaseException:
+            for value in outputs[1:]:
+                value.release()
+            raise
+        finally:
+            logits.release()
+        return self._keep(list(outputs[1:])), row
+
+    def release(self, state: int) -> None:
+        for value in self._states.pop(state, ()):
+            value.release()
+
+    def close(self) -> None:
+        for state in list(self._states):
+            self.release(state)
+        for value in self._cross:
+            value.release()
+        self._cross = []
 
 
 def _model(folder: Path, stem: str) -> Path:

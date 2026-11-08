@@ -170,6 +170,7 @@ class _Model:
 
     moonshine = False  # the Turkish Moonshine trial writes Turkish (MOON_ENV)
     trial = False  # a test model picked by hand writes everything, as Turkish (spec "trial")
+    beam: Any = None  # ... a Moonshine read with our beam and n-gram (moon_beam.BeamReader)
 
     def __init__(self, spec: dict) -> None:
         runtime = spec.get("runtime")
@@ -198,12 +199,15 @@ class _Model:
         found = trial_models.describe(Path(picked)) if paths and picked else None
         if picked and found is None:
             logger.warning("AI captions: the test model %s isn't here; the usual models", picked)
+        beam: Optional[trial_models.TrialModel] = None
         if found is not None:
             self.trial = True
             kind, trial_dir = found.kind, str(found.folder)
             turkish = trial_dir if kind == trial_models.UFAK else None
             moon_dir = trial_dir if kind == trial_models.MOONSHINE else None
             stream_dir = trial_dir if kind == trial_models.STREAM else None
+            if found.decoding == trial_models.BEAM_LM:
+                beam = found  # read with our beam and the n-gram, not sherpa-onnx's greedy
             logger.info("AI captions: the test model %s writes Turkish", found.label)
         # 2026-11-07: with the Moonshine trial writing Turkish, Qwen loads (and warms up) only
         # once a run needs it: its load and warm-up kept the captions from starting while the
@@ -213,7 +217,13 @@ class _Model:
             self._qwen_done.set()
         self.turkish: Any = None
         self.moonshine = False
-        if paths and moon_dir:
+        self.beam = None
+        if paths and beam is not None:
+            from services.captions.moon_beam import BeamReader
+
+            self.beam = self.turkish = BeamReader(beam.folder, beam.lm, threads=min(2, threads))
+            self.moonshine = True
+        elif paths and moon_dir:
             encoder, decoder, tokens = trial_models.moonshine_files(Path(moon_dir))
             self.turkish = sherpa_onnx.OfflineRecognizer.from_moonshine_v2(
                 encoder=str(encoder),
@@ -284,7 +294,9 @@ class _Model:
             # Warm up: the first decode is slow (graph optimisation), not the viewer's first.
             if self.recognizer is not None:
                 self.decode(array("f", bytes(16000 * 4)), "")
-            if self.turkish is not None:
+            if self.beam is not None:
+                self.beam.warm()  # (silence is skipped: a quiet tone)
+            elif self.turkish is not None:
                 self.decode(array("f", bytes(16000 * 4)), TURKISH)
 
     def _new_qwen(self) -> Any:
@@ -408,6 +420,8 @@ class _Model:
         return getattr(self, name)
 
     def decode(self, samples: array, language: str) -> str:
+        if language == TURKISH and self.beam is not None:
+            return lone_i_joined(self.beam.transcribe(samples).strip())  # as sherpa-onnx's text
         if language == TURKISH and self.turkish is not None:
             stream = self.turkish.create_stream()
             if self.moonshine:
