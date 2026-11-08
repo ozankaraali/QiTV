@@ -13,6 +13,7 @@ it) the sherpa-onnx runtime, all pinned below by size and sha256. They live in
         qwen3-asr-1.7b/        tokenizer/ (both tiers alike)
         ufakzeka-kulak/        encoder.int8.onnx, decoder.int8.onnx, joiner.int8.onnx,
                                tokens.txt (a FastConformer TDT for Turkish alone)
+        speaker-eres2net/      the speaker model (a run from source's Speaker marks)
         silero_vad.onnx
         verified.json          what was downloaded whole and checked (sha256), by path
 
@@ -311,6 +312,25 @@ COHERE_CONTENTS: tuple[tuple[str, Optional[int]], ...] = (
 )
 
 
+# 2026-11-08, Speaker marks (a run from source; services.captions.speakers): 3D-Speaker's ERes2Net
+# trained on VoxCeleb (Apache-2.0), sherpa-onnx's export in its release "speaker-recongition-models"
+# (sic). Picked on two-person Turkish drama dialogue against CAM++, TitaNet small and WeSpeaker's
+# ResNet34 and CAM++: on the caption lines themselves it told the speakers apart best (CAM++, in
+# a third of its time, marked 57 % of the changes against its 75 %, as many marks wrong). Size and
+# sha256 as GitHub served it on 2026-11-08 (uploaded 2024-10-14).
+_SPEAKER_RELEASE = (
+    "https://github.com/k2-fsa/sherpa-onnx/releases/download/speaker-recongition-models/"
+)
+SPEAKER_KEY = "speaker"
+SPEAKER_FOLDER = "speaker-eres2net"
+SPEAKER_FILE = RemoteFile(
+    _SPEAKER_RELEASE + "3dspeaker_speech_eres2net_sv_en_voxceleb_16k.onnx",
+    "3dspeaker_speech_eres2net_sv_en_voxceleb_16k.onnx",
+    26485263,
+    "c59158379255ad66e161679cca6af8d52d51e389e3224ab7d7a7baae295c2db5",
+)
+
+
 def _wheel(folder: str, name: str, size: int, sha256: str) -> RemoteFile:
     return RemoteFile(f"{_PYPI_FILES}{folder}/{name}", name, size, sha256, EXTRACT_WHEEL)
 
@@ -449,6 +469,11 @@ def available() -> bool:
     return True
 
 
+def speaker_file(root: Optional[Path] = None) -> Path:
+    """The speaker model's file (Speaker marks), here or not."""
+    return _root(root) / SPEAKER_FOLDER / SPEAKER_FILE.path
+
+
 def model_paths(tier: str, root: Optional[Path] = None) -> ModelPaths:
     base = _root(root)
     folder = base / TIERS[tier].folder
@@ -517,11 +542,14 @@ SPECIALISTS = (TURKISH_KEY, EUROPEAN_KEY, COHERE_KEY)
 def needed(key: str, root: Optional[Path] = None) -> list[Download]:
     """What `key` needs to run, in download order. A tier ("small", "large"): the runtime
     (unless this Python has one), the VAD and Qwen's files, what captions need to start. A
-    specialist (`SPECIALISTS`): its own files. Unsupported without a runtime for this
-    computer."""
+    specialist (`SPECIALISTS`), or the speaker model (`SPEAKER_KEY`): its own files.
+    Unsupported without a runtime for this computer."""
     base = _root(root)
     if key in SPECIALISTS:
         return _specialist(key, base)
+    if key == SPEAKER_KEY:
+        file = SPEAKER_FILE
+        return [Download(base / SPEAKER_FOLDER, file, ((file.path, file.size),))]
     downloads: list[Download] = []
     runtime = runtime_dir(base)
     if runtime is not None:

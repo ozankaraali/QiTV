@@ -80,7 +80,9 @@ class CaptionsProcess(QObject):
 
     ready = Signal()
     failed = Signal(str)
-    caption = Signal(int, float, float, str)  # run, start, end, text
+    # run, start, end, text, turn (1: another speaker than the line before's, 2026-11-08), and
+    # the speaker (1, 2, ... in the run; 0: untold)
+    caption = Signal(int, float, float, str, int, int)
     # run, newest second decoded, real-time factor, the second the captions are written to
     progress = Signal(int, float, float, float, bool)  # ..., written to, Qwen writes
     resync = Signal(int, float)  # run, newest second: read again from there
@@ -153,7 +155,11 @@ class CaptionsProcess(QObject):
             # its "gone" would forget the new one, its "ready" would be the new one's.
             return
         if kind == "caption":
-            self.caption.emit(int(message[1]), float(message[2]), float(message[3]), message[4])
+            turn = int(message[5]) if len(message) > 5 else 0
+            speaker = int(message[6]) if len(message) > 6 else 0
+            self.caption.emit(
+                int(message[1]), float(message[2]), float(message[3]), message[4], turn, speaker
+            )
         elif kind == "progress":
             written = message[4] if len(message) > 4 else message[2]
             qwen = bool(message[5]) if len(message) > 5 else True

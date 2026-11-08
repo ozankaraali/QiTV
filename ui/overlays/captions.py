@@ -8,6 +8,10 @@ word-wrapped and centred, two lines at most, of about one length (2.9, the owner
 line over a short one stretched the box from edge to edge): a longer caption's font shrinks a
 little. Longer still, it is shown in parts (`pages`, which the controller times across its
 words; 2.9.1, the owner: a long one ended in "…"); only a part that still can't fit is cut.
+2026-11-08, Speaker marks: a caption may break its lines itself ("- Nereye?\n- Eve.": two
+speakers, each on a line of its own), and a line may come in its speaker's colour, as teletext's
+(services.captions.speakers.coloured: SPEAKER_COLOURS, on the same box); one that can't fit so is
+shown a speaker at a time.
 
 Its size follows the picture: FONT_U units of a 16:9 picture as wide as the window, or as tall
 in a window wider than 16:9 (never under MIN_FONT_PX: the mini player's stays readable), so it
@@ -31,6 +35,7 @@ from PySide6.QtGui import (
 )
 from PySide6.QtWidgets import QWidget
 
+from services.captions.speakers import colour_of, coloured
 from services.i18n import N_
 from ui.overlays.base import Overlay
 from ui.overlays.painting import Units, fill_round
@@ -49,6 +54,9 @@ _EDGE_U = 2.0  # from the window's sides
 _PAD_X_U, _PAD_Y_U = 1.3, 0.7
 _RADIUS_U = 0.8
 _EVENTS = (QEvent.Type.Show, QEvent.Type.Hide, QEvent.Type.Resize)
+# 2026-11-08, Speaker marks' Colours: each speaker's colour, teletext's (white, yellow, cyan,
+# green) on the captions' own dark box
+SPEAKER_COLOURS = (PALETTE.text, "#ffff00", "#00ffff", "#00ff00")
 
 
 # One family for the captions and the subtitles libVLC draws (2.9, the owner's: on par). A
@@ -124,6 +132,17 @@ def _split(text: str, count: int) -> list[str]:
     return [part for part in parts if part]
 
 
+def _tidy(text: str) -> str:
+    """A caption's words with single spaces, and its own line breaks (two speakers' lines)."""
+    lines = (" ".join(line.split()) for line in str(text).split("\n"))
+    return "\n".join(line for line in lines if line)
+
+
+def _rows(text: str, font: QFont, width: float) -> int:
+    """The rows `text` takes at `width`, each of its own lines wrapped on its own."""
+    return sum(len(wrap(colour_of(line)[1], font, width)) for line in text.split("\n"))
+
+
 def wrap(text: str, font: QFont, width: float) -> list[tuple[int, int]]:
     """Where each line of `text` starts and how long it is, word-wrapped at `width` (a word
     too long for a line, or a language written without spaces, breaks where it must)."""
@@ -152,6 +171,7 @@ class CaptionsOverlay(Overlay):
         self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
         self._text = ""
         self._lines: list[str] = []
+        self._colours: list[Optional[int]] = []  # each line's speaker colour (None: its own)
         self._pages_for: Optional[tuple[tuple[str, int, int], list[str]]] = None
         self._font = QFont()
         self._floor: Optional[int] = None  # the player controls' top while they show
@@ -163,8 +183,9 @@ class CaptionsOverlay(Overlay):
     # ---- public API ---------------------------------------------------------------------
 
     def show_text(self, text: str) -> None:
-        """Show the caption `text` (its lines as one; "" clears it)."""
-        text = " ".join(str(text).split())
+        """Show the caption `text` (wrapped as it fits; its own line breaks kept: two speakers'
+        lines; "" clears it)."""
+        text = _tidy(text)
         if not text:
             self.clear()
             return
@@ -176,7 +197,7 @@ class CaptionsOverlay(Overlay):
             self.show()
 
     def clear(self) -> None:
-        self._text, self._lines = "", []
+        self._text, self._lines, self._colours = "", [], []
         self.hide()
 
     def text(self) -> str:
@@ -186,11 +207,15 @@ class CaptionsOverlay(Overlay):
         """The lines shown (two at most; a cut one ends in "…")."""
         return list(self._lines)
 
+    def line_colours(self) -> list[Optional[int]]:
+        """Each line's speaker colour (an index of SPEAKER_COLOURS; None: the captions' own)."""
+        return list(self._colours)
+
     def pages(self, text: str) -> list[str]:
         """`text` in parts that each fit two lines as the captions show now (one part when it
         fits, a little smaller too): of about one length each, split after a sentence's or a
         clause's end when one is near, else between words."""
-        text = " ".join(str(text).split())
+        text = _tidy(text)
         host = self.parentWidget()
         if not text or host is None:
             return [text] if text else []
@@ -200,13 +225,21 @@ class CaptionsOverlay(Overlay):
         un = picture_units(host)
         width = self._line_width(un, host)
         smallest = self._font_at(un, _SHRINK[-1])
-        if len(wrap(text, smallest, width)) <= MAX_LINES:
+        if "\n" in text:  # two speakers' lines: together when they fit, else one at a time
+            if _rows(text, smallest, width) <= MAX_LINES:
+                parts = [text]
+            else:
+                parts = [part for line in text.split("\n") for part in self.pages(line)]
+        elif len(wrap(colour_of(text)[1], smallest, width)) <= MAX_LINES:
             parts = [text]
         else:  # as few parts as fit, each a little smaller where it must (as _layout does)
-            count = -(-len(wrap(text, smallest, width)) // MAX_LINES)
-            parts = _split(text, count)
+            colour, words = colour_of(text)
+            count = -(-len(wrap(words, smallest, width)) // MAX_LINES)
+            parts = _split(words, count)
             if any(len(wrap(part, smallest, width)) > MAX_LINES for part in parts):
-                parts = _split(text, count + 1)
+                parts = _split(words, count + 1)
+            if colour is not None:  # each part in the speaker's colour
+                parts = [coloured(part, colour) for part in parts]
         self._pages_for = (key, parts)
         return list(parts)
 
@@ -253,18 +286,35 @@ class CaptionsOverlay(Overlay):
         pad_x, pad_y = un.px(_PAD_X_U), un.px(_PAD_Y_U)
         room = max(1, host.width() - 2 * un.px(_EDGE_U))
         width = self._line_width(un, host)
-        text = self._text
-        for scale in _SHRINK:
-            font = self._font_at(un, scale)
-            spans = wrap(text, font, width)
-            if len(spans) <= MAX_LINES:
-                spans = wrap(text, font, balanced(text, font, width))
-                break
+        paragraphs = [colour_of(line) for line in self._text.split("\n")]
+        lines: list[str] = []
+        colours: list[Optional[int]] = []
+        if len(paragraphs) > 1:  # its own lines (two speakers'), each wrapped, while they fit
+            for scale in _SHRINK:
+                font = self._font_at(un, scale)
+                if sum(len(wrap(words, font, width)) for _c, words in paragraphs) <= MAX_LINES:
+                    for colour, words in paragraphs:
+                        for start, length in wrap(words, font, width):
+                            lines.append(words[start : start + length].strip())
+                            colours.append(colour)
+                    break
+        # too long for that (as one caption then), or one line of its own
+        text = " ".join(" ".join(words for _c, words in paragraphs).split())
+        if not lines:
+            for scale in _SHRINK:
+                font = self._font_at(un, scale)
+                spans = wrap(text, font, width)
+                if len(spans) <= MAX_LINES:
+                    spans = wrap(text, font, balanced(text, font, width))
+                    break
+            lines = [text[start : start + length].strip() for start, length in spans[:MAX_LINES]]
+            if len(spans) > MAX_LINES:  # still too long: the second line ends in "…"
+                rest = text[spans[MAX_LINES - 1][0] :].strip()
+                fm = QFontMetricsF(font)
+                lines[-1] = fm.elidedText(rest, Qt.TextElideMode.ElideRight, width)
+            colours = [paragraphs[0][0]] * len(lines)
+        self._colours = colours
         fm = QFontMetricsF(font)
-        lines = [text[start : start + length].strip() for start, length in spans[:MAX_LINES]]
-        if len(spans) > MAX_LINES:  # still too long: the second line ends in "…"
-            rest = text[spans[MAX_LINES - 1][0] :].strip()
-            lines[-1] = fm.elidedText(rest, Qt.TextElideMode.ElideRight, width)
         self._font, self._lines = font, lines
         line_w = max(fm.horizontalAdvance(line) for line in lines)
         box_w = min(room, round(line_w + 2 * pad_x) + 2)
@@ -293,7 +343,10 @@ class CaptionsOverlay(Overlay):
         p.setPen(qcolor(PALETTE.text))
         fm = QFontMetricsF(self._font)
         y = (self.height() - len(self._lines) * fm.lineSpacing()) / 2
-        for line in self._lines:
+        colours = self._colours + [None] * (len(self._lines) - len(self._colours))
+        for line, colour in zip(self._lines, colours):
+            text_colour = SPEAKER_COLOURS[colour] if colour is not None else PALETTE.text
+            p.setPen(qcolor(text_colour))
             rect = QRectF(QPointF(0, y), QPointF(self.width(), y + fm.lineSpacing()))
             p.drawText(rect, Qt.AlignmentFlag.AlignCenter, line)
             y += fm.lineSpacing()

@@ -11,8 +11,11 @@ always comes first.
 
 Messages to it: ("load", {...}), ("start", run, url, segment_start, audio_track, language),
 ("film", run, location, start_s, audio_track, language, vlc_options): a film's run,
-("viewer", position), ("language", name), ("stop",), ("quit",).
-From it: ("ready",), ("failed", reason), ("caption", run, start, end, text),
+("viewer", position), ("language", name), ("speakers", model file or None), ("stop",),
+("quit",).
+From it: ("ready",), ("failed", reason), ("caption", run, start, end, text, turn, speaker)
+(turn: 1 when another speaker than the line before's says it; speaker: 1, 2, ... in the run, 0
+untold: services.captions.speakers),
 ("progress", run, newest, rtf, written_to, qwen_writes), ("resync", run, newest),
 ("ended", run, reason),
 ("detected", run, language) once the pieces agree on one (none was given),
@@ -41,6 +44,7 @@ from services.captions import guards, numbers_tr, text_language, trial_models
 from services.captions.growing import GrowingWriter
 from services.captions.languages import COHERE, EUROPEAN, QWEN_LANGUAGES, iso_code
 from services.captions.pieces import END_PAUSE_S, MAX_PIECE_S, Cutter, Piece
+from services.captions.speakers import Recent, Speakers, Turn, Voices
 from services.captions.stream_clock import StreamClock, TsTimes
 from services.captions.streaming import StreamWriter
 
@@ -118,6 +122,13 @@ _IDLE_S = 0.25  # the growing writer looks at the picture this often when no sou
 # The trial's field test set (the owner, 2026-11-07): with a folder named here, each piece the
 # Moonshine trial reads is kept as a 16 kHz WAV beside a line of what the model wrote, to label.
 SAVE_ENV = "QITV_TR_SAVE_PIECES"
+
+
+def line_level() -> int:
+    """The level each caption line is logged at (2026-11-08, the owner): INFO in a run from
+    source or with QITV_TRIAL_MODELS=1 (where test models are offered, to compare them); DEBUG
+    in a released build, which logged no lines before."""
+    return logging.INFO if trial_models.enabled() else logging.DEBUG
 
 
 def _folder_name(folder: Any) -> str:
@@ -308,6 +319,13 @@ class _Model:
         self.cohere: Any = None
         self.european: Any = None
         self._loading: dict[str, threading.Event] = {}
+        # 2026-11-08, the owner's Speaker marks (a run from source): the speaker model, and the
+        # voice detector of the sound it reads (its own: its windows come in their order)
+        self.voices: Any = None
+        self.speakers_on = False
+        self._speaker_vad: Any = None
+        self._speaker_lock = threading.Lock()
+        self._speakers_loading = False
 
         def detector(shortest: Optional[float] = None) -> Any:
             config = sherpa_onnx.VadModelConfig()
@@ -322,7 +340,9 @@ class _Model:
 
         self.vad = detector()
         self.voiced = detector(_VOICED_MIN_S)
+        self._detector = detector
         self._lock = threading.Lock()
+        self.use_speakers(spec.get("speaker"))
         if self.has_model:
             # Warm up: the first decode is slow (graph optimisation), not the viewer's first.
             if self.recognizer is not None:
@@ -331,6 +351,36 @@ class _Model:
                 self.beam.warm()  # (silence is skipped: a quiet tone)
             elif self.turkish is not None:
                 self.decode(array("f", bytes(16000 * 4)), TURKISH)
+
+    def use_speakers(self, model: Optional[str]) -> None:
+        """2026-11-08, Speaker marks: each line's speaker told with the speaker model in the
+        file `model` (it loads in its own thread the first time; lines go untold till then);
+        None: no longer told."""
+        if not model or not self.has_model:
+            self.speakers_on = False
+            return
+        self.speakers_on = True
+        if self.voices is not None or self._speakers_loading:
+            return
+        self._speakers_loading = True
+        threading.Thread(
+            target=self._load_speakers, args=(model,), name="qitv-captions-speakers", daemon=True
+        ).start()
+
+    def _load_speakers(self, model: str) -> None:
+        try:
+            self._speaker_vad = self._detector(_VOICED_MIN_S)
+            self.voices = Voices(self._sherpa, model, threads=min(2, self._threads))
+            logger.info("AI captions: the speaker model is loaded (%s)", Path(model).name)
+        except Exception as error:  # the lines go on, untold
+            logger.warning("AI captions: the speaker model did not load: %s", type(error).__name__)
+        finally:
+            self._speakers_loading = False
+
+    def speaker_voiced(self, window: array) -> bool:
+        """Whether a window of the sound the speaker model reads is voiced."""
+        with self._speaker_lock:
+            return bool(self._speaker_vad.is_speech(window))
 
     def name(self, part: str) -> str:
         """The model of a part (_QWEN, _TURKISH_ROLE, ...) as the log names it."""
@@ -570,6 +620,11 @@ class _Run:
         self._working: Optional[float] = None  # the start of the piece being recognized
         self._said: Optional[tuple[str, float]] = None  # the line written last, and its end
         self._writes = ""  # the model that wrote the run's last line, as the log names it
+        self._line_level = line_level()
+        # 2026-11-08, Speaker marks: the voices heard in the run, and its recent sound (from
+        # once the speaker model is loaded and on)
+        self.speakers = Speakers()
+        self.recent: Optional[Recent] = None
         self.votes = text_language.Votes()  # the language heard, when none is given
         # streaming Turkish: the sound goes to the model whole (no pieces), lines come back
         self.blocks: queue.Queue[Optional[tuple[float, array]]] = queue.Queue()
@@ -604,14 +659,45 @@ class _Run:
         writes = getattr(getattr(self, "model", None), "writes", None)
         return str(writes(language)) if callable(writes) else "?"
 
-    def _logged(self, name: str, heard: str, shown: str) -> None:
+    def _logged(self, name: str, heard: str, shown: str, turn: Optional[Turn] = None) -> None:
         """A line in the log by the model that wrote it (2026-11-08, the owner: "Write to logs
-        which one writes"), what it heard and what shows; the run's model changing (a language
-        locked, a specialist loaded) is said once, with the run."""
+        which one writes"), what it heard and what shows, and who says it (S1, S2, ... and how
+        like the speaker before's voice); the run's model changing (a language locked, a
+        specialist loaded) is said once, with the run. At INFO only where test models are
+        offered (`line_level`)."""
+        level = getattr(self, "_line_level", None) or line_level()
         if name != getattr(self, "_writes", ""):
             self._writes = name
-            logger.info("AI captions: run %d: [%s] writes now", getattr(self, "run", 0), name)
-        logger.info("AI captions: [%s] heard %r, shows %r", name, heard, shown)
+            logger.log(level, "AI captions: run %d: [%s] writes now", getattr(self, "run", 0), name)
+        who = f" · {turn.tag()}" if turn is not None else ""
+        logger.log(level, "AI captions: [%s] heard %r, shows %r%s", name, heard, shown, who)
+
+    def _write(
+        self, name: str, heard: str, shown: str, start: float, end: float, until: float = 0.0
+    ) -> None:
+        """A line of the sound of [start, end) out (shown until `until` when later), and in the
+        log: its speaker told first while Speaker marks are on."""
+        turn = self._speaker(start, end)
+        self._logged(name, heard, shown, turn)
+        changed = 1 if turn is not None and turn.changed else 0
+        speaker = turn.speaker if turn is not None else 0
+        self.link.send(("caption", self.run, start, max(end, until), shown, changed, speaker))
+
+    def _speaker(self, start: float, end: float) -> Optional[Turn]:
+        """Who says the line of timeline seconds [start, end): the speaker before, or another
+        (services.captions.speakers); None while speakers are not told."""
+        model = getattr(self, "model", None)
+        voices = getattr(model, "voices", None)
+        recent = getattr(self, "recent", None)
+        if voices is None or recent is None or not getattr(model, "speakers_on", False):
+            return None
+        sound = recent.voiced(start, end)
+        try:
+            print_ = voices.embed(sound)
+        except Exception as error:
+            logger.warning("AI captions: a voice print failed: %s", type(error).__name__)
+            return None
+        return self.speakers.hear(print_, len(sound) / 16000, start)
 
     def stop(self) -> None:
         self.stopped.set()
@@ -732,12 +818,23 @@ class _Run:
         if self.stopped.is_set():
             return
         self.newest = at + len(floats) / 16000
+        self._hold_for_speakers(at, floats)
         if getattr(self, "writer", None) is not None:
             self.blocks.put((at, floats))
             return
         self.cutter.set_max(self._longest())
         for piece in self.cutter.push(at, floats):
             self.pieces.put(piece)
+
+    def _hold_for_speakers(self, at: float, floats: array) -> None:
+        """The sound kept for the speaker model while it is on (a line finds its own there)."""
+        model = getattr(self, "model", None)
+        if getattr(model, "voices", None) is None or not getattr(model, "speakers_on", False):
+            return
+        if getattr(self, "recent", None) is None:
+            self.recent = Recent(model.speaker_voiced)
+        assert self.recent is not None
+        self.recent.push(at, floats)
 
     def _longest(self) -> float:
         """How long a piece may be and still be written before the picture gets to it."""
@@ -801,8 +898,7 @@ class _Run:
                 text = unfinished(text)
             if self.language == TURKISH and self.model.turkish is not None:
                 text = numbers_tr.written(self.sentence_case(text, piece.start, piece.end))
-            self._logged(name, heard, text)
-            self.link.send(("caption", self.run, piece.start, piece.end, text))
+            self._write(name, heard, text, piece.start, piece.end)
 
     def sentence_case(self, text: str, start: float, end: float) -> str:
         """ufak's line with a capital where a sentence starts (the run's first line, after a
@@ -857,8 +953,8 @@ class _Run:
                     # a capital after a sentence end or a pause, as for ufak's lines (the model
                     # starts a sentence after a pause in lower case at times)
                     shown = numbers_tr.written(self.sentence_case(text, start, end))
-                    self._logged(name, text, shown)  # the owner's field tests compare them
-                    self.link.send(("caption", self.run, start, max(end, start + 0.5), shown))
+                    # (the owner's field tests compare what it heard with what shows)
+                    self._write(name, text, shown, start, end, until=start + 0.5)
             if None in batch:
                 return
 
@@ -1063,6 +1159,9 @@ def _serve(link: _Link) -> None:
             run.start()
         elif kind == "viewer":
             viewer[0] = float(message[1])
+        elif kind == "speakers":
+            if model is not None:
+                model.use_speakers(message[1])  # 2026-11-08: Speaker marks on (a file) or off
         elif kind == "language":
             if model is not None and model.trial:
                 continue  # a test model's runs stay Turkish

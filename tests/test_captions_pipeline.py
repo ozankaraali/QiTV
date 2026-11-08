@@ -1137,6 +1137,7 @@ class StepDownTests(unittest.TestCase):
             "turkish": True,
             "european": True,
             "cohere": True,
+            "speaker": True,  # (Speaker marks' model, a run from source's: here, nothing fetched)
         }
         self.captions._here = lambda name: self.disk[name]
         self.toasts = []

@@ -146,6 +146,10 @@ against pinned SHA-256 sums:
 - **sherpa-onnx** and **sherpa-onnx-core** 2.0.1 (k2-fsa), which run the model and include
   ONNX Runtime (Microsoft, MIT License): Apache License 2.0, from PyPI.
 - **Silero VAD** (Silero Team), the voice detector: MIT License, from sherpa-onnx's releases.
+- **ERes2Net** (3D-Speaker, Alibaba's Tongyi Lab: `speech_eres2net_sv_en_voxceleb_16k`, trained
+  on VoxCeleb), the speaker model that tells caption lines' speakers apart (a run from source's
+  Speaker marks): Apache License 2.0 (<https://github.com/modelscope/3D-Speaker>), as converted
+  to ONNX by the sherpa-onnx project (its GitHub releases).
 
 The sound is decoded by QiTV's own libVLC (above); nothing you hear or that the model writes
 leaves your computer.
