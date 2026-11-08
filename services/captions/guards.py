@@ -38,6 +38,16 @@ _FALSE_CAPTIONS = re.compile(
     r"sous-titrage|sous-titres réalisés|subtítulos (?:realizados|por)|amara\.org",
     re.IGNORECASE,
 )
+# A YouTube outro on its own (2026-11-08, the Turkish Moonshine trial on a drama: "Abone ol." over a
+# short blip; its training text has YouTubers' "kanalıma abone olun" endings): a caption that is
+# nothing but such words, six at most, is the model's habit, not the channel. Inside a longer line
+# the words stay (someone on TV may say "abone olun" while saying more).
+_OUTRO_WORDS = frozenset(
+    "abone ol olun olmayı olmayi unutmayın unutmayin kanalıma kanalımıza kanalima kanalimiza "
+    "beğen beğenin beğenmeyi begen begenin begenmeyi ve lütfen lutfen videoyu bildirimleri aç açın "
+    "açmayı zile basın basmayı".split()
+)
+_OUTRO_KEY = ("abone", "beğen", "begen", "bildirim")
 # A loop nobody speaks, its words compared without case or punctuation: one word ten or more times
 # in a row, two words five or more, three words four or more, four to eight words three or more
 # ("Gol! Gol! Gol! Gol! Gol!" is a commentator and shows as said; "iki bin on yedide, iki bin on
@@ -60,6 +70,16 @@ def _looped(text: str) -> bool:
     return False
 
 
+def _outro_only(text: str) -> bool:
+    """A caption that is only a YouTube outro ("Abone ol.", "Beğen ve abone ol!")."""
+    words = [w for w in (_WORD.sub("", t.lower()) for t in text.split()) if w]
+    return (
+        0 < len(words) <= 6
+        and all(w in _OUTRO_WORDS for w in words)
+        and any(w.startswith(_OUTRO_KEY) for w in words)
+    )
+
+
 def token_cap(seconds: float, language: str | None = "") -> int:
     """The most tokens a piece of `seconds` of speech in `language` (Qwen3-ASR's English name;
     None: not known yet) may produce."""
@@ -72,7 +92,7 @@ def clean(text: str) -> str:
     text = " ".join(_HEADING.sub("", text).replace("<asr_text>", " ").split())
     if not any(c.isalnum() for c in text) or _ROLE_WORDS.fullmatch(text):
         return ""  # nothing said (a lone "." over music), or the prompt's own words
-    if _FALSE_CAPTIONS.search(text):
+    if _FALSE_CAPTIONS.search(text) or _outro_only(text):
         return ""
     if _looped(text):
         return ""  # the model looping over music or noise: nothing of it was said

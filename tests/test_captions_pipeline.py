@@ -35,6 +35,22 @@ def setUpModule():
 
 
 class GuardTests(unittest.TestCase):
+    def test_a_youtube_outro_alone_is_the_models_habit(self):
+        # 2026-11-08, the Turkish Moonshine trial on a drama: "Abone ol." over a short blip.
+        for said in (
+            "Abone ol.",
+            "Abone olun!",
+            "Beğen ve abone ol.",
+            "Kanalıma abone olmayı unutmayın.",
+        ):
+            self.assertEqual(guards.clean(said), "", said)
+        # Inside a longer line, or another sentence: as said.
+        self.assertEqual(
+            guards.clean("Bu programa abone olun, her hafta buradayız."),
+            "Bu programa abone olun, her hafta buradayız.",
+        )
+        self.assertEqual(guards.clean("Ve lütfen."), "Ve lütfen.")  # no outro word: a line
+
     def test_what_the_broadcasts_showed_never_reaches_the_screen(self):
         self.assertEqual(guards.clean("system."), "")
         self.assertEqual(guards.clean("."), "")
