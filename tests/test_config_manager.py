@@ -17,6 +17,22 @@ class WindowConfigMigrationTests(unittest.TestCase):
     def setUpClass(cls):
         cls.app = QApplication.instance() or QApplication([])
 
+    def test_the_language_models_answer_survives_a_restart(self):
+        # 2.9.6's first question ("download the speech models for your languages?"): the yes was
+        # set on the object only and asked again after every restart.
+        with tempfile.TemporaryDirectory() as directory:
+            config_path = Path(directory) / "config.json"
+            config_path.write_text(json.dumps({}), encoding="utf-8")
+            with patch.object(ConfigManager, "_get_config_path", return_value=str(config_path)):
+                config = ConfigManager()
+                self.assertFalse(config.ai_captions_language_models)
+                config.ai_captions_language_models = True
+                config.save_config(wait=True)
+                reloaded = ConfigManager()
+                self.assertTrue(reloaded.ai_captions_language_models)
+                reloaded.config["ai_captions_language_models"] = "yes"  # not a bool: not a yes
+                self.assertFalse(reloaded.ai_captions_language_models)
+
     def test_a_1x_config_gains_the_tv_window_without_resetting_saved_state(self):
         # A 1.x config names only the old windows. A missing window entry once kept the
         # player from starting (KeyError in 1.13.7); the TV window's entry is added instead.

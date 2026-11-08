@@ -591,6 +591,12 @@ class ConfigManager:
             else {}
         ),
     )
+    # 2.9.6, optional (older builds ignore it): the viewer said yes to downloading the speech models
+    # for the languages they watch (the first question). Undeclared until 2026-11-08, so it was set
+    # on the object only, never written, and the question came back after every restart.
+    ai_captions_language_models = _config_property(
+        "ai_captions_language_models", False, coerce=lambda value: value is True
+    )
     # 2026-11-08, optional (older builds ignore it): the AI captions test model picked in a run
     # from source (services.captions.trial_models: a folder's name; "": the usual models)
     ai_captions_trial_model = _config_property("ai_captions_trial_model", "", coerce=str)
