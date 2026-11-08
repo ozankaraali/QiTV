@@ -88,6 +88,10 @@ _SLOW_RTF = 0.9  # the model takes this long per second of speech: it can't keep
 _LANGUAGE_MODELS_OK = "ai_captions_language_models"
 _BACKLOG_S = 2.0  # ... or this much sound read waits for it (2.9.1)
 _SLOW_FOR_S = 30.0
+# 2026-11-08, the owner: a run from source lists our Turkish test models (Subtitles panel → Test
+# model, services.captions.trial_models); the pick is kept here ("": the usual models)
+_TRIAL_MODEL = "ai_captions_trial_model"
+_TRIAL_SCAN_S = 5.0  # the folder is looked at again this often while the panel asks (new exports)
 
 from ui.captions_texts import (  # noqa: E402  (the texts, with their translations)
     CANT_KEEP_UP,
@@ -133,6 +137,7 @@ class CaptionsController(QObject):
 
     changed = Signal()  # the row's state or text changed: the panel shows it again
     _scored = Signal()  # this computer's speed is measured (from the benchmark's thread)
+    _trials_found = Signal(object)  # the test models found (from the folder scan's thread)
 
     def __init__(self, window: Any, card: Any = None, overlay: Any = None) -> None:
         super().__init__(window)
@@ -170,6 +175,10 @@ class CaptionsController(QObject):
         self._unmeasured = False  # it failed: Automatic doesn't wait for it
         self._toggle_waits = False  # turned on before the speed was known: on once it is
         self._scored.connect(self._on_scored)
+        self._trials: list[Any] = []  # the test models here (trial_models.TrialModel), by scan
+        self._trials_known = False  # a scan has finished
+        self._trials_scanned: Optional[float] = None  # when the last scan began (monotonic)
+        self._trials_found.connect(self._on_trials_found)
         self._download: Any = None
         self._percent = 0
         self._unpacking = False
@@ -442,6 +451,89 @@ class CaptionsController(QObject):
             return False
         return tier.known_score() is None and not self._unmeasured
 
+    # ---- the Test model list (2026-11-08, the owner: a run from source compares our own
+    # Turkish models live, one at a time, picked directly; services.captions.trial_models) ----
+    def trial_models(self) -> list[tuple[str, str]]:
+        """The test models here, as (folder name, label) in the list's order; none unless this
+        run offers them (from source). The folder is looked at in a thread: the list follows."""
+        from services.captions import trial_models
+
+        if not trial_models.enabled():
+            return []
+        self._scan_trials()
+        return [(model.name, model.label) for model in self._trials]
+
+    def trial_model(self) -> str:
+        """The test model picked ("": the usual models, language detection and all). A pick
+        whose folder went reads as none once the folder has been looked at."""
+        from services.captions import trial_models
+
+        if not trial_models.enabled():
+            return ""
+        name = str(self._config_get(_TRIAL_MODEL, "") or "")
+        if name and self._trials_known and name not in {m.name for m in self._trials}:
+            return ""
+        return name
+
+    def trial_choices(self) -> list[tuple[str, str]]:
+        """The Test model list: Automatic ("": the usual models), then each test model here;
+        none while there are none (or this run doesn't offer them)."""
+        found = self.trial_models()
+        return [("", model_texts()["auto"]), *found] if found else []
+
+    def set_trial_model(self, name: str) -> None:
+        """A test model picked ("": back to the usual models). On (or loading), they come on
+        again with it: the process loads it (off the GUI thread) and reads on from the picture;
+        off, a test model turns them on with it at once."""
+        if name and name not in {model for model, _label in self.trial_models()}:
+            return
+        before = self.trial_model()
+        self._config_set(_TRIAL_MODEL, name)
+        if name == before and (self._enabled or not name):
+            return
+        logger.info("AI captions: the test model is now %s", name or "none (the usual models)")
+        if self._enabled:
+            self._process.stop()
+            self._forget_cues()  # the new model's captions only: they are compared
+            self._show("")
+            self._slow_since = None
+            self._newest = self._written = None
+            self._resolve_language()
+            self._load_model()
+        elif name and self._download is None and not self._asking:
+            self.toggle()
+        self.changed.emit()
+
+    def _scan_trials(self) -> None:
+        """The AI captions folder looked at for test models, in a thread, at most every
+        `_TRIAL_SCAN_S` (an export copied in meanwhile shows up)."""
+        now = time.monotonic()
+        if self._trials_scanned is not None and now - self._trials_scanned < _TRIAL_SCAN_S:
+            return
+        self._trials_scanned = now
+        import threading
+
+        from services.captions import models, trial_models
+
+        def scan() -> None:
+            try:
+                found = trial_models.discover(models.captions_root())
+            except Exception as error:
+                logger.warning("AI captions: the test models were not looked for: %s", error)
+                found = []
+            try:
+                self._trials_found.emit(found)  # (a signal: the GUI thread hears it)
+            except RuntimeError:
+                pass  # QiTV closed meanwhile
+
+        threading.Thread(target=scan, name="qitv-captions-trials", daemon=True).start()
+
+    def _on_trials_found(self, found: list) -> None:
+        known, self._trials_known = self._trials_known, True
+        if found != self._trials or not known:
+            self._trials = list(found)
+            self.changed.emit()
+
     def _here(self, name: str) -> bool:
         """The model is installed, looked at once until a download or Settings' Delete changes
         it: the panel and the phones ask often."""
@@ -653,6 +745,7 @@ class CaptionsController(QObject):
 
         paths = models.model_paths(self._tier)
         runtime = models.runtime_dir()
+        trial = self.trial_model()
         self._loading, self._ready = True, False
         self._process.start(
             {
@@ -668,6 +761,8 @@ class CaptionsController(QObject):
                 "turkish": self._folder("turkish", paths.turkish),  # 2.9.1: ufakzeka-kulak
                 "european": self._folder("european", paths.european),  # 2.9.3: Parakeet
                 "cohere": self._folder("cohere", paths.cohere),  # 2.9.3: Cohere Transcribe
+                # a test model picked (a run from source): it alone writes, as Turkish
+                "trial": str(models.captions_root() / trial) if trial else None,
                 "threads": model_threads(),
             },
             detailed_log=bool(self._config_get("detailed_log", False)),
@@ -684,6 +779,7 @@ class CaptionsController(QObject):
         return (
             not self._step_tried
             and self._qwen_writes
+            and not self.trial_model()
             and self._behind()
             and self._ready
             and self._tier == "large"
@@ -733,6 +829,8 @@ class CaptionsController(QObject):
         key = specialist_for(self._language[0])
         if key is None or key in self._offered or not self._enabled or self._here(key):
             return
+        if self.trial_model():
+            return  # a test model writes it
         if self._asking or self._download is not None or self._card is None:
             return
         try:
@@ -1328,6 +1426,9 @@ class CaptionsController(QObject):
         from services.captions.languages import language_from_title, qwen_name
 
         self._guessed = False
+        if self.trial_model():
+            self._language = ("Turkish", FROM_VIEWER)  # a test model's: as it is, no detection
+            return
         pick = (self._config_get("ai_captions_picks", {}) or {}).get(self._channel_key())
         if pick:
             self._language = (pick, FROM_VIEWER)

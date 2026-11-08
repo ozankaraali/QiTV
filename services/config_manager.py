@@ -591,6 +591,9 @@ class ConfigManager:
             else {}
         ),
     )
+    # 2026-11-08, optional (older builds ignore it): the AI captions test model picked in a run
+    # from source (services.captions.trial_models: a folder's name; "": the usual models)
+    ai_captions_trial_model = _config_property("ai_captions_trial_model", "", coerce=str)
     watch_history = _config_property("watch_history", [])
     playback_positions = _config_property("playback_positions", {})
 

@@ -37,7 +37,7 @@ import time
 from typing import Any, Optional
 import urllib.request
 
-from services.captions import guards, numbers_tr, text_language
+from services.captions import guards, numbers_tr, text_language, trial_models
 from services.captions.growing import GrowingWriter
 from services.captions.languages import COHERE, EUROPEAN, QWEN_LANGUAGES, iso_code
 from services.captions.pieces import END_PAUSE_S, MAX_PIECE_S, Cutter, Piece
@@ -169,6 +169,7 @@ class _Model:
     twenty-fifth of its time) once the files are given."""
 
     moonshine = False  # the Turkish Moonshine trial writes Turkish (MOON_ENV)
+    trial = False  # a test model picked by hand writes everything, as Turkish (spec "trial")
 
     def __init__(self, spec: dict) -> None:
         runtime = spec.get("runtime")
@@ -187,27 +188,37 @@ class _Model:
         self._qwen_paths = paths
         self._qwen_done = threading.Event()
         self._qwen_started = False
+        turkish = spec.get("turkish")
+        stream_dir = spec.get("turkish_stream") or os.environ.get(STREAM_ENV)
         moon_dir = os.environ.get(MOON_ENV)
+        # 2026-11-08, the owner: a test model picked in the Subtitles panel's Test model list
+        # (services.captions.trial_models) runs as it is: it alone, on Turkish, no language
+        # detection and no Qwen; the environment's trials (MOON_ENV, STREAM_ENV) step aside.
+        picked = spec.get("trial")
+        found = trial_models.describe(Path(picked)) if paths and picked else None
+        if picked and found is None:
+            logger.warning("AI captions: the test model %s isn't here; the usual models", picked)
+        if found is not None:
+            self.trial = True
+            kind, trial_dir = found.kind, str(found.folder)
+            turkish = trial_dir if kind == trial_models.UFAK else None
+            moon_dir = trial_dir if kind == trial_models.MOONSHINE else None
+            stream_dir = trial_dir if kind == trial_models.STREAM else None
+            logger.info("AI captions: the test model %s writes Turkish", found.label)
         # 2026-11-07: with the Moonshine trial writing Turkish, Qwen loads (and warms up) only
         # once a run needs it: its load and warm-up kept the captions from starting while the
-        # picture played on (`prepare_qwen`)
-        if paths and not moon_dir:
+        # picture played on (`prepare_qwen`); a test model's runs never need it
+        if paths and not moon_dir and not self.trial:
             self.recognizer = self._new_qwen()
             self._qwen_done.set()
         self.turkish: Any = None
         self.moonshine = False
-        turkish = spec.get("turkish")
         if paths and moon_dir:
-            folder = Path(moon_dir)
-
-            def onnx(stem: str) -> str:
-                quantized = folder / f"{stem}_quantized.onnx"
-                return str(quantized if quantized.exists() else folder / f"{stem}.onnx")
-
+            encoder, decoder, tokens = trial_models.moonshine_files(Path(moon_dir))
             self.turkish = sherpa_onnx.OfflineRecognizer.from_moonshine_v2(
-                encoder=onnx("encoder_model"),
-                decoder=onnx("decoder_model_merged"),
-                tokens=str(folder / "tokens.txt"),
+                encoder=str(encoder),
+                decoder=str(decoder),
+                tokens=str(tokens),
                 num_threads=min(2, threads),
             )
             self.moonshine = True
@@ -223,7 +234,6 @@ class _Model:
                 model_type="nemo_transducer",
             )
         self.turkish_stream: Any = None
-        stream_dir = spec.get("turkish_stream") or os.environ.get(STREAM_ENV)
         if stream_dir:
             folder = Path(stream_dir)
             self.turkish_stream = sherpa_onnx.OnlineRecognizer.from_transducer(
@@ -250,6 +260,8 @@ class _Model:
         self._folders = {
             name: Path(spec[name]) for name in (_COHERE, _EUROPEAN) if paths and spec.get(name)
         }
+        if self.trial:
+            self._folders = {}  # Turkish only: no specialist
         self.cohere: Any = None
         self.european: Any = None
         self._loading: dict[str, threading.Event] = {}
@@ -291,6 +303,8 @@ class _Model:
         """Qwen loads now, in its own thread, when it was left for later and has not begun."""
         if self.recognizer is not None or not self._qwen_paths or self._qwen_started:
             return
+        if self.trial:
+            return  # a test model writes everything (as Turkish)
         self._qwen_started = True
         threading.Thread(target=self._load_qwen, name="qitv-captions-qwen", daemon=True).start()
 
@@ -310,13 +324,15 @@ class _Model:
     def qwen(self) -> Any:
         """Qwen, once loaded; one left for later loads now (waited for, `_LOAD_WAIT_S` at
         most). None when there is none."""
-        if self.recognizer is None and getattr(self, "_qwen_paths", None):
+        if self.recognizer is None and self.has_qwen():
             self.prepare_qwen()
             self._qwen_done.wait(_LOAD_WAIT_S)
         return self.recognizer
 
     def has_qwen(self) -> bool:
-        """Qwen is here, or can be loaded."""
+        """Qwen is here, or can be loaded (never beside a test model)."""
+        if getattr(self, "trial", False):
+            return False
         return self.recognizer is not None or bool(getattr(self, "_qwen_paths", None))
 
     def is_speech(self, window: array) -> bool:
@@ -455,6 +471,8 @@ class _Run:
         self.model = model
         self.run = run
         self.url = url
+        if getattr(model, "trial", False):
+            language, guessed = TURKISH, False  # a test model: Turkish, as it is (no vote)
         self.language = language
         # 2026-11-07: a language guessed from the channel's title prefix ("TR: …"): the run
         # starts in it (no Qwen vote first), and its readings may still say otherwise
@@ -751,6 +769,8 @@ class _Run:
         down while it only wrote English until Cohere was loaded, and the step down's restart
         made Cohere load again: the first caption came 101 s after captions were on)."""
         language = self.language
+        if getattr(self.model, "trial", False):
+            return False  # a test model writes it: no smaller Qwen helps
         if not language:
             return True
         if language == TURKISH and (
@@ -944,6 +964,8 @@ def _serve(link: _Link) -> None:
         elif kind == "viewer":
             viewer[0] = float(message[1])
         elif kind == "language":
+            if model is not None and model.trial:
+                continue  # a test model's runs stay Turkish
             language = message[1]
             if model is not None and not (language == TURKISH and model.moonshine):
                 model.prepare_qwen()  # Qwen writes the new language: it loads, if it was left

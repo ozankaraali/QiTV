@@ -36,6 +36,8 @@ from ui.track_controls import (
     AI_CAPTIONS,
     AI_LANGUAGE,
     AI_PICK,
+    AI_TRIAL,
+    AI_TRIAL_PICK,
     TrackControls,
     audio_names,
     language_label,
@@ -504,6 +506,104 @@ class CaptionRowsTests(PanelCase):
         self.captions = None
         self.click_button("subtitles")
         self.assertEqual(self.texts(), ["*Off", "English", "Français", "Load a file…"])
+
+
+class TrialCaptions(FakeCaptions):
+    """The controller with test models here (a run from source)."""
+
+    def __init__(self):
+        super().__init__()
+        self.trial = ""
+        self.trial_picks = []
+
+    def trial_choices(self):
+        return [
+            ("", "Automatic"),
+            ("ufakzeka-kulak", "ufak"),
+            ("tr-moonm-avg", "Moonshine medium · tr-moonm-avg"),
+        ]
+
+    def trial_model(self):
+        return self.trial
+
+    def set_trial_model(self, name):
+        """As the controller's: off, a model turns them on with it (asking first, if asks)."""
+        self.trial_picks.append(name)
+        self.trial = name
+        if name and not self.on:
+            self.toggle()
+        self.changed.emit()
+
+
+class TrialRowsTests(PanelCase):
+    """2026-11-08, the owner: a run from source picks our Turkish test models directly."""
+
+    make_controls = CaptionRowsTests.make_controls
+    rows = CaptionRowsTests.rows
+    texts = CaptionRowsTests.texts
+    click_row = CaptionRowsTests.click_row
+
+    def setUp(self):
+        self.captions = TrialCaptions()
+        super().setUp()
+        self.current = CHANNEL
+
+    def test_the_test_model_row_says_the_pick_and_opens_its_list(self):
+        self.click_button("subtitles")
+        self.assertEqual(
+            self.texts(),
+            [
+                "*Off",
+                "English",
+                "Français",
+                "AI captions",
+                "Test model [Automatic]",
+                "Load a file…",
+            ],
+        )
+        self.assertTrue(self.rows()[4].opens)
+        self.click_row(AI_TRIAL)
+        self.assertEqual(self.subtitle_panel.model().title, "Test model")
+        self.assertEqual(
+            self.texts(),
+            ["Subtitles", "*Automatic", "ufak", "Moonshine medium · tr-moonm-avg"],
+        )
+        self.click_row(AI_BACK)
+        self.assertEqual(self.subtitle_panel.model().title, "Subtitles")
+
+    def test_a_model_picked_turns_them_on_with_it_and_no_language_row_shows(self):
+        self.player.spu = 4  # Français shows: one subtitle source at a time
+        self.click_button("subtitles")
+        self.click_row(AI_TRIAL)
+        self.click_row((AI_TRIAL_PICK, "tr-moonm-avg"))
+        self.assertEqual((self.captions.trial_picks, self.captions.on), (["tr-moonm-avg"], True))
+        self.assertEqual(self.player.spu, -1)
+        self.assertTrue(self.subtitle_panel.isVisible())
+        self.assertEqual(self.subtitle_panel.model().title, "Subtitles")
+        self.assertEqual(
+            self.texts(),
+            [
+                "Off",
+                "English",
+                "Français",
+                "*AI captions",
+                "Test model [Moonshine medium · tr-moonm-avg]",
+                "Load a file…",
+            ],
+        )
+        self.click_row(AI_TRIAL)
+        self.assertEqual(self.texts()[1:3], ["Automatic", "ufak"])
+        self.assertIn("*Moonshine medium · tr-moonm-avg", self.texts())
+        self.click_row((AI_TRIAL_PICK, ""))  # Automatic: the usual models, the language again
+        self.assertEqual(self.captions.trial_picks, ["tr-moonm-avg", ""])
+        self.assertIn(AI_LANGUAGE, [r.key for r in self.rows()])
+
+    def test_a_pick_whose_question_comes_puts_it_in_front(self):
+        self.captions.asks = True
+        self.click_button("subtitles")
+        self.click_row(AI_TRIAL)
+        self.click_row((AI_TRIAL_PICK, "ufakzeka-kulak"))
+        self.assertFalse(self.subtitle_panel.isVisible())
 
 
 class PhoneChoicesTests(PanelCase):

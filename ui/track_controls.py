@@ -43,6 +43,10 @@ file turns AI captions off, and AI captions turned on turn the track shown off. 
 closes the panel first, as their first time asks a question (the download); it opens again once
 they are on or on their way.
 
+In a run from source (services.captions.trial_models) a "Test model  Automatic ›" row opens a
+list of our own Turkish test models found in the AI captions folder (Automatic: the usual
+models); one picked writes the captions alone, as Turkish, with no language row or detection.
+
 The phone remote's Subtitles and Sound sheets (2.9, ui/remote_controller.py) list the same
 choices, named the same (`sound_choices`, `subtitle_choices`, `captions_choice`), and choose
 them as the rows do (`choose_sound`, `choose_subtitles`, `set_captions`,
@@ -73,6 +77,18 @@ from ui.player_keys import PlayerKeys
 logger = logging.getLogger(__name__)
 
 
+def _trial_choices(captions: Any) -> list[tuple[str, str]]:
+    """The Test model list's choices, (folder name or "" for Automatic, text); none unless the
+    controller offers test models (a run from source with some here)."""
+    choices = getattr(captions, "trial_choices", None)
+    return list(choices()) if callable(choices) else []
+
+
+def _trial_picked(captions: Any) -> str:
+    picked = getattr(captions, "trial_model", None)
+    return str(picked()) if callable(picked) else ""
+
+
 def _same_series(previous: Optional[Target], target: Target) -> bool:
     """`target` is another episode of the series `previous` was one of (its next, mostly)."""
     if previous is None or previous.section != "series" or target.section != "series":
@@ -100,6 +116,12 @@ AI_CAPTIONS = "ai_captions"  # on or off
 AI_LANGUAGE = "ai_language"  # the language they hear: opens the list
 AI_BACK = "ai_back"  # the list's way back to the Subtitles panel
 AI_PICK = "ai_pick"  # a language of the list: (AI_PICK, "auto" or Qwen's name)
+# 2026-11-08, the owner: a run from source lists our Turkish test models, picked directly
+AI_TRIAL = "ai_trial"  # the test model: opens its list
+AI_TRIAL_PICK = "ai_trial_pick"  # a model of the list: (AI_TRIAL_PICK, folder name or "")
+# i18n: the Subtitles panel's row in a developer's run only: the AI captions speech model to
+# try (one of the developers' own test models), and its list's title
+TRIAL_TEXT = N_("Test model")
 # i18n: the Subtitles panel's row: captions written on this computer by a speech model, in the
 # language spoken; a Settings group's title
 AI_CAPTIONS_TEXT = N_("AI captions")
@@ -605,6 +627,8 @@ class TrackControls(QObject):
         captions = self._offered()
         if self._level == AI_LANGUAGE and captions is not None and captions.enabled():
             return self._language_model(captions)
+        if self._level == AI_TRIAL and captions is not None and _trial_choices(captions):
+            return self._trial_model(captions)
         self._level = ""
         session = self._session()
         shown = session.subtitle_track()
@@ -782,10 +806,39 @@ class TrackControls(QObject):
                 choosable=True,
             )
         ]
-        if on:
+        trials = _trial_choices(captions)
+        if trials:  # a developer's run: the test model, picked directly (Turkish, as it is)
+            note = dict(trials).get(_trial_picked(captions), "")
+            rows.append(PanelRow(AI_TRIAL, translate(TRIAL_TEXT), note=note, opens=True))
+        if on and not (trials and _trial_picked(captions)):
             note = self._language_text(captions)
             rows.append(PanelRow(AI_LANGUAGE, translate(LANGUAGE_TEXT), note=note, opens=True))
         return rows
+
+    def _trial_model(self, captions) -> PanelModel:
+        """The Test model list: "‹ Subtitles", Automatic (the usual models), then each test
+        model here; the one picked ticked."""
+        picked = _trial_picked(captions)
+        rows = [PanelRow(AI_BACK, translate(SUBTITLES_TITLE), action=True, icon="chevron_left")]
+        rows += [
+            PanelRow((AI_TRIAL_PICK, name), text, name == picked)
+            for name, text in _trial_choices(captions)
+        ]
+        return PanelModel(translate(TRIAL_TEXT), tuple(rows))
+
+    def _pick_trial(self, name: str) -> None:
+        """A test model picked (or Automatic): on, they come on again with it; off, a model
+        turns them on with it (its question in front, if one comes)."""
+        self._level = ""
+        captions = self._offered()
+        if captions is None:
+            return
+        captions.set_trial_model(name)
+        self._one_source(captions)
+        if captions.asking():
+            self.close()
+        elif self._playing():
+            self._open(SUBTITLES)
 
     @staticmethod
     def _language_text(captions) -> str:
@@ -876,6 +929,11 @@ class TrackControls(QObject):
         elif key == AI_LANGUAGE:
             self._level = AI_LANGUAGE
             self._open(SUBTITLES)
+        elif key == AI_TRIAL:
+            self._level = AI_TRIAL
+            self._open(SUBTITLES)
+        elif isinstance(key, tuple) and len(key) == 2 and key[0] == AI_TRIAL_PICK:
+            self._pick_trial(str(key[1]))
         elif key == AI_BACK:
             self._back_to_subtitles()
         elif isinstance(key, tuple) and len(key) == 2 and key[0] == AI_PICK:
