@@ -135,6 +135,19 @@ LEXICON = (
 
 
 class HelpersTest(unittest.TestCase):
+    def test_a_word_said_again_that_the_written_words_hold_once_writes_nothing_twice(self) -> None:
+        # An eval drama clip at an 8 s lead: a partial reading wrote "... barış da yeter. Kardeşim"
+        # (it heard "yeter" once); the next reading heard "yeter yeter. Kardeşim çok severdi ...".
+        # After "yeter" and after "Kardeşim" were equally near; the earlier was taken and the line
+        # read "... yeter. Kardeşim yeter. Kardeşim çok severdi ...".
+        held = (
+            "yapabildim ama yeter umarım. Yani yeter bence de ya. Bir sürü barış da yeter. Kardeşim"
+        ).split()
+        heard = (
+            "Bir sürü barıştı, yeter yeter. Kardeşim çok severdi bunları, özellikle çikolatalısını."
+        ).split()
+        self.assertEqual(heard[continues(held, heard, 5) :][0], "çok")
+
     def test_a_reading_goes_on_past_the_words_written_from_it(self) -> None:
         self.assertEqual(continues(["Burada", "her"], ["Burada", "her", "gün", "yeni"]), 2)
         # written a little differently the second time: still past them

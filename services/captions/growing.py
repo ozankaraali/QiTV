@@ -132,7 +132,13 @@ def continues(written: Sequence[str], heard: Sequence[str], expect: Optional[int
         before, previous = previous, row
     best = min(previous)
     near = [j for j, d in enumerate(previous) if d <= best + 1e-9]
-    return min(near, key=lambda j: (0 if expect is None else abs(j - expect), j))
+    # Of places as near and as far from `expect`, one that ends on the last written word: a word
+    # said again that the written words hold once ("yeter yeter") made the earlier place as near,
+    # and the words after it were written again (2026-11-08, an eval drama clip).
+    return min(
+        near,
+        key=lambda j: (0 if expect is None else abs(j - expect), not (j and b[j - 1] == a[-1]), j),
+    )
 
 
 def joined_rest(written: str, heard: str, said_next: Sequence[str]) -> Optional[str]:
