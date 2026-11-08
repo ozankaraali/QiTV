@@ -11,11 +11,12 @@ always comes first.
 
 Messages to it: ("load", {...}), ("start", run, url, segment_start, audio_track, language),
 ("film", run, location, start_s, audio_track, language, vlc_options): a film's run,
-("viewer", position), ("language", name), ("speakers", model file or None), ("stop",),
-("quit",).
-From it: ("ready",), ("failed", reason), ("caption", run, start, end, text, turn, speaker)
-(turn: 1 when another speaker than the line before's says it; speaker: 1, 2, ... in the run, 0
-untold: services.captions.speakers),
+("viewer", position), ("language", name), ("speakers", model file or None, segmentation
+file), ("stop",), ("quit",).
+From it: ("ready",), ("failed", reason), ("caption", run, start, end, text, turn, speaker[,
+parts]) (turn: 1 when another speaker than the line before's says it; speaker: 1, 2, ... in the
+run, 0 untold: services.captions.speakers; parts, a line of more than one: [(text, start, end,
+turn, speaker), ...]),
 ("progress", run, newest, rtf, written_to, qwen_writes), ("resync", run, newest),
 ("ended", run, reason),
 ("detected", run, language) once the pieces agree on one (none was given),
@@ -37,14 +38,14 @@ import re
 import sys
 import threading
 import time
-from typing import Any, Optional
+from typing import Any, Optional, Sequence
 import urllib.request
 
 from services.captions import guards, numbers_tr, text_language, trial_models
 from services.captions.growing import GrowingWriter
 from services.captions.languages import COHERE, EUROPEAN, QWEN_LANGUAGES, iso_code
 from services.captions.pieces import END_PAUSE_S, MAX_PIECE_S, Cutter, Piece
-from services.captions.speakers import Recent, Speakers, Turn, Voices
+from services.captions.speakers import Recent, Speakers, Turn, Voices, parts_of
 from services.captions.stream_clock import StreamClock, TsTimes
 from services.captions.streaming import StreamWriter
 
@@ -322,6 +323,7 @@ class _Model:
         # 2026-11-08, the owner's Speaker marks (a run from source): the speaker model, and the
         # voice detector of the sound it reads (its own: its windows come in their order)
         self.voices: Any = None
+        self.turns: Any = None  # ... and the segmentation (services.captions.turns)
         self.speakers_on = False
         self._speaker_vad: Any = None
         self._speaker_lock = threading.Lock()
@@ -342,7 +344,7 @@ class _Model:
         self.voiced = detector(_VOICED_MIN_S)
         self._detector = detector
         self._lock = threading.Lock()
-        self.use_speakers(spec.get("speaker"))
+        self.use_speakers(spec.get("speaker"), spec.get("segmentation"))
         if self.has_model:
             # Warm up: the first decode is slow (graph optimisation), not the viewer's first.
             if self.recognizer is not None:
@@ -352,10 +354,11 @@ class _Model:
             elif self.turkish is not None:
                 self.decode(array("f", bytes(16000 * 4)), TURKISH)
 
-    def use_speakers(self, model: Optional[str]) -> None:
+    def use_speakers(self, model: Optional[str], segmentation: Optional[str] = None) -> None:
         """2026-11-08, Speaker marks: each line's speaker told with the speaker model in the
-        file `model` (it loads in its own thread the first time; lines go untold till then);
-        None: no longer told."""
+        file `model`, where it changes inside a line heard by the segmentation model in the file
+        `segmentation` (they load in their own thread the first time; lines go untold till
+        then); None: no longer told."""
         if not model or not self.has_model:
             self.speakers_on = False
             return
@@ -364,16 +367,24 @@ class _Model:
             return
         self._speakers_loading = True
         threading.Thread(
-            target=self._load_speakers, args=(model,), name="qitv-captions-speakers", daemon=True
+            target=self._load_speakers,
+            args=(model, segmentation),
+            name="qitv-captions-speakers",
+            daemon=True,
         ).start()
 
-    def _load_speakers(self, model: str) -> None:
+    def _load_speakers(self, model: str, segmentation: Optional[str]) -> None:
         try:
             self._speaker_vad = self._detector(_VOICED_MIN_S)
             self.voices = Voices(self._sherpa, model, threads=min(2, self._threads))
             logger.info("AI captions: the speaker model is loaded (%s)", Path(model).name)
-        except Exception as error:  # the lines go on, untold
-            logger.warning("AI captions: the speaker model did not load: %s", type(error).__name__)
+            if segmentation:
+                from services.captions.turns import Turns
+
+                self.turns = Turns(segmentation)
+                logger.info("AI captions: the segmentation is loaded")
+        except Exception as error:  # the lines go on, untold (or by the speaker model alone)
+            logger.warning("AI captions: the speaker models did not load: %s", type(error).__name__)
         finally:
             self._speakers_loading = False
 
@@ -659,32 +670,91 @@ class _Run:
         writes = getattr(getattr(self, "model", None), "writes", None)
         return str(writes(language)) if callable(writes) else "?"
 
-    def _logged(self, name: str, heard: str, shown: str, turn: Optional[Turn] = None) -> None:
+    def _logged(
+        self, name: str, heard: str, shown: str, turns: Sequence[Optional[Turn]] = ()
+    ) -> None:
         """A line in the log by the model that wrote it (2026-11-08, the owner: "Write to logs
-        which one writes"), what it heard and what shows, and who says it (S1, S2, ... and how
-        like the speaker before's voice); the run's model changing (a language locked, a
-        specialist loaded) is said once, with the run. At INFO only where test models are
-        offered (`line_level`)."""
+        which one writes"), what it heard and what shows, and who says it, part by part (S1, S2,
+        ... and how like the speaker before's voice); the run's model changing (a language
+        locked, a specialist loaded) is said once, with the run. At INFO only where test models
+        are offered (`line_level`)."""
         level = getattr(self, "_line_level", None) or line_level()
         if name != getattr(self, "_writes", ""):
             self._writes = name
             logger.log(level, "AI captions: run %d: [%s] writes now", getattr(self, "run", 0), name)
-        who = f" · {turn.tag()}" if turn is not None else ""
+        told = [turn.tag() for turn in turns if turn is not None]
+        who = f" · {' | '.join(told)}" if told else ""
         logger.log(level, "AI captions: [%s] heard %r, shows %r%s", name, heard, shown, who)
 
     def _write(
-        self, name: str, heard: str, shown: str, start: float, end: float, until: float = 0.0
+        self,
+        name: str,
+        heard: str,
+        shown: str,
+        start: float,
+        end: float,
+        until: float = 0.0,
+        voiced: Optional[Sequence[bool]] = None,
     ) -> None:
         """A line of the sound of [start, end) out (shown until `until` when later), and in the
-        log: its speaker told first while Speaker marks are on."""
-        turn = self._speaker(start, end)
-        self._logged(name, heard, shown, turn)
-        changed = 1 if turn is not None and turn.changed else 0
-        speaker = turn.speaker if turn is not None else 0
-        self.link.send(("caption", self.run, start, max(end, until), shown, changed, speaker))
+        log. 2026-11-08, the owner: a line of more than one sentence, or with a long pause in it,
+        goes in parts (speakers.parts_of: each with its sound's span, from `voiced`, the voice
+        detector's windows from `start`, else the speaker model's), each part's speaker told
+        while Speaker marks are on; the captions show a long line a part at a time as each is
+        said."""
+        flags, at = (list(voiced), start) if voiced is not None else self._flags(start, end)
+        found = self._turns(start, end)
+        parts = parts_of(
+            shown,
+            start,
+            end,
+            flags,
+            at,
+            changes=found.changes if found is not None else None,
+        )
+        turns = [self._speaker(part.start, part.end) for part in parts]
+        self._logged(name, heard, shown, turns)
+        said = [
+            (
+                part.text,
+                part.start,
+                part.end,
+                1 if turn is not None and turn.changed else 0,
+                turn.speaker if turn is not None else 0,
+            )
+            for part, turn in zip(parts, turns)
+        ]
+        changed, speaker = said[0][3], said[0][4]
+        message = ("caption", self.run, start, max(end, until), shown, changed, speaker)
+        self.link.send(message + ((said,) if len(said) > 1 else ()))
+
+    def _flags(self, start: float, end: float) -> tuple[Optional[list[bool]], float]:
+        """The voice detector's windows of [start, end) kept for the speaker model, if it is on."""
+        recent = getattr(self, "recent", None)
+        if recent is None:
+            return None, start
+        flags, at = recent.flags(start, end)
+        return flags, at
+
+    def _turns(self, start: float, end: float) -> Any:
+        """Where the segmentation hears the speaker change in the line of [start, end), read
+        with the CONTEXT_S before it (services.captions.turns.Found); None without it."""
+        model = getattr(self, "model", None)
+        turns = getattr(model, "turns", None)
+        recent = getattr(self, "recent", None)
+        if turns is None or recent is None or not getattr(model, "speakers_on", False):
+            return None
+        from services.captions.turns import CONTEXT_S
+
+        sound, at = recent.sound(start - CONTEXT_S, end)
+        try:
+            return turns.changes(sound, at, start)
+        except Exception as error:
+            logger.warning("AI captions: the segmentation failed: %s", type(error).__name__)
+            return None
 
     def _speaker(self, start: float, end: float) -> Optional[Turn]:
-        """Who says the line of timeline seconds [start, end): the speaker before, or another
+        """Who says the part of timeline seconds [start, end): the speaker before, or another
         (services.captions.speakers); None while speakers are not told."""
         model = getattr(self, "model", None)
         voices = getattr(model, "voices", None)
@@ -898,7 +968,7 @@ class _Run:
                 text = unfinished(text)
             if self.language == TURKISH and self.model.turkish is not None:
                 text = numbers_tr.written(self.sentence_case(text, piece.start, piece.end))
-            self._write(name, heard, text, piece.start, piece.end)
+            self._write(name, heard, text, piece.start, piece.end, voiced=piece.voiced)
 
     def sentence_case(self, text: str, start: float, end: float) -> str:
         """ufak's line with a capital where a sentence starts (the run's first line, after a
@@ -1159,9 +1229,9 @@ def _serve(link: _Link) -> None:
             run.start()
         elif kind == "viewer":
             viewer[0] = float(message[1])
-        elif kind == "speakers":
+        elif kind == "speakers":  # 2026-11-08: Speaker marks on (the models' files) or off
             if model is not None:
-                model.use_speakers(message[1])  # 2026-11-08: Speaker marks on (a file) or off
+                model.use_speakers(message[1], message[2] if len(message) > 2 else None)
         elif kind == "language":
             if model is not None and model.trial:
                 continue  # a test model's runs stay Turkish

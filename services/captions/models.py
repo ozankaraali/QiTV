@@ -14,6 +14,7 @@ it) the sherpa-onnx runtime, all pinned below by size and sha256. They live in
         ufakzeka-kulak/        encoder.int8.onnx, decoder.int8.onnx, joiner.int8.onnx,
                                tokens.txt (a FastConformer TDT for Turkish alone)
         speaker-eres2net/      the speaker model (a run from source's Speaker marks)
+        pyannote-segmentation-3.0/  ... and where the speaker changes (its segmentation)
         silero_vad.onnx
         verified.json          what was downloaded whole and checked (sha256), by path
 
@@ -321,13 +322,24 @@ COHERE_CONTENTS: tuple[tuple[str, Optional[int]], ...] = (
 _SPEAKER_RELEASE = (
     "https://github.com/k2-fsa/sherpa-onnx/releases/download/speaker-recongition-models/"
 )
-SPEAKER_KEY = "speaker"
+SPEAKER_KEY = "speaker"  # the speaker model and the segmentation, fetched together
 SPEAKER_FOLDER = "speaker-eres2net"
 SPEAKER_FILE = RemoteFile(
     _SPEAKER_RELEASE + "3dspeaker_speech_eres2net_sv_en_voxceleb_16k.onnx",
     "3dspeaker_speech_eres2net_sv_en_voxceleb_16k.onnx",
     26485263,
     "c59158379255ad66e161679cca6af8d52d51e389e3224ab7d7a7baae295c2db5",
+)
+# ... and pyannote's segmentation 3.0 (MIT), which hears where the speaker changes inside a line
+# (services.captions.turns): sherpa-onnx's ONNX export, as Hugging Face served it on 2026-11-08
+# (revision 9403a690, the file of sherpa-onnx's speaker-segmentation-models release).
+SEGMENTATION_FOLDER = "pyannote-segmentation-3.0"
+SEGMENTATION_FILE = RemoteFile(
+    "https://huggingface.co/csukuangfj/sherpa-onnx-pyannote-segmentation-3-0/resolve/"
+    "9403a6902bb58e3d5ae8c7e77c3422de279db2e0/model.onnx",
+    "model.onnx",
+    5992913,
+    "220ad67ca923bef2fa91f2390c786097bf305bceb5e261d4af67b38e938e1079",
 )
 
 
@@ -474,6 +486,11 @@ def speaker_file(root: Optional[Path] = None) -> Path:
     return _root(root) / SPEAKER_FOLDER / SPEAKER_FILE.path
 
 
+def segmentation_file(root: Optional[Path] = None) -> Path:
+    """The segmentation model's file (Speaker marks), here or not."""
+    return _root(root) / SEGMENTATION_FOLDER / SEGMENTATION_FILE.path
+
+
 def model_paths(tier: str, root: Optional[Path] = None) -> ModelPaths:
     base = _root(root)
     folder = base / TIERS[tier].folder
@@ -548,8 +565,13 @@ def needed(key: str, root: Optional[Path] = None) -> list[Download]:
     if key in SPECIALISTS:
         return _specialist(key, base)
     if key == SPEAKER_KEY:
-        file = SPEAKER_FILE
-        return [Download(base / SPEAKER_FOLDER, file, ((file.path, file.size),))]
+        return [
+            Download(base / folder, file, ((file.path, file.size),))
+            for folder, file in (
+                (SPEAKER_FOLDER, SPEAKER_FILE),
+                (SEGMENTATION_FOLDER, SEGMENTATION_FILE),
+            )
+        ]
     downloads: list[Download] = []
     runtime = runtime_dir(base)
     if runtime is not None:

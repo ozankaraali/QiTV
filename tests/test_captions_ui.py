@@ -1064,7 +1064,10 @@ class OverlayTests(unittest.TestCase):
             self.overlay.show_text(part)
             self.assertLessEqual(len(self.overlay.lines()), 2)
             self.assertFalse(self.overlay.lines()[-1].endswith("…"), part)
-        self.assertTrue(parts[0].endswith("söyledi."))  # after the sentence's end, near the half
+        # 2026-11-08, the owner: "after the dot we can split and show the other part later": a
+        # part ends at a sentence's end, or (a sentence too long alone) at a clause's
+        self.assertTrue(any(part.endswith("söyledi.") for part in parts))
+        self.assertTrue(all(part[-1] in ".," for part in parts), parts)
         self.assertEqual(self.overlay.pages("Good evening"), ["Good evening"])
 
     def test_it_hides_when_cleared(self):

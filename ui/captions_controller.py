@@ -19,10 +19,12 @@ again, and a seek reads again from where the picture went. Another audio track (
 panel, a key, a phone) is read from where the picture is, in its own language. A caption
 that comes after its words started shows for what is left of it (the picture's own pace
 decides); one that comes after they ended never shows (captions in the next scene are worse
-than none).
+than none). A caption too long for two lines shows in parts, sentence by sentence, each as it is
+said by its line's parts' times (`_page_at`; 2026-11-08, the owner).
 
 In a run from source (where the Test model list is offered) each line's speaker is told too,
-by a small speaker model of its own (downloaded unasked, some 26 MB), and a change of speaker
+by a small speaker model of its own (downloaded unasked, some 26 MB), part by part of each line
+(its sentences, and the stretches between long pauses), and a change of speaker
 shows (the Subtitles panel's Speaker marks): a new speaker's line starts with "- " on a line of
 its own, as Turkish subtitles write dialogue (Dashes, the default), or each speaker's lines are
 in a colour of their own, as teletext's (Colours), or nothing shows (Off).
@@ -83,6 +85,7 @@ JOIN_GAP_S = 0.3
 JOIN_LONGEST_S = 3.5
 JOIN_CHARS = 84  # without an overlay to ask: what two lines hold
 LAG_S = 1.0
+PAGE_S = 1.0  # a part of a long caption stays at least this long (2026-11-08: none flashes by)
 _LAG_LOOK = 32  # cues looked back at for a wait that reaches the one asked about
 TICK_MS = 250
 SEEK_S = 2.0  # the position moved this much more than the clock: a seek, read again there
@@ -127,6 +130,21 @@ from ui.captions_texts import (  # noqa: E402  (the texts, with their translatio
 
 MODEL_NAMES = ("auto", "small", "large")  # the AI captions row's ‹ › steps, in order
 MODEL_SIZES = {"small": "0.6B", "large": "1.7B"}
+
+
+def _words(text: str) -> int:
+    """A caption's words (Speaker marks' dashes are none)."""
+    return sum(1 for word in text.split() if word != "-")
+
+
+def _word_time(timing: list[tuple[int, float, float]], k: int) -> float:
+    """When the caption's word `k` (from 0) is said, by its part's times: (words, start, end)
+    each, the words spread evenly over their part."""
+    for words, start, end in timing:
+        if k < words:
+            return start + (end - start) * k / max(1, words)
+        k -= words
+    return timing[-1][2] if timing else 0.0
 
 
 def model_texts() -> dict[str, str]:
@@ -203,6 +221,8 @@ class CaptionsController(QObject):
         self._run_start = 0.0  # the timeline second the run reads from
         self._run_track: Optional[int] = None  # the audio track the run reads (None: default)
         self._cues: list[tuple[float, float, str]] = []  # (start, end, text) by start
+        # each cue's words' times, by its start: (words, start, end) of each part said in it
+        self._timing: dict[float, list[tuple[int, float, float]]] = {}
         self._gone = float("-inf")  # the start of the latest cue whose time on screen ended
         self._newest: Optional[float] = None  # the newest second the run has read
         self._written: Optional[float] = None  # the second its captions are written to
@@ -594,8 +614,14 @@ class CaptionsController(QObject):
         logger.info("AI captions: speaker marks %s", mark)
         self._fetch_speakers()
         if self._process.running():
-            self._process.send("speakers", self._speaker_file())
+            self._process.send("speakers", self._speaker_file(), self._segmentation_file())
         self.changed.emit()
+
+    def _segmentation_file(self) -> Optional[str]:
+        """The segmentation model's file while speakers are marked and it is here, else None."""
+        from services.captions import models
+
+        return str(models.segmentation_file()) if self._speaker_file() else None
 
     def _speaker_file(self) -> Optional[str]:
         """The speaker model's file while speakers are marked and it is here, else None."""
@@ -756,7 +782,7 @@ class CaptionsController(QObject):
         from services.captions.models import SPEAKER_KEY, SPECIALISTS
 
         if self._fetching == SPEAKER_KEY:  # Speaker marks' model: the process takes it as it is
-            self._process.send("speakers", self._speaker_file())
+            self._process.send("speakers", self._speaker_file(), self._segmentation_file())
             self.changed.emit()
             return
         if self._fetching in SPECIALISTS:  # 2.9.6: a language's own model is here
@@ -861,7 +887,8 @@ class CaptionsController(QObject):
                 "cohere": self._folder("cohere", paths.cohere),  # 2.9.3: Cohere Transcribe
                 # a test model picked (a run from source): it alone writes, as Turkish
                 "trial": str(models.captions_root() / trial) if trial else None,
-                "speaker": self._speaker_file(),  # Speaker marks' model (a run from source)
+                "speaker": self._speaker_file(),  # Speaker marks' models (a run from source)
+                "segmentation": self._segmentation_file(),
                 "threads": model_threads(),
             },
             detailed_log=bool(self._config_get("detailed_log", False)),
@@ -1083,30 +1110,30 @@ class CaptionsController(QObject):
         self._process.send("viewer", self._position())
 
     def _on_caption(
-        self, run: int, start: float, end: float, text: str, turn: int = 0, speaker: int = 0
+        self,
+        run: int,
+        start: float,
+        end: float,
+        text: str,
+        turn: int = 0,
+        speaker: int = 0,
+        parts: Any = (),
     ) -> None:
         """A line written (`turn`: another speaker than the line before's says it; `speaker`:
-        who, 1, 2, ... in the run, 0 untold)."""
+        who, 1, 2, ... in the run, 0 untold). A line of more than one part (`parts`: (text,
+        start, end, turn, speaker) each, its sentences and the stretches between long pauses)
+        marks each part's speaker, and its parts' times say when each is said (`_page_at`)."""
         if run != self._run or not self._enabled:
             return
-        from services.captions.speakers import (
-            COLOURS,
-            DASHES,
-            OFF,
-            Colours,
-            coloured,
-            dashed,
-            joined,
-        )
+        from services.captions.speakers import OFF, joined
 
         mark = self.speaker_marks()
-        turned = bool(turn) and mark != OFF
-        if turned and mark == DASHES:
-            text = dashed(text)  # a new speaker's line starts with "- "
-        elif mark == COLOURS and speaker > 0:
-            if self._colours is None or self._colours_run != run:
-                self._colours, self._colours_run = Colours(), run  # S1 white again
-            text = coloured(text, self._colours.of(speaker))  # each speaker's own colour
+        said = [tuple(part) for part in parts] or [(text, start, end, turn, speaker)]
+        turned = bool(said[0][3]) and mark != OFF
+        text = self._marked(run, mark, said[0])
+        for part in said[1:]:  # another speaker's part on a line of its own, marked
+            text = joined(text, self._marked(run, mark, part), bool(part[3]) and mark != OFF, mark)
+        timing = [(_words(str(part[0])), float(part[1]), float(part[2])) for part in said]
         i = bisect.bisect_left(self._cues, (start, end, text))
         if i < len(self._cues) and self._cues[i][0] == start:
             self._cues[i] = (start, end, text)  # read again over a stretch: the newer words
@@ -1114,6 +1141,7 @@ class CaptionsController(QObject):
             return  # read again: it is the end of the line before, joined to it
         else:
             self._cues.insert(i, (start, end, text))
+        self._timing[start] = timing
         if (
             i > 0
             and self._shows(i - 1) > self._position()
@@ -1123,6 +1151,22 @@ class CaptionsController(QObject):
             # another speaker's line goes on a line of its own, both marked (Speaker marks)
             self._cues[i - 1] = (before[0], end, joined(before[2], text, turned, mark))
             del self._cues[i]
+            known = self._timing.pop(before[0], [(_words(before[2]), before[0], before[1])])
+            self._timing[before[0]] = known + self._timing.pop(start, timing)
+
+    def _marked(self, run: int, mark: str, part: tuple) -> str:
+        """A part's words as Speaker marks show them: dashed when another speaker says it
+        (DASHES), in its speaker's colour (COLOURS), else as they are."""
+        from services.captions.speakers import COLOURS, DASHES, Colours, coloured, dashed
+
+        text, turn, speaker = str(part[0]), bool(part[3]), int(part[4])
+        if mark == DASHES and turn:
+            return dashed(text)  # a new speaker's line starts with "- "
+        if mark == COLOURS and speaker > 0:
+            if self._colours is None or self._colours_run != run:
+                self._colours, self._colours_run = Colours(), run  # S1 white again
+            return coloured(text, self._colours.of(speaker))  # each speaker's own colour
+        return text
 
     def _joins(
         self,
@@ -1307,10 +1351,11 @@ class CaptionsController(QObject):
             return ""
         if position < shows:
             return ""
-        return self._part_at(text, position - shows, end - start - FIRST_WORD_S)
+        return self._page_at(i, position, shows)
 
     def _forget_cues(self) -> None:
         self._cues.clear()
+        self._timing.clear()
         self._gone = float("-inf")
 
     def _shows(self, i: int) -> float:
@@ -1333,21 +1378,44 @@ class CaptionsController(QObject):
     def _reading(text: str) -> float:
         return max(MIN_SHOW_S, len(text) / READ_CPS)
 
-    def _part_at(self, text: str, elapsed: float, words_s: float) -> str:
-        """`elapsed` into a caption whose words last `words_s`: the whole of it, or the part
-        of it said by then when it doesn't fit two lines (2.9.1, the owner: a long one ended
-        in "…"), each part for its share of the words by its letters; the last one held."""
+    def _page_at(self, i: int, position: float, shows: float) -> str:
+        """Cue `i`, shown since `shows`, at `position`: the whole of it, or the part of it said
+        by then when it doesn't fit two lines (2.9.1, the owner: a long one ended in "…"). Its
+        parts end at sentences' ends first (the overlay's `pages`), and each shows when its first
+        words are said, as the line's parts' times tell (2026-11-08, the owner: "after the dot
+        we can split and show the other part later"), on screen for the one before's reading
+        time (by at most LAG_S past its words) and PAGE_S at least; with no times, each for its
+        share of the words by its letters. The last one is held."""
+        start, end, text = self._cues[i]
         overlay = next((o for o in self._overlays if hasattr(o, "pages")), None)
-        parts = overlay.pages(text) if overlay is not None else [text]
-        if len(parts) <= 1:
+        pages = overlay.pages(text) if overlay is not None else [text]
+        if len(pages) <= 1:
             return text
-        total = sum(len(part) for part in parts)
+        timing = self._timing.get(start, [])
+        if sum(n for n, _a, _b in timing) != sum(_words(page) for page in pages):
+            return self._share_at(pages, position - shows, end - start - FIRST_WORD_S)
+        on, said = shows, 0
+        for k, page in enumerate(pages):
+            if k:
+                spoken = _word_time(timing, said)
+                read = min(on + self._reading(pages[k - 1]), spoken + LAG_S)
+                on = max(spoken, on + PAGE_S, read)
+            if position < on:
+                return pages[k - 1] if k else page
+            said += _words(page)
+        return pages[-1]
+
+    @staticmethod
+    def _share_at(pages: list[str], elapsed: float, words_s: float) -> str:
+        """Of a caption's `pages`, the one said `elapsed` into its words (lasting `words_s`),
+        each for its share of the words by its letters."""
+        total = sum(len(page) for page in pages)
         said, span = 0, max(words_s, MIN_SHOW_S)
-        for part in parts[:-1]:
-            said += len(part)
+        for page in pages[:-1]:
+            said += len(page)
             if elapsed < span * said / total:
-                return part
-        return parts[-1]
+                return page
+        return pages[-1]
 
     def _covered(self, position: float) -> bool:
         """The run reads on from before `position` and has not passed it by long: no need to
@@ -1357,7 +1425,7 @@ class CaptionsController(QObject):
 
     def _forget(self, position: float) -> None:
         while self._cues and self._cues[0][1] < position - KEEP_S:
-            self._cues.pop(0)
+            self._timing.pop(self._cues.pop(0)[0], None)
 
     def _lead(self) -> Optional[float]:
         """How far ahead of the picture the captions are written (2.9, the review: not how far

@@ -27,12 +27,13 @@ from services.captions.speakers import (
     DASHES,
     KNOWN_ABOVE,
     MIN_NEW_S,
+    MIN_PART_S,
     MIN_VOICED_S,
     OFF,
-    PREFER,
     RATE,
     WINDOW,
     Colours,
+    Part,
     Recent,
     Speakers,
     Turn,
@@ -40,6 +41,7 @@ from services.captions.speakers import (
     coloured,
     dashed,
     joined,
+    parts_of,
     plain,
 )
 
@@ -77,25 +79,48 @@ class SpeakersTests(unittest.TestCase):
         self.assertEqual((none.speaker, none.changed, none.trusted), (1, False, False))
         self.assertTrue(voices.hear(B, 2.0, 14.0).changed)  # long enough: it is another
 
-    def test_a_line_goes_to_the_voice_it_is_most_like(self):
-        voices = Speakers()
+    def test_with_a_margin_a_part_goes_to_another_voice_only_clearly_the_most_alike(self):
+        voices = Speakers(margin=0.05)
         voices.hear(A, 2.0, 10.0)
-        voices.hear(B, 2.0, 12.0)
-        voices.hear(A, 2.0, 14.0)  # A speaks last
-        near = speakers.unit(mix((1, A), (1.1, B)))  # a little more like B
-        self.assertGreater(speakers.cosine(near, A), KNOWN_ABOVE)
-        self.assertEqual(voices.hear(near, 2.0, 16.0).speaker, 2)
-        self.assertEqual(PREFER, 0.0)  # (measured: the speaker before held no better)
+        voices.hear(B, 2.0, 12.0)  # B speaks last
+        both = speakers.unit(mix((1, A), (0.98, B)))  # about as like A as B: B goes on
+        self.assertGreater(speakers.cosine(both, A), KNOWN_ABOVE)
+        self.assertEqual(voices.hear(both, 2.0, 14.0).speaker, 2)
 
-    def test_the_speaker_before_may_be_preferred_within_a_margin(self):
-        voices = Speakers(prefer=0.1)
+    def test_with_a_wait_away_from_the_speaker_before_once_the_next_part_agrees(self):
+        voices = Speakers(strong=0.2)
+        voices.hear(A, 2.0, 10.0)
+        voices.hear(B, 2.0, 12.0)  # B speaks last
+        leaning = speakers.unit(mix((1, A), (0.8, B)))  # more like A, not by much
+        first = voices.hear(leaning, 2.0, 14.0)
+        self.assertEqual((first.speaker, first.changed, first.trusted), (2, False, False))
+        second = voices.hear(leaning, 2.0, 16.0)  # it agrees: A speaks
+        self.assertEqual((second.speaker, second.changed), (1, True))
+
+    def test_strong_evidence_changes_the_speaker_at_once(self):
+        voices = Speakers(strong=0.2)
         voices.hear(A, 2.0, 10.0)
         voices.hear(B, 2.0, 12.0)
-        voices.hear(A, 2.0, 14.0)
-        near = speakers.unit(mix((1, A), (1.1, B)))  # more like B, but within 0.1
-        turn = voices.hear(near, 2.0, 16.0)
-        self.assertEqual((turn.speaker, turn.changed), (1, False))
-        self.assertEqual(voices.hear(mix((1, A), (3, B)), 2.0, 18.0).speaker, 2)  # clearly B
+        turn = voices.hear(mix((1, A), (0.1, C)), 2.0, 14.0)
+        self.assertEqual((turn.speaker, turn.changed), (1, True))
+
+    def test_a_mistaken_new_voice_turns_out_an_old_one_and_keeps_its_number(self):
+        voices = Speakers(known_above=0.3, new_below=0.3, merge_above=0.6)
+        voices.hear(A, 2.0, 10.0)
+        odd = speakers.unit(mix((0.25, A), (1, C)))  # A, heard oddly: taken for a new voice
+        self.assertEqual(voices.hear(odd, 2.0, 12.0).speaker, 2)
+        # more of A as the new voice learns: it comes out as A's, and goes into it
+        for at in (14.0, 16.0, 18.0):
+            turn = voices.hear(speakers.unit(mix((1, A), (0.9, C))), 2.0, at)
+        self.assertEqual(turn.speaker, 1)
+        self.assertEqual(voices.hear(A, 2.0, 20.0).speaker, 1)
+
+    def test_six_voices_are_kept(self):
+        voices = Speakers()
+        prints = [[1.0 if i == k else 0.0 for i in range(7)] for k in range(7)]
+        for k, print_ in enumerate(prints[:6]):
+            self.assertEqual(voices.hear(print_, 2.0, 10.0 + k).speaker, k + 1)
+        self.assertEqual(voices.hear(prints[0], 2.0, 20.0).speaker, 1)  # still known
 
     def test_a_new_voice_needs_a_line_long_enough_to_be_sure_of(self):
         voices = Speakers()
@@ -154,6 +179,124 @@ class RecentTests(unittest.TestCase):
         self.assertEqual(len(recent.voiced(19.0, 21.0)), WINDOW)
 
 
+class PartsTests(unittest.TestCase):
+    """A line in the parts that may each be another speaker's (2026-11-08, the owner)."""
+
+    @staticmethod
+    def windows(*runs):
+        """Voiced flags from (seconds, voiced) runs, a window each 32 ms."""
+        step = WINDOW / RATE
+        return [voiced for seconds, voiced in runs for _ in range(round(seconds / step))]
+
+    def test_a_line_splits_after_each_sentence_at_the_pause_nearest(self):
+        voiced = self.windows((2.0, True), (0.3, False), (1.5, True))
+        parts = parts_of("Nereye gidiyorsun böyle? Eve dönüyorum.", 10.0, 13.8, voiced)
+        self.assertEqual([p.text for p in parts], ["Nereye gidiyorsun böyle?", "Eve dönüyorum."])
+        self.assertAlmostEqual(parts[0].end, 12.15, delta=0.05)  # in the pause, not by letters
+        self.assertEqual((parts[0].start, parts[1].start, parts[1].end), (10.0, parts[0].end, 13.8))
+
+    def test_a_long_pause_splits_a_line_with_no_sentence_end(self):
+        voiced = self.windows((1.5, True), (0.6, False), (1.5, True))
+        parts = parts_of("bu akşam geliyor musun yarın sabah değil", 0.0, 3.6, voiced)
+        self.assertEqual(len(parts), 2)
+        self.assertAlmostEqual(parts[0].end, 1.8, delta=0.05)
+
+    def test_only_a_line_s_longest_pauses_split_it(self):
+        voiced = self.windows(
+            (1.0, True),
+            (0.5, False),
+            (1.0, True),
+            (0.7, False),
+            (1.0, True),
+            (0.45, False),
+            (1.0, True),
+        )
+        words = "bir iki üç dört beş altı yedi sekiz"
+        self.assertEqual(len(parts_of(words, 0.0, 5.65, voiced)), 4)
+        two = parts_of(words, 0.0, 5.65, voiced, most=2)  # the 0.7 s and 0.5 s pauses
+        self.assertEqual([p.text for p in two], ["bir iki", "üç dört", "beş altı yedi sekiz"])
+        self.assertAlmostEqual(two[1].end, 2.85, delta=0.05)
+
+    def test_a_short_part_goes_with_a_neighbour(self):
+        voiced = self.windows((0.4, True), (0.3, False), (2.0, True))
+        parts = parts_of("Evet. Yarın gelirim, merak etme.", 0.0, 2.7, voiced)
+        self.assertEqual([p.text for p in parts], ["Evet. Yarın gelirim, merak etme."])
+        self.assertGreater(MIN_PART_S, 0.4)
+
+    def test_without_the_voice_detector_by_letters_and_one_word_as_it_is(self):
+        parts = parts_of("Bir iki üç. Dört beş altı.", 0.0, 4.0)
+        self.assertEqual([p.text for p in parts], ["Bir iki üç.", "Dört beş altı."])
+        self.assertAlmostEqual(parts[0].end, 4.0 * 12 / 27, delta=0.01)  # its share of letters
+        self.assertEqual(parts_of("Evet.", 1.0, 2.0), [Part("Evet.", 1.0, 2.0)])
+
+    def test_the_windows_may_begin_before_the_line(self):
+        voiced = self.windows((1.0, False), (2.0, True), (0.3, False), (1.5, True))
+        parts = parts_of("Nereye gidiyorsun böyle? Eve dönüyorum.", 11.0, 14.8, voiced, at=10.0)
+        self.assertAlmostEqual(parts[0].end, 13.15, delta=0.05)
+
+
+class SegmentationTests(unittest.TestCase):
+    """Where the speaker changes inside a line, as pyannote's segmentation hears it."""
+
+    @staticmethod
+    def frames(*runs):
+        """Per-frame labels from (seconds, label) runs (17 ms frames)."""
+        from services.captions.turns import FRAME
+
+        return [label for seconds, label in runs for _ in range(round(seconds * RATE / FRAME))]
+
+    def test_the_changes_inside_a_line(self):
+        from services.captions.turns import found_in
+
+        labels = self.frames((1.5, 1), (0.3, 0), (2.0, 2), (0.2, 0), (1.5, 1))
+        found = found_in(labels, 100.0, 101.0)  # the line begins 1 s in
+        self.assertEqual(len(found.changes), 2)
+        self.assertAlmostEqual(found.changes[0], 101.67, delta=0.05)  # in the gap
+        before = self.frames((2.0, 2), (1.0, 1))  # a change before the line is none of its own
+        self.assertEqual(found_in(before, 0.0, 2.5).changes, [])
+
+    def test_a_blip_is_no_turn_and_two_at_once_none_either(self):
+        from services.captions.turns import found_in, runs
+
+        labels = self.frames((1.0, 1), (0.1, 2), (1.0, 1), (0.5, -1), (1.0, 1))
+        self.assertEqual([r[0] for r in runs(labels, 18)], [1])
+        self.assertEqual(found_in(labels, 0.0, 0.0).changes, [])
+
+    def test_parts_split_where_it_changes_and_say_so(self):
+        parts = parts_of("Nereye? Eve dönüyorum ben hemen.", 0.0, 3.0, changes=[1.0])
+        self.assertEqual([p.text for p in parts], ["Nereye?", "Eve dönüyorum ben hemen."])
+        self.assertEqual([p.new for p in parts], [None, True])  # (at the sentence's end near it)
+        same = parts_of("Bir şey. Bir şey daha söyleyeyim.", 0.0, 3.0, changes=[])
+        self.assertEqual([p.new for p in same], [None, False])  # a sentence's end, the same voice
+
+
+class PagedTests(unittest.TestCase):
+    """A caption too long for two lines in parts at sentences' ends (2026-11-08, the owner)."""
+
+    def test_whole_sentences_together_while_they_fit(self):
+        from ui.overlays.captions import paged
+
+        text = "Bugün hava çok güzel. Parka gidelim mi? Olur, gidelim. Ama önce yemek yiyelim."
+        pages = paged(text, lambda part: len(part) <= 45)
+        self.assertEqual(
+            pages,
+            ["Bugün hava çok güzel. Parka gidelim mi?", "Olur, gidelim. Ama önce yemek yiyelim."],
+        )
+
+    def test_a_sentence_too_long_alone_at_its_clauses_then_between_words(self):
+        from ui.overlays.captions import paged
+
+        text = (
+            "Toplantıda bakan, yeni düzenlemenin önümüzdeki aydan itibaren yürürlüğe "
+            "gireceğini söyledi. Kısa."
+        )
+        pages = paged(text, lambda part: len(part) <= 45)
+        self.assertEqual(pages[0], "Toplantıda bakan,")
+        self.assertEqual(" ".join(pages), text)  # no word cut, none lost
+        self.assertTrue(all(len(page) <= 45 for page in pages))
+        self.assertEqual(paged("Kısa.", lambda part: True), ["Kısa."])
+
+
 class MarkTests(unittest.TestCase):
     def test_a_new_speaker_s_line_starts_with_a_dash_once(self):
         self.assertEqual(dashed("Eve."), "- Eve.")
@@ -175,13 +318,13 @@ class MarkTests(unittest.TestCase):
         colours = Colours()
         self.assertEqual([colours.of(n) for n in (1, 2, 1, 3, 2, 4)], [0, 1, 0, 2, 1, 3])
 
-    def test_a_fifth_speaker_takes_the_colour_of_the_one_heard_longest_ago(self):
+    def test_a_fifth_speaker_shares_the_colour_of_the_one_heard_longest_ago(self):
         colours = Colours()
         for n in (1, 2, 3, 4, 1, 3, 4):
             colours.of(n)
         self.assertEqual(colours.of(5), 1)  # S2's yellow: S2 was heard longest ago
         self.assertEqual(colours.of(1), 0)  # the others keep theirs
-        self.assertEqual(colours.of(2), 2)  # S2 back: S3's cyan (now heard longest ago)
+        self.assertEqual(colours.of(2), 1)  # and S2 too: a colour never changes once given
 
     def test_a_line_s_colour_goes_with_its_words(self):
         line = coloured("Eve.", 2)
@@ -261,6 +404,37 @@ class ProcessTests(unittest.TestCase):
                 "AI captions: [ufak] heard 'eve', shows 'Eve.' · S2 0.00 new",
             ],
         )
+
+    def test_a_line_of_two_speakers_goes_out_in_parts_each_told(self):
+        model = self.model()
+        model.speaker_voiced = lambda window: window[0] != 0.0  # (silence: unvoiced)
+        run = _bare_run(model)
+        run._hold_for_speakers(10.0, array("f", [0.1] * 2 * RATE))
+        run._hold_for_speakers(12.0, array("f", [0.0] * (RATE // 2)))  # a pause
+        run._hold_for_speakers(12.5, array("f", [-0.1] * 2 * RATE))
+        with self.assertLogs("services.captions.worker", logging.INFO) as logs:
+            run._write("ufak", "x", "Nereye gidiyorsun? Eve dönüyorum.", 10.0, 14.5)
+        [message] = run.sent
+        self.assertEqual(
+            message[:7], ("caption", 3, 10.0, 14.5, "Nereye gidiyorsun? Eve dönüyorum.", 0, 1)
+        )
+        (first, a, b, turn1, s1), (second, c, d, turn2, s2) = message[7]
+        self.assertEqual(
+            (first, turn1, s1, second, turn2, s2),
+            ("Nereye gidiyorsun?", 0, 1, "Eve dönüyorum.", 1, 2),
+        )
+        self.assertEqual((a, d), (10.0, 14.5))
+        self.assertAlmostEqual(b, 12.25, delta=0.1)  # in the pause
+        self.assertIn("· S1 | S2 0.00 new", logs.records[0].getMessage())
+
+    def test_a_piece_s_own_voice_detector_times_its_parts(self):
+        run = _bare_run(self.model(on=False))
+        voiced = PartsTests.windows((2.0, True), (0.4, False), (1.5, True))
+        run._write("ufak", "x", "Bir iki üç dört. Beş altı yedi.", 20.0, 23.9, voiced=voiced)
+        [message] = run.sent
+        self.assertEqual([part[0] for part in message[7]], ["Bir iki üç dört.", "Beş altı yedi."])
+        self.assertAlmostEqual(message[7][0][2], 22.2, delta=0.05)
+        self.assertEqual([part[3:] for part in message[7]], [(0, 0), (0, 0)])  # none told
 
     def test_with_speakers_unmarked_no_sound_is_kept_and_no_line_is_told(self):
         model = self.model(on=False)
@@ -346,7 +520,18 @@ class ProcessTests(unittest.TestCase):
         process._on_message(1, ("caption", 2, 10.0, 11.0, "Eve.", 1, 2))
         process._on_message(1, ("caption", 2, 11.0, 12.0, "Evet."))  # none told
         process._supervisor = None
-        self.assertEqual(heard, [(2, 10.0, 11.0, "Eve.", 1, 2), (2, 11.0, 12.0, "Evet.", 0, 0)])
+        parts = [("Eve.", 10.0, 10.5, 1, 2), ("Evet.", 10.5, 11.0, 0, 2)]
+        process._supervisor = object()  # type: ignore[assignment]
+        process._on_message(1, ("caption", 2, 10.0, 11.0, "Eve. Evet.", 1, 2, parts))
+        process._supervisor = None
+        self.assertEqual(
+            heard,
+            [
+                (2, 10.0, 11.0, "Eve.", 1, 2, []),
+                (2, 11.0, 12.0, "Evet.", 0, 0, []),
+                (2, 10.0, 11.0, "Eve. Evet.", 1, 2, parts),
+            ],
+        )
 
 
 class ControllerTests(unittest.TestCase):
@@ -441,10 +626,57 @@ class ControllerTests(unittest.TestCase):
         self.captions._on_caption(self.captions._run, 20.0, 21.0, "Yeni.", 0, 2)
         self.assertEqual(self.captions._cues[-1][2], coloured("Yeni.", 0))
 
+    def test_each_part_of_a_line_is_marked_on_its_own(self):
+        parts = [("Nereye gidiyorsun?", 10.0, 11.5, 0, 1), ("Eve.", 11.5, 12.5, 1, 2)]
+        self.captions._on_caption(self.number, 10.0, 12.5, "Nereye gidiyorsun? Eve.", 0, 1, parts)
+        self.assertEqual(self.captions._cues, [(10.0, 12.5, "- Nereye gidiyorsun?\n- Eve.")])
+        self.captions.set_speaker_marks(COLOURS)
+        self.captions._forget_cues()
+        self.captions._on_caption(self.number, 10.0, 12.5, "Nereye gidiyorsun? Eve.", 0, 1, parts)
+        white, yellow = coloured("Nereye gidiyorsun?", 0), coloured("Eve.", 1)
+        self.assertEqual(self.captions._cues[0][2], f"{white}\n{yellow}")
+        self.captions.set_speaker_marks(OFF)
+        self.captions._forget_cues()
+        self.captions._on_caption(self.number, 10.0, 12.5, "Nereye gidiyorsun? Eve.", 0, 1, parts)
+        self.assertEqual(self.captions._cues[0][2], "Nereye gidiyorsun? Eve.")
+
+    def test_a_long_caption_shows_part_by_part_as_each_is_said(self):
+        self.overlay.pages = lambda text: [  # (as the overlay pages it: at the sentences)
+            page for page in ("Birinci cümle burada bitiyor.", "İkincisi de sonra geliyor.")
+        ]
+        parts = [
+            ("Birinci cümle burada bitiyor.", 10.0, 13.0, 0, 0),
+            ("İkincisi de sonra geliyor.", 13.0, 15.0, 0, 0),
+        ]
+        text = "Birinci cümle burada bitiyor. İkincisi de sonra geliyor."
+        self.captions._on_caption(self.number, 10.0, 15.0, text, 0, 0, parts)
+        self.assertEqual(self.at(10.4), "Birinci cümle burada bitiyor.")
+        self.assertEqual(self.at(12.9), "Birinci cümle burada bitiyor.")  # its words go on
+        self.assertEqual(self.at(13.1), "İkincisi de sonra geliyor.")  # when it is said
+
+    def test_a_part_said_soon_after_waits_to_be_read_but_no_flash_and_never_long(self):
+        self.overlay.pages = lambda text: ["Evet.", "Hemen geliyorum, bekle beni orada lütfen."]
+        parts = [
+            ("Evet.", 10.0, 10.2, 0, 0),
+            ("Hemen geliyorum, bekle beni orada lütfen.", 10.2, 13.0, 0, 0),
+        ]
+        self.captions._on_caption(
+            self.number, 10.0, 13.0, "Evet. Hemen geliyorum, bekle beni orada lütfen.", 0, 0, parts
+        )
+        self.assertEqual(self.at(11.2), "Evet.")  # on PAGE_S at least (from 10.3)
+        self.assertEqual(self.at(11.35), "Hemen geliyorum, bekle beni orada lütfen.")
+
+    def test_a_long_caption_with_no_times_shows_by_its_letters(self):
+        self.overlay.pages = lambda text: text.split(" | ")
+        self.captions._on_caption(self.number, 10.0, 16.0, "one two three | four five six")
+        self.captions._timing.clear()  # (no times: each part for its share of the letters)
+        self.assertEqual(self.at(10.3), "one two three")
+        self.assertEqual(self.at(15.0), "four five six")
+
     def test_off_a_change_shows_as_before_and_the_process_tells_them_no_more(self):
         self.captions.set_speaker_marks(OFF)
         self.assertEqual(self.config["ai_captions_speaker_marks"], OFF)
-        self.assertEqual(self.sent[-1], ("speakers", None))
+        self.assertEqual(self.sent[-1], ("speakers", None, None))
         self.dialogue()
         self.assertEqual(self.captions._cues[0], (10.0, 13.0, "Nereye gidiyorsun? Eve."))
         self.captions.set_speaker_marks(DASHES)
@@ -483,6 +715,7 @@ class ControllerTests(unittest.TestCase):
         self.captions._tier = "small"
         self.captions._load_model()
         self.assertTrue(loaded[0]["speaker"].endswith(".onnx"))
+        self.assertTrue(loaded[0]["segmentation"].endswith("model.onnx"))
         self.config["ai_captions_speaker_marks"] = OFF
         self.captions._load_model()
         self.assertIsNone(loaded[1]["speaker"])
@@ -507,7 +740,8 @@ class ControllerTests(unittest.TestCase):
         self.captions._download = download
         self.here["speaker"] = True
         self.captions._on_downloaded(download)
-        self.assertEqual(self.sent[-1], ("speakers", str(models.speaker_file())))
+        speaker, segmentation = str(models.speaker_file()), str(models.segmentation_file())
+        self.assertEqual(self.sent[-1], ("speakers", speaker, segmentation))
         self.assertTrue(self.captions.enabled())  # nothing else restarts
 
     def test_the_mark_chosen_is_kept_in_the_config_older_builds_ignore(self):
@@ -524,10 +758,13 @@ class ControllerTests(unittest.TestCase):
     def test_the_speaker_model_is_pinned_in_its_own_folder(self):
         from services.captions import models
 
-        [download] = models.needed(models.SPEAKER_KEY, Path(self.tmp.name))
-        self.assertEqual(download.folder, Path(self.tmp.name) / models.SPEAKER_FOLDER)
+        root = Path(self.tmp.name)
+        download, segmentation = models.needed(models.SPEAKER_KEY, root)
+        self.assertEqual(download.folder, root / models.SPEAKER_FOLDER)
         self.assertEqual(download.file.size, 26485263)
-        self.assertEqual(models.speaker_file(Path(self.tmp.name)), download.target)
+        self.assertEqual(models.speaker_file(root), download.target)
+        self.assertEqual(segmentation.file.size, 5992913)  # pyannote's segmentation, with it
+        self.assertEqual(models.segmentation_file(root), segmentation.target)
         self.assertNotIn(models.SPEAKER_KEY, models.SPECIALISTS)  # not in the first question
         self.assertFalse(models.installed(models.SPEAKER_KEY, Path(self.tmp.name)))
 
@@ -566,6 +803,11 @@ class OverlayTests(unittest.TestCase):
         self.assertEqual(self.overlay.pages(text), [first, "- Tamam."])
         self.overlay.show_text(text)  # (shown whole it would be cut: as one caption then)
         self.assertLessEqual(len(self.overlay.lines()), 2)
+
+    def test_a_caption_too_long_comes_in_parts_at_its_sentences_ends(self):
+        first = "Bu akşam yemekten sonra hep birlikte sahile inip biraz yürüyelim mi?"
+        second = "Olur ama önce annemi arayıp eve geç kalacağımızı söylemem gerekiyor."
+        self.assertEqual(self.overlay.pages(f"{first} {second}"), [first, second])
 
     def test_each_speaker_s_line_in_its_colour(self):
         from ui.overlays.captions import SPEAKER_COLOURS
