@@ -20,7 +20,11 @@ guesses, and the same word said again is told apart by where they put it.
 2026-11-07, the owner's first live test: a line came again without its first word (a reading
 held more written words than their guessed times said, and those were taken for new), and
 "odada bunu konuşuyorlar" came as "odada bu." and "konuşuyorlar." (a cut at an 80 ms hush inside
-"bunu", the pause it was cut at being any of 80 ms or more).
+"bunu", the pause it was cut at being any of 80 ms or more). 2026-11-08, a drama: a phrase came
+as its first word and its third ("Kara", then "yolunu kesti." for "kara kedi yolunu kesti"): the
+last written word, read again run together with the next one ("Karakedi"), was taken for itself.
+Now what follows it in such a word is new when an earlier reading heard it apart
+(`joined_rest`), and a written word read again in two (or two run together) is no new word.
 
 Measured (2026-11-07, held-out drama and read speech joined into live-like streams, the
 captions' 8 s distance, a tune at each start): 24.8 % of words wrong against 26.5 % for pieces
@@ -97,7 +101,8 @@ def continues(written: Sequence[str], heard: Sequence[str], expect: Optional[int
     go on past them: the j for which heard[:j] is nearest `written`. A word changed costs less
     the more alike the two are (a word read a little differently is the same word), two words
     not alike as much as one missed and one added (a reading that holds none of the written
-    words never takes its new words for them); of two
+    words never takes its new words for them); a word read again in two ("Karakedi", "Kara
+    kedi"), or two read again run together, costs nothing; of two
     places as near, the one nearest `expect` (how many written words the reading should hold,
     by their guessed times: the same word said again is told apart by where it is), else the
     earlier, so that a written word the reading left out costs it no new word."""
@@ -106,6 +111,7 @@ def continues(written: Sequence[str], heard: Sequence[str], expect: Optional[int
     if not a:
         return 0
     previous = [float(j) for j in range(len(b) + 1)]  # distances of a[:0] to b[:j]
+    before = previous  # (of a[:i - 2])
     for i in range(1, len(a) + 1):
         row = [float(i)] + [0.0] * len(b)
         for j in range(1, len(b) + 1):
@@ -115,10 +121,39 @@ def continues(written: Sequence[str], heard: Sequence[str], expect: Optional[int
             # not alike are no change of one word but two (one gone, one come)
             change = 2.0 * (1.0 - alike) if alike >= 0.6 else 2.0
             row[j] = min(previous[j] + 1, row[j - 1] + 1, previous[j - 1] + change)
-        previous = row
+            if j >= 2 and x == b[j - 2] + y:
+                row[j] = min(row[j], previous[j - 2])  # the written word read in two
+            if i >= 2 and y == a[i - 2] + x:
+                row[j] = min(row[j], before[j - 1])  # two written words read as one
+        before, previous = previous, row
     best = min(previous)
     near = [j for j, d in enumerate(previous) if d <= best + 1e-9]
     return min(near, key=lambda j: (0 if expect is None else abs(j - expect), j))
+
+
+def joined_rest(written: str, heard: str, said_next: Sequence[str]) -> Optional[str]:
+    """The word after `written` when a reading wrote the two run together (`heard`, the word
+    `continues` matched to `written`, "Karakedi" for "Kara"): what follows `written` in it,
+    but only when an earlier reading heard that word on its own right after `written`
+    (`said_next`, its words past the written ones: "kedi", or the "ke" its end cut). Else None:
+    `heard` is `written` read a little differently ("seviyor", "seviyorum")."""
+    a, b = norm(written), norm(heard)
+    rest = b[len(a) :]
+    nxt = norm(said_next[0]) if said_next else ""
+    if not a or not b.startswith(a) or len(rest) < 2 or not nxt:
+        return None
+    short = min(len(rest), len(nxt))
+    if rest != nxt and (len(rest) < 3 or short < 2 or rest[:short] != nxt[:short]):
+        return None
+    count = 0
+    for i, letter in enumerate(heard):  # `heard` past the letters of `written`
+        count += len(norm(letter))
+        if count >= len(a):
+            tail = heard[i + 1 :]
+            while tail and not tail[0].isalnum():
+                tail = tail[1:]
+            return tail or None
+    return None
 
 
 def words_of(text: str) -> list[str]:
@@ -184,6 +219,7 @@ class _Utterance:
     # words not told yet begin (the word left to it)
     carried: list[Word] = field(default_factory=list)
     told_to: float = float("-inf")
+    left: list[str] = field(default_factory=list)  # the word left to it, as that part heard it
     written: list[Word] = field(default_factory=list)  # its words written so far
     heard: list[str] = field(default_factory=list)  # the last reading's words past them
     read_to: float = float("-inf")  # the end of the sound the last reading had
@@ -218,8 +254,13 @@ class GrowingWriter:
         self.clock = clock
         self.keep = keep  # (start, end, sound, text) of each utterance read whole
         # a split part's end read again by the next part: where that begins, where its words
-        # not told yet begin, the words told so far
-        self._carry: tuple[float, float, list[Word]] = (float("nan"), float("-inf"), [])
+        # not told yet begin, the words told so far, the word left to it (as heard)
+        self._carry: tuple[float, float, list[Word], list[str]] = (
+            float("nan"),
+            float("-inf"),
+            [],
+            [],
+        )
         self.newest = float("-inf")
         self.cost = _COST_START
         self.readings = 0
@@ -327,7 +368,8 @@ class GrowingWriter:
                 told_to = left_over.start
             else:
                 told_to = utterance.written[-1].end if utterance.written else utterance.told_to
-            self._carry = (again, max(told_to, utterance.told_to), told[-CARRIED_WORDS:])
+            left = [left_over.text] if left_over is not None else []
+            self._carry = (again, max(told_to, utterance.told_to), told[-CARRIED_WORDS:], left)
         self._pending += placed
         return self._close(final=not piece.split)
 
@@ -440,14 +482,23 @@ class GrowingWriter:
             w.text for w in utterance.written if w.end > begins - HELD_S
         ]
         expect = len([w for w in told if w.end > begins + 0.15])
-        return heard[continues(held, heard, expect) :]
+        j = continues(held, heard, expect)
+        new = heard[j:]
+        if held and j:
+            # The last written word read again run together with the next one: "Kara" was
+            # written and this reading has "Karakedi" (the owner, 2026-11-08: the phrase came
+            # as "Kara" and "yolunu kesti.").
+            rest = joined_rest(held[-1], heard[j - 1], utterance.heard or utterance.left)
+            if rest is not None:
+                new = [rest] + new
+        return new
 
     def _new_utterance(self, piece: Piece) -> _Utterance:
         """The utterance of a piece that has begun; one that reads the end of a split part
         again carries that part's words."""
-        again, told_to, words = self._carry
+        again, told_to, words, left = self._carry
         if abs(again - piece.start) < 1e-3:
-            return _Utterance(piece.start, carried=words, told_to=told_to)
+            return _Utterance(piece.start, carried=words, told_to=told_to, left=list(left))
         return _Utterance(piece.start)
 
     def _split(

@@ -8,6 +8,7 @@ from services.captions.growing import (
     agreed,
     continues,
     ends_sentence,
+    joined_rest,
     place,
     words_of,
 )
@@ -30,12 +31,14 @@ class Script:
         stop: bool = False,
         hushed: tuple[tuple[float, float], ...] = (),
         unsure: bool = False,
+        joins: tuple[tuple[str, str], ...] = (),
     ) -> None:
         self.words = words
         self.cost = cost  # seconds a reading takes per second of sound
         self.stop = stop  # each reading ends with a full stop, as Moonshine's do
         self.hushed = hushed  # stretches inside words the detector hears no voice in
         self.unsure = unsure  # each reading writes its later words a little differently
+        self.joins = joins  # two words a reading writes run together when it has both whole
         self.readings: list[tuple[float, float]] = []
         self.clock = [0.0]
 
@@ -48,10 +51,13 @@ class Script:
         first, last = float(samples[0]), float(samples[-1]) + 1.0 / RATE
         self.readings.append((first, last))
         self.clock[0] += self.cost * (last - first)
-        out = []
+        out: list[str] = []
         for text, start, end in self.words:
             if start >= first and end <= last:
-                out.append(text)
+                if out and (out[-1], text) in self.joins:
+                    out[-1] += text  # "kara kedi" heard as "karakedi"
+                else:
+                    out.append(text)
             elif start >= first and start < last:
                 out.append(text[: max(1, len(text) // 2)])  # cut by the end: garbled
         if self.unsure:  # a shouted scene: two readings agree on little
@@ -149,6 +155,23 @@ class HelpersTest(unittest.TestCase):
         self.assertEqual(continues(["bir", "hafta", "sonu"], ["bir", "hafta", "geçirmenizi"]), 2)
         # ... and one it read a little differently is still that word
         self.assertEqual(continues(["bir", "hafta", "sonu"], ["bir", "hafta", "sonun", "iyi"]), 3)
+        # a written word read again in two, or two read again run together (2026-11-08)
+        self.assertEqual(continues(["oraya", "Karakedi"], ["oraya", "Kara", "kedi", "yolunu"]), 3)
+        written = ["oraya", "Karakedi", "yolunu"]
+        self.assertEqual(continues(written, ["oraya", "Kara", "kedi", "yolunu", "kesti"]), 4)
+        self.assertEqual(continues(["Kara", "kedi"], ["Karakedi", "yolunu"]), 1)
+
+    def test_a_word_read_again_run_together_with_the_next_gives_the_next_back(self) -> None:
+        # the owner, 2026-11-08: "Kara" written, a later reading had "Karakedi"
+        self.assertEqual(joined_rest("Kara", "Karakedi,", ["kedi"]), "kedi,")
+        self.assertEqual(joined_rest("Kara", "Karakedi", ["ke"]), "kedi")  # its end cut
+        self.assertEqual(joined_rest("ben", "Bende", ["de"]), "de")
+        # the same word read a little differently: nothing new in it
+        self.assertIsNone(joined_rest("seviyor", "seviyorum", ["çünkü"]))
+        self.assertIsNone(joined_rest("bahanemiz", "bahanemizi", ["istiyoruz"]))
+        self.assertIsNone(joined_rest("gel", "geliyorum", ["iyi"]))
+        self.assertIsNone(joined_rest("Kara", "Karakedi", []))  # nothing heard after it
+        self.assertIsNone(joined_rest("Kara", "Karam", ["kedi"]))
 
     def test_two_readings_agree_without_case_or_marks(self) -> None:
         self.assertEqual(agreed(["Burada", "her", "gü"], ["burada", "her,", "gün"]), 2)
@@ -299,6 +322,33 @@ class GrowingWriterTest(unittest.TestCase):
             run = Run(script, lead=lead).play(10.0).end()
             self.assertEqual(run.words(), [growing.norm(w) for w in text.split()], lead)
             self.assertEqual(run.full_stops(), ["gün."], lead)
+
+    def test_a_word_a_later_reading_runs_into_the_one_before_is_not_lost(self) -> None:
+        # The owner's live log, 2026-11-08: a phrase like "kara kedi yolunu kesti" came as
+        # "Kara" and "yolunu kesti.": a reading wrote "Kara" (its end cut "kedi"), a later one
+        # ran the two together ("Karakedi") and that was taken for the written word. The other
+        # way round ("Karakedi" written, read again as "Kara kedi"), "kedi" came twice.
+        head = "Hediye değil mi evet söylemiyorum hazır mısın hazırım bak oraya Kara"
+        tail = "yolunu kesti dedi annem ben de güldüm sonra çok güzel teşekkür ediyorum"
+        words = sentence(head, 1.0, gap=0.03)
+        t = words[-1][2] + 0.03
+        words.append(("kedi", t, t + 1.0))  # drawn out: a reading can end inside it
+        words += sentence(tail, t + 1.03, gap=0.03)
+        said = [growing.norm(w) for w, _, _ in words]
+
+        class Once(Script):  # runs the two together in one reading only
+            def decode(self, samples: array) -> str:
+                text = super().decode(samples)
+                if "Karakedi" in text:
+                    self.joins = ()
+                return text
+
+        cases = ((Script, 0.03, 2.5), (Script, 0.06, 4.0), (Once, 0.03, 3.0), (Once, 0.1, 3.0))
+        for kind, cost, lead in cases:
+            script = kind(words, cost=cost, stop=True, joins=(("Kara", "kedi"),))
+            run = Run(script, lead=lead).play(16.0).end()
+            heard = " ".join(run.words()).replace("karakedi", "kara kedi").split()
+            self.assertEqual(heard, said, (kind.__name__, cost, lead))
 
     def test_an_utterance_the_picture_passed_is_not_read(self) -> None:
         script = Script(sentence("Geç kaldım", 1.0))
