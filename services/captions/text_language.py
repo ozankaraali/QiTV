@@ -153,7 +153,9 @@ def _latin(text: str) -> Optional[str]:
         hits = sum(text.count(m) for m in marks)
         if hits:
             scores[name] += 2 * hits
-    words = [w for w in _SPLIT.split(unicodedata.normalize("NFC", text.lower())) if w]
+    # (a typographic apostrophe is one too: "Ahmet’i" is one word, not "ahmet" and Polish "i")
+    plain = unicodedata.normalize("NFC", text.lower()).replace("’", "'")
+    words = [w for w in _SPLIT.split(plain) if w]
     for word in words:
         for name, common in _WORD_SETS.items():
             if word in common:

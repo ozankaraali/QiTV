@@ -306,7 +306,7 @@ class TrialProcessTests(unittest.TestCase):
                 self.warmed += 1
 
             def transcribe(self, samples):
-                return " i stanbul'da "
+                return " Deniz'i gördüm i şte "
 
         with mock.patch("services.captions.moon_beam.BeamReader", Reader):
             model = self.model("tr-moonm-avg+beam-lm")
@@ -315,8 +315,45 @@ class TrialProcessTests(unittest.TestCase):
         self.assertTrue(model.trial and model.moonshine)
         self.assertIs(model.turkish, model.beam)
         self.assertEqual(model.beam.warmed, 1)
-        self.assertEqual(model.decode(array("f", bytes(64)), TURKISH), "istanbul'da")
+        # as it wrote it: ufak's lone-i join is not for our own models (2026-11-08, the owner)
+        self.assertEqual(model.decode(array("f", bytes(64)), TURKISH), "Deniz'i gördüm i şte")
+        label = "Moonshine medium · beam + LM · tr-moonm-avg"
+        self.assertEqual((model.wrote(), model.writes(TURKISH)), (label, label))  # for the log
         self.assertFalse(model.has_qwen())
+
+    @staticmethod
+    def said(model, text):
+        """The Turkish model's next reading is `text`."""
+        model.turkish.create_stream = lambda: SimpleNamespace(
+            accept_waveform=lambda rate, samples: None, result=SimpleNamespace(text=text)
+        )
+
+    def test_only_ufak_has_its_lone_i_joined(self):
+        # 2026-11-08, the owner: "Deniz'igördüm bu arada." from a Moonshine pick; "model
+        # specific": the join is for ufak's "i stanbul" alone
+        from services.captions.worker import TURKISH
+
+        moonshine = self.model("tr-moonm-avg")
+        self.said(moonshine, "Deniz'i gördüm i şte")
+        self.assertEqual(moonshine.decode(array("f", bytes(64)), TURKISH), "Deniz'i gördüm i şte")
+        self.assertEqual(moonshine.wrote(), "Moonshine medium · tr-moonm-avg")
+        ufak = self.model("ufakzeka-kulak")
+        self.said(ufak, "i stanbul'a gittik Deniz'i gördüm")
+        self.assertEqual(
+            ufak.decode(array("f", bytes(64)), TURKISH), "istanbul'a gittik Deniz'i gördüm"
+        )
+        self.assertEqual(ufak.wrote(), "ufak")
+
+    def test_the_log_names_the_model_each_language_is_written_by(self):
+        from services.captions.worker import TURKISH
+
+        self.assertEqual(self.model("tr-fc-r2").writes(TURKISH), "FastConformer · tr-fc-r2")
+        usual = self.model()  # ufak for Turkish, Qwen for the rest until a specialist loads
+        self.assertEqual(usual.writes(TURKISH), "ufak")
+        self.assertEqual(usual.writes("English"), "Qwen3-ASR")
+        self.assertEqual(usual.writes(""), "Qwen3-ASR")
+        usual.cohere = object()
+        self.assertEqual(usual.writes("English"), "cohere")  # its folder's name
 
     def test_a_streaming_fastconformer_picked_is_read_as_a_stream(self):
         model = self.model("tr-fc-r2")

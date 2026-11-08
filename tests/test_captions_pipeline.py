@@ -16,7 +16,7 @@ import unittest.mock
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
-from services.captions import guards
+from services.captions import guards, text_language
 from services.captions.pieces import RATE, WINDOW, Cutter
 from services.captions.stream_clock import StreamClock, TsTimes, pts_seconds
 
@@ -403,6 +403,36 @@ class WrittenToTests(unittest.TestCase):
         self.assertEqual(len(decoded), 1)  # 90-95 s: the picture is at 100 s
         self.assertEqual([m[2] for m in sent if m[0] == "caption"], [101.0])  # its start
 
+    def test_each_line_is_logged_by_the_model_that_wrote_it(self):
+        # 2026-11-08, the owner: "Write to logs which one writes"
+        import logging
+        import threading
+
+        run = self.run_with(self.piece(101.0, 104.0))
+        sent = []
+        run.model = SimpleNamespace(
+            recognizer=object(),
+            decode=lambda samples, language: "Hello there.",
+            wrote=lambda: "qwen3-asr-0.6b",
+        )
+        run.link = SimpleNamespace(send=sent.append)
+        run.viewer, run.language, run.run, run.rtf = [100.0], "English", 4, 0.5
+        run._writes = "qwen3-asr-0.6b"  # as the run began: no change to say
+        run.stopped = threading.Event()
+        with self.assertLogs("services.captions.worker", logging.INFO) as logs:
+            thread = threading.Thread(target=run._recognize, daemon=True)
+            thread.start()
+            deadline = time.monotonic() + 5
+            while not [m for m in sent if m[0] == "caption"] and time.monotonic() < deadline:
+                time.sleep(0.01)
+            run.stopped.set()
+            run.pieces.put(None)
+            thread.join(5)
+        self.assertEqual(
+            [r.getMessage() for r in logs.records],
+            ["AI captions: [qwen3-asr-0.6b] heard 'Hello there.', shows 'Hello there.'"],
+        )
+
 
 class StreamClockTests(unittest.TestCase):
     def test_the_tables_the_first_stamps_and_the_language_are_read_in_any_chunks(self):
@@ -516,6 +546,15 @@ class CutterTests(unittest.TestCase):
         self.assertEqual(lone_i_joined("ı i stanbul i şte bir"), "ı istanbul işte bir")
         self.assertEqual(lone_i_joined("bu iki ile"), "bu iki ile")  # i inside words stays
         self.assertEqual(lone_i_joined("sonunda i"), "sonunda i")  # nothing after it
+        # 2026-11-08, the owner: "Deniz'igördüm bu arada." for "Deniz'i gördüm bu arada.": an
+        # "i" after an apostrophe is a suffix
+        self.assertEqual(lone_i_joined("Deniz'i gördüm bu arada."), "Deniz'i gördüm bu arada.")
+        self.assertEqual(lone_i_joined("Ahmet’i aradım"), "Ahmet’i aradım")
+        self.assertEqual(lone_i_joined("i stanbul'a gittik"), "istanbul'a gittik")
+
+    def test_a_typographic_apostrophe_keeps_a_suffix_in_its_word(self):
+        # "Deniz’e de" read as "deniz", "e", "de": two Portuguese words (2026-11-08)
+        self.assertIsNone(text_language.guess("Deniz’e de"))
 
     def test_qwen_writes_for_good_only_where_no_specialist_writes(self):
         from services.captions.worker import TURKISH, _Run

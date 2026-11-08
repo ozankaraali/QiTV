@@ -60,7 +60,16 @@ from typing import Optional
 import unicodedata
 
 from services.captions.pieces import RATE, WINDOW, Cutter, Piece
-from services.captions.streaming import SENTENCE_ENDS, Lines, Word
+from services.captions.streaming import (  # the picture's pace, as the streaming lines'
+    FIRST_WORD_S,
+    HELD_AFTER_S,
+    HOLDBACK_S,
+    MARGIN_S,
+    SENTENCE_ENDS,
+    Lines,
+    Word,
+    time_left,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -72,13 +81,8 @@ FIRST_READ_S = 1.0  # an utterance is read again only once it is this long
 CONTEXT_S = 2.0  # a reading past written words begins about this long before their end
 STEP_S = 0.8  # the least sound between two readings of an utterance going on...
 STEP_SHARE = 1.5  # ... and at least this many times the last reading's time
-MARGIN_S = 0.8  # a line is out this long before the picture reaches its first word
-HOLDBACK_S = 0.5  # a reading on the last moment leaves its words from this near its end
-HELD_AFTER_S = 0.75  # the picture has not moved for this long: it waits
-HOLD_FLOOR_S = 7.5  # a waiting picture plays on once this far behind the sound read
 MIN_SPEECH_SHARE = 0.3  # less of an utterance was speech: music the detector caught
 PASSED_S = 1.0  # an utterance the picture passed by this much is not read
-FIRST_WORD_S = 0.3  # the captions show a line this long after its start (ui.captions_controller)
 JOIN_GAP_S = 0.3  # a line this near the one before goes on from it (ui.captions_controller)
 _COST_START = 0.15  # seconds a reading takes per second of sound, until measured
 SPLIT_PAUSE_S = 0.2  # a pause between words an utterance going on may end at (a word's own
@@ -296,10 +300,7 @@ class GrowingWriter:
         now, position = self.clock(), float(self.viewer[0])
         if position != self._seen[0]:
             self._seen = (position, now)
-        still = now - self._seen[1]
-        if still >= HELD_AFTER_S:  # it waits (or was paused): it plays on from the floor
-            return max(0.0, HOLD_FLOOR_S - (self.newest - position)) + (t - position)
-        return t - position - still
+        return time_left(t, position, now - self._seen[1], self.newest)
 
     def frontier(self) -> float:
         """The timeline second up to which lines are out (what is not, is still to come)."""
