@@ -477,6 +477,50 @@ class StreamClockTests(unittest.TestCase):
         self.assertIsNone(clock.place(9_000_000, 1600, RATE))  # VLC's blocks stepped
         self.assertTrue(clock.broken)
 
+    def test_a_run_read_again_past_a_step_reads_on_from_where_its_sound_ended(self):
+        # 2026-11-09, the owner's channel: its clock leapt and its sound was anchored again
+        # many times a second; the reader started over 25 times from the same second
+        times = TsTimes()
+        times.feed(_stream([90_000], [90_000]))
+        clock = StreamClock(100.0, times)
+        self.assertAlmostEqual(clock.place(5_000_000, 1600, RATE), 100.0)
+        self.assertIsNone(clock.place(60_000_000, 1600, RATE))  # VLC's blocks stepped 55 s
+        clock.rebase(100.1)  # read on: from where the sound before ended
+        self.assertAlmostEqual(clock.place(60_000_000, 1600, RATE), 100.1)
+        self.assertAlmostEqual(clock.place(60_100_000, 1600, RATE), 100.2)
+
+    def test_a_run_that_reads_on_never_asks_to_read_again(self):
+        from services.captions.worker import _Run
+
+        def bare(read_on):
+            run = object.__new__(_Run)
+            run.stopped, run.run, run.read_on, run._steps = threading.Event(), 7, read_on, 0
+            run._resynced, run.newest = False, 100.0
+            run.sent, run.placed = [], []
+            run.link = SimpleNamespace(send=run.sent.append)
+            times = TsTimes()
+            times.feed(_stream([90_000], [90_000]))
+            run.clock = StreamClock(100.0, times)
+            run._take = lambda at, floats: (
+                run.placed.append(round(at, 2)),
+                setattr(run, "newest", at + len(floats) / RATE),
+            )
+            return run
+
+        block = bytes(2 * 1600)
+        first = bare(read_on=False)
+        for us in (5_000_000, 5_100_000, 60_000_000):  # a step of 55 s
+            first._on_block(us, block)
+        [(kind, number, newest)] = first.sent  # once: read again past it
+        self.assertEqual((kind, number, round(newest, 3)), ("resync", 7, 100.2))
+        again = bare(read_on=True)  # ... that run reads on past every next step
+        with self.assertLogs("services.captions.worker", "INFO") as logs:
+            for us in (5_000_000, 5_100_000, 60_000_000, 60_100_000, 9_000_000, 9_100_000):
+                again._on_block(us, block)
+        self.assertEqual(again.sent, [])
+        self.assertEqual(again.placed, [100.0, 100.1, 100.2, 100.3, 100.4, 100.5])
+        self.assertEqual(len(logs.records), 1)  # said once
+
     def test_a_radio_channel_is_timed_by_its_sound(self):
         # The helper cuts and times an audio-only channel by its sound (services.live.ts).
         pmt_pid = 0x100
@@ -1086,6 +1130,56 @@ class ControllerTimingTests(unittest.TestCase):
         self.captions._start_run()
         self.assertEqual(self.window.live_session.asked_after, 20.0)
         self.assertEqual(self.sent[0][2], "http://127.0.0.1:1/t/s1/side/9.ts")
+        self.assertTrue(self.sent[0][7])  # and reads on past the next steps
+
+    def test_a_jumpy_clock_reads_again_once_and_never_from_the_same_second(self):
+        # 2026-11-09, the owner's channel: 25 runs in 27 s, each from 2422.0 s
+        live = self.window.live_session
+        self.captions._run_start = 2422.0
+        self.captions._on_resync(self.captions._run, 2422.0)  # it placed nothing
+        self.captions._start_run()
+        self.assertGreater(live.asked_after, 2422.0)  # the next segment, not the same one
+
+    def test_a_jump_s_place_is_its_channel_s_alone(self):
+        # 2026-11-09: past the old channel's jump (2422 s) was waited for on the new one
+        from ui.captions_controller import RESYNC_TRIES
+
+        live = self.window.live_session
+        self.captions._on_resync(self.captions._run, 2422.0)
+        live.caption_source = lambda after=None: None if after is not None else live.source
+        for _ in range(RESYNC_TRIES):
+            self.captions._start_run()  # (its restart timer, each second)
+        self.sent.clear()
+        self.captions._start_run()  # then from the picture
+        self.assertEqual(self.sent[0][:2], ("start", self.captions._run))
+        self.captions._on_resync(self.captions._run, 2422.0)
+        self.captions._session_key = "another channel"
+        self.captions._slow_since = 1.0
+        loads: list = []
+        captions: Any = self.captions
+        captions._process.start = lambda *args, **kwargs: loads.append(args)
+        self.sent.clear()
+        self.captions._tick()  # a new tune: its own picture, its speed judged anew
+        self.assertEqual(self.sent[0][0], "start")
+        self.assertIsNone(self.captions._slow_since)  # (no "Can't keep up" left from before)
+        self.assertFalse(self.sent[0][7])
+        self.assertEqual(loads, [])  # the models stay loaded: only a new run
+
+    def test_a_run_that_hears_nothing_reads_again_from_the_picture_twice_at_most(self):
+        import time as clock
+
+        from ui.captions_controller import NO_SOUND_S
+
+        self.captions._last = (0.0, clock.monotonic())
+        for expected in (True, True, False):
+            self.sent.clear()
+            run = self.captions._run
+            self.captions._on_progress(run, self.captions._run_start, 0.5)  # no sound yet
+            self.captions._run_began = clock.monotonic() - NO_SOUND_S - 1
+            self.captions._last = None
+            self.captions._tick()
+            started = any(m[0] == "start" for m in self.sent)
+            self.assertEqual(started, expected)
 
     def test_a_language_the_pieces_agreed_on_is_the_runs_channel(self):
         self.captions._run_channel = "provider|A"

@@ -9,7 +9,8 @@ pieces at pauses (pieces) and has Qwen3-ASR (sherpa-onnx, the language locked wh
 write each one; what nobody said is dropped (guards). It runs at low priority: the picture
 always comes first.
 
-Messages to it: ("load", {...}), ("start", run, url, segment_start, audio_track, language),
+Messages to it: ("load", {...}), ("start", run, url, segment_start, audio_track, language,
+guessed, read_on),
 ("film", run, location, start_s, audio_track, language, vlc_options): a film's run,
 ("viewer", position), ("language", name), ("speakers", diarizer folder or None, speaker
 model file), ("stop",), ("quit",).
@@ -609,11 +610,18 @@ class _Run:
         language: str,
         viewer: list,
         guessed: bool = False,
+        read_on: bool = False,
     ) -> None:
         self.link = link
         self.model = model
         self.run = run
         self.url = url
+        # 2026-11-09, the owner's channel: its clock leapt and its sound was anchored again many
+        # times a second; each run read again from past the step, met the next step at once, and
+        # the reader started over 25 times from the same second. A run started again past a
+        # step reads on past the next ones, counting its sound from where it got to
+        self.read_on = read_on
+        self._steps = 0
         if getattr(model, "trial", False):
             language, guessed = TURKISH, False  # a test model: Turkish, as it is (no vote)
         self.language = language
@@ -926,14 +934,23 @@ class _Run:
                         break
                     self.times.feed(data)
                     if self.times.jumped:
-                        self._resync()
-                        return
+                        if not self.read_on:
+                            self._resync()
+                            return
+                        self.times.jumped = False
+                        self._stepped()
                     self.decoder.feed(data)
         except Exception as error:
             reason = type(error).__name__  # no message: it could hold the URL
         if not self.stopped.is_set():
             self.decoder.end()
             self._end(reason)
+
+    def _stepped(self) -> None:
+        """A step in the stream's clock a run that reads on goes past (said once in the log)."""
+        self._steps += 1
+        if self._steps == 1:
+            logger.info("AI captions: run %d reads on past steps in the stream's clock", self.run)
 
     def _resync(self) -> None:
         if not self._resynced:
@@ -952,6 +969,10 @@ class _Run:
             return
         samples = len(pcm) // 2
         at = self.clock.place(vlc_us, samples, 16000)
+        if at is None and self.clock.broken and self.read_on:
+            self.clock.rebase(float(self.newest))
+            self._stepped()
+            at = self.clock.place(vlc_us, samples, 16000)
         if at is None:
             if self.clock.broken:
                 self._resync()
@@ -1305,6 +1326,7 @@ def _serve(link: _Link) -> None:
         elif kind == "start":
             _, number, url, segment_start, audio_track, language = message[:6]
             guessed = bool(message[6]) if len(message) > 6 else False
+            read_on = bool(message[7]) if len(message) > 7 else False
             if run is not None:
                 run.stop()
                 run = None
@@ -1313,7 +1335,16 @@ def _serve(link: _Link) -> None:
                 continue
             viewer[0] = float(segment_start)
             run = _Run(
-                link, model, number, url, segment_start, audio_track, language, viewer, guessed
+                link,
+                model,
+                number,
+                url,
+                segment_start,
+                audio_track,
+                language,
+                viewer,
+                guessed,
+                read_on,
             )
             run.start()
         elif kind == "film":

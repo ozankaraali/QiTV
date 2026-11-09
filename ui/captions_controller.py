@@ -99,6 +99,16 @@ TICK_MS = 250
 SEEK_S = 2.0  # the position moved this much more than the clock: a seek, read again there
 KEEP_S = 30 * 60.0  # cues kept this far behind the picture
 _RESTART_MS = 1000
+# 2026-11-09, the owner's channel: its clock leapt, every run read again from the same second
+# (25 runs in 27 s), and the second it waited for stayed past the next channel's tune (no run
+# there for minutes, "Can't keep up" for a run that never read). A run read again past a jump
+# starts at least this far past the last one's start and reads on past the next steps; a jump's
+# place is the session's alone; a jump whose segment is not there after RESYNC_TRIES restarts
+# reads from the picture instead; and a run that has heard nothing NO_SOUND_S after it began
+# reads again from the picture
+RESYNC_STEP_S = 0.1
+RESYNC_TRIES = 5
+NO_SOUND_S = 12.0
 _SLOW_RTF = 0.9  # the model takes this long per second of speech: it can't keep up
 # 2.9.6: the first question's yes (it said every language's model may come): they download as
 # their languages play, unasked
@@ -200,6 +210,10 @@ class CaptionsController(QObject):
         self._start_after_leaving = False
         self._run_channel = ""  # the channel the run reads (a vote's language is its)
         self._resync_at: Optional[float] = None  # read again from past a jump here
+        self._resync_tries = 0  # restarts that found no segment past it yet
+        self._read_on = False  # the next run reads on past steps of the stream's clock
+        self._run_began: Optional[float] = None  # when the run began (its sound awaited)
+        self._deaf_runs = 0  # runs in a row read again for hearing nothing (twice at most)
         self._supported: Optional[bool] = None
         self._asking = False
         self._question = ("", "", "")  # the download's question and its answers, as asked
@@ -1050,7 +1064,8 @@ class CaptionsController(QObject):
         self._loading = self._ready = False
         self._session_key = ""
         self._newest = self._written = None
-        self._slow_since = None
+        self._forget_run()
+        self._run_began = None
         self._routed = ""  # a film relay stays until its title ends; on again, asked again
         self._drop_floor()
         self._show("")
@@ -1097,19 +1112,26 @@ class CaptionsController(QObject):
             return
         live = self._live()
         after, self._resync_at = self._resync_at, None
+        read_on, self._read_on = self._read_on, False
         source = None
         if live is not None:
             source = live.caption_source(after) if after is not None else live.caption_source()
+            if source is None and after is not None and self._resync_tries >= RESYNC_TRIES:
+                logger.info("AI captions: past the jump is not there: read from the picture")
+                after, source = None, live.caption_source()
         if source is None:
             if after is not None:  # the segment after the jump is not there yet
-                self._resync_at = after
+                self._resync_at, self._read_on = after, read_on
+                self._resync_tries += 1
                 self._restart.start()
                 return
             self._session_key = ""
             self.changed.emit()
             return
+        self._resync_tries = 0
         url, _seq, start = source
         self._run += 1
+        self._run_began = time.monotonic()
         self._run_channel = self._channel_key()
         self._run_start = start
         self._run_track = self._audio_track()
@@ -1117,7 +1139,14 @@ class CaptionsController(QObject):
         self._session_key = url.rsplit("/side/", 1)[0]
         self._newest = self._written = None
         self._process.send(
-            "start", self._run, url, start, self._run_track, self._language[0], self._guessed
+            "start",
+            self._run,
+            url,
+            start,
+            self._run_track,
+            self._language[0],
+            self._guessed,
+            read_on,
         )
         self._process.send("viewer", self._position())
         self._offer_specialist()
@@ -1234,6 +1263,8 @@ class CaptionsController(QObject):
         if run != self._run:
             return
         self._newest, self._rtf = newest, rtf
+        if float(newest) > self._run_start + 0.5:
+            self._deaf_runs = 0  # it hears
         self._qwen_writes = qwen_writes  # 2.9.6: only then does a step down help
         self._written = newest if written is None else written
         self._started()
@@ -1270,8 +1301,24 @@ class CaptionsController(QObject):
         """The stream's stamps jumped (a provider's restart): read again from the segment
         after the jump, not from the picture's (before it: the same jump again)."""
         if run == self._run and self._enabled:
-            self._resync_at = newest
+            self._resync_at = max(float(newest), self._run_start + RESYNC_STEP_S)
+            self._read_on = True  # once read again, it reads on past the next steps
             self._restart.start()
+
+    def _forget_run(self) -> None:
+        """What a run left for the next (where past a jump to read, how slow it was) let go: a
+        new session's, or a run that heard nothing."""
+        self._resync_at, self._resync_tries, self._read_on = None, 0, False
+        self._slow_since = None
+
+    def _deaf(self) -> bool:
+        """The live run has placed no sound NO_SOUND_S after it began (the picture playing)."""
+        began = self._run_began
+        if began is None or self._deaf_runs >= 2 or not self._is_live() or self._waiting():
+            return False
+        if self._newest is not None and float(self._newest) > self._run_start + 0.5:
+            return False
+        return time.monotonic() - began >= NO_SOUND_S
 
     def _on_ended(self, run: int, reason: str) -> None:
         if run == self._run and self._enabled:
@@ -1298,6 +1345,8 @@ class CaptionsController(QObject):
             return  # a film opens (again) or goes to where it resumes: read from there after
         if self._ready and key != self._session_key:
             self._forget_cues()  # another channel or a new session: its own captions
+            self._forget_run()  # ... read from its own picture, its speed judged anew
+            self._deaf_runs = 0
             self._last = None
             self._resolve_language()  # its own language too
             self._start_run()
@@ -1305,6 +1354,16 @@ class CaptionsController(QObject):
             return
         if self._ready and self._track_changed():
             self._hear_track()
+            return
+        if self._ready and self._deaf():
+            logger.info(
+                "AI captions: run %d heard nothing in %.0f s: read again from the picture",
+                self._run,
+                NO_SOUND_S,
+            )
+            self._forget_run()
+            self._deaf_runs += 1
+            self._start_run()
             return
         waiting = self._waiting()
         if waiting != self._was_waiting:
