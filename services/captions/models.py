@@ -13,8 +13,7 @@ it) the sherpa-onnx runtime, all pinned below by size and sha256. They live in
         qwen3-asr-1.7b/        tokenizer/ (both tiers alike)
         ufakzeka-kulak/        encoder.int8.onnx, decoder.int8.onnx, joiner.int8.onnx,
                                tokens.txt (a FastConformer TDT for Turkish alone)
-        speaker-eres2net/      the speaker model (a run from source's Speaker marks)
-        pyannote-segmentation-3.0/  ... and where the speaker changes (its segmentation)
+        nemotron-3-diarization/  the diarizer (a run from source's Speaker marks)
         silero_vad.onnx
         verified.json          what was downloaded whole and checked (sha256), by path
 
@@ -313,33 +312,43 @@ COHERE_CONTENTS: tuple[tuple[str, Optional[int]], ...] = (
 )
 
 
-# 2026-11-08, Speaker marks (a run from source; services.captions.speakers): 3D-Speaker's ERes2Net
-# trained on VoxCeleb (Apache-2.0), sherpa-onnx's export in its release "speaker-recongition-models"
-# (sic). Picked on two-person Turkish drama dialogue against CAM++, TitaNet small and WeSpeaker's
-# ResNet34 and CAM++: on the caption lines themselves it told the speakers apart best (CAM++, in
-# a third of its time, marked 57 % of the changes against its 75 %, as many marks wrong). Size and
-# sha256 as GitHub served it on 2026-11-08 (uploaded 2024-10-14).
-_SPEAKER_RELEASE = (
-    "https://github.com/k2-fsa/sherpa-onnx/releases/download/speaker-recongition-models/"
+SPEAKER_KEY = "speaker"  # 2026-11-08, Speaker marks (a run from source): its download
+# 2026-11-09, the owner ("JUST DOWNLOAD PRETRAINED DIARIZER SOTA AND CONNECT TO IT"): NVIDIA's
+# Nemotron 3 Diarization (OpenMDW-1.1), a streaming Sortformer, in the community ONNX export that
+# splits it for a host-side speaker cache (services.captions.sortformer): its embedder, its encoder
+# and head with int8 weights (2.2 times as fast as the onnx-community export's on an arm64 CPU),
+# the mel filterbank and the learned silence embedding. Sizes and sha256 as Hugging Face served
+# them on 2026-11-09 (revision 46642c09).
+_DIARIZER = (
+    "https://huggingface.co/NealCaren/Nemotron-3-Diarization-ONNX/resolve/"
+    "46642c09b3bd014c5ceb19d20524fa2f1dc27dee/"
 )
-SPEAKER_KEY = "speaker"  # the speaker model and the segmentation, fetched together
-SPEAKER_FOLDER = "speaker-eres2net"
-SPEAKER_FILE = RemoteFile(
-    _SPEAKER_RELEASE + "3dspeaker_speech_eres2net_sv_en_voxceleb_16k.onnx",
-    "3dspeaker_speech_eres2net_sv_en_voxceleb_16k.onnx",
-    26485263,
-    "c59158379255ad66e161679cca6af8d52d51e389e3224ab7d7a7baae295c2db5",
-)
-# ... and pyannote's segmentation 3.0 (MIT), which hears where the speaker changes inside a line
-# (services.captions.turns): sherpa-onnx's ONNX export, as Hugging Face served it on 2026-11-08
-# (revision 9403a690, the file of sherpa-onnx's speaker-segmentation-models release).
-SEGMENTATION_FOLDER = "pyannote-segmentation-3.0"
-SEGMENTATION_FILE = RemoteFile(
-    "https://huggingface.co/csukuangfj/sherpa-onnx-pyannote-segmentation-3-0/resolve/"
-    "9403a6902bb58e3d5ae8c7e77c3422de279db2e0/model.onnx",
-    "model.onnx",
-    5992913,
-    "220ad67ca923bef2fa91f2390c786097bf305bceb5e261d4af67b38e938e1079",
+DIARIZER_FOLDER = "nemotron-3-diarization"
+DIARIZER_FILES = (
+    RemoteFile(
+        _DIARIZER + "embed.onnx",
+        "embed.onnx",
+        2102458,
+        "2e8796e42286abe2e2d7d44a97fab7e5a7d06b2d4cbee82a3a0f730cfff84a33",
+    ),
+    RemoteFile(
+        _DIARIZER + "step_int8.onnx",
+        "step_int8.onnx",
+        103325385,
+        "1f18a5aed4909677d3618c9e6ed6e3003720b6d6e766f0f8b337aa4fcb0a9d2a",
+    ),
+    RemoteFile(
+        _DIARIZER + "mel_filters.bin",
+        "mel_filters.bin",
+        131584,
+        "bce5ec5f194a5913f6508cee5a85512e7bad2352db8fc28f5c6ff75af8b09137",
+    ),
+    RemoteFile(
+        _DIARIZER + "silence_embeds.bin",
+        "silence_embeds.bin",
+        2048,
+        "d4417b3c0eabdf7c47032fac2b5b5a7ee83d819a6ddda8fd8eaf74e2b5cc4ac7",
+    ),
 )
 
 
@@ -481,14 +490,9 @@ def available() -> bool:
     return True
 
 
-def speaker_file(root: Optional[Path] = None) -> Path:
-    """The speaker model's file (Speaker marks), here or not."""
-    return _root(root) / SPEAKER_FOLDER / SPEAKER_FILE.path
-
-
-def segmentation_file(root: Optional[Path] = None) -> Path:
-    """The segmentation model's file (Speaker marks), here or not."""
-    return _root(root) / SEGMENTATION_FOLDER / SEGMENTATION_FILE.path
+def diarizer_folder(root: Optional[Path] = None) -> Path:
+    """The streaming diarizer's folder (Speaker marks), here or not."""
+    return _root(root) / DIARIZER_FOLDER
 
 
 def model_paths(tier: str, root: Optional[Path] = None) -> ModelPaths:
@@ -559,19 +563,14 @@ SPECIALISTS = (TURKISH_KEY, EUROPEAN_KEY, COHERE_KEY)
 def needed(key: str, root: Optional[Path] = None) -> list[Download]:
     """What `key` needs to run, in download order. A tier ("small", "large"): the runtime
     (unless this Python has one), the VAD and Qwen's files, what captions need to start. A
-    specialist (`SPECIALISTS`), or the speaker model (`SPEAKER_KEY`): its own files.
+    specialist (`SPECIALISTS`), or the diarizer (`SPEAKER_KEY`): its own files.
     Unsupported without a runtime for this computer."""
     base = _root(root)
     if key in SPECIALISTS:
         return _specialist(key, base)
     if key == SPEAKER_KEY:
-        return [
-            Download(base / folder, file, ((file.path, file.size),))
-            for folder, file in (
-                (SPEAKER_FOLDER, SPEAKER_FILE),
-                (SEGMENTATION_FOLDER, SEGMENTATION_FILE),
-            )
-        ]
+        folder = base / DIARIZER_FOLDER
+        return [Download(folder, file, ((file.path, file.size),)) for file in DIARIZER_FILES]
     downloads: list[Download] = []
     runtime = runtime_dir(base)
     if runtime is not None:

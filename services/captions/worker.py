@@ -11,8 +11,8 @@ always comes first.
 
 Messages to it: ("load", {...}), ("start", run, url, segment_start, audio_track, language),
 ("film", run, location, start_s, audio_track, language, vlc_options): a film's run,
-("viewer", position), ("language", name), ("speakers", model file or None, segmentation
-file), ("stop",), ("quit",).
+("viewer", position), ("language", name), ("speakers", diarizer folder or None), ("stop",),
+("quit",).
 From it: ("ready",), ("failed", reason), ("caption", run, start, end, text, turn, speaker[,
 parts]) (turn: 1 when another speaker than the line before's says it; speaker: 1, 2, ... in the
 run, 0 untold: services.captions.speakers; parts, a line of more than one: [(text, start, end,
@@ -45,7 +45,7 @@ from services.captions import guards, numbers_tr, text_language, trial_models
 from services.captions.growing import GrowingWriter
 from services.captions.languages import COHERE, EUROPEAN, QWEN_LANGUAGES, iso_code
 from services.captions.pieces import END_PAUSE_S, MAX_PIECE_S, Cutter, Piece
-from services.captions.speakers import Recent, Speakers, Turn, Voices, parts_of
+from services.captions.speakers import Recent, Turn, parts_of
 from services.captions.stream_clock import StreamClock, TsTimes
 from services.captions.streaming import StreamWriter
 
@@ -120,6 +120,7 @@ STREAM_ENV = "QITV_TR_STREAM"
 MOON_ENV = "QITV_TR_MOONSHINE"
 _MOON_FRAME = 80
 _IDLE_S = 0.25  # the growing writer looks at the picture this often when no sound comes
+SEND_MARGIN_S = 1.0  # a line waiting for its speakers goes when the picture is this near it
 # The trial's field test set (the owner, 2026-11-07): with a folder named here, each piece the
 # Moonshine trial reads is kept as a 16 kHz WAV beside a line of what the model wrote, to label.
 SAVE_ENV = "QITV_TR_SAVE_PIECES"
@@ -320,10 +321,10 @@ class _Model:
         self.cohere: Any = None
         self.european: Any = None
         self._loading: dict[str, threading.Event] = {}
-        # 2026-11-08, the owner's Speaker marks (a run from source): the speaker model, and the
-        # voice detector of the sound it reads (its own: its windows come in their order)
-        self.voices: Any = None
-        self.turns: Any = None  # ... and the segmentation (services.captions.turns)
+        # 2026-11-08, the owner's Speaker marks (a run from source): the diarizer (2026-11-09:
+        # services.captions.sortformer), and the voice detector of the sound lines are timed by
+        # (its own: its windows come in their order)
+        self.diarizer: Any = None
         self.speakers_on = False
         self._speaker_vad: Any = None
         self._speaker_lock = threading.Lock()
@@ -344,7 +345,7 @@ class _Model:
         self.voiced = detector(_VOICED_MIN_S)
         self._detector = detector
         self._lock = threading.Lock()
-        self.use_speakers(spec.get("speaker"), spec.get("segmentation"))
+        self.use_speakers(spec.get("diarizer"))
         if self.has_model:
             # Warm up: the first decode is slow (graph optimisation), not the viewer's first.
             if self.recognizer is not None:
@@ -354,37 +355,33 @@ class _Model:
             elif self.turkish is not None:
                 self.decode(array("f", bytes(16000 * 4)), TURKISH)
 
-    def use_speakers(self, model: Optional[str], segmentation: Optional[str] = None) -> None:
-        """2026-11-08, Speaker marks: each line's speaker told with the speaker model in the
-        file `model`, where it changes inside a line heard by the segmentation model in the file
-        `segmentation` (they load in their own thread the first time; lines go untold till
-        then); None: no longer told."""
-        if not model or not self.has_model:
+    def use_speakers(self, diarizer: Optional[str]) -> None:
+        """2026-11-08, Speaker marks: each line's speakers told by the streaming diarizer whose
+        files are in the folder `diarizer` (it loads in its own thread the first time; lines go
+        untold till then); None: no longer told."""
+        if not diarizer or not self.has_model:
             self.speakers_on = False
             return
         self.speakers_on = True
-        if self.voices is not None or self._speakers_loading:
+        if self.diarizer is not None or self._speakers_loading:
             return
         self._speakers_loading = True
         threading.Thread(
             target=self._load_speakers,
-            args=(model, segmentation),
+            args=(diarizer,),
             name="qitv-captions-speakers",
             daemon=True,
         ).start()
 
-    def _load_speakers(self, model: str, segmentation: Optional[str]) -> None:
+    def _load_speakers(self, folder: str) -> None:
         try:
-            self._speaker_vad = self._detector(_VOICED_MIN_S)
-            self.voices = Voices(self._sherpa, model, threads=min(2, self._threads))
-            logger.info("AI captions: the speaker model is loaded (%s)", Path(model).name)
-            if segmentation:
-                from services.captions.turns import Turns
+            from services.captions.sortformer import Sortformer
 
-                self.turns = Turns(segmentation)
-                logger.info("AI captions: the segmentation is loaded")
-        except Exception as error:  # the lines go on, untold (or by the speaker model alone)
-            logger.warning("AI captions: the speaker models did not load: %s", type(error).__name__)
+            self._speaker_vad = self._detector(_VOICED_MIN_S)
+            self.diarizer = Sortformer(folder)
+            logger.info("AI captions: the diarizer is loaded (%s)", Path(folder).name)
+        except Exception as error:  # the lines go on, untold
+            logger.warning("AI captions: the diarizer did not load: %s", type(error).__name__)
         finally:
             self._speakers_loading = False
 
@@ -632,10 +629,15 @@ class _Run:
         self._said: Optional[tuple[str, float]] = None  # the line written last, and its end
         self._writes = ""  # the model that wrote the run's last line, as the log names it
         self._line_level = line_level()
-        # 2026-11-08, Speaker marks: the voices heard in the run, and its recent sound (from
-        # once the speaker model is loaded and on)
-        self.speakers = Speakers()
+        # 2026-11-08, Speaker marks: the run's recent sound and its voiced windows (from once the
+        # diarizer is loaded and on); 2026-11-09: the sound the diarizer is still to read, the
+        # lines waiting for it to have told their speakers, and the last line's speaker
         self.recent: Optional[Recent] = None
+        self._diary: Optional[queue.Queue[Optional[tuple[float, array]]]] = None
+        self._waiting: Optional[queue.Queue[Optional[tuple]]] = None
+        self._said_by: Optional[int] = None
+        self._diary_token: Optional[int] = None  # the diarizer reads this run's sound (its reset)
+        self._diarizer_broken = False
         self.votes = text_language.Votes()  # the language heard, when none is given
         # streaming Turkish: the sound goes to the model whole (no pieces), lines come back
         self.blocks: queue.Queue[Optional[tuple[float, array]]] = queue.Queue()
@@ -675,9 +677,8 @@ class _Run:
     ) -> None:
         """A line in the log by the model that wrote it (2026-11-08, the owner: "Write to logs
         which one writes"), what it heard and what shows, and who says it, part by part (S1, S2,
-        ... and how like the speaker before's voice); the run's model changing (a language
-        locked, a specialist loaded) is said once, with the run. At INFO only where test models
-        are offered (`line_level`)."""
+        ...); the run's model changing (a language locked, a specialist loaded) is said once,
+        with the run. At INFO only where test models are offered (`line_level`)."""
         level = getattr(self, "_line_level", None) or line_level()
         if name != getattr(self, "_writes", ""):
             self._writes = name
@@ -697,22 +698,82 @@ class _Run:
         voiced: Optional[Sequence[bool]] = None,
     ) -> None:
         """A line of the sound of [start, end) out (shown until `until` when later), and in the
-        log. 2026-11-08, the owner: a line of more than one sentence, or with a long pause in it,
-        goes in parts (speakers.parts_of: each with its sound's span, from `voiced`, the voice
-        detector's windows from `start`, else the speaker model's), each part's speaker told
-        while Speaker marks are on; the captions show a long line a part at a time as each is
-        said."""
+        log. 2026-11-08, the owner: a line of more than one sentence, or where the speaker
+        changes, goes in parts (speakers.parts_of: each with its sound's span, from `voiced`, the
+        voice detector's windows from `start`, else the ones kept for the diarizer), each part's
+        speaker told while Speaker marks are on; the captions show a long line a part at a time
+        as each is said. 2026-11-09: with the diarizer, a line waits (in order) until it has told
+        the line's speakers, or the picture is about to reach it (`_send_when_told`)."""
+        line = (name, heard, shown, start, end, until, voiced)
+        if getattr(self, "_waiting", None) is None:
+            if self._diarizer() is None:
+                self._send(line, None)
+                return
+            self._waiting = queue.Queue()  # (from now on every line goes through it, in order)
+            threading.Thread(
+                target=self._send_when_told,
+                args=(self._waiting,),
+                name="qitv-captions-speakers-out",
+                daemon=True,
+            ).start()
+        assert self._waiting is not None
+        self._waiting.put(line)
+
+    def _diarizer(self) -> Any:
+        """The diarizer while Speaker marks are on and it is loaded (and has not failed in this
+        run), else None."""
+        model = getattr(self, "model", None)
+        if not getattr(model, "speakers_on", False) or getattr(self, "_diarizer_broken", False):
+            return None
+        return getattr(model, "diarizer", None)
+
+    def _serving(self) -> Any:
+        """The diarizer while it reads this run's sound, else None (not started for this run
+        yet, or a newer run's already)."""
+        diarizer = self._diarizer()
+        token = getattr(self, "_diary_token", None)
+        if diarizer is None or token is None or diarizer.token != token:
+            return None
+        return diarizer
+
+    def _send_when_told(self, waiting: "queue.Queue[Optional[tuple]]") -> None:
+        """The lines out in order, each once the diarizer has told its speakers, or once the
+        picture is SEND_MARGIN_S from its first word (at once while Speaker marks are off)."""
+        while not self.stopped.is_set():
+            try:
+                line = waiting.get(timeout=_IDLE_S)
+            except queue.Empty:
+                continue
+            if line is None:
+                return
+            start, end = line[3], line[4]
+            while not self.stopped.is_set() and self._diarizer() is not None:
+                serving = self._serving()
+                if serving is not None and serving.covered() >= end - 0.05:
+                    break
+                if start - float(self.viewer[0]) <= SEND_MARGIN_S:
+                    break
+                self.stopped.wait(0.05)
+            if not self.stopped.is_set():
+                self._send(line, self._serving())
+
+    def _send(self, line: tuple, diarizer: Any) -> None:
+        """A line in parts, each with its speaker as the diarizer told it (`diarizer` None: none
+        told), to the captions and the log."""
+        from services.captions import sortformer
+
+        name, heard, shown, start, end, until, voiced = line
         flags, at = (list(voiced), start) if voiced is not None else self._flags(start, end)
-        found = self._turns(start, end)
-        parts = parts_of(
-            shown,
-            start,
-            end,
-            flags,
-            at,
-            changes=found.changes if found is not None else None,
-        )
-        turns = [self._speaker(part.start, part.end) for part in parts]
+        changes = None
+        if diarizer is not None:
+            changes = sortformer.changes(diarizer.frames(start, end), diarizer.time_of(0, start))
+        parts = parts_of(shown, start, end, flags, at, changes=changes)
+        turns: list[Optional[Turn]] = []
+        for part in parts:
+            told = None
+            if diarizer is not None:
+                told = sortformer.speaker(diarizer.frames(part.start, part.end))
+            turns.append(self._turn(told) if diarizer is not None else None)
         self._logged(name, heard, shown, turns)
         said = [
             (
@@ -728,52 +789,37 @@ class _Run:
         message = ("caption", self.run, start, max(end, until), shown, changed, speaker)
         self.link.send(message + ((said,) if len(said) > 1 else ()))
 
+    def _turn(self, told: Optional[int]) -> Optional[Turn]:
+        """A part's speaker, 1 to 8 in the order the diarizer heard them come (`told`: its index,
+        None: nobody heard enough: the speaker before goes on), and whether it changed."""
+        before = self._said_by
+        speaker = before if told is None else told + 1
+        if speaker is None:
+            return None
+        self._said_by = speaker
+        changed = before is not None and speaker != before
+        return Turn(speaker, changed, heard=told is not None)
+
     def _flags(self, start: float, end: float) -> tuple[Optional[list[bool]], float]:
-        """The voice detector's windows of [start, end) kept for the speaker model, if it is on."""
+        """The voice detector's windows of [start, end) kept for the diarizer, if it is on."""
         recent = getattr(self, "recent", None)
         if recent is None:
             return None, start
         flags, at = recent.flags(start, end)
         return flags, at
 
-    def _turns(self, start: float, end: float) -> Any:
-        """Where the segmentation hears the speaker change in the line of [start, end), read
-        with the CONTEXT_S before it (services.captions.turns.Found); None without it."""
-        model = getattr(self, "model", None)
-        turns = getattr(model, "turns", None)
-        recent = getattr(self, "recent", None)
-        if turns is None or recent is None or not getattr(model, "speakers_on", False):
-            return None
-        from services.captions.turns import CONTEXT_S
-
-        sound, at = recent.sound(start - CONTEXT_S, end)
-        try:
-            return turns.changes(sound, at, start)
-        except Exception as error:
-            logger.warning("AI captions: the segmentation failed: %s", type(error).__name__)
-            return None
-
-    def _speaker(self, start: float, end: float) -> Optional[Turn]:
-        """Who says the part of timeline seconds [start, end): the speaker before, or another
-        (services.captions.speakers); None while speakers are not told."""
-        model = getattr(self, "model", None)
-        voices = getattr(model, "voices", None)
-        recent = getattr(self, "recent", None)
-        if voices is None or recent is None or not getattr(model, "speakers_on", False):
-            return None
-        sound = recent.voiced(start, end)
-        try:
-            print_ = voices.embed(sound)
-        except Exception as error:
-            logger.warning("AI captions: a voice print failed: %s", type(error).__name__)
-            return None
-        return self.speakers.hear(print_, len(sound) / 16000, start)
-
     def stop(self) -> None:
         self.stopped.set()
         self.pieces.put(None)
         self.blocks.put(None)
+        self._wake()
         self.decoder.stop()
+
+    def _wake(self) -> None:
+        """The diarizer's threads end with the run."""
+        for waiting in (getattr(self, "_diary", None), getattr(self, "_waiting", None)):
+            if waiting is not None:
+                waiting.put(None)
 
     def _maybe_stream(self) -> None:
         """Turkish with the streaming model here: from now on the sound goes to it whole; with
@@ -897,14 +943,44 @@ class _Run:
             self.pieces.put(piece)
 
     def _hold_for_speakers(self, at: float, floats: array) -> None:
-        """The sound kept for the speaker model while it is on (a line finds its own there)."""
-        model = getattr(self, "model", None)
-        if getattr(model, "voices", None) is None or not getattr(model, "speakers_on", False):
+        """The sound kept while Speaker marks are on (a line finds its voiced windows there), and
+        given to the diarizer, which reads it in its own thread (`_diarize`)."""
+        diarizer = self._diarizer()
+        if diarizer is None:
             return
+        model = self.model
         if getattr(self, "recent", None) is None:
             self.recent = Recent(model.speaker_voiced)
         assert self.recent is not None
         self.recent.push(at, floats)
+        if self._diary is None:
+            self._diary = queue.Queue()
+            threading.Thread(
+                target=self._diarize,
+                args=(self._diary, diarizer, at),
+                name="qitv-captions-diarizer",
+                daemon=True,
+            ).start()
+        self._diary.put((at, floats))
+
+    def _diarize(
+        self, diary: "queue.Queue[Optional[tuple[float, array]]]", diarizer: Any, at: float
+    ) -> None:
+        """The run's sound to the diarizer, from timeline second `at` on, a block at a time (a
+        failure: the run's lines go out untold, at once)."""
+        try:
+            self._diary_token = diarizer.reset(at)
+            while not self.stopped.is_set():
+                try:
+                    block = diary.get(timeout=_IDLE_S)
+                except queue.Empty:
+                    continue
+                if block is None:
+                    return
+                diarizer.push(*block, token=self._diary_token)
+        except Exception as error:
+            self._diarizer_broken = True
+            logger.warning("AI captions: the diarizer failed: %s", type(error).__name__)
 
     def _longest(self) -> float:
         """How long a piece may be and still be written before the picture gets to it."""
@@ -1111,6 +1187,7 @@ class _FilmRun(_Run):
         self.stopped.set()
         self.pieces.put(None)
         self.blocks.put(None)
+        self._wake()
         self.reader.stop()
 
     def _watch(self) -> None:
@@ -1229,9 +1306,9 @@ def _serve(link: _Link) -> None:
             run.start()
         elif kind == "viewer":
             viewer[0] = float(message[1])
-        elif kind == "speakers":  # 2026-11-08: Speaker marks on (the models' files) or off
+        elif kind == "speakers":  # 2026-11-08: Speaker marks on (the diarizer's folder) or off
             if model is not None:
-                model.use_speakers(message[1], message[2] if len(message) > 2 else None)
+                model.use_speakers(message[1])
         elif kind == "language":
             if model is not None and model.trial:
                 continue  # a test model's runs stay Turkish

@@ -23,8 +23,9 @@ than none). A caption too long for two lines shows in parts, sentence by sentenc
 said by its line's parts' times (`_page_at`; 2026-11-08, the owner).
 
 In a run from source (where the Test model list is offered) each line's speaker is told too,
-by a small speaker model of its own (downloaded unasked, some 26 MB), part by part of each line
-(its sentences, and the stretches between long pauses), and a change of speaker
+by NVIDIA's streaming diarizer (services.captions.sortformer, downloaded unasked, some 106 MB),
+part by part of each line (its sentences, and where the diarizer hears the speaker change), and a
+change of speaker
 shows (the Subtitles panel's Speaker marks): a new speaker's line starts with "- " on a line of
 its own, as Turkish subtitles write dialogue (Dashes, the default), or each speaker's lines are
 in a colour of their own, as teletext's (Colours), or nothing shows (Off).
@@ -605,7 +606,7 @@ class CaptionsController(QObject):
 
     def set_speaker_marks(self, mark: str) -> None:
         """How a change of speaker shows from now on. Marked, the captions process tells
-        speakers apart (its model downloads first when it isn't here); Off, it no longer does."""
+        speakers apart (its diarizer downloads first when it isn't here); Off, it no longer does."""
         from services.captions.speakers import MARKS
 
         if not self.speaker_marks_offered() or mark not in MARKS:
@@ -614,26 +615,20 @@ class CaptionsController(QObject):
         logger.info("AI captions: speaker marks %s", mark)
         self._fetch_speakers()
         if self._process.running():
-            self._process.send("speakers", self._speaker_file(), self._segmentation_file())
+            self._process.send("speakers", self._diarizer_folder())
         self.changed.emit()
 
-    def _segmentation_file(self) -> Optional[str]:
-        """The segmentation model's file while speakers are marked and it is here, else None."""
-        from services.captions import models
-
-        return str(models.segmentation_file()) if self._speaker_file() else None
-
-    def _speaker_file(self) -> Optional[str]:
-        """The speaker model's file while speakers are marked and it is here, else None."""
+    def _diarizer_folder(self) -> Optional[str]:
+        """The diarizer's folder while speakers are marked and it is here, else None."""
         from services.captions import models
         from services.captions.speakers import OFF
 
         if self.speaker_marks() == OFF or not self._here(models.SPEAKER_KEY):
             return None
-        return str(models.speaker_file())
+        return str(models.diarizer_folder())
 
     def _fetch_speakers(self) -> None:
-        """The speaker model downloads while captions are on with speakers marked (unasked: a
+        """The diarizer downloads while captions are on with speakers marked (unasked: a
         developer's run; once while QiTV runs, after the speech model is here); the process
         takes it once it is here."""
         from services.captions import models
@@ -781,8 +776,8 @@ class CaptionsController(QObject):
         self._download = None
         from services.captions.models import SPEAKER_KEY, SPECIALISTS
 
-        if self._fetching == SPEAKER_KEY:  # Speaker marks' model: the process takes it as it is
-            self._process.send("speakers", self._speaker_file(), self._segmentation_file())
+        if self._fetching == SPEAKER_KEY:  # Speaker marks' diarizer: the process takes it as it is
+            self._process.send("speakers", self._diarizer_folder())
             self.changed.emit()
             return
         if self._fetching in SPECIALISTS:  # 2.9.6: a language's own model is here
@@ -887,8 +882,7 @@ class CaptionsController(QObject):
                 "cohere": self._folder("cohere", paths.cohere),  # 2.9.3: Cohere Transcribe
                 # a test model picked (a run from source): it alone writes, as Turkish
                 "trial": str(models.captions_root() / trial) if trial else None,
-                "speaker": self._speaker_file(),  # Speaker marks' models (a run from source)
-                "segmentation": self._segmentation_file(),
+                "diarizer": self._diarizer_folder(),  # Speaker marks' (a run from source)
                 "threads": model_threads(),
             },
             detailed_log=bool(self._config_get("detailed_log", False)),
