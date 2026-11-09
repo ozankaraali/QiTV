@@ -14,6 +14,7 @@ it) the sherpa-onnx runtime, all pinned below by size and sha256. They live in
         ufakzeka-kulak/        encoder.int8.onnx, decoder.int8.onnx, joiner.int8.onnx,
                                tokens.txt (a FastConformer TDT for Turkish alone)
         nemotron-3-diarization/  the diarizer (a run from source's Speaker marks)
+        speaker-eres2net/      ... and the speaker model of its voice prints
         silero_vad.onnx
         verified.json          what was downloaded whole and checked (sha256), by path
 
@@ -351,6 +352,20 @@ DIARIZER_FILES = (
     ),
 )
 
+# ... and, who is who across the diarizer's fresh starts (2026-11-09, the owner: "try 2"), voice
+# prints by 3D-Speaker's ERes2Net trained on VoxCeleb (Apache-2.0), sherpa-onnx's export in its
+# release "speaker-recongition-models" (sic): on two-person Turkish drama dialogue it told voices
+# apart best of those sherpa-onnx runs (2026-11-08). Size and sha256 as GitHub served it on
+# 2026-11-08 (uploaded 2024-10-14).
+PRINT_FOLDER = "speaker-eres2net"
+PRINT_FILE = RemoteFile(
+    "https://github.com/k2-fsa/sherpa-onnx/releases/download/speaker-recongition-models/"
+    "3dspeaker_speech_eres2net_sv_en_voxceleb_16k.onnx",
+    "3dspeaker_speech_eres2net_sv_en_voxceleb_16k.onnx",
+    26485263,
+    "c59158379255ad66e161679cca6af8d52d51e389e3224ab7d7a7baae295c2db5",
+)
+
 
 def _wheel(folder: str, name: str, size: int, sha256: str) -> RemoteFile:
     return RemoteFile(f"{_PYPI_FILES}{folder}/{name}", name, size, sha256, EXTRACT_WHEEL)
@@ -495,6 +510,11 @@ def diarizer_folder(root: Optional[Path] = None) -> Path:
     return _root(root) / DIARIZER_FOLDER
 
 
+def print_file(root: Optional[Path] = None) -> Path:
+    """The speaker model's file (Speaker marks' voice prints), here or not."""
+    return _root(root) / PRINT_FOLDER / PRINT_FILE.path
+
+
 def model_paths(tier: str, root: Optional[Path] = None) -> ModelPaths:
     base = _root(root)
     folder = base / TIERS[tier].folder
@@ -570,7 +590,9 @@ def needed(key: str, root: Optional[Path] = None) -> list[Download]:
         return _specialist(key, base)
     if key == SPEAKER_KEY:
         folder = base / DIARIZER_FOLDER
-        return [Download(folder, file, ((file.path, file.size),)) for file in DIARIZER_FILES]
+        found = [Download(folder, file, ((file.path, file.size),)) for file in DIARIZER_FILES]
+        prints = Download(base / PRINT_FOLDER, PRINT_FILE, ((PRINT_FILE.path, PRINT_FILE.size),))
+        return found + [prints]
     downloads: list[Download] = []
     runtime = runtime_dir(base)
     if runtime is not None:

@@ -247,6 +247,65 @@ class CacheTests(unittest.TestCase):
                 self.assertEqual(probs, [0.0] * SPEAKERS)
 
 
+class VoiceBookTests(unittest.TestCase):
+    """Who Sortformer's speakers are across its fresh starts, by prints of their pooled speech."""
+
+    @staticmethod
+    def voice(k, seconds):
+        """Sound in voice k (the fake print reads it back), `seconds` long."""
+        return array("f", [float(k)] * int(seconds * RATE))
+
+    def book(self, **settings):
+        def prints(sound):  # a voice's print: its sound's level, as a direction
+            k = int(round(sound[len(sound) // 2]))
+            return [1.0 if i == k else 0.0 for i in range(4)]
+
+        return sortformer.VoiceBook(prints, probe_s=2.0, enrol_s=10.0, min_enrol_s=5.0, **settings)
+
+    def test_after_a_fresh_start_a_speaker_shows_new_then_its_print_finds_who_it_is(self):
+        book = self.book()
+        self.assertEqual([book.speaker(0, 0), book.speaker(0, 1)], [0, 1])  # as they come
+        book.said(0, 0, self.voice(1, 6.0))  # A, 6 s pooled: remembered
+        book.said(0, 1, self.voice(2, 6.0))  # B
+        self.assertEqual(book.speaker(1, 0), 2)  # a fresh start: new at once (a fresh colour)
+        book.said(1, 0, self.voice(2, 1.0))
+        self.assertEqual(book.known(1, 0), 2)  # 1 s: too little to tell
+        book.said(1, 0, self.voice(2, 1.0))
+        self.assertEqual(book.known(1, 0), 1)  # 2 s: B's voice, B's colour from now on
+        book.speaker(1, 1)
+        book.said(1, 1, self.voice(3, 2.0))  # nobody heard before: stays new
+        self.assertEqual(book.known(1, 1), 3)
+
+    def test_unsure_is_a_fresh_colour_and_a_voice_is_one_speaker_a_stretch(self):
+        book = self.book()
+        book.speaker(0, 0)
+        book.said(0, 0, self.voice(1, 3.0))  # A heard 3 s only: too little to remember
+        book.speaker(1, 0)
+        book.said(1, 0, self.voice(1, 2.0))
+        self.assertEqual(book.known(1, 0), 1)  # not matched to A: new
+        book = self.book()
+        book.speaker(0, 0)
+        book.said(0, 0, self.voice(1, 6.0))
+        book.speaker(1, 0)
+        book.said(1, 0, self.voice(1, 2.0))  # A
+        book.speaker(1, 1)
+        book.said(1, 1, self.voice(1, 2.0))  # alike A too, but A is taken in this stretch
+        self.assertEqual((book.known(1, 0), book.known(1, 1)), (0, 2))
+
+    def test_without_prints_every_fresh_start_is_new_speakers(self):
+        book = sortformer.VoiceBook(None)
+        book.speaker(0, 0)
+        book.said(0, 0, self.voice(1, 6.0))
+        self.assertEqual(book.speaker(1, 0), 1)
+        book.said(1, 0, self.voice(1, 6.0))
+        self.assertEqual(book.known(1, 0), 1)
+
+    def test_a_frame_by_the_run_s_speakers(self):
+        book = sortformer.VoiceBook()
+        book.speaker(0, 2)
+        self.assertEqual(book.row(0, [0.9, 0.3, 0.7] + [0.0] * 5, 1), [0.7])  # (0, 1 unheard)
+
+
 class _Tensor:
     def __init__(self, values):
         self.values = values
@@ -273,9 +332,16 @@ class SortformerTests(unittest.TestCase):
         (self.folder / "silence_embeds.bin").write_bytes(bytes(4 * HIDDEN))
         self.widest = 0
 
-        def step(tensor):  # speaker 0 says everything
+        self.script: Any = lambda step: 0  # who talks in each step (None: nobody)
+        self.steps = 0
+
+        def step(tensor):  # speaker 0 says everything, or as the script says
             self.widest = max(self.widest, tensor.shape[1])
-            return [4.0 if k == 0 else -4.0 for _ in range(tensor.shape[1] * SUB) for k in range(8)]
+            who = self.script(self.steps)
+            self.steps += 1
+            return [
+                4.0 if k == who else -4.0 for _ in range(tensor.shape[1] * SUB) for k in range(8)
+            ]
 
         runs = {
             sortformer.MEL_GRAPH: lambda t: [0.0] * (t.shape[0] * MELS),
@@ -338,16 +404,42 @@ class SortformerTests(unittest.TestCase):
         self.assertAlmostEqual(covered((100.0, 2.0), (101.5, 3.0)), whole)  # read once
         self.assertGreater(sortformer.JUMP_S, 2.0)  # (a lost 2 s segment is a gap)
 
-    def test_a_jump_starts_the_front_end_there_and_the_speakers_are_kept(self):
+    def test_a_jump_starts_afresh_there_and_the_voices_are_kept(self):
         token = self.diarizer.reset(100.0)
         self.diarizer.push(100.0, array("f", bytes(4 * 10 * RATE)), token)
-        cache = self.diarizer._cache
+        book, stretch = self.diarizer.book, self.diarizer._stretch
         self.diarizer.push(200.0, array("f", bytes(4 * RATE)), token)  # 90 s on
         self.assertAlmostEqual(self.diarizer.covered(), 200.64, places=6)
-        self.assertIs(self.diarizer._cache, cache)
+        self.assertEqual((self.diarizer.book, self.diarizer._stretch), (book, stretch + 1))
         self.assertEqual(self.diarizer.frames(100.0, 110.0), [])
-        self.diarizer.reset(0.0)  # a new run: speakers afresh
-        self.assertIsNot(self.diarizer._cache, cache)
+        self.diarizer.reset(0.0)  # a new run: the voices afresh too
+        self.assertIsNot(self.diarizer.book, book)
+
+    def test_after_a_pause_it_starts_afresh_and_a_voice_print_keeps_who_is_who(self):
+        # 2026-11-09, the owner ("try 2"): late in a run Sortformer told speakers apart worse
+        def told_after(second_voice):
+            # speaker 0 for 19 steps (6.1 s), nobody for 3 (0.96 s), then its speaker 0 again
+            self.steps, self.script = 0, lambda step: None if 19 <= step < 22 else 0
+
+            def prints(sound):
+                return [1.0, 0.0] if sum(sound) > 0 else [0.0, 1.0]
+
+            diarizer = sortformer.Sortformer(
+                str(self.folder), self.SMALL, prints=prints, pause_s=0.5, min_stretch_s=0.0
+            )
+            first = array("f", [0.1] * int(6.6 * RATE))  # (the voice in its sound's sign)
+            then = array("f", [-0.1 if second_voice else 0.1] * int(4.4 * RATE))
+            token = diarizer.reset(0.0)
+            diarizer.push(0.0, first + then, token)
+            return diarizer
+
+        same = told_after(second_voice=False)
+        self.assertEqual(same._stretch, 1)  # started afresh after the pause
+        self.assertEqual(sortformer.speaker(same.frames(9.5, 10.5)), 0)  # the same voice: 0
+        other = told_after(second_voice=True)
+        self.assertEqual(sortformer.speaker(other.frames(1.0, 5.0)), 0)
+        self.assertEqual(sortformer.speaker(other.frames(9.5, 10.5)), 1)  # another voice: 1
+        self.assertEqual(len(other.frames(9.5, 10.5)[0]), 2)  # (by the run's speakers)
 
     def test_a_stopped_run_s_sound_is_let_go(self):
         old = self.diarizer.reset(100.0)
@@ -758,22 +850,42 @@ class ProcessTests(unittest.TestCase):
         made = []
 
         class Diarizer:
-            def __init__(self, folder):
+            def __init__(self, folder, prints=None):
                 made.append(folder)
+                self.prints = prints
 
         from services.captions.worker import _Model
 
+        extractors = []
+
+        class Config:
+            def __init__(self, model, num_threads):
+                self.model = model
+
+            def validate(self):
+                return True
+
+        class Extractor:
+            def __init__(self, config):
+                extractors.append(config.model)
+
+        sherpa: Any = _fake_sherpa([])
+        sherpa.SpeakerEmbeddingExtractorConfig = Config
+        sherpa.SpeakerEmbeddingExtractor = Extractor
         spec = {
             "runtime": None,
             "model": {"conv_frontend": "c", "encoder": "e", "decoder": "d", "tokenizer": "t"},
             "vad": "vad.onnx",
             "diarizer": "/models/nemotron-3-diarization",
+            "voice_prints": "/models/eres2net.onnx",
         }
-        with mock.patch.dict(sys.modules, {"sherpa_onnx": _fake_sherpa([])}):
+        with mock.patch.dict(sys.modules, {"sherpa_onnx": sherpa}):
             with mock.patch.object(sortformer, "Sortformer", Diarizer):
                 model = _Model(spec)
                 _until(self, lambda: model.diarizer is not None)
         self.assertEqual(made, ["/models/nemotron-3-diarization"])
+        self.assertEqual(extractors, ["/models/eres2net.onnx"])  # its voice prints' model
+        self.assertTrue(callable(model.diarizer.prints))
         self.assertTrue(model.speakers_on)
         self.assertFalse(model.speaker_voiced(array("f", bytes(4 * WINDOW))))
         model.use_speakers(None)
@@ -842,6 +954,12 @@ class ControllerTests(unittest.TestCase):
         self.captions._enabled = self.captions._ready = True
         self.captions._start_run()
         self.number = self.captions._run
+
+    @staticmethod
+    def speaker_files():
+        from services.captions import models
+
+        return str(models.diarizer_folder()), str(models.print_file())
 
     def at(self, position):
         self.window.live_session.position_s = position
@@ -948,22 +1066,18 @@ class ControllerTests(unittest.TestCase):
         self.assertEqual(self.at(15.0), "four five six")
 
     def test_off_a_change_shows_as_before_and_the_process_tells_them_no_more(self):
-        from services.captions import models
-
         self.captions.set_speaker_marks(OFF)
         self.assertEqual(self.config["ai_captions_speaker_marks"], OFF)
         self.dialogue()
         self.assertEqual(self.captions._cues[0], (10.0, 13.0, "Nereye gidiyorsun? Eve."))
         self.assertTrue(self.captions._speakers_off.isActive())  # the process told a moment on
         self.captions._speakers_off.timeout.emit()
-        self.assertEqual(self.sent[-1], ("speakers", None))
+        self.assertEqual(self.sent[-1], ("speakers", None, None))
         self.captions.set_speaker_marks(DASHES)
-        self.assertEqual(self.sent[-1], ("speakers", str(models.diarizer_folder())))
+        self.assertEqual(self.sent[-1], ("speakers", *self.speaker_files()))
 
     def test_a_step_through_off_leaves_the_speakers_told_and_the_picture_where_it_is(self):
         # 2026-11-09, the owner's live test: Dashes, Off, Colours in half a second
-        from services.captions import models
-
         live: Any = self.window.live_session
         captions: Any = self.captions
         captions._floored, self.captions._tier = live, "small"
@@ -973,7 +1087,7 @@ class ControllerTests(unittest.TestCase):
         self.captions.set_speaker_marks(OFF)
         self.captions.set_speaker_marks(DASHES)
         self.assertFalse(self.captions._speakers_off.isActive())
-        self.assertEqual(self.sent[sent:], [("speakers", str(models.diarizer_folder()))])
+        self.assertEqual(self.sent[sent:], [("speakers", *self.speaker_files())])
         self.assertEqual(live.floor, 10.0)
         self.captions.set_speaker_marks(OFF)
         self.captions._speakers_off.timeout.emit()  # off for good: the model's own distance
@@ -1013,6 +1127,7 @@ class ControllerTests(unittest.TestCase):
         self.captions._tier = "small"
         self.captions._load_model()
         self.assertEqual(loaded[0]["diarizer"], str(models.diarizer_folder()))
+        self.assertEqual(loaded[0]["voice_prints"], str(models.print_file()))
         self.assertNotIn("speaker", loaded[0])
         self.config["ai_captions_speaker_marks"] = OFF
         self.captions._load_model()
@@ -1038,7 +1153,7 @@ class ControllerTests(unittest.TestCase):
         self.captions._download = download
         self.here["speaker"] = True
         self.captions._on_downloaded(download)
-        self.assertEqual(self.sent[-1], ("speakers", str(models.diarizer_folder())))
+        self.assertEqual(self.sent[-1], ("speakers", *self.speaker_files()))
         self.assertTrue(self.captions.enabled())  # nothing else restarts
 
     def test_the_mark_chosen_is_kept_in_the_config_older_builds_ignore(self):
@@ -1056,7 +1171,7 @@ class ControllerTests(unittest.TestCase):
         from services.captions import models
 
         root = Path(self.tmp.name)
-        downloads = models.needed(models.SPEAKER_KEY, root)
+        *downloads, prints = models.needed(models.SPEAKER_KEY, root)
         self.assertEqual(
             [d.file.path for d in downloads],
             ["embed.onnx", "step_int8.onnx", "mel_filters.bin", "silence_embeds.bin"],
@@ -1066,6 +1181,8 @@ class ControllerTests(unittest.TestCase):
         self.assertEqual(sum(d.file.size for d in downloads), 105561475)  # some 106 MB
         self.assertTrue(all(len(d.file.sha256) == 64 for d in downloads))
         self.assertTrue(all("/resolve/46642c09" in d.file.url for d in downloads))  # pinned
+        self.assertEqual(prints.target, models.print_file(root))  # the voice prints' (26 MB)
+        self.assertEqual(prints.file.size, 26485263)
         self.assertNotIn(models.SPEAKER_KEY, models.SPECIALISTS)  # not in the first question
         self.assertFalse(models.installed(models.SPEAKER_KEY, root))
 

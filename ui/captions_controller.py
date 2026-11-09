@@ -23,7 +23,7 @@ than none). A caption too long for two lines shows in parts, sentence by sentenc
 said by its line's parts' times (`_page_at`; 2026-11-08, the owner).
 
 In a run from source (where the Test model list is offered) each line's speaker is told too,
-by NVIDIA's streaming diarizer (services.captions.sortformer, downloaded unasked, some 106 MB),
+by NVIDIA's streaming diarizer (services.captions.sortformer, downloaded unasked, some 132 MB),
 part by part of each line (its sentences, and where the diarizer hears the speaker change), and a
 change of speaker
 shows (the Subtitles panel's Speaker marks): a new speaker's line starts with "- " on a line of
@@ -638,7 +638,7 @@ class CaptionsController(QObject):
         """The process tells speakers or not as the marks chosen say, and the picture keeps its
         distance for them."""
         if self._process.running():
-            self._process.send("speakers", self._diarizer_folder())
+            self._process.send("speakers", self._diarizer_folder(), self._print_file())
         if self._floored is not None:
             self._floored.set_caption_floor(self._picture_lead(), shift=False)
 
@@ -649,6 +649,12 @@ class CaptionsController(QObject):
 
         lead = LEAD_S.get(self._tier, 8.0)
         return lead + SPEAKER_LEAD_S if self.speaker_marks() != OFF else lead
+
+    def _print_file(self) -> Optional[str]:
+        """The voice prints' speaker model while speakers are marked and it is here, else None."""
+        from services.captions import models
+
+        return str(models.print_file()) if self._diarizer_folder() else None
 
     def _diarizer_folder(self) -> Optional[str]:
         """The diarizer's folder while speakers are marked and it is here, else None."""
@@ -809,7 +815,7 @@ class CaptionsController(QObject):
         from services.captions.models import SPEAKER_KEY, SPECIALISTS
 
         if self._fetching == SPEAKER_KEY:  # Speaker marks' diarizer: the process takes it as it is
-            self._process.send("speakers", self._diarizer_folder())
+            self._process.send("speakers", self._diarizer_folder(), self._print_file())
             self.changed.emit()
             return
         if self._fetching in SPECIALISTS:  # 2.9.6: a language's own model is here
@@ -915,6 +921,7 @@ class CaptionsController(QObject):
                 # a test model picked (a run from source): it alone writes, as Turkish
                 "trial": str(models.captions_root() / trial) if trial else None,
                 "diarizer": self._diarizer_folder(),  # Speaker marks' (a run from source)
+                "voice_prints": self._print_file(),
                 "threads": model_threads(),
             },
             detailed_log=bool(self._config_get("detailed_log", False)),

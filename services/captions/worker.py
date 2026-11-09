@@ -11,8 +11,8 @@ always comes first.
 
 Messages to it: ("load", {...}), ("start", run, url, segment_start, audio_track, language),
 ("film", run, location, start_s, audio_track, language, vlc_options): a film's run,
-("viewer", position), ("language", name), ("speakers", diarizer folder or None), ("stop",),
-("quit",).
+("viewer", position), ("language", name), ("speakers", diarizer folder or None, speaker
+model file), ("stop",), ("quit",).
 From it: ("ready",), ("failed", reason), ("caption", run, start, end, text, turn, speaker[,
 parts]) (turn: 1 when another speaker than the line before's says it; speaker: 1, 2, ... in the
 run, 0 untold: services.captions.speakers; parts, a line of more than one: [(text, start, end,
@@ -345,7 +345,7 @@ class _Model:
         self.voiced = detector(_VOICED_MIN_S)
         self._detector = detector
         self._lock = threading.Lock()
-        self.use_speakers(spec.get("diarizer"))
+        self.use_speakers(spec.get("diarizer"), spec.get("voice_prints"))
         if self.has_model:
             # Warm up: the first decode is slow (graph optimisation), not the viewer's first.
             if self.recognizer is not None:
@@ -355,10 +355,11 @@ class _Model:
             elif self.turkish is not None:
                 self.decode(array("f", bytes(16000 * 4)), TURKISH)
 
-    def use_speakers(self, diarizer: Optional[str]) -> None:
+    def use_speakers(self, diarizer: Optional[str], prints: Optional[str] = None) -> None:
         """2026-11-08, Speaker marks: each line's speakers told by the streaming diarizer whose
-        files are in the folder `diarizer` (it loads in its own thread the first time; lines go
-        untold till then); None: no longer told."""
+        files are in the folder `diarizer`, who is who across its fresh starts by the speaker
+        model in the file `prints` (2026-11-09; they load in their own thread the first time;
+        lines go untold till then); None: no longer told."""
         if not diarizer or not self.has_model:
             self.speakers_on = False
             return
@@ -368,18 +369,23 @@ class _Model:
         self._speakers_loading = True
         threading.Thread(
             target=self._load_speakers,
-            args=(diarizer,),
+            args=(diarizer, prints),
             name="qitv-captions-speakers",
             daemon=True,
         ).start()
 
-    def _load_speakers(self, folder: str) -> None:
+    def _load_speakers(self, folder: str, prints: Optional[str]) -> None:
         try:
-            from services.captions.sortformer import Sortformer
+            from services.captions.sortformer import SherpaPrints, Sortformer
 
             self._speaker_vad = self._detector(_VOICED_MIN_S)
-            self.diarizer = Sortformer(folder)
-            logger.info("AI captions: the diarizer is loaded (%s)", Path(folder).name)
+            voices = SherpaPrints(self._sherpa, prints) if prints else None
+            self.diarizer = Sortformer(folder, prints=voices.print_ if voices else None)
+            logger.info(
+                "AI captions: the diarizer is loaded (%s%s)",
+                Path(folder).name,
+                f", voice prints by {Path(prints).name}" if prints else "",
+            )
         except Exception as error:  # the lines go on, untold
             logger.warning("AI captions: the diarizer did not load: %s", type(error).__name__)
         finally:
@@ -1308,7 +1314,7 @@ def _serve(link: _Link) -> None:
             viewer[0] = float(message[1])
         elif kind == "speakers":  # 2026-11-08: Speaker marks on (the diarizer's folder) or off
             if model is not None:
-                model.use_speakers(message[1])
+                model.use_speakers(message[1], message[2] if len(message) > 2 else None)
         elif kind == "language":
             if model is not None and model.trial:
                 continue  # a test model's runs stay Turkish

@@ -32,7 +32,7 @@ import math
 from pathlib import Path
 import sys
 import threading
-from typing import Any, Optional, Sequence
+from typing import Any, Callable, Optional, Sequence
 
 from services.captions import onnx_graph
 
@@ -231,13 +231,189 @@ class SpeakerCache:
         return out_e, out_p
 
 
+# 2026-11-09, the owner ("try 2 then if not 1"): late in a run, all its speakers' places taken,
+# Sortformer tells speakers apart far worse than at its start. It starts afresh where nobody has
+# talked for PAUSE_S (a scene's end), and voice prints keep who is who across those (VoiceBook):
+# each speaker of the run is remembered by a print of their speech pooled across their turns (up
+# to ENROL_S), and a speaker Sortformer hears after a fresh start shows at once as a new one,
+# then, once they have said PROBE_S, is found to be a remembered one (MATCH or more alike:
+# their colour from then on) or stays new: unsure, a fresh colour, never someone else's.
+# Chosen on the 8.8-minute set, each stretch after the episode's 15 minutes before it (and with
+# fresh starts forced inside the stretches, to test who is who across them), and by a speaker
+# verification sweep (pooled enrollment of 5/10/20 s against probes of 1/2/3 s): ERes2Net told
+# TV voices apart best (CAM++ and TitaNet-L near it; ERes2NetV2 over the CPU budget). MATCH lets
+# 1 % of other speakers' probes through on the TV set, 0.2 % of 50 held-out Common Voice
+# speakers': a wrong merge (two people in one colour) is the worse error. A fresh start waits
+# MIN_STRETCH_S since the last (one at every pause turned a scene's colours over and over).
+PAUSE_S = 5.0
+MIN_STRETCH_S = 60.0  # ... once its speakers have been told this long since its last start
+PROBE_S = 3.0
+ENROL_S = 10.0
+MIN_ENROL_S = 5.0  # a voice remembered by less of its speech than this is matched to nobody
+MATCH = 0.51
+SOUND_KEEP_S = 30.0  # the sound kept until it is told who said it (some seconds)
+
+Print = Callable[[array], Optional[Sequence[float]]]
+
+
+def _unit(vector: Sequence[float]) -> list[float]:
+    norm = math.sqrt(sum(x * x for x in vector)) or 1.0
+    return [x / norm for x in vector]
+
+
+class VoiceBook:
+    """Who Sortformer's speakers are across its fresh starts: the run's speakers 0, 1, ... (each a
+    colour), each remembered by a print of their speech pooled across turns. A Sortformer speaker
+    of a stretch (between fresh starts) is a new run speaker when first heard; in a stretch after
+    the first, once it has said `probe_s`, its print finds the remembered speaker MATCH alike (not
+    another of this stretch's), whose colour it takes from then on, else it stays new."""
+
+    def __init__(
+        self,
+        prints: Optional[Print] = None,
+        match: float = MATCH,
+        probe_s: float = PROBE_S,
+        enrol_s: float = ENROL_S,
+        min_enrol_s: float = MIN_ENROL_S,
+    ) -> None:
+        self._prints = prints
+        self.match = match
+        self._probe = int(probe_s * RATE)
+        self._enrol = int(enrol_s * RATE)
+        self._min_enrol = int(min_enrol_s * RATE)
+        self._lock = threading.Lock()
+        self._map: dict[tuple[int, int], int] = {}  # (stretch, Sortformer speaker): run speaker
+        self._own: dict[tuple[int, int], array] = {}  # their speech in the stretch (to probe_s)
+        self._decided: set[tuple[int, int]] = set()
+        self._pool: list[array] = []  # by run speaker: their speech, pooled (to enrol_s)
+        self._voice: list[Optional[list[float]]] = []  # ... its print
+        self._printed_at: list[int] = []  # ... the pool's length when printed
+
+    def count(self) -> int:
+        return len(self._pool)
+
+    def speaker(self, stretch: int, local: int) -> int:
+        """The run speaker of Sortformer's `local` in `stretch`: a new one when first heard."""
+        key = (stretch, local)
+        with self._lock:
+            if key not in self._map:
+                self._pool.append(array("f"))
+                self._voice.append(None)
+                self._printed_at.append(0)
+                self._map[key] = len(self._pool) - 1
+                if not any(st < stretch for st, _ in self._map):
+                    self._decided.add(key)  # the run's first stretch: nobody to be
+            return self._map[key]
+
+    def known(self, stretch: int, local: int) -> Optional[int]:
+        return self._map.get((stretch, local))
+
+    def said(self, stretch: int, local: int, sound: Sequence[float]) -> None:
+        """Sound `local` said alone in `stretch`: pooled into their run speaker's voice once who
+        they are is decided; before, kept until it is PROBE_S, then their print decides."""
+        if self._prints is None:
+            return
+        key = (stretch, local)
+        g = self.speaker(stretch, local)
+        if key not in self._decided:
+            own = self._own.setdefault(key, array("f"))
+            own.extend(sound)
+            if len(own) < self._probe:
+                return
+            g = self._decide(key, g, own)
+            sound = own
+            del self._own[key]
+        pool = self._pool[g]
+        room = self._enrol - len(pool)
+        if room > 0:
+            pool.extend(sound[:room])
+        grown = len(pool) >= min(self._enrol, max(self._min_enrol, 2 * self._printed_at[g]))
+        if (
+            self._voice[g] is None
+            and len(pool) >= self._min_enrol
+            or (self._voice[g] is not None and len(pool) > self._printed_at[g] and grown)
+        ):
+            vector = self._print(pool)
+            if vector is not None:
+                with self._lock:
+                    self._voice[g], self._printed_at[g] = vector, len(pool)
+
+    def _print(self, sound: array) -> Optional[list[float]]:
+        assert self._prints is not None
+        try:
+            vector = self._prints(array("f", sound))
+        except Exception:
+            return None
+        return _unit(vector) if vector is not None else None
+
+    def _decide(self, key: tuple[int, int], g: int, own: array) -> int:
+        """Whose voice `own` is: the remembered speaker MATCH alike, else its own run speaker."""
+        probe = self._print(own)
+        self._decided.add(key)
+        if probe is None:
+            return g
+        stretch, local = key
+        with self._lock:
+            taken = {v for (st, lo), v in self._map.items() if st == stretch and lo != local}
+            best, alike = None, self.match
+            for other, voice in enumerate(self._voice):
+                if voice is None or other == g or other in taken:
+                    continue
+                score = sum(a * b for a, b in zip(voice, probe))
+                if score >= alike:
+                    best, alike = other, score
+            if best is not None:
+                self._map[key] = g = best
+        return g
+
+    def row(self, stretch: int, probs: Sequence[float], width: int) -> list[float]:
+        """A told frame's probabilities by run speaker (`width` of them): each Sortformer
+        speaker's as its run speaker's, those never heard alone left out."""
+        out = [0.0] * width
+        for local, p in enumerate(probs):
+            g = self._map.get((stretch, local))
+            if g is not None and g < width and p > out[g]:
+                out[g] = p
+        return out
+
+
+class SherpaPrints:
+    """Voice prints by a speaker model through the runtime's sherpa-onnx (its
+    SpeakerEmbeddingExtractor; models.PRINT_FILE): `print_` of some sound, or None."""
+
+    def __init__(self, sherpa_onnx: Any, model: str, threads: int = 1) -> None:
+        config = sherpa_onnx.SpeakerEmbeddingExtractorConfig(model=model, num_threads=threads)
+        if not config.validate():
+            raise ValueError("the speaker model's file is not there")
+        self._extractor = sherpa_onnx.SpeakerEmbeddingExtractor(config)
+
+    def print_(self, sound: array) -> Optional[list[float]]:
+        stream = self._extractor.create_stream()
+        stream.accept_waveform(RATE, sound)
+        stream.input_finished()
+        if not self._extractor.is_ready(stream):
+            return None
+        return list(self._extractor.compute(stream))
+
+
 class Sortformer:
     """A run's diarization: placed sound in (`push`, from one thread), each 10 ms's speaker
     probabilities out (`frames`, `covered`, from others). One is loaded for the captions
     process; each run starts it afresh (`reset`), and the token that gives keeps a stopped run's
-    last sound out of the next one."""
+    last sound out of the next one. Within a run it starts its speakers afresh after a pause
+    (`pause_s`; none: never), and `prints` (a voice print of some sound, or None) keeps who is
+    who across those (VoiceBook); `frames` are by the run's speakers."""
 
-    def __init__(self, folder: str, settings: Settings = Settings(), threads: int = 1) -> None:
+    def __init__(
+        self,
+        folder: str,
+        settings: Settings = Settings(),
+        threads: int = 1,
+        prints: Optional[Print] = None,
+        pause_s: Optional[float] = PAUSE_S,
+        match: float = MATCH,
+        min_stretch_s: float = MIN_STRETCH_S,
+    ) -> None:
         from services.captions import onnx_c
 
         base = Path(folder)
@@ -255,6 +431,10 @@ class Sortformer:
         self._step: Any = onnx_c.Session(self._api, base / "step_int8.onnx", threads)
         self.silence = floats(base / "silence_embeds.bin")
         self.settings = settings
+        self._prints = prints
+        self._pause = None if pause_s is None else max(1, round(pause_s / FRAME_S))
+        self._match = match
+        self._min_stretch = round(min_stretch_s / FRAME_S)
         self._lock = threading.Lock()  # what is told (read from other threads)
         self._work = threading.Lock()  # the sound in (a run's thread, the next run's reset)
         self._token = 0
@@ -281,9 +461,22 @@ class Sortformer:
             self._embeds_from = 0
             self._next = 0  # the next chunk's first embedding
             if told:
-                self._cache = SpeakerCache(self.silence, self.settings)
-            self._told: deque[tuple[int, list[float]]] = deque()  # (10 ms frame, probabilities)
+                self.book = VoiceBook(self._prints, self._match)
+                self._stretch = -1
+            self._new_stretch()  # (a jump: a fresh start too, the voices kept)
+            # (10 ms frame, stretch, Sortformer's probabilities)
+            self._told: deque[tuple[int, int, list[float]]] = deque()
             self._told_to = 0  # 10 ms frames told so far
+            self._sound = array("f")  # the sound of the last SOUND_KEEP_S, from sample...
+            self._sound_from = 0
+            self._quiet = 0  # told frames since someone last talked
+
+    def _new_stretch(self) -> None:
+        """Sortformer's speakers afresh (its cache and FIFO), the sound each says kept anew."""
+        self._cache = SpeakerCache(self.silence, self.settings)
+        self._stretch += 1
+        self._talked = False
+        self._stretch_from = getattr(self, "_told_to", 0)
 
     # ---- in ------------------------------------------------------------------------------
     def push(self, at: float, samples: Sequence[float], token: Optional[int] = None) -> None:
@@ -313,6 +506,12 @@ class Sortformer:
         self._last = last
         self._fed += len(samples)
         self._pre.extend(pre)
+        if self._prints is not None:
+            self._sound.extend(samples)
+            extra = len(self._sound) - int(SOUND_KEEP_S * RATE)
+            if extra > 0:
+                del self._sound[:extra]
+                self._sound_from += extra
         self._frames()
         self._steps()
 
@@ -372,17 +571,40 @@ class Sortformer:
                     told.append(probs)
             pooled.append(mean)
         self._cache.update(inputs, pooled, chunk)
+        first = self._told_to
         with self._lock:
             for probs in told:
-                self._told.append((self._told_to, probs))
+                self._told.append((self._told_to, self._stretch, probs))
                 self._told_to += 1
             while len(self._told) > KEEP_FRAMES:
                 self._told.popleft()
+        self._listen(first, told)
         self._next += chunk
         drop = self._next - self._embeds_from
         if drop > 0:
             del self._embeds[:drop]
             self._embeds_from += drop
+
+    def _listen(self, first: int, told: list[list[float]]) -> None:
+        """After a step: each Sortformer speaker heard alone is a run speaker, and what they said
+        goes to the voice book; after PAUSE_S of nobody, its speakers start afresh."""
+        stretch = self._stretch
+        said: dict[int, array] = {}
+        for i, probs in enumerate(told):
+            on = [k for k, x in enumerate(probs) if x > 0.5]
+            self._quiet = 0 if on else self._quiet + 1
+            if len(on) != 1:
+                continue
+            self._talked = True
+            self.book.speaker(stretch, on[0])
+            start = (first + i) * HOP - self._sound_from
+            if self._prints is not None and start >= 0:
+                said.setdefault(on[0], array("f")).extend(self._sound[start : start + HOP])
+        for local, sound in said.items():
+            self.book.said(stretch, local, sound)
+        if self._pause is not None and self._talked and self._quiet >= self._pause:
+            if self._told_to - self._stretch_from >= self._min_stretch:
+                self._new_stretch()
 
     # ---- out -----------------------------------------------------------------------------
     @property
@@ -396,11 +618,13 @@ class Sortformer:
             return self._origin + self._told_to * FRAME_S
 
     def frames(self, start: float, end: float) -> list[list[float]]:
-        """Each told 10 ms frame's speaker probabilities in timeline seconds [start, end)."""
+        """Each told 10 ms frame's probabilities, by the run's speakers, in timeline seconds
+        [start, end)."""
         with self._lock:
             first = math.ceil((start - self._origin) / FRAME_S - 1e-9)
             last = math.ceil((end - self._origin) / FRAME_S - 1e-9)
-            return [p for f, p in self._told if first <= f < last]
+            width = self.book.count()
+            return [self.book.row(st, p, width) for f, st, p in self._told if first <= f < last]
 
     def time_of(self, frame_offset: int, start: float) -> float:
         """The timeline second of the `frame_offset`-th frame `frames(start, ...)` gives."""
@@ -460,12 +684,13 @@ def changes(frames: Sequence[Sequence[float]], start: float) -> list[float]:
 
 
 def speaker(frames: Sequence[Sequence[float]]) -> Optional[int]:
-    """The speaker (0 to SPEAKERS - 1, in the order they came) most heard in `frames`, of those
-    where someone talks (VOICED_P); None when nobody talks, or the likeliest for less than
-    MIN_SHARE of them."""
-    voiced = [p for p in frames if max(p) >= VOICED_P]
+    """The speaker (0, 1, ... in the order they came) most heard in `frames`, of those where
+    someone talks (VOICED_P); None when nobody talks, or the likeliest for less than MIN_SHARE
+    of them."""
+    voiced = [p for p in frames if p and max(p) >= VOICED_P]
     if not voiced:
         return None
-    mass = [sum(p[k] for p in voiced) for k in range(SPEAKERS)]
-    best = max(range(SPEAKERS), key=mass.__getitem__)
+    width = len(voiced[0])
+    mass = [sum(p[k] for p in voiced) for k in range(width)]
+    best = max(range(width), key=mass.__getitem__)
     return best if mass[best] / len(voiced) >= MIN_SHARE else None

@@ -152,6 +152,11 @@ against pinned SHA-256 sums:
   licence by `NealCaren/Nemotron-3-Diarization-ONNX` on Hugging Face (its embedder, its encoder
   with int8 weights, mel filterbank and silence embedding). NVIDIA and Nemotron are trademarks of
   NVIDIA Corporation.
+- **ERes2Net** (3D-Speaker, Alibaba's Tongyi Lab: `speech_eres2net_sv_en_voxceleb_16k`, trained
+  on VoxCeleb), the speaker model whose voice prints keep who is who across the diarizer's fresh
+  starts (a run from source's Speaker marks): Apache License 2.0
+  (<https://github.com/modelscope/3D-Speaker>), as converted to ONNX by the sherpa-onnx project
+  (its GitHub releases).
 
 The sound is decoded by QiTV's own libVLC (above); nothing you hear or that the model writes
 leaves your computer.
