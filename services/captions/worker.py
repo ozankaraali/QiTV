@@ -123,6 +123,9 @@ _MOON_FRAME = 80
 _IDLE_S = 0.25  # the growing writer looks at the picture this often when no sound comes
 SEND_MARGIN_S = 1.0  # a line waiting for its speakers goes when the picture is this near it
 FRESH_FROM = 1000  # the speaker numbers of cuts whose speaker is unsure (a fresh colour each)
+# 2026-11-09, the owner: buffered channels watched at 1.5x or 2x, so 2 s of sound to read a second;
+# from this rate on, our Moonshine beam reads its best path alone (about 4x cheaper)
+FAST_RATE = 1.25
 # The trial's field test set (the owner, 2026-11-07): with a folder named here, each piece the
 # Moonshine trial reads is kept as a 16 kHz WAV beside a line of what the model wrote, to label.
 SAVE_ENV = "QITV_TR_SAVE_PIECES"
@@ -542,11 +545,13 @@ class _Model:
             self._loading[name].wait(_LOAD_WAIT_S)
         return getattr(self, name)
 
-    def decode(self, samples: array, language: str) -> str:
-        """`samples` read by the model that writes `language` (`wrote` names it after)."""
+    def decode(self, samples: array, language: str, fast: bool = False) -> str:
+        """`samples` read by the model that writes `language` (`wrote` names it after); `fast`
+        (the picture plays faster than FAST_RATE): our beam narrowed to its best path alone."""
         if language == TURKISH and self.beam is not None:
             self._wrote.name = self.name(_TURKISH_ROLE)
-            return str(self.beam.transcribe(samples)).strip()  # as sherpa-onnx's text
+            width = 1 if fast else None
+            return str(self.beam.transcribe(samples, width=width)).strip()  # as sherpa-onnx's
         if language == TURKISH and self.turkish is not None:
             self._wrote.name = self.name(_TURKISH_ROLE)
             stream = self.turkish.create_stream()
@@ -740,6 +745,11 @@ class _Run:
         assert self._waiting is not None
         self._waiting.put(line)
 
+    def fast(self) -> bool:
+        """The picture plays faster than FAST_RATE (the reader reads ahead at its speed)."""
+        viewer = getattr(self, "viewer", None)
+        return bool(viewer is not None and len(viewer) > 1 and float(viewer[1]) >= FAST_RATE)
+
     def _diarizer(self) -> Any:
         """The diarizer while Speaker marks are on and it is loaded (and has not failed in this
         run), else None."""
@@ -884,7 +894,7 @@ class _Run:
 
     def _moon_reading(self, samples: array) -> str:
         """The Moonshine trial's reading of a whole stretch of sound, what nobody said left out."""
-        text = guards.clean(self.model.decode(samples, TURKISH))
+        text = guards.clean(self.model.decode(samples, TURKISH, fast=self.fast()))
         if text and getattr(self, "guessed", False):
             self._check_guess(text)
         if text and not text_language.written_in(text, TURKISH):
@@ -1074,7 +1084,7 @@ class _Run:
             started = time.perf_counter()
             self._working = piece.start
             try:
-                text = self.model.decode(piece.samples, self.language)
+                text = self.model.decode(piece.samples, self.language, fast=self.fast())
             except Exception as error:
                 logger.warning("AI captions: a piece failed: %s", type(error).__name__)
                 continue
@@ -1303,10 +1313,27 @@ def captions_main(conn: Connection, detailed_log: bool = False) -> None:
         os._exit(0)
 
 
+def _rate_seen(viewer: list, seen: list, now: float) -> None:
+    """The picture's playback rate (viewer[1]) from how its position moved over the last second
+    or so (2026-11-09, the owner: buffered channels watched at 2x); a seek or a pause: anew."""
+    position = float(viewer[0])
+    if seen[0] is None:
+        seen[0] = (position, now)
+        return
+    start, then = seen[0]
+    if now - then < 1.0:
+        return
+    rate = (position - start) / (now - then)
+    if 0.5 <= rate <= 4.0:
+        viewer[1] = 0.5 * float(viewer[1]) + 0.5 * rate
+    seen[0] = (position, now)
+
+
 def _serve(link: _Link) -> None:
     model: Optional[_Model] = None
     run: Optional[_Run] = None
-    viewer = [0.0]
+    viewer = [0.0, 1.0]  # the picture's position, and its playback rate (`_rate_seen`)
+    seen: list = [None]  # (position, clock) the rate is measured from
     language = ""
     while True:
         try:
@@ -1370,6 +1397,7 @@ def _serve(link: _Link) -> None:
             run.start()
         elif kind == "viewer":
             viewer[0] = float(message[1])
+            _rate_seen(viewer, seen, time.monotonic())
         elif kind == "speakers":  # 2026-11-08: Speaker marks on (the diarizer's folder) or off
             if model is not None:
                 model.use_speakers(*message[1:3])

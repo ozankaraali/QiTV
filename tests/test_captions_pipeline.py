@@ -404,7 +404,8 @@ class WrittenToTests(unittest.TestCase):
         run = self.run_with(self.piece(90.0, 95.0), self.piece(101.0, 104.0))
         decoded, sent = [], []
         run.model = SimpleNamespace(
-            recognizer=object(), decode=lambda samples, language: decoded.append(1) or "Hello."
+            recognizer=object(),
+            decode=lambda samples, language, fast=False: decoded.append(1) or "Hello.",
         )
         run.link = SimpleNamespace(send=sent.append)
         run.viewer, run.language, run.run, run.rtf = [100.0], "English", 1, 0.5
@@ -429,7 +430,7 @@ class WrittenToTests(unittest.TestCase):
         sent = []
         run.model = SimpleNamespace(
             recognizer=object(),
-            decode=lambda samples, language: "Hello there.",
+            decode=lambda samples, language, fast=False: "Hello there.",
             wrote=lambda: "qwen3-asr-0.6b",
         )
         run.link = SimpleNamespace(send=sent.append)
@@ -493,7 +494,7 @@ class StreamClockTests(unittest.TestCase):
         from services.captions.worker import _Run
 
         def bare(read_on):
-            run = object.__new__(_Run)
+            run: Any = object.__new__(_Run)
             run.stopped, run.run, run.read_on, run._steps = threading.Event(), 7, read_on, 0
             run._resynced, run.newest = False, 100.0
             run.sent, run.placed = [], []
@@ -501,10 +502,12 @@ class StreamClockTests(unittest.TestCase):
             times = TsTimes()
             times.feed(_stream([90_000], [90_000]))
             run.clock = StreamClock(100.0, times)
-            run._take = lambda at, floats: (
-                run.placed.append(round(at, 2)),
-                setattr(run, "newest", at + len(floats) / RATE),
-            )
+
+            def take(at, floats):
+                run.placed.append(round(at, 2))
+                run.newest = at + len(floats) / RATE
+
+            run._take = take
             return run
 
         block = bytes(2 * 1600)
@@ -520,6 +523,55 @@ class StreamClockTests(unittest.TestCase):
         self.assertEqual(again.sent, [])
         self.assertEqual(again.placed, [100.0, 100.1, 100.2, 100.3, 100.4, 100.5])
         self.assertEqual(len(logs.records), 1)  # said once
+
+    def test_the_process_hears_the_picture_s_rate_and_reads_faster_from_1_25x(self):
+        from services.captions import worker
+
+        viewer, seen = [100.0, 1.0], [None]
+        for second in range(6):
+            viewer[0] = 100.0 + 2.0 * second
+            worker._rate_seen(viewer, seen, 1000.0 + second)
+        self.assertAlmostEqual(viewer[1], 2.0, delta=0.1)
+        viewer[0] = 400.0  # a seek: not a rate
+        worker._rate_seen(viewer, seen, 1007.0)
+        self.assertAlmostEqual(viewer[1], 2.0, delta=0.1)
+        run: Any = object.__new__(worker._Run)
+        run.viewer = viewer
+        self.assertTrue(run.fast())
+        viewer[1] = 1.1
+        self.assertFalse(run.fast())
+        model: Any = object.__new__(worker._Model)
+        widths = []
+
+        def transcribe(samples, width=None):
+            widths.append(width)
+            return ""
+
+        model.beam = SimpleNamespace(transcribe=transcribe)
+        model._wrote, model.names = threading.local(), {}
+        model.name = lambda role: "beam"
+        model.decode(array("f"), worker.TURKISH, fast=True)
+        model.decode(array("f"), worker.TURKISH)
+        self.assertEqual(widths, [1, None])  # its best path alone at 2x, the beam at 1x
+
+    def test_a_beam_read_narrowed_for_once(self):
+        from services.captions import moon_beam
+
+        reader: Any = object.__new__(moon_beam.BeamReader)
+        reader.settings, reader.scores = moon_beam.Settings(), None
+
+        class Model:
+            def steps(self, encoded):
+                return mock.MagicMock()
+
+        reader.model = Model()
+        seen = []
+        with mock.patch.object(
+            moon_beam, "search", lambda st, cap, settings, lm: seen.append(settings.width)
+        ):
+            reader.decode(SimpleNamespace(silent=False, frames=40), width=1)
+            reader.decode(SimpleNamespace(silent=False, frames=40))
+        self.assertEqual(seen, [1, moon_beam.WIDTH])
 
     def test_a_radio_channel_is_timed_by_its_sound(self):
         # The helper cuts and times an audio-only channel by its sound (services.live.ts).
@@ -823,6 +875,31 @@ class ControllerTimingTests(unittest.TestCase):
         self.assertEqual(self.at(12.85), "Nasılsın")
         self.assertEqual(self.at(13.9), "Nasılsın")  # held long enough to read
         self.assertEqual(self.at(14.1), "")
+
+    def test_at_2x_a_caption_stays_as_long_for_the_viewer_to_read(self):
+        # 2026-11-09, the owner: buffered channels watched at 2x
+        run = self.captions._run
+        self.captions._on_caption(run, 10.0, 11.0, "Nasılsın")
+        self.assertEqual(self.at(10.35), "Nasılsın")
+        self.assertEqual(self.at(11.55), "Nasılsın")  # 1x: 0.6 s past its words
+        self.assertEqual(self.at(11.65), "")
+        self.captions._forget_cues()
+        self.captions._rate, self.captions._rate_from = 2.0, None  # (as measured: the next test)
+        self.captions._on_caption(run, 20.0, 21.0, "Nasılsın")
+        self.assertEqual(self.at(22.6), "Nasılsın")  # 2.4 s of the picture's: 1.2 s the viewer's
+        self.assertEqual(self.at(22.8), "")
+        self.captions._rate = 1.05  # stay-live's gentle steering: as at 1x
+        self.assertEqual(self.captions._scale(), 1.0)
+        self.captions._rate = 3.0
+        self.assertEqual(self.captions._scale(), 2.0)  # (at most RATE_CAP)
+
+    def test_the_picture_s_rate_is_measured_from_its_position(self):
+        self.captions._rate_from = None
+        for second in range(5):
+            self.captions._measure_rate(100.0 + 2.0 * second, 1000.0 + second)
+        self.assertAlmostEqual(self.captions._rate, 2.0, delta=0.1)
+        self.captions._measure_rate(500.0, 1006.0)  # a seek: not a rate
+        self.assertAlmostEqual(self.captions._rate, 2.0, delta=0.1)
 
     def test_the_end_of_a_line_cut_off_on_its_own_joins_it(self):
         # 2.9.5, the owner: a sentence's last words came alone ("ötesine geçiyor").

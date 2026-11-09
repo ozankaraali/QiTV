@@ -437,7 +437,9 @@ class WorkerTest(unittest.TestCase):
             ("Тот самый день", ""),  # another language's letters
             ("Sevgi, iyilik ve umutla.", "Sevgi, iyilik ve umutla."),
         ):
-            run.model = SimpleNamespace(decode=lambda samples, language, text=text: text)
+            run.model = SimpleNamespace(
+                decode=lambda samples, language, text=text, fast=False: text
+            )
             self.assertEqual(run._moon_reading(array("f")), kept)
 
     def test_each_utterance_read_whole_is_kept_for_the_field_tests(self) -> None:
@@ -652,7 +654,7 @@ class TitlePrefixTest(unittest.TestCase):
             prepare_qwen=mock.Mock(),
             is_speech=lambda window: False,
             is_voiced=lambda window: False,
-            decode=lambda samples, language: next(texts),
+            decode=lambda samples, language, fast=False: next(texts),
         )
         run = object.__new__(_Run)
         with mock.patch("services.captions.decoder.AudioDecoder"):

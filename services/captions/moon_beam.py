@@ -26,7 +26,7 @@ blocks (only the blocks that hold one are looked through).
 from __future__ import annotations
 
 from array import array
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from itertools import compress
 import logging
 from math import exp, inf, log, sin, tau
@@ -252,20 +252,26 @@ class BeamReader:
             f" and a {self.lm.order}-gram" if self.lm is not None else "",
         )
 
-    def decode(self, encoded: Encoded, max_new_tokens: Optional[int] = None) -> Decoded:
+    def decode(
+        self, encoded: Encoded, max_new_tokens: Optional[int] = None, width: Optional[int] = None
+    ) -> Decoded:
+        """The best hypothesis; `width` narrows the beam for this reading (1: its best path)."""
         if encoded.silent:
             return Decoded(eos=True)
         cap = token_cap(encoded.frames) if max_new_tokens is None else max_new_tokens
         if cap <= 0:
             return Decoded()
+        settings = self.settings if width is None else replace(self.settings, width=width)
         with self.model.steps(encoded) as steps:
-            return search(steps, cap, self.settings, self.scores)
+            return search(steps, cap, settings, self.scores)
 
-    def transcribe(self, samples: Union[array, Sequence[float]]) -> str:
+    def transcribe(
+        self, samples: Union[array, Sequence[float]], width: Optional[int] = None
+    ) -> str:
         """A piece's text (16 kHz mono floats), as sherpa-onnx writes a decode's tokens."""
         encoded = self.model.encode(samples)
         try:
-            return self.model.text(self.decode(encoded).tokens)
+            return self.model.text(self.decode(encoded, width=width).tokens)
         finally:
             encoded.release()
 

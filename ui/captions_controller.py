@@ -94,6 +94,10 @@ JOIN_LONGEST_S = 3.5
 JOIN_CHARS = 84  # without an overlay to ask: what two lines hold
 LAG_S = 1.0
 PAGE_S = 1.0  # a part of a long caption stays at least this long (2026-11-08: none flashes by)
+# 2026-11-09, the owner: buffered channels watched at 1.5x or 2x; the times a caption stays to be
+# read are the viewer's, so they stretch by the picture's rate (from FAST_FROM, at most RATE_CAP)
+FAST_FROM = 1.2
+RATE_CAP = 2.0
 _LAG_LOOK = 32  # cues looked back at for a wait that reaches the one asked about
 TICK_MS = 250
 SEEK_S = 2.0  # the position moved this much more than the clock: a seek, read again there
@@ -214,6 +218,8 @@ class CaptionsController(QObject):
         self._read_on = False  # the next run reads on past steps of the stream's clock
         self._run_began: Optional[float] = None  # when the run began (its sound awaited)
         self._deaf_runs = 0  # runs in a row read again for hearing nothing (twice at most)
+        self._rate = 1.0  # the picture's playback rate, as its position moves
+        self._rate_from: Optional[tuple[float, float]] = None  # (position, clock) measured from
         self._supported: Optional[bool] = None
         self._asking = False
         self._question = ("", "", "")  # the download's question and its answers, as asked
@@ -1382,10 +1388,12 @@ class CaptionsController(QObject):
             # unless the run there has read it already.
             if (moved > elapsed + SEEK_S or moved < -SEEK_S) and self._ready:
                 self._last = (position, now)
+                self._rate_from = None
                 if not self._covered(position):
                     self._start_run()
                 return
         self._last = (position, now)
+        self._measure_rate(position, now)
         self._process.send("viewer", position)
         self._show(self._cue_at(position))
         self._forget(position)
@@ -1435,7 +1443,7 @@ class CaptionsController(QObject):
         if following is not None and following - end <= BRIDGE_S:
             until = following  # a short pause: on until the next line
         else:
-            until = max(end + HOLD_S, shows + MIN_SHOW_S, shows + len(text) / READ_CPS)
+            until = max(end + HOLD_S * self._scale(), shows + self._reading(text))
             if following is not None:
                 until = min(until, following)
         if position >= until:
@@ -1454,21 +1462,39 @@ class CaptionsController(QObject):
         """When cue `i` shows: at its first word, or once the one before has been read, by at
         most LAG_S later (2.9.5)."""
         cues = self._cues
+        lag = LAG_S * self._scale()  # (as long for the viewer at any rate)
         j = i
         while j > 0 and i - j < _LAG_LOOK:
             before_start, _, before_text = cues[j - 1]
-            if before_start + LAG_S + self._reading(before_text) <= cues[j][0]:
+            if before_start + lag + self._reading(before_text) <= cues[j][0]:
                 break  # the one before is read before this one's word: it starts on time
             j -= 1
         shows = cues[j][0] + FIRST_WORD_S
         for k in range(j + 1, i + 1):
             earliest = cues[k][0] + FIRST_WORD_S
-            shows = max(earliest, min(shows + self._reading(cues[k - 1][2]), earliest + LAG_S))
+            shows = max(earliest, min(shows + self._reading(cues[k - 1][2]), earliest + lag))
         return shows
 
-    @staticmethod
-    def _reading(text: str) -> float:
-        return max(MIN_SHOW_S, len(text) / READ_CPS)
+    def _measure_rate(self, position: float, now: float) -> None:
+        """The picture's playback rate over the last second or so (a seek or a wait: anew)."""
+        if self._rate_from is None:
+            self._rate_from = (position, now)
+            return
+        start, then = self._rate_from
+        if now - then < 1.0:
+            return
+        rate = (position - start) / (now - then)
+        if 0.0 <= rate <= 4.0:
+            self._rate = 0.5 * self._rate + 0.5 * rate
+        self._rate_from = (position, now)
+
+    def _scale(self) -> float:
+        """How much longer, in the picture's seconds, a caption stays to be read: the playback
+        rate from FAST_FROM on, at most RATE_CAP (1x, or stay-live's gentle steering: as it is)."""
+        return 1.0 if self._rate < FAST_FROM else min(self._rate, RATE_CAP)
+
+    def _reading(self, text: str) -> float:
+        return max(MIN_SHOW_S, len(text) / READ_CPS) * self._scale()
 
     def _page_at(self, i: int, position: float, shows: float) -> str:
         """Cue `i`, shown since `shows`, at `position`: the whole of it, or the part of it said
@@ -1490,8 +1516,8 @@ class CaptionsController(QObject):
         for k, page in enumerate(pages):
             if k:
                 spoken = _word_time(timing, said)
-                read = min(on + self._reading(pages[k - 1]), spoken + LAG_S)
-                on = max(spoken, on + PAGE_S, read)
+                read = min(on + self._reading(pages[k - 1]), spoken + LAG_S * self._scale())
+                on = max(spoken, on + PAGE_S * self._scale(), read)
             if position < on:
                 return pages[k - 1] if k else page
             said += _words(page)

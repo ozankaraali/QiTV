@@ -305,7 +305,7 @@ class TrialProcessTests(unittest.TestCase):
             def warm(self):
                 self.warmed += 1
 
-            def transcribe(self, samples):
+            def transcribe(self, samples, width=None):
                 return " Deniz'i gördüm i şte "
 
         with mock.patch("services.captions.moon_beam.BeamReader", Reader):
