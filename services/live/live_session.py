@@ -24,11 +24,11 @@ after `_CLOSE_CAP_MS`. A direct play after a session was open that fails at once
 and 10 s; a provider allowing one stream may still count the buffer's connection a while),
 with "Reconnecting…" each time, and only then reported; a later failure (VLC timed out
 opening it: the provider does not answer) and, once it played, any error are reported at
-once. Only `available(False)` plays directly at once: no helper, so no upstream and no
-buffer, is left (also for a session whose input had ended). Unsupported sources, failures
-before ready and a ready that does not come within `ready_timeout_ms` fall back with
-"Time-shift isn't available for this channel"; after `available(False)` every start plays
-directly for the rest of the run. A source that
+once (a tune that played comes back by itself instead: below). Only `available(False)` plays
+directly at once: no helper, so no upstream and no buffer, is left (also for a session whose
+input had ended). Unsupported sources, failures before ready and a ready that does not come
+within `ready_timeout_ms` fall back with "Time-shift isn't available for this channel"; after
+`available(False)` every start plays directly for the rest of the run. A source that
 sent bytes by then without anything playable (no keyframe yet: an on-demand restream
 starting up, say), or a raw-TS one that answered and holds its body back (2.1: headers at
 once, the body seconds later; an HLS channel only once segment bytes flow), gets until
@@ -39,6 +39,20 @@ with a recording, not the channel (2.8.11: `not_live` in the helper's state, a p
 "connection limit" clip, say), says so (`NOT_LIVE`, at each such answer, also while playing)
 and is waited for while the helper asks again: played directly, it would answer the same. It
 plays once an answer is live, or is refused once the helper gives up (`STREAM_LIMIT`).
+
+A channel that played in this tune is never given up on while it stays chosen
+(`services.revive`, `start(revive=True)`, the default): a direct play that ends or fails after
+that (and after the fallback's quick tries above) opens again in the same player, so in the
+same budget slot, after the next wait of `REVIVE_S` (1 s, 3 s, 10 s … then every 5 minutes),
+until it plays (`HEALTHY_S` of play starts the waits anew), the tune ends, or an address no
+player is handed comes (`NO_STREAM_MESSAGE`); nothing is reported meanwhile, and the UI leaves
+such an end to it (`revives()`). Through the pipeline the helper itself never gives up on a
+live channel's stream (`services.live.source`): past its quick reconnects its state names when
+the next try is due (`retry_at`), and the buffer plays on. Either way `retrying(seconds)` says
+when the next try comes (0.0: one opens now; -1.0: none is waited for any more), `retry_in()`
+reads it, and `retry_now()` tries at once (the picture's Try now). While the helper waits for
+the channel so, VLC's interruptions never fall back to a direct play (`_gave_up`): it would
+come no sooner, and the buffer would go.
 
 Position (spec §6.3; 2.1): the start of the opened segment plus VLC's clock as
 `VlcClock` follows its `get_time()` readings: a clock at the rate set while VLC plays,
@@ -289,6 +303,7 @@ from services.live.timeline import Span
 from services.live.tuning import LiveTuning, Tuning
 from services.live.vlc_clock import ClockMark, VlcClock
 from services.playback import PlaybackState, Session
+from services.revive import Revive
 from services.stream_address import NO_STREAM_MESSAGE
 from services.vlc_profile import PlayKind
 
@@ -549,6 +564,9 @@ class LiveSession(QObject):
     # 2.6: coming back to a kept buffer, it plays live; where the user was is offered:
     # (timeline second, its Unix time of day). `go_back_to` goes there.
     backOffered = Signal(float, float)
+    # The channel's stream is down and opens again by itself (`services.revive`): the seconds
+    # until its next try (0.0: one opens now); -1.0 once none is waited for any more.
+    retrying = Signal(float)
 
     def __init__(
         self,
@@ -592,6 +610,15 @@ class LiveSession(QObject):
         self._direct_timer.timeout.connect(self._retry_direct)
         self._direct_retries = 0  # tries a fallback's direct play has left (0: report errors)
         self._direct_at = -math.inf  # when the direct play() was last made
+        # A channel that played in this tune comes back by itself (`services.revive`): whether
+        # it played, whether its start allows it, a direct play's tries, one on its way, the
+        # helper's `retry_at` seen last, and when the next try is due (`clock`; None: none).
+        self._played = False
+        self._revive_on = True
+        self._revive = Revive(clock)
+        self._reviving = False
+        self._retry_at_seen: Optional[float] = None
+        self._retry_due: Optional[float] = None
         self._limited: Optional[str] = None  # the provider's refusal (one of REFUSALS)
         self._software = False  # hardware decoding froze this channel's picture
         self._phase = _Phase.IDLE
@@ -832,6 +859,7 @@ class LiveSession(QObject):
         https_first: bool = False,
         max_height: Optional[int] = None,
         borrowed: Optional[Borrowed] = None,
+        revive: bool = True,
     ) -> None:
         """`ram_bytes`: the memory a disk buffer that fails goes on in (the helper's default
         when None). `channel`: the channel's key in the tuning store ("": nothing kept).
@@ -847,8 +875,12 @@ class LiveSession(QObject):
         best again); None: the cap the channel kept, if any. `borrowed` (2.9.7): another's
         session that already reads the channel (a scheduled recording's) plays instead of a
         new one: no upstream opens; should it fail, the picture fails (`LENT_ENDED`), never
-        plays the channel directly (that would be a second stream)."""
+        plays the channel directly (that would be a second stream). `revive` False: a direct
+        play that ends or fails is the caller's, as before (an STB portal's channel, whose link
+        is made again instead)."""
         self.stop()
+        self._played, self._revive_on = False, revive
+        self._revive.reset()
         self._kept = kept
         self._borrowed = borrowed
         self._one_stream = one_stream and borrowed is None  # never parks another's upstream
@@ -977,6 +1009,7 @@ class LiveSession(QObject):
 
     def _halt(self, *, park: bool) -> None:
         """Stop playback; the session closes, or parks (2.6); a server part closes."""
+        self._forget_retry()
         self._caption_held, self._caption_armed = None, False
         self._end_recording()
         self._close_part(resume=False)
@@ -1918,6 +1951,7 @@ class LiveSession(QObject):
             return
         self._close_part(resume=False)  # 2.7: a server part goes with it
         self._live_parked = False
+        self._forget_retry()  # the helper's wait goes with its session
         phase = self._phase
         self._end_recording()  # a direct play has no buffer to record from
         if phase is not _Phase.IDLE and self._phase is _Phase.IDLE:
@@ -1943,6 +1977,7 @@ class LiveSession(QObject):
             self._lose_borrowed(LENT_ENDED)  # 2.9.7: its owner's stream was refused
             return
         phase = self._phase
+        self._forget_retry()  # a refusal is never asked again
         self._end_recording()
         self._close_part(resume=False)
         self._live_parked = False
@@ -2066,6 +2101,7 @@ class LiveSession(QObject):
         self._say_scheme(snapshot)
         self._say_not_live(snapshot)
         self._keep_heights(snapshot)
+        self._follow_retry(snapshot)
         if part is not None:
             self._follow_buffer_start(part)
         self._since_edge_moved(snapshot)  # when a burst lands, to the update
@@ -2448,8 +2484,15 @@ class LiveSession(QObject):
 
     # ---- playback ----------------------------------------------------------------------
     def _on_state(self, state: str) -> None:
+        if state == _PLAYING and self._phase in (_Phase.PIPELINE, _Phase.DIRECT):
+            self._played = True  # from now on it comes back by itself (`revives`)
         if self._phase is _Phase.DIRECT and state == _PLAYING:
             self._direct_retries = 0  # it played: a later error is reported at once
+            self._revive.playing()
+            if self._reviving:
+                self._reviving = False
+                _LOG.info("The channel plays again.")
+                self._set_retry(None)
         if self._phase is not _Phase.PIPELINE:
             return
         if state == _PLAYING and self._opened_at is not None:
@@ -2480,6 +2523,9 @@ class LiveSession(QObject):
                 self._direct_timer.start(wait)
                 return
             self._direct_retries = 0
+            if message != NO_STREAM_MESSAGE and self.revives():
+                self._revive_direct("it failed")  # it played in this tune: never given up
+                return
             self.failed.emit(message)
         else:
             self._on_interrupted(message or "an error")
@@ -2487,7 +2533,89 @@ class LiveSession(QObject):
     def _retry_direct(self) -> None:
         if self._phase is _Phase.DIRECT:
             self._direct_at = self._clock()
+            if self._reviving:
+                self._set_retry(0.0)  # a try opens now
             self._play_provider()
+
+    # ---- coming back by itself (`services.revive`) ---------------------------------------
+    def revives(self) -> bool:
+        """Its direct play of the channel opens again by itself once it ends or fails: it
+        plays directly, it played in this tune, and its start allows it (`revive`); a
+        borrowed session's never does (that would be a second stream)."""
+        return (
+            self._phase is _Phase.DIRECT
+            and self._played
+            and self._revive_on
+            and self._borrowed is None
+        )
+
+    def retry_in(self) -> Optional[float]:
+        """The seconds until the channel's next try while its stream is down (0.0: one opens
+        now); None while nothing is waited for."""
+        due = self._retry_due
+        return None if due is None else max(0.0, due - self._clock())
+
+    def retry_now(self) -> bool:
+        """Try the channel's stream again now while it is waited for (the picture's Try
+        now): a direct play opens at once, the helper asks its source at once. False when
+        nothing is waited for."""
+        if self._retry_due is None:
+            return False
+        if self._phase is _Phase.DIRECT and self._reviving:
+            _LOG.info("Opening the channel again now (asked).")
+            self._direct_timer.stop()
+            self._retry_direct()
+            return True
+        if self._sid is not None and self._retry_at_seen is not None:
+            retry = getattr(self._engine, "retry_now", None)
+            if callable(retry):
+                _LOG.info("Asking the time-shift helper for the channel again now.")
+                retry(self._sid)
+                return True
+        return False
+
+    def _revive_direct(self, why: str) -> None:
+        """The channel's direct play ended or failed after the tune played: it opens again in
+        the same player, so in its budget slot, after the next wait (`REVIVE_S`)."""
+        self._revive.stopped()
+        wait = self._revive.next_wait()
+        _LOG.info(
+            "The channel's stream stopped (%s); opening it again in %.0f s (try %d).",
+            why,
+            wait,
+            self._revive.tries,
+        )
+        self._reviving = True
+        self._direct_timer.start(round(wait * 1000))
+        self._set_retry(wait)
+
+    def _follow_retry(self, snapshot: Mapping[str, Any]) -> None:
+        """The helper's state names when the next try for the channel is due (`retry_at`, a
+        time of day), or no longer: `retrying` says so."""
+        at = snapshot.get("retry_at")
+        if isinstance(at, (int, float)) and not isinstance(at, bool):
+            if at != self._retry_at_seen:
+                self._retry_at_seen = float(at)
+                self._set_retry(max(0.0, float(at) - self._wall()))
+        elif self._retry_at_seen is not None:
+            self._retry_at_seen = None
+            self._set_retry(None)
+
+    def _set_retry(self, seconds: Optional[float]) -> None:
+        if seconds is None:
+            if self._retry_due is None:
+                return
+            self._retry_due = None
+            self.retrying.emit(-1.0)
+            return
+        self._retry_due = self._clock() + seconds
+        self.retrying.emit(float(seconds))
+
+    def _forget_retry(self) -> None:
+        """The tune ended, fell back or was refused: nothing is waited for any more."""
+        self._reviving = False
+        self._retry_at_seen = None
+        self._set_retry(None)
 
     def _play_provider(self) -> None:
         """The provider's stream in VLC itself, with the channel's agent and, when its M3U
@@ -2530,6 +2658,9 @@ class LiveSession(QObject):
             self._reopen_at_position()
 
     def _on_interrupted(self, why: str = "it ended") -> None:
+        if self._phase is _Phase.DIRECT and self.revives():
+            self._revive_direct(why)  # VLC's own stream of the channel ended
+            return
         if self._phase is not _Phase.PIPELINE:
             return
         _LOG.debug("VLC's time-shift stream stopped (%s).", why)
@@ -4105,12 +4236,17 @@ class LiveSession(QObject):
             self.notice.emit(REWOUND)
 
     def _gave_up(self) -> bool:
-        """After `ready_timeout_ms` of interruptions without VLC playing, fall back."""
+        """After `ready_timeout_ms` of interruptions without VLC playing, fall back; never
+        while the helper waits for the channel's stream itself (reconnecting, or a long wait
+        before its next try): played directly it would come no sooner, and the buffer would go."""
         now = self._clock()
         if self._failing_since is None:
             self._failing_since = now
             return False
         if now - self._failing_since <= self._ready_timeout_s:
+            return False
+        snapshot = self._snapshot()
+        if snapshot.get("reconnecting") is True or self._retry_at_seen is not None:
             return False
         _LOG.warning("The time-shift stream kept failing; playing the channel directly.")
         self._fall_back(LOST)

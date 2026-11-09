@@ -68,6 +68,7 @@ STATE_KEYS = {
     "steered",
     "not_live",  # 2.8.11
     "settled_s",  # 2.8.11
+    "retry_at",  # the channel's stream down: when its next try is due
 }
 DISK_LIMIT = "The disk buffer limit cannot fit one keyframe interval or an active read."
 # The owner hands a copy of its pipe end to a holder process that outlives it, so the
@@ -1719,6 +1720,47 @@ class JunctionCommandTests(unittest.TestCase):
         while time.monotonic() < deadline and asked() != 2.5:
             time.sleep(0.02)
         self.assertEqual(asked(), 2.5)
+
+
+class RetryWaitTests(unittest.TestCase):
+    def test_a_channel_down_past_the_quick_reconnects_says_when_and_tries_at_retry_now(self):
+        # Its state says when the next try is due (the picture counts down to it), and
+        # ("retry_now", sid) tries at once: the stream comes back, and the state says so.
+        body = make_stream(4)
+        half = len(body) // 2 // 188 * 188
+        up = threading.Event()
+
+        def live(_request, count):
+            if count == 1:
+
+                def broken(request):
+                    request.wfile.write(body[:half])
+
+                return 200, {"Content-Length": str(len(body))}, broken
+            return (200, {}, body[half:]) if up.is_set() else (503, {}, b"")
+
+        upstream = LocalSource({SECRET_PATH: live})
+        self.addCleanup(upstream.close)
+        fast = {"_RECONNECT_DELAYS": (0.01,) * 6, "_ENDLESS_DELAYS": (60.0,)}
+        self.enterContext(patch.multiple(source_module, **fast))
+        helper = InProcessHelper(self)
+        helper.parent.send(("open", "p", upstream.url + SECRET_PATH, {}, True, RAM, 6.0, {}))
+
+        def waiting(message):
+            return message[0] == "state" and message[1] == "p" and message[2].get("retry_at")
+
+        state = helper.wait_for(waiting)[2]
+        self.assertGreater(state["retry_at"], time.time() + 30.0)  # a minute's wait, told
+        up.set()
+        helper.parent.send(("retry_now", "p"))
+        helper.wait_for(
+            lambda m: m[0] == "state" and m[1] == "p" and m[2].get("retry_at", 0) is None,
+            timeout=5.0,
+        )
+        helper.parent.send(("retry_now", "nobody"))  # a session it does not hold: nothing
+        helper.parent.send(("retry_now",))  # malformed: ignored, the loop goes on
+        helper.parent.send(("close", "p"))
+        helper.wait_for(lambda m: m == ("closed", "p"))
 
 
 class ThreadDeathTests(unittest.TestCase):

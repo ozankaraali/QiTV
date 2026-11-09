@@ -68,6 +68,9 @@ class LiveStart:
     referrer: str = ""  # the channel's M3U http-referrer (2.1; "": none)
     https: bool = False  # 2.7.1: the helper asks it over HTTPS first (see live_start)
     max_height: Optional[int] = None  # 2.8, the live ⚙: the size cap chosen (None: its own)
+    # Its direct play opens again by itself once it ended or failed after it played
+    # (`services.revive`); False: the caller's (an STB portal's channel gets a fresh link).
+    revive: bool = True
 
 
 def start_kwargs(start: LiveStart, config: Any, *, disk: Optional[bool] = None) -> dict[str, Any]:
@@ -78,7 +81,8 @@ def start_kwargs(start: LiveStart, config: Any, *, disk: Optional[bool] = None) 
     goes on in that memory (`ram_bytes`). A channel with a key passes it (`channel`), one whose
     M3U names a referrer passes that (`referrer`, and its `Referer` header for the helper).
     A start asked over HTTPS first has the helper try that first (`https_first`, 2.7.1).
-    A size cap chosen in the ⚙ goes with it (`max_height`, 2.8; 0: the best again).
+    A size cap chosen in the ⚙ goes with it (`max_height`, 2.8; 0: the best again), and so
+    does a start whose direct play the caller brings back itself (`revive=False`).
     """
     consent = bool(config.timeshift_enabled)
     disk = consent if disk is None else disk and consent
@@ -106,6 +110,8 @@ def start_kwargs(start: LiveStart, config: Any, *, disk: Optional[bool] = None) 
         kwargs["https_first"] = True
     if start.max_height is not None:
         kwargs["max_height"] = start.max_height
+    if not start.revive:
+        kwargs["revive"] = False
     return kwargs
 
 

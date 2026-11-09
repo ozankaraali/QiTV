@@ -3,14 +3,20 @@
 Which live links play through the time-shift pipeline, and with which budget slot; the
 transport's time-shift controls (seek, speed, Go live, ⏮ to the programme start, the bar's
 programme ticks); and LiveSession's reports: its mode and timeline, its notices (time-shift
-unavailable, once per channel and run) and its failures. An STB channel that fails gets a
-fresh link once per tune (its play token may have expired) before the error shows, and once
-more each time that link then played for HEALTHY_S; a refusal for the provider's connection
-limit is never retried and says so. A live channel played directly whose stream ends (an
-on-demand restream may show a placeholder and end) opens again in the same player, so in the
-same budget slot, twice per tune at most, after RECONNECT_MS: "Reconnecting…", and only then
-"The stream ended"; once it has played for HEALTHY_S since it last opened, it may open again
-twice more.
+unavailable, once per channel and run) and its failures.
+
+A live channel that played in this tune is never given up on while it stays chosen
+(`services.revive`), as a TV's: the time-shift helper waits for its stream itself, and a
+direct play that ends or fails opens again in the same player, so in the same budget slot,
+after a growing wait (RECONNECT_MS, then the revive's 10 s, 30 s, 60 s, 120 s and every
+5 minutes; HEALTHY_S of play starts them anew): LiveSession's direct play by itself
+(`revives()`), one the player plays itself (an on-demand restream may show a placeholder and
+end) here. Meanwhile the pill over the picture (ui/overlays/retry_notice.py) says "The stream
+ended · Trying again in 0:25", and its Try now (a click, or Enter) tries at once. A channel
+that never played opens again twice at most, then "The stream ended", as before. An STB
+channel that fails gets a fresh link instead (its play token may have expired): at once the
+first time in a tune and each time it played HEALTHY_S since, then, once it played, after the
+revive's waits. A refusal for the provider's connection limit is never retried and says so.
 
 Kept buffers (2.6): coming back to a channel whose buffer was kept, it plays live and the
 session offers where the user was (`LiveSession.backOffered`): the Resume pill
@@ -62,6 +68,7 @@ from services.live.refusals import REFUSALS, STREAM_LIMIT, STREAM_REFUSED
 from services.live.tuning import channel_key
 from services.playback import PlaybackState
 from services.provider_api import known_http_only, portal_http_only
+from services.revive import revive_wait
 from services.vlc_profile import PlayKind
 from ui import item_provider
 from ui.catchup_controls import NO_RECORDING_TEXT, NOT_AVAILABLE_TEXT, CatchUp
@@ -69,6 +76,7 @@ from ui.link_lanes import LinkLanes, Target
 from ui.live_tuner import LiveStart, LiveTuner
 from ui.overlays.back_notice import LEFT_OFF
 from ui.overlays.painting import fmt_clock
+from ui.overlays.retry_notice import ended_text
 from ui.overlays.transport import NO_RECORDING, NOTHING_PLAYING, Transport
 
 logger = logging.getLogger(__name__)
@@ -95,10 +103,23 @@ TICK_PROGRAMMES = 6  # programme starts marked on the time-shift bar
 # When its limit is not known (shown with translate()).
 LIMITED_TEXT = N_("Your provider limits concurrent streams")  # i18n: error toast
 ERROR_MS = 6000
-RECONNECT_MS = (1000, 3000)  # the back-off before each reopen of a live stream that ended
-HEALTHY_S = 60.0  # a stream that played this long before it ended has its reopens back
+# The waits before the first reopens of a live stream that ended (a stream that never played
+# gets these only); one that played goes on with the revive's (`services.revive`).
+RECONNECT_MS = (1000, 3000)
+HEALTHY_S = 60.0  # a stream that played this long before it ended has its waits back
 # i18n: toast: a live channel's stream ended and is opened again
 RECONNECTING_TEXT = N_("Reconnecting…")
+RETRY_TICK_MS = 1000  # the pill's countdown
+
+
+def reopen_wait_ms(tries: int) -> int:
+    """The wait before reopen `tries` + 1 of an ended live stream: RECONNECT_MS, then the
+    revive's longer ones (`services.revive.REVIVE_S`)."""
+    if tries < len(RECONNECT_MS):
+        return RECONNECT_MS[tries]
+    return round(revive_wait(tries) * 1000)
+
+
 # i18n: a toast: R or the record button was pressed while the channel is still opening
 NOT_YET_TEXT = N_("Recording can start once the channel plays")
 # i18n: a toast: R on a channel that already records on schedule (2.9.7)
@@ -142,6 +163,7 @@ class Reopen:
     kind: PlayKind
     remaining_ms: int  # of its back-off
     count: int  # its reopens so far
+    played: bool = False  # its tune played: it comes back by itself (`services.revive`)
 
 
 def _named(title: str, message: str) -> str:
@@ -199,6 +221,7 @@ class LiveControls(QObject):
         back_notice: Callable[[], Any] = lambda: None,
         on_sizes: Callable[[], None] = lambda: None,
         borrow: Callable[[dict, str, str], Any] = lambda item, provider, purpose: None,
+        retry_notice: Callable[[], Any] = lambda: None,
         parent: Optional[QObject] = None,
     ) -> None:
         """`explain(item, title)` asks why the failure just toasted happened at the item's
@@ -211,7 +234,8 @@ class LiveControls(QObject):
         records (CatchUp's), `runner` runs the archive probes (a JobRunner by default).
         `gave_up()`: the channel's live session failed for good (said; a multiview's focused
         tile then stops and shows its card). `on_sizes()`: the channel's picture
-        sizes came, or an archive started or ended (2.8: the ⚙ may show or go)."""
+        sizes came, or an archive started or ended (2.8: the ⚙ may show or go).
+        `retry_notice()`: the pill that counts down to a channel's next try (None: none)."""
         super().__init__(parent)
         self._on_sizes = on_sizes
         self._borrow = borrow  # 2.9.7: a scheduled recording's session, to watch
@@ -258,9 +282,23 @@ class LiveControls(QObject):
         self._wired = False
         self._reconnects = 0  # reopens of the current tune's ended stream so far
         self._playing_since: Optional[float] = None  # the player's last "playing" (monotonic)
+        self._played = False  # the current tune played (it comes back by itself then)
         self._reopen_due: Optional[tuple[Target, str, PlayKind]] = None  # after the back-off
         self._reopen_timer = QTimer(self, singleShot=True)
         self._reopen_timer.timeout.connect(self._reopen)
+        # An STB channel's fresh link after the revive's wait (`relink`).
+        self._relink_due: Optional[Target] = None
+        self._relink_timer = QTimer(self, singleShot=True)
+        self._relink_timer.timeout.connect(self._relink_now)
+        # The pill counting down to the channel's next try: when it is due (monotonic), what
+        # Try now does, and whether LiveSession's `retrying` drives it (else a wait of ours).
+        self._retry_notice = retry_notice
+        self._retry_due: Optional[float] = None
+        self._retry_action: Optional[Callable[[], object]] = None
+        self._retry_from_live = False
+        self._retry_timer = QTimer(self, interval=RETRY_TICK_MS)
+        self._retry_timer.timeout.connect(self._show_retry_text)
+        self._wired_retry: set[int] = set()
         self.catchup = CatchUp(
             tuner=tuner,
             session=session,
@@ -307,6 +345,9 @@ class LiveControls(QObject):
             offered = getattr(live, "backOffered", None)
             if offered is not None:
                 pairs.append((offered, self._on_back_offered))
+            retrying = getattr(live, "retrying", None)
+            if retrying is not None:
+                pairs.append((retrying, self._on_live_retrying))
         for signal, slot in pairs:
             if connect:
                 signal.connect(slot)
@@ -367,6 +408,10 @@ class LiveControls(QObject):
         self._forget_channel()
         self.catchup.use_slot(tuner, session)  # the new large picture's archive, if any
         self._on_recording_changed()  # the REC chip is the new large picture's
+        waiting = getattr(live, "retry_in", None)
+        seconds = waiting() if callable(waiting) else None
+        if seconds is not None:  # its stream was down, small: the pill says so large
+            self._on_live_retrying(seconds)
 
     # ---- tuning -------------------------------------------------------------------------------
 
@@ -382,7 +427,10 @@ class LiveControls(QObject):
         self._ticks = []
         self._reconnects = 0
         self._playing_since = None
+        self._played = False
         self._cancel_reopen()
+        self._cancel_relink()
+        self._hide_retry()
 
     def window_reach(self, channel: dict) -> float:
         """How far back (seconds) the channel's own server keeps it, as seen this run (2.7);
@@ -545,10 +593,14 @@ class LiveControls(QObject):
         verify_ssl = bool(provider.get("ssl_verify", self.config.ssl_verify))
         channel = channel_key(str(provider.get("name", "")), target.item)
         referrer = str(target.item.get("referrer") or "")
-        xtream = item_provider.provider_type(self.catalog, target.item) == "XTREAM"
-        plain = xtream or portal_http_only(provider)  # its sign-in found no HTTPS
+        kind = item_provider.provider_type(self.catalog, target.item)
+        plain = kind == "XTREAM" or portal_http_only(provider)  # its sign-in found no HTTPS
         https = not known_http_only(url) and not (plain and url.startswith("http://"))
-        return LiveStart(url, user_agent, verify_ssl, channel, referrer, https, target.max_height)
+        # An STB portal's channel that fails gets a fresh link (`relink`), never the old again.
+        revive = kind != "STB"
+        return LiveStart(
+            url, user_agent, verify_ssl, channel, referrer, https, target.max_height, revive
+        )
 
     def pipeline_live(self) -> bool:
         """The current channel plays from the time-shift buffer."""
@@ -557,34 +609,80 @@ class LiveControls(QObject):
 
     def stop_tune(self) -> None:
         self._cancel_reopen()
+        self._cancel_relink()
+        self._hide_retry()
         self.catchup.reset()
         self._tuner.stop()
         self._ticks = []
 
-    def may_retry(self, current: Optional[Target]) -> bool:
-        """An STB channel's link may be made again once per tune (its play token expires),
-        and once more each time its fresh link played for `HEALTHY_S` (its token expired
-        again), as an ended direct stream gets its reopens back."""
+    def _stb(self, current: Optional[Target]) -> bool:
         return (
             current is not None
             and current.live
-            and (not current.retried or self._played_well())
             and item_provider.provider_type(self.catalog, current.item) == "STB"
+        )
+
+    def may_retry(self, current: Optional[Target]) -> bool:
+        """An STB channel's link may be made again at once once per tune (its play token
+        expires), and once more each time its fresh link played for `HEALTHY_S` (its token
+        expired again), as an ended direct stream gets its reopens back."""
+        return (
+            self._stb(current)
+            and current is not None
+            and (not current.retried or self._played_well())
             and not self._lanes.busy()
         )
+
+    def relink(self, current: Optional[Target]) -> bool:
+        """`current`, an STB channel, failed or ended: its link is made again (`retry`), at
+        once when `may_retry`, else, once it played since it was chosen, after the revive's
+        next wait (`services.revive`; the pill counts down, Try now makes it at once), for as
+        long as it stays chosen. False: not an STB channel's, or one that never played (the
+        caller says why, as before)."""
+        if self._relink_due is not None and self._relink_due is current:
+            return True  # already on its way
+        if self.may_retry(current):
+            assert current is not None
+            self.retry(current)  # STB play tokens expire: a fresh link before the error
+            return True
+        if not self._stb(current) or self._lanes.busy():
+            return False
+        assert current is not None
+        if not (current.played or self._played):
+            return False
+        wait = revive_wait(current.relinks)
+        logger.info("Making the link of %s again in %.0f s (it keeps failing)", current.title, wait)
+        self._relink_due = current
+        self._relink_timer.start(round(wait * 1000))
+        self._show_retry(wait, self._relink_now)
+        return True
+
+    def _relink_now(self) -> None:
+        target, self._relink_due = self._relink_due, None
+        self._relink_timer.stop()
+        if target is None or self._closed() or self._current() is not target:
+            self._hide_retry()
+            return  # something else plays now
+        self.retry(target, relinks=target.relinks + 1)
+
+    def _cancel_relink(self) -> None:
+        self._relink_due = None
+        self._relink_timer.stop()
 
     def _played_well(self) -> bool:
         """The player played for `HEALTHY_S` since it last started playing."""
         since = self._playing_since
         return since is not None and time.monotonic() - since >= HEALTHY_S
 
-    def reconnect(self, current: Target) -> bool:
-        """`current`'s live stream, played directly, ended: open it again after a back-off.
+    def reconnect(self, current: Target, *, failed: bool = False) -> bool:
+        """`current`'s live stream, played directly, ended (or `failed` to play): open it
+        again after a back-off (`reopen_wait_ms`).
 
         The same player opens the same stream (its ended input ends before the new one
         opens), so it keeps its budget slot and the provider never sees two connections.
-        False when nothing more is tried: twice per tune, never on-demand content or a file
-        listed as a channel; the caller says "The stream ended" then.
+        False when nothing more is tried: a tune that never played twice at most (and never
+        after a failure), never on-demand content or a file listed as a channel; the caller
+        says "The stream ended" (or why it failed) then. One that played is never given up on.
         """
         if self._reopen_due is not None:
             return True  # already on its way
@@ -594,12 +692,21 @@ class LiveControls(QObject):
         since, self._playing_since = self._playing_since, None
         if since is not None and time.monotonic() - since >= HEALTHY_S:
             self._reconnects = 0  # it played well since it last opened: the back-off anew
-        if self._reconnects >= len(RECONNECT_MS):
+        if not self._played and (failed or self._reconnects >= len(RECONNECT_MS)):
+            self._hide_retry()  # the caller says why
             return False
+        wait_ms = reopen_wait_ms(self._reconnects)
         self._reopen_due = (current, url, kind)
-        self._reopen_timer.start(RECONNECT_MS[self._reconnects])
+        self._reopen_timer.start(wait_ms)
         self._reconnects += 1
-        self._toast(translate(RECONNECTING_TEXT))
+        logger.info(
+            "%s's stream %s; opening it again in %.0f s (try %d)",
+            current.title,
+            "failed" if failed else "ended",
+            wait_ms / 1000,
+            self._reconnects,
+        )
+        self._show_retry(wait_ms / 1000, self._reopen_now)
         return True
 
     def _reopen(self) -> None:
@@ -609,10 +716,14 @@ class LiveControls(QObject):
         target, url, kind = due
         session = self.session
         if self._current() is not target or session.url != url:
+            self._hide_retry()
             return  # something else plays now
         if not self._may_reopen(target):
+            self._hide_retry()
             return  # no stream of its provider to spare (the caller says so)
         logger.info("Opening %s again after its stream ended", target.title)
+        if self._retry_action is not None and not self._retry_from_live:
+            self._show_retry(0.0, self._reopen_now)  # "Reconnecting…" until it plays
         session.play(
             url,
             kind=kind,
@@ -620,9 +731,78 @@ class LiveControls(QObject):
             **reopen_options(session, target.item, self.catalog),
         )
 
+    def _reopen_now(self) -> None:
+        if self._reopen_due is not None:
+            self._reopen_timer.stop()
+            self._reopen()
+
     def _cancel_reopen(self) -> None:
         self._reopen_due = None
         self._reopen_timer.stop()
+
+    # ---- the pill over a channel that comes back by itself (`services.revive`) ----------
+    def retry_now(self) -> bool:
+        """Try now (the pill's click, Enter): the channel waited for opens at once. False
+        when nothing is waited for."""
+        action = self._retry_action
+        if action is None or self._closed():
+            return False
+        action()
+        return True
+
+    def retrying(self) -> bool:
+        """The pill shows: the channel's next try is waited for."""
+        return self._retry_action is not None
+
+    def _on_live_retrying(self, seconds: float) -> None:
+        """LiveSession's `retrying`: its channel's stream is down (the helper waits for it,
+        or its direct play opens again by itself), or no longer (< 0)."""
+        current = self._current()
+        if self._closed() or current is None or not current.live:
+            return
+        if seconds < 0.0:
+            if self._retry_from_live:
+                self._hide_retry()
+            return
+        live = self.live
+        if live is None:
+            return
+        self._show_retry(seconds, live.retry_now, from_live=True)
+
+    def _show_retry(
+        self, seconds: float, action: Callable[[], object], *, from_live: bool = False
+    ) -> None:
+        self._retry_due = time.monotonic() + max(0.0, seconds)
+        self._retry_action = action
+        self._retry_from_live = from_live
+        notice = self._retry_notice()
+        if notice is not None and id(notice) not in self._wired_retry:
+            self._wired_retry.add(id(notice))
+            notice.keepWatching.connect(self.retry_now)
+        self._show_retry_text()
+        if not self._retry_timer.isActive():
+            self._retry_timer.start()
+
+    def _show_retry_text(self) -> None:
+        due = self._retry_due
+        if self._closed():  # the window closes: its overlays may be gone already
+            self._retry_due = self._retry_action = None
+            self._retry_timer.stop()
+            return
+        if due is None:
+            self._hide_retry()
+            return
+        notice = self._retry_notice()
+        if notice is not None:
+            notice.show_notice(ended_text(due - time.monotonic()))
+
+    def _hide_retry(self) -> None:
+        self._retry_due = self._retry_action = None
+        self._retry_from_live = False
+        self._retry_timer.stop()
+        notice = self._retry_notice()
+        if notice is not None and not self._closed() and not notice.isHidden():
+            notice.hide()
 
     def take_reopen(self) -> Optional[Reopen]:
         """A swap: the large picture's ended stream on its way to open again goes with its
@@ -632,21 +812,27 @@ class LiveControls(QObject):
             return None
         remaining = max(0, self._reopen_timer.remainingTime())
         self._cancel_reopen()
+        self._hide_retry()
         target, url, kind = due
-        return Reopen(target, url, kind, remaining, self._reconnects)
+        return Reopen(target, url, kind, remaining, self._reconnects, self._played)
 
     def adopt_reopen(self, reopen: Reopen) -> None:
         """A swap made the large picture a player whose ended stream was on its way to open
         again (small): it opens here once the rest of its back-off is over."""
         self._reopen_due = (reopen.target, reopen.url, reopen.kind)
         self._reconnects = reopen.count
+        self._played = self._played or reopen.played
         self._reopen_timer.start(reopen.remaining_ms)
+        self._show_retry(reopen.remaining_ms / 1000, self._reopen_now)
 
-    def retry(self, current: Target) -> None:
+    def retry(self, current: Target, *, relinks: int = 0) -> None:
+        """Make `current`'s link again (an STB portal's: its play token may have expired) and
+        tune it anew; `relinks`: the links made again in a row after a wait (the revive's)."""
         logger.info("Making the link of %s again after a playback failure", current.title)
+        played = current.played or self._played
         self.stop_tune()  # it failed: its slot goes back, also if the new link does not come
         item_provider.sign_in_again(self.catalog, current.item)  # its own portal's session
-        self._request(replace(current, retried=True))
+        self._request(replace(current, retried=True, relinks=relinks, played=played))
 
     # ---- LiveSession's reports ----------------------------------------------------------------
 
@@ -756,13 +942,18 @@ class LiveControls(QObject):
         self._toast(translate(text))  # LiveSession's notices are English (N_) texts
 
     def on_playing(self) -> None:
-        """The player plays: an ended stream counts how long it played since (HEALTHY_S)."""
+        """The player plays: an ended stream counts how long it played since (HEALTHY_S), and
+        a wait of ours for it is over (LiveSession's own says when its own is)."""
         self._playing_since = time.monotonic()
+        self._played = True
+        if not self._retry_from_live:
+            self._hide_retry()
 
     def _on_live_failed(self, message: str) -> None:
         """Playback of the live channel failed for good (LiveSession recovered what it could)."""
         if self._closed():
             return
+        self._hide_retry()  # (a fresh link below may count down again)
         current = self._current()
         if message == STREAM_LIMIT:
             # Never asked again (spec §9), not even with a fresh STB link: the limit is
@@ -775,6 +966,8 @@ class LiveControls(QObject):
         if current is not None and self.may_retry(current):
             self.retry(current)  # STB play tokens expire: a fresh link before the error
             return
+        if message not in REFUSALS and self.relink(current):
+            return  # it keeps failing, but played: a fresh link after the revive's wait
         title = current.title if current is not None else ""
         if message in REFUSALS:
             self.stop_tune()  # nothing plays: its slot goes back

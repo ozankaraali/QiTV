@@ -18,6 +18,13 @@ bounded only by the 60 s connect timeout per address. Credentials never reach er
 or log lines: all ``SourceError`` messages are fixed strings. How ``close()`` wakes a
 blocked call on each platform: `services.live.interruptible_http`. What a source reads can
 be saved for replay: `services.live.capture`.
+
+A live channel's stream is never given up on while it is watched (`services.revive`): once
+its quick reconnects are spent (`_RECONNECT_DELAYS`), a raw TS channel's connection and an
+HLS channel's playlist are asked for again after the longer waits of `_ENDLESS_DELAYS`, the
+last one each time from then on; the buffer plays on meanwhile, and the listener a source is
+given (`listen_retries`) hears when the next try is due (the helper's state says so, and the
+picture shows it). `retry_now()` cuts such a wait short.
 """
 
 from __future__ import annotations
@@ -50,6 +57,7 @@ from services.live.hls_audio import _LEAD_TICKS, AudioWeaver, video_start
 from services.live.interruptible_http import _Closed, _Interrupter, _InterruptibleAdapter
 from services.live.refusals import REFUSALS, STREAM_LIMIT, STREAM_REFUSED  # noqa: F401 (and here)
 from services.live.ts import ContinuityJoiner, program_has_audio, pts_delta
+from services.revive import REVIVE_S
 from services.vlc_profile import DEFAULT_USER_AGENT
 
 log = logging.getLogger(__name__)
@@ -85,6 +93,9 @@ _AUDIO_STEPS = 3  # ... and so on, this many segments back at most
 _PACKET = 188
 _BLOCK = 16
 _RECONNECT_DELAYS = (0.5, 1.0, 2.0, 4.0, 8.0, 8.0)
+# Then a live channel's stream is asked for again after these, the last one each time from
+# then on, as long as it is watched (`services.revive`: a TV's channel comes back by itself).
+_ENDLESS_DELAYS = tuple(wait for wait in REVIVE_S if wait >= 10.0)
 # 2.8.5: a reconnect the provider refuses (`_refused`) is asked again this often, for this
 # long: one that allows a single stream counts the connection that broke for minutes (one
 # provider: 5-7 minutes), and the buffer plays on meanwhile.
@@ -413,16 +424,25 @@ def _translate(error: BaseException) -> SourceError:
 
 
 class _Backoff:
-    """The reconnect schedule; the caller refills it once data flows again."""
+    """The reconnect schedule; the caller refills it once data flows again. An `endless` one
+    (a live channel's) goes on with `_ENDLESS_DELAYS` once the quick delays are spent."""
 
-    def __init__(self) -> None:
+    def __init__(self, *, endless: bool = False) -> None:
         self.used = 0
+        self.endless = endless
 
     def next_delay(self) -> float | None:
-        if self.used >= len(_RECONNECT_DELAYS):
+        quick = len(_RECONNECT_DELAYS)
+        if self.used >= quick and not self.endless:
             return None
         self.used += 1
-        return _RECONNECT_DELAYS[self.used - 1]
+        if self.used <= quick:
+            return _RECONNECT_DELAYS[self.used - 1]
+        return _ENDLESS_DELAYS[min(self.used - quick, len(_ENDLESS_DELAYS)) - 1]
+
+    def long(self) -> bool:
+        """The delay `next_delay` gave last is one of the long ones (`_ENDLESS_DELAYS`)."""
+        return self.used > len(_RECONNECT_DELAYS)
 
     def reset(self) -> None:
         self.used = 0
@@ -444,6 +464,11 @@ class _Http:
         self._stall_timeout = _STALL_TIMEOUT
         self.connect_timeout = _TIMEOUT  # 2.7.1: an HTTPS-first attempt's is shorter
         self.closed = False
+        # A live channel's long waits (`_ENDLESS_DELAYS`): told the time of day of the next try
+        # before each, None once a try answered; `wake()` cuts the wait short.
+        self.on_retry: Callable[[float | None], None] | None = None
+        self._woken = threading.Event()
+        self._told_retry = False
         provided = {name.lower(): value for name, value in headers.items() if value}
         self.user_agent = provided.get("user-agent") or DEFAULT_USER_AGENT
         referer = provided.get("referer")
@@ -570,10 +595,36 @@ class _Http:
         """Sleep, waking early (True) when the source closes."""
         return self._closed_event.wait(max(0.0, seconds))
 
+    def wake(self) -> None:
+        """Try again now: a long wait between a live channel's tries ends (`retry_now`); one
+        asked during a try ends the next wait at once."""
+        self._woken.set()
+
+    def _wait_long(self, seconds: float) -> bool:
+        """A long wait before a live channel's next try, told to `on_retry` first; `wake()`
+        ends it early. True when the source closed."""
+        self._tell_retry(time.time() + seconds)
+        log.info("The channel's stream is down; asking for it again in %.0f s.", seconds)
+        self._woken.wait(max(0.0, seconds))
+        self._woken.clear()
+        return self.closed
+
+    def _tell_retry(self, at: float | None) -> None:
+        listener = self.on_retry
+        if at is None and not self._told_retry:
+            return
+        self._told_retry = at is not None
+        if listener is not None:
+            try:
+                listener(at)
+            except Exception as error:  # the source goes on whatever the listener does
+                log.warning("A live source's retry listener failed (%s).", type(error).__name__)
+
     def retry(
         self, attempt: Callable[[], _T], backoff: _Backoff | None = None, *, patient: bool = False
     ) -> _T:
-        """Repeat ``attempt`` after each remaining reconnect delay; then give up. `patient`
+        """Repeat ``attempt`` after each remaining reconnect delay; then give up (an `endless`
+        backoff never does: each of its long waits is told to `on_retry`). `patient`
         (2.8.5: a stream that broke): a refusal (`_refused`) is asked again every
         `_REFUSED_RETRY_S` for up to `_REFUSED_PATIENCE_S`, outside the delays: a provider
         that allows one stream may still count the connection that broke."""
@@ -581,16 +632,19 @@ class _Http:
             backoff = _Backoff()
         refused_since: float | None = None
         delay = backoff.next_delay()
+        long = backoff.long()
         while delay is not None:
-            if self.wait(delay):
+            if self._wait_long(delay) if long else self.wait(delay):
                 raise _Closed()
             try:
-                return attempt()
+                answer = attempt()
             except Exception as error:
                 if self.closed:
                     raise _Closed() from None
                 if patient and _refused(error):
                     now = time.monotonic()
+                    long = False  # asked again at its own pace, and said so
+                    self._tell_retry(None)
                     if refused_since is None:
                         refused_since = now
                         log.info(
@@ -605,14 +659,22 @@ class _Http:
                         continue
                     raise
                 if not _retryable(error):
+                    self._tell_retry(None)
                     raise
-                log.info(
-                    "Live source retry %d of %d failed (%s).",
-                    backoff.used,
-                    len(_RECONNECT_DELAYS),
-                    type(error).__name__,
-                )
+                if backoff.long():
+                    log.info("Live source try %d failed (%s).", backoff.used, type(error).__name__)
+                else:
+                    log.info(
+                        "Live source retry %d of %d failed (%s).",
+                        backoff.used,
+                        len(_RECONNECT_DELAYS),
+                        type(error).__name__,
+                    )
+            else:
+                self._tell_retry(None)
+                return answer
             delay = backoff.next_delay()
+            long = backoff.long()
         raise _Exhausted()
 
     def fetch(self, attempt: Callable[[], _T]) -> _T:
@@ -635,6 +697,7 @@ class _Http:
             response, self._response = self._response, None
             owner = self._owner
         self._closed_event.set()
+        self._woken.set()  # a long wait between a live channel's tries ends too
         self._interrupter.interrupt()
         if response is not None and not interruptible_http._INTERRUPT_OWNERS:
             # A close-delimited body's socket has no live duplicate (http.client closed its
@@ -708,9 +771,10 @@ class TsSource:
     """Raw MPEG-TS from one HTTP(S) response; reconnects after the connection breaks.
 
     Only a body with a Content-Length ends the input when complete; every other end
-    reconnects while the backoff schedule allows. A provider archive's (2.7, `archive`)
-    never reconnects: a new request would play its address from the start again, so any end
-    ends the input; and it reads no further while `hold` says so (its pacing).
+    reconnects: after the quick delays, after the long ones for as long as it is read (an
+    endless backoff: a live channel comes back once its stream does). A provider archive's
+    (2.7, `archive`) never reconnects: a new request would play its address from the start
+    again, so any end ends the input; and it reads no further while `hold` says so (its pacing).
     """
 
     hls = False
@@ -757,6 +821,16 @@ class TsSource:
     def chunks(self) -> Iterator[Chunk]:
         return _guarded(self._http, self._run(), self._capture)
 
+    def listen_retries(self, listener: Callable[[float | None], None] | None) -> None:
+        """`listener(at)` hears the time of day of the next try before each long wait for the
+        channel (`_ENDLESS_DELAYS`), and None once a try answered; it runs in the reading
+        thread."""
+        self._http.on_retry = listener
+
+    def retry_now(self) -> None:
+        """A long wait for the channel ends now (any thread)."""
+        self._http.wake()
+
     def close(self) -> None:
         self._http.close()
         if self._capture is not None:
@@ -772,7 +846,7 @@ class TsSource:
         self._response, self._prefix = None, b""
         if response is None:
             return
-        backoff = _Backoff()
+        backoff = _Backoff(endless=not self._archive)  # a live channel is never given up on
         connected, received, reconnected = time.monotonic(), 0, False
         not_live_since: float | None = None  # answered with recordings since (2.8.10)
         # 2.8.12: only a stream whose first answer declared its length is finite: a live
@@ -1213,7 +1287,10 @@ class HlsSource:
       for again on a new connection each second, until such copies persist as long as a stale
       copy is waited out (at least 4 s): a restart, or ours went down, followed with a marker
       (`_other_copy`);
-    - reloads that bring no new segment for 60 s (download time excluded) time out.
+    - reloads that bring no new segment for 60 s (download time excluded) time out;
+    - a live playlist's reload that keeps failing (a broken connection, a 5xx) through the
+      quick delays is asked for again after the long ones, for as long as it is read
+      (`_reload`; a server part's fails as before).
 
     Fragmented MP4 (CMAF) segments, a playlist with an init section (EXT-X-MAP), are fetched
     whole and remuxed to TS (`Fmp4Remuxer`), the init loaded whenever its URI changes: one
@@ -1433,6 +1510,16 @@ class HlsSource:
 
     def chunks(self) -> Iterator[Chunk]:
         return _guarded(self._http, self._run(), self._capture)
+
+    def listen_retries(self, listener: Callable[[float | None], None] | None) -> None:
+        """`listener(at)` hears the time of day of the next try before each long wait for the
+        channel (`_ENDLESS_DELAYS`), and None once a try answered; it runs in the reading
+        thread."""
+        self._http.on_retry = listener
+
+    def retry_now(self) -> None:
+        """A long wait for the channel ends now (any thread)."""
+        self._http.wake()
 
     def close(self) -> None:
         self._http.close()
@@ -1669,6 +1756,10 @@ class HlsSource:
 
         try:
             return http.fetch(lambda: _load_playlist(http, url))
+        except _Exhausted:
+            if self._back is not None:
+                raise  # a server part (2.7) plays the past: its failure is said, as before
+            return self._reload_endlessly(http, url, gone)
         except Exception as error:
             if not gone(error):
                 raise
@@ -1691,6 +1782,27 @@ class HlsSource:
             raise failure
         log.info("The HLS variant's playlist is gone; asking the channel's master again.")
         return http.fetch(lambda: _load_playlist(http, self._origin or url))
+
+    def _reload_endlessly(
+        self, http: _Http, url: str, gone: Callable[[Exception], bool]
+    ) -> tuple[bytes, str]:
+        """The media playlist did not answer through the quick delays: asked for again after
+        the long ones, as long as the channel is watched (the buffer plays on meanwhile); a
+        variant's playlist that answers 404 or 410 then is asked at the channel's own address
+        (its master names its variant anew). Any other answer that means it ends the source."""
+        log.info("The HLS playlist does not answer; asking again while the channel is watched.")
+        backoff = _Backoff(endless=True)
+        backoff.used = len(_RECONNECT_DELAYS)  # the quick delays are spent
+
+        def attempt() -> tuple[bytes, str]:
+            try:
+                return _load_playlist(http, url)
+            except Exception as error:
+                if self._origin is None or not gone(error):
+                    raise
+            return _load_playlist(http, self._origin)
+
+        return http.retry(attempt, backoff)
 
     def _reloaded(self, http: _Http, content: bytes, final: str) -> tuple[Any, str]:
         """A reload's media playlist and its URL. The same copy again (byte for byte, at the

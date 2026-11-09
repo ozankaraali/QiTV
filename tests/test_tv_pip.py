@@ -299,6 +299,7 @@ class PipTests(PipCase):
                 "channel": channel_key("Home", CHANNELS[0]),
                 "one_stream": True,  # 2.7: its provider limits streams (a part parks live)
                 "https_first": True,  # 2.7.1: HTTPS is chosen by what answers
+                "revive": False,  # an STB portal's channel: a fresh link, not the old again
             },
         )
         self.assertTrue(self.sessions.pip_open())
@@ -504,18 +505,48 @@ class PipTests(PipCase):
 
         end_and_reopen()
         end_and_reopen()
-        self.pip_session.stateChanged.emit("playing")
-        QTest.qWait(80)  # it played a while since: twice more
-        end_and_reopen()
-        end_and_reopen()
-        self.pip_session.stateChanged.emit("ended")
+        self.pip_session.stateChanged.emit("ended")  # it never played: twice at most
         self.assertEqual(self.toast.messages()[-1], ("Two: The stream ended", "info"))
         QTest.qWait(200)
-        self.assertEqual(len(self.pip_session.plays), 6)  # the first, then four reopens
+        self.assertEqual(len(self.pip_session.plays), 4)  # the first, then two reopens
         # One slot, the same one, all along: nothing was stopped or given back.
         self.assertEqual(self.pip_session.stops, stops)
         self.assertEqual(sorted(self.budget.holders("Home")), holders)
         self.assertEqual(self.pip_live.named("stop"), [])
+
+    def test_a_small_channel_that_played_comes_back_by_itself_with_its_label_counting(self):
+        # `services.revive`: its live session leaves the reopen to the caller here (an STB
+        # portal's), so the small picture opens it again itself, never giving up.
+        self.enterContext(mock.patch("ui.live_controls.RECONNECT_MS", (40, 120)))
+        self.enterContext(mock.patch("services.revive.REVIVE_S", (0.04, 0.12, 0.2)))
+        self.start_large(0)
+        self.open_small(CHANNELS[1])
+        self.pip_live.play_direct()
+        url = self.pip_session.plays[-1][0]
+        holders, stops = sorted(self.budget.holders("Home")), self.pip_session.stops
+        self.pip_session.stateChanged.emit("playing")
+        for _ in range(5):
+            plays = len(self.pip_session.plays)
+            self.pip_session.stateChanged.emit("ended")
+            self.assertTrue(self.label.info[1].startswith("Trying again in 0:0"))
+            self.assertTrue(wait_until(lambda: len(self.pip_session.plays) == plays + 1))
+            self.assertEqual(self.pip_session.plays[-1][0], url)
+        self.assertNotIn(("Two: The stream ended", "info"), self.toast.messages())
+        self.assertEqual(self.pip_session.stops, stops)  # the same player and slot
+        self.assertEqual(sorted(self.budget.holders("Home")), holders)
+        self.pip_session.stateChanged.emit("playing")
+        self.assertFalse(self.label.info[1].startswith("Trying again"))
+
+    def test_a_small_live_session_that_opens_its_direct_play_again_is_left_to_it(self):
+        self.enterContext(mock.patch("ui.live_controls.RECONNECT_MS", (40, 120)))
+        self.start_large(0)
+        self.open_small(CHANNELS[1])
+        self.pip_live.play_direct()
+        self.pip_live.revives = lambda: True  # LiveSession opens it again itself
+        plays = len(self.pip_session.plays)
+        self.pip_session.stateChanged.emit("ended")
+        QTest.qWait(150)
+        self.assertEqual(len(self.pip_session.plays), plays)
 
     def test_the_small_pictures_reopen_decodes_in_software_as_its_stream_did(self):
         self.enterContext(mock.patch("ui.live_controls.RECONNECT_MS", (40, 120)))
@@ -554,7 +585,7 @@ class PipTests(PipCase):
         url = self.session.plays[-1][0]
         plays = len(self.session.plays)
         self.session.ended.emit()
-        self.assertEqual(self.toast.messages()[-1], ("Reconnecting…", "info"))
+        self.assertTrue(self.controller._live_controls.retrying())  # the pill counts down
         self.controller.handle(Action.SWAP)  # its player is the small picture's now
         self.assertIs(self.sessions.small(), self.main_slot)
         self.assertTrue(wait_until(lambda: len(self.session.plays) == plays + 1))
@@ -1512,9 +1543,28 @@ class PipRetryTests(PipCase):
         self.assertTrue(wait_until(lambda: len(small.live.named("start")) == 3))
         small.live.play_pipeline()
         small.playback.stateChanged.emit("playing")  # too briefly this time
+        self.enterContext(mock.patch("services.revive.REVIVE_S", (0.05,)))
         self.fail_small(small)
-        self.assertEqual(self.toast.messages(), [(PIP_FAILED, "error")])
+        # It played: never given up on, but its link is made again after a wait now.
+        self.assertEqual(self.toast.messages(), [("Two: Trying again in 0:01", "info")])
         self.assertEqual(len(self.catalog.links), links + 1)
+        self.assertTrue(wait_until(lambda: len(self.catalog.links) == links + 2))
+        self.assertEqual(self.catalog.links[-1][1], self.PORTAL_TWO)
+
+    def test_a_relink_waiting_is_dropped_when_another_channel_opens_small(self):
+        self.enterContext(mock.patch("ui.live_controls.HEALTHY_S", 60.0))
+        self.enterContext(mock.patch("services.revive.REVIVE_S", (0.1,)))
+        small = self.open_small(self.PORTAL_TWO)
+        self.fail_small(small)
+        self.ready("http://stream/2?play_token=new")
+        self.assertTrue(wait_until(lambda: len(small.live.named("start")) == 2))
+        small.live.play_pipeline()
+        small.playback.stateChanged.emit("playing")
+        self.fail_small(small)  # it waits for its fresh link now
+        links = len(self.catalog.links)
+        self.open_small(CHANNELS[2])
+        QTest.qWait(200)
+        self.assertNotIn(self.PORTAL_TWO, [link[1] for link in self.catalog.links[links:]])
 
     def test_the_browsed_portal_makes_the_link_again_without_signing_in(self):
         small = self.open_small(CHANNELS[1])

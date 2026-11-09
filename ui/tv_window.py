@@ -143,6 +143,7 @@ from ui.overlays.pip_label import PipLabel
 from ui.overlays.question_card import QuestionCard
 from ui.overlays.rec_sign import RecSign
 from ui.overlays.remote_pair import PairOverlay
+from ui.overlays.retry_notice import RetryNotice
 from ui.overlays.sleep_notice import SleepNotice
 from ui.overlays.stats import StatsOverlay
 from ui.overlays.stopped_notice import StoppedNotice
@@ -566,6 +567,7 @@ class TVWindow(QMainWindow):
         self.rec_sign = RecSign(host)  # 2.6: recordings in the background
         self.stopped_notice = StoppedNotice(host)  # 2.6: after Stop, Play again
         self.cast_notice = CastNotice(host)  # 2.8: Playing on <device>, Stop casting
+        self.retry_notice = RetryNotice(host)  # a channel's stream down: Trying again, Try now
         self.pair_overlay = PairOverlay(host)  # the phone remote's pairing QR
         self.layout_row = LayoutRow(host)  # the multiview's layouts, above its layout chip
         self.subtitle_search = SubtitleSearchPage(host)
@@ -618,6 +620,7 @@ class TVWindow(QMainWindow):
             library_rec_sign=self.library_rec_sign,
             stopped_notice=self.stopped_notice,
             cast_notice=self.cast_notice,
+            retry_notice=self.retry_notice,
             pairing=self.pair_overlay,
             library_toast=self.library_toast,
             layout_row=self.layout_row,
@@ -666,6 +669,7 @@ class TVWindow(QMainWindow):
             self.back_notice,
             self.stopped_notice,
             self.cast_notice,
+            self.retry_notice,
             self.rec_sign,
             self.question_card,
             self.quality_card,

@@ -27,11 +27,15 @@ it goes on as at its end there (its next stretch, or live). The label's × close
 picture, its speaker mutes or unmutes it, and its ⇄, like a click on the small picture,
 swaps (the shell's `swap`).
 
-A channel the small picture plays directly (its live session fell back) whose stream ends
-opens again in the same player, so in its budget slot, as the large picture's does
-(`ui.live_controls`): after RECONNECT_MS, twice per channel (twice more once it played for
-HEALTHY_S), then "The stream ended". A swap during the back-off hands the reopen to the
-picture that has the player then (`take_reopen`, `adopt_reopen`, and LiveControls' own).
+A channel shown small that played comes back by itself, as the large picture's does
+(`services.revive`, `ui.live_controls`): its live session waits for its stream, or opens its
+direct play again, in the same player and so in its budget slot, and the label counts down
+("Trying again in 0:25"). One whose live session leaves that to the caller (an STB portal's)
+opens again here, after RECONNECT_MS and then the revive's longer waits; a channel that never
+played twice at most, then "The stream ended". An STB channel that failed small gets its fresh
+link at once once, then, once it played, after the revive's waits (it opens small again). A
+swap during the back-off hands the reopen to the picture that has the player then
+(`take_reopen`, `adopt_reopen`, and LiveControls' own).
 
 What each slot shows (its target, the zap group it came from and, for a movie or an episode,
 its resume key) is kept here, so a swap can give the shell the new large picture's
@@ -51,9 +55,10 @@ from PySide6.QtCore import QObject, QTimer, Signal
 from services.catalog import ALL_GROUP_ID
 from services.i18n import N_, tr, tr_n, translate
 from services.live.live_session import LOADING, RECONNECTING, UNAVAILABLE
-from services.live.refusals import STREAM_LIMIT
+from services.live.refusals import REFUSALS, STREAM_LIMIT
 from services.live.stay_live import TARGETS
 from services.navigation import payloads
+from services.revive import revive_wait
 from services.sessions import SessionManager, Slot, limit_message, records
 from services.vlc_profile import PlayKind
 from services.zapping import ZapContext
@@ -63,6 +68,7 @@ from ui.context_actions import is_channel
 from ui.link_lanes import LinkLanes, Target
 from ui.live_tuner import LiveStart, start_kwargs
 from ui.overlays.pip_label import CONNECTING, LIVE, REC
+from ui.overlays.retry_notice import retry_text
 from ui.overlays.transport import fmt_behind
 
 logger = logging.getLogger(__name__)
@@ -196,6 +202,16 @@ class PipControls(QObject):
         self._reopen_due: Optional[tuple[str, Target, str, PlayKind]] = None
         self._reopen_timer = QTimer(self, singleShot=True)
         self._reopen_timer.timeout.connect(self._reopen)
+        # A channel shown small comes back by itself (`services.revive`): the slots whose
+        # channel played since it opened, when our reopen is due (monotonic), an STB channel's
+        # fresh link after its wait, and the label's countdown.
+        self._played: set[str] = set()
+        self._reopen_at: Optional[float] = None
+        self._relink_due: Optional[SlotView] = None
+        self._relink_timer = QTimer(self, singleShot=True)
+        self._relink_timer.timeout.connect(self._relink_now)
+        self._label_timer = QTimer(self, interval=live_controls.RETRY_TICK_MS)
+        self._label_timer.timeout.connect(self._tick_label)
 
     def wire(self) -> None:
         sessions = self.sessions
@@ -225,6 +241,9 @@ class PipControls(QObject):
         slot.live.recordingChanged.connect(self._refresh_label)  # REC (2.2)
         slot.live.notice.connect(partial(self._on_notice, slot.name))
         slot.playback.stateChanged.connect(partial(self._on_player_state, slot.name))
+        retrying = getattr(slot.live, "retrying", None)
+        if retrying is not None:  # its stream is down and waited for: the label counts down
+            retrying.connect(lambda *_: self._tick_label())
 
     # ---- state --------------------------------------------------------------------------------
 
@@ -555,6 +574,7 @@ class PipControls(QObject):
         self._wanted = None
         self._link = None  # a late link for it is ignored (it is no longer `_link`)
         self._cancel_reopen()
+        self._cancel_relink()
         sessions = self.sessions
         if keep_recording:
             self._set_small_aside()
@@ -584,6 +604,7 @@ class PipControls(QObject):
         self._wanted = None
         self._link = None
         self._cancel_reopen()
+        self._cancel_relink()
         self._set_small_aside()
         if context is not None:
             self.view(name).context = context
@@ -645,7 +666,12 @@ class PipControls(QObject):
         self._said.pop(slot.name, None)  # its new channel's notices are said again
         self._reopens.pop(slot.name, None)
         self._playing_since.pop(slot.name, None)  # how long it played counts from its open
+        if not target.played:
+            self._played.discard(slot.name)  # (a fresh link of one that played keeps it)
+        else:
+            self._played.add(slot.name)
         self._cancel_reopen()
+        self._cancel_relink()
         try:
             # The small picture keeps its time-shift in memory: one disk ring at most.
             kwargs = start_kwargs(self._live_start(target, url), self.config, disk=False)
@@ -712,6 +738,8 @@ class PipControls(QObject):
         if view is not None and self._may_retry(view.target, name):
             self._retry(view)
             return
+        if view is not None and self._relink_later(view, name):
+            return  # an STB channel that played: a fresh link after the revive's wait
         self._toast(translate(message), "error", ERROR_MS)  # one kept in English shows translated
         target = view.target if view is not None else None
         if target is not None:
@@ -735,20 +763,65 @@ class PipControls(QObject):
             and item_provider.provider_type(self.catalog, target.item) == "STB"
         )
 
-    def _retry(self, view: SlotView) -> None:
+    def _retry(self, view: SlotView, *, relinks: int = 0, played: bool = False) -> None:
         target = view.target
         assert target is not None
         logger.info("Making the link of %s again after the small picture failed", target.title)
         item_provider.sign_in_again(self.catalog, target.item)
-        again = replace(target, retried=True)
+        again = replace(target, retried=True, relinks=relinks, played=target.played or played)
         self._wanted = (again, view.context if view.context is not None else ZapContext())
         self._request(again)
+
+    def _relink_later(self, view: SlotView, name: str) -> bool:
+        """The small picture closed for its STB channel's failure, past its fresh link at
+        once: once it played, its link is made again after the revive's next wait and it
+        opens small again (`services.revive`), for as long as nothing else is chosen small;
+        never for the provider's limit. False: none."""
+        target = view.target
+        failure = self.sessions.failure
+        played = name in self._played
+        if (
+            target is None
+            or not target.live
+            or not (target.played or played)
+            or not failure
+            or failure in REFUSALS
+            or self._wanted is not None
+            or self._link is not None
+            or item_provider.provider_type(self.catalog, target.item) != "STB"
+        ):
+            return False
+        wait = revive_wait(target.relinks)
+        logger.info("Making the link of %s again in %.0f s (small)", target.title, wait)
+        self._relink_due = replace(view, target=replace(target, played=True))
+        self._relink_timer.start(round(wait * 1000))
+        shown = tr("{name}: {message}", name=target.title, message=retry_text(wait))
+        self._toast(shown, "info", NOTICE_MS)
+        return True
+
+    def _relink_now(self) -> None:
+        view, self._relink_due = self._relink_due, None
+        if view is None or view.target is None or self._closed():
+            return
+        if self._wanted is not None or self._link is not None or self.sessions.pip_open():
+            return  # another channel was chosen small meanwhile
+        if ZapContext.same(view.target.item, self._large_channel()):
+            return  # the large picture took the channel
+        self._retry(view, relinks=view.target.relinks + 1, played=True)
+
+    def _cancel_relink(self) -> None:
+        self._relink_due = None
+        self._relink_timer.stop()
 
     def _on_player_state(self, name: str, state: str) -> None:
         """A player's state: a title that ended small says "Finished" on the label; a channel
         played directly that ended small opens again."""
         if state == "playing":
             self._playing_since[name] = time.monotonic()
+            self._played.add(name)
+            if self._reopen_due is None:
+                self._reopen_at = None  # a reopen of ours played: nothing is waited for
+            self._tick_label()
         elif state == "ended":
             self._reconnect_small(name)
         ended = state == "ended"
@@ -807,17 +880,25 @@ class PipControls(QObject):
             return
         if kind is None or kind in live_controls.NOT_REOPENED:
             return  # the time-shift buffer reopens itself
+        revives = getattr(small.live, "revives", None)
+        if callable(revives) and revives():
+            return  # its live session opens its direct play again itself (the label says)
         count = self._reopens.get(name, 0)
         since = self._playing_since.pop(name, None)
         if since is not None and time.monotonic() - since >= live_controls.HEALTHY_S:
             count = 0  # it played well since it last opened: the back-off anew
-        if count >= len(live_controls.RECONNECT_MS):
+        if name not in self._played and count >= len(live_controls.RECONNECT_MS):
             self._say(name, tr("The stream ended"))
             return
+        wait_ms = live_controls.reopen_wait_ms(count)
         self._reopens[name] = count + 1
         self._reopen_due = (name, target, url, kind)
-        self._reopen_timer.start(live_controls.RECONNECT_MS[count])
-        self._say(name, translate(RECONNECTING))
+        self._reopen_timer.start(wait_ms)
+        self._reopen_at = time.monotonic() + wait_ms / 1000
+        logger.info("%s small ended; opening it again in %.0f s", target.title, wait_ms / 1000)
+        if count < len(live_controls.RECONNECT_MS):
+            self._say(name, translate(RECONNECTING))
+        self._tick_label()
 
     def _reopen(self) -> None:
         due, self._reopen_due = self._reopen_due, None
@@ -830,6 +911,7 @@ class PipControls(QObject):
         playback = small.playback
         if getattr(playback, "url", None) != url:
             return
+        self._reopen_at = time.monotonic()  # "Reconnecting…" until it plays
         logger.info("Opening %s small again after its stream ended", target.title)
         playback.play(
             url,
@@ -840,7 +922,31 @@ class PipControls(QObject):
 
     def _cancel_reopen(self) -> None:
         self._reopen_due = None
+        self._reopen_at = None
         self._reopen_timer.stop()
+
+    def _retry_in(self, slot: Slot) -> Optional[float]:
+        """The seconds until slot's channel is tried again while its stream is down (its live
+        session's wait, or our reopen's); None: nothing is waited for."""
+        retry_in = getattr(slot.live, "retry_in", None)
+        seconds = retry_in() if callable(retry_in) else None
+        if seconds is not None:
+            return float(seconds)
+        due, at = self._reopen_due, self._reopen_at
+        if at is None or (due is not None and due[0] != slot.name):
+            return None
+        return max(0.0, at - time.monotonic())  # 0.0 once it opens: "Reconnecting…"
+
+    def _tick_label(self) -> None:
+        """The label's countdown: each second while the small picture's stream is waited
+        for."""
+        small = self.sessions.small()
+        waiting = small is not None and self._retry_in(small) is not None
+        if waiting and not self._label_timer.isActive():
+            self._label_timer.start()
+        elif not waiting:
+            self._label_timer.stop()
+        self._refresh_label()
 
     def take_reopen(self, name: str) -> Optional[live_controls.Reopen]:
         """A swap made slot `name` large: its ended stream on its way to open again goes with
@@ -851,14 +957,19 @@ class PipControls(QObject):
         remaining = max(0, self._reopen_timer.remainingTime())
         self._cancel_reopen()
         _name, target, url, kind = due
-        return live_controls.Reopen(target, url, kind, remaining, self._reopens.get(name, 0))
+        count = self._reopens.get(name, 0)
+        return live_controls.Reopen(target, url, kind, remaining, count, name in self._played)
 
     def adopt_reopen(self, name: str, reopen: live_controls.Reopen) -> None:
         """A swap made slot `name` small while its ended stream was on its way to open again
         (large): it opens here once the rest of its back-off is over."""
         self._reopens[name] = reopen.count
+        if reopen.played:
+            self._played.add(name)
         self._reopen_due = (name, reopen.target, reopen.url, reopen.kind)
         self._reopen_timer.start(reopen.remaining_ms)
+        self._reopen_at = time.monotonic() + reopen.remaining_ms / 1000
+        self._tick_label()
 
     def _on_timeline(self, name: str, state: dict) -> None:
         self._timelines[name] = state
@@ -886,6 +997,9 @@ class PipControls(QObject):
             return FINISHED_TEXT if slot.name in self._ended else ""
         if slot.live.recording() or lender_records(slot.live):
             return REC  # its recording goes on small (2.2; 2.9.7: one on schedule too)
+        waiting = self._retry_in(slot)
+        if waiting is not None:
+            return retry_text(waiting)  # its stream is down: when it is tried again
         mode = slot.live.mode
         timeline = self._timelines.get(slot.name)
         if mode == "pipeline" and timeline is not None:

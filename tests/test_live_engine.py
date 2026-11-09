@@ -70,6 +70,7 @@ STATE_KEYS = {
     "steered",
     "not_live",  # 2.8.11
     "settled_s",  # 2.8.11
+    "retry_at",  # the channel's stream down: when its next try is due
 }
 HEADERS = {"User-Agent": "QiTV-test"}
 MIB = 1024 * 1024
@@ -300,6 +301,38 @@ class StartTargetTests(unittest.TestCase):
         supervisor._commands.put(junction)
         supervisor._serve_without_helper()
         self.assertEqual(relayed, [])
+
+    def test_retry_now_reaches_the_helper_and_never_closes(self):
+        # The picture's Try now while the channel's stream is down: like the junction, a
+        # command the supervisor's close fallback must never take.
+        import queue
+
+        from services.live import engine as engine_module
+
+        commands: queue.Queue = queue.Queue()
+        engine = engine_module.LiveEngine.__new__(engine_module.LiveEngine)
+        engine._shut, engine._sessions, engine._commands = False, {}, commands
+        sid = engine.open_session(
+            URL_FOR_RING, headers={}, verify_ssl=True, disk=False, max_bytes=MIB, window={}
+        )
+        opened = commands.get_nowait()
+        engine.retry_now(sid)
+        retry = commands.get_nowait()
+        self.assertEqual(retry, ("retry_now", sid))
+        supervisor = engine_module._Supervisor(Path(tempfile.gettempdir()), queue.Queue())
+        supervisor._records[sid] = engine_module._Record(command=opened, sent=True)
+        supervisor._commands.put(retry)
+        sent = []
+        supervisor._send_next(SimpleNamespace(send=sent.append))
+        self.assertEqual(sent, [retry])
+        self.assertFalse(supervisor._records[sid].closing)
+        relayed = []
+        supervisor._relay = relayed.append  # no helper: nothing to forward, nothing closed
+        supervisor._commands.put(retry)
+        supervisor._serve_without_helper()
+        self.assertEqual(relayed, [])
+        engine.retry_now("unknown")  # a session it does not hold: nothing is asked
+        self.assertTrue(commands.empty())
 
     def test_set_until_reaches_the_helper_and_never_closes(self):
         # 2.7: a server part's stop follows the live buffer's start; the supervisor's

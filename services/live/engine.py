@@ -312,7 +312,7 @@ class _Supervisor(QThread):
             if record.sent:  # else after its open (`_send_notes`)
                 conn.send(command)
             return
-        if name in ("until", "junction"):  # 2.7, 2.8.5: never the close fallback below
+        if name in ("until", "junction", "retry_now"):  # never the close fallback below
             if record is not None and record.sent and not record.closing:
                 conn.send(command)
             return
@@ -683,8 +683,15 @@ class _Supervisor(QThread):
             return
         if command[0] == "drop_kept":
             self._drop_kept()  # 2.8: the disk buffer turned off needs no helper
-        elif command[0] in ("adopt_kept", "disk_amount", "detailed_log", "junction", "secure_dns"):
-            return  # 2.8: no helper takes anything back, holds a disk ring or logs
+        elif command[0] in (
+            "adopt_kept",
+            "disk_amount",
+            "detailed_log",
+            "junction",
+            "secure_dns",
+            "retry_now",
+        ):
+            return  # 2.8: no helper takes anything back, holds a disk ring, logs or retries
         elif command[0] == "open":
             # Time-shift is off: available(False) was emitted already, and no reopen follows.
             self._relay(("error", command[1], "unavailable", _UNAVAILABLE))
@@ -996,6 +1003,13 @@ class LiveEngine(QObject):
         view = self._sessions.get(sid)
         if view is not None and not view.closing and not self._shut:
             self._commands.put(("until", sid, int(seq)))
+
+    def retry_now(self, sid: str) -> None:
+        """Have a session whose channel's stream is down try it again now, instead of after
+        the rest of its long wait (the state's `retry_at`: the picture's Try now)."""
+        view = self._sessions.get(sid)
+        if view is not None and not view.closing and not self._shut:
+            self._commands.put(("retry_now", sid))
 
     def keep_session(self, sid: str, label: Mapping[str, Any]) -> None:
         """Label a disk session's buffer (2.6: the channel's key), so a later helper knows

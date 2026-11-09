@@ -46,6 +46,11 @@ class Target:
     subtitle: str = ""
     zapped: bool = False  # chosen by a zap step (↑/↓, digits, previous), not picked
     retried: bool = False  # its link was made again after a playback failure (STB tokens)
+    # A live channel that keeps failing comes back by itself (`services.revive`): the links
+    # made again in a row after a wait since it last played well, and whether it played since
+    # it was chosen (a link made again keeps both).
+    relinks: int = 0
+    played: bool = False
     context: Optional[dict] = None  # a movie's or episode's play context (see play_vod)
     start_over: bool = False  # from the start, not where it stopped
     local: bool = False  # a file opened from the disk: no provider's link, slot or history
