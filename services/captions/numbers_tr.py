@@ -66,6 +66,24 @@ MONTHS = (
     "kasım",
     "aralık",
 )
+CLOCK_AFTER = frozenset(
+    (
+        "pazartesi",
+        "salı",
+        "çarşamba",
+        "perşembe",
+        "cuma",
+        "cumartesi",
+        "pazar",
+        "bugün",
+        "yarın",
+        "sabah",
+        "öğle",
+        "öğlen",
+        "akşam",
+        "gece",
+    )
+)  # a clock time may follow these without "saat" ("pazartesi 21.30'da")
 _LEAD = "\"'“‘(«"
 _TRAIL = ".,;:!?…\"'”’)»"
 
@@ -236,6 +254,30 @@ def written(text: str) -> str:
                     out.append(f"{n.value}{_tail(n)}{last.trail}")
                     i = n.end
                 continue
+        # DAY H M: a clock time after a day or a time of day, its minutes ending the phrase
+        # ("pazartesi yirmi bir otuzda" -> "pazartesi 21.30'da", not the range "21-30'da":
+        # the owner's TV promo, 2026-11-09)
+        if i > 0 and not words[i - 1].trail and _lower(words[i - 1].body) in CLOCK_AFTER:
+            n = _number(words, i)
+            if (
+                n is not None
+                and n.value <= 24
+                and not n.ordinal
+                and not n.suffix
+                and not words[n.end - 1].trail
+                and n.end < len(words)
+            ):
+                m = _number(words, n.end)
+                if (
+                    m is not None
+                    and 10 <= m.value <= 59
+                    and not m.ordinal
+                    and (m.suffix or words[m.end - 1].trail or m.end == len(words))
+                ):
+                    last = words[m.end - 1]
+                    out.append(f"{w.lead}{n.value}.{m.value:02d}{_tail(m)}{last.trail}")
+                    i = m.end
+                    continue
         n = _number(words, i)
         if n is None:
             out.append(w.lead + w.body + w.trail)

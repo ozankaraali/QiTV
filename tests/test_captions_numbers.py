@@ -108,6 +108,18 @@ class TurkishNumbersTest(unittest.TestCase):
             ]
         )
 
+    def test_a_clock_time_after_a_day_is_no_range(self):
+        # the owner's TV promo, 2026-11-09: "21-30'da" was written for a time
+        self.check(
+            [
+                ("yeni bölüm pazartesi yirmi bir otuzda", "yeni bölüm pazartesi 21.30'da"),
+                ("bu akşam yirmi iki kırk beşte", "bu akşam 22.45'te"),
+                ("pazar on bir on beş.", "pazar 11.15."),
+                ("bugün iki üç kişi geldi", "bugün iki üç kişi geldi"),
+                ("bugün on beş yirmi kişi geldi", "bugün 15-20 kişi geldi"),
+            ]
+        )
+
     def test_punctuation_and_spacing(self):
         self.check(
             [
