@@ -26,7 +26,7 @@ os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 import test_captions_ui as ui_tests  # (as modules: their tests are not run again here)
 import test_track_panel as panel_tests
 
-from services.captions import onnx_graph, sortformer, trial_models
+from services.captions import onnx_graph, sortformer, speakers, trial_models
 from services.captions.sortformer import FRAME_S, HIDDEN, MELS, SPEAKERS, SUB, Settings
 from services.captions.speakers import (
     COLOURS,
@@ -152,6 +152,41 @@ class PartsTests(unittest.TestCase):
         voiced = self.windows((1.0, False), (2.0, True), (0.3, False), (1.5, True))
         parts = parts_of("Nereye gidiyorsun böyle? Eve dönüyorum.", 11.0, 14.8, voiced, at=10.0)
         self.assertAlmostEqual(parts[0].end, 13.15, delta=0.05)
+
+
+class CutLayerTests(unittest.TestCase):
+    """Where one speaker gives way to another, apart from who (2026-11-09, the owner: "cut points
+    especially male to female should be straightforward")."""
+
+    def test_a_clear_pitch_says_the_gender_and_an_unclear_one_nothing(self):
+        from services.captions.cuts import gender_of
+
+        self.assertEqual(
+            [gender_of(h) for h in (110.0, 160.0, 230.0, None)], ["m", None, "f", None]
+        )
+
+    @unittest.skipUnless(importlib.util.find_spec("sherpa_onnx"), "no sherpa-onnx runtime here")
+    def test_the_pitch_graph_hears_a_tone_s_pitch(self):
+        from services.captions.cuts import Pitch
+
+        with tempfile.TemporaryDirectory() as tmp:
+            pitch = Pitch(tmp)
+            tone = [0.3 * math.sin(2 * math.pi * 160 * n / RATE) for n in range(RATE)]
+            hz = pitch.hz(tone)
+            assert hz is not None
+            self.assertAlmostEqual(hz, 160, delta=3)
+            self.assertIsNone(pitch.hz([0.0] * RATE))  # (silence: no pitch)
+
+    def test_a_cut_where_the_diarizer_hears_the_speaker_go_on_is_a_fresh_speaker(self):
+        fresh = iter(range(1000, 1010)).__next__
+        turns = speakers.told_parts([1, 1, 2], [False, True, False], 1, fresh)
+        self.assertEqual(
+            [(t.speaker, t.changed) for t in turns], [(1, False), (1000, True), (2, True)]
+        )
+        self.assertEqual(turns[1].tag(), "S1000 cut")
+        turns = speakers.told_parts([None, 2], [True, False], 2, fresh)  # untold, but a cut
+        self.assertEqual([(t.speaker, t.changed) for t in turns], [(1001, True), (2, True)])
+        self.assertEqual(speakers.told_parts([None], [False], None, fresh), [None])
 
 
 class ToldTests(unittest.TestCase):
@@ -669,7 +704,7 @@ def _bare_run(model, level=logging.INFO):
     run.recent, run._line_level, run._writes = None, level, "ufak"
     run.stopped, run.viewer = threading.Event(), [0.0]
     run._diary = run._waiting = run._said_by = run._diary_token = None
-    run._diarizer_broken = False
+    run._diarizer_broken, run._gender, run._fresh = False, None, 999
     return run
 
 
@@ -731,6 +766,22 @@ class ProcessTests(unittest.TestCase):
         self.assertEqual((a, b, c, d), (10.0, b, b, 14.5))
         self.assertAlmostEqual(b, 12.35, delta=0.02)  # where it changes, in the gap
         self.assertIn("· S1 | S2 after S1", logs.records[0].getMessage())
+
+    def test_a_woman_after_a_man_is_a_cut_where_the_diarizer_hears_one_voice(self):
+        # 2026-11-09, the owner: "cut points especially male to female should be straightforward"
+        run = self.run_with(_Diarizer([(10.0, 17.0, 0)]))  # the diarizer: one voice throughout
+        run.recent = Recent(None)
+        run.recent.push(8.0, array("f", [0.1] * int(10 * RATE)))
+        genders = iter(["m", "f", None])  # the pitch: a man, a woman, then unclear
+        run.model.pitch = SimpleNamespace(gender=lambda sound: next(genders))
+        run._write("ufak", "x", "Nereye gidiyorsun böyle? Eve dönüyorum hemen.", 10.0, 14.0)
+        _until(self, lambda: run.sent)
+        (_t, _a, _b, t1, s1), (_t2, _c, _d, t2, s2) = run.sent[0][7]
+        self.assertEqual((t1, s1, t2), (0, 1, 1))  # a dash
+        self.assertGreaterEqual(s2, 1000)  # who she is unsure: a fresh colour
+        run._write("ufak", "y", "Peki.", 14.5, 16.0)  # unclear: no cut, the diarizer's voice
+        _until(self, lambda: len(run.sent) == 2)
+        self.assertEqual(run.sent[1][5:7], (1, 1))  # (back from the fresh one to S1)
 
     def test_a_part_nobody_is_heard_in_goes_on_with_the_speaker_before(self):
         run = self.run_with(_Diarizer([(10.0, 12.0, 1)]))
@@ -879,10 +930,14 @@ class ProcessTests(unittest.TestCase):
             "diarizer": "/models/nemotron-3-diarization",
             "voice_prints": "/models/eres2net.onnx",
         }
+        from services.captions import cuts
+
         with mock.patch.dict(sys.modules, {"sherpa_onnx": sherpa}):
             with mock.patch.object(sortformer, "Sortformer", Diarizer):
-                model = _Model(spec)
-                _until(self, lambda: model.diarizer is not None)
+                with mock.patch.object(cuts, "Pitch", lambda folder: "pitch"):
+                    model = _Model(spec)
+                    _until(self, lambda: model.diarizer is not None)
+        self.assertEqual(model.pitch, "pitch")  # the cut layer's pitch, with it
         self.assertEqual(made, ["/models/nemotron-3-diarization"])
         self.assertEqual(extractors, ["/models/eres2net.onnx"])  # its voice prints' model
         self.assertTrue(callable(model.diarizer.prints))

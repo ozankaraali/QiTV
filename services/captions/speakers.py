@@ -63,14 +63,48 @@ class Turn:
     changed: bool  # another speaker than the part before's
     heard: bool = True  # the diarizer heard this speaker in it (False: the one before goes on)
     before: Optional[int] = None  # the part before's speaker
+    cut: bool = False  # a cut the diarizer did not hear as a change: a fresh speaker for it
 
     def tag(self) -> str:
-        """The log's words for it: "S2 after S1" (a change), "S1", "S1 untold"."""
+        """The log's words for it: "S2 after S1" (a change), "S9 cut", "S1", "S1 untold"."""
+        if self.cut:
+            return f"S{self.speaker} cut"
         if not self.heard:
             return f"S{self.speaker} untold"
         if self.changed:
             return f"S{self.speaker} after S{self.before}"
         return f"S{self.speaker}"
+
+
+def told_parts(
+    told: Sequence[Optional[int]],
+    cut_before: Sequence[bool],
+    said_by: Optional[int],
+    fresh: Callable[[], int],
+) -> list[Optional[Turn]]:
+    """Each part's turn from its speaker as the diarizer told it (`told`: run speaker 1, 2, ...,
+    None: nobody heard enough, the one before goes on) and whether the cut layer puts a cut
+    before it (services.captions.cuts: a clear flip of the voice's gender; 2026-11-09, the owner:
+    "cut points especially male to female should be straightforward"); `said_by` the speaker
+    before the line. A cut where the diarizer heard the same speaker go on is a turn too: a dash,
+    or in Colours a fresh colour (`fresh`), as who it is stays unsure."""
+    turns: list[Optional[Turn]] = []
+    before = said_by
+    for speaker, cut in zip(told, cut_before):
+        heard = speaker is not None
+        current = speaker if speaker is not None else before
+        if current is None and not cut:
+            turns.append(None)
+            continue
+        changed = before is not None and current != before
+        forced = cut and not changed and before is not None
+        if forced or current is None:
+            current = fresh()
+            changed = before is not None
+        assert current is not None
+        turns.append(Turn(current, changed, heard=heard, before=before, cut=forced))
+        before = current
+    return turns
 
 
 @dataclass(frozen=True)
@@ -214,14 +248,15 @@ def parts_of(
 
 
 class Recent:
-    """The voice detector's verdicts on the run's last KEEP_S seconds of placed sound, a window
-    at a time (`flags`: a line's words are spread over its voiced windows). `push` from the
-    thread that places the sound, `flags` from the ones that write the lines."""
+    """The run's last KEEP_S seconds of placed sound in voice detector windows, each with its
+    verdict (`flags`: a line's words are spread over its voiced windows; `voiced`: the cut layer
+    reads a part's voice). `push` from the thread that places the sound, the rest
+    from the ones that write the lines."""
 
     def __init__(self, is_voiced: Optional[Callable[[array], bool]], keep_s: float = KEEP_S):
         self._is_voiced = is_voiced
         self._keep_s = keep_s
-        self._windows: deque[tuple[float, bool]] = deque()  # (timeline second, voiced)
+        self._windows: deque[tuple[float, array, bool]] = deque()  # (second, sound, voiced)
         self._rest = array("f")  # the start of the next window
         self._rest_at: Optional[float] = None
         self._lock = threading.Lock()
@@ -231,7 +266,7 @@ class Recent:
         if self._rest_at is None or abs(at - (self._rest_at + len(self._rest) / RATE)) > 0.02:
             self._rest, self._rest_at = array("f"), at
         self._rest.extend(samples)
-        done: list[tuple[float, bool]] = []
+        done: list[tuple[float, array, bool]] = []
         while len(self._rest) >= WINDOW:
             window = self._rest[:WINDOW]
             del self._rest[:WINDOW]
@@ -241,7 +276,7 @@ class Recent:
                     voiced = bool(self._is_voiced(window))
                 except Exception:
                     voiced = False
-            done.append((self._rest_at, voiced))
+            done.append((self._rest_at, window, voiced))
             self._rest_at += WINDOW / RATE
         if not done:
             return
@@ -251,13 +286,24 @@ class Recent:
             while self._windows and self._windows[0][0] < newest - self._keep_s:
                 self._windows.popleft()
 
+    def _inside(self, start: float, end: float) -> list[tuple[float, array, bool]]:
+        half = WINDOW / RATE / 2
+        with self._lock:
+            return [w for w in self._windows if start <= w[0] + half < end]
+
     def flags(self, start: float, end: float) -> tuple[list[bool], float]:
         """The voice detector's verdicts of the windows of timeline seconds [start, end) (each
         window whose middle is in), and the first one's second (`start` when none is kept)."""
-        half = WINDOW / RATE / 2
-        with self._lock:
-            kept = [(at, voiced) for at, voiced in self._windows if start <= at + half < end]
-        return [voiced for _at, voiced in kept], (kept[0][0] if kept else start)
+        kept = self._inside(start, end)
+        return [voiced for _at, _w, voiced in kept], (kept[0][0] if kept else start)
+
+    def voiced(self, start: float, end: float) -> array:
+        """The voiced sound of timeline seconds [start, end)."""
+        out = array("f")
+        for _at, window, voiced in self._inside(start, end):
+            if voiced:
+                out.extend(window)
+        return out
 
 
 class Colours:

@@ -45,7 +45,7 @@ from services.captions import guards, numbers_tr, text_language, trial_models
 from services.captions.growing import GrowingWriter
 from services.captions.languages import COHERE, EUROPEAN, QWEN_LANGUAGES, iso_code
 from services.captions.pieces import END_PAUSE_S, MAX_PIECE_S, Cutter, Piece
-from services.captions.speakers import Recent, Turn, parts_of
+from services.captions.speakers import Recent, Turn, parts_of, told_parts
 from services.captions.stream_clock import StreamClock, TsTimes
 from services.captions.streaming import StreamWriter
 
@@ -121,6 +121,7 @@ MOON_ENV = "QITV_TR_MOONSHINE"
 _MOON_FRAME = 80
 _IDLE_S = 0.25  # the growing writer looks at the picture this often when no sound comes
 SEND_MARGIN_S = 1.0  # a line waiting for its speakers goes when the picture is this near it
+FRESH_FROM = 1000  # the speaker numbers of cuts whose speaker is unsure (a fresh colour each)
 # The trial's field test set (the owner, 2026-11-07): with a folder named here, each piece the
 # Moonshine trial reads is kept as a 16 kHz WAV beside a line of what the model wrote, to label.
 SAVE_ENV = "QITV_TR_SAVE_PIECES"
@@ -325,6 +326,7 @@ class _Model:
         # services.captions.sortformer), and the voice detector of the sound lines are timed by
         # (its own: its windows come in their order)
         self.diarizer: Any = None
+        self.pitch: Any = None  # ... and the cut layer's (services.captions.cuts)
         self.speakers_on = False
         self._speaker_vad: Any = None
         self._speaker_lock = threading.Lock()
@@ -358,8 +360,9 @@ class _Model:
     def use_speakers(self, diarizer: Optional[str], prints: Optional[str] = None) -> None:
         """2026-11-08, Speaker marks: each line's speakers told by the streaming diarizer whose
         files are in the folder `diarizer`, who is who across its fresh starts by the speaker
-        model in the file `prints` (2026-11-09; they load in their own thread the first time;
-        lines go untold till then); None: no longer told."""
+        model in the file `prints`, and a clear flip of the voice's gender as a cut (2026-11-09;
+        they load in their own thread the first time; lines go untold till then); None: no longer
+        told."""
         if not diarizer or not self.has_model:
             self.speakers_on = False
             return
@@ -376,10 +379,12 @@ class _Model:
 
     def _load_speakers(self, folder: str, prints: Optional[str]) -> None:
         try:
+            from services.captions.cuts import Pitch
             from services.captions.sortformer import SherpaPrints, Sortformer
 
             self._speaker_vad = self._detector(_VOICED_MIN_S)
             voices = SherpaPrints(self._sherpa, prints) if prints else None
+            self.pitch = Pitch(folder)
             self.diarizer = Sortformer(folder, prints=voices.print_ if voices else None)
             logger.info(
                 "AI captions: the diarizer is loaded (%s%s)",
@@ -644,6 +649,8 @@ class _Run:
         self._said_by: Optional[int] = None
         self._diary_token: Optional[int] = None  # the diarizer reads this run's sound (its reset)
         self._diarizer_broken = False
+        self._gender: Optional[str] = None  # the last part's speaker's, when clear
+        self._fresh = FRESH_FROM - 1
         self.votes = text_language.Votes()  # the language heard, when none is given
         # streaming Turkish: the sound goes to the model whole (no pieces), lines come back
         self.blocks: queue.Queue[Optional[tuple[float, array]]] = queue.Queue()
@@ -765,7 +772,10 @@ class _Run:
 
     def _send(self, line: tuple, diarizer: Any) -> None:
         """A line in parts, each with its speaker as the diarizer told it (`diarizer` None: none
-        told), to the captions and the log."""
+        told), to the captions and the log. 2026-11-09, the owner ("cut points especially male
+        to female should be straightforward"): where a part begins another speaker's turn is
+        where the cut layer hears a clear flip of the voice's gender (services.captions.cuts),
+        apart from who they are."""
         from services.captions import sortformer
 
         name, heard, shown, start, end, until, voiced = line
@@ -774,12 +784,21 @@ class _Run:
         if diarizer is not None:
             changes = sortformer.changes(diarizer.frames(start, end), diarizer.time_of(0, start))
         parts = parts_of(shown, start, end, flags, at, changes=changes)
-        turns: list[Optional[Turn]] = []
-        for part in parts:
-            told = None
-            if diarizer is not None:
-                told = sortformer.speaker(diarizer.frames(part.start, part.end))
-            turns.append(self._turn(told) if diarizer is not None else None)
+        turns: list[Optional[Turn]] = [None] * len(parts)
+        if diarizer is not None:
+            told = []
+            for part in parts:
+                k = sortformer.speaker(diarizer.frames(part.start, part.end))
+                told.append(None if k is None else k + 1)
+            cut_before = [part.new is True for part in parts]
+            for i, gender in enumerate(self._genders(parts)):
+                if gender is not None and self._gender not in (None, gender):
+                    cut_before[i] = True
+                self._gender = gender or self._gender
+            turns = told_parts(told, cut_before, self._said_by, self._fresh_speaker)
+            self._said_by = next(
+                (turn.speaker for turn in reversed(turns) if turn is not None), self._said_by
+            )
         self._logged(name, heard, shown, turns)
         said = [
             (
@@ -795,16 +814,24 @@ class _Run:
         message = ("caption", self.run, start, max(end, until), shown, changed, speaker)
         self.link.send(message + ((said,) if len(said) > 1 else ()))
 
-    def _turn(self, told: Optional[int]) -> Optional[Turn]:
-        """A part's speaker, 1 to 8 in the order the diarizer heard them come (`told`: its index,
-        None: nobody heard enough: the speaker before goes on), and whether it changed."""
-        before = self._said_by
-        speaker = before if told is None else told + 1
-        if speaker is None:
-            return None
-        self._said_by = speaker
-        changed = before is not None and speaker != before
-        return Turn(speaker, changed, heard=told is not None, before=before)
+    def _fresh_speaker(self) -> int:
+        """A speaker number no one has: a cut whose speaker is unsure (a fresh colour)."""
+        self._fresh = getattr(self, "_fresh", FRESH_FROM - 1) + 1
+        return self._fresh
+
+    def _genders(self, parts: Sequence[Any]) -> list[Optional[str]]:
+        """Each part's speaker's gender when the voice's pitch says it clearly (None: unsure)."""
+        pitch = getattr(getattr(self, "model", None), "pitch", None)
+        recent = getattr(self, "recent", None)
+        if pitch is None or recent is None:
+            return [None] * len(parts)
+        out: list[Optional[str]] = []
+        for part in parts:
+            try:
+                out.append(pitch.gender(recent.voiced(part.start, part.end)))
+            except Exception:
+                out.append(None)
+        return out
 
     def _flags(self, start: float, end: float) -> tuple[Optional[list[bool]], float]:
         """The voice detector's windows of [start, end) kept for the diarizer, if it is on."""
@@ -1314,7 +1341,7 @@ def _serve(link: _Link) -> None:
             viewer[0] = float(message[1])
         elif kind == "speakers":  # 2026-11-08: Speaker marks on (the diarizer's folder) or off
             if model is not None:
-                model.use_speakers(message[1], message[2] if len(message) > 2 else None)
+                model.use_speakers(*message[1:3])
         elif kind == "language":
             if model is not None and model.trial:
                 continue  # a test model's runs stay Turkish
