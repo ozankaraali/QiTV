@@ -177,9 +177,17 @@ class ToldTests(unittest.TestCase):
         self.assertEqual(sortformer.speaker(told((0.4, 0), (1.0, 1), (0.2, None))), 1)
         self.assertIsNone(sortformer.speaker(told((1.0, None))))
         self.assertIsNone(sortformer.speaker([]))
-        barely = told((0.1, 2), (0.9, None))  # 9 % of it: too little to tell
-        self.assertLess(0.1 * 0.9, sortformer.MIN_SHARE)
-        self.assertIsNone(sortformer.speaker(barely))
+        a, b = [0.2, 0.02, 0.02] + [0.0] * 5, [0.02, 0.2, 0.02] + [0.0] * 5
+        unsure = [a, b] * 50  # someone talks, nobody for 15 % of it
+        self.assertIsNone(sortformer.speaker(unsure))
+
+    def test_a_short_answer_over_the_silence_after_it_is_told(self):
+        # 2026-11-09, the owner: "Kurtuldu mu şimdi?" "Bilemiyorum." both in the asker's colour.
+        # Late in a run the model was unsure (about 0.3), and the answer's line went on past it
+        answer = [[0.32 if k == 2 else 0.2 if k == 6 else 0.02 for k in range(8)]] * 30
+        frames = answer + told((0.5, None))  # 0.3 s said, 0.5 s of silence after it
+        self.assertLess(0.32 * 30 / len(frames), sortformer.MIN_SHARE)  # (of all: untold)
+        self.assertEqual(sortformer.speaker(frames), 2)
 
     def test_a_change_goes_to_the_nearest_sentence_end_or_end_of_the_line(self):
         # 2026-11-09, the owner: the colour changed at "geri vereceksin", not where the next

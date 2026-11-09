@@ -413,6 +413,10 @@ class Sortformer:
 
 MIN_RUN_S = 0.3  # a speaker alone for less than this is no turn of their own
 MIN_SHARE = 0.15  # a stretch whose likeliest speaker talks for less of it than this: untold
+# 2026-11-09, the owner's live test ("one asked one answered", both one colour): a short answer
+# written as a line of its own also covers the silence after it; a frame where nobody is this
+# likely is silence, and the share is of the frames where someone talks
+VOICED_P = 0.2
 
 
 def labels(frames: Sequence[Sequence[float]]) -> list[int]:
@@ -456,10 +460,12 @@ def changes(frames: Sequence[Sequence[float]], start: float) -> list[float]:
 
 
 def speaker(frames: Sequence[Sequence[float]]) -> Optional[int]:
-    """The speaker (0 to SPEAKERS - 1, in the order they came) most heard in `frames`; None when
-    nobody talks for MIN_SHARE of them."""
-    if not frames:
+    """The speaker (0 to SPEAKERS - 1, in the order they came) most heard in `frames`, of those
+    where someone talks (VOICED_P); None when nobody talks, or the likeliest for less than
+    MIN_SHARE of them."""
+    voiced = [p for p in frames if max(p) >= VOICED_P]
+    if not voiced:
         return None
-    mass = [sum(p[k] for p in frames) for k in range(SPEAKERS)]
+    mass = [sum(p[k] for p in voiced) for k in range(SPEAKERS)]
     best = max(range(SPEAKERS), key=mass.__getitem__)
-    return best if mass[best] / len(frames) >= MIN_SHARE else None
+    return best if mass[best] / len(voiced) >= MIN_SHARE else None
