@@ -53,6 +53,13 @@ from services.i18n import tr, translate
 logger = logging.getLogger(__name__)
 
 LEAD_S = {"small": 8.0, "large": 10.0}  # the picture's distance behind live while on
+# ... and this much more while speakers are marked (a run from source; 2026-11-09, the owner's
+# live test: lines went out untold): the diarizer tells who speaks some seconds after it is said
+SPEAKER_LEAD_S = 2.0
+# Speaker marks turned Off reach the process this much later (2026-11-09, the owner's live test:
+# stepping the row through Off to Colours let the diarizer miss the sound meanwhile, and the
+# picture would wait again for its distance)
+SPEAKERS_OFF_MS = 3000
 FILM_AHEAD_S = 6.0  # a film's sound is read from this far past the picture (after a seek too)
 # "Catching up…" only when what has been heard is about to fall behind the picture: anything
 # ahead of it is in time (2.9: a 1.7B film's captions 3-6 s ahead, all in time, said so at
@@ -248,6 +255,10 @@ class CaptionsController(QObject):
         self._restart.setSingleShot(True)
         self._restart.setInterval(_RESTART_MS)
         self._restart.timeout.connect(self._start_run)
+        self._speakers_off = QTimer(self)
+        self._speakers_off.setSingleShot(True)
+        self._speakers_off.setInterval(SPEAKERS_OFF_MS)
+        self._speakers_off.timeout.connect(self._tell_speakers)
 
     # ---- the panel's questions ---------------------------------------------------------
     def available(self) -> bool:
@@ -606,17 +617,38 @@ class CaptionsController(QObject):
 
     def set_speaker_marks(self, mark: str) -> None:
         """How a change of speaker shows from now on. Marked, the captions process tells
-        speakers apart (its diarizer downloads first when it isn't here); Off, it no longer does."""
-        from services.captions.speakers import MARKS
+        speakers apart (its diarizer downloads first when it isn't here) and the picture waits
+        SPEAKER_LEAD_S longer; Off, neither, SPEAKERS_OFF_MS later (a step through Off changes
+        nothing for them)."""
+        from services.captions.speakers import MARKS, OFF
 
         if not self.speaker_marks_offered() or mark not in MARKS:
             return
         self._config_set(_SPEAKER_MARKS, mark)
         logger.info("AI captions: speaker marks %s", mark)
         self._fetch_speakers()
+        if mark == OFF:
+            self._speakers_off.start()
+        else:
+            self._speakers_off.stop()
+            self._tell_speakers()
+        self.changed.emit()
+
+    def _tell_speakers(self) -> None:
+        """The process tells speakers or not as the marks chosen say, and the picture keeps its
+        distance for them."""
         if self._process.running():
             self._process.send("speakers", self._diarizer_folder())
-        self.changed.emit()
+        if self._floored is not None:
+            self._floored.set_caption_floor(self._picture_lead(), shift=False)
+
+    def _picture_lead(self) -> float:
+        """The picture's distance behind live: the model's, and SPEAKER_LEAD_S more while
+        speakers are marked."""
+        from services.captions.speakers import OFF
+
+        lead = LEAD_S.get(self._tier, 8.0)
+        return lead + SPEAKER_LEAD_S if self.speaker_marks() != OFF else lead
 
     def _diarizer_folder(self) -> Optional[str]:
         """The diarizer's folder while speakers are marked and it is here, else None."""
@@ -1559,7 +1591,7 @@ class CaptionsController(QObject):
             return
         self._drop_floor(shift=False)
         if live is not None:
-            live.set_caption_floor(LEAD_S.get(self._tier, 8.0))
+            live.set_caption_floor(self._picture_lead())
             self._floored = live
             self._tell_ready()
 

@@ -62,7 +62,7 @@ def told(*runs):
 
 class TurnTests(unittest.TestCase):
     def test_the_log_s_words_for_a_part_s_speaker(self):
-        self.assertEqual(Turn(2, True).tag(), "S2 new")
+        self.assertEqual(Turn(2, True, before=1).tag(), "S2 after S1")  # (S2 heard before too)
         self.assertEqual(Turn(1, False).tag(), "S1")
         self.assertEqual(Turn(1, False, heard=False).tag(), "S1 untold")  # the one before goes on
 
@@ -180,6 +180,21 @@ class ToldTests(unittest.TestCase):
         barely = told((0.1, 2), (0.9, None))  # 9 % of it: too little to tell
         self.assertLess(0.1 * 0.9, sortformer.MIN_SHARE)
         self.assertIsNone(sortformer.speaker(barely))
+
+    def test_a_change_goes_to_the_nearest_sentence_end_or_end_of_the_line(self):
+        # 2026-11-09, the owner: the colour changed at "geri vereceksin", not where the next
+        # speaker began, the next line: a change this near the line's end is that end's
+        line = "Benden aldığın 300 milyona geri vereceksin."
+        self.assertEqual(len(parts_of(line, 1271.56, 1274.32, changes=[1273.45])), 1)
+        two = "Sen gelmeden önce bitti. Ben de çıktım oradan hemen sonra, kimse yoktu."
+        parts = parts_of(two, 0.0, 6.0, changes=[3.2])  # nearer the sentence's end than an end
+        self.assertEqual([p.text for p in parts], ["Sen gelmeden önce bitti.", two[25:]])
+        self.assertEqual((parts[1].start, parts[1].new), (3.2, True))
+        long = "bir iki üç dört beş altı yedi sekiz dokuz on on bir on iki on üç on dört"
+        cut = parts_of(long, 0.0, 6.0, changes=[3.0])  # no sentence end near: between words
+        self.assertEqual(len(cut), 2)
+        wide = parts_of(long, 0.0, 6.0, changes=[3.0], change_snap=3.0)  # an end near enough
+        self.assertEqual(wide, [Part(long, 0.0, 6.0)])
 
     def test_parts_split_where_it_changes_and_say_so(self):
         parts = parts_of("Nereye? Eve dönüyorum ben hemen.", 0.0, 3.0, changes=[1.0])
@@ -300,6 +315,20 @@ class SortformerTests(unittest.TestCase):
         self.assertEqual(sortformer.speaker(self.diarizer.frames(101.0, 102.0)), 0)
         self.assertAlmostEqual(self.diarizer.time_of(0, 101.004), 101.01)
         self.assertAlmostEqual(self.diarizer.time_of(0, 99.0), 100.0)  # (before its first)
+
+    def test_sound_after_a_gap_or_an_overlap_keeps_its_place(self):
+        # 2026-11-09, the owner's live test: Speaker marks off for a moment let sound go, and
+        # what came after was told as said earlier
+        def covered(*blocks):
+            token = self.diarizer.reset(100.0)
+            for at, seconds in blocks:
+                self.diarizer.push(at, array("f", bytes(4 * round(seconds * RATE))), token)
+            return self.diarizer.covered()
+
+        whole = covered((100.0, 4.5))
+        self.assertAlmostEqual(covered((100.0, 2.0), (102.5, 2.0)), whole)  # silence between
+        self.assertAlmostEqual(covered((100.0, 2.0), (101.5, 3.0)), whole)  # read once
+        self.assertGreater(sortformer.JUMP_S, 2.0)  # (a lost 2 s segment is a gap)
 
     def test_a_jump_starts_the_front_end_there_and_the_speakers_are_kept(self):
         token = self.diarizer.reset(100.0)
@@ -581,7 +610,7 @@ class ProcessTests(unittest.TestCase):
             said,
             [
                 "AI captions: [ufak] heard 'nereye', shows 'Nereye?' · S1",
-                "AI captions: [ufak] heard 'eve', shows 'Eve.' · S2 new",
+                "AI captions: [ufak] heard 'eve', shows 'Eve.' · S2 after S1",
             ],
         )
 
@@ -601,7 +630,7 @@ class ProcessTests(unittest.TestCase):
         )
         self.assertEqual((a, b, c, d), (10.0, b, b, 14.5))
         self.assertAlmostEqual(b, 12.35, delta=0.02)  # where it changes, in the gap
-        self.assertIn("· S1 | S2 new", logs.records[0].getMessage())
+        self.assertIn("· S1 | S2 after S1", logs.records[0].getMessage())
 
     def test_a_part_nobody_is_heard_in_goes_on_with_the_speaker_before(self):
         run = self.run_with(_Diarizer([(10.0, 12.0, 1)]))
@@ -915,11 +944,32 @@ class ControllerTests(unittest.TestCase):
 
         self.captions.set_speaker_marks(OFF)
         self.assertEqual(self.config["ai_captions_speaker_marks"], OFF)
-        self.assertEqual(self.sent[-1], ("speakers", None))
         self.dialogue()
         self.assertEqual(self.captions._cues[0], (10.0, 13.0, "Nereye gidiyorsun? Eve."))
+        self.assertTrue(self.captions._speakers_off.isActive())  # the process told a moment on
+        self.captions._speakers_off.timeout.emit()
+        self.assertEqual(self.sent[-1], ("speakers", None))
         self.captions.set_speaker_marks(DASHES)
         self.assertEqual(self.sent[-1], ("speakers", str(models.diarizer_folder())))
+
+    def test_a_step_through_off_leaves_the_speakers_told_and_the_picture_where_it_is(self):
+        # 2026-11-09, the owner's live test: Dashes, Off, Colours in half a second
+        from services.captions import models
+
+        live: Any = self.window.live_session
+        captions: Any = self.captions
+        captions._floored, self.captions._tier = live, "small"
+        self.captions.set_speaker_marks(COLOURS)
+        self.assertEqual(live.floor, 10.0)  # 8 s, and SPEAKER_LEAD_S more for the speakers
+        sent = len(self.sent)
+        self.captions.set_speaker_marks(OFF)
+        self.captions.set_speaker_marks(DASHES)
+        self.assertFalse(self.captions._speakers_off.isActive())
+        self.assertEqual(self.sent[sent:], [("speakers", str(models.diarizer_folder()))])
+        self.assertEqual(live.floor, 10.0)
+        self.captions.set_speaker_marks(OFF)
+        self.captions._speakers_off.timeout.emit()  # off for good: the model's own distance
+        self.assertEqual((live.floor, live.shifted), (8.0, False))  # steered back to it
 
     def test_the_row_steps_round_the_three_from_dashes(self):
         self.assertEqual(self.captions.speaker_marks(), DASHES)  # the default

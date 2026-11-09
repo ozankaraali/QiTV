@@ -49,7 +49,11 @@ SPEAKERS = 8
 FRAME_S = HOP / RATE  # 10 ms: how often it says who speaks
 LOG_HALF = math.log(0.5)
 KEEP_FRAMES = 6000  # the told frames kept (a minute: lines are out within seconds)
-JUMP_S = 1.0  # sound this far from where the sound before ended starts the front end afresh
+# 2026-11-09, the owner's live test: sound that does not go on from the sound before (Speaker
+# marks off for a moment, a dropped block) keeps its place on the timeline: a gap up to JUMP_S is
+# filled with silence, sound already read is let go, a jump further starts the front end afresh
+JUMP_S = 5.0
+_SLACK_S = 0.005  # (block times are rounded)
 MEL_GRAPH = "mel-128.onnx"  # written beside the model on first use
 MEL_VERSION = 1  # (the file's name holds no settings: a change of them writes it again)
 
@@ -283,15 +287,22 @@ class Sortformer:
 
     # ---- in ------------------------------------------------------------------------------
     def push(self, at: float, samples: Sequence[float], token: Optional[int] = None) -> None:
-        """Placed sound from timeline second `at`, going on from the sound before (a run's
-        `token`: a stopped run's is let go). Sound more than JUMP_S from where the sound before
-        ended starts the front end there, the speakers heard kept."""
+        """Placed sound from timeline second `at` (a run's `token`: a stopped run's is let go),
+        kept in its place: a gap after the sound before up to JUMP_S filled with silence, what
+        overlaps it dropped; sound further away starts the front end there, the speakers
+        heard kept."""
         with self._work:
             if token is not None and token != self._token:
                 return
-            if abs(at - (self._origin + self._fed / RATE)) > JUMP_S:
+            gap = at - (self._origin + self._fed / RATE)
+            if abs(gap) > JUMP_S:
                 self._restart(at, told=False)
-            self._push(samples)
+            elif gap > _SLACK_S:
+                self._push(array("f", bytes(4 * round(gap * RATE))))
+            elif gap < -_SLACK_S:
+                samples = samples[round(-gap * RATE) :]
+            if len(samples):
+                self._push(samples)
 
     def _push(self, samples: Sequence[float]) -> None:
         pre = array("f")

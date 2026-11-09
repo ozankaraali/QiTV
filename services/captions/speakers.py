@@ -41,6 +41,11 @@ _CLOSERS = "'\"”’»)"
 LONG_PAUSE_S = 0.4
 MOST_PAUSES = 3  # the longest pauses of a line it is split at, at most
 SNAP_S = 0.6
+# 2026-11-09, the owner's live test ("not from the sentence beginning"): a line's word times are
+# estimates (by its letters, or a pause near them), so a change of speaker the diarizer hears
+# goes to the nearest sentence end or end of the line within this; a sentence is split only with
+# neither near (and a change nearest an end of the line is that line's own)
+CHANGE_SNAP_S = 1.5
 MIN_PART_S = 0.7
 OFF, DASHES, COLOURS = "off", "dashes", "colours"  # how a change of speaker shows
 MARKS = (OFF, DASHES, COLOURS)
@@ -57,12 +62,15 @@ class Turn:
     speaker: int
     changed: bool  # another speaker than the part before's
     heard: bool = True  # the diarizer heard this speaker in it (False: the one before goes on)
+    before: Optional[int] = None  # the part before's speaker
 
     def tag(self) -> str:
-        """The log's words for it: "S2 new", "S1", "S1 untold"."""
+        """The log's words for it: "S2 after S1" (a change), "S1", "S1 untold"."""
         if not self.heard:
             return f"S{self.speaker} untold"
-        return f"S{self.speaker} new" if self.changed else f"S{self.speaker}"
+        if self.changed:
+            return f"S{self.speaker} after S{self.before}"
+        return f"S{self.speaker}"
 
 
 @dataclass(frozen=True)
@@ -92,6 +100,7 @@ def parts_of(
     most: int = MOST_PAUSES,
     min_voiced: float = MIN_PART_S,
     changes: Optional[Sequence[float]] = None,
+    change_snap: float = CHANGE_SNAP_S,
 ) -> list[Part]:
     """`text`, a line of timeline seconds [start, end), in parts that may each be another
     speaker's: split after each sentence's end and where the diarizer heard the speaker
@@ -99,7 +108,9 @@ def parts_of(
     longest pauses of `pause` or more. The words are spread over the voiced windows by their
     letters (`voiced`: the voice detector's verdict per WINDOW from timeline second `at`, `start`
     by default), a sentence's end going to the longest pause within SNAP_S of where they put it;
-    without them, over [start, end). A part with less than `min_voiced` of voiced sound (of time,
+    without them, over [start, end). A change goes to the nearest sentence end or end of the line
+    within `change_snap` (one nearest an end of the line splits nothing), else between the
+    words nearest it. A part with less than `min_voiced` of voiced sound (of time,
     without them) goes with a neighbour: the next when it begins another speaker's turn the
     next goes on, else the one before (the first, the next). Each part says whether the
     diarizer heard another speaker begin with it (`Part.new`)."""
@@ -151,13 +162,18 @@ def parts_of(
         return min(range(len(words) - 1), key=lambda j: abs(after[j] / count - share))
 
     if changes is not None:
-        ends = list(cuts)  # a speaker changes at a sentence's end more often than not
+        ends = dict(cuts)  # a speaker changes at a sentence's end more often than not
         for t in changes:
-            if start < t < end:
-                close = [i for i in ends if abs(cuts[i] - t) <= SNAP_S]
-                i = min(close, key=lambda j: abs(cuts[j] - t)) if close else nearest(t)
-                cuts[i] = t
-                turned.add(i)
+            if not start < t < end:
+                continue
+            edge = min(t - start, end - t)
+            close = [j for j in ends if abs(ends[j] - t) <= change_snap]
+            end_near = min(close, key=lambda j: abs(ends[j] - t)) if close else None
+            if edge <= change_snap and (end_near is None or edge < abs(ends[end_near] - t)):
+                continue  # the line's own start or end
+            at_word = nearest(t) if end_near is None else end_near
+            cuts[at_word] = t
+            turned.add(at_word)
     else:
         long = [p for p in pauses if (p[1] - p[0]) * step >= pause - 1e-6]
         for quiet_from, quiet_to, _before in sorted(long, key=lambda p: p[0] - p[1])[:most]:

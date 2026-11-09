@@ -798,7 +798,7 @@ class _Run:
             return None
         self._said_by = speaker
         changed = before is not None and speaker != before
-        return Turn(speaker, changed, heard=told is not None)
+        return Turn(speaker, changed, heard=told is not None, before=before)
 
     def _flags(self, start: float, end: float) -> tuple[Optional[list[bool]], float]:
         """The voice detector's windows of [start, end) kept for the diarizer, if it is on."""
