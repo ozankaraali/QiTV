@@ -107,6 +107,14 @@ def _manifest(folder: Path) -> dict:
     return data if isinstance(data, dict) else {}
 
 
+def normalize_samples(folder: Path) -> bool:
+    """Whether sherpa-onnx scales a streaming export's samples to [-1, 1] (its default). An export
+    whose encoder reads NeMo's own feature scale says {"normalize_samples": false} in its manifest
+    (2026-11-12: sherpa's feature floor and first chunk then read as NeMo reads them, 3-5 words in
+    100 fewer wrong); read the other way, such an export writes nothing at all."""
+    return _manifest(folder).get("normalize_samples") is not False
+
+
 def _kind_by_name(name: str) -> Optional[str]:
     if name == UFAK_FOLDER:
         return UFAK

@@ -304,6 +304,7 @@ class _Model:
                 num_threads=min(2, threads),
                 sample_rate=16000,
                 feature_dim=80,
+                normalize_samples=trial_models.normalize_samples(folder),  # its manifest says
                 decoding_method="modified_beam_search",  # beam 4 and a small penalty on
                 max_active_paths=4,  # "write nothing": the model drops fewer words
                 blank_penalty=0.5,

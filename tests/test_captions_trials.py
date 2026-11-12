@@ -365,6 +365,16 @@ class TrialProcessTests(unittest.TestCase):
             self.root / "tr-fc-r2" / "encoder.int8.onnx",
         )
 
+    def test_a_stream_export_s_manifest_says_whether_samples_are_scaled(self):
+        self.assertTrue(self.model("tr-fc-r2").turkish_stream.options["normalize_samples"])
+        folder = self.root / "tr-fc7"
+        folder.mkdir()
+        for file in trial_models.TRANSDUCER_FILES:
+            (folder / file).write_bytes(b"x")
+        manifest = {"kind": "fastconformer-stream", "normalize_samples": False}
+        (folder / trial_models.MANIFEST).write_text(json.dumps(manifest), encoding="utf-8")
+        self.assertFalse(self.model("tr-fc7").turkish_stream.options["normalize_samples"])
+
     def test_ufak_picked_writes_alone(self):
         model = self.model("ufakzeka-kulak")
         self.assertEqual(self.loaded, ["offline transducer"])
