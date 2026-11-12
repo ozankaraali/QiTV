@@ -115,6 +115,19 @@ def normalize_samples(folder: Path) -> bool:
     return _manifest(folder).get("normalize_samples") is not False
 
 
+STREAM_BLANK_PENALTY = 0.5  # our FastConformers: the blank's score lowered, fewer words dropped
+
+
+def blank_penalty(folder: Path) -> float:
+    """How much a streaming export's blank score is lowered: its manifest's "blank_penalty"
+    when it gives one (another streaming model is read with its own setting, as it was
+    scored), else ours."""
+    value = _manifest(folder).get("blank_penalty")
+    if isinstance(value, (int, float)) and not isinstance(value, bool) and value >= 0:
+        return float(value)
+    return STREAM_BLANK_PENALTY
+
+
 def _kind_by_name(name: str) -> Optional[str]:
     if name == UFAK_FOLDER:
         return UFAK

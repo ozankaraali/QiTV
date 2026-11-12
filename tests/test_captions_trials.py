@@ -375,6 +375,20 @@ class TrialProcessTests(unittest.TestCase):
         (folder / trial_models.MANIFEST).write_text(json.dumps(manifest), encoding="utf-8")
         self.assertFalse(self.model("tr-fc7").turkish_stream.options["normalize_samples"])
 
+    def test_another_streaming_model_keeps_its_own_blank_penalty(self):
+        from services.captions.worker import TURKISH
+
+        self.assertEqual(self.model("tr-fc-r2").turkish_stream.options["blank_penalty"], 0.5)
+        folder = self.root / "mihu-v2"
+        folder.mkdir()
+        for file in trial_models.TRANSDUCER_FILES:
+            (folder / file).write_bytes(b"x")
+        manifest = {"kind": "online-transducer", "label": "mihu-v2", "blank_penalty": 0}
+        (folder / trial_models.MANIFEST).write_text(json.dumps(manifest), encoding="utf-8")
+        model = self.model("mihu-v2")
+        self.assertEqual(model.turkish_stream.options["blank_penalty"], 0.0)
+        self.assertEqual(model.writes(TURKISH), "mihu-v2")  # its folder's name is in the label
+
     def test_ufak_picked_writes_alone(self):
         model = self.model("ufakzeka-kulak")
         self.assertEqual(self.loaded, ["offline transducer"])

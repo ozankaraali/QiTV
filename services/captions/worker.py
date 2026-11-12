@@ -307,7 +307,7 @@ class _Model:
                 normalize_samples=trial_models.normalize_samples(folder),  # its manifest says
                 decoding_method="modified_beam_search",  # beam 4 and a small penalty on
                 max_active_paths=4,  # "write nothing": the model drops fewer words
-                blank_penalty=0.5,
+                blank_penalty=trial_models.blank_penalty(folder),
                 enable_endpoint_detection=True,
                 rule1_min_trailing_silence=2.4,
                 rule2_min_trailing_silence=0.8,  # a pause ends what was said: its line shows
