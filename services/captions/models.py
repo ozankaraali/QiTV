@@ -222,11 +222,13 @@ VAD = RemoteFile(
 
 # 2.10: QiTV's own Turkish model, qitv-asr-tr-moonshine-mid (CC BY 4.0; Moonshine Streaming Medium
 # trained further on Turkish), its 8-bit sherpa-onnx Moonshine v2 files, read with our beam search
-# (services.captions.moon_beam). Sizes and sha256 as Hugging Face serves them (revision 9656ad3c).
-_TURKISH_REPO = (
+# (services.captions.moon_beam). Sizes and sha256 as Hugging Face serves them (revision a060dc16). Its top-level
+# config.json comes too (1.8 KB, unused here): the Hub counts a model's downloads by that file.
+_TURKISH_REVISION = (
     "https://huggingface.co/ozankaraali/qitv-asr-tr-moonshine-mid/resolve/"
-    "9656ad3c9269818d1c777e1a0964d08c49526b7a/onnx/"
+    "a060dc16743824b8fd9742a6d718de0ccafbf7f9/"
 )
+_TURKISH_REPO = _TURKISH_REVISION + "onnx/"
 TURKISH_FOLDER = "qitv-asr-tr-moonshine-mid"
 TURKISH_FILES = (
     RemoteFile(
@@ -246,6 +248,12 @@ TURKISH_FILES = (
         "tokens.txt",
         179159,
         "8766e1592373d47ea3f7e52975840a96c51f8d0b4b8619c7bdb951f650eb21ba",
+    ),
+    RemoteFile(
+        _TURKISH_REVISION + "config.json",
+        "config.json",
+        1856,
+        "0a8950a8ea8b41c43413921beff70f8d9655278fa9ad2cb07dc5609e138c604c",
     ),
 )
 
