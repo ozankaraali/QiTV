@@ -110,7 +110,7 @@ TILE_NAMES = ("main", "pip", "t2", "t3", "t4", "t5", "t6", "t7", "t8")
 # i18n: a multiview tile's card and a toast: the provider's connections are all in use
 NO_STREAM = N_("No stream to spare at {provider}")
 TILE_FAILED = N_("Couldn't play this channel")  # i18n: a multiview tile's card
-# i18n: a multiview tile's card: its stream ended, and it does not open again by itself
+# i18n: a multiview tile's card: its stream ended (it may try again by itself, or on a click)
 STREAM_ENDED = N_("The stream ended")
 LIVE_ONLY = N_("Multiview is for live TV")  # i18n: a toast
 EXTERNAL_ONLY = N_("Multiview is off while channels play in an external player")  # i18n: a toast

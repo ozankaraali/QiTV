@@ -12,10 +12,10 @@ from services.live.live_session import RECONNECTING
 from services.revive import fmt_wait
 from ui.overlays.sleep_notice import SleepNotice
 
+# i18n: the pill over a live channel whose stream ended, before "Trying again in {time}"
 STREAM_ENDED = N_("The stream ended")
-# i18n: the pill over a live channel whose stream ended: when QiTV tries it again by itself;
-# {time} counts down, e.g. 0:25 or 5:00
-TRYING_AGAIN = N_("Trying again in {time}")
+# i18n: the pill over a live channel whose stream ended: when QiTV tries it again by itself
+TRYING_AGAIN = N_("Trying again in {time}")  # i18n: {time} counts down: 0:25, 5:00
 TRY_NOW = N_("Try now")  # i18n: button: open the live channel's stream again now; short
 
 
