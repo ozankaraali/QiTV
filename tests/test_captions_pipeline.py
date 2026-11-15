@@ -1732,42 +1732,52 @@ class ControllerTimingTests(unittest.TestCase):
         self.assertEqual(self.at(10.5), "Merhaba")
         self.assertEqual(changed, [True, True])
 
-    def test_the_session_learns_they_write_once_a_run_wrote_past_the_picture(self):
-        # 2026-11-07; since 2.10.1 the picture never waits for it, only for their distance
-        # (tests/test_live_session.py: the AI captions loading)
-        live = self.window.live_session
-        told = []
-        live.set_caption_ready = told.append
-        self.captions._ready = False
-        self.captions._floored = None
-        self.captions._hold_floor()  # captions on, the model loading
-        self.assertEqual(told, [False])
+    def _load(self):
+        """The model loading, its process faked."""
+        self.captions._loading, self.captions._ready = True, False
+
+    def _turned_on_loading(self):
+        """Captions turned on, their model loading."""
+        self.captions._enabled = self.captions._ready = False
+        self.enterContext(mock.patch.object(self.captions._process, "running", lambda: False))
+        self.enterContext(mock.patch.object(self.captions, "_load_model", self._load))
+        self.captions._enable("small")
+
+    def test_starting_captions_shows_on_the_picture_until_their_first_words_are_written(self):
+        # 2.10.1: the picture no longer waits for the model, only for their distance; it plays
+        # on, saying so while the model loads and until the first run has written past it. The
+        # row says "Preparing…" while it loads, as before.
+        self._turned_on_loading()
+        self.assertEqual(self.at(100.0), "Starting captions…")
         self.assertEqual(self.captions.status_text(), "Preparing…")
         self.captions._on_ready()
-        self.assertEqual(told[-1], False)  # loaded: not until the run writes past the picture
         run = self.captions._run
-        live.position_s = 100.0
-        self.captions._on_progress(run, 108.0, 0.2, 100.5)  # written 0.5 s past the picture
-        self.assertEqual(told[-1], False)
-        self.captions._on_progress(run, 109.0, 0.2, 102.0)
-        self.assertEqual(told[-1], True)
-        self.captions._drop_floor()  # off: nothing left to tell
-        self.assertEqual(told[-1], True)
+        self.captions._on_caption(run, 100.0, 103.0, "Merhaba")
+        self.captions._on_progress(run, 101.0, 0.2, 101.0)
+        self.assertEqual(self.at(100.5), "Starting captions…")  # written 0.5 s past it
+        self.captions._on_progress(run, 103.0, 0.2, 103.0)
+        self.assertEqual(self.at(100.5), "Merhaba")  # 2.5 s past it
+        self.assertEqual(self.captions.status_text(), "")
+        self.assertEqual(self.at(100.6), "Merhaba")
 
-    def test_a_first_run_that_writes_nothing_counts_as_writing_after_a_while(self):
+    def test_a_first_run_that_writes_nothing_says_starting_captions_not_for_long(self):
         from ui.captions_controller import START_WAIT_S
 
-        live = self.window.live_session
-        told = []
-        live.set_caption_ready = told.append
-        self.captions._ready = False
-        self.captions._floored = None
-        self.captions._hold_floor()
+        self._turned_on_loading()
         self.captions._on_ready()
-        self.assertEqual(told[-1], False)
-        self.captions._starting -= START_WAIT_S  # as if that long ago
-        self.at(5.0)
-        self.assertEqual(told[-1], True)
+        self.assertEqual(self.at(5.0), "Starting captions…")
+        assert self.captions._starting is not None
+        self.captions._starting -= START_WAIT_S  # ready that long ago, nothing written
+        self.assertEqual(self.at(5.0), "")
+
+    def test_a_model_loaded_again_while_on_keeps_showing_what_was_written(self):
+        # translation turned on (or Automatic's step down): the captions written stay and show
+        run = self.captions._run
+        self.captions._on_caption(run, 10.0, 12.0, "Merhaba")
+        self.enterContext(mock.patch.object(self.captions._process, "stop", lambda: None))
+        self.enterContext(mock.patch.object(self.captions, "_load_model", self._load))
+        self.captions._switch("small", stepped=False)
+        self.assertEqual(self.at(10.5), "Merhaba")
 
     def test_a_caption_from_a_run_before_is_not_shown(self):
         self.captions._on_caption(self.captions._run - 1, 10.0, 12.0, "old")

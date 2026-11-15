@@ -1427,12 +1427,6 @@ class LiveSession(QObject):
     def caption_floor(self) -> float:
         return self._caption_floor
 
-    def set_caption_ready(self, ready: bool) -> None:
-        """AI captions: whether they can write yet (their models loaded and warm). 2.10.1, the
-        owner: the picture never waits for it (2026-11-07 to 2.10.0 its wait went on past the
-        floor while they loaded, and stay-live kept the lag it left: "suddenly we are too
-        behind"); it waits for their distance only, and they join where it is once ready."""
-
     def caption_waiting(self) -> bool:
         """The picture waits for the AI captions' distance behind live (`_caption_wait`)."""
         return self._caption_held is not None
@@ -1447,10 +1441,12 @@ class LiveSession(QObject):
         """AI captions (2.9): the picture short of the floor by more than `_CAPTION_SHORT_S`
         after the floor rose or a landing waits (VLC held, as at the edge, saying "Starting
         captions…") until its lag reaches the floor, then plays at 1x; one at the floor or
-        further back already waits for nothing, whether they write yet or not (2.10.1: never
-        further behind than the floor for them). A drift later is stay-live's to steer, gently;
-        a time-shifted picture stays where the viewer put it. True while it waits: stay-live is
-        not consulted (no rate, no trouble, no landing measured)."""
+        further back already waits for nothing. Never for their models (2.10.1, the owner:
+        2.10.0 waited on past the floor while they loaded, and stay-live kept the lag it left,
+        "suddenly we are too behind"): they join where the picture is once ready. A drift later
+        is stay-live's to steer, gently; a time-shifted picture stays where the viewer put it.
+        True while it waits: stay-live is not consulted (no rate, no trouble, no landing
+        measured)."""
         if self._caption_held is not None:
             if lag >= self._caption_floor - _CAPTION_REACHED_S:
                 self._release_caption_wait()

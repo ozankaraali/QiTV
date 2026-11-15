@@ -2386,7 +2386,6 @@ class StayLiveTests(LiveSessionCase):
         feed = Feed(self, sid, burst=0.0, edge=2.5).ready()
         feed.run(30.0)
         rates, holds = len(self.playback.rates), len(self.playback.holds)
-        self.live.set_caption_ready(False)
         self.live.set_caption_floor(8.0)
         feed.run(1.0)
         self.assertTrue(self.live.caption_waiting())
@@ -2403,7 +2402,6 @@ class StayLiveTests(LiveSessionCase):
     def test_ai_captions_loading_after_a_tune_hold_it_only_to_their_distance(self):
         # captions on, a channel tuned while their models load: its first picture waits for
         # the floor, once, and plays on there
-        self.live.set_caption_ready(False)
         self.live.set_caption_floor(8.0)
         sid = self.start()
         feed = Feed(self, sid, burst=0.0, edge=2.5).ready()
@@ -2423,7 +2421,6 @@ class StayLiveTests(LiveSessionCase):
         self.live.toggle_pause()
         feed.run(2.0)
         holds = len(self.playback.holds)
-        self.live.set_caption_ready(False)
         self.live.go_live()
         feed.run(10.0)
         self.assertEqual(self.playback.holds[holds:], [])
@@ -2445,7 +2442,6 @@ class StayLiveTests(LiveSessionCase):
         lag = self.timelines[-1]["lag"]
         self.assertAlmostEqual(lag, 29.2, delta=0.5)
         rates, holds = len(self.playback.rates), len(self.playback.holds)
-        self.live.set_caption_ready(False)
         self.live.set_caption_floor(8.0)
         feed.run(1.0)
         self.assertFalse(self.live.caption_waiting())
@@ -2471,7 +2467,6 @@ class StayLiveTests(LiveSessionCase):
         self.live.toggle_pause()
         feed.run(0.5)
         holds = len(self.playback.holds)
-        self.live.set_caption_ready(False)
         with self.assertLogs("services.live.live_session", "INFO") as logs:
             self.live.set_caption_floor(13.0)  # translated: 5 s more
             feed.run(10.0)
@@ -2491,6 +2486,47 @@ class StayLiveTests(LiveSessionCase):
         feed.run(120.0)
         self.assertEqual(self.timelines[-1]["mode"], "live")
         self.assertAlmostEqual(self.timelines[-1]["lag"], 13.0, delta=0.5)
+
+    def test_ai_captions_loading_never_hold_a_live_picture_further_back_than_their_distance(self):
+        # live further back than the floor (here: steered back from an 8 s floor when another
+        # floor of 5 s comes): no wait, stay-live steers it to the floor as before
+        sid = self.start()
+        feed = Feed(self, sid, burst=0.0, edge=2.5).ready()
+        feed.run(20.0)
+        self.live.set_caption_floor(8.0)
+        feed.run(15.0)
+        self.live.set_caption_floor(0.0, shift=False)  # no longer large: steered back
+        feed.run(0.5)
+        self.assertEqual(self.timelines[-1]["mode"], "live")
+        self.assertGreater(self.timelines[-1]["lag"], 7.0)
+        holds = len(self.playback.holds)
+        self.live.set_caption_floor(5.0)
+        feed.run(1.0)
+        self.assertFalse(self.live.caption_waiting())
+        feed.run(120.0)
+        self.assertEqual(self.playback.holds[holds:], [])
+        self.assertEqual(self.timelines[-1]["mode"], "live")
+        self.assertAlmostEqual(self.timelines[-1]["lag"], 5.0, delta=0.75)
+
+    def test_ai_captions_loading_translated_wait_live_only_to_their_new_distance(self):
+        # translation turned on while live at the floor: 5 s more, waited once, then on at 1x
+        sid = self.start()
+        feed = Feed(self, sid, burst=0.0, edge=2.5).ready()
+        feed.run(20.0)
+        self.live.set_caption_floor(8.0)
+        feed.run(30.0)
+        self.assertEqual(self.timelines[-1]["mode"], "live")
+        rates, holds = len(self.playback.rates), len(self.playback.holds)
+        self.live.set_caption_floor(13.0, shift=False)
+        feed.run(10.0)
+        self.assertFalse(self.live.caption_waiting())
+        self.assertEqual(self.playback.holds[holds:], [True, False])
+        self.assertAlmostEqual(self.timelines[-1]["lag"], 13.0, delta=0.5)
+        feed.run(120.0)
+        self.assertEqual(self.playback.holds[holds:], [True, False])
+        self.assertEqual(self.timelines[-1]["mode"], "live")
+        self.assertAlmostEqual(self.timelines[-1]["lag"], 13.0, delta=0.5)
+        self.assertEqual([r for r in self.playback.rates[rates:] if r != 1.0], [])
 
     def test_ai_captions_off_leave_the_picture_where_it_is_time_shifted(self):
         # 2.9: turned off, nothing catches up by itself: time-shifted as after a pause, the
