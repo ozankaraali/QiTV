@@ -172,6 +172,21 @@ class MessageTests(unittest.TestCase):
         ):
             self.assertIsNone(parse_phone_message(bad), bad)
 
+    def test_ai_captions_are_translated_into_a_language_or_not(self):  # 2.10
+        for target in ("", "Turkish", "Chinese (Simplified)", "Russian"):  # "": off
+            message = {"t": "captions", "translate": target, "of": 2}
+            self.assertEqual(parse_phone_message(message), message)
+        for bad in (
+            {"t": "captions", "translate": "tr", "of": 2},  # MiLMMT's names only, as listed
+            {"t": "captions", "translate": "Klingon", "of": 2},
+            {"t": "captions", "translate": "auto", "of": 2},
+            {"t": "captions", "translate": None, "of": 2},
+            {"t": "captions", "translate": ["Turkish"], "of": 2},
+            {"t": "captions", "translate": "Turkish", "on": True, "of": 2},  # one at a time
+            {"t": "captions", "translate": "Turkish"},
+        ):
+            self.assertIsNone(parse_phone_message(bad), bad)
+
     def test_a_programme_is_scheduled_or_cancelled(self):  # 2.8
         for do in ("once", "series", "cancel"):
             self.assertEqual(

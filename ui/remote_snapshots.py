@@ -169,6 +169,12 @@ def tracks(window: Any, of: int) -> dict:
             ai["models"] = [
                 {"id": name, "name": text[:TITLE_CHARS]} for name, text in captions.models
             ]
+        if captions.translations:  # 2.10: the Translate to row, on or off, and its list
+            ai["translate"] = captions.translate
+            ai["translate_note"] = captions.translate_text[:TITLE_CHARS]  # "Türkçe", "Off"
+            ai["translate_langs"] = [
+                {"id": name, "name": own[:TITLE_CHARS]} for name, own in captions.translations
+            ]
         message["ai"] = ai
     return message
 

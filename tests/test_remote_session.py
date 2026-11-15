@@ -9,6 +9,7 @@ from services.remote.protocol import (
     Answered,
     CaptionsLanguage,
     CaptionsSwitch,
+    CaptionsTranslate,
     CastTo,
     Closed,
     CloseSearch,
@@ -234,6 +235,7 @@ class KkTests(SessionCase):
             {"t": "track", "kind": "sound", "id": 257, "of": 3},
             {"t": "captions", "on": True, "of": 3},
             {"t": "captions", "lang": "Turkish", "of": 3},
+            {"t": "captions", "translate": "Russian", "of": 3},  # 2.10
         ):
             got += session.receive(phone.seal(message)).events
         self.assertEqual(
@@ -265,6 +267,7 @@ class KkTests(SessionCase):
                 TrackPick(sid, "sound", 257, 3),
                 CaptionsSwitch(sid, True, 3),
                 CaptionsLanguage(sid, "Turkish", 3),
+                CaptionsTranslate(sid, "Russian", 3),
             ],
         )
 

@@ -28,6 +28,7 @@ from services.remote.protocol import (
     CaptionsLanguage,
     CaptionsModel,
     CaptionsSwitch,
+    CaptionsTranslate,
     CastTo,
     Closed,
     CloseSearch,
@@ -309,6 +310,8 @@ class Session:
                 return Reply(events=[CaptionsSwitch(sid, m["on"], m["of"])])
             if "model" in m:
                 return Reply(events=[CaptionsModel(sid, m["model"], m["of"])])
+            if "translate" in m:  # 2.10: the language they are translated into
+                return Reply(events=[CaptionsTranslate(sid, m["translate"], m["of"])])
             return Reply(events=[CaptionsLanguage(sid, m["lang"], m["of"])])
         if t == "sched":  # 2.8
             return Reply(events=[Schedule(sid, m["id"], m["do"])])
