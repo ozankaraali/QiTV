@@ -146,7 +146,7 @@ def turkish_capital(text: str) -> str:
 
 class _Model:
     """The loaded speech models and voice detector; decodes one piece at a time: Qwen3-ASR, and
-    for Turkish QiTV's own Turkish Moonshine (2.10; 2.9.1 to 2.9.10: ufakzeka-kulak, far better
+    for Turkish QiTV's own Turkish Moonshine (2.10; 2.9.2 to 2.9.10: ufakzeka-kulak, far better
     Turkish than Qwen's, at a twenty-fifth of its time) once the files are given."""
 
     moonshine = False  # our Turkish Moonshine writes Turkish (2.10)
@@ -178,13 +178,18 @@ class _Model:
         self.beam = None
         if paths and turkish:
             # 2.10: QiTV's own Turkish Moonshine medium (models.TURKISH_FILES), read with our
-            # 4-path beam alone (no n-gram), as its model card's beam numbers were read
-            from services.captions.moon_beam import BeamReader
-
+            # 4-path beam alone (no n-gram), as its model card's beam numbers were read; one
+            # that does not load leaves Turkish to Qwen (the final review: it failed the whole
+            # process, every language)
             folder = Path(turkish)
             self.names[_TURKISH_ROLE] = _folder_name(folder)
-            self.beam = self.turkish = BeamReader(folder, None, threads=min(2, threads))
-            self.moonshine = True
+            try:
+                from services.captions.moon_beam import BeamReader
+
+                self.beam = self.turkish = BeamReader(folder, None, threads=min(2, threads))
+                self.moonshine = True
+            except Exception as error:
+                self.drop_turkish("did not load", error)
         # 2.9.3: the specialists, each loaded once a run's language needs it (in its own thread;
         # Qwen writes meanwhile): Cohere Transcribe for its 14 languages, told the language,
         # and NVIDIA's Parakeet TDT 0.6B v3 for the other European ones. Qwen still tells the
@@ -216,7 +221,21 @@ class _Model:
             if self.recognizer is not None:
                 self.decode(array("f", bytes(16000 * 4)), "")
             if self.beam is not None:
-                self.beam.warm()  # (silence is skipped: a quiet tone)
+                try:
+                    self.beam.warm()  # (silence is skipped: a quiet tone)
+                except Exception as error:
+                    self.drop_turkish("did not load", error)
+
+    def drop_turkish(self, what: str, error: BaseException) -> None:
+        """Our Turkish Moonshine writes no more, for the process's life: Qwen writes Turkish."""
+        logger.warning(
+            "AI captions: the Turkish model %s (%s: %s); Qwen writes Turkish",
+            what,
+            type(error).__name__,
+            error,
+        )
+        self.beam = self.turkish = None
+        self.moonshine = False
 
     def name(self, part: str) -> str:
         """The model of a part (_QWEN, _TURKISH_ROLE, ...) as the log names it."""
@@ -327,10 +346,11 @@ class _Model:
     def decode(self, samples: array, language: str, fast: bool = False) -> str:
         """`samples` read by the model that writes `language` (`wrote` names it after); `fast`
         (the picture plays faster than FAST_RATE): our beam narrowed to its best path alone."""
-        if language == TURKISH and self.beam is not None:
+        beam = self.beam  # (once: a failure on the stream's thread lets it go, `drop_turkish`)
+        if language == TURKISH and beam is not None:
             self._wrote.name = self.name(_TURKISH_ROLE)
             width = 1 if fast else None
-            return str(self.beam.transcribe(samples, width=width)).strip()  # as sherpa-onnx's
+            return str(beam.transcribe(samples, width=width)).strip()  # as sherpa-onnx's
         specialist = self._specialist(language) if language else None
         if specialist is None and language and language not in QWEN_LANGUAGES:
             return ""  # 2.9.6: only its own model writes it, and that isn't here (not now)
@@ -729,7 +749,14 @@ class _Run:
                     writer.push(at, floats)
                 lines = writer.work()
             except Exception as error:
-                logger.warning("AI captions: the Turkish model failed: %s", type(error).__name__)
+                # pieces again, Qwen's (the final review: the writer stayed, and the sound piled
+                # up in `blocks`, read by nothing)
+                drop = getattr(self.model, "drop_turkish", None)
+                if callable(drop):
+                    drop("failed", error)
+                else:
+                    logger.warning("AI captions: the Turkish model failed: %s", error)
+                self.writer = None
                 return
             if seconds:
                 took = time.perf_counter() - started
@@ -859,7 +886,8 @@ class _Line:
 class _Translation:
     """2.10, caption translation (MiLMMT-46 1B, services.captions.translate), one for the
     process. The model loads on its own thread as soon as a target and the model's folder are
-    known, and stays. While it is loaded, every line goes through one queue, in order, to that
+    known, and stays while there is a target (turned off, it goes: some 700 MB; a target again
+    loads it again). While it is loaded, every line goes through one queue, in order, to that
     thread: a line in a language MiLMMT knows, not the target, goes out translated when that is
     done DEADLINE_MARGIN_S before the picture gets to it, else as written; the others go out as
     written, in their turn. Until it is loaded, or if it could not be, lines go out as written at
@@ -908,6 +936,10 @@ class _Translation:
                 )
             if not self._ready():
                 self._flush("translation off" if not self._on() else "the model is loading")
+            if self._target is None:
+                # its memory back (the final review: it stayed till captions went off); a line
+                # being translated keeps it till that is done (the thread's own reference)
+                self._translator = self._loaded = None
             if self._to_load() is not None:
                 if self._thread is None:
                     self._thread = threading.Thread(
@@ -921,6 +953,11 @@ class _Translation:
         caller does, at once."""
         with self._lock:
             if not self._ready():
+                return False
+            thread = self._thread
+            if thread is None or not thread.is_alive():
+                # (the final review's insurance: a thread gone would keep every line queued)
+                self._flush("the translator's thread is gone")
                 return False
             self._lines.append(line)
             self._lock.notify()
@@ -973,7 +1010,8 @@ class _Translation:
                 self._next()
 
     def _load(self, folder: Path) -> None:
-        """The model in `folder`, loaded and kept; one that does not load, never tried again."""
+        """The model in `folder`, loaded and kept while it is still the one wanted; one that does
+        not load, never tried again."""
         began = time.monotonic()
         translator: Any = None
         failure = ""  # (services.captions.translate logs its own)
@@ -982,10 +1020,18 @@ class _Translation:
 
             translator = Translator(folder, threads=2)
             loaded = bool(translator.warm())
+            cause = "" if loaded else str(getattr(translator, "error", "") or "")
+            if cause:
+                failure = f": {cause}"  # (the owner's log gets a record's message alone)
         except Exception as error:
-            loaded, failure = False, f": {type(error).__name__}"
+            loaded, failure = False, f": {type(error).__name__}: {error}"
         with self._lock:
-            if loaded:
+            if loaded and not (self._on() and folder == self._folder):
+                logger.info(
+                    "AI captions: the translation model (%s) is not kept: no longer wanted",
+                    _folder_name(folder),
+                )
+            elif loaded:
                 self._translator, self._loaded = translator, folder
                 logger.info(
                     "AI captions: loading the translation model (%s) took %.1f s",

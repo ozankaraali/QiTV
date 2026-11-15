@@ -2,7 +2,7 @@
 
 Nothing ships with QiTV: the first time AI captions are turned on, the viewer downloads a
 speech model tier, the Silero VAD, the Turkish model (2.10: QiTV's own Turkish Moonshine medium,
-278 MB, read with our beam search; 2.9.1 to 2.9.10 used ufakzeka-kulak) and (unless this Python
+278 MB, read with our beam search; 2.9.2 to 2.9.10 used ufakzeka-kulak) and (unless this Python
 already has it) the sherpa-onnx runtime, all pinned below by size and sha256. They live in
 `captions_root()`:
 

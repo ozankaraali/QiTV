@@ -449,6 +449,42 @@ class WorkerTest(unittest.TestCase):
         self.assertEqual([m[4] for m in captions], ["Tam 28 yıllık bir mücadele."])
         self.assertEqual(captions[0][1:3], (7, run.writer._last[0]))
 
+    def test_a_failing_turkish_model_hands_turkish_to_qwen(self) -> None:
+        # the final review: the stream's thread ended, the writer stayed, and every block piled
+        # up where nothing read it (no captions, "Can't keep up", no "ended")
+        import queue
+        from types import SimpleNamespace
+
+        from services.captions import worker
+
+        run, sent = self.run_of(Script(sentence("tam yirmi sekiz yıllık bir mücadele", 1.0)))
+
+        def broken() -> list:
+            raise RuntimeError("bad allocation")
+
+        run.writer.work = broken  # type: ignore[method-assign]
+        model: Any = object.__new__(worker._Model)
+        model.beam = model.turkish = object()
+        model.moonshine, model._folders = True, {}
+        run.model = model
+        run.blocks.put((0.0, array("f", bytes(4 * 1600))))
+        with self.assertLogs("services.captions.worker", "WARNING") as logs:
+            run._stream()
+        self.assertIsNone(run.writer)  # pieces again
+        self.assertIn("RuntimeError: bad allocation", logs.records[0].getMessage())
+        self.assertEqual((model.beam, model.turkish, model.moonshine), (None, None, False))
+        self.assertTrue(run.qwen_writes())  # Qwen writes Turkish now
+        pushed: list = []
+        run.cutter = SimpleNamespace(
+            set_max=lambda s: None, push=lambda at, f: pushed.append(at) or []
+        )
+        run.pieces, run.newest = queue.Queue(), 0.0
+        run._take(1.0, array("f", bytes(4 * 1600)))
+        self.assertEqual(pushed, [1.0])  # cut into pieces, not left in the blocks
+        self.assertTrue(run.blocks.empty())
+        run._maybe_stream()  # ("language", "Turkish") again: no growing writer
+        self.assertIsNone(run.writer)
+
     def test_a_reading_keeps_nothing_nobody_said(self) -> None:
         from types import SimpleNamespace
 
@@ -490,6 +526,79 @@ class LookbackTest(unittest.TestCase):
 class ModelLoadTest(unittest.TestCase):
     """The captions process loads Qwen at once and, with its files given, our Turkish Moonshine
     read with our beam (2.10); the log names the model each language is written by."""
+
+    def load(self, beam: Any, loaded: list) -> Any:
+        """worker._Model with a fake sherpa-onnx (Qwen says "Good evening.") and `beam` for
+        moon_beam.BeamReader; the Turkish model's folder is named as its own."""
+        import shutil
+        import sys
+        import tempfile
+        from types import SimpleNamespace
+        from unittest import mock
+
+        from services.captions import worker
+
+        class Recognizer:
+            def create_stream(self):
+                class Stream:
+                    result = SimpleNamespace(text="Good evening.")
+
+                    def set_option(self, key, value):
+                        pass
+
+                    def accept_waveform(self, rate, samples):
+                        pass
+
+                return Stream()
+
+            def decode_stream(self, stream):
+                pass
+
+        def qwen(**_):
+            loaded.append("qwen")
+            return Recognizer()
+
+        fake = SimpleNamespace(
+            OfflineRecognizer=SimpleNamespace(from_qwen3_asr=qwen),
+            VadModelConfig=lambda: SimpleNamespace(silero_vad=SimpleNamespace()),
+            VadModel=SimpleNamespace(create=lambda config: SimpleNamespace(is_speech=bool)),
+        )
+        folder = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, folder, True)
+        spec = {"model": dict.fromkeys(("conv_frontend", "encoder", "decoder", "tokenizer"), "x")}
+        spec.update(vad="vad.onnx", turkish=folder)
+        with (
+            mock.patch.dict(sys.modules, {"sherpa_onnx": fake}),
+            mock.patch("services.captions.moon_beam.BeamReader", beam),
+        ):
+            return worker._Model(spec)
+
+    def test_a_turkish_model_that_does_not_load_leaves_turkish_to_qwen(self) -> None:
+        # the final review: it made the whole process fail ("Couldn't start AI captions"), in
+        # every language, for good
+        from services.captions import worker
+
+        class Fails:
+            def __init__(self, folder, lm, threads=2):
+                raise OSError("model.onnx is damaged")
+
+        class WarmFails:
+            def __init__(self, folder, lm, threads=2):
+                pass
+
+            def warm(self):
+                raise RuntimeError("bad allocation")
+
+        for beam, said in ((Fails, "OSError: model.onnx"), (WarmFails, "RuntimeError: bad")):
+            with self.subTest(beam=beam.__name__):
+                loaded: list = []
+                with self.assertLogs("services.captions.worker", "WARNING") as logs:
+                    model = self.load(beam, loaded)
+                self.assertIn(said, logs.records[0].getMessage())
+                self.assertEqual((model.beam, model.turkish, model.moonshine), (None, None, False))
+                turkish = model.decode(array("f", bytes(4 * 1600)), worker.TURKISH)
+                self.assertEqual(turkish, "Good evening.")  # Qwen's
+                self.assertEqual(model.writes(worker.TURKISH), "Qwen3-ASR")
 
     def test_qwen_and_the_turkish_moonshine_load_at_once(self) -> None:
         import os

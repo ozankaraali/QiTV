@@ -493,6 +493,8 @@ class TranslationTests(unittest.TestCase):
             def __init__(self, folder, threads=2, library=None):
                 test.made.append((Path(folder), threads))
 
+            error = "OSError: no tokenizer.json"  # why it is of no use, once warm() is False
+
             def warm(self):
                 return test.warm()
 
@@ -736,16 +738,79 @@ class TranslationTests(unittest.TestCase):
         self.assertEqual(self.sent, as_written)  # at once, the one being translated too
         run._write("qwen", "heard", "Dört.", 109.0, 110.0)
         self.assertEqual(self.sent[2:], [self.written("Dört.", 109.0, 110.0)])  # straight out
-        translation.set("English")  # on again: the model was kept
-        self.assertTrue(translation._ready())
-        run._write("qwen", "heard", "Beş.", 110.0, 111.0)
+        self.assertIsNone(translation._translator)  # its memory back (the final review)
+        translation.set("English")  # on again: the model loads again
         go.set()
+        self.assertTrue(self.until(translation._ready))
+        run._write("qwen", "heard", "Beş.", 110.0, 111.0)
         sent = self.captions(4)
         self.assertEqual(sent[3], ("caption", 1, 110.0, 111.0, "<English> Beş."))
         self.assertEqual(len(sent), 4)  # the first went once: its translation never came
         said = [message for message in self.outcomes(logs) if TWO_PARTS in message]
         self.assertEqual(said, [f"AI captions: shown as written, translation off: {TWO_PARTS!r}"])
-        self.assertEqual(self.made, [(MT_FOLDER, 2)])
+        self.assertEqual(self.made, [(MT_FOLDER, 2)] * 2)
+
+    def test_off_lets_the_model_go_and_another_target_loads_it_again(self):
+        # the final review: after ("translate", None) the model (0.7 to 1 GB) stayed loaded
+        # until captions went off
+        translation = self.translation("English")
+        translation.set(None)
+        self.assertIsNone(translation._translator)
+        self.assertFalse(translation._ready())
+        translation.set("German")
+        self.assertTrue(self.until(translation._ready))
+        self.assertEqual(self.made, [(MT_FOLDER, 2)] * 2)
+
+    def test_off_while_the_model_loads_keeps_none_of_it(self):
+        go, began = self.held(), threading.Event()
+        self.warm = lambda: began.set() or go.wait(5)
+        translation = self.translation("English", loaded=False)
+        self.assertTrue(began.wait(5))
+        with self.assertLogs("services.captions.worker", logging.INFO) as logs:
+            translation.set(None)
+            go.set()
+            self.assertTrue(
+                self.until(lambda: any("not kept" in r.getMessage() for r in logs.records))
+            )
+        self.assertIsNone(translation._translator)
+        translation.set("English")  # wanted again: loaded again
+        self.assertTrue(self.until(translation._ready))
+        self.assertEqual(len(self.made), 2)
+
+    def test_a_dead_translator_thread_never_keeps_a_line(self):
+        # the final review's insurance: lines queued for a thread that is gone would never show
+        go, began = self.held(), threading.Event()
+
+        def answer(text, source, target, deadline):
+            began.set()
+            go.wait(5)
+            return f"<{target}> {text}"
+
+        self.answer = answer
+        translation = self.translation("English")
+        run = self.a_run(translation, "Turkish")
+        run._write("qwen", "heard", "Bir.", 104.0, 104.5)  # being translated
+        run._write("qwen", "heard", "İki.", 104.5, 105.0)  # waiting
+        self.assertTrue(began.wait(5))
+        translation._thread = SimpleNamespace(is_alive=lambda: False)  # as if it had died
+        run._write("qwen", "heard", "Üç.", 105.0, 105.5)
+        self.assertEqual(
+            self.sent,
+            [
+                self.written("Bir.", 104.0, 104.5),
+                self.written("İki.", 104.5, 105.0),
+                self.written("Üç.", 105.0, 105.5),
+            ],
+        )  # at once, in order
+        go.set()
+
+    def test_a_model_that_did_not_load_says_why_in_the_owners_log(self):
+        self.warm = lambda: False
+        with self.assertLogs("services.captions.worker", logging.WARNING) as logs:
+            translation = self.translation("English", loaded=False)
+            self.assertTrue(self.until(lambda: translation.reserve() == 0.0))
+        [said] = [r.getMessage() for r in logs.records if "did not load" in r.getMessage()]
+        self.assertIn("OSError: no tokenizer.json", said)
 
     def test_speech_never_waits_for_translation_nor_counts_its_time(self):
         import queue
@@ -799,8 +864,7 @@ class TranslationTests(unittest.TestCase):
         with self.assertLogs("services.captions.worker", logging.INFO) as logs:
             translation = self.translation("English", MT_FOLDER)
             translation.set("English", str(MT_FOLDER))  # the same folder, as the spec has it
-            translation.set(None)
-            translation.set("German")  # on again: the model kept
+            translation.set("German")  # another language: the model kept (off lets it go)
             self.assertTrue(translation._ready())
         self.assertEqual(self.made, [(MT_FOLDER, 2)])
         [load] = [r.getMessage() for r in logs.records]
@@ -840,7 +904,7 @@ class TranslationTests(unittest.TestCase):
         self.assertEqual(len(self.made), 2)
         self.assertFalse(translation._ready())
         [warning] = [r.getMessage() for r in logs.records]
-        self.assertTrue(warning.endswith("did not load: RuntimeError"), warning)
+        self.assertTrue(warning.endswith("did not load: RuntimeError: no model"), warning)
 
     def budget(self, run):
         """How long a piece of `run` may grow now (its cutter's length), sound read to 101.1 s."""
@@ -871,8 +935,9 @@ class TranslationTests(unittest.TestCase):
             self.viewer[0] += TRANSLATE_LEAD_S
             translation.set(None)  # turned off mid-run
             self.assertEqual(self.budget(run), plain)
-            translation.set("English")  # on again (its model kept)
+            translation.set("English")  # on again (its model loads again)
             self.assertAlmostEqual(self.budget(run), plain - TRANSLATE_LEAD_S / 1.5)
+            self.assertTrue(self.until(translation._ready))  # (loaded while the fake is in)
 
     def test_the_translators_time_is_kept_while_its_model_loads_and_not_once_it_failed(self):
         from services.captions.streaming import TRANSLATE_LEAD_S
@@ -921,6 +986,7 @@ class TranslationTests(unittest.TestCase):
         self.assertTrue(self.until(lambda: seen[-1] == TRANSLATE_LEAD_S))
         run.blocks.put(None)
         thread.join(5)
+        self.assertTrue(self.until(translation._ready))  # (loaded again while the fake is in)
         self.assertEqual(seen[0], TRANSLATE_LEAD_S)
 
     def serve(self, *script):
