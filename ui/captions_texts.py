@@ -24,8 +24,8 @@ DOWNLOAD_QUESTION = N_(
     "AI captions need speech models on this computer: {size} to start, up to {total} with "
     "every language's model, each downloaded once. Download them now?"
 )
-# 2.9.6: a language's own speech model (ufak AI's for Turkish, Cohere's, Parakeet), downloaded
-# once the language is wanted. i18n: language: its name, as "Turkish"; size: as "43 MB"
+# 2.9.6: a language's own speech model (QiTV's for Turkish, Cohere's, Parakeet), downloaded
+# once the language is wanted. i18n: language: its name, as "Turkish"; size: as "278 MB"
 SPECIALIST_QUESTION = N_(
     "AI captions need another speech model for this language ({language}): {size} to download "
     "once. Download it now?"

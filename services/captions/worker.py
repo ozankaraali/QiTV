@@ -282,16 +282,14 @@ class _Model:
             self.moonshine = True
             logger.info("AI captions: the Turkish Moonshine trial writes Turkish")
         elif paths and turkish:
+            # 2.10: QiTV's own Turkish Moonshine medium (models.TURKISH_FILES), read with our
+            # 4-path beam alone (no n-gram), as its model card's beam numbers were read
+            from services.captions.moon_beam import BeamReader
+
             folder = Path(turkish)
             self.names[_TURKISH_ROLE] = found.label if found is not None else _label(folder)
-            self.turkish = sherpa_onnx.OfflineRecognizer.from_transducer(
-                encoder=str(folder / "encoder.int8.onnx"),
-                decoder=str(folder / "decoder.int8.onnx"),
-                joiner=str(folder / "joiner.int8.onnx"),
-                tokens=str(folder / "tokens.txt"),
-                num_threads=min(2, threads),
-                model_type="nemo_transducer",
-            )
+            self.beam = self.turkish = BeamReader(folder, None, threads=min(2, threads))
+            self.moonshine = True
         self.turkish_stream: Any = None
         if stream_dir:
             folder = Path(stream_dir)

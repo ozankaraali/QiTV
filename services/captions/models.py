@@ -1,9 +1,9 @@
 """What AI captions download, where it goes, and whether it's in place. No Qt.
 
 Nothing ships with QiTV: the first time AI captions are turned on, the viewer downloads a
-speech model tier, the Silero VAD, the Turkish model (2.9.1: ufakzeka-kulak, 43 MB: Qwen's
-Turkish was poor, this one's far better and 25 times faster) and (unless this Python already has
-it) the sherpa-onnx runtime, all pinned below by size and sha256. They live in
+speech model tier, the Silero VAD, the Turkish model (2.10: QiTV's own Turkish Moonshine medium,
+278 MB, read with our beam search; 2.9.1 to 2.9.10 used ufakzeka-kulak) and (unless this Python
+already has it) the sherpa-onnx runtime, all pinned below by size and sha256. They live in
 `captions_root()`:
 
     ai-captions/
@@ -11,8 +11,8 @@ it) the sherpa-onnx runtime, all pinned below by size and sha256. They live in
                                out in site-packages (put on the captions process's sys.path)
         qwen3-asr-0.6b/        conv_frontend.onnx, encoder.int8.onnx, decoder.int8.onnx,
         qwen3-asr-1.7b/        tokenizer/ (both tiers alike)
-        ufakzeka-kulak/        encoder.int8.onnx, decoder.int8.onnx, joiner.int8.onnx,
-                               tokens.txt (a FastConformer TDT for Turkish alone)
+        qitv-asr-tr-moonshine-mid/  encoder_model_quantized.onnx,
+                               decoder_model_merged_quantized.onnx, tokens.txt (Moonshine v2 files)
         nemotron-3-diarization/  the diarizer (a run from source's Speaker marks)
         speaker-eres2net/      ... and the speaker model of its voice prints
         silero_vad.onnx
@@ -112,7 +112,7 @@ class ModelPaths:
     decoder: Path
     tokenizer: Path  # a folder
     vad: Path
-    turkish: Path  # ufakzeka-kulak's folder (its transducer's files, TURKISH_FILES)
+    turkish: Path  # the Turkish Moonshine's folder (TURKISH_FILES)
     european: Path  # 2.9.3: Parakeet TDT 0.6B v3's folder (EUROPEAN_FILES)
     cohere: Path  # 2.9.3: Cohere Transcribe's folder (COHERE_FILE, unpacked)
 
@@ -222,37 +222,32 @@ VAD = RemoteFile(
     "9e2449e1087496d8d4caba907f23e0bd3f78d91fa552479bb9c23ac09cbb1fd6",
 )
 
-# 2.9.1: ufak AI's ufakzeka-kulak (Apache-2.0), Turkish alone, the sherpa-onnx TDT export. Sizes
-# and sha256 as Hugging Face served them on 2026-11-03 (revision 7190ff5f).
-_UFAK = (
-    "https://huggingface.co/ufakai/ufakzeka-kulak/resolve/"
-    "7190ff5f2374060f488fd234e581ac94a53a887a/sherpa-onnx-tdt/"
+# 2.10: QiTV's own Turkish model, qitv-asr-tr-moonshine-mid (CC BY 4.0; Moonshine Streaming Medium
+# trained further on Turkish), its 8-bit sherpa-onnx Moonshine v2 files, read with our beam search
+# (services.captions.moon_beam). Sizes and sha256 as Hugging Face serves them (revision 9656ad3c).
+_TURKISH_REPO = (
+    "https://huggingface.co/ozankaraali/qitv-asr-tr-moonshine-mid/resolve/"
+    "9656ad3c9269818d1c777e1a0964d08c49526b7a/onnx/"
 )
-TURKISH_FOLDER = "ufakzeka-kulak"
+TURKISH_FOLDER = "qitv-asr-tr-moonshine-mid"
 TURKISH_FILES = (
     RemoteFile(
-        _UFAK + "encoder.int8.onnx",
-        "encoder.int8.onnx",
-        37776818,
-        "8b19aa33674fc55ef6a37f01569be19e1b7fed5057ec1bea483c19d3ef07e4ea",
+        _TURKISH_REPO + "encoder_model_quantized.onnx",
+        "encoder_model_quantized.onnx",
+        142363625,
+        "39e7e9a74bbe8152021fa8a926c8a51845546359e31984a903314ec4fe0ea920",
     ),
     RemoteFile(
-        _UFAK + "decoder.int8.onnx",
-        "decoder.int8.onnx",
-        3955864,
-        "ef9ae1cc76112970f959da1351b702436ace8a3c94e7631952ba54cb4c806919",
+        _TURKISH_REPO + "decoder_model_merged_quantized.onnx",
+        "decoder_model_merged_quantized.onnx",
+        135617948,
+        "2a9a6492007a12a05d3f368357e6b70f6928c8d850f3bedebd0bb51f03881b39",
     ),
     RemoteFile(
-        _UFAK + "joiner.int8.onnx",
-        "joiner.int8.onnx",
-        1247562,
-        "526499204410eb962dac609aed2140dbeff8d5f7e98037c187d735031ef80664",
-    ),
-    RemoteFile(
-        _UFAK + "tokens.txt",
+        _TURKISH_REPO + "tokens.txt",
         "tokens.txt",
-        10138,
-        "af3092629f214e420ee9a4b563663227cd1998cdd23e1a08a41d489142499c03",
+        179159,
+        "8766e1592373d47ea3f7e52975840a96c51f8d0b4b8619c7bdb951f650eb21ba",
     ),
 )
 

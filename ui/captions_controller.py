@@ -935,7 +935,7 @@ class CaptionsController(QObject):
                 },
                 "vad": str(paths.vad),
                 # the specialists that are here (2.9.6: each comes once its language is wanted)
-                "turkish": self._folder("turkish", paths.turkish),  # 2.9.1: ufakzeka-kulak
+                "turkish": self._folder("turkish", paths.turkish),  # 2.10: our Turkish Moonshine
                 "european": self._folder("european", paths.european),  # 2.9.3: Parakeet
                 "cohere": self._folder("cohere", paths.cohere),  # 2.9.3: Cohere Transcribe
                 # a test model picked (a run from source): it alone writes, as Turkish

@@ -1379,11 +1379,11 @@ class StepDownTests(unittest.TestCase):
 
         self.disk["turkish"] = False
         self.captions._language = ("Turkish", "")
-        with mock.patch("services.captions.models.download_size", return_value=43_000_000):
+        with mock.patch("services.captions.models.download_size", return_value=278_000_000):
             self.captions._offer_specialist()
             self.captions._offer_specialist()  # once while QiTV runs
         [(text, _yes, _no)] = self.card.asked
-        self.assertIn("43 MB", text)
+        self.assertIn("278 MB", text)
         self.assertTrue(self.captions.asked_unprompted())  # every phone hears it too
         started = []
         self.captions._start_download = lambda: started.append(self.captions._fetching)
@@ -1394,7 +1394,9 @@ class StepDownTests(unittest.TestCase):
         self.disk["turkish"] = True
         self.captions._on_downloaded(download)
         self.assertEqual(self.stopped, [True])  # the captions process again ...
-        self.assertTrue(self.loaded[-1]["turkish"].endswith("ufakzeka-kulak"))  # ... with it
+        self.assertTrue(
+            self.loaded[-1]["turkish"].endswith("qitv-asr-tr-moonshine-mid")
+        )  # ... with it
         self.assertEqual(self.captions._tier, "large")  # the same Qwen
 
     def test_after_the_first_questions_yes_a_languages_model_comes_unasked(self):

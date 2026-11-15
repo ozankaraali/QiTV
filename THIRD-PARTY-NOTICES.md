@@ -131,10 +131,10 @@ against pinned SHA-256 sums:
   (<https://huggingface.co/Qwen/Qwen3-ASR-0.6B>). The 0.6B model as converted to int8 ONNX by
   the sherpa-onnx project (its GitHub releases); the 1.7B model as converted by a community
   export on ModelScope (`zengshuishui/Qwen3-ASR-onnx`), under the same license.
-- **ufakzeka-kulak** (ufak AI), the Turkish speech model: Apache License 2.0
-  (<https://huggingface.co/ufakai/ufakzeka-kulak>), its sherpa-onnx export; trained on openly
-  licensed Turkish speech (Common Voice, ISSAI Turkish Speech Corpus, antalia-voice-corpus,
-  YODAS), each source and its licence listed in the model's ATTRIBUTION.md.
+- **qitv-asr-tr-moonshine-mid** (QiTV ASR Turkish, Ozan Karaali), the Turkish speech model:
+  Creative Commons Attribution 4.0 (<https://huggingface.co/ozankaraali/qitv-asr-tr-moonshine-mid>),
+  its 8-bit sherpa-onnx files. It is Moonshine Streaming Medium (Moonshine AI, MIT License)
+  trained further on Turkish speech; its model card lists the training data and their licences.
 - **Parakeet TDT 0.6B v3** (NVIDIA), the speech model for 25 European languages: Creative
   Commons Attribution 4.0 (CC-BY-4.0) (<https://huggingface.co/nvidia/parakeet-tdt-0.6b-v3>),
   as converted to int8 ONNX by the sherpa-onnx project
