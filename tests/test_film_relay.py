@@ -360,11 +360,15 @@ class CaptionsTests(RelayTestCase):
         relay.start()
         self.addCleanup(relay.wait_closed, 3.0)
         self.addCleanup(relay.stop)
-        picture = Reader(relay.leader_url, 0)
+        # The picture's asks name their last byte. The relay counts the picture where it has
+        # sent it, and an open-ended ask runs that past what the test read by all the loopback
+        # buffers take (0.7 MiB on a Mac; 1.9 MiB or more on CI's macOS runner): `near` is then
+        # no longer by the picture, or `far` within its reach (that read waits for the picture).
+        picture = Reader(relay.leader_url, 0, 100 * KIB - 1)
         picture.read(100 * KIB)  # the picture's own opening
         picture.close()
         at = 6 * MIB  # where it plays (a resume, a seek)
-        picture = Reader(relay.leader_url, at)
+        picture = Reader(relay.leader_url, at, at + 320 * KIB - 1)  # all it reads here
         self.assertEqual(picture.read(64 * KIB), film[at : at + 64 * KIB])
         self.assertTrue(wait_until(lambda: relay._frontier() >= at + 512 * KIB))
         self.assertEqual(self.read(relay.follower_url, 0, 64 * KIB), film[: 64 * KIB])  # opens
@@ -388,7 +392,7 @@ class CaptionsTests(RelayTestCase):
         self.assertEqual(provider.overlaps, [], "two upstream connections were open at once")
 
     def test_a_captions_read_the_upstream_is_not_heading_for_fails_in_time(self):
-        picture = Reader(self.relay.leader_url, 0)
+        picture = Reader(self.relay.leader_url, 0, 100 * KIB - 1)  # its last byte: see above
         picture.read(100 * KIB)
         far = 4 * MIB
         started = time.monotonic()
