@@ -413,7 +413,7 @@ class WorkerTest(unittest.TestCase):
         )
         return run, sent
 
-    def test_the_trials_lines_reach_the_captions_capitalised_with_numbers_as_digits(self) -> None:
+    def test_turkish_lines_reach_the_captions_capitalised_with_numbers_as_digits(self) -> None:
         script = Script(sentence("tam yirmi sekiz yıllık bir mücadele", 1.0))
         run, sent = self.run_of(script)
         t = 0.0
@@ -442,21 +442,6 @@ class WorkerTest(unittest.TestCase):
             )
             self.assertEqual(run._moon_reading(array("f")), kept)
 
-    def test_each_utterance_read_whole_is_kept_for_the_field_tests(self) -> None:
-        import os
-        import shutil
-        import tempfile
-        from unittest import mock
-
-        from services.captions.worker import SAVE_ENV, _Run
-
-        folder = tempfile.mkdtemp()
-        self.addCleanup(shutil.rmtree, folder, True)
-        with mock.patch.dict(os.environ, {SAVE_ENV: folder}):
-            _Run._keep_piece(3.0, 4.5, array("f", [0.1] * 1600), "Hoş geldin.")
-        with open(os.path.join(folder, "pieces.tsv"), encoding="utf-8") as listing:
-            self.assertTrue(listing.read().endswith("\t3.00\t4.50\tHoş geldin.\n"))
-
 
 class LookbackTest(unittest.TestCase):
     def test_a_piece_leads_in_from_the_voice_the_held_detector_heard_late(self) -> None:
@@ -479,12 +464,13 @@ class LookbackTest(unittest.TestCase):
             self.assertAlmostEqual(pieces[0].start, start, delta=0.05)
 
 
-class DeferredQwenTest(unittest.TestCase):
-    """2026-11-07: with the Moonshine trial writing Turkish, Qwen's load and warm-up kept the
-    captions from starting while the picture played on: it loads once a run needs it."""
+class ModelLoadTest(unittest.TestCase):
+    """The captions process loads Qwen at once and, with its files given, our Turkish Moonshine
+    read with our beam (2.10); the log names the model each language is written by."""
 
-    def model(self, moonshine: bool):
+    def test_qwen_and_the_turkish_moonshine_load_at_once(self) -> None:
         import os
+        import shutil
         import sys
         import tempfile
         from types import SimpleNamespace
@@ -495,14 +481,9 @@ class DeferredQwenTest(unittest.TestCase):
         loaded: list[str] = []
 
         class Recognizer:
-            def __init__(self, name: str, text: str) -> None:
-                self.name, self.text = name, text
-
             def create_stream(self):
-                recognizer = self
-
                 class Stream:
-                    result = SimpleNamespace(text=recognizer.text)
+                    result = SimpleNamespace(text="Good evening.")
 
                     def set_option(self, key, value):
                         pass
@@ -517,59 +498,40 @@ class DeferredQwenTest(unittest.TestCase):
 
         def qwen(**_):
             loaded.append("qwen")
-            return Recognizer("qwen", "Good evening.")
+            return Recognizer()
 
-        def moon(**_):
-            loaded.append("moonshine")
-            return Recognizer("moonshine", "iyi akşamlar")
+        class Beam:
+            def __init__(self, folder, lm, threads=2):
+                loaded.append(("beam", folder.name, lm))
+
+            def warm(self):
+                pass
+
+            def transcribe(self, samples, width=None):
+                return " iyi akşamlar "
 
         fake = SimpleNamespace(
-            OfflineRecognizer=SimpleNamespace(from_qwen3_asr=qwen, from_moonshine_v2=moon),
+            OfflineRecognizer=SimpleNamespace(from_qwen3_asr=qwen),
             VadModelConfig=lambda: SimpleNamespace(silero_vad=SimpleNamespace()),
             VadModel=SimpleNamespace(create=lambda config: SimpleNamespace(is_speech=bool)),
         )
         folder = tempfile.mkdtemp()
-        env = {worker.MOON_ENV: folder} if moonshine else {}
+        self.addCleanup(shutil.rmtree, folder, True)
         spec = {"model": dict.fromkeys(("conv_frontend", "encoder", "decoder", "tokenizer"), "x")}
-        spec["vad"] = "vad.onnx"
+        spec.update(vad="vad.onnx", turkish=folder)
         with (
             mock.patch.dict(sys.modules, {"sherpa_onnx": fake}),
-            mock.patch.dict(os.environ, env, clear=False),
+            mock.patch("services.captions.moon_beam.BeamReader", Beam),
         ):
-            if not moonshine:
-                os.environ.pop(worker.MOON_ENV, None)
             model = worker._Model(spec)
-        return model, loaded
-
-    def test_the_moonshine_trial_starts_without_loading_qwen(self) -> None:
-        from services.captions.worker import TURKISH
-
-        model, loaded = self.model(moonshine=True)
-        self.assertEqual(loaded, ["moonshine"])  # ready without Qwen
-        self.assertEqual(model.decode(array("f", bytes(4 * 1600)), TURKISH), "iyi akşamlar")
-        self.assertEqual(loaded, ["moonshine"])
-        # another language needs Qwen: it loads then, once
-        self.assertEqual(model.decode(array("f", bytes(4 * 1600)), "English"), "Good evening.")
-        model.decode(array("f", bytes(4 * 1600)), "English")
-        self.assertEqual(loaded, ["moonshine", "qwen"])
-
-    def test_without_the_trial_qwen_loads_at_once_as_before(self) -> None:
-        model, loaded = self.model(moonshine=False)
-        self.assertEqual(loaded, ["qwen"])
+        name = os.path.basename(folder)
+        self.assertEqual(loaded, ["qwen", ("beam", name, None)])  # the beam alone, no n-gram
         self.assertIsNotNone(model.recognizer)
-
-    def test_a_run_in_another_language_loads_qwen_while_the_sound_comes(self) -> None:
-        from unittest import mock
-
-        from services.captions.worker import TURKISH, _Run
-
-        model, loaded = self.model(moonshine=True)
-        for language, wanted in ((TURKISH, False), ("English", True), ("", True)):
-            with mock.patch.object(model, "prepare_qwen") as prepare:
-                run = object.__new__(_Run)
-                with mock.patch("services.captions.decoder.AudioDecoder"):
-                    _Run.__init__(run, None, model, 1, "", 0.0, None, language, [0.0])
-                self.assertEqual(prepare.called, wanted, language)
+        self.assertEqual(model.decode(array("f", bytes(4 * 1600)), worker.TURKISH), "iyi akşamlar")
+        self.assertEqual(model.wrote(), name)
+        self.assertEqual(model.decode(array("f", bytes(4 * 1600)), "English"), "Good evening.")
+        self.assertEqual(model.writes(worker.TURKISH), name)
+        self.assertEqual(model.writes("English"), "Qwen3-ASR")
 
 
 class TitlePrefixTest(unittest.TestCase):
@@ -651,7 +613,6 @@ class TitlePrefixTest(unittest.TestCase):
             moonshine=True,
             turkish=object(),
             prepare=lambda language: None,
-            prepare_qwen=mock.Mock(),
             is_speech=lambda window: False,
             is_voiced=lambda window: False,
             decode=lambda samples, language, fast=False: next(texts),
@@ -683,7 +644,6 @@ class TitlePrefixTest(unittest.TestCase):
         for _ in said:
             run._moon_reading(array("f", bytes(4 * 1600)))
         self.assertIn(("detected", 4, "Turkish"), sent)
-        model.prepare_qwen.assert_not_called()
 
     def test_a_guess_the_readings_belie_hands_over_to_detection(self) -> None:
         said = ["The weather is good today and we will go there."] * 4
@@ -692,5 +652,4 @@ class TitlePrefixTest(unittest.TestCase):
             run._moon_reading(array("f", bytes(4 * 1600)))
         self.assertEqual(run.language, "")  # not known: Qwen tells it, as without a prefix
         self.assertIsNone(run.writer)
-        model.prepare_qwen.assert_called_once()
         self.assertFalse([m for m in sent if m[0] == "detected"])

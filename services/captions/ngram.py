@@ -1,6 +1,6 @@
 """A back-off n-gram over our Turkish Moonshine's pieces, read with the standard library only
-(mmap, bisect, struct; no numpy, no native code): the language model of the Test model list's
-"beam + LM" entries (services.captions.moon_beam).
+(mmap, bisect, struct; no numpy, no native code): the language model a beam search may read
+with (services.captions.moon_beam; 2.10's Turkish is read without one).
 
 The file (".qng", built from an ARPA file over piece ids written as decimal words: `write_arpa`):
 

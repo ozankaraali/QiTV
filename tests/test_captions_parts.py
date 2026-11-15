@@ -109,7 +109,7 @@ class PagedTests(unittest.TestCase):
         self.assertEqual(paged("Kısa.", lambda part: True), ["Kısa."])
 
 
-def _bare_run(level=logging.INFO):
+def _bare_run():
     """A captions run without its stream, its sound or its recognizing threads."""
     from services.captions.worker import _Run
 
@@ -117,7 +117,7 @@ def _bare_run(level=logging.INFO):
     run.run, run.model = 3, SimpleNamespace()
     run.sent = []
     run.link = SimpleNamespace(send=run.sent.append)
-    run._line_level, run._writes = level, "Qwen3-ASR"
+    run._writes = "Qwen3-ASR"
     run.stopped, run.viewer = threading.Event(), [0.0]
     return run
 
@@ -125,13 +125,14 @@ def _bare_run(level=logging.INFO):
 class ProcessTests(unittest.TestCase):
     """The captions process sends each line, in parts when it has more than one, and logs it."""
 
-    def test_a_line_goes_out_at_once_and_the_log_says_what_it_heard(self):
+    def test_a_line_goes_out_at_once_and_the_log_says_what_it_heard_at_debug(self):
         run = _bare_run()
-        with self.assertLogs("services.captions.worker", logging.INFO) as logs:
+        with self.assertLogs("services.captions.worker", logging.DEBUG) as logs:
             run._write("Qwen3-ASR", "eve", "Eve.", 10.0, 11.0, until=11.5)
         self.assertEqual(run.sent, [("caption", 3, 10.0, 11.5, "Eve.")])
         self.assertEqual(
-            logs.records[0].getMessage(), "AI captions: [Qwen3-ASR] heard 'eve', shows 'Eve.'"
+            [(r.levelno, r.getMessage()) for r in logs.records],
+            [(logging.DEBUG, "AI captions: [Qwen3-ASR] heard 'eve', shows 'Eve.'")],
         )
 
     def test_a_piece_s_own_voice_detector_times_its_parts(self):

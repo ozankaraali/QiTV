@@ -437,7 +437,7 @@ class WrittenToTests(unittest.TestCase):
         run.viewer, run.language, run.run, run.rtf = [100.0], "English", 4, 0.5
         run._writes = "qwen3-asr-0.6b"  # as the run began: no change to say
         run.stopped = threading.Event()
-        with self.assertLogs("services.captions.worker", logging.INFO) as logs:
+        with self.assertLogs("services.captions.worker", logging.DEBUG) as logs:
             thread = threading.Thread(target=run._recognize, daemon=True)
             thread.start()
             deadline = time.monotonic() + 5
@@ -715,7 +715,7 @@ class CutterTests(unittest.TestCase):
 
         return Cutter(lambda window: True, is_voiced)
 
-    def test_the_moonshine_trials_turkish_is_read_in_whole_utterances(self):
+    def test_our_moonshines_turkish_is_read_in_whole_utterances(self):
         # 2026-11-07, the owner: right after a tune its 2 s pieces lost "gün" and "iyi"; its
         # Turkish goes to the growing writer instead (no forced cuts), the rest as before
         import queue
@@ -732,7 +732,6 @@ class CutterTests(unittest.TestCase):
             run.stopped, run.writer, run.blocks = threading.Event(), None, queue.Queue()
             run.model = SimpleNamespace(
                 moonshine=moonshine,
-                turkish_stream=None,
                 is_speech=lambda window: False,
                 is_voiced=lambda window: False,
             )
@@ -1816,23 +1815,3 @@ class FilmCaptionsTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
-
-
-class TrialPieceTests(unittest.TestCase):
-    def test_a_trial_piece_is_kept_as_sound_and_words(self):
-        from array import array
-        import wave
-
-        from services.captions import worker
-
-        folder = tempfile.mkdtemp()
-        self.addCleanup(shutil.rmtree, folder, True)
-        worker.keep_piece(
-            folder, 12.5, 14.0, array("f", [0.0, 0.5, -0.5] * 1000), "Bu  bir\tdeneme."
-        )
-        names = [n for n in os.listdir(folder) if n.endswith(".wav")]
-        self.assertEqual(len(names), 1)
-        with wave.open(os.path.join(folder, names[0])) as w:
-            self.assertEqual((w.getframerate(), w.getnchannels(), w.getnframes()), (16000, 1, 3000))
-        with open(os.path.join(folder, "pieces.tsv"), encoding="utf-8") as listing:
-            self.assertEqual(listing.read(), f"{names[0]}\t12.50\t14.00\tBu bir deneme.\n")

@@ -39,13 +39,12 @@ import time
 from typing import Any, Optional, Sequence
 import urllib.request
 
-from services.captions import guards, numbers_tr, text_language, trial_models
+from services.captions import guards, numbers_tr, text_language
 from services.captions.growing import GrowingWriter
 from services.captions.languages import COHERE, EUROPEAN, QWEN_LANGUAGES, iso_code
 from services.captions.parts import parts_of
 from services.captions.pieces import END_PAUSE_S, MAX_PIECE_S, Cutter, Piece
 from services.captions.stream_clock import StreamClock, TsTimes
-from services.captions.streaming import StreamWriter
 
 logger = logging.getLogger(__name__)
 
@@ -89,11 +88,10 @@ class _LogToOwner(logging.Handler):
 TURKISH = "Turkish"  # Qwen's name for it: the language ufakzeka-kulak writes (2.9.1)
 _COHERE, _EUROPEAN = "cohere", "european"  # 2.9.3: the specialists (their spec keys)
 # ... and the others' parts, by which the log names the model that wrote a line (2026-11-08)
-_QWEN, _TURKISH_ROLE, _STREAM_ROLE = "qwen", "turkish", "stream"
+_QWEN, _TURKISH_ROLE = "qwen", "turkish"
 _NAMES = {  # ... when its folder says nothing
     _QWEN: "Qwen3-ASR",
     _TURKISH_ROLE: "ufakzeka-kulak",
-    _STREAM_ROLE: "the streaming Turkish model",
     _COHERE: "Cohere Transcribe",
     _EUROPEAN: "Parakeet",
 }
@@ -103,64 +101,17 @@ _TURKISH_GAIN = 8.0  # the model card's input gain: its sherpa-onnx files want t
 # and phrases are (pieces.Cutter's `is_voiced`)
 _VOICED_MIN_S = 0.05
 _UPPER = {"i": "İ", "ı": "I"}  # Turkish's own capitals of the dotted and the dotless i
-# A streaming Turkish model (a dev trial: our own FastConformer, sherpa-onnx's online files in
-# this folder): Turkish runs feed it the sound continuously instead of cutting pieces, so no
-# word is ever cut; services.captions.streaming makes the lines.
-STREAM_ENV = "QITV_TR_STREAM"
-# A dev trial: our own Turkish Moonshine (sherpa-onnx's Moonshine v2 files in this folder:
-# encoder_model, decoder_model_merged, tokens.txt) writes Turkish in ufakzeka-kulak's place.
-# It was trained on the sound as it comes (no input gain) and its frontend reads 5 ms frames
-# (80 samples), so a piece is padded to a whole number of them. sherpa-onnx runs Moonshine only
-# on whole pieces (no streaming, no word times), and pieces cut to the lead lost words at the
-# cuts (the owner, 2026-11-07: "Burada her | yeni bir mücadele var" lost "gün"): the trial's
-# Turkish goes to services.captions.growing instead, which reads each utterance whole and, while
-# it goes on, again as it grows, with no forced cuts.
-MOON_ENV = "QITV_TR_MOONSHINE"
-_MOON_FRAME = 80
+_MOON_FRAME = 80  # sherpa-onnx's Moonshine reads 5 ms frames: a piece is padded to whole ones
 _IDLE_S = 0.25  # the growing writer looks at the picture this often when no sound comes
 # 2026-11-09, the owner: buffered channels watched at 1.5x or 2x, so 2 s of sound to read a second;
 # from this rate on, our Moonshine beam reads its best path alone (about 4x cheaper)
 FAST_RATE = 1.25
-# The trial's field test set (the owner, 2026-11-07): with a folder named here, each piece the
-# Moonshine trial reads is kept as a 16 kHz WAV beside a line of what the model wrote, to label.
-SAVE_ENV = "QITV_TR_SAVE_PIECES"
-
-
-def line_level() -> int:
-    """The level each caption line is logged at (2026-11-08, the owner): INFO in a run from
-    source or with QITV_TRIAL_MODELS=1 (where test models are offered, to compare them); DEBUG
-    in a released build, which logged no lines before."""
-    return logging.INFO if trial_models.enabled() else logging.DEBUG
+LINE_LEVEL = logging.DEBUG  # each caption line is logged at this level (2026-11-08)
 
 
 def _folder_name(folder: Any) -> str:
     """A model's folder as the log names the model ("qwen3-asr-0.6b"); "" without one."""
     return Path(str(folder)).name if folder else ""
-
-
-def _label(folder: Any) -> str:
-    """A test model's folder as the list names it ("FastConformer r2 · tr-fc-r2"), else its
-    folder's name."""
-    found = trial_models.describe(Path(str(folder)))
-    return found.label if found is not None else _folder_name(folder)
-
-
-def keep_piece(folder: str, start: float, end: float, samples: array, text: str) -> None:
-    """One trial piece kept: `folder`/<time>-<start>.wav (16 kHz, 16-bit) and a line in pieces.tsv
-    (file, start, end, what the model wrote)."""
-    import wave
-
-    path = Path(folder)
-    path.mkdir(parents=True, exist_ok=True)
-    name = f"{time.strftime('%Y%m%d-%H%M%S')}-{start:09.2f}.wav"
-    pcm = array("h", (max(-32768, min(32767, int(s * 32767))) for s in samples))
-    with wave.open(str(path / name), "wb") as out:
-        out.setnchannels(1)
-        out.setsampwidth(2)
-        out.setframerate(16000)
-        out.writeframes(pcm.tobytes())
-    with open(path / "pieces.tsv", "a", encoding="utf-8") as listing:
-        listing.write(f"{name}\t{start:.2f}\t{end:.2f}\t{' '.join(text.split())}\n")
 
 
 _SENTENCE_ENDS = (".", "!", "?", "…")
@@ -204,11 +155,10 @@ class _Model:
     for Turkish ufak AI's ufakzeka-kulak (2.9.1: far better Turkish than Qwen's, at a
     twenty-fifth of its time) once the files are given."""
 
-    moonshine = False  # the Turkish Moonshine trial writes Turkish (MOON_ENV)
-    trial = False  # a test model picked by hand writes everything, as Turkish (spec "trial")
-    beam: Any = None  # ... a Moonshine read with our beam and n-gram (moon_beam.BeamReader)
+    moonshine = False  # our Turkish Moonshine writes Turkish (2.10)
+    beam: Any = None  # ... read with our beam (moon_beam.BeamReader)
     # 2026-11-08, the owner: "Write to logs which one writes": each model's name in the log,
-    # by its part (_QWEN, _TURKISH_ROLE, _STREAM_ROLE, _COHERE, _EUROPEAN)
+    # by its part (_QWEN, _TURKISH_ROLE, _COHERE, _EUROPEAN)
     names: dict[str, str] = {}
     _wrote = threading.local()  # the name of the model that wrote this thread's last decode
 
@@ -225,88 +175,22 @@ class _Model:
         # Without a model (the packaged smoke test's probe): the sound, the clock and the
         # detector alone; each piece is reported instead of written.
         self.has_model = bool(paths)
-        self.recognizer: Any = None
         self._qwen_paths = paths
-        self._qwen_done = threading.Event()
-        self._qwen_started = False
         turkish = spec.get("turkish")
-        stream_dir = spec.get("turkish_stream") or os.environ.get(STREAM_ENV)
-        moon_dir = os.environ.get(MOON_ENV)
-        # 2026-11-08, the owner: a test model picked in the Subtitles panel's Test model list
-        # (services.captions.trial_models) runs as it is: it alone, on Turkish, no language
-        # detection and no Qwen; the environment's trials (MOON_ENV, STREAM_ENV) step aside.
-        picked = spec.get("trial")
-        found = trial_models.describe(Path(picked)) if paths and picked else None
-        if picked and found is None:
-            logger.warning("AI captions: the test model %s isn't here; the usual models", picked)
-        beam: Optional[trial_models.TrialModel] = None
-        if found is not None:
-            self.trial = True
-            kind, trial_dir = found.kind, str(found.folder)
-            turkish = trial_dir if kind == trial_models.UFAK else None
-            moon_dir = trial_dir if kind == trial_models.MOONSHINE else None
-            stream_dir = trial_dir if kind == trial_models.STREAM else None
-            if found.decoding == trial_models.BEAM_LM:
-                beam = found  # read with our beam and the n-gram, not sherpa-onnx's greedy
-            logger.info("AI captions: the test model %s writes Turkish", found.label)
         self.names = {_QWEN: _folder_name(Path(paths["encoder"]).parent if paths else None)}
-        # 2026-11-07: with the Moonshine trial writing Turkish, Qwen loads (and warms up) only
-        # once a run needs it: its load and warm-up kept the captions from starting while the
-        # picture played on (`prepare_qwen`); a test model's runs never need it
-        if paths and not moon_dir and not self.trial:
-            self.recognizer = self._new_qwen()
-            self._qwen_done.set()
+        self.recognizer: Any = self._new_qwen() if paths else None
         self.turkish: Any = None
         self.moonshine = False
         self.beam = None
-        if paths and beam is not None:
-            from services.captions.moon_beam import BeamReader
-
-            self.beam = self.turkish = BeamReader(beam.folder, beam.lm, threads=min(2, threads))
-            self.moonshine = True
-            self.names[_TURKISH_ROLE] = beam.label
-        elif paths and moon_dir:
-            self.names[_TURKISH_ROLE] = found.label if found is not None else _label(moon_dir)
-            encoder, decoder, tokens = trial_models.moonshine_files(Path(moon_dir))
-            self.turkish = sherpa_onnx.OfflineRecognizer.from_moonshine_v2(
-                encoder=str(encoder),
-                decoder=str(decoder),
-                tokens=str(tokens),
-                num_threads=min(2, threads),
-            )
-            self.moonshine = True
-            logger.info("AI captions: the Turkish Moonshine trial writes Turkish")
-        elif paths and turkish:
+        if paths and turkish:
             # 2.10: QiTV's own Turkish Moonshine medium (models.TURKISH_FILES), read with our
             # 4-path beam alone (no n-gram), as its model card's beam numbers were read
             from services.captions.moon_beam import BeamReader
 
             folder = Path(turkish)
-            self.names[_TURKISH_ROLE] = found.label if found is not None else _label(folder)
+            self.names[_TURKISH_ROLE] = _folder_name(folder)
             self.beam = self.turkish = BeamReader(folder, None, threads=min(2, threads))
             self.moonshine = True
-        self.turkish_stream: Any = None
-        if stream_dir:
-            folder = Path(stream_dir)
-            self.names[_STREAM_ROLE] = found.label if found is not None else _label(folder)
-            self.turkish_stream = sherpa_onnx.OnlineRecognizer.from_transducer(
-                tokens=str(folder / "tokens.txt"),
-                encoder=str(folder / "encoder.int8.onnx"),
-                decoder=str(folder / "decoder.int8.onnx"),
-                joiner=str(folder / "joiner.int8.onnx"),
-                num_threads=min(2, threads),
-                sample_rate=16000,
-                feature_dim=80,
-                normalize_samples=trial_models.normalize_samples(folder),  # its manifest says
-                decoding_method="modified_beam_search",  # beam 4 and a small penalty on
-                max_active_paths=4,  # "write nothing": the model drops fewer words
-                blank_penalty=trial_models.blank_penalty(folder),
-                enable_endpoint_detection=True,
-                rule1_min_trailing_silence=2.4,
-                rule2_min_trailing_silence=0.8,  # a pause ends what was said: its line shows
-                rule3_min_utterance_length=20.0,
-            )
-            logger.info("AI captions: the streaming Turkish model is loaded")
         # 2.9.3: the specialists, each loaded once a run's language needs it (in its own thread;
         # Qwen writes meanwhile): Cohere Transcribe for its 14 languages, told the language,
         # and NVIDIA's Parakeet TDT 0.6B v3 for the other European ones. Qwen still tells the
@@ -314,8 +198,6 @@ class _Model:
         self._folders = {
             name: Path(spec[name]) for name in (_COHERE, _EUROPEAN) if paths and spec.get(name)
         }
-        if self.trial:
-            self._folders = {}  # Turkish only: no specialist
         self.names.update({name: _folder_name(folder) for name, folder in self._folders.items()})
         self.cohere: Any = None
         self.european: Any = None
@@ -353,10 +235,8 @@ class _Model:
         return str(getattr(self._wrote, "name", "") or "")
 
     def writes(self, language: str) -> str:
-        """The model that writes `language` now, as the log names it: for Turkish the streaming
-        model or the Turkish one, else its specialist once loaded, else Qwen."""
-        if language == TURKISH and getattr(self, "turkish_stream", None) is not None:
-            return self.name(_STREAM_ROLE)
+        """The model that writes `language` now, as the log names it: for Turkish the Turkish
+        one, else its specialist once loaded, else Qwen."""
         if language == TURKISH and getattr(self, "turkish", None) is not None:
             return self.name(_TURKISH_ROLE)
         special = self.writer(language) if language else None
@@ -376,41 +256,9 @@ class _Model:
             max_new_tokens=guards.token_cap(MAX_PIECE_S, "Hindi"),  # each piece: its own
         )
 
-    def prepare_qwen(self) -> None:
-        """Qwen loads now, in its own thread, when it was left for later and has not begun."""
-        if self.recognizer is not None or not self._qwen_paths or self._qwen_started:
-            return
-        if self.trial:
-            return  # a test model writes everything (as Turkish)
-        self._qwen_started = True
-        threading.Thread(target=self._load_qwen, name="qitv-captions-qwen", daemon=True).start()
-
-    def _load_qwen(self) -> None:
-        try:
-            recognizer = self._new_qwen()
-            stream = recognizer.create_stream()  # warm up, as at load
-            stream.accept_waveform(16000, array("f", bytes(16000 * 4)))
-            recognizer.decode_stream(stream)
-            self.recognizer = recognizer
-            logger.info("AI captions: Qwen is loaded (a run needs it)")
-        except Exception as error:  # its languages get no captions; Turkish goes on
-            logger.warning("AI captions: Qwen did not load: %s", type(error).__name__)
-        finally:
-            self._qwen_done.set()
-
-    def qwen(self) -> Any:
-        """Qwen, once loaded; one left for later loads now (waited for, `_LOAD_WAIT_S` at
-        most). None when there is none."""
-        if self.recognizer is None and self.has_qwen():
-            self.prepare_qwen()
-            self._qwen_done.wait(_LOAD_WAIT_S)
-        return self.recognizer
-
     def has_qwen(self) -> bool:
-        """Qwen is here, or can be loaded (never beside a test model)."""
-        if getattr(self, "trial", False):
-            return False
-        return self.recognizer is not None or bool(getattr(self, "_qwen_paths", None))
+        """Qwen is here."""
+        return self.recognizer is not None
 
     def is_speech(self, window: array) -> bool:
         with self._lock:
@@ -525,7 +373,7 @@ class _Model:
             drifted = language != "English" and text_language.guess(text) == "English"
             if not drifted or not self.has_qwen() or language not in QWEN_LANGUAGES:
                 return text
-        recognizer = self.qwen()
+        recognizer = self.recognizer
         if recognizer is None:
             return ""  # Qwen did not load: no caption for this piece
         self._wrote.name = self.name(_QWEN)
@@ -566,8 +414,6 @@ class _Run:
         # step reads on past the next ones, counting its sound from where it got to
         self.read_on = read_on
         self._steps = 0
-        if getattr(model, "trial", False):
-            language, guessed = TURKISH, False  # a test model: Turkish, as it is (no vote)
         self.language = language
         # 2026-11-07: a language guessed from the channel's title prefix ("TR: …"): the run
         # starts in it (no Qwen vote first), and its readings may still say otherwise
@@ -576,10 +422,6 @@ class _Run:
         self.checks = text_language.Votes()
         if language:
             model.prepare(language)  # 2.9.3: its specialist loads while the sound comes
-        if not (language == TURKISH and getattr(model, "moonshine", False)):
-            prepare_qwen = getattr(model, "prepare_qwen", None)
-            if callable(prepare_qwen):
-                prepare_qwen()  # Qwen writes it, or tells its language: loading while sound comes
         self.viewer = viewer  # [position], shared with the command loop
         self.times = TsTimes(audio_pid=audio_track)
         self.clock = StreamClock(segment_start, self.times)
@@ -591,11 +433,10 @@ class _Run:
         self._working: Optional[float] = None  # the start of the piece being recognized
         self._said: Optional[tuple[str, float]] = None  # the line written last, and its end
         self._writes = ""  # the model that wrote the run's last line, as the log names it
-        self._line_level = line_level()
         self.votes = text_language.Votes()  # the language heard, when none is given
-        # streaming Turkish: the sound goes to the model whole (no pieces), lines come back
+        # Turkish: the sound goes to the growing writer whole (no pieces), lines come back
         self.blocks: queue.Queue[Optional[tuple[float, array]]] = queue.Queue()
-        self.writer: Optional[StreamWriter | GrowingWriter] = None
+        self.writer: Optional[GrowingWriter] = None
         self._resynced = False
         self._ended = False
         from services.captions.decoder import AudioDecoder
@@ -629,9 +470,9 @@ class _Run:
     def _logged(self, name: str, heard: str, shown: str) -> None:
         """A line in the log by the model that wrote it (2026-11-08, the owner: "Write to logs
         which one writes"), what it heard and what shows; the run's model changing (a language
-        locked, a specialist loaded) is said once, with the run. At INFO only where test models
-        are offered (`line_level`)."""
-        level = getattr(self, "_line_level", None) or line_level()
+        locked, a specialist loaded) is said once, with the run. At LINE_LEVEL (DEBUG: Settings'
+        detailed log shows them)."""
+        level = LINE_LEVEL
         if name != getattr(self, "_writes", ""):
             self._writes = name
             logger.log(level, "AI captions: run %d: [%s] writes now", getattr(self, "run", 0), name)
@@ -669,27 +510,21 @@ class _Run:
         self.decoder.stop()
 
     def _maybe_stream(self) -> None:
-        """Turkish with the streaming model here: from now on the sound goes to it whole; with
-        the Moonshine trial, to the growing writer (utterances read whole, no forced cuts)."""
+        """Turkish with our Moonshine here: from now on the sound goes to the growing writer
+        whole, which reads each utterance whole and, while it goes on, again as it grows, with no
+        forced cuts (2026-11-07, the owner: pieces cut to the lead lost words at the cuts,
+        "Burada her | yeni bir mücadele var" lost "gün")."""
         if getattr(self, "writer", None) is not None or self.language != TURKISH:
             return
-        recognizer = getattr(self.model, "turkish_stream", None)
-        if recognizer is not None:
-            self.writer = StreamWriter(recognizer, self.viewer)  # lines out before the picture
-        elif getattr(self.model, "moonshine", False):
-            self.writer = GrowingWriter(
-                self._moon_reading,
-                self.model.is_speech,
-                self.model.is_voiced,
-                self.viewer,
-                keep=self._keep_piece,
-            )
-        else:
+        if not getattr(self.model, "moonshine", False):
             return
+        self.writer = GrowingWriter(
+            self._moon_reading, self.model.is_speech, self.model.is_voiced, self.viewer
+        )
         threading.Thread(target=self._stream, name="qitv-captions-stream", daemon=True).start()
 
     def _moon_reading(self, samples: array) -> str:
-        """The Moonshine trial's reading of a whole stretch of sound, what nobody said left out."""
+        """Our Moonshine's reading of a whole stretch of sound, what nobody said left out."""
         text = guards.clean(self.model.decode(samples, TURKISH, fast=self.fast()))
         if text and getattr(self, "guessed", False):
             self._check_guess(text)
@@ -713,17 +548,7 @@ class _Run:
         )
         self.language = ""
         self.votes = text_language.Votes()
-        self.writer = None  # pieces again (`_take`); the streaming thread ends
-        prepare_qwen = getattr(self.model, "prepare_qwen", None)
-        if callable(prepare_qwen):
-            prepare_qwen()
-
-    @staticmethod
-    def _keep_piece(start: float, end: float, samples: array, text: str) -> None:
-        """The trial's field test set (SAVE_ENV): each utterance read whole, kept to label."""
-        folder = os.environ.get(SAVE_ENV)
-        if folder:
-            keep_piece(folder, start, end, samples, text)
+        self.writer = None  # pieces again (`_take`); the growing writer's thread ends
 
     # ---- reading (its thread) --------------------------------------------------------
     def _read(self) -> None:
@@ -878,11 +703,10 @@ class _Run:
         return turkish_capital(text) if begins else text
 
     def _stream(self) -> None:
-        """The streaming model's thread (or the growing writer's): placed sound in, whole lines
-        out (no pieces, no cuts). The sound that came while the model was busy goes in at once:
-        the growing writer's next reading has all of it. Both look at the picture when no sound
-        comes for a moment: a line it is about to reach goes out then (the sound comes in
-        bursts, a segment at a time)."""
+        """The growing writer's thread: placed sound in, whole lines out (no pieces, no cuts).
+        The sound that came while the model was busy goes in at once: the writer's next reading
+        has all of it. It looks at the picture when no sound comes for a moment: a line it is
+        about to reach goes out then (the sound comes in bursts, a segment at a time)."""
         writer = self.writer
         assert writer is not None
         name = self._writer_name(TURKISH)
@@ -907,7 +731,7 @@ class _Run:
                     writer.push(at, floats)
                 lines = writer.work()
             except Exception as error:
-                logger.warning("AI captions: the streaming model failed: %s", type(error).__name__)
+                logger.warning("AI captions: the Turkish model failed: %s", type(error).__name__)
                 return
             if seconds:
                 took = time.perf_counter() - started
@@ -929,14 +753,9 @@ class _Run:
         down while it only wrote English until Cohere was loaded, and the step down's restart
         made Cohere load again: the first caption came 101 s after captions were on)."""
         language = self.language
-        if getattr(self.model, "trial", False):
-            return False  # a test model writes it: no smaller Qwen helps
         if not language:
             return True
-        if language == TURKISH and (
-            getattr(self.model, "turkish", None) is not None
-            or getattr(self.model, "turkish_stream", None) is not None
-        ):
+        if language == TURKISH and getattr(self.model, "turkish", None) is not None:
             return False
         writer = getattr(self.model, "writer", None)
         return writer is None or writer(language) is None
@@ -965,7 +784,7 @@ class _Run:
         if locked is not None:
             self.language = locked
             self.model.prepare(locked)  # 2.9.3: Qwen writes until its specialist is loaded
-            self._maybe_stream()  # Turkish heard and the streaming model here: it takes over
+            self._maybe_stream()  # Turkish heard and our Moonshine here: it takes over
             self.link.send(("detected", self.run, locked))
             return True
         return heard is not None and heard == self.votes.leading()
@@ -1153,11 +972,7 @@ def _serve(link: _Link) -> None:
             viewer[0] = float(message[1])
             _rate_seen(viewer, seen, time.monotonic())
         elif kind == "language":
-            if model is not None and model.trial:
-                continue  # a test model's runs stay Turkish
             language = message[1]
-            if model is not None and not (language == TURKISH and model.moonshine):
-                model.prepare_qwen()  # Qwen writes the new language: it loads, if it was left
             if run is not None:
                 run.language = language
                 run._maybe_stream()

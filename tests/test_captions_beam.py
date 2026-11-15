@@ -1,4 +1,4 @@
-"""The Test model list's beam + LM reading of our Turkish Moonshine: the n-gram reader
+"""The beam (+ LM) reading of our Turkish Moonshine: the n-gram reader
 (services.captions.ngram), the best tokens of a row of logits and the beam search's rules
 (services.captions.moon_beam). With QITV_TR_MOONSHINE naming a model folder and sherpa_onnx
 importable, the model itself: a beam of one is the greedy decode, and a beam + LM reading

@@ -1,5 +1,5 @@
-"""Turkish captions' numbers written as Turkish subtitles write them (a dev trial: the speech
-models write every number in words, "iki bin yediden", as they were trained). Digits for 11 and
+"""Turkish captions' numbers written as Turkish subtitles write them (the speech models write
+every number in words, "iki bin yediden", as they were trained). Digits for 11 and
 up ("on dörtte" -> "14'te"), years ("iki bin yedi" -> "2007"), percentages ("yüzde beş" -> "%5"),
 clock times after "saat" ("saat on beş otuzda" -> "saat 15.30'da"), days with a month ("yirmi üç
 Nisan" -> "23 Nisan"), decimals ("üç virgül beş" -> "3,5"), ordinals from 11 ("on birinci" ->

@@ -34,9 +34,14 @@ class WindowConfigMigrationTests(unittest.TestCase):
                 self.assertFalse(reloaded.ai_captions_language_models)
 
     def test_a_config_with_settings_this_build_no_longer_has_reads_and_keeps_them(self):
-        # A run from source's Speaker marks (2026-11-08) were left out of 2.10: a config that
-        # holds its choice reads as any other, and keeps it as it was (older builds read it).
-        saved = {"ai_captions_speaker_marks": "colours", "ai_captions_model": "small"}
+        # A run from source's Test model and Speaker marks (2026-11-08) are gone in 2.10: a
+        # config that holds their choices reads as any other, and keeps them as they were (older
+        # builds read them).
+        saved = {
+            "ai_captions_trial_model": "tr-moonm-avg",
+            "ai_captions_speaker_marks": "colours",
+            "ai_captions_model": "small",
+        }
         with tempfile.TemporaryDirectory() as directory:
             config_path = Path(directory) / "config.json"
             config_path.write_text(json.dumps(saved), encoding="utf-8")

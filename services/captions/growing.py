@@ -1,5 +1,5 @@
-"""An offline speech model on live sound with no forced cuts (a dev trial: our Turkish Moonshine,
-sherpa-onnx's Moonshine v2 files, which read whole pieces only and give no word times).
+"""An offline speech model on live sound with no forced cuts (our Turkish Moonshine, which reads
+whole pieces only and gives no word times).
 
 Pieces cut to the captions' lead lost words at the cuts (the owner, 2026-11-07: right after a
 tune, "Burada her | yeni bir mücadele var" lost "gün"; "geldik | bir hafta sonu" lost "iyi"):
@@ -32,8 +32,8 @@ of up to 6 s and 35 % for the 2 s pieces right after a tune; under a music bed 2
 28.6 % and 39.6 %; about 1.7 times the reading of 6 s pieces.
 
 Without word times, the words are spread over the voiced windows of the sound they came from,
-by their letters (`place`). Lines follow services.captions.streaming's rules (a sentence's end,
-two rows at most, six seconds at most).
+by their letters (`place`). Lines follow services.captions.streaming's `line_end` (a sentence's
+end, two rows at most, six seconds at most).
 
 - An utterance leads in from the first voiced window up to LOOKBACK_S before the detector's
   first speech window (the detector says speech late, and the word that started the sound was
@@ -60,14 +60,14 @@ from typing import Optional
 import unicodedata
 
 from services.captions.pieces import RATE, WINDOW, Cutter, Piece
-from services.captions.streaming import (  # the picture's pace, as the streaming lines'
+from services.captions.streaming import (  # where a line ends, and the picture's pace
     FIRST_WORD_S,
     HELD_AFTER_S,
     HOLDBACK_S,
     MARGIN_S,
     SENTENCE_ENDS,
-    Lines,
     Word,
+    line_end,
     time_left,
 )
 
@@ -256,13 +256,11 @@ class GrowingWriter:
         viewer: list,
         *,
         clock: Callable[[], float] = time.monotonic,
-        keep: Optional[Callable[[float, float, array, str], None]] = None,
     ) -> None:
         self.decode = decode  # whole sound -> the model's text, already cleaned (guards)
         self.cutter = Cutter(is_speech, is_voiced, longest=LONGEST_S, lookback=LOOKBACK_S)
         self.viewer = viewer  # [position], the picture's timeline second
         self.clock = clock
-        self.keep = keep  # (start, end, sound, text) of each utterance read whole
         # a split part's end read again by the next part: where that begins, where its words
         # not told yet begin, the words told so far, the word left to it (as heard)
         self._carry: tuple[float, float, list[Word], list[str]] = (
@@ -356,12 +354,6 @@ class GrowingWriter:
         if piece.speech_share < MIN_SPEECH_SHARE or passed:
             return self._close(final=not piece.split)
         new = self._new_words(utterance, piece)
-        if self.keep is not None:
-            said = " ".join([w.text for w in utterance.written] + new)
-            try:
-                self.keep(piece.start, piece.end, piece.samples, said)
-            except Exception as error:  # a full disk never stops the captions
-                logger.warning("AI captions: a trial piece was not kept: %s", error)
         at, voiced = utterance.unwritten(piece)
         placed = place(new, at, voiced)
         if piece.overlap:
@@ -460,7 +452,7 @@ class GrowingWriter:
         clear = max(0, min(len(new) - 1, timed))
         same = min(same, clear) if same else clear
         # the first line of it: the words after it may still be read whole
-        cut = Lines._cut(placed[:same], True) if same else None
+        cut = line_end(placed[:same], True) if same else None
         utterance.ready = placed[: same if cut is None else cut + 1]
         utterance.clear = placed[:clear]
         if utterance.ready and len(utterance.ready) == len(placed):
@@ -530,7 +522,7 @@ class GrowingWriter:
         out: list[tuple[str, float, float]] = []
         while self._pending:
             words = self._pending
-            cut = Lines._cut(words, True)
+            cut = line_end(words, True)
             if cut is None:
                 break
             line = words[: cut + 1]

@@ -1,6 +1,5 @@
-"""Our Turkish Moonshine read with a beam search and shallow fusion with an n-gram over its pieces
-(services.captions.ngram): the Test model list's "beam + LM" entries (a run from source), to
-compare live against the greedy decode the same model gets through sherpa-onnx.
+"""Our Turkish Moonshine read with a beam search, and shallow fusion with an n-gram over its pieces
+when one is given (services.captions.ngram; 2.10's Turkish is read with the beam alone).
 
 A hypothesis scores log p_model + λ · log p_LM + β · its tokens (λ = 0.1, β = 0.5; natural logs).
 Each step, every hypothesis takes its 8 best next tokens by the model alone before the LM is
