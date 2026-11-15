@@ -38,10 +38,11 @@ _FALSE_CAPTIONS = re.compile(
     r"sous-titrage|sous-titres réalisés|subtítulos (?:realizados|por)|amara\.org",
     re.IGNORECASE,
 )
-# A YouTube outro on its own (2026-11-08, the Turkish Moonshine trial on a drama: "Abone ol." over a
-# short blip; its training text has YouTubers' "kanalıma abone olun" endings): a caption that is
-# nothing but such words, six at most, is the model's habit, not the channel. Inside a longer line
-# the words stay (someone on TV may say "abone olun" while saying more).
+# A video channel's subscribe outro on its own (2026-11-08, the Turkish Moonshine trial on a drama:
+# "Abone ol." over a short blip; its training text has video makers' "kanalıma abone olun"
+# endings): a caption that is nothing but such words, six at most, is the model's habit, not the
+# channel. Inside a longer line the words stay (someone on TV may say "abone olun" while saying
+# more).
 _OUTRO_WORDS = frozenset(
     "abone ol olun olmayı olmayi unutmayın unutmayin kanalıma kanalımıza kanalima kanalimiza "
     "beğen beğenin beğenmeyi begen begenin begenmeyi ve lütfen lutfen videoyu bildirimleri aç açın "
@@ -71,7 +72,7 @@ def _looped(text: str) -> bool:
 
 
 def _outro_only(text: str) -> bool:
-    """A caption that is only a YouTube outro ("Abone ol.", "Beğen ve abone ol!")."""
+    """A caption that is only a subscribe outro ("Abone ol.", "Beğen ve abone ol!")."""
     words = [w for w in (_WORD.sub("", t.lower()) for t in text.split()) if w]
     return (
         0 < len(words) <= 6

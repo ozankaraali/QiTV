@@ -37,7 +37,7 @@ def setUpModule():
 
 
 class GuardTests(unittest.TestCase):
-    def test_a_youtube_outro_alone_is_the_models_habit(self):
+    def test_a_subscribe_outro_alone_is_the_models_habit(self):
         # 2026-11-08, the Turkish Moonshine trial on a drama: "Abone ol." over a short blip.
         for said in (
             "Abone ol.",
