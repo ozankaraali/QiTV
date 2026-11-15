@@ -45,11 +45,20 @@ def prompt(text: str, source: str, target: str) -> str:
     return f"Translate this from {source} to {target}:\n{source}: {text}\n{target}:"
 
 
+# scripts where a character carries about a word: the cap on a translation's length counts
+# each as 3 (a 10-character Chinese line translates to 50 or more English characters)
+_DENSE = re.compile(
+    "[\u0e00-\u0eff\u1000-\u109f\u1780-\u17ff\u3040-\u30ff\u3400-\u4dbf"
+    "\u4e00-\u9fff\uac00-\ud7af\u1100-\u11ff]"
+)
+
+
 def clean(source: str, output: str, target: str) -> Optional[str]:
     """What the model wrote, tidied; None when it is not a translation to show: empty, far
     longer than the source, a word said over and over, or not in the target's script."""
     text = _DASH.sub(", ", output.split("\n", 1)[0].strip()).strip()
-    if not text or len(text) > 3 * len(source) + 20:
+    dense = len(_DENSE.findall(source))
+    if not text or len(text) > 3 * (len(source) + 2 * dense) + 20:
         return None
     if _REPEAT.search(text):
         return None
@@ -76,52 +85,88 @@ class Translator:
         self._present_names: list[str] = []
         self._selection: Any = None
         self._empty: Any = None
+        self._broken = False
 
     def _load(self) -> None:
         from tokenizers import Tokenizer  # downloaded with the model: not a dependency
 
         api = onnx_c.Api(onnx_c.find_library(self._library))
-        session = onnx_c.Session(api, self._folder / _MODEL, self._threads)
-        past = [name for name in session.inputs if name.startswith(_PAST)]
-        present = [_PRESENT + name[len(_PAST) :] for name in past]
-        needed = {"input_ids", "attention_mask", *past}
-        if set(session.inputs) != needed or not past:
-            raise ValueError(f"not MiLMMT's graph: {session.inputs}")
-        if _NEXT not in session.outputs or any(n not in session.outputs for n in present):
-            raise ValueError(f"not MiLMMT's graph: {session.outputs}")
-        self._tokenizer = Tokenizer.from_file(str(self._folder / _TOKENIZER))
+        session = None
+        try:
+            session = onnx_c.Session(api, self._folder / _MODEL, self._threads)
+            past = [name for name in session.inputs if name.startswith(_PAST)]
+            present = [_PRESENT + name[len(_PAST) :] for name in past]
+            needed = {"input_ids", "attention_mask", *past}
+            if set(session.inputs) != needed or not past:
+                raise ValueError(f"not MiLMMT's graph: {session.inputs}")
+            if _NEXT not in session.outputs or any(n not in session.outputs for n in present):
+                raise ValueError(f"not MiLMMT's graph: {session.outputs}")
+            tokenizer = Tokenizer.from_file(str(self._folder / _TOKENIZER))
+            selection = session.select([_NEXT, *present])
+            empty = api.tensor(array("f"), (1, _HEADS, 0, _HEAD_SIZE), onnx_c.FLOAT)
+        except BaseException:
+            if session is not None:
+                session.close()
+            api.close()
+            raise
+        self._tokenizer = tokenizer
         self._api = api
         self._session = session
         self._past_names = past
         self._present_names = present
-        self._selection = session.select([_NEXT, *present])
-        self._empty = api.tensor(array("f"), (1, _HEADS, 0, _HEAD_SIZE), onnx_c.FLOAT)
+        self._selection = selection
+        self._empty = empty
         logger.info(
             "MiLMMT through onnxruntime %s's C API (%d threads)", api.version, self._threads
         )
 
+    def _ready(self) -> bool:
+        """The model is loaded (the lock is held); False once a load has failed, for good."""
+        if self._session is not None:
+            return True
+        if self._broken:
+            return False
+        try:
+            self._load()
+        except Exception:
+            self._broken = True
+            logger.exception("caption translation: the model could not be loaded; it stays off")
+            return False
+        return True
+
     def warm(self) -> None:
         """Loads the model and runs one call, so the first caption is not the slow one."""
         with self._lock:
-            if self._session is None:
-                self._load()
-            self._generate([2], 1, None)
+            if not self._ready():
+                return
+            try:
+                self._generate([2], 1, None)
+            except Exception:
+                logger.exception("caption translation: the warm-up call failed")
 
     def translate(
         self, text: str, source: str, target: str, deadline: Optional[float] = None
     ) -> Optional[str]:
         """`text` from `source` to `target` (MiLMMT's names); None when the original should
-        show: a bad output, or `deadline` (a time.monotonic() value) passed between tokens."""
+        show: a bad output, an error (logged), or `deadline` (a time.monotonic() value) passed
+        between tokens."""
         with self._lock:
-            if self._session is None:
-                self._load()
-            ids = list(
-                self._tokenizer.encode(prompt(text, source, target), add_special_tokens=False).ids
-            )
-            tokens = self._generate(ids, MAX_NEW_TOKENS, deadline)
-            if tokens is None:
+            if not self._ready():
                 return None
-            return clean(text, self._tokenizer.decode(tokens, skip_special_tokens=True), target)
+            try:
+                ids = list(
+                    self._tokenizer.encode(
+                        prompt(text, source, target), add_special_tokens=False
+                    ).ids
+                )
+                tokens = self._generate(ids, MAX_NEW_TOKENS, deadline)
+                if tokens is None:
+                    return None
+                decoded = self._tokenizer.decode(tokens, skip_special_tokens=True)
+            except Exception:
+                logger.exception("caption translation failed; the original shows")
+                return None
+            return clean(text, decoded, target)
 
     def _feed(self, ids: array, mask: int, pasts: list[Any]) -> tuple[list[Any], list[Any]]:
         api = self._api

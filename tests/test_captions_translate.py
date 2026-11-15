@@ -3,11 +3,12 @@ prompt, the greedy loop's stops, the clean-up of what the model wrote, the langu
 
 import ctypes
 from pathlib import Path
+import sys
 from typing import Any
 import unittest
 from unittest import mock
 
-from services.captions import translate
+from services.captions import onnx_c, translate
 from services.captions.mt_languages import MT_LANGUAGES, app_default, own_name, source_for
 from services.captions.translate import EOS_IDS, MAX_NEW_TOKENS, Translator, clean, prompt
 
@@ -140,6 +141,79 @@ class TranslatorTest(unittest.TestCase):
         for out in ("", "the the the the the the the the", "x" * 400, "Привет мир"):
             self.assertIsNone(clean("Merhaba dünya", out, "English"))
         self.assertEqual(clean("Merhaba dünya", " Hello — world \n", "English"), "Hello, world")
+
+    def test_a_cjk_source_may_have_a_longer_translation(self) -> None:
+        chinese = "我们今天晚上一起去吃饭吧好吗"[:12]
+        english = "We are all going out to eat together tonight, aren't we? Yes. " * 2
+        self.assertEqual(len(chinese), 12)
+        self.assertEqual(clean(chinese, english[:90], "English"), english[:90].strip())
+        self.assertIsNone(clean(chinese, "x" * 400, "English"))
+        self.assertIsNone(clean("Merhaba dünya", english[:90], "English"))
+
+    def test_a_failing_run_gives_none_and_releases_everything(self) -> None:
+        t = Fake([10, 12, 1])
+        original = t.session.run
+        calls = []
+
+        def run(values: Any, selection: Any) -> Any:
+            calls.append(1)
+            if len(calls) == 2:
+                raise RuntimeError("boom")
+            return original(values, selection)
+
+        t.session.run = run  # type: ignore[method-assign]
+        with self.assertLogs(translate.logger, "ERROR"):
+            self.assertIsNone(t.translate("Pekala tamam", "Turkish", "English"))
+        self.assertTrue(t.session.made)
+        self.assertTrue(all(v.released for v in t.session.made))
+        t2 = Fake([])  # run raises at once (no scripted token): warm logs, no raise
+        with self.assertLogs(translate.logger, "ERROR"):
+            t2.warm()
+
+    def test_a_failed_load_closes_what_it_made_and_is_not_retried(self) -> None:
+        closed: list[str] = []
+        made: list[str] = []
+
+        class Api:
+            version = "x"
+
+            def close(self) -> None:
+                closed.append("api")
+
+        class Session:
+            inputs = ["input_ids", "attention_mask", *PASTS]
+            outputs = ["next_token", *PRESENTS]
+
+            def __init__(self, *args: Any, **kwargs: Any) -> None:
+                made.append("session")
+
+            def select(self, names: Any) -> list[str]:
+                return list(names)
+
+            def close(self) -> None:
+                closed.append("session")
+
+        class Tokenizer:
+            @staticmethod
+            def from_file(path: str) -> Any:
+                made.append("tokenizer")
+                raise OSError("no tokenizer.json")
+
+        t = Translator(Path("."))
+        fake_module = mock.Mock(Tokenizer=Tokenizer)
+        with (
+            mock.patch.dict(sys.modules, {"tokenizers": fake_module}),
+            mock.patch.object(onnx_c, "Api", return_value=Api()),
+            mock.patch.object(onnx_c, "Session", Session),
+            mock.patch.object(onnx_c, "find_library", return_value=Path("lib")),
+        ):
+            with self.assertLogs(translate.logger, "ERROR") as logged:
+                self.assertIsNone(t.translate("Merhaba", "Turkish", "English"))
+            self.assertIsNone(t.translate("Merhaba", "Turkish", "English"))
+            t.warm()
+        self.assertEqual(closed, ["session", "api"])
+        self.assertEqual(made, ["session", "tokenizer"])  # loaded once, never retried
+        self.assertEqual(len(logged.records), 1)
 
     def test_names(self) -> None:
         self.assertEqual(len(MT_LANGUAGES), 46)
