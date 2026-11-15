@@ -5,13 +5,13 @@ import os
 from pathlib import Path
 import shutil
 import tempfile
-import time
 from types import SimpleNamespace
 import unittest
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 from PySide6.QtWidgets import QApplication
+from timer_fixtures import wait_until
 
 from services import recording, recording_desk as desk, recording_schedule as rs
 from services.epg_view import Programme
@@ -20,20 +20,6 @@ from services.recordings_list import RecordingsList
 app = QApplication.instance() or QApplication([])
 NEWS = {"id": "7", "name": "News One", "_provider": "P"}
 FILMS = {"id": "8", "name": "Films", "_provider": "P"}
-
-
-def wait_for(predicate, seconds=5.0):
-    """Process events until `predicate()`; False once `seconds` have passed. It sleeps between
-    rounds with the GIL released, as test_recordings_list's wait does: QTest.qWait (and so
-    timer_fixtures.wait_until) holds it, and a thread then runs only between its calls (the
-    recordings list's read took 2.3 s so on a Mac, more than 5 s on a loaded CI runner)."""
-    deadline = time.monotonic() + seconds
-    while not predicate():
-        if time.monotonic() > deadline:
-            return False
-        app.processEvents()
-        time.sleep(0.005)
-    return True
 
 
 def local(day, hour, minute=0):
@@ -396,7 +382,7 @@ class PlaceTests(unittest.TestCase):
         recording.add_place(self.config, str(self.folder / "missing"))
         listing = RecordingsList(self.config)
         listing.refresh()
-        self.assertTrue(wait_for(lambda: bool(listing.places())))  # its thread's read
+        self.assertTrue(wait_until(lambda: bool(listing.places()), 5000))  # its thread's read
         self.assertEqual([f["name"] for f in listing.files()], ["News", "Films"])
         self.assertEqual(listing.files()[0]["_size"], 10)
         states = listing.places()

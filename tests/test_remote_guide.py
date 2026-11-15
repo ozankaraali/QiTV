@@ -11,8 +11,8 @@ import unittest
 from unittest import mock
 
 from PySide6.QtCore import QObject, Signal
-from PySide6.QtTest import QTest
 from test_tv_window import WindowCase, wait_until
+from timer_fixtures import pause
 
 from services.epg_view import Programme
 from services.find import FoundChannel, FoundGenre
@@ -369,7 +369,7 @@ class SharedFindTests(WindowCase):
         lists[0].groups(0, "cnn")
         lists[1].groups(0, "bbc")
         finder.changed.emit()
-        QTest.qWait(600)  # past both lists' pushes
+        pause(600)  # past both lists' pushes
         self.assertEqual(finder.asked, ["cnn", "bbc"])
         guide = [m for m in sent if m["t"] == "groups"][-1]
         self.assertEqual((guide["find"], guide["channels"], guide["searching"]), ("cnn", [], False))

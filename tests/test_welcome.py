@@ -8,6 +8,7 @@ from PySide6.QtCore import QPoint, QRectF, Qt
 from PySide6.QtGui import QFont, QPainter
 from PySide6.QtTest import QTest
 from PySide6.QtWidgets import QApplication, QWidget
+from timer_fixtures import pause
 
 from ui.overlays.painting import Units
 from ui.overlays.welcome import (
@@ -86,7 +87,7 @@ class WelcomeCardTests(unittest.TestCase):
     def test_it_follows_the_host_size(self):
         self.card.show_card()
         self.host.resize(800, 600)
-        QTest.qWait(10)
+        pause(10)
         self.assertEqual(self.card.width(), Units(800).px(WIDTH_U))
         self.assertAlmostEqual(self.card.geometry().center().x(), 400, delta=1)
 

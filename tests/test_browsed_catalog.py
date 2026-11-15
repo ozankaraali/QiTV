@@ -6,13 +6,14 @@ import unittest
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
-from PySide6.QtTest import QSignalSpy, QTest
+from PySide6.QtTest import QSignalSpy
 from PySide6.QtWidgets import QApplication
 from job_fixtures import ImmediateRunner
 from mixed_fixtures import DEMO, HARBOR, live_content, mixed_config, shut_hub
 import orjson
 from test_catalog_service import FakeWorker
 from test_catalogs import RecordingFactory
+from timer_fixtures import pause
 
 from services.browsed_catalog import BrowsedCatalog
 from services.catalog import ALL_GROUP_ID
@@ -347,7 +348,7 @@ class BrowsedCatalogTests(unittest.TestCase):
         view.linkReady.connect(lambda rid, url: links.append((rid, url)))
         harbor = with_provider({"id": 9, "cmd": "http://h/9.ts"}, "Harbor IPTV")
         request = view.request_link(harbor, section="live")
-        QTest.qWait(30)
+        pause(30)
         self.assertEqual(links, [(request, "http://h/9.ts")])
 
     def test_the_catalog_for_an_item_is_its_providers(self):
@@ -741,11 +742,11 @@ class EditedProviderTests(unittest.TestCase):
         view.select_provider(ALL_PROVIDERS)
         nav = NavModel(view, self.config)
         nav.reset_to("live", ALL_GROUP_ID)
-        QTest.qWait(10)
+        pause(10)
         before = len(nav.children(nav.path[-1]))
         self.assertEqual(before, 24 + 69)
         self.edit_harbor("renewed")  # not the selected provider
-        QTest.qWait(10)
+        pause(10)
         self.assertEqual(len(nav.children(nav.path[-1])), before)
         manager = self.catalogs.catalog("Harbor IPTV").provider_manager
         self.assertEqual(manager.current_provider["password"], "renewed")
@@ -756,7 +757,7 @@ class EditedProviderTests(unittest.TestCase):
         self.config.library_provider_name = "Harbor IPTV"
         library = self.page("library_provider_name", "library_all_providers")
         library.select_provider()
-        QTest.qWait(10)
+        pause(10)
         ready = []
         library.providerReady.connect(ready.append)
         self.edit_harbor("renewed")
@@ -764,7 +765,7 @@ class EditedProviderTests(unittest.TestCase):
         self.assertEqual(manager.current_provider["password"], "renewed")
         self.assertEqual(ready, ["Harbor IPTV"])  # the Library opens its lists again
         library.request_section("live")
-        QTest.qWait(10)
+        pause(10)
         self.assertEqual(self.factory.passwords, ["renewed"])
         self.assertTrue(library.has_content("live"))
 

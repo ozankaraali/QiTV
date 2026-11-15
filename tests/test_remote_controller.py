@@ -11,6 +11,7 @@ from unittest import mock
 from PySide6.QtCore import QObject, Qt, QTimer, Signal
 from PySide6.QtTest import QTest
 from test_tv_window import WindowCase, wait_until
+from timer_fixtures import pause
 
 from services.remote.protocol import (
     Answered,
@@ -174,7 +175,7 @@ class RemoteDispatchTests(WindowCase):
 class RemoteEventTests(WindowCase):
     def deliver(self, event):
         self.window.remote.bridge.post(event)
-        QTest.qWait(10)
+        pause(10)
 
     def test_remote_off_by_default_starts_nothing(self):
         self.window.remote.apply_config()
@@ -211,7 +212,7 @@ class RemoteEventTests(WindowCase):
         remote.fire = fired.append
         self.deliver(Press("s1", "down", True, 1))
         self.deliver(Closed("s1", "d1"))
-        QTest.qWait(700)
+        pause(700)
         self.assertEqual(fired, ["down"])
 
     def test_hold_repeats_on_the_gui_thread(self):
@@ -223,11 +224,11 @@ class RemoteEventTests(WindowCase):
         alive.timeout.connect(lambda: remote.bridge.post(Held("s1")))
         self.deliver(Press("s1", "down", True, 1))
         alive.start()
-        QTest.qWait(530)  # one press, then from 400 ms one every 40 ms
+        pause(530)  # one press, then from 400 ms one every 40 ms
         alive.stop()
         remote.bridge.post(Press("s1", "down", False, 5))
         self.assertTrue(wait_until(lambda: len(fired) >= 5))
-        QTest.qWait(200)
+        pause(200)
         # Where the phone let go, however late this machine's timers ran: overshoot steps back.
         self.assertEqual(fired.count("down") - fired.count("up"), 5)
         self.assertTrue(set(fired) <= {"down", "up"})
@@ -236,7 +237,7 @@ class RemoteEventTests(WindowCase):
 class ReviewFixControllerTests(WindowCase):
     def deliver(self, event):
         self.window.remote.bridge.post(event)
-        QTest.qWait(10)
+        pause(10)
 
     def test_store_saved_keeps_the_settings_switches(self):
         device = {"id": "d1", "name": "Phone A", "paired_at": 1.0, "last_used": 2.0, "keys": []}
@@ -331,7 +332,7 @@ class PhoneQuestionTests(WindowCase):
             self.window.remote.bridge.post(Answered("s8", ask["id"], True))
             self.window.remote.bridge.post(Answered("s8", ask["id"], False))  # once
             self.assertTrue(wait_until(lambda: answer.called))
-            QTest.qWait(50)
+            pause(50)
         answer.assert_called_once_with(True)
 
     def test_keep_recording_tells_the_phone_nothing_opened(self):
@@ -490,16 +491,16 @@ class PhoneTracksTests(WindowCase):
         self.assertEqual(
             self.sent("tracks")[-1]["sound"][1], {"id": 2, "name": "Deutsch", "on": True}
         )
-        QTest.qWait(600)  # nothing changed since: nothing more
+        pause(600)  # nothing changed since: nothing more
         self.assertEqual(len(self.sent("tracks")), 2)
         self.assertEqual(self.sent("tracks", "s9"), [])  # a phone that never asked
 
     def test_a_closed_sheet_hears_no_more_changes(self):
         self.opened()
         self.window.remote.bridge.post(Get("s8", "tracks_closed", "", 0))
-        QTest.qWait(50)
+        pause(50)
         self.controls.sound_choices.return_value = [(1, "English", False), (2, "Deutsch", True)]
-        QTest.qWait(700)  # a look came: nothing goes to a phone whose sheet closed
+        pause(700)  # a look came: nothing goes to a phone whose sheet closed
         self.assertEqual(len(self.sent("tracks")), 1)
         self.opened()  # opened again: the list as it is now
         self.assertEqual(self.sent("tracks")[-1]["sound"][1]["on"], True)
@@ -517,7 +518,7 @@ class PhoneTracksTests(WindowCase):
         self.controls.choose_caption_language.assert_called_once_with("Turkish")
         with mock.patch.object(self.window.controller, "now_playing", return_value=object()):
             remote.bridge.post(TrackPick("s8", "sound", 1, of))  # a zap came meanwhile
-            QTest.qWait(50)
+            pause(50)
             self.controls.choose_sound.assert_called_once_with(2)
             self.assertNotEqual(self.sent("tracks")[-1]["of"], of)  # the new list went to it
 
@@ -558,7 +559,7 @@ class PhoneTracksTests(WindowCase):
         self.assertTrue(wait_until(lambda: answer.called))
         answer.assert_called_once_with(True)
         self.window.remote.bridge.post(Answered("s8", ask["id"], False))  # answered once
-        QTest.qWait(50)
+        pause(50)
         answer.assert_called_once_with(True)
         self.assertEqual(self.sent("unask"), [])  # it closed its own
 
@@ -570,7 +571,7 @@ class PhoneTracksTests(WindowCase):
         self.assertTrue(wait_until(lambda: self.sent("ask")))
         self.controls.choose_caption_model.assert_called_once_with("large")
         self.window.remote.bridge.post(CaptionsModel("s8", "large", of + 1))  # an older list
-        QTest.qWait(50)
+        pause(50)
         self.controls.choose_caption_model.assert_called_once_with("large")
 
     def test_a_translation_picked_on_the_phone_is_the_tvs_and_its_question_every_phones(self):
@@ -583,13 +584,13 @@ class PhoneTracksTests(WindowCase):
             self.window.remote.bridge.post(CaptionsTranslate("s8", "Turkish", of))
             self.assertTrue(wait_until(lambda: self.controls.choose_caption_translation.called))
             self.controls.choose_caption_translation.assert_called_once_with("Turkish")
-            QTest.qWait(50)
+            pause(50)
             self.assertEqual(self.sent("ask"), [])  # asked when the TV's state says so
             captions.changed.emit()
             self.assertEqual(len(self.sent("ask")), 1)
             self.assertEqual(len(self.sent("ask", "s9")), 1)
         self.window.remote.bridge.post(CaptionsTranslate("s8", "German", of + 1))  # older
-        QTest.qWait(50)
+        pause(50)
         self.controls.choose_caption_translation.assert_called_once_with("Turkish")
 
     def test_answered_on_the_tv_it_closes_on_the_phones(self):
@@ -613,7 +614,7 @@ class PhoneTracksTests(WindowCase):
         self.window.remote.bridge.post(CaptionsSwitch("s8", True, of))
         self.assertTrue(wait_until(lambda: self.sent("ask")))
         self.window.remote.bridge.post(Closed("s8", "d8"))
-        QTest.qWait(50)
+        pause(50)
         answer.assert_not_called()  # the TV's card still asks
         self.assertEqual(self.window.remote._caption_asks, {})
 
@@ -901,7 +902,7 @@ class WatchHereTests(WindowCase):
             remote._on_event(Closed("s8", None))
             remote._on_event(Opened("s10", device, "home"))  # a reload: the same phone
             self.addCleanup(remote._phones.discard, "s10")
-            QTest.qWait(400)
+            pause(400)
         self.assertFalse(stopped.called)
         self.assertIn(device, remote._watching)
 
@@ -1036,7 +1037,7 @@ class WatchHereTests(WindowCase):
         play = self.plays()[-1]["p"]
         with mock.patch.object(self.window.watch, "update_position") as update:
             self.window.remote.bridge.post(Position("s8", 61000, 5400000, play))
-            QTest.qWait(200)
+            pause(200)
         update.assert_not_called()
 
     def test_the_phones_library_searches_with_the_desktops_search(self):

@@ -16,8 +16,8 @@ import time
 import unittest
 
 from PySide6.QtCore import QCoreApplication, QEvent, QObject, QTimer, Signal
-from PySide6.QtTest import QTest
 from PySide6.QtWidgets import QApplication
+from timer_fixtures import pause
 
 from services.live import worker
 from services.live.engine import LiveEngine
@@ -293,7 +293,7 @@ def wait_until(predicate, timeout):
     while not predicate():
         if time.monotonic() >= deadline:
             return False
-        QTest.qWait(20)
+        pause(20)
     return True
 
 
@@ -356,7 +356,7 @@ class BurstyRawTsTests(unittest.TestCase):
         self.assertEqual(self.live.mode, "pipeline")
         self.assertEqual(self.playback.plays[0][1], PlayKind.LIVE_PIPELINE)
         first = next(i for i, t in enumerate(self.timelines) if t["target"] > TARGETS[latency])
-        QTest.qWait(round(2.5 * self.BURST * 1000))  # more bursts land meanwhile
+        pause(round(2.5 * self.BURST * 1000))  # more bursts land meanwhile
         after = self.timelines[first:]
         self.assertGreater(len(after), 20)
         for state in after:

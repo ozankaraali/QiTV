@@ -13,8 +13,8 @@ import requests
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
-from PySide6.QtTest import QTest
 from PySide6.QtWidgets import QApplication
+from timer_fixtures import pause
 
 from services import provider_api, thread_cleanup
 from services.exporter import (
@@ -434,8 +434,8 @@ class ExporterTests(unittest.TestCase):
         for _ in range(100):
             if got and not thread_cleanup.has_pending_threads():
                 break
-            QTest.qWait(50)
-        QTest.qWait(50)
+            pause(50)
+        pause(50)
         self.assertEqual(got, [3])
         self.assertFalse(thread_cleanup.has_pending_threads())
 

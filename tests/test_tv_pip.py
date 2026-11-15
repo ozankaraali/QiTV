@@ -11,8 +11,8 @@ from unittest import mock
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 from PySide6.QtCore import QObject, QPoint, QRect, Qt, Signal
-from PySide6.QtTest import QTest
 from PySide6.QtWidgets import QMenu
+from timer_fixtures import pause
 
 from services.connection_budget import ConnectionBudget
 from services.epg_view import Programme
@@ -353,7 +353,7 @@ class PipTests(PipCase):
         self.controller.handle(Action.PIP)
         self.controller.handle(Action.PIP)  # changed one's mind
         self.ready("http://stream/1")
-        QTest.qWait(20)
+        pause(20)
         self.assertEqual(self.pip_live.calls, [])
         self.assertFalse(self.sessions.pip_open())
 
@@ -507,7 +507,7 @@ class PipTests(PipCase):
         end_and_reopen()
         self.pip_session.stateChanged.emit("ended")  # it never played: twice at most
         self.assertEqual(self.toast.messages()[-1], ("Two: The stream ended", "info"))
-        QTest.qWait(200)
+        pause(200)
         self.assertEqual(len(self.pip_session.plays), 4)  # the first, then two reopens
         # One slot, the same one, all along: nothing was stopped or given back.
         self.assertEqual(self.pip_session.stops, stops)
@@ -545,7 +545,7 @@ class PipTests(PipCase):
         self.pip_live.revives = lambda: True  # LiveSession opens it again itself
         plays = len(self.pip_session.plays)
         self.pip_session.stateChanged.emit("ended")
-        QTest.qWait(150)
+        pause(150)
         self.assertEqual(len(self.pip_session.plays), plays)
 
     def test_the_small_pictures_reopen_decodes_in_software_as_its_stream_did(self):
@@ -572,7 +572,7 @@ class PipTests(PipCase):
         self.assertIs(self.sessions.large(), self.pip_slot)
         self.assertTrue(wait_until(lambda: len(self.pip_session.plays) == plays + 1))
         self.assertEqual(self.pip_session.plays[-1][0], url)
-        QTest.qWait(150)
+        pause(150)
         self.assertEqual(len(self.pip_session.plays), plays + 1)  # once
         self.assertNotIn(("The stream ended", "info"), self.toast.messages())
 
@@ -590,7 +590,7 @@ class PipTests(PipCase):
         self.assertIs(self.sessions.small(), self.main_slot)
         self.assertTrue(wait_until(lambda: len(self.session.plays) == plays + 1))
         self.assertEqual(self.session.plays[-1][0], url)
-        QTest.qWait(150)
+        pause(150)
         self.assertEqual(len(self.session.plays), plays + 1)  # once
         self.assertEqual(sorted(self.budget.holders("Home")), ["main", "pip"])
 
@@ -600,7 +600,7 @@ class PipTests(PipCase):
         self.open_small(CHANNELS[1])
         plays = len(self.pip_session.plays)
         self.pip_session.stateChanged.emit("ended")  # LiveSession reopens its buffer itself
-        QTest.qWait(100)
+        pause(100)
         self.assertEqual(len(self.pip_session.plays), plays)
 
     def test_closing_the_small_picture_cancels_its_reopen(self):
@@ -611,7 +611,7 @@ class PipTests(PipCase):
         self.pip_session.stateChanged.emit("ended")
         self.controller.handle(Action.PIP)  # closed during the back-off
         plays = len(self.pip_session.plays)
-        QTest.qWait(100)
+        pause(100)
         self.assertEqual(len(self.pip_session.plays), plays)
 
     def test_a_closed_small_picture_says_nothing(self):
@@ -628,7 +628,7 @@ class PipTests(PipCase):
         self.start_large(1)
         self.controller.handle(Action.PIP)
         self.ready("http://stream/1")
-        QTest.qWait(20)
+        pause(20)
         self.assertIn(("Your provider allows 1 stream at a time", "error"), self.toast.messages())
         self.assertEqual(self.pip_live.calls, [])
         self.assertEqual(self.frame.calls, [])
@@ -743,7 +743,7 @@ class PipTests(PipCase):
         self.controller.open_pip(CHANNELS[1], group_key="10", channels=CHANNELS)
         self.controller.handle(Action.CH_NEXT)  # Two, whose PiP link is on its way
         self.ready("http://stream/2")  # the PiP's link: it opens nothing now
-        QTest.qWait(20)
+        pause(20)
         self.assertEqual(self.pip_live.calls, [])
         self.assertEqual(self.requested()[-1], "Two")
         self.ready("http://stream/2")  # the large picture's own
@@ -1449,7 +1449,7 @@ class PipLinkSettlingTests(PipCase):
         self.controller.open_pip(self.home_two, group_key="10", channels=[self.home_two])
         self.catalog.hub_failed("Home", "down")
         self.ready("http://stream/2")  # a late result is ignored
-        QTest.qWait(20)
+        pause(20)
         self.assertFalse(self.sessions.pip_open())
         self.assertEqual(self.pip_live.named("start"), [])
 
@@ -1460,7 +1460,7 @@ class PipLinkSettlingTests(PipCase):
         self.assertEqual(self.toast.messages()[-1], ("Harbor IPTV: Portal down", "error"))
         self.assertEqual(self.controller._channel, CHANNELS[0])  # the large picture's
         self.ready("http://stream/2")  # a late result is ignored
-        QTest.qWait(20)
+        pause(20)
         self.assertFalse(self.sessions.pip_open())
 
     def test_its_own_providers_setup_asks_the_link_again(self):
@@ -1534,7 +1534,7 @@ class PipRetryTests(PipCase):
         self.assertTrue(wait_until(lambda: len(small.live.named("start")) == 2))
         small.live.play_pipeline()
         small.playback.stateChanged.emit("playing")
-        QTest.qWait(80)  # it played HEALTHY_S on its fresh link
+        pause(80)  # it played HEALTHY_S on its fresh link
         links = len(self.catalog.links)
         self.fail_small(small)
         self.assertEqual(self.toast.messages(), [])
@@ -1563,7 +1563,7 @@ class PipRetryTests(PipCase):
         self.fail_small(small)  # it waits for its fresh link now
         links = len(self.catalog.links)
         self.open_small(CHANNELS[2])
-        QTest.qWait(200)
+        pause(200)
         self.assertNotIn(self.PORTAL_TWO, [link[1] for link in self.catalog.links[links:]])
 
     def test_the_browsed_portal_makes_the_link_again_without_signing_in(self):
@@ -1622,7 +1622,7 @@ class MixedProviderPipTests(PipCase):
         self.open_small(HARBOR_TWO)
         self.controller._guide.catchupRequested.emit(HARBOR_THREE, SHOW, "10", [HARBOR_THREE])
         self.ready(HARBOR_THREE["cmd"])
-        QTest.qWait(10)
+        pause(10)
         self.assertEqual(
             self.toast.messages()[-1], ("Your provider allows 1 stream at a time", "error")
         )
@@ -1637,7 +1637,7 @@ class MixedProviderPipTests(PipCase):
         self.catalog.current_provider = lambda: {"name": "Home", "type": "STB", "max_streams": 2}
         self.budget.request("Harbor IPTV", 1, purpose="main")  # Harbor's only stream is taken
         self.controller.open_pip(HARBOR_TWO, group_key="10", channels=[HARBOR_TWO])
-        QTest.qWait(20)
+        pause(20)
         self.assertIn(("Your provider allows 1 stream at a time", "error"), self.toast.messages())
         self.assertEqual(self.catalog.links, [])  # no link was asked for
         self.assertEqual(self.pip_live.calls, [])
@@ -1702,7 +1702,7 @@ class OneStreamPipTests(PipCase):
         self.controller.handle(Action.PIP)  # P closes it
         self.tune(2)
         self.ready("http://stream/3")  # through the time-shift pipeline
-        QTest.qWait(20)
+        pause(20)
         self.assertNotIn(
             ("Your provider allows 1 stream at a time", "error"), self.toast.messages()
         )

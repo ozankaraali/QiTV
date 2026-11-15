@@ -8,6 +8,7 @@ os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 from PySide6.QtCore import Qt
 from PySide6.QtTest import QTest
 from PySide6.QtWidgets import QApplication, QWidget
+from timer_fixtures import pause
 
 from tests.timer_fixtures import wait_until
 from ui.overlays.painting import Units
@@ -152,7 +153,7 @@ class RecSignHudTests(unittest.TestCase):  # 2.9.7: on the player, it comes and 
         self.assertTrue(wait_until(lambda: not self.shown(), 2000))
         self.hud.show()
         self.assertTrue(self.shown())
-        QTest.qWait(80)
+        pause(80)
         self.assertTrue(self.shown())  # the controls up: it stays
         self.hud.hide()
         self.assertFalse(self.shown())

@@ -8,9 +8,9 @@ from unittest import mock
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
-from PySide6.QtTest import QTest
 from PySide6.QtWidgets import QApplication
 from job_fixtures import ImmediateRunner
+from timer_fixtures import pause
 
 from services import thread_cleanup
 from services.jobs import JobRunner
@@ -320,7 +320,7 @@ class SearchWorkerTests(unittest.TestCase):
         for _ in range(300):
             if results and not thread_cleanup.has_pending_threads():
                 break
-            QTest.qWait(10)
+            pause(10)
         self.assertTrue(results, "SearchWorker delivered no result within 3 s")
         self.assertEqual(titles(results[0][2]), ["Salt Roads"])
         self.assertFalse(thread_cleanup.has_pending_threads())

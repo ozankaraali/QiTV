@@ -26,11 +26,11 @@ from unittest.mock import patch
 from urllib.request import urlopen
 
 from PySide6.QtCore import Qt
-from PySide6.QtTest import QTest
 from PySide6.QtWidgets import QApplication
 from gc_fixtures import collect_on_the_gui_thread
 from http_fixtures import LocalSource
 from process_fixtures import still_running, terminate
+from timer_fixtures import pause
 from ts_fixtures import make_stream
 
 from services.live import engine as engine_module
@@ -116,7 +116,7 @@ def wait_until(predicate, timeout=10.0):
     while not predicate():
         if time.monotonic() >= deadline:
             return False
-        QTest.qWait(10)
+        pause(10)
     return True
 
 
@@ -1143,7 +1143,7 @@ class Signals:
                 index += 1
             if time.monotonic() >= deadline:
                 raise AssertionError(f"no matching engine signal among {self.events!r}")
-            QTest.qWait(10)
+            pause(10)
 
     def of(self, kind, sid=None, start=0):
         return [
@@ -1358,7 +1358,7 @@ class LiveEngineTests(unittest.TestCase):
         engine.close_session(sid)
         closed = signals.wait_for(lambda event: event == ("closed", sid))
         self.assertTrue(self.hung_up.wait(3), "the closed session kept its upstream")
-        QTest.qWait(300)
+        pause(300)
         self.assertEqual([event for event in signals.events[closed + 1 :] if event[1] == sid], [])
         self.assertEqual(engine.spans(sid), [])
         self.assertEqual(signals.of("failed"), [])
@@ -1421,7 +1421,7 @@ class LiveEngineTests(unittest.TestCase):
         self.assertEqual(session_dirs(self.root), [], "the dead helper's buffer was left behind")
         self.assertEqual(engine.spans(sid), [])
         self.assertEqual(engine.stream_url(sid, 0), "")
-        QTest.qWait(500)
+        pause(500)
         self.assertEqual(helpers(), [], "a second restart was attempted")
         self.assertEqual(signals.of("available", start=unavailable + 1), [])
 
@@ -1487,7 +1487,7 @@ class LiveEngineTests(unittest.TestCase):
                 )
             for session in (sid, other):
                 signals.wait_for(lambda event, s=session: event == ("ready", s), start=restarted)
-            QTest.qWait(300)
+            pause(300)
         self.assertTrue(closed.is_set(), "the helper pipe never reached its closed-peer boundary")
         self.assertEqual(signals.of("failed", sid), [("failed", sid, "internal", INTERNAL)])
         self.assertEqual(signals.of("failed", other), [("failed", other, "internal", INTERNAL)])
@@ -1528,7 +1528,7 @@ class LiveEngineTests(unittest.TestCase):
             off = signals.wait_for(lambda event: event == ("available", False), start=mark)
         self.assertIn("time-shift is off for this run", logs.output[-1])
         self.assertEqual(signals.of("failed", start=mark), [("failed", sid, "internal", INTERNAL)])
-        QTest.qWait(500)
+        pause(500)
         self.assertEqual(helpers(), [], "a helper was started again")
         self.assertEqual(signals.of("available", start=off + 1), [])
         self.assertEqual(source.counts[SECRET_PATH], 1, "the session was reopened")
@@ -1551,7 +1551,7 @@ class LiveEngineTests(unittest.TestCase):
             kill(helpers()[0])
             restarted = signals.wait_for(lambda event: event == ("available", True), start=mark)
         signals.wait_for(lambda event: event == ("ready", live), start=restarted)
-        QTest.qWait(500)  # time for an unwanted reopen to crash again
+        pause(500)  # time for an unwanted reopen to crash again
         # A reopen would crash once more: the session heard of its failure once, and of the
         # helper's death not at all.
         self.assertEqual(signals.of("failed", crashed), [("failed", crashed, "crashed", INTERNAL)])
@@ -1584,7 +1584,7 @@ class LiveEngineTests(unittest.TestCase):
         self.assertFalse(engine.is_available())
         self.assertTrue(stalled.hung_up.wait(2), "the stalled upstream stayed open")
         self.assertTrue(self.hung_up.wait(2), "an upstream stayed open")
-        QTest.qWait(300)
+        pause(300)
         self.assertEqual(signals.events[mark:], [], "signals after shutdown")
         self.assertEqual(engine.stream_url(stalled_sid, 0), "")
         engine.shutdown()  # a second call changes nothing
@@ -1669,7 +1669,7 @@ class LiveEngineTests(unittest.TestCase):
             kill(helpers()[0])
             restarted = signals.wait_for(lambda event: event == ("available", True), start=mark)
         signals.wait_for(lambda event: event == ("ready", sids["live"]), start=restarted)
-        QTest.qWait(1000)  # time for an unwanted reopen to reach the source
+        pause(1000)  # time for an unwanted reopen to reach the source
         for name in ("http", "unsupported", "ended"):
             self.assertEqual(source.counts[paths[name]], requests[paths[name]], name)
             self.assertEqual(signals.of("ready", sids[name], start=mark), [], name)

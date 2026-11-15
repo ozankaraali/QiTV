@@ -7,8 +7,8 @@ os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 from PySide6.QtCore import QCoreApplication, QElapsedTimer, Qt, QThread, Signal
 from PySide6.QtGui import QColor, QImage
-from PySide6.QtTest import QTest
 from PySide6.QtWidgets import QApplication
+from timer_fixtures import pause
 
 from services import image_loader
 from services.thread_cleanup import has_pending_threads
@@ -52,11 +52,11 @@ class ImageCacheTest(unittest.TestCase):
 
     def assert_no_pending_threads(self):
         # Runs before the loader patch is undone and after cache.shutdown (LIFO order).
-        QTest.qWait(1)
+        pause(1)
         deadline = QElapsedTimer()
         deadline.start()
         while has_pending_threads() and deadline.elapsed() < 2000:
-            QTest.qWait(10)
+            pause(10)
         self.assertFalse(has_pending_threads(), "a test leaked a pending thread cleanup")
 
     def image(self, width, height):
@@ -245,7 +245,7 @@ class ImageCacheTest(unittest.TestCase):
             deadline = QElapsedTimer()
             deadline.start()
             while has_pending_threads() and deadline.elapsed() < 3000:
-                QTest.qWait(10)
+                pause(10)
         self.assertFalse(has_pending_threads())
 
     def test_missing_poster_file_leaves_no_entry(self):

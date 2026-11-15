@@ -11,7 +11,7 @@ from PySide6.QtGui import QHelpEvent, QRegion, QWheelEvent
 from PySide6.QtTest import QTest
 from PySide6.QtWidgets import QApplication, QMainWindow, QStackedWidget, QVBoxLayout, QWidget
 from shiboken6 import isValid
-from timer_fixtures import elapse, wait_until
+from timer_fixtures import elapse, pause, wait_until
 
 from ui.overlay_host import RESTORE_REPORT_MS, OverlayHost
 from ui.overlays.base import Overlay, TooltipWidget
@@ -33,7 +33,7 @@ class HostCase(unittest.TestCase):
         self.window.setCentralWidget(self.surface)
         self.window.setGeometry(100, 100, 800, 450)
         self.window.show()
-        QTest.qWait(20)
+        pause(20)
         self.host = OverlayHost(self.window, self.surface)
         self.panel = Overlay()
         self.host.add_overlay(self.panel)
@@ -46,7 +46,7 @@ class OverlayHostTests(HostCase):
         # X11: the restore's last event came while the window still said minimized, and no
         # event followed (the Linux smoke's "host covers the video surface after a restore").
         self.panel.show()
-        QTest.qWait(20)
+        pause(20)
         self.assertTrue(self.host.isVisible())
         with mock.patch.object(self.window, "isMinimized", return_value=True):
             self.host.eventFilter(self.window, QEvent(QEvent.Type.WindowStateChange))
@@ -70,21 +70,21 @@ class OverlayHostTests(HostCase):
     def test_hidden_until_an_overlay_is_visible(self):
         self.assertFalse(self.host.isVisible())
         self.panel.show()
-        QTest.qWait(20)
+        pause(20)
         self.assertTrue(self.host.isVisible())
         self.panel.hide()
-        QTest.qWait(20)
+        pause(20)
         self.assertFalse(self.host.isVisible())
 
     def test_glued_to_surface_through_move_and_resize(self):
         self.panel.show()
-        QTest.qWait(20)
+        pause(20)
         self.assertEqual(self.host.geometry(), surface_rect(self.surface))
         self.window.move(160, 140)
-        QTest.qWait(30)
+        pause(30)
         self.assertEqual(self.host.geometry(), surface_rect(self.surface))
         self.window.resize(1000, 560)
-        QTest.qWait(30)
+        pause(30)
         self.assertEqual(self.host.geometry(), surface_rect(self.surface))
 
     def test_hidden_it_follows_the_window_so_an_overlay_opens_at_the_size_it_shows(self):
@@ -93,7 +93,7 @@ class OverlayHostTests(HostCase):
         # the next one laid itself out against the host's old size as it opened.
         self.assertFalse(self.host.isVisible())
         self.window.resize(1200, 675)
-        QTest.qWait(30)
+        pause(30)
         self.assertEqual(self.host.size(), self.surface.size())
         sizes = []
 
@@ -106,13 +106,13 @@ class OverlayHostTests(HostCase):
         self.host.add_overlay(drawer)
         drawer.setGeometry(0, 0, self.host.width() // 3, self.host.height())  # as it opens
         drawer.show()
-        QTest.qWait(20)
+        pause(20)
         self.assertEqual(drawer.height(), self.surface.height())
         self.assertEqual(sizes[0], self.surface.size())
 
     def test_mask_is_union_of_visible_overlays(self):
         self.panel.show()
-        QTest.qWait(20)
+        pause(20)
         self.assertEqual(self.host.mask().boundingRect(), QRect(0, 0, 200, 100))
 
     def test_what_leaves_the_mask_is_cleared_first_and_what_joins_it_is_painted(self):
@@ -124,7 +124,7 @@ class OverlayHostTests(HostCase):
         card.setGeometry(300, 50, 300, 120)
         self.panel.show()
         card.show()
-        QTest.qWait(20)
+        pause(20)
         calls = []
         real_repaint, real_update = self.host.repaint, self.host.update
 
@@ -160,7 +160,7 @@ class OverlayHostTests(HostCase):
         # second", and old captions now and then. The last overlay to hide was never cleared,
         # and the mask was cleared: the window's whole buffers showed for a frame.
         self.panel.show()
-        QTest.qWait(20)
+        pause(20)
         calls = []
         real_repaint = self.host.repaint
 
@@ -178,7 +178,7 @@ class OverlayHostTests(HostCase):
     def test_a_resize_paints_all_it_shows_at_once(self):
         # 2.9: the owner's window left fullscreen; leftovers of older captions showed stretched.
         self.panel.show()
-        QTest.qWait(20)
+        pause(20)
         painted = []
         real_repaint = self.host.repaint
         with mock.patch.object(
@@ -189,7 +189,7 @@ class OverlayHostTests(HostCase):
             self.host.sync_geometry()  # nothing moved: nothing painted
             self.assertEqual(painted, [])
             self.surface.resize(self.surface.width() + 40, self.surface.height())
-            QTest.qWait(20)
+            pause(20)
             self.host.sync_geometry()
         self.assertTrue(painted)
 
@@ -219,12 +219,12 @@ class OverlayHostTests(HostCase):
 
     def test_hidden_with_window(self):
         self.panel.show()
-        QTest.qWait(20)
+        pause(20)
         self.window.hide()
-        QTest.qWait(30)
+        pause(30)
         self.assertFalse(self.host.isVisible())
         self.window.show()
-        QTest.qWait(30)
+        pause(30)
         self.assertTrue(self.host.isVisible())
 
     def test_hidden_while_another_page_hides_the_surface(self):
@@ -238,11 +238,11 @@ class OverlayHostTests(HostCase):
         pages.addWidget(player)
         pages.addWidget(library)
         self.window.setCentralWidget(pages)
-        QTest.qWait(20)
+        pause(20)
         self.panel.show()
         self.assertTrue(wait_until(self.host.isVisible))
         pages.setCurrentWidget(library)
-        QTest.qWait(20)
+        pause(20)
         self.assertFalse(self.host.isVisible())
         self.panel.update()  # an overlay still shown changes nothing while the page is away
         self.host.overlay_changed()
@@ -273,12 +273,12 @@ class RestoreFromDockTests(HostCase):
         animated.start()
         self.addCleanup(animated.stop)
         self.panel.show()
-        QTest.qWait(20)
+        pause(20)
 
     def minimize(self):
         self.window.showMinimized()
         self.assertTrue(wait_until(lambda: not self.host.isVisible()))
-        QTest.qWait(20)  # and the platform's report of it
+        pause(20)  # and the platform's report of it
 
     def test_overlays_wait_for_the_platform_to_report_the_restore(self):
         self.minimize()
@@ -364,7 +364,7 @@ class OverlayHostPointerTests(PointerBehaviourMixin, HostCase):
     def setUp(self):
         super().setUp()
         self.panel.show()
-        QTest.qWait(20)
+        pause(20)
 
     def target(self):
         return self.host
@@ -373,7 +373,7 @@ class OverlayHostPointerTests(PointerBehaviourMixin, HostCase):
 class LifetimeTests(HostCase):
     def test_remove_overlay_and_destroyed_overlay(self):
         self.panel.show()
-        QTest.qWait(20)
+        pause(20)
         self.host.remove_overlay(self.panel)
         self.assertEqual(self.host.visible_overlays(), [])
         other = Overlay()
@@ -381,14 +381,14 @@ class LifetimeTests(HostCase):
         other.setGeometry(0, 0, 10, 10)
         other.show()
         other.deleteLater()
-        QTest.qWait(30)
+        pause(30)
         self.assertEqual(self.host.visible_overlays(), [])
 
     def test_filters_survive_window_destruction(self):
         self.panel.show()
-        QTest.qWait(20)
+        pause(20)
         self.window.deleteLater()
-        QTest.qWait(50)
+        pause(50)
         self.host.eventFilter(self.window, QEvent(QEvent.Type.Move))  # must not raise
 
     def test_reattaches_when_native_window_changes(self):
@@ -397,14 +397,14 @@ class LifetimeTests(HostCase):
             "ui.overlay_host.attach_child_window", lambda p, c: calls.append(int(c.winId())) or True
         ):
             self.panel.show()
-            QTest.qWait(20)
+            pause(20)
             self.panel.hide()
-            QTest.qWait(20)
+            pause(20)
             self.host.winId()
             self.host.destroy()  # drops the native window; show() recreates a new one
             self.host.create()
             self.panel.show()
-            QTest.qWait(20)
+            pause(20)
         self.assertGreaterEqual(len(calls), 1)
 
     def test_attaches_again_after_every_show(self):
@@ -412,11 +412,11 @@ class LifetimeTests(HostCase):
         calls = []
         with patch("ui.overlay_host.attach_child_window", lambda p, c: calls.append(c) or True):
             self.panel.show()
-            QTest.qWait(20)
+            pause(20)
             self.panel.hide()
-            QTest.qWait(20)
+            pause(20)
             self.panel.show()
-            QTest.qWait(20)
+            pause(20)
         self.assertEqual(calls, [self.host, self.host])
 
     def test_stays_on_top_overlays_stay_above_raised_overlays(self):

@@ -15,10 +15,9 @@ from collections.abc import Callable
 import time
 from typing import Any
 
-from PySide6.QtCore import QCoreApplication, Qt, QTimer
-from PySide6.QtTest import QTest
+from PySide6.QtCore import QCoreApplication, QEvent, Qt, QTimer
 
-__all__ = ["elapse", "timeline", "wait_until"]
+__all__ = ["elapse", "pause", "timeline", "wait_until"]
 
 _TIMEOUT_MS = 10_000
 
@@ -62,11 +61,39 @@ def elapse(ms: int, then: Callable[[], Any] = lambda: None) -> Any:
     return timeline((ms, then))[0]
 
 
+def _spin() -> None:
+    """One round of the event loop, as ``QTest.qWait`` runs it (deferred deletes included)."""
+    QCoreApplication.processEvents()
+    QCoreApplication.sendPostedEvents(None, QEvent.Type.DeferredDelete)
+
+
+def pause(ms: int) -> None:
+    """Process events for ``ms`` of wall-clock time, sleeping between rounds with the GIL released.
+
+    ``QTest.qWait`` holds the GIL while it runs Qt's event loop, so a worker thread the test is
+    waiting for barely runs (a few hundred ``os.stat`` calls a second, against ~200 k with a
+    sleep), and a loaded runner turns that into a timeout. Use this where a thread may need to
+    run; keep ``QTest.qWait`` for a test that is only about Qt timers.
+    """
+    deadline = time.monotonic() + ms / 1000
+    while True:
+        _spin()
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            return
+        time.sleep(min(0.005, remaining))
+
+
 def wait_until(predicate: Callable[[], object], timeout_ms: int = _TIMEOUT_MS) -> bool:
-    """Process events until ``predicate()`` is true; False if ``timeout_ms`` passes first."""
+    """Process events until ``predicate()`` is true; False if ``timeout_ms`` passes first.
+
+    Sleeps between event rounds with the GIL released (see ``pause``); the predicate is checked
+    once more at the deadline.
+    """
     deadline = time.monotonic() + timeout_ms / 1000
     while not predicate():
         if time.monotonic() > deadline:
-            return False
-        QTest.qWait(5)
+            return bool(predicate())
+        _spin()
+        time.sleep(0.005)
     return True

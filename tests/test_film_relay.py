@@ -13,6 +13,7 @@ import subprocess
 import tempfile
 import threading
 import time
+from typing import Any
 import unittest
 from unittest import mock
 from urllib.parse import urlsplit
@@ -92,7 +93,7 @@ class RelayTestCase(unittest.TestCase):
         self.relay = self.make_relay()
 
     def make_relay(self, **kwargs):
-        options = {"user_agent": "VLC/3.0.20", "limits": SMALL}
+        options: dict[str, Any] = {"user_agent": "VLC/3.0.20", "limits": SMALL}
         options.update(kwargs)
         relay = FilmRelay(self.provider.url, **options)
         relay.start()
@@ -145,11 +146,12 @@ class PictureTests(RelayTestCase):
         reader.close()
 
     def test_a_seek_moves_the_upstream_closing_the_old_connection_first(self):
-        reader = Reader(self.relay.leader_url, 0)
+        reader = Reader(self.relay.leader_url, 0, 200 * KIB - 1)  # its last byte: see PictureTests
         self.assertEqual(reader.read(200 * KIB), FILM[: 200 * KIB])
         far = 4 * MIB + 1000
         self.assertEqual(
-            self.read(self.relay.leader_url, far, 300 * KIB), FILM[far : far + 300 * KIB]
+            self.read(self.relay.leader_url, far, 300 * KIB, far + 300 * KIB - 1),
+            FILM[far : far + 300 * KIB],
         )
         reader.close()
         firsts = [ask["first"] for ask in self.provider.film_asks()]
@@ -460,19 +462,24 @@ class ProviderTests(RelayTestCase):
         self.assertTrue(wait_until(lambda: self.provider.open_now() == 0, 4.0))
 
     def test_a_refusal_once_the_film_plays_ends_the_pictures_read(self):
-        self.assertEqual(self.read(self.relay.leader_url, 0, 100 * KIB), FILM[: 100 * KIB])
+        self.assertEqual(
+            self.read(self.relay.leader_url, 0, 100 * KIB, 100 * KIB - 1), FILM[: 100 * KIB]
+        )
         self.provider.answers = [404, 404]  # the address it went to, then the provider's
-        reader = Reader(self.relay.leader_url, 4 * MIB)  # a seek: the upstream moves
+        reader = Reader(self.relay.leader_url, 4 * MIB, 4 * MIB + 64 * KIB - 1)  # a seek: it moves
         self.assertEqual(reader.status, 206)
         self.assertEqual(reader.read(64 * KIB), b"")  # libVLC's reconnect asks again
         reader.close()
         self.assertFalse(self.relay.declined())
         self.assertEqual(
-            self.read(self.relay.leader_url, 4 * MIB, 64 * KIB), FILM[4 * MIB : 4 * MIB + 64 * KIB]
+            self.read(self.relay.leader_url, 4 * MIB, 64 * KIB, 4 * MIB + 64 * KIB - 1),
+            FILM[4 * MIB : 4 * MIB + 64 * KIB],
         )
 
     def test_a_film_shorter_than_it_said_ends_where_it_ends(self):  # review: a 416 loop
-        self.assertEqual(self.read(self.relay.leader_url, 0, 64 * KIB), FILM[: 64 * KIB])
+        self.assertEqual(
+            self.read(self.relay.leader_url, 0, 64 * KIB, 64 * KIB - 1), FILM[: 64 * KIB]
+        )
         self.provider.data = FILM[: 3 * MIB]  # its 416 says the real length
         asks = len(self.provider.film_asks())
         reader = Reader(self.relay.leader_url, 4 * MIB)
@@ -486,7 +493,9 @@ class ProviderTests(RelayTestCase):
         late.close()
 
     def test_a_416_without_the_length_is_tried_a_few_times_then_told(self):
-        self.assertEqual(self.read(self.relay.leader_url, 0, 64 * KIB), FILM[: 64 * KIB])
+        self.assertEqual(
+            self.read(self.relay.leader_url, 0, 64 * KIB, 64 * KIB - 1), FILM[: 64 * KIB]
+        )
         self.provider.data, self.provider.bare_416 = FILM[: 3 * MIB], True
         asks = len(self.provider.film_asks())
         started = time.monotonic()
@@ -498,7 +507,9 @@ class ProviderTests(RelayTestCase):
         self.assertGreaterEqual(time.monotonic() - started, SMALL.retry_s * 2)  # it waited
 
     def test_answers_without_a_byte_are_tried_a_few_times_with_waits_never_in_a_loop(self):
-        self.assertEqual(self.read(self.relay.leader_url, 0, 64 * KIB), FILM[: 64 * KIB])
+        self.assertEqual(
+            self.read(self.relay.leader_url, 0, 64 * KIB, 64 * KIB - 1), FILM[: 64 * KIB]
+        )
         self.provider.empty = True  # a 206 with Content-Length: 0
         asks = len(self.provider.film_asks())
         reader = Reader(self.relay.leader_url, 4 * MIB)
@@ -653,7 +664,10 @@ class HttpsTests(unittest.TestCase):
         reader = Reader(relay.leader_url, 0)
         self.assertEqual(reader.read(1 * MIB), FILM[: 1 * MIB])
         far = 4 * MIB
-        self.assertEqual(Reader(relay.leader_url, far).read(64 * KIB), FILM[far : far + 64 * KIB])
+        self.assertEqual(
+            Reader(relay.leader_url, far, far + 64 * KIB - 1).read(64 * KIB),
+            FILM[far : far + 64 * KIB],
+        )
         reader.close()
         relay.stop()
         self.assertTrue(relay.wait_closed(2.0))

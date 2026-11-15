@@ -7,9 +7,8 @@ import unittest
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 from PySide6.QtCore import QObject, Signal
-from PySide6.QtTest import QTest
 from PySide6.QtWidgets import QApplication
-from timer_fixtures import elapse
+from timer_fixtures import elapse, pause
 
 from services.connection_budget import ConnectionBudget
 from services.live.live_session import Borrowed
@@ -202,11 +201,11 @@ class DirectSlotTests(unittest.TestCase):
         self.tuner.open(self.play("movie"), direct=True)
         self.session.holding = True
         self.tuner.tune(LiveStart(URL, "QiTV", True), PROVIDER, 1)
-        QTest.qWait(10)
+        pause(10)
         self.assertEqual(self.live.starts, [])
         self.assertEqual(self.holders(), ["main"])  # the movie's, until VLC let go
         self.session.let_go()
-        QTest.qWait(10)
+        pause(10)
         self.assertEqual(self.live.starts, [URL])
         self.assertEqual(self.holders(), ["main"])  # now the channel's
 
@@ -283,7 +282,7 @@ class SlotRoleTests(unittest.TestCase):
 
     def start_pipeline(self):
         self.tuner.tune(LiveStart(URL, "QiTV", True), PROVIDER, 2)
-        QTest.qWait(10)
+        pause(10)
         self.assertEqual(self.live.starts, [URL])
 
     def test_a_tune_back_takes_the_channels_kept_buffer(self):
@@ -296,7 +295,7 @@ class SlotRoleTests(unittest.TestCase):
         ring = KeptRing("s1", "k1", True, Where(12.0, True))
         kept.put(ring)
         self.tuner.tune(LiveStart(URL, "QiTV", True, channel="k1"), PROVIDER, 2)
-        QTest.qWait(10)
+        pause(10)
         self.assertEqual(self.live.kwargs[-1]["kept"], ring)
 
     def test_a_channel_tuned_again_keeps_the_buffer_left_before(self):  # 2.8 review M3
@@ -325,13 +324,13 @@ class SlotRoleTests(unittest.TestCase):
         tuner.set_kept(kept)
         kept.put(KeptRing("old", "k0", False, Where(None, False)))  # left before, in memory
         tuner.tune(LiveStart(URL, "QiTV", True, channel="k1"), PROVIDER, 2)
-        QTest.qWait(10)
+        pause(10)
         tuner.tune(LiveStart(URL, "QiTV", True, channel="k1", max_height=720), PROVIDER, 2)
-        QTest.qWait(10)
+        pause(10)
         self.assertEqual(live.kwargs[-1]["kept"].sid, "s-k1")
         self.assertEqual(([r.sid for r in kept.rings()], closed), (["old"], []))
         tuner.tune(LiveStart(URL, "QiTV", True, channel="k2"), PROVIDER, 2)  # another channel
-        QTest.qWait(10)
+        pause(10)
         self.assertEqual(closed, ["old"])  # the channel left last is the one kept, as before
 
     def test_a_kept_disk_buffer_taken_back_leaves_the_disk_to_the_others(self):
@@ -346,7 +345,7 @@ class SlotRoleTests(unittest.TestCase):
         one_disk_ring(main, self.tuner)
         self.tuner.set_disk_allowed(lambda: False)  # its own tunes keep theirs in memory
         self.tuner.tune(LiveStart(URL, "QiTV", True, channel="k1"), PROVIDER, 2)
-        QTest.qWait(10)
+        pause(10)
         self.assertFalse(self.live.kwargs[-1]["disk"])
         self.assertTrue(self.tuner.on_disk())  # the kept buffer stays the kind it is
         self.assertTrue(main._disk_allowed())
@@ -453,7 +452,7 @@ class SlotRoleTests(unittest.TestCase):
         other.disk = False
         self.tuner.stop()
         self.tuner.tune(LiveStart(URL, "QiTV", True), PROVIDER, 2)
-        QTest.qWait(10)
+        pause(10)
         self.assertEqual(self.live.kwargs[-1]["disk"], True)
         self.assertTrue(self.tuner.on_disk())
 
@@ -464,7 +463,7 @@ class SlotRoleTests(unittest.TestCase):
             with self.subTest(limit=limit):
                 self.tuner.stop()
                 self.tuner.tune(LiveStart(URL, "QiTV", True), PROVIDER, limit)
-                QTest.qWait(10)
+                pause(10)
                 self.assertIs(self.live.kwargs[-1]["one_stream"], one_stream)
 
     def test_one_disk_ring_among_every_player(self):

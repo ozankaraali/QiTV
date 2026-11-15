@@ -9,8 +9,8 @@ from unittest import mock
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 from PySide6.QtCore import QObject, QTimer, Signal
-from PySide6.QtTest import QTest
 from PySide6.QtWidgets import QApplication
+from timer_fixtures import pause
 
 from services import revive
 from services.live import learned_target, worker
@@ -723,7 +723,7 @@ class LiveSessionCase(unittest.TestCase):
         while not predicate():
             if time.monotonic() > deadline:
                 self.fail("timed out")
-            QTest.qWait(10)
+            pause(10)
 
     def active_timers(self):
         return [timer for timer in self.live.findChildren(QTimer) if timer.isActive()]
@@ -5126,7 +5126,7 @@ class InterruptionTests(LiveSessionCase):
                 self.playback.errorOccurred.emit("The stream could not be opened")
                 self.assertEqual(self.failures, [])
                 self.assertEqual(self.retries[-1], 5.0)  # the revive's wait, said
-                QTest.qWait(80)
+                pause(80)
                 self.assertEqual(len(self.playback.plays), plays + 4)  # four tries, then waits
                 self.assertEqual(self.notices.count(RECONNECTING), 3)
 
@@ -5143,7 +5143,7 @@ class InterruptionTests(LiveSessionCase):
         self.assertEqual(self.failures, [])
         self.assertEqual(self.retries, [5.0])
         self.assertNotIn(RECONNECTING, self.notices)
-        QTest.qWait(80)
+        pause(80)
         self.assertEqual(len(self.playback.plays), plays + 1)
 
     def test_a_retry_that_times_out_waits_for_the_revive(self):
@@ -5157,7 +5157,7 @@ class InterruptionTests(LiveSessionCase):
         self.clock.now += 20.0  # the retry timed out
         self.playback.errorOccurred.emit("Timed out opening the stream")
         self.assertEqual((self.failures, self.retries), ([], [5.0]))
-        QTest.qWait(80)
+        pause(80)
         self.assertEqual(len(self.playback.plays), plays + 2)
         self.assertEqual(self.notices.count(RECONNECTING), 1)
 
@@ -5264,7 +5264,7 @@ class ReviveTests(LiveSessionCase):
         self.live.stop()
         self.assertEqual(self.retries[-1], -1.0)
         self.assertEqual(self.active_timers(), [])
-        QTest.qWait(120)
+        pause(120)
         self.assertEqual(len(self.playback.plays), plays)
 
     def test_a_tune_that_never_played_is_reported_as_before(self):
@@ -5279,7 +5279,7 @@ class ReviveTests(LiveSessionCase):
         plays = self.direct_that_played()
         self.playback.errorOccurred.emit(NO_STREAM)
         self.assertEqual(self.failures, [NO_STREAM])
-        QTest.qWait(30)
+        pause(30)
         self.assertEqual(len(self.playback.plays), plays)
 
     def test_without_revive_an_end_is_the_callers(self):
@@ -5290,7 +5290,7 @@ class ReviveTests(LiveSessionCase):
         self.end()
         self.playback.errorOccurred.emit("The stream could not be played")
         self.assertEqual(self.failures, ["The stream could not be played"])
-        QTest.qWait(60)
+        pause(60)
         self.assertEqual((len(self.playback.plays), self.retries), (plays, []))
 
     def helper_says(self, sid, **fields):
@@ -5457,7 +5457,7 @@ class EngineShutdownTests(LiveSessionCase):
         self.assertEqual(self.releases, [])
         with self.assertNoLogs("services.live.live_session", "WARNING"):
             self.live.engine_shut_down()
-            QTest.qWait(10)
+            pause(10)
         self.assertEqual(self.releases, [True])  # at once, not after the close cap
         self.assertEqual(self.active_timers(), [])
 
@@ -5546,7 +5546,7 @@ class StreamLimitTests(LiveSessionCase):
         sid = self.start()
         self.not_live(sid, 1)
         self.assertEqual(self.notices, [NOT_LIVE])
-        QTest.qWait(600)  # past the longest wait for a start
+        pause(600)  # past the longest wait for a start
         self.assertEqual((self.engine.closed, self.playback.plays), ([], []))
         self.not_live(sid, 2)  # asked again: the same answer
         self.assertEqual(self.notices, [NOT_LIVE, NOT_LIVE])
@@ -5772,7 +5772,7 @@ class HelperDeathTests(LiveSessionCase):
         self.engine.available.emit(True)
         self.engine.buffer(sid, segments(0, 5), live_edge=10.0)
         self.engine.sessionReady.emit(sid)
-        QTest.qWait(100)
+        pause(100)
         self.assertEqual(len(self.playback.plays), 1)
         self.assertEqual(self.notices, [])
 
@@ -6972,12 +6972,12 @@ class ServerWindowTests(LiveSessionCase):
         self.live.seek_to(-300.0)
         first = self.engine.opened[-1][0]
         self.engine.sessionFailed.emit(first, "http", STREAM_LIMIT)
-        QTest.qWait(20)
+        pause(20)
         second = self.engine.opened[-1][0]
         self.assertNotEqual(second, first)  # a closed stream may still count: once more
         self.assertNotIn(PART_FAILED, self.notices)
         self.engine.sessionFailed.emit(second, "http", STREAM_LIMIT)
-        QTest.qWait(20)
+        pause(20)
         self.assertEqual(self.engine.opened[-1][0], second)
         self.assertIn(PART_FAILED, self.notices)
         self.assertEqual(self.failures, [])
@@ -6990,7 +6990,7 @@ class ServerWindowTests(LiveSessionCase):
         self.engine.answer()  # once the part's connection let go (2.8.12)
         for _ in range(2):  # refused, and once more (the part's connection may still count)
             self.engine.sessionFailed.emit(sid, "http", STREAM_LIMIT)
-            QTest.qWait(20)
+            pause(20)
         self.assertIn(KEPT_ONLY, self.notices)  # Go live tries again
         self.assertEqual(self.failures, [])
 
@@ -7200,12 +7200,12 @@ class ServerWindowFixTests(LiveSessionCase):
         self.engine.answer()  # the part's connection let go (2.8.12: the resume waits for it)
         self.playback.ended.emit()  # the part's stream ended under VLC
         self.engine.sessionFailed.emit(sid, "http", STREAM_LIMIT)  # its connection still counts
-        QTest.qWait(20)
+        pause(20)
         self.assertEqual([resume[0] for resume in self.engine.resumes], [sid, sid])
         self.assertNotIn(KEPT_ONLY, self.notices)
         plays = len(self.playback.plays)
         self.engine.sessionFailed.emit(sid, "http", STREAM_LIMIT)
-        QTest.qWait(20)
+        pause(20)
         self.assertIn(KEPT_ONLY, self.notices)
         self.assertGreater(len(self.playback.plays), plays)  # the newest of what was kept
         self.assertTrue(self.playback.plays[-1][0].startswith(f"http://127.0.0.1:9/token/{sid}/"))
@@ -7333,7 +7333,7 @@ class ServerWindowFixTests(LiveSessionCase):
         self.assertIn("refused", "\n".join(logs.output))
         self.assertNotIn(part, self.engine.closed)  # VLC plays on what it holds
         opens, plays = len(self.engine.opened), len(self.playback.plays)
-        QTest.qWait(20)
+        pause(20)
         self.assertEqual((len(self.engine.opened), len(self.playback.plays)), (opens, plays))
         self.playback.ended.emit()  # VLC played what it fetched
         self.assertIn(part, self.engine.closed)
@@ -7585,7 +7585,7 @@ class NightAuditSessionTests(LiveSessionCase):
         self.live._part_retry_ms = 10
         new = self.zap_during_part_resume()
         self.engine.sessionFailed.emit(new, "http", STREAM_LIMIT)
-        QTest.qWait(300)
+        pause(300)
         self.engine.answer()
         self.assertEqual(self.failures, [STREAM_LIMIT])  # said, and nothing plays directly
         self.assertNotIn("direct", self.modes)
@@ -7612,7 +7612,7 @@ class NightAuditSessionTests(LiveSessionCase):
         self.engine._snapshots[sid]["not_live"] = 1
         self.engine.sessionUpdated.emit(sid, dict(self.engine._snapshots[sid]))
         self.assertEqual(self.notices, [NOT_LIVE])
-        QTest.qWait(200)  # past the recovery cap, several times
+        pause(200)  # past the recovery cap, several times
         self.engine.answer()
         self.assertEqual(len(self.playback.plays), plays)  # not the provider directly
         self.engine.sessionFailed.emit(sid, "http", STREAM_LIMIT)  # it gave up
