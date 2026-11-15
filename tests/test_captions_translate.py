@@ -71,7 +71,8 @@ class FakeTokenizer:
 
     WORDS = {10: " So", 11: " —", 12: " okay", 13: " the", 7: "\n", 14: " Привет", 15: "x" * 200}
 
-    def encode(self, text: str) -> Any:
+    def encode(self, text: str, add_special_tokens: bool = True) -> Any:
+        self.special = add_special_tokens
         self.encoded = text
         return mock.Mock(ids=[2, 20, 21])
 
@@ -109,6 +110,7 @@ class TranslatorTest(unittest.TestCase):
             t.fake_tokenizer.encoded,
             "Translate this from Turkish to English:\nTurkish: Pekala tamam\nEnglish:",
         )
+        self.assertFalse(t.fake_tokenizer.special)  # no <bos>, as the model card
         calls = t.session.calls
         self.assertEqual(len(calls), 4)  # the prefill, then a step after each text token
         self.assertEqual(calls[0]["ids"], [2, 20, 21])

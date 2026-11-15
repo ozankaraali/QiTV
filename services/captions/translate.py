@@ -6,7 +6,7 @@ The graph takes `input_ids` [1, n], `attention_mask` [1, total] (all ones) and, 
 past keys and values [1, 1, past, 256] (empty at the first call); it gives `next_token` (the
 argmax at the last position, one int64) and the presents, fed back as the next call's pasts. The
 prompt is the model card's; the tokenizer (Hugging Face `tokenizers`, which downloads with the
-model) adds `<bos>`. It is imported only when the model is first used. No Qt, no numpy.
+model) is asked for no special tokens (no `<bos>`), as the model card runs it. It is imported only when the model is first used. No Qt, no numpy.
 """
 
 from __future__ import annotations
@@ -115,7 +115,9 @@ class Translator:
         with self._lock:
             if self._session is None:
                 self._load()
-            ids = list(self._tokenizer.encode(prompt(text, source, target)).ids)
+            ids = list(
+                self._tokenizer.encode(prompt(text, source, target), add_special_tokens=False).ids
+            )
             tokens = self._generate(ids, MAX_NEW_TOKENS, deadline)
             if tokens is None:
                 return None
