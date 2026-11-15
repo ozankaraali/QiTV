@@ -2,6 +2,7 @@ import itertools
 import math
 import os
 import random
+import re
 import time
 import unittest
 from unittest import mock
@@ -2377,51 +2378,119 @@ class StayLiveTests(LiveSessionCase):
         self.assertEqual(self.timelines[-1]["mode"], "live")
         self.assertEqual(len(self.playback.plays), 1)
 
-    def test_ai_captions_still_loading_keep_the_picture_waiting_past_their_distance(self):
-        # 2026-11-07, a talk show: the wait ended at the floor while the models still loaded,
-        # the picture played on, and the first 25 s it showed got no captions
+    def test_ai_captions_still_loading_hold_the_picture_only_to_their_distance(self):
+        # 2.10.1, the owner: the wait went on past the floor while the models loaded ("then
+        # suddenly we are too behind"), and stay-live kept what it left. Only the distance is
+        # waited for: they join when ready, where the picture is.
         sid = self.start()
         feed = Feed(self, sid, burst=0.0, edge=2.5).ready()
         feed.run(30.0)
-        holds = len(self.playback.holds)
+        rates, holds = len(self.playback.rates), len(self.playback.holds)
         self.live.set_caption_ready(False)
         self.live.set_caption_floor(8.0)
-        feed.run(15.0)
-        self.assertTrue(self.live.caption_waiting())  # at its floor long since, still waiting
-        self.assertGreater(self.timelines[-1]["lag"], 12.0)
-        self.live.set_caption_ready(True)
         feed.run(1.0)
-        self.assertFalse(self.live.caption_waiting())
+        self.assertTrue(self.live.caption_waiting())
+        feed.run(7.0)
+        self.assertFalse(self.live.caption_waiting())  # at the floor, the models loading still
         self.assertEqual(self.playback.holds[holds:], [True, False])
-        feed.run(5.0)
+        self.assertAlmostEqual(self.timelines[-1]["lag"], 8.0, delta=0.5)
+        feed.run(300.0)
+        self.assertEqual(self.playback.holds[holds:], [True, False])  # nothing more behind
+        self.assertAlmostEqual(self.timelines[-1]["lag"], 8.0, delta=0.5)
+        self.assertEqual([r for r in self.playback.rates[rates:] if r != 1.0], [])
         self.assertEqual(self.timelines[-1]["mode"], "live")
 
-    def test_ai_captions_that_never_get_ready_let_the_picture_go_after_a_while(self):
-        from services.live.live_session import _CAPTION_READY_MAX_S
-
-        sid = self.start()
-        feed = Feed(self, sid, burst=0.0, edge=2.5).ready()
-        feed.run(30.0)
-        self.live.set_caption_ready(False)
-        self.live.set_caption_floor(8.0)
-        feed.run(_CAPTION_READY_MAX_S - 2.0)
-        self.assertTrue(self.live.caption_waiting())
-        feed.run(4.0)
-        self.assertFalse(self.live.caption_waiting())
-
-    def test_ai_captions_loading_hold_a_picture_already_at_their_distance(self):
-        # captions turned on at the floor already (off and on again): while the model loads,
-        # the picture waits there too, then plays on at once
+    def test_ai_captions_loading_after_a_tune_hold_it_only_to_their_distance(self):
+        # captions on, a channel tuned while their models load: its first picture waits for
+        # the floor, once, and plays on there
         self.live.set_caption_ready(False)
         self.live.set_caption_floor(8.0)
         sid = self.start()
         feed = Feed(self, sid, burst=0.0, edge=2.5).ready()
         feed.run(20.0)
-        self.assertTrue(self.live.caption_waiting())
-        self.live.set_caption_ready(True)
-        feed.run(1.0)
         self.assertFalse(self.live.caption_waiting())
         self.assertEqual(self.playback.holds, [True, False])
+        self.assertAlmostEqual(self.timelines[-1]["lag"], 8.0, delta=0.5)
+
+    def test_ai_captions_loading_never_hold_a_picture_at_their_distance(self):
+        # Go live lands at the floor: nothing to wait for, loaded or not
+        self.live.set_caption_floor(8.0)
+        sid = self.start()
+        feed = Feed(self, sid, burst=0.0, edge=2.5).ready()
+        feed.run(20.0)
+        self.live.toggle_pause()
+        feed.run(30.0)
+        self.live.toggle_pause()
+        feed.run(2.0)
+        holds = len(self.playback.holds)
+        self.live.set_caption_ready(False)
+        self.live.go_live()
+        feed.run(10.0)
+        self.assertEqual(self.playback.holds[holds:], [])
+        self.assertFalse(self.live.caption_waiting())
+        self.assertEqual(self.timelines[-1]["mode"], "live")
+        self.assertAlmostEqual(self.timelines[-1]["lag"], 8.0, delta=1.0)
+
+    def test_ai_captions_loading_never_hold_a_picture_further_behind_than_their_distance(self):
+        # 2026-11-15, the owner's log: "waiting 29.2 s behind live until 8.0 s and they are
+        # ready", 16.3 s, then about 45 s behind. Time-shifted further back than the floor, it
+        # stays where the viewer put it, the bar and Go live showing.
+        sid = self.start()
+        feed = Feed(self, sid, burst=0.0, edge=2.5).ready()
+        feed.run(20.0)
+        self.live.toggle_pause()
+        feed.run(26.7)
+        self.live.toggle_pause()
+        feed.run(2.0)
+        lag = self.timelines[-1]["lag"]
+        self.assertAlmostEqual(lag, 29.2, delta=0.5)
+        rates, holds = len(self.playback.rates), len(self.playback.holds)
+        self.live.set_caption_ready(False)
+        self.live.set_caption_floor(8.0)
+        feed.run(1.0)
+        self.assertFalse(self.live.caption_waiting())
+        feed.run(20.0)
+        self.assertEqual(self.playback.holds[holds:], [])
+        self.assertEqual(self.timelines[-1]["mode"], "shifted")
+        self.assertAlmostEqual(self.timelines[-1]["lag"], lag, delta=0.5)
+        self.assertEqual([r for r in self.playback.rates[rates:] if r != 1.0], [])
+        self.live.go_live()  # for the pause's time: live at the floor
+        feed.run(10.0)
+        self.assertEqual(self.timelines[-1]["mode"], "live")
+        self.assertAlmostEqual(self.timelines[-1]["lag"], 8.0, delta=1.0)
+        self.assertEqual(self.playback.holds[holds:], [])
+
+    def test_ai_captions_loading_release_the_wait_at_their_distance_not_later(self):
+        # 2026-11-15, the owner's log: "waiting 7.3 s behind live until 13.0 s and they are
+        # ready", 11.7 s, then about 19 s behind. It waits the 5.7 s to the floor, and says so.
+        sid = self.start()
+        feed = Feed(self, sid, burst=0.0, edge=2.5).ready()
+        feed.run(20.0)
+        self.live.toggle_pause()
+        feed.run(4.8)
+        self.live.toggle_pause()
+        feed.run(0.5)
+        holds = len(self.playback.holds)
+        self.live.set_caption_ready(False)
+        with self.assertLogs("services.live.live_session", "INFO") as logs:
+            self.live.set_caption_floor(13.0)  # translated: 5 s more
+            feed.run(10.0)
+        self.assertFalse(self.live.caption_waiting())
+        self.assertEqual(self.playback.holds[holds:], [True, False])
+        self.assertAlmostEqual(self.timelines[-1]["lag"], 13.0, delta=0.5)
+        said = [r.getMessage() for r in logs.records if r.getMessage().startswith("AI captions")]
+        self.assertEqual(len(said), 2, said)
+        waiting = re.fullmatch(
+            r"AI captions: waiting (\d+\.\d) s behind live until 13\.0 s\.", said[0]
+        )
+        self.assertIsNotNone(waiting, said[0])
+        self.assertAlmostEqual(float(waiting.group(1)), 7.3, delta=0.5)
+        waited = re.fullmatch(r"AI captions: waited (\d+\.\d) s; playing on\.", said[1])
+        self.assertIsNotNone(waited, said[1])
+        self.assertAlmostEqual(float(waited.group(1)), 13.0 - float(waiting.group(1)), delta=0.5)
+        feed.run(120.0)
+        self.assertEqual(self.timelines[-1]["mode"], "live")
+        self.assertAlmostEqual(self.timelines[-1]["lag"], 13.0, delta=0.5)
 
     def test_ai_captions_off_leave_the_picture_where_it_is_time_shifted(self):
         # 2.9: turned off, nothing catches up by itself: time-shifted as after a pause, the

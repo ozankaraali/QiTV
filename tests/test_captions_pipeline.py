@@ -1732,9 +1732,9 @@ class ControllerTimingTests(unittest.TestCase):
         self.assertEqual(self.at(10.5), "Merhaba")
         self.assertEqual(changed, [True, True])
 
-    def test_the_picture_waits_while_the_model_loads_and_plays_once_it_is_ready(self):
-        # 2026-11-07, a talk show: the picture played on while the models still loaded, and the
-        # captions began 25 s of it later
+    def test_the_session_learns_they_write_once_a_run_wrote_past_the_picture(self):
+        # 2026-11-07; since 2.10.1 the picture never waits for it, only for their distance
+        # (tests/test_live_session.py: the AI captions loading)
         live = self.window.live_session
         told = []
         live.set_caption_ready = told.append
@@ -1744,17 +1744,17 @@ class ControllerTimingTests(unittest.TestCase):
         self.assertEqual(told, [False])
         self.assertEqual(self.captions.status_text(), "Preparing…")
         self.captions._on_ready()
-        self.assertEqual(told[-1], False)  # loaded: it waits on until the run writes past it
+        self.assertEqual(told[-1], False)  # loaded: not until the run writes past the picture
         run = self.captions._run
         live.position_s = 100.0
         self.captions._on_progress(run, 108.0, 0.2, 100.5)  # written 0.5 s past the picture
         self.assertEqual(told[-1], False)
         self.captions._on_progress(run, 109.0, 0.2, 102.0)
         self.assertEqual(told[-1], True)
-        self.captions._drop_floor()  # off: nothing left to wait for
+        self.captions._drop_floor()  # off: nothing left to tell
         self.assertEqual(told[-1], True)
 
-    def test_a_first_run_that_writes_nothing_does_not_hold_the_picture_for_long(self):
+    def test_a_first_run_that_writes_nothing_counts_as_writing_after_a_while(self):
         from ui.captions_controller import START_WAIT_S
 
         live = self.window.live_session

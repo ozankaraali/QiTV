@@ -59,9 +59,9 @@ FILM_AHEAD_S = 6.0  # a film's sound is read from this far past the picture (aft
 # ahead of it is in time (2.9: a 1.7B film's captions 3-6 s ahead, all in time, said so at
 # every dip under the 6 s it starts with).
 LATE_LEAD_S = 1.0
-# 2026-11-07: once the model has loaded, the picture's wait for the captions goes on until the
-# first run has written this far past it (its first words are written, not passed), this long
-# after the model was ready at most
+# 2026-11-07: after the model loaded, the captions count as writing when the first run has
+# written this far past the picture (its first words are written, not passed), or this long
+# after the model was ready (LiveSession.set_caption_ready; 2.10.1: the picture never waits for it)
 START_LEAD_S = 1.5
 START_WAIT_S = 6.0
 HOLD_S = 0.6  # a caption stays this long after its words, unless the next one starts
@@ -1032,7 +1032,7 @@ class CaptionsController(QObject):
     # ---- the process ---------------------------------------------------------------------
     def _on_ready(self) -> None:
         self._loading, self._ready = False, True
-        # the picture waits on until the first run has written past it (`_on_progress`)
+        # they write once the first run has written past the picture (`_started`)
         self._starting = time.monotonic()
         if self._enabled:
             self._start_run()
@@ -1244,7 +1244,7 @@ class CaptionsController(QObject):
     def _tick(self) -> None:
         if not self._enabled:
             return
-        self._started()  # (no progress from a run that did not start: the wait ends anyway)
+        self._started()  # (no progress from a run that did not start: START_WAIT_S anyway)
         if self._steps_down():
             self._step_down()
         if self._is_live() and self._live() is not self._floored:
@@ -1604,16 +1604,16 @@ class CaptionsController(QObject):
 
     def _tell_ready(self, ready: Optional[bool] = None) -> None:
         """The session holding the captions' distance learns whether they can write yet
-        (2026-11-07): while the model loads, and its first run has not written past the
-        picture, the picture waits on ("Starting captions…") rather than play away what they
-        could still write (LiveSession.set_caption_ready)."""
+        (2026-11-07): not while the model loads, nor before its first run has written past the
+        picture (LiveSession.set_caption_ready). 2.10.1, the owner: the picture never waits for
+        it, only for their distance; they join where it is."""
         tell = getattr(self._floored, "set_caption_ready", None)
         if callable(tell):
             tell(self._ready and self._starting is None if ready is None else ready)
 
     def _started(self) -> None:
         """The first run after the model loaded has written START_LEAD_S past the picture (or
-        START_WAIT_S went by): the picture may play on."""
+        START_WAIT_S went by): the session learns they write."""
         if self._starting is None:
             return
         lead = self._lead()
