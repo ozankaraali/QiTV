@@ -281,6 +281,9 @@ class GrowingWriter:
         # where the picture was, when it last moved: waiting until it is seen to move (a run
         # starts with it waiting for the captions' distance, or there already)
         self._seen = (float(viewer[0]), clock() - HELD_AFTER_S)
+        # 2.10: seconds before the picture gets to a line that it must be out by (the run sets
+        # it: TRANSLATE_LEAD_S while translating, its translator's time; else 0)
+        self.reserve = 0.0
         self._last = (float("-inf"), float("-inf"))  # the last line's start and end
 
     # ---- in ------------------------------------------------------------------------------
@@ -300,11 +303,12 @@ class GrowingWriter:
 
     # ---- the picture ---------------------------------------------------------------------
     def time_left(self, t: float) -> float:
-        """Seconds until the picture gets to timeline second `t`."""
+        """Seconds until the picture gets to timeline second `t`, `reserve` sooner: what a line
+        there has left to be out by."""
         now, position = self.clock(), float(self.viewer[0])
         if position != self._seen[0]:
             self._seen = (position, now)
-        return time_left(t, position, now - self._seen[1], self.newest)
+        return time_left(t - self.reserve, position, now - self._seen[1], self.newest)
 
     def frontier(self) -> float:
         """The timeline second up to which lines are out (what is not, is still to come)."""

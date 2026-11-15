@@ -49,7 +49,7 @@ from services.captions.mt_languages import source_for
 from services.captions.parts import parts_of
 from services.captions.pieces import END_PAUSE_S, MAX_PIECE_S, Cutter, Piece
 from services.captions.stream_clock import StreamClock, TsTimes
-from services.captions.streaming import FIRST_WORD_S, HELD_AFTER_S, time_left
+from services.captions.streaming import FIRST_WORD_S, HELD_AFTER_S, TRANSLATE_LEAD_S, time_left
 
 logger = logging.getLogger(__name__)
 
@@ -617,9 +617,16 @@ class _Run:
             self.pieces.put(piece)
 
     def _longest(self) -> float:
-        """How long a piece may be and still be written before the picture gets to it."""
-        lead = float(self.newest) - float(self.viewer[0])
+        """How long a piece may be and still be written before the picture gets to it, the
+        translator's time before that while translating (`_reserve`)."""
+        lead = float(self.newest) - float(self.viewer[0]) - self._reserve()
         return (lead - END_PAUSE_S - _MARGIN_S) / (1.0 + float(self.rtf))
+
+    def _reserve(self) -> float:
+        """Seconds a line must be out before the picture gets to it, for its translation (2.10:
+        TRANSLATE_LEAD_S while translating, else 0)."""
+        translation = self.translation
+        return 0.0 if translation is None else translation.reserve()
 
     # ---- recognizing (its thread) ----------------------------------------------------
     def _recognize(self) -> None:
@@ -713,6 +720,7 @@ class _Run:
             if self.stopped.is_set():
                 return
             sound = [block for block in batch if block is not None]
+            writer.reserve = self._reserve()  # (translation turned on or off mid-run)
             started = time.perf_counter()
             seconds = 0.0
             try:
@@ -917,6 +925,14 @@ class _Translation:
             self._lines.append(line)
             self._lock.notify()
         return True
+
+    def reserve(self) -> float:
+        """Seconds the speech side leaves the translator before a line shows: TRANSLATE_LEAD_S
+        while lines are to be translated (a target, and a model's folder that did not fail,
+        loaded or loading), else 0."""
+        with self._lock:
+            on = self._on() and self._folder not in self._failed
+        return TRANSLATE_LEAD_S if on else 0.0
 
     def _on(self) -> bool:
         return bool(self._target) and self._folder is not None

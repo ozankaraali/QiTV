@@ -479,7 +479,7 @@ class TranslationTests(unittest.TestCase):
     def setUp(self):
         from services.captions import translate, worker
 
-        self.run_class = worker._Run
+        self.run_class, self.film_class = worker._Run, worker._FilmRun
         self.sent: list = []
         self.link: Any = SimpleNamespace(send=self.sent.append)
         self.viewer = [100.0, 1.0]
@@ -841,6 +841,87 @@ class TranslationTests(unittest.TestCase):
         self.assertFalse(translation._ready())
         [warning] = [r.getMessage() for r in logs.records]
         self.assertTrue(warning.endswith("did not load: RuntimeError"), warning)
+
+    def budget(self, run):
+        """How long a piece of `run` may grow now (its cutter's length), sound read to 101.1 s."""
+        import queue
+
+        run.cutter, run.rtf = Cutter(lambda window: False), 0.5
+        run.pieces, run._working = queue.Queue(), None
+        run._take(101.0, array("f", bytes(4 * 1600)))
+        return run.cutter.max_s
+
+    def test_while_translating_a_piece_may_grow_the_translators_time_less(self):
+        from services.captions.streaming import TRANSLATE_LEAD_S
+
+        self.viewer[0] = 90.0  # the sound read 11.1 s ahead of the picture
+        translation = self.translation("English")
+        for kind in (self.run_class, self.film_class):
+            run = self.a_run(None)  # translation off: as before 2.10
+            run.__class__ = kind
+            plain = self.budget(run)
+            self.assertAlmostEqual(plain, (11.1 - 0.6 - 0.5) / 1.5)  # END_PAUSE_S, _MARGIN_S
+            written_to = run.written_to()
+            run.translation = translation
+            translation.follow(run)
+            self.assertAlmostEqual(self.budget(run), plain - TRANSLATE_LEAD_S / 1.5, msg=kind)
+            self.assertEqual(run.written_to(), written_to)  # what "Catching up" reads: as it was
+            self.viewer[0] -= TRANSLATE_LEAD_S  # the picture held that much further back (5)
+            self.assertAlmostEqual(self.budget(run), plain)  # pieces as long as without it
+            self.viewer[0] += TRANSLATE_LEAD_S
+            translation.set(None)  # turned off mid-run
+            self.assertEqual(self.budget(run), plain)
+            translation.set("English")  # on again (its model kept)
+            self.assertAlmostEqual(self.budget(run), plain - TRANSLATE_LEAD_S / 1.5)
+
+    def test_the_translators_time_is_kept_while_its_model_loads_and_not_once_it_failed(self):
+        from services.captions.streaming import TRANSLATE_LEAD_S
+
+        go = self.held()
+        self.warm = lambda: go.wait(5) and False  # it loads, then fails
+        translation = self.translation("English", loaded=False)
+        self.assertTrue(self.until(lambda: self.made))
+        self.assertEqual(translation.reserve(), TRANSLATE_LEAD_S)  # loading
+        with self.assertLogs("services.captions.worker", logging.WARNING):
+            go.set()
+            self.assertTrue(self.until(lambda: translation.reserve() == 0.0))  # failed
+        translation.set("German")  # the same folder: still none
+        self.assertEqual(translation.reserve(), 0.0)
+        self.assertEqual(self.translation(None, loaded=False).reserve(), 0.0)  # no target
+        self.assertEqual(self.translation("English", None, loaded=False).reserve(), 0.0)
+
+    def test_the_turkish_writer_keeps_the_translators_time_as_it_is_turned_on_and_off(self):
+        import queue
+
+        from services.captions.streaming import TRANSLATE_LEAD_S
+
+        translation = self.translation("English")
+        run = self.a_run(translation, "Turkish")
+        seen: list = []
+
+        class Writer:  # the growing writer, as the run's stream uses it
+            reserve = 0.0
+
+            def push(self, at, floats):
+                pass
+
+            def work(self):
+                seen.append(self.reserve)
+                return []
+
+        run.writer, run.blocks, run.rtf = Writer(), queue.Queue(), 0.5
+        run.model = SimpleNamespace(writes=lambda language: "moonshine")
+        thread = threading.Thread(target=run._stream, daemon=True)
+        thread.start()
+        run.blocks.put((100.0, array("f", bytes(4 * 1600))))
+        self.assertTrue(self.until(lambda: seen))
+        translation.set(None)  # off mid-run
+        self.assertTrue(self.until(lambda: seen[-1] == 0.0))
+        translation.set("English")
+        self.assertTrue(self.until(lambda: seen[-1] == TRANSLATE_LEAD_S))
+        run.blocks.put(None)
+        thread.join(5)
+        self.assertEqual(seen[0], TRANSLATE_LEAD_S)
 
     def serve(self, *script):
         """The process's command loop over `script`, with a fake model; its runs are bare ones

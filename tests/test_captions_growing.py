@@ -13,6 +13,7 @@ from services.captions.growing import (
     words_of,
 )
 from services.captions.pieces import RATE, WINDOW
+from services.captions.streaming import TRANSLATE_LEAD_S
 
 STEP = 0.1  # the test's blocks of sound
 
@@ -258,6 +259,28 @@ class GrowingWriterTest(unittest.TestCase):
             self.assertEqual(run.words(), LEXICON[:40], lead)
             longest = max(last - first for first, last in script.readings)
             self.assertLessEqual(longest, growing.LONG_S + 0.5, lead)
+
+    def test_while_translating_a_line_is_out_the_translators_time_sooner(self) -> None:
+        # 2.10: a line's translation takes its time before the picture gets to it; the picture
+        # is held that much further back (ui.captions_controller), which then buys it back
+        words = LEXICON[:40]
+
+        def played(lead: float, reserve: float) -> Run:
+            # (said once the picture plays at either lead: the test's picture waits at 0 till then)
+            script = Script(sentence(" ".join(words), 12.0, gap=0.0), cost=0.02)
+            run = Run(script, lead=lead)
+            run.writer.reserve = reserve
+            return run.play(36.0).end()
+
+        def before(run: Run, seconds: float) -> bool:
+            return all(out <= start + seconds for _, start, _, out in run.lines)
+
+        plain, translating = played(8.0, 0.0), played(8.0, TRANSLATE_LEAD_S)
+        self.assertEqual(translating.words(), words)
+        self.assertTrue(before(translating, 8.0 - TRANSLATE_LEAD_S))  # the translator's time
+        self.assertFalse(before(plain, 8.0 - TRANSLATE_LEAD_S))  # at the last moment
+        held = played(8.0 + TRANSLATE_LEAD_S, TRANSLATE_LEAD_S)
+        self.assertEqual(held.lines, plain.lines)  # the same lines, at the same moments
 
     def test_readings_that_agree_on_little_still_keep_up_with_the_picture(self) -> None:
         # 2026-11-07, a shouted drama scene: readings agreed on a word at a time, a line came
