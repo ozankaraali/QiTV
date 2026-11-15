@@ -36,10 +36,16 @@ _NEXT = "next_token"
 _MODEL = "model.onnx"
 _TOKENIZER = "tokenizer.json"
 _HEADS, _HEAD_SIZE = 1, 256
-_DASH = re.compile(r"\s*—\s*")
+# a dash between words reads as a comma; one at the start or the end goes
+_DASH = re.compile(r"(?<=\w)\s*—\s*(?=\w)")
+_EDGE_DASHES = re.compile(r"^[\s—]+|[\s—]+$")
 _REPEAT = re.compile(r"\b(\w+)(?:\s+\1\b){3,}", re.IGNORECASE)
-# MiLMMT's English names to the names text_language.written_in knows (Qwen's)
-_SCRIPT_NAME = {"Chinese (Simplified)": "Chinese", "Chinese (Traditional)": "Chinese"}
+
+
+def _cause(error: BaseException) -> str:
+    """An error as the log names it: "OSError: no tokenizer.json"."""
+    text = str(error)
+    return f"{type(error).__name__}: {text}" if text else type(error).__name__
 
 
 def prompt(text: str, source: str, target: str) -> str:
@@ -57,17 +63,16 @@ _DENSE = re.compile(
 
 def clean(source: str, output: str, target: str) -> Optional[str]:
     """What the model wrote, tidied; None when it is not a translation to show: empty, far
-    longer than the source, a word said over and over, or not in the target's script."""
-    text = _DASH.sub(", ", output.split("\n", 1)[0].strip()).strip()
+    longer than the source, a word said over and over, or not in the target's script (each of
+    MiLMMT's targets has its own in text_language)."""
+    text = _DASH.sub(", ", _EDGE_DASHES.sub("", output.split("\n", 1)[0]))
     dense = len(_DENSE.findall(source))
     if not text or len(text) > 3 * (len(source) + 2 * dense) + 20:
         return None
     if _REPEAT.search(text):
         return None
-    if target in MT_LANGUAGES:
-        language = _SCRIPT_NAME.get(target, target)
-        if not text_language.written_in(text, language):
-            return None
+    if target in MT_LANGUAGES and not text_language.written_in(text, target):
+        return None
     return text
 
 
@@ -88,6 +93,7 @@ class Translator:
         self._selection: Any = None
         self._empty: Any = None
         self._broken = False
+        self.error = ""  # why the model is of no use ("OSError: ..."), once it is not
 
     def _load(self) -> None:
         site = self._folder / "site"  # the tokenizers wheel, unpacked with the model
@@ -133,9 +139,13 @@ class Translator:
             return False
         try:
             self._load()
-        except Exception:
+        except Exception as error:
             self._broken = True
-            logger.exception("caption translation: the model could not be loaded; it stays off")
+            self.error = _cause(error)
+            # (the owner's log gets the message alone: the cause goes in it)
+            logger.exception(
+                "caption translation: the model could not be loaded (%s); it stays off", self.error
+            )
             return False
         return True
 
@@ -146,9 +156,10 @@ class Translator:
             if not self._ready():
                 return False
             try:
-                self._generate([2], 1, None)
-            except Exception:
-                logger.exception("caption translation: the warm-up call failed")
+                self._generate([2], 1, None)  # (one token: its result is of no use)
+            except Exception as error:
+                self.error = _cause(error)
+                logger.exception("caption translation: the warm-up call failed (%s)", self.error)
                 return False
             return True
 
@@ -156,8 +167,8 @@ class Translator:
         self, text: str, source: str, target: str, deadline: Optional[float] = None
     ) -> Optional[str]:
         """`text` from `source` to `target` (MiLMMT's names); None when the original should
-        show: a bad output, an error (logged), or `deadline` (a time.monotonic() value) passed
-        between tokens."""
+        show: a bad output, one cut off at MAX_NEW_TOKENS, an error (logged), or `deadline` (a
+        time.monotonic() value) passed between tokens."""
         with self._lock:
             if not self._ready():
                 return None
@@ -187,7 +198,9 @@ class Translator:
     def _generate(
         self, prompt_ids: list[int], limit: int, deadline: Optional[float]
     ) -> Optional[list[int]]:
-        """Greedy tokens after the prompt: until EOS, a newline, `limit` or the deadline."""
+        """Greedy tokens after the prompt, until EOS or a newline; None when `limit` tokens or
+        the deadline came first (the final review: a translation cut off at MAX_NEW_TOKENS
+        showed; the original shows instead)."""
         session = self._session
         total = len(prompt_ids)
         step = array("q", prompt_ids)
@@ -213,7 +226,7 @@ class Translator:
                     break
                 tokens.append(token)
                 if len(tokens) >= limit:
-                    break
+                    return None  # cut off: not the whole translation
                 if deadline is not None and time.monotonic() > deadline:
                     return None
                 total += 1

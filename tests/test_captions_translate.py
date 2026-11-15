@@ -17,6 +17,81 @@ LAYERS = 2
 PASTS = [f"past_key_values.{i}.{kv}" for i in range(LAYERS) for kv in ("key", "value")]
 PRESENTS = [n.replace("past_key_values", "present") for n in PASTS]
 
+# "I am going home today" (or near it) in each of MiLMMT's 46 languages, in its own script
+SAMPLES = {
+    "Arabic": "أنا ذاهب إلى البيت اليوم",
+    "Azerbaijani": "Bu gün evə gedirəm",
+    "Bulgarian": "Днес се прибирам вкъщи",
+    "Bengali": "আমি আজ বাড়ি যাচ্ছি",
+    "Catalan": "Avui me'n vaig a casa",
+    "Czech": "Dnes jdu domů",
+    "Danish": "Jeg går hjem i dag",
+    "German": "Ich gehe heute nach Hause",
+    "Greek": "Σήμερα πηγαίνω σπίτι",
+    "English": "I am going home today",
+    "Spanish": "Hoy me voy a casa",
+    "Persian": "امروز به خانه می‌روم",
+    "Finnish": "Menen tänään kotiin",
+    "French": "Je rentre à la maison aujourd'hui",
+    "Hebrew": "אני הולך הביתה היום",
+    "Hindi": "मैं आज घर जा रहा हूँ",
+    "Croatian": "Danas idem kući",
+    "Hungarian": "Ma hazamegyek",
+    "Indonesian": "Hari ini saya pulang ke rumah",
+    "Italian": "Oggi vado a casa",
+    "Japanese": "今日は家に帰ります",
+    "Kazakh": "Мен бүгін үйге барамын",
+    "Khmer": "ថ្ងៃនេះខ្ញុំទៅផ្ទះ",
+    "Korean": "오늘 집에 갑니다",
+    "Lao": "ມື້ນີ້ຂ້ອຍກັບບ້ານ",
+    "Malay": "Hari ini saya balik ke rumah",
+    "Burmese": "ဒီနေ့ ကျွန်တော် အိမ်ပြန်မယ်",
+    "Norwegian": "Jeg går hjem i dag",
+    "Dutch": "Ik ga vandaag naar huis",
+    "Polish": "Dzisiaj idę do domu",
+    "Portuguese": "Hoje vou para casa",
+    "Romanian": "Astăzi merg acasă",
+    "Russian": "Сегодня я иду домой",
+    "Slovak": "Dnes idem domov",
+    "Slovenian": "Danes grem domov",
+    "Swedish": "Jag går hem idag",
+    "Tamil": "நான் இன்று வீட்டுக்குப் போகிறேன்",
+    "Thai": "วันนี้ฉันจะกลับบ้าน",
+    "Tagalog": "Uuwi ako ngayon",
+    "Turkish": "Bugün eve gidiyorum",
+    "Urdu": "میں آج گھر جا رہا ہوں",
+    "Uzbek": "Bugun uyga boraman",
+    "Vietnamese": "Hôm nay tôi về nhà",
+    "Cantonese": "我今日返屋企",
+    "Chinese (Simplified)": "我今天回家",
+    "Chinese (Traditional)": "我們今天回家",
+}
+# the targets a Latin line is not written in
+NOT_LATIN = frozenset(
+    {
+        "Arabic",
+        "Bulgarian",
+        "Bengali",
+        "Greek",
+        "Persian",
+        "Hebrew",
+        "Hindi",
+        "Japanese",
+        "Kazakh",
+        "Khmer",
+        "Korean",
+        "Lao",
+        "Burmese",
+        "Russian",
+        "Tamil",
+        "Thai",
+        "Urdu",
+        "Cantonese",
+        "Chinese (Simplified)",
+        "Chinese (Traditional)",
+    }
+)
+
 
 class FakeValue:
     def __init__(self, data: Any = None) -> None:
@@ -127,9 +202,15 @@ class TranslatorTest(unittest.TestCase):
         self.assertEqual(Fake([10, 106]).translate("Pekala", "Turkish", "English"), "So")
 
     def test_the_cap(self) -> None:
-        t = Fake([10] * (MAX_NEW_TOKENS + 5))
-        t.translate("Pekala tamam", "Turkish", "English")
+        long = "Pekala tamam " * 60  # (room for a long translation)
+        t = Fake([10, 12, 13] * 34)  # 102 tokens, no end
+        # cut off at the cap, not ended: not the whole translation, the original shows
+        self.assertIsNone(t.translate(long, "Turkish", "English"))
         self.assertEqual(len(t.session.calls), MAX_NEW_TOKENS)  # prefill + cap - 1 steps
+        self.assertTrue(all(v.released for v in t.session.made))
+        short = Fake([10, 12, 13] * 31 + [10, 12, 1])  # ended a token under the cap: shown
+        self.assertEqual(len(short.session.script), MAX_NEW_TOKENS)
+        self.assertIsNotNone(short.translate(long, "Turkish", "English"))
         self.assertEqual(EOS_IDS, frozenset({1, 106}))
 
     def test_a_deadline_passed_between_tokens_gives_none(self) -> None:
@@ -216,6 +297,9 @@ class TranslatorTest(unittest.TestCase):
         self.assertEqual(closed, ["session", "api"])
         self.assertEqual(made, ["session", "tokenizer"])  # loaded once, never retried
         self.assertEqual(len(logged.records), 1)
+        # the owner's log gets a record's message alone (worker._LogToOwner): the cause in it
+        self.assertIn("OSError: no tokenizer.json", logged.records[0].getMessage())
+        self.assertEqual(t.error, "OSError: no tokenizer.json")  # for the worker's warning
 
     def test_the_site_folder_beside_the_model_is_put_first_on_sys_path(self) -> None:
         with tempfile.TemporaryDirectory(prefix="qitv-mt-") as name:
@@ -249,6 +333,43 @@ class TranslatorTest(unittest.TestCase):
                     with self.assertRaises(OSError):
                         Translator(Path(bare))._load()
                     self.assertEqual(sys.path, before)
+
+    def test_a_line_in_each_targets_own_script_passes_and_a_latin_one_fails_where_it_should(
+        self,
+    ) -> None:
+        # the final review: Urdu and Kazakh lines were taken for Latin ones and never shown, and
+        # Hebrew, Bengali, Tamil, Khmer, Lao and Burmese letters counted as Latin
+        source = "Bugün eve gidiyorum."
+        for target in MT_LANGUAGES:
+            with self.subTest(target=target):
+                line = SAMPLES[target]
+                self.assertEqual(clean(source, line, target), line)
+                latin = clean(source, "I am going home today.", target)
+                if target in NOT_LATIN:
+                    self.assertIsNone(latin)
+                else:
+                    self.assertEqual(latin, "I am going home today.")
+        self.assertEqual(set(SAMPLES), set(MT_LANGUAGES))
+        self.assertIsNone(clean("Merhaba", "Hola", "Hebrew"))
+        self.assertIsNone(clean(source, SAMPLES["Russian"], "Hebrew"))  # another script
+        self.assertIsNone(clean(source, SAMPLES["Hebrew"], "Turkish"))  # nor Latin's
+
+    def test_the_speech_side_still_tells_only_its_own_languages(self) -> None:
+        from services.captions.text_language import guess, written_in
+
+        for target in ("Hebrew", "Bengali", "Tamil", "Khmer", "Lao", "Burmese"):
+            self.assertIsNone(guess(SAMPLES[target]), target)  # none of Qwen's
+        self.assertTrue(written_in(SAMPLES["Turkish"], "Turkish"))
+
+    def test_dashes_become_commas_only_between_words(self) -> None:
+        for out, shown in (
+            ("— Hello", "Hello"),
+            ("Hello —", "Hello"),
+            ("— Hello — world —", "Hello, world"),
+            ("Hello—world", "Hello, world"),
+            ("Hello — world", "Hello, world"),
+        ):
+            self.assertEqual(clean("Merhaba dünya", out, "English"), shown, out)
 
     def test_names(self) -> None:
         self.assertEqual(len(MT_LANGUAGES), 46)
