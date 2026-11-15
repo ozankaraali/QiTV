@@ -6,8 +6,10 @@ player controls while they show (`follow`: the transport's controls_top() and ba
 the Sound panel does). Its text is the palette's text colour on a translucent panel box,
 word-wrapped and centred, two lines at most, of about one length (2.9, the owner: a full top
 line over a short one stretched the box from edge to edge): a longer caption's font shrinks a
-little. Longer still, it is shown in parts (`pages`, which the controller times across its
-words; 2.9.1, the owner: a long one ended in "…"); only a part that still can't fit is cut.
+little. Longer still, it is shown in parts (`pages`, which the controller times by when each is
+said; 2.9.1, the owner: a long one ended in "…"): whole sentences while they fit, else a
+sentence's clauses, else about one length between words (`paged`; 2026-11-08, the owner: "after
+the dot we can split and show the other part later"); only a part that still can't fit is cut.
 
 Its size follows the picture: FONT_U units of a 16:9 picture as wide as the window, or as tall
 in a window wider than 16:9 (never under MIN_FONT_PX: the mini player's stays readable), so it
@@ -16,6 +18,7 @@ reads alike in a small window and at fullscreen. Clicks go through it to the pic
 
 from __future__ import annotations
 
+from collections.abc import Callable
 import sys
 from typing import Optional
 
@@ -94,6 +97,69 @@ def balanced(text: str, font: QFont, width: float) -> float:
 _ENDS = ".!?…;:,"  # a part ends best after one of these (a sentence's, then a clause's end)
 
 
+_SENTENCE = ".!?…"
+_CLAUSE = ",;:"
+_CLOSERS = "'\"”’»)"
+
+
+def _after(text: str, marks: str) -> list[str]:
+    """`text` split after each word that ends with one of `marks` (before closing quotes)."""
+    out: list[list[str]] = [[]]
+    for word in text.split():
+        out[-1].append(word)
+        if word.rstrip(_CLOSERS)[-1:] in marks:
+            out.append([])
+    return [" ".join(words) for words in out if words]
+
+
+def paged(text: str, fits: Callable[[str], bool]) -> list[str]:
+    """`text` in parts that each `fits` (two lines), whole sentences together while they fit
+    (2026-11-08, the owner: "after the dot we can split and show the other part later"); a
+    sentence too long alone splits at its clauses' ends (",", ";", ":"), and a clause too long
+    alone between words, in parts of about one length. No word is ever cut."""
+    if fits(text):
+        return [text]
+    pages: list[str] = []
+    going = ""
+
+    def words_of(clause: str) -> list[str]:
+        count = 2
+        while True:
+            found = _split(clause, count)
+            if len(found) < count or all(fits(part) for part in found):
+                return found
+            count += 1
+
+    def clauses(sentence: str) -> list[str]:
+        found = _after(sentence, _CLAUSE)
+        return found if len(found) > 1 else words_of(sentence)
+
+    def add(piece: str, smaller: Optional[Callable[[str], list[str]]]) -> None:
+        nonlocal going
+        together = f"{going} {piece}".strip()
+        if fits(together):
+            going = together
+            return
+        if going:
+            pages.append(going)
+            going = ""
+        if fits(piece):
+            going = piece
+            return
+        inner = smaller(piece) if smaller is not None else [piece]
+        if inner == [piece]:
+            pages.append(piece)  # one word too long for two lines: as it is
+            return
+        for each in inner:
+            add(each, words_of if smaller is clauses else None)
+
+    for sentence in _after(text, _SENTENCE):
+        add(sentence, clauses)
+    if going:
+        pages.append(going)
+    return pages
+
+
 def _split(text: str, count: int) -> list[str]:
     """`text` in `count` parts of about one length, each split between words, after a
     sentence's or a clause's end when one is within a sixth of a part of where it would be."""
@@ -122,6 +188,11 @@ def _split(text: str, count: int) -> list[str]:
         parts.append(" ".join(words[first : cut + 1]))
         first = cut + 1
     return [part for part in parts if part]
+
+
+def _tidy(text: str) -> str:
+    """A caption's words with single spaces (its lines as one)."""
+    return " ".join(str(text).split())
 
 
 def wrap(text: str, font: QFont, width: float) -> list[tuple[int, int]]:
@@ -163,8 +234,8 @@ class CaptionsOverlay(Overlay):
     # ---- public API ---------------------------------------------------------------------
 
     def show_text(self, text: str) -> None:
-        """Show the caption `text` (its lines as one; "" clears it)."""
-        text = " ".join(str(text).split())
+        """Show the caption `text` (its lines as one, wrapped as it fits; "" clears it)."""
+        text = _tidy(text)
         if not text:
             self.clear()
             return
@@ -188,9 +259,9 @@ class CaptionsOverlay(Overlay):
 
     def pages(self, text: str) -> list[str]:
         """`text` in parts that each fit two lines as the captions show now (one part when it
-        fits, a little smaller too): of about one length each, split after a sentence's or a
-        clause's end when one is near, else between words."""
-        text = " ".join(str(text).split())
+        fits, a little smaller too): whole sentences, else clauses, else about one length each
+        between words (`paged`)."""
+        text = _tidy(text)
         host = self.parentWidget()
         if not text or host is None:
             return [text] if text else []
@@ -202,11 +273,8 @@ class CaptionsOverlay(Overlay):
         smallest = self._font_at(un, _SHRINK[-1])
         if len(wrap(text, smallest, width)) <= MAX_LINES:
             parts = [text]
-        else:  # as few parts as fit, each a little smaller where it must (as _layout does)
-            count = -(-len(wrap(text, smallest, width)) // MAX_LINES)
-            parts = _split(text, count)
-            if any(len(wrap(part, smallest, width)) > MAX_LINES for part in parts):
-                parts = _split(text, count + 1)
+        else:  # sentence by sentence, each part a little smaller where it must (as _layout)
+            parts = paged(text, lambda part: len(wrap(part, smallest, width)) <= MAX_LINES)
         self._pages_for = (key, parts)
         return list(parts)
 

@@ -12,6 +12,7 @@ from PySide6.QtCore import QObject, QTimer, Signal
 from PySide6.QtTest import QTest
 from PySide6.QtWidgets import QApplication
 
+from services import revive
 from services.live import learned_target, worker
 from services.live.kept import KeptRing, Where
 from services.live.learned_target import ArrivalModel, Learned, LearnedTarget
@@ -88,6 +89,7 @@ class FakeEngine(QObject):
         self.record_stops = []  # sids
         self.untils = []  # (sid, seq): a server part's stop moved (2.7)
         self.junctions = []  # (sid, seconds): what a session's next restart is asked (2.8.5)
+        self.retry_nows = []  # sids asked to try their channel's stream again now
         self.events = []  # ("open", sid) as sessions open
         self._answered = set()
         self._spans = {}
@@ -140,6 +142,9 @@ class FakeEngine(QObject):
 
     def set_junction(self, sid, seconds):
         self.junctions.append((sid, seconds))  # 2.8.5
+
+    def retry_now(self, sid):
+        self.retry_nows.append(sid)  # the picture's Try now while the channel is down
 
     def start_recording(self, sid, path, seq, **kwargs):
         rid = f"r{len(self.recordings) + 1}"
@@ -618,7 +623,8 @@ class LiveSessionCase(unittest.TestCase):
         kwargs.setdefault("clock", self.clock)
         live = LiveSession(self.engine, self.playback, **kwargs)
         self.modes, self.notices, self.failures = [], [], []
-        self.releases, self.timelines = [], []
+        self.releases, self.timelines, self.retries = [], [], []
+        live.retrying.connect(self.retries.append)
         live.modeChanged.connect(self.modes.append)
         live.notice.connect(self.notices.append)
         live.failed.connect(self.failures.append)
@@ -631,6 +637,12 @@ class LiveSessionCase(unittest.TestCase):
 
     def patch(self, name, value):
         self.enterContext(mock.patch.object(live_session, name, value))
+
+    def patch_revive(self, waits, healthy=None):
+        """The revive's waits (`services.revive.REVIVE_S`), and what playing well takes."""
+        self.enterContext(mock.patch.object(revive, "REVIVE_S", tuple(waits)))
+        if healthy is not None:
+            self.enterContext(mock.patch.object(revive, "HEALTHY_S", healthy))
 
     # ---- helpers ----------------------------------------------------------------------
     def start(
@@ -2365,6 +2377,52 @@ class StayLiveTests(LiveSessionCase):
         self.assertEqual(self.timelines[-1]["mode"], "live")
         self.assertEqual(len(self.playback.plays), 1)
 
+    def test_ai_captions_still_loading_keep_the_picture_waiting_past_their_distance(self):
+        # 2026-11-07, a talk show: the wait ended at the floor while the models still loaded,
+        # the picture played on, and the first 25 s it showed got no captions
+        sid = self.start()
+        feed = Feed(self, sid, burst=0.0, edge=2.5).ready()
+        feed.run(30.0)
+        holds = len(self.playback.holds)
+        self.live.set_caption_ready(False)
+        self.live.set_caption_floor(8.0)
+        feed.run(15.0)
+        self.assertTrue(self.live.caption_waiting())  # at its floor long since, still waiting
+        self.assertGreater(self.timelines[-1]["lag"], 12.0)
+        self.live.set_caption_ready(True)
+        feed.run(1.0)
+        self.assertFalse(self.live.caption_waiting())
+        self.assertEqual(self.playback.holds[holds:], [True, False])
+        feed.run(5.0)
+        self.assertEqual(self.timelines[-1]["mode"], "live")
+
+    def test_ai_captions_that_never_get_ready_let_the_picture_go_after_a_while(self):
+        from services.live.live_session import _CAPTION_READY_MAX_S
+
+        sid = self.start()
+        feed = Feed(self, sid, burst=0.0, edge=2.5).ready()
+        feed.run(30.0)
+        self.live.set_caption_ready(False)
+        self.live.set_caption_floor(8.0)
+        feed.run(_CAPTION_READY_MAX_S - 2.0)
+        self.assertTrue(self.live.caption_waiting())
+        feed.run(4.0)
+        self.assertFalse(self.live.caption_waiting())
+
+    def test_ai_captions_loading_hold_a_picture_already_at_their_distance(self):
+        # captions turned on at the floor already (off and on again): while the model loads,
+        # the picture waits there too, then plays on at once
+        self.live.set_caption_ready(False)
+        self.live.set_caption_floor(8.0)
+        sid = self.start()
+        feed = Feed(self, sid, burst=0.0, edge=2.5).ready()
+        feed.run(20.0)
+        self.assertTrue(self.live.caption_waiting())
+        self.live.set_caption_ready(True)
+        feed.run(1.0)
+        self.assertFalse(self.live.caption_waiting())
+        self.assertEqual(self.playback.holds, [True, False])
+
     def test_ai_captions_off_leave_the_picture_where_it_is_time_shifted(self):
         # 2.9: turned off, nothing catches up by itself: time-shifted as after a pause, the
         # bar and Go live showing; Go live goes back to the latency's target.
@@ -2481,17 +2539,24 @@ class StayLiveTests(LiveSessionCase):
         self.assertFalse(self.live.caption_waiting())  # 20 s behind now: nothing to wait for
         self.assertIs(self.playback.current, PlaybackState.PLAYING)
 
-    def test_ai_captions_read_from_the_segment_that_holds_the_picture(self):
+    def test_ai_captions_read_from_the_segment_before_the_one_that_holds_the_picture(self):
+        # 2026-11-07: from the picture's own segment, a sentence going on there was read from
+        # mid-word ("O beslediği takdirde" lost); from the one before, it is read whole
         self.ready(segments(0, 4), live_edge=8.0)
         self.playback.set_state(PlaybackState.PLAYING)
         self.step(0.25)
         source = self.live.caption_source()
         self.assertIsNotNone(source)
         url, seq, start = source
-        position = self.live.position()
         self.assertIn("/side/", url)
-        self.assertTrue(start <= position < start + 2.0, (start, position))
         self.assertTrue(url.endswith(f"/{seq}.ts"))
+        self.assertEqual(start, 0.0)  # in the first segment: none before it
+        for _ in range(16):
+            self.step(0.25)
+        position = self.live.position()
+        url, seq, start = self.live.caption_source()
+        self.assertGreaterEqual(position, 4.0)
+        self.assertTrue(start + 2.0 <= position < start + 4.0, (start, position))
 
     def test_a_lasting_lag_above_the_band_gets_one_gentle_nudge_then_settles(self):
         # 2.1: not within a tick (2.0 did, and flapped on a public HLS channel): after 15 s outside
@@ -5045,7 +5110,9 @@ class InterruptionTests(LiveSessionCase):
         provider still counted the buffer's connection) and nothing played for minutes. The
         direct play opens only once the buffer's upstream is closed (never two connections),
         and a failure right after is tried again up to three times (3, 5 and 10 s apart),
-        "Reconnecting…" each time, and only then reported."""
+        "Reconnecting…" each time. A channel that played in the tune (through the buffer, here)
+        then comes back by itself (`ReviveTests`): never reported, never given up on."""
+        self.patch_revive((5.0,))
         for kind in ("network", "crashed"):
             with self.subTest(kind=kind):
                 plays = self.fall_back_on_one_stream(kind)
@@ -5057,25 +5124,30 @@ class InterruptionTests(LiveSessionCase):
                     self.wait_until(lambda: len(self.playback.plays) == plays + 1 + tries)
                     self.assertEqual(self.playback.plays[-1], DIRECT)
                 self.playback.errorOccurred.emit("The stream could not be opened")
-                self.assertEqual(self.failures, ["The stream could not be opened"])
+                self.assertEqual(self.failures, [])
+                self.assertEqual(self.retries[-1], 5.0)  # the revive's wait, said
                 QTest.qWait(80)
-                self.assertEqual(len(self.playback.plays), plays + 4)  # four tries, no more
+                self.assertEqual(len(self.playback.plays), plays + 4)  # four tries, then waits
                 self.assertEqual(self.notices.count(RECONNECTING), 3)
 
-    def test_a_direct_play_that_timed_out_is_reported_at_once(self):
+    def test_a_direct_play_that_timed_out_is_not_tried_again_quickly(self):
         """A provider that does not answer times out after VLC's open
         timeout (20 s), and retrying that showed "Reconnecting…" for a minute and a half.
-        Only a failure within a few seconds of its play call is tried again."""
+        Only a failure within a few seconds of its play call is tried again so; a channel
+        that played in the tune waits for its revive instead (`ReviveTests`)."""
+        self.patch_revive((5.0,))
         plays = self.fall_back_on_one_stream()
         self.clock.now += 20.0  # VLC gave up opening it
         self.playback.set_state(PlaybackState.ERROR)
         self.playback.errorOccurred.emit("Timed out opening the stream")
-        self.assertEqual(self.failures, ["Timed out opening the stream"])
+        self.assertEqual(self.failures, [])
+        self.assertEqual(self.retries, [5.0])
         self.assertNotIn(RECONNECTING, self.notices)
         QTest.qWait(80)
         self.assertEqual(len(self.playback.plays), plays + 1)
 
-    def test_a_retry_that_times_out_is_reported_at_once(self):
+    def test_a_retry_that_times_out_waits_for_the_revive(self):
+        self.patch_revive((5.0,))
         plays = self.fall_back_on_one_stream()
         self.clock.now += 4.0  # refused within a few seconds: tried again
         self.playback.set_state(PlaybackState.ERROR)
@@ -5084,19 +5156,186 @@ class InterruptionTests(LiveSessionCase):
         self.wait_until(lambda: len(self.playback.plays) == plays + 2)
         self.clock.now += 20.0  # the retry timed out
         self.playback.errorOccurred.emit("Timed out opening the stream")
-        self.assertEqual(self.failures, ["Timed out opening the stream"])
+        self.assertEqual((self.failures, self.retries), ([], [5.0]))
         QTest.qWait(80)
         self.assertEqual(len(self.playback.plays), plays + 2)
         self.assertEqual(self.notices.count(RECONNECTING), 1)
 
-    def test_a_fallback_that_played_reports_a_later_error_at_once(self):
+    def test_a_fallback_that_played_opens_again_after_a_later_error(self):
+        self.patch_revive((0.02, 5.0))
         plays = self.fall_back_on_one_stream()
         self.playback.set_state(PlaybackState.PLAYING)  # it played
         self.playback.set_state(PlaybackState.ERROR)
         self.playback.errorOccurred.emit("The stream could not be played")
-        self.assertEqual(self.failures, ["The stream could not be played"])
-        QTest.qWait(80)
+        self.assertEqual(self.failures, [])
+        self.wait_until(lambda: len(self.playback.plays) == plays + 2)
+        self.assertEqual(self.playback.plays[-1], DIRECT)
+
+
+class ReviveTests(LiveSessionCase):
+    """A channel that played in the tune comes back by itself while it stays chosen
+    (`services.revive`). The owner's channel (2026-11-09): its source gave up, the direct
+    play ended twice, "The stream ended", and the picture stayed dead for 74 minutes."""
+
+    def direct_that_played(self, revive=True):
+        """Time-shift is off: the channel plays directly, and played. The plays so far."""
+        self.engine.lose()
+        self.live.start(
+            URL,
+            headers={"User-Agent": "QiTV-Test"},
+            verify_ssl=True,
+            latency="normal",
+            user_agent="QiTV-Test",
+            disk=False,
+            max_bytes=128 * MiB,
+            revive=revive,
+        )
+        self.assertEqual(self.playback.plays[-1], DIRECT)
+        self.playback.set_state(PlaybackState.PLAYING)
+        return len(self.playback.plays)
+
+    def end(self):
+        self.playback.set_state(PlaybackState.ENDED)
+        self.playback.ended.emit()
+
+    def test_an_ended_direct_play_opens_again_after_growing_waits_forever(self):
+        self.patch_revive((0.02, 0.05, 0.08))
+        plays = self.direct_that_played()
+        stops = self.playback.stops
+        self.assertTrue(self.live.revives())
+        waits = []
+        for count in range(1, 6):
+            self.end()
+            waits.append(self.retries[-1])
+            self.assertIsNotNone(self.live.retry_in())
+            self.wait_until(lambda: len(self.playback.plays) == plays + count)
+            self.assertEqual(self.playback.plays[-1], DIRECT)  # the same stream
+            self.assertEqual(self.retries[-1], 0.0)  # it opens now
+        self.assertEqual(waits, [0.02, 0.05, 0.08, 0.08, 0.08])  # the last, each time on
+        # The same player, so the same budget slot: nothing stopped, no session opened.
+        self.assertEqual(self.playback.stops, stops)
+        self.assertEqual(self.engine.opened, [])
+        self.assertEqual(self.failures, [])
+
+    def test_failing_to_open_again_keeps_waiting(self):
+        self.patch_revive((0.02, 0.05))
+        plays = self.direct_that_played()
+        self.end()
+        self.wait_until(lambda: len(self.playback.plays) == plays + 1)
+        self.playback.set_state(PlaybackState.ERROR)
+        self.playback.errorOccurred.emit("The stream could not be opened")  # still down
+        self.assertEqual(self.failures, [])
+        self.assertEqual(self.retries[-1], 0.05)
+        self.wait_until(lambda: len(self.playback.plays) == plays + 2)
+
+    def test_playing_again_ends_the_wait_and_playing_well_starts_the_waits_anew(self):
+        self.patch_revive((0.02, 0.05, 0.08), healthy=0.1)
+        plays = self.direct_that_played()
+        self.end()
+        self.wait_until(lambda: len(self.playback.plays) == plays + 1)
+        self.end()  # it opened, but ended before it played
+        self.assertEqual(self.retries[-1], 0.05)
+        self.wait_until(lambda: len(self.playback.plays) == plays + 2)
+        self.playback.set_state(PlaybackState.PLAYING)
+        self.assertEqual(self.retries[-1], -1.0)  # no wait any more
+        self.assertIsNone(self.live.retry_in())
+        self.assertFalse(self.live.retry_now())  # nothing to try
+        self.end()  # briefly: the waits go on growing
+        self.assertEqual(self.retries[-1], 0.08)
+        self.wait_until(lambda: len(self.playback.plays) == plays + 3)
+        self.playback.set_state(PlaybackState.PLAYING)
+        self.clock.now += 0.2  # it played well
+        self.end()
+        self.assertEqual(self.retries[-1], 0.02)
+
+    def test_retry_now_opens_at_once(self):
+        self.patch_revive((60.0,))
+        plays = self.direct_that_played()
+        self.end()
+        self.assertEqual(self.retries[-1], 60.0)
+        self.assertTrue(self.live.retry_now())
         self.assertEqual(len(self.playback.plays), plays + 1)
+        self.assertEqual(self.retries[-1], 0.0)
+
+    def test_a_channel_change_or_a_stop_ends_the_wait(self):
+        self.patch_revive((0.05,))
+        plays = self.direct_that_played()
+        self.end()
+        self.live.stop()
+        self.assertEqual(self.retries[-1], -1.0)
+        self.assertEqual(self.active_timers(), [])
+        QTest.qWait(120)
+        self.assertEqual(len(self.playback.plays), plays)
+
+    def test_a_tune_that_never_played_is_reported_as_before(self):
+        self.engine.lose()
+        self.start()
+        self.assertFalse(self.live.revives())
+        self.playback.errorOccurred.emit("The stream could not be opened")
+        self.assertEqual(self.failures, ["The stream could not be opened"])
+        self.assertEqual(self.retries, [])
+
+    def test_an_address_no_player_is_handed_is_final(self):
+        plays = self.direct_that_played()
+        self.playback.errorOccurred.emit(NO_STREAM)
+        self.assertEqual(self.failures, [NO_STREAM])
+        QTest.qWait(30)
+        self.assertEqual(len(self.playback.plays), plays)
+
+    def test_without_revive_an_end_is_the_callers(self):
+        # An STB portal's channel: its link is made again instead (ui.live_controls).
+        self.patch_revive((0.02,))
+        plays = self.direct_that_played(revive=False)
+        self.assertFalse(self.live.revives())
+        self.end()
+        self.playback.errorOccurred.emit("The stream could not be played")
+        self.assertEqual(self.failures, ["The stream could not be played"])
+        QTest.qWait(60)
+        self.assertEqual((len(self.playback.plays), self.retries), (plays, []))
+
+    def helper_says(self, sid, **fields):
+        self.engine._snapshots[sid].update(fields)
+        self.engine.sessionUpdated.emit(sid, dict(self.engine._snapshots[sid]))
+
+    def test_the_helpers_wait_for_the_channel_is_said_and_retry_now_asks_it(self):
+        self.live._wall = lambda: 50_000.0
+        sid = self.ready(segments(0, 3), live_edge=6.0)
+        self.playback.set_state(PlaybackState.PLAYING)
+        self.assertFalse(self.live.retry_now())  # nothing waits
+        self.helper_says(sid, reconnecting=True, retry_at=50_030.0)
+        self.assertEqual(self.retries, [30.0])
+        self.assertEqual(self.live.retry_in(), 30.0)
+        self.helper_says(sid, reconnecting=True, retry_at=50_030.0)  # the same wait: once
+        self.assertEqual(self.retries, [30.0])
+        self.assertTrue(self.live.retry_now())
+        self.assertEqual(self.engine.retry_nows, [sid])
+        self.helper_says(sid, reconnecting=False, retry_at=None)  # it came back
+        self.assertEqual(self.retries, [30.0, -1.0])
+        self.assertTrue(self.live.is_pipeline())
+        self.assertEqual(self.engine.closed, [])
+
+    def test_vlc_never_falls_back_while_the_helper_waits_for_the_channel(self):
+        self.live = self.make(ready_timeout_ms=1000)
+        self.live._wall = lambda: 50_000.0
+        sid = self.ready(segments(0, 5), live_edge=10.5)
+        self.playback.set_state(PlaybackState.PLAYING)
+        self.helper_says(sid, reconnecting=True, retry_at=50_120.0)
+        for _ in range(5):  # VLC ran out and kept failing, far past the ready timeout
+            self.clock.now += 0.6
+            self.playback.errorOccurred.emit("The stream could not be opened")
+        self.assertNotIn(sid, self.engine.closed)
+        self.assertNotIn(DIRECT, self.playback.plays)
+        self.assertEqual(self.modes, ["pipeline"])
+
+    def test_a_refusal_while_waiting_ends_the_wait_and_is_never_asked_again(self):
+        self.live._wall = lambda: 50_000.0
+        sid = self.ready(segments(0, 3), live_edge=6.0)
+        self.playback.set_state(PlaybackState.PLAYING)
+        self.helper_says(sid, reconnecting=True, retry_at=50_030.0)
+        self.engine.sessionFailed.emit(sid, "http", STREAM_LIMIT)
+        self.assertEqual(self.retries, [30.0, -1.0])
+        self.assertEqual(self.failures, [STREAM_LIMIT])
+        self.assertNotIn(DIRECT, self.playback.plays)
 
 
 class InputReleaseTests(LiveSessionCase):

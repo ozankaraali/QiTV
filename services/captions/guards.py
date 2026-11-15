@@ -4,7 +4,10 @@ Measured on broadcasts (2026-11-02, Qwen3-ASR and Whisper on a drama with music 
 channel): over music or silence the models write a phrase again and again until their token
 cap ("Sen öyle." 40 times), the words of their own prompt ("system."), or the credits their
 training subtitles ended with ("Altyazı M.K.", "İzlediğiniz için teşekkür ederim.", "Thanks
-for watching"). `clean()` keeps a phrase repeated in a row once and drops the rest;
+for watching"). People repeat themselves for real ("Hayır hayır hayır!"), so `clean()` shows a
+repetition as said; only a loop no one speaks drops the whole caption (the Turkish Moonshine trial,
+2026-11-07: over sung music it wrote "iki bin on yedide" again and again, shown as "2017'de"; the
+owner saw "1606 124" when nobody said a number);
 `token_cap()` bounds what a piece of speech can produce. With no language given, the 1.7B
 (2026-11-03, the community export) writes the one it heard first ("language Turkish<asr_text>
 Gedällle halkoyunları…"): only the words after it are the caption.
@@ -35,8 +38,47 @@ _FALSE_CAPTIONS = re.compile(
     r"sous-titrage|sous-titres réalisés|subtítulos (?:realizados|por)|amara\.org",
     re.IGNORECASE,
 )
-# A phrase of 1 to 8 words (with its punctuation) said three or more times in a row.
-_REPEATS = re.compile(r"((?:\S+\s+){0,7}?\S+?[.!?,…]?)(?:\s+\1){2,}", re.IGNORECASE)
+# A video channel's subscribe outro on its own (2026-11-08, the Turkish Moonshine trial on a drama:
+# "Abone ol." over a short blip; its training text has video makers' "kanalıma abone olun"
+# endings): a caption that is nothing but such words, six at most, is the model's habit, not the
+# channel. Inside a longer line the words stay (someone on TV may say "abone olun" while saying
+# more).
+_OUTRO_WORDS = frozenset(
+    "abone ol olun olmayı olmayi unutmayın unutmayin kanalıma kanalımıza kanalima kanalimiza "
+    "beğen beğenin beğenmeyi begen begenin begenmeyi ve lütfen lutfen videoyu bildirimleri aç açın "
+    "açmayı zile basın basmayı".split()
+)
+_OUTRO_KEY = ("abone", "beğen", "begen", "bildirim")
+# A loop nobody speaks, its words compared without case or punctuation: one word ten or more times
+# in a row, two words five or more, three words four or more, four to eight words three or more
+# ("Gol! Gol! Gol! Gol! Gol!" is a commentator and shows as said; "iki bin on yedide, iki bin on
+# yedide, iki bin on yedide!" over a song is the model, 2026-11-07).
+_LOOP_TIMES = {1: 10, 2: 5, 3: 4}  # four to eight words: 3
+_WORD = re.compile(r"[^\w]+")
+
+
+def _looped(text: str) -> bool:
+    words = [w for w in (_WORD.sub("", t.lower()) for t in text.split()) if w]
+    for size in range(1, 9):
+        need = _LOOP_TIMES.get(size, 3)
+        for start in range(0, len(words) - size * need + 1):
+            phrase = words[start : start + size]
+            times, at = 1, start + size
+            while words[at : at + size] == phrase:
+                times, at = times + 1, at + size
+            if times >= need:
+                return True
+    return False
+
+
+def _outro_only(text: str) -> bool:
+    """A caption that is only a subscribe outro ("Abone ol.", "Beğen ve abone ol!")."""
+    words = [w for w in (_WORD.sub("", t.lower()) for t in text.split()) if w]
+    return (
+        0 < len(words) <= 6
+        and all(w in _OUTRO_WORDS for w in words)
+        and any(w.startswith(_OUTRO_KEY) for w in words)
+    )
 
 
 def token_cap(seconds: float, language: str | None = "") -> int:
@@ -51,10 +93,8 @@ def clean(text: str) -> str:
     text = " ".join(_HEADING.sub("", text).replace("<asr_text>", " ").split())
     if not any(c.isalnum() for c in text) or _ROLE_WORDS.fullmatch(text):
         return ""  # nothing said (a lone "." over music), or the prompt's own words
-    if _FALSE_CAPTIONS.search(text):
+    if _FALSE_CAPTIONS.search(text) or _outro_only(text):
         return ""
-    previous = None
-    while previous != text:  # a loop of loops
-        previous = text
-        text = _REPEATS.sub(r"\1", text)
+    if _looped(text):
+        return ""  # the model looping over music or noise: nothing of it was said
     return text.strip()

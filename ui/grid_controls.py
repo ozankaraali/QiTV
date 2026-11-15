@@ -21,13 +21,17 @@ one per request): when the provider's other streams take all of it, the tile sho
 to spare at <provider>" with the channel, and asks for nothing; so does a tile whose stream the
 budget then refuses (`SessionManager.slotDenied`). A tile whose stream fails says so too; the
 focused tile's direct stream reconnects as the big picture's does, and once the focus moves on
-during its back-off the tile stops and says the stream ended (`stream_ended`); past its
-reopens, or failing for good, the focused tile stops and says so too, keeping the focus
-(`focused_failed`). A click on the
-card tries again; nothing queues or asks again by itself, but for a tile without the focus
-whose STB channel failed: its link is made again once (the portal's play token may have
-expired), as the big picture's and the PiP's are. Zapping onto a channel another tile shows
-moves the focus there.
+during its back-off the tile stops and says the stream ended (`stream_ended`); failing for
+good (a refusal, or a channel that never played), the focused tile stops and says so too,
+keeping the focus (`focused_failed`). A click on the card tries again. A tile's channel that
+played comes back by itself (`services.revive`), as a TV's: its live session opens its direct
+play again (its label counts down: "Trying again in 0:25"), and a tile that failed or ended
+beside the focus opens its channel again after the revive's growing waits, its card counting
+down ("The stream ended · Trying again in 0:25"), until it plays, the tile takes another
+channel or goes, or the grid is left; a refusal for the provider's limit never is. A tile
+without the focus whose STB channel failed has its link made again at once first (the portal's
+play token may have expired), as the big picture's and the PiP's are. Nothing else queues or
+asks again by itself. Zapping onto a channel another tile shows moves the focus there.
 
 A tile without the focus plays at 1x: muted, it needs no nudge, so its stay-live only jumps
 it to live when it fell far behind (`SessionManager.set_large`); a tile paused or rewound is
@@ -51,7 +55,9 @@ their tiles, each once its provider is ready, and its focus. A channel dragged f
 channel list onto a tile plays there (`drag_over`, `tile_at`). The
 Library, films, files, the mini player and external players leave the grid first (the shell
 calls `leave`). A smaller layout, and leaving, stop every player but the big picture and the
-PiP, and nothing still on its way for a tile that went opens there.
+PiP, and nothing still on its way for a tile that went opens there; such a tile comes back
+"+", its old channel forgotten (the controls, the banner and the channel list never take it
+up again when it takes the focus).
 """
 
 from __future__ import annotations
@@ -59,9 +65,10 @@ from __future__ import annotations
 from dataclasses import dataclass
 from functools import partial
 import logging
+import time
 from typing import Any, Callable, Optional
 
-from PySide6.QtCore import QEvent, QObject, QPoint, QPointF, QRectF, Signal
+from PySide6.QtCore import QEvent, QObject, QPoint, QPointF, QRectF, QTimer, Signal
 from PySide6.QtGui import QCursor
 
 from services.config_manager import ConfigManager
@@ -70,6 +77,7 @@ from services.live.refusals import REFUSALS
 from services.live.stay_live import TARGETS
 from services.provider_ids import with_provider
 from services.redact import safe_message
+from services.revive import Revive
 from services.sessions import SessionManager, Slot, records
 from services.zapping import ZapContext
 from ui import item_provider
@@ -78,6 +86,7 @@ from ui.keymap import Action
 from ui.overlays.grid_tiles import DENIED, EMPTY, FAILED, OPENING, PLAYING, TileView
 from ui.overlays.layout_row import LayoutChoice
 from ui.overlays.pip_label import CONNECTING, LIVE, REC
+from ui.overlays.retry_notice import ended_text, retry_text
 from ui.overlays.transport import MINUS, fmt_behind
 
 logger = logging.getLogger(__name__)
@@ -101,7 +110,7 @@ TILE_NAMES = ("main", "pip", "t2", "t3", "t4", "t5", "t6", "t7", "t8")
 # i18n: a multiview tile's card and a toast: the provider's connections are all in use
 NO_STREAM = N_("No stream to spare at {provider}")
 TILE_FAILED = N_("Couldn't play this channel")  # i18n: a multiview tile's card
-# i18n: a multiview tile's card: its stream ended, and it does not open again by itself
+# i18n: a multiview tile's card: its stream ended (it may try again by itself, or on a click)
 STREAM_ENDED = N_("The stream ended")
 LIVE_ONLY = N_("Multiview is for live TV")  # i18n: a toast
 EXTERNAL_ONLY = N_("Multiview is off while channels play in an external player")  # i18n: a toast
@@ -114,6 +123,7 @@ MIB = 1024 * 1024
 DEFAULT_RAM_MIB = ConfigManager.DEFAULT_OPTION_TIMESHIFT_RAM_MIB  # a config without the key
 _SHOWING = (OPENING, PLAYING)
 _PLAYING_STATES = ("playing", "paused")
+_REVIVE_TICK_MS = 1000  # the countdowns on the tiles
 
 
 def no_stream_text(provider: str) -> str:
@@ -186,10 +196,11 @@ class GridControls(QObject):
         LayoutRow the layout chip opens (None, in tests: the chip steps to the next layout);
         `tile_action(name, control)` is the shell acting on tile `name`'s strip: "play"
         (pause or play it), "live" (go live), "speaker" (mute or unmute it), "close" (the
-        focused tile: its stream stops) and "closed" (a tile without the focus was closed:
-        what it showed is forgotten); `show_controls()` shows the player controls (the
-        layouts' hint is drawn above them); `confirm(name, then)` asks before tile `name`'s
-        recording would stop (2.6): True, asked (`then` follows)."""
+        focused tile: its stream stops) and "closed" (a tile without the focus was closed, or
+        went with a smaller layout or the grid: what it showed is forgotten);
+        `show_controls()` shows the player controls (the layouts' hint is drawn above them);
+        `confirm(name, then)` asks before tile `name`'s recording would stop (2.6): True,
+        asked (`then` follows)."""
         super().__init__(parent)
         self.sessions = sessions
         self.frame = frame
@@ -232,6 +243,13 @@ class GridControls(QObject):
         self._timelines: dict[str, dict] = {}
         self._playing: set[str] = set()  # the tiles whose surface shows (frame)
         self._focused_by_press: Optional[str] = None  # its click only focused it
+        # A tile's channel comes back by itself (`services.revive`): the channel each tile
+        # played since it opened there, its tries, and when a failed tile's opens again.
+        self._played: dict[str, dict] = {}
+        self._revives: dict[str, tuple[dict, Revive]] = {}
+        self._revive_due: dict[str, float] = {}  # monotonic
+        self._revive_timer = QTimer(self, interval=_REVIVE_TICK_MS)
+        self._revive_timer.timeout.connect(self._tick_revives)
 
     def wire(self) -> None:
         sessions = self.sessions
@@ -277,6 +295,9 @@ class GridControls(QObject):
         slot.playback.stateChanged.connect(partial(self._on_player_state, slot.name))
         slot.live.modeChanged.connect(lambda *_: self._refresh())
         slot.live.recordingChanged.connect(lambda *_: self._refresh())  # REC (2.2)
+        retrying = getattr(slot.live, "retrying", None)
+        if retrying is not None:  # its direct play opens again by itself: the label counts
+            retrying.connect(lambda *_: self._follow_revives())
 
     # ---- state --------------------------------------------------------------------------
 
@@ -383,6 +404,7 @@ class GridControls(QObject):
         self._cards.clear()
         self._wanted.clear()
         self._restored = False
+        self._focused_by_press = None
         full, tile = self.ring_sizes()
         sessions.enter_grid(full_bytes=full, tile_bytes=tile)
         self._shown = True
@@ -424,7 +446,7 @@ class GridControls(QObject):
                 continue
             if records(slot) and sessions.keep_recording(slot.name):
                 continue  # 2.6: it records on in the background
-            self._stop(slot.name)
+            self._drop(slot.name)
         if self._forget is not None:
             for name in self._names:  # no link on its way opens a tile any more
                 self._forget(name)
@@ -469,7 +491,7 @@ class GridControls(QObject):
                 names[-1] = large
             for name in self._names:
                 if name not in names:  # it stops, and nothing on its way opens there
-                    self._stop(name)
+                    self._drop(name)
                     self._forget_tile(name)
         self._cells, self._names = cells, names
         if self._previous not in names:
@@ -732,6 +754,9 @@ class GridControls(QObject):
         behind live, "Connecting…" or the card's why."""
         card = self._cards.get(name)
         if card is not None:
+            due = self._revive_due.get(name)
+            if due is not None:  # it opens again by itself: when
+                return self._title(name), ended_text(due - time.monotonic())
             return self._title(name), card.detail
         if self.state(name) in _SHOWING:
             return self._title(name), self._detail(name)
@@ -757,12 +782,19 @@ class GridControls(QObject):
         """A click on a card: its channel again, in its tile (focused by then)."""
         card = self._cards.get(name)
         if card is not None and name == self.sessions.large().name:
+            self._revive_due.pop(name, None)  # now, not after the wait
             self._retry(card.channel)
 
     # ---- the frame's and the overlay's mouse --------------------------------------------
 
     def _on_focus_requested(self, name: str) -> None:
-        if self._shown and self._focus(name):
+        if not self._shown or not self._focus(name):
+            return
+        view = self._tiles_view
+        # Only the overlay's press has a click to follow; a press on a tile's video ends
+        # there, and a mark no click clears would keep the next click on the tile's label
+        # from opening the channel list.
+        if view is None or view.clicking() == name:
             self._focused_by_press = name
 
     def _on_tile_clicked(self, name: str) -> None:
@@ -803,6 +835,9 @@ class GridControls(QObject):
     def _on_slot_state(self, name: str, open_: bool) -> None:
         if open_:
             self._cards.pop(name, None)
+            self._revive_due.pop(name, None)
+            if not ZapContext.same(self._played.get(name), self._tile_channel(name)):
+                self._played.pop(name, None)  # another channel: it has to play to come back
         else:
             self._wanted.pop(name, None)
             self._timelines.pop(name, None)
@@ -868,6 +903,67 @@ class GridControls(QObject):
             self._retried[name] = channel
             assert self._reopen is not None
             self._reopen(name, channel)
+            return
+        self._revive_later(name, channel, message)
+
+    # ---- a tile's channel comes back by itself (`services.revive`) ----------------------
+    def _revive_for(self, name: str, channel: dict) -> Revive:
+        """Tile `name`'s tries for `channel` (afresh for another channel)."""
+        entry = self._revives.get(name)
+        if entry is None or not ZapContext.same(entry[0], channel):
+            entry = self._revives[name] = (channel, Revive())
+        return entry[1]
+
+    def _revive_later(self, name: str, channel: dict, message: str) -> None:
+        """Tile `name`'s channel failed or ended after it played there: it opens again in that
+        tile after the next wait, its card counting down (never after a refusal)."""
+        played = self._played.get(name)
+        if self._reopen is None or message in REFUSALS or not ZapContext.same(played, channel):
+            return
+        revive = self._revive_for(name, channel)
+        revive.stopped()
+        wait = revive.next_wait()
+        logger.info("A tile's channel opens again in %.0f s (try %d)", wait, revive.tries)
+        self._revive_due[name] = time.monotonic() + wait
+        self._follow_revives()
+
+    def _follow_revives(self) -> None:
+        """The countdowns tick while a tile's channel is waited for (its card's, or its live
+        session's own direct play), and stop once none is."""
+        waiting = self._shown and (
+            bool(self._revive_due)
+            or any(self._live_retry_in(name) is not None for name in self._names)
+        )
+        if waiting and not self._revive_timer.isActive():
+            self._revive_timer.start()
+        elif not waiting:
+            self._revive_timer.stop()
+        self._paint()
+
+    def _live_retry_in(self, name: str) -> Optional[float]:
+        slot = self._slot(name)
+        retry_in = getattr(slot.live, "retry_in", None) if slot is not None else None
+        seconds = retry_in() if callable(retry_in) else None
+        return None if seconds is None else float(seconds)
+
+    def _tick_revives(self) -> None:
+        now = time.monotonic()
+        for name, due in list(self._revive_due.items()):
+            if now < due:
+                continue
+            del self._revive_due[name]
+            card = self._cards.get(name)
+            if (
+                not self._shown
+                or name not in self._names
+                or card is None
+                or card.state != FAILED
+                or self._reopen is None
+            ):
+                continue  # the tile went, took another channel, or the grid was left
+            logger.info("Opening a tile's channel again: %s", card.channel.get("name") or "")
+            self._reopen(name, card.channel)
+        self._follow_revives()
 
     def _may_retry(self, name: str, channel: dict, message: str) -> bool:
         """A tile without the focus (the focused one is the shell's) whose STB channel
@@ -882,6 +978,11 @@ class GridControls(QObject):
 
     def _on_player_state(self, name: str, state: str) -> None:
         self._states[name] = state
+        if state == "playing":
+            channel = self._tile_channel(name)
+            if channel is not None:
+                self._played[name] = channel  # it comes back by itself from now on
+                self._revive_for(name, channel).playing()
         self._refresh()
 
     def _on_timeline(self, name: str, state: dict) -> None:
@@ -959,6 +1060,14 @@ class GridControls(QObject):
             return
         self.sessions.close_slot(name)
 
+    def _drop(self, name: str) -> None:
+        """Tile `name` goes (a smaller layout, or the grid left without it): its stream stops,
+        and the shell forgets what it showed, as for its ✕: shown again, it takes the focus as
+        "+", never as the channel it played before."""
+        self._stop(name)
+        if self._tile_action is not None:
+            self._tile_action(name, "closed")
+
     def _deny(self, name: str, channel: dict, provider: str) -> None:
         self._cards[name] = _Card(DENIED, channel, no_stream_text(provider))
         self._refresh()
@@ -975,11 +1084,15 @@ class GridControls(QObject):
         return str((channel or {}).get("name") or "")
 
     def _detail(self, name: str) -> str:
-        """A playing tile's label state: LIVE, "−MM:SS" behind live, "Connecting…", or REC
-        while its channel records (2.2)."""
+        """A playing tile's label state: LIVE, "−MM:SS" behind live, "Connecting…", REC
+        while its channel records (2.2), or "Trying again in 0:25" while its stream is down
+        and waited for."""
         slot = self._slot(name)
         if slot is not None and slot.live.recording():
             return REC
+        waiting = self._live_retry_in(name)
+        if waiting is not None and self.state(name) != PLAYING:
+            return retry_text(waiting)
         return self._strip_state(name)[3] or CONNECTING
 
     def _showing(self) -> set[str]:

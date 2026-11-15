@@ -16,6 +16,15 @@ brings the fullscreen desktop back, which puts the picture back the same way. Le
 closing QiTV puts it back first. The floating window can be dragged; it shows on every desktop
 (`join_all_spaces`), above other windows, and never takes the keyboard.
 
+A covered window (macOS, a setting of its own, off by default): while the TV window is not
+fullscreen, the same floating window takes the picture once the window has been out of sight
+for `COVERED_SETTLE_MS`: minimized, or covered whole by other apps' windows while QiTV is not
+the active app (`seen`: on macOS its NSWindow occlusionState; a sliver showing counts as seen).
+QiTV's own dialogs and menus never float it: QiTV is the active app then. The picture goes back
+when any of the window shows again, when QiTV becomes the active app, or on a double-click on
+the floating window (which brings QiTV to the front). The floating window can't hide the window
+by itself: while it lies over the whole window, what is seen says nothing (`_unseen`).
+
 The floating window has its picture's shape, so it shows no bars: `shape()` (the lent player's
 `picture_ratio`) is asked as it floats and at each check while it does, and a new shape (the
 stream's picture becomes known, a zap, another aspect ratio) reshapes it, as large as it was,
@@ -27,6 +36,7 @@ from __future__ import annotations
 
 import logging
 import math
+import time
 from typing import Callable, Optional
 
 from PySide6.QtCore import QEvent, QObject, QPoint, QRect, Qt, QTimer, Signal
@@ -37,7 +47,11 @@ from services.picture import box_height, box_ratio, box_size, same_shape
 
 logger = logging.getLogger(__name__)
 
-POLL_MS = 400  # how often the fullscreen window's desktop is asked about
+# Why the picture floats (DesktopPip.arm): the fullscreen window's desktop is not the one shown
+# (2.4), or the window (not fullscreen) is covered whole or minimized.
+DESKTOP = "desktop"
+COVERED = "covered"
+POLL_MS = 400  # how often the fullscreen window's desktop (or a window's sight) is asked about
 WIDTH_FRACTION = 0.25  # the floating window: a quarter of the screen's width, 16:9
 MARGIN = 24  # from the screen's corner
 EDGE_PX = 10  # a press this near an edge (or two: a corner) resizes the floating window
@@ -45,6 +59,10 @@ MIN_WIDTH = 240  # the smallest it gets in 16:9 (another shape: as large as that
 AWAY_CHECKS = 2  # answers "another desktop" in a row before the picture floats (the
 # fullscreen animation may answer it once)
 CONFIRM_MS = 150  # the second answer is asked this soon after the first, not a poll later
+# A covered window: out of sight this long before the picture floats (a menu, a notification or
+# a window dragged across never floats it). Asked again a little after (a timer may be early).
+COVERED_SETTLE_MS = 500
+COVERED_CONFIRM_MS = COVERED_SETTLE_MS + 60
 _MOUSE_EVENTS = (
     QEvent.Type.MouseButtonPress,
     QEvent.Type.MouseButtonRelease,
@@ -265,8 +283,13 @@ class FloatingPlayer(QWidget):
             self._reshape()
 
 
+def _qitv_active() -> bool:
+    return QGuiApplication.applicationState() == Qt.ApplicationState.ApplicationActive
+
+
 class DesktopPip(QObject):
-    """Floats the large picture while the fullscreen TV window's desktop is not shown."""
+    """Floats the large picture while the fullscreen TV window's desktop is not shown, or (the
+    covered reason) while the TV window is out of sight."""
 
     floatingChanged = Signal(bool)
 
@@ -281,6 +304,11 @@ class DesktopPip(QObject):
         place: Callable[[], QRect],
         join_all_spaces: Callable[[QWidget], object],
         remember: Optional[Callable[[QRect], None]] = None,
+        seen: Optional[Callable[[QWidget], Optional[bool]]] = None,
+        may_float_covered: Optional[Callable[[], bool]] = None,
+        app_active: Callable[[], bool] = _qitv_active,
+        activate: Optional[Callable[[], object]] = None,
+        clock: Callable[[], float] = time.monotonic,
         shape: Optional[Callable[[], Optional[float]]] = None,
         parent: Optional[QObject] = None,
     ) -> None:
@@ -289,7 +317,13 @@ class DesktopPip(QObject):
         the large surface out of and back into the player; `place()`: where the floating
         window goes (screen coordinates); `join_all_spaces(widget)`: show it on every desktop;
         `remember(rect)`: where the user moved or resized it (`place` gives it back next time);
-        `shape()`: the shape the lent picture shows in (None: not known; it keeps its own)."""
+        `shape()`: the shape the lent picture shows in (None: not known; it keeps its own).
+
+        The covered reason (without `seen` and `may_float_covered` it is never asked about):
+        `seen(window)`: whether any of the window can be seen (None: can't tell);
+        `may_float_covered()`: whether a picture may float for it now; `app_active()`: whether
+        QiTV is the active app; `activate()`: QiTV to the front as an app (a double-click on
+        the floating window); `clock()`: seconds, for how long the window was out of sight."""
         super().__init__(parent)
         self._window = window
         self._on_active_space = on_active_space
@@ -299,10 +333,18 @@ class DesktopPip(QObject):
         self._place = place
         self._join_all_spaces = join_all_spaces
         self._remember = remember
+        self._seen = seen
+        self._may_float_covered = may_float_covered
+        self._app_active = app_active
+        self._activate = activate
+        self._clock = clock
         self._shape = shape
         self._floating: Optional[FloatingPlayer] = None
         self._shown = False
+        self._reason = DESKTOP  # what `check` asks about (the timer runs while it is armed)
         self._away = 0  # "another desktop" answers in a row
+        self._since: Optional[float] = None  # covered: out of sight since (`clock`)
+        self._held = False  # covered: after a double-click, nothing floats before it was seen
         self._timer = QTimer(self)
         self._timer.setInterval(POLL_MS)
         self._timer.timeout.connect(self.check)
@@ -320,18 +362,37 @@ class DesktopPip(QObject):
         if self._timer.isActive():
             self.check()
 
+    def reason(self) -> Optional[str]:
+        """What is asked about now (DESKTOP, COVERED); None while nothing is."""
+        return self._reason if self._timer.isActive() else None
+
     def watch(self, on: bool) -> None:
         """Ask about the desktop (the window is fullscreen) or not; not puts the picture back."""
-        if on:
+        self.arm(DESKTOP if on else None)
+
+    def arm(self, reason: Optional[str]) -> None:
+        """Ask about `reason` from now on: DESKTOP (the window is fullscreen: is its desktop
+        shown?), COVERED (a window: can it be seen?) or nothing (None). The reason asked about
+        already goes on as it was; another one, or nothing, puts the picture back first."""
+        if reason == COVERED and (self._seen is None or self._may_float_covered is None):
+            reason = None  # (nothing to ask with)
+        if reason is not None and reason == self._reason:
             if not self._timer.isActive():
                 self._timer.start()
-        else:
-            self._timer.stop()
-            self._away = 0
-            self.dock()
+            return
+        self._timer.stop()
+        self._away, self._since, self._held = 0, None, False
+        self.dock()
+        self._reason = reason or DESKTOP
+        if reason is not None:
+            self._timer.start()
 
     def check(self) -> None:
-        """The window's desktop now: float the picture when it is away, put it back when not."""
+        """The window's desktop now: float the picture when it is away, put it back when not
+        (covered: whether the window can be seen, `_check_covered`)."""
+        if self._reason == COVERED:
+            self._check_covered()
+            return
         if self._shown and not self._may_float():
             self.dock()  # nothing to float any more (it stopped, the grid or the Library came)
             return
@@ -351,6 +412,55 @@ class DesktopPip(QObject):
     def _follow_shape(self) -> None:
         if self._floating is not None and self._shape is not None:
             self._floating.set_ratio(self._shape())
+
+    def _check_covered(self) -> None:
+        """The window out of sight for COVERED_SETTLE_MS floats the picture; any of it seen
+        puts it back at once."""
+        may_float = self._may_float_covered
+        if may_float is None or not may_float():
+            self._since = None
+            self.dock()  # nothing to float any more (it stopped, the grid, Keep on Top came)
+            return
+        unseen = self._unseen()
+        if unseen is None:
+            return
+        if not unseen:
+            self._since, self._held = None, False
+            self.dock()
+            return
+        if self._shown:
+            self._follow_shape()  # it floats on: its picture's shape may have changed
+            return
+        if self._held:
+            return
+        now = self._clock()
+        if self._since is None:
+            self._since = now
+            if self._timer.isActive():
+                QTimer.singleShot(COVERED_CONFIRM_MS, self, self.nudge)  # (not a poll later)
+        elif (now - self._since) * 1000 >= COVERED_SETTLE_MS:
+            self._float()
+
+    def _unseen(self) -> Optional[bool]:
+        """Covered: whether the window is out of sight now (None: can't tell). Minimized, it
+        is; with QiTV the active app it is not (its own dialog or menu over the window, or the
+        user back in QiTV); else none of it can be seen. The floating window is QiTV's own:
+        while it lies over the whole window, what is seen says nothing (it would hide the
+        window it floats for, and never let the picture go back)."""
+        window = self._window
+        if window.isMinimized():
+            return True
+        if self._app_active():
+            return False
+        floating = self._floating
+        if (
+            self._shown
+            and floating is not None
+            and floating.frameGeometry().contains(window.frameGeometry())
+        ):
+            return None
+        seen = self._seen(window) if self._seen is not None else None
+        return None if seen is None else not seen
 
     def dock(self) -> None:
         """The picture back in the fullscreen window (nothing when it is there)."""
@@ -382,14 +492,26 @@ class DesktopPip(QObject):
         floating.show()
         self._join_all_spaces(floating)  # again: showing may set its own
         self._shown = True
-        logger.info("Desktop picture in picture: floating")
+        if self._reason == COVERED:
+            logger.info("Desktop picture in picture: floating (the window is out of sight)")
+        else:
+            logger.info("Desktop picture in picture: floating")
         self.floatingChanged.emit(True)
 
     def _return(self) -> None:
         """A click on the floating window: the fullscreen window's desktop again (macOS shows
-        it as the window is activated); the next check puts the picture back."""
+        it as the window is activated); the next check puts the picture back. Covered: the
+        window back from the Dock and QiTV in front of the app that covered it; nothing floats
+        again before the window was seen (should macOS not bring QiTV, the picture stays)."""
         self.dock()  # back at once, while macOS brings that desktop
         window = self._window
+        if self._reason == COVERED and self._timer.isActive():
+            self._held, self._since = True, None
+            if window.isMinimized():
+                window.setWindowState(window.windowState() & ~Qt.WindowState.WindowMinimized)
+                window.show()
+            if self._activate is not None:
+                self._activate()
         window.raise_()
         window.activateWindow()
 

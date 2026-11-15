@@ -788,6 +788,7 @@ class FakeLiveSession(QObject):
     recordingChanged = Signal(bool)  # 2.3
     recordingEnded = Signal(str, str, int)  # (reason, path, written)
     backOffered = Signal(float, float)  # 2.6: (where it was left, that moment's Unix time)
+    retrying = Signal(float)  # its channel's stream is down: seconds to its next try (-1: no)
 
     def go_back_to(self, t):
         self.calls.append(("go_back_to", t))
@@ -3478,6 +3479,7 @@ class PipelineTuneTests(PipelineCase):
                 "channel": channel_key("Home", CHANNELS[0]),  # what it taught is kept (2.0.2)
                 "one_stream": True,  # 2.7: a provider with a limit: no second download
                 "https_first": True,  # 2.7.1: HTTPS is chosen by what answers
+                "revive": False,  # an STB portal's channel: a fresh link, not the old again
             },
         )
         self.assertEqual(self.session.plays, [])  # the live session plays it, not the controller
@@ -4043,9 +4045,8 @@ class PipelineErrorTests(PipelineCase):
         self.session.errorOccurred.emit("Broken")  # LiveSession forwards it as failed
         self.live.failed.emit("Broken")
         self.session.ended.emit()  # first opened again (2.0.1), see ReconnectTests
-        self.assertEqual(
-            self.toast.messages(), [("One: Broken", "error"), ("Reconnecting…", "info")]
-        )
+        self.assertEqual(self.toast.messages(), [("One: Broken", "error")])
+        self.assertTrue(self.controller._live_controls.retrying())  # the pill says when
 
     def test_an_stb_failure_makes_the_link_again_once_per_tune(self):
         self.start_pipeline(0)  # an STB provider
@@ -4084,9 +4085,14 @@ class PipelineErrorTests(PipelineCase):
         self.assertTrue(wait_until(lambda: len(self.starts()) == 3))
         self.live.play_pipeline()
         self.session.stateChanged.emit("playing")  # too briefly this time
+        self.enterContext(mock.patch("services.revive.REVIVE_S", (0.05,)))
         self.live.failed.emit("The stream could not be opened")
-        self.assertEqual(self.toast.messages(), [("One: The stream could not be opened", "error")])
+        # It played: never given up on, but its link is made again only after a wait now.
+        self.assertEqual(self.toast.messages(), [])
         self.assertEqual(len(self.catalog.links), 3)
+        self.assertTrue(self.controller._live_controls.retrying())
+        self.assertTrue(wait_until(lambda: len(self.catalog.links) == 4))
+        self.assertEqual(self.requested(), ["One"] * 4)
 
     def test_an_stb_stream_that_ends_at_once_in_direct_play_is_made_again(self):
         self.start_channel(0)
@@ -4098,7 +4104,8 @@ class PipelineErrorTests(PipelineCase):
         self.assertTrue(wait_until(lambda: len(self.starts()) == 2))
         self.live.play_direct()
         self.session.ended.emit()  # once per tune: then the same link opens again
-        self.assertEqual(self.toast.messages(), [("Reconnecting…", "info")])
+        self.assertEqual(self.toast.messages(), [])
+        self.assertTrue(self.controller._live_controls.retrying())  # the pill says when
         self.assertEqual(self.requested(), ["One", "One"])
 
     def test_a_failure_before_the_retry_does_not_use_up_the_notice(self):
@@ -4141,15 +4148,34 @@ class PipelineReferrerTests(PipelineCase):
         self.assertEqual((kwargs["user_agent"], kwargs["referrer"]), ("UA/1", "https://site.test/"))
 
 
-class ReconnectTests(PipelineCase):
+class RetryPillCase:
+    """A real retry pill on an offscreen host: "The stream ended · Trying again in 0:01"."""
+
+    def install_pill(self):
+        from ui.overlays.retry_notice import RetryNotice
+
+        self.host = QWidget()
+        self.host.resize(1280, 720)
+        self.host.show()
+        self.addCleanup(self.host.close)
+        self.pill = RetryNotice(self.host)
+        self.controller.overlays.retry_notice = self.pill
+
+    def pill_text(self):
+        return self.pill.text() if not self.pill.isHidden() else None
+
+
+class ReconnectTests(RetryPillCase, PipelineCase):
     """A live channel played directly whose stream ends (2.0.1): an on-demand restream
     may show its placeholder and end. It opens again in the same player, so in the same
-    budget slot, twice at most, before "The stream ended"."""
+    budget slot, the pill counting down to it; one that never played twice at most, before
+    "The stream ended"; one that played is never given up on (`services.revive`)."""
 
     def setUp(self):
         super().setUp()
         self.enterContext(mock.patch("ui.live_controls.RECONNECT_MS", (40, 120)))
         self.catalog.ptype = "XTREAM"  # no link to make again
+        self.install_pill()
 
     def fall_back(self, index=0):
         self.start_channel(index)
@@ -4159,12 +4185,13 @@ class ReconnectTests(PipelineCase):
     def end_and_reopen(self, plays):
         started = time.monotonic()
         self.session.ended.emit()
-        self.assertEqual(self.toast.messages()[-1], ("Reconnecting…", "info"))
+        self.assertTrue(self.pill_text().startswith("The stream ended · Trying again in 0:0"))
         self.assertEqual(len(self.session.plays), plays)  # after a back-off
         self.assertTrue(wait_until(lambda: len(self.session.plays) == plays + 1))
+        self.assertEqual(self.pill_text(), "The stream ended · Reconnecting…")
         return time.monotonic() - started
 
-    def test_an_ended_fallback_opens_again_twice_then_says_it_ended(self):
+    def test_an_ended_fallback_that_never_played_opens_again_twice_then_says_it_ended(self):
         plays = self.fall_back()
         url, kwargs = self.session.plays[-1]
         stops = self.session.stops
@@ -4175,7 +4202,7 @@ class ReconnectTests(PipelineCase):
         self.assertGreater(second, first)  # a longer back-off the second time
         self.session.ended.emit()
         self.assertEqual(self.toast.messages()[-1], ("The stream ended", "info"))
-        self.assertEqual([text for text, _ in self.toast.messages()].count("Reconnecting…"), 2)
+        self.assertIsNone(self.pill_text())
         QTest.qWait(200)
         self.assertEqual(len(self.session.plays), plays + 2)
         # One slot, the same one, all along: nothing was stopped or given back.
@@ -4183,18 +4210,46 @@ class ReconnectTests(PipelineCase):
         self.assertEqual(self.live.named("stop"), [])
         self.assertEqual(self.budget.holders("Home"), ["main"])
 
+    def test_a_stream_that_played_opens_again_with_growing_waits_and_never_gives_up(self):
+        # The owner's channel (2026-11-09): two reopens, "The stream ended", and 74 minutes
+        # of a dead picture until a channel change. One that played comes back by itself.
+        self.enterContext(mock.patch("services.revive.REVIVE_S", (0.04, 0.12, 0.2, 0.3)))
+        plays = self.fall_back()
+        url, kwargs = self.session.plays[-1]
+        self.session.stateChanged.emit("playing")
+        waits = []
+        for count in range(5):
+            started = time.monotonic()
+            self.session.ended.emit()
+            self.assertEqual(self.toast.messages(), [])
+            self.assertTrue(wait_until(lambda: len(self.session.plays) == plays + count + 1))
+            waits.append(time.monotonic() - started)
+            self.assertEqual(self.session.plays[-1], (url, kwargs))
+        self.assertGreater(waits[3], waits[0])  # RECONNECT_MS, then the revive's longer ones
+        self.assertEqual(self.budget.holders("Home"), ["main"])  # the same slot all along
+        self.assertEqual(self.live.named("stop"), [])
+        self.session.stateChanged.emit("playing")  # it came back
+        self.assertIsNone(self.pill_text())
+
+    def test_try_now_and_enter_open_it_at_once(self):
+        self.enterContext(mock.patch("ui.live_controls.RECONNECT_MS", (60_000, 60_000)))
+        plays = self.fall_back()
+        self.session.ended.emit()
+        self.assertEqual(self.pill_text(), "The stream ended · Trying again in 1:00")
+        self.pill.keepWatching.emit()  # a click on the pill (Try now)
+        self.assertEqual(len(self.session.plays), plays + 1)
+        self.session.ended.emit()
+        self.controller.handle(Action.OK)  # Enter, while the pill shows
+        self.assertEqual(len(self.session.plays), plays + 2)
+
     def test_a_stream_that_played_a_while_since_may_reconnect_twice_again(self):
         self.enterContext(mock.patch("ui.live_controls.HEALTHY_S", 0.05))
         plays = self.fall_back()
         self.end_and_reopen(plays)
         self.end_and_reopen(plays + 1)
         self.session.stateChanged.emit("playing")
-        QTest.qWait(80)  # it played HEALTHY_S since its last reopen
-        self.end_and_reopen(plays + 2)
-        self.session.stateChanged.emit("playing")  # too briefly this time
-        self.end_and_reopen(plays + 3)
-        self.session.ended.emit()
-        self.assertEqual(self.toast.messages()[-1], ("The stream ended", "info"))
+        QTest.qWait(80)  # it played HEALTHY_S since its last reopen: the quick waits again
+        self.assertLess(self.end_and_reopen(plays + 2), 0.5)
 
     def test_a_reopen_decodes_in_software_as_the_stream_did(self):
         plays = self.fall_back()
@@ -4214,6 +4269,7 @@ class ReconnectTests(PipelineCase):
         plays = self.fall_back(0)
         self.end_and_reopen(plays)
         plays = self.fall_back(1)
+        self.assertIsNone(self.pill_text())  # another channel: its own waits
         self.end_and_reopen(plays)
         self.end_and_reopen(plays + 1)
 
@@ -4221,6 +4277,7 @@ class ReconnectTests(PipelineCase):
         self.fall_back(0)
         self.session.ended.emit()
         self.start_channel(1)
+        self.assertIsNone(self.pill_text())
         QTest.qWait(200)
         self.assertNotIn("http://stream/1", self.played_urls()[1:])
 
@@ -4230,9 +4287,33 @@ class ReconnectTests(PipelineCase):
         self.session.ended.emit()  # LiveSession reopens its buffer itself
         QTest.qWait(200)
         self.assertEqual((len(self.session.plays), self.toast.messages()), (plays, []))
+        self.assertIsNone(self.pill_text())
+
+    def test_a_live_session_that_revives_its_direct_play_is_left_to_it(self):
+        plays = self.fall_back()
+        self.live.revives = lambda: True  # LiveSession opens it again itself
+        self.session.ended.emit()
+        QTest.qWait(200)
+        self.assertEqual(len(self.session.plays), plays)
+        self.assertIsNone(self.pill_text())
+
+    def test_the_pill_follows_the_live_sessions_wait_and_try_now_asks_it(self):
+        self.start_pipeline(0)
+        asked = []
+        self.live.retry_now = lambda: asked.append(True) or True
+        self.live.retrying.emit(30.0)  # the helper waits for the channel's stream
+        self.assertEqual(self.pill_text(), "The stream ended · Trying again in 0:30")
+        self.controller.handle(Action.OK)
+        self.assertEqual(asked, [True])
+        self.session.stateChanged.emit("playing")  # the buffer plays: the wait goes on
+        self.assertIsNotNone(self.pill_text())
+        self.live.retrying.emit(-1.0)  # it came back
+        self.assertIsNone(self.pill_text())
+        self.controller.handle(Action.OK)  # Enter opens the channel list again
+        self.assertEqual(asked, [True])
 
 
-class DirectReconnectTests(ControllerTestCase):
+class DirectReconnectTests(RetryPillCase, ControllerTestCase):
     """The same for a channel the pipeline cannot read, which the player opens itself."""
 
     def setUp(self):
@@ -4240,6 +4321,7 @@ class DirectReconnectTests(ControllerTestCase):
         self.enterContext(mock.patch("ui.live_controls.RECONNECT_MS", (40, 120)))
         self.catalog.ptype = "XTREAM"
         self.controller.start()
+        self.install_pill()
 
     def test_an_ended_direct_channel_opens_again_in_the_same_slot(self):
         self.play(0)
@@ -4248,12 +4330,34 @@ class DirectReconnectTests(ControllerTestCase):
         self.session.holding = True  # libVLC holds the ended input until the reopen
         for count in (2, 3):
             self.session.ended.emit()
-            self.assertEqual(self.toast.messages()[-1], ("Reconnecting…", "info"))
+            self.assertTrue(self.pill_text().startswith("The stream ended · Trying again in"))
             self.assertTrue(wait_until(lambda: len(self.session.plays) == count))
             self.assertEqual(self.session.plays[-1], (url, kwargs))
         self.session.ended.emit()
         self.assertEqual(self.toast.messages()[-1], ("The stream ended", "info"))
         self.assertEqual(self.session.stops, 0)  # the slot was never given back
+
+    def test_a_direct_channel_that_played_comes_back_after_failing_to_open(self):
+        self.enterContext(mock.patch("services.revive.REVIVE_S", (0.04, 0.08)))
+        self.play(0)
+        url, kwargs = self.session.plays[-1]
+        self.session.stateChanged.emit("playing")
+        self.session.ended.emit()
+        self.assertTrue(wait_until(lambda: len(self.session.plays) == 2))
+        for count in (3, 4, 5):  # its reopens fail while the channel is down
+            self.session.errorOccurred.emit("The stream could not be opened")
+            self.assertEqual(self.toast.messages(), [])
+            self.assertTrue(wait_until(lambda: len(self.session.plays) == count))
+            self.assertEqual(self.session.plays[-1], (url, kwargs))
+        self.assertEqual(self.session.stops, 0)  # the same player, the same slot
+        self.session.stateChanged.emit("playing")
+        self.assertIsNone(self.pill_text())
+
+    def test_a_direct_channel_that_never_played_reports_its_error(self):
+        self.play(0)
+        self.session.errorOccurred.emit("The stream could not be opened")
+        self.assertEqual(self.toast.messages(), [("One: The stream could not be opened", "error")])
+        self.assertIsNone(self.pill_text())
 
     def test_an_m3u_channels_agent_and_referrer_go_with_its_play_and_reopen(self):
         # 2.1: #EXTVLCOPT http-user-agent and http-referrer reach VLC's own requests.
@@ -4283,7 +4387,7 @@ class DirectReconnectTests(ControllerTestCase):
         self.session.ended.emit()
         QTest.qWait(200)
         self.assertEqual(len(self.session.plays), 1)
-        self.assertNotIn(("Reconnecting…", "info"), self.toast.messages())
+        self.assertIsNone(self.pill_text())
 
 
 class ExternalAgentTests(ControllerTestCase):  # 2.8 review M7

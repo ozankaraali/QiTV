@@ -1,9 +1,9 @@
 """What AI captions download, where it goes, and whether it's in place. No Qt.
 
 Nothing ships with QiTV: the first time AI captions are turned on, the viewer downloads a
-speech model tier, the Silero VAD, the Turkish model (2.9.1: ufakzeka-kulak, 43 MB: Qwen's
-Turkish was poor, this one's far better and 25 times faster) and (unless this Python already has
-it) the sherpa-onnx runtime, all pinned below by size and sha256. They live in
+speech model tier, the Silero VAD, the Turkish model (2.10: QiTV's own Turkish Moonshine medium,
+278 MB, read with our beam search; 2.9.2 to 2.9.10 used ufakzeka-kulak) and (unless this Python
+already has it) the sherpa-onnx runtime, all pinned below by size and sha256. They live in
 `captions_root()`:
 
     ai-captions/
@@ -11,8 +11,11 @@ it) the sherpa-onnx runtime, all pinned below by size and sha256. They live in
                                out in site-packages (put on the captions process's sys.path)
         qwen3-asr-0.6b/        conv_frontend.onnx, encoder.int8.onnx, decoder.int8.onnx,
         qwen3-asr-1.7b/        tokenizer/ (both tiers alike)
-        ufakzeka-kulak/        encoder.int8.onnx, decoder.int8.onnx, joiner.int8.onnx,
-                               tokens.txt (a FastConformer TDT for Turkish alone)
+        qitv-asr-tr-moonshine-mid/  encoder_model_quantized.onnx,
+                               decoder_model_merged_quantized.onnx, tokens.txt (Moonshine v2 files)
+        qitv-mt-milmmt-46-1b/  model.onnx, model.onnx.data, tokenizer.json, config.json
+                               (2.10: translation)
+            site/              the tokenizers wheel, unpacked (put on sys.path by the translator)
         silero_vad.onnx
         verified.json          what was downloaded whole and checked (sha256), by path
 
@@ -110,9 +113,10 @@ class ModelPaths:
     decoder: Path
     tokenizer: Path  # a folder
     vad: Path
-    turkish: Path  # ufakzeka-kulak's folder (its transducer's files, TURKISH_FILES)
+    turkish: Path  # the Turkish Moonshine's folder (TURKISH_FILES)
     european: Path  # 2.9.3: Parakeet TDT 0.6B v3's folder (EUROPEAN_FILES)
     cohere: Path  # 2.9.3: Cohere Transcribe's folder (COHERE_FILE, unpacked)
+    translation: Path  # 2.10: the translator's folder (TRANSLATION_FILES, and site/)
 
 
 # ---- what is downloaded -------------------------------------------------------------------
@@ -220,37 +224,41 @@ VAD = RemoteFile(
     "9e2449e1087496d8d4caba907f23e0bd3f78d91fa552479bb9c23ac09cbb1fd6",
 )
 
-# 2.9.1: ufak AI's ufakzeka-kulak (Apache-2.0), Turkish alone, the sherpa-onnx TDT export. Sizes
-# and sha256 as Hugging Face served them on 2026-11-03 (revision 7190ff5f).
-_UFAK = (
-    "https://huggingface.co/ufakai/ufakzeka-kulak/resolve/"
-    "7190ff5f2374060f488fd234e581ac94a53a887a/sherpa-onnx-tdt/"
+# 2.10: QiTV's own Turkish model, qitv-asr-tr-moonshine-mid (CC BY 4.0; Moonshine Streaming Medium
+# trained further on Turkish), its 8-bit sherpa-onnx Moonshine v2 files, read with our beam search
+# (services.captions.moon_beam). Its top-level config.json comes too (1.8 KB, unused here): the Hub
+# counts a model's downloads by that file. Revision d81f33cb stores the decoder's weights unsigned,
+# so processors without VNNI read it exactly (the signed int8 weights looped on AVX2 kernels).
+_TURKISH_REVISION = (
+    "https://huggingface.co/ozankaraali/qitv-asr-tr-moonshine-mid/resolve/"
+    "d81f33cbdc992b78b7dd9e4a949f2862bd47f62c/"
 )
-TURKISH_FOLDER = "ufakzeka-kulak"
+_TURKISH_REPO = _TURKISH_REVISION + "onnx/"
+TURKISH_FOLDER = "qitv-asr-tr-moonshine-mid"
 TURKISH_FILES = (
     RemoteFile(
-        _UFAK + "encoder.int8.onnx",
-        "encoder.int8.onnx",
-        37776818,
-        "8b19aa33674fc55ef6a37f01569be19e1b7fed5057ec1bea483c19d3ef07e4ea",
+        _TURKISH_REPO + "encoder_model_quantized.onnx",
+        "encoder_model_quantized.onnx",
+        142363625,
+        "39e7e9a74bbe8152021fa8a926c8a51845546359e31984a903314ec4fe0ea920",
     ),
     RemoteFile(
-        _UFAK + "decoder.int8.onnx",
-        "decoder.int8.onnx",
-        3955864,
-        "ef9ae1cc76112970f959da1351b702436ace8a3c94e7631952ba54cb4c806919",
+        _TURKISH_REPO + "decoder_model_merged_quantized.onnx",
+        "decoder_model_merged_quantized.onnx",
+        135617948,
+        "0e90f98f754053dd13cc39594f64a85ec92cce71ef5c8e1063b2caddb7b46322",
     ),
     RemoteFile(
-        _UFAK + "joiner.int8.onnx",
-        "joiner.int8.onnx",
-        1247562,
-        "526499204410eb962dac609aed2140dbeff8d5f7e98037c187d735031ef80664",
-    ),
-    RemoteFile(
-        _UFAK + "tokens.txt",
+        _TURKISH_REPO + "tokens.txt",
         "tokens.txt",
-        10138,
-        "af3092629f214e420ee9a4b563663227cd1998cdd23e1a08a41d489142499c03",
+        179159,
+        "8766e1592373d47ea3f7e52975840a96c51f8d0b4b8619c7bdb951f650eb21ba",
+    ),
+    RemoteFile(
+        _TURKISH_REVISION + "config.json",
+        "config.json",
+        1856,
+        "0a8950a8ea8b41c43413921beff70f8d9655278fa9ad2cb07dc5609e138c604c",
     ),
 )
 
@@ -308,6 +316,42 @@ COHERE_CONTENTS: tuple[tuple[str, Optional[int]], ...] = (
     ("encoder.int8.onnx.data", 2731503072),
     ("decoder.int8.onnx", 153250705),
     ("tokens.txt", 207437),
+)
+
+
+# 2.10: caption translation, MiLMMT-46-1B (Xiaomi) as an int4 ONNX export with the greedy pick
+# inside the graph. Sizes and sha256 as Hugging Face serves them (revision 73356cb2). Its top-level
+# config.json comes too (1.5 KB, unused here): the Hub counts a model's downloads by that file.
+_TRANSLATION_REPO = (
+    "https://huggingface.co/ozankaraali/qitv-mt-milmmt-46-1b/resolve/"
+    "73356cb2ee11aeb7be2b2bbe14e37126612bc66b/"
+)
+TRANSLATION_FOLDER = "qitv-mt-milmmt-46-1b"
+TRANSLATION_FILES = (
+    RemoteFile(
+        _TRANSLATION_REPO + "model.onnx",
+        "model.onnx",
+        295402,
+        "e8652dbcd810fb2026255996547c64a2e872f32dcdc290f2f478e3806a4eae30",
+    ),
+    RemoteFile(
+        _TRANSLATION_REPO + "model.onnx.data",
+        "model.onnx.data",
+        692490752,
+        "48ed68e06bc41cd138e7bc5d513b33c1461d735e1dcd5a50d58d057d0eaa6f3d",
+    ),
+    RemoteFile(
+        _TRANSLATION_REPO + "tokenizer.json",
+        "tokenizer.json",
+        33384567,
+        "daab2354f8a74e70d70b4d1f804939b68a8c9624dd06cb7858e52dd8970e9726",
+    ),
+    RemoteFile(
+        _TRANSLATION_REPO + "config.json",
+        "config.json",
+        1538,
+        "221aeaf24f0e52f590f1fa5555366edd78906c75ef79b8bddd2fa192d358f904",
+    ),
 )
 
 
@@ -376,6 +420,36 @@ _WHEELS: dict[tuple[str, str], tuple[RemoteFile, RemoteFile]] = {
     ),
 }
 _WHEEL_PYTHON_TAG = "cp314"
+# The tokenizers 0.23.3 wheels the translator imports: abi3 (cp310 and later, so any Python that
+# runs QiTV), one per system `_WHEELS` covers, from PyPI's JSON API
+# (pypi.org/pypi/tokenizers/0.23.3/json: urls[].url, size, digests.sha256), 2026-11-15.
+_TOKENIZERS_WHEELS: dict[tuple[str, str], RemoteFile] = {
+    ("darwin", "x86_64"): _wheel(
+        "aa/2e/4ce5b9716f26e526eff6b0502ebed4ea8d7161f03b3c77617c9f25528e97",
+        "tokenizers-0.23.3-cp310-abi3-macosx_10_12_x86_64.whl",
+        3148800,
+        "9d2b5c97daf61688c2ad1803ca851800feaba50fb68d5821779e9ea5880d968c",
+    ),
+    ("darwin", "arm64"): _wheel(
+        "b2/72/01e49f032bb346e5aaf06c10c74fe8aeec847173adbadd66eb7c53054bf2",
+        "tokenizers-0.23.3-cp310-abi3-macosx_11_0_arm64.whl",
+        3101381,
+        "68649e97d5b43c44c031d8d848874a6eecae8f8fe40ea989aa777a5a83aca716",
+    ),
+    ("win32", "x86_64"): _wheel(
+        "d1/6c/24f074c9a0efb98e61b20aafe6b2641922d5db24e447d5d6daffd9e17555",
+        "tokenizers-0.23.3-cp310-abi3-win_amd64.whl",
+        2872101,
+        "1f0823bb00c5fdc98e487354d54dd55a03848d61a1a0bf29a68c77f24f3b26c3",
+    ),
+    ("linux", "x86_64"): _wheel(
+        "3a/40/6706b82693715581457c6d5423eaa7faae576bb0526c5738a57085eb4449",
+        "tokenizers-0.23.3-cp310-abi3-manylinux_2_17_x86_64.manylinux2014_x86_64.whl",
+        3396193,
+        "376851d22bcf9d650a5c3090bb83e6cf9e895fbf0595369fa4cd43c1f69b5f87",
+    ),
+}
+_TOKENIZERS_CONTENTS: tuple[tuple[str, Optional[int]], ...] = (("tokenizers/__init__.py", None),)
 _MACHINES = {"x86_64": "x86_64", "amd64": "x86_64", "x64": "x86_64", "arm64": "arm64"}
 # What the main wheel holds once extracted (the core wheel's libraries differ by system).
 _RUNTIME_CONTENTS: tuple[tuple[str, Optional[int]], ...] = (("sherpa_onnx/__init__.py", None),)
@@ -393,6 +467,17 @@ def runtime_files(
     if wheels is None or python_tag != _WHEEL_PYTHON_TAG:
         raise Unsupported(f"no sherpa-onnx runtime for {sys_platform} {machine} {python_tag}")
     return wheels
+
+
+def tokenizers_file(
+    sys_platform: str = sys.platform, machine: str = platform.machine()
+) -> RemoteFile:
+    """The tokenizers wheel for a system and a processor; Unsupported when none is pinned."""
+    system = "linux" if sys_platform.startswith("linux") else sys_platform
+    wheel = _TOKENIZERS_WHEELS.get((system, _MACHINES.get(machine.lower(), machine.lower())))
+    if wheel is None:
+        raise Unsupported(f"no tokenizers wheel for {sys_platform} {machine}")
+    return wheel
 
 
 def runtime_folder_name(python_tag: str = PYTHON_TAG) -> str:
@@ -430,6 +515,15 @@ def sherpa_importable() -> bool:
         return False
 
 
+@functools.cache
+def tokenizers_importable() -> bool:
+    """This Python imports `tokenizers` already (a source run with it installed)."""
+    try:
+        return importlib.util.find_spec("tokenizers") is not None
+    except ImportError, ValueError:
+        return False
+
+
 def runtime_dir(root: Optional[Path] = None) -> Optional[Path]:
     """The folder to put on the captions process's sys.path; None when this Python imports
     sherpa_onnx already."""
@@ -461,6 +555,7 @@ def model_paths(tier: str, root: Optional[Path] = None) -> ModelPaths:
         turkish=base / TURKISH_FOLDER,
         european=base / EUROPEAN_FOLDER,
         cohere=base / COHERE_FOLDER,
+        translation=base / TRANSLATION_FOLDER,
     )
 
 
@@ -512,14 +607,18 @@ def has_contents(folder: Path, contents: tuple[tuple[str, Optional[int]], ...]) 
 # question said 43 MB, 832 MB or 2.3 GB, and all 3.3-4.8 GB came at once, whatever was watched)
 TURKISH_KEY, EUROPEAN_KEY, COHERE_KEY = "turkish", "european", "cohere"
 SPECIALISTS = (TURKISH_KEY, EUROPEAN_KEY, COHERE_KEY)
+# 2.10: caption translation, downloaded once translating is wanted (not a speech specialist:
+# `full_size` leaves it out)
+TRANSLATION_KEY = "translation"
 
 
 def needed(key: str, root: Optional[Path] = None) -> list[Download]:
     """What `key` needs to run, in download order. A tier ("small", "large"): the runtime
     (unless this Python has one), the VAD and Qwen's files, what captions need to start. A
-    specialist (`SPECIALISTS`): its own files. Unsupported without a runtime for this
-    computer."""
+    specialist (`SPECIALISTS`): its own files. Unsupported without a runtime for this computer."""
     base = _root(root)
+    if key == TRANSLATION_KEY:
+        return _translation(base)
     if key in SPECIALISTS:
         return _specialist(key, base)
     downloads: list[Download] = []
@@ -553,6 +652,17 @@ def _specialist(key: str, base: Path) -> list[Download]:
         (TURKISH_FOLDER, TURKISH_FILES) if key == TURKISH_KEY else (EUROPEAN_FOLDER, EUROPEAN_FILES)
     )
     return [Download(base / folder, file, ((file.path, file.size),)) for file in files]
+
+
+def _translation(base: Path) -> list[Download]:
+    """The model's files and, unless this Python imports tokenizers, its wheel unpacked into
+    the model's `site` folder (the translator puts that on sys.path); Unsupported when no wheel
+    suits this computer."""
+    folder = base / TRANSLATION_FOLDER
+    downloads = [Download(folder, file, ((file.path, file.size),)) for file in TRANSLATION_FILES]
+    if not tokenizers_importable():
+        downloads.append(Download(folder / "site", tokenizers_file(), _TOKENIZERS_CONTENTS))
+    return downloads
 
 
 def missing(tier: str, root: Optional[Path] = None) -> list[Download]:

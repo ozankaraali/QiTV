@@ -39,6 +39,7 @@ from services.remote.protocol import (  # noqa: E402
     CaptionsLanguage,
     CaptionsModel,
     CaptionsSwitch,
+    CaptionsTranslate,
     CastTo,
     CloseSearch,
     Code,
@@ -2099,6 +2100,15 @@ MODELS = {  # 2.9: the speech model, Settings' choice, stepped on the AI caption
         {"id": "large", "name": "More accurate (1.7B)"},
     ],
 }
+TRANSLATE = {  # 2.10: the Translate to row while they are on, and its list (Off first)
+    "translate": "",
+    "translate_note": "Off",
+    "translate_langs": [
+        {"id": "", "name": "Off"},
+        {"id": "Turkish", "name": "Türkçe"},
+        {"id": "English", "name": "English"},
+    ],
+}
 TRACKS["ai"] = {**TRACKS["ai"], **MODELS}
 AI_ON = {
     "on": True,
@@ -2190,6 +2200,17 @@ def scenario_tracks(rig: Rig) -> None:
     rig.page.locator("#tracksList .choice", has_text="English").click()
     rig.events.wait(
         CaptionsLanguage, where=lambda e: (e.language, e.of) == ("English", 4), after=mark
+    )
+    assert rig.page.inner_text("#tracksTitle") == "Subtitles"  # back, as the panel's list
+    rig.hub.send(sid, {**TRACKS, "ai": {**AI_ON, **TRANSLATE}})  # 2.10: Translate to
+    rig.page.locator("#tracksList .choice", has_text="Translate to").click()
+    assert rig.page.inner_text("#tracksTitle") == "Translate to"
+    assert ticked(rig) == ["Off"], ticked(rig)
+    rig.shot("tracks-translate")
+    mark = rig.events.mark()
+    rig.page.locator("#tracksList .choice", has_text="Türkçe").click()
+    rig.events.wait(
+        CaptionsTranslate, where=lambda e: (e.target, e.of) == ("Turkish", 4), after=mark
     )
     assert rig.page.inner_text("#tracksTitle") == "Subtitles"  # back, as the panel's list
     mark = rig.events.mark()

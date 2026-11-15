@@ -1,7 +1,7 @@
 """The TV window's Cocoa details: the overlay attached as a child window, so macOS moves it with
 the player, the keys given back to the window after a click on the video, and for the desktop
-picture in picture (ui/desktop_pip.py) whether a window is on the desktop shown and a window
-that shows on every desktop."""
+picture in picture (ui/desktop_pip.py) whether a window is on the desktop shown, whether any of
+it can be seen, and a window that shows on every desktop."""
 
 import ctypes
 import ctypes.util
@@ -17,6 +17,7 @@ _NS_WINDOW_ABOVE = 1
 _CAN_JOIN_ALL_SPACES = 1 << 0
 _FULL_SCREEN_AUXILIARY = 1 << 8
 _NONACTIVATING_PANEL = 1 << 7  # NSWindowStyleMaskNonactivatingPanel
+_OCCLUSION_VISIBLE = 1 << 1  # NSWindowOcclusionStateVisible: some of the window can be seen
 
 
 @functools.cache
@@ -134,6 +135,44 @@ def on_active_space(widget) -> Optional[bool]:
         return bool(_send(ns_window, b"isOnActiveSpace", ctypes.c_bool))
     except Exception as e:  # never let a Cocoa detail break the player
         logger.debug("Could not tell the window's desktop: %s", e)
+        return None
+
+
+def is_visible(widget) -> Optional[bool]:
+    """macOS: whether any of `widget`'s window can be seen now: its [NSWindow occlusionState]
+    has NSWindowOcclusionStateVisible (not covered whole by other windows, on the desktop
+    shown), or one of its child windows' has (the overlays glued over it are its own); False
+    when it is minimized. None elsewhere, when it cannot tell, and while QiTV is hidden (⌘H:
+    its windows are away on purpose, and showing one would bring QiTV back)."""
+    if QGuiApplication.platformName() != "cocoa":
+        return None
+    try:
+        objc = _objc()
+        objc.objc_getClass.restype = ctypes.c_void_p
+        objc.objc_getClass.argtypes = [ctypes.c_char_p]
+        app = _send(objc.objc_getClass(b"NSApplication"), b"sharedApplication")
+        if not app or _send(app, b"isHidden", ctypes.c_bool):
+            return None
+        ns_window = _send(int(widget.winId()), b"window")
+        if not ns_window:
+            return None
+        if _send(ns_window, b"isMiniaturized", ctypes.c_bool):
+            return False
+        windows = [ns_window]
+        children = _send(ns_window, b"childWindows")
+        if children:
+            count = _send(children, b"count", ctypes.c_ulong)
+            windows += [
+                _send(children, b"objectAtIndex:", ctypes.c_void_p, (ctypes.c_ulong, index))
+                for index in range(count)
+            ]
+        return any(
+            _send(window, b"occlusionState", ctypes.c_ulong) & _OCCLUSION_VISIBLE
+            for window in windows
+            if window
+        )
+    except Exception as e:  # never let a Cocoa detail break the player
+        logger.debug("Could not tell whether the window can be seen: %s", e)
         return None
 
 

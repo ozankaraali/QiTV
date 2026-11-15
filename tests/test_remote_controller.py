@@ -17,6 +17,7 @@ from services.remote.protocol import (
     CaptionsLanguage,
     CaptionsModel,
     CaptionsSwitch,
+    CaptionsTranslate,
     CastTo,
     Closed,
     CloseSearch,
@@ -571,6 +572,25 @@ class PhoneTracksTests(WindowCase):
         self.window.remote.bridge.post(CaptionsModel("s8", "large", of + 1))  # an older list
         QTest.qWait(50)
         self.controls.choose_caption_model.assert_called_once_with("large")
+
+    def test_a_translation_picked_on_the_phone_is_the_tvs_and_its_question_every_phones(self):
+        # 2.10: the translation model's question is QiTV's own (as a language's speech model's):
+        # every phone hears it as the TV's state changes, the picking phone once
+        of = self.opened()["of"]
+        captions, _answer = self.captions()
+        self.controls.choose_caption_translation.return_value = True
+        with mock.patch.object(captions, "asked_unprompted", return_value=True):
+            self.window.remote.bridge.post(CaptionsTranslate("s8", "Turkish", of))
+            self.assertTrue(wait_until(lambda: self.controls.choose_caption_translation.called))
+            self.controls.choose_caption_translation.assert_called_once_with("Turkish")
+            QTest.qWait(50)
+            self.assertEqual(self.sent("ask"), [])  # asked when the TV's state says so
+            captions.changed.emit()
+            self.assertEqual(len(self.sent("ask")), 1)
+            self.assertEqual(len(self.sent("ask", "s9")), 1)
+        self.window.remote.bridge.post(CaptionsTranslate("s8", "German", of + 1))  # older
+        QTest.qWait(50)
+        self.controls.choose_caption_translation.assert_called_once_with("Turkish")
 
     def test_answered_on_the_tv_it_closes_on_the_phones(self):
         of = self.opened()["of"]

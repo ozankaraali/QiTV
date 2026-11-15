@@ -38,7 +38,9 @@ AI captions (2.9, `captions`: the window's CaptionsController, once it has one):
 be offered for what plays, the Subtitles panel has an "AI captions" row, ticked while they are
 on, saying at its right what they wait for ("Downloading 34%"), and while they are on a
 "Language  Türkçe · audio track ›" row that opens the language list in the panel (Auto, then
-each language; "‹ Subtitles" or ← goes back). One subtitle source at a time: a track, Off or a
+each language; "‹ Subtitles" or ← goes back), and under it (2.10) "Translate to  Off ›", which
+opens the list of languages they can be translated into the same way (Off, the app language
+first, then the rest by their own names). One subtitle source at a time: a track, Off or a
 file turns AI captions off, and AI captions turned on turn the track shown off. Turning them on
 closes the panel first, as their first time asks a question (the download); it opens again once
 they are on or on their way.
@@ -46,7 +48,7 @@ they are on or on their way.
 The phone remote's Subtitles and Sound sheets (2.9, ui/remote_controller.py) list the same
 choices, named the same (`sound_choices`, `subtitle_choices`, `captions_choice`), and choose
 them as the rows do (`choose_sound`, `choose_subtitles`, `set_captions`,
-`choose_caption_language`); an open panel follows.
+`choose_caption_language`, `choose_caption_translation`); an open panel follows.
 """
 
 from __future__ import annotations
@@ -60,11 +62,13 @@ from typing import Any, Callable, Iterable, Optional
 from PySide6.QtCore import QEvent, QObject, QRectF, Qt, QTimer
 
 from services import i18n
+from services.captions import mt_languages
 from services.captions.languages import own_name, qwen_name
 from services.i18n import N_, tr, translate
 from services.sound_sync import LIMIT_MS, STEP_MS, SoundSync, clamp
 from services.track_memory import TrackMemory, title_key
 from services.zapping import ZapContext
+from ui.captions_texts import TRANSLATE_ROW, translate_off_text
 from ui.keymap import Action, key_hint
 from ui.link_lanes import Target
 from ui.overlays.track_panel import PanelModel, PanelRow, PanelSync
@@ -100,6 +104,8 @@ AI_CAPTIONS = "ai_captions"  # on or off
 AI_LANGUAGE = "ai_language"  # the language they hear: opens the list
 AI_BACK = "ai_back"  # the list's way back to the Subtitles panel
 AI_PICK = "ai_pick"  # a language of the list: (AI_PICK, "auto" or Qwen's name)
+AI_TRANSLATE = "ai_translate"  # 2.10: the language they are translated into: opens its list
+AI_TRANSLATE_PICK = "ai_translate_pick"  # its list's: (AI_TRANSLATE_PICK, "" or MiLMMT's name)
 # i18n: the Subtitles panel's row: captions written on this computer by a speech model, in the
 # language spoken; a Settings group's title
 AI_CAPTIONS_TEXT = N_("AI captions")
@@ -309,6 +315,9 @@ class CaptionsChoice:
     languages: tuple[tuple[str, str], ...]  # while on, the list: ("auto", "Auto"), (name, own)
     model: str = "auto"  # the speech model, the row's ‹ ›: "auto", "small" or "large"
     models: tuple[tuple[str, str], ...] = ()  # its steps, in order: (name, "Automatic (1.7B)")
+    translate: str = ""  # 2.10: the language they are translated into (MiLMMT's name; "": off)
+    translate_text: str = ""  # the Translate to row's note: its own name, or Off
+    translations: tuple[tuple[str, str], ...] = ()  # its list: ("", "Off"), then (name, own)
 
 
 class TrackControls(QObject):
@@ -362,7 +371,9 @@ class TrackControls(QObject):
         self._captions = captions
         self._watched: Any = None  # the CaptionsController whose `changed` reaches us
         self._captions_on = False  # what it said last: turned on since, the track shown goes
-        self._level = ""  # the Subtitles panel's list: "" its own, AI_LANGUAGE the languages
+        # the Subtitles panel's list: "" its own, AI_LANGUAGE the languages heard, AI_TRANSLATE
+        # those they can be translated into
+        self._level = ""
         self._refresh = QTimer(self, interval=REFRESH_MS)
         self._refresh.timeout.connect(self._follow_player)
 
@@ -605,6 +616,8 @@ class TrackControls(QObject):
         captions = self._offered()
         if self._level == AI_LANGUAGE and captions is not None and captions.enabled():
             return self._language_model(captions)
+        if self._level == AI_TRANSLATE and captions is not None and captions.enabled():
+            return self._translate_model(captions)
         self._level = ""
         session = self._session()
         shown = session.subtitle_track()
@@ -670,6 +683,9 @@ class TrackControls(QObject):
             languages=languages,
             model=str(captions.model()),
             models=tuple(captions.model_choices()),
+            translate=str(captions.translate_to()),
+            translate_text=self._translate_text(captions) if on else "",
+            translations=tuple(self._translations(captions)) if on else (),
         )
 
     def choose_sound(self, track_id: int) -> bool:
@@ -721,6 +737,23 @@ class TrackControls(QObject):
             return False
         captions.set_language(name)
         self._follow_player()
+        return True
+
+    def choose_caption_translation(self, name: str) -> bool:
+        """2.10: the language AI captions are translated into ("": none), while they are on, as
+        the Translate to list picks it; its model's download question first when it isn't here
+        (the panels give way to it). False: they are off, none such, or nothing plays."""
+        captions = self._offered()
+        if captions is None or not self.offers() or not captions.enabled():
+            return False
+        if name not in {target for target, _own in self._translations(captions)}:
+            return False
+        captions.set_translate_to(name)
+        self._one_source(captions)
+        if captions.asking():
+            self.close()  # the question in front, as their row's own
+        else:
+            self._follow_player()
         return True
 
     def choose_caption_model(self, name: str) -> bool:
@@ -785,7 +818,31 @@ class TrackControls(QObject):
         if on:
             note = self._language_text(captions)
             rows.append(PanelRow(AI_LANGUAGE, translate(LANGUAGE_TEXT), note=note, opens=True))
+            note = self._translate_text(captions)  # 2.10: under it, while on as it is
+            rows.append(PanelRow(AI_TRANSLATE, translate(TRANSLATE_ROW), note=note, opens=True))
         return rows
+
+    @staticmethod
+    def _translate_text(captions) -> str:
+        """The Translate to row's note: the language's own name, or Off."""
+        target = captions.translate_to()
+        return mt_languages.own_name(target) if target else translate_off_text()
+
+    @staticmethod
+    def _translations(captions) -> list[tuple[str, str]]:
+        """The Translate to list: Off, then the languages as the controller orders them."""
+        return [("", translate_off_text()), *captions.translate_languages()]
+
+    def _translate_model(self, captions) -> PanelModel:
+        """The Translate to list: "‹ Subtitles", Off, then each language by its own name (the
+        app language's first); the one chosen ticked."""
+        current = captions.translate_to()
+        rows = [PanelRow(AI_BACK, translate(SUBTITLES_TITLE), action=True, icon="chevron_left")]
+        rows += [
+            PanelRow((AI_TRANSLATE_PICK, target), shown, current == target)
+            for target, shown in self._translations(captions)
+        ]
+        return PanelModel(translate(TRANSLATE_ROW), tuple(rows))
 
     @staticmethod
     def _language_text(captions) -> str:
@@ -812,7 +869,9 @@ class TrackControls(QObject):
         """A row's ‹ or › (2.9: AI captions' speech model): they come on again with it while
         on, its download's question first when it isn't here (the question in front)."""
         captions = self._offered()
-        if name != SUBTITLES or key != AI_CAPTIONS or captions is None or not self._playing():
+        if name != SUBTITLES or captions is None or not self._playing():
+            return
+        if key != AI_CAPTIONS:
             return
         captions.step_model(delta)
         self._one_source(captions)
@@ -876,6 +935,9 @@ class TrackControls(QObject):
         elif key == AI_LANGUAGE:
             self._level = AI_LANGUAGE
             self._open(SUBTITLES)
+        elif key == AI_TRANSLATE:
+            self._level = AI_TRANSLATE
+            self._open(SUBTITLES)
         elif key == AI_BACK:
             self._back_to_subtitles()
         elif isinstance(key, tuple) and len(key) == 2 and key[0] == AI_PICK:
@@ -883,6 +945,11 @@ class TrackControls(QObject):
             if captions is not None:
                 captions.set_language(key[1])
             self._back_to_subtitles()
+        elif isinstance(key, tuple) and len(key) == 2 and key[0] == AI_TRANSLATE_PICK:
+            self._level = ""
+            self.choose_caption_translation(key[1])
+            if self._shown() is not None:  # back to Subtitles (asked: the question is in front)
+                self._open(SUBTITLES)
         else:
             return False
         return True

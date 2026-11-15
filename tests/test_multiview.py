@@ -22,11 +22,11 @@ from PySide6.QtCore import (
 from PySide6.QtGui import QMouseEvent, QRegion
 from PySide6.QtTest import QTest
 from PySide6.QtWidgets import QApplication, QWidget
-from timer_fixtures import wait_until
+from timer_fixtures import elapse, wait_until
 
 from services.connection_budget import ConnectionBudget
 from services.live.refusals import STREAM_LIMIT
-from services.navigation import NavNode
+from services.navigation import NavNode, item_key
 from services.sessions import SessionManager, Slot
 from services.zapping import ZapContext
 from tests.test_tv_controller import CHANNELS, FakeLiveSession, FakeSession
@@ -56,6 +56,7 @@ MIB = 1024 * 1024
 HARBOR_NINE = {"id": 9, "name": "Nine", "number": "9", "cmd": "ffrt http://harbor/9"}
 HARBOR_NINE["_provider"] = "Harbor IPTV"
 PAGE = QSize(1280, 720)
+CHANNEL_ROWS = ["Channel 1", "Channel 2"]  # the local fixture provider's
 _OFFSCREEN_NOISE = (
     "This plugin does not support raise()",
     "This plugin does not support setting window masks",
@@ -824,16 +825,16 @@ class MultiviewTests(MultiviewCase):
         self.catalog.ptype = "XTREAM"  # no link to make again: it reconnects
         self.start_large(0)
         self.live.play_direct()  # the big picture's live session fell back
-        self.session.stateChanged.emit("playing")
         self.open_small(CHANNELS[1])
         self.pip_session.stateChanged.emit("playing")
         self.v()
         plays = len(self.session.plays)
         self.session.ended.emit()
-        self.assertEqual(self.toast.messages()[-1], ("Reconnecting…", "info"))
+        self.assertTrue(self.controller._live_controls.retrying())  # the pill counts down
         self.grid_frame.focusRequested.emit("pip")  # the focus moves on during its back-off
         self.assertEqual(self.grid.state("main"), FAILED)
         self.assertEqual(self.grid.label("main"), ("One", "The stream ended"))
+        self.assertFalse(self.controller._live_controls.retrying())  # the pill went with it
         self.assertEqual(self.live.calls[-1], ("stop",))  # its stream stops
         self.live.released.emit()
         self.assertEqual(self.budget.holders("Home"), ["pip"])
@@ -842,6 +843,29 @@ class MultiviewTests(MultiviewCase):
         self.grid_frame.focusRequested.emit("main")  # the focus back: nothing reopens either
         QTest.qWait(150)
         self.assertEqual(len(self.session.plays), plays)
+
+    def test_a_tile_beside_the_focus_that_played_comes_back_after_a_wait(self):
+        # `services.revive`: its card counts down, then its channel is asked for again there.
+        self.enterContext(mock.patch("ui.live_controls.RECONNECT_MS", (80, 120)))
+        self.enterContext(mock.patch("services.revive.REVIVE_S", (0.1, 5.0)))
+        self.catalog.ptype = "XTREAM"
+        self.start_large(0)
+        self.live.play_direct()
+        self.session.stateChanged.emit("playing")  # the big picture's channel played
+        self.open_small(CHANNELS[1])
+        self.pip_session.stateChanged.emit("playing")
+        self.v()
+        self.session.ended.emit()
+        self.grid_frame.focusRequested.emit("pip")  # the focus moves on during its back-off
+        self.assertEqual(self.grid.state("main"), FAILED)
+        title, detail = self.grid.label("main")
+        self.assertEqual(title, "One")
+        self.assertTrue(detail.startswith("The stream ended · Trying again in 0:0"), detail)
+        self.live.released.emit()
+        links = len(self.catalog.links)
+        self.assertTrue(wait_until(lambda: len(self.catalog.links) == links + 1))
+        self.assertEqual(self.catalog.links[-1][1], CHANNELS[0])  # its channel, in its tile
+        self.assertEqual(self.sessions.large().name, "pip")  # the focus stays
 
     def test_a_focused_tile_whose_stream_fails_stops_and_says_so_as_one_beside_it(self):
         # It said "Connecting…" forever and kept its stream.
@@ -866,8 +890,7 @@ class MultiviewTests(MultiviewCase):
         self.assertEqual(self.sessions.large().name, "t2")
         self.assertEqual(len(self.catalog.links), links + 1)
 
-    def test_a_focused_tiles_direct_stream_ended_past_its_reopens_stops_and_says_so(self):
-        self.enterContext(mock.patch("ui.live_controls.RECONNECT_MS", (20, 30)))
+    def focused_direct_tile(self):
         self.catalog.ptype = "XTREAM"
         self.start_large(0)
         self.session.stateChanged.emit("playing")
@@ -875,8 +898,12 @@ class MultiviewTests(MultiviewCase):
         self.grid_frame.tileClicked.emit("t2")
         self.controller.tune(CHANNELS[2], group_key="10", channels=CHANNELS)
         self.ready("rtsp://stream/3")  # a direct tile, focused
-        t2 = self.sessions.slot("t2")
-        t2.playback.stateChanged.emit("playing")
+        return self.sessions.slot("t2")
+
+    def test_a_focused_tiles_direct_stream_ended_past_its_reopens_stops_and_says_so(self):
+        # One that never played: two reopens, then it is over.
+        self.enterContext(mock.patch("ui.live_controls.RECONNECT_MS", (20, 30)))
+        t2 = self.focused_direct_tile()
         for reopen in range(3):  # two reopens, then it is over
             opened = len(t2.playback.plays)
             t2.playback.ended.emit()
@@ -888,6 +915,20 @@ class MultiviewTests(MultiviewCase):
         self.assertEqual(self.grid.label("t2"), ("Three", "The stream ended"))
         self.assertEqual(t2.playback.stops, 1)
         self.assertEqual(self.budget.holders("Home"), ["main"])
+
+    def test_a_focused_tiles_direct_stream_that_played_opens_again_past_its_reopens(self):
+        self.enterContext(mock.patch("ui.live_controls.RECONNECT_MS", (20, 30)))
+        self.enterContext(mock.patch("services.revive.REVIVE_S", (0.02, 0.03, 0.04)))
+        t2 = self.focused_direct_tile()
+        t2.playback.stateChanged.emit("playing")
+        for _reopen in range(5):  # never over while it stays chosen
+            opened = len(t2.playback.plays)
+            t2.playback.ended.emit()
+            t2.playback.stateChanged.emit("ended")
+            self.assertTrue(wait_until(lambda: len(t2.playback.plays) > opened))
+        self.assertNotIn(("The stream ended", "info"), self.toast.messages())
+        self.assertNotEqual(self.grid.state("t2"), FAILED)
+        self.assertEqual(t2.playback.stops, 0)  # the same player and slot all along
 
     def test_leaving_with_an_empty_tile_focused_gives_the_big_picture_to_one_that_plays(self):
         # The big picture was black, One small beside it.
@@ -1019,6 +1060,56 @@ class MultiviewTests(MultiviewCase):
         self.assertEqual(self.grid.state("t2"), FAILED)
         self.assertEqual(len(self.catalog.links), links + 1)
 
+    def test_a_tile_beside_the_focus_that_played_and_failed_opens_again_until_it_plays(self):
+        # `services.revive`: its card counts down, then its link is asked again in its tile,
+        # with growing waits; its tries start anew for another channel.
+        self.enterContext(mock.patch("services.revive.REVIVE_S", (0.05, 0.1, 5.0)))
+        self.catalog.ptype = "XTREAM"
+        self.start_large(0)
+        self.v()
+        t2 = self.pick_in("t2", CHANNELS[2], "http://stream/3")
+        t2.playback.stateChanged.emit("playing")  # it played there
+        self.grid_frame.focusRequested.emit("main")
+        t2.live.failed.emit("The stream broke")
+        self.assertEqual(self.grid.state("t2"), FAILED)
+        self.assertTrue(self.grid.label("t2")[1].startswith("The stream ended · Trying again"))
+        t2.live.released.emit()
+        links = len(self.catalog.links)
+        self.assertTrue(wait_until(lambda: len(self.catalog.links) == links + 1))
+        self.assertEqual(self.catalog.links[-1][1], CHANNELS[2])
+        self.assertEqual(self.sessions.large().name, "main")  # the focus stays
+        self.ready("http://stream/3-again")
+        self.assertTrue(wait_until(lambda: t2.live.running and t2.live.url.endswith("again")))
+        t2.live.failed.emit("The stream broke")  # still down: a longer wait
+        t2.live.released.emit()
+        self.assertTrue(wait_until(lambda: len(self.catalog.links) == links + 2))
+        self.ready("http://stream/3-third")
+        self.assertTrue(wait_until(lambda: t2.live.url.endswith("third")))
+        t2.live.failed.emit("The stream broke")  # the third wait: five seconds
+        QTest.qWait(150)
+        self.assertEqual(len(self.catalog.links), links + 2)
+        self.grid_frame.tileClicked.emit("t2")  # a click tries at once (focused)
+        self.assertEqual(len(self.catalog.links), links + 3)
+
+    def test_a_tile_that_never_played_or_was_refused_is_not_opened_again(self):
+        self.enterContext(mock.patch("services.revive.REVIVE_S", (0.05,)))
+        self.catalog.current_provider = lambda: {"name": "Home", "type": "M3U", "max_streams": 4}
+        self.catalog.ptype = "XTREAM"
+        self.start_large(0)
+        self.v()
+        t2 = self.pick_in("t2", CHANNELS[2], "http://stream/3")
+        self.grid_frame.focusRequested.emit("main")
+        t2.live.failed.emit("The stream broke")  # it never played
+        self.assertEqual(self.grid.label("t2"), ("Three", "Couldn't play this channel"))
+        t3 = self.pick_in("t3", CHANNELS[1], "http://stream/2")
+        t3.playback.stateChanged.emit("playing")
+        self.grid_frame.focusRequested.emit("main")
+        links = len(self.catalog.links)
+        t3.live.failed.emit(STREAM_LIMIT)  # a refusal is never asked again
+        QTest.qWait(150)
+        self.assertEqual(len(self.catalog.links), links)
+        self.assertEqual(self.grid.state("t3"), FAILED)
+
     def test_a_refusal_is_never_asked_again(self):
         self.catalog.current_provider = lambda: {"name": "Home", "type": "STB", "max_streams": 4}
         self.start_large(0)
@@ -1034,6 +1125,41 @@ class MultiviewTests(MultiviewCase):
         self.v()
         self.pick_in("t2", HARBOR_NINE, "http://harbor/9")
         self.assertIn("Harbor IPTV", self.controller.guides_in_use())
+
+    def assert_takes_the_focus_as_plus(self, name):
+        """Tile `name` shows "+": a click focuses it as "+", never as a channel it played
+        before; the channel list opens where the focus was, not on that channel."""
+        self.assertEqual(self.grid.state(name), EMPTY)
+        watched, banners = len(self.watch.plays), len(self.banner.named("show_info"))
+        self.grid_frame.tileClicked.emit(name)
+        self.assertEqual(self.sessions.large().name, name)
+        self.assertIsNone(self.controller._current)
+        self.assertIsNone(self.controller.playing_channel())
+        self.assertEqual(len(self.watch.plays), watched)  # never "watched" again
+        self.assertEqual(len(self.banner.named("show_info")), banners)
+        self.assertEqual(self.drawer.named("open_drawer")[-1], (item_key(CHANNELS[0]),))
+
+    def test_a_tile_stopped_by_leaving_comes_back_as_plus_and_forgets_its_channel(self):
+        self.catalog.current_provider = lambda: {"name": "Home", "type": "STB", "max_streams": 4}
+        self.start_large(0)
+        self.v()
+        self.pick_in("t2", CHANNELS[2], "http://stream/3")
+        self.pick_in("t3", CHANNELS[3], "http://stream/4")
+        self.grid_frame.focusRequested.emit("main")
+        self.v()  # t2 stops; t3 plays on as the small picture
+        self.v()  # the grid again: t2 is "+"
+        self.assertEqual(self.grid.names(), ["main", "t3", "pip", "t2"])
+        self.assert_takes_the_focus_as_plus("t2")
+
+    def test_a_tile_a_smaller_layout_stopped_comes_back_as_plus(self):
+        self.catalog.current_provider = lambda: {"name": "Home", "type": "STB", "max_streams": 4}
+        self.start_large(0)
+        self.v()
+        self.pick_in("t3", CHANNELS[2], "http://stream/3")
+        self.grid_frame.focusRequested.emit("main")
+        self.grid.set_cells(2)  # t3 stops
+        self.grid.set_cells(4)
+        self.assert_takes_the_focus_as_plus("t3")
 
 
 class OneStreamMultiviewTests(MultiviewCase):
@@ -1752,6 +1878,80 @@ class MultiviewWindowTests(WindowCase):
         self.assertFalse(window.grid_tiles.isVisible())
         for name in ("main", "pip"):
             self.assertFalse(window.surfaces[name].isVisible(), name)
+
+    def grid_with_the_list_open(self):
+        """The grid, and a click on the focused "+" tile: the channel list opens on the
+        fixture's channels."""
+        self.show()
+        window = self.window
+        drawer = self.wait_for_drawer()
+        QTest.keyClick(window, Qt.Key.Key_Escape)
+        self.assertTrue(wait_until(lambda: not drawer.isVisible()))
+        QTest.keyClick(window, Qt.Key.Key_V)
+        tile = window.grid_tiles.tiles()[0]
+        self.assertTrue(tile.focused)
+        QTest.mouseClick(window.grid_tiles.hits, LEFT, pos=tile.rect.center())
+        self.assertTrue(wait_until(drawer.isVisible))
+        right = drawer._columns["right"]
+        self.assertTrue(wait_until(lambda: [n.title for n in right.nodes][:2] == CHANNEL_ROWS))
+        return window.controller._grid, drawer
+
+    def double_click(self, view, row):
+        """A double-click on `view`'s `row` as the platform delivers it: through the overlay
+        host's window, each click to the widget under the pointer then."""
+        rect = view.visualRect(view.model().index(row))
+        point = view.viewport().mapToGlobal(rect.center())
+        host = self.window.host.windowHandle()
+        QTest.mouseDClick(host, LEFT, pos=host.mapFromGlobal(point))
+
+    def test_a_double_click_on_a_channel_row_plays_it_in_the_tile_and_the_grid_stays(self):
+        # The first click plays the channel and closes the list; the second, on the grid
+        # under it, used to leave the grid (or focus another tile).
+        grid, drawer = self.grid_with_the_list_open()
+        self.double_click(drawer._columns["right"].view, 1)
+        self.assertFalse(drawer.isVisible())
+        self.assertTrue(grid.shown())
+        self.assertEqual(self.window.sessions.large().name, "main")
+        self.assertEqual(self.window.controller.playing_channel()["name"], CHANNEL_ROWS[1])
+
+    def test_a_tile_focused_by_a_press_on_its_video_opens_the_list_at_a_click_on_its_label(self):
+        self.open_first_channel()  # Channel 1 plays large: tile 1
+        window = self.window
+        drawer = window.overlays.drawer
+        self.assertTrue(wait_until(lambda: not drawer.isVisible()))
+        QTest.keyClick(window, Qt.Key.Key_V)
+        grid, hits = window.controller._grid, window.grid_tiles.hits
+        self.assertTrue(wait_until(lambda: grid.state("main") == PLAYING))
+        plus = window.grid_tiles.tiles()[1].rect.center()
+        QTest.mouseClick(hits, LEFT, pos=plus)  # tile 2 takes the focus; the list opens
+        self.assertTrue(wait_until(drawer.isVisible))
+        QTest.keyClick(window, Qt.Key.Key_Escape)
+        self.assertTrue(wait_until(lambda: not drawer.isVisible()))
+        QTest.mouseClick(window.surfaces["main"], LEFT, pos=QPoint(40, 100))  # focus only
+        self.assertEqual(window.sessions.large().name, "main")
+        elapse(QApplication.doubleClickInterval() + 80)
+        self.assertFalse(drawer.isVisible())
+        label = window.grid_tiles.pill_rect("main")
+        self.assertFalse(label.isEmpty())
+        QTest.mouseClick(hits, LEFT, pos=label.center().toPoint())  # the focused tile's
+        self.assertTrue(wait_until(drawer.isVisible))
+
+    def test_a_double_click_on_the_zap_columns_row_tunes_it_and_the_grid_stays(self):
+        grid, drawer = self.grid_with_the_list_open()
+        right = drawer._columns["right"]
+        view = right.view
+        rect = view.visualRect(view.model().index(1))
+        QTest.mouseClick(view.viewport(), LEFT, pos=rect.center())  # one click: it plays
+        self.assertFalse(drawer.isVisible())
+        controller = self.window.controller
+        column = self.window.overlays.column
+        controller.zap.step(-1)
+        controller.zap.step(-1)  # a burst: the column opens
+        self.assertTrue(wait_until(column.isVisible))
+        self.double_click(column._view, 0)
+        self.assertFalse(column.isVisible())
+        self.assertTrue(grid.shown())
+        self.assertEqual(controller.playing_channel()["name"], CHANNEL_ROWS[0])
 
 
 if __name__ == "__main__":

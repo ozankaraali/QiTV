@@ -19,13 +19,18 @@ Each piece says how much of it was speech: a piece that was mostly not (music th
 caught now and then) is where models write what nobody said. Times are seconds on the
 time-shift timeline; samples are 16 kHz mono floats in an `array("f")`. Only the standard
 library is used (no numpy in the captions runtime).
+
+2026-11-07, for a model that reads an utterance again as it grows (services.captions.growing):
+a cutter may run longer than these defaults and lead in from the first voiced window before the
+held detector's first speech (`lookback`), its pieces carry their voiced windows, and the piece
+going on can be read (`open_piece`) or ended at a pause (`split_at`, `pause_between`).
 """
 
 from __future__ import annotations
 
 from array import array
 from collections.abc import Callable
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Optional
 
 RATE = 16_000
@@ -55,6 +60,8 @@ class Piece:
     samples: array
     speech_share: float
     split: bool = False  # 2.9.4: cut mid-speech (it reached its length), not at a pause
+    voiced: list[bool] = field(default_factory=list)  # per window, the detector without its hold
+    overlap: float = 0.0  # seconds of its end the next piece reads again (cut with no pause)
 
 
 class Cutter:
@@ -64,10 +71,19 @@ class Cutter:
         self,
         is_speech: Callable[[array], bool],
         is_voiced: Optional[Callable[[array], bool]] = None,
+        *,
+        lead_in: float = LEAD_IN_S,
+        longest: float = MAX_PIECE_S,
+        lookback: float = 0.0,
     ) -> None:
         self._is_speech = is_speech
         self._is_voiced = is_voiced  # the detector without its hold (2.9.5)
-        self.max_s = MAX_PIECE_S
+        self._lead_in = _windows(lead_in)
+        # a piece leads in from the first voiced window this long before the held detector's
+        # first speech window, when there is one (it says speech late; 2026-11-07)
+        self._lookback = _windows(lookback) if lookback > 0 else 0
+        self.longest = longest
+        self.max_s = longest
         self.reset()
 
     def reset(self) -> None:
@@ -85,7 +101,7 @@ class Cutter:
         self._await_voice = False  # ended at a phrase's pause: the next starts with a voice
 
     def set_max(self, seconds: float) -> None:
-        self.max_s = min(MAX_PIECE_S, max(MIN_MAX_S, seconds))
+        self.max_s = min(self.longest, max(MIN_MAX_S, seconds))
 
     # ---- in --------------------------------------------------------------------------
     def push(self, start: float, samples: array) -> list[Piece]:
@@ -132,7 +148,12 @@ class Cutter:
                 self._await_voice = False  # a real pause: the next starts as any
             elif voiced or not self._await_voice:
                 self._await_voice = False
-                self._piece = max(self._floor, i - _windows(LEAD_IN_S))
+                onset = i
+                for j in range(max(self._floor, i - self._lookback), i):
+                    if self._voiced[j]:
+                        onset = j
+                        break
+                self._piece = max(self._floor, onset - self._lead_in)
                 self._last_speech = i
                 self._pause = 0
             return None
@@ -172,19 +193,32 @@ class Cutter:
     def _cut_point(self, start: int, end: int) -> int:
         """Where to cut a piece that reached its length: the longest pause between words in
         its second half (the later of two as long), else its quietest window there."""
-        lo = start + (end - start) // 2
+        return self._pause_in(start + (end - start) // 2, end)
+
+    def _pause_in(self, lo: int, end: int) -> int:
+        """The window after the longest pause between words in [lo, end), else after the
+        quietest window there."""
+        at = self._longest_pause(lo, end)
+        if at is not None:
+            return at
+        quietest = min(range(lo, end), key=lambda i: self._loud[i])
+        return quietest + 1
+
+    def _longest_pause(
+        self, lo: int, end: int, shortest: float = WORD_PAUSE_S, latest: bool = False
+    ) -> Optional[int]:
+        """The window after the middle of the longest pause between words in [lo, end) (the
+        later of two as long; `latest`: the last one) at least `shortest` long, None when there
+        is none."""
         run, best, longest = 0, None, 0
         for i in range(lo, end):
             if not self._voiced[i]:
                 run += 1
-                if run >= _windows(WORD_PAUSE_S) and run >= longest:
+                if run >= _windows(shortest) and (latest or run >= longest):
                     best, longest = i - run // 2, run  # inside the pause
             else:
                 run = 0
-        if best is not None:
-            return best + 1
-        quietest = min(range(lo, end), key=lambda i: self._loud[i])
-        return quietest + 1
+        return None if best is None else best + 1
 
     def _cut(self, start: int, end: int, *, split: bool = False) -> Optional[Piece]:
         end = min(end, len(self._flags))
@@ -198,11 +232,75 @@ class Cutter:
             samples=samples,
             speech_share=speech / max(1, end - start),
             split=split,
+            voiced=self._voiced[start:end],
         )
+
+    # ---- the piece going on (services.captions.growing) --------------------------------
+    def open_piece(self) -> Optional[Piece]:
+        """The piece going on, as heard so far (it has not ended), or None."""
+        if self._piece is None or self._buf_start is None:
+            return None
+        start, end = self._piece, len(self._flags)
+        if end <= start:
+            return None
+        return Piece(
+            start=self._buf_start + start * WINDOW / RATE,
+            end=self._buf_start + end * WINDOW / RATE,
+            samples=self._buf[start * WINDOW : end * WINDOW],
+            speech_share=sum(self._flags[start:end]) / (end - start),
+            split=True,
+            voiced=self._voiced[start:end],
+        )
+
+    def pause_between(
+        self, lo: float, hi: float, shortest: float = WORD_PAUSE_S, latest: bool = False
+    ) -> Optional[float]:
+        """The timeline second inside the longest pause between words (`latest`: the last one)
+        at least `shortest` long, of the piece going on from `lo` to `hi`; None when none."""
+        first, last = self._span(lo, hi)
+        at = self._longest_pause(first, last, shortest, latest) if last > first else None
+        return None if at is None or self._buf_start is None else self._at(at)
+
+    def quietest_between(self, lo: float, hi: float) -> Optional[float]:
+        """The timeline second after the quietest window of the piece going on from `lo` to
+        `hi`; None when there is no window there."""
+        first, last = self._span(lo, hi)
+        if last <= first:
+            return None
+        return self._at(min(range(first, last), key=lambda i: self._loud[i]) + 1)
+
+    def split_at(self, at: float, back: float = 0.0) -> Optional[Piece]:
+        """The piece going on ends at timeline second `at`, as a split; the next starts `back`
+        seconds before that (it reads that much of this one again: a word cut in two, or left
+        to it, comes whole there)."""
+        if self._piece is None or self._buf_start is None:
+            return None
+        start = self._piece
+        cut = round((at - self._buf_start) * RATE / WINDOW)
+        if not start < cut <= len(self._flags):
+            return None
+        overlap = min(_windows(back), cut - start - 1) if back > 0 else 0
+        self._piece = self._floor = cut - overlap
+        piece = self._cut(start, cut, split=True)
+        if piece is not None:
+            piece.overlap = overlap * WINDOW / RATE
+        return piece
+
+    def _span(self, lo: float, hi: float) -> tuple[int, int]:
+        """The windows of the piece going on from timeline second `lo` to `hi`."""
+        if self._piece is None or self._buf_start is None:
+            return 0, 0
+        first = max(self._piece + 1, round((lo - self._buf_start) * RATE / WINDOW))
+        last = min(len(self._flags), round((hi - self._buf_start) * RATE / WINDOW))
+        return first, last
+
+    def _at(self, window: int) -> float:
+        assert self._buf_start is not None
+        return self._buf_start + window * WINDOW / RATE
 
     def _trim(self) -> None:
         """Forget what no piece can still need."""
-        keep = self._piece if self._piece is not None else len(self._flags) - _windows(LEAD_IN_S)
+        keep = self._piece if self._piece is not None else len(self._flags) - self._lead_in
         keep = max(0, min(keep, len(self._flags)))
         if keep < _windows(10.0) or self._buf_start is None:
             return  # trim in steps, not per window

@@ -581,6 +581,9 @@ class _Session:
         self._answered = False  # the source's response headers came (bytes may not have yet)
         self._caught_up = False  # HLS: every segment its playlist listed was delivered once
         self._reconnecting = False  # raw TS: the connection broke, a new one is being opened
+        # The channel's stream is down past the quick reconnects: the time of day its next try
+        # is due (`services.live.source`'s long waits; None: none waits).
+        self._retry_at: float | None = None
         # Raw TS (2.8.11): the connections answered with a recording, not the channel, since
         # one last proved live (`NotLiveGuard`): the source asks again meanwhile.
         self._not_live = 0
@@ -903,6 +906,7 @@ class _Session:
         self._new_part = self._open_junction = self._junction_next = True
         self._received, self._answered, self._caught_up = 0, False, False
         self._reconnecting = self._skipping = False
+        self._retry_at = None
         self._not_live, self._settled = 0, 0.0
         self._segment, self._measured = (0, 0.0), (0.0, 0.0)
         self._bursts = BurstMeter()
@@ -945,6 +949,9 @@ class _Session:
         if cancelled:
             source.close()
             raise _Cancelled()
+        listen = getattr(source, "listen_retries", None)
+        if callable(listen):
+            listen(self._on_retry)  # the channel's stream down: when its next try is due
         if self._ring is None:  # a resumed run goes on in its ring
             self._adopt(self._make_ring())
             if isinstance(window, dict) and self._ring is not None:
@@ -1222,6 +1229,23 @@ class _Session:
             self._answered = answered
             self._notify(force=True)
 
+    def _on_retry(self, at: float | None) -> None:
+        """The source waits long for the channel's stream (the time of day of its next try),
+        or a try answered (None); in the reading thread. The state says so at once."""
+        with self._moving:
+            if at != self._retry_at:
+                self._retry_at = at
+                self._notify(force=True)
+
+    def retry_now(self) -> None:
+        """Try the channel's stream again now, when the source waits long for it (the
+        picture's Try now); any thread."""
+        with self.lock:
+            source = self._source
+        wake = getattr(source, "retry_now", None)
+        if callable(wake):
+            wake()
+
     def _take(
         self,
         item: Any,
@@ -1239,6 +1263,7 @@ class _Session:
             self._notify(force=True)
             return
         self._reconnecting = False
+        self._retry_at = None  # the stream came back
         if isinstance(item, Discontinuity):
             self._relabeler.reconnect()
             if trimmer is not None and rejoiner is not None:
@@ -1618,6 +1643,9 @@ class _Session:
             # Raw TS: the connection broke and a new one is being opened (a silent but open
             # connection is waited out first: a stall is not a reconnect).
             "reconnecting": self._reconnecting,
+            # The channel's stream is down past the quick reconnects (raw TS or an HLS
+            # playlist): the time of day (Unix seconds) its next try is due; None: none waits.
+            "retry_at": self._retry_at,
             # Raw TS (2.8.11): the connections answered with a recording, not the channel
             # (`NotLiveGuard`), since one last proved live: the source asks again meanwhile.
             "not_live": self._not_live,
@@ -1928,6 +1956,12 @@ class _Helper:
                 session = self._sessions.get(command[1])
                 if session is not None:
                     session.set_junction(command[2])
+            elif name == "retry_now":  # the picture's Try now: a long wait for the channel ends
+                if len(command) != 2 or not isinstance(command[1], str):
+                    raise ValueError("a try needs a session")
+                session = self._sessions.get(command[1])
+                if session is not None:
+                    session.retry_now()
             elif name == "record_start":
                 self._record(command)
             elif name == "record_stop":

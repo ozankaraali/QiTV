@@ -12,6 +12,7 @@ import orjson as json
 
 from services.atomic_write import atomic_write, set_aside
 from services.captions.languages import CAPTION_LANGUAGES
+from services.captions.mt_languages import MT_LANGUAGES
 from services.config_writer import ConfigWriter
 from services.free_channels import ALL_NAME, ALL_URL
 from services.multikeydict import MultiKeyDict
@@ -509,6 +510,10 @@ class ConfigManager:
     desktop_pip = _config_property("desktop_pip", True, coerce=lambda value: value is not False)
     # 2.4.1, optional: where the user moved or resized that window, [x, y, width, height].
     desktop_pip_rect = _config_property("desktop_pip_rect", None)
+    # Optional (older builds ignore it): on macOS, the picture floats in that window too
+    # while the TV window (not fullscreen) is covered by other apps' windows or minimized
+    # (ui/desktop_pip.py, the covered reason). Off by default: only true turns it on.
+    covered_pip = _config_property("covered_pip", False, coerce=lambda value: value is True)
     # 2.8.5, optional (older builds ignore it): the window stays above other apps' windows
     # (View → Keep on Top).
     keep_on_top = _config_property("keep_on_top", False, coerce=lambda value: value is True)
@@ -586,6 +591,17 @@ class ConfigManager:
             if isinstance(v, dict)
             else {}
         ),
+    )
+    # 2.9.6, optional (older builds ignore it): the viewer said yes to downloading the speech models
+    # for the languages they watch (the first question). Undeclared until 2026-11-08, so it was set
+    # on the object only, never written, and the question came back after every restart.
+    ai_captions_language_models = _config_property(
+        "ai_captions_language_models", False, coerce=lambda value: value is True
+    )
+    # 2.10, optional (older builds ignore it): the language AI captions are translated into
+    # ("": off; else one of services.captions.mt_languages.MT_LANGUAGES, MiLMMT's names)
+    ai_captions_translate_to = _config_property(
+        "ai_captions_translate_to", "", coerce=_one_of(("", *MT_LANGUAGES), "")
     )
     watch_history = _config_property("watch_history", [])
     playback_positions = _config_property("playback_positions", {})

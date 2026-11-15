@@ -13,6 +13,7 @@ import json
 import os
 import tempfile
 import unittest
+from unittest import mock
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
@@ -21,7 +22,7 @@ from PySide6.QtTest import QTest
 from PySide6.QtWidgets import QApplication, QWidget
 from timer_fixtures import elapse
 
-from services import i18n, picture
+from services import i18n, picture, playback
 from services.picture import FILL, STANDARD, WIDE, ChannelPictures, stats_rows
 from services.playback import PlaybackSession
 from services.sleep_timer import SleepTimer, clock_text
@@ -759,6 +760,32 @@ class PictureSessionTests(unittest.TestCase):
         self.session.set_aspect(WIDE)  # another call: deinterlacing is given again
         self.assertEqual(self.picture_calls()[-1], ("video_set_deinterlace", "yadif"))
 
+    def test_on_leaves_a_picture_taller_than_1080i_alone_and_the_next_media_gets_it(self):
+        # 2.9.10: a 2160p 50 fps channel with On showed 5 of its 50 pictures a second, garbled:
+        # VLC 3 deinterlaces on the CPU. No broadcast taller than 1080i is interlaced.
+        self.player.media = _Media()
+        heights = {"height": 0}
+        with mock.patch.object(playback, "_track_stats", side_effect=lambda _m: dict(heights)):
+            self.session.set_deinterlace(picture.ON)
+            self.play(sessions.A)
+            self.assertEqual(self.picture_calls()[-1], ("video_set_deinterlace", "yadif"))
+            self.player.calls.clear()
+            self.session._tick()  # its size not known yet
+            self.assertEqual(self.picture_calls(), [])
+            heights["height"] = 2160
+            self.session._tick()
+            self.assertEqual(self.picture_calls()[-1], ("video_set_deinterlace", None))
+            self.player.calls.clear()
+            self.session._tick()  # read once per media
+            self.assertEqual(self.picture_calls(), [])
+            self.session.set_aspect(WIDE)  # given again: still none for this picture
+            self.assertEqual(self.picture_calls()[-1], ("video_set_deinterlace", None))
+            heights["height"] = 1080
+            self.play(sessions.B)  # a 1080i channel: deinterlaced again
+            self.runner.finish()
+            self.session._tick()
+            self.assertEqual(self.picture_calls()[-1], ("video_set_deinterlace", "yadif"))
+
     def test_a_fill_crop_waiting_for_a_worker_follows_once_it_let_go(self):
         self.session.set_video_size(1280, 720)
         self.play(sessions.A)
@@ -777,6 +804,7 @@ class _PicturePlayer(sessions._FakePlayer):
     def __init__(self):
         super().__init__()
         self.vouts = 0
+        self.media = None
 
     def video_set_aspect_ratio(self, aspect):
         self._call("video_set_aspect_ratio", aspect)
@@ -792,7 +820,14 @@ class _PicturePlayer(sessions._FakePlayer):
         return self.vouts
 
     def get_media(self):
-        return None
+        return self.media
+
+
+class _Media:
+    """The media a player holds (its tracks are read through playback._track_stats)."""
+
+    def release(self):
+        pass
 
 
 class OverlayTests(PictureCase):

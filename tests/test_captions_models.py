@@ -641,6 +641,138 @@ class PinnedFilesTests(unittest.TestCase):
         self.assertEqual(models.runtime_folder_name("cp314"), "runtime-2.0.1-cp314")
 
 
+class TranslationDownloadTests(unittest.TestCase):
+    """2.10: the translation model (three files) and the tokenizers wheel beside them."""
+
+    def setUp(self) -> None:
+        folder = tempfile.TemporaryDirectory(prefix="qitv-captions-")
+        self.addCleanup(folder.cleanup)
+        self.root = Path(folder.name) / "ai-captions"
+        self.folder = self.root / models.TRANSLATION_FOLDER
+        self.wheel_file = RemoteFile(
+            "https://x/t.whl", "t.whl", 321, "ab" * 32, models.EXTRACT_WHEEL
+        )
+        for patch in (
+            mock.patch.object(models, "tokenizers_importable", return_value=False),
+            mock.patch.object(models, "tokenizers_file", return_value=self.wheel_file),
+        ):
+            patch.start()
+            self.addCleanup(patch.stop)
+
+    def place_model(self) -> None:
+        self.folder.mkdir(parents=True)
+        for file in models.TRANSLATION_FILES:
+            with open(self.folder / file.path, "wb") as out:
+                out.truncate(file.size)  # sparse: the size is what is checked
+            models.mark_verified(self.root, f"{models.TRANSLATION_FOLDER}/{file.path}", file.sha256)
+
+    def place_wheel(self) -> None:
+        init = self.folder / "site" / "tokenizers" / "__init__.py"
+        init.parent.mkdir(parents=True)
+        init.write_bytes(b"")
+        models.mark_verified(
+            self.root, f"{models.TRANSLATION_FOLDER}/site/t.whl", self.wheel_file.sha256
+        )
+
+    def test_the_model_is_pinned_to_its_revision(self):
+        self.assertEqual(models.TRANSLATION_KEY, "translation")
+        self.assertEqual(models.TRANSLATION_FOLDER, "qitv-mt-milmmt-46-1b")
+        sizes = {f.path: f.size for f in models.TRANSLATION_FILES}
+        self.assertEqual(
+            sizes,
+            {
+                "model.onnx": 295402,
+                "model.onnx.data": 692490752,
+                "tokenizer.json": 33384567,
+                "config.json": 1538,
+            },
+        )
+        for file in models.TRANSLATION_FILES:
+            self.assertTrue(
+                file.url.startswith(
+                    "https://huggingface.co/ozankaraali/qitv-mt-milmmt-46-1b/resolve/"
+                    "73356cb2ee11aeb7be2b2bbe14e37126612bc66b/"
+                )
+            )
+            self.assertTrue(file.url.endswith("/" + file.path))
+            self.assertEqual(len(file.sha256), 64)
+            self.assertEqual(file.extract, "")
+
+    def test_needed_lists_the_files_and_the_tokenizers_wheel_into_site(self):
+        downloads = models.needed(models.TRANSLATION_KEY, self.root)
+        self.assertEqual(
+            [(d.folder, d.file.path) for d in downloads],
+            [(self.folder, f.path) for f in models.TRANSLATION_FILES]
+            + [(self.folder / "site", "t.whl")],
+        )
+        self.assertEqual(downloads[-1].contents, (("tokenizers/__init__.py", None),))
+        self.assertEqual(models.model_paths("small", self.root).translation, self.folder)
+
+    def test_a_python_with_tokenizers_needs_no_wheel(self):
+        with mock.patch.object(models, "tokenizers_importable", return_value=True):
+            names = [d.file.path for d in models.needed(models.TRANSLATION_KEY, self.root)]
+        self.assertEqual(names, [f.path for f in models.TRANSLATION_FILES])
+
+    def test_installed_needs_the_files_verified_and_the_wheel_unpacked(self):
+        self.assertFalse(models.installed(models.TRANSLATION_KEY, self.root))
+        total = sum(f.size for f in models.TRANSLATION_FILES) + 321
+        self.assertEqual(models.download_size(models.TRANSLATION_KEY, self.root), total)
+        self.place_model()
+        self.assertFalse(models.installed(models.TRANSLATION_KEY, self.root))
+        self.assertEqual(models.download_size(models.TRANSLATION_KEY, self.root), 321)
+        self.place_wheel()
+        self.assertTrue(models.installed(models.TRANSLATION_KEY, self.root))
+        self.assertEqual(models.download_size(models.TRANSLATION_KEY, self.root), 0)
+
+    def test_a_file_not_verified_is_not_installed(self):
+        self.place_model()
+        self.place_wheel()
+        (self.root / models.VERIFIED_FILE).unlink()
+        self.assertFalse(models.installed(models.TRANSLATION_KEY, self.root))
+
+    def test_speech_tiers_are_unchanged_by_translation(self):
+        for key in ("small", *models.SPECIALISTS):
+            names = [d.file.path for d in models.needed(key, self.root)]
+            self.assertFalse(any("tokenizers" in n or "model.onnx" in n for n in names))
+
+    def test_an_unsupported_computer_has_no_translation(self):
+        with mock.patch.object(models, "tokenizers_file", side_effect=models.Unsupported("x")):
+            self.assertFalse(models.installed(models.TRANSLATION_KEY, self.root))
+            with self.assertRaises(models.Unsupported):
+                models.needed(models.TRANSLATION_KEY, self.root)
+
+    def test_delete_all_takes_the_translation_folder_too(self):
+        self.place_model()
+        self.place_wheel()
+        self.assertGreater(models.space_used(self.root), 0)
+        models.delete_all(self.root)
+        self.assertFalse(self.folder.exists())
+        self.assertFalse(models.installed(models.TRANSLATION_KEY, self.root))
+
+
+class TokenizersWheelTests(unittest.TestCase):
+    def test_tokenizers_wheels_for_each_platform(self):
+        cases = {
+            ("darwin", "x86_64"): "macosx_10_12_x86_64",
+            ("darwin", "arm64"): "macosx_11_0_arm64",
+            ("win32", "AMD64"): "win_amd64",
+            ("linux", "x86_64"): "manylinux_2_17_x86_64",
+        }
+        for (system, machine), tag in cases.items():
+            with self.subTest(system=system, machine=machine):
+                file = models.tokenizers_file(system, machine)
+                self.assertTrue(file.path.startswith("tokenizers-0.23.3-cp310-abi3-"))
+                self.assertIn(tag, file.path)
+                self.assertEqual(file.extract, models.EXTRACT_WHEEL)
+                self.assertTrue(file.url.startswith("https://files.pythonhosted.org/"))
+                self.assertTrue(file.url.endswith("/" + file.path))
+                self.assertEqual(len(file.sha256), 64)
+        for system, machine in (("linux", "aarch64"), ("win32", "ARM64"), ("freebsd14", "amd64")):
+            with self.subTest(system=system, machine=machine):
+                with self.assertRaises(models.Unsupported):
+                    models.tokenizers_file(system, machine)
+
+
 class TierChoiceTests(unittest.TestCase):
     GB = 1024**3
 
@@ -672,6 +804,18 @@ class TierChoiceTests(unittest.TestCase):
     def test_the_viewer_s_choice_wins(self):
         self.assertEqual(self.choose("small", score=9.0, ram=64 * self.GB, arm_mac=True), "small")
         self.assertEqual(self.choose("large", score=0.1, ram=4 * self.GB, arm_mac=False), "large")
+
+    def test_while_translating_the_large_tier_wants_a_faster_machine(self):
+        # 2.10: the 1.7B and the translator share the CPU
+        self.assertEqual(tier.TRANSLATE_SMALL_BELOW, 1.5)
+        machine = {"ram": 16 * self.GB, "arm_mac": False}
+        self.assertEqual(self.choose(score=1.2, **machine), "large")
+        self.assertEqual(self.choose(score=1.2, translating=True, **machine), "small")
+        self.assertEqual(self.choose(score=0.99, translating=True, **machine), "small")
+        self.assertEqual(self.choose(score=2.0, translating=True, **machine), "large")
+        arm = {"ram": 16 * self.GB, "arm_mac": True}
+        self.assertEqual(self.choose(score=0.5, translating=True, **arm), "large")  # as before
+        self.assertEqual(self.choose("large", score=1.0, translating=True, **machine), "large")
 
 
 class MachineTests(unittest.TestCase):

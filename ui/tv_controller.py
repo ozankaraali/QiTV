@@ -206,6 +206,8 @@ class Overlays:
     stopped_notice: Any = None  # 2.6: "Stopped", with Play again, after Stop
     library_rec_sign: Any = None  # its twin on the Library page
     cast_notice: Any = None  # 2.8: "Playing on <device>", with Stop casting
+    # "The stream ended · Trying again in 0:25", with Try now (`services.revive`)
+    retry_notice: Any = None
     quality_panel: Any = None  # 2.8: the ⚙ quality menu's panel above its button
     quality_question: Any = None  # 2.8: its own QuestionCard (convert on the server?)
     captions: Any = None  # 2.9: the AI captions over the picture (a CaptionsOverlay)
@@ -346,6 +348,7 @@ class TVController(QObject):
             borrow=lambda item, provider, purpose: self.lend_scheduled(item, provider, purpose),
             gave_up=self._fail_focused_tile,
             on_sizes=self._offer_live_quality,
+            retry_notice=lambda: self.overlays.retry_notice,
             parent=self,
         )
         # Provider setups: the loading and welcome hints, the last channel, the Library's
@@ -730,7 +733,13 @@ class TVController(QObject):
         cast_requested = getattr(transport, "castRequested", None)
         if self._cast is not None and cast_requested is not None:
             cast_requested.connect(self._on_cast_requested)
-        transport.volumeRequested.connect(self._mixer.open_main)
+        # 2.10: the speaker's mixer holds the controls up, as the track panels do: the pointer on
+        # the mixer (above the controls) left the controls idle, they hid, and the mixer they
+        # carried dropped and stayed (hovered)
+        transport.volumeRequested.connect(self._open_mixer)
+        mixer_closed = getattr(self.overlays.mixer, "closed", None)
+        if mixer_closed is not None:
+            mixer_closed.connect(self._on_mixer_closed)
         # The buttons for the player's keys (every key has a control on screen) act as the keys.
         transport.guideRequested.connect(partial(self.handle, Action.GUIDE))
         transport.previousRequested.connect(partial(self.handle, Action.PREVIOUS))
@@ -1168,6 +1177,8 @@ class TVController(QObject):
                 self._on_column_row(self.overlays.column.current_index())  # tune it now
             elif self._live_controls.go_back():
                 pass  # 2.6: the Resume pill shows: back to where the channel was left
+            elif self._live_controls.retry_now():
+                pass  # the channel's stream is down and waited for: Try now
             else:
                 self._open_drawer()
         elif action is Action.BACK_TO:
@@ -1234,7 +1245,8 @@ class TVController(QObject):
             return
         failed = self._failed_live()
         if failed is not None:
-            self._retry_failed(failed)
+            if not self._live_controls.retry_now():  # one that comes back by itself: now
+                self._retry_failed(failed)
             return
         self._tuner.toggle_pause()
         self._show_transport()
@@ -2877,10 +2889,13 @@ class TVController(QObject):
         self.play_in_tile(name, node.payload, group_key=key, channels=channels)
 
     def _reopen_tile(self, name: str, channel: dict) -> None:
-        """A tile without the focus failed on an STB portal: a fresh link, once (its portal's
-        session may have expired; the grid says when)."""
+        """A tile without the focus failed: its channel's link is made again and it opens in
+        that tile; the grid says when (an STB portal's at once, once: its portal's session may
+        have expired, so it signs in again; any channel that played, after the revive's wait,
+        `services.revive`)."""
         logger.info("Making the link of a tile's channel again after it failed")
-        item_provider.sign_in_again(self.catalog, channel)
+        if item_provider.provider_type(self.catalog, channel) == "STB":
+            item_provider.sign_in_again(self.catalog, channel)
         self.play_in_tile(name, channel, retried=True)
 
     def _drop_pip_on_its_way(self) -> None:
@@ -3521,9 +3536,11 @@ class TVController(QObject):
         if self._live_controls.catchup.on_error(message):
             return  # the archive's: it says so and goes live
         current = self._current
-        if current is not None and self._live_controls.may_retry(current):
-            self._live_controls.retry(current)  # STB play tokens expire: a fresh link first
-            return
+        if current is not None and current.live:
+            if self._live_controls.relink(current):
+                return  # STB play tokens expire: a fresh link first (after a wait, again)
+            if self._live_controls.reconnect(current, failed=True):
+                return  # it played: it opens again by itself, in the same slot
         title = current.title if current is not None else ""
         if current is not None and not current.live:
             self._give_small_channel_large()
@@ -3555,11 +3572,14 @@ class TVController(QObject):
                 return  # the archive's next stretch opens, or the channel live
             if self._live_controls.pipeline_live():
                 return  # the buffer reopens
-            if self._live_controls.may_retry(current):
-                self._live_controls.retry(current)  # an expired STB token can end it at once
-                return
+            if self._live_controls.relink(current):
+                return  # an expired STB token can end it at once: a fresh link
+            live = self._live_controls.live
+            revives = getattr(live, "revives", None) if self._tuner.running() else None
+            if callable(revives) and revives():
+                return  # LiveSession opens its direct play again itself, in the same slot
             if self._live_controls.reconnect(current):
-                return  # "Reconnecting…": the same stream opens again, in the same slot
+                return  # the same stream opens again, in the same slot (the pill says when)
             self._toast(tr("The stream ended"))  # i18n: a toast
             self._fail_focused_tile(ended=True)
             return
@@ -3891,6 +3911,18 @@ class TVController(QObject):
         small = sessions.small() if sessions is not None else None
         target = pip.view(small.name).target if pip is not None and small is not None else None
         return large, target.title if target is not None else ""
+
+    def _open_mixer(self) -> None:
+        """The transport's speaker: the mixer, the controls held up (the speaker lit) until it
+        closes."""
+        self._mixer.open_main()
+        if self._mixer.visible():
+            self.overlays.transport.hold("volume")
+
+    def _on_mixer_closed(self) -> None:
+        transport = self.overlays.transport
+        if transport.held() == "volume":
+            transport.hold("")
 
     def _on_audio_changed(self) -> None:
         """A level or mute changed, or the pictures swapped: the PiP label's speaker and the

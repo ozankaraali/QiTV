@@ -19,7 +19,8 @@ again, and a seek reads again from where the picture went. Another audio track (
 panel, a key, a phone) is read from where the picture is, in its own language. A caption
 that comes after its words started shows for what is left of it (the picture's own pace
 decides); one that comes after they ended never shows (captions in the next scene are worse
-than none).
+than none). A caption too long for two lines shows in parts, sentence by sentence, each as it is
+said by its line's parts' times (`_page_at`; 2026-11-08, the owner).
 
 A film or an episode has no helper: the process plays its sound from `FILM_AHEAD_S` past the
 picture (services.captions.film), on the film's own clock, from where the window's player reads
@@ -28,6 +29,14 @@ film is read through a film relay (services.film_relay) instead of a second stre
 providers allow none of: the picture's one provider connection serves both. A film started while
 captions are on plays through it from the start; turning them on during one opens it again there,
 where it is (TVController.relay_film); turning them off keeps it until the title ends.
+
+2.10: the captions show translated into the language the viewer picks from the "Translate to"
+list (`set_translate_to`; MiLMMT-46 1B in the captions process, services.captions.translate). Its
+model is downloaded once its question is answered (asked while they are on; not now: none).
+While they are translated the picture is held TRANSLATE_LEAD_S further back (a film's sound read
+that much further ahead), on every channel. On a computer too slow for the 1.7B and the
+translator both, Automatic takes the 0.6B (services.captions.tier.TRANSLATE_SMALL_BELOW) and
+Turkish is read with its best path alone while translating (the load's "slow_to_translate").
 """
 
 from __future__ import annotations
@@ -39,6 +48,7 @@ from typing import Any, Optional
 
 from PySide6.QtCore import QObject, QTimer, Signal
 
+from services.captions.streaming import TRANSLATE_LEAD_S
 from services.i18n import tr, translate
 
 logger = logging.getLogger(__name__)
@@ -49,6 +59,11 @@ FILM_AHEAD_S = 6.0  # a film's sound is read from this far past the picture (aft
 # ahead of it is in time (2.9: a 1.7B film's captions 3-6 s ahead, all in time, said so at
 # every dip under the 6 s it starts with).
 LATE_LEAD_S = 1.0
+# 2026-11-07: once the model has loaded, the picture's wait for the captions goes on until the
+# first run has written this far past it (its first words are written, not passed), this long
+# after the model was ready at most
+START_LEAD_S = 1.5
+START_WAIT_S = 6.0
 HOLD_S = 0.6  # a caption stays this long after its words, unless the next one starts
 MIN_SHOW_S = 1.2
 # 2.9, the owner: captions came "a tiny bit" before the words, and went before the next line
@@ -72,17 +87,33 @@ JOIN_GAP_S = 0.3
 JOIN_LONGEST_S = 3.5
 JOIN_CHARS = 84  # without an overlay to ask: what two lines hold
 LAG_S = 1.0
+PAGE_S = 1.0  # a part of a long caption stays at least this long (2026-11-08: none flashes by)
+# 2026-11-09, the owner: buffered channels watched at 1.5x or 2x; the times a caption stays to be
+# read are the viewer's, so they stretch by the picture's rate (from FAST_FROM, at most RATE_CAP)
+FAST_FROM = 1.2
+RATE_CAP = 2.0
 _LAG_LOOK = 32  # cues looked back at for a wait that reaches the one asked about
 TICK_MS = 250
 SEEK_S = 2.0  # the position moved this much more than the clock: a seek, read again there
 KEEP_S = 30 * 60.0  # cues kept this far behind the picture
 _RESTART_MS = 1000
+# 2026-11-09, the owner's channel: its clock leapt, every run read again from the same second
+# (25 runs in 27 s), and the second it waited for stayed past the next channel's tune (no run
+# there for minutes, "Can't keep up" for a run that never read). A run read again past a jump
+# starts at least this far past the last one's start and reads on past the next steps; a jump's
+# place is the session's alone; a jump whose segment is not there after RESYNC_TRIES restarts
+# reads from the picture instead; and a run that has heard nothing NO_SOUND_S after it began
+# reads again from the picture
+RESYNC_STEP_S = 0.1
+RESYNC_TRIES = 5
+NO_SOUND_S = 12.0
 _SLOW_RTF = 0.9  # the model takes this long per second of speech: it can't keep up
 # 2.9.6: the first question's yes (it said every language's model may come): they download as
 # their languages play, unasked
 _LANGUAGE_MODELS_OK = "ai_captions_language_models"
 _BACKLOG_S = 2.0  # ... or this much sound read waits for it (2.9.1)
 _SLOW_FOR_S = 30.0
+_TRANSLATE_TO = "ai_captions_translate_to"  # 2.10: the language they are translated into
 
 from ui.captions_texts import (  # noqa: E402  (the texts, with their translations)
     CANT_KEEP_UP,
@@ -103,11 +134,27 @@ from ui.captions_texts import (  # noqa: E402  (the texts, with their translatio
     STARTING,
     STEP_DOWN_QUESTION,
     STEPPED_DOWN,
+    TRANSLATE_QUESTION,
     size_text,
 )
 
 MODEL_NAMES = ("auto", "small", "large")  # the AI captions row's ‹ › steps, in order
 MODEL_SIZES = {"small": "0.6B", "large": "1.7B"}
+
+
+def _words(text: str) -> int:
+    """A caption's words (a lone dash is none)."""
+    return sum(1 for word in text.split() if word != "-")
+
+
+def _word_time(timing: list[tuple[int, float, float]], k: int) -> float:
+    """When the caption's word `k` (from 0) is said, by its part's times: (words, start, end)
+    each, the words spread evenly over their part."""
+    for words, start, end in timing:
+        if k < words:
+            return start + (end - start) * k / max(1, words)
+        k -= words
+    return timing[-1][2] if timing else 0.0
 
 
 def model_texts() -> dict[str, str]:
@@ -154,6 +201,12 @@ class CaptionsController(QObject):
         self._start_after_leaving = False
         self._run_channel = ""  # the channel the run reads (a vote's language is its)
         self._resync_at: Optional[float] = None  # read again from past a jump here
+        self._resync_tries = 0  # restarts that found no segment past it yet
+        self._read_on = False  # the next run reads on past steps of the stream's clock
+        self._run_began: Optional[float] = None  # when the run began (its sound awaited)
+        self._deaf_runs = 0  # runs in a row read again for hearing nothing (twice at most)
+        self._rate = 1.0  # the picture's playback rate, as its position moves
+        self._rate_from: Optional[tuple[float, float]] = None  # (position, clock) measured from
         self._supported: Optional[bool] = None
         self._asking = False
         self._question = ("", "", "")  # the download's question and its answers, as asked
@@ -176,6 +229,8 @@ class CaptionsController(QObject):
         self._run_start = 0.0  # the timeline second the run reads from
         self._run_track: Optional[int] = None  # the audio track the run reads (None: default)
         self._cues: list[tuple[float, float, str]] = []  # (start, end, text) by start
+        # each cue's words' times, by its start: (words, start, end) of each part said in it
+        self._timing: dict[float, list[tuple[int, float, float]]] = {}
         self._gone = float("-inf")  # the start of the latest cue whose time on screen ended
         self._newest: Optional[float] = None  # the newest second the run has read
         self._written: Optional[float] = None  # the second its captions are written to
@@ -187,8 +242,10 @@ class CaptionsController(QObject):
         self._last: Optional[tuple[float, float]] = None  # (position, monotonic) last tick
         self._was_waiting = False  # the live picture waited for the captions' distance
         self._floored: Any = None  # the live session holding the captions' distance
+        self._starting: Optional[float] = None  # when the model got ready, till the run writes
         self._shown = ""
         self._language: tuple[str, str] = ("", FROM_MODEL)  # (qwen name or "", source)
+        self._guessed = False  # the language is a guess from the channel's title prefix
         self._detected: dict[str, str] = {}  # channel: the language the model's pieces agreed on
         self._routed = ""  # the provider's film last sent through a film relay while on
         self._timer = QTimer(self)
@@ -366,6 +423,136 @@ class CaptionsController(QObject):
         self.changed.emit()
         self._offer_specialist()
 
+    # ---- 2.10: translated into the language the viewer picks ------------------------------
+    def translate_to(self) -> str:
+        """The language AI captions are translated into, as the viewer chose it (MiLMMT's
+        name; "": none). Its model may not be here yet (asked for, or on its way)."""
+        from services.captions.mt_languages import MT_LANGUAGES
+
+        name = str(self._config_get(_TRANSLATE_TO, "") or "")
+        return name if name in MT_LANGUAGES else ""
+
+    def translate_languages(self) -> list[tuple[str, str]]:
+        """The Translate to list's languages, Off aside, as (MiLMMT's name, its own name): the
+        app language's first when MiLMMT has it, then the rest by their own names (as Settings
+        sorts the captions' languages)."""
+        from services import i18n
+        from services.captions.mt_languages import MT_LANGUAGES, app_default, own_name
+
+        first = app_default(i18n.language())
+        rest = sorted(
+            (name for name in MT_LANGUAGES if name != first),
+            key=lambda name: own_name(name).casefold(),
+        )
+        return [(name, own_name(name)) for name in ([first] if first else []) + rest]
+
+    def set_translate_to(self, name: str) -> None:
+        """The language AI captions are translated into ("": none), kept as Settings keep
+        theirs. A language whose model isn't here asks its download's question first, while
+        they are on (else as they start; not now: none); "" takes back that question, or calls
+        off that download."""
+        from services.captions.models import TRANSLATION_KEY
+        from services.captions.mt_languages import MT_LANGUAGES
+
+        if name and name not in MT_LANGUAGES:
+            return
+        before = self._translation()
+        if not name and self._fetching == TRANSLATION_KEY:
+            if self._download is not None:
+                self._cancel_download()
+            elif self._asking:
+                self._asking = self._asking_step = False
+                if self._card is not None:
+                    self._card.withdraw()
+        self._config_set(_TRANSLATE_TO, name)
+        logger.info("AI captions: translated into %s", name or "nothing")
+        self._follow_translation(before)
+        self._offer_translation()
+        self.changed.emit()
+
+    def _translation(self) -> str:
+        """What AI captions are translated into now: the language chosen, once its model is
+        here ("": nothing; then no hold, no step to the 0.6B, nothing for the process)."""
+        from services.captions.models import TRANSLATION_KEY
+
+        target = self.translate_to()
+        return target if target and self._here(TRANSLATION_KEY) else ""
+
+    @staticmethod
+    def _translation_folder() -> str:
+        from services.captions import models
+
+        return str(models.captions_root() / models.TRANSLATION_FOLDER)
+
+    def _translate_message(self) -> tuple:
+        """The process's ("translate", ...): the language and its model's folder, or None."""
+        now = self._translation()
+        return ("translate", now, self._translation_folder()) if now else ("translate", None)
+
+    def _follow_translation(self, before: str) -> None:
+        """What they are translated into changed from `before` ("": nothing). Turned on or off,
+        Automatic's speech model may change: turned on with it here, it takes over while they go
+        on (R25, `_switch`); else they come on again with it, as with a model chosen.
+        Else the process translates from now on, and the picture keeps its distance for it as it
+        plays: raised, it waits there once; lowered, stay-live steers it back. A film's sound is
+        read again from further ahead (turned off, it reads on, ahead as it is)."""
+        now = self._translation()
+        if now == before:
+            return
+        turned = bool(now) != bool(before)
+        switched = False
+        if turned and (self._enabled or self._download is not None):
+            tier = self._choose_tier()
+            if tier != self._tier and now and self._enabled and self._here(tier):
+                # R25: Automatic's 0.6B, here, takes over while they go on (the captions written
+                # stay, the picture too); the load carries the translation
+                self._switch(tier, stepped=False)
+                switched = True
+            elif tier != self._tier:
+                self._disable()
+                self.toggle()
+                return
+        if self._process.running() and not switched:
+            self._process.send(*self._translate_message())
+        if not turned:
+            return  # another language: held as it is
+        if self._floored is not None:
+            self._floored.set_caption_floor(self._picture_lead(), shift=False)
+        if now and self._enabled and self._ready and self._session_key and not self._is_live():
+            self._start_run()
+
+    def _offer_translation(self) -> None:
+        """A language to translate into whose model isn't here: its download's question, while
+        they are on and nothing else asks or downloads (else when the next run starts), as a
+        language's own speech model's (QiTV's own: every phone hears it)."""
+        from services.captions import models
+
+        if not self.translate_to() or not self._enabled:
+            return
+        if self._here(models.TRANSLATION_KEY) or self._asking or self._download is not None:
+            return
+        if self._card is None:
+            return
+        try:
+            missing = models.download_size(models.TRANSLATION_KEY)
+        except models.Unsupported:
+            logger.warning("AI captions: no translation model suits this computer")
+            self._config_set(_TRANSLATE_TO, "")
+            self.changed.emit()  # the row (and the phones) say Off
+            return
+        self._fetching = models.TRANSLATION_KEY
+        if missing == 0:  # here already, only to be checked
+            self._start_download()
+            return
+        self._asking = self._asking_step = True
+        self._question = (
+            translate(TRANSLATE_QUESTION, size=size_text(missing)),
+            translate(DOWNLOAD),
+            translate(NOT_NOW),
+        )
+        self._card.ask(*self._question)
+        self.changed.emit()  # the phones ask too (asked_unprompted)
+
     # ---- the speech model (2.9: on the AI captions row, a game's ‹ quality ›; Settings' too) --
     def model(self) -> str:
         """The viewer's speech model: "auto" (by this computer's speed), "small" or "large"."""
@@ -416,14 +603,21 @@ class CaptionsController(QObject):
 
         if self._stepped_down:
             return "small"
+        score = tier.known_score()
+        translating = bool(self._translation())
+        # 2.10: translated on a computer too slow for the 1.7B and the translator both: the
+        # 0.6B once it is here (R25: else the 1.7B here goes on, and the step down asks for the
+        # 0.6B if it can't keep up; with neither here, choose_tier gives the 0.6B below)
+        if translating and score is not None and tier.slow_to_translate(score):
+            if self._here("small"):
+                return "small"
         for name in ("large", "small"):
             if self._here(name):
                 return name
-        score = tier.known_score()
         if score is None:
             self._warm_tier()
-            score = tier.LARGE_MIN_SCORE
-        return str(tier.choose_tier("auto", score=score))
+            return str(tier.choose_tier("auto", score=tier.LARGE_MIN_SCORE))
+        return str(tier.choose_tier("auto", score=score, translating=translating))
 
     def _speed_unknown(self) -> bool:
         """Automatic would pick by this computer's speed, not measured yet."""
@@ -431,9 +625,20 @@ class CaptionsController(QObject):
 
         if self.model() != "auto" or self._stepped_down:
             return False
-        if self._here("large") or self._here("small"):
-            return False
+        if (self._here("large") or self._here("small")) and not self._translation():
+            return False  # one here: Automatic takes it (translated: by the speed first)
         return tier.known_score() is None and not self._unmeasured
+
+    def _picture_lead(self) -> float:
+        """The picture's distance behind live: the model's, and TRANSLATE_LEAD_S more while
+        they are translated (2.10: on every channel, one in the language chosen too)."""
+        lead = LEAD_S.get(self._tier, 8.0)
+        return lead + TRANSLATE_LEAD_S if self._translation() else lead
+
+    def _film_ahead(self) -> float:
+        """How far past the picture a film's sound is read: FILM_AHEAD_S, and TRANSLATE_LEAD_S
+        more while they are translated."""
+        return FILM_AHEAD_S + TRANSLATE_LEAD_S if self._translation() else FILM_AHEAD_S
 
     def _here(self, name: str) -> bool:
         """The model is installed, looked at once until a download or Settings' Delete changes
@@ -460,8 +665,8 @@ class CaptionsController(QObject):
     def _cancel_download(self) -> None:
         download, self._download = self._download, None
         self._start_after_leaving = False
-        if download is not None:
-            self._show("")  # its progress goes with it
+        if download is not None and not self._enabled:
+            self._show("")  # its progress goes with it (on, the captions show: they stay)
         if download is not None and download is not self._leaving_download:
             download.cancel()
             self._leaving_download = download
@@ -498,7 +703,12 @@ class CaptionsController(QObject):
         self._asking = self._asking_step = False
         first, self._first_question = self._first_question, False
         if not yes:
+            from services.captions.models import TRANSLATION_KEY
+
+            if self._fetching == TRANSLATION_KEY:
+                self._config_set(_TRANSLATE_TO, "")  # 2.10: not now: not translated
             self.changed.emit()  # the question is gone (a phone's closes too)
+            self._offer_translation()  # 2.10: one picked while this one was up
             return
         if first:  # 2.9.6, the owner: asked once, the sizes said; each language's comes alone
             self._config_set(_LANGUAGE_MODELS_OK, True)
@@ -560,8 +770,13 @@ class CaptionsController(QObject):
         self._disk.clear()
         self._unpacking = False
         self._download = None
-        from services.captions.models import SPECIALISTS
+        from services.captions.models import SPECIALISTS, TRANSLATION_KEY
 
+        if self._fetching == TRANSLATION_KEY:  # 2.10: translated from now on
+            self._follow_translation("")
+            self._offer_specialist()  # one wanted while this one downloaded (every phone hears)
+            self.changed.emit()
+            return
         if self._fetching in SPECIALISTS:  # 2.9.6: a language's own model is here
             if self._enabled:
                 self._reload()
@@ -586,9 +801,12 @@ class CaptionsController(QObject):
         if not self._enabled:  # else the captions show on (a step down's download failed)
             self._show("")
         from services.captions.download import CANCELLED
+        from services.captions.models import TRANSLATION_KEY
 
         if reason != CANCELLED:
             self._toast(reason, "error")  # already the whole sentence ("Download failed: …")
+            if self._fetching == TRANSLATION_KEY:
+                self._config_set(_TRANSLATE_TO, "")  # 2.10: not translated (a pick asks again)
             self._offer_faster()
         self.changed.emit()
 
@@ -646,6 +864,7 @@ class CaptionsController(QObject):
 
         paths = models.model_paths(self._tier)
         runtime = models.runtime_dir()
+        translation = self._translation()
         self._loading, self._ready = True, False
         self._process.start(
             {
@@ -658,13 +877,25 @@ class CaptionsController(QObject):
                 },
                 "vad": str(paths.vad),
                 # the specialists that are here (2.9.6: each comes once its language is wanted)
-                "turkish": self._folder("turkish", paths.turkish),  # 2.9.1: ufakzeka-kulak
+                "turkish": self._folder("turkish", paths.turkish),  # 2.10: our Turkish Moonshine
                 "european": self._folder("european", paths.european),  # 2.9.3: Parakeet
                 "cohere": self._folder("cohere", paths.cohere),  # 2.9.3: Cohere Transcribe
+                # 2.10: the language they are translated into, and its model once it is here
+                "translate_to": translation or None,
+                "translation": self._translation_folder() if translation else None,
+                "slow_to_translate": self._slow_to_translate(),  # 2.10 (an older child ignores it)
                 "threads": model_threads(),
             },
             detailed_log=bool(self._config_get("detailed_log", False)),
         )
+
+    def _slow_to_translate(self) -> bool:
+        """This computer is slow to translate (tier.slow_to_translate, by the score already
+        known; unknown counts as not slow): the child reads Turkish plainly while translating."""
+        from services.captions import tier
+
+        score = tier.known_score()
+        return score is not None and tier.slow_to_translate(score)
 
     # ---- Automatic steps down (2.9: the owner's call) -------------------------------------
     def _behind(self) -> bool:
@@ -759,18 +990,23 @@ class CaptionsController(QObject):
         self._load_model()
         self.changed.emit()
 
-    def _switch(self, tier: str) -> None:
+    def _switch(self, tier: str, stepped: bool = True) -> None:
         """Captions on with `tier` instead, at once: the captions written so far stay (the
         timeline is the same), the picture stays where it is, and the new model reads on
-        from it once loaded (`_on_ready`)."""
-        logger.info("AI captions: the %s model can't keep up, the %s instead", self._tier, tier)
-        self._stepped_down = True
+        from it once loaded (`_on_ready`). `stepped`: Automatic's step down (kept while QiTV
+        runs, and said); else translation turned on (2.10, R25: nothing said, nothing kept)."""
+        if stepped:
+            logger.info("AI captions: the %s model can't keep up, the %s instead", self._tier, tier)
+            self._stepped_down = True
+        else:
+            logger.info("AI captions: translated: the %s model instead of the %s", tier, self._tier)
         self._process.stop()
         self._tier = tier
         self._slow_since = None
         self._newest = self._written = None
         self._load_model()
-        self._toast(translate(STEPPED_DOWN))
+        if stepped:
+            self._toast(translate(STEPPED_DOWN))
         self.changed.emit()
 
     def _disable(self) -> None:
@@ -786,7 +1022,8 @@ class CaptionsController(QObject):
         self._loading = self._ready = False
         self._session_key = ""
         self._newest = self._written = None
-        self._slow_since = None
+        self._forget_run()
+        self._run_began = None
         self._routed = ""  # a film relay stays until its title ends; on again, asked again
         self._drop_floor()
         self._show("")
@@ -795,6 +1032,8 @@ class CaptionsController(QObject):
     # ---- the process ---------------------------------------------------------------------
     def _on_ready(self) -> None:
         self._loading, self._ready = False, True
+        # the picture waits on until the first run has written past it (`_on_progress`)
+        self._starting = time.monotonic()
         if self._enabled:
             self._start_run()
         self.changed.emit()
@@ -803,6 +1042,8 @@ class CaptionsController(QObject):
         was = self._enabled
         logger.warning("AI captions stopped: %s", reason)
         self._loading = self._ready = False
+        self._starting = None
+        self._tell_ready(True)  # nothing to wait for any more
         if reason != "gone":
             self._process.stop()  # it did not load: no child left without a model
         if was:
@@ -823,31 +1064,48 @@ class CaptionsController(QObject):
         self._restart.stop()  # this is the start a pending restart was for
         if not self._enabled or not self._ready:
             return
+        self._offer_translation()  # 2.10: a language chosen whose model isn't here (any more)
         if not self._is_live():
             self._start_film()
             return
         live = self._live()
         after, self._resync_at = self._resync_at, None
+        read_on, self._read_on = self._read_on, False
         source = None
         if live is not None:
             source = live.caption_source(after) if after is not None else live.caption_source()
+            if source is None and after is not None and self._resync_tries >= RESYNC_TRIES:
+                logger.info("AI captions: past the jump is not there: read from the picture")
+                after, source = None, live.caption_source()
         if source is None:
             if after is not None:  # the segment after the jump is not there yet
-                self._resync_at = after
+                self._resync_at, self._read_on = after, read_on
+                self._resync_tries += 1
                 self._restart.start()
                 return
             self._session_key = ""
             self.changed.emit()
             return
+        self._resync_tries = 0
         url, _seq, start = source
         self._run += 1
+        self._run_began = time.monotonic()
         self._run_channel = self._channel_key()
         self._run_start = start
         self._run_track = self._audio_track()
         self._resolve_language()  # the language of the track it reads, as it begins
         self._session_key = url.rsplit("/side/", 1)[0]
         self._newest = self._written = None
-        self._process.send("start", self._run, url, start, self._run_track, self._language[0])
+        self._process.send(
+            "start",
+            self._run,
+            url,
+            start,
+            self._run_track,
+            self._language[0],
+            self._guessed,
+            read_on,
+        )
         self._process.send("viewer", self._position())
         self._offer_specialist()
 
@@ -858,7 +1116,7 @@ class CaptionsController(QObject):
             self.changed.emit()
             return
         location, options = film
-        start = self._position() + FILM_AHEAD_S
+        start = self._position() + self._film_ahead()
         self._run += 1
         self._run_channel = self._channel_key()
         self._run_start = start
@@ -871,9 +1129,15 @@ class CaptionsController(QObject):
         )
         self._process.send("viewer", self._position())
 
-    def _on_caption(self, run: int, start: float, end: float, text: str) -> None:
+    def _on_caption(self, run: int, start: float, end: float, text: str, parts: Any = ()) -> None:
+        """A line written. A line of more than one part (`parts`: (text, start, end) each, its
+        sentences and the stretches between long pauses) shows its parts as each is said, by
+        their times (`_page_at`)."""
         if run != self._run or not self._enabled:
             return
+        said = [tuple(part) for part in parts] or [(text, start, end)]
+        text = " ".join(str(part[0]) for part in said)
+        timing = [(_words(str(part[0])), float(part[1]), float(part[2])) for part in said]
         i = bisect.bisect_left(self._cues, (start, end, text))
         if i < len(self._cues) and self._cues[i][0] == start:
             self._cues[i] = (start, end, text)  # read again over a stretch: the newer words
@@ -881,6 +1145,7 @@ class CaptionsController(QObject):
             return  # read again: it is the end of the line before, joined to it
         else:
             self._cues.insert(i, (start, end, text))
+        self._timing[start] = timing
         if (
             i > 0
             and self._shows(i - 1) > self._position()
@@ -889,17 +1154,19 @@ class CaptionsController(QObject):
             before = self._cues[i - 1]
             self._cues[i - 1] = (before[0], end, f"{before[2]} {text}")
             del self._cues[i]
+            known = self._timing.pop(before[0], [(_words(before[2]), before[0], before[1])])
+            self._timing[before[0]] = known + self._timing.pop(start, timing)
 
     def _joins(self, before: tuple[float, float, str], line: tuple[float, float, str]) -> bool:
         """Whether `line` is the end of `before`, on its own (2.9.5, JOIN_GAP_S)."""
         start, end, text = line
         if not 0.0 <= start - before[1] <= JOIN_GAP_S or end - start > JOIN_LONGEST_S:
             return False
-        joined = f"{before[2]} {text}"
+        together = f"{before[2]} {text}"
         overlay = next((o for o in self._overlays if hasattr(o, "pages")), None)
         if overlay is None:
-            return len(joined) <= JOIN_CHARS
-        return len(overlay.pages(joined)) <= max(1, len(overlay.pages(before[2])))
+            return len(together) <= JOIN_CHARS
+        return len(overlay.pages(together)) <= max(1, len(overlay.pages(before[2])))
 
     def _on_progress(
         self,
@@ -912,8 +1179,11 @@ class CaptionsController(QObject):
         if run != self._run:
             return
         self._newest, self._rtf = newest, rtf
+        if float(newest) > self._run_start + 0.5:
+            self._deaf_runs = 0  # it hears
         self._qwen_writes = qwen_writes  # 2.9.6: only then does a step down help
         self._written = newest if written is None else written
+        self._started()
         # Late, and for the model: a short line ("Yes.") costs the model a fixed while, so a
         # dialogue's speed reads slow while the silences between its lines keep the captions
         # ahead of the picture (2.9: 1.06 while a film's were 3-60 s ahead, all in time). A
@@ -947,8 +1217,24 @@ class CaptionsController(QObject):
         """The stream's stamps jumped (a provider's restart): read again from the segment
         after the jump, not from the picture's (before it: the same jump again)."""
         if run == self._run and self._enabled:
-            self._resync_at = newest
+            self._resync_at = max(float(newest), self._run_start + RESYNC_STEP_S)
+            self._read_on = True  # once read again, it reads on past the next steps
             self._restart.start()
+
+    def _forget_run(self) -> None:
+        """What a run left for the next (where past a jump to read, how slow it was) let go: a
+        new session's, or a run that heard nothing."""
+        self._resync_at, self._resync_tries, self._read_on = None, 0, False
+        self._slow_since = None
+
+    def _deaf(self) -> bool:
+        """The live run has placed no sound NO_SOUND_S after it began (the picture playing)."""
+        began = self._run_began
+        if began is None or self._deaf_runs >= 2 or not self._is_live() or self._waiting():
+            return False
+        if self._newest is not None and float(self._newest) > self._run_start + 0.5:
+            return False
+        return time.monotonic() - began >= NO_SOUND_S
 
     def _on_ended(self, run: int, reason: str) -> None:
         if run == self._run and self._enabled:
@@ -958,6 +1244,7 @@ class CaptionsController(QObject):
     def _tick(self) -> None:
         if not self._enabled:
             return
+        self._started()  # (no progress from a run that did not start: the wait ends anyway)
         if self._steps_down():
             self._step_down()
         if self._is_live() and self._live() is not self._floored:
@@ -972,6 +1259,8 @@ class CaptionsController(QObject):
             return  # a film opens (again) or goes to where it resumes: read from there after
         if self._ready and key != self._session_key:
             self._forget_cues()  # another channel or a new session: its own captions
+            self._forget_run()  # ... read from its own picture, its speed judged anew
+            self._deaf_runs = 0
             self._last = None
             self._resolve_language()  # its own language too
             self._start_run()
@@ -979,6 +1268,16 @@ class CaptionsController(QObject):
             return
         if self._ready and self._track_changed():
             self._hear_track()
+            return
+        if self._ready and self._deaf():
+            logger.info(
+                "AI captions: run %d heard nothing in %.0f s: read again from the picture",
+                self._run,
+                NO_SOUND_S,
+            )
+            self._forget_run()
+            self._deaf_runs += 1
+            self._start_run()
             return
         waiting = self._waiting()
         if waiting != self._was_waiting:
@@ -997,10 +1296,12 @@ class CaptionsController(QObject):
             # unless the run there has read it already.
             if (moved > elapsed + SEEK_S or moved < -SEEK_S) and self._ready:
                 self._last = (position, now)
+                self._rate_from = None
                 if not self._covered(position):
                     self._start_run()
                 return
         self._last = (position, now)
+        self._measure_rate(position, now)
         self._process.send("viewer", position)
         self._show(self._cue_at(position))
         self._forget(position)
@@ -1050,7 +1351,7 @@ class CaptionsController(QObject):
         if following is not None and following - end <= BRIDGE_S:
             until = following  # a short pause: on until the next line
         else:
-            until = max(end + HOLD_S, shows + MIN_SHOW_S, shows + len(text) / READ_CPS)
+            until = max(end + HOLD_S * self._scale(), shows + self._reading(text))
             if following is not None:
                 until = min(until, following)
         if position >= until:
@@ -1058,47 +1359,89 @@ class CaptionsController(QObject):
             return ""
         if position < shows:
             return ""
-        return self._part_at(text, position - shows, end - start - FIRST_WORD_S)
+        return self._page_at(i, position, shows)
 
     def _forget_cues(self) -> None:
         self._cues.clear()
+        self._timing.clear()
         self._gone = float("-inf")
 
     def _shows(self, i: int) -> float:
         """When cue `i` shows: at its first word, or once the one before has been read, by at
         most LAG_S later (2.9.5)."""
         cues = self._cues
+        lag = LAG_S * self._scale()  # (as long for the viewer at any rate)
         j = i
         while j > 0 and i - j < _LAG_LOOK:
             before_start, _, before_text = cues[j - 1]
-            if before_start + LAG_S + self._reading(before_text) <= cues[j][0]:
+            if before_start + lag + self._reading(before_text) <= cues[j][0]:
                 break  # the one before is read before this one's word: it starts on time
             j -= 1
         shows = cues[j][0] + FIRST_WORD_S
         for k in range(j + 1, i + 1):
             earliest = cues[k][0] + FIRST_WORD_S
-            shows = max(earliest, min(shows + self._reading(cues[k - 1][2]), earliest + LAG_S))
+            shows = max(earliest, min(shows + self._reading(cues[k - 1][2]), earliest + lag))
         return shows
 
-    @staticmethod
-    def _reading(text: str) -> float:
-        return max(MIN_SHOW_S, len(text) / READ_CPS)
+    def _measure_rate(self, position: float, now: float) -> None:
+        """The picture's playback rate over the last second or so (a seek or a wait: anew)."""
+        if self._rate_from is None:
+            self._rate_from = (position, now)
+            return
+        start, then = self._rate_from
+        if now - then < 1.0:
+            return
+        rate = (position - start) / (now - then)
+        if 0.0 <= rate <= 4.0:
+            self._rate = 0.5 * self._rate + 0.5 * rate
+        self._rate_from = (position, now)
 
-    def _part_at(self, text: str, elapsed: float, words_s: float) -> str:
-        """`elapsed` into a caption whose words last `words_s`: the whole of it, or the part
-        of it said by then when it doesn't fit two lines (2.9.1, the owner: a long one ended
-        in "…"), each part for its share of the words by its letters; the last one held."""
+    def _scale(self) -> float:
+        """How much longer, in the picture's seconds, a caption stays to be read: the playback
+        rate from FAST_FROM on, at most RATE_CAP (1x, or stay-live's gentle steering: as it is)."""
+        return 1.0 if self._rate < FAST_FROM else min(self._rate, RATE_CAP)
+
+    def _reading(self, text: str) -> float:
+        return max(MIN_SHOW_S, len(text) / READ_CPS) * self._scale()
+
+    def _page_at(self, i: int, position: float, shows: float) -> str:
+        """Cue `i`, shown since `shows`, at `position`: the whole of it, or the part of it said
+        by then when it doesn't fit two lines (2.9.1, the owner: a long one ended in "…"). Its
+        parts end at sentences' ends first (the overlay's `pages`), and each shows when its first
+        words are said, as the line's parts' times tell (2026-11-08, the owner: "after the dot
+        we can split and show the other part later"), on screen for the one before's reading
+        time (by at most LAG_S past its words) and PAGE_S at least; with no times, each for its
+        share of the words by its letters. The last one is held."""
+        start, end, text = self._cues[i]
         overlay = next((o for o in self._overlays if hasattr(o, "pages")), None)
-        parts = overlay.pages(text) if overlay is not None else [text]
-        if len(parts) <= 1:
+        pages = overlay.pages(text) if overlay is not None else [text]
+        if len(pages) <= 1:
             return text
-        total = sum(len(part) for part in parts)
+        timing = self._timing.get(start, [])
+        if sum(n for n, _a, _b in timing) != sum(_words(page) for page in pages):
+            return self._share_at(pages, position - shows, end - start - FIRST_WORD_S)
+        on, said = shows, 0
+        for k, page in enumerate(pages):
+            if k:
+                spoken = _word_time(timing, said)
+                read = min(on + self._reading(pages[k - 1]), spoken + LAG_S * self._scale())
+                on = max(spoken, on + PAGE_S * self._scale(), read)
+            if position < on:
+                return pages[k - 1] if k else page
+            said += _words(page)
+        return pages[-1]
+
+    @staticmethod
+    def _share_at(pages: list[str], elapsed: float, words_s: float) -> str:
+        """Of a caption's `pages`, the one said `elapsed` into its words (lasting `words_s`),
+        each for its share of the words by its letters."""
+        total = sum(len(page) for page in pages)
         said, span = 0, max(words_s, MIN_SHOW_S)
-        for part in parts[:-1]:
-            said += len(part)
+        for page in pages[:-1]:
+            said += len(page)
             if elapsed < span * said / total:
-                return part
-        return parts[-1]
+                return page
+        return pages[-1]
 
     def _covered(self, position: float) -> bool:
         """The run reads on from before `position` and has not passed it by long: no need to
@@ -1108,7 +1451,7 @@ class CaptionsController(QObject):
 
     def _forget(self, position: float) -> None:
         while self._cues and self._cues[0][1] < position - KEEP_S:
-            self._cues.pop(0)
+            self._timing.pop(self._cues.pop(0)[0], None)
 
     def _lead(self) -> Optional[float]:
         """How far ahead of the picture the captions are written (2.9, the review: not how far
@@ -1248,13 +1591,37 @@ class CaptionsController(QObject):
             return
         self._drop_floor(shift=False)
         if live is not None:
-            live.set_caption_floor(LEAD_S.get(self._tier, 8.0))
+            live.set_caption_floor(self._picture_lead())
             self._floored = live
+            self._tell_ready()
 
     def _drop_floor(self, shift: bool = True) -> None:
+        self._starting = None
+        self._tell_ready(True)
         live, self._floored = self._floored, None
         if live is not None:
             live.set_caption_floor(0.0, shift=shift)
+
+    def _tell_ready(self, ready: Optional[bool] = None) -> None:
+        """The session holding the captions' distance learns whether they can write yet
+        (2026-11-07): while the model loads, and its first run has not written past the
+        picture, the picture waits on ("Starting captions…") rather than play away what they
+        could still write (LiveSession.set_caption_ready)."""
+        tell = getattr(self._floored, "set_caption_ready", None)
+        if callable(tell):
+            tell(self._ready and self._starting is None if ready is None else ready)
+
+    def _started(self) -> None:
+        """The first run after the model loaded has written START_LEAD_S past the picture (or
+        START_WAIT_S went by): the picture may play on."""
+        if self._starting is None:
+            return
+        lead = self._lead()
+        if (lead is not None and lead >= START_LEAD_S) or (
+            time.monotonic() - self._starting >= START_WAIT_S
+        ):
+            self._starting = None
+            self._tell_ready()
 
     def _target(self) -> Any:
         controller = getattr(self._window, "controller", None)
@@ -1283,9 +1650,12 @@ class CaptionsController(QObject):
 
     def _resolve_language(self) -> None:
         """The viewer's pick for the channel, else the audio track's, else Settings', else
-        the model's own detection."""
-        from services.captions.languages import qwen_name
+        the model's own detection: what it detected on the channel before, else a guess from a
+        prefix on the channel's title or group ("TR: …", 2026-11-07), which the captions
+        process may still correct (`_guessed`)."""
+        from services.captions.languages import language_from_title, qwen_name
 
+        self._guessed = False
         pick = (self._config_get("ai_captions_picks", {}) or {}).get(self._channel_key())
         if pick:
             self._language = (pick, FROM_VIEWER)
@@ -1298,7 +1668,14 @@ class CaptionsController(QObject):
         if default and default != "auto":
             self._language = (str(qwen_name(default) or default), FROM_DEFAULT)
             return
-        self._language = (self._detected.get(self._channel_key(), ""), FROM_MODEL)
+        detected = self._detected.get(self._channel_key(), "")
+        if not detected:
+            target = self._target()
+            item = getattr(target, "item", None)
+            group = item.get("group") or item.get("category_name") if isinstance(item, dict) else ""
+            detected = language_from_title(getattr(target, "title", ""), group)
+            self._guessed = bool(detected)
+        self._language = (detected, FROM_MODEL)
 
     def _track_language(self) -> str:
         """The language the playing audio track names, as Qwen's name ("" when none). The

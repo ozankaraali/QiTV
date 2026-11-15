@@ -10,7 +10,7 @@ from services.i18n import N_
 from ui.overlays.base import Overlay
 from ui.overlays.channel_rows import ChannelListView, ChannelRowDelegate, ChannelRowsModel
 from ui.overlays.painting import elided, ui_units
-from ui.pointer import NAV_BUTTONS
+from ui.pointer import NAV_BUTTONS, SecondClickGuard
 from ui.theme import PALETTE, qcolor
 
 logger = logging.getLogger(__name__)
@@ -44,6 +44,7 @@ class ChannelColumn(Overlay):
         # that was merely resting where the column opened).
         self._hovering = False
         self._pointer: QPointF | None = None
+        self._second_click = SecondClickGuard(self)  # a row's click that closed it
         self.setMouseTracking(True)
         self._view.viewport().setMouseTracking(True)
         self._view.viewport().installEventFilter(self)
@@ -60,6 +61,7 @@ class ChannelColumn(Overlay):
         mixes providers)."""
         self._title = title
         self._hovering, self._pointer = False, None
+        self._second_click.disarm()  # open again: the next click is on the list
         self._model.set_channels(channels, None, show_provider)
         self._relayout()
         self.show()
@@ -100,7 +102,12 @@ class ChannelColumn(Overlay):
 
     def _on_row_clicked(self, row: int) -> None:
         self._idle.start()
+        shown = self.isVisible()
         self.rowClicked.emit(row)
+        if shown and not self.isVisible():
+            # Its channel tunes and the column closed: a double-click's second click would
+            # land on the picture under it (fullscreen, or leaving the multiview's grid).
+            self._second_click.arm()
 
     def eventFilter(self, obj, event):
         if obj is self.parentWidget() and event.type() == QEvent.Resize:

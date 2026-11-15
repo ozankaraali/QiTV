@@ -66,13 +66,13 @@ def _script(text: str) -> Counter:
     counts: Counter = Counter()
     for char in text:
         code = ord(char)
-        if 0x4E00 <= code <= 0x9FFF or 0x3400 <= code <= 0x4DBF:
+        if 0x4E00 <= code <= 0x9FFF or 0x3400 <= code <= 0x4DBF or 0x20000 <= code <= 0x2FFFF:
             counts["Han"] += 1
         elif 0x3040 <= code <= 0x30FF:
             counts["Kana"] += 1
         elif 0xAC00 <= code <= 0xD7AF or 0x1100 <= code <= 0x11FF:
             counts["Hangul"] += 1
-        elif 0x0400 <= code <= 0x04FF:
+        elif 0x0400 <= code <= 0x052F:
             counts["Cyrillic"] += 1
         elif 0x0600 <= code <= 0x06FF or 0x0750 <= code <= 0x077F:
             counts["Arabic"] += 1
@@ -82,12 +82,26 @@ def _script(text: str) -> Counter:
             counts["Greek"] += 1
         elif 0x0900 <= code <= 0x097F:
             counts["Devanagari"] += 1
+        # 2.10: the scripts of MiLMMT's other targets (before, their letters counted as Latin)
+        elif 0x0590 <= code <= 0x05FF:
+            counts["Hebrew"] += 1
+        elif 0x0980 <= code <= 0x09FF:
+            counts["Bengali"] += 1
+        elif 0x0B80 <= code <= 0x0BFF:
+            counts["Tamil"] += 1
+        elif 0x0E80 <= code <= 0x0EFF:
+            counts["Lao"] += 1
+        elif 0x1000 <= code <= 0x109F:
+            counts["Myanmar"] += 1
+        elif 0x1780 <= code <= 0x17FF:
+            counts["Khmer"] += 1
         elif char.isalpha():
             counts["Latin"] += 1
     return counts
 
 
-# The scripts each of Qwen's languages is written in (Latin for the rest).
+# The scripts each of Qwen's languages is written in, and (2.10, caption translation) each of
+# MiLMMT's targets by its name there (services.captions.mt_languages); Latin for the rest.
 _SCRIPTS = {
     "Ukrainian": {"Cyrillic"},  # 2.9.3: Parakeet's own (the rest of them: Latin)
     "Bulgarian": {"Cyrillic"},
@@ -102,13 +116,23 @@ _SCRIPTS = {
     "Thai": {"Thai"},
     "Greek": {"Greek"},
     "Hindi": {"Devanagari"},
+    "Urdu": {"Arabic"},
+    "Kazakh": {"Cyrillic"},
+    "Hebrew": {"Hebrew"},
+    "Bengali": {"Bengali"},
+    "Tamil": {"Tamil"},
+    "Khmer": {"Khmer"},
+    "Lao": {"Lao"},
+    "Burmese": {"Myanmar"},
+    "Chinese (Simplified)": {"Han"},
+    "Chinese (Traditional)": {"Han"},
 }
 
 
 def written_in(text: str, language: str) -> bool:
-    """`text` may be in `language` (one of Qwen's names): False only when most of its letters
-    are in a script the language is not written in (2.9: locked to Turkish, the model wrote a
-    line of Korean speech in Urdu's letters)."""
+    """`text` may be in `language` (one of Qwen's names, or MiLMMT's): False only when most of
+    its letters are in a script the language is not written in (2.9: locked to Turkish, the
+    model wrote a line of Korean speech in Urdu's letters)."""
     counts = _script(text)
     letters = sum(counts.values())
     if letters < 4:
@@ -144,6 +168,8 @@ def guess(text: str) -> Optional[str]:
         return "Greek"
     if script == "Devanagari":
         return "Hindi"
+    if script != "Latin":
+        return None  # (2.10) a script none of Qwen's languages is written in
     return _latin(text)
 
 
@@ -153,7 +179,9 @@ def _latin(text: str) -> Optional[str]:
         hits = sum(text.count(m) for m in marks)
         if hits:
             scores[name] += 2 * hits
-    words = [w for w in _SPLIT.split(unicodedata.normalize("NFC", text.lower())) if w]
+    # (a typographic apostrophe is one too: "Ahmet’i" is one word, not "ahmet" and Polish "i")
+    plain = unicodedata.normalize("NFC", text.lower()).replace("’", "'")
+    words = [w for w in _SPLIT.split(plain) if w]
     for word in words:
         for name, common in _WORD_SETS.items():
             if word in common:

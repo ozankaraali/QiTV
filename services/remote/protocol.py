@@ -16,6 +16,7 @@ import re
 from typing import Literal, Optional
 
 from services.captions.languages import QWEN_LANGUAGES
+from services.captions.mt_languages import MT_LANGUAGES
 
 RELAY_URL = "https://remote.qitv.app"
 DEFAULT_PORT = 5384
@@ -198,7 +199,7 @@ def parse_phone_message(obj: object) -> Optional[dict]:
         return None
     if t == "track":  # 2.9: a sound or subtitle track of the list QiTV sent (its "of")
         return _track(obj)
-    if t == "captions":  # 2.9: AI captions on or off, or the language they hear
+    if t == "captions":  # 2.9: AI captions on or off, the language they hear (2.10: or into)
         return _captions(obj)
     if t == "sched":  # 2.8: a timetable row's programme recorded at its time, or cancelled
         if _short_id(obj.get("id")) and obj.get("do") in ("once", "series", "cancel"):
@@ -250,6 +251,9 @@ MAX_TRACK = 2**31 - 1  # 2.9: a track's id, as libVLC numbers it (an MPEG-TS str
 # 2.9: the languages AI captions hear, as the phone picks one: "auto", or Qwen's name
 CAPTION_LANGUAGES = frozenset(("auto", *QWEN_LANGUAGES))
 CAPTION_MODELS = frozenset(("auto", "small", "large"))  # 2.9: the speech model, as Settings
+# 2.10: the languages AI captions are translated into, as the phone picks one: "" (none), or
+# MiLMMT's name
+CAPTION_TRANSLATIONS = frozenset(("", *MT_LANGUAGES))
 MAX_POS = 2 * 24 * 3600 * 1000  # a title's place or length, in ms: two days at most
 MAX_TIMER_TITLE = 80  # 2.8: a timer's name, as the phone typed it (cut there)
 DAY_MINUTES = 24 * 60
@@ -275,9 +279,10 @@ def _track(obj: dict) -> Optional[dict]:
 
 def _captions(obj: dict) -> Optional[dict]:
     """2.9: AI captions on or off ("on"), the language they hear ("lang"), or the speech model
-    that writes them ("model"): one of the three."""
+    that writes them ("model"); 2.10: or the language they are translated into ("translate";
+    "": none): one of them."""
     of = _of(obj)
-    if of is None or sum(key in obj for key in ("on", "lang", "model")) != 1:
+    if of is None or sum(key in obj for key in ("on", "lang", "model", "translate")) != 1:
         return None
     if "on" in obj:
         return {"t": "captions", "on": obj["on"], "of": of} if isinstance(obj["on"], bool) else None
@@ -285,6 +290,11 @@ def _captions(obj: dict) -> Optional[dict]:
         model = obj["model"]
         if isinstance(model, str) and model in CAPTION_MODELS:
             return {"t": "captions", "model": model, "of": of}
+        return None
+    if "translate" in obj:
+        target = obj["translate"]
+        if isinstance(target, str) and target in CAPTION_TRANSLATIONS:
+            return {"t": "captions", "translate": target, "of": of}
         return None
     lang = obj["lang"]
     if isinstance(lang, str) and lang in CAPTION_LANGUAGES:
@@ -530,6 +540,15 @@ class CaptionsModel:
 
     sid: str
     model: str
+    of: int
+
+
+@dataclass(frozen=True)
+class CaptionsTranslate:
+    """2.10: the language AI captions are translated into (MiLMMT's name; "": none)."""
+
+    sid: str
+    target: str
     of: int
 
 

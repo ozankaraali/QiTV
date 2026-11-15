@@ -123,18 +123,19 @@ stream to an MPV player you installed yourself ("Play in MPV").
 
 ## Downloaded for AI captions (not in the packaged apps)
 
-AI captions run a speech model on your computer. Nothing of it ships with QiTV: when you
-first turn AI captions on, QiTV downloads, from their publishers' own servers, and checks
-against pinned SHA-256 sums:
+AI captions run a speech model on your computer and, once you pick a language under
+**Translate to**, a translation model too. Nothing of them ships with QiTV: when you first turn
+AI captions on, or first pick a language to translate them into, QiTV downloads, from their
+publishers' own servers, and checks against pinned SHA-256 sums:
 
 - **Qwen3-ASR** (0.6B or 1.7B, by the Qwen team, Alibaba Cloud): Apache License 2.0
   (<https://huggingface.co/Qwen/Qwen3-ASR-0.6B>). The 0.6B model as converted to int8 ONNX by
   the sherpa-onnx project (its GitHub releases); the 1.7B model as converted by a community
   export on ModelScope (`zengshuishui/Qwen3-ASR-onnx`), under the same license.
-- **ufakzeka-kulak** (ufak AI), the Turkish speech model: Apache License 2.0
-  (<https://huggingface.co/ufakai/ufakzeka-kulak>), its sherpa-onnx export; trained on openly
-  licensed Turkish speech (Common Voice, ISSAI Turkish Speech Corpus, antalia-voice-corpus,
-  YODAS), each source and its licence listed in the model's ATTRIBUTION.md.
+- **qitv-asr-tr-moonshine-mid** (QiTV ASR Turkish, Ozan Karaali), the Turkish speech model:
+  Creative Commons Attribution 4.0 (<https://huggingface.co/ozankaraali/qitv-asr-tr-moonshine-mid>),
+  its 8-bit sherpa-onnx files. It is Moonshine Streaming Medium (Moonshine AI, MIT License)
+  trained further on Turkish speech; its model card lists the training data and their licences.
 - **Parakeet TDT 0.6B v3** (NVIDIA), the speech model for 25 European languages: Creative
   Commons Attribution 4.0 (CC-BY-4.0) (<https://huggingface.co/nvidia/parakeet-tdt-0.6b-v3>),
   as converted to int8 ONNX by the sherpa-onnx project
@@ -143,12 +144,23 @@ against pinned SHA-256 sums:
 - **Cohere Transcribe** (03-2026, Cohere Labs), the speech model for 14 languages: Apache
   License 2.0 (<https://huggingface.co/CohereLabs/cohere-transcribe-03-2026>), as converted to
   int8 ONNX by the sherpa-onnx project (its GitHub releases). Cohere is a trademark of Cohere Inc.
+- **MiLMMT-46-1B-v0.1** (Xiaomi Inc.), the translation model for 46 languages
+  (<https://huggingface.co/xiaomi-research/MiLMMT-46-1B-v0.1>). It is built on Gemma 3 1B
+  (Google) and is under the Gemma Terms of Use (<https://ai.google.dev/gemma/terms>). QiTV
+  downloads an int4 ONNX export of it, published under the same terms
+  (<https://huggingface.co/ozankaraali/qitv-mt-milmmt-46-1b>). Gemma is provided under and
+  subject to the Gemma Terms of Use found at ai.google.dev/gemma/terms. Gemma is a trademark of
+  Google LLC; Xiaomi is a trademark of Xiaomi Inc.
 - **sherpa-onnx** and **sherpa-onnx-core** 2.0.1 (k2-fsa), which run the model and include
-  ONNX Runtime (Microsoft, MIT License): Apache License 2.0, from PyPI.
+  ONNX Runtime (Microsoft, MIT License): Apache License 2.0, from PyPI. The translation model
+  runs on the same ONNX Runtime.
+- **tokenizers** 0.23.3 (Hugging Face), which reads the translation model's tokenizer: Apache
+  License 2.0 (<https://github.com/huggingface/tokenizers>), from PyPI with the translation
+  model.
 - **Silero VAD** (Silero Team), the voice detector: MIT License, from sherpa-onnx's releases.
 
-The sound is decoded by QiTV's own libVLC (above); nothing you hear or that the model writes
-leaves your computer.
+The sound is decoded by QiTV's own libVLC (above); nothing you hear, nothing the model writes
+and no translation of it leaves your computer.
 
 ## Online services and media servers
 

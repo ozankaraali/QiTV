@@ -953,6 +953,37 @@ video.m3u8
         self.assertEqual(server.counts["/live.m3u8"], 4)
         self.assertEqual(server.counts["/b.ts"], 2)
 
+    def test_a_live_playlist_down_beyond_the_quick_delays_is_asked_again(self):
+        quick = len(FAST_RETRIES)
+
+        def playlist(_request, count):
+            text = "#EXTM3U\n#EXT-X-TARGETDURATION:1\n#EXT-X-MEDIA-SEQUENCE:0\n#EXTINF:1,\na.ts\n"
+            if count == 1:
+                return 200, {}, text.encode()
+            if count <= 2 + quick + 1:  # the reload, its quick tries and one long one
+                return 503, {}, b""
+            return 200, {}, (text + "#EXTINF:1,\nb.ts\n#EXT-X-ENDLIST\n").encode()
+
+        server = self.server(
+            {
+                "/live.m3u8": playlist,
+                "/a.ts": (200, {}, self.video),
+                "/b.ts": (200, {}, self.next_video),
+            }
+        )
+        source = open_source(
+            server.url + "/live.m3u8", headers={}, verify_ssl=True, stop=threading.Event()
+        )
+        heard = []
+        source.listen_retries(heard.append)
+        fast = {"_RECONNECT_DELAYS": FAST_RETRIES, "_ENDLESS_DELAYS": (0.02,)}
+        with patch.multiple(source_module, **fast):
+            parts = drain(source)
+        self.assertEqual(parts, joined(self.video, self.next_video))
+        self.assertEqual(server.counts["/live.m3u8"], 2 + quick + 2)
+        self.assertEqual(len(heard), 3)  # two long waits told, then None
+        self.assertIsNone(heard[-1])
+
     def test_a_reload_answered_404_a_moment_is_asked_again(self):
         # 2.9: a public channel's CDN answered one 404 for its playlist: the session ended,
         # played the channel directly, and AI captions had no buffer to read.
@@ -1814,7 +1845,9 @@ video.m3u8
                     )
                     self.assertEqual(server.counts[path], asked)
 
-    def test_raw_ts_reconnect_gives_up_after_six_tries(self):
+    def broken_then(self, later):
+        """A raw TS channel whose first connection breaks half way; `later(count)` answers
+        each request after it (count 2 on)."""
         half = len(self.video) // 2 // 188 * 188
 
         def live(_request, count):
@@ -1824,23 +1857,105 @@ video.m3u8
                     request.wfile.write(self.video[:half])
 
                 return 200, {"Content-Length": str(len(self.video))}, broken
-            return 503, {}, b""
+            return later(count, half)
 
-        server = self.server({"/user/secret/live.ts": live})
+        return self.server({"/user/secret/live.ts": live})
+
+    def test_raw_ts_reconnects_go_on_after_the_quick_tries(self):
+        # The owner's channel (2026-11-09): its connections closed for 40 s, the source gave
+        # up after six tries, and the picture stayed dead for 74 minutes until the channel was
+        # changed. A live channel is never given up on while it is watched: after the quick
+        # delays come the long ones, each told to the listener (the helper's state).
+        quick = len(FAST_RETRIES)
+        server = self.broken_then(
+            lambda count, half: (
+                (503, {}, b"") if count <= 1 + quick + 2 else (200, {}, self.video[half:])
+            )
+        )
         source = open_source(
             server.url + "/user/secret/live.ts", headers={}, verify_ssl=True, stop=threading.Event()
         )
-        received = []
-        with patch.object(source_module, "_RECONNECT_DELAYS", FAST_RETRIES):
+        heard = []
+        source.listen_retries(heard.append)
+        fast = {"_RECONNECT_DELAYS": FAST_RETRIES, "_ENDLESS_DELAYS": (0.02, 0.04)}
+        with patch.multiple(source_module, **fast):
+            received = list(source.chunks())
+        media_bytes = b"".join(item for item in received if isinstance(item, bytes))
+        self.assertEqual(media_bytes, self.video)
+        self.assertIn(Reconnecting(), received)
+        self.assertEqual(server.counts["/user/secret/live.ts"], 1 + quick + 3)
+        # Before each long wait, when the next try is due (a time of day); then None.
+        self.assertEqual(len(heard), 4)
+        self.assertTrue(all(isinstance(at, float) for at in heard[:3]))
+        self.assertLessEqual(heard[0], heard[1])
+        self.assertIsNone(heard[-1])
+
+    def test_the_long_waits_grow_to_the_last_and_stay_there(self):
+        backoff = source_module._Backoff(endless=True)
+        quick = [backoff.next_delay() for _ in source_module._RECONNECT_DELAYS]
+        self.assertEqual(quick, list(source_module._RECONNECT_DELAYS))
+        self.assertFalse(backoff.long())
+        later = [backoff.next_delay() for _ in range(7)]
+        self.assertTrue(backoff.long())
+        self.assertEqual(later, [10.0, 30.0, 60.0, 120.0, 300.0, 300.0, 300.0])
+        once = source_module._Backoff()  # a first answer's, a segment's: it runs out
+        for _ in source_module._RECONNECT_DELAYS:
+            once.next_delay()
+        self.assertIsNone(once.next_delay())
+
+    def test_retry_now_ends_a_long_wait(self):
+        quick = len(FAST_RETRIES)
+        server = self.broken_then(
+            lambda count, half: (
+                (503, {}, b"") if count <= 1 + quick else (200, {}, self.video[half:])
+            )
+        )
+        source = open_source(
+            server.url + "/user/secret/live.ts", headers={}, verify_ssl=True, stop=threading.Event()
+        )
+
+        def heard(at):
+            if at is not None:  # the user's Try now, from the GUI's side
+                threading.Thread(target=source.retry_now, daemon=True).start()
+
+        source.listen_retries(heard)
+        started = time.monotonic()
+        fast = {"_RECONNECT_DELAYS": FAST_RETRIES, "_ENDLESS_DELAYS": (60.0,)}
+        with patch.multiple(source_module, **fast):
+            received = list(source.chunks())
+        self.assertLess(time.monotonic() - started, 10.0)
+        self.assertEqual(b"".join(i for i in received if isinstance(i, bytes)), self.video)
+
+    def test_a_close_ends_a_long_wait_quietly(self):
+        server = self.broken_then(lambda count, half: (503, {}, b""))
+        source = open_source(
+            server.url + "/user/secret/live.ts", headers={}, verify_ssl=True, stop=threading.Event()
+        )
+        source.listen_retries(
+            lambda at: at is not None and threading.Timer(0.05, source.close).start()
+        )
+        started = time.monotonic()
+        fast = {"_RECONNECT_DELAYS": FAST_RETRIES, "_ENDLESS_DELAYS": (60.0,)}
+        with patch.multiple(source_module, **fast):
+            received = list(source.chunks())  # no error: a channel change, say
+        self.assertLess(time.monotonic() - started, 10.0)
+        self.assertIn(Reconnecting(), received)
+
+    def test_an_answer_that_means_it_still_ends_the_reconnects(self):
+        # A 404 is no outage: the session ends, and the channel plays directly.
+        server = self.broken_then(lambda count, half: (404, {}, b""))
+        source = open_source(
+            server.url + "/user/secret/live.ts", headers={}, verify_ssl=True, stop=threading.Event()
+        )
+        heard = []
+        source.listen_retries(heard.append)
+        with patch.multiple(source_module, _RECONNECT_DELAYS=FAST_RETRIES):
             with self.assertRaises(SourceError) as raised:
-                for item in source.chunks():
-                    received.append(item)
-        self.assertEqual(raised.exception.kind, "network")
-        self.assertIsNone(raised.exception.status)
+                list(source.chunks())
+        self.assertEqual((raised.exception.kind, raised.exception.status), ("http", 404))
         self.assertNotIn("secret", str(raised.exception))
-        self.assertEqual(received[-1], Reconnecting())  # said before the retries began
-        self.assertEqual(b"".join(received[:-1]), self.video[:half])
-        self.assertEqual(server.counts["/user/secret/live.ts"], 7)
+        self.assertEqual(server.counts["/user/secret/live.ts"], 2)
+        self.assertEqual(heard, [])
 
     def test_a_refused_reconnect_is_asked_again_patiently_until_the_slot_frees(self):
         # 2.8.5: a provider that allows one stream counts the connection that broke for
@@ -1940,14 +2055,15 @@ video.m3u8
         source = open_source(
             server.url + "/live.ts", headers={}, verify_ssl=True, stop=threading.Event()
         )
-        items = []
-        with patch.object(source_module, "_RECONNECT_DELAYS", FAST_RETRIES):
-            with self.assertRaises(SourceError) as raised:
-                for item in source.chunks():
-                    items.append(item)
-        self.assertEqual(raised.exception.kind, "network")
-        self.assertEqual(server.counts["/live.ts"], 7)
-        self.assertEqual(items.count(Discontinuity()), 6)
+        heard = []
+        source.listen_retries(heard.append)
+        fast = {"_RECONNECT_DELAYS": FAST_RETRIES, "_ENDLESS_DELAYS": (0.01,)}
+        with patch.multiple(source_module, **fast):
+            items = list(source.chunks())  # never given up on: it came back at the 21st
+        self.assertEqual(server.counts["/live.ts"], 21)
+        self.assertEqual(items.count(Discontinuity()), 20)
+        # Past the six quick tries, each answer that broke off at once waited the long way.
+        self.assertEqual(len([at for at in heard if at is not None]), 21 - 1 - 6)
 
     def test_the_reconnect_budget_refills_after_data_flows_again(self):
         drops = 9  # more than the six-try budget

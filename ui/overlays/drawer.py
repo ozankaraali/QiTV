@@ -109,7 +109,7 @@ from ui.overlays.channel_rows import (
     paint_hover,
 )
 from ui.overlays.painting import Units, draw_icon, draw_refresh, elided, fill_round, ui_units
-from ui.pointer import NAV_BUTTONS
+from ui.pointer import NAV_BUTTONS, SecondClickGuard
 from ui.text_edit import SELECTION_ALPHA, Dragging, TextEdit, edit_key, paint_edit
 from ui.theme import FOCUS_FILL_ALPHA, PALETTE, qcolor
 
@@ -738,6 +738,8 @@ class Drawer(Overlay):
         self._drag_enabled: Callable[[], bool] = lambda: False  # set_drag_enabled
         self._drag_from: tuple[str, int, QPoint] | None = None  # a press on a row (global)
         self._dragging: NavNode | None = None  # the channel being dragged out
+        # A row's click that closed the list (a channel plays): see _on_row_clicked.
+        self._second_click = SecondClickGuard(self)
         # Hover over the header buttons (a move elsewhere goes on to the host, as without it).
         self.setMouseTracking(True)
         nav.changed.connect(self._on_nav_changed)
@@ -756,6 +758,7 @@ class Drawer(Overlay):
         self._left_choice = None  # the left highlight starts at the end of the path
         self._pending_key = focus_key
         self._cancel_preview()
+        self._second_click.disarm()  # open again: the next click is on the list
         self._columns["right"].parent = None  # force the highlight to be re-chosen
         self._relayout()
         self._refresh()
@@ -1126,8 +1129,14 @@ class Drawer(Overlay):
         if side != self.focus_side:
             self.focus_side = side
             self._refresh()
+        shown = self.isVisible()
         self._select(col, row)
         self.activate()
+        if shown and not self.isVisible():
+            # The click chose what closed the list (a channel plays): a double-click's second
+            # click would land on the picture under it, toggling fullscreen or, over the
+            # multiview, leaving the grid or focusing another tile; it reaches nothing.
+            self._second_click.arm()
 
     def row_anchor(self, key: str) -> QPoint:
         """The global point under the sources column's row `key` (where its menu opens)."""

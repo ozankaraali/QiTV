@@ -222,6 +222,7 @@ class StreamClock:
         self._first_block: Optional[int] = None  # VLC µs
         self._expected: Optional[int] = None
         self.broken = False  # VLC's blocks stepped: a gap or a clock reset inside VLC
+        self._rebased: Optional[float] = None  # read on from this timeline second (`rebase`)
 
     def ready(self) -> bool:
         return self.times.first_video_pts is not None and self.times.first_audio_pts is not None
@@ -237,6 +238,17 @@ class StreamClock:
             self.broken = True
             return None
         self._expected = vlc_us + samples * 1_000_000 // max(1, rate)
+        if self._rebased is not None:
+            return self._rebased + (vlc_us - self._first_block) / 1e6
         assert self.times.first_audio_pts is not None and self.times.first_video_pts is not None
         offset = pts_seconds(self.times.first_audio_pts, self.times.first_video_pts)
         return self.segment_start + offset + (vlc_us - self._first_block) / 1e6
+
+    def rebase(self, at: float) -> None:
+        """After a step (`broken`), the next block goes on from timeline second `at`, the sound
+        before it ended there: a run that reads on past a jumpy clock (2026-11-09) counts its
+        sound from there instead of reading again."""
+        self.broken = False
+        self._first_block = None
+        self._expected = None
+        self._rebased = at

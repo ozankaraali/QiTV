@@ -25,6 +25,9 @@ either way keeps it: its video outputs inherit the player's setting, which a med
 QiTV starts again. Measured with 3.0.20: On and Off apply at once, without a reopen; with
 hardware decoding (VideoToolbox) VLC has the graphics chip hand an interlaced stream's pictures
 back as I420 and deinterlaces them on the CPU (its cvpx converter in the filter chain).
+On leaves a picture taller than 1080i alone (`never_interlaced`; 2.9.10): no broadcast that tall is
+interlaced (UHD is progressive), and a 2160p 50 fps 10-bit channel deinterlaced so showed 5 of its
+50 pictures a second, garbled, where Off showed them all.
 
 Statistics (`stats_rows`): the plain dict `PlaybackSession.video_stats()` gives, as rows to
 show. libVLC 3 counts a stream's pictures from its open: decoded, shown, and lost, which are
@@ -52,6 +55,7 @@ ASPECTS = (AUTO, WIDE, STANDARD, FILL)  # the order ‹ and › (and A) step thr
 ON, OFF = "on", "off"
 DEINTERLACING = (AUTO, ON, OFF)
 DEINTERLACE_METHOD = "yadif"  # On: libVLC's deinterlace method
+INTERLACED_MAX_HEIGHT = 1088  # 1080i as coded (16-line blocks): nothing taller is interlaced
 
 # What a stream's source is, as the statistics name it.
 SOURCE_TS, SOURCE_HLS, SOURCE_FMP4, SOURCE_DIRECT = "ts", "hls", "fmp4", "direct"
@@ -180,6 +184,11 @@ def deinterlace_name(choice: str) -> str:
 def deinterlace_method(choice: str) -> Optional[str]:
     """libVLC's method for On, None for Off (Auto sets nothing: see the module docstring)."""
     return DEINTERLACE_METHOD if choice == ON else None
+
+
+def never_interlaced(height: int) -> bool:
+    """A picture `height` lines tall is never interlaced: On leaves it alone."""
+    return height > INTERLACED_MAX_HEIGHT
 
 
 def stepped(choices: tuple[str, ...], current: str, delta: int) -> str:
