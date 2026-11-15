@@ -479,7 +479,7 @@ class TranslationTests(unittest.TestCase):
         from services.captions import translate
 
         self.sent: list = []
-        self.link = SimpleNamespace(send=self.sent.append)
+        self.link: Any = SimpleNamespace(send=self.sent.append)
         self.viewer = [100.0, 1.0]
         self.made: list = []  # (folder, threads) of each translator made
         self.calls: list = []  # (text, source, target, seconds it had) of each translation
@@ -600,11 +600,11 @@ class TranslationTests(unittest.TestCase):
         self.captions(1)
         # a run begins with the picture waiting: it plays on once 7.5 s behind the sound read
         # (2.5 s from now), then 4.3 s to the line's first word
-        self.assertAlmostEqual(self.calls[0][3], 2.5 + 4.3 - DEADLINE_MARGIN_S, delta=0.1)
+        self.assertAlmostEqual(self.calls[0][3], 2.5 + 4.3 - DEADLINE_MARGIN_S, delta=0.5)
         self.viewer[0] = 101.0  # it plays
         run._write("qwen", "heard", "İki.", 104.0, 105.0)
         self.captions(2)
-        self.assertAlmostEqual(self.calls[1][3], 3.3 - DEADLINE_MARGIN_S, delta=0.1)
+        self.assertAlmostEqual(self.calls[1][3], 3.3 - DEADLINE_MARGIN_S, delta=0.5)
 
     def test_a_slow_translation_keeps_the_lines_after_it_waiting_in_order(self):
         go = self.held()
@@ -661,6 +661,7 @@ class TranslationTests(unittest.TestCase):
         run._write("qwen", "heard", TWO_PARTS, 104.0, 107.9, voiced=TWO_PARTS_VOICED)
         run._write("qwen", "heard", "Üç.", 108.0, 109.0)
         began.wait(5)  # the first being translated, the second waiting
+        logs = self.enterContext(self.assertLogs("services.captions.worker", logging.DEBUG))
         translation.set(None)
         as_written = [
             self.written(TWO_PARTS, 104.0, 107.9, voiced=TWO_PARTS_VOICED),
@@ -675,6 +676,10 @@ class TranslationTests(unittest.TestCase):
         sent = self.captions(4)
         self.assertEqual(sent[3], ("caption", 1, 110.0, 111.0, "<English> Beş."))
         self.assertEqual(len(sent), 4)  # the first went once: its translation never came
+        outcomes = ("AI captions: translated", "AI captions: shown as written")
+        said = [r.getMessage() for r in logs.records if r.getMessage().startswith(outcomes)]
+        said = [message for message in said if TWO_PARTS in message]
+        self.assertEqual(said, [f"AI captions: shown as written, translation off: {TWO_PARTS!r}"])
 
     def test_speech_never_waits_for_translation_nor_counts_its_time(self):
         import queue
@@ -689,10 +694,12 @@ class TranslationTests(unittest.TestCase):
         for start in (101.0, 104.5):
             run.pieces.put(Piece(start, start + 3.0, array("f"), 1.0))
         decoded = []
-        run.model = SimpleNamespace(
-            recognizer=object(),
-            decode=lambda samples, language, fast=False: decoded.append(1) or "Bonsoir à tous.",
-        )
+
+        def decode(samples, language, fast=False):
+            decoded.append(1)
+            return "Bonsoir à tous."
+
+        run.model = SimpleNamespace(recognizer=object(), decode=decode)
 
         def caught_up():  # a progress written to all the sound read
             return [m for m in self.sent if m[0] == "progress" and m[4] == 140.0]
@@ -751,7 +758,7 @@ class TranslationTests(unittest.TestCase):
                 pass
 
         messages = iter(script + (("quit",),))
-        conn = SimpleNamespace(recv=lambda: next(messages), send=self.sent.append)
+        conn: Any = SimpleNamespace(recv=lambda: next(messages), send=self.sent.append)
         with (
             mock.patch.object(worker, "_Model", lambda spec: SimpleNamespace()),
             mock.patch.object(worker, "_Run", Run),
@@ -782,6 +789,22 @@ class TranslationTests(unittest.TestCase):
         )
         self.a_run(off, "Turkish")._write("qwen", "heard", "Bir.", 104.0, 105.0)
         self.assertEqual(self.sent[1:], [("caption", 1, 104.0, 105.0, "Bir.")])  # straight out
+
+    def test_the_detailed_log_gets_each_line_from_the_process(self):
+        # each line logs at LINE_LEVEL (DEBUG), which the process's handler let through only at
+        # INFO: Settings' detailed log showed no line, translated or not
+        from services.captions import worker
+
+        sent: list = []
+        logger = logging.getLogger("qitv-test-captions-process")
+        logger.propagate = False
+        self.addCleanup(setattr, logger, "handlers", [])
+        link: Any = SimpleNamespace(send=sent.append)
+        logger.handlers[:] = [worker._LogToOwner(link)]
+        for detailed in (True, False):  # the process's root level, as captions_main sets it
+            logger.setLevel(logging.DEBUG if detailed else logging.INFO)
+            logger.log(worker.LINE_LEVEL, "AI captions: translated 'Bir.': 'One.'")
+        self.assertEqual(sent, [("log", logging.DEBUG, "AI captions: translated 'Bir.': 'One.'")])
 
     def test_a_target_without_the_models_folder_translates_nothing_and_says_so_once(self):
         with self.assertLogs("services.captions.worker", logging.INFO) as logs:

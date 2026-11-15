@@ -79,8 +79,11 @@ class _Link:
 
 
 class _LogToOwner(logging.Handler):
+    """The process's log to the owner's, from the level `captions_main` sets (DEBUG for
+    Settings' detailed log: each caption line, LINE_LEVEL)."""
+
     def __init__(self, link: _Link) -> None:
-        super().__init__(logging.INFO)
+        super().__init__()
         self._link = link
 
     def emit(self, record: logging.LogRecord) -> None:
@@ -927,57 +930,47 @@ class _Translation:
                 line = self._busy = self._lines.popleft()
                 target, folder = self._target, self._folder
             try:
-                text = self._translated(line, target, folder)
+                text, why = self._translated(line, target, folder)
             except Exception as error:  # the thread lives on: every line goes through it
                 logger.warning("AI captions: a translation failed: %s", type(error).__name__)
-                text = None
+                text, why = None, "its translation failed"
             with self._lock:
                 if self._busy is not line:
                     continue  # turned off meanwhile: it went out as written
                 self._busy = None
                 if line.run.stopped.is_set():
                     continue  # its run ended (a seek, another channel, captions off): dropped
-                if text is not None and target == self._target:
+                if text is not None and target != self._target:
+                    text, why = None, "the target changed"
+                if text is not None:
+                    logger.log(LINE_LEVEL, "AI captions: translated %r: %r", line.shown, text)
                     self.link.send(line.message[:4] + (text,))  # the parts are the original's
-                else:
-                    self.link.send(line.message)
+                    continue
+                if why:
+                    logger.log(LINE_LEVEL, "AI captions: shown as written, %s: %r", why, line.shown)
+                self.link.send(line.message)
 
     def _translated(
         self, line: _Line, target: Optional[str], folder: Optional[Path]
-    ) -> Optional[str]:
+    ) -> tuple[Optional[str], str]:
         """`line` in `target` when it is to be translated and that is done in time; else None
-        (it goes out as written)."""
+        (it goes out as written) and why, "" for a line not to translate."""
         source = source_for(line.language)  # None: not known yet ("") or not MiLMMT's
         if not target or folder is None or source is None or source == target:
-            return None
+            return None, ""
         if line.run.stopped.is_set():
-            return None
+            return None, ""
         translator = self._translator_in(folder)
         deadline = self._deadline(line)
         began = time.monotonic()
         if began >= deadline:
-            logger.log(
-                LINE_LEVEL,
-                "AI captions: shown as written, %.1f s late for its translation: %r",
-                began - deadline,
-                line.shown,
-            )
-            return None
+            return None, f"{began - deadline:.1f} s late for its translation"
         text: Optional[str] = translator.translate(line.shown, source, target, deadline)
         if text is not None:
-            logger.log(LINE_LEVEL, "AI captions: translated %r: %r", line.shown, text)
-        elif time.monotonic() > deadline:
-            logger.log(
-                LINE_LEVEL,
-                "AI captions: shown as written, not translated in the %.1f s it had: %r",
-                deadline - began,
-                line.shown,
-            )
-        else:
-            logger.log(
-                LINE_LEVEL, "AI captions: shown as written, no usable translation: %r", line.shown
-            )
-        return text
+            return text, ""
+        if time.monotonic() > deadline:
+            return None, f"not translated in the {deadline - began:.1f} s it had"
+        return None, "no usable translation"
 
     def _translator_in(self, folder: Path) -> Any:
         """The model in `folder`: loaded on the first need and kept; from another folder, anew."""
