@@ -146,17 +146,6 @@ against pinned SHA-256 sums:
 - **sherpa-onnx** and **sherpa-onnx-core** 2.0.1 (k2-fsa), which run the model and include
   ONNX Runtime (Microsoft, MIT License): Apache License 2.0, from PyPI.
 - **Silero VAD** (Silero Team), the voice detector: MIT License, from sherpa-onnx's releases.
-- **Nemotron 3 Diarization** (NVIDIA), the streaming speaker diarizer that tells caption lines'
-  speakers apart (a run from source's Speaker marks): OpenMDW License Agreement v1.1
-  (<https://huggingface.co/nvidia/Nemotron-3-Diarization>), as exported to ONNX under the same
-  licence by `NealCaren/Nemotron-3-Diarization-ONNX` on Hugging Face (its embedder, its encoder
-  with int8 weights, mel filterbank and silence embedding). NVIDIA and Nemotron are trademarks of
-  NVIDIA Corporation.
-- **ERes2Net** (3D-Speaker, Alibaba's Tongyi Lab: `speech_eres2net_sv_en_voxceleb_16k`, trained
-  on VoxCeleb), the speaker model whose voice prints keep who is who across the diarizer's fresh
-  starts (a run from source's Speaker marks): Apache License 2.0
-  (<https://github.com/modelscope/3D-Speaker>), as converted to ONNX by the sherpa-onnx project
-  (its GitHub releases).
 
 The sound is decoded by QiTV's own libVLC (above); nothing you hear or that the model writes
 leaves your computer.

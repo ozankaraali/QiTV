@@ -46,8 +46,6 @@ they are on or on their way.
 In a run from source (services.captions.trial_models) a "Test model  Automatic ›" row opens a
 list of our own Turkish test models found in the AI captions folder (Automatic: the usual
 models); one picked writes the captions alone, as Turkish, with no language row or detection.
-Beside it, "Speaker marks  ‹ Dashes ›" (2026-11-08): how a change of speaker shows in the
-captions (services.captions.speakers): Dashes, Colours or Off; a click or ‹ › steps it.
 
 The phone remote's Subtitles and Sound sheets (2.9, ui/remote_controller.py) list the same
 choices, named the same (`sound_choices`, `subtitle_choices`, `captions_choice`), and choose
@@ -124,10 +122,6 @@ AI_TRIAL_PICK = "ai_trial_pick"  # a model of the list: (AI_TRIAL_PICK, folder n
 # i18n: the Subtitles panel's row in a developer's run only: the AI captions speech model to
 # try (one of the developers' own test models), and its list's title
 TRIAL_TEXT = N_("Test model")
-AI_MARKS = "ai_marks"  # 2026-11-08, Speaker marks: Off, Dashes or Colours (a click or ‹ ›)
-# (how AI captions show a change of speaker, as subtitles show dialogue)
-# i18n: the Subtitles panel's row in a developer's run only: how a change of speaker shows
-MARKS_TEXT = N_("Speaker marks")
 # i18n: the Subtitles panel's row: captions written on this computer by a speech model, in the
 # language spoken; a Settings group's title
 AI_CAPTIONS_TEXT = N_("AI captions")
@@ -816,19 +810,6 @@ class TrackControls(QObject):
         if trials:  # a developer's run: the test model, picked directly (Turkish, as it is)
             note = dict(trials).get(_trial_picked(captions), "")
             rows.append(PanelRow(AI_TRIAL, translate(TRIAL_TEXT), note=note, opens=True))
-        offered = getattr(captions, "speaker_marks_offered", None)
-        if callable(offered) and offered():  # ... and beside it, how speakers show
-            choices = dict(captions.speaker_mark_choices())
-            mark = str(captions.speaker_marks())
-            rows.append(
-                PanelRow(
-                    AI_MARKS,
-                    translate(MARKS_TEXT),
-                    value=choices.get(mark, ""),
-                    widest=max(choices.values(), key=len, default=""),
-                    lit=mark != "dashes",  # Dashes is its default
-                )
-            )
         if on and not (trials and _trial_picked(captions)):
             note = self._language_text(captions)
             rows.append(PanelRow(AI_LANGUAGE, translate(LANGUAGE_TEXT), note=note, opens=True))
@@ -885,9 +866,6 @@ class TrackControls(QObject):
         on, its download's question first when it isn't here (the question in front)."""
         captions = self._offered()
         if name != SUBTITLES or captions is None or not self._playing():
-            return
-        if key == AI_MARKS:  # Off, Dashes, Colours, round
-            captions.step_speaker_marks(delta)
             return
         if key != AI_CAPTIONS:
             return

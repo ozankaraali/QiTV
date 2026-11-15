@@ -33,6 +33,21 @@ class WindowConfigMigrationTests(unittest.TestCase):
                 reloaded.config["ai_captions_language_models"] = "yes"  # not a bool: not a yes
                 self.assertFalse(reloaded.ai_captions_language_models)
 
+    def test_a_config_with_settings_this_build_no_longer_has_reads_and_keeps_them(self):
+        # A run from source's Speaker marks (2026-11-08) were left out of 2.10: a config that
+        # holds its choice reads as any other, and keeps it as it was (older builds read it).
+        saved = {"ai_captions_speaker_marks": "colours", "ai_captions_model": "small"}
+        with tempfile.TemporaryDirectory() as directory:
+            config_path = Path(directory) / "config.json"
+            config_path.write_text(json.dumps(saved), encoding="utf-8")
+            with patch.object(ConfigManager, "_get_config_path", return_value=str(config_path)):
+                config = ConfigManager()
+                self.assertEqual(config.ai_captions_model, "small")
+                config.save_config(wait=True)
+                written = json.loads(config_path.read_text(encoding="utf-8"))
+        for key, value in saved.items():
+            self.assertEqual(written[key], value)
+
     def test_a_1x_config_gains_the_tv_window_without_resetting_saved_state(self):
         # A 1.x config names only the old windows. A missing window entry once kept the
         # player from starting (KeyError in 1.13.7); the TV window's entry is added instead.

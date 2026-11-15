@@ -22,14 +22,6 @@ decides); one that comes after they ended never shows (captions in the next scen
 than none). A caption too long for two lines shows in parts, sentence by sentence, each as it is
 said by its line's parts' times (`_page_at`; 2026-11-08, the owner).
 
-In a run from source (where the Test model list is offered) each line's speaker is told too,
-by NVIDIA's streaming diarizer (services.captions.sortformer, downloaded unasked, some 132 MB),
-part by part of each line (its sentences, and where the diarizer hears the speaker change), and a
-change of speaker
-shows (the Subtitles panel's Speaker marks): a new speaker's line starts with "- " on a line of
-its own, as Turkish subtitles write dialogue (Dashes, the default), or each speaker's lines are
-in a colour of their own, as teletext's (Colours), or nothing shows (Off).
-
 A film or an episode has no helper: the process plays its sound from `FILM_AHEAD_S` past the
 picture (services.captions.film), on the film's own clock, from where the window's player reads
 it: a file on this computer, or a Jellyfin or Emby server (no stream limit there). A provider's
@@ -53,13 +45,6 @@ from services.i18n import tr, translate
 logger = logging.getLogger(__name__)
 
 LEAD_S = {"small": 8.0, "large": 10.0}  # the picture's distance behind live while on
-# ... and this much more while speakers are marked (a run from source; 2026-11-09, the owner's
-# live test: lines went out untold): the diarizer tells who speaks some seconds after it is said
-SPEAKER_LEAD_S = 2.0
-# Speaker marks turned Off reach the process this much later (2026-11-09, the owner's live test:
-# stepping the row through Off to Colours let the diarizer miss the sound meanwhile, and the
-# picture would wait again for its distance)
-SPEAKERS_OFF_MS = 3000
 FILM_AHEAD_S = 6.0  # a film's sound is read from this far past the picture (after a seek too)
 # "Catching up…" only when what has been heard is about to fall behind the picture: anything
 # ahead of it is in time (2.9: a 1.7B film's captions 3-6 s ahead, all in time, said so at
@@ -123,10 +108,6 @@ _SLOW_FOR_S = 30.0
 # model, services.captions.trial_models); the pick is kept here ("": the usual models)
 _TRIAL_MODEL = "ai_captions_trial_model"
 _TRIAL_SCAN_S = 5.0  # the folder is looked at again this often while the panel asks (new exports)
-# 2026-11-08, the owner: "we need diarization otherwise dialogs write single". Beside the Test
-# model list, Speaker marks: how a change of speaker shows (services.captions.speakers: Dashes,
-# the default, Colours or Off; "dashes or colourful text?", the owner)
-_SPEAKER_MARKS = "ai_captions_speaker_marks"
 
 from ui.captions_texts import (  # noqa: E402  (the texts, with their translations)
     CANT_KEEP_UP,
@@ -155,7 +136,7 @@ MODEL_SIZES = {"small": "0.6B", "large": "1.7B"}
 
 
 def _words(text: str) -> int:
-    """A caption's words (Speaker marks' dashes are none)."""
+    """A caption's words (a lone dash is none)."""
     return sum(1 for word in text.split() if word != "-")
 
 
@@ -235,9 +216,6 @@ class CaptionsController(QObject):
         self._trials_known = False  # a scan has finished
         self._trials_scanned: Optional[float] = None  # when the last scan began (monotonic)
         self._trials_found.connect(self._on_trials_found)
-        self._speakers_tried = False  # the speaker model's download began while QiTV runs
-        self._colours: Any = None  # each speaker's colour in the run (speakers.Colours)
-        self._colours_run = -1
         self._download: Any = None
         self._percent = 0
         self._unpacking = False
@@ -275,10 +253,6 @@ class CaptionsController(QObject):
         self._restart.setSingleShot(True)
         self._restart.setInterval(_RESTART_MS)
         self._restart.timeout.connect(self._start_run)
-        self._speakers_off = QTimer(self)
-        self._speakers_off.setSingleShot(True)
-        self._speakers_off.setInterval(SPEAKERS_OFF_MS)
-        self._speakers_off.timeout.connect(self._tell_speakers)
 
     # ---- the panel's questions ---------------------------------------------------------
     def available(self) -> bool:
@@ -599,113 +573,9 @@ class CaptionsController(QObject):
             self._trials = list(found)
             self.changed.emit()
 
-    # ---- Speaker marks (2026-11-08, the owner: "we need diarization otherwise dialogs write
-    # single"; beside the Test model list, offered where it is: services.captions.speakers) ----
-    def speaker_marks_offered(self) -> bool:
-        """Speaker marks can be chosen here (a run from source, as test models)."""
-        from services.captions import trial_models
-
-        return trial_models.enabled()
-
-    def speaker_marks(self) -> str:
-        """How a change of speaker shows: speakers.DASHES (the default), COLOURS or OFF (also
-        wherever they aren't offered)."""
-        from services.captions.speakers import DASHES, MARKS, OFF
-
-        if not self.speaker_marks_offered():
-            return OFF
-        mark = str(self._config_get(_SPEAKER_MARKS, DASHES) or DASHES)
-        return mark if mark in MARKS else DASHES
-
-    def speaker_mark_choices(self) -> list[tuple[str, str]]:
-        """The Speaker marks row's steps, in order, as (mark, text)."""
-        from services.captions.speakers import COLOURS, DASHES, OFF
-
-        return [
-            (OFF, tr("Off", ctx="speaker marks")),  # i18n: AI captions mark no speaker change
-            # i18n: AI captions: a new speaker's line starts with "- ", as subtitles' dialogue
-            (DASHES, tr("Dashes", ctx="speaker marks")),
-            # i18n: AI captions: each speaker's lines in a colour of their own, as teletext's
-            (COLOURS, tr("Colours", ctx="speaker marks")),
-        ]
-
-    def step_speaker_marks(self, delta: int) -> None:
-        """The row's ‹ or ›: the mark before or after the one chosen (round the three)."""
-        marks = [mark for mark, _text in self.speaker_mark_choices()]
-        at = marks.index(self.speaker_marks())
-        self.set_speaker_marks(marks[(at + (1 if delta > 0 else -1)) % len(marks)])
-
-    def set_speaker_marks(self, mark: str) -> None:
-        """How a change of speaker shows from now on. Marked, the captions process tells
-        speakers apart (its diarizer downloads first when it isn't here) and the picture waits
-        SPEAKER_LEAD_S longer; Off, neither, SPEAKERS_OFF_MS later (a step through Off changes
-        nothing for them)."""
-        from services.captions.speakers import MARKS, OFF
-
-        if not self.speaker_marks_offered() or mark not in MARKS:
-            return
-        self._config_set(_SPEAKER_MARKS, mark)
-        logger.info("AI captions: speaker marks %s", mark)
-        self._fetch_speakers()
-        if mark == OFF:
-            self._speakers_off.start()
-        else:
-            self._speakers_off.stop()
-            self._tell_speakers()
-        self.changed.emit()
-
-    def _tell_speakers(self) -> None:
-        """The process tells speakers or not as the marks chosen say, and the picture keeps its
-        distance for them."""
-        if self._process.running():
-            self._process.send("speakers", self._diarizer_folder(), self._print_file())
-        if self._floored is not None:
-            self._floored.set_caption_floor(self._picture_lead(), shift=False)
-
     def _picture_lead(self) -> float:
-        """The picture's distance behind live: the model's, and SPEAKER_LEAD_S more while
-        speakers are marked."""
-        from services.captions.speakers import OFF
-
-        lead = LEAD_S.get(self._tier, 8.0)
-        return lead + SPEAKER_LEAD_S if self.speaker_marks() != OFF else lead
-
-    def _print_file(self) -> Optional[str]:
-        """The voice prints' speaker model while speakers are marked and it is here, else None."""
-        from services.captions import models
-
-        return str(models.print_file()) if self._diarizer_folder() else None
-
-    def _diarizer_folder(self) -> Optional[str]:
-        """The diarizer's folder while speakers are marked and it is here, else None."""
-        from services.captions import models
-        from services.captions.speakers import OFF
-
-        if self.speaker_marks() == OFF or not self._here(models.SPEAKER_KEY):
-            return None
-        return str(models.diarizer_folder())
-
-    def _fetch_speakers(self) -> None:
-        """The diarizer downloads while captions are on with speakers marked (unasked: a
-        developer's run; once while QiTV runs, after the speech model is here); the process
-        takes it once it is here."""
-        from services.captions import models
-        from services.captions.speakers import OFF
-
-        if (
-            self._speakers_tried
-            or self.speaker_marks() == OFF
-            or not self._enabled
-            or self._download is not None
-            or self._asking
-            or self._tier not in models.TIERS
-            or not self._here(self._tier)
-            or self._here(models.SPEAKER_KEY)
-        ):
-            return
-        self._speakers_tried = True
-        self._fetching = models.SPEAKER_KEY
-        self._start_download()
+        """The picture's distance behind live: the model's."""
+        return LEAD_S.get(self._tier, 8.0)
 
     def _here(self, name: str) -> bool:
         """The model is installed, looked at once until a download or Settings' Delete changes
@@ -832,12 +702,8 @@ class CaptionsController(QObject):
         self._disk.clear()
         self._unpacking = False
         self._download = None
-        from services.captions.models import SPEAKER_KEY, SPECIALISTS
+        from services.captions.models import SPECIALISTS
 
-        if self._fetching == SPEAKER_KEY:  # Speaker marks' diarizer: the process takes it as it is
-            self._process.send("speakers", self._diarizer_folder(), self._print_file())
-            self.changed.emit()
-            return
         if self._fetching in SPECIALISTS:  # 2.9.6: a language's own model is here
             if self._enabled:
                 self._reload()
@@ -940,8 +806,6 @@ class CaptionsController(QObject):
                 "cohere": self._folder("cohere", paths.cohere),  # 2.9.3: Cohere Transcribe
                 # a test model picked (a run from source): it alone writes, as Turkish
                 "trial": str(models.captions_root() / trial) if trial else None,
-                "diarizer": self._diarizer_folder(),  # Speaker marks' (a run from source)
-                "voice_prints": self._print_file(),
                 "threads": model_threads(),
             },
             detailed_log=bool(self._config_get("detailed_log", False)),
@@ -1084,7 +948,6 @@ class CaptionsController(QObject):
         self._starting = time.monotonic()
         if self._enabled:
             self._start_run()
-            self._fetch_speakers()
         self.changed.emit()
 
     def _on_failed(self, reason: str) -> None:
@@ -1177,30 +1040,14 @@ class CaptionsController(QObject):
         )
         self._process.send("viewer", self._position())
 
-    def _on_caption(
-        self,
-        run: int,
-        start: float,
-        end: float,
-        text: str,
-        turn: int = 0,
-        speaker: int = 0,
-        parts: Any = (),
-    ) -> None:
-        """A line written (`turn`: another speaker than the line before's says it; `speaker`:
-        who, 1, 2, ... in the run, 0 untold). A line of more than one part (`parts`: (text,
-        start, end, turn, speaker) each, its sentences and the stretches between long pauses)
-        marks each part's speaker, and its parts' times say when each is said (`_page_at`)."""
+    def _on_caption(self, run: int, start: float, end: float, text: str, parts: Any = ()) -> None:
+        """A line written. A line of more than one part (`parts`: (text, start, end) each, its
+        sentences and the stretches between long pauses) shows its parts as each is said, by
+        their times (`_page_at`)."""
         if run != self._run or not self._enabled:
             return
-        from services.captions.speakers import OFF, joined
-
-        mark = self.speaker_marks()
-        said = [tuple(part) for part in parts] or [(text, start, end, turn, speaker)]
-        turned = bool(said[0][3]) and mark != OFF
-        text = self._marked(run, mark, said[0])
-        for part in said[1:]:  # another speaker's part on a line of its own, marked
-            text = joined(text, self._marked(run, mark, part), bool(part[3]) and mark != OFF, mark)
+        said = [tuple(part) for part in parts] or [(text, start, end)]
+        text = " ".join(str(part[0]) for part in said)
         timing = [(_words(str(part[0])), float(part[1]), float(part[2])) for part in said]
         i = bisect.bisect_left(self._cues, (start, end, text))
         if i < len(self._cues) and self._cues[i][0] == start:
@@ -1213,49 +1060,23 @@ class CaptionsController(QObject):
         if (
             i > 0
             and self._shows(i - 1) > self._position()
-            and self._joins(self._cues[i - 1], self._cues[i], turned, mark)
+            and self._joins(self._cues[i - 1], self._cues[i])
         ):
             before = self._cues[i - 1]
-            # another speaker's line goes on a line of its own, both marked (Speaker marks)
-            self._cues[i - 1] = (before[0], end, joined(before[2], text, turned, mark))
+            self._cues[i - 1] = (before[0], end, f"{before[2]} {text}")
             del self._cues[i]
             known = self._timing.pop(before[0], [(_words(before[2]), before[0], before[1])])
             self._timing[before[0]] = known + self._timing.pop(start, timing)
 
-    def _marked(self, run: int, mark: str, part: tuple) -> str:
-        """A part's words as Speaker marks show them: dashed when another speaker says it
-        (DASHES), in its speaker's colour (COLOURS), else as they are."""
-        from services.captions.speakers import COLOURS, DASHES, Colours, coloured, dashed
-
-        text, turn, speaker = str(part[0]), bool(part[3]), int(part[4])
-        if mark == DASHES and turn:
-            return dashed(text)  # a new speaker's line starts with "- "
-        if mark == COLOURS and speaker > 0:
-            if self._colours is None or self._colours_run != run:
-                self._colours, self._colours_run = Colours(), run  # S1 white again
-            return coloured(text, self._colours.of(speaker))  # each speaker's own colour
-        return text
-
-    def _joins(
-        self,
-        before: tuple[float, float, str],
-        line: tuple[float, float, str],
-        turn: bool = False,
-        mark: str = "dashes",
-    ) -> bool:
-        """Whether `line` is the end of `before`, on its own (2.9.5, JOIN_GAP_S); another
-        speaker's (`turn`) shows with it when both fit, each on a line of its own."""
-        from services.captions.speakers import joined
-
+    def _joins(self, before: tuple[float, float, str], line: tuple[float, float, str]) -> bool:
+        """Whether `line` is the end of `before`, on its own (2.9.5, JOIN_GAP_S)."""
         start, end, text = line
         if not 0.0 <= start - before[1] <= JOIN_GAP_S or end - start > JOIN_LONGEST_S:
             return False
-        together = joined(before[2], text, turn, mark)
+        together = f"{before[2]} {text}"
         overlay = next((o for o in self._overlays if hasattr(o, "pages")), None)
         if overlay is None:
-            lines = together.split("\n")
-            room = JOIN_CHARS if len(lines) == 1 else JOIN_CHARS // 2
-            return len(lines) <= 2 and all(len(each) <= room for each in lines)
+            return len(together) <= JOIN_CHARS
         return len(overlay.pages(together)) <= max(1, len(overlay.pages(before[2])))
 
     def _on_progress(
@@ -1335,8 +1156,6 @@ class CaptionsController(QObject):
         if not self._enabled:
             return
         self._started()  # (no progress from a run that did not start: the wait ends anyway)
-        if self._ready:
-            self._fetch_speakers()  # (another download was on its way when they came on)
         if self._steps_down():
             self._step_down()
         if self._is_live() and self._live() is not self._floored:

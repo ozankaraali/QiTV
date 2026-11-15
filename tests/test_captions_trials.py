@@ -169,6 +169,28 @@ class TrialModelsTests(unittest.TestCase):
         self.assertFalse(enabled({}, frozen=True))
         self.assertTrue(enabled({trial_models.ENV: "1"}, frozen=True))
 
+    def test_each_line_is_logged_at_info_only_where_test_models_are_offered(self):
+        import logging
+
+        from services.captions import worker
+
+        with mock.patch.object(trial_models, "enabled", return_value=True):
+            self.assertEqual(worker.line_level(), logging.INFO)
+        with mock.patch.object(trial_models, "enabled", return_value=False):
+            self.assertEqual(worker.line_level(), logging.DEBUG)  # a released build: quieter
+        # (trial_models.enabled: a run from source, or a packaged one with QITV_TRIAL_MODELS=1)
+        with mock.patch.object(sys, "frozen", True, create=True):
+            with mock.patch.dict(os.environ, {"QITV_TRIAL_MODELS": "1"}):
+                self.assertEqual(worker.line_level(), logging.INFO)
+            with mock.patch.dict(os.environ, {"QITV_TRIAL_MODELS": ""}):
+                self.assertEqual(worker.line_level(), logging.DEBUG)
+        from test_captions_parts import _bare_run
+
+        run = _bare_run(level=logging.DEBUG)
+        with self.assertLogs("services.captions.worker", logging.DEBUG) as logs:
+            run._write("Qwen3-ASR", "eve", "Eve.", 10.0, 11.0)
+        self.assertEqual([r.levelno for r in logs.records], [logging.DEBUG])
+
     def test_it_needs_no_qt(self):  # the captions process imports it
         import subprocess
         import sys

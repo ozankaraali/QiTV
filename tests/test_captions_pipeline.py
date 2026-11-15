@@ -1000,8 +1000,6 @@ class ControllerTimingTests(unittest.TestCase):
         self.window.controller = controller
         self.captions._floored = None
         self.captions._tier = "small"
-        captions: Any = self.captions
-        captions.speaker_marks_offered = lambda: False  # (a released build's distance)
         self.captions._hold_floor()
         self.assertEqual(main.floor, 8.0)
         controller.live = other  # swapped: the other picture is large now
@@ -1327,11 +1325,8 @@ class StepDownTests(unittest.TestCase):
             "turkish": True,
             "european": True,
             "cohere": True,
-            "speaker": True,  # (Speaker marks' model, a run from source's: here, nothing fetched)
         }
         self.captions._here = lambda name: self.disk[name]
-        captions: Any = self.captions
-        captions.speaker_marks_offered = lambda: False  # (a released build's distance)
         self.toasts = []
         self.captions._toast = lambda text, kind="info": self.toasts.append(text)
         self.captions._tier = "large"

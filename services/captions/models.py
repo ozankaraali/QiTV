@@ -13,8 +13,6 @@ already has it) the sherpa-onnx runtime, all pinned below by size and sha256. Th
         qwen3-asr-1.7b/        tokenizer/ (both tiers alike)
         qitv-asr-tr-moonshine-mid/  encoder_model_quantized.onnx,
                                decoder_model_merged_quantized.onnx, tokens.txt (Moonshine v2 files)
-        nemotron-3-diarization/  the diarizer (a run from source's Speaker marks)
-        speaker-eres2net/      ... and the speaker model of its voice prints
         silero_vad.onnx
         verified.json          what was downloaded whole and checked (sha256), by path
 
@@ -308,60 +306,6 @@ COHERE_CONTENTS: tuple[tuple[str, Optional[int]], ...] = (
 )
 
 
-SPEAKER_KEY = "speaker"  # 2026-11-08, Speaker marks (a run from source): its download
-# 2026-11-09, the owner ("JUST DOWNLOAD PRETRAINED DIARIZER SOTA AND CONNECT TO IT"): NVIDIA's
-# Nemotron 3 Diarization (OpenMDW-1.1), a streaming Sortformer, in the community ONNX export that
-# splits it for a host-side speaker cache (services.captions.sortformer): its embedder, its encoder
-# and head with int8 weights (2.2 times as fast as the onnx-community export's on an arm64 CPU),
-# the mel filterbank and the learned silence embedding. Sizes and sha256 as Hugging Face served
-# them on 2026-11-09 (revision 46642c09).
-_DIARIZER = (
-    "https://huggingface.co/NealCaren/Nemotron-3-Diarization-ONNX/resolve/"
-    "46642c09b3bd014c5ceb19d20524fa2f1dc27dee/"
-)
-DIARIZER_FOLDER = "nemotron-3-diarization"
-DIARIZER_FILES = (
-    RemoteFile(
-        _DIARIZER + "embed.onnx",
-        "embed.onnx",
-        2102458,
-        "2e8796e42286abe2e2d7d44a97fab7e5a7d06b2d4cbee82a3a0f730cfff84a33",
-    ),
-    RemoteFile(
-        _DIARIZER + "step_int8.onnx",
-        "step_int8.onnx",
-        103325385,
-        "1f18a5aed4909677d3618c9e6ed6e3003720b6d6e766f0f8b337aa4fcb0a9d2a",
-    ),
-    RemoteFile(
-        _DIARIZER + "mel_filters.bin",
-        "mel_filters.bin",
-        131584,
-        "bce5ec5f194a5913f6508cee5a85512e7bad2352db8fc28f5c6ff75af8b09137",
-    ),
-    RemoteFile(
-        _DIARIZER + "silence_embeds.bin",
-        "silence_embeds.bin",
-        2048,
-        "d4417b3c0eabdf7c47032fac2b5b5a7ee83d819a6ddda8fd8eaf74e2b5cc4ac7",
-    ),
-)
-
-# ... and, who is who across the diarizer's fresh starts (2026-11-09, the owner: "try 2"), voice
-# prints by 3D-Speaker's ERes2Net trained on VoxCeleb (Apache-2.0), sherpa-onnx's export in its
-# release "speaker-recongition-models" (sic): on two-person Turkish drama dialogue it told voices
-# apart best of those sherpa-onnx runs (2026-11-08). Size and sha256 as GitHub served it on
-# 2026-11-08 (uploaded 2024-10-14).
-PRINT_FOLDER = "speaker-eres2net"
-PRINT_FILE = RemoteFile(
-    "https://github.com/k2-fsa/sherpa-onnx/releases/download/speaker-recongition-models/"
-    "3dspeaker_speech_eres2net_sv_en_voxceleb_16k.onnx",
-    "3dspeaker_speech_eres2net_sv_en_voxceleb_16k.onnx",
-    26485263,
-    "c59158379255ad66e161679cca6af8d52d51e389e3224ab7d7a7baae295c2db5",
-)
-
-
 def _wheel(folder: str, name: str, size: int, sha256: str) -> RemoteFile:
     return RemoteFile(f"{_PYPI_FILES}{folder}/{name}", name, size, sha256, EXTRACT_WHEEL)
 
@@ -500,16 +444,6 @@ def available() -> bool:
     return True
 
 
-def diarizer_folder(root: Optional[Path] = None) -> Path:
-    """The streaming diarizer's folder (Speaker marks), here or not."""
-    return _root(root) / DIARIZER_FOLDER
-
-
-def print_file(root: Optional[Path] = None) -> Path:
-    """The speaker model's file (Speaker marks' voice prints), here or not."""
-    return _root(root) / PRINT_FOLDER / PRINT_FILE.path
-
-
 def model_paths(tier: str, root: Optional[Path] = None) -> ModelPaths:
     base = _root(root)
     folder = base / TIERS[tier].folder
@@ -578,16 +512,10 @@ SPECIALISTS = (TURKISH_KEY, EUROPEAN_KEY, COHERE_KEY)
 def needed(key: str, root: Optional[Path] = None) -> list[Download]:
     """What `key` needs to run, in download order. A tier ("small", "large"): the runtime
     (unless this Python has one), the VAD and Qwen's files, what captions need to start. A
-    specialist (`SPECIALISTS`), or the diarizer (`SPEAKER_KEY`): its own files.
-    Unsupported without a runtime for this computer."""
+    specialist (`SPECIALISTS`): its own files. Unsupported without a runtime for this computer."""
     base = _root(root)
     if key in SPECIALISTS:
         return _specialist(key, base)
-    if key == SPEAKER_KEY:
-        folder = base / DIARIZER_FOLDER
-        found = [Download(folder, file, ((file.path, file.size),)) for file in DIARIZER_FILES]
-        prints = Download(base / PRINT_FOLDER, PRINT_FILE, ((PRINT_FILE.path, PRINT_FILE.size),))
-        return found + [prints]
     downloads: list[Download] = []
     runtime = runtime_dir(base)
     if runtime is not None:

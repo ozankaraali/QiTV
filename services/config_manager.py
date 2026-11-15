@@ -600,13 +600,6 @@ class ConfigManager:
     # 2026-11-08, optional (older builds ignore it): the AI captions test model picked in a run
     # from source (services.captions.trial_models: a folder's name; "": the usual models)
     ai_captions_trial_model = _config_property("ai_captions_trial_model", "", coerce=str)
-    # 2026-11-08, optional (older builds ignore it): how the AI captions of a run from source show
-    # a change of speaker (services.captions.speakers: "dashes", "colours" or "off")
-    ai_captions_speaker_marks = _config_property(
-        "ai_captions_speaker_marks",
-        "dashes",
-        coerce=_one_of(("off", "dashes", "colours"), "dashes"),
-    )
     watch_history = _config_property("watch_history", [])
     playback_positions = _config_property("playback_positions", {})
 
