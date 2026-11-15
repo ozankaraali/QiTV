@@ -907,6 +907,34 @@ class TranslationTests(unittest.TestCase):
             ],
         )
 
+    def test_a_stop_drops_the_lines_being_translated_and_waiting(self):
+        go, began = self.held(), threading.Event()
+
+        def answer(text, source, target, deadline):
+            began.set()
+            go.wait(5)
+            return f"<{target}> {text}"
+
+        self.answer = answer
+
+        def done():  # the translator has nothing left
+            translation = self.runs[0].translation
+            return translation._busy is None and not translation._lines
+
+        self.serve(
+            ("load", {"translation": str(MT_FOLDER), "translate_to": "English"}),
+            ("start", 5, "http://127.0.0.1/side", 100.0, None, "Turkish"),
+            lambda: self.until(lambda: self.runs[0].translation._ready()),
+            lambda: self.runs[0]._write("qwen", "heard", "Bir.", 104.0, 105.0),
+            lambda: self.runs[0]._write("qwen", "heard", "İki.", 105.0, 106.0),
+            lambda: began.wait(5),
+            ("stop",),  # captions off
+            lambda: go.set(),
+            lambda: self.assertTrue(self.until(done)),
+        )
+        self.assertEqual(self.sent, [("ready",)])  # neither went out
+        self.assertEqual([call[0] for call in self.calls], ["Bir."])
+
     def test_no_translator_without_a_speech_model(self):
         with self.assertLogs("services.captions.worker", logging.WARNING):
             self.serve(
