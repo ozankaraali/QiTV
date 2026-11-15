@@ -30,6 +30,12 @@ SPECIALIST_QUESTION = N_(
     "AI captions need another speech model for this language ({language}): {size} to download "
     "once. Download it now?"
 )
+# 2.10: the translation model, downloaded once translating AI captions is wanted.
+# i18n: size: as "726 MB"
+TRANSLATE_QUESTION = N_(
+    "Translating AI captions needs a translation model on this computer: {size} to download "
+    "once. Download it now?"
+)
 # AI captions fell behind with the larger speech model (Automatic) and the faster isn't here.
 # i18n: the question when AI captions fall behind with the larger speech model; size: "880 MB"
 STEP_DOWN_QUESTION = N_(

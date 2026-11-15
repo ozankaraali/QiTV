@@ -16,6 +16,7 @@ import ctypes
 import logging
 from pathlib import Path
 import re
+import sys
 import threading
 import time
 from typing import Any, Optional
@@ -88,6 +89,9 @@ class Translator:
         self._broken = False
 
     def _load(self) -> None:
+        site = self._folder / "site"  # the tokenizers wheel, unpacked with the model
+        if site.is_dir() and str(site) not in sys.path:
+            sys.path.insert(0, str(site))
         from tokenizers import Tokenizer  # downloaded with the model: not a dependency
 
         api = onnx_c.Api(onnx_c.find_library(self._library))

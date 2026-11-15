@@ -4,6 +4,7 @@ prompt, the greedy loop's stops, the clean-up of what the model wrote, the langu
 import ctypes
 from pathlib import Path
 import sys
+import tempfile
 from typing import Any
 import unittest
 from unittest import mock
@@ -214,6 +215,39 @@ class TranslatorTest(unittest.TestCase):
         self.assertEqual(closed, ["session", "api"])
         self.assertEqual(made, ["session", "tokenizer"])  # loaded once, never retried
         self.assertEqual(len(logged.records), 1)
+
+    def test_the_site_folder_beside_the_model_is_put_first_on_sys_path(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="qitv-mt-") as name:
+            folder = Path(name)
+            package = folder / "site" / "tokenizers"
+            package.mkdir(parents=True)
+            (package / "__init__.py").write_text("class Tokenizer:\n    pass\n")
+            site = str(folder / "site")
+            t = Translator(folder)
+            with (
+                mock.patch.object(sys, "path", list(sys.path)),
+                mock.patch.dict(sys.modules),
+                mock.patch.object(onnx_c, "find_library", side_effect=OSError("no library")),
+            ):
+                sys.modules.pop("tokenizers", None)
+                with self.assertRaises(OSError):
+                    t._load()
+                self.assertEqual(sys.path[0], site)
+                self.assertEqual(sys.modules["tokenizers"].__file__, str(package / "__init__.py"))
+                with self.assertRaises(OSError):
+                    t._load()
+                self.assertEqual(sys.path.count(site), 1)
+            # no site folder: nothing is added
+            with tempfile.TemporaryDirectory(prefix="qitv-mt-") as bare:
+                with (
+                    mock.patch.object(sys, "path", list(sys.path)),
+                    mock.patch.dict(sys.modules, {"tokenizers": mock.Mock()}),
+                    mock.patch.object(onnx_c, "find_library", side_effect=OSError("x")),
+                ):
+                    before = list(sys.path)
+                    with self.assertRaises(OSError):
+                        Translator(Path(bare))._load()
+                    self.assertEqual(sys.path, before)
 
     def test_names(self) -> None:
         self.assertEqual(len(MT_LANGUAGES), 46)
