@@ -763,7 +763,12 @@ class TranslationTests(unittest.TestCase):
 
     def test_off_while_the_model_loads_keeps_none_of_it(self):
         go, began = self.held(), threading.Event()
-        self.warm = lambda: began.set() or go.wait(5)
+
+        def warm():
+            began.set()
+            return go.wait(5)
+
+        self.warm = warm
         translation = self.translation("English", loaded=False)
         self.assertTrue(began.wait(5))
         with self.assertLogs("services.captions.worker", logging.INFO) as logs:

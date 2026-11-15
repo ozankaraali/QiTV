@@ -462,7 +462,7 @@ class WorkerTest(unittest.TestCase):
         def broken() -> list:
             raise RuntimeError("bad allocation")
 
-        run.writer.work = broken  # type: ignore[method-assign]
+        run.writer.work = broken
         model: Any = object.__new__(worker._Model)
         model.beam = model.turkish = object()
         model.moonshine, model._folders = True, {}
@@ -475,9 +475,12 @@ class WorkerTest(unittest.TestCase):
         self.assertEqual((model.beam, model.turkish, model.moonshine), (None, None, False))
         self.assertTrue(run.qwen_writes())  # Qwen writes Turkish now
         pushed: list = []
-        run.cutter = SimpleNamespace(
-            set_max=lambda s: None, push=lambda at, f: pushed.append(at) or []
-        )
+
+        def push(at: float, floats: Any) -> list:
+            pushed.append(at)
+            return []
+
+        run.cutter = SimpleNamespace(set_max=lambda seconds: None, push=push)
         run.pieces, run.newest = queue.Queue(), 0.0
         run._take(1.0, array("f", bytes(4 * 1600)))
         self.assertEqual(pushed, [1.0])  # cut into pieces, not left in the blocks

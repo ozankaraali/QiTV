@@ -490,7 +490,8 @@ class CaptionsController(QObject):
 
     def _follow_translation(self, before: str) -> None:
         """What they are translated into changed from `before` ("": nothing). Turned on or off,
-        Automatic's speech model may change: they come on again with it, as with a model chosen.
+        Automatic's speech model may change: turned on with it here, it takes over while they go
+        on (R25, `_switch`); else they come on again with it, as with a model chosen.
         Else the process translates from now on, and the picture keeps its distance for it as it
         plays: raised, it waits there once; lowered, stay-live steers it back. A film's sound is
         read again from further ahead (turned off, it reads on, ahead as it is)."""

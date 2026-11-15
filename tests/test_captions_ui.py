@@ -1280,7 +1280,7 @@ class TranslationTests(unittest.TestCase):
         installed = mock.patch("services.captions.models.installed", return_value=True)
         installed.start()
         self.addCleanup(installed.stop)
-        self.captions.set_translate_to("English")  # as a model chosen: on again with the 0.6B
+        self.captions.set_translate_to("English")  # the 0.6B here takes over (R25: they stay on)
         self.assertEqual(self.stopped, [True])
         [load] = self.loaded
         self.assertIn("qwen3-asr-0.6b", load["model"]["encoder"])

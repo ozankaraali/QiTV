@@ -755,7 +755,9 @@ class _Run:
                 if callable(drop):
                     drop("failed", error)
                 else:
-                    logger.warning("AI captions: the Turkish model failed: %s", error)
+                    logger.warning(
+                        "AI captions: the Turkish model failed: %s: %s", type(error).__name__, error
+                    )
                 self.writer = None
                 return
             if seconds:
