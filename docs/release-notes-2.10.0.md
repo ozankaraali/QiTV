@@ -19,13 +19,14 @@ others' distributions, which may have malware.**
 - **Translated on your computer:** each caption line is translated by Xiaomi's MiLMMT-46 1B
   model, on your computer. No text or sound leaves it, and it costs nothing. The first time you
   pick a language, QiTV asks before a one-time download of about 730 MB.
-- **On time, translated or as said:** while translating, the picture waits about 3 seconds more,
+- **On time, translated or as said:** while translating, the picture waits about 5 seconds more,
   so each line has time to be translated before it shows. A line that isn't translated in time
   shows as it was said, never late. A line already in the language you chose shows as it is.
 - **On a slower computer,** Automatic uses the faster speech model while translating, when you
   have it, so the captions and their translation both keep up; the captions stay on while it
   switches. Without it, the more accurate model goes on translating, and if the captions can't
-  keep up, QiTV asks to download the faster one, as before.
+  keep up, QiTV asks to download the faster one, as before. Turkish is also read a little more
+  simply there while translating, so the translation keeps up.
 - **On the phone remote,** the Subtitles sheet has the same Translate to row and list.
 
 ## Turkish captions by QiTV's own model

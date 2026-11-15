@@ -26,7 +26,7 @@ FIRST_WORD_S = 0.3  # the captions show a line this long after its start (ui.cap
 # 2.10: while translating, a line's translation takes this long before the line shows: the
 # picture is held this much further back (ui.captions_controller) and the speech side writes each
 # line this much sooner (services.captions.worker, the growing writer's `reserve`)
-TRANSLATE_LEAD_S = 3.0
+TRANSLATE_LEAD_S = 5.0
 
 
 def time_left(t: float, position: float, still: float, newest: float) -> float:

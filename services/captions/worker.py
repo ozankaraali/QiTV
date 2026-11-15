@@ -164,6 +164,9 @@ class _Model:
 
         paths = spec.get("model")
         threads = int(spec.get("threads", 2))
+        # 2.10: a computer too slow to translate at full quality reads Turkish with its best
+        # path alone while translating (`_Run.fast`); an older GUI doesn't say
+        self.slow_to_translate = bool(spec.get("slow_to_translate"))
         self._sherpa = sherpa_onnx
         self._threads = threads
         # Without a model (the packaged smoke test's probe): the sound, the clock and the
@@ -509,9 +512,15 @@ class _Run:
             self.link.send(message)
 
     def fast(self) -> bool:
-        """The picture plays faster than FAST_RATE (the reader reads ahead at its speed)."""
+        """The picture plays faster than FAST_RATE (the reader reads ahead at its speed), or
+        2.10: this computer is slow to translate and translation is on (the same "on" as
+        `_Translation.reserve`; off again, the beam comes back at the next reading)."""
         viewer = getattr(self, "viewer", None)
-        return bool(viewer is not None and len(viewer) > 1 and float(viewer[1]) >= FAST_RATE)
+        if viewer is not None and len(viewer) > 1 and float(viewer[1]) >= FAST_RATE:
+            return True
+        translation = getattr(self, "translation", None)
+        slow = getattr(getattr(self, "model", None), "slow_to_translate", False)
+        return bool(slow and translation is not None and translation.reserve() > 0)
 
     def stop(self) -> None:
         self.stopped.set()

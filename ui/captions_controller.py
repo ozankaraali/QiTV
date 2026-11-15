@@ -34,8 +34,9 @@ where it is (TVController.relay_film); turning them off keeps it until the title
 list (`set_translate_to`; MiLMMT-46 1B in the captions process, services.captions.translate). Its
 model is downloaded once its question is answered (asked while they are on; not now: none).
 While they are translated the picture is held TRANSLATE_LEAD_S further back (a film's sound read
-that much further ahead), on every channel, and Automatic takes the 0.6B on a computer too slow
-for the 1.7B and the translator both (services.captions.tier.TRANSLATE_SMALL_BELOW).
+that much further ahead), on every channel. On a computer too slow for the 1.7B and the
+translator both, Automatic takes the 0.6B (services.captions.tier.TRANSLATE_SMALL_BELOW) and
+Turkish is read with its best path alone while translating (the load's "slow_to_translate").
 """
 
 from __future__ import annotations
@@ -882,10 +883,19 @@ class CaptionsController(QObject):
                 # 2.10: the language they are translated into, and its model once it is here
                 "translate_to": translation or None,
                 "translation": self._translation_folder() if translation else None,
+                "slow_to_translate": self._slow_to_translate(),  # 2.10 (an older child ignores it)
                 "threads": model_threads(),
             },
             detailed_log=bool(self._config_get("detailed_log", False)),
         )
+
+    def _slow_to_translate(self) -> bool:
+        """This computer is slow to translate (tier.slow_to_translate, by the score already
+        known; unknown counts as not slow): the child reads Turkish plainly while translating."""
+        from services.captions import tier
+
+        score = tier.known_score()
+        return score is not None and tier.slow_to_translate(score)
 
     # ---- Automatic steps down (2.9: the owner's call) -------------------------------------
     def _behind(self) -> bool:

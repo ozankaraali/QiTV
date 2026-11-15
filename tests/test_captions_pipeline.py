@@ -1241,6 +1241,43 @@ class StreamClockTests(unittest.TestCase):
         model.decode(array("f"), worker.TURKISH)
         self.assertEqual(widths, [1, None])  # its best path alone at 2x, the beam at 1x
 
+    def test_a_slow_computer_reads_turkish_plainly_only_while_translating(self):
+        from services.captions import worker
+
+        class On:
+            def __init__(self):
+                self.on = True
+
+            def reserve(self):
+                return 5.0 if self.on else 0.0
+
+        def run(slow, translation):
+            made: Any = object.__new__(worker._Run)
+            made.viewer = [100.0, 1.0]
+            made.model = SimpleNamespace(slow_to_translate=slow)
+            made.translation = translation
+            return made
+
+        on = On()
+        slow = run(True, on)
+        self.assertTrue(slow.fast())
+        on.on = False  # translation turned off mid-run: the beam comes back
+        self.assertFalse(slow.fast())
+        on.on = True
+        self.assertFalse(run(False, on).fast())  # a fast computer keeps its beam
+        self.assertFalse(run(True, None).fast())
+        model: Any = object.__new__(worker._Model)
+        widths = []
+        model.beam = SimpleNamespace(
+            transcribe=lambda samples, width=None: widths.append(width) or ""
+        )
+        model._wrote, model.names = threading.local(), {}
+        model.name = lambda role: "beam"
+        model.decode(array("f"), worker.TURKISH, fast=slow.fast())
+        on.on = False
+        model.decode(array("f"), worker.TURKISH, fast=slow.fast())
+        self.assertEqual(widths, [1, None])
+
     def test_a_beam_read_narrowed_for_once(self):
         from services.captions import moon_beam
 

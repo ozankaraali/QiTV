@@ -19,6 +19,7 @@ from test_track_panel import CHANNEL, FILM, FakePlayer, PanelCase
 from timer_fixtures import wait_until
 
 from services.captions.languages import QWEN_LANGUAGES, iso_code, own_name, qwen_name
+from services.captions.streaming import TRANSLATE_LEAD_S
 from services.config_manager import ConfigManager
 from services.i18n import translate
 from services.playback import AudioTrackInfo, NullSession
@@ -1032,7 +1033,7 @@ class TranslationTests(unittest.TestCase):
         self.disk["translation"] = True
         self.captions._on_downloaded(download)
         self.assertEqual(self.sent[-1], ("translate", "English", self.folder()))
-        self.assertEqual(self.window.live_session.floor, 11.0)
+        self.assertEqual(self.window.live_session.floor, 8.0 + TRANSLATE_LEAD_S)
         self.assertEqual((self.loaded, self.stopped), ([], []))  # the same speech model reads on
         self.assertTrue(self.captions.enabled())
 
@@ -1199,10 +1200,12 @@ class TranslationTests(unittest.TestCase):
         self.assertEqual((self.captions._picture_lead(), live.floor), (LEAD_S["small"], 8.0))
         self.captions.set_translate_to("English")
         self.assertEqual(self.captions._picture_lead(), LEAD_S["small"] + TRANSLATE_LEAD_S)
-        self.assertEqual((live.floor, live.shifted), (11.0, False))  # it waits there once
+        self.assertEqual(
+            (live.floor, live.shifted), (8.0 + TRANSLATE_LEAD_S, False)
+        )  # it waits there once
         self.assertEqual(self.sent[-1], ("translate", "English", self.folder()))
         self.captions.set_translate_to("German")  # another language: held as it is
-        self.assertEqual(live.floor, 11.0)
+        self.assertEqual(live.floor, 8.0 + TRANSLATE_LEAD_S)
         self.assertEqual(self.sent[-1], ("translate", "German", self.folder()))
         self.captions.set_translate_to("")
         self.assertEqual(
@@ -1226,6 +1229,26 @@ class TranslationTests(unittest.TestCase):
         self.assertEqual(loaded(), (None, None))
         self.disk["translation"] = True
         self.assertEqual(loaded(), ("English", self.folder()))
+
+    def test_the_hold_is_the_tier_s_lead_and_five_seconds_while_translating(self):
+        from ui.captions_controller import LEAD_S
+
+        self.config["ai_captions_translate_to"] = "English"
+        self.assertEqual(self.captions._picture_lead(), LEAD_S["small"] + 5.0)
+
+    def test_the_load_says_whether_this_computer_is_slow_to_translate(self):
+        def slow(score, arm=False):
+            with (
+                mock.patch("services.captions.tier.known_score", return_value=score),
+                mock.patch("services.captions.tier.is_arm_mac", return_value=arm),
+            ):
+                self.captions._load_model()
+            return self.loaded[-1]["slow_to_translate"]
+
+        self.assertIs(slow(1.2), True)
+        self.assertIs(slow(2.0), False)
+        self.assertIs(slow(1.2, arm=True), False)
+        self.assertIs(slow(None), False)
 
     def test_a_films_sound_is_read_further_ahead_while_translating(self):
         from test_captions_pipeline import _Controller, _Session, _Target
@@ -1285,7 +1308,7 @@ class TranslationTests(unittest.TestCase):
         [load] = self.loaded
         self.assertIn("qwen3-asr-0.6b", load["model"]["encoder"])
         self.assertEqual((load["translate_to"], load["translation"]), ("English", self.folder()))
-        self.assertEqual(self.window.live_session.floor, 11.0)
+        self.assertEqual(self.window.live_session.floor, 8.0 + TRANSLATE_LEAD_S)
         self.assertTrue(self.captions.enabled())
         self.captions.set_translate_to("")  # the 1.7B again
         self.assertEqual(len(self.loaded), 2)
@@ -1314,7 +1337,7 @@ class TranslationTests(unittest.TestCase):
         self.assertIn("qwen3-asr-0.6b", load["model"]["encoder"])
         self.assertEqual((load["translate_to"], load["translation"]), ("English", self.folder()))
         self.assertNotIn("translate", [message[0] for message in self.sent])  # the load says it
-        self.assertEqual(self.window.live_session.floor, 11.0)
+        self.assertEqual(self.window.live_session.floor, 8.0 + TRANSLATE_LEAD_S)
         self.assertFalse(self.captions._stepped_down)  # not a step down: off, the 1.7B again
         self.assertEqual(self.captions._auto_tier(), "small")
 
@@ -1333,7 +1356,7 @@ class TranslationTests(unittest.TestCase):
             self.assertEqual((self.stopped, self.loaded), ([], []))  # the 1.7B reads on
             self.assertTrue(self.captions.enabled())
             self.assertEqual(self.sent[-1], ("translate", "English", self.folder()))
-            self.assertEqual(self.window.live_session.floor, 13.0)
+            self.assertEqual(self.window.live_session.floor, 10.0 + TRANSLATE_LEAD_S)
             self.captions._step_down()  # it can't keep up
         [(text, _yes, _no)] = self.card.asked
         self.assertEqual(text, translate(STEP_DOWN_QUESTION, size="600 MB"))
