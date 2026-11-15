@@ -13,7 +13,8 @@ already has it) the sherpa-onnx runtime, all pinned below by size and sha256. Th
         qwen3-asr-1.7b/        tokenizer/ (both tiers alike)
         qitv-asr-tr-moonshine-mid/  encoder_model_quantized.onnx,
                                decoder_model_merged_quantized.onnx, tokens.txt (Moonshine v2 files)
-        qitv-mt-milmmt-46-1b/  model.onnx, model.onnx.data, tokenizer.json (2.10: translation)
+        qitv-mt-milmmt-46-1b/  model.onnx, model.onnx.data, tokenizer.json, config.json
+                               (2.10: translation)
             site/              the tokenizers wheel, unpacked (put on sys.path by the translator)
         silero_vad.onnx
         verified.json          what was downloaded whole and checked (sha256), by path
@@ -318,10 +319,11 @@ COHERE_CONTENTS: tuple[tuple[str, Optional[int]], ...] = (
 
 
 # 2.10: caption translation, MiLMMT-46-1B (Xiaomi) as an int4 ONNX export with the greedy pick
-# inside the graph. Sizes and sha256 as Hugging Face serves them (revision 5f140c43).
+# inside the graph. Sizes and sha256 as Hugging Face serves them (revision 73356cb2). Its top-level
+# config.json comes too (1.5 KB, unused here): the Hub counts a model's downloads by that file.
 _TRANSLATION_REPO = (
     "https://huggingface.co/ozankaraali/qitv-mt-milmmt-46-1b/resolve/"
-    "5f140c439ea53e0cb07657c05d80ce5251ff0abd/"
+    "73356cb2ee11aeb7be2b2bbe14e37126612bc66b/"
 )
 TRANSLATION_FOLDER = "qitv-mt-milmmt-46-1b"
 TRANSLATION_FILES = (
@@ -342,6 +344,12 @@ TRANSLATION_FILES = (
         "tokenizer.json",
         33384567,
         "daab2354f8a74e70d70b4d1f804939b68a8c9624dd06cb7858e52dd8970e9726",
+    ),
+    RemoteFile(
+        _TRANSLATION_REPO + "config.json",
+        "config.json",
+        1538,
+        "221aeaf24f0e52f590f1fa5555366edd78906c75ef79b8bddd2fa192d358f904",
     ),
 )
 

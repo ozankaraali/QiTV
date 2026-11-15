@@ -679,13 +679,19 @@ class TranslationDownloadTests(unittest.TestCase):
         self.assertEqual(models.TRANSLATION_FOLDER, "qitv-mt-milmmt-46-1b")
         sizes = {f.path: f.size for f in models.TRANSLATION_FILES}
         self.assertEqual(
-            sizes, {"model.onnx": 295402, "model.onnx.data": 692490752, "tokenizer.json": 33384567}
+            sizes,
+            {
+                "model.onnx": 295402,
+                "model.onnx.data": 692490752,
+                "tokenizer.json": 33384567,
+                "config.json": 1538,
+            },
         )
         for file in models.TRANSLATION_FILES:
             self.assertTrue(
                 file.url.startswith(
                     "https://huggingface.co/ozankaraali/qitv-mt-milmmt-46-1b/resolve/"
-                    "5f140c439ea53e0cb07657c05d80ce5251ff0abd/"
+                    "73356cb2ee11aeb7be2b2bbe14e37126612bc66b/"
                 )
             )
             self.assertTrue(file.url.endswith("/" + file.path))
