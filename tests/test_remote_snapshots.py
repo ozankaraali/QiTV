@@ -29,16 +29,14 @@ MODELS = {
         {"id": "small", "name": "Faster (0.6B)"},
         {"id": "large", "name": "More accurate (1.7B)"},
     ],
-    # 2.10: the Translate to row (Off) and its list, Off first
-    "translate": "",
-    "translate_note": "Off",
-    "translate_langs": [
-        {"id": "", "name": "Off"},
-        {"id": "Turkish", "name": "Türkçe"},
-        {"id": "English", "name": "English"},
-        {"id": "German", "name": "Deutsch"},
-    ],
 }
+# 2.10: while they are on, the Translate to row (Off) and its list, Off first
+TRANSLATE_LANGS = [
+    {"id": "", "name": "Off"},
+    {"id": "Turkish", "name": "Türkçe"},
+    {"id": "English", "name": "English"},
+    {"id": "German", "name": "Deutsch"},
+]
 
 
 class SnapshotTests(WindowCase):
@@ -364,11 +362,15 @@ class TracksTests(PanelCase):
         self.captions.offered = False  # a provider's film: none
         self.assertNotIn("ai", tracks(self.window, 1))
 
-    def test_ai_captions_say_the_language_they_are_translated_into_and_the_list(self):
-        self.captions.target = "Turkish"  # on or off: chosen as the speech model is
+    def test_ai_captions_say_the_language_they_are_translated_into_while_on(self):
+        self.captions.target = "Turkish"
+        ai = tracks(self.window, 1)["ai"]
+        for key in ("translate", "translate_note", "translate_langs"):
+            self.assertNotIn(key, ai)  # off: no Translate to row, as no Language row
+        self.captions.on = True
         ai = tracks(self.window, 1)["ai"]
         self.assertEqual((ai["translate"], ai["translate_note"]), ("Turkish", "Türkçe"))
-        self.assertEqual(ai["translate_langs"], MODELS["translate_langs"])
+        self.assertEqual(ai["translate_langs"], TRANSLATE_LANGS)
 
     def test_nothing_playing_lists_nothing(self):
         self.playing = False

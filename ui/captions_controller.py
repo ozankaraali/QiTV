@@ -529,6 +529,7 @@ class CaptionsController(QObject):
         except models.Unsupported:
             logger.warning("AI captions: no translation model suits this computer")
             self._config_set(_TRANSLATE_TO, "")
+            self.changed.emit()  # the row (and the phones) say Off
             return
         self._fetching = models.TRANSLATION_KEY
         if missing == 0:  # here already, only to be checked
@@ -653,8 +654,8 @@ class CaptionsController(QObject):
     def _cancel_download(self) -> None:
         download, self._download = self._download, None
         self._start_after_leaving = False
-        if download is not None:
-            self._show("")  # its progress goes with it
+        if download is not None and not self._enabled:
+            self._show("")  # its progress goes with it (on, the captions show: they stay)
         if download is not None and download is not self._leaving_download:
             download.cancel()
             self._leaving_download = download
@@ -696,6 +697,7 @@ class CaptionsController(QObject):
             if self._fetching == TRANSLATION_KEY:
                 self._config_set(_TRANSLATE_TO, "")  # 2.10: not now: not translated
             self.changed.emit()  # the question is gone (a phone's closes too)
+            self._offer_translation()  # 2.10: one picked while this one was up
             return
         if first:  # 2.9.6, the owner: asked once, the sizes said; each language's comes alone
             self._config_set(_LANGUAGE_MODELS_OK, True)
@@ -761,6 +763,7 @@ class CaptionsController(QObject):
 
         if self._fetching == TRANSLATION_KEY:  # 2.10: translated from now on
             self._follow_translation("")
+            self._offer_specialist()  # one wanted while this one downloaded (every phone hears)
             self.changed.emit()
             return
         if self._fetching in SPECIALISTS:  # 2.9.6: a language's own model is here
@@ -868,7 +871,7 @@ class CaptionsController(QObject):
                 "cohere": self._folder("cohere", paths.cohere),  # 2.9.3: Cohere Transcribe
                 # 2.10: the language they are translated into, and its model once it is here
                 "translate_to": translation or None,
-                "translation": str(paths.translation) if translation else None,
+                "translation": self._translation_folder() if translation else None,
                 "threads": model_threads(),
             },
             detailed_log=bool(self._config_get("detailed_log", False)),

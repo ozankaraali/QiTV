@@ -2100,7 +2100,7 @@ MODELS = {  # 2.9: the speech model, Settings' choice, stepped on the AI caption
         {"id": "large", "name": "More accurate (1.7B)"},
     ],
 }
-TRANSLATE = {  # 2.10: the Translate to row, on or off, and its list (Off first)
+TRANSLATE = {  # 2.10: the Translate to row while they are on, and its list (Off first)
     "translate": "",
     "translate_note": "Off",
     "translate_langs": [

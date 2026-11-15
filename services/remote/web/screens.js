@@ -874,7 +874,7 @@ function drawTracks() {
   const tracks = trackList;
   const ai = tracks && tracks.ai;
   if (tracksView === "langs" && !(ai && ai.on && Array.isArray(ai.langs))) tracksView = "subs"; // off meanwhile
-  if (tracksView === "trans" && !(ai && Array.isArray(ai.translate_langs))) tracksView = "subs"; // none offered now
+  if (tracksView === "trans" && !(ai && ai.on && Array.isArray(ai.translate_langs))) tracksView = "subs"; // off meanwhile
   $("tracksTitle").textContent = w(TRACK_TITLES[tracksView]);
   const rows = [];
   const note = (key) => rows.push(el("p", "step", w(key)));
@@ -923,8 +923,8 @@ function drawTracks() {
       const row = choiceRow(w("ai_captions"), turn, { on: ai.on || ai.going, note: ai.note });
       rows.push(Array.isArray(ai.models) && ai.models.length ? modelSteps(row, ai) : row);
       if (ai.on) rows.push(choiceRow(w("language"), () => showTracks("langs"), { note: ai.lang_note, opens: true }));
-      // 2.10: on or off, as the TV's row
-      if (Array.isArray(ai.translate_langs)) rows.push(choiceRow(w("translate_to"), () => showTracks("trans"), { note: ai.translate_note, opens: true }));
+      // 2.10: under Language, while they are on, as the TV's row
+      if (ai.on && Array.isArray(ai.translate_langs)) rows.push(choiceRow(w("translate_to"), () => showTracks("trans"), { note: ai.translate_note, opens: true }));
     } else if (!subs.length) note("no_subtitles");
   }
   // Pushes come often (a download's percent): a list whose rows are the same but for their notes

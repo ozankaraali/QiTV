@@ -160,20 +160,19 @@ def tracks(window: Any, of: int) -> dict:
             "going": captions.going,  # the model downloads: they are on their way
             "note": captions.status[:TITLE_CHARS],  # "Downloading 40%", "Catching up…"
         }
-        if captions.on:  # their Language row, and its list
+        if captions.on:  # their Language row, and its list; 2.10: Translate to's, under it
             ai["lang"] = captions.language
             ai["lang_note"] = captions.language_text[:TITLE_CHARS]  # "Türkçe · automatic"
             ai["langs"] = [{"id": name, "name": own} for name, own in captions.languages]
-        if captions.models:  # their row's ‹ speech model ›, and its steps in order
-            ai["model"] = captions.model
-            ai["models"] = [
-                {"id": name, "name": text[:TITLE_CHARS]} for name, text in captions.models
-            ]
-        if captions.translations:  # 2.10: the Translate to row, on or off, and its list
             ai["translate"] = captions.translate
             ai["translate_note"] = captions.translate_text[:TITLE_CHARS]  # "Türkçe", "Off"
             ai["translate_langs"] = [
                 {"id": name, "name": own[:TITLE_CHARS]} for name, own in captions.translations
+            ]
+        if captions.models:  # their row's ‹ speech model ›, and its steps in order
+            ai["model"] = captions.model
+            ai["models"] = [
+                {"id": name, "name": text[:TITLE_CHARS]} for name, text in captions.models
             ]
         message["ai"] = ai
     return message

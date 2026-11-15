@@ -38,7 +38,7 @@ AI captions (2.9, `captions`: the window's CaptionsController, once it has one):
 be offered for what plays, the Subtitles panel has an "AI captions" row, ticked while they are
 on, saying at its right what they wait for ("Downloading 34%"), and while they are on a
 "Language  Türkçe · audio track ›" row that opens the language list in the panel (Auto, then
-each language; "‹ Subtitles" or ← goes back). Under them (2.10), on or off, "Translate to  Off ›"
+each language; "‹ Subtitles" or ← goes back), and under it (2.10) "Translate to  Off ›", which
 opens the list of languages they can be translated into the same way (Off, the app language
 first, then the rest by their own names). One subtitle source at a time: a track, Off or a
 file turns AI captions off, and AI captions turned on turn the track shown off. Turning them on
@@ -616,7 +616,7 @@ class TrackControls(QObject):
         captions = self._offered()
         if self._level == AI_LANGUAGE and captions is not None and captions.enabled():
             return self._language_model(captions)
-        if self._level == AI_TRANSLATE and captions is not None:
+        if self._level == AI_TRANSLATE and captions is not None and captions.enabled():
             return self._translate_model(captions)
         self._level = ""
         session = self._session()
@@ -684,8 +684,8 @@ class TrackControls(QObject):
             model=str(captions.model()),
             models=tuple(captions.model_choices()),
             translate=str(captions.translate_to()),
-            translate_text=self._translate_text(captions),
-            translations=tuple(self._translations(captions)),
+            translate_text=self._translate_text(captions) if on else "",
+            translations=tuple(self._translations(captions)) if on else (),
         )
 
     def choose_sound(self, track_id: int) -> bool:
@@ -740,11 +740,11 @@ class TrackControls(QObject):
         return True
 
     def choose_caption_translation(self, name: str) -> bool:
-        """2.10: the language AI captions are translated into ("": none), as the Translate to
-        list picks it, on or off; its model's download question first when it isn't here (the
-        panels give way to it). False: none such, or nothing plays."""
+        """2.10: the language AI captions are translated into ("": none), while they are on, as
+        the Translate to list picks it; its model's download question first when it isn't here
+        (the panels give way to it). False: they are off, none such, or nothing plays."""
         captions = self._offered()
-        if captions is None or not self.offers():
+        if captions is None or not self.offers() or not captions.enabled():
             return False
         if name not in {target for target, _own in self._translations(captions)}:
             return False
@@ -818,9 +818,8 @@ class TrackControls(QObject):
         if on:
             note = self._language_text(captions)
             rows.append(PanelRow(AI_LANGUAGE, translate(LANGUAGE_TEXT), note=note, opens=True))
-        # 2.10: chosen before they are on too, as their speech model is
-        note = self._translate_text(captions)
-        rows.append(PanelRow(AI_TRANSLATE, translate(TRANSLATE_ROW), note=note, opens=True))
+            note = self._translate_text(captions)  # 2.10: under it, while on as it is
+            rows.append(PanelRow(AI_TRANSLATE, translate(TRANSLATE_ROW), note=note, opens=True))
         return rows
 
     @staticmethod
