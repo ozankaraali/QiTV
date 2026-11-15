@@ -20,6 +20,7 @@ from timer_fixtures import wait_until
 
 from services.captions.languages import QWEN_LANGUAGES, iso_code, own_name, qwen_name
 from services.config_manager import ConfigManager
+from services.i18n import translate
 from services.playback import AudioTrackInfo, NullSession
 from services.sound_sync import SoundSync
 from tests import test_tv_window as base
@@ -36,6 +37,8 @@ from ui.track_controls import (
     AI_CAPTIONS,
     AI_LANGUAGE,
     AI_PICK,
+    AI_TRANSLATE,
+    AI_TRANSLATE_PICK,
     TrackControls,
     audio_names,
     language_label,
@@ -208,6 +211,9 @@ class FakeCaptions(QObject):
         self.chosen_model = "auto"
         self.models = []  # set_model's calls
         self.model_asks = False  # choosing a model asks its download's question first
+        self.target = ""  # 2.10: the language they are translated into ("": off)
+        self.translated = []  # set_translate_to's calls
+        self.translate_asks = False  # a language asks its model's download question first
 
     def available(self):
         return self.offered
@@ -280,6 +286,18 @@ class FakeCaptions(QObject):
             self.on, self.asked = False, True
         self.changed.emit()  # as the controller's: the panel follows
 
+    def translate_to(self):
+        return self.target
+
+    def translate_languages(self):
+        return [("Turkish", "Türkçe"), ("English", "English"), ("German", "Deutsch")]
+
+    def set_translate_to(self, name):
+        self.translated.append(name)
+        self.target = name
+        self.asked = bool(name) and self.translate_asks
+        self.changed.emit()
+
 
 class CaptionRowsTests(PanelCase):
     def setUp(self):
@@ -333,6 +351,7 @@ class CaptionRowsTests(PanelCase):
                 "English",
                 "Français",
                 "AI captions",
+                "Translate to [Off]",  # 2.10: chosen before they are on too, as the model
                 "Load a file…",
             ],
         )
@@ -351,6 +370,7 @@ class CaptionRowsTests(PanelCase):
                 "Français",
                 "*AI captions",
                 "Language [Türkçe · audio track]",
+                "Translate to [Off]",
                 "Load a file…",
             ],
         )
@@ -418,6 +438,38 @@ class CaptionRowsTests(PanelCase):
         self.assertEqual(self.texts()[1:4], ["Auto", "English", "*Türkçe"])
         self.click_row(AI_BACK)
         self.assertEqual(self.subtitle_panel.model().title, "Subtitles")
+
+    def test_the_translate_list_starts_at_off_picks_one_and_comes_back(self):
+        # 2.10, the owner's: "Translate to" opens a list as Language does
+        self.click_button("subtitles")
+        row = self.rows()[[r.key for r in self.rows()].index(AI_TRANSLATE)]
+        self.assertEqual((row.note, row.opens), ("Off", True))
+        self.click_row(AI_TRANSLATE)
+        self.assertEqual(self.subtitle_panel.model().title, "Translate to")
+        self.assertEqual(self.texts(), ["Subtitles", "*Off", "Türkçe", "English", "Deutsch"])
+        self.assertEqual(self.rows()[0].key, AI_BACK)
+        self.click_row((AI_TRANSLATE_PICK, "English"))
+        self.assertEqual(self.captions.translated, ["English"])
+        self.assertEqual(self.subtitle_panel.model().title, "Subtitles")
+        row = self.rows()[[r.key for r in self.rows()].index(AI_TRANSLATE)]
+        self.assertEqual(row.note, "English")
+        self.click_row(AI_TRANSLATE)
+        self.assertEqual(self.texts()[1:4], ["Off", "Türkçe", "*English"])
+        self.assertTrue(self.controls.handle(Action.SEEK_BACK))  # ← goes back, as Language's
+        self.assertEqual(self.subtitle_panel.model().title, "Subtitles")
+        self.click_row(AI_TRANSLATE)
+        self.click_row((AI_TRANSLATE_PICK, ""))
+        self.assertEqual(self.captions.translated, ["English", ""])
+
+    def test_a_language_whose_model_must_download_puts_its_question_in_front(self):
+        self.captions.on, self.captions.translate_asks = True, True
+        self.click_button("subtitles")
+        self.click_row(AI_TRANSLATE)
+        self.click_row((AI_TRANSLATE_PICK, "Turkish"))
+        self.assertTrue(self.captions.asking())
+        self.assertFalse(self.subtitle_panel.isVisible())
+        self.click_button("subtitles")
+        self.assertEqual(self.subtitle_panel.model().title, "Subtitles")  # its own list again
 
     def ai_row(self):
         return self.rows()[[r.key for r in self.rows()].index(AI_CAPTIONS)]
@@ -614,6 +666,31 @@ class PhoneChoicesTests(PanelCase):
         self.assertFalse(controls.choose_caption_language("Klingon"))
         self.assertTrue(controls.choose_caption_language("auto"))
         self.assertEqual(self.captions.picked, ["Turkish", "auto"])
+
+    def test_the_translation_is_listed_and_chosen_as_its_row_does(self):
+        # 2.10: on or off, as the Translate to row (shown whenever AI captions are offered)
+        controls = self.controls
+        choice = controls.captions_choice()
+        self.assertEqual((choice.translate, choice.translate_text), ("", "Off"))
+        self.assertEqual(
+            choice.translations,
+            (("", "Off"), ("Turkish", "Türkçe"), ("English", "English"), ("German", "Deutsch")),
+        )
+        self.assertTrue(controls.choose_caption_translation("Turkish"))
+        self.assertFalse(controls.choose_caption_translation("Klingon"))
+        self.assertFalse(controls.choose_caption_translation("auto"))
+        choice = controls.captions_choice()
+        self.assertEqual((choice.translate, choice.translate_text), ("Turkish", "Türkçe"))
+        self.assertTrue(controls.choose_caption_translation(""))  # Off
+        self.assertEqual(self.captions.translated, ["Turkish", ""])
+        self.playing = False
+        self.assertFalse(controls.choose_caption_translation("Turkish"))  # nothing plays
+
+    def test_a_translation_that_asks_first_puts_the_panel_aside(self):
+        self.captions.translate_asks = True
+        self.click_button("subtitles")
+        self.assertTrue(self.controls.choose_caption_translation("Turkish"))
+        self.assertFalse(self.subtitle_panel.isVisible())  # the question in front
 
 
 class DownloadQuestionTests(unittest.TestCase):
@@ -834,6 +911,275 @@ class SpeechModelTests(unittest.TestCase):
         self.assertEqual(self.captions._choose_tier(), "large")
         self.captions.set_model("auto")
         self.assertEqual(self.captions._choose_tier(), "small")  # the one here
+
+
+class TranslationTests(unittest.TestCase):
+    """2.10: AI captions translated into the language the viewer picks: the list, its model's
+    question, the picture held the translator's time further back (a film's sound read further
+    ahead), and Automatic's speech model while translating."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.app = QApplication.instance() or QApplication([])
+
+    def setUp(self):
+        from test_captions_pipeline import _Card, _Live, _Overlay
+
+        from ui.captions_controller import CaptionsController
+
+        self.window = QWidget()
+        self.addCleanup(self.window.deleteLater)
+        self.window.live_session = _Live()
+        self.window.live_session.position_s = 100.0
+        self.card = _Card()
+        self.captions = CaptionsController(self.window, card=self.card, overlay=_Overlay())
+        process = self.captions._process
+        self.sent, self.loaded, self.stopped = [], [], []
+        self.alive = True
+        process.send = lambda *m: self.sent.append(m)
+        process.running = lambda: self.alive
+        process.stop = lambda: self.stop()
+        process.start = lambda load, detailed_log=False: self.start(load)
+        self.config = {"ai_captions_model": "small"}
+        self.captions._config_get = lambda name, default: self.config.get(name, default)
+        self.captions._config_set = self.config.__setitem__
+        self.disk = dict.fromkeys(("small", "large", "turkish", "european", "cohere"), True)
+        self.disk["translation"] = True
+        self.captions._here = lambda name: self.disk[name]
+        self.toasts = []
+        self.captions._toast = lambda text, kind="info": self.toasts.append(text)
+        self.captions._tier = "small"
+        self.captions._enabled = self.captions._ready = True
+        self.captions._hold_floor()
+        self.captions._start_run()
+
+    def stop(self):
+        self.alive = False
+        self.stopped.append(True)
+
+    def start(self, load):
+        self.alive = True
+        self.loaded.append(load)
+
+    def folder(self):
+        from services.captions import models
+
+        return str(models.captions_root() / models.TRANSLATION_FOLDER)
+
+    def machine(self, score):
+        """This computer as Automatic sees it: measured at `score`, an Intel one with 16 GB."""
+        from services.captions import tier
+
+        for name, value in (
+            ("known_score", score),
+            ("is_arm_mac", False),
+            ("total_ram_bytes", 16 * 1024**3),
+        ):
+            patch = mock.patch.object(tier, name, return_value=value)
+            patch.start()
+            self.addCleanup(patch.stop)
+
+    def test_the_list_has_the_app_language_first_then_the_rest_by_their_own_names(self):
+        from services.captions.mt_languages import MT_LANGUAGES
+
+        with mock.patch("services.i18n.language", return_value="tr"):
+            listed = self.captions.translate_languages()
+        self.assertEqual(listed[0], ("Turkish", "Türkçe"))
+        self.assertEqual(sorted(name for name, _own in listed), sorted(MT_LANGUAGES))  # once each
+        rest = [own for _name, own in listed[1:]]
+        self.assertEqual(rest, sorted(rest, key=str.casefold))
+        self.assertIn(("Chinese (Simplified)", "简体中文"), listed)
+        # 2.10, the owner's: "a serbian if they know russian and wants to translate to russian"
+        with mock.patch("services.i18n.language", return_value="sr"):
+            listed = self.captions.translate_languages()
+        self.assertEqual(len(listed), 46)
+        owns = [own for _name, own in listed]
+        self.assertEqual(owns, sorted(owns, key=str.casefold))
+        self.assertIn(("Russian", "Русский"), listed)
+
+    def test_a_language_without_its_model_asks_once_then_it_downloads_and_translates(self):
+        from services.captions import models
+        from ui.captions_texts import TRANSLATE_QUESTION
+
+        self.disk["translation"] = False
+        sizes = {models.TRANSLATION_KEY: 726_000_000}
+        with mock.patch.object(models, "download_size", side_effect=lambda key: sizes[key]):
+            self.captions.set_translate_to("English")
+            self.captions.set_translate_to("English")  # again while it asks: asked once
+        [(text, yes, no)] = self.card.asked
+        self.assertEqual(text, translate(TRANSLATE_QUESTION, size="726 MB"))
+        self.assertEqual((yes, no), ("Download", "Not now"))
+        self.assertTrue(self.captions.asked_unprompted())  # every phone hears it too
+        self.assertEqual(self.captions.translate_to(), "English")  # the row says the one asked
+        self.assertEqual(self.window.live_session.floor, 8.0)  # nothing held for it yet
+        self.assertNotIn("translate", [message[0] for message in self.sent])
+        started = []
+        self.captions._start_download = lambda: started.append(self.captions._fetching)
+        self.captions.answer(True)
+        self.assertEqual(started, [models.TRANSLATION_KEY])
+        download = self.captions._download = object()
+        self.disk["translation"] = True
+        self.captions._on_downloaded(download)
+        self.assertEqual(self.sent[-1], ("translate", "English", self.folder()))
+        self.assertEqual(self.window.live_session.floor, 11.0)
+        self.assertEqual((self.loaded, self.stopped), ([], []))  # the same speech model reads on
+        self.assertTrue(self.captions.enabled())
+
+    def test_not_now_leaves_translation_off(self):
+        self.disk["translation"] = False
+        with mock.patch("services.captions.models.download_size", return_value=726_000_000):
+            self.captions.set_translate_to("English")
+        self.captions.answer(False)
+        self.assertEqual(self.captions.translate_to(), "")
+        self.assertEqual(self.config["ai_captions_translate_to"], "")
+        self.assertIsNone(self.captions._download)
+        self.assertEqual(self.window.live_session.floor, 8.0)
+
+    def test_off_while_its_question_is_up_takes_the_question_away(self):
+        self.disk["translation"] = False
+        with mock.patch("services.captions.models.download_size", return_value=726_000_000):
+            self.captions.set_translate_to("English")
+        self.captions.set_translate_to("")
+        self.assertEqual((self.card.withdrawn, self.captions.asking()), (1, False))
+        self.assertEqual(self.captions.translate_to(), "")
+
+    def test_a_download_that_failed_says_why_and_leaves_translation_off(self):
+        self.disk["translation"] = False
+        self.captions._begin_download = lambda: setattr(self.captions, "_download", object())
+        with mock.patch("services.captions.models.download_size", return_value=726_000_000):
+            self.captions.set_translate_to("English")
+        self.captions.answer(True)
+        self.captions._on_download_failed(self.captions._download, "Download failed: 404")
+        self.assertEqual(self.toasts, ["Download failed: 404"])
+        self.assertEqual(self.captions.translate_to(), "")
+        self.assertTrue(self.captions.enabled())  # the captions go on, as written
+
+    def test_off_while_its_model_downloads_calls_the_download_off(self):
+        cancelled = []
+
+        class Download:
+            def running(self):
+                return True
+
+            def cancel(self):
+                cancelled.append(True)
+
+        self.disk["translation"] = False
+        self.captions._begin_download = lambda: setattr(self.captions, "_download", Download())
+        with mock.patch("services.captions.models.download_size", return_value=726_000_000):
+            self.captions.set_translate_to("English")
+        self.captions.answer(True)
+        self.captions.set_translate_to("")
+        self.assertEqual(cancelled, [True])
+        self.assertIsNone(self.captions._download)
+        self.assertTrue(self.captions.enabled())
+
+    def test_a_language_whose_model_went_is_asked_for_again_as_the_next_run_starts(self):
+        # Settings' Delete took the model the language chosen needs: no hold, no translation,
+        # and its question when captions read again (a pick asks again too)
+        self.config["ai_captions_translate_to"] = "English"
+        self.disk["translation"] = False
+        self.assertEqual(self.captions._picture_lead(), 8.0)
+        with mock.patch("services.captions.models.download_size", return_value=726_000_000):
+            self.captions._start_run()
+        [(text, _yes, _no)] = self.card.asked
+        self.assertIn("726 MB", text)
+
+    def test_the_picture_is_held_the_translators_time_further_back_while_translating(self):
+        from services.captions.streaming import TRANSLATE_LEAD_S
+        from ui.captions_controller import LEAD_S
+
+        live = self.window.live_session
+        self.assertEqual((self.captions._picture_lead(), live.floor), (LEAD_S["small"], 8.0))
+        self.captions.set_translate_to("English")
+        self.assertEqual(self.captions._picture_lead(), LEAD_S["small"] + TRANSLATE_LEAD_S)
+        self.assertEqual((live.floor, live.shifted), (11.0, False))  # it waits there once
+        self.assertEqual(self.sent[-1], ("translate", "English", self.folder()))
+        self.captions.set_translate_to("German")  # another language: held as it is
+        self.assertEqual(live.floor, 11.0)
+        self.assertEqual(self.sent[-1], ("translate", "German", self.folder()))
+        self.captions.set_translate_to("")
+        self.assertEqual(
+            (self.captions._picture_lead(), live.floor, live.shifted), (8.0, 8.0, False)
+        )
+        self.assertEqual(self.sent[-1], ("translate", None))
+        self.captions._tier = "large"
+        self.assertEqual(self.captions._picture_lead(), LEAD_S["large"])
+        self.config["ai_captions_translate_to"] = "English"
+        self.assertEqual(self.captions._picture_lead(), LEAD_S["large"] + TRANSLATE_LEAD_S)
+        self.assertEqual((self.loaded, self.stopped), ([], []))  # the viewer's own speech model
+
+    def test_the_load_names_the_language_and_its_model_only_once_the_model_is_here(self):
+        def loaded():
+            self.captions._load_model()
+            return self.loaded[-1]["translate_to"], self.loaded[-1]["translation"]
+
+        self.assertEqual(loaded(), (None, None))
+        self.config["ai_captions_translate_to"] = "English"
+        self.disk["translation"] = False
+        self.assertEqual(loaded(), (None, None))
+        self.disk["translation"] = True
+        self.assertEqual(loaded(), ("English", self.folder()))
+
+    def test_a_films_sound_is_read_further_ahead_while_translating(self):
+        from test_captions_pipeline import _Controller, _Session, _Target
+
+        from services.captions.streaming import TRANSLATE_LEAD_S
+        from ui.captions_controller import FILM_AHEAD_S
+
+        self.window.controller = _Controller(_Target(live=False, local=True))
+        self.window.session = _Session("file:///films/a.mkv", 120_000)
+
+        def starts():
+            return [message[3] for message in self.sent if message[0] == "film"]
+
+        self.captions._start_run()
+        self.assertEqual(starts(), [120.0 + FILM_AHEAD_S])
+        self.captions.set_translate_to("English")  # on during it: read again from further ahead
+        self.assertEqual(starts(), [120.0 + FILM_AHEAD_S, 120.0 + FILM_AHEAD_S + TRANSLATE_LEAD_S])
+        self.captions.set_translate_to("")  # off: it reads on, ahead as it is
+        self.assertEqual(len(starts()), 2)
+        self.captions._start_run()  # a seek: as far ahead as before
+        self.assertEqual(starts()[-1], 120.0 + FILM_AHEAD_S)
+
+    def test_automatic_takes_the_0_6b_while_translating_on_a_slower_computer(self):
+        self.config["ai_captions_model"] = "auto"
+        for score, plain, translating in (
+            (1.2, "large", "small"),
+            (0.99, "large", "small"),
+            (2.0, "large", "large"),
+        ):
+            with self.subTest(score=score):
+                self.machine(score)
+                self.config["ai_captions_translate_to"] = ""
+                self.assertEqual(self.captions._auto_tier(), plain)  # the one here
+                self.config["ai_captions_translate_to"] = "English"
+                self.assertEqual(self.captions._auto_tier(), translating)
+        self.disk["translation"] = False  # its model not here: not translated
+        self.assertEqual(self.captions._auto_tier(), "large")
+        self.config["ai_captions_model"] = "large"  # the viewer's own choice wins
+        self.disk["translation"] = True
+        self.assertEqual(self.captions._choose_tier(), "large")
+
+    def test_automatic_s_model_follows_translation_turned_on_and_off_while_they_are_on(self):
+        self.config["ai_captions_model"] = "auto"
+        self.captions._tier = "large"
+        self.machine(1.2)
+        installed = mock.patch("services.captions.models.installed", return_value=True)
+        installed.start()
+        self.addCleanup(installed.stop)
+        self.captions.set_translate_to("English")  # as a model chosen: on again with the 0.6B
+        self.assertEqual(self.stopped, [True])
+        [load] = self.loaded
+        self.assertIn("qwen3-asr-0.6b", load["model"]["encoder"])
+        self.assertEqual((load["translate_to"], load["translation"]), ("English", self.folder()))
+        self.assertEqual(self.window.live_session.floor, 11.0)
+        self.assertTrue(self.captions.enabled())
+        self.captions.set_translate_to("")  # the 1.7B again
+        self.assertEqual(len(self.loaded), 2)
+        self.assertIn("qwen3-asr-1.7b", self.loaded[-1]["model"]["encoder"])
+        self.assertEqual(self.loaded[-1]["translate_to"], None)
+        self.assertEqual(self.window.live_session.floor, 10.0)
 
 
 class NoteRowTests(PanelCase):
