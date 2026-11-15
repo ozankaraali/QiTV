@@ -12,6 +12,7 @@ import orjson as json
 
 from services.atomic_write import atomic_write, set_aside
 from services.captions.languages import CAPTION_LANGUAGES
+from services.captions.mt_languages import MT_LANGUAGES
 from services.config_writer import ConfigWriter
 from services.free_channels import ALL_NAME, ALL_URL
 from services.multikeydict import MultiKeyDict
@@ -596,6 +597,11 @@ class ConfigManager:
     # on the object only, never written, and the question came back after every restart.
     ai_captions_language_models = _config_property(
         "ai_captions_language_models", False, coerce=lambda value: value is True
+    )
+    # 2.10, optional (older builds ignore it): the language AI captions are translated into
+    # ("": off; else one of services.captions.mt_languages.MT_LANGUAGES, MiLMMT's names)
+    ai_captions_translate_to = _config_property(
+        "ai_captions_translate_to", "", coerce=_one_of(("", *MT_LANGUAGES), "")
     )
     watch_history = _config_property("watch_history", [])
     playback_positions = _config_property("playback_positions", {})

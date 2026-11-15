@@ -35,6 +35,10 @@ LARGE = "large"
 # kernel keep some), hence 11.5 GiB.
 LARGE_MIN_SCORE = 0.9
 LARGE_MIN_RAM = int(11.5 * 1024**3)
+# 2.10: while AI captions are translated, the translator (MiLMMT-46 1B, 2 threads) shares the
+# CPU with the speech model: below this score Automatic takes the small one (an arm64 Mac keeps
+# its rule)
+TRANSLATE_SMALL_BELOW = 1.5
 
 # The reference, score 1.0: a 2017 MacBook Pro, an Intel i7-7820HQ (4 cores, 8 threads), on
 # which the 0.6B model keeps up 2-4x beside 1080p decoding, and the 1.7B 1.6-1.7x. Calibrated on
@@ -218,22 +222,35 @@ def total_ram_bytes() -> int:
         return 0
 
 
+def slow_to_translate(score: float, *, arm_mac: Optional[bool] = None) -> bool:
+    """While AI captions are translated, the large tier and the translator can't both keep up
+    on this machine: it scores below TRANSLATE_SMALL_BELOW and isn't an arm64 Mac."""
+    if is_arm_mac() if arm_mac is None else arm_mac:
+        return False
+    return score < TRANSLATE_SMALL_BELOW
+
+
 def choose_tier(
     override: str = AUTO,
     *,
     score: Optional[float] = None,
     ram: Optional[int] = None,
     arm_mac: Optional[bool] = None,
+    translating: bool = False,
 ) -> str:
     """The tier for this machine, SMALL or LARGE. `override` (SMALL or LARGE, the viewer's
     choice in Settings) wins; otherwise LARGE when the machine is an arm64 Mac or scores at
-    least LARGE_MIN_SCORE, and has at least LARGE_MIN_RAM. `score`, `ram` and `arm_mac`
-    default to this machine's: the benchmark (about 0.2 s, off the GUI thread) runs only when
-    the memory allows the large tier and the machine isn't an arm64 Mac."""
+    least LARGE_MIN_SCORE (TRANSLATE_SMALL_BELOW while AI captions are `translating`), and has
+    at least LARGE_MIN_RAM. `score`, `ram` and `arm_mac` default to this machine's: the
+    benchmark (about 0.2 s, off the GUI thread) runs only when the memory allows the large tier
+    and the machine isn't an arm64 Mac."""
     if override in (SMALL, LARGE):
         return override
     if (total_ram_bytes() if ram is None else ram) < LARGE_MIN_RAM:
         return SMALL
     if is_arm_mac() if arm_mac is None else arm_mac:
         return LARGE
-    return LARGE if (machine_score() if score is None else score) >= LARGE_MIN_SCORE else SMALL
+    score = machine_score() if score is None else score
+    if translating and slow_to_translate(score, arm_mac=False):
+        return SMALL
+    return LARGE if score >= LARGE_MIN_SCORE else SMALL

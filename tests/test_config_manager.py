@@ -53,6 +53,30 @@ class WindowConfigMigrationTests(unittest.TestCase):
         for key, value in saved.items():
             self.assertEqual(written[key], value)
 
+    def test_the_language_captions_are_translated_into_is_off_or_one_of_the_models(self):
+        # 2.10: an older config has none (Off) and keeps what it has; anything but one of
+        # MiLMMT's names reads as Off
+        saved = {"ai_captions_model": "small", "ai_captions_language": "Turkish"}
+        with tempfile.TemporaryDirectory() as directory:
+            config_path = Path(directory) / "config.json"
+            config_path.write_text(json.dumps(saved), encoding="utf-8")
+            with patch.object(ConfigManager, "_get_config_path", return_value=str(config_path)):
+                config = ConfigManager()
+                self.assertEqual(config.ai_captions_translate_to, "")
+                self.assertEqual(config.ai_captions_language, "Turkish")
+                for stored in ("tr", "Klingon", 5, ["Turkish"], None):
+                    config.config["ai_captions_translate_to"] = stored
+                    self.assertEqual(config.ai_captions_translate_to, "", stored)
+                config.ai_captions_translate_to = "Klingon"
+                self.assertEqual(config.config["ai_captions_translate_to"], "")
+                config.ai_captions_translate_to = "Chinese (Simplified)"
+                config.save_config(wait=True)
+                reloaded = ConfigManager()
+                self.assertEqual(reloaded.ai_captions_translate_to, "Chinese (Simplified)")
+                written = json.loads(config_path.read_text(encoding="utf-8"))
+        for key, value in saved.items():
+            self.assertEqual(written[key], value)
+
     def test_a_1x_config_gains_the_tv_window_without_resetting_saved_state(self):
         # A 1.x config names only the old windows. A missing window entry once kept the
         # player from starting (KeyError in 1.13.7); the TV window's entry is added instead.

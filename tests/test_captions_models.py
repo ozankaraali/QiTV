@@ -799,6 +799,18 @@ class TierChoiceTests(unittest.TestCase):
         self.assertEqual(self.choose("small", score=9.0, ram=64 * self.GB, arm_mac=True), "small")
         self.assertEqual(self.choose("large", score=0.1, ram=4 * self.GB, arm_mac=False), "large")
 
+    def test_while_translating_the_large_tier_wants_a_faster_machine(self):
+        # 2.10: the 1.7B and the translator share the CPU
+        self.assertEqual(tier.TRANSLATE_SMALL_BELOW, 1.5)
+        machine = {"ram": 16 * self.GB, "arm_mac": False}
+        self.assertEqual(self.choose(score=1.2, **machine), "large")
+        self.assertEqual(self.choose(score=1.2, translating=True, **machine), "small")
+        self.assertEqual(self.choose(score=0.99, translating=True, **machine), "small")
+        self.assertEqual(self.choose(score=2.0, translating=True, **machine), "large")
+        arm = {"ram": 16 * self.GB, "arm_mac": True}
+        self.assertEqual(self.choose(score=0.5, translating=True, **arm), "large")  # as before
+        self.assertEqual(self.choose("large", score=1.0, translating=True, **machine), "large")
+
 
 class MachineTests(unittest.TestCase):
     def test_the_score_is_relative_to_the_reference_machine(self):
