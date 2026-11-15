@@ -733,7 +733,13 @@ class TVController(QObject):
         cast_requested = getattr(transport, "castRequested", None)
         if self._cast is not None and cast_requested is not None:
             cast_requested.connect(self._on_cast_requested)
-        transport.volumeRequested.connect(self._mixer.open_main)
+        # 2.10: the speaker's mixer holds the controls up, as the track panels do: the pointer on
+        # the mixer (above the controls) left the controls idle, they hid, and the mixer they
+        # carried dropped and stayed (hovered)
+        transport.volumeRequested.connect(self._open_mixer)
+        mixer_closed = getattr(self.overlays.mixer, "closed", None)
+        if mixer_closed is not None:
+            mixer_closed.connect(self._on_mixer_closed)
         # The buttons for the player's keys (every key has a control on screen) act as the keys.
         transport.guideRequested.connect(partial(self.handle, Action.GUIDE))
         transport.previousRequested.connect(partial(self.handle, Action.PREVIOUS))
@@ -3905,6 +3911,18 @@ class TVController(QObject):
         small = sessions.small() if sessions is not None else None
         target = pip.view(small.name).target if pip is not None and small is not None else None
         return large, target.title if target is not None else ""
+
+    def _open_mixer(self) -> None:
+        """The transport's speaker: the mixer, the controls held up (the speaker lit) until it
+        closes."""
+        self._mixer.open_main()
+        if self._mixer.visible():
+            self.overlays.transport.hold("volume")
+
+    def _on_mixer_closed(self) -> None:
+        transport = self.overlays.transport
+        if transport.held() == "volume":
+            transport.hold("")
 
     def _on_audio_changed(self) -> None:
         """A level or mute changed, or the pictures swapped: the PiP label's speaker and the

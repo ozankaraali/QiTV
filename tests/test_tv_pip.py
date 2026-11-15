@@ -1919,6 +1919,13 @@ class MixerTests(PipCase):
         self.controller.handle(Action.CH_NEXT, key=DOWN)  # its keys: ↓ is quieter now
         self.assertEqual(self.sessions.level("main"), 95)
 
+    def test_the_speakers_mixer_holds_the_controls_up_till_it_closes(self):  # 2.10
+        self.start_large(0)
+        self.transport.volumeRequested.emit()
+        self.assertEqual(self.transport.held(), "volume")  # the pointer on the mixer: no hiding
+        self.mixer.dismiss()
+        self.assertEqual(self.transport.held(), "")  # the controls fade again
+
     def test_the_transports_speaker_shows_whether_the_large_picture_is_heard(self):
         self.start_large(0)
         self.open_small(CHANNELS[1])
