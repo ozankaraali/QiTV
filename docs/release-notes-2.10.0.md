@@ -14,16 +14,18 @@ others' distributions, which may have malware.**
 
 - **Translate to:** a new row under AI captions in the Subtitles panel shows the captions in
   another language. Its list has Off first, then your QiTV language when the model covers it,
-  then 46 languages, each by its own name. Like the Language row above it, it shows while AI
-  captions are on.
+  then the other languages the model covers (46 in all), each by its own name. Like the Language
+  row above it, it shows while AI captions are on.
 - **Translated on your computer:** each caption line is translated by Xiaomi's MiLMMT-46 1B
   model, on your computer. No text or sound leaves it, and it costs nothing. The first time you
   pick a language, QiTV asks before a one-time download of about 730 MB.
 - **On time, translated or as said:** while translating, the picture waits about 3 seconds more,
   so each line has time to be translated before it shows. A line that isn't translated in time
   shows as it was said, never late. A line already in the language you chose shows as it is.
-- **On a slower computer,** Automatic uses the faster speech model while translating, so the
-  captions and their translation both keep up.
+- **On a slower computer,** Automatic uses the faster speech model while translating, when you
+  have it, so the captions and their translation both keep up; the captions stay on while it
+  switches. Without it, the more accurate model goes on translating, and if the captions can't
+  keep up, QiTV asks to download the faster one, as before.
 - **On the phone remote,** the Subtitles sheet has the same Translate to row and list.
 
 ## Turkish captions by QiTV's own model
@@ -32,8 +34,8 @@ others' distributions, which may have malware.**
   [qitv-asr-tr-moonshine-mid](https://huggingface.co/ozankaraali/qitv-asr-tr-moonshine-mid),
   released openly on Hugging Face (CC BY 4.0). QiTV reads it with a beam search, which weighs
   several readings of what was said before writing one. It gets fewer words wrong than the model
-  2.9.1 to 2.9.10 used, especially in TV series and talk. It downloads once (278 MB), the first
-  time Turkish captions are wanted, as before.
+  QiTV has used since 2.9.2, especially in TV series and talk. It downloads once (278 MB), the
+  first time Turkish captions are wanted, as before.
 - **Numbers as subtitles write them:** "86,5 milyon", and a time after a day as a clock time
   ("pazartesi 21.30'da"), not as a range.
 
@@ -43,6 +45,13 @@ others' distributions, which may have malware.**
   that language at once, without first listening for it. What is said can still correct it.
 - **At 1.5× and 2×,** each caption stays on screen about as long for you as at normal speed, and
   Turkish captions keep up with the picture.
+- **A long caption shows a sentence at a time:** one too long for two lines is split where its
+  sentences end (else at a comma, or between words), and each part shows in its turn.
+- **"Starting captions…" waits for the first words:** when captions come on, the picture waits
+  while the speech model loads and until its first lines are written (half a minute at most),
+  instead of playing on past what was said meanwhile.
+- **Captions that hear nothing start again:** on a live channel, captions that have heard no
+  sound 12 seconds after they started read again from the picture (twice at most).
 - **When a channel's clock jumps,** captions no longer start over and over, the next channel's
   captions no longer stay silent, and "Can't keep up" no longer shows by mistake.
 - **Your answer to the first download question is kept:** the question about the speech models
@@ -75,8 +84,8 @@ others' distributions, which may have malware.**
 
 ## Player controls
 
-- **The speaker's mixer keeps the player's controls up until it closes.** Before, they hid while
-  the pointer was over the mixer, and the mixer went down with them.
+- **The speaker's mixer keeps the player's controls up until it closes.** Before, the controls
+  hid while the pointer was over the mixer, and the mixer dropped out of place.
 
 ## Phone remote and logos on every Mac
 
