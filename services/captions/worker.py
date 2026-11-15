@@ -12,7 +12,9 @@ always comes first.
 Messages to it: ("load", {...}), ("start", run, url, segment_start, audio_track, language,
 guessed, read_on),
 ("film", run, location, start_s, audio_track, language, vlc_options): a film's run,
-("viewer", position), ("language", name), ("stop",), ("quit",).
+("viewer", position), ("language", name), ("translate", target[, folder]) (2.10: the language
+lines are translated into, MiLMMT's name, None off; the translation model's folder when it came
+after the load; the load's "translate_to" and "translation" start them), ("stop",), ("quit",).
 From it: ("ready",), ("failed", reason), ("caption", run, start, end, text[, parts]) (parts, a
 line of more than one: [(text, start, end), ...], services.captions.parts),
 ("progress", run, newest, rtf, written_to, qwen_writes), ("resync", run, newest),
@@ -26,6 +28,8 @@ or URL crosses: URLs carry the session token.
 from __future__ import annotations
 
 from array import array
+from collections import deque
+from dataclasses import dataclass
 import logging
 import multiprocessing
 from multiprocessing.connection import Connection, wait
@@ -41,9 +45,11 @@ import urllib.request
 from services.captions import guards, numbers_tr, text_language
 from services.captions.growing import GrowingWriter
 from services.captions.languages import COHERE, EUROPEAN, QWEN_LANGUAGES, iso_code
+from services.captions.mt_languages import source_for
 from services.captions.parts import parts_of
 from services.captions.pieces import END_PAUSE_S, MAX_PIECE_S, Cutter, Piece
 from services.captions.stream_clock import StreamClock, TsTimes
+from services.captions.streaming import FIRST_WORD_S, HELD_AFTER_S, time_left
 
 logger = logging.getLogger(__name__)
 
@@ -104,6 +110,7 @@ _IDLE_S = 0.25  # the growing writer looks at the picture this often when no sou
 # from this rate on, our Moonshine beam reads its best path alone (about 4x cheaper)
 FAST_RATE = 1.25
 LINE_LEVEL = logging.DEBUG  # each caption line is logged at this level (2026-11-08)
+DEADLINE_MARGIN_S = 0.3  # 2.10: a line's translation is done this long before the line shows
 
 
 def _folder_name(folder: Any) -> str:
@@ -361,6 +368,8 @@ class _Model:
 class _Run:
     """One reading of the stream, from one segment on, until it ends or is replaced."""
 
+    translation: Optional[_Translation] = None  # 2.10: its lines go out through it while on
+
     def __init__(
         self,
         link: _Link,
@@ -373,11 +382,13 @@ class _Run:
         viewer: list,
         guessed: bool = False,
         read_on: bool = False,
+        translation: Optional[_Translation] = None,
     ) -> None:
         self.link = link
         self.model = model
         self.run = run
         self.url = url
+        self.translation = translation
         # 2026-11-09, the owner's channel: its clock leapt and its sound was anchored again many
         # times a second; each run read again from past the step, met the next step at once, and
         # the reader started over 25 times from the same second. A run started again past a
@@ -461,12 +472,18 @@ class _Run:
         """A line of the sound of [start, end) out (shown until `until` when later), and in the
         log. 2026-11-08, the owner: a line of more than one sentence goes in parts (parts.parts_of:
         each with its sound's span, from `voiced`, the voice detector's windows from `start`); the
-        captions show a long line a part at a time as each is said."""
+        captions show a long line a part at a time as each is said. 2.10: while translation is on,
+        the line goes to it instead (it sends the line, translated or as written)."""
         parts = parts_of(shown, start, end, voiced, start)
         self._logged(name, heard, shown)
         said = [(part.text, part.start, part.end) for part in parts]
-        message = ("caption", self.run, start, max(end, until), shown)
-        self.link.send(message + ((said,) if len(said) > 1 else ()))
+        message: tuple = ("caption", self.run, start, max(end, until), shown)
+        message += (said,) if len(said) > 1 else ()
+        translation = self.translation
+        if translation is None or not translation.take(
+            _Line(self, self.language, shown, start, message)
+        ):
+            self.link.send(message)
 
     def fast(self) -> bool:
         """The picture plays faster than FAST_RATE (the reader reads ahead at its speed)."""
@@ -776,8 +793,11 @@ class _FilmRun(_Run):
         language: str,
         viewer: list,
         options: tuple[str, ...] = (),
+        translation: Optional[_Translation] = None,
     ) -> None:
-        super().__init__(link, model, run, "", start_s, audio_track, language, viewer)
+        super().__init__(
+            link, model, run, "", start_s, audio_track, language, viewer, translation=translation
+        )
         from services.captions.film import FilmReader
 
         self.reader = FilmReader(
@@ -811,6 +831,184 @@ class _FilmRun(_Run):
                 self.pieces.put(None)
                 self._end("ended")
                 return
+
+
+@dataclass
+class _Line:
+    """A caption line for the translator (2.10): its run, the language the run wrote it in, what
+    shows, where its sound starts, and the message that sends it as written."""
+
+    run: _Run
+    language: str
+    shown: str
+    start: float
+    message: tuple
+
+
+class _Translation:
+    """2.10, caption translation (MiLMMT-46 1B, services.captions.translate). While a target and
+    the model's folder are set, every line of a run goes through one queue, in order, to one
+    thread (it starts with the first line and lasts the process): a line in a language MiLMMT
+    knows, not the target, goes out translated when that is done DEADLINE_MARGIN_S before the
+    picture gets to it, else as written; the others go out as written, in their turn; a line of
+    a run that ended is dropped. The speech threads only queue: translation's time is never
+    theirs (progress, rtf, the step down). The model loads on the first line to translate and
+    stays; the translator is imported only then (the GUI's process imports this module)."""
+
+    def __init__(self, link: _Link, viewer: list) -> None:
+        self.link = link
+        self.viewer = viewer  # [position, rate], shared with the command loop
+        self._lock = threading.Condition()  # over the five below
+        self._lines: deque[_Line] = deque()
+        self._busy: Optional[_Line] = None  # the line the thread has, until it goes out
+        self._target: Optional[str] = None
+        self._folder: Optional[Path] = None
+        self._thread: Optional[threading.Thread] = None
+        self._told = False  # a target without the model's folder: said once
+        # the thread's own: the model, its folder, and where the picture was when it was last
+        # seen to move (for which run, its position, the clock), as the growing writer keeps it
+        self._translator: Any = None
+        self._loaded: Optional[Path] = None
+        self._seen: tuple[Optional[_Run], float, float] = (None, 0.0, 0.0)
+
+    def set(self, target: Optional[str], folder: Any = None) -> None:
+        """Lines are translated into `target` (MiLMMT's name; None: they are not) by the model in
+        `folder` (when given, else the one known). Off, the lines waiting go out as written at
+        once."""
+        with self._lock:
+            if folder:
+                self._folder = Path(folder)
+            self._target = target or None
+            if self._target and self._folder is None and not self._told:
+                self._told = True
+                logger.info(
+                    "AI captions: no translation into %s: the translation model is not here",
+                    self._target,
+                )
+            if not self._on():
+                self._flush()
+
+    def take(self, line: _Line) -> bool:
+        """`line` queued while translation is on: the thread sends it. False: the caller does."""
+        with self._lock:
+            if not self._on():
+                return False
+            self._lines.append(line)
+            if self._thread is None:
+                self._thread = threading.Thread(
+                    target=self._work, name="qitv-captions-translate", daemon=True
+                )
+                self._thread.start()
+            self._lock.notify()
+        return True
+
+    def _on(self) -> bool:
+        return bool(self._target) and self._folder is not None
+
+    def _flush(self) -> None:
+        """The line the thread has and those waiting out as written, those of a run that ended
+        dropped (the lock is held)."""
+        waiting = list(self._lines) if self._busy is None else [self._busy, *self._lines]
+        self._busy = None
+        self._lines.clear()
+        for line in waiting:
+            if not line.run.stopped.is_set():
+                logger.log(
+                    LINE_LEVEL, "AI captions: shown as written, translation off: %r", line.shown
+                )
+                self.link.send(line.message)
+
+    # ---- the thread ----------------------------------------------------------------------
+    def _work(self) -> None:
+        while True:
+            with self._lock:
+                while not self._lines:
+                    self._lock.wait()
+                line = self._busy = self._lines.popleft()
+                target, folder = self._target, self._folder
+            try:
+                text = self._translated(line, target, folder)
+            except Exception as error:  # the thread lives on: every line goes through it
+                logger.warning("AI captions: a translation failed: %s", type(error).__name__)
+                text = None
+            with self._lock:
+                if self._busy is not line:
+                    continue  # turned off meanwhile: it went out as written
+                self._busy = None
+                if line.run.stopped.is_set():
+                    continue  # its run ended (a seek, another channel, captions off): dropped
+                if text is not None and target == self._target:
+                    self.link.send(line.message[:4] + (text,))  # the parts are the original's
+                else:
+                    self.link.send(line.message)
+
+    def _translated(
+        self, line: _Line, target: Optional[str], folder: Optional[Path]
+    ) -> Optional[str]:
+        """`line` in `target` when it is to be translated and that is done in time; else None
+        (it goes out as written)."""
+        source = source_for(line.language)  # None: not known yet ("") or not MiLMMT's
+        if not target or folder is None or source is None or source == target:
+            return None
+        if line.run.stopped.is_set():
+            return None
+        translator = self._translator_in(folder)
+        deadline = self._deadline(line)
+        began = time.monotonic()
+        if began >= deadline:
+            logger.log(
+                LINE_LEVEL,
+                "AI captions: shown as written, %.1f s late for its translation: %r",
+                began - deadline,
+                line.shown,
+            )
+            return None
+        text: Optional[str] = translator.translate(line.shown, source, target, deadline)
+        if text is not None:
+            logger.log(LINE_LEVEL, "AI captions: translated %r: %r", line.shown, text)
+        elif time.monotonic() > deadline:
+            logger.log(
+                LINE_LEVEL,
+                "AI captions: shown as written, not translated in the %.1f s it had: %r",
+                deadline - began,
+                line.shown,
+            )
+        else:
+            logger.log(
+                LINE_LEVEL, "AI captions: shown as written, no usable translation: %r", line.shown
+            )
+        return text
+
+    def _translator_in(self, folder: Path) -> Any:
+        """The model in `folder`: loaded on the first need and kept; from another folder, anew."""
+        if self._translator is None or self._loaded != folder:
+            from services.captions.translate import Translator
+
+            self._translator = None  # the one before goes first (some 700 MB)
+            began = time.monotonic()
+            translator = Translator(folder, threads=2)
+            translator.warm()
+            self._translator, self._loaded = translator, folder
+            logger.info(
+                "AI captions: loading the translation model (%s) took %.1f s",
+                _folder_name(folder),
+                time.monotonic() - began,
+            )
+        return self._translator
+
+    def _deadline(self, line: _Line) -> float:
+        """When `line`'s translation must be done (a time.monotonic() value): DEADLINE_MARGIN_S
+        before the picture gets to its first word, at the pace the growing writer counts on."""
+        now, position = time.monotonic(), float(self.viewer[0])
+        run, seen, since = self._seen
+        if run is not line.run:  # a run starts with the picture waiting (or there already)
+            seen, since = position, now - HELD_AFTER_S
+        elif position != seen:
+            seen, since = position, now
+        self._seen = (line.run, seen, since)
+        still = now - since
+        left = time_left(line.start + FIRST_WORD_S, position, still, float(line.run.newest))
+        return now + left - DEADLINE_MARGIN_S
 
 
 def _lower_priority() -> None:
@@ -878,6 +1076,7 @@ def _serve(link: _Link) -> None:
     viewer = [0.0, 1.0]  # the picture's position, and its playback rate (`_rate_seen`)
     seen: list = [None]  # (position, clock) the rate is measured from
     language = ""
+    translation = _Translation(link, viewer)  # 2.10: one for the process, across its runs
     while True:
         try:
             message: Any = link.conn.recv()
@@ -887,8 +1086,10 @@ def _serve(link: _Link) -> None:
         if kind == "quit":
             break
         if kind == "load":
+            spec = message[1]
+            translation.set(spec.get("translate_to"), spec.get("translation"))
             try:
-                model = _Model(message[1])
+                model = _Model(spec)
                 link.send(("ready",))
             except Exception as error:
                 logger.warning("AI captions: the model did not load: %s", error)
@@ -915,6 +1116,7 @@ def _serve(link: _Link) -> None:
                 viewer,
                 guessed,
                 read_on,
+                translation=translation,
             )
             run.start()
         elif kind == "film":
@@ -936,6 +1138,7 @@ def _serve(link: _Link) -> None:
                 language,
                 viewer,
                 tuple(options),
+                translation=translation,
             )
             run.start()
         elif kind == "viewer":
@@ -946,6 +1149,8 @@ def _serve(link: _Link) -> None:
             if run is not None:
                 run.language = language
                 run._maybe_stream()
+        elif kind == "translate":
+            translation.set(message[1], message[2] if len(message) > 2 else None)
         elif kind == "stop":
             if run is not None:
                 run.stop()
