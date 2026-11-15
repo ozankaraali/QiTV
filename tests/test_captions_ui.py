@@ -1263,6 +1263,12 @@ class TranslationTests(unittest.TestCase):
                 self.assertEqual(self.captions._auto_tier(), translating)
         self.disk["translation"] = False  # its model not here: not translated
         self.assertEqual(self.captions._auto_tier(), "large")
+        self.disk["translation"] = True
+        self.machine(1.2)
+        self.disk["small"] = False  # R25: the 0.6B only when it is here, else the 1.7B stays
+        self.assertEqual(self.captions._auto_tier(), "large")
+        self.disk["large"] = False  # neither here (the first time): the 0.6B, its question
+        self.assertEqual(self.captions._auto_tier(), "small")
         self.config["ai_captions_model"] = "large"  # the viewer's own choice wins
         self.disk["translation"] = True
         self.assertEqual(self.captions._choose_tier(), "large")
@@ -1286,6 +1292,51 @@ class TranslationTests(unittest.TestCase):
         self.assertIn("qwen3-asr-1.7b", self.loaded[-1]["model"]["encoder"])
         self.assertEqual(self.loaded[-1]["translate_to"], None)
         self.assertEqual(self.window.live_session.floor, 10.0)
+
+    def test_on_a_slower_computer_translation_moves_to_the_0_6b_with_captions_going_on(self):
+        # R25: picked while the 1.7B wrote, with the 0.6B here: the 0.6B reads on from the
+        # picture, and the captions stay on (before: off and on again)
+        self.config["ai_captions_model"] = "auto"
+        self.captions._tier = "large"
+        self.machine(1.2)
+        installed = mock.patch("services.captions.models.installed", return_value=True)
+        installed.start()
+        self.addCleanup(installed.stop)
+        self.captions._show("Merhaba")  # a caption on screen
+        disabled: list = []
+        self.captions._disable = lambda: disabled.append(True)  # type: ignore[method-assign]
+        self.captions.set_translate_to("English")
+        self.assertEqual(disabled, [])  # never turned off
+        self.assertEqual(self.overlay.text, "Merhaba")  # it stays its time
+        self.assertTrue(self.captions.enabled())
+        self.assertEqual((self.card.asked, self.toasts), ([], []))  # nothing asked nor said
+        [load] = self.loaded
+        self.assertIn("qwen3-asr-0.6b", load["model"]["encoder"])
+        self.assertEqual((load["translate_to"], load["translation"]), ("English", self.folder()))
+        self.assertNotIn("translate", [message[0] for message in self.sent])  # the load says it
+        self.assertEqual(self.window.live_session.floor, 11.0)
+        self.assertFalse(self.captions._stepped_down)  # not a step down: off, the 1.7B again
+        self.assertEqual(self.captions._auto_tier(), "small")
+
+    def test_on_a_slower_computer_without_the_0_6b_translation_keeps_the_1_7b(self):
+        # R25: no question and no restart; the 1.7B goes on translating, and Automatic's step
+        # down asks for the 0.6B if it can't keep up
+        from ui.captions_texts import STEP_DOWN_QUESTION
+
+        self.config["ai_captions_model"] = "auto"
+        self.captions._tier = "large"
+        self.disk["small"] = False
+        self.machine(1.2)
+        with mock.patch("services.captions.models.download_size", return_value=600_000_000):
+            self.captions.set_translate_to("English")
+            self.assertEqual(self.card.asked, [])
+            self.assertEqual((self.stopped, self.loaded), ([], []))  # the 1.7B reads on
+            self.assertTrue(self.captions.enabled())
+            self.assertEqual(self.sent[-1], ("translate", "English", self.folder()))
+            self.assertEqual(self.window.live_session.floor, 13.0)
+            self.captions._step_down()  # it can't keep up
+        [(text, _yes, _no)] = self.card.asked
+        self.assertEqual(text, translate(STEP_DOWN_QUESTION, size="600 MB"))
 
 
 class NoteRowTests(PanelCase):

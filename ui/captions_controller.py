@@ -498,12 +498,19 @@ class CaptionsController(QObject):
         if now == before:
             return
         turned = bool(now) != bool(before)
+        switched = False
         if turned and (self._enabled or self._download is not None):
-            if self._choose_tier() != self._tier:
+            tier = self._choose_tier()
+            if tier != self._tier and now and self._enabled and self._here(tier):
+                # R25: Automatic's 0.6B, here, takes over while they go on (the captions written
+                # stay, the picture too); the load carries the translation
+                self._switch(tier, stepped=False)
+                switched = True
+            elif tier != self._tier:
                 self._disable()
                 self.toggle()
                 return
-        if self._process.running():
+        if self._process.running() and not switched:
             self._process.send(*self._translate_message())
         if not turned:
             return  # another language: held as it is
@@ -597,9 +604,11 @@ class CaptionsController(QObject):
         score = tier.known_score()
         translating = bool(self._translation())
         # 2.10: translated on a computer too slow for the 1.7B and the translator both: the
-        # 0.6B, here or not (its question first, as any model chosen)
+        # 0.6B once it is here (R25: else the 1.7B here goes on, and the step down asks for the
+        # 0.6B if it can't keep up; with neither here, choose_tier gives the 0.6B below)
         if translating and score is not None and tier.slow_to_translate(score):
-            return "small"
+            if self._here("small"):
+                return "small"
         for name in ("large", "small"):
             if self._here(name):
                 return name
@@ -970,18 +979,23 @@ class CaptionsController(QObject):
         self._load_model()
         self.changed.emit()
 
-    def _switch(self, tier: str) -> None:
+    def _switch(self, tier: str, stepped: bool = True) -> None:
         """Captions on with `tier` instead, at once: the captions written so far stay (the
         timeline is the same), the picture stays where it is, and the new model reads on
-        from it once loaded (`_on_ready`)."""
-        logger.info("AI captions: the %s model can't keep up, the %s instead", self._tier, tier)
-        self._stepped_down = True
+        from it once loaded (`_on_ready`). `stepped`: Automatic's step down (kept while QiTV
+        runs, and said); else translation turned on (2.10, R25: nothing said, nothing kept)."""
+        if stepped:
+            logger.info("AI captions: the %s model can't keep up, the %s instead", self._tier, tier)
+            self._stepped_down = True
+        else:
+            logger.info("AI captions: translated: the %s model instead of the %s", tier, self._tier)
         self._process.stop()
         self._tier = tier
         self._slow_since = None
         self._newest = self._written = None
         self._load_model()
-        self._toast(translate(STEPPED_DOWN))
+        if stepped:
+            self._toast(translate(STEPPED_DOWN))
         self.changed.emit()
 
     def _disable(self) -> None:
