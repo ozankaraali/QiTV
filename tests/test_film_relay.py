@@ -8,6 +8,7 @@ from http.client import HTTPConnection, IncompleteRead
 import os
 from pathlib import Path
 import shutil
+import socket
 import ssl
 import subprocess
 import tempfile
@@ -58,9 +59,12 @@ def wait_until(predicate, timeout=5.0):
 class Reader:
     """A reader of one of the relay's addresses (as libVLC asks: a range from `first` on)."""
 
-    def __init__(self, url, first=0, last=None, method="GET"):
+    def __init__(self, url, first=0, last=None, method="GET", rcvbuf=None):
         parts = urlsplit(url)
         self.connection = HTTPConnection(parts.hostname, parts.port, timeout=10)
+        if rcvbuf:  # a small window: the relay's sending follows this reader's reading
+            self.connection.connect()
+            self.connection.sock.setsockopt(socket.SOL_SOCKET, socket.SO_RCVBUF, rcvbuf)
         headers = {"Range": f"bytes={first}-{'' if last is None else last}"}
         self.connection.request(method, parts.path, headers=headers)
         self.response = self.connection.getresponse()
@@ -202,7 +206,9 @@ class PictureTests(RelayTestCase):
 
 class CapTests(RelayTestCase):
     def test_the_upstream_reads_no_further_than_its_cap_past_the_picture_then_waits(self):
-        reader = Reader(self.relay.leader_url, 0)
+        reader = Reader(
+            self.relay.leader_url, 0, rcvbuf=64 * KIB
+        )  # a small window: it sends as this reads
         reader.read(100 * KIB)  # then the picture's libVLC reads nothing for a while
         time.sleep(1.0)
         read = self.relay.stats["bytes"]
@@ -274,7 +280,7 @@ class CaptionsTests(RelayTestCase):
         picture.close()
 
     def test_an_mkvs_cues_the_picture_did_not_keep_come_by_a_detour(self):
-        picture = Reader(self.relay.leader_url, 0)
+        picture = Reader(self.relay.leader_url, 0, 600 * KIB - 1)  # its last byte: see PictureTests
         self.assertEqual(picture.read(600 * KIB), FILM[: 600 * KIB])  # cached ahead: it can wait
         cues = len(FILM) - 30 * KIB
         self.assertEqual(self.read(self.relay.follower_url, cues, 30 * KIB), FILM[cues:])
@@ -290,16 +296,18 @@ class CaptionsTests(RelayTestCase):
         # The picture goes on, past what was cached ahead before the detour (how far ahead
         # depends on how busy the computer is: CI ran this under load and read only cache).
         at = 600 * KIB
-        while not after_detour() and at + MIB <= len(FILM) - SMALL.pin_tail:
-            self.assertEqual(picture.read(MIB), FILM[at : at + MIB])
-            at += MIB
         picture.close()
+        while not after_detour() and at + MIB <= len(FILM) - SMALL.pin_tail:
+            self.assertEqual(
+                self.read(self.relay.leader_url, at, MIB, at + MIB - 1), FILM[at : at + MIB]
+            )
+            at += MIB
         [resumed, *_] = after_detour()
         self.assertGreater(resumed["first"], 600 * KIB)  # from where the picture's run was
         self.assertIsNone(resumed["last"])
 
     def test_an_mp4s_moov_at_the_end_comes_in_detours_and_is_kept(self):
-        picture = Reader(self.relay.leader_url, 0)
+        picture = Reader(self.relay.leader_url, 0, 1624 * KIB - 1)  # all it reads here
         picture.read(600 * KIB)
         moov = len(FILM) - 250 * KIB  # larger than one detour
         self.assertEqual(self.read(self.relay.follower_url, moov, 250 * KIB), FILM[moov:])
@@ -314,7 +322,7 @@ class CaptionsTests(RelayTestCase):
         self.provider.rate = 400 * KIB  # a slow provider: the picture reads at its edge
         limits = Limits(**{**SMALL.__dict__, "follower_wait_s": 6.0})
         relay = self.make_relay(limits=limits)
-        picture = Reader(relay.leader_url, 0)
+        picture = Reader(relay.leader_url, 0, 432 * KIB - 1)  # all it reads here
         picture.read(32 * KIB)
         done = {}
 
@@ -336,7 +344,7 @@ class CaptionsTests(RelayTestCase):
 
     def test_a_failed_detour_fails_that_captions_read_alone_and_once(self):  # review
         self.provider.fail_from = len(FILM) - 200 * KIB  # the provider fails the tail
-        picture = Reader(self.relay.leader_url, 0)
+        picture = Reader(self.relay.leader_url, 0, 600 * KIB + 2 * MIB - 1)  # all it reads here
         self.assertEqual(picture.read(600 * KIB), FILM[: 600 * KIB])
         cues = len(FILM) - 30 * KIB
         for _ in range(2):
