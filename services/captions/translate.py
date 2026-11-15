@@ -6,7 +6,8 @@ The graph takes `input_ids` [1, n], `attention_mask` [1, total] (all ones) and, 
 past keys and values [1, 1, past, 256] (empty at the first call); it gives `next_token` (the
 argmax at the last position, one int64) and the presents, fed back as the next call's pasts. The
 prompt is the model card's; the tokenizer (Hugging Face `tokenizers`, which downloads with the
-model) is asked for no special tokens (no `<bos>`), as the model card runs it. It is imported only when the model is first used. No Qt, no numpy.
+model) is asked for no special tokens (no `<bos>`), as the model card runs it. It is imported
+only when the model is first used. No Qt, no numpy.
 """
 
 from __future__ import annotations
@@ -138,15 +139,18 @@ class Translator:
             return False
         return True
 
-    def warm(self) -> None:
-        """Loads the model and runs one call, so the first caption is not the slow one."""
+    def warm(self) -> bool:
+        """Loads the model and runs one call, so the first caption is not the slow one; False
+        when either failed (logged): the translator is of no use."""
         with self._lock:
             if not self._ready():
-                return
+                return False
             try:
                 self._generate([2], 1, None)
             except Exception:
                 logger.exception("caption translation: the warm-up call failed")
+                return False
+            return True
 
     def translate(
         self, text: str, source: str, target: str, deadline: Optional[float] = None

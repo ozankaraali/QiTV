@@ -167,9 +167,10 @@ class TranslatorTest(unittest.TestCase):
             self.assertIsNone(t.translate("Pekala tamam", "Turkish", "English"))
         self.assertTrue(t.session.made)
         self.assertTrue(all(v.released for v in t.session.made))
+        self.assertTrue(Fake([1]).warm())  # loaded, and its call ran
         t2 = Fake([])  # run raises at once (no scripted token): warm logs, no raise
         with self.assertLogs(translate.logger, "ERROR"):
-            t2.warm()
+            self.assertFalse(t2.warm())  # of no use: the captions show as written
 
     def test_a_failed_load_closes_what_it_made_and_is_not_retried(self) -> None:
         closed: list[str] = []
@@ -211,7 +212,7 @@ class TranslatorTest(unittest.TestCase):
             with self.assertLogs(translate.logger, "ERROR") as logged:
                 self.assertIsNone(t.translate("Merhaba", "Turkish", "English"))
             self.assertIsNone(t.translate("Merhaba", "Turkish", "English"))
-            t.warm()
+            self.assertFalse(t.warm())
         self.assertEqual(closed, ["session", "api"])
         self.assertEqual(made, ["session", "tokenizer"])  # loaded once, never retried
         self.assertEqual(len(logged.records), 1)

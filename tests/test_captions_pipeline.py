@@ -473,17 +473,20 @@ TWO_PARTS_VOICED = [
 class TranslationTests(unittest.TestCase):
     """2.10: the captions process translates each line into the viewer's language before it
     shows, in order, and sends the original when the translation would come too late; speech's
-    own pace never waits for it. A fake translator: no model."""
+    own pace never waits for it, nor any line for the model's load. A fake translator: no
+    model."""
 
     def setUp(self):
-        from services.captions import translate
+        from services.captions import translate, worker
 
+        self.run_class = worker._Run
         self.sent: list = []
         self.link: Any = SimpleNamespace(send=self.sent.append)
         self.viewer = [100.0, 1.0]
         self.made: list = []  # (folder, threads) of each translator made
         self.calls: list = []  # (text, source, target, seconds it had) of each translation
         self.answer: Any = lambda text, source, target, deadline: f"<{target}> {text}"
+        self.warm: Any = lambda: True  # its load: True when it loaded
         test = self
 
         class Translator:  # services.captions.translate.Translator's interface
@@ -491,7 +494,7 @@ class TranslationTests(unittest.TestCase):
                 test.made.append((Path(folder), threads))
 
             def warm(self):
-                pass
+                return test.warm()
 
             def translate(self, text, source, target, deadline=None):
                 test.calls.append((text, source, target, deadline - time.monotonic()))
@@ -501,22 +504,37 @@ class TranslationTests(unittest.TestCase):
         patch.start()
         self.addCleanup(patch.stop)
 
-    def translation(self, target="English", folder=MT_FOLDER):
+    def until(self, done):
+        """`done()`, waited for (5 s at most)."""
+        deadline = time.monotonic() + 5
+        while not done() and time.monotonic() < deadline:
+            time.sleep(0.01)
+        return done()
+
+    def translation(self, target="English", folder=MT_FOLDER, loaded=True):
         from services.captions.worker import _Translation
 
         translation = _Translation(self.link, self.viewer)
         translation.set(target, folder)
+        if loaded:
+            self.assertTrue(self.until(translation._ready))
         return translation
 
-    def a_run(self, translation, language="Turkish", number=1, newest=110.0):
-        """A captions run without its stream, its sound or its threads."""
-        from services.captions.worker import _Run
-
-        run: Any = object.__new__(_Run)
+    def a_run(self, translation, language="Turkish", number=1, newest=110.0, follow=True):
+        """A captions run without its stream, its sound or its threads; the current one (as the
+        command loop makes it), begun with the picture waiting."""
+        run: Any = object.__new__(self.run_class)
         run.run, run.language, run.newest, run.translation = number, language, newest, translation
         run.link, run.viewer, run.stopped = self.link, self.viewer, threading.Event()
         run._writes = "qwen"
+        if translation is not None and follow:
+            translation.follow(run)
         return run
+
+    def plays(self, translation, position):
+        """The picture seen moving, at `position` (as the command loop stamps it)."""
+        self.viewer[0] = position
+        translation.moved = time.monotonic()
 
     def written(self, *line, number=1, **times):
         """A line as the process sends it with translation off (as before 2.10)."""
@@ -528,9 +546,7 @@ class TranslationTests(unittest.TestCase):
 
     def captions(self, count):
         """What went out once `count` lines have (5 s at most)."""
-        deadline = time.monotonic() + 5
-        while len(self.sent) < count and time.monotonic() < deadline:
-            time.sleep(0.01)
+        self.until(lambda: len(self.sent) >= count)
         return list(self.sent)
 
     def held(self):
@@ -538,6 +554,12 @@ class TranslationTests(unittest.TestCase):
         event = threading.Event()
         self.addCleanup(event.set)
         return event
+
+    @staticmethod
+    def outcomes(logs):
+        """What the log said became of each line."""
+        said = ("AI captions: translated", "AI captions: shown as written")
+        return [r.getMessage() for r in logs.records if r.getMessage().startswith(said)]
 
     def test_a_line_in_another_language_goes_out_translated_without_its_parts(self):
         run = self.a_run(self.translation("English"), "Turkish")
@@ -548,27 +570,28 @@ class TranslationTests(unittest.TestCase):
         self.assertEqual(sent, [("caption", 1, 104.0, 108.5, translated)])  # no parts
         [(text, source, target, _had)] = self.calls
         self.assertEqual((text, source, target), (TWO_PARTS, "Turkish", "English"))
-        self.assertEqual(self.made, [(MT_FOLDER, 2)])  # loaded by the first line to translate
-        said = [(r.levelno, r.getMessage()) for r in logs.records]
-        self.assertIn(
-            (logging.DEBUG, f"AI captions: translated {TWO_PARTS!r}: {translated!r}"), said
+        self.assertEqual(self.made, [(MT_FOLDER, 2)])
+        self.assertEqual(
+            self.outcomes(logs), [f"AI captions: translated {TWO_PARTS!r}: {translated!r}"]
         )
 
     def test_a_line_in_the_target_or_an_unknown_or_uncovered_language_goes_out_as_written(self):
         written = self.written(TWO_PARTS, 104.0, 107.9, voiced=TWO_PARTS_VOICED)
         self.assertEqual(len(written), 6)  # with its parts
-        translation = self.translation("English")
-        # the target's own; Automatic before the language settles; one MiLMMT lacks
-        for number, language in ((1, "English"), (2, ""), (3, "Ukrainian")):
-            run = self.a_run(translation, language, number)
-            run._write("qwen", "heard", TWO_PARTS, 104.0, 107.9, voiced=TWO_PARTS_VOICED)
-        self.assertEqual(self.captions(3), [written[:1] + (n,) + written[2:] for n in (1, 2, 3)])
-        self.assertEqual((self.calls, self.made), ([], []))  # no model loaded for them
+        run = self.a_run(self.translation("English"))
+        with self.assertLogs("services.captions.worker", logging.DEBUG) as logs:
+            # the target's own; Automatic before the language settles; one MiLMMT lacks
+            for language in ("English", "", "Ukrainian"):
+                run.language = language
+                run._write("qwen", "heard", TWO_PARTS, 104.0, 107.9, voiced=TWO_PARTS_VOICED)
+            self.assertEqual(self.captions(3), [written] * 3)
+        self.assertEqual((self.calls, self.outcomes(logs)), ([], []))  # nor a word in the log
 
     def test_a_line_whose_translation_misses_its_time_goes_out_as_written_with_its_parts(self):
         written = self.written(TWO_PARTS, 104.0, 107.9, voiced=TWO_PARTS_VOICED)
-        run = self.a_run(self.translation("English"), "Turkish", newest=120.0)
-        self.viewer[0] = 104.2  # its first word shows at 104.3: 0.2 s past the deadline
+        translation = self.translation("English")
+        run = self.a_run(translation, "Turkish", newest=120.0)
+        self.viewer[0] = 104.2  # waiting where its first word shows (104.3): 0.2 s past due
         with self.assertLogs("services.captions.worker", logging.DEBUG) as logs:
             run._write("qwen", "heard", TWO_PARTS, 104.0, 107.9, voiced=TWO_PARTS_VOICED)
             self.assertEqual(self.captions(1), [written])
@@ -578,15 +601,15 @@ class TranslationTests(unittest.TestCase):
                 time.sleep(max(0.0, deadline - time.monotonic()) + 0.01)
 
             self.answer = gives_up
-            self.viewer[0] = 103.8  # it plays: 0.5 s to its first word, 0.2 s to translate
+            self.plays(translation, 103.8)  # 0.5 s to its first word: 0.2 s to translate
             run._write("qwen", "heard", TWO_PARTS, 104.0, 107.9, voiced=TWO_PARTS_VOICED)
             self.assertEqual(self.captions(2), [written, written])
             self.answer = lambda text, source, target, deadline: None  # a bad output
-            self.viewer[0] = 102.0
+            self.plays(translation, 102.0)
             run._write("qwen", "heard", TWO_PARTS, 104.0, 107.9, voiced=TWO_PARTS_VOICED)
             self.assertEqual(self.captions(3), [written] * 3)
         self.assertEqual(len(self.calls), 2)
-        said = [r.getMessage() for r in logs.records if "as written" in r.getMessage()]
+        said = self.outcomes(logs)
         self.assertEqual(len(said), 3)
         self.assertRegex(said[0], r"\d\.\d s late for its translation")
         self.assertRegex(said[1], r"not translated in the \d\.\d s it had")
@@ -595,16 +618,22 @@ class TranslationTests(unittest.TestCase):
     def test_a_translation_has_till_the_picture_gets_to_the_lines_first_word(self):
         from services.captions.worker import DEADLINE_MARGIN_S
 
-        run = self.a_run(self.translation("English"), "Turkish", newest=105.0)
+        translation = self.translation("English")
+        run = self.a_run(translation, "Turkish", newest=105.0)
         run._write("qwen", "heard", "Bir.", 104.0, 105.0)
         self.captions(1)
         # a run begins with the picture waiting: it plays on once 7.5 s behind the sound read
         # (2.5 s from now), then 4.3 s to the line's first word
         self.assertAlmostEqual(self.calls[0][3], 2.5 + 4.3 - DEADLINE_MARGIN_S, delta=0.5)
-        self.viewer[0] = 101.0  # it plays
+        self.plays(translation, 101.0)
         run._write("qwen", "heard", "İki.", 104.0, 105.0)
         self.captions(2)
         self.assertAlmostEqual(self.calls[1][3], 3.3 - DEADLINE_MARGIN_S, delta=0.5)
+        self.viewer[1] = 2.0  # watched at 2x: it gets there in half the time
+        self.plays(translation, 101.0)
+        run._write("qwen", "heard", "Üç.", 104.0, 105.0)
+        self.captions(3)
+        self.assertAlmostEqual(self.calls[2][3], 3.3 / 2 - DEADLINE_MARGIN_S, delta=0.5)
 
     def test_a_slow_translation_keeps_the_lines_after_it_waiting_in_order(self):
         go = self.held()
@@ -627,7 +656,39 @@ class TranslationTests(unittest.TestCase):
         texts = [m[4] for m in self.captions(3)]
         self.assertEqual(texts, ["<English> Bir.", "<English> İki.", "Three."])
 
-    def test_the_waiting_lines_of_a_run_that_ended_are_dropped(self):
+    def test_a_new_run_or_a_stop_drops_the_lines_waiting(self):
+        gates = {"Bir.": self.held(), "Dört.": self.held()}
+        began: list = []
+
+        def answer(text, source, target, deadline):
+            began.append(text)
+            if text in gates:
+                gates[text].wait(5)
+            return f"<{target}> {text}"
+
+        self.answer = answer
+        translation = self.translation("English")
+        old = self.a_run(translation, "Turkish", 1)
+        old._write("qwen", "heard", "Bir.", 104.0, 104.5)  # being translated
+        old._write("qwen", "heard", "İki.", 104.5, 105.0)  # waiting
+        self.until(lambda: began)
+        new = self.a_run(translation, "Turkish", 2)  # a seek, another channel: a new run
+        new._write("qwen", "heard", "Üç.", 104.0, 105.0)
+        gates["Bir."].set()
+        self.assertEqual(self.captions(1), [("caption", 2, 104.0, 105.0, "<English> Üç.")])
+        new._write("qwen", "heard", "Dört.", 105.0, 106.0)  # being translated
+        new._write("qwen", "heard", "Beş.", 106.0, 107.0)  # waiting
+        self.until(lambda: "Dört." in began)
+        translation.follow(None)  # ("stop",): captions off
+        gates["Dört."].set()
+        self.a_run(translation, "Turkish", 3)._write("qwen", "heard", "Altı.", 107.0, 108.0)
+        self.assertEqual(self.captions(2)[1], ("caption", 3, 107.0, 108.0, "<English> Altı."))
+        self.assertEqual(len(self.sent), 2)
+        self.assertEqual(began, ["Bir.", "Üç.", "Dört.", "Altı."])  # "İki.", "Beş." never begun
+
+    def test_a_run_read_again_after_a_jump_keeps_its_lines_waiting(self):
+        # a resync: the run reads no more, but its lines still show (the controller keeps the
+        # run's captions while it starts the next, ui.captions_controller)
         go, began = self.held(), threading.Event()
 
         def answer(text, source, target, deadline):
@@ -636,16 +697,21 @@ class TranslationTests(unittest.TestCase):
             return f"<{target}> {text}"
 
         self.answer = answer
-        translation = self.translation("English")
-        old = self.a_run(translation, "Turkish", 1)
-        old._write("qwen", "heard", "Bir.", 104.0, 104.5)  # being translated
-        old._write("qwen", "heard", "İki.", 104.5, 105.0)  # waiting
+        run = self.a_run(self.translation("English"), "Turkish")
+        run._write("qwen", "heard", "Bir.", 104.0, 104.5)  # being translated
+        run._write("qwen", "heard", "İki.", 104.5, 105.0)  # waiting
         began.wait(5)
-        old.stopped.set()  # a seek, another channel or captions off: a new run, or none
-        self.a_run(translation, "Turkish", 2)._write("qwen", "heard", "Üç.", 104.0, 105.0)
+        logs = self.enterContext(self.assertLogs("services.captions.worker", logging.DEBUG))
+        run.stopped.set()  # _resync: the stream's stamps jumped
         go.set()
-        self.assertEqual(self.captions(1), [("caption", 2, 104.0, 105.0, "<English> Üç.")])
-        self.assertEqual([call[0] for call in self.calls], ["Bir.", "Üç."])  # "İki." never
+        self.assertEqual(
+            self.captions(2),
+            [("caption", 1, 104.0, 104.5, "<English> Bir."), self.written("İki.", 104.5, 105.0)],
+        )
+        self.assertEqual([call[0] for call in self.calls], ["Bir."])  # no more time spent on it
+        self.assertEqual(
+            self.outcomes(logs)[-1], "AI captions: shown as written, its run reads no more: 'İki.'"
+        )
 
     def test_off_sends_the_lines_waiting_as_written_at_once(self):
         go, began = self.held(), threading.Event()
@@ -670,16 +736,16 @@ class TranslationTests(unittest.TestCase):
         self.assertEqual(self.sent, as_written)  # at once, the one being translated too
         run._write("qwen", "heard", "Dört.", 109.0, 110.0)
         self.assertEqual(self.sent[2:], [self.written("Dört.", 109.0, 110.0)])  # straight out
-        translation.set("English")
+        translation.set("English")  # on again: the model was kept
+        self.assertTrue(translation._ready())
         run._write("qwen", "heard", "Beş.", 110.0, 111.0)
         go.set()
         sent = self.captions(4)
         self.assertEqual(sent[3], ("caption", 1, 110.0, 111.0, "<English> Beş."))
         self.assertEqual(len(sent), 4)  # the first went once: its translation never came
-        outcomes = ("AI captions: translated", "AI captions: shown as written")
-        said = [r.getMessage() for r in logs.records if r.getMessage().startswith(outcomes)]
-        said = [message for message in said if TWO_PARTS in message]
+        said = [message for message in self.outcomes(logs) if TWO_PARTS in message]
         self.assertEqual(said, [f"AI captions: shown as written, translation off: {TWO_PARTS!r}"])
+        self.assertEqual(self.made, [(MT_FOLDER, 2)])
 
     def test_speech_never_waits_for_translation_nor_counts_its_time(self):
         import queue
@@ -707,9 +773,7 @@ class TranslationTests(unittest.TestCase):
         with mock.patch.object(worker, "_PROGRESS_S", 0.05):
             thread = threading.Thread(target=run._recognize, daemon=True)
             thread.start()
-            deadline = time.monotonic() + 5
-            while not (len(decoded) == 2 and caught_up()) and time.monotonic() < deadline:
-                time.sleep(0.01)
+            self.until(lambda: len(decoded) == 2 and caught_up())
             run.stopped.set()
             run.pieces.put(None)
             thread.join(5)
@@ -718,77 +782,153 @@ class TranslationTests(unittest.TestCase):
         self.assertLess(run.rtf, 0.4)  # speech's own time alone: 0.5, 0.4, 0.32
         self.assertEqual([m for m in self.sent if m[0] == "caption"], [])  # still translating
 
-    def test_the_model_loads_on_the_first_line_to_translate_and_again_from_another_folder(self):
-        translation = self.translation("English", MT_FOLDER)
-        run = self.a_run(translation, "English")
-        run._write("qwen", "heard", "Hello.", 104.0, 105.0)
-        self.captions(1)
-        self.assertEqual(self.made, [])  # nothing to translate: no model
-        run.language = "Turkish"
+    def test_the_model_loads_once_it_is_wanted_and_no_line_waits_for_it(self):
+        go = self.held()
+        self.warm = lambda: go.wait(5)
+        translation = self.translation("English", loaded=False)
+        self.assertTrue(self.until(lambda: self.made))  # loading, before any line
+        run = self.a_run(translation, "Turkish")
+        run._write("qwen", "heard", "Bir.", 104.0, 105.0)
+        self.assertEqual(self.sent, [self.written("Bir.", 104.0, 105.0)])  # at once, as written
+        go.set()
+        self.assertTrue(self.until(translation._ready))
+        run._write("qwen", "heard", "İki.", 105.0, 106.0)
+        self.assertEqual(self.captions(2)[1], ("caption", 1, 105.0, 106.0, "<English> İki."))
+
+    def test_the_model_is_loaded_once_and_kept_and_anew_from_another_folder(self):
         with self.assertLogs("services.captions.worker", logging.INFO) as logs:
-            run._write("qwen", "heard", "Bir.", 105.0, 106.0)
+            translation = self.translation("English", MT_FOLDER)
             translation.set("English", str(MT_FOLDER))  # the same folder, as the spec has it
-            run._write("qwen", "heard", "İki.", 106.0, 107.0)
-            self.captions(3)
-        self.assertEqual(self.made, [(MT_FOLDER, 2)])  # loaded once, kept
+            translation.set(None)
+            translation.set("German")  # on again: the model kept
+            self.assertTrue(translation._ready())
+        self.assertEqual(self.made, [(MT_FOLDER, 2)])
         [load] = [r.getMessage() for r in logs.records]
         self.assertRegex(
             load, r"loading the translation model \(qitv-mt-milmmt-46-1b\) took \d+\.\d s"
         )
-        translation.set("English", "another-folder")  # downloaded again elsewhere
-        run._write("qwen", "heard", "Üç.", 107.0, 108.0)
-        self.captions(4)
-        self.assertEqual(self.made, [(MT_FOLDER, 2), (Path("another-folder"), 2)])
+        translation.set("German", "another-folder")  # downloaded again elsewhere
+        self.assertTrue(self.until(lambda: len(self.made) == 2 and translation._ready()))
+        self.assertEqual(self.made[1], (Path("another-folder"), 2))
+
+    def test_a_model_that_does_not_load_is_said_once_and_not_tried_again(self):
+        self.warm = lambda: False  # (services.captions.translate logs why)
+        with self.assertLogs("services.captions.worker", logging.DEBUG) as logs:
+            translation = self.translation("English", MT_FOLDER, loaded=False)
+            self.until(lambda: [r for r in logs.records if r.levelno == logging.WARNING])
+            run = self.a_run(translation, "Turkish")
+            run._write("qwen", "heard", "Bir.", 104.0, 105.0)
+            translation.set("German", str(MT_FOLDER))  # the same folder: not again
+            run._write("qwen", "heard", "İki.", 105.0, 106.0)
+            time.sleep(0.05)  # time for a load it should not try
+        written = [self.written("Bir.", 104.0, 105.0), self.written("İki.", 105.0, 106.0)]
+        self.assertEqual(self.sent, written)  # as written, at once
+        self.assertEqual(self.made, [(MT_FOLDER, 2)])
+        [warning] = [r.getMessage() for r in logs.records if r.levelno >= logging.WARNING]
+        self.assertIn("caption translation is unavailable", warning)
+        self.assertEqual(self.outcomes(logs), [])  # no word per line
+        self.assertFalse([r for r in logs.records if "took" in r.getMessage()])  # not loaded
+
+        def raises():
+            raise RuntimeError("no model")
+
+        self.warm = raises
+        with self.assertLogs("services.captions.worker", logging.WARNING) as logs:
+            translation.set("German", "another-folder")  # another folder: tried
+            self.until(lambda: logs.records)
+            time.sleep(0.05)  # time for a second word it should not say
+        self.assertEqual(len(self.made), 2)
+        self.assertFalse(translation._ready())
+        [warning] = [r.getMessage() for r in logs.records]
+        self.assertTrue(warning.endswith("did not load: RuntimeError"), warning)
 
     def serve(self, *script):
-        """The process's command loop over `script` (its model and runs fakes); the
-        translation each run was given."""
+        """The process's command loop over `script`, with a fake model; its runs are bare ones
+        (self.runs). A callable in the script runs between two commands."""
         from services.captions import worker
 
-        given = []
+        self.runs: list = []
 
-        class Run:
-            def __init__(self, *args, translation=None, **kwargs):
-                given.append(translation)
+        def run(link, model, number, where, start, track, language, viewer, *rest, **kwargs):
+            made = self.a_run(kwargs.get("translation"), language, number, follow=False)
+            made.viewer, made.start, made.stop = viewer, lambda: None, made.stopped.set
+            self.runs.append(made)
+            return made
 
-            def start(self):
-                pass
+        steps = iter(script + (("quit",),))
 
-            def stop(self):
-                pass
+        def recv():
+            step = next(steps)
+            while callable(step):
+                step()
+                step = next(steps)
+            return step
 
-        messages = iter(script + (("quit",),))
-        conn: Any = SimpleNamespace(recv=lambda: next(messages), send=self.sent.append)
+        def model(spec):  # the speech model loads (and puts its runtime on sys.path) ...
+            time.sleep(0.05)
+            if spec.get("fails"):
+                raise RuntimeError("no speech model")
+            self.speech.append(len(self.made))  # ... before the translator is made
+            return SimpleNamespace()
+
+        self.speech: list = []
+        conn: Any = SimpleNamespace(recv=recv, send=self.sent.append)
         with (
-            mock.patch.object(worker, "_Model", lambda spec: SimpleNamespace()),
-            mock.patch.object(worker, "_Run", Run),
-            mock.patch.object(worker, "_FilmRun", Run),
+            mock.patch.object(worker, "_Model", model),
+            mock.patch.object(worker, "_Run", run),
+            mock.patch.object(worker, "_FilmRun", run),
         ):
             worker._serve(worker._Link(conn))
-        return given
 
     def test_the_process_translates_from_its_load_and_as_the_command_says(self):
         other = Path("another-folder")
-        given = self.serve(
+        self.serve(
             ("load", {"translation": str(MT_FOLDER), "translate_to": "English"}),
+            lambda: self.assertTrue(self.until(lambda: self.made)),  # loading: no line asked
             ("start", 5, "http://127.0.0.1/side", 100.0, None, "Turkish"),
             ("film", 6, "film.mkv", 0.0, None, "French", ()),
             ("translate", "German", str(other)),  # a model downloaded after the speech one
-        )
-        self.assertEqual(self.sent, [("ready",)])
-        first, second = given
-        self.assertIs(first, second)  # one for the process, across runs
-        self.a_run(first, "Turkish")._write("qwen", "heard", "Bir.", 104.0, 105.0)
-        self.assertEqual(self.captions(2)[1], ("caption", 1, 104.0, 105.0, "<German> Bir."))
-        self.assertEqual(self.made, [(other, 2)])
-        self.sent.clear()
-        [off] = self.serve(
-            ("load", {"translation": str(MT_FOLDER), "translate_to": "English"}),
+            lambda: self.until(lambda: len(self.made) == 2 and self.runs[1].translation._ready()),
+            lambda: self.runs[1]._write("qwen", "heard", "Bonsoir.", 104.0, 105.0),
+            lambda: self.captions(2),
             ("translate", None),
-            ("start", 5, "http://127.0.0.1/side", 100.0, None, "Turkish"),
+            lambda: self.runs[1]._write("qwen", "heard", "Merci.", 105.0, 106.0),
         )
-        self.a_run(off, "Turkish")._write("qwen", "heard", "Bir.", 104.0, 105.0)
-        self.assertEqual(self.sent[1:], [("caption", 1, 104.0, 105.0, "Bir.")])  # straight out
+        first, second = self.runs
+        self.assertIs(first.translation, second.translation)  # one for the process
+        self.assertEqual(self.speech, [0])  # the translator found the speech model's runtime
+        self.assertEqual(self.made, [(MT_FOLDER, 2), (other, 2)])
+        self.assertEqual(
+            self.sent,
+            [
+                ("ready",),
+                ("caption", 6, 104.0, 105.0, "<German> Bonsoir."),
+                ("caption", 6, 105.0, 106.0, "Merci."),  # off: straight out
+            ],
+        )
+
+    def test_no_translator_without_a_speech_model(self):
+        with self.assertLogs("services.captions.worker", logging.WARNING):
+            self.serve(
+                ("load", {"translation": str(MT_FOLDER), "translate_to": "English", "fails": True}),
+                lambda: time.sleep(0.05),
+            )
+        self.assertEqual(self.sent, [("failed", "RuntimeError")])
+        self.assertEqual(self.made, [])
+
+    def test_a_first_line_while_the_picture_plays_is_given_no_time_for_a_hold(self):
+        from services.captions.worker import DEADLINE_MARGIN_S
+
+        self.serve(
+            ("load", {"translation": str(MT_FOLDER), "translate_to": "English"}),
+            ("start", 5, "http://127.0.0.1/side", 100.0, None, "Turkish"),
+            lambda: self.until(lambda: self.runs[0].translation._ready()),
+            ("viewer", 100.5),  # it plays
+            lambda: setattr(self.runs[0], "newest", 105.5),  # a waiting one would wait 2.5 s
+            lambda: self.runs[0]._write("qwen", "heard", "Bir.", 104.0, 105.0),
+            lambda: self.captions(2),
+        )
+        self.assertAlmostEqual(self.calls[0][3], 104.3 - 100.5 - DEADLINE_MARGIN_S, delta=0.5)
 
     def test_the_detailed_log_gets_each_line_from_the_process(self):
         # each line logs at LINE_LEVEL (DEBUG), which the process's handler let through only at
@@ -808,14 +948,14 @@ class TranslationTests(unittest.TestCase):
 
     def test_a_target_without_the_models_folder_translates_nothing_and_says_so_once(self):
         with self.assertLogs("services.captions.worker", logging.INFO) as logs:
-            [translation] = self.serve(
+            self.serve(
                 ("load", {"translate_to": "English", "translation": None}),
                 ("translate", "German"),
                 ("start", 5, "http://127.0.0.1/side", 100.0, None, "Turkish"),
+                lambda: self.runs[0]._write("qwen", "heard", "Bir.", 104.0, 105.0),
             )
         self.assertEqual(len([r for r in logs.records if "translation model" in r.getMessage()]), 1)
-        self.a_run(translation, "Turkish")._write("qwen", "heard", "Bir.", 104.0, 105.0)
-        self.assertEqual(self.sent[1:], [("caption", 1, 104.0, 105.0, "Bir.")])  # straight out
+        self.assertEqual(self.sent[1:], [("caption", 5, 104.0, 105.0, "Bir.")])  # straight out
         self.assertEqual(self.made, [])
 
 
