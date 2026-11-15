@@ -32,7 +32,6 @@ from multiprocessing.connection import Connection, wait
 import os
 from pathlib import Path
 import queue
-import re
 import sys
 import threading
 import time
@@ -85,23 +84,21 @@ class _LogToOwner(logging.Handler):
             pass
 
 
-TURKISH = "Turkish"  # Qwen's name for it: the language ufakzeka-kulak writes (2.9.1)
+TURKISH = "Turkish"  # Qwen's name for it: the language our Turkish Moonshine writes (2.10)
 _COHERE, _EUROPEAN = "cohere", "european"  # 2.9.3: the specialists (their spec keys)
 # ... and the others' parts, by which the log names the model that wrote a line (2026-11-08)
 _QWEN, _TURKISH_ROLE = "qwen", "turkish"
 _NAMES = {  # ... when its folder says nothing
     _QWEN: "Qwen3-ASR",
-    _TURKISH_ROLE: "ufakzeka-kulak",
+    _TURKISH_ROLE: "the Turkish Moonshine",
     _COHERE: "Cohere Transcribe",
     _EUROPEAN: "Parakeet",
 }
 _LOAD_WAIT_S = 60.0  # a language only a specialist writes waits this long for it to load
-_TURKISH_GAIN = 8.0  # the model card's input gain: its sherpa-onnx files want the sound louder
 # 2.9.5: the voice detector again, without its hold: it says where the pauses between words
 # and phrases are (pieces.Cutter's `is_voiced`)
 _VOICED_MIN_S = 0.05
 _UPPER = {"i": "İ", "ı": "I"}  # Turkish's own capitals of the dotted and the dotless i
-_MOON_FRAME = 80  # sherpa-onnx's Moonshine reads 5 ms frames: a piece is padded to whole ones
 _IDLE_S = 0.25  # the growing writer looks at the picture this often when no sound comes
 # 2026-11-09, the owner: buffered channels watched at 1.5x or 2x, so 2 s of sound to read a second;
 # from this rate on, our Moonshine beam reads its best path alone (about 4x cheaper)
@@ -116,19 +113,6 @@ def _folder_name(folder: Any) -> str:
 
 _SENTENCE_ENDS = (".", "!", "?", "…")
 SENTENCE_GAP_S = 1.0  # a pause this long before a line: it starts a sentence
-
-
-# (an "i" after an apostrophe is a suffix: "Deniz'i gördüm" stays as it is, the owner 2026-11-08)
-_LONE_I = re.compile(r"(?<![\w'’])i (?=\w)")
-
-
-def lone_i_joined(text: str) -> str:
-    """ufak's words that start with a capital İ ("İstanbul", "İşte") come as a lone "i" and
-    the rest ("i stanbul": its training text lower-cased İ to i and a combining dot, which
-    its tokenizer took for a word's start); a lone "i" is no Turkish word, so it joins the
-    word after it (2.9.6, the real-use review: "i stanbul" three times on a news channel).
-    ufak's alone: our own models write İ (2026-11-08, the owner: "model specific")."""
-    return _LONE_I.sub("i", text)
 
 
 def unfinished(text: str) -> str:
@@ -152,8 +136,8 @@ def turkish_capital(text: str) -> str:
 
 class _Model:
     """The loaded speech models and voice detector; decodes one piece at a time: Qwen3-ASR, and
-    for Turkish ufak AI's ufakzeka-kulak (2.9.1: far better Turkish than Qwen's, at a
-    twenty-fifth of its time) once the files are given."""
+    for Turkish QiTV's own Turkish Moonshine (2.10; 2.9.1 to 2.9.10: ufakzeka-kulak, far better
+    Turkish than Qwen's, at a twenty-fifth of its time) once the files are given."""
 
     moonshine = False  # our Turkish Moonshine writes Turkish (2.10)
     beam: Any = None  # ... read with our beam (moon_beam.BeamReader)
@@ -223,8 +207,6 @@ class _Model:
                 self.decode(array("f", bytes(16000 * 4)), "")
             if self.beam is not None:
                 self.beam.warm()  # (silence is skipped: a quiet tone)
-            elif self.turkish is not None:
-                self.decode(array("f", bytes(16000 * 4)), TURKISH)
 
     def name(self, part: str) -> str:
         """The model of a part (_QWEN, _TURKISH_ROLE, ...) as the log names it."""
@@ -339,18 +321,6 @@ class _Model:
             self._wrote.name = self.name(_TURKISH_ROLE)
             width = 1 if fast else None
             return str(self.beam.transcribe(samples, width=width)).strip()  # as sherpa-onnx's
-        if language == TURKISH and self.turkish is not None:
-            self._wrote.name = self.name(_TURKISH_ROLE)
-            stream = self.turkish.create_stream()
-            if self.moonshine:
-                sound = array("f", samples)
-                sound.extend(array("f", bytes(4 * (-len(sound) % _MOON_FRAME))))
-            else:
-                sound = array("f", (v * _TURKISH_GAIN for v in samples))
-            stream.accept_waveform(16000, sound)
-            self.turkish.decode_stream(stream)
-            text = str(stream.result.text).strip()  # its case: sentence_case
-            return text if self.moonshine else lone_i_joined(text)  # ufak's "i stanbul"
         specialist = self._specialist(language) if language else None
         if specialist is None and language and language not in QWEN_LANGUAGES:
             return ""  # 2.9.6: only its own model writes it, and that isn't here (not now)
@@ -691,10 +661,10 @@ class _Run:
             self._write(name, heard, text, piece.start, piece.end, voiced=piece.voiced)
 
     def sentence_case(self, text: str, start: float, end: float) -> str:
-        """ufak's line with a capital where a sentence starts (the run's first line, after a
-        full stop, after a pause of SENTENCE_GAP_S), else as it wrote it: it writes no full
-        stops at times, and each line began with a capital mid-sentence (2.9.2, the owner:
-        "capitalization is kinda weird since we are not finalizing sentences with dots")."""
+        """A Turkish line with a capital where a sentence starts (the run's first line, after a
+        full stop, after a pause of SENTENCE_GAP_S), else as the model wrote it: it writes no
+        full stops at times, and each line began with a capital mid-sentence (2.9.2, the owner on
+        ufak: "capitalization is kinda weird since we are not finalizing sentences with dots")."""
         said = self._said
         begins = (
             said is None or said[0].endswith(_SENTENCE_ENDS) or start - said[1] >= SENTENCE_GAP_S
@@ -739,8 +709,8 @@ class _Run:
             for text, start, end in lines:
                 text = guards.clean(text)
                 if text and text_language.written_in(text, TURKISH):
-                    # a capital after a sentence end or a pause, as for ufak's lines (the model
-                    # starts a sentence after a pause in lower case at times)
+                    # a capital after a sentence end or a pause (the model starts a sentence
+                    # after a pause in lower case at times)
                     shown = numbers_tr.written(self.sentence_case(text, start, end))
                     # (the owner's field tests compare what it heard with what shows)
                     self._write(name, text, shown, start, end, until=start + 0.5)
@@ -748,10 +718,10 @@ class _Run:
                 return
 
     def qwen_writes(self) -> bool:
-        """Qwen writes this run's language for good: no specialist (ufak, Cohere, Parakeet)
-        writes it, or none is known yet (2.9.6, the real-use review: Automatic stepped Qwen
-        down while it only wrote English until Cohere was loaded, and the step down's restart
-        made Cohere load again: the first caption came 101 s after captions were on)."""
+        """Qwen writes this run's language for good: no specialist (the Turkish Moonshine, Cohere,
+        Parakeet) writes it, or none is known yet (2.9.6, the real-use review: Automatic stepped
+        Qwen down while it only wrote English until Cohere was loaded, and the step down's
+        restart made Cohere load again: the first caption came 101 s after captions were on)."""
         language = self.language
         if not language:
             return True

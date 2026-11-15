@@ -204,8 +204,8 @@ def _stream(video_pts, audio_pts, language=b"tur"):
 
 
 class TurkishModelTests(unittest.TestCase):
-    """2.9.1: Turkish is written by ufakzeka-kulak (far better than Qwen's Turkish, 25 times
-    faster), the rest by Qwen."""
+    """Turkish is written by our Turkish Moonshine (2.10; 2.9.1: ufakzeka-kulak, far better than
+    Qwen's Turkish), the rest by Qwen and the specialists."""
 
     def model(self):
         from services.captions.worker import _Model
@@ -233,9 +233,14 @@ class TurkishModelTests(unittest.TestCase):
             def decode_stream(self, stream):
                 pass
 
+        class Beam:
+            def transcribe(self, samples, width=None):
+                heard.append(("moonshine", "peak", max(samples)))
+                return " iyi akşamlar "
+
         model = object.__new__(_Model)
         model.recognizer = Recognizer("qwen", "Good evening.")
-        model.turkish = Recognizer("ufak", "iyi akşamlar")
+        model.beam = model.turkish = Beam()
         model.european = model.cohere = None
         model._folders, model._loading = {}, {}
         return model, heard
@@ -249,8 +254,8 @@ class TurkishModelTests(unittest.TestCase):
     def test_coheres_languages_go_to_it_told_the_language(self):
         # 2.9.3: Cohere Transcribe wrote its 14 languages best (FLEURS and broadcasts).
         model, heard = self.model()
-        self.given(model, "cohere", type(model.turkish)("cohere", "Bonsoir."))
-        self.given(model, "european", type(model.turkish)("parakeet", "God aften."))
+        self.given(model, "cohere", type(model.recognizer)("cohere", "Bonsoir."))
+        self.given(model, "european", type(model.recognizer)("parakeet", "God aften."))
         self.assertEqual(model.decode(array("f", [0.1]), "French"), "Bonsoir.")
         self.assertEqual(heard[0], ("cohere", "language", "fr"))
         heard.clear()
@@ -269,7 +274,7 @@ class TurkishModelTests(unittest.TestCase):
         def load(name, done):
             loads.append(name)
             go.wait(5)
-            setattr(model, name, type(model.turkish)(name, "loaded"))
+            setattr(model, name, type(model.recognizer)(name, "loaded"))
             done.set()
 
         model._load = load
@@ -287,7 +292,7 @@ class TurkishModelTests(unittest.TestCase):
     def test_parakeets_languages_go_to_it_and_qwen_is_never_told_one_it_doesnt_know(self):
         # 2.9.3: Parakeet TDT 0.6B v3 writes its European languages, better than Qwen.
         model, heard = self.model()
-        self.given(model, "european", type(model.turkish)("parakeet", "Good evening."))
+        self.given(model, "european", type(model.recognizer)("parakeet", "Good evening."))
         self.assertEqual(model.decode(array("f", [0.1]), "English"), "Good evening.")
         self.assertEqual([name for name, *_ in heard], ["parakeet"])  # no gain, no language
         heard.clear()
@@ -309,9 +314,9 @@ class TurkishModelTests(unittest.TestCase):
         self.given(
             model,
             "european",
-            type(model.turkish)("parakeet", "And I've been at the bank, you know."),
+            type(model.recognizer)("parakeet", "And I've been at the bank, you know."),
         )
-        model.recognizer = type(model.turkish)("qwen", "Et je vais à la banque.")
+        model.recognizer = type(model.recognizer)("qwen", "Et je vais à la banque.")
         self.assertEqual(model.decode(array("f", [0.1]), "French"), "Et je vais à la banque.")
         self.assertIn(("qwen", "language", "French"), heard)
         heard.clear()
@@ -320,19 +325,21 @@ class TurkishModelTests(unittest.TestCase):
         )
         self.assertEqual({name for name, *_ in heard}, {"parakeet"})
         heard.clear()
-        model.european = type(model.turkish)("parakeet", "Love money, forcément, dans un bureau.")
+        model.european = type(model.recognizer)(
+            "parakeet", "Love money, forcément, dans un bureau."
+        )
         self.assertEqual(model.decode(array("f", [0.1]), "French")[:10], "Love money")  # French
 
-    def test_turkish_goes_to_ufak_louder_and_starts_with_a_capital(self):
+    def test_turkish_goes_to_our_moonshine_as_it_sounds_and_the_rest_to_qwen(self):
         model, heard = self.model()
         self.assertEqual(model.decode(array("f", [0.1, 0.05]), "Turkish"), "iyi akşamlar")
-        self.assertEqual(heard, [("ufak", "peak", array("f", [0.8])[0])])  # its card's gain
+        self.assertEqual(heard, [("moonshine", "peak", array("f", [0.1])[0])])  # no gain
         heard.clear()
         self.assertEqual(model.decode(array("f", [0.1]), "English"), "Good evening.")
         self.assertEqual(heard[0], ("qwen", "language", "English"))
         cap = guards.token_cap(1 / 16000, "English")  # 2.9.3: each piece's own cap
         self.assertEqual(heard[1], ("qwen", "max_new_tokens", str(cap)))
-        model.turkish = None  # its files not given: Qwen writes Turkish too
+        model.turkish = model.beam = None  # its files not given: Qwen writes Turkish too
         self.assertEqual(model.decode(array("f", [0.1]), "Turkish"), "Good evening.")
 
     def test_a_capital_only_where_a_sentence_starts(self):
@@ -651,19 +658,6 @@ class CutterTests(unittest.TestCase):
         model.recognizer, model.turkish, model.european, model.cohere = object(), None, None, None
         model._folders, model._loading = {}, {}
         self.assertEqual(model.decode(array("f", bytes(64)), "Ukrainian"), "")
-
-    def test_ufaks_lone_i_joins_the_word_it_begins(self):
-        # 2.9.6, the real-use review: "i stanbul" (İstanbul), "i şte" (İşte).
-        from services.captions.worker import lone_i_joined
-
-        self.assertEqual(lone_i_joined("ı i stanbul i şte bir"), "ı istanbul işte bir")
-        self.assertEqual(lone_i_joined("bu iki ile"), "bu iki ile")  # i inside words stays
-        self.assertEqual(lone_i_joined("sonunda i"), "sonunda i")  # nothing after it
-        # 2026-11-08, the owner: "Deniz'igördüm bu arada." for "Deniz'i gördüm bu arada.": an
-        # "i" after an apostrophe is a suffix
-        self.assertEqual(lone_i_joined("Deniz'i gördüm bu arada."), "Deniz'i gördüm bu arada.")
-        self.assertEqual(lone_i_joined("Ahmet’i aradım"), "Ahmet’i aradım")
-        self.assertEqual(lone_i_joined("i stanbul'a gittik"), "istanbul'a gittik")
 
     def test_a_typographic_apostrophe_keeps_a_suffix_in_its_word(self):
         # "Deniz’e de" read as "deniz", "e", "de": two Portuguese words (2026-11-08)
