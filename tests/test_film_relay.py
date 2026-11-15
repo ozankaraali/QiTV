@@ -62,9 +62,12 @@ class Reader:
     def __init__(self, url, first=0, last=None, method="GET", rcvbuf=None):
         parts = urlsplit(url)
         self.connection = HTTPConnection(parts.hostname, parts.port, timeout=10)
-        if rcvbuf:  # a small window: the relay's sending follows this reader's reading
-            self.connection.connect()
-            self.connection.sock.setsockopt(socket.SOL_SOCKET, socket.SO_RCVBUF, rcvbuf)
+        if rcvbuf:  # a small window, set before connecting: the relay sends as this reads
+            sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+            sock.setsockopt(socket.SOL_SOCKET, socket.SO_RCVBUF, rcvbuf)
+            sock.settimeout(10)
+            sock.connect((parts.hostname, parts.port))
+            self.connection.sock = sock
         headers = {"Range": f"bytes={first}-{'' if last is None else last}"}
         self.connection.request(method, parts.path, headers=headers)
         self.response = self.connection.getresponse()
@@ -239,7 +242,7 @@ class CapTests(RelayTestCase):
 
 class CaptionsTests(RelayTestCase):
     def test_the_captions_read_a_little_past_the_picture_on_the_same_connection(self):
-        picture = Reader(self.relay.leader_url, 0)
+        picture = Reader(self.relay.leader_url, 0, 300 * KIB - 1)  # all it reads here
         picture.read(300 * KIB)
         at = 600 * KIB
         self.assertEqual(
