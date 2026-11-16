@@ -7,6 +7,7 @@ os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 from PySide6.QtWidgets import QApplication
 from timer_fixtures import pause
 
+from services import watch_state
 from services.watch_state import WatchState
 
 
@@ -268,3 +269,43 @@ class LockedConfigTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class LocalKeyTests(unittest.TestCase):
+    def test_local_key_is_stable_and_colon_safe(self):
+        k = watch_state.local_key("Dizi Bölüm 1.mkv", 734003200)
+        self.assertRegex(k, r"^local:[0-9a-f]{16}$")
+        self.assertEqual(k, watch_state.local_key("Dizi Bölüm 1.mkv", 734003200))
+        self.assertNotEqual(k, watch_state.local_key("Dizi Bölüm 1.mkv", 734003201))
+
+    def test_short_audio_never_saved_long_audio_is(self):
+        ws = WatchState(make_config())
+        k, k2, k3 = (watch_state.local_key(n, 1) for n in ("a.mp3", "b.mp3", "c.mp3"))
+        for key in (k, k2, k3):
+            ws.mark_audio(key)
+        ws.update_position(k, 60_000, 180_000)
+        ws.update_position(k3, 60_000, 0)  # its length isn't known yet
+        ws.update_position(k2, 60_000, 3_600_000)
+        positions = ws.config.playback_positions
+        self.assertNotIn(k, positions)
+        self.assertNotIn(k3, positions)
+        self.assertIn(k2, positions)
+
+    def test_local_keys_pruned_to_newest_300_only(self):
+        cfg = make_config()
+        cfg.save_playback_position = lambda cid, pos, dur: cfg.playback_positions.__setitem__(
+            cid, {"position": pos, "duration": dur, "timestamp": f"2026-11-17T10:{clock.n:05d}"}
+        )
+        clock = SimpleNamespace(n=0)
+        ws = WatchState(cfg)
+        for name in ("Home:1", "Home:2", "Home:3"):
+            cfg.playback_positions[name] = {"position": 1, "duration": 2, "timestamp": ""}
+        keys = []
+        for i in range(305):
+            clock.n = i
+            keys.append(watch_state.local_key(f"f{i}.mkv", i))
+            ws.update_position(keys[-1], 60_000, 3_600_000)
+        local = [k for k in cfg.playback_positions if k.startswith("local:")]
+        self.assertEqual(sorted(local), sorted(keys[5:]))
+        self.assertEqual(len(cfg.playback_positions), 303)
+        self.assertTrue(all(f"Home:{n}" in cfg.playback_positions for n in (1, 2, 3)))

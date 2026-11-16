@@ -96,6 +96,7 @@ from services.navigation import (
     recent_channel,
 )
 from services.next_episode import play_context
+from services.open_paths import is_music
 from services.picture import SOURCE_DIRECT, ChannelPictures
 from services.provider_ids import (
     ALL_PROVIDERS,
@@ -110,6 +111,7 @@ from services.sessions import SessionManager, Slot, records
 from services.sound_sync import SoundSync
 from services.track_memory import TrackMemory
 from services.vlc_profile import DEFAULT_USER_AGENT, classify
+from services.watch_state import local_key
 from services.zapping import ZapContext
 from ui import item_provider
 from ui.autoplay import FINISHED_TEXT, Autoplay
@@ -1001,12 +1003,18 @@ class TVController(QObject):
         since = now - min(back, reach) if reach > timedelta(0) else now
         return now, self._programmes(channel, since, limit)
 
-    def play_file(self, path: str) -> None:
+    def play_file(self, path: str, size: Optional[int] = None) -> None:
         """Play a local media file (File → Open File…) as a movie: no link, no history.
 
-        It is no provider's: nothing records it, and no position is saved for it.
+        It is no provider's: nothing records it in a history. With its `size`, it goes on
+        from where it stopped (its name and size are its resume key); without one, from the
+        start and no position is kept.
         """
-        self._play_local(path, Path(path).name)
+        name = Path(path).name
+        key = local_key(name, size) if size is not None else None
+        if key and is_music(path):
+            self.watch.mark_audio(key)
+        self._play_local(path, name, resume_key=key)
 
     def play_recording(self, item: dict, start_over: bool = False) -> None:
         """A recording from the Library (2.8): its file plays as a movie from where it stopped
