@@ -1,0 +1,114 @@
+"""How long a second start of QiTV takes to hand over to the one already running.
+
+    uv run python scripts/smoke_open_file.py --app dist/qitv-linux --out smoke-frozen
+    uv run python scripts/smoke_open_file.py --app "uv run python main.py" --out /tmp/open
+
+Starts --app with its own config dir (<out>/config), waits for the control port, starts
+--app again and times that second process until it exits 0 (it hands over with `show` and
+leaves), then quits the first. Writes <out>/open-file.json: {"first_s", "handover_s"}.
+"""
+
+from __future__ import annotations
+
+import argparse
+import json
+import os
+from pathlib import Path
+import shlex
+import subprocess
+import sys
+import time
+
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+
+import qitv_control  # noqa: E402
+
+START_TIMEOUT_S = 60.0
+HANDOVER_TIMEOUT_S = 60.0
+
+
+def _command(app: str) -> list[str]:
+    if os.name == "nt":
+        return [app]
+    return shlex.split(app)
+
+
+def _status_pid() -> int | None:
+    """The running QiTV's pid when its control port answers, else None."""
+    try:
+        answer = qitv_control.ask("status", timeout=5.0)
+    except SystemExit:
+        return None
+    pid = answer.get("pid")
+    return int(pid) if pid else None
+
+
+def run(app: str, out: Path, file: str = "", second: str = "") -> dict:
+    out.mkdir(parents=True, exist_ok=True)
+    config = out / "config"
+    config.mkdir(parents=True, exist_ok=True)
+    # Nothing modal: no startup update check, no provider to fetch.
+    (config / "config.json").write_text(json.dumps({"check_updates": False}), encoding="utf-8")
+    os.environ.update(
+        QITV_CONFIG_DIR=str(config), QITV_CONTROL="1", QITV_SMOKE_MUTE="1"
+    )
+    command = _command(app)
+    log = open(out / "open-file-first.out", "ab")
+    started = time.monotonic()
+    first = subprocess.Popen(command, stdout=log, stderr=log, stdin=subprocess.DEVNULL)
+    others: list[subprocess.Popen] = []
+    try:
+        pid = None
+        while time.monotonic() - started < START_TIMEOUT_S:
+            if first.poll() is not None:
+                raise SystemExit(f"The first QiTV exited with {first.returncode}.")
+            pid = _status_pid()
+            if pid:
+                break
+            time.sleep(0.25)
+        if not pid:
+            raise SystemExit(f"The first QiTV did not answer within {START_TIMEOUT_S:.0f} s.")
+        first_s = time.monotonic() - started
+
+        began = time.monotonic()
+        again = subprocess.Popen(
+            command + ([file] if file else []),
+            stdout=log,
+            stderr=log,
+            stdin=subprocess.DEVNULL,
+        )
+        others.append(again)
+        try:
+            code = again.wait(timeout=HANDOVER_TIMEOUT_S)
+        except subprocess.TimeoutExpired:
+            raise SystemExit(f"The second start did not exit within {HANDOVER_TIMEOUT_S:.0f} s.")
+        handover_s = time.monotonic() - began
+        if code != 0:
+            raise SystemExit(f"The second start exited with {code}.")
+        if _status_pid() != pid:
+            raise SystemExit("The first QiTV's pid changed or it stopped answering.")
+        result = {"first_s": round(first_s, 3), "handover_s": round(handover_s, 3)}
+        qitv_control.quit_qitv()
+        (out / "open-file.json").write_text(json.dumps(result), encoding="utf-8")
+        return result
+    finally:
+        for process in [first, *others]:
+            if process.poll() is None:
+                process.kill()
+        log.close()
+
+
+def main(argv: list[str]) -> int:
+    parser = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
+    parser.add_argument("--app", required=True, help="the packaged binary, or a command")
+    parser.add_argument("--out", required=True, type=Path)
+    parser.add_argument("--file", default="", help="(from Task 11 on)")
+    parser.add_argument("--second", default="", help="(from Task 11 on)")
+    options = parser.parse_args(argv)
+    result = run(options.app, options.out.resolve(), options.file, options.second)
+    print(f"first_s={result['first_s']} handover_s={result['handover_s']}")
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv[1:]))

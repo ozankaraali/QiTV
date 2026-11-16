@@ -144,6 +144,22 @@ jobs:
         env:
           QT_QPA_PLATFORM: xcb
           QITV_SMOKE: '1'
+      - name: Time the hand-over to a running app (packaged)
+        if: ${{ !cancelled() && steps.package.outcome == 'success' }}
+        # A second start of the one-file build unpacks itself, then hands over to the first
+        # and exits; open-file.json has both times (it rides along with smoke-frozen).
+        run: |
+          dbus-run-session -- xvfb-run -a -s "-screen 0 1920x1080x24" sh -c '
+            openbox &
+            for i in $(seq 50); do
+              xprop -root _NET_SUPPORTING_WM_CHECK | grep -q "window id" && break
+              sleep 0.2
+            done
+            uv run python scripts/smoke_open_file.py --app dist/qitv-linux --out smoke-frozen
+          '
+        timeout-minutes: 5
+        env:
+          QT_QPA_PLATFORM: xcb
       - name: Restore the system VLC
         if: always()
         run: |
@@ -276,6 +292,13 @@ jobs:
         timeout-minutes: 8
         env:
           QITV_SMOKE: '1'
+      - name: Time the hand-over to a running app (packaged)
+        if: ${{ !cancelled() && steps.package.outcome == 'success' }}
+        # A second start of the one-file build unpacks itself, then hands over to the first
+        # and exits; open-file.json has both times (it rides along with smoke-frozen).
+        shell: pwsh
+        run: uv run python scripts/smoke_open_file.py --app dist\qitv-windows.exe --out smoke-frozen
+        timeout-minutes: 5
       - name: Restore the system VLC
         if: always()
         shell: pwsh
@@ -372,6 +395,12 @@ jobs:
         timeout-minutes: 8
         env:
           QITV_SMOKE: '1'
+      - name: Time the hand-over to a running app (packaged)
+        if: ${{ !cancelled() && steps.package.outcome == 'success' }}
+        # A second start hands over to the first and exits; open-file.json has both times
+        # (it rides along with smoke-frozen).
+        run: uv run python scripts/smoke_open_file.py --app dist/QiTV.app/Contents/MacOS/QiTV --out smoke-frozen
+        timeout-minutes: 5
       - name: The packaged app's plugin cache is current
         if: ${{ !cancelled() && steps.package.outcome == 'success' }}
         run: |
@@ -496,6 +525,12 @@ jobs:
         timeout-minutes: 8
         env:
           QITV_SMOKE: '1'
+      - name: Time the hand-over to a running app (packaged)
+        if: ${{ !cancelled() && steps.package.outcome == 'success' }}
+        # A second start hands over to the first and exits; open-file.json has both times
+        # (it rides along with smoke-frozen).
+        run: uv run python scripts/smoke_open_file.py --app dist/QiTV.app/Contents/MacOS/QiTV --out smoke-frozen
+        timeout-minutes: 5
       - name: The packaged app's plugin cache is current
         if: ${{ !cancelled() && steps.package.outcome == 'success' }}
         run: |
