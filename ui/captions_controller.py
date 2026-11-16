@@ -59,9 +59,9 @@ FILM_AHEAD_S = 6.0  # a film's sound is read from this far past the picture (aft
 # ahead of it is in time (2.9: a 1.7B film's captions 3-6 s ahead, all in time, said so at
 # every dip under the 6 s it starts with).
 LATE_LEAD_S = 1.0
-# 2026-11-07: once the model has loaded, the picture's wait for the captions goes on until the
-# first run has written this far past it (its first words are written, not passed), this long
-# after the model was ready at most
+# 2.10.1: turned on, the picture says "Starting captions…" while the model loads and until the
+# first run has written this far past it (its first words are written), or this long after the
+# model was ready; the picture plays on meanwhile (it waits only for their distance)
 START_LEAD_S = 1.5
 START_WAIT_S = 6.0
 HOLD_S = 0.6  # a caption stays this long after its words, unless the next one starts
@@ -242,7 +242,9 @@ class CaptionsController(QObject):
         self._last: Optional[tuple[float, float]] = None  # (position, monotonic) last tick
         self._was_waiting = False  # the live picture waited for the captions' distance
         self._floored: Any = None  # the live session holding the captions' distance
-        self._starting: Optional[float] = None  # when the model got ready, till the run writes
+        # turned on, till the first run writes (`_started`): since when (the model's ready, once
+        # it is)
+        self._starting: Optional[float] = None
         self._shown = ""
         self._language: tuple[str, str] = ("", FROM_MODEL)  # (qwen name or "", source)
         self._guessed = False  # the language is a guess from the channel's title prefix
@@ -846,6 +848,7 @@ class CaptionsController(QObject):
     def _enable(self, tier: str) -> None:
         self._tier = tier
         self._enabled = True
+        self._starting = time.monotonic()  # "Starting captions…" till their first words
         self._forget_cues()
         self._resolve_language()
         self._hold_floor()
@@ -1020,6 +1023,7 @@ class CaptionsController(QObject):
         self._restart.stop()
         self._process.stop()  # the model's memory back (a GB or two)
         self._loading = self._ready = False
+        self._starting = None
         self._session_key = ""
         self._newest = self._written = None
         self._forget_run()
@@ -1032,8 +1036,8 @@ class CaptionsController(QObject):
     # ---- the process ---------------------------------------------------------------------
     def _on_ready(self) -> None:
         self._loading, self._ready = False, True
-        # the picture waits on until the first run has written past it (`_on_progress`)
-        self._starting = time.monotonic()
+        if self._starting is not None:
+            self._starting = time.monotonic()  # START_WAIT_S counts from here
         if self._enabled:
             self._start_run()
         self.changed.emit()
@@ -1043,7 +1047,6 @@ class CaptionsController(QObject):
         logger.warning("AI captions stopped: %s", reason)
         self._loading = self._ready = False
         self._starting = None
-        self._tell_ready(True)  # nothing to wait for any more
         if reason != "gone":
             self._process.stop()  # it did not load: no child left without a model
         if was:
@@ -1244,7 +1247,7 @@ class CaptionsController(QObject):
     def _tick(self) -> None:
         if not self._enabled:
             return
-        self._started()  # (no progress from a run that did not start: the wait ends anyway)
+        self._started()  # (no progress from a run that did not start: START_WAIT_S anyway)
         if self._steps_down():
             self._step_down()
         if self._is_live() and self._live() is not self._floored:
@@ -1303,7 +1306,8 @@ class CaptionsController(QObject):
         self._last = (position, now)
         self._measure_rate(position, now)
         self._process.send("viewer", position)
-        self._show(self._cue_at(position))
+        # 2.10.1: "Starting captions…" until their first words are written, the picture playing
+        self._show(translate(STARTING) if self._starting is not None else self._cue_at(position))
         self._forget(position)
 
     def _track_changed(self) -> bool:
@@ -1593,35 +1597,23 @@ class CaptionsController(QObject):
         if live is not None:
             live.set_caption_floor(self._picture_lead())
             self._floored = live
-            self._tell_ready()
 
     def _drop_floor(self, shift: bool = True) -> None:
-        self._starting = None
-        self._tell_ready(True)
         live, self._floored = self._floored, None
         if live is not None:
             live.set_caption_floor(0.0, shift=shift)
 
-    def _tell_ready(self, ready: Optional[bool] = None) -> None:
-        """The session holding the captions' distance learns whether they can write yet
-        (2026-11-07): while the model loads, and its first run has not written past the
-        picture, the picture waits on ("Starting captions…") rather than play away what they
-        could still write (LiveSession.set_caption_ready)."""
-        tell = getattr(self._floored, "set_caption_ready", None)
-        if callable(tell):
-            tell(self._ready and self._starting is None if ready is None else ready)
-
     def _started(self) -> None:
-        """The first run after the model loaded has written START_LEAD_S past the picture (or
-        START_WAIT_S went by): the picture may play on."""
-        if self._starting is None:
+        """Turned on, the first run after the model loaded has written START_LEAD_S past the
+        picture (or START_WAIT_S went by since it was ready): "Starting captions…" goes, and the
+        captions show (2.10.1: the picture played on meanwhile; 2.10.0 held it)."""
+        if self._starting is None or not self._ready:
             return
         lead = self._lead()
         if (lead is not None and lead >= START_LEAD_S) or (
             time.monotonic() - self._starting >= START_WAIT_S
         ):
             self._starting = None
-            self._tell_ready()
 
     def _target(self) -> Any:
         controller = getattr(self._window, "controller", None)
