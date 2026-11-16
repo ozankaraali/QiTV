@@ -267,10 +267,6 @@ class LockedConfigTests(unittest.TestCase):
         self.assertEqual(self.attempts, 2)
 
 
-if __name__ == "__main__":
-    unittest.main()
-
-
 class LocalKeyTests(unittest.TestCase):
     def test_local_key_is_stable_and_colon_safe(self):
         k = watch_state.local_key("Dizi Bölüm 1.mkv", 734003200)
@@ -309,3 +305,7 @@ class LocalKeyTests(unittest.TestCase):
         self.assertEqual(sorted(local), sorted(keys[5:]))
         self.assertEqual(len(cfg.playback_positions), 303)
         self.assertTrue(all(f"Home:{n}" in cfg.playback_positions for n in (1, 2, 3)))
+
+
+if __name__ == "__main__":
+    unittest.main()
