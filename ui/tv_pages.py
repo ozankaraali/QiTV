@@ -31,6 +31,7 @@ from services.failure_reasons import shown_message
 from services.i18n import tr, translate
 from services.library import LibraryModel
 from services.navigation import FAVORITES_GROUP, RECENT_GROUP
+from services.open_paths import MEDIA_EXTENSIONS
 from services.provider_ids import provider_of
 from services.recording_desk import COMING, NOW, RECORDED
 from services.recording_thumbs import FOLDER as THUMBS_FOLDER, Thumbnails
@@ -48,10 +49,7 @@ from ui.tv_controller import ERROR_MS, INFO_MS, scrub
 logger = logging.getLogger(__name__)
 
 # File → Open File…'s files (the dialog's filter, after its name).
-MEDIA_PATTERNS = (
-    "*.mp4 *.m4v *.mkv *.avi *.mov *.webm *.ts *.m2ts *.mts *.mpg *.mpeg *.flv"
-    " *.wmv *.ogv *.mp3 *.m4a *.aac *.flac *.ogg *.opus *.wav *.m3u8"
-)
+MEDIA_PATTERNS = " ".join(f"*.{ext}" for ext in (*sorted(MEDIA_EXTENSIONS), "m3u8"))
 
 
 def _loop_level() -> int:

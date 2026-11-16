@@ -65,6 +65,7 @@ from services import i18n
 from services.captions import mt_languages
 from services.captions.languages import own_name, qwen_name
 from services.i18n import N_, tr, translate
+from services.open_paths import SUBTITLE_EXTENSIONS
 from services.sound_sync import LIMIT_MS, STEP_MS, SoundSync, clamp
 from services.track_memory import TrackMemory, title_key
 from services.zapping import ZapContext
@@ -110,7 +111,6 @@ AI_TRANSLATE_PICK = "ai_translate_pick"  # its list's: (AI_TRANSLATE_PICK, "" or
 # language spoken; a Settings group's title
 AI_CAPTIONS_TEXT = N_("AI captions")
 LANGUAGE_TEXT = N_("Language")
-SUBTITLE_EXTENSIONS = (".srt", ".ass", ".ssa", ".vtt", ".sub")
 # i18n: the file dialog's filter; keep the part in brackets as it is
 SUBTITLE_FILTER = N_("Subtitles (*.srt *.ass *.ssa *.vtt *.sub)")
 REFRESH_MS = 500  # a panel follows what libVLC reports meanwhile (a track that came)
