@@ -11,9 +11,8 @@ import unittest
 from unittest import mock
 
 from PySide6.QtCore import QCoreApplication, QObject, Signal
-from PySide6.QtTest import QTest
 from test_library_model import FakeCatalog, OnThreads, history, make_config, movie, resume
-from timer_fixtures import wait_until
+from timer_fixtures import pause, wait_until
 
 from services import library
 from services.jobs import JobRunner
@@ -369,7 +368,7 @@ class PhoneLibraryTests(unittest.TestCase):
         searcher.land([])
         QCoreApplication.processEvents()
         self.assertTrue(wait_until(lambda: searcher.asked == ["comedy", "dune"]))
-        QTest.qWait(400)
+        pause(400)
         self.assertEqual(searcher.asked, ["comedy", "dune"])
         self.assertEqual([t["title"] for t in self.last("genres")["titles"]], ["Comedy one"])
 

@@ -7,7 +7,7 @@ os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 from PySide6.QtCore import QPoint, Qt
 from PySide6.QtTest import QTest
 from PySide6.QtWidgets import QApplication
-from timer_fixtures import wait_until
+from timer_fixtures import pause, wait_until
 
 from services import free_channels
 from services.navigation import FREE_CHANNELS_ROW
@@ -55,7 +55,7 @@ class MenuTests(unittest.TestCase):
         menu = build_menu(None, self.chosen.append, territory="", picker=lambda _p: asked.append(1))
         menu.actions()[1].trigger()
         self.assertTrue(wait_until(lambda: asked == [1]))
-        QTest.qWait(20)
+        pause(20)
         self.assertEqual(self.chosen, [])
 
     def test_the_default_picker_lists_every_country_and_maps_a_name_back(self):

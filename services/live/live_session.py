@@ -365,10 +365,6 @@ _EDGE_S = 1.0  # VLC this close to the live edge is at it (a starvation, and its
 _CAPTION_SHORT_S = 1.0
 _CAPTION_REACHED_S = 0.1
 _CAPTION_BACK_S = 3.0  # time-shifted this near their floor when they come on: live again
-# 2026-11-07: while the captions' models still load, the wait goes on past the floor (the picture
-# played away what they could have written: a talk show's first 25 s had no captions), this long
-# at most from its start
-_CAPTION_READY_MAX_S = 30.0
 # 2.7: a channel's own server window (a long HLS playlist) is offered past the buffer when it
 # keeps at least this much more (the bar then shows all of it); a part played without one (a
 # provider archive's) has the bar reach this far past where it plays (as catch-up's).
@@ -739,7 +735,6 @@ class LiveSession(QObject):
         self._caption_floor = 0.0
         self._caption_armed = False
         self._caption_held: Optional[float] = None
-        self._caption_ready = True  # the captions write already (`set_caption_ready`)
         self._part_ready = False
         self._in_part = False  # also while a new part is on its way to replace one VLC played
         self._part_playing = False  # VLC plays `_part` itself
@@ -1432,13 +1427,6 @@ class LiveSession(QObject):
     def caption_floor(self) -> float:
         return self._caption_floor
 
-    def set_caption_ready(self, ready: bool) -> None:
-        """AI captions (2026-11-07): whether they can write yet (their models loaded and warm).
-        While they can't, the picture's wait for their distance goes on past it, for
-        `_CAPTION_READY_MAX_S` from its start at most, and one at the floor already waits too:
-        playing on would pass what they could still write once ready."""
-        self._caption_ready = bool(ready)
-
     def caption_waiting(self) -> bool:
         """The picture waits for the AI captions' distance behind live (`_caption_wait`)."""
         return self._caption_held is not None
@@ -1452,14 +1440,15 @@ class LiveSession(QObject):
     def _caption_wait(self, snapshot: Mapping[str, Any], lag: float) -> bool:
         """AI captions (2.9): the picture short of the floor by more than `_CAPTION_SHORT_S`
         after the floor rose or a landing waits (VLC held, as at the edge, saying "Starting
-        captions…") until its lag reaches the floor, then plays at 1x; one at the floor
-        already waits for nothing. A drift later is stay-live's to steer, gently. True while
-        it waits: stay-live is not consulted (no rate, no trouble, no landing measured)."""
+        captions…") until its lag reaches the floor, then plays at 1x; one at the floor or
+        further back already waits for nothing. Never for their models (2.10.1, the owner:
+        2.10.0 waited on past the floor while they loaded, and stay-live kept the lag it left,
+        "suddenly we are too behind"): they join where the picture is once ready. A drift later
+        is stay-live's to steer, gently; a time-shifted picture stays where the viewer put it.
+        True while it waits: stay-live is not consulted (no rate, no trouble, no landing
+        measured)."""
         if self._caption_held is not None:
-            ready = (
-                self._caption_ready or self._clock() - self._caption_held >= _CAPTION_READY_MAX_S
-            )
-            if lag >= self._caption_floor - _CAPTION_REACHED_S and ready:
+            if lag >= self._caption_floor - _CAPTION_REACHED_S:
                 self._release_caption_wait()
                 return False
             self._reland_edge = self._live_edge(snapshot)  # the wait's growth, no backlog's
@@ -1469,14 +1458,9 @@ class LiveSession(QObject):
         if self._held is not None or self._playback.state() is not PlaybackState.PLAYING:
             return False  # held at the edge, or not playing yet: once it plays
         self._caption_armed = False
-        if lag >= self._caption_floor - _CAPTION_SHORT_S and self._caption_ready:
+        if lag >= self._caption_floor - _CAPTION_SHORT_S:
             return False
-        _LOG.info(
-            "AI captions: waiting %.1f s behind live until %.1f s%s.",
-            lag,
-            self._caption_floor,
-            "" if self._caption_ready else " and they are ready",
-        )
+        _LOG.info("AI captions: waiting %.1f s behind live until %.1f s.", lag, self._caption_floor)
         self._caption_held = self._clock()
         self._land_check = None  # a wait is no landing's error
         self._ask_junction(0.0)  # a restart meanwhile takes nothing of what the wait builds
@@ -1488,12 +1472,7 @@ class LiveSession(QObject):
         held, self._caption_held = self._caption_held, None
         if held is None:
             return
-        _LOG.info(
-            "AI captions: waited %.1f s; playing on%s.",
-            self._clock() - held,
-            "" if self._caption_ready else " (they are not ready yet)",
-        )
-        self._caption_ready = True  # waited for them long enough: no wait for them again
+        _LOG.info("AI captions: waited %.1f s; playing on.", self._clock() - held)
         self._stay.absorb()  # the lag stepped up on purpose: counted afresh from here
         self._playback.hold(False)
 

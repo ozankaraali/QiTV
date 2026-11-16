@@ -5,10 +5,9 @@ import unittest
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 from PySide6.QtCore import QObject, Signal
-from PySide6.QtTest import QTest
 from PySide6.QtWidgets import QApplication
 from job_fixtures import ImmediateRunner
-from timer_fixtures import wait_until
+from timer_fixtures import pause, wait_until
 
 from services.library import LibraryModel
 from services.provider_ids import provider_of
@@ -118,7 +117,7 @@ class SearchSessionTests(unittest.TestCase):
         session = self.session
         for text in ("sa", "sal", "salt", "salt r"):
             session.set_query(text)
-            QTest.qWait(WAIT_MS)
+            pause(WAIT_MS)
         self.assertEqual(len(self.runner.jobs), 1)  # the first, cold search is still running
         self.assertEqual(session.message(), SEARCHING_TEXT)
         self.runner.finish(0)
@@ -238,14 +237,14 @@ class SearchSessionTests(unittest.TestCase):
         self.addCleanup(session.shutdown)
         session.set_query("salt")
         session.run_now()
-        QTest.qWait(300)  # still searching: nothing goes
+        pause(300)  # still searching: nothing goes
         self.runner.finish(0)
         self.assertIsNotNone(session._index)
         session.set_query("salt r")
         session.run_now()
-        QTest.qWait(150)
+        pause(150)
         self.runner.finish(1)  # (with the index kept: the catalogs were read once)
-        QTest.qWait(100)
+        pause(100)
         self.assertIsNotNone(session._index)  # used 0.1 s ago
         self.assertTrue(wait_until(lambda: session._index is None))
         self.assertIsNone(session._caches)

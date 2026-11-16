@@ -22,7 +22,7 @@ from PySide6.QtCore import (
 from PySide6.QtGui import QMouseEvent, QRegion
 from PySide6.QtTest import QTest
 from PySide6.QtWidgets import QApplication, QWidget
-from timer_fixtures import elapse, wait_until
+from timer_fixtures import elapse, pause, wait_until
 
 from services.connection_budget import ConnectionBudget
 from services.live.refusals import STREAM_LIMIT
@@ -838,10 +838,10 @@ class MultiviewTests(MultiviewCase):
         self.assertEqual(self.live.calls[-1], ("stop",))  # its stream stops
         self.live.released.emit()
         self.assertEqual(self.budget.holders("Home"), ["pip"])
-        QTest.qWait(150)
+        pause(150)
         self.assertEqual(len(self.session.plays), plays)  # never opened again behind its card
         self.grid_frame.focusRequested.emit("main")  # the focus back: nothing reopens either
-        QTest.qWait(150)
+        pause(150)
         self.assertEqual(len(self.session.plays), plays)
 
     def test_a_tile_beside_the_focus_that_played_comes_back_after_a_wait(self):
@@ -1086,7 +1086,7 @@ class MultiviewTests(MultiviewCase):
         self.ready("http://stream/3-third")
         self.assertTrue(wait_until(lambda: t2.live.url.endswith("third")))
         t2.live.failed.emit("The stream broke")  # the third wait: five seconds
-        QTest.qWait(150)
+        pause(150)
         self.assertEqual(len(self.catalog.links), links + 2)
         self.grid_frame.tileClicked.emit("t2")  # a click tries at once (focused)
         self.assertEqual(len(self.catalog.links), links + 3)
@@ -1106,7 +1106,7 @@ class MultiviewTests(MultiviewCase):
         self.grid_frame.focusRequested.emit("main")
         links = len(self.catalog.links)
         t3.live.failed.emit(STREAM_LIMIT)  # a refusal is never asked again
-        QTest.qWait(150)
+        pause(150)
         self.assertEqual(len(self.catalog.links), links)
         self.assertEqual(self.grid.state("t3"), FAILED)
 
@@ -1198,7 +1198,7 @@ class OneStreamMultiviewTests(MultiviewCase):
 
     def test_a_click_on_the_card_tries_again_and_never_by_itself(self):
         links = self.deny_t2()
-        QTest.qWait(50)
+        pause(50)
         self.assertEqual(len(self.catalog.links), links)  # nothing asked again by itself
         self.grid_frame.tileClicked.emit("t2")
         self.assertEqual(len(self.catalog.links), links)  # still full: said, not asked
@@ -1446,7 +1446,7 @@ class TileLifecycleTests(MultiviewCase):
         self.grid.set_cells(4)  # tile 7 goes while its link is on its way
         self.assertEqual(self.controller._tile_links, {})
         self.ready("http://stream/3")
-        QTest.qWait(20)
+        pause(20)
         self.assertEqual(self.sessions.slot("t6").live.named("start"), [])
         self.others_hold_nothing()
         self.v()
@@ -1459,7 +1459,7 @@ class TileLifecycleTests(MultiviewCase):
         self.v()
         self.assertFalse(self.sessions.pip_open())  # it had no picture to keep small
         self.ready("http://stream/3")
-        QTest.qWait(20)
+        pause(20)
         self.assertEqual(self.sessions.slot("t3").live.named("start"), [])
         self.others_hold_nothing()
 

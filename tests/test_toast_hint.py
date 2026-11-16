@@ -8,6 +8,7 @@ from PySide6.QtCore import QPointF, Qt
 from PySide6.QtGui import QAccessible
 from PySide6.QtTest import QTest
 from PySide6.QtWidgets import QApplication, QWidget
+from timer_fixtures import pause
 
 from ui.overlays.toast import Toast
 
@@ -15,7 +16,7 @@ from ui.overlays.toast import Toast
 def wait_until(predicate, timeout_ms=2000):
     waited = 0
     while not predicate() and waited < timeout_ms:
-        QTest.qWait(10)
+        pause(10)
         waited += 10
     return predicate()
 
@@ -39,7 +40,7 @@ class ToastHintTests(unittest.TestCase):
         self.toast.set_hint("Loading Home…")
         self.assertTrue(self.toast.isVisible())
         self.assertEqual(self.toast.text(), "Loading Home…")
-        QTest.qWait(100)
+        pause(100)
         self.assertTrue(self.toast.isVisible())
         self.toast.set_hint(None)
         self.assertFalse(self.toast.isVisible())
@@ -50,7 +51,7 @@ class ToastHintTests(unittest.TestCase):
         self.assertEqual(self.toast.text(), "Volume 50%")
         self.assertTrue(wait_until(lambda: self.toast.text() == "Add a provider"))
         self.assertTrue(self.toast.isVisible())
-        QTest.qWait(150)
+        pause(150)
         self.assertTrue(self.toast.isVisible())
 
     def test_clearing_the_hint_during_a_message_keeps_the_message_until_it_ends(self):
@@ -69,7 +70,7 @@ class ToastHintTests(unittest.TestCase):
         self.toast.set_hint(None)
         self.toast.set_hint("Loading Backup…")  # a new setup: the old error is history
         self.assertEqual(self.toast.text(), "Loading Backup…")
-        QTest.qWait(100)
+        pause(100)
         self.assertEqual(self.toast.text(), "Loading Backup…")
 
     def test_a_new_hint_replaces_the_old_one(self):

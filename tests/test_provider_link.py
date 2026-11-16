@@ -8,6 +8,7 @@ os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 from PySide6.QtGui import QGuiApplication
 from PySide6.QtTest import QTest
+from timer_fixtures import pause
 
 from services.provider_link import M3U, STB, XTREAM, ProviderLink, parse_provider_link
 from tests import test_tv_window as base
@@ -150,7 +151,7 @@ class PasteLinkTests(base.WindowCase):
         dialog.url_input.setFocus()
         self.paste("http://portal.example.test/stalker_portal/c/")
         dialog.url_input.paste()
-        QTest.qWait(10)  # it fills once the paste's own signals are out
+        pause(10)  # it fills once the paste's own signals are out
         self.assertTrue(dialog.type_STB.isChecked())
         self.assertEqual(dialog.url_input.text(), "http://portal.example.test/stalker_portal/c/")
         self.assertIn("MAC address", dialog.verify_result.text())
@@ -158,7 +159,7 @@ class PasteLinkTests(base.WindowCase):
     def test_typing_a_link_never_cuts_it_up(self):
         dialog = self.dialog()
         QTest.keyClicks(dialog.url_input, f"{PANEL}/get.php?username=ann&password=pw1")
-        QTest.qWait(10)
+        pause(10)
         self.assertEqual(dialog.url_input.text(), f"{PANEL}/get.php?username=ann&password=pw1")
         self.assertTrue(dialog.type_STB.isChecked())  # a new provider's type, untouched
 

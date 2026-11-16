@@ -12,8 +12,8 @@ from unittest import mock
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 from PySide6.QtCore import QObject, QTimer
-from PySide6.QtTest import QTest
 from PySide6.QtWidgets import QApplication
+from timer_fixtures import pause
 
 from services import update_checker
 from ui import update_dialogs
@@ -58,12 +58,12 @@ class WindowsUpdateTests(unittest.TestCase):
         ):
             update_checker._perform_windows_update("C:/Downloads/qitv.exe", "https://release")
             if threads_finish_later:
-                QTest.qWait(100)  # retried every 25 ms meanwhile
+                pause(100)  # retried every 25 ms meanwhile
                 self.assertFalse(process.Popen.called)
                 self.pending[0] = False
             waited = 0
             while not process.Popen.called and waited < 2000:
-                QTest.qWait(25)
+                pause(25)
                 waited += 25
             process.Popen.assert_called_once()  # inside the patches: no retry is left behind
         return process, close_all
@@ -220,7 +220,7 @@ class MacUpdateTests(unittest.TestCase):
             update_checker.perform_update(path, "https://release", self.ui)
             waited, limit = 0, (2000 if until else 100)
             while until not in self.calls and waited < limit:
-                QTest.qWait(25)
+                pause(25)
                 waited += 25
         return process
 

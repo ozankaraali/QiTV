@@ -10,7 +10,7 @@ from PySide6.QtGui import QFontMetrics, QMouseEvent
 from PySide6.QtTest import QSignalSpy, QTest
 from PySide6.QtWidgets import QApplication, QMainWindow, QWidget
 from shiboken6 import delete, isValid
-from timer_fixtures import elapse, wait_until
+from timer_fixtures import elapse, pause, wait_until
 
 from services import i18n
 from services.i18n import translate
@@ -507,7 +507,7 @@ class NativeSurfaceTests(FrameCase):
         frame = PipFrame(container, main, pip, FakeConfig())
         frame.show_pip()
         container.show()
-        QTest.qWait(10)
+        pause(10)
         frame.__dict__.clear()
         delete(container)  # raises the filter's error, if it has one
         self.assertFalse(isValid(main))
@@ -552,7 +552,7 @@ class LabelCase(unittest.TestCase):
         label.follow(BOTTOM_RIGHT)
         window.show()
         label.show()
-        QTest.qWait(10)
+        pause(10)
         self.addCleanup(window.close)
         self.addCleanup(host.close)
         return host, label
@@ -822,7 +822,7 @@ class PlayerCase(unittest.TestCase):
         window.setGeometry(100, 100, 1280, 720)
         window.show()
         self.addCleanup(window.close)
-        QTest.qWait(20)
+        pause(20)
         host = OverlayHost(window, container)
         label = PipLabel(host)
         host.add_overlay(label)
@@ -833,7 +833,7 @@ class PlayerCase(unittest.TestCase):
         frame.show_pip()
         label.set_info("Nature One HD", "LIVE")
         label.show()
-        QTest.qWait(20)
+        pause(20)
         return main, pip, frame, label
 
 
@@ -893,7 +893,7 @@ class HostGlueTests(PlayerCase):
         self.assertEqual(on_screen(label), on_screen(main))
         window.move(160, 140)
         window.resize(1000, 600)
-        QTest.qWait(30)
+        pause(30)
         self.assertEqual(on_screen(label), on_screen(main))
         self.assertTrue(host.geometry().contains(on_screen(main)))
         self.assertTrue(host.geometry().contains(on_screen(pip)))

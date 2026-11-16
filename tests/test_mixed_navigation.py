@@ -7,13 +7,12 @@ import unittest
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
-from PySide6.QtTest import QTest
 from PySide6.QtWidgets import QApplication, QStyleOptionViewItem, QWidget
 from job_fixtures import ImmediateRunner
 from mixed_fixtures import DEMO, HARBOR, HeldSetups, live_content, mixed_config, shut_hub
 from test_browsed_catalog import FakeEpg, ScriptedFactory
 from test_catalog_service import FakeWorker
-from timer_fixtures import elapse, wait_until
+from timer_fixtures import elapse, pause, wait_until
 
 from services.browsed_catalog import BrowsedCatalog
 from services.catalog import ALL_GROUP_ID
@@ -437,7 +436,7 @@ class MixedNavigationTests(unittest.TestCase):
         )
         nav.open(nav.children(None)[0])
         nav.reset_to("live")
-        QTest.qWait(10)
+        pause(10)
         headings = [n.title for n in nav.children(nav.path[1]) if n.layer == "header"]
         self.assertEqual(headings, ["Demo TV"])
 
@@ -480,7 +479,7 @@ class MixedNavigationTests(unittest.TestCase):
         count = len(self.nav.children(self.nav.path[-1]))
         # A retry, a setup the Library starts, an STB sign-in again: new content, same place.
         self.view.catalogs.sign_in_again("Harbor IPTV")
-        QTest.qWait(10)
+        pause(10)
         self.assertEqual([n.key for n in self.nav.path], before)
         self.assertEqual(len(self.nav.children(self.nav.path[-1])), count)
 
@@ -490,7 +489,7 @@ class MixedNavigationTests(unittest.TestCase):
         before = [n.key for n in self.nav.path]
         self.factory.fail_setup("Harbor IPTV", "Portal down")
         self.view.catalogs.sign_in_again("Harbor IPTV")
-        QTest.qWait(10)
+        pause(10)
         self.assertEqual([n.key for n in self.nav.path], before)
         harbor = NavNode("source", "Harbor IPTV", "Harbor IPTV", "Harbor IPTV")
         self.assertTrue(self.nav.provider_error(harbor))
@@ -503,12 +502,12 @@ class MixedNavigationTests(unittest.TestCase):
         )
         nav.open(nav.children(None)[0])
         nav.reset_to("live", ALL_GROUP_ID)
-        QTest.qWait(10)  # Demo answers, Harbor refuses while it sets up
+        pause(10)  # Demo answers, Harbor refuses while it sets up
         live = nav.path[1]
         self.assertIn("News", [n.title for n in nav.children(live)])
         self.assertEqual([n.key for n in nav.path], [ALL_PROVIDERS, "live", ALL_GROUP_ID])
         runner.release("Harbor IPTV")
-        QTest.qWait(10)
+        pause(10)
         self.assertEqual([n.key for n in nav.path], [ALL_PROVIDERS, "live", ALL_GROUP_ID])
         self.assertIn("TR: Haber", [n.title for n in nav.children(live)])
         self.assertEqual(len(nav.children(nav.path[-1])), 24 + 69)
@@ -519,11 +518,11 @@ class MixedNavigationTests(unittest.TestCase):
         self.factory.fail_setup("Harbor IPTV", "Portal down")
         nav.open(nav.children(None)[0])
         nav.reset_to("live")
-        QTest.qWait(10)
+        pause(10)
         rows = self.rows_under(nav, "Harbor IPTV")
         self.assertEqual([(n.layer, n.title) for n in rows], [("notice", "Loading…")])
         runner.release("Harbor IPTV")
-        QTest.qWait(10)
+        pause(10)
         rows = self.rows_under(nav, "Harbor IPTV")
         self.assertEqual([n.layer for n in rows], ["notice"])
         self.assertNotEqual(rows[0].title, "Loading…")  # its error
@@ -538,7 +537,7 @@ class MixedNavigationTests(unittest.TestCase):
         self.factory.xtream = lambda *args: FakeWorker(fail="Wrong password")
         nav.open(nav.children(None)[0])
         nav.reset_to("live")
-        QTest.qWait(10)
+        pause(10)
         rows = self.rows_under(nav, "Harbor IPTV")
         self.assertEqual([n.layer for n in rows], ["notice"])
         self.assertNotEqual(rows[0].title, "Loading…")
@@ -553,12 +552,12 @@ class MixedNavigationTests(unittest.TestCase):
         self.factory.xtream = lambda *args: FakeWorker(fail="Wrong password")
         nav.open(nav.children(None)[0])
         nav.reset_to("live")
-        QTest.qWait(10)
+        pause(10)
         self.assertEqual([n.layer for n in self.rows_under(nav, "Harbor IPTV")], ["notice"])
         self.assertEqual(notices, [])
         self.factory.m3u = lambda *args: FakeWorker(fail="Portal down")
         view.catalogs.catalog("Demo TV").request_section("live", force=True)  # Demo's refresh
-        QTest.qWait(10)
+        pause(10)
         self.assertEqual(notices, ["Couldn't refresh Live TV; showing saved channels"])
         self.assertIn("News", [n.title for n in nav.children(nav.path[1])])
 
@@ -570,14 +569,14 @@ class MixedNavigationTests(unittest.TestCase):
         self.factory.fail_setup("Harbor IPTV", "Portal down")
         nav.open(nav.children(None)[0])
         nav.reset_to("live")
-        QTest.qWait(10)
+        pause(10)
         self.assertEqual([c[0] for c in self.factory.calls if c[0] in ("m3u", "xtream")], [])
         self.assertFalse(nav.is_loading(nav.path[1]))  # nothing comes: the headings say why
         rows = [(n.layer, n.title) for n in self.rows_under(nav, "Demo TV")]
         self.assertEqual([layer for layer, _title in rows], ["notice", "header", "notice"])
         self.assertNotIn("Loading…", [title for _layer, title in rows])
         nav.reset_to("live")
-        QTest.qWait(10)
+        pause(10)
         self.assertEqual(self.factory.setups.count("Harbor IPTV"), 1)
         view.select_provider(ALL_PROVIDERS)  # chosen again: every provider is tried
         self.assertEqual(self.factory.setups.count("Harbor IPTV"), 2)
@@ -591,12 +590,12 @@ class MixedNavigationTests(unittest.TestCase):
         self.factory.m3u = lambda *args: FakeWorker(parse_m3u("#EXTM3U\n", categorize=True))
         nav.open(nav.children(None)[0])
         nav.reset_to("live")
-        QTest.qWait(10)
+        pause(10)
         runner.release("Harbor IPTV")
-        QTest.qWait(10)
+        pause(10)
         self.assertEqual([n.title for n in self.rows_under(nav, "Empty list")], ["Loading…"])
         runner.release("Empty list")  # set up: its playlist has no channels
-        QTest.qWait(10)
+        pause(10)
         self.assertNotIn("Empty list", self.headings(nav))  # no heading over nothing
         self.assertEqual([n.layer for n in self.rows_under(nav, "Harbor IPTV")][:1], ["notice"])
 
@@ -615,9 +614,9 @@ class MixedNavigationTests(unittest.TestCase):
         self.factory.m3u = playlist
         nav.open(nav.children(None)[0])
         nav.reset_to("live")
-        QTest.qWait(10)
+        pause(10)
         runner.release("Demo TV")
-        QTest.qWait(10)
+        pause(10)
         self.assertNotIn("Empty list", self.headings(nav))  # asked, and without channels
         self.assertIn("News", [n.title for n in nav.children(nav.path[1])])
 
@@ -629,10 +628,10 @@ class MixedNavigationTests(unittest.TestCase):
         _config, _view, nav = self.build([DEMO, HARBOR], {"Demo TV": demo_content()}, runner)
         nav.open(nav.children(None)[0])
         nav.reset_to("live")
-        QTest.qWait(10)
+        pause(10)
         self.assertEqual(nav._refused_sections, {"live"})  # Harbor refused: it sets up
         nav.open(nav.children(None)[1])  # leaves All for one provider
-        QTest.qWait(10)
+        pause(10)
         self.assertEqual(nav._refused_sections, set())
 
     @staticmethod

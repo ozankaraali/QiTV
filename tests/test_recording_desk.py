@@ -11,11 +11,11 @@ import unittest
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 from PySide6.QtWidgets import QApplication
+from timer_fixtures import wait_until
 
 from services import recording, recording_desk as desk, recording_schedule as rs
 from services.epg_view import Programme
 from services.recordings_list import RecordingsList
-from tests.timer_fixtures import wait_until
 
 app = QApplication.instance() or QApplication([])
 NEWS = {"id": "7", "name": "News One", "_provider": "P"}
@@ -382,7 +382,7 @@ class PlaceTests(unittest.TestCase):
         recording.add_place(self.config, str(self.folder / "missing"))
         listing = RecordingsList(self.config)
         listing.refresh()
-        self.assertTrue(wait_until(lambda: bool(listing.places()), 5000))
+        self.assertTrue(wait_until(lambda: bool(listing.places()), 5000))  # its thread's read
         self.assertEqual([f["name"] for f in listing.files()], ["News", "Films"])
         self.assertEqual(listing.files()[0]["_size"], 10)
         states = listing.places()

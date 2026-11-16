@@ -12,11 +12,11 @@ from types import SimpleNamespace
 import unittest
 from unittest import mock
 
-from PySide6.QtTest import QTest
 import test_captions_ui
 from test_captions_ui import FakeCaptions, InfoPlayer, info
 from test_track_panel import PanelCase
 from test_tv_window import LIBRARY_WAIT_MS, XTREAM, TwoProviderCase, WindowCase, wait_until
+from timer_fixtures import pause
 
 from services.remote.protocol import Closed, Get, Opened, OpenItem, Press, Query
 from tests.fixtures import local_xtream
@@ -204,9 +204,9 @@ class PushTests(WindowCase):
         self.open_first_channel()
         remote = self.window.remote
         remote.bridge.post(Opened("s1", "d1", "home"))
-        QTest.qWait(50)
+        pause(50)
         self.hub.broadcast.reset_mock()
-        QTest.qWait(1200)  # two diff ticks with the same channel on
+        pause(1200)  # two diff ticks with the same channel on
         self.assertFalse(self.hub.broadcast.called)
 
     def test_get_guide_and_library_answer_that_phone(self):
@@ -260,13 +260,13 @@ class PushTests(WindowCase):
     def test_closed_phones_get_no_pushes(self):
         remote = self.window.remote
         remote.bridge.post(Opened("s1", "d1", "home"))
-        QTest.qWait(50)
+        pause(50)
         from services.remote.protocol import Closed
 
         remote.bridge.post(Closed("s1", "d1"))
-        QTest.qWait(50)
+        pause(50)
         self.hub.broadcast.reset_mock()
-        QTest.qWait(700)  # past a diff tick
+        pause(700)  # past a diff tick
         self.assertFalse(self.hub.broadcast.called)
 
 

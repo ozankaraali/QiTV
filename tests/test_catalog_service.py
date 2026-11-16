@@ -6,9 +6,9 @@ import unittest
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 from PySide6.QtCore import QCoreApplication, QObject, Signal
-from PySide6.QtTest import QTest
 from PySide6.QtWidgets import QApplication
 from job_fixtures import ImmediateRunner
+from timer_fixtures import pause
 
 from services import media_server as ms
 from services.catalog import (
@@ -372,7 +372,7 @@ class CatalogServiceTests(unittest.TestCase):
             for _ in range(300):
                 if ready and epg and sections:
                     break
-                QTest.qWait(10)
+                pause(10)
             self.assertEqual((ready, len(epg), sections), ([("X",)], 1, [("live",)]))
 
     def test_overlapping_setups_are_serialized_and_only_latest_reports(self):
@@ -665,7 +665,7 @@ class CatalogShutdownTests(unittest.TestCase):
         service.request_seasons({"id": 1})
         service.request_episodes({"id": 1}, {"id": 2})
         service.request_link({"cmd": "ffrt x"}, section="live")
-        QTest.qWait(20)
+        pause(20)
         self.assertEqual(runner.jobs, [])
         self.assertEqual(seen, [])
 
@@ -679,7 +679,7 @@ class CatalogShutdownTests(unittest.TestCase):
         service.shutdown()
         for index in range(3):
             runner.complete(index)
-        QTest.qWait(20)
+        pause(20)
         self.assertEqual(len(runner.jobs), 3)  # the waiting group never starts
         self.assertEqual(seen, [])
 

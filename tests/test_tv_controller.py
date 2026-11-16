@@ -12,11 +12,10 @@ os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 from PySide6.QtCore import QObject, QPoint, QPointF, QRectF, Qt, Signal
 from PySide6.QtGui import QGuiApplication, QPixmap, QWheelEvent
-from PySide6.QtTest import QTest
 from PySide6.QtWidgets import QAbstractItemView, QApplication, QMenu, QWidget
 from mixed_fixtures import DEMO, HARBOR, HeldSetups, live_content, mixed_config, shut_hub
 from test_browsed_catalog import FakeEpg, ScriptedFactory
-from timer_fixtures import elapse, wait_until
+from timer_fixtures import elapse, pause, wait_until
 
 from services import media_server as ms, provider_api
 from services.browsed_catalog import BrowsedCatalog
@@ -4076,7 +4075,7 @@ class PipelineErrorTests(PipelineCase):
         self.assertTrue(wait_until(lambda: len(self.starts()) == 2))
         self.live.play_pipeline()
         self.session.stateChanged.emit("playing")
-        QTest.qWait(80)  # it played HEALTHY_S on its fresh link
+        pause(80)  # it played HEALTHY_S on its fresh link
         self.live.failed.emit("The stream could not be opened")
         self.assertEqual(self.toast.messages(), [])
         self.assertEqual(self.requested(), ["One", "One", "One"])
@@ -4203,7 +4202,7 @@ class ReconnectTests(RetryPillCase, PipelineCase):
         self.session.ended.emit()
         self.assertEqual(self.toast.messages()[-1], ("The stream ended", "info"))
         self.assertIsNone(self.pill_text())
-        QTest.qWait(200)
+        pause(200)
         self.assertEqual(len(self.session.plays), plays + 2)
         # One slot, the same one, all along: nothing was stopped or given back.
         self.assertEqual(self.session.stops, stops)
@@ -4248,7 +4247,7 @@ class ReconnectTests(RetryPillCase, PipelineCase):
         self.end_and_reopen(plays)
         self.end_and_reopen(plays + 1)
         self.session.stateChanged.emit("playing")
-        QTest.qWait(80)  # it played HEALTHY_S since its last reopen: the quick waits again
+        pause(80)  # it played HEALTHY_S since its last reopen: the quick waits again
         self.assertLess(self.end_and_reopen(plays + 2), 0.5)
 
     def test_a_reopen_decodes_in_software_as_the_stream_did(self):
@@ -4278,14 +4277,14 @@ class ReconnectTests(RetryPillCase, PipelineCase):
         self.session.ended.emit()
         self.start_channel(1)
         self.assertIsNone(self.pill_text())
-        QTest.qWait(200)
+        pause(200)
         self.assertNotIn("http://stream/1", self.played_urls()[1:])
 
     def test_the_time_shift_buffer_is_never_reconnected_here(self):
         self.start_pipeline(0)
         plays = len(self.session.plays)
         self.session.ended.emit()  # LiveSession reopens its buffer itself
-        QTest.qWait(200)
+        pause(200)
         self.assertEqual((len(self.session.plays), self.toast.messages()), (plays, []))
         self.assertIsNone(self.pill_text())
 
@@ -4293,7 +4292,7 @@ class ReconnectTests(RetryPillCase, PipelineCase):
         plays = self.fall_back()
         self.live.revives = lambda: True  # LiveSession opens it again itself
         self.session.ended.emit()
-        QTest.qWait(200)
+        pause(200)
         self.assertEqual(len(self.session.plays), plays)
         self.assertIsNone(self.pill_text())
 
@@ -4378,14 +4377,14 @@ class DirectReconnectTests(RetryPillCase, ControllerTestCase):
         self.assertEqual(self.session.plays[-1][1]["kind"], PlayKind.VOD_FILE)
         self.session.ended.emit()
         self.assertEqual(self.toast.messages(), [("The stream ended", "info")])
-        QTest.qWait(200)
+        pause(200)
         self.assertEqual(len(self.session.plays), 1)
 
     def test_a_movie_is_never_reconnected(self):
         self.controller.play_vod(VodTests.MOVIE, "movie", play_context())
         self.catalog.linkReady.emit(1, "http://vod/heat.mkv")
         self.session.ended.emit()
-        QTest.qWait(200)
+        pause(200)
         self.assertEqual(len(self.session.plays), 1)
         self.assertIsNone(self.pill_text())
 
@@ -5737,11 +5736,11 @@ class AllProvidersLaunchTests(ControllerTestCase):
         # Another provider's setup no longer replaces the last channel's
         # autotune, and the drawer never opens on the idle player meanwhile.
         self.controller.start()
-        QTest.qWait(20)
+        pause(20)
         self.assertEqual(self.asked, [])  # its provider still sets up
         self.assertEqual(self.drawer.named("open_drawer"), [])
         self.runner.release("Harbor IPTV")
-        QTest.qWait(20)
+        pause(20)
         shown = [(provider_of(item), item["name"]) for item in self.asked]
         self.assertEqual(shown, [("Harbor IPTV", "Harbor 1")])
         self.assertEqual(self.drawer.named("open_drawer"), [])
@@ -5752,7 +5751,7 @@ class AllProvidersLaunchTests(ControllerTestCase):
     def test_a_provider_failing_while_nothing_plays_keeps_the_list_on_all_providers(self):
         self.config.last_live_channel = None
         self.controller.start()
-        QTest.qWait(20)
+        pause(20)
         self.drawer.calls.clear()
         self.hub.catalog("Demo TV").providerFailed.emit("Demo TV", "Portal down")
         self.assertEqual(self.toast.messages()[-1], ("Demo TV: Portal down", "error"))
@@ -5772,9 +5771,9 @@ class AllProvidersLaunchTests(ControllerTestCase):
         }
         self.runner.held.add("Demo TV")
         self.controller.start()
-        QTest.qWait(20)
+        pause(20)
         self.runner.release("Demo TV")  # Demo is set up and downloads its playlist
-        QTest.qWait(20)
+        pause(20)
         self.assertEqual(self.factory.setups.count("Harbor IPTV"), 1)
         said = [text for text, _kind in self.toast.messages() if text.startswith("Harbor IPTV:")]
         self.assertEqual(len(said), 1)

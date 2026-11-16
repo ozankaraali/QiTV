@@ -9,10 +9,10 @@ os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 from PySide6.QtCore import Qt
 from PySide6.QtWidgets import QApplication
+from timer_fixtures import wait_until
 
 import services.media_keys as media_keys
 from services.media_keys import MediaKeys
-from timer_fixtures import wait_until
 
 app = QApplication.instance() or QApplication([])
 _K = Qt.Key

@@ -4,8 +4,8 @@ import unittest
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
-from PySide6.QtTest import QTest
 from PySide6.QtWidgets import QApplication
+from timer_fixtures import pause
 
 from services.watch_state import WatchState
 
@@ -170,7 +170,7 @@ class WatchStateTests(unittest.TestCase):
 def wait_until(predicate, timeout_ms=2000):
     waited = 0
     while not predicate() and waited < timeout_ms:
-        QTest.qWait(10)
+        pause(10)
         waited += 10
     return predicate()
 
@@ -192,14 +192,14 @@ class DeferredSaveTests(unittest.TestCase):
         self.assertEqual(self.cfg.saves, 0)
         self.assertEqual(self.cfg.last_live_channel["item"], {"id": 4})  # in memory at once
         self.assertTrue(wait_until(lambda: self.cfg.saves == 1))
-        QTest.qWait(100)
+        pause(100)
         self.assertEqual(self.cfg.saves, 1)
 
     def test_flush_saves_a_pending_play_at_once(self):
         self.ws.record_play("P", {"id": 1}, item_type="channel", link="u")
         self.ws.flush()  # e.g. the window closes
         self.assertEqual(self.cfg.saves, 1)
-        QTest.qWait(100)
+        pause(100)
         self.assertEqual(self.cfg.saves, 1)  # the timer no longer runs
 
     def test_a_channel_taken_out_of_recents_is_saved_once_it_settles(self):

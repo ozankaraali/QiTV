@@ -7,13 +7,13 @@ import unittest
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
-from PySide6.QtTest import QTest
 from PySide6.QtWidgets import QApplication
 from job_fixtures import ImmediateRunner
 from mixed_fixtures import DEMO, HARBOR, HeldSetups, live_content, mixed_config, shut_hub
 import orjson
 from test_catalog_lifecycle import RealSetupFactory
 from test_catalog_service import FakeWorker
+from timer_fixtures import pause
 
 from services.catalogs import Catalogs
 from services.provider_ids import provider_of, with_provider
@@ -86,7 +86,7 @@ class CatalogsTests(unittest.TestCase):
         return epg
 
     def ready_links(self):
-        QTest.qWait(30)  # a link answer is emitted from the event loop
+        pause(30)  # a link answer is emitted from the event loop
         return list(self.links)
 
     def delete_provider(self, name):
@@ -109,7 +109,7 @@ class CatalogsTests(unittest.TestCase):
     def test_the_ready_providers_hold_their_content_for_search_to_read(self):
         self.assertEqual(self.catalogs.loaded_contents(), {})  # nothing is set up yet
         self.catalogs.ensure("Harbor IPTV")
-        QTest.qWait(30)
+        pause(30)
         loaded = self.catalogs.loaded_contents()
         self.assertEqual(list(loaded), ["Harbor IPTV"])
         self.assertEqual(loaded["Harbor IPTV"]["itv"]["contents"][0]["name"], "Four")
@@ -124,7 +124,7 @@ class CatalogsTests(unittest.TestCase):
 
     def test_an_unknown_provider_fails_the_link(self):
         request = self.catalogs.request_link(with_provider({"cmd": "x"}, "Gone"), section="live")
-        QTest.qWait(30)
+        pause(30)
         self.assertEqual([rid for rid, _ in self.failures], [request])
 
     def test_a_provider_deleted_while_it_plays_stays_until_out_of_use(self):
@@ -246,22 +246,22 @@ class CatalogsTests(unittest.TestCase):
 
     def test_only_guides_in_use_are_loaded(self):
         self.catalogs.use_guides({"Demo TV"})
-        QTest.qWait(50)
+        pause(50)
         self.assertEqual(self.factory.epg_loads, ["Demo TV"])
         self.catalogs.use_guides({"Harbor IPTV"})
-        QTest.qWait(50)
+        pause(50)
         self.assertEqual(self.factory.epg_loads, ["Demo TV", "Harbor IPTV"])
         self.assertEqual([e.name for e in self.epgs if e.released], ["Demo TV"])
 
     def test_a_provider_set_up_for_browsing_loads_no_guide_once_guides_are_chosen(self):
         self.catalogs.use_guides({"Demo TV"})
         self.catalogs.ensure("Harbor IPTV")
-        QTest.qWait(50)
+        pause(50)
         self.assertEqual(self.factory.epg_loads, ["Demo TV"])
 
     def test_every_guide_loads_until_guides_are_chosen(self):  # one provider: as before 2.1
         self.catalogs.ensure("Demo TV")
-        QTest.qWait(50)
+        pause(50)
         self.assertEqual(self.factory.epg_loads, ["Demo TV"])
 
     def test_a_guide_released_while_it_loads_and_wanted_again_loads_again(self):
@@ -308,7 +308,7 @@ class CatalogsTests(unittest.TestCase):
         # The hub forgot a removed provider's catalog, but the pages' views still held it,
         # and with it its guide and its channel lists, until QiTV quit.
         self.catalogs.ensure("Harbor IPTV")
-        QTest.qWait(30)
+        pause(30)
         catalog = self.catalogs.catalog("Harbor IPTV")
         epg = self.epgs[-1]
         self.assertTrue(catalog.has_content("live"))
@@ -427,10 +427,10 @@ class LinksDuringSetupTests(unittest.TestCase):
         self.hub.select("Demo TV", force_refresh=True)  # ↻: its channels and guide again
         self.assertFalse(self.hub.is_ready("Demo TV"))
         request = self.hub.request_link(self.ONE, section="live")
-        QTest.qWait(30)
+        pause(30)
         self.assertEqual(self.hub_failures, [])
         self.runner.release("Demo TV")
-        QTest.qWait(30)
+        pause(30)
         self.assertEqual(self.hub_links, [(request, "http://127.0.0.1:9/live/1.ts")])
         self.assertEqual(self.hub_failures, [])
 
@@ -450,7 +450,7 @@ class LinksDuringSetupTests(unittest.TestCase):
         lanes.request_side(Target(self.ONE, "live", "One"), self.side.append, play=False)
         lanes.request_side(two, self.side.append, play=False)  # the PiP asks again: one ask
         self.runner.release("Demo TV")
-        QTest.qWait(30)
+        pause(30)
         self.assertEqual(self.dropped, [None])  # nothing to ask again: the hub answers them
         self.assertEqual(self.tunes, ["http://127.0.0.1:9/live/1.ts"])
         # The menu's second link waited behind the first (before, it was lost).
@@ -474,10 +474,10 @@ class LinksDuringSetupTests(unittest.TestCase):
         lanes = self.lanes()
         lanes.request(Target(seven, "live", "Seven"))
         lanes.request(Target(self.ONE, "live", "One"))  # chosen since, of Demo (ready)
-        QTest.qWait(30)
+        pause(30)
         self.assertEqual(self.tunes, ["http://127.0.0.1:9/live/1.ts"])
         self.runner.release("Harbor IPTV")
-        QTest.qWait(30)
+        pause(30)
         self.assertEqual(self.tunes, ["http://127.0.0.1:9/live/1.ts"])
         self.assertEqual(asked, [])
         self.assertEqual(self.hub_failures, [])
@@ -496,7 +496,7 @@ class LinksDuringSetupTests(unittest.TestCase):
         lanes.request_side(Target(self.TWO, "live", "Two"), self.side.append, play=False)
         lanes.request_side(Target(self.ONE, "live", "One"), self.side.append, play=False)
         self.runner.release("Demo TV")
-        QTest.qWait(30)
+        pause(30)
         self.assertEqual([t.title for t in self.dropped if t is not None], ["One"])
         self.assertEqual(self.side_lost, [True])  # the shell says so, once
         self.assertEqual(self.tunes, [])  # the shell says why (the provider failed)

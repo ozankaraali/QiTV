@@ -4,9 +4,8 @@ import unittest
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
-from PySide6.QtTest import QTest
 from PySide6.QtWidgets import QApplication, QWidget
-from timer_fixtures import timeline, wait_until
+from timer_fixtures import pause, timeline, wait_until
 
 from services.epg_view import Programme
 from ui.overlays.toast import Toast
@@ -159,7 +158,7 @@ class BannerTest(Base):
         b = ZapBanner(self.host)
         b.show_info(info())
         self.host.resize(800, 400)
-        QTest.qWait(10)
+        pause(10)
         self.assertEqual((b.width(), b.height()), (800, round(400 * 0.48)))
 
     def test_shown_again_it_stays_under_a_list_opened_over_it(self):

@@ -40,7 +40,7 @@ from PySide6.QtGui import (
 from PySide6.QtTest import QTest
 from PySide6.QtWidgets import QApplication, QMenu, QWidget
 from gc_fixtures import collect_on_the_gui_thread
-from timer_fixtures import elapse, wait_until
+from timer_fixtures import elapse, pause, wait_until
 
 import main as qitv_main
 from services import update_checker
@@ -2675,7 +2675,7 @@ class DrawerSettingsTests(WindowCase):
             )
 
         self.assertEqual(self.click_where_search_was(click_the_entry), [])
-        QTest.qWait(1)  # the click was handled: the next entry chosen by its keys is a key
+        pause(1)  # the click was handled: the next entry chosen by its keys is a key
         self.assertFalse(self.window.menus._clicked)
 
     def test_a_dialogs_own_loop_inside_a_menu_entry_guards_its_clicks(self):
@@ -2999,7 +2999,7 @@ class OptionsDialogTests(WindowCase):
         dialog.max_streams_input.setValue(2)
         with mock.patch.object(catalog, "select_provider", wraps=catalog.select_provider) as setup:
             dialog.save_settings()
-            QTest.qWait(200)  # a setup would have finished by now
+            pause(200)  # a setup would have finished by now
         setup.assert_not_called()
         self.assertTrue(os.path.exists(cache))
         self.assertEqual(nav.path, path)

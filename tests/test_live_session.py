@@ -2,6 +2,7 @@ import itertools
 import math
 import os
 import random
+import re
 import time
 import unittest
 from unittest import mock
@@ -9,8 +10,8 @@ from unittest import mock
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 from PySide6.QtCore import QObject, QTimer, Signal
-from PySide6.QtTest import QTest
 from PySide6.QtWidgets import QApplication
+from timer_fixtures import pause
 
 from services import revive
 from services.live import learned_target, worker
@@ -723,7 +724,7 @@ class LiveSessionCase(unittest.TestCase):
         while not predicate():
             if time.monotonic() > deadline:
                 self.fail("timed out")
-            QTest.qWait(10)
+            pause(10)
 
     def active_timers(self):
         return [timer for timer in self.live.findChildren(QTimer) if timer.isActive()]
@@ -2377,51 +2378,155 @@ class StayLiveTests(LiveSessionCase):
         self.assertEqual(self.timelines[-1]["mode"], "live")
         self.assertEqual(len(self.playback.plays), 1)
 
-    def test_ai_captions_still_loading_keep_the_picture_waiting_past_their_distance(self):
-        # 2026-11-07, a talk show: the wait ended at the floor while the models still loaded,
-        # the picture played on, and the first 25 s it showed got no captions
+    def test_ai_captions_still_loading_hold_the_picture_only_to_their_distance(self):
+        # 2.10.1, the owner: the wait went on past the floor while the models loaded ("then
+        # suddenly we are too behind"), and stay-live kept what it left. Only the distance is
+        # waited for: they join when ready, where the picture is.
         sid = self.start()
         feed = Feed(self, sid, burst=0.0, edge=2.5).ready()
         feed.run(30.0)
-        holds = len(self.playback.holds)
-        self.live.set_caption_ready(False)
+        rates, holds = len(self.playback.rates), len(self.playback.holds)
         self.live.set_caption_floor(8.0)
-        feed.run(15.0)
-        self.assertTrue(self.live.caption_waiting())  # at its floor long since, still waiting
-        self.assertGreater(self.timelines[-1]["lag"], 12.0)
-        self.live.set_caption_ready(True)
         feed.run(1.0)
-        self.assertFalse(self.live.caption_waiting())
+        self.assertTrue(self.live.caption_waiting())
+        feed.run(7.0)
+        self.assertFalse(self.live.caption_waiting())  # at the floor, the models loading still
         self.assertEqual(self.playback.holds[holds:], [True, False])
-        feed.run(5.0)
+        self.assertAlmostEqual(self.timelines[-1]["lag"], 8.0, delta=0.5)
+        feed.run(300.0)
+        self.assertEqual(self.playback.holds[holds:], [True, False])  # nothing more behind
+        self.assertAlmostEqual(self.timelines[-1]["lag"], 8.0, delta=0.5)
+        self.assertEqual([r for r in self.playback.rates[rates:] if r != 1.0], [])
         self.assertEqual(self.timelines[-1]["mode"], "live")
 
-    def test_ai_captions_that_never_get_ready_let_the_picture_go_after_a_while(self):
-        from services.live.live_session import _CAPTION_READY_MAX_S
-
-        sid = self.start()
-        feed = Feed(self, sid, burst=0.0, edge=2.5).ready()
-        feed.run(30.0)
-        self.live.set_caption_ready(False)
-        self.live.set_caption_floor(8.0)
-        feed.run(_CAPTION_READY_MAX_S - 2.0)
-        self.assertTrue(self.live.caption_waiting())
-        feed.run(4.0)
-        self.assertFalse(self.live.caption_waiting())
-
-    def test_ai_captions_loading_hold_a_picture_already_at_their_distance(self):
-        # captions turned on at the floor already (off and on again): while the model loads,
-        # the picture waits there too, then plays on at once
-        self.live.set_caption_ready(False)
+    def test_ai_captions_loading_after_a_tune_hold_it_only_to_their_distance(self):
+        # captions on, a channel tuned while their models load: its first picture waits for
+        # the floor, once, and plays on there
         self.live.set_caption_floor(8.0)
         sid = self.start()
         feed = Feed(self, sid, burst=0.0, edge=2.5).ready()
         feed.run(20.0)
-        self.assertTrue(self.live.caption_waiting())
-        self.live.set_caption_ready(True)
-        feed.run(1.0)
         self.assertFalse(self.live.caption_waiting())
         self.assertEqual(self.playback.holds, [True, False])
+        self.assertAlmostEqual(self.timelines[-1]["lag"], 8.0, delta=0.5)
+
+    def test_ai_captions_loading_never_hold_a_picture_at_their_distance(self):
+        # Go live lands at the floor: nothing to wait for, loaded or not
+        self.live.set_caption_floor(8.0)
+        sid = self.start()
+        feed = Feed(self, sid, burst=0.0, edge=2.5).ready()
+        feed.run(20.0)
+        self.live.toggle_pause()
+        feed.run(30.0)
+        self.live.toggle_pause()
+        feed.run(2.0)
+        holds = len(self.playback.holds)
+        self.live.go_live()
+        feed.run(10.0)
+        self.assertEqual(self.playback.holds[holds:], [])
+        self.assertFalse(self.live.caption_waiting())
+        self.assertEqual(self.timelines[-1]["mode"], "live")
+        self.assertAlmostEqual(self.timelines[-1]["lag"], 8.0, delta=1.0)
+
+    def test_ai_captions_loading_never_hold_a_picture_further_behind_than_their_distance(self):
+        # 2026-11-15, the owner's log: "waiting 29.2 s behind live until 8.0 s and they are
+        # ready", 16.3 s, then about 45 s behind. Time-shifted further back than the floor, it
+        # stays where the viewer put it, the bar and Go live showing.
+        sid = self.start()
+        feed = Feed(self, sid, burst=0.0, edge=2.5).ready()
+        feed.run(20.0)
+        self.live.toggle_pause()
+        feed.run(26.7)
+        self.live.toggle_pause()
+        feed.run(2.0)
+        lag = self.timelines[-1]["lag"]
+        self.assertAlmostEqual(lag, 29.2, delta=0.5)
+        rates, holds = len(self.playback.rates), len(self.playback.holds)
+        self.live.set_caption_floor(8.0)
+        feed.run(1.0)
+        self.assertFalse(self.live.caption_waiting())
+        feed.run(20.0)
+        self.assertEqual(self.playback.holds[holds:], [])
+        self.assertEqual(self.timelines[-1]["mode"], "shifted")
+        self.assertAlmostEqual(self.timelines[-1]["lag"], lag, delta=0.5)
+        self.assertEqual([r for r in self.playback.rates[rates:] if r != 1.0], [])
+        self.live.go_live()  # for the pause's time: live at the floor
+        feed.run(10.0)
+        self.assertEqual(self.timelines[-1]["mode"], "live")
+        self.assertAlmostEqual(self.timelines[-1]["lag"], 8.0, delta=1.0)
+        self.assertEqual(self.playback.holds[holds:], [])
+
+    def test_ai_captions_loading_release_the_wait_at_their_distance_not_later(self):
+        # 2026-11-15, the owner's log: "waiting 7.3 s behind live until 13.0 s and they are
+        # ready", 11.7 s, then about 19 s behind. It waits the 5.7 s to the floor, and says so.
+        sid = self.start()
+        feed = Feed(self, sid, burst=0.0, edge=2.5).ready()
+        feed.run(20.0)
+        self.live.toggle_pause()
+        feed.run(4.8)
+        self.live.toggle_pause()
+        feed.run(0.5)
+        holds = len(self.playback.holds)
+        with self.assertLogs("services.live.live_session", "INFO") as logs:
+            self.live.set_caption_floor(13.0)  # translated: 5 s more
+            feed.run(10.0)
+        self.assertFalse(self.live.caption_waiting())
+        self.assertEqual(self.playback.holds[holds:], [True, False])
+        self.assertAlmostEqual(self.timelines[-1]["lag"], 13.0, delta=0.5)
+        said = [r.getMessage() for r in logs.records if r.getMessage().startswith("AI captions")]
+        self.assertEqual(len(said), 2, said)
+        waiting = re.fullmatch(
+            r"AI captions: waiting (\d+\.\d) s behind live until 13\.0 s\.", said[0]
+        )
+        self.assertIsNotNone(waiting, said[0])
+        self.assertAlmostEqual(float(waiting.group(1)), 7.3, delta=0.5)
+        waited = re.fullmatch(r"AI captions: waited (\d+\.\d) s; playing on\.", said[1])
+        self.assertIsNotNone(waited, said[1])
+        self.assertAlmostEqual(float(waited.group(1)), 13.0 - float(waiting.group(1)), delta=0.5)
+        feed.run(120.0)
+        self.assertEqual(self.timelines[-1]["mode"], "live")
+        self.assertAlmostEqual(self.timelines[-1]["lag"], 13.0, delta=0.5)
+
+    def test_ai_captions_loading_never_hold_a_live_picture_further_back_than_their_distance(self):
+        # live further back than the floor (here: steered back from an 8 s floor when another
+        # floor of 5 s comes): no wait, stay-live steers it to the floor as before
+        sid = self.start()
+        feed = Feed(self, sid, burst=0.0, edge=2.5).ready()
+        feed.run(20.0)
+        self.live.set_caption_floor(8.0)
+        feed.run(15.0)
+        self.live.set_caption_floor(0.0, shift=False)  # no longer large: steered back
+        feed.run(0.5)
+        self.assertEqual(self.timelines[-1]["mode"], "live")
+        self.assertGreater(self.timelines[-1]["lag"], 7.0)
+        holds = len(self.playback.holds)
+        self.live.set_caption_floor(5.0)
+        feed.run(1.0)
+        self.assertFalse(self.live.caption_waiting())
+        feed.run(120.0)
+        self.assertEqual(self.playback.holds[holds:], [])
+        self.assertEqual(self.timelines[-1]["mode"], "live")
+        self.assertAlmostEqual(self.timelines[-1]["lag"], 5.0, delta=0.75)
+
+    def test_ai_captions_loading_translated_wait_live_only_to_their_new_distance(self):
+        # translation turned on while live at the floor: 5 s more, waited once, then on at 1x
+        sid = self.start()
+        feed = Feed(self, sid, burst=0.0, edge=2.5).ready()
+        feed.run(20.0)
+        self.live.set_caption_floor(8.0)
+        feed.run(30.0)
+        self.assertEqual(self.timelines[-1]["mode"], "live")
+        rates, holds = len(self.playback.rates), len(self.playback.holds)
+        self.live.set_caption_floor(13.0, shift=False)
+        feed.run(10.0)
+        self.assertFalse(self.live.caption_waiting())
+        self.assertEqual(self.playback.holds[holds:], [True, False])
+        self.assertAlmostEqual(self.timelines[-1]["lag"], 13.0, delta=0.5)
+        feed.run(120.0)
+        self.assertEqual(self.playback.holds[holds:], [True, False])
+        self.assertEqual(self.timelines[-1]["mode"], "live")
+        self.assertAlmostEqual(self.timelines[-1]["lag"], 13.0, delta=0.5)
+        self.assertEqual([r for r in self.playback.rates[rates:] if r != 1.0], [])
 
     def test_ai_captions_off_leave_the_picture_where_it_is_time_shifted(self):
         # 2.9: turned off, nothing catches up by itself: time-shifted as after a pause, the
@@ -5126,7 +5231,7 @@ class InterruptionTests(LiveSessionCase):
                 self.playback.errorOccurred.emit("The stream could not be opened")
                 self.assertEqual(self.failures, [])
                 self.assertEqual(self.retries[-1], 5.0)  # the revive's wait, said
-                QTest.qWait(80)
+                pause(80)
                 self.assertEqual(len(self.playback.plays), plays + 4)  # four tries, then waits
                 self.assertEqual(self.notices.count(RECONNECTING), 3)
 
@@ -5143,7 +5248,7 @@ class InterruptionTests(LiveSessionCase):
         self.assertEqual(self.failures, [])
         self.assertEqual(self.retries, [5.0])
         self.assertNotIn(RECONNECTING, self.notices)
-        QTest.qWait(80)
+        pause(80)
         self.assertEqual(len(self.playback.plays), plays + 1)
 
     def test_a_retry_that_times_out_waits_for_the_revive(self):
@@ -5157,7 +5262,7 @@ class InterruptionTests(LiveSessionCase):
         self.clock.now += 20.0  # the retry timed out
         self.playback.errorOccurred.emit("Timed out opening the stream")
         self.assertEqual((self.failures, self.retries), ([], [5.0]))
-        QTest.qWait(80)
+        pause(80)
         self.assertEqual(len(self.playback.plays), plays + 2)
         self.assertEqual(self.notices.count(RECONNECTING), 1)
 
@@ -5264,7 +5369,7 @@ class ReviveTests(LiveSessionCase):
         self.live.stop()
         self.assertEqual(self.retries[-1], -1.0)
         self.assertEqual(self.active_timers(), [])
-        QTest.qWait(120)
+        pause(120)
         self.assertEqual(len(self.playback.plays), plays)
 
     def test_a_tune_that_never_played_is_reported_as_before(self):
@@ -5279,7 +5384,7 @@ class ReviveTests(LiveSessionCase):
         plays = self.direct_that_played()
         self.playback.errorOccurred.emit(NO_STREAM)
         self.assertEqual(self.failures, [NO_STREAM])
-        QTest.qWait(30)
+        pause(30)
         self.assertEqual(len(self.playback.plays), plays)
 
     def test_without_revive_an_end_is_the_callers(self):
@@ -5290,7 +5395,7 @@ class ReviveTests(LiveSessionCase):
         self.end()
         self.playback.errorOccurred.emit("The stream could not be played")
         self.assertEqual(self.failures, ["The stream could not be played"])
-        QTest.qWait(60)
+        pause(60)
         self.assertEqual((len(self.playback.plays), self.retries), (plays, []))
 
     def helper_says(self, sid, **fields):
@@ -5457,7 +5562,7 @@ class EngineShutdownTests(LiveSessionCase):
         self.assertEqual(self.releases, [])
         with self.assertNoLogs("services.live.live_session", "WARNING"):
             self.live.engine_shut_down()
-            QTest.qWait(10)
+            pause(10)
         self.assertEqual(self.releases, [True])  # at once, not after the close cap
         self.assertEqual(self.active_timers(), [])
 
@@ -5546,7 +5651,7 @@ class StreamLimitTests(LiveSessionCase):
         sid = self.start()
         self.not_live(sid, 1)
         self.assertEqual(self.notices, [NOT_LIVE])
-        QTest.qWait(600)  # past the longest wait for a start
+        pause(600)  # past the longest wait for a start
         self.assertEqual((self.engine.closed, self.playback.plays), ([], []))
         self.not_live(sid, 2)  # asked again: the same answer
         self.assertEqual(self.notices, [NOT_LIVE, NOT_LIVE])
@@ -5772,7 +5877,7 @@ class HelperDeathTests(LiveSessionCase):
         self.engine.available.emit(True)
         self.engine.buffer(sid, segments(0, 5), live_edge=10.0)
         self.engine.sessionReady.emit(sid)
-        QTest.qWait(100)
+        pause(100)
         self.assertEqual(len(self.playback.plays), 1)
         self.assertEqual(self.notices, [])
 
@@ -6972,12 +7077,12 @@ class ServerWindowTests(LiveSessionCase):
         self.live.seek_to(-300.0)
         first = self.engine.opened[-1][0]
         self.engine.sessionFailed.emit(first, "http", STREAM_LIMIT)
-        QTest.qWait(20)
+        pause(20)
         second = self.engine.opened[-1][0]
         self.assertNotEqual(second, first)  # a closed stream may still count: once more
         self.assertNotIn(PART_FAILED, self.notices)
         self.engine.sessionFailed.emit(second, "http", STREAM_LIMIT)
-        QTest.qWait(20)
+        pause(20)
         self.assertEqual(self.engine.opened[-1][0], second)
         self.assertIn(PART_FAILED, self.notices)
         self.assertEqual(self.failures, [])
@@ -6990,7 +7095,7 @@ class ServerWindowTests(LiveSessionCase):
         self.engine.answer()  # once the part's connection let go (2.8.12)
         for _ in range(2):  # refused, and once more (the part's connection may still count)
             self.engine.sessionFailed.emit(sid, "http", STREAM_LIMIT)
-            QTest.qWait(20)
+            pause(20)
         self.assertIn(KEPT_ONLY, self.notices)  # Go live tries again
         self.assertEqual(self.failures, [])
 
@@ -7200,12 +7305,12 @@ class ServerWindowFixTests(LiveSessionCase):
         self.engine.answer()  # the part's connection let go (2.8.12: the resume waits for it)
         self.playback.ended.emit()  # the part's stream ended under VLC
         self.engine.sessionFailed.emit(sid, "http", STREAM_LIMIT)  # its connection still counts
-        QTest.qWait(20)
+        pause(20)
         self.assertEqual([resume[0] for resume in self.engine.resumes], [sid, sid])
         self.assertNotIn(KEPT_ONLY, self.notices)
         plays = len(self.playback.plays)
         self.engine.sessionFailed.emit(sid, "http", STREAM_LIMIT)
-        QTest.qWait(20)
+        pause(20)
         self.assertIn(KEPT_ONLY, self.notices)
         self.assertGreater(len(self.playback.plays), plays)  # the newest of what was kept
         self.assertTrue(self.playback.plays[-1][0].startswith(f"http://127.0.0.1:9/token/{sid}/"))
@@ -7333,7 +7438,7 @@ class ServerWindowFixTests(LiveSessionCase):
         self.assertIn("refused", "\n".join(logs.output))
         self.assertNotIn(part, self.engine.closed)  # VLC plays on what it holds
         opens, plays = len(self.engine.opened), len(self.playback.plays)
-        QTest.qWait(20)
+        pause(20)
         self.assertEqual((len(self.engine.opened), len(self.playback.plays)), (opens, plays))
         self.playback.ended.emit()  # VLC played what it fetched
         self.assertIn(part, self.engine.closed)
@@ -7585,7 +7690,7 @@ class NightAuditSessionTests(LiveSessionCase):
         self.live._part_retry_ms = 10
         new = self.zap_during_part_resume()
         self.engine.sessionFailed.emit(new, "http", STREAM_LIMIT)
-        QTest.qWait(300)
+        pause(300)
         self.engine.answer()
         self.assertEqual(self.failures, [STREAM_LIMIT])  # said, and nothing plays directly
         self.assertNotIn("direct", self.modes)
@@ -7612,7 +7717,7 @@ class NightAuditSessionTests(LiveSessionCase):
         self.engine._snapshots[sid]["not_live"] = 1
         self.engine.sessionUpdated.emit(sid, dict(self.engine._snapshots[sid]))
         self.assertEqual(self.notices, [NOT_LIVE])
-        QTest.qWait(200)  # past the recovery cap, several times
+        pause(200)  # past the recovery cap, several times
         self.engine.answer()
         self.assertEqual(len(self.playback.plays), plays)  # not the provider directly
         self.engine.sessionFailed.emit(sid, "http", STREAM_LIMIT)  # it gave up

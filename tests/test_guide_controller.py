@@ -4,8 +4,8 @@ import unittest
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
-from PySide6.QtTest import QTest
 from PySide6.QtWidgets import QApplication, QWidget
+from timer_fixtures import pause
 
 from services.zapping import ZapContext
 from ui.guide_controller import GuideController
@@ -50,7 +50,7 @@ class GuideControllerTests(unittest.TestCase):
         self.controller.handle(Action.DIGIT, "3")
         self.assertEqual(self.current(), "Chan 123")
         for _ in range(30):  # the number ends after a pause (short waits: a slow paint
-            QTest.qWait(10)  # must not swallow the timer's turn)
+            pause(10)  # must not swallow the timer's turn)
         self.controller.handle(Action.DIGIT, "7")
         self.assertEqual(self.current(), "Chan 7")
         self.controller.handle(Action.NAV_ACTIVATE)

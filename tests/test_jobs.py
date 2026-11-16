@@ -9,9 +9,9 @@ from unittest import mock
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 from PySide6.QtCore import QObject, Signal
-from PySide6.QtTest import QTest
 from PySide6.QtWidgets import QApplication
 from job_fixtures import ImmediateRunner
+from timer_fixtures import pause
 
 from services.jobs import Cancelled, JobRunner, cancel_requested
 from tests.timer_fixtures import wait_until
@@ -56,7 +56,7 @@ def _wait_for(runner, receiver):
     for _ in range(200):
         if (receiver.results or receiver.errors) and runner.pending() == 0:
             return
-        QTest.qWait(10)
+        pause(10)
 
 
 class JobRunnerTests(unittest.TestCase):
@@ -117,7 +117,7 @@ class JobRunnerStressTests(unittest.TestCase):
         for _ in range(300):
             if len(delivered) >= 50 and runner.pending() == 0:
                 break
-            QTest.qWait(10)
+            pause(10)
         self.assertEqual(sorted(c for _, c in delivered), list(range(50)))
         self.assertEqual(runner.pending(), 0)
         self.assertEqual(len(runner._relays), 0)

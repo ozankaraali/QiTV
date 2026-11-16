@@ -7,7 +7,7 @@ os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 from PySide6.QtCore import QObject, QPoint, Qt, Signal
 from PySide6.QtTest import QTest
 from PySide6.QtWidgets import QApplication
-from timer_fixtures import elapse
+from timer_fixtures import elapse, pause
 
 from services.failure_reasons import SIGN_IN_AGAIN_MESSAGE
 from services.library import Details
@@ -271,7 +271,7 @@ class SeriesViewTests(unittest.TestCase):
         view.set_seasons(ss)
         view.set_episodes(ss[0], episodes(100))
         view.show()
-        QTest.qWait(30)
+        pause(30)
         view.page(1)
         first = view.current_episode()["series"]
         self.assertGreater(first, 2)
@@ -365,7 +365,7 @@ class SeriesViewTests(unittest.TestCase):
         view.set_seasons(ss)
         view.set_progress_provider(lambda ep: 0.5)
         view.show()
-        QTest.qWait(50)
+        pause(50)
         start = time.thread_time()  # CPU time: the work, not a loaded runner's waits
         view.set_episodes(ss[0], episodes(2000))
         view.grab()
