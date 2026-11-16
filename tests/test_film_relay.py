@@ -209,9 +209,8 @@ class PictureTests(RelayTestCase):
 
 class CapTests(RelayTestCase):
     def test_the_upstream_reads_no_further_than_its_cap_past_the_picture_then_waits(self):
-        reader = Reader(
-            self.relay.leader_url, 0, rcvbuf=64 * KIB
-        )  # a small window: it sends as this reads
+        # A small window: the relay sends about as this reads.
+        reader = Reader(self.relay.leader_url, 0, rcvbuf=64 * KIB)
         reader.read(100 * KIB)  # then the picture's libVLC reads nothing for a while
         time.sleep(1.0)
         read = self.relay.stats["bytes"]
@@ -220,7 +219,8 @@ class CapTests(RelayTestCase):
         time.sleep(0.5)
         self.assertEqual(self.relay.stats["bytes"], read)  # held: TCP backpressure
         self.assertEqual(self.provider.open_now(), 1)  # the connection is kept, not closed
-        self.assertEqual(reader.read(2 * MIB), FILM[100 * KIB : 100 * KIB + 2 * MIB])
+        # past what the sending side's buffer may have taken, whatever the system gives it
+        self.assertEqual(reader.read(4 * MIB), FILM[100 * KIB : 100 * KIB + 4 * MIB])
         self.assertGreater(self.relay.stats["bytes"], read)  # and goes on as the picture reads
         self.assertEqual(len(self.provider.film_asks()), 1)
         reader.close()
