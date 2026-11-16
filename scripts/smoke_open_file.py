@@ -15,6 +15,7 @@ import json
 import os
 from pathlib import Path
 import shlex
+import signal
 import subprocess
 import sys
 import time
@@ -43,20 +44,48 @@ def _status_pid() -> int | None:
     return int(pid) if pid else None
 
 
+def _spawn(command: list[str], log) -> subprocess.Popen:
+    # Its own session on POSIX, so the whole tree (a one-file build's unpacked child) can go.
+    return subprocess.Popen(
+        command,
+        stdout=log,
+        stderr=log,
+        stdin=subprocess.DEVNULL,
+        start_new_session=os.name != "nt",
+    )
+
+
+def _kill_tree(process: subprocess.Popen) -> None:
+    """Stop `process` and everything it started (it may have unpacked a child)."""
+    if os.name == "nt":
+        subprocess.run(
+            ["taskkill", "/T", "/F", "/PID", str(process.pid)],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            check=False,
+        )
+    else:
+        try:
+            os.killpg(process.pid, signal.SIGKILL)
+        except OSError:
+            pass
+    if process.poll() is None:
+        process.kill()
+
+
 def run(app: str, out: Path, file: str = "", second: str = "") -> dict:
     out.mkdir(parents=True, exist_ok=True)
     config = out / "config"
     config.mkdir(parents=True, exist_ok=True)
     # Nothing modal: no startup update check, no provider to fetch.
     (config / "config.json").write_text(json.dumps({"check_updates": False}), encoding="utf-8")
-    os.environ.update(
-        QITV_CONFIG_DIR=str(config), QITV_CONTROL="1", QITV_SMOKE_MUTE="1"
-    )
+    os.environ.update(QITV_CONFIG_DIR=str(config), QITV_CONTROL="1", QITV_SMOKE_MUTE="1")
     command = _command(app)
     log = open(out / "open-file-first.out", "ab")
     started = time.monotonic()
-    first = subprocess.Popen(command, stdout=log, stderr=log, stdin=subprocess.DEVNULL)
+    first = _spawn(command, log)
     others: list[subprocess.Popen] = []
+    result: dict = {"ok": False}
     try:
         pid = None
         while time.monotonic() - started < START_TIMEOUT_S:
@@ -68,33 +97,39 @@ def run(app: str, out: Path, file: str = "", second: str = "") -> dict:
             time.sleep(0.25)
         if not pid:
             raise SystemExit(f"The first QiTV did not answer within {START_TIMEOUT_S:.0f} s.")
-        first_s = time.monotonic() - started
+        result["first_s"] = round(time.monotonic() - started, 3)
 
         began = time.monotonic()
-        again = subprocess.Popen(
-            command + ([file] if file else []),
-            stdout=log,
-            stderr=log,
-            stdin=subprocess.DEVNULL,
-        )
+        again = _spawn(command + ([file] if file else []), log)
         others.append(again)
         try:
             code = again.wait(timeout=HANDOVER_TIMEOUT_S)
+            result["second_exit"] = code
         except subprocess.TimeoutExpired:
+            code = None
+            result["second_exit"] = None
+            result["handover_over_s"] = HANDOVER_TIMEOUT_S
+        result["handover_s"] = round(time.monotonic() - began, 3)
+        # The figure is on disk and printed before anything else can fail.
+        (out / "open-file.json").write_text(json.dumps(result), encoding="utf-8")
+        print(f"first_s={result['first_s']} handover_s={result['handover_s']}", flush=True)
+        if code is None:
             raise SystemExit(f"The second start did not exit within {HANDOVER_TIMEOUT_S:.0f} s.")
-        handover_s = time.monotonic() - began
         if code != 0:
             raise SystemExit(f"The second start exited with {code}.")
         if _status_pid() != pid:
             raise SystemExit("The first QiTV's pid changed or it stopped answering.")
-        result = {"first_s": round(first_s, 3), "handover_s": round(handover_s, 3)}
-        qitv_control.quit_qitv()
+        qitv_control.ask("quit")
+        try:
+            first.wait(timeout=30.0)  # not a pid poll: os.kill(pid, 0) would kill it on Windows
+        except subprocess.TimeoutExpired:
+            raise SystemExit("The first QiTV is still running 30 s after quit.")
+        result["ok"] = True
         (out / "open-file.json").write_text(json.dumps(result), encoding="utf-8")
         return result
     finally:
         for process in [first, *others]:
-            if process.poll() is None:
-                process.kill()
+            _kill_tree(process)
         log.close()
 
 
@@ -105,8 +140,7 @@ def main(argv: list[str]) -> int:
     parser.add_argument("--file", default="", help="(from Task 11 on)")
     parser.add_argument("--second", default="", help="(from Task 11 on)")
     options = parser.parse_args(argv)
-    result = run(options.app, options.out.resolve(), options.file, options.second)
-    print(f"first_s={result['first_s']} handover_s={result['handover_s']}")
+    run(options.app, options.out.resolve(), options.file, options.second)
     return 0
 
 
