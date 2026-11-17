@@ -1402,6 +1402,10 @@ class PlaybackSession(QObject):
                 self._playing_clock.start()
             self._ever_played = True
         self._set_state(state)
+        if not self._player_free():
+            # A slot stopped or replaced the media as its state changed: a job joins the input
+            # now, and what follows (has_vout among it) takes the input's lock.
+            return
         if state is PlaybackState.PLAYING:
             self._apply_audio()
             if self._files_due:

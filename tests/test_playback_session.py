@@ -595,6 +595,26 @@ class PlayerJobTests(unittest.TestCase):
         tail = self.player.calls[-3:]
         self.assertEqual(tail, [("set_media", B), ("set_rate", 1.5), ("play",)])
 
+    def tick_with_a_slot_that(self, act):
+        """A poll whose state change (Opening to Playing) reaches a slot that does `act`."""
+        self.play(A)
+        self.player.get_state = lambda: vlc.State.Playing
+        self.session.stateChanged.connect(lambda state: act() if state == "playing" else None)
+        self.session._tick()  # the fake's has_vout raises if asked while the input is joined
+        self.assertTrue(self.player.joining)  # the slot's job holds the input
+        self.assertIn("playing", self.states)
+        self.runner.finish()
+
+    def test_a_slot_that_stops_the_player_as_its_state_changes_ends_the_tick(self):
+        # Until a picture shows, each poll asks libVLC for its video output (has_vout, under
+        # the input lock). A stateChanged slot may stop the media first: its job then joins
+        # the input, and the rest of the tick must not wait on that lock.
+        self.tick_with_a_slot_that(self.session.stop)
+
+    def test_a_slot_that_opens_another_media_as_the_state_changes_ends_the_tick(self):
+        self.tick_with_a_slot_that(lambda: self.play(B))
+        self.assertEqual(self.opened(), [A, B])
+
     def test_a_burst_of_zaps_joins_once_and_opens_only_the_newest(self):
         self.play(A)
         self.play(B)
