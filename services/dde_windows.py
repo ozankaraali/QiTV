@@ -28,7 +28,6 @@ import logging
 import re
 import sys
 import threading
-import time
 from typing import Any, Callable, Optional
 
 from PySide6.QtCore import QObject, QTimer, Signal
@@ -43,7 +42,7 @@ TOPIC = "System"
 COMMAND = '[open("%1")]'  # Explorer puts the file's path for %1
 KIND = "videos"
 WRITER_THREAD = "qitv-dde-key"
-WRITER_JOIN_S = 2.0  # at quit, a start's key write still on its way (it takes milliseconds)
+QUIT_LOCK_S = 2.0  # at quit, the longest wait for a file types change on its way (it takes ms)
 CLIENT_TIMEOUT_MS = 2000
 
 # ddeml.h
@@ -83,6 +82,9 @@ CALLBACK = WINFUNCTYPE(
 DWORD = c_uint32
 BOOL = c_int
 HANDLE = c_void_p  # HSZ, HCONV, HDDEDATA
+# The callbacks of instances DDEML didn't let go (DdeUninitialize failed): it may still call
+# them, so they are kept for the run.
+_UNRELEASED: list[Any] = []
 
 _OPEN = re.compile(r'\[\s*open\s*\(\s*"((?:[^"]|"")*)"\s*\)\s*\]', re.IGNORECASE)
 
@@ -228,8 +230,10 @@ class DdeServer(QObject):
         for handle in (service, topic):
             if handle:
                 attempt("free a name", lambda: lib.DdeFreeStringHandle(inst, handle))
-        if attempt("let go", lambda: lib.DdeUninitialize(inst)):
-            self._callback = None  # DDEML calls it no more
+        if not attempt("let go", lambda: lib.DdeUninitialize(inst)):
+            logger.warning("DDEML didn't let QiTV's DDE go: its callback is kept for the run")
+            _UNRELEASED.append(self._callback)
+        self._callback = None  # DDEML calls it no more, or it is kept above
         self._service = self._topic = None
         self._registered = False
         self._pending = []
@@ -303,7 +307,6 @@ class Serving:
     def __init__(self, server: Optional[DdeServer] = None, exe: str = "") -> None:
         self.server = server if server is not None else DdeServer()
         self._exe = exe or sys.executable
-        self._writers: list[threading.Thread] = []
         self._served = False  # it served once: the quit takes the ddeexec back
         self._closed = False
 
@@ -313,46 +316,39 @@ class Serving:
 
     def follow(self, registered: bool) -> bool:
         """Registered: the server starts unless it runs (never a second one), and the
-        ddeexec is written on a worker; a server that can't start takes a stale ddeexec back
-        instead. Not registered: the server stops (unregistering took the ddeexec with the
-        ProgID). True while it serves."""
+        ddeexec is written on a worker each time (written over: a registration may have come
+        meanwhile); a server that can't start takes a stale ddeexec back instead. Not
+        registered: the server stops (unregistering took the ddeexec with the ProgID). True
+        while it serves."""
         if self._closed:
             return False
         if not registered:
             self.server.stop()
             return False
-        if self.server.running:
-            return True
-        if not self.server.start():
-            self._on_worker(file_types.remove_ddeexec)
+        if not self.server.start():  # True at once when it runs
+            _on_worker(file_types.remove_ddeexec)
             return False
         self._served = True
         exe = self._exe
-        self._on_worker(lambda: file_types.add_ddeexec(exe))
+        _on_worker(lambda: file_types.add_ddeexec(exe, wanted=lambda: not self._closed))
         return True
 
     def close(self) -> None:
-        """At quit, on the GUI thread: the ddeexec goes first (a few registry calls, once the
-        writes on their way are through), so Explorer starts QiTV again; then the server
-        stops. It never raises."""
+        """At quit (aboutToQuit, which a Windows sign-out or shutdown still sends; main()'s
+        `finally` too), on the GUI thread: the ddeexec goes first, so Explorer starts QiTV
+        again, then the server stops. A key write still queued then writes nothing; one on its
+        way is waited for, QUIT_LOCK_S at most. Once; it never raises."""
         if self._closed:
             return
         self._closed = True
-        deadline = time.monotonic() + WRITER_JOIN_S
-        for writer in self._writers:
-            writer.join(max(0.0, deadline - time.monotonic()))
         if self._served:
             try:
-                file_types.remove_ddeexec()
+                file_types.remove_ddeexec(timeout=QUIT_LOCK_S)
             except Exception as e:
                 logger.warning(
                     "QiTV's DDE key stays (%s): the next start writes it", type(e).__name__
                 )
         self.server.stop()
-
-    def _on_worker(self, work: Callable[[], object]) -> None:
-        self._writers = [w for w in self._writers if w.is_alive()]
-        self._writers.append(_on_worker(work))
 
 
 def serve(config: Any, frozen: Optional[bool] = None) -> Optional[Serving]:
@@ -393,6 +389,8 @@ def execute(command: str, timeout_ms: int = CLIENT_TIMEOUT_MS) -> bool:
     service = lib.DdeCreateStringHandleW(inst.value, SERVICE, CP_WINUNICODE)
     topic = lib.DdeCreateStringHandleW(inst.value, TOPIC, CP_WINUNICODE)
     try:
+        if not (service and topic):  # a 0 handle connects to any server, or any topic
+            return False
         conversation = lib.DdeConnect(inst.value, service, topic, None)
         if not conversation:
             logger.info("No QiTV answered over DDE (0x%x)", lib.DdeGetLastError(inst.value))
@@ -418,4 +416,5 @@ def execute(command: str, timeout_ms: int = CLIENT_TIMEOUT_MS) -> bool:
         for handle in (service, topic):
             if handle:
                 lib.DdeFreeStringHandle(inst.value, handle)
-        lib.DdeUninitialize(inst.value)
+        if not lib.DdeUninitialize(inst.value):
+            _UNRELEASED.append(callback)  # DDEML may still call it

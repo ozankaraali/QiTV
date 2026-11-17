@@ -311,7 +311,11 @@ class DdeFollowsSettingsTests(RowCase):
         self.added: list[str] = []
         patches = (
             mock.patch.object(dde_windows, "_user32", side_effect=lambda: self.ddeml),
-            mock.patch.object(file_types, "add_ddeexec", side_effect=self.added.append),
+            mock.patch.object(
+                file_types,
+                "add_ddeexec",
+                side_effect=lambda exe, wanted=None: self.added.append(exe),
+            ),
             mock.patch.object(file_types, "remove_ddeexec", return_value=True),
             mock.patch.object(file_types, "open_default_apps"),
         )
@@ -329,22 +333,38 @@ class DdeFollowsSettingsTests(RowCase):
         for thread in worker(dde_windows.WRITER_THREAD):
             thread.join(5)
 
-    def test_windows_register_starts_the_server_and_writes_the_key_once(self):
+    def test_windows_register_starts_the_server_and_writes_the_key(self):
         serving = self.serving()
         dialog = self.dialog(system="win32")
         with self.registering():
             self.press(dialog, "win32")
         self.settle()
         self.assertTrue(serving.running)
-        self.assertEqual(self.added, [EXE])  # on a worker, once
-        # a second register while it runs (QiTV unregistered behind its back, say)
+        self.assertEqual(self.added, [EXE])  # on a worker
+        # a second register while it runs (QiTV unregistered behind its back, say): the same
+        # server, the key written over (Ruling 28c: a registration rewrote the ProgID)
         self.config.file_types = {}
         dialog = self.dialog(system="win32")
         with self.registering():
             self.press(dialog, "win32")
         self.settle()
         self.assertEqual(self.ddeml.calls.count("DdeInitializeW"), 1)  # no second server
-        self.assertEqual(self.added, [EXE])
+        self.assertEqual(self.added, [EXE, EXE])
+
+    def test_a_closing_window_follows_no_more(self):
+        serving = self.serving()
+        self.window._closing = True  # QiTV is closing: Settings' late answer starts nothing
+        try:
+            self.window.dde_follow_registration(True)
+        finally:
+            self.window._closing = False
+        self.settle()
+        self.assertFalse(serving.running)
+        self.assertEqual(self.ddeml.calls, [])
+        self.assertEqual(self.added, [])
+        self.window.dde_follow_registration(True)  # open again: it follows
+        self.settle()
+        self.assertTrue(serving.running)
 
     def test_unregister_stops_the_server(self):
         serving = self.serving()

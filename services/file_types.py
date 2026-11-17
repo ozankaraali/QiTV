@@ -262,17 +262,27 @@ def open_default_apps() -> None:
             logger.info("Windows didn't open %s (%s)", page, type(e).__name__)
 
 
-def add_ddeexec(exe: str) -> bool:
+def add_ddeexec(exe: str, wanted: Optional[Callable[[], bool]] = None) -> bool:
     """Windows, while QiTV runs and its DDE server answers (services.dde_windows): Explorer
     hands a double-clicked video to it over DDE instead of starting QiTV again. Only where QiTV
-    is registered; False when it isn't or the key couldn't be written. Off the GUI thread."""
-    return _windows.add_ddeexec(exe)
+    is registered, and only while `wanted()` still says so once no other change is on its way
+    (a quit's removal came first: nothing is written after it). False when it isn't, or the key
+    couldn't be written. Off the GUI thread."""
+    return _windows.add_ddeexec(exe, wanted)
 
 
-def remove_ddeexec() -> bool:
+def remove_ddeexec(timeout: Optional[float] = None) -> bool:
     """Windows: Explorer starts QiTV with the file again (at quit, or a server that didn't
-    start). False, logged, when a key stayed; it never raises."""
-    return _windows.remove_ddeexec()
+    start). `timeout`: how long to wait for another change on its way (the quit's bound), else
+    as long as it takes. False, logged, when a key stayed or the wait ran out; it never
+    raises."""
+    if not _windows_lock.acquire(timeout=-1 if timeout is None else timeout):
+        logger.warning("Another file types change takes too long: QiTV's DDE key stays")
+        return False
+    try:
+        return _windows.remove_ddeexec()
+    finally:
+        _windows_lock.release()
 
 
 def temporary_location(exe: str) -> bool:
@@ -503,13 +513,16 @@ class _WindowsBackend:
         return ok
 
     @_one_at_a_time
-    def add_ddeexec(self, exe: str) -> bool:
+    def add_ddeexec(self, exe: str, wanted: Optional[Callable[[], bool]] = None) -> bool:
         """The open verb's ddeexec, in each ProgID QiTV is registered with (its command is
         there: a ProgID is never made for it). A stale one, left by a crash, is written over;
         one that can't be written whole is taken back. True when every registered ProgID got
-        it, False when there was none."""
+        it, False when there was none or `wanted()` no longer wants it (asked under the lock)."""
         from services.dde_windows import COMMAND, SERVICE, TOPIC
 
+        if wanted is not None and not wanted():
+            logger.info("QiTV quits: its DDE key isn't written")
+            return False
         reg = _winreg()
         found, ok = False, True
         for progid in PROGIDS.values():

@@ -164,6 +164,7 @@ class FakeDdeml:
         self.freed_data = []
         self.fail = set()  # names of calls that fail
         self.on_uninitialize = None
+        self.uninitialize_answer = 1
 
     # the functions
 
@@ -210,7 +211,11 @@ class FakeDdeml:
         self.calls.append("DdeUninitialize")
         if self.on_uninitialize:
             self.on_uninitialize()
-        return 1
+        return self.uninitialize_answer
+
+    def DdeConnect(self, inst, service, topic, context):
+        self.calls.append(("DdeConnect", service, topic))
+        return None  # no server here
 
     def DdeGetLastError(self, inst):
         return 0x4009  # DMLERR_INVALIDPARAMETER
@@ -378,6 +383,32 @@ class DdeServerTests(unittest.TestCase):
         self.server.stop()  # twice: nothing more
         self.assertEqual(self.ddeml.calls.count("DdeUninitialize"), 1)
 
+    def test_a_callback_ddeml_kept_stays_alive(self):  # Ruling 28b
+        self.assertTrue(self.server.start())
+        first = self.ddeml.callback
+        self.ddeml.uninitialize_answer = 0  # DdeUninitialize failed: DDEML may still call it
+        with self.assertLogs("services.dde_windows", "WARNING"):
+            self.server.stop()
+        self.addCleanup(dde_windows._UNRELEASED.remove, first)
+        self.assertIn(first, dde_windows._UNRELEASED)
+        self.ddeml.uninitialize_answer = 1
+        self.assertTrue(self.server.start())  # a new instance, with a callback of its own
+        self.assertIsNot(self.ddeml.callback, first)
+        self.assertIn(first, dde_windows._UNRELEASED)
+        self.assertFalse(first(dde_windows.XTYP_CONNECT, 0, None, 1, 2, None, 0, 0))  # callable
+        self.server.stop()
+        self.assertNotIn(self.ddeml.callback, dde_windows._UNRELEASED)  # let go: not kept
+
+    def test_the_client_never_connects_without_both_names(self):  # Ruling 28d
+        self.ddeml.fail.add("DdeCreateStringHandleW")  # a 0 handle is any server or topic
+        self.assertFalse(dde_windows.execute('[open("C:\\x.mkv")]'))
+        self.assertNotIn("DdeConnect", [c[0] for c in self.ddeml.calls if isinstance(c, tuple)])
+        self.assertEqual(self.ddeml.calls[-1], "DdeUninitialize")
+        self.ddeml = FakeDdeml()
+        self.assertFalse(dde_windows.execute('[open("C:\\x.mkv")]'))  # both, no server
+        service, topic = self.ddeml.atom(SERVICE), self.ddeml.atom(TOPIC)
+        self.assertIn(("DdeConnect", service, topic), self.ddeml.calls)
+
     def test_stop_never_raises(self):
         self.assertTrue(self.server.start())
 
@@ -431,7 +462,9 @@ class ServeTests(unittest.TestCase):
         with patch.object(
             file_types,
             "add_ddeexec",
-            side_effect=lambda exe: written_on.append(threading.current_thread()) or real_add(exe),
+            side_effect=lambda exe, wanted=None: (
+                written_on.append(threading.current_thread()) or real_add(exe, wanted)
+            ),
         ):
             serving = dde_windows.serve(self.registered, frozen=True)
             self.assertIsNotNone(serving)
@@ -498,22 +531,27 @@ class ServeTests(unittest.TestCase):
         serving = dde_windows.serve(Config(), frozen=True)
         self.addCleanup(serving.close)
         added = []
-        with patch.object(file_types, "add_ddeexec", side_effect=added.append):
+
+        def add(exe, wanted=None):
+            added.append(exe)
+
+        with patch.object(file_types, "add_ddeexec", side_effect=add):
             self.assertTrue(serving.follow(True))  # registered in Settings
             self.join_writers()
             self.assertTrue(serving.running)
             self.assertEqual(added, [WINDOWS_EXE])
-            self.assertTrue(serving.follow(True))  # again while it runs: no second server
+            # again while it runs: no second server, the key written over (Ruling 28c)
+            self.assertTrue(serving.follow(True))
             self.join_writers()
         self.assertEqual(self.ddeml.calls.count("DdeInitializeW"), 1)
-        self.assertEqual(added, [WINDOWS_EXE])
+        self.assertEqual(added, [WINDOWS_EXE, WINDOWS_EXE])
         self.assertFalse(serving.follow(False))  # unregistered: it stops
         self.assertFalse(serving.running)
         self.assertEqual(self.ddeml.calls.count("DdeUninitialize"), 1)
-        with patch.object(file_types, "add_ddeexec", side_effect=added.append):
+        with patch.object(file_types, "add_ddeexec", side_effect=add):
             self.assertTrue(serving.follow(True))  # registered again: the same server
             self.join_writers()
-        self.assertEqual(added, [WINDOWS_EXE, WINDOWS_EXE])
+        self.assertEqual(added, [WINDOWS_EXE] * 3)
         serving.close()
         self.assertFalse(serving.follow(True))  # once quitting, never again
         self.assertEqual(self.ddeml.calls.count("DdeInitializeW"), 2)
@@ -531,6 +569,59 @@ class ServeTests(unittest.TestCase):
         writer.join(5)
         self.assertTrue(written.is_set())
         self.assertEqual(self.reg.values(DDEEXEC), {"": COMMAND})
+
+    def test_a_second_close_does_nothing(self):  # aboutToQuit, then main()'s finally
+        serving = dde_windows.serve(self.registered, frozen=True)
+        self.join_writers()
+        serving.close()
+        self.assertIsNone(self.reg.values(DDEEXEC))
+        with (
+            patch.object(file_types, "remove_ddeexec") as remove,
+            patch.object(file_types, "add_ddeexec") as add,
+        ):
+            serving.close()
+            self.assertFalse(serving.follow(True))
+        remove.assert_not_called()
+        add.assert_not_called()
+        self.assertEqual(self.ddeml.calls.count("DdeInitializeW"), 1)
+        self.assertEqual(self.ddeml.calls.count("DdeUninitialize"), 1)
+
+    def test_a_key_write_queued_behind_the_quit_writes_nothing(self):  # Ruling 28a
+        serving = dde_windows.serve(Config(), frozen=True)
+        with self.assertLogs("services.file_types", "INFO") as logs:
+            with file_types._windows_lock:  # another change on its way
+                self.assertTrue(serving.follow(True))  # its key write waits for the lock
+                serving.close()  # the quit comes first (this thread may take the lock)
+            self.join_writers()
+        self.assertIn("isn't written", "\n".join(logs.output))
+        self.assertIsNone(self.reg.values(DDEEXEC))  # never written after the removal
+
+    def test_the_quit_waits_for_a_change_on_its_way_a_bounded_time(self):  # Ruling 28a
+        serving = dde_windows.serve(self.registered, frozen=True)
+        self.join_writers()
+        self.assertEqual(self.reg.values(DDEEXEC), {"": COMMAND})
+        held, release = threading.Event(), threading.Event()
+
+        def hold():
+            with file_types._windows_lock:
+                held.set()
+                release.wait(10)
+
+        holder = threading.Thread(target=hold, daemon=True)
+        holder.start()
+        self.assertTrue(held.wait(5))
+        try:
+            with (
+                patch.object(dde_windows, "QUIT_LOCK_S", 0.1),
+                self.assertLogs("services.file_types", "WARNING"),
+            ):
+                serving.close()
+        finally:
+            release.set()
+            holder.join(5)
+        self.assertFalse(serving.running)  # it stopped all the same
+        self.assertIn("DdeUninitialize", self.ddeml.calls)
+        self.assertEqual(self.reg.values(DDEEXEC), {"": COMMAND})  # the next start writes it
 
     def test_close_never_raises(self):
         serving = dde_windows.serve(self.registered, frozen=True)
@@ -572,6 +663,31 @@ class LiveDdeTests(unittest.TestCase):
         self.assertTrue(wait_until(lambda: not client.is_alive(), 5000))
         self.assertEqual(got, [[path]])
         self.assertEqual(answers, [True])  # acknowledged (DDE_FACK)
+
+    def test_live_paths_arrive_unchanged(self):
+        server = DdeServer()
+        self.assertTrue(server.start())
+        self.addCleanup(server.stop)
+        got = []
+        server.opened.connect(got.extend)
+        turkish = 'C:\\Dizi\\Bölüm 1 – "özel".mkv'  # its quotes go doubled
+        long_unc = "\\\\sunucu\\paylaşım\\" + "ğüşıöç" * 50 + "\\Bölüm 2.mkv"  # > 260
+        self.assertGreater(len(long_unc), 260)
+        commands = [COMMAND.replace("%1", p.replace('"', '""')) for p in (turkish, long_unc)]
+        answers = []
+        client = threading.Thread(
+            target=lambda: answers.extend(dde_windows.execute(c) for c in commands),
+            daemon=True,
+        )
+        client.start()
+        self.assertTrue(wait_until(lambda: len(got) == 2, 2000), f"client answered {answers}")
+        self.assertTrue(wait_until(lambda: not client.is_alive(), 5000))
+        self.assertEqual(got, [turkish, long_unc])  # code point for code point
+        self.assertEqual(
+            [p.encode("utf-16-le") for p in got],
+            [p.encode("utf-16-le") for p in (turkish, long_unc)],
+        )
+        self.assertEqual(answers, [True, True])
 
 
 if __name__ == "__main__":

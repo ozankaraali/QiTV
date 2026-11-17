@@ -121,6 +121,21 @@ class MainModuleTests(unittest.TestCase):
         self.assertLess(last.index("dde.close()"), last.index("instance.close()"))
         self.assertLess(last.index("dde.close()"), last.index("config_manager.flush_saves()"))
 
+    def test_a_windows_sign_out_still_takes_the_dde_key_back(self):
+        # Qt ends a Windows session with aboutToQuit and the process is killed after it:
+        # main()'s `finally` never runs then, so the key's removal hangs on aboutToQuit too
+        # (Serving.close runs once; the `finally` stays the backstop). And DDE that fails to
+        # come up is never a reason for QiTV not to start.
+        body = (REPO / "main.py").read_text(encoding="utf-8").split("def main()", 1)[1]
+        serve = body.index("dde = window.dde = dde_windows.serve(config_manager)")
+        start, end = body.rindex("try:", 0, serve), body.index("if not_replaced", serve)
+        block = body[start:end]
+        self.assertLess(block.index("from services import dde_windows"), block.index("serve("))
+        self.assertIn("except Exception:", block)
+        self.assertIn("dde = window.dde = None", block)
+        self.assertIn("app.aboutToQuit.connect(dde.close)", block)
+        self.assertIn("dde.close()", body.rsplit("finally:", 1)[1])
+
     def test_freeze_support_comes_first_when_run_as_a_script(self):
         source = (REPO / "main.py").read_text(encoding="utf-8")
         block = source.split('if __name__ == "__main__":', 1)[1]

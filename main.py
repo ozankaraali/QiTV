@@ -303,11 +303,17 @@ def main() -> int:
             # Registered for videos: a double-click reaches this QiTV over DDE, with no second
             # start (which unpacks the whole app first); Explorer is told so while it runs.
             # The run's one server: Settings turns it on and off (dde_follow_registration).
-            from services import dde_windows
+            try:
+                from services import dde_windows
 
-            dde = window.dde = dde_windows.serve(config_manager)
+                dde = window.dde = dde_windows.serve(config_manager)
+            except Exception:  # never a reason for QiTV not to start
+                log.warning("No DDE: a double-click starts QiTV again.", exc_info=True)
+                dde = window.dde = None
             if dde is not None:
                 dde.server.opened.connect(lambda files: window.open_paths(files, source=HANDOVER))
+                # A sign-out or shutdown ends QiTV after aboutToQuit, never reaching `finally`.
+                app.aboutToQuit.connect(dde.close)
         if not_replaced is not None:  # where the new version is, and where the old one stayed
             old_path, new_path = not_replaced
             QTimer.singleShot(0, window, lambda: replace_failed(old_path, new_path, window))
