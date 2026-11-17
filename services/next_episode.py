@@ -14,6 +14,10 @@ from services.i18n import tr
 
 Key = Callable[[dict], str]
 
+# A local file's next episode, found in its folder (services.local_episodes.next_in_folder); a
+# context carries it only when there is one, so play_context does not default it.
+LOCAL_NEXT = "local_next"
+
 PLAY_CONTEXT_KEYS = ("start_over", "series", "season", "episodes", "genre_items")
 
 
@@ -84,7 +88,10 @@ def play_context(values: Optional[dict] = None) -> dict:
 
 
 def has_next(kind: str, context: dict) -> bool:
-    """Whether Next can follow: an episode of a known series and season, a genre's movie."""
+    """Whether Next can follow: a local file's next episode, an episode of a known series and
+    season, a genre's movie."""
+    if isinstance(context.get(LOCAL_NEXT), dict):
+        return True
     if kind == "episode":
         return isinstance(context.get("series"), dict) and isinstance(context.get("season"), dict)
     return kind == "movie" and bool(context.get("genre_items"))
@@ -112,8 +119,12 @@ def following(
     """What follows `item` (an "episode" or a "movie") in its play context.
 
     `seasons(series)` and `episodes(series, season)` read the loaded catalog (None: not
-    loaded). Without the series' seasons only the current season is searched.
+    loaded). Without the series' seasons only the current season is searched. A local next
+    needs no catalog.
     """
+    local = context.get(LOCAL_NEXT)
+    if isinstance(local, dict):
+        return NextUp(None, local)
     if kind == "episode":
         series, season = context.get("series"), context.get("season")
         if not isinstance(series, dict) or not isinstance(season, dict):

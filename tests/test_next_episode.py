@@ -173,6 +173,29 @@ class PlayContextTests(unittest.TestCase):
         self.assertTrue(has_next("movie", play_context({"genre_items": [{"id": 1}]})))
         self.assertFalse(has_next("movie", play_context({})))
 
+    def test_a_local_next_can_follow(self):
+        item = {"name": "Show", "season": 1, "number": 2, "local_path": "/v/Show.S01E02.mkv"}
+        context = play_context({"local_next": item})
+        self.assertTrue(has_next("movie", context))
+        self.assertTrue(has_next("episode", context))
+        self.assertEqual(self._follow("movie", context), NextUp(None, item))
+        self.assertFalse(has_next("movie", play_context({"local_next": None})))
+
+    @staticmethod
+    def _follow(kind, context):
+        def unused(*_args):
+            raise AssertionError("a local next reads no catalog")
+
+        return following(
+            kind,
+            context,
+            {"name": "Show"},
+            seasons=unused,
+            episodes=unused,
+            key=item_key,
+            episode_key=episode_key,
+        )
+
     def test_episode_label(self):
         self.assertEqual(episode_label({"number": "2"}, {"number": "1"}), "S2 · E1")
         self.assertEqual(episode_label(None, {"season": "3", "episode_num": "4"}), "S3 · E4")
