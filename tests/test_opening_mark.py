@@ -355,6 +355,35 @@ class WidgetTests(unittest.TestCase):
         self.assertAlmostEqual(self.mark.frame().t, 0.0)
         self.assertAlmostEqual(self.mark.frame().opening, 0.0)
 
+    def test_start_during_a_finish_keeps_it_and_its_then(self):
+        self.at_phase(0.3)
+        self.mark.finish(self.then)
+        self.clock.now += 0.2
+        before = self.mark.frame()
+        self.mark.start()  # e.g. a second open while the first one's mark opens
+        self.assertEqual(self.mark.frame(), before)
+        self.clock.now -= 0.2
+        self.assertAlmostEqual(self.run_out(), 0.75, delta=0.011)
+
+    def test_start_during_a_plain_finish_before_any_start_keeps_it(self):
+        self.reduced.return_value = True
+        self.mark.finish(self.then)
+        self.mark.start()
+        self.assertAlmostEqual(self.run_out(), 0.35, delta=0.011)
+
+    def test_finish_after_the_end_calls_then_later_from_the_event_loop(self):
+        self.at_phase(0.7)
+        self.mark.finish(self.then)
+        self.run_out()
+        late = []
+        self.mark.finish(lambda: late.append(1))
+        self.assertEqual(late, [])  # never from inside finish()
+        for _ in range(20):
+            if late:
+                break
+            app.processEvents()
+        self.assertEqual(late, [1])
+
     def test_reduced_motion_holds_the_lit_frame_and_fades_plainly(self):
         self.reduced.return_value = True
         self.mark.start()
@@ -510,6 +539,10 @@ class ReducedMotionTests(unittest.TestCase):
         ):
             self.assertTrue(opening_mark._reduced_motion())
         self.assertEqual(seen, [0x1042])
+        self.assertEqual(
+            spi.argtypes, [ctypes.c_uint, ctypes.c_uint, ctypes.c_void_p, ctypes.c_uint]
+        )
+        self.assertIs(spi.restype, ctypes.c_long)
 
     def test_macos_asks_the_shared_workspace(self):
         from ui import macos_window

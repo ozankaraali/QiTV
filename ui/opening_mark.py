@@ -442,14 +442,10 @@ class OpeningMark(QWidget):
         return _reduced_motion()
 
     def start(self) -> None:
-        """Runs the loop from its beginning. While it runs this does nothing; during a finish
-        it starts again, and that finish's `then` is dropped."""
-        if self._started is not None and self._finish is None and not self._done:
+        """Runs the loop from its beginning. While it loops, or while a finish runs (its `then`
+        always comes), this does nothing; once the mark is done it starts again."""
+        if not self._done and (self._started is not None or self._finish is not None):
             return
-        if self._then:
-            logger.debug(
-                "The opening mark starts again; %d finish callbacks dropped", len(self._then)
-            )
         self._started = self._clock()
         self._finish = None
         self._done = False
@@ -459,10 +455,11 @@ class OpeningMark(QWidget):
         self.update()
 
     def finish(self, then: Callable[[], None]) -> None:
-        """Completes the draw, opens, then calls `then` (at once if the mark is already done;
-        a second call during a finish adds its `then` to the same end)."""
+        """Completes the draw, opens, then calls `then`, always later from the event loop: a
+        mark already done calls it on the loop's next turn, and a second call during a finish
+        adds its `then` to the same end."""
         if self._done:
-            then()
+            QTimer.singleShot(0, then)
             return
         self._then.append(then)
         if self._finish is not None:
@@ -636,10 +633,17 @@ def _user32() -> Any:
 def _windows_reduces_motion() -> bool:
     """Windows' "Show animations" off: SPI_GETCLIENTAREAANIMATION answers FALSE."""
     try:
+        system_parameters_info = _user32().SystemParametersInfoW
+        # BOOL SystemParametersInfoW(UINT uiAction, UINT uiParam, PVOID pvParam, UINT fWinIni)
+        system_parameters_info.argtypes = [
+            ctypes.c_uint,
+            ctypes.c_uint,
+            ctypes.c_void_p,
+            ctypes.c_uint,
+        ]
+        system_parameters_info.restype = ctypes.c_long
         enabled = ctypes.c_long(1)  # a BOOL
-        ok = _user32().SystemParametersInfoW(
-            SPI_GETCLIENTAREAANIMATION, 0, ctypes.byref(enabled), 0
-        )
+        ok = system_parameters_info(SPI_GETCLIENTAREAANIMATION, 0, ctypes.byref(enabled), 0)
         return bool(ok) and not enabled.value
     except Exception as e:
         logger.debug("Could not ask Windows whether animations are on: %s", e)
