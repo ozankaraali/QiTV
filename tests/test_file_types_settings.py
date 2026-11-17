@@ -47,6 +47,11 @@ def worker(name):
     return [t for t in threading.enumerate() if t.name == name]
 
 
+def join_default_apps():
+    for thread in worker(row_module.DEFAULT_APPS_THREAD):
+        thread.join(5)
+
+
 class RowCase(base.WindowCase):
     """Settings' row on a real window: its dialog, a press and its answer."""
 
@@ -79,6 +84,7 @@ class RowCase(base.WindowCase):
             self.assertTrue(wait_until(dialog.file_types_button.isEnabled))
             for thread in worker(row_module.PRESS_THREAD):
                 thread.join(5)
+            join_default_apps()  # opened after a Windows register, on a thread of its own
 
     def registering(self, result=RegisterResult(True, True), gate=None):
         """A register that records as the service does, and the thread it ran on."""
@@ -128,9 +134,18 @@ class FileTypesRowTests(RowCase):
         button = dialog.file_types_default_apps_button
         self.assertEqual(button.text(), "Default Apps…")
         self.assertFalse(button.autoDefault())
-        with mock.patch.object(file_types, "open_default_apps") as default_apps:
+        opened_on = []
+        with mock.patch.object(
+            file_types,
+            "open_default_apps",
+            side_effect=lambda: opened_on.append(threading.current_thread()),
+        ) as default_apps:
             button.click()
+            join_default_apps()
         default_apps.assert_called_once_with()
+        # Review M6: ShellExecute (os.startfile) may stall: never on the GUI thread
+        self.assertIsNot(opened_on[0], threading.main_thread())
+        self.assertEqual(opened_on[0].name, row_module.DEFAULT_APPS_THREAD)
         self.assertEqual(dialog.file_types_button.text(), translate(STOP_TEXT))  # no press
 
     def test_default_apps_goes_once_windows_stops_using_qitv(self):
@@ -203,12 +218,19 @@ class FileTypesRowTests(RowCase):
             with self.subTest(system=system):
                 self.config.file_types = {}
                 dialog = self.dialog(system=system)
+                opened_on = []
                 with (
                     self.registering(),
-                    mock.patch.object(file_types, "open_default_apps") as default_apps,
+                    mock.patch.object(
+                        file_types,
+                        "open_default_apps",
+                        side_effect=lambda: opened_on.append(threading.current_thread()),
+                    ) as default_apps,
                 ):
                     self.press(dialog, system)
                 self.assertEqual(default_apps.call_count, 1 if system == "win32" else 0)
+                for thread in opened_on:  # never on the GUI thread (Review M6)
+                    self.assertIsNot(thread, threading.main_thread())
 
     def test_a_failed_press_says_so_and_can_be_tried_again(self):
         dialog = self.dialog()

@@ -33,6 +33,7 @@ logger = logging.getLogger(__name__)
 KIND = "videos"
 PRESS_THREAD = "qitv-file-types"
 REFRESH_THREAD = "qitv-file-types-refresh"
+DEFAULT_APPS_THREAD = "qitv-default-apps"
 ERROR_STYLE = "color: red;"  # as Settings' other failures (Verify Provider, Paste link)
 
 # The button (Settings → General → Open videos with QiTV) and the hints under it.
@@ -86,6 +87,19 @@ def hint_text(state: Status, system: str, open_with_only: bool = False) -> str:
     if hint is None and state is Status.TEMPORARY:
         hint = TEMPORARY_HINT
     return translate(hint) if hint else ""
+
+
+def open_default_apps() -> None:
+    """Windows' Default Apps page (file_types.open_default_apps), on a thread of its own:
+    os.startfile is ShellExecute, which can keep the calling thread waiting."""
+
+    def body() -> None:
+        try:
+            file_types.open_default_apps()
+        except Exception:
+            logger.warning("Windows' Default Apps page didn't open", exc_info=True)
+
+    threading.Thread(target=body, name=DEFAULT_APPS_THREAD, daemon=True).start()
 
 
 def _save(config: Any) -> None:
@@ -149,7 +163,7 @@ class FileTypesRow:
         self.default_apps_button.setObjectName("fileTypesDefaultApps")
         self.default_apps_button.setAutoDefault(False)
         self.default_apps_button.setFlat(True)  # the row's second action, quieter
-        self.default_apps_button.clicked.connect(lambda: file_types.open_default_apps())
+        self.default_apps_button.clicked.connect(lambda: open_default_apps())
         buttons = QHBoxLayout()
         buttons.addWidget(self.button)
         buttons.addWidget(self.default_apps_button)
@@ -213,7 +227,7 @@ class FileTypesRow:
             if follow is not None and isValid(self._window):
                 follow(registering)
             if registering and _system() == "win32":
-                file_types.open_default_apps()  # where Windows asks the user to confirm
+                open_default_apps()  # where Windows asks the user to confirm
         if not (isValid(self.button) and isValid(self.hint)):
             return  # Settings is gone
         self._failed = not result
