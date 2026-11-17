@@ -3,6 +3,7 @@
 from pathlib import Path
 from types import SimpleNamespace
 import unittest
+from unittest import mock
 
 from test_tv_controller import ControllerTestCase
 
@@ -41,6 +42,33 @@ class LocalResumeTests(ControllerTestCase):
         self.controller.play_file("/music/song.mp3", size=99)
         self.session.positionChanged.emit(60_000, 180_000)
         self.assertEqual(self.store.playback_positions, {})
+
+
+class OpeningMarkTests(ControllerTestCase):
+    """Where a file's opening ends for QiTV's mark over it (TVWindow.opening_over): never as
+    the file itself is played, at once on a stop, an error, its end or another title."""
+
+    def setUp(self):
+        super().setUp()
+        self.controller.start()
+        self.over = mock.Mock()
+        self.window.opening_over = self.over
+
+    def test_playing_a_file_leaves_the_mark(self):
+        self.controller.play_file("/videos/ep.mkv", size=1234)
+        self.controller.play_file("/videos/next.mkv", size=99)  # a file over a file
+        self.over.assert_not_called()
+
+    def test_a_stop_an_error_or_an_end_ends_it(self):
+        for end in (
+            self.controller.stop,
+            lambda: self.session.errorOccurred.emit("The stream could not be opened"),
+            self.session.ended.emit,
+        ):
+            self.controller.play_file("/videos/ep.mkv", size=1234)
+            self.over.reset_mock()
+            end()
+            self.over.assert_called()
 
 
 if __name__ == "__main__":

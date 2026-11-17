@@ -6,18 +6,23 @@ pressed, or after 20 s. It takes no click, key or focus. Fictional files; the co
 play_file is the router tests' fake, and the session's picture is said by the test."""
 
 import os
+from pathlib import Path
+import shutil
+import tempfile
 import unittest
 from unittest import mock
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 from PySide6.QtCore import QRectF, QSize, Qt
+from PySide6.QtTest import QTest
 from PySide6.QtWidgets import QApplication
 from timer_fixtures import elapse, wait_until
 
 from services.playback import NullSession, PlaybackSession, PlaybackState
 from services.vlc_profile import PlayKind
-from tests.test_open_router import SETTLE_MS, RouterCase
+from tests import test_tv_window as base
+from tests.test_open_router import FILM, SETTLE_MS, RouterCase
 from tests.test_playback_session import _FakeInstance, _HeldRunner, _ShapePlayer, vlc
 from ui.link_lanes import Target
 from ui.opening_mark import MARK_PX, STAGE_PX, OpeningMark
@@ -234,6 +239,48 @@ class OpeningOverlayTests(OverlayCase):
         self.assertTrue(centred())
         self.assertIsNot(QApplication.focusWidget(), overlay)
         self.assertIsNot(QApplication.focusWidget(), overlay.mark)
+        clicks, doubles = [], []
+        host.clicked.connect(lambda: clicks.append(True))
+        host.doubleClicked.connect(lambda: doubles.append(True))
+        middle = overlay.geometry().center()
+        QTest.mouseClick(host, Qt.MouseButton.LeftButton, pos=middle)
+        self.assertTrue(wait_until(lambda: clicks))  # on to the player, as on the black
+        QTest.mouseDClick(host, Qt.MouseButton.LeftButton, pos=middle)
+        self.assertTrue(wait_until(lambda: doubles))  # fullscreen, as over the picture
+
+
+@unittest.skipIf(base.INSTANCE is None, "libVLC is not available")
+class RealPlayerOpeningTests(base.WindowCase):
+    """The mark over the real player (libVLC with a dummy picture and no sound), the router
+    and the controller unfaked: it draws as the file is played and goes once its picture
+    shows; a file opened over that picture opens with none."""
+
+    vlc_instance = base.INSTANCE
+
+    def test_the_mark_draws_until_the_real_players_picture(self):
+        directory = tempfile.TemporaryDirectory()
+        self.addCleanup(directory.cleanup)
+        film = Path(directory.name) / "Film.mkv"
+        shutil.copyfile(FILM, film)
+        window, controller = self.window, self.window.controller
+        overlay = window.opening_overlay
+        self.show()
+        session = controller.session
+        pictures = []
+        session.pictureShown.connect(lambda: pictures.append(session.url))
+        with mock.patch.object(overlay, "open_for", wraps=overlay.open_for) as open_for:
+            window.open_paths([str(film)], source="dialog")
+            self.assertTrue(wait_until(lambda: open_for.called))
+            self.assertTrue(overlay.opening() or pictures)  # (a quick picture closes it)
+            self.assertTrue(wait_until(lambda: overlay.isHidden(), OPENING_TIMEOUT_MS // 2))
+            self.assertEqual(pictures, [film.as_uri()])  # its picture closed it
+            self.assertTrue(session.shows_picture())
+            other = shutil.copyfile(FILM, film.with_name("Next.mkv"))
+            window.open_paths([str(other)], source="dialog")
+            self.assertTrue(wait_until(lambda: session.url == other.as_uri()))
+            elapse(SETTLE_MS)
+        self.assertEqual(open_for.call_count, 1)  # none over the first film's picture
+        self.assertTrue(overlay.isHidden())
 
 
 class OverlayWidgetTests(unittest.TestCase):
