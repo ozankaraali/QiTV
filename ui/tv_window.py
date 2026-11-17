@@ -1449,6 +1449,10 @@ class TVWindow(QMainWindow):
 
         A launch or a hand-over brings the window forward. The paths are passed on as given.
         While QiTV closes nothing opens (the log names each film left out).
+
+        From the moment a file is to be looked at, nothing opens over it (the controller's
+        hold_for_file): no last channel, no drawer, no welcome card, and what waits for QiTV to
+        be idle (when_idle) waits. A file that's gone lets go, unless a file plays on.
         """
         if self._closing:
             for path in sort_paths(paths).media:
@@ -1490,16 +1494,23 @@ class TVWindow(QMainWindow):
                 self.controller.drop_subtitles(subtitles)
             return
         self._open_due = (self._open_generation, path, subtitles)
+        self.controller.hold_for_file(True)  # while it is looked at, it counts as playing
         self._file_check.start(self._open_generation, path)
 
     def _plays_now(self, path: str) -> bool:
         """Whether the file at `path` is what the large picture plays (opening, playing or
         paused; one that ended or failed opens again)."""
-        target = self.controller.now_playing()
-        if target is None or not target.local or not self.controller.playing():
+        target = self._playing_file()
+        if target is None:
             return False
         playing = QUrl(str(target.item.get("cmd") or "")).toLocalFile()
         return bool(playing) and _same_file(playing, path)
+
+    def _playing_file(self) -> Optional[Target]:
+        """The file the large picture plays (opening, playing or paused), if it plays one."""
+        target = self.controller.now_playing()
+        local = target is not None and target.local and self.controller.playing()
+        return target if local else None
 
     def _on_file_checked(self, generation: int, path: str, size: Optional[int]) -> None:
         due = self._open_due
@@ -1511,12 +1522,21 @@ class TVWindow(QMainWindow):
             name = os.path.basename(path)
             # i18n: an error toast: a file opened in QiTV is gone or unreadable ({name}: its name)
             self.screens.notify(tr("Couldn't open “{name}”", name=name), "error", ERROR_MS)
+            if self._playing_file() is None:  # a film that plays on keeps its hold
+                self.controller.hold_for_file(False)
             return
+        # Held again: a channel chosen while it was looked at let go of the hold.
+        self.controller.hold_for_file(True)
         self.screens.play_path(path, size)
         target = self.controller.now_playing()
         if due[2] and target is not None and target.local:
             self._subtitles_due = (target, due[2], self._clock() + OPENED_WAIT_S)
             self._subtitles_wait.start()
+
+    def when_idle(self, callback: Callable[[], None]) -> None:
+        """`callback` now, or once the file opened in QiTV is over (it ended, was stopped,
+        failed or gave way to another title): the startup update question waits for it."""
+        self.controller.when_idle(callback)
 
     def _load_due_subtitles(self) -> None:
         """The subtitle files dropped with a video load once it opened, never into another

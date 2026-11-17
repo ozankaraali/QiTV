@@ -73,14 +73,20 @@ class QiTVApplication(QApplication):
         return super().event(event)
 
     def add_opened(self, paths: Sequence[str]) -> None:
-        """Files to open (macOS's open event, another start's hand-over): passed on, and kept
-        until the window takes them."""
+        """Files to open (macOS's open event, another start's hand-over): kept until the window
+        takes them, passed on after (never both: they would open twice)."""
         files = [path for path in paths if path]
         if not files:
             return
         if self._kept is not None:
             self._kept.extend(files)
+            return
         self.filesOpened.emit(files)
+
+    def kept_opened(self) -> list[str]:
+        """The files kept so far, still kept for the window: a second start hands them over
+        with its own."""
+        return list(self._kept or [])
 
     def take_opened(self) -> list[str]:
         """The files that came before the window, once; from now on they are only passed on."""

@@ -39,12 +39,13 @@ server.opened.connect(app.add_opened)
 QCoreApplication.sendEvent(app, QFileOpenEvent("/x/a.mkv"))  # macOS: a launch's open event
 QCoreApplication.sendEvent(app, QFileOpenEvent(""))  # nothing to open
 server.opened.emit(["/x/Dizi Bölüm 2.mkv"])  # handed over before the window
+kept = app.kept_opened()  # what a second start hands over: they are still kept
 first = app.take_opened()  # the window shows
 QCoreApplication.sendEvent(app, QFileOpenEvent("/x/b.mkv"))
 QCoreApplication.sendEvent(app, QFileOpenEvent("/x/c.mkv"))
 server.opened.emit(["/x/d.mkv"])
-print(json.dumps({"first": first, "again": app.take_opened(), "emitted": emitted,
-                  "log": lines}), flush=True)
+print(json.dumps({"kept": kept, "first": first, "again": app.take_opened(),
+                  "emitted": emitted, "log": lines}), flush=True)
 """
 
 
@@ -102,14 +103,19 @@ class OpenedFilesTests(unittest.TestCase):
 
     def test_file_open_event_queues_then_emits(self):
         said = self.opened()
-        # Before the window: kept for it (and passed on, to nobody yet), in order.
+        # Before the window: kept for it, in order, and not passed on (the window takes them
+        # once; passed on too, they would open twice).
         self.assertEqual(said["first"], ["/x/a.mkv", "/x/Dizi Bölüm 2.mkv"])
         # After: passed on only, each once; nothing is kept twice.
         self.assertEqual(said["again"], [])
-        self.assertEqual(
-            said["emitted"],
-            [["/x/a.mkv"], ["/x/Dizi Bölüm 2.mkv"], ["/x/b.mkv"], ["/x/c.mkv"], ["/x/d.mkv"]],
-        )
+        self.assertEqual(said["emitted"], [["/x/b.mkv"], ["/x/c.mkv"], ["/x/d.mkv"]])
+
+    def test_the_kept_files_can_be_read_before_the_window_takes_them(self):
+        # A second start hands them over with its own (main's claim); if it is the first,
+        # the window still takes them.
+        said = self.opened()
+        self.assertEqual(said["kept"], ["/x/a.mkv", "/x/Dizi Bölüm 2.mkv"])
+        self.assertEqual(said["first"], said["kept"])
 
     def test_a_hand_over_before_the_window_is_not_lost(self):
         # Ruling 6: a start's files reach this QiTV while its window is built.

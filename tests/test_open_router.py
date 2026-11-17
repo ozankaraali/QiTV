@@ -27,7 +27,9 @@ FILM = Path(__file__).parent / "fixtures" / "film" / "h264_aac.mkv"  # 8 s
 SUBTITLES = "1\n00:00:00,000 --> 00:00:08,000\nHallo\n"
 
 
-class OpenRouterTests(base.WindowCase):
+class RouterCase(base.WindowCase):
+    """The window's router, over a fake play_file: what it plays is recorded."""
+
     def setUp(self):
         super().setUp()
         directory = tempfile.TemporaryDirectory()
@@ -78,6 +80,8 @@ class OpenRouterTests(base.WindowCase):
     def handover(self, *paths):
         self.window.open_paths([str(p) for p in paths], source="handover")
 
+
+class OpenRouterTests(RouterCase):
     def test_drop_video_plays_it(self):
         path = self.film("ep.mkv", b"x" * 1234)
         self.window.screens.open_library("movies")
@@ -122,6 +126,8 @@ class OpenRouterTests(base.WindowCase):
         self.handover(on_now)
         self.wait_for_plays(1)
         playing = self.current
+        runs = []
+        self.window.when_idle(lambda: runs.append(True))  # the update question waits
         folder = self.folder / "Season 1.mkv"
         folder.mkdir()
         link = self.folder / "link.mkv"
@@ -133,6 +139,7 @@ class OpenRouterTests(base.WindowCase):
                 self.assertTrue(wait_until(lambda: (text, "error") in self.toasts), self.toasts)
         self.assertEqual(self.plays(), [(str(on_now), 4)])
         self.assertIs(self.current, playing)
+        self.assertEqual(runs, [])  # the film on keeps its hold
 
     def test_same_file_again_only_comes_forward(self):
         path = self.film("ep.mkv")
@@ -248,6 +255,26 @@ class OpenRouterTests(base.WindowCase):
         self.assertEqual(drop(self.window, paths=[self.folder / "notes.txt"]), (False, False))
         entered, _dropped = drop(self.window.host, paths=[self.folder / "clip.webm"])
         self.assertTrue(entered)
+
+
+class NoProviderRouterTests(RouterCase):
+    def provider_list(self):
+        return []
+
+    def test_late_file_open_with_no_providers(self):
+        # Ruling 1: macOS's open event after the window (or a hand-over) holds as a launch's
+        # file does: the welcome card that is up goes until the film is over.
+        film = self.film("Dizi Bölüm 1.mkv")
+        card = self.window.overlays.welcome
+        self.show()
+        self.assertTrue(wait_until(card.isVisible))
+        self.window.open_paths([str(film)], source="handover")
+        self.assertFalse(card.isVisible())
+        self.wait_for_plays(1)
+        self.assertEqual(self.plays(), [(str(film), 4)])
+        self.assertFalse(card.isVisible())
+        self.window.controller.hold_for_file(False)  # it ended (the fake player says nothing)
+        self.assertTrue(card.isVisible())
 
 
 class LongWindowsPathTests(unittest.TestCase):

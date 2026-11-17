@@ -147,7 +147,7 @@ def main() -> int:
 
     from services import log_file
     from services.config_manager import get_app_version
-    from services.open_paths import launch_paths
+    from services.open_paths import launch_paths, sort_paths
     from ui.quit_reason import QiTVApplication
 
     # Basic logging configuration (tweak level as needed); the console's lines are masked as
@@ -175,6 +175,10 @@ def main() -> int:
     # It notes a quit request the system sends (2.8), and keeps the files QiTV is asked to
     # open until the window takes them.
     app = QiTVApplication(sys.argv)
+    if platform.system() == "Darwin":
+        # A double-click in Finder gives no argument: the file comes as an open event, sent
+        # at launch. Kept now, it is handed over (a second start) or kept for the window.
+        app.processEvents()
     # The files this start was given (a double-click while QiTV runs hands them over).
     paths = launch_paths(sys.argv)
     # 2.8.12: one QiTV per settings folder (a second start would record and stream twice and
@@ -182,7 +186,10 @@ def main() -> int:
     from services.single_instance import claim
 
     try:
-        instance = claim(settings_dir(), replacing="--replace" in sys.argv, paths=paths)
+        # The open events kept so far go too; they stay kept for the window if this is first.
+        instance = claim(
+            settings_dir(), replacing="--replace" in sys.argv, paths=paths + app.kept_opened()
+        )
         handed_over = instance is None
     except Exception as error:  # the check is never a reason for QiTV not to start
         log.warning("The check for another QiTV failed (%s); starting.", type(error).__name__)
@@ -193,10 +200,6 @@ def main() -> int:
         return 0
     if instance is not None:  # a start's files while the window is built are kept for it
         instance.opened.connect(app.add_opened)
-    if platform.system() == "Darwin":
-        # A double-click in Finder gives no argument: the file comes as an open event, sent
-        # at launch. Taken now, it is kept for the window.
-        app.processEvents()
 
     from PySide6 import QtGui
     from PySide6.QtCore import QLocale, QTimer, qInstallMessageHandler
@@ -279,11 +282,15 @@ def main() -> int:
         window = TVWindow(app, config_manager, provider_manager, image_manager, epg_manager)
         if instance is not None:
             instance.activated.connect(window.come_to_front)
-        window.show()
         # This start's files, and those that came before the window (macOS's open event,
-        # another start's hand-over); from now on each plays as it comes.
+        # another start's hand-over), taken once; from now on each plays as it comes.
         opened = paths + app.take_opened()
         app.filesOpened.connect(lambda files: window.open_paths(files, source=HANDOVER))
+        if sort_paths(opened).media:
+            # A start with a film plays only the film: no last channel, drawer or welcome card
+            # over it, from the window's first moment (open_paths holds too, once it shows).
+            window.controller.hold_for_file(True)
+        window.show()
         if opened:
             window.open_paths(opened, source=LAUNCH)
         if not_replaced is not None:  # where the new version is, and where the old one stayed
@@ -302,8 +309,8 @@ def main() -> int:
             )
             control.start()
 
-        if config_manager.check_updates:
-            check_for_updates(config_manager=config_manager)
+        if config_manager.check_updates:  # after the film a start opened, if it has one
+            window.when_idle(lambda: check_for_updates(config_manager=config_manager))
 
         code = app.exec()
         log.info("QiTV's event loop ended (%d).", code)

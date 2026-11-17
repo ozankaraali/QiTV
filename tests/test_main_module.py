@@ -86,6 +86,22 @@ class MainModuleTests(unittest.TestCase):
         self.assertNotIn("ui.tv_window", imported)
         self.assertNotIn("qdarktheme", imported)
 
+    def test_a_start_with_a_film_holds_what_would_open_over_it(self):
+        # macOS's open event is kept before the claim (a second start hands it over); the
+        # film is held for before the window shows, and the update question waits for it.
+        body = (REPO / "main.py").read_text(encoding="utf-8").split("def main()", 1)[1]
+        self.assertLess(body.index("app.processEvents()"), body.index("instance = claim("))
+        self.assertIn("paths=paths + app.kept_opened()", body)
+        self.assertEqual(body.count("app.take_opened()"), 1)
+        show = body.index("window.show()")
+        self.assertLess(body.index("opened = paths + app.take_opened()"), show)
+        self.assertLess(body.index("app.filesOpened.connect("), show)
+        self.assertLess(body.index("window.controller.hold_for_file(True)"), show)
+        self.assertLess(show, body.index("window.open_paths(opened, source=LAUNCH)"))
+        self.assertIn(
+            "window.when_idle(lambda: check_for_updates(config_manager=config_manager))", body
+        )
+
     def test_freeze_support_comes_first_when_run_as_a_script(self):
         source = (REPO / "main.py").read_text(encoding="utf-8")
         block = source.split('if __name__ == "__main__":', 1)[1]
