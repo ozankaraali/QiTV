@@ -441,12 +441,20 @@ class OpeningMark(QWidget):
         on Linux the first call asks on a worker and answers False until it knows."""
         return _reduced_motion()
 
-    def start(self) -> None:
-        """Runs the loop from its beginning. While it loops, or while a finish runs (its `then`
-        always comes), this does nothing; once the mark is done it starts again."""
+    @property
+    def origin(self) -> Optional[float]:
+        """When its loop began, on its clock (None before start())."""
+        return self._started
+
+    def start(self, origin: Optional[float] = None) -> None:
+        """Runs the loop from its beginning: now, or at `origin`, a time on its clock (by
+        default time.monotonic, one clock for every process on the computer: another process's
+        mark started at the same origin shows the same frame at the same moment). While it
+        loops, or while a finish runs (its `then` always comes), this does nothing; once the
+        mark is done it starts again."""
         if not self._done and (self._started is not None or self._finish is not None):
             return
-        self._started = self._clock()
+        self._started = self._clock() if origin is None else origin
         self._finish = None
         self._done = False
         self._then = []

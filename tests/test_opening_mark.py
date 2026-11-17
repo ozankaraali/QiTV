@@ -293,6 +293,23 @@ class WidgetTests(unittest.TestCase):
         self.clock.now += LOOP_S
         self.assertAlmostEqual(self.mark.frame().t, 0.25)
 
+    def test_a_mark_started_at_anothers_origin_shows_its_frame(self):
+        # The splash's mark and the player's (another process, the same monotonic clock).
+        self.mark.start()
+        origin = self.mark.origin
+        self.assertEqual(origin, self.clock.now)
+        self.clock.now += 1.3
+        other = OpeningMark(clock=self.clock)
+        self.addCleanup(other.deleteLater)
+        other.start(origin)
+        self.assertEqual(other.origin, origin)
+        for _ in range(5):
+            self.clock.now += 0.37
+            self.assertAlmostEqual(other.frame(self.clock.now).t, self.mark.frame().t)
+        other.start(origin + 1.0)  # while it loops, start() changes nothing (as before)
+        self.assertEqual(other.origin, origin)
+        self.assertIsNone(OpeningMark(clock=self.clock).origin)  # before any start
+
     def test_an_early_finish_completes_the_draw_within_0_4_s_then_opens(self):
         self.at_phase(0.1)
         self.mark.finish(self.then)

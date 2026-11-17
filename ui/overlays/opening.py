@@ -64,6 +64,10 @@ class OpeningOverlay(Overlay):
         self._sound_only = False
         self._opening = False  # it draws for a file still opening
         self._finishing = False  # it opens out of the page (OpeningMark.finish)
+        self._held = False  # its mark draws unseen (hold_mark)
+        # Where its loop begins (ui/splash_helper.py: the splash's own mark's, so that the two
+        # show the same frame); None: as it starts.
+        self.loop_origin: Callable[[], Optional[float]] = lambda: None
         if parent is not None:
             parent.installEventFilter(self)
         self.hide()
@@ -88,9 +92,20 @@ class OpeningOverlay(Overlay):
         self._opening = True
         self._timeout.start()
         if not self._finishing:
-            self._mark.start()  # nothing while it draws already
+            self._mark.start(self.loop_origin())  # nothing while it draws already
+        self._mark.setVisible(not self._held)
         self._layout()
         self.show()
+
+    def hold_mark(self, held: bool) -> None:
+        """The splash's mark stands where this one draws (ui/splash_helper.py): this one draws
+        on unseen, on the same loop, until it is let go; one that opens out by then stays
+        unseen until its next file."""
+        self._held = held
+        if held:
+            self._mark.hide()
+        elif self._opening:
+            self._mark.show()
 
     def close_opening(self) -> None:
         """The mark opens out of the page, then hides; nothing when it does not draw."""
@@ -106,7 +121,8 @@ class OpeningOverlay(Overlay):
     def _opened_out(self) -> None:
         self._finishing = False
         if self._opening:
-            self._mark.start()  # a file opened as it opened out: it draws again for that one
+            # a file opened as it opened out: it draws again for that one
+            self._mark.start(self.loop_origin())
         else:
             self.hide()
 

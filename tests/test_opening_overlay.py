@@ -14,9 +14,9 @@ from unittest import mock
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
-from PySide6.QtCore import QRectF, QSize, Qt
+from PySide6.QtCore import QObject, QRectF, QSize, Qt, Signal
 from PySide6.QtTest import QTest
-from PySide6.QtWidgets import QApplication
+from PySide6.QtWidgets import QApplication, QWidget
 from timer_fixtures import elapse, wait_until
 
 from services.playback import NullSession, PlaybackSession, PlaybackState
@@ -283,6 +283,14 @@ class RealPlayerOpeningTests(base.WindowCase):
         self.assertTrue(overlay.isHidden())
 
 
+class _Session(QObject):
+    """A session as the overlay listens to it."""
+
+    pictureShown = Signal()
+    stateChanged = Signal(str)
+    url = None
+
+
 class OverlayWidgetTests(unittest.TestCase):
     """The overlay on its own: its mark's size, and a close with nothing shown."""
 
@@ -303,6 +311,38 @@ class OverlayWidgetTests(unittest.TestCase):
         with mock.patch.object(overlay.mark, "finish") as finish:
             overlay.close_opening()
         finish.assert_not_called()
+
+    def page(self):
+        page = QWidget()
+        page.resize(800, 600)
+        self.addCleanup(page.deleteLater)
+        overlay = OpeningOverlay(page, clock=lambda: 50.0)
+        page.show()
+        return overlay
+
+    def test_while_the_splash_stands_there_its_mark_draws_unseen_on_its_loop(self):
+        # ui/splash_helper.py: the splash's mark glides onto this one, then this one shows.
+        overlay = self.page()
+        overlay.loop_origin = lambda: 42.0  # the splash's loop origin
+        overlay.hold_mark(True)
+        overlay.open_for(_Session(), "file:///Film.mkv")
+        self.assertTrue(overlay.opening())
+        self.assertFalse(overlay.isHidden())
+        self.assertEqual(overlay.mark.origin, 42.0)  # the same frame as the splash's
+        self.assertTrue(overlay.mark.isHidden())
+        overlay.hold_mark(False)
+        self.assertFalse(overlay.mark.isHidden())
+
+    def test_a_mark_let_go_as_it_opens_out_stays_unseen(self):
+        overlay = self.page()
+        overlay.hold_mark(True)
+        overlay.open_for(_Session(), "file:///Film.mkv")
+        self.assertEqual(overlay.mark.origin, 50.0)  # no splash loop: its own, from now
+        overlay.close_opening()  # the picture showed during the glide
+        overlay.hold_mark(False)
+        self.assertTrue(overlay.mark.isHidden())  # its open-out is not seen
+        overlay.open_for(_Session(), "file:///Film 2.mkv")  # the next file's shows
+        self.assertFalse(overlay.mark.isHidden())
 
 
 class _VoutPlayer(_ShapePlayer):

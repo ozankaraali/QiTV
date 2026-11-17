@@ -341,7 +341,8 @@ def main() -> int:
             window.controller.hold_for_file(True)
         splash.before_show(window)  # transparent: it fades in as the splash opens into it
         window.show()
-        splash.open_into(window)
+        # A film's start: the splash's mark glides onto the player page's, which draws on.
+        splash.open_into(window, window.opening_overlay)
         if opened:
             window.open_paths(opened, source=LAUNCH)
         # A QiTV moved or renamed since it registered for videos registers again where it is

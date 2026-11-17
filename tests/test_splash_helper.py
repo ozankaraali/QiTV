@@ -72,17 +72,53 @@ class OpacityWindow(QWidget):
 
 def unwatched(window):
     """A started Splash with no helper and no watcher: each message it queues is kept, with
-    `window`'s opacity at that moment."""
+    `window`'s opacity and the time at that moment."""
     splash = Splash()
     splash._process = mock.Mock()
     sent = []
 
     class Queue:
         def put(self, message):
-            sent.append((message, window.opacities[-1][1] if window.opacities else None))
+            sent.append((message, opacity(window), time.monotonic()))
 
     splash._commands = Queue()
     return splash, sent
+
+
+def opacity(window):
+    return window.opacities[-1][1] if window.opacities else None
+
+
+def names(sent):
+    return [message[0] for message, _, _ in sent]
+
+
+def rising(window):
+    """When the window's fade first rose above 0."""
+    return next(when for when, level in window.opacities if level > 0.0)
+
+
+ORIGIN = 1234.5  # the splash's loop origin, on time.monotonic
+
+
+class FakeOverlay:
+    """The player page's OpeningOverlay as Splash sees it: whether it draws a file's mark, the
+    mark (its loop origin and place), and each hold with the window's opacity then."""
+
+    def __init__(self, window, *, drawing=True, origin=ORIGIN):
+        self.window = window
+        self.drawing = drawing
+        self.mark = QWidget()
+        self.mark.setGeometry(300, 200, STAGE_PX, STAGE_PX)
+        self.mark.origin = origin
+        self.holds = []
+        self.loop_origin = None
+
+    def opening(self):
+        return self.drawing
+
+    def hold_mark(self, held):
+        self.holds.append((held, opacity(self.window)))
 
 
 class HelperProcessTests(unittest.TestCase):
@@ -93,8 +129,12 @@ class HelperProcessTests(unittest.TestCase):
         self.addCleanup(self.process.kill)
 
     def wait_shown(self):
+        """("shown", its loop origin): a time on this process's monotonic clock too."""
         self.assertTrue(self.conn.poll(SPAWN_S), "the helper never said it was shown")
-        self.assertEqual(self.conn.recv(), ("shown",))
+        name, origin = self.conn.recv()
+        self.assertEqual(name, "shown")
+        self.assertLess(time.monotonic() - SPAWN_S, origin)
+        self.assertLessEqual(origin, time.monotonic())
 
     def test_helper_quits_when_parent_pipe_closes(self):
         self.wait_shown()
@@ -107,13 +147,33 @@ class HelperProcessTests(unittest.TestCase):
         self.wait_shown()
         self.conn.send(("open", (0, 0, 1280, 720)))
         sent = time.monotonic()
+        self.assertTrue(self.conn.poll(5))
+        self.assertEqual(self.conn.recv(), ("opening",))  # its draw completed: it opens out
+        opening = time.monotonic()
         self.process.join(10)
-        took = time.monotonic() - sent
+        ended = time.monotonic()
         self.assertFalse(self.process.is_alive())
         self.assertEqual(self.process.exitcode, 0)
         # the open plays out whole (350 ms), after at most 0.4 s finishing the first draw
-        self.assertGreaterEqual(took, OPEN_S)
-        self.assertLessEqual(took, CATCH_UP_MAX_S + OPEN_S + SLACK_S)
+        self.assertLessEqual(opening - sent, CATCH_UP_MAX_S + SLACK_S)
+        self.assertGreaterEqual(ended - opening, OPEN_S - 0.05)
+        self.assertGreaterEqual(ended - sent, OPEN_S)
+        self.assertLessEqual(ended - sent, CATCH_UP_MAX_S + OPEN_S + SLACK_S)
+
+    def test_after_a_handover_it_glides_and_waits_for_quit(self):
+        # It glides onto the player's mark and loops on there; one never told to quit ends
+        # by itself HANDOVER_LIMIT_MS after its glide.
+        self.wait_shown()
+        self.conn.send(("handover", (300, 200, STAGE_PX, STAGE_PX)))
+        sent = time.monotonic()
+        glide_and_wait = (splash_helper.FADE_IN_MS + splash_helper.HANDOVER_LIMIT_MS) / 1000
+        self.process.join(glide_and_wait - 0.3)
+        self.assertTrue(self.process.is_alive())
+        self.process.join(SLACK_S + 0.3)
+        self.assertFalse(self.process.is_alive())
+        self.assertEqual(self.process.exitcode, 0)
+        # Qt's coarse timers may fire up to 5 % early
+        self.assertGreaterEqual(time.monotonic() - sent, glide_and_wait - 0.1)
 
     def test_quit_ends_it_at_once(self):
         self.wait_shown()
@@ -203,21 +263,20 @@ class SplashTests(unittest.TestCase):
             splash.open_into(window)
             self.assertEqual(len(window.opacities), 1)  # it waits for the event loop
             began = time.monotonic()
-            pump(splash_helper.FADE_IN_MS / 1000 + 0.3)
+            pump(CATCH_UP_MAX_S + splash_helper.FADE_IN_MS / 1000 + SLACK_S)
         levels = [level for _, level in window.opacities[1:]]
         self.assertEqual(levels[-1], 1.0)  # it always ends opaque
         self.assertEqual(levels, sorted(levels))
         self.assertTrue(any(0.0 < level < 1.0 for level in levels))
-        ended = window.opacities[-1][0] - began
-        self.assertGreaterEqual(ended, 0.3)
-        self.assertLessEqual(ended, splash_helper.FADE_IN_MS / 1000 + SLACK_S)
+        # it fades as the mark opens out: after its draw completes, at most 0.4 s
+        self.assertLessEqual(rising(window) - began, CATCH_UP_MAX_S + SLACK_S)
+        self.assertGreaterEqual(window.opacities[-1][0] - rising(window), 0.3)
         splash._watcher.join(CATCH_UP_MAX_S + OPEN_S + KILL_WAIT_S)
         self.assertEqual(splash._process.exitcode, 0)  # it opened and quit by itself
 
-    def test_the_helper_opens_as_the_windows_fade_first_moves(self):
-        # The window's first paint can hold the loop after its first turn (a quarter of a
-        # second in a Linux test start): "open" waits for the fade's first step, so a lit mark
-        # never opens and goes before the window appears.
+    def test_the_window_fades_as_the_mark_opens_out(self):
+        # "open" goes once the window is on screen; the window fades as the helper says its
+        # mark opens out ("opening", after its draw completed).
         window = OpacityWindow()
         self.addCleanup(window.deleteLater)
         splash, sent = unwatched(window)
@@ -225,15 +284,116 @@ class SplashTests(unittest.TestCase):
             splash.before_show(window)
             window.show()
             splash.open_into(window)
-            app.processEvents()  # the loop's first turn: the fade starts, at 0
-            self.assertEqual(sent, [])
-            deadline = time.monotonic() + 2
-            while not sent and time.monotonic() < deadline:
-                pump(0.01)
+            pump(0.1)
+            self.assertEqual(names(sent), ["open"])
+            self.assertEqual([level for _, level in window.opacities], [0.0])  # it waits
+            splash._relay.tell(("opening",))
+            told = time.monotonic()
             pump(splash_helper.FADE_IN_MS / 1000 + 0.2)
-        self.assertEqual([message[0] for message, _ in sent], ["open"])
-        self.assertGreater(sent[0][1], 0.0)  # the window's opacity as "open" was queued
-        self.assertEqual(window.opacities[-1][1], 1.0)
+        self.assertGreaterEqual(rising(window), told)
+        self.assertLess(rising(window) - told, 0.1)
+        self.assertEqual(opacity(window), 1.0)
+
+    def test_without_opening_the_window_fades_0_6_s_after_open(self):
+        window = OpacityWindow()
+        self.addCleanup(window.deleteLater)
+        splash, sent = unwatched(window)
+        with mock.patch.object(splash_helper, "_fades_windows", return_value=True):
+            splash.before_show(window)
+            window.show()
+            splash.open_into(window)
+            pump(0.4)
+            self.assertEqual(names(sent), ["open"])
+            self.assertEqual([level for _, level in window.opacities], [0.0])
+            pump(0.4 + splash_helper.FADE_IN_MS / 1000)
+        waited = rising(window) - sent[0][2]
+        self.assertGreaterEqual(waited, splash_helper.OPENING_WAIT_MS / 1000)
+        self.assertLess(waited, splash_helper.OPENING_WAIT_MS / 1000 + 0.15)
+        self.assertEqual(opacity(window), 1.0)  # never left transparent
+
+    def test_the_hand_over_is_chosen_only_while_the_overlay_draws(self):
+        cases = (
+            ("drawing on the splash's loop", dict(), "offscreen", "handover"),
+            ("not drawing", dict(drawing=False), "offscreen", "open"),
+            ("drawing on another loop", dict(origin=ORIGIN + 1), "offscreen", "open"),
+            ("Wayland", dict(), "wayland", "open"),
+        )
+        for case, overlay_args, platform_name, chosen in cases:
+            with self.subTest(case):
+                window = OpacityWindow()
+                self.addCleanup(window.deleteLater)
+                splash, sent = unwatched(window)
+                splash._origin = ORIGIN
+                overlay = FakeOverlay(window, **overlay_args)
+                with mock.patch.object(splash_helper, "_platform_name", return_value=platform_name):
+                    window.show()
+                    splash.open_into(window, overlay)
+                    self.assertEqual(overlay.holds, [(True, None)])  # unseen from now
+                    self.assertEqual(overlay.loop_origin(), ORIGIN)  # on the splash's loop
+                    pump(0.1)
+                self.assertEqual(names(sent)[0], chosen)
+                if chosen == "handover":
+                    self.assertEqual(sent[0][0][1], (300, 200, STAGE_PX, STAGE_PX))
+                else:
+                    self.assertEqual(overlay.holds[1][0], False)  # it shows: the splash opens
+                    self.assertIsNone(overlay.loop_origin())  # a later file's from its start
+
+    def test_the_player_mark_shows_only_after_the_fade(self):
+        window = OpacityWindow()
+        self.addCleanup(window.deleteLater)
+        splash, sent = unwatched(window)
+        splash._origin = ORIGIN
+        overlay = FakeOverlay(window)
+        with mock.patch.object(splash_helper, "_fades_windows", return_value=True):
+            splash.before_show(window)
+            window.show()
+            splash.open_into(window, overlay)
+            pump(0.1)
+            self.assertEqual(names(sent), ["handover"])
+            self.assertGreater(opacity(window), 0.0)  # the window fades at once, as it glides
+            pump(splash_helper.FADE_IN_MS / 1000 + 0.2)
+        self.assertEqual(overlay.holds, [(True, 0.0), (False, 1.0)])  # shown once faded in
+        self.assertIsNone(overlay.loop_origin())  # a later file's draws from its start
+        self.assertEqual(names(sent), ["handover", "quit"])  # then the splash goes
+        self.assertGreaterEqual(
+            sent[1][2] - window.opacities[-1][0], splash_helper.HANDOVER_OVERLAP_MS / 1000 - 0.01
+        )
+
+    def test_an_overlay_that_closes_during_the_glide_falls_back_to_the_open(self):
+        window = OpacityWindow()
+        self.addCleanup(window.deleteLater)
+        splash, sent = unwatched(window)
+        splash._origin = ORIGIN
+        overlay = FakeOverlay(window)
+        with mock.patch.object(splash_helper, "_fades_windows", return_value=True):
+            splash.before_show(window)
+            window.show()
+            splash.open_into(window, overlay)
+            pump(0.1)
+            overlay.drawing = False  # the film's picture showed
+            pump(splash_helper.FADE_IN_MS / 1000 + 0.2)
+        self.assertEqual(names(sent), ["handover", "open"])  # the splash's mark opens out
+        self.assertEqual(overlay.holds[-1][0], False)
+        self.assertLess(overlay.holds[-1][1], 1.0)  # as it closed, not at the fade's end
+        self.assertEqual(opacity(window), 1.0)
+
+    def test_a_splash_that_ends_lets_the_player_mark_show(self):
+        window = OpacityWindow()
+        self.addCleanup(window.deleteLater)
+        splash, sent = unwatched(window)
+        splash._origin = ORIGIN
+        overlay = FakeOverlay(window)
+        with mock.patch.object(splash_helper, "_fades_windows", return_value=True):
+            splash.before_show(window)
+            window.show()
+            splash.open_into(window, overlay)
+            pump(0.1)
+            splash._relay.tell(("ended",))  # it crashed, or was killed
+            pump(0.05)
+            self.assertEqual(overlay.holds[-1][0], False)
+            pump(splash_helper.FADE_IN_MS / 1000)
+        self.assertEqual(names(sent), ["handover"])
+        self.assertEqual(opacity(window), 1.0)
 
     def test_a_window_that_doesnt_fade_still_gets_the_open(self):
         window = OpacityWindow()
@@ -244,7 +404,7 @@ class SplashTests(unittest.TestCase):
             window.show()
             splash.open_into(window)
             pump(0.1)
-        self.assertEqual([message[0] for message, _ in sent], ["open"])
+        self.assertEqual(names(sent), ["open"])
         self.assertEqual(window.opacities, [])
 
     def test_a_close_before_the_open_still_fades_the_window_in(self):
@@ -258,7 +418,7 @@ class SplashTests(unittest.TestCase):
             app.processEvents()
             splash.close()
             pump(splash_helper.FADE_IN_MS / 1000 + 0.2)
-        self.assertEqual([message[0] for message, _ in sent], ["quit"])
+        self.assertEqual(names(sent), ["quit"])
         self.assertEqual(window.opacities[-1][1], 1.0)  # never left transparent
 
     def test_a_helper_that_ignores_quit_is_killed(self):
@@ -340,14 +500,34 @@ class HelperWindowTests(unittest.TestCase):
         deadline = time.monotonic() + 5
         while not self.conn.poll() and time.monotonic() < deadline:
             pump(0.01)
-        self.assertEqual(self.conn.recv(), ("shown",))
+        self.assertEqual(self.conn.recv(), ("shown", self.window.origin))
+        self.assertIsNotNone(self.window.origin)
+        self.conn.send(("quit",))
+        pump(0.1)
+        self.assertFalse(self.window.isVisible())
+        self.assertEqual(self.ended, [1])
+
+    def test_a_handover_glides_onto_the_players_mark_and_quit_ends_it(self):
+        self.assertTrue(self.window.begin())
+        target = QRect(300, 200, STAGE_PX, STAGE_PX)
+        self.conn.send(("handover", (300, 200, STAGE_PX, STAGE_PX)))
+        pump(splash_helper.FADE_IN_MS / 1000 + 0.2)
+        self.assertEqual(self.window.geometry(), target)
+        self.assertTrue(self.window.isVisible())  # it loops on there
+        frame = self.window.frame()
+        self.assertEqual((frame.opening, frame.fade), (0.0, 1.0))  # no grow, no fade
+        self.assertEqual(self.ended, [])
         self.conn.send(("quit",))
         pump(0.1)
         self.assertFalse(self.window.isVisible())
         self.assertEqual(self.ended, [1])
 
     def test_what_came_before_it_shows_ends_it_unseen(self):
-        for message in (("quit",), ("open", (0, 0, 800, 600))):
+        for message in (
+            ("quit",),
+            ("open", (0, 0, 800, 600)),
+            ("handover", (0, 0, STAGE_PX, STAGE_PX)),
+        ):
             with self.subTest(message=message):
                 conn, child = multiprocessing.Pipe(duplex=True)
                 ended = []
@@ -439,7 +619,7 @@ class MainTests(unittest.TestCase):
         # the window starts transparent, then the splash opens into it
         show = body.index("window.show()")
         self.assertLess(body.index("splash.before_show(window)"), show)
-        self.assertLess(show, body.index("splash.open_into(window)"))
+        self.assertLess(show, body.index("splash.open_into(window, window.opening_overlay)"))
         self.assertIn("splash.close()", body.rsplit("finally:", 1)[1])
 
     def test_no_splash_for_smoke_or_replace(self):
