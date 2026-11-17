@@ -2,8 +2,11 @@
 frame timelines, and the window-tree reading. The recording itself needs a Linux box with Xvfb
 and runs by hand."""
 
+import time
 import unittest
+from unittest import mock
 
+from scripts import record_start
 from scripts.record_start import (
     Events,
     Sample,
@@ -151,10 +154,70 @@ class GlyphTest(unittest.TestCase):
         ev = self.ev(out_from=3.0, out_to=4.0)  # from the open on: not judged
         self.assertTrue(by(analyse(self.samples(), ev))["glyph_held"].ok)
 
+    def test_a_one_file_start_that_could_not_be_measured_fails_with_its_reason(self):
+        ev = self.ev()
+        ev.glyph_levels = []  # no frames
+        check = by(analyse(self.samples(), ev))["glyph_held"]
+        self.assertFalse(check.ok)
+        self.assertIn("no frames", check.detail)
+        ev = self.ev()  # no still seen
+        none = [s for s in self.samples() if not s.still and not s.splash]
+        check = by(analyse(none, ev))["glyph_held"]
+        self.assertFalse(check.ok)
+        self.assertIn("not measured", check.detail)
+        ev = self.ev()  # too few frames between the still and the open
+        ev.frame_times, ev.glyph_levels = ev.frame_times[:16], ev.glyph_levels[:16]
+        check = by(analyse(self.samples(), ev))["glyph_held"]
+        self.assertFalse(check.ok)
+        self.assertIn("frame(s)", check.detail)
+
     def test_a_source_start_is_not_judged(self):
         ev = self.ev(out_from=1.5, out_to=2.2)
         ev.onefile = False
         self.assertNotIn("glyph_held", by(analyse(self.samples(), ev)))
+
+
+class SamplerTest(unittest.TestCase):
+    """The sampler thread, with a fake `xwininfo` (no X server)."""
+
+    def run_sampler(self, answers):
+        calls = []
+
+        def fake(cmd, env, timeout=2.0):
+            calls.append(cmd[0])
+            if cmd[0] == "xwininfo":
+                return answers.pop(0) if answers else TREE
+            if cmd[0] == "xdotool":
+                return "8388615 6291463"
+            return ""
+
+        sampler = record_start.Sampler({})
+        with mock.patch.object(record_start, "_run", fake):
+            sampler.start()
+            deadline = time.time() + 5
+            while len(sampler.samples) < 2 and time.time() < deadline:
+                time.sleep(0.02)
+            self.assertTrue(sampler.is_alive())
+            sampler.stop()
+        self.assertFalse(sampler.is_alive())
+        return sampler
+
+    def test_an_empty_tree_does_not_end_the_sampling(self):
+        sampler = self.run_sampler(["", "", ""])  # xwininfo failed three times, then answers
+        self.assertGreaterEqual(len(sampler.samples), 2)
+        self.assertTrue(all(s.splash for s in sampler.samples))  # nothing recorded from a blank
+
+    def test_it_stops_cleanly_and_does_not_shadow_the_threads_own_stop(self):
+        sampler = self.run_sampler([])
+        self.assertNotIn("_stop", vars(sampler))
+
+
+class FramesTest(unittest.TestCase):
+    def test_no_frames_is_the_failure(self):
+        with self.assertRaises(SystemExit) as caught:
+            record_start.require_frames([])
+        self.assertIn("no frames", str(caught.exception))
+        record_start.require_frames([(0.0, b"")])
 
 
 def handover_timeline(splash_until, new_main=False):

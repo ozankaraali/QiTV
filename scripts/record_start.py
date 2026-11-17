@@ -286,9 +286,7 @@ def analyse(samples: Sequence[Sample], ev: Events, scenario: str = "plain") -> R
 
     # 4b. a mark lit from the still never goes out and comes back before the open
     if ev.onefile and not ev.reduced:
-        verdict = _glyph_held(ev, seen.t if seen else None, part)
-        if verdict is not None:
-            checks.append(verdict)
+        checks.append(_glyph_held(ev, seen.t if seen else None, part))
 
     # 5. reduced motion: nothing glides
     if ev.reduced:
@@ -309,11 +307,14 @@ def _on_screen(s: Sample) -> bool:
     return bool(s.mains) and (s.opacity is None or s.opacity > 0)
 
 
-def _glyph_held(ev: Events, first_t: Optional[float], part: Sequence[Sample]) -> Optional[Check]:
+def _glyph_held(ev: Events, first_t: Optional[float], part: Sequence[Sample]) -> Check:
     """From the still to the open (the window's first opacity above 0), the glyph's brightness
-    never falls to the dark tile's: it is lit all along."""
-    if not ev.glyph_levels or first_t is None:
-        return None
+    never falls to the dark tile's: it is lit all along. A recording that cannot say is a
+    failed check, with its reason."""
+    if not ev.glyph_levels:
+        return Check("glyph_held", False, "not measured: no frames were filmed")
+    if first_t is None:
+        return Check("glyph_held", False, "not measured: no still or splash was ever seen")
     opened = _first(part, lambda s: bool(s.mains) and (s.opacity or 0.0) > 0.0)
     if opened is None:
         return Check("glyph_held", False, "the window never opened")
@@ -323,7 +324,11 @@ def _glyph_held(ev: Events, first_t: Optional[float], part: Sequence[Sample]) ->
         if first_t + GLYPH_SETTLE_S <= t <= opened.t - SAMPLE_S
     ]
     if len(span) < 3:
-        return None
+        return Check(
+            "glyph_held",
+            False,
+            f"not measured: {len(span)} frame(s) between the still and the open (need 3)",
+        )
     ref = sorted(span)[len(span) // 2]
     low = min(span)
     return Check(
@@ -472,14 +477,14 @@ class Sampler(threading.Thread):
         self.env = env
         self.samples: list[Sample] = []
         self._last_main = ""
-        self._stop = threading.Event()
+        self._done = threading.Event()
 
     def stop(self) -> None:
-        self._stop.set()
+        self._done.set()
         self.join(5)
 
     def run(self) -> None:
-        while not self._stop.is_set():
+        while not self._done.is_set():
             began = time.time()
             visible: set[str] = set()
             for field_ in ("--name", "--class"):  # the splash has a class and no title
@@ -487,7 +492,7 @@ class Sampler(threading.Thread):
                 visible |= {"0x%x" % int(i) for i in found.split()}
             tree = parse_tree(_run(["xwininfo", "-root", "-tree"], self.env))
             if not tree:  # a tool call that failed or timed out says nothing about the screen
-                self._halt.wait(SAMPLE_S)
+                self._done.wait(SAMPLE_S)
                 continue
             sample = classify(tree, visible, None)
             if sample.mains:
@@ -500,7 +505,7 @@ class Sampler(threading.Thread):
                 sample.note = f"{self._last_main}: {m.group(1) if m else 'gone'}"
             sample.t = began
             self.samples.append(sample)
-            self._stop.wait(max(0.0, SAMPLE_S - (time.time() - began)))
+            self._done.wait(max(0.0, SAMPLE_S - (time.time() - began)))
 
     def _opacity(self, win: str) -> Optional[float]:
         out = _run(["xprop", "-id", win, "_NET_WM_WINDOW_OPACITY"], self.env)
@@ -554,6 +559,12 @@ class Grabber:
         except subprocess.TimeoutExpired:
             self.proc.kill()
         self.thread.join(5)
+
+
+def require_frames(frames: Sequence[Any]) -> None:
+    """ffmpeg filmed nothing (no screen grab): that is the failure, not a missing file later."""
+    if not frames:
+        raise SystemExit("record_start: ffmpeg filmed no frames (is x11grab available?)")
 
 
 def glyph_levels(frames: list[tuple[float, bytes]]) -> list[float]:
@@ -679,6 +690,7 @@ def record(scenario: str, out: Path, app: Path) -> tuple[list[Sample], Events, d
         log.close()
         samples = sampler.samples
         frames = grab.frames
+        require_frames(frames)
         ev.frame_times = [t for t, _ in frames]
         ev.frame_diffs = frame_diffs(frames, base)
         ev.glyph_levels = glyph_levels(frames)
@@ -776,6 +788,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     args = ap.parse_args(argv)
     if "DBUS_SESSION_BUS_ADDRESS" not in os.environ and shutil.which("dbus-run-session"):
         os.execvp("dbus-run-session", ["dbus-run-session", "--", sys.executable, *sys.argv])
+    args.out.mkdir(parents=True, exist_ok=True)
     samples, ev, files = record(args.scenario, args.out, args.app)
     report = analyse(samples, ev, args.scenario)
     print(render(report))
