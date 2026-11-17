@@ -119,6 +119,29 @@ class FramesTests(unittest.TestCase):
             self.assertEqual(bare.pixelColor(*inside), full.pixelColor(*inside), inside)
         self.assertFalse(OpeningMark().bare)  # a mark paints all of itself unless told
 
+    def test_its_light_and_shadow_come_in_as_one_amount(self):
+        # The splash taking over from the bootloader's still (its bare tile and glyph): the
+        # light and the shadow come in from none, the tile and the glyph unchanged.
+        def stage(**kwargs):
+            image = QImage(240, 240, QImage.Format.Format_ARGB32_Premultiplied)
+            image.fill(Qt.GlobalColor.transparent)
+            painter = QPainter(image)
+            rect = mark_rect(QRectF(0, 0, 240, 240), opening_mark.MARK_PX)
+            paint_mark(painter, rect, opening_mark.STILL_T, **kwargs)
+            painter.end()
+            return image
+
+        none, half, full = stage(light=0.0), stage(light=0.5), stage()
+        self.assertEqual(none, stage(bare=True))
+        self.assertEqual(stage(light=1.0), full)
+        for outside in ((50, 120), (120, 174)):  # the light beside the tile; its shadow below
+            levels = [image.pixelColor(*outside).alpha() for image in (none, half, full)]
+            self.assertEqual(levels[0], 0, outside)
+            self.assertLess(levels[1], levels[2], outside)
+            self.assertGreater(levels[1], 0, outside)
+        for inside in ((120, 124), (80, 80), (150, 100)):  # the tile and the glyph
+            self.assertEqual(half.pixelColor(*inside), full.pixelColor(*inside), inside)
+
     def test_the_mark_is_gone_at_98_percent_but_the_tile_stays(self):
         image = render(0.985)
         self.assertTrue(near(at(image, BASE_INSIDE), TILE), at(image, BASE_INSIDE).name())
@@ -419,6 +442,49 @@ class WidgetTests(unittest.TestCase):
                 break
             app.processEvents()
         self.assertEqual(late, [1])
+
+    def test_a_light_in_fades_its_light_in_from_start(self):
+        self.mark.start(light_in_s=0.3)
+        self.assertEqual(self.mark.frame().light, 0.0)
+        self.clock.now += 0.15
+        self.assertAlmostEqual(self.mark.frame().light, 0.5, delta=0.01)  # eased: half way
+        self.clock.now += 0.075
+        self.assertTrue(0.5 < self.mark.frame().light < 1.0)
+        self.clock.now += 0.075
+        self.assertEqual(self.mark.frame().light, 1.0)
+        other = OpeningMark(clock=self.clock)
+        self.addCleanup(other.deleteLater)
+        other.start()
+        self.assertEqual(other.frame().light, 1.0)  # without one, all of it from the start
+
+    def test_a_light_in_under_reduced_motion_is_a_plain_fade(self):
+        # The held, lit frame, its light fading in: nothing moves; the timer stops after.
+        self.reduced.return_value = True
+        self.mark.start(light_in_s=0.3)
+        self.mark.show()
+        self.assertTrue(self.mark._timer.isActive())
+        self.clock.now += 0.15
+        frame = self.mark.frame()
+        self.assertTrue(frame.still)
+        self.assertTrue(0.0 < frame.light < 1.0)
+        self.clock.now += 0.16
+        self.mark._tick()
+        self.assertEqual(self.mark.frame().light, 1.0)
+        self.assertFalse(self.mark._timer.isActive())
+
+    def test_it_paints_the_light_its_frame_says(self):
+        self.mark.resize(240, 240)
+        self.mark.start(light_in_s=0.3)
+
+        def beside_the_tile():
+            image = QImage(240, 240, QImage.Format.Format_ARGB32_Premultiplied)
+            image.fill(Qt.GlobalColor.transparent)
+            self.mark.render(image, QPoint(), QRegion(), QWidget.RenderFlag.DrawChildren)
+            return image.pixelColor(64, 120).alpha()  # 6 px beside the tile
+
+        self.assertEqual(beside_the_tile(), 0)
+        self.clock.now += 0.3
+        self.assertGreater(beside_the_tile(), 0)
 
     def test_reduced_motion_holds_the_lit_frame_and_fades_plainly(self):
         self.reduced.return_value = True

@@ -256,10 +256,12 @@ def paint_mark(
     still: bool = False,
     opening: float = 0.0,
     bare: bool = False,
+    light: float = 1.0,
 ) -> None:
     """QiTV's mark at loop phase `t` (0..1): its light, the tile and its shadow, the outline
     drawn so far and the fill; `bare`, the tile and the glyph only (the opaque parts: where the
-    same mark's light and shadow show under it, they are not drawn twice).
+    same mark's light and shadow show under it, they are not drawn twice). `light` (0..1) is
+    how much of its light and shadow shows (0: as bare).
 
     `rect` is the mark's square, its tile's 416 grid (MARK_PX on screen; a non-square rect
     uses the square in its middle). The light spills out of it, to LIGHT_PX/MARK_PX of its side
@@ -280,10 +282,18 @@ def paint_mark(
         scale = side / GRID * (1.0 + OPEN_GROWTH * opening)
         p.scale(scale, scale)
         p.translate(-GRID / 2, -GRID / 2)
+        if light <= 0.0:
+            bare = True
+        light = min(light, 1.0)
         if opening > 0.0 or p.opacity() < 1.0:
-            _in_layer(p, _stage_bounds(phase), 1.0 - opening, lambda q: _paint_all(q, phase, bare))
+            _in_layer(
+                p,
+                _stage_bounds(phase),
+                1.0 - opening,
+                lambda q: _paint_all(q, phase, bare, light),
+            )
         else:
-            _paint_all(p, phase, bare)
+            _paint_all(p, phase, bare, light)
     finally:
         p.restore()
 
@@ -326,9 +336,11 @@ def _in_layer(
         p.restore()
 
 
-def _paint_all(p: QPainter, t: float, bare: bool = False) -> None:
+def _paint_all(p: QPainter, t: float, bare: bool = False, light: float = 1.0) -> None:
     p.setPen(Qt.PenStyle.NoPen)
     if not bare:
+        p.save()
+        p.setOpacity(p.opacity() * light)
         _paint_light(p, t)
         p.setPen(Qt.PenStyle.NoPen)
         shadow = QRectF(TILE).translated(0, _SHADOW_DY)
@@ -336,6 +348,7 @@ def _paint_all(p: QPainter, t: float, bare: bool = False) -> None:
             p.setBrush(QColor.fromRgbF(0.0, 0.0, 0.0, alpha))
             radius = TILE_RADIUS + growth
             p.drawRoundedRect(shadow.adjusted(-growth, -growth, growth, growth), radius, radius)
+        p.restore()
     p.setBrush(TILE_COLOR)
     p.drawRoundedRect(TILE, TILE_RADIUS, TILE_RADIUS)
     _paint_glyph(p, t)
@@ -393,13 +406,14 @@ def _draw_glyph(p: QPainter, drawn: float, filled: float) -> None:
 
 
 class Frame(NamedTuple):
-    """What OpeningMark paints at a moment: paint_mark's `t`, `still` and `opening`, and the
-    plain fade's opacity (reduced motion; 1.0 otherwise)."""
+    """What OpeningMark paints at a moment: paint_mark's `t`, `still`, `opening` and `light`,
+    and the plain fade's opacity (reduced motion; 1.0 otherwise)."""
 
     t: float
     still: bool
     opening: float
     fade: float
+    light: float = 1.0
 
 
 @dataclass(frozen=True)
@@ -432,6 +446,7 @@ class OpeningMark(QWidget):
         self._clock = clock
         self._mark_px = float(mark_px)
         self._started: Optional[float] = None
+        self._light_in: Optional[tuple[float, float]] = None  # (from when, for how long)
         # Only the tile and the glyph (paint_mark's `bare`): another mark's light shows under it.
         self.bare = False
         self._still = False
@@ -457,15 +472,19 @@ class OpeningMark(QWidget):
         """When its loop began, on its clock (None before start())."""
         return self._started
 
-    def start(self, origin: Optional[float] = None) -> None:
+    def start(self, origin: Optional[float] = None, *, light_in_s: float = 0.0) -> None:
         """Runs the loop from its beginning: now, or at `origin`, a time on its clock (by
         default time.monotonic, one clock for every process on the computer: another process's
         mark started at the same origin shows the same frame at the same moment). While it
         loops, or while a finish runs (its `then` always comes), this does nothing; once the
-        mark is done it starts again."""
+        mark is done it starts again. `light_in_s`: its light and shadow come in from none
+        over that long from now, eased (the splash taking over from the bootloader's still,
+        which has neither); a plain fade under reduced motion too."""
         if not self._done and (self._started is not None or self._finish is not None):
             return
-        self._started = self._clock() if origin is None else origin
+        now = self._clock()
+        self._started = now if origin is None else origin
+        self._light_in = (now, light_in_s) if light_in_s > 0.0 else None
         self._finish = None
         self._done = False
         self._then = []
@@ -505,6 +524,19 @@ class OpeningMark(QWidget):
     def frame(self, now: Optional[float] = None) -> Frame:
         """What the mark shows at `now` (the clock's time; by default, now)."""
         now = self._clock() if now is None else now
+        return self._frame(now)._replace(light=self._light(now))
+
+    def _light(self, now: float) -> float:
+        """How much of its light shows at `now`: all of it, unless it is coming in."""
+        if self._light_in is None:
+            return 1.0
+        since, span = self._light_in
+        return _ease_in_out((now - since) / span)
+
+    def _lighting(self) -> bool:
+        return self._light_in is not None and self._light(self._clock()) < 1.0
+
+    def _frame(self, now: float) -> Frame:
         finish = self._finish
         if self._done:
             return Frame(finish.end if finish else STILL_T, self._still, 1.0, 0.0)
@@ -536,6 +568,8 @@ class OpeningMark(QWidget):
         elif not self._still and self._started is not None and self.reduced_motion():
             self._still = True  # known late (Linux asks on a worker): hold the lit frame
             self._update_timer()
+        elif self._still:
+            self._update_timer()  # once its light has come in, nothing moves
         self.update()
 
     def _end(self) -> None:
@@ -550,7 +584,8 @@ class OpeningMark(QWidget):
                 logger.exception("A callback after the opening mark failed")
 
     def _update_timer(self) -> None:
-        looping = self._started is not None and not self._still and not self._done
+        looping = self._started is not None and (not self._still or self._lighting())
+        looping = looping and not self._done
         runs = not self._done and (self._finish is not None or (looping and self.isVisible()))
         if runs and not self._timer.isActive():
             self._timer.start()
@@ -573,7 +608,15 @@ class OpeningMark(QWidget):
         try:
             p.setOpacity(frame.fade)
             rect = mark_rect(QRectF(self.rect()), self._mark_px)
-            paint_mark(p, rect, frame.t, still=frame.still, opening=frame.opening, bare=self.bare)
+            paint_mark(
+                p,
+                rect,
+                frame.t,
+                still=frame.still,
+                opening=frame.opening,
+                bare=self.bare,
+                light=frame.light,
+            )
         finally:
             p.end()
 

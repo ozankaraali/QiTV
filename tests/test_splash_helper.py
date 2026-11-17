@@ -720,6 +720,7 @@ class HelperWindowTests(unittest.TestCase):
         self.assertEqual(self.conn.recv(), ("shown", self.window.origin))
         self.assertIsNotNone(self.window.origin)
         self.assertLess(self.window.frame().t, 0.25)  # its loop begins: the line draws
+        self.assertEqual(self.window.frame().light, 1.0)  # with all of its light
         self.conn.send(("quit",))
         self.assertTrue(pump_until(lambda: self.ended))
         self.assertFalse(self.window.isVisible())
@@ -812,8 +813,12 @@ class HelperWindowTests(unittest.TestCase):
         frame = window.frame()
         self.assertAlmostEqual(frame.t, STILL_T, delta=0.02)
         self.assertEqual((frame.opening, frame.fade), (0.0, 1.0))
+        # The still is its bare tile and glyph: its light and shadow come in as it takes over.
+        self.assertLess(frame.light, 0.2)
         self.assertTrue(pump_until(conn.poll))
         self.assertEqual(conn.recv(), ("shown", window.origin))
+        light_in = splash_helper.LIGHT_IN_MS / 1000
+        self.assertTrue(pump_until(lambda: window.frame().light == 1.0, timeout=10 * light_in))
 
     def test_a_closed_pipe_ends_it(self):
         self.assertTrue(self.window.begin())

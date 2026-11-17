@@ -1,7 +1,9 @@
-"""The build's splash image (scripts/render_splash.py): QiTV's held, lit mark, 240 px square with
-a transparent outside, the very frame the splash helper (ui/splash_helper.py) first shows over
-it; the Windows and Linux one-file apps show it from PyInstaller's bootloader while they unpack,
-the macOS app doesn't, and CI renders it (and checks for Tcl/Tk) before packaging."""
+"""The build's splash image (scripts/render_splash.py): the bare tile and lit glyph of QiTV's held,
+lit mark, MARK_PX square, which PyInstaller's bootloader shows on Windows (its corners keyed
+out: every pixel opaque or transparent) and Linux (its corners the tile's colour: Tk there has
+no transparency) while the one file unpacks; the splash helper's first frame has the same tile
+and glyph in the same place, its light and shadow then coming in. The macOS app has none, and
+CI renders it (and checks for Tcl/Tk) before packaging."""
 
 import ast
 import os
@@ -10,14 +12,24 @@ import subprocess
 import sys
 import tempfile
 import unittest
+from unittest import mock
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
-from PySide6.QtCore import QPoint, Qt
-from PySide6.QtGui import QColor, QImage, QRegion
+from PySide6.QtCore import QPoint, QRect, Qt
+from PySide6.QtGui import QColor, QGuiApplication, QImage, QRegion
 from PySide6.QtWidgets import QApplication, QWidget
 
-from ui.opening_mark import FILL_COLOR, LOOP_S, STAGE_PX, STILL_T, TILE_COLOR, OpeningMark
+from ui import splash_helper
+from ui.opening_mark import (
+    FILL_COLOR,
+    LOOP_S,
+    MARK_PX,
+    STAGE_PX,
+    STILL_T,
+    TILE_COLOR,
+    OpeningMark,
+)
 
 app = QApplication.instance() or QApplication([])
 
@@ -25,13 +37,14 @@ ROOT = Path(__file__).resolve().parent.parent
 SCRIPT = ROOT / "scripts" / "render_splash.py"
 WORKFLOW = ROOT / ".github" / "workflows" / "main.yml"
 NO_SCREEN = ("QT_QPA_PLATFORM", "DISPLAY", "WAYLAND_DISPLAY")
+INSET = (STAGE_PX - MARK_PX) // 2  # where the mark's square sits in the helper's window
 
 
-def render(out: Path) -> QImage:
+def render(out: Path, style: str) -> QImage:
     """The script run as CI runs it, with no screen and no Qt platform chosen."""
     env = {k: v for k, v in os.environ.items() if k not in NO_SCREEN}
     result = subprocess.run(
-        [sys.executable, str(SCRIPT), str(out)],
+        [sys.executable, str(SCRIPT), "--style", style, str(out)],
         cwd=ROOT,
         env=env,
         capture_output=True,
@@ -52,14 +65,19 @@ def near(color: QColor, wanted: QColor, slack: int = 6) -> bool:
     )
 
 
+def pixels(image: QImage) -> list[tuple[int, int, QColor]]:
+    width, height = image.width(), image.height()
+    return [(x, y, image.pixelColor(x, y)) for x in range(width) for y in range(height)]
+
+
 def helper_first_frame() -> QImage:
-    """What the splash helper's window paints first over the bootloader's splash: its mark
-    started at the lit frame's origin, onto a transparent window, at one device pixel per
-    pixel."""
+    """What the splash helper's window paints first over the bootloader's still: its mark
+    started at the lit frame's origin, its light coming in from none, onto a transparent
+    window, at one device pixel per pixel."""
     now = 1000.0
     mark = OpeningMark(clock=lambda: now)
     mark.resize(STAGE_PX, STAGE_PX)
-    mark.start(now - STILL_T * LOOP_S)
+    mark.start(now - STILL_T * LOOP_S, light_in_s=splash_helper.LIGHT_IN_MS / 1000)
     image = QImage(STAGE_PX, STAGE_PX, QImage.Format.Format_ARGB32_Premultiplied)
     image.fill(Qt.GlobalColor.transparent)
     mark.render(image, QPoint(), QRegion(), QWidget.RenderFlag.DrawChildren)
@@ -72,34 +90,71 @@ class RenderSplashTests(unittest.TestCase):
     def setUpClass(cls):
         folder = tempfile.TemporaryDirectory()
         cls.addClassCleanup(folder.cleanup)
-        cls.image = render(Path(folder.name) / "nested" / "splash.png")
+        cls.windows = render(Path(folder.name) / "nested" / "windows.png", "windows")
+        cls.linux = render(Path(folder.name) / "linux.png", "linux")
+        cls.shown = helper_first_frame()
 
-    def test_it_is_240_px_square_transparent_outside_and_lit_inside(self):
-        image = self.image
-        self.assertEqual((image.width(), image.height()), (STAGE_PX, STAGE_PX))
-        last = STAGE_PX - 1
-        for x, y in ((0, 0), (last, 0), (0, last), (last, last)):
-            self.assertEqual(image.pixelColor(x, y).alpha(), 0, (x, y))
-        # The mark's square, 104 px in the middle: its tile, and its glyph filled (lit).
-        square = [image.pixelColor(x, y) for x in range(68, 172) for y in range(68, 172)]
-        opaque = [color for color in square if color.alpha() == 255]
+    def lit_tile(self, image):
+        """The glyph filled (lit) on the tile."""
+        opaque = [color for _x, _y, color in pixels(image) if color.alpha() == 255]
         self.assertGreater(sum(near(c, FILL_COLOR) for c in opaque), 500)
         self.assertGreater(sum(near(c, TILE_COLOR) for c in opaque), 2000)
-        # The light around the tile: a translucent coral, fading out before the corners.
-        light = image.pixelColor(STAGE_PX // 2, 46)
-        self.assertTrue(0 < light.alpha() < 255, light.alpha())
-        self.assertGreater(light.red(), light.blue())
 
-    def test_it_is_the_frame_the_splash_helper_first_shows(self):
-        # The helper's window replaces the bootloader's: the same pixels, so the swap is unseen.
-        shown = helper_first_frame()
-        differences = [
-            max(abs(a - b) for a, b in zip(self.image.pixelColor(x, y).getRgb(), c.getRgb()))
-            for x in range(STAGE_PX)
-            for y in range(STAGE_PX)
-            for c in (shown.pixelColor(x, y),)
+    def test_on_windows_every_pixel_is_opaque_or_keyed_out(self):
+        # Tk keys out one colour there: a pixel partly transparent would show it as a fringe.
+        image = self.windows
+        self.assertEqual((image.width(), image.height()), (MARK_PX, MARK_PX))
+        self.assertEqual({color.alpha() for _x, _y, color in pixels(image)}, {0, 255})
+        last = MARK_PX - 1
+        for x, y in ((0, 0), (last, 0), (0, last), (last, last)):
+            self.assertEqual(image.pixelColor(x, y).alpha(), 0, (x, y))
+        self.lit_tile(image)
+
+    def test_on_linux_the_corners_are_the_tiles_colour(self):
+        # Tk there shows no transparency: a square dark tile, never a grey box around it.
+        image = self.linux
+        self.assertEqual((image.width(), image.height()), (MARK_PX, MARK_PX))
+        self.assertEqual({color.alpha() for _x, _y, color in pixels(image)}, {255})
+        last = MARK_PX - 1
+        for x, y in ((0, 0), (last, 0), (0, last), (last, last), (1, 50), (50, last)):
+            self.assertEqual(image.pixelColor(x, y).rgb(), TILE_COLOR.rgb(), (x, y))
+        self.lit_tile(image)
+
+    def test_the_helper_first_shows_the_same_tile_and_glyph_with_no_light(self):
+        # Where the still is opaque and so is the helper's first frame, the pixels are the
+        # same; around the tile the helper draws nothing yet (its light and shadow come in).
+        for name, still in (("windows", self.windows), ("linux", self.linux)):
+            with self.subTest(name):
+                compared = []
+                for x, y, color in pixels(still):
+                    shown = self.shown.pixelColor(INSET + x, INSET + y)
+                    if color.alpha() == 255 and shown.alpha() == 255:
+                        compared.append(
+                            max(abs(a - b) for a, b in zip(color.getRgb(), shown.getRgb()))
+                        )
+                self.assertGreater(len(compared), 9000)  # the 100 px tile but its corners
+                self.assertLessEqual(max(compared), 1)
+        outside = [
+            color.alpha()
+            for x, y, color in pixels(self.shown)
+            if not (INSET <= x < INSET + MARK_PX and INSET <= y < INSET + MARK_PX)
         ]
-        self.assertLessEqual(max(differences), 1)
+        self.assertEqual(set(outside), {0})
+
+    def test_the_still_sits_where_the_helpers_tile_is(self):
+        # Tk centres the still as the helper centres its window (int(x + 0.5 * spare room));
+        # 240 - 104 is even, so the still's corner is the helper's tile's on any screen.
+        for area in (QRect(0, 0, 1280, 800), QRect(0, 0, 1281, 801), QRect(1920, -40, 1367, 769)):
+            with self.subTest(area=area):
+                screen = mock.Mock()
+                screen.geometry.return_value = area
+                with mock.patch.object(QGuiApplication, "primaryScreen", return_value=screen):
+                    window = splash_helper.centred_on_primary()
+                still = (
+                    area.x() + int(0.5 * (area.width() - MARK_PX)),
+                    area.y() + int(0.5 * (area.height() - MARK_PX)),
+                )
+                self.assertEqual((window.x() + INSET, window.y() + INSET), still)
 
 
 def calls(spec: str) -> dict:

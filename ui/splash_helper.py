@@ -20,10 +20,11 @@ KILL_AFTER_S after its first command if it hasn't ended by then. The helper ends
 it finds the pipe closed (QiTV died, or ended before its window showed).
 
 Over PyInstaller's bootloader splash (the Windows and Linux one-file apps show the build's
-still, scripts/render_splash.py, while they unpack), start(lit=True) has the helper's mark begin
-on that held, lit frame, in the same 240 px square centred as Tk centres it: once "shown", QiTV
-closes the bootloader's (main.BootloaderSplash, through `on_shown`, or `on_end` if the helper
-ends unshown).
+still while they unpack: the held, lit frame's bare tile and glyph, scripts/render_splash.py),
+start(lit=True) has the helper's mark begin on that frame, its tile where the still's is (both
+centred as Tk centres), its light and shadow coming in over LIGHT_IN_MS: the mark lights up as
+it takes over. Once "shown", QiTV closes the bootloader's (main.BootloaderSplash, through
+`on_shown`, or `on_end` if the helper ends unshown).
 
 The helper process imports PySide6's GUI modules and the mark only (and ui.macos_window on
 macOS, where it takes no Dock icon or menu bar).
@@ -81,6 +82,7 @@ SWAP_POLL_MS = 5
 HANDOVER_OVERLAP_MS = 50
 HANDOVER_LIMIT_MS = 1000  # after its glide: a helper never told to quit ends by itself
 GLIDE_MAX_PX = 160  # farther (another screen, a window off the middle): it opens out instead
+LIGHT_IN_MS = 300  # over the bootloader's still (no light, no shadow): they come in as it shows
 FADING_PLATFORMS = ("xcb", "windows", "cocoa")  # Qt platforms that fade a window
 # NSApplicationActivationPolicyAccessory: no Dock icon and no menu bar, windows allowed.
 NS_ACTIVATION_POLICY_ACCESSORY = 1
@@ -634,7 +636,7 @@ class _SplashWindow(OpeningMark):
     once there, it draws only its tile and glyph. It then waits for "quit", or "open" (the
     player's mark went), and ends by itself HANDOVER_LIMIT_MS after its first glide. "quit" and
     a closed pipe end it at once. `on_end` quits the app. `lit`: its loop begins on the held,
-    lit frame (STILL_T), the bootloader's splash it shows over.
+    lit frame (STILL_T), the bootloader's still it shows over, its light coming in.
     """
 
     def __init__(
@@ -682,8 +684,12 @@ class _SplashWindow(OpeningMark):
         if _platform_name() == "cocoa":
             _hide_from_dock()  # before the window shows: no Dock icon, no menu bar
         self.show()
-        # Over the bootloader's still: from that frame on (held lit, gone, drawn again).
-        self.start(time.monotonic() - STILL_T * LOOP_S if self._lit else None)
+        # Over the bootloader's still: from that frame on (held lit, gone, drawn again), its
+        # light and shadow coming in.
+        if self._lit:
+            self.start(time.monotonic() - STILL_T * LOOP_S, light_in_s=LIGHT_IN_MS / 1000)
+        else:
+            self.start()
         self._poller.start()
         return True
 
