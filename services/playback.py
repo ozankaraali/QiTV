@@ -52,6 +52,12 @@ input (`_player_free`): what is asked for meanwhile is set once the next media o
 take (no bars): the stream's own is read from libVLC's track list only when asked, while a
 picture plays, at most once a second once known.
 
+What plays is told for the audio screen: `has_video_track()` (a picture at all, from libVLC's
+track list once it has played; None before) and `tags()` (its tags and art URL as libVLC read
+them, services.song_facts), both read from the playing media when asked. A file that is not
+playing is never parsed here: services.album_listing does that on a worker, with an instance
+of its own.
+
 With hardware decoding (Settings; `hardware`), each tick while a stream plays reads libVLC's
 media statistics: once its picture stood still while its sound played (`FrozenPicture`, which
 has the lab) where pictures can show (`_can_show`: on a window system, or once VLC made a video
@@ -91,6 +97,7 @@ from services import casting, picture
 from services.i18n import N_, tr, translate
 from services.jobs import JobRunner
 from services.picture_watch import Counters, FrozenPicture
+from services.song_facts import META_KEYS, song_tags, stand_in_names
 from services.sound_watch import SoundWatch
 from services.stream_address import NO_STREAM_MESSAGE, playable, shape
 from services.vlc_profile import PlayKind, media_options
@@ -1328,6 +1335,45 @@ class PlaybackSession(QObject):
             stats["decoding"] = "froze" if self._software else "hardware"
         return stats
 
+    def has_video_track(self) -> Optional[bool]:
+        """The media playing has a video track (True) or only sound (False: a song, a radio
+        channel); None until known (nothing plays, it has not played yet, libVLC lists no
+        track yet) and while a worker ends an input. Read from libVLC's track list each time
+        (a cheap read on the GUI thread, as `video_stats`): a channel's picture may come or go."""
+        if vlc is None or not self._player_free() or not self._has_input or not self._ever_played:
+            return None
+        media = self._player.get_media()
+        if media is None:
+            return None
+        try:
+            found = _track_stats(media)
+        finally:
+            media.release()
+        if "video_codec" in found:
+            return True
+        if "audio_codec" in found:
+            return False
+        return None
+
+    def tags(self) -> dict[str, Any]:
+        """The tags of the media playing as libVLC read them (song_facts.song_tags: every key,
+        "" or None where it says nothing; all of them so while nothing plays). A cheap read on
+        the GUI thread: a file's tags and its embedded picture's art URL (a file:// one in
+        libVLC's art cache) are there once it plays, a stream's song (`now_playing`) as it
+        changes."""
+        if vlc is None or not self._player_free() or not self._has_input:
+            return song_tags({})
+        media = self._player.get_media()
+        if media is None:
+            return song_tags({})
+        try:
+            meta = {name: media.get_meta(getattr(vlc.Meta, name)) for name in META_KEYS}
+            duration = int(media.get_duration() or 0)
+            mrl = media.get_mrl() or ""
+        finally:
+            media.release()
+        return song_tags(meta, stand_ins=stand_in_names(mrl, self._url), duration_ms=duration)
+
     def release(self) -> None:
         """Release the player; with an input still open, after a worker has stopped it.
 
@@ -1735,6 +1781,10 @@ class Session(Protocol):
 
     def video_stats(self) -> dict[str, Any]: ...
 
+    def has_video_track(self) -> Optional[bool]: ...
+
+    def tags(self) -> dict[str, Any]: ...
+
     def release(self) -> None: ...
 
 
@@ -1932,6 +1982,12 @@ class NullSession(QObject):
 
     def video_stats(self) -> dict[str, Any]:
         return {}
+
+    def has_video_track(self) -> Optional[bool]:
+        return None
+
+    def tags(self) -> dict[str, Any]:
+        return song_tags({})
 
     def release(self) -> None:
         pass
