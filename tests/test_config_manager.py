@@ -94,6 +94,23 @@ class WindowConfigMigrationTests(unittest.TestCase):
                 self.assertTrue(reloaded.ai_captions_local_on)
                 self.assertEqual(reloaded.ai_captions_model, "small")
 
+    def test_file_types_are_none_until_registered_and_kept(self):
+        # An older config has none; anything but a dict reads as none.
+        with tempfile.TemporaryDirectory() as directory:
+            config_path = Path(directory) / "config.json"
+            config_path.write_text(json.dumps({"ai_captions_model": "small"}), encoding="utf-8")
+            with patch.object(ConfigManager, "_get_config_path", return_value=str(config_path)):
+                config = ConfigManager()
+                self.assertEqual(config.file_types, {})
+                for stored in ("videos", ["videos"], 5, None):
+                    config.config["file_types"] = stored
+                    self.assertEqual(config.file_types, {}, stored)
+                config.file_types = {"videos": "/opt/qitv/qitv-linux"}
+                config.save_config(wait=True)
+                reloaded = ConfigManager()
+                self.assertEqual(reloaded.file_types, {"videos": "/opt/qitv/qitv-linux"})
+                self.assertEqual(reloaded.ai_captions_model, "small")
+
     def test_a_1x_config_gains_the_tv_window_without_resetting_saved_state(self):
         # A 1.x config names only the old windows. A missing window entry once kept the
         # player from starting (KeyError in 1.13.7); the TV window's entry is added instead.

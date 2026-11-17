@@ -609,6 +609,12 @@ class ConfigManager:
     ai_captions_local_on = _config_property(
         "ai_captions_local_on", False, coerce=lambda v: v is True
     )
+    # Optional (older builds ignore it): the kinds of files QiTV registered itself for with the
+    # system, and the executable registered ({"videos": "<path>"}); services.file_types reads
+    # it and assigns a new dict (the default is shared: never changed in place).
+    file_types = _config_property(
+        "file_types", {}, coerce=lambda v: v if isinstance(v, dict) else {}
+    )
     watch_history = _config_property("watch_history", [])
     playback_positions = _config_property("playback_positions", {})
 
