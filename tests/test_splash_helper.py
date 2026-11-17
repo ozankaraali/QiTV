@@ -12,6 +12,7 @@ import gc
 import json
 import multiprocessing
 from multiprocessing import context as mp_context
+from multiprocessing.connection import wait
 import os
 from pathlib import Path
 import subprocess
@@ -759,6 +760,52 @@ class SplashTests(unittest.TestCase):
         first_turn = time.monotonic()
         self.assertTrue(pump_until(lambda: called))
         self.assertGreaterEqual(called[0] - first_turn, splash_helper.WINDOW_WAIT_MS / 1000 - 0.05)
+
+    def test_stop_ends_the_helper_at_once_without_the_watcher(self):
+        # QiTV's crash: the watcher may never run again (a windowed Windows build's error
+        # dialog holds Python's lock), so the helper ends from here, whatever it does.
+        shown = threading.Event()
+        with mock.patch.object(splash_helper, "run_splash", stubborn):
+            splash = Splash(on_shown=shown.set)
+            self.assertTrue(splash.start(QRect(*GEOMETRY)))
+            self.addCleanup(splash._process.kill)
+            self.assertTrue(shown.wait(SPAWN_S))
+            with mock.patch.object(splash, "_commands") as commands:
+                splash.stop()
+            commands.put.assert_not_called()  # nothing for the watcher to send
+            # (a stubborn helper sleeps 60 s; its end read from its sentinel: the watcher may
+            # reap it first)
+            self.assertTrue(wait([splash._process.sentinel], WAIT_S))
+        with self.assertNoLogs("ui.splash_helper", "WARNING"):  # QiTV's own end of it
+            splash._watcher.join(KILL_WAIT_S)
+
+    def test_stop_never_raises(self):
+        Splash().stop()  # never started
+        splash = Splash()
+        splash._process = mock.Mock()
+        splash._process.terminate.side_effect = OSError("no such process")
+        splash.stop()
+        splash._process.terminate.assert_called_once_with()
+
+    def test_qitvs_crash_ends_the_splash(self):
+        # main() hands Splash.stop to its crash hook: an error nothing handled ends the
+        # helper as it is logged.
+        import main
+
+        self.addCleanup(setattr, sys, "excepthook", sys.excepthook)
+        logged = []
+        sys.excepthook = lambda *exc: logged.append(exc[0])
+        shown = threading.Event()
+        with mock.patch.object(splash_helper, "run_splash", stubborn):
+            splash = Splash(on_shown=shown.set)
+            self.assertTrue(splash.start(QRect(*GEOMETRY)))
+            self.addCleanup(splash._process.kill)
+            self.assertTrue(shown.wait(SPAWN_S))
+            main.close_on_crash(splash.stop)
+            sys.excepthook(RuntimeError, RuntimeError("the window failed"), None)
+            self.assertTrue(wait([splash._process.sentinel], WAIT_S))
+        self.assertEqual(logged, [RuntimeError])
+        splash._watcher.join(KILL_WAIT_S)
 
     def test_a_helper_that_ignores_quit_is_killed(self):
         shown = threading.Event()

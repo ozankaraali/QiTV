@@ -103,7 +103,8 @@ Geometry = tuple[int, int, int, int]  # x, y, width, height
 
 class Splash:
     """The splash as QiTV drives it, from its GUI thread: start(), then open_into(window) or
-    close(). Each does nothing once the splash didn't start; none of them waits.
+    close() (stop(), from QiTV's crash). Each does nothing once the splash didn't start; none
+    of them waits.
 
     `on_shown` is called once, on the watcher thread (it must not touch Qt), when the helper's
     window has painted; never when it doesn't show. `on_end` is called once there too, when the
@@ -217,6 +218,20 @@ class Splash:
         if self._process is not None and not self._closed:
             self._closed = True
             self._commands.put(("quit",))
+
+    def stop(self) -> None:
+        """The helper ends now, from any thread, without the watcher: QiTV is failing (an
+        error nothing handled, main.close_on_crash), and the watcher may never run again (a
+        windowed Windows build's error dialog holds Python's lock, and this process, with
+        the helper's pipe, alive). Never raises; nothing once the helper has ended."""
+        process = self._process
+        if process is None:
+            return
+        self._closed = True
+        try:
+            process.terminate()  # its exit code is one QiTV's own end gives: not logged
+        except Exception:
+            pass
 
     # ---- the window's opening (GUI thread) ----
 

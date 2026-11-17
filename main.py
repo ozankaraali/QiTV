@@ -62,6 +62,26 @@ def wants_splash(argv: Sequence[str], environ: Mapping[str, str]) -> bool:
     return chosen not in ("offscreen", "minimal")
 
 
+def close_on_crash(close: Callable[[], None]) -> None:
+    """An exception nothing handles runs `close` too, once logged (sys.excepthook). That runs
+    before atexit, and before a windowed Windows build's error dialog, which PyInstaller's
+    bootloader shows with this process, and what it started, still alive, and with Python's
+    lock held: no other thread runs until the dialog is dismissed. An exception a Qt slot
+    raises reaches it too. `close` never raises from there."""
+    logged = sys.excepthook
+
+    def hook(kind: Any, error: Any, frames: Any) -> None:
+        try:
+            logged(kind, error, frames)
+        finally:
+            try:
+                close()
+            except Exception:  # the error's own report comes first; nothing hides it
+                pass
+
+    sys.excepthook = hook
+
+
 class BootloaderSplash:
     """PyInstaller's bootloader splash: the Windows and Linux one-file apps show the build's
     still of QiTV's mark (scripts/render_splash.py) from the double-click while they unpack,
@@ -117,17 +137,8 @@ class BootloaderSplash:
         """An exception nothing handles closes it too, once logged (sys.excepthook, which also
         runs before a windowed Windows build's error dialog, and before atexit's own close): a
         start that fails before main()'s `finally` leaves no still on top."""
-        if self._module is None:
-            return
-        logged = sys.excepthook
-
-        def hook(kind: Any, error: Any, frames: Any) -> None:
-            try:
-                logged(kind, error, frames)
-            finally:
-                self.close("an unhandled error")
-
-        sys.excepthook = hook
+        if self._module is not None:
+            close_on_crash(lambda: self.close("an unhandled error"))
 
 
 def replace_executable(
@@ -297,6 +308,10 @@ def main() -> int:
     )
     if not (with_splash and splash.start(lit=bootloader.shows)):
         bootloader.close("no splash started")
+    # An error nothing handles ends it at once, as it is logged: until main()'s `finally`
+    # (the claim, the heavy imports, the settings and the managers come first), and before a
+    # windowed Windows build's error dialog, which would keep it looping on top.
+    close_on_crash(splash.stop)
     if platform.system() == "Darwin":
         # A double-click in Finder gives no argument: the file comes as an open event, sent
         # at launch. Kept now, it is handed over (a second start) or kept for the window.

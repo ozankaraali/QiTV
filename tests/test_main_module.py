@@ -464,6 +464,37 @@ class BootloaderSplashTests(unittest.TestCase):
             sys.excepthook(ValueError, ValueError("boom"), None)
         self.assertEqual(len(again.closes), 1)  # closed all the same
 
+    def test_an_unhandled_error_runs_a_close_after_its_log_and_never_raises_for_it(self):
+        # The splash helper's: a windowed Windows build's error dialog keeps QiTV's process,
+        # and so the splash's pipe, alive, with no other thread running meanwhile.
+        import main
+
+        self.addCleanup(setattr, sys, "excepthook", sys.excepthook)
+        order = []
+        sys.excepthook = lambda *exc: order.append("logged")
+        main.close_on_crash(lambda: order.append("closed"))
+        sys.excepthook(ValueError, ValueError("boom"), None)
+        self.assertEqual(order, ["logged", "closed"])
+
+        def broken():
+            raise OSError("no such process")
+
+        order.clear()
+        sys.excepthook = lambda *exc: order.append("logged")
+        main.close_on_crash(broken)
+        sys.excepthook(ValueError, ValueError("boom"), None)  # the close's error stays quiet
+        self.assertEqual(order, ["logged"])
+
+    def test_the_splash_helper_ends_on_a_crash_from_its_start_on(self):
+        # Between the splash's start and main()'s `try` come the heavy imports, the settings and
+        # the managers: an error there ends the splash too, at once.
+        body = (REPO / "main.py").read_text(encoding="utf-8").split("def main()", 1)[1]
+        started = body.index("splash.start(lit=bootloader.shows)")
+        crash = body.index("close_on_crash(splash.stop)")
+        self.assertLess(started, crash)
+        self.assertLess(crash, body.index("instance = claim("))
+        self.assertLess(crash, body.index("from ui.tv_window import"))
+
     def test_with_none_showing_the_excepthook_is_left_alone(self):
         self.addCleanup(setattr, sys, "excepthook", sys.excepthook)
         hook = sys.excepthook
