@@ -270,7 +270,11 @@ class _InstanceLock:
         except OSError as error:
             logger.warning("QiTV's start lock can't be opened (%s).", type(error).__name__)
             return _Lock.UNAVAILABLE
-        state = _lock(fd)
+        try:
+            state = _lock(fd)
+        except BaseException:
+            os.close(fd)  # never a descriptor left open (Windows couldn't remove the folder)
+            raise
         if state is _Lock.OURS:
             self._fd = fd
         else:

@@ -124,11 +124,14 @@ RACE_BOUND_S = 60.0  # a listening start ends sooner once every other start's fi
 
 # A QiTV of this version holding the settings folder's lock (argv[1]): it listens (but in
 # "unlistened") and says "ready", then stays without an event loop for argv[3] seconds, a cold
-# start under load. "slow" then serves 8 s, printing `opened <path as JSON>` for each file
-# handed to it; "quiet" and "unlistened" end without ever answering (their lock goes with
-# them); "closes" closes its server as a quitting QiTV does (the lock goes) and lives on 3 s.
+# start under load, or until its stdin ends. "slow" then serves, printing `opened <path as
+# JSON>` for each file handed to it, until its stdin ends (8 s at most). Each quits as QiTV
+# does, letting go of its lock itself ("quits" and "unlistened" without ever answering):
+# Windows lets go of a killed process's lock only when it gets round to it, so the tests end a
+# holder through its stdin, never by a kill. "closes" closes its server first and lives on
+# 3 s; "crashes" ends without letting go (os._exit: the system lets go).
 HOLDER = r"""
-import json, sys, time
+import json, os, sys, threading
 from PySide6.QtCore import QCoreApplication, QTimer
 from services.single_instance import InstanceServer, _InstanceLock, _Lock, server_name
 app = QCoreApplication([])
@@ -138,19 +141,27 @@ assert lock.acquire() is _Lock.OURS
 server = InstanceServer(server_name(folder), lock=lock)
 if mode != "unlistened":
     assert server.listen()
+done = threading.Event()  # the test is done with it: its stdin ended
+threading.Thread(target=lambda: (sys.stdin.read(), done.set()), daemon=True).start()
 print("ready", flush=True)
-time.sleep(delay)
+done.wait(delay)
+if mode == "crashes":
+    os._exit(0)
 if mode == "closes":
     server.close()
-    time.sleep(3)
-if mode != "slow":
-    sys.exit(0)
-def on_opened(paths):
-    for path in paths:
-        print("opened " + json.dumps(path), flush=True)
-server.opened.connect(on_opened)
-QTimer.singleShot(8000, app.quit)
-app.exec()
+    done.wait(3)
+if mode == "slow" and not done.is_set():
+    def on_opened(paths):
+        for path in paths:
+            print("opened " + json.dumps(path), flush=True)
+    server.opened.connect(on_opened)
+    watch = QTimer()
+    watch.timeout.connect(lambda: done.is_set() and app.quit())
+    watch.start(100)
+    QTimer.singleShot(8000, app.quit)
+    app.exec()
+server.close()  # the server, then its lock
+sys.exit(0)
 """
 
 # What a start logs when the first didn't take its files.
@@ -325,6 +336,7 @@ class ClaimTests(unittest.TestCase):
         # The files of the starts that handed over all reached it.
         others = sorted(f for f, s in zip(files, said) if s["handed_over"])
         self.assertEqual(sorted(stayed[0]["opened"]), others)
+        self.assertLockFree()  # the one that listened let go of it as it closed
 
     def test_a_windows_updates_copy_never_hands_over(self):
         with (
@@ -383,19 +395,46 @@ class ClaimTests(unittest.TestCase):
         # The file stays: removed, two starts could each lock a file of their own.
         self.assertTrue(os.path.exists(os.path.join(self.folder, single_instance.LOCK_FILE)))
 
+    def fresh_folder(self):
+        """A settings folder of its own for a subcase (nothing an earlier one held)."""
+        folder = tempfile.TemporaryDirectory()
+        self.addCleanup(folder.cleanup)
+        self.folder = folder.name
+        self.name = server_name(self.folder)
+
     def holder(self, mode, delay):
         env = dict(os.environ, PYTHONPATH=str(REPO), QT_QPA_PLATFORM="offscreen")
         process = subprocess.Popen(
             [sys.executable, "-c", HOLDER, self.folder, mode, str(delay)],
+            stdin=subprocess.PIPE,
             stdout=subprocess.PIPE,
             stderr=subprocess.DEVNULL,
             text=True,
             env=env,
             cwd=str(REPO),
         )
-        self.addCleanup(self.end, process)
+        self.addCleanup(self.stop_holder, process)  # before its folder goes
         self.assertEqual(process.stdout.readline().strip(), "ready")
         return process
+
+    def stop_holder(self, process):
+        """It quits through its stdin, letting go of its lock itself, and is waited for (a kill
+        only when it didn't within 15 s)."""
+        if process.stdin and not process.stdin.closed:
+            process.stdin.close()
+        try:
+            process.wait(15)
+        except subprocess.TimeoutExpired:
+            process.kill()
+            process.wait(15)
+        if process.stdout and not process.stdout.closed:
+            process.stdout.close()
+
+    def assertLockFree(self):
+        """Nothing holds the settings folder's lock any more: no test leaves it held."""
+        lock = single_instance._InstanceLock(self.folder)
+        self.assertIs(lock.acquire(), single_instance._Lock.OURS)
+        lock.release()
 
     def test_a_late_lock_holder_gets_every_start(self):
         # Ruling 32: a holder whose event loop runs only after 25 s (past START_WAIT_MS; CI's
@@ -406,18 +445,23 @@ class ClaimTests(unittest.TestCase):
         self.assertEqual(said, [{"handed_over": True}] * 3)
         got = sorted(json.loads(holder.stdout.readline().split(" ", 1)[1]) for _ in files)
         self.assertEqual(got, sorted(files))
+        self.stop_holder(holder)
+        self.assertEqual(holder.returncode, 0)
+        self.assertLockFree()
 
     def test_a_lock_holder_that_never_answers_ends_the_start(self):
         # Reached but never answering ("quiet"), or never listening (this process's own lock):
         # after HELD_WAIT_MS the start ends without listening, never beside its holder.
         for case in ("quiet", "unlistened"):
             with self.subTest(case=case):
+                self.fresh_folder()
                 process, held = None, None
                 if case == "quiet":
-                    process = self.holder("quiet", 30)
+                    process = self.holder("quits", 30)
                 else:
                     held = single_instance._InstanceLock(self.folder)
                     self.assertIs(held.acquire(), single_instance._Lock.OURS)
+                    self.addCleanup(held.release)  # before its folder goes, whatever fails
                 started = time.monotonic()
                 with (
                     mock.patch.object(single_instance, "HELD_WAIT_MS", 1500),
@@ -433,14 +477,21 @@ class ClaimTests(unittest.TestCase):
                 if held is not None:
                     held.release()
                 if process is not None:
-                    self.end(process)  # its lock goes with it
+                    self.stop_holder(process)
+                    self.assertEqual(process.returncode, 0)
+                self.assertLockFree()
 
     def test_a_lock_holder_that_ends_mid_wait_passes_the_lock_on(self):
         # Its holder quits or crashes while a start waits: the start takes the lock and runs.
         # "closes": a quitting QiTV hangs up before it lets go of the lock; the start waits on,
         # and takes the lock once it is let go, while that process still lives.
-        for mode in ("quiet", "unlistened", "closes"):
+        for mode in ("quits", "unlistened", "closes", "crashes"):
             with self.subTest(mode=mode):
+                if mode == "crashes" and os.name == "nt":
+                    # Windows lets go of a dead process's lock "depending upon available system
+                    # resources": QiTV waits for it (HELD_WAIT_MS), a test can't bound it.
+                    self.skipTest("Windows lets go of a crashed process's lock in its own time")
+                self.fresh_folder()
                 holder = self.holder(mode, 2)
                 started = time.monotonic()
                 server = claim(self.folder)
@@ -451,7 +502,8 @@ class ClaimTests(unittest.TestCase):
                 self.assertEqual(holder.wait(10), 0)
                 other = single_instance._InstanceLock(self.folder)
                 self.assertIs(other.acquire(), single_instance._Lock.HELD)  # the start's now
-                server.close()  # the lock goes: the next case starts free
+                server.close()  # the server, then its lock
+                self.assertLockFree()
 
     def test_the_server_answers_and_says_so(self):
         server = InstanceServer(self.name)
