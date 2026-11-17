@@ -49,6 +49,16 @@ def smoke_arguments(argv: Sequence[str], environ: Mapping[str, str]) -> Optional
     return None
 
 
+def wants_splash(argv: Sequence[str], environ: Mapping[str, str]) -> bool:
+    """Whether this start shows the splash (ui/splash_helper.py): not the smoke test, not a
+    Windows update's copy (`--replace`: it starts while the old QiTV quits), and not a run with
+    no screen to draw on (Qt's offscreen or minimal platform, the tests')."""
+    if smoke_arguments(argv, environ) is not None or "--replace" in argv:
+        return False
+    chosen = environ.get("QT_QPA_PLATFORM", "").split(";", 1)[0].split(":", 1)[0].strip()
+    return chosen not in ("offscreen", "minimal")
+
+
 def replace_executable(
     old: str,
     new: str,
@@ -196,6 +206,13 @@ def main() -> int:
     # It notes a quit request the system sends (2.8), and keeps the files QiTV is asked to
     # open until the window takes them.
     app = QiTVApplication(sys.argv)
+    # QiTV's mark, from now until the window opens into it, drawn by a process of its own: this
+    # thread builds the window until it shows. It shows while another QiTV is asked, too.
+    from ui.splash_helper import Splash
+
+    splash = Splash()
+    if wants_splash(sys.argv, os.environ):
+        splash.start()
     if platform.system() == "Darwin":
         # A double-click in Finder gives no argument: the file comes as an open event, sent
         # at launch. Kept now, it is handed over (a second start) or kept for the window.
@@ -218,6 +235,7 @@ def main() -> int:
         log.warning("The check for another QiTV failed (%s); starting.", type(error).__name__)
         instance, handed_over = None, False
     if handed_over:
+        splash.close()
         log.info("Another QiTV runs with these settings; this start ends here.")
         log_file.close()
         return 0
@@ -321,7 +339,9 @@ def main() -> int:
             # over it, from the window's first moment (open_paths holds too, once it shows).
             # A file QiTV won't play holds too: open_paths says so, then lets go.
             window.controller.hold_for_file(True)
+        splash.before_show(window)  # transparent: it fades in as the splash opens into it
         window.show()
+        splash.open_into(window)
         if opened:
             window.open_paths(opened, source=LAUNCH)
         # A QiTV moved or renamed since it registered for videos registers again where it is
@@ -371,6 +391,7 @@ def main() -> int:
     finally:
         if dde is not None:  # first: Explorer starts QiTV again (it never raises)
             dde.close()
+        splash.close()  # one that never opened (the window didn't show)
         if control is not None:
             control.stop()
         allow_sleep()
