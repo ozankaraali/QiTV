@@ -104,6 +104,22 @@ class MainModuleTests(unittest.TestCase):
             "window.when_idle(lambda: check_for_updates(config_manager=config_manager))", body
         )
 
+    def test_windows_hears_double_clicks_over_dde_while_it_runs(self):
+        # Registered on Windows: a double-click reaches this QiTV over DDE once its window
+        # shows, as another start's hand-over does; at quit Explorer is told first, before
+        # anything else closes (services/dde_windows.py).
+        body = (REPO / "main.py").read_text(encoding="utf-8").split("def main()", 1)[1]
+        serve = body.index("dde = dde_windows.serve(config_manager)")
+        self.assertLess(body.index("window.show()"), serve)
+        self.assertLess(body.rindex('if sys.platform == "win32":', 0, serve), serve)
+        self.assertIn(
+            "dde.server.opened.connect(lambda files: window.open_paths(files, source=HANDOVER))",
+            body,
+        )
+        last = body.rsplit("finally:", 1)[1]
+        self.assertLess(last.index("dde.close()"), last.index("instance.close()"))
+        self.assertLess(last.index("dde.close()"), last.index("config_manager.flush_saves()"))
+
     def test_freeze_support_comes_first_when_run_as_a_script(self):
         source = (REPO / "main.py").read_text(encoding="utf-8")
         block = source.split('if __name__ == "__main__":', 1)[1]

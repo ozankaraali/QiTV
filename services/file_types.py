@@ -11,6 +11,9 @@ the caller saves it on the GUI thread.
 - **Windows** (HKEY_CURRENT_USER only): the ProgID `QiTV.Video`, `OpenWithProgids` for every
   type, the exe's `Applications` entry, and Default Programs' `Capabilities` with its
   `RegisteredApplications` value; Windows' own Default Apps page then lets the user choose.
+  While a registered QiTV runs, the ProgID's open verb also has a `ddeexec` (`add_ddeexec`):
+  Explorer hands a double-clicked video to it over DDE (services.dde_windows), and starts
+  QiTV with the file when none runs. Unregistering takes it with the ProgID.
 - **Linux**: `$XDG_DATA_HOME/applications/qitv-open.desktop`, the icon in the user's hicolor
   theme, and `xdg-mime default` for the default types (which writes the user's mimeapps.list).
 - **macOS**: the bundle's Info.plist declares the types (qitv-macos.spec), so Open With lists
@@ -257,6 +260,19 @@ def open_default_apps() -> None:
             logger.info("Windows didn't open %s (%s)", page, type(e).__name__)
 
 
+def add_ddeexec(exe: str) -> bool:
+    """Windows, while QiTV runs and its DDE server answers (services.dde_windows): Explorer
+    hands a double-clicked video to it over DDE instead of starting QiTV again. Only where QiTV
+    is registered; False when it isn't or the key couldn't be written. Off the GUI thread."""
+    return _windows.add_ddeexec(exe)
+
+
+def remove_ddeexec() -> bool:
+    """Windows: Explorer starts QiTV with the file again (at quit, or a server that didn't
+    start). False, logged, when a key stayed; it never raises."""
+    return _windows.remove_ddeexec()
+
+
 def temporary_location(exe: str) -> bool:
     """Whether `exe` sits where it won't stay: the system's temporary folder or below it
     (Windows' `AppData\\Local\\Temp` too), inside a `.zip` (Explorer's zip view, and the
@@ -393,13 +409,18 @@ def _asset(name: str) -> Path:
 # --- Windows --------------------------------------------------------------------------------
 
 # Microsoft's "File Types", "Programmatic Identifiers", "How to Include an Application in the
-# Open With Dialog Box", "Application Registration", "Default Programs" and "Launch the
-# Default Apps settings page".
+# Open With Dialog Box", "Application Registration", "Default Programs", "Launch the Default
+# Apps settings page" and "How to Associate Verbs with DDE Commands".
 _CLASSES = "Software\\Classes"
 _CAPABILITIES = f"Software\\{APP_NAME}\\Capabilities"
 _FILE_ASSOCIATIONS = f"{_CAPABILITIES}\\FileAssociations"
 _REGISTERED_APPLICATIONS = "Software\\RegisteredApplications"
 PROGIDS = {"videos": "QiTV.Video"}
+# The open verb's DDE while QiTV runs: its default value is the command; the application,
+# topic and ifexec subkeys' default values are the service, the topic and what Explorer sends
+# to a QiTV it started itself when the conversation failed (the file is on its command line).
+_DDEEXEC = "shell\\open\\ddeexec"
+IFEXEC = "[noop]"
 SHCNE_ASSOCCHANGED = 0x08000000
 SHCNF_IDLIST = 0x0000  # what SHCNE_ASSOCCHANGED takes; both items are NULL
 
@@ -460,6 +481,62 @@ class _WindowsBackend:
         reg = _winreg()
         ok = self._remove(reg, kind, exe)
         _assoc_changed()
+        return ok
+
+    def add_ddeexec(self, exe: str) -> bool:
+        """The open verb's ddeexec, in each ProgID QiTV is registered with (its command is
+        there: a ProgID is never made for it). A stale one, left by a crash, is written over;
+        one that can't be written whole is taken back. True when every registered ProgID got
+        it, False when there was none."""
+        from services.dde_windows import COMMAND, SERVICE, TOPIC
+
+        reg = _winreg()
+        found, ok = False, True
+        for progid in PROGIDS.values():
+            verb = f"{_CLASSES}\\{progid}\\shell\\open"
+            ddeexec = f"{_CLASSES}\\{progid}\\{_DDEEXEC}"
+            try:
+                command = _default(reg, f"{verb}\\command")
+                if command is None:
+                    continue
+                found = True
+                if command.lower() != f'"{exe}" "%1"'.lower():  # refresh moves it here
+                    logger.info("The registration names another QiTV; this one answers")
+                _set_values(reg, ddeexec, {"": COMMAND})
+                subkeys = (("Application", SERVICE), ("Topic", TOPIC), ("ifexec", IFEXEC))
+                for subkey, value in subkeys:
+                    _set_values(reg, f"{ddeexec}\\{subkey}", {"": value})
+            except OSError as e:
+                logger.warning("Couldn't tell Explorer QiTV runs (%s)", type(e).__name__)
+                ok = False
+                try:
+                    _delete_tree(reg, ddeexec)
+                except OSError as error:
+                    logger.warning("A part of the DDE key stays (%s)", type(error).__name__)
+        if not found:
+            logger.info("QiTV isn't registered for videos: Explorer starts it for each")
+            return False
+        _assoc_changed()
+        return ok
+
+    def remove_ddeexec(self) -> bool:
+        """Each ProgID's ddeexec, and the keys that leaves empty (a ProgID unregistered
+        meanwhile leaves none); the shell is told only when one was there."""
+        reg = _winreg()
+        ok, removed = True, False
+        for progid in PROGIDS.values():
+            ddeexec = f"{_CLASSES}\\{progid}\\{_DDEEXEC}"
+            try:
+                if not _exists(reg, ddeexec):
+                    continue
+                removed = True
+                _delete_tree(reg, ddeexec)
+                _prune(reg, ddeexec.rpartition("\\")[0], _CLASSES)
+            except OSError as e:
+                logger.warning("Couldn't remove QiTV's DDE key (%s)", type(e).__name__)
+                ok = False
+        if removed:
+            _assoc_changed()
         return ok
 
     def _write(self, reg: Any, kind: str, exe: str) -> None:
@@ -566,6 +643,16 @@ def _drop_values(reg: Any, path: str, names: list[str], stop: str) -> None:
     """Delete these values at `path`, then the keys left empty up to `stop`."""
     _delete_values(reg, path, names)
     _prune(reg, path, stop)
+
+
+def _default(reg: Any, path: str) -> Optional[str]:
+    """The default value of the key at `path`; None without the key or a string there."""
+    try:
+        with reg.OpenKey(reg.HKEY_CURRENT_USER, path, 0, reg.KEY_READ) as key:
+            value, _kind = reg.QueryValueEx(key, "")
+    except FileNotFoundError:
+        return None
+    return value if isinstance(value, str) else None
 
 
 def _exists(reg: Any, path: str) -> bool:

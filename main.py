@@ -279,6 +279,7 @@ def main() -> int:
 
     prevent_sleep()
     control = None
+    dde = None
     try:
         window = TVWindow(app, config_manager, provider_manager, image_manager, epg_manager)
         if instance is not None:
@@ -298,6 +299,14 @@ def main() -> int:
         # A QiTV moved or renamed since it registered for videos registers again where it is
         # now, on a thread of its own (never from source); the config is saved once it changed.
         refresh_at_start(config_manager, window)
+        if sys.platform == "win32":
+            # Registered for videos: a double-click reaches this QiTV over DDE, with no second
+            # start (which unpacks the whole app first); Explorer is told so while it runs.
+            from services import dde_windows
+
+            dde = dde_windows.serve(config_manager)
+            if dde is not None:
+                dde.server.opened.connect(lambda files: window.open_paths(files, source=HANDOVER))
         if not_replaced is not None:  # where the new version is, and where the old one stayed
             old_path, new_path = not_replaced
             QTimer.singleShot(0, window, lambda: replace_failed(old_path, new_path, window))
@@ -321,6 +330,8 @@ def main() -> int:
         log.info("QiTV's event loop ended (%d).", code)
         return code
     finally:
+        if dde is not None:  # first: Explorer starts QiTV again (it never raises)
+            dde.close()
         if instance is not None:
             instance.close()
         if control is not None:
