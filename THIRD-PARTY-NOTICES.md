@@ -32,8 +32,11 @@ and the `licenses/` folder are inside every packaged app.
 The apps contain the CPython 3.14.8 interpreter and standard library as `uv` installs it: the
 python-build-standalone build of release 20261009. On macOS and Linux that build links the
 libraries below into the interpreter (`libpython`); on Windows they are separate files, and the
-app contains those of the modules QiTV uses. Tcl/Tk, and on Linux Berkeley DB and the X11
-libraries, are separate modules QiTV does not use: they are not in the apps.
+app contains those of the modules QiTV uses. On Linux, Berkeley DB and the X11 libraries are
+separate modules QiTV does not use: they are not in the apps. Tcl/Tk is in the Windows and Linux
+apps for PyInstaller's start-up splash only (the Tcl and Tk libraries and a few of their
+scripts): its bootloader shows the still of QiTV's mark with them while the app unpacks. QiTV's
+code doesn't use tkinter, and the macOS app has no Tcl/Tk.
 
 | Component | Version | License, as its source states it | Text | Platforms |
 | --- | --- | --- | --- | --- |
@@ -52,6 +55,7 @@ libraries, are separate modules QiTV does not use: they are not in the apps.
 | ncurses | 6.5 | X11 (MIT-style) | `licenses/python/ncurses.txt` (its `COPYING`) | Linux (macOS uses the system's) |
 | libedit | 20240808-3.1 | BSD-3-Clause | `licenses/python/libedit.txt` (its `COPYING`) | Linux (macOS uses the system's) |
 | libuuid | 1.0.3 | BSD-3-Clause | `licenses/python/libuuid.txt` (its `COPYING`, and the license its `uuid.h` states) | macOS, Linux |
+| Tcl/Tk | 9.0.4 | TCL (the BSD-style terms of each one's `license.terms`) | `licenses/python/Tcl.txt` and `licenses/python/Tk.txt` (Tcl's and Tk's 9.0.4 `license.terms`) | Windows, Linux |
 
 - Source code: <https://www.python.org/downloads/source/>, and the build at
   <https://github.com/astral-sh/python-build-standalone> (release 20261009), which names each

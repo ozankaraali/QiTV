@@ -27,7 +27,7 @@ from PySide6.QtGui import QGuiApplication
 from PySide6.QtWidgets import QApplication, QWidget
 
 from ui import macos_window, splash_helper
-from ui.opening_mark import CATCH_UP_MAX_S, OPEN_S, STAGE_PX, OpeningMark
+from ui.opening_mark import CATCH_UP_MAX_S, LOOP_S, OPEN_S, STAGE_PX, STILL_T, OpeningMark
 from ui.splash_helper import Splash, run_splash
 
 app = QApplication.instance() or QApplication([])
@@ -52,13 +52,13 @@ def spawn(target=run_splash):
     return conn, process
 
 
-def stubborn(conn, geometry):
+def stubborn(conn, geometry, lit=False):
     """A helper that says it is shown, then ignores its pipe until it is killed."""
     conn.send(("shown",))
     time.sleep(60)
 
 
-def failing(conn, geometry):
+def failing(conn, geometry, lit=False):
     """A helper that fails as it starts, as a crash would: only its exit code says so."""
     os._exit(3)
 
@@ -265,6 +265,37 @@ class SplashTests(unittest.TestCase):
         self.assertEqual(rect.size().height(), STAGE_PX)
         self.assertEqual(rect.center(), area.center())
 
+    def test_it_centres_as_the_bootloaders_splash_does(self):
+        # PyInstaller's Tk script puts its image at int(x + 0.5 * (width - 240)): on a screen
+        # of odd size, Qt's own centring would land a pixel off it.
+        for area, top_left in (
+            (QRect(0, 0, 1367, 769), (563, 264)),
+            (QRect(1920, -40, 1366, 768), (1920 + 563, -40 + 264)),
+        ):
+            with self.subTest(area=area):
+                screen = mock.Mock()
+                screen.geometry.return_value = area
+                with mock.patch.object(QGuiApplication, "primaryScreen", return_value=screen):
+                    rect = splash_helper.centred_on_primary()
+                self.assertEqual((rect.x(), rect.y()), top_left)
+                self.assertEqual((rect.width(), rect.height()), (STAGE_PX, STAGE_PX))
+
+    def test_over_the_bootloaders_splash_the_helper_starts_on_the_lit_frame(self):
+        # The bootloader's splash is the held, lit frame: the helper's mark first shows that
+        # frame (its loop's origin set back to it), then loops on from there.
+        shown = threading.Event()
+        splash = Splash(on_shown=shown.set)
+        self.assertTrue(splash.start(QRect(*GEOMETRY), lit=True))
+        self.addCleanup(splash._process.kill)
+        self.assertTrue(shown.wait(SPAWN_S))
+        heard = time.monotonic()
+        self.assertIsNotNone(splash._origin)
+        # its first paint was at most SPAWN_S ago, and painted phase STILL_T then
+        self.assertLessEqual(heard - splash._origin, STILL_T * LOOP_S + SPAWN_S)
+        self.assertGreaterEqual(heard - splash._origin, STILL_T * LOOP_S)
+        splash.close()
+        splash._watcher.join(KILL_WAIT_S)
+
     def test_shown_calls_the_hook_on_its_thread_and_close_ends_the_helper(self):
         shown, threads = threading.Event(), []
 
@@ -272,11 +303,13 @@ class SplashTests(unittest.TestCase):
             threads.append(threading.current_thread())
             shown.set()
 
-        splash = Splash(on_shown=on_shown)
+        ended = []
+        splash = Splash(on_shown=on_shown, on_end=lambda: ended.append(threading.current_thread()))
         self.assertTrue(splash.start(QRect(*GEOMETRY)))
         self.addCleanup(splash._process.kill)
         self.assertTrue(shown.wait(SPAWN_S))
         self.assertIsNot(threads[0], threading.main_thread())  # never the GUI thread
+        self.assertEqual(ended, [])  # it runs on
         # this platform (offscreen) fades no window: it is left as it is
         window = self.window()
         splash.before_show(window)
@@ -287,6 +320,32 @@ class SplashTests(unittest.TestCase):
         self.assertFalse(splash._watcher.is_alive())
         self.assertEqual(splash._process.exitcode, 0)  # it quit: it wasn't killed
         self.assertEqual(threads, [threads[0]])  # once
+        self.assertEqual(ended, [threads[0]])  # once it ended, on the watcher's thread
+
+    def test_a_helper_that_ends_unshown_calls_the_end_hook_only(self):
+        # The bootloader's splash waits for "shown": a helper that never shows lets it go too.
+        shown, ended = [], []
+        with mock.patch.object(splash_helper, "run_splash", failing):
+            splash = Splash(on_shown=lambda: shown.append(1), on_end=lambda: ended.append(1))
+            with self.assertLogs("ui.splash_helper", "WARNING"):
+                self.assertTrue(splash.start(QRect(*GEOMETRY)))
+                self.addCleanup(splash._process.kill)
+                splash._watcher.join(SPAWN_S)
+        self.assertFalse(splash._watcher.is_alive())
+        self.assertEqual((shown, ended), ([], [1]))
+
+    def test_an_end_hook_that_fails_is_only_logged(self):
+        def broken():
+            raise RuntimeError("broken")
+
+        with mock.patch.object(splash_helper, "run_splash", failing):
+            splash = Splash(on_end=broken)
+            with self.assertLogs("ui.splash_helper", "WARNING") as logs:
+                self.assertTrue(splash.start(QRect(*GEOMETRY)))
+                self.addCleanup(splash._process.kill)
+                splash._watcher.join(SPAWN_S)
+        self.assertFalse(splash._watcher.is_alive())
+        self.assertTrue(any("end hook failed" in line for line in logs.output), logs.output)
 
     def test_open_into_fades_the_window_in_as_the_helper_opens(self):
         with mock.patch.object(splash_helper, "_fades_windows", return_value=True):
@@ -339,7 +398,8 @@ class SplashTests(unittest.TestCase):
             self.assertTrue(pump_until(lambda: opacity(window) == 1.0))
         self.assertEqual(names(sent), ["open"])
         waited = rising(window) - sent[0][2]
-        self.assertGreaterEqual(waited, splash_helper.OPENING_WAIT_MS / 1000)
+        # Qt's coarse timers may fire up to 5 % early (seen: 0.599 s, four copies at once)
+        self.assertGreaterEqual(waited, 0.95 * splash_helper.OPENING_WAIT_MS / 1000)
         self.assertLess(waited, 3 * splash_helper.OPENING_WAIT_MS / 1000)
 
     def test_the_windows_own_top_levels_fade_in_with_it(self):
@@ -659,6 +719,7 @@ class HelperWindowTests(unittest.TestCase):
         self.assertTrue(pump_until(self.conn.poll))
         self.assertEqual(self.conn.recv(), ("shown", self.window.origin))
         self.assertIsNotNone(self.window.origin)
+        self.assertLess(self.window.frame().t, 0.25)  # its loop begins: the line draws
         self.conn.send(("quit",))
         self.assertTrue(pump_until(lambda: self.ended))
         self.assertFalse(self.window.isVisible())
@@ -736,6 +797,24 @@ class HelperWindowTests(unittest.TestCase):
                 conn.close()
                 child.close()
 
+    def test_a_lit_helper_starts_on_the_held_lit_frame(self):
+        # Over the bootloader's splash (the build's still): its first frame is that frame.
+        conn, child = multiprocessing.Pipe(duplex=True)
+        self.addCleanup(conn.close)
+        self.addCleanup(child.close)
+        window = splash_helper._SplashWindow(child, GEOMETRY, lambda: None, lit=True)
+        self.addCleanup(window.deleteLater)
+        before = time.monotonic()
+        self.assertTrue(window.begin())
+        after = time.monotonic()
+        self.assertGreaterEqual(window.origin, before - STILL_T * LOOP_S)
+        self.assertLessEqual(window.origin, after - STILL_T * LOOP_S)
+        frame = window.frame()
+        self.assertAlmostEqual(frame.t, STILL_T, delta=0.02)
+        self.assertEqual((frame.opening, frame.fade), (0.0, 1.0))
+        self.assertTrue(pump_until(conn.poll))
+        self.assertEqual(conn.recv(), ("shown", window.origin))
+
     def test_a_closed_pipe_ends_it(self):
         self.assertTrue(self.window.begin())
         self.conn.close()
@@ -804,7 +883,7 @@ class MainTests(unittest.TestCase):
 
     def test_main_starts_splash_before_heavy_imports(self):
         body = self.body()
-        start = body.index("splash.start()")
+        start = body.index("splash.start(lit=bootloader.shows)")
         self.assertLess(body.index("app = QiTVApplication(sys.argv)"), start)
         self.assertLess(start, body.index("instance = claim("))  # it shows while claim waits
         self.assertLess(start, body.index("from ui.tv_window import"))
@@ -832,7 +911,8 @@ class MainTests(unittest.TestCase):
         for name in ("offscreen", "minimal", "offscreen;xcb"):
             self.assertFalse(main.wants_splash(["qitv"], {"QT_QPA_PLATFORM": name}), name)
         body = self.body()
-        self.assertIn("if wants_splash(sys.argv, os.environ):\n        splash.start()", body)
+        self.assertIn("with_splash = wants_splash(sys.argv, os.environ)", body)
+        self.assertIn("if not (with_splash and splash.start(lit=bootloader.shows)):", body)
 
 
 if __name__ == "__main__":

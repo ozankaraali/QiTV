@@ -5,6 +5,7 @@ from pathlib import Path
 import subprocess
 import sys
 import tempfile
+import threading
 import unittest
 from unittest import mock
 
@@ -354,6 +355,118 @@ class MainModuleTests(unittest.TestCase):
         microphone = ast.literal_eval(keys["NSMicrophoneUsageDescription"])
         self.assertIn("never records", microphone)
         self.assertIn("Bluetooth", microphone)
+
+
+class FakePyiSplash:
+    """PyInstaller's pyi_splash as BootloaderSplash uses it: connected (`alive`) or not, and
+    each close() with its thread; `fails` is raised from close()."""
+
+    def __init__(self, alive=True, fails=None):
+        self.alive, self.fails = alive, fails
+        self.closes = []
+
+    def is_alive(self):
+        return self.alive
+
+    def close(self):
+        self.closes.append(threading.current_thread())
+        if self.fails is not None:
+            raise self.fails
+
+
+PORT = {"_PYI_SPLASH_IPC": "51234"}
+
+
+class BootloaderSplashTests(unittest.TestCase):
+    """PyInstaller's bootloader splash (Windows and Linux one-file apps), which every start
+    closes: once, from any thread, never raising into the start."""
+
+    def take(self, environ, module):
+        import main
+
+        with mock.patch.dict(sys.modules, {"pyi_splash": module}):
+            return main.BootloaderSplash(environ)
+
+    def test_without_its_port_there_is_none_and_nothing_is_imported(self):
+        # A run from source, the macOS app, a process the app spawned (port 0): pyi_splash,
+        # which warns without its port, is never imported.
+        for environ in ({}, {"_PYI_SPLASH_IPC": "0"}, {"_PYI_SPLASH_IPC": ""}):
+            with self.subTest(environ=environ):
+                module = mock.Mock()
+                bootloader = self.take(environ, module)
+                self.assertFalse(bootloader.shows)
+                bootloader.close("test")
+                self.assertEqual(module.mock_calls, [])
+
+    def test_a_splash_that_shows_closes_once_from_any_thread(self):
+        module = FakePyiSplash()
+        bootloader = self.take(PORT, module)
+        self.assertTrue(bootloader.shows)
+        threads = [threading.Thread(target=bootloader.close, args=("test",)) for _ in range(8)]
+        with self.assertLogs("qitv", "INFO") as logs:
+            for thread in threads:
+                thread.start()
+            bootloader.close("test")
+            for thread in threads:
+                thread.join()
+        self.assertEqual(len(module.closes), 1)
+        self.assertFalse(bootloader.shows)
+        self.assertEqual(logs.output, ["INFO:qitv:PyInstaller's splash closed: test."])
+
+    def test_a_splash_that_cannot_close_is_never_a_reason_not_to_start(self):
+        module = FakePyiSplash(fails=ConnectionResetError("gone"))
+        bootloader = self.take(PORT, module)
+        bootloader.close("test")  # no exception
+        bootloader.close("test")
+        self.assertEqual(len(module.closes), 1)
+
+    def test_a_splash_that_isnt_there_is_none(self):
+        # The bootloader's splash failed to start (no X display), or its module is missing.
+        for module in (FakePyiSplash(alive=False), None):
+            with self.subTest(module=module):
+                bootloader = self.take(PORT, module)
+                self.assertFalse(bootloader.shows)
+                bootloader.close("test")
+
+    def test_main_imports_pyi_splash_by_name(self):
+        # PyInstaller bundles pyi_splash only where an import statement names it: without it
+        # the close does nothing, and the splash stays on top for the whole run.
+        tree = ast.parse((REPO / "main.py").read_text(encoding="utf-8"))
+        names = {
+            alias.name
+            for node in ast.walk(tree)
+            if isinstance(node, ast.Import)
+            for alias in node.names
+        }
+        self.assertIn("pyi_splash", names)
+
+    def test_every_start_closes_it(self):
+        body = (REPO / "main.py").read_text(encoding="utf-8").split("def main()", 1)[1]
+        take = body.index("bootloader = BootloaderSplash()")
+        replace = body.index("not_replaced = handle_replace_flag()")
+        self.assertLess(take, replace)
+        # no splash of QiTV's own (--replace, --smoke, no screen): at once, before an update's
+        # copy waits up to 30 s for the old QiTV to quit
+        self.assertIn('if not with_splash:\n        bootloader.close("', body[take:replace])
+        # the helper's window stands over it, or the helper ended (shown or not)
+        self.assertIn('on_shown=lambda: bootloader.close("', body)
+        self.assertIn('on_end=lambda: bootloader.close("', body)
+        started = body[body.index("splash = Splash(") : body.index("instance = claim(")]
+        self.assertIn("if not (with_splash and splash.start(lit=bootloader.shows)):", started)
+        self.assertIn('bootloader.close("', started.split("splash.start(lit=", 1)[1])
+        # a start that handed over: right after the claim
+        handed_over = body[body.index("if handed_over:") : body.index("return 0")]
+        self.assertTrue(handed_over.split("\n", 1)[1].strip().startswith("bootloader.close("))
+        # before the window shows (it would cover it), and at the end
+        show = body.index("window.show()")
+        self.assertIn('bootloader.close("', body[body.index("splash.before_show(window)") : show])
+        self.assertIn('bootloader.close("', body.rsplit("finally:", 1)[1])
+
+    def test_the_smoke_test_closes_it_first(self):
+        source = (REPO / "main.py").read_text(encoding="utf-8")
+        block = source.split('if __name__ == "__main__":', 1)[1]
+        smoke = block[block.index("if smoke is not None:") :]
+        self.assertLess(smoke.index("BootloaderSplash().close("), smoke.index("smoke_main(smoke)"))
 
 
 if __name__ == "__main__":

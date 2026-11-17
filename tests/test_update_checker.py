@@ -78,6 +78,16 @@ class WindowsUpdateTests(unittest.TestCase):
         )
         close_all.assert_called_once_with()
 
+    def test_the_updates_copy_shows_no_bootloader_splash(self):
+        # An update's copy shows no splash (main.wants_splash): nor its bootloader's, which
+        # would stand on top for its whole unpack, before its Python could close it.
+        self.pending[0] = False
+        process, _close_all = self.update()
+        env = process.Popen.call_args[1]["env"]
+        self.assertEqual(env["PYINSTALLER_SUPPRESS_SPLASH_SCREEN"], "1")
+        self.assertEqual(env.get("PATH"), os.environ.get("PATH"))  # the rest as it is
+        self.assertNotIn("PYINSTALLER_SUPPRESS_SPLASH_SCREEN", os.environ)  # this QiTV's own
+
     def test_an_updates_copy_updates_the_installed_qitv_again(self):
         # A run that is itself an update's copy (it replaced the installed QiTV and runs on
         # from Downloads): a newer update replaces the installed QiTV again, never the copy.

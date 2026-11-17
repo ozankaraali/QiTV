@@ -128,9 +128,26 @@ a.binaries = [entry for entry in a.binaries if ships(entry)]
 a.datas = [entry for entry in a.datas if ships(entry)]
 
 pyz = PYZ(a.pure)
+
+# PyInstaller's bootloader splash: QiTV's held, lit mark (scripts/render_splash.py renders it
+# first, 240 px), from the double-click while the one file unpacks, before Python runs. On top
+# of everything until main.py closes it, as the splash helper's window stands over it (the same
+# frame, place and size: ui/splash_helper.py centres on the primary screen as Tk's script does
+# here; Tk's default centres on X11's whole virtual screen).
+splash = Splash(
+    'build/splash.png',
+    binaries=a.binaries,
+    datas=a.datas,
+    text_pos=None,
+    always_on_top=True,
+    center='primary',
+)
+
 exe = EXE(
     pyz,
     a.scripts,
+    splash,
+    splash.binaries,
     a.binaries + [
         ("libvlc.dll", os.path.join(VLC_PATH, 'libvlc.dll'), "BINARY"),
         ("libvlccore.dll", os.path.join(VLC_PATH, 'libvlccore.dll'), "BINARY"),

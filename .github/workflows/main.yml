@@ -86,6 +86,14 @@ jobs:
       - name: Sync dependencies
         id: sync
         run: uv sync --frozen --dev
+      - name: Check the packaging Python's Tcl/Tk
+        # PyInstaller's splash (the build's still of QiTV's mark, shown while the one file
+        # unpacks) runs on the Tcl/Tk of this Python's tkinter: it must be there, threaded,
+        # in shared libraries. It prints which Python and Tcl/Tk the build uses.
+        run: uv run python scripts/render_splash.py --check-tcl-tk
+      - name: Render the splash image
+        # build/splash.png (offscreen), which the spec's Splash target bundles.
+        run: uv run python scripts/render_splash.py
       - name: Write the build's keys
         # services/_build_keys.py gets the OpenSubtitles key and the TMDB token from the
         # secrets, never printed; without a secret (a fork) its key stays empty. Nothing here
@@ -270,6 +278,14 @@ jobs:
       - name: Sync dependencies
         id: sync
         run: uv sync --frozen --dev
+      - name: Check the packaging Python's Tcl/Tk
+        # PyInstaller's splash (the build's still of QiTV's mark, shown while the one file
+        # unpacks) runs on the Tcl/Tk of this Python's tkinter: it must be there, threaded,
+        # in shared libraries. It prints which Python and Tcl/Tk the build uses.
+        run: uv run python scripts/render_splash.py --check-tcl-tk
+      - name: Render the splash image
+        # build/splash.png (offscreen), which the spec's Splash target bundles.
+        run: uv run python scripts/render_splash.py
       - name: Write the build's keys
         # services/_build_keys.py gets the OpenSubtitles key and the TMDB token from the
         # secrets, never printed; without a secret (a fork) its key stays empty. Nothing here

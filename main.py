@@ -12,8 +12,9 @@ import os
 import platform
 import shutil
 import sys
+import threading
 import time
-from typing import Callable, Mapping, Optional, Sequence
+from typing import Any, Callable, Mapping, Optional, Sequence
 import warnings
 
 SMOKE_FLAG = "--smoke"
@@ -25,6 +26,8 @@ APP_USER_MODEL_ID = "com.ozankaraali.qitv"
 # replacing its file (Windows keeps a running program's file locked), and how often it tries.
 REPLACE_WAIT_S = 30.0
 REPLACE_RETRY_S = 0.5
+# PyInstaller's bootloader puts its splash's port here; 0 where it shows none.
+PYI_SPLASH_IPC = "_PYI_SPLASH_IPC"
 
 
 def qt_platform_override(system: str, environ: Mapping[str, str]) -> Optional[str]:
@@ -57,6 +60,54 @@ def wants_splash(argv: Sequence[str], environ: Mapping[str, str]) -> bool:
         return False
     chosen = environ.get("QT_QPA_PLATFORM", "").split(";", 1)[0].split(":", 1)[0].strip()
     return chosen not in ("offscreen", "minimal")
+
+
+class BootloaderSplash:
+    """PyInstaller's bootloader splash: the Windows and Linux one-file apps show the build's
+    still of QiTV's mark (scripts/render_splash.py) from the double-click while they unpack,
+    before Python runs. It stays on top of every window until it is closed, so each start
+    closes it: once the splash helper's window stands over it, or at once where none will.
+    close() acts once, from any thread, and never raises.
+
+    It is there only while its port is set (none in a run from source or the macOS app, 0 in
+    a process the app spawned): pyi_splash, which warns without it, is imported only then, and
+    takes the port out of the environment as it connects."""
+
+    def __init__(self, environ: Mapping[str, str] = os.environ) -> None:
+        self._lock = threading.Lock()
+        self._module: Any = None
+        if environ.get(PYI_SPLASH_IPC, "0") in ("", "0"):
+            return
+        try:
+            # By name: PyInstaller bundles the module only where an import statement names it.
+            import pyi_splash
+
+            if pyi_splash.is_alive():
+                self._module = pyi_splash
+        except Exception as error:  # never a reason for QiTV not to start
+            logging.getLogger("qitv").debug(
+                "PyInstaller's splash is not there (%s).", type(error).__name__
+            )
+
+    @property
+    def shows(self) -> bool:
+        """Whether it shows (until close())."""
+        return self._module is not None
+
+    def close(self, why: str) -> None:
+        """It goes: `why`, for the log."""
+        with self._lock:
+            module, self._module = self._module, None
+        if module is None:
+            return
+        try:
+            module.close()
+        except Exception as error:  # it may have gone already
+            logging.getLogger("qitv").debug(
+                "PyInstaller's splash did not close cleanly (%s).", type(error).__name__
+            )
+            return
+        logging.getLogger("qitv").info("PyInstaller's splash closed: %s.", why)
 
 
 def replace_executable(
@@ -185,6 +236,13 @@ def main() -> int:
     log_file.install()
     log = logging.getLogger("qitv")
     log.info("QiTV %s starts.", get_app_version())
+    # PyInstaller's splash, up since the double-click (Windows and Linux): it stays until QiTV's
+    # own splash stands over it, and goes at once on a start that shows none (before an
+    # update's copy waits for the old QiTV to quit).
+    bootloader = BootloaderSplash()
+    with_splash = wants_splash(sys.argv, os.environ)
+    if not with_splash:
+        bootloader.close("this start shows no splash")
 
     # Windows's self-update: this new version takes the old one's place, once it quit.
     not_replaced, replaced = None, None
@@ -207,12 +265,17 @@ def main() -> int:
     # open until the window takes them.
     app = QiTVApplication(sys.argv)
     # QiTV's mark, from now until the window opens into it, drawn by a process of its own: this
-    # thread builds the window until it shows. It shows while another QiTV is asked, too.
+    # thread builds the window until it shows. It shows while another QiTV is asked, too. Over
+    # the bootloader's splash, it begins on that frame, and that one goes once it shows (or
+    # it ended without showing).
     from ui.splash_helper import Splash
 
-    splash = Splash()
-    if wants_splash(sys.argv, os.environ):
-        splash.start()
+    splash = Splash(
+        on_shown=lambda: bootloader.close("the splash shows over it"),
+        on_end=lambda: bootloader.close("the splash ended"),
+    )
+    if not (with_splash and splash.start(lit=bootloader.shows)):
+        bootloader.close("no splash started")
     if platform.system() == "Darwin":
         # A double-click in Finder gives no argument: the file comes as an open event, sent
         # at launch. Kept now, it is handed over (a second start) or kept for the window.
@@ -235,6 +298,7 @@ def main() -> int:
         log.warning("The check for another QiTV failed (%s); starting.", type(error).__name__)
         instance, handed_over = None, False
     if handed_over:
+        bootloader.close("this start handed over")
         splash.close()
         log.info("Another QiTV runs with these settings; this start ends here.")
         log_file.close()
@@ -340,6 +404,7 @@ def main() -> int:
             # A file QiTV won't play holds too: open_paths says so, then lets go.
             window.controller.hold_for_file(True)
         splash.before_show(window)  # transparent: it fades in as the splash opens into it
+        bootloader.close("the window shows")  # by now (it stays on top of the window)
         window.show()
         # A film's start: the splash's mark glides onto the player page's, which draws on.
         splash.open_into(window, window.opening_overlay)
@@ -393,6 +458,7 @@ def main() -> int:
         if dde is not None:  # first: Explorer starts QiTV again (it never raises)
             dde.close()
         splash.close()  # one that never opened (the window didn't show)
+        bootloader.close("QiTV ends")
         if control is not None:
             control.stop()
         allow_sleep()
@@ -419,6 +485,7 @@ if __name__ == "__main__":
     use_bundled_authorities()
     smoke = smoke_arguments(sys.argv, os.environ)
     if smoke is not None:
+        BootloaderSplash().close("the smoke test")  # it would stand over the app under test
         from scripts.smoke_tv import main as smoke_main
 
         sys.exit(smoke_main(smoke))

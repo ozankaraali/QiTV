@@ -19,6 +19,12 @@ thread) at "shown", passes "opening" on to the GUI thread, and joins the helper,
 KILL_AFTER_S after its first command if it hasn't ended by then. The helper ends by itself once
 it finds the pipe closed (QiTV died, or ended before its window showed).
 
+Over PyInstaller's bootloader splash (the Windows and Linux one-file apps show the build's
+still, scripts/render_splash.py, while they unpack), start(lit=True) has the helper's mark begin
+on that held, lit frame, in the same 240 px square centred as Tk centres it: once "shown", QiTV
+closes the bootloader's (main.BootloaderSplash, through `on_shown`, or `on_end` if the helper
+ends unshown).
+
 The helper process imports PySide6's GUI modules and the mark only (and ui.macos_window on
 macOS, where it takes no Dock icon or menu bar).
 """
@@ -58,7 +64,7 @@ from PySide6.QtGui import QGuiApplication
 from PySide6.QtWidgets import QApplication, QWidget
 from shiboken6 import isValid
 
-from ui.opening_mark import STAGE_PX, OpeningMark
+from ui.opening_mark import LOOP_S, STAGE_PX, STILL_T, OpeningMark
 
 logger = logging.getLogger(__name__)
 
@@ -94,11 +100,17 @@ class Splash:
     close(). Each does nothing once the splash didn't start; none of them waits.
 
     `on_shown` is called once, on the watcher thread (it must not touch Qt), when the helper's
-    window has painted; never when it doesn't show.
+    window has painted; never when it doesn't show. `on_end` is called once there too, when the
+    helper has ended, whether it showed or not.
     """
 
-    def __init__(self, on_shown: Optional[Callable[[], None]] = None) -> None:
+    def __init__(
+        self,
+        on_shown: Optional[Callable[[], None]] = None,
+        on_end: Optional[Callable[[], None]] = None,
+    ) -> None:
         self._on_shown = on_shown
+        self._on_end = on_end
         self._commands: queue.SimpleQueue[tuple[Any, ...]] = queue.SimpleQueue()
         self._relay = _Relay(self._heard)
         self._process: Optional[BaseProcess] = None
@@ -121,9 +133,11 @@ class Splash:
         self._arrived = False  # the helper said its glide reached _target
         self._swapping = False
 
-    def start(self, geometry: Optional[QRect] = None) -> bool:
+    def start(self, geometry: Optional[QRect] = None, *, lit: bool = False) -> bool:
         """Spawns the helper, its window at `geometry` (by default 240 px in the middle of the
-        primary screen). False, and logged, when it couldn't: QiTV starts without a splash."""
+        primary screen, where the bootloader's splash is), its mark's loop beginning on the
+        held, lit frame when `lit` (it shows over the bootloader's splash, that frame). False,
+        and logged, when it couldn't: QiTV starts without a splash."""
         if self._process is not None:
             return False
         conn = child = process = None
@@ -133,7 +147,7 @@ class Splash:
             context = multiprocessing.get_context("spawn")
             conn, child = context.Pipe(duplex=True)
             process = context.Process(
-                target=run_splash, args=(child, place), name="qitv-splash", daemon=True
+                target=run_splash, args=(child, place, lit), name="qitv-splash", daemon=True
             )
             process.start()
             child.close()  # the helper's end of the pipe is its own: its exit shows up as EOF
@@ -359,7 +373,7 @@ class Splash:
                         shown = True
                         if len(message) > 1 and isinstance(message[1], float):
                             self._origin = message[1]
-                        self._call_on_shown()
+                        self._call(self._on_shown, "shown")
                     elif name == "opening":
                         self._relay.tell(("opening",))
                     elif name == "arrived" and len(message) > 1:
@@ -375,6 +389,7 @@ class Splash:
                 process.kill()
         finally:
             conn.close()
+            self._call(self._on_end, "end")
             self._relay.tell(("ended",))
 
     def _send_queued(self, conn: Connection, deadline: Optional[float]) -> Optional[float]:
@@ -391,13 +406,14 @@ class Splash:
             if deadline is None:
                 deadline = time.monotonic() + KILL_AFTER_S
 
-    def _call_on_shown(self) -> None:
-        if self._on_shown is None:
+    @staticmethod
+    def _call(hook: Optional[Callable[[], None]], name: str) -> None:
+        if hook is None:
             return
         try:
-            self._on_shown()
+            hook()
         except Exception:
-            logger.warning("The splash's shown hook failed.", exc_info=True)
+            logger.warning("The splash's %s hook failed.", name, exc_info=True)
 
     @staticmethod
     def _reap(process: BaseProcess, deadline: Optional[float]) -> None:
@@ -501,11 +517,19 @@ class _AfterPaint(QObject):
 
 
 def centred_on_primary(size: int = STAGE_PX) -> QRect:
-    """A `size` square in the middle of the primary screen."""
+    """A `size` square in the middle of the primary screen, rounded as PyInstaller's splash
+    script places its image there (int(x + 0.5 * (width - size)); QRect.moveCenter lands a
+    pixel off it on a screen of odd size): the helper's window covers the bootloader's."""
     rect = QRect(0, 0, size, size)
     screen = QGuiApplication.primaryScreen()
     if screen is not None:
-        rect.moveCenter(screen.geometry().center())
+        area = screen.geometry()
+        rect.moveTopLeft(
+            QPoint(
+                area.x() + int(0.5 * (area.width() - size)),
+                area.y() + int(0.5 * (area.height() - size)),
+            )
+        )
     return rect
 
 
@@ -567,16 +591,17 @@ def _fades_windows() -> bool:
 # ---- the helper process ----------------------------------------------------------------------
 
 
-def run_splash(conn: Connection, geometry: Geometry) -> None:
+def run_splash(conn: Connection, geometry: Geometry, lit: bool = False) -> None:
     """The helper process (multiprocessing's spawn target): the mark at `geometry` until "open"
-    has played, or "quit" or a closed pipe ends it. It ends with os._exit, so nothing in the
-    interpreter's teardown keeps it going once its window is hidden."""
+    has played, or "quit" or a closed pipe ends it; `lit`, its loop begins on the held, lit
+    frame. It ends with os._exit, so nothing in the interpreter's teardown keeps it going once
+    its window is hidden."""
     code = 0
     try:
         if sys.platform == "darwin":
             os.environ[_MAC_NO_FOREGROUND] = "1"  # it becomes an accessory app instead
         application = QApplication.instance() or QApplication(["qitv-splash"])
-        window = _SplashWindow(conn, geometry, application.quit)
+        window = _SplashWindow(conn, geometry, application.quit, lit=lit)
         if window.begin():
             application.exec()
     except Exception:
@@ -608,13 +633,22 @@ class _SplashWindow(OpeningMark):
     on from where it is (the player's mark moved). "bare" (the player's mark shows under it):
     once there, it draws only its tile and glyph. It then waits for "quit", or "open" (the
     player's mark went), and ends by itself HANDOVER_LIMIT_MS after its first glide. "quit" and
-    a closed pipe end it at once. `on_end` quits the app.
+    a closed pipe end it at once. `on_end` quits the app. `lit`: its loop begins on the held,
+    lit frame (STILL_T), the bootloader's splash it shows over.
     """
 
-    def __init__(self, conn: Connection, geometry: Geometry, on_end: Callable[[], None]) -> None:
+    def __init__(
+        self,
+        conn: Connection,
+        geometry: Geometry,
+        on_end: Callable[[], None],
+        *,
+        lit: bool = False,
+    ) -> None:
         super().__init__()
         self._conn = conn
         self._on_end = on_end
+        self._lit = lit
         self._opening = False
         self._gliding = False
         self._arrived = False  # its glide has ended
@@ -648,7 +682,8 @@ class _SplashWindow(OpeningMark):
         if _platform_name() == "cocoa":
             _hide_from_dock()  # before the window shows: no Dock icon, no menu bar
         self.show()
-        self.start()
+        # Over the bootloader's still: from that frame on (held lit, gone, drawn again).
+        self.start(time.monotonic() - STILL_T * LOOP_S if self._lit else None)
         self._poller.start()
         return True
 
