@@ -125,6 +125,10 @@ class Autoplay(QObject):
     def card_open(self) -> bool:
         return bool(self.card.isVisible())
 
+    def offered(self) -> bool:
+        """The card offers what follows (shown, or under a host that doesn't show now)."""
+        return self._next is not None
+
     def waiting(self) -> bool:
         return self._awaiting is not None
 

@@ -267,9 +267,9 @@ class FolderEpisodeTests(FolderCase):
         self.assertEqual(len(self.next_card.named("show_next")), 1)
         self.assertIn(FINISHED, self.toast.messages())
 
-    def test_a_channel_chosen_over_the_card_lets_the_hold_go(self):
-        # The card dropped for a channel whose link then fails: the ended file keeps no hold.
-        self.controller.start()
+    def card_over_the_end(self):
+        """An episode with a next one in its folder ended: the card offers it, and the file's
+        hold waits for the card (the update question too)."""
         first = self.episode("Show.S01E01.mkv")
         self.episode("Show.S01E02.mkv")
         self.open(first)
@@ -277,10 +277,50 @@ class FolderEpisodeTests(FolderCase):
         self.when_idle()
         self.end()
         self.assertTrue(self.next_card.visible)
+        self.assertEqual(self.runs, [])
+
+    def test_a_channel_chosen_over_the_card_lets_the_hold_go(self):
+        # The card dropped for a channel whose link then fails: the ended file keeps no hold.
+        self.controller.start()
+        self.card_over_the_end()
         self.tune(0)
         self.assertFalse(self.next_card.visible)
         self.assertEqual(self.runs, ["update question"])
         self.catalog.linkFailed.emit(self.catalog.links[-1][0], "Not found")
+        self.assertEqual(self.runs, ["update question"])
+
+    def test_the_list_asked_for_with_no_provider_over_the_card_lets_the_hold_go(self):
+        # Review I1: the welcome card asked for drops the Next card (ProviderFlow.welcome),
+        # never as an Esc: the hold kept for the card went with it all the same.
+        self.catalog.names = []
+        self.controller.start()
+        self.card_over_the_end()
+        self.controller.handle(Action.OPEN_DRAWER)
+        self.assertTrue(self.welcome.visible)
+        self.assertFalse(self.next_card.visible)
+        self.assertEqual(self.runs, ["update question"])
+        self.when_idle()  # nothing held any more: at once
+        self.assertEqual(self.runs, ["update question"] * 2)
+
+    def test_a_provider_chosen_over_the_card_lets_the_hold_go(self):
+        # Review I1: a setup the viewer asks for drops the Next card (its "Loading" hint).
+        self.controller.start()
+        self.card_over_the_end()
+        self.controller.select_provider("Backup")
+        self.assertFalse(self.next_card.visible)
+        self.assertEqual(self.runs, ["update question"])
+        self.drawer.calls.clear()
+        # Not held: a setup that fails opens the list on its retry row (a held film's waits).
+        self.catalog.hub_failed("Backup", "Portal down")
+        self.assertEqual(self.drawer.named("open_drawer"), [(None, "left")])
+
+    def test_a_card_offered_under_a_hidden_host_still_counts(self):
+        # The card offered while its host doesn't show (isVisible False): a channel chosen
+        # then lets go of the file's hold as over a card that shows.
+        self.controller.start()
+        self.card_over_the_end()
+        self.next_card.visible = False  # offered, not on screen
+        self.tune(0)
         self.assertEqual(self.runs, ["update question"])
 
     def test_a_next_file_gone_fails_like_any_open(self):

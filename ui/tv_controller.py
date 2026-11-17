@@ -373,7 +373,7 @@ class TVController(QObject):
             open_drawer=self._open_drawer,
             live_section_loaded=self._live_section_loaded,
             error=self._error,
-            drop_autoplay=lambda: self._autoplay.drop(),
+            drop_autoplay=self._drop_card,
             autoplay_hint=lambda: self._autoplay.hint(),
             explain=self._explain,
             parent=self,
@@ -1146,6 +1146,16 @@ class TVController(QObject):
         if not self._closed and current is not None and current.local:
             self._flow.hold_for_file(False)
 
+    def _drop_card(self) -> None:
+        """A newer choice than the Next card's offer (a link asked for, the welcome card asked
+        for, a provider setup): the card closes without a reply, and a file's end that kept its
+        hold for the card lets go, after the card is gone. Autoplay.drop() alone never does:
+        a file opened, or Next, drops it just before holding again."""
+        offered = self._autoplay.offered()
+        self._autoplay.drop()
+        if offered:
+            self._release_file_hold()  # a file's end kept the hold for the card
+
     def settings_saved(self) -> None:
         """Settings were saved: a new live latency reaches the running channel at once.
 
@@ -1885,10 +1895,9 @@ class TVController(QObject):
         self._give_back_later = False  # the large picture has a newer choice
         self._cancel_external()
         self._flow.drop_autotune()  # a choice made before the live section loaded comes first
-        self._listing_generation += 1  # a folder's late listing gives the file no Next now
-        if self._autoplay.card_open():
-            self._release_file_hold()  # a file's end kept it for the card (its link may fail)
-        self._autoplay.drop()  # a newer choice than what the Next card offers
+        # A folder's late listing gives the file no Next now, nor once this link fails.
+        self._listing_generation += 1
+        self._drop_card()  # a newer choice than what the Next card offers
         self._lanes.request(target)
 
     def _follow_queue(self, settled: Target) -> bool:
