@@ -9,6 +9,33 @@ from services import file_types
 from services.open_paths import VIDEO_EXTENSIONS
 
 SPEC = Path(__file__).resolve().parent.parent / "qitv-macos.spec"
+EXTENSIONS = "public.filename-extension"
+MIME = "public.mime-type"
+
+# The bundle's imports: {UTI: (conforms to, tags)}.
+IMPORTS = {
+    # macOS 13 (the oldest QiTV runs on) doesn't declare these: the identifiers other apps use
+    "org.matroska.mkv": (["public.movie"], {EXTENSIONS: ["mkv"], MIME: ["video/x-matroska"]}),
+    "org.xiph.ogg-video": (["public.movie"], {EXTENSIONS: ["ogv"], MIME: ["video/ogg"]}),
+    # macOS 13 declares these only as imports itself (CoreTypes; QuickTime Player for m2ts and
+    # mts): QiTV's say exactly the same, so whichever import macOS takes, nothing changes
+    "org.webmproject.webm": (
+        ["public.movie"],
+        {EXTENSIONS: ["webm"], MIME: ["video/webm", "audio/webm"]},
+    ),
+    "com.adobe.flash.video": (
+        ["public.movie"],
+        {EXTENSIONS: ["flv", "f4v", "f4p", "f4a", "f4b"], MIME: ["video/x-flv"]},
+    ),
+    "com.microsoft.windows-media-wmv": (
+        ["public.movie", "com.microsoft.advanced-systems-format"],
+        {EXTENSIONS: ["wmv"], MIME: ["video/x-ms-wmv"]},
+    ),
+    "public.avchd-mpeg-2-transport-stream": (
+        ["public.mpeg-2-transport-stream"],
+        {EXTENSIONS: ["mts", "m2ts"]},
+    ),
+}
 
 
 def _bundle_call():
@@ -59,24 +86,22 @@ class MacBundleTypesTests(unittest.TestCase):
         for ext in file_types.MAC_DEFAULT_VIDEO:  # what the Settings button makes default
             self.assertIn(file_types.MAC_UTIS[ext][0], claimed)
 
-    def test_imports_only_what_macos_does_not_declare(self):
-        # macOS 13 (the oldest QiTV runs on) declares every other type itself, in CoreTypes
-        # (webm, flv and wmv among them) or QuickTime Player (m2ts and mts)
+    def test_imports_every_type_macos_may_not_declare(self):
         imported = {d["UTTypeIdentifier"]: d for d in self.plist["UTImportedTypeDeclarations"]}
-        self.assertEqual(set(imported), {"org.matroska.mkv", "org.xiph.ogg-video"})
-        for uti, declared in imported.items():
+        self.assertEqual(imported.keys(), IMPORTS.keys())
+        for uti, (conforms, tags) in IMPORTS.items():
             with self.subTest(uti=uti):
+                declared = imported[uti]
                 self.assertTrue(declared["UTTypeDescription"])
-                self.assertEqual(declared["UTTypeConformsTo"], ["public.movie"])
-                tags = declared["UTTypeTagSpecification"]
+                self.assertEqual(declared["UTTypeConformsTo"], conforms)
+                self.assertEqual(declared["UTTypeTagSpecification"], tags)
+                # a movie (a transport stream is one: UTCoreTypes.h)
+                self.assertTrue({"public.movie", "public.mpeg-2-transport-stream"} & set(conforms))
                 extensions = tags["public.filename-extension"]
-                self.assertTrue(extensions)
-                for ext in extensions:
+                videos = [ext for ext in extensions if ext in VIDEO_EXTENSIONS]
+                self.assertTrue(videos)
+                for ext in videos:
                     self.assertEqual(file_types.MAC_UTIS[ext][0], uti)
-                self.assertTrue(
-                    set(tags["public.mime-type"])
-                    <= {m for ext in extensions for m in file_types.MIME_TYPES[ext]}
-                )
         self.assertNotIn("UTExportedTypeDeclarations", self.plist)  # QiTV owns no type
 
     def test_the_bundle_is_the_one_launch_services_is_told(self):

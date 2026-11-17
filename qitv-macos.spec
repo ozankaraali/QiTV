@@ -170,8 +170,10 @@ app = BUNDLE(
                 ],
             },
         ],
-        # The types macOS 13 (the oldest QiTV runs on) doesn't declare itself, under the
-        # identifiers other apps use for them; macOS declares every other type above.
+        # mkv and ogv: macOS 13 (the oldest QiTV runs on) doesn't declare them; the identifiers
+        # are those other apps use. webm, flv, wmv and m2ts/mts: macOS 13 declares them only
+        # as imports itself (CoreTypes, QuickTime Player); these say exactly what it says, for
+        # a Mac without them. The other types are the system's own (exported).
         'UTImportedTypeDeclarations': [
             {
                 'UTTypeIdentifier': 'org.matroska.mkv',
@@ -189,6 +191,42 @@ app = BUNDLE(
                 'UTTypeTagSpecification': {
                     'public.filename-extension': ['ogv'],
                     'public.mime-type': ['video/ogg'],
+                },
+            },
+            {
+                'UTTypeIdentifier': 'org.webmproject.webm',
+                'UTTypeDescription': 'WebM video',
+                'UTTypeConformsTo': ['public.movie'],
+                'UTTypeTagSpecification': {
+                    'public.filename-extension': ['webm'],
+                    'public.mime-type': ['video/webm', 'audio/webm'],
+                },
+            },
+            {
+                'UTTypeIdentifier': 'com.adobe.flash.video',
+                'UTTypeDescription': 'FLV video',
+                'UTTypeConformsTo': ['public.movie'],
+                'UTTypeTagSpecification': {
+                    'public.filename-extension': ['flv', 'f4v', 'f4p', 'f4a', 'f4b'],
+                    'public.mime-type': ['video/x-flv'],
+                },
+            },
+            {
+                'UTTypeIdentifier': 'com.microsoft.windows-media-wmv',
+                'UTTypeDescription': 'WMV video',
+                'UTTypeConformsTo': ['public.movie', 'com.microsoft.advanced-systems-format'],
+                'UTTypeTagSpecification': {
+                    'public.filename-extension': ['wmv'],
+                    'public.mime-type': ['video/x-ms-wmv'],
+                },
+            },
+            {
+                # a transport stream (which is a public.movie), as QuickTime Player says
+                'UTTypeIdentifier': 'public.avchd-mpeg-2-transport-stream',
+                'UTTypeDescription': 'M2TS video',
+                'UTTypeConformsTo': ['public.mpeg-2-transport-stream'],
+                'UTTypeTagSpecification': {
+                    'public.filename-extension': ['mts', 'm2ts'],
                 },
             },
         ],

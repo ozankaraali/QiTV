@@ -748,9 +748,10 @@ class LinuxBackendTests(unittest.TestCase):
 # --- macOS with a fake Launch Services ------------------------------------------------------
 
 # Apple's headers: CFString.h (kCFStringEncodingUTF8) and LaunchServices' LSConstants.h
-# (kLSRolesViewer); the values are written out here, not taken from the module.
+# (kLSRolesAll: every role, as Finder's Change All); the values are written out here, not
+# taken from the module.
 UTF8 = 0x08000100
-ROLES_VIEWER = 0x00000002
+ROLES_ALL = 0xFFFFFFFF
 BUNDLE_ID = "com.ozankaraali.QiTV"
 FIVE = [
     "org.matroska.mkv",
@@ -790,6 +791,7 @@ class FakeCoreServices:
     def LSSetDefaultRoleHandlerForContentType(self, content_type, role, handler):
         for ref in (content_type, handler):
             assert ref in self.strings and ref not in self.released, "a string used freed"
+        assert 0 <= role <= 0xFFFFFFFF, role  # an LSRolesMask is a UInt32
         uti = self.strings[content_type]
         self.calls.append((uti, role, self.strings[handler]))
         return self.answers.get(uti, self.answers.get("*", 0))
@@ -810,7 +812,7 @@ class MacBackendTests(unittest.TestCase):
         result = file_types._mac.register("videos", MAC_APP)
         self.assertTrue(result)
         self.assertTrue(result.defaults)
-        self.assertEqual(fake.calls, [(uti, ROLES_VIEWER, BUNDLE_ID) for uti in FIVE])
+        self.assertEqual(fake.calls, [(uti, ROLES_ALL, BUNDLE_ID) for uti in FIVE])
         self.assertEqual(
             [file_types.MAC_UTIS[ext][0] for ext in file_types.MAC_DEFAULT_VIDEO], FIVE
         )

@@ -82,7 +82,8 @@ MIME_TYPES: dict[str, tuple[str, ...]] = {
 # Each type's Uniform Type Identifiers on macOS (qitv-macos.spec claims them all): the one
 # Launch Services is told for a default first, then another that apps declare for it too.
 # macOS 13, the oldest QiTV runs on, declares all but mkv and ogv itself (CoreTypes, and
-# QuickTime Player for m2ts and mts); the bundle imports those two.
+# QuickTime Player for m2ts and mts). The bundle imports those two, and also the four that
+# macOS declares only as imports (webm, flv, wmv, m2ts/mts), saying what macOS says.
 MAC_UTIS: dict[str, tuple[str, ...]] = {
     "mp4": ("public.mpeg-4",),
     "m4v": ("com.apple.m4v-video",),
@@ -823,11 +824,11 @@ _linux = _LinuxBackend()
 # --- macOS ----------------------------------------------------------------------------------
 
 # Apple's LaunchServices headers (LSInfo.h: LSSetDefaultRoleHandlerForContentType, deprecated
-# since macOS 12 for an Objective-C call; LSConstants.h: kLSRolesViewer), CoreFoundation's
+# since macOS 12 for an Objective-C call; LSConstants.h: kLSRolesAll), CoreFoundation's
 # CFString.h (CFStringCreateWithCString, kCFStringEncodingUTF8), and "Defining file and data
 # types for your app" (a type the system declares isn't declared again; see qitv-macos.spec).
 MAC_BUNDLE_ID = "com.ozankaraali.QiTV"  # qitv-macos.spec's bundle_identifier
-LS_ROLES_VIEWER = 0x00000002
+LS_ROLES_ALL = 0xFFFFFFFF  # every role, as Finder's Change All: one held before doesn't win
 CF_STRING_ENCODING_UTF8 = 0x08000100
 _CORE_FOUNDATION = "/System/Library/Frameworks/CoreFoundation.framework/CoreFoundation"
 _CORE_SERVICES = "/System/Library/Frameworks/CoreServices.framework/CoreServices"
@@ -860,7 +861,7 @@ def _core_services() -> Any:
 
 class _MacBackend:
     """The bundle declares the types, so Open With lists QiTV with nothing written.
-    Registering makes QiTV the default viewer for the kind's short list (what Finder's Get
+    Registering makes QiTV the default app for the kind's short list (what Finder's Get
     Info → Open with → Change All does); macOS 26.4 and later ask the user once for each."""
 
     def register(
@@ -905,12 +906,13 @@ def _cf_string(lib: Any, text: str) -> Any:
 
 
 def _take_default(lib: Any, uti: str, handler: Any) -> bool:
-    """Make the bundle `handler` names the default viewer for `uti`; whether macOS did."""
+    """Make the bundle `handler` names the default for `uti`, in every role; whether macOS
+    did."""
     content_type = _cf_string(lib, uti)
     if not content_type:
         return False
     try:
-        status = lib.LSSetDefaultRoleHandlerForContentType(content_type, LS_ROLES_VIEWER, handler)
+        status = lib.LSSetDefaultRoleHandlerForContentType(content_type, LS_ROLES_ALL, handler)
     finally:
         lib.CFRelease(content_type)
     if status:
