@@ -211,6 +211,29 @@ class FileHoldTests(ControllerTestCase):
         self.ready("http://stream/2")
         self.assertEqual(self.runs, ["update question"])
 
+    def test_a_file_still_looked_at_gives_way_only_to_a_choice_made_since(self):
+        # Review M5: TVWindow drops a file whose check is still on its way (file_gives_way)
+        # once something else is chosen; a link that comes for an earlier choice doesn't.
+        gave: list[str] = []
+        self.window.file_gives_way = lambda: gave.append("gave way")
+        self.controller.start()
+        self.tune(0)
+        self.assertEqual(len(gave), 1)  # a channel chosen now
+        self.ready()
+        self.assertEqual(len(gave), 1)  # its link came: chosen before, no newer choice
+        self.tune(1)
+        self.tune(2)  # while 1's link is on its way: queued, chosen now all the same
+        self.assertEqual(len(gave), 3)
+        self.ready("http://stream/2")  # 1's link: the queued choice is asked for now
+        self.assertEqual(self.requested()[-1], CHANNELS[2]["name"])
+        self.assertEqual(len(gave), 3)  # asked again, chosen before
+        self.ready("http://stream/3")
+        self.assertEqual(len(gave), 3)
+        self.controller.play_file(FILM, size=1234)  # a file is no other choice
+        self.assertEqual(len(gave), 3)
+        self.controller._before_new_target(None)  # a phone's Watch or an outside player
+        self.assertEqual(len(gave), 4)
+
     def startup_check(self):
         """main()'s startup check, its network answering now that an update exists: the
         questions shown are recorded."""

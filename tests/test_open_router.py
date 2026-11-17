@@ -179,6 +179,56 @@ class OpenRouterTests(RouterCase):
             self.handover(srt)
         self.assertEqual(runs, [])
 
+    def looked_at(self, path, how="handover"):
+        """`path` opened, its check still on its way (a slow share): the check's arguments."""
+        with mock.patch.object(self.window._file_check, "start") as check:
+            if how == "handover":
+                self.handover(path)
+            else:
+                drop(self.window, paths=[path])
+        check.assert_called_once()
+        return check.call_args.args
+
+    def test_a_choice_made_while_a_file_is_looked_at_wins(self):
+        # Review M5: the check of a file on a slow share came back after the viewer chose
+        # something else (here an outside player takes the title: TVController's own call),
+        # and the file played over it. The later choice wins; its hold goes too.
+        generation, path = self.looked_at(self.film("ep.mkv"))
+        runs = []
+        self.window.when_idle(lambda: runs.append(True))
+        self.assertEqual(runs, [])  # held while it is looked at
+        self.window.controller._before_new_target(None)
+        self.assertEqual(runs, [True])
+        self.window._file_check.checked.emit(generation, path, 4)  # the share answers
+        elapse(SETTLE_MS)
+        self.assertEqual(self.plays(), [])
+
+    def test_a_channel_chosen_before_the_file_lets_the_file_play(self):
+        # The link of a channel asked for before the file was opened comes while the file is
+        # looked at: it plays a moment, and the file, the later choice, still replaces it.
+        generation, path = self.looked_at(self.film("ep.mkv"))
+        channel = Target({"name": "Kanal 1", "cmd": "http://x/1"}, "live", "Kanal 1")
+        self.window.controller._before_new_target(channel, delivered=True)
+        self.window._file_check.checked.emit(generation, path, 4)
+        self.wait_for_plays(1)
+        self.assertEqual(self.plays(), [(path, 4)])
+        runs = []
+        self.window.when_idle(lambda: runs.append(True))
+        self.assertEqual(runs, [])  # held again for it
+
+    def test_a_film_that_plays_keeps_its_hold_when_the_next_file_gives_way(self):
+        on_now = self.film("on now.mkv")
+        self.handover(on_now)
+        self.wait_for_plays(1)
+        generation, path = self.looked_at(self.film("next.mkv"), how="drop")
+        runs = []
+        self.window.when_idle(lambda: runs.append(True))
+        self.window.file_gives_way()  # a newer choice, still on its way
+        self.assertEqual(runs, [])  # the film on now keeps its hold until it gives way
+        self.window._file_check.checked.emit(generation, path, 4)
+        elapse(SETTLE_MS)
+        self.assertEqual(self.plays(), [(str(on_now), 4)])
+
     def test_missing_file_toasts_and_keeps_playing(self):
         on_now = self.film("on now.mkv")
         self.handover(on_now)

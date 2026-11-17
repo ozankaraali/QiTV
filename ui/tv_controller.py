@@ -1811,7 +1811,12 @@ class TVController(QObject):
                 return channel
         return kept
 
-    def _request(self, target: Target) -> None:
+    def _request(self, target: Target, *, chosen_now: bool = True) -> None:
+        """Ask for `target`'s link. `chosen_now`: the viewer chose it now; False when it was
+        chosen earlier and is only asked for again (queued behind another link, or held by
+        its provider's setup)."""
+        if chosen_now and not target.local:
+            self._file_gives_way()  # a file still looked at is older than this choice
         self._forget_stopped()  # 2.6: a newer choice than what Stop stopped
         self._give_back_later = False  # the large picture has a newer choice
         self._cancel_external()
@@ -1830,7 +1835,7 @@ class TVController(QObject):
             logger.debug(
                 "Dropping the link for %s: %s was chosen since", settled.title, queued.title
             )
-            self._request(queued)
+            self._request(queued, chosen_now=False)  # chosen as it was queued
         return True
 
     def _is_stay(self, target: Optional[Target]) -> bool:
@@ -1983,7 +1988,9 @@ class TVController(QObject):
             listing.playing_changed()
 
     def _deliver(self, target: Target, url: str) -> None:
-        self._before_new_target(target)  # its link came: it replaces what plays
+        # Its link came: it replaces what plays. It was chosen as it was asked for
+        # (_request), perhaps before a file opened since: that file isn't dropped for it.
+        self._before_new_target(target, delivered=True)
         item = target.item
         launcher = self._external_launcher()
         multiview = target.live and self.multiview_shown()
@@ -3160,17 +3167,29 @@ class TVController(QObject):
         assert isinstance(tuner, LiveTuner)
         return tuner
 
-    def _before_new_target(self, target: Optional[Target]) -> None:
+    def _before_new_target(self, target: Optional[Target], *, delivered: bool = False) -> None:
         """`target` replaces what the large picture shows (None: an outside player or a phone
         takes it, nothing plays here). A file opened in QiTV gives way to anything but another
-        file: what waited for it (the welcome card, the update question) may come now. AI
-        captions that came on by themselves for a video file go off before anything else
+        file: what waited for it (the welcome card, the update question) may come now. A file
+        still being looked at gives way too, to a choice made now (a swap, a bring-back, an
+        outside player), not to a link `delivered` for a choice made before it was opened.
+        AI captions that came on by themselves for a video file go off before anything else
         opens (CaptionsController.target_changing)."""
         if target is None or not target.local:
+            if not delivered:
+                self._file_gives_way()
             self._flow.hold_for_file(False)
         captions = getattr(self.window_actions, "captions", None)
         if captions is not None:
             captions.target_changing(target is not None and target.video_file)
+
+    def _file_gives_way(self) -> None:
+        """Something other than a file was chosen for the large picture: a file opened before
+        it, still being looked at, isn't played once its check is back (TVWindow); the later
+        choice wins."""
+        gives_way = getattr(self.window_actions, "file_gives_way", None)
+        if callable(gives_way):
+            gives_way()
 
     def _video_file_playing(self) -> None:
         """The large picture's player plays: a video file's first time (not a pause's end, nor
@@ -3351,7 +3370,7 @@ class TVController(QObject):
         if self._is_stay(newest):
             self._lanes.take_queued()
         else:
-            self._request(newest)
+            self._request(newest, chosen_now=False)  # chosen before its provider was ready
 
     def _live_section_loaded(self) -> None:
         context = self.zap.context

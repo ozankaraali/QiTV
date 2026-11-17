@@ -1546,13 +1546,28 @@ class TVWindow(QMainWindow):
             if self._playing_file() is None:  # a film that plays on keeps its hold
                 self.controller.hold_for_file(False)
             return
-        # Held again: a channel chosen while it was looked at let go of the hold.
+        # Held again: what let go of the hold while it was looked at (a film before it that
+        # ended, the link of a channel chosen before it) leaves it this file's. A choice made
+        # after it dropped the file instead (file_gives_way).
         self.controller.hold_for_file(True)
         self.screens.play_path(path, size)
         target = self.controller.now_playing()
         if due[2] and target is not None and target.local:
             self._subtitles_due = (target, due[2], self._clock() + OPENED_WAIT_S)
             self._subtitles_wait.start()
+
+    def file_gives_way(self) -> None:
+        """Something other than a file was chosen for the large picture since a file was
+        opened (a channel, a provider's film, a swap, a phone's Watch or an outside player:
+        TVController): the file still being looked at (a slow share) isn't played when its
+        check is back; the later choice wins. Its hold goes with it unless a film still plays
+        (that one's hold goes once it gives way, ends or stops)."""
+        if self._open_due is None:
+            return
+        self._open_due = None
+        logger.info("A file opened in QiTV gave way to a newer choice before it played")
+        if self._playing_file() is None:
+            self.controller.hold_for_file(False)
 
     def when_idle(self, callback: Callable[[], None]) -> None:
         """`callback` now, or once the file opened in QiTV is over (it ended, was stopped,
