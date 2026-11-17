@@ -819,8 +819,11 @@ class TVController(QObject):
 
     def hold_for_file(self, on: bool) -> None:
         """A file opened in QiTV is on its way or plays (`on`): nothing opens over it (see
-        ProviderFlow.hold_for_file). The controller lets go when the file ends, is stopped,
-        fails or gives way to another title (_before_new_target)."""
+        ProviderFlow.hold_for_file), nor does the Next card's episode (it would count as a
+        choice made since: TVWindow.file_gives_way). The controller lets go when the file
+        ends, is stopped, fails or gives way to another title (_before_new_target)."""
+        if on:
+            self._autoplay.drop()
         self._flow.hold_for_file(on)
 
     def when_idle(self, callback: Callable[[], None]) -> None:
@@ -860,7 +863,8 @@ class TVController(QObject):
         target, self._resume = self._resume, None
         if not self._closed and target is not None and target is self._current:
             again = replace(target, zapped=False, retried=False, start_over=False)
-            self._request(replace(again, archive_at=None, archive_until=None))  # live
+            again = replace(again, archive_at=None, archive_until=None)  # live
+            self._request(again, chosen_now=False)  # what played: no newer choice
 
     def stop_for_library(self) -> None:
         """Stop what plays, waiting for nothing: the corner player's ×, or the Library opened

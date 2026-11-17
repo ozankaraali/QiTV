@@ -234,6 +234,29 @@ class FileHoldTests(ControllerTestCase):
         self.controller._before_new_target(None)  # a phone's Watch or an outside player
         self.assertEqual(len(gave), 4)
 
+    def test_a_file_on_its_way_drops_the_next_cards_episode(self):
+        # The Next card's countdown ending while a file is looked at would ask for a provider's
+        # episode: a choice made since (it would drop the file), and a provider stream opened
+        # over a double-click. The hold drops the card's offer first; the resume after a
+        # failed self-update is no newer choice either.
+        gave: list[str] = []
+        self.window.file_gives_way = lambda: gave.append("gave way")
+        with mock.patch.object(self.controller._autoplay, "drop") as drop:
+            self.controller.hold_for_file(False)
+            drop.assert_not_called()
+            self.controller.hold_for_file(True)
+            drop.assert_called_once_with()
+        self.controller.hold_for_file(False)
+        self.controller.start()
+        self.play(0)
+        gave.clear()
+        self.controller.stop_live()  # a self-update that couldn't launch: it plays again
+        asked = len(self.catalog.links)
+        self.controller.resume_stopped()
+        self.assertEqual(len(self.catalog.links), asked + 1)  # asked for again
+        self.assertEqual(self.requested()[-1], CHANNELS[0]["name"])
+        self.assertEqual(gave, [])
+
     def startup_check(self):
         """main()'s startup check, its network answering now that an update exists: the
         questions shown are recorded."""
