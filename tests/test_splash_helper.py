@@ -71,12 +71,10 @@ def stubborn(conn, geometry, lit=False):
     time.sleep(60)
 
 
-LATE_S = 1.5  # a helper that shows this late: after the window is on screen
-
-
 def late(conn, geometry, lit=False):
-    """The real helper, slow to start (a busy computer, a slow disk)."""
-    time.sleep(LATE_S)
+    """The real helper, slow to start (a busy computer, a slow disk): it begins only once QiTV
+    has told it something (left unread), the window on screen by then."""
+    conn.poll(SPAWN_S)
     run_splash(conn, geometry, lit)
 
 
