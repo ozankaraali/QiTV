@@ -108,6 +108,39 @@ class FileHoldTests(ControllerTestCase):
         self.session.ended.emit()
         self.assertTrue(self.welcome.visible)
 
+    def test_a_providers_loading_hint_waits_for_the_film(self):
+        # "Loading <provider>…" showed over a film opened at start: the provider loads behind
+        # it, and its hint shows once the film is over, while it still loads.
+        self.controller.hold_for_file(True)  # main(), before the window shows
+        self.controller.start()
+        self.assertEqual(self.catalog.selected, [None])  # it loads all the same
+        self.assertEqual(self.toast.named("set_hint"), [])  # not even a moment
+        self.controller.hold_for_file(False)
+        self.assertEqual(self.toast.hint, "Loading Home…")
+        self.catalog.hub_ready("Home")
+        self.catalog.sectionReady.emit("live")
+        self.assertIsNone(self.toast.hint)
+
+    def test_a_loading_hint_up_goes_for_the_film_and_never_comes_back_once_loaded(self):
+        self.controller.start()
+        self.assertEqual(self.toast.hint, "Loading Home…")
+        self.film()  # a double-click while the provider loads
+        self.assertIsNone(self.toast.hint)
+        self.catalog.hub_ready("Home")
+        self.catalog.sectionReady.emit("live")
+        self.session.stateChanged.emit("ended")
+        self.session.ended.emit()
+        self.assertIsNone(self.toast.hint)
+        self.assertNotIn(("Loading Home…",), self.toast.named("set_hint")[1:])  # never again
+
+    def test_a_failed_setup_still_says_so_over_the_film(self):
+        self.controller.hold_for_file(True)
+        self.controller.start()
+        self.catalog.hub_failed("Home", "Portal down")
+        self.assertEqual(self.toast.messages(), [("Home: Portal down", "error")])
+        self.controller.hold_for_file(False)
+        self.assertIsNone(self.toast.hint)  # nothing loads any more
+
     def test_the_list_key_shows_the_card_over_the_film(self):
         # Asked for: the list's key (or button) with no provider shows the card at once.
         self.catalog.names = []

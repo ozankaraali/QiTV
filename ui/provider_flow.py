@@ -18,9 +18,9 @@ A failure it says (a setup, the live section, a last channel's provider) is foll
 `explain`, which asks that provider's account why (TVController._explain).
 
 A file opened in QiTV holds the flow while it is on its way or plays (`hold_for_file`, spec
-§3 of the open-videos design): nothing opens over it, neither the last channel, the drawer nor
-the welcome card, and what waits for QiTV to be idle (`when_idle`: the startup update question)
-runs once it is over.
+§3 of the open-videos design): nothing opens over it, neither the last channel, the drawer, the
+welcome card nor a setup's "Loading <provider>…" (the setup goes on behind it), and what waits
+for QiTV to be idle (`when_idle`: the startup update question) runs once it is over.
 
 TVController owns the links, the zapping and the player, and hands this unit callbacks.
 """
@@ -87,7 +87,8 @@ class ProviderFlow(QObject):
         self._autoplay_hint = autoplay_hint
         self._explain = explain
         self._await_live = False  # after providerReady: the first live section decides
-        self._loading = False  # the "Loading <provider>…" hint is up
+        self._loading = False  # a setup shows "Loading <provider>…" (_loading_text)
+        self._loading_text: Optional[str] = None  # held back while a file is held for
         self._autotune: Optional[tuple[dict, str]] = None
         self._in_library = False  # the window shows the Library: nothing live starts
         self._live_on_ready = False  # back from the Library during a setup: tune once ready
@@ -220,7 +221,8 @@ class ProviderFlow(QObject):
         stopped, failed, turned out missing or gave way to another title.
 
         While held QiTV is busy: a provider that becomes ready tunes nothing and opens no
-        drawer, and the welcome card waits (one already up is withdrawn until then). A last
+        drawer, and the welcome card and a setup's "Loading <provider>…" wait (one already up
+        is withdrawn until then; the setup goes on, and says if it fails). A last
         channel on its way, or waited for at its own provider, is dropped, and "start with the
         last channel" is spent for this run, as the list a ready provider opens on an idle
         player is. Released, the welcome card asked meanwhile shows and what waited
@@ -230,6 +232,8 @@ class ProviderFlow(QObject):
             if self._welcome_up:
                 self._dismiss_welcome()
                 self._welcome_due = True
+            if self._loading:
+                self.overlays.toast.set_hint(None)  # the setup goes on behind the file
             self.drop_autotune()
             return
         if not self._held:
@@ -237,6 +241,8 @@ class ProviderFlow(QObject):
         self._held = False
         if self._closed():
             return
+        if self._loading:
+            self.overlays.toast.set_hint(self._loading_text)  # it still loads
         due, self._welcome_due = self._welcome_due, False
         if due and not self.catalog.provider_names():
             self.welcome()
@@ -293,7 +299,9 @@ class ProviderFlow(QObject):
         self._welcome_due = False
         self._loading = True
         # i18n: a hint while a provider's channels load; name is the provider's
-        self.overlays.toast.set_hint(tr("Loading {name}…", name=name) if name else tr("Loading…"))
+        self._loading_text = tr("Loading {name}…", name=name) if name else tr("Loading…")
+        if not self._held:  # a file opened in QiTV shows alone: the hint waits for its end
+            self.overlays.toast.set_hint(self._loading_text)
 
     def _end_loading(self) -> None:
         if self._loading:
