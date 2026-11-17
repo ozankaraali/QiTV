@@ -20,9 +20,14 @@ from PySide6.QtWidgets import QApplication, QWidget
 
 from ui import opening_mark
 from ui.opening_mark import (
+    FILLED_AT,
+    LIT_UNTIL,
     LOOP_MS,
     MARK_PATH,
+    OPEN_S,
+    STILL_T,
     OpeningMark,
+    held_phase,
     mark_rect,
     paint_mark,
     parse_path,
@@ -566,6 +571,94 @@ class WidgetTests(unittest.TestCase):
             for a, b in [(through_window.pixelColor(x, y), direct.pixelColor(x, y))]
         )
         self.assertLessEqual(worst, 2)
+
+
+class HeldLitTests(unittest.TestCase):
+    """A mark lit from its first moment (the splash over the bootloader's still) stays lit until
+    it opens: its glyph never goes out and is drawn again."""
+
+    def setUp(self):
+        self.clock = Clock()
+        motion = mock.patch.object(OpeningMark, "reduced_motion", return_value=False)
+        self.reduced = motion.start()
+        self.addCleanup(motion.stop)
+        self.mark = OpeningMark(clock=self.clock)
+        self.addCleanup(self.mark.deleteLater)
+
+    def test_it_begins_on_the_stills_frame(self):
+        self.assertAlmostEqual(held_phase(0.0), STILL_T)
+
+    def test_the_glyph_is_never_out_after_an_hour_of_loop_time(self):
+        self.mark.start(self.clock.now, held=True)
+        low, high = 1.0, 0.0
+        for step in range(0, 3600 * 20):  # an hour, every 50 ms
+            self.clock.now = step * 0.05
+            frame = self.mark.frame()
+            self.assertFalse(frame.still)
+            self.assertEqual((frame.opening, frame.fade), (0.0, 1.0))
+            low, high = min(low, frame.t), max(high, frame.t)
+        # filled from FILLED_AT, and not yet fading at LIT_UNTIL: lit the whole hour
+        self.assertGreaterEqual(low, FILLED_AT)
+        self.assertLessEqual(high, LIT_UNTIL)
+        self.assertGreater(high - low, 0.25)  # the light does breathe
+
+    def test_the_glyph_paints_whole_at_every_held_phase(self):
+        for i in range(0, 101):
+            t = held_phase(i * opening_mark.HOLD_BREATH_S / 100)
+            self.assertEqual(opening_mark._value(opening_mark._SHOWN, t), 1.0)
+            self.assertEqual(opening_mark._value(opening_mark._DRAWN, t), 1.0)
+            self.assertEqual(opening_mark._value(opening_mark._FILLED, t), 1.0)
+
+    def test_two_marks_on_one_origin_show_one_frame(self):
+        # the splash's and the player's, another process, the same clock
+        other = OpeningMark(clock=self.clock)
+        self.addCleanup(other.deleteLater)
+        self.mark.start(5.0, held=True)
+        other.start(5.0, held=True)
+        for now in (5.3, 6.1, 9.77, 40.2):
+            self.clock.now = now
+            self.assertAlmostEqual(other.frame().t, self.mark.frame().t)
+
+    def test_finish_opens_at_once_with_nothing_to_catch_up(self):
+        for at in (0.0, 0.4, 1.1, 1.9, 2.3):
+            with self.subTest(at=at):
+                mark = OpeningMark(clock=self.clock)
+                self.addCleanup(mark.deleteLater)
+                self.clock.now = 0.0
+                mark.start(0.0, held=True)
+                self.clock.now = at
+                held = mark.frame().t
+                calls = []
+                mark.finish(lambda: calls.append(1))
+                self.assertEqual(mark._finish.catch_up_s, 0.0)
+                self.assertFalse(mark._finish.plain)
+                frame = mark.frame()
+                self.assertAlmostEqual(frame.t, held)  # the open starts from this very frame
+                self.assertFalse(frame.still)
+                self.clock.now = at + OPEN_S / 2
+                self.assertGreater(mark.frame().opening, 0.0)
+                self.assertAlmostEqual(mark.frame().t, held)
+                self.clock.now = at + OPEN_S + 0.01
+                mark._tick()
+                self.assertTrue(mark._done)
+
+    def test_under_reduced_motion_it_holds_still(self):
+        self.reduced.return_value = True
+        self.mark.start(0.0, held=True)
+        for now in (0.0, 0.7, 5.0, 1000.0):
+            self.clock.now = now
+            frame = self.mark.frame()
+            self.assertEqual((frame.t, frame.still), (STILL_T, True))
+        self.assertFalse(self.mark._timer.isActive())
+
+    def test_a_mark_not_held_still_loops_through_the_glyph_going_out(self):
+        self.mark.start(0.0)
+        phases = []
+        for step in range(0, 64):
+            self.clock.now = step * 0.05
+            phases.append(self.mark.frame().t)
+        self.assertGreater(max(phases), LIT_UNTIL)
+        self.assertLess(min(phases), FILLED_AT)
 
 
 class ReducedMotionTests(unittest.TestCase):

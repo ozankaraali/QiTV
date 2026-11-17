@@ -122,6 +122,41 @@ class AnalyseTest(unittest.TestCase):
         self.assertFalse(by(report)["no_glide"].ok)
 
 
+class GlyphTest(unittest.TestCase):
+    def levels(self, out_from=None, out_to=None):
+        times = [T0 + i / 30 for i in range(150)]
+        levels = [60.0 if not (out_from and out_from <= t - T0 < out_to) else 28.0 for t in times]
+        return times, levels
+
+    def samples(self):
+        # the still from 0.1 s, the window at opacity > 0 from 3.0 s
+        out = [smp(i / 10, still=True) for i in range(1, 30)]
+        out += [smp(i / 10, still=True, mains=["a"], opacity=0.1 * (i - 29)) for i in range(30, 40)]
+        out += [smp(i / 10, mains=["a"]) for i in range(40, 50)]
+        return out
+
+    def ev(self, **levels):
+        times, lv = self.levels(**levels)
+        return Events(t_exec=T0, onefile=True, frame_times=times, glyph_levels=lv)
+
+    def test_a_glyph_lit_to_the_open_passes(self):
+        report = analyse(self.samples(), self.ev())
+        self.assertTrue(by(report)["glyph_held"].ok)
+
+    def test_a_glyph_that_goes_out_and_comes_back_fails(self):
+        report = analyse(self.samples(), self.ev(out_from=1.5, out_to=2.2))
+        self.assertFalse(by(report)["glyph_held"].ok)
+
+    def test_the_open_may_dim_it(self):
+        ev = self.ev(out_from=3.0, out_to=4.0)  # from the open on: not judged
+        self.assertTrue(by(analyse(self.samples(), ev))["glyph_held"].ok)
+
+    def test_a_source_start_is_not_judged(self):
+        ev = self.ev(out_from=1.5, out_to=2.2)
+        ev.onefile = False
+        self.assertNotIn("glyph_held", by(analyse(self.samples(), ev)))
+
+
 def handover_timeline(splash_until, new_main=False):
     out = [smp(i / 10, mains=["a"]) for i in range(0, 50)]  # the running window
     t2 = 5.0

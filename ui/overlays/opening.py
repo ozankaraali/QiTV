@@ -71,6 +71,9 @@ class OpeningOverlay(Overlay):
         # Where its loop begins (ui/splash_helper.py: the splash's own mark's, so that the two
         # show the same frame); None: as it starts.
         self.loop_origin: Callable[[], Optional[float]] = lambda: None
+        # Whether that mark is held lit (the splash came from the bootloader's still): this one
+        # is too, on the same origin, so that the two show the same frame.
+        self.loop_held: Callable[[], bool] = lambda: False
         if parent is not None:
             parent.installEventFilter(self)
         self.hide()
@@ -95,7 +98,7 @@ class OpeningOverlay(Overlay):
         self._opening = True
         self._timeout.start()
         if not self._finishing:
-            self._mark.start(self.loop_origin())  # nothing while it draws already
+            self._start_mark()  # nothing while it draws already
         self._mark.setVisible(not self._held)
         self._layout()
         self.show()
@@ -125,9 +128,13 @@ class OpeningOverlay(Overlay):
         self._finishing = False
         if self._opening:
             # a file opened as it opened out: it draws again for that one
-            self._mark.start(self.loop_origin())
+            self._start_mark()
         else:
             self.hide()
+
+    def _start_mark(self) -> None:
+        origin = self.loop_origin()
+        self._mark.start(origin, held=origin is not None and self.loop_held())
 
     def _listen(self, session: Any) -> None:
         old = self._session

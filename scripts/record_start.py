@@ -23,6 +23,7 @@ counted as a second appearance of the window.
 --check asserts (exit 1 when one fails):
     the splash shows within 1.5 s of the start (a one-file build: of the exec, the still counts);
     the main window appears once, with one id;
+    a one-file start: from the still the glyph never goes out before the open;
     the visible window count (splash, still, main) never goes 1 -> 0 -> 1, on the windows and on
         the filmed frames (an empty frame between the first mark and the shown window);
     the splash is gone at most 0.5 s after the window is fully shown (its opacity is 1);
@@ -77,6 +78,11 @@ SPLASH_WITHIN_S = 1.5
 SPLASH_AFTER_FULL_S = 0.5
 OCCUPIED_DIFF = 0.3  # mean gray levels away from the empty screen: a mark, a window
 FULL_OPACITY = 0.999
+# The glyph's brightness: the mean gray of the middle of the tile in the small frames. From the
+# still the glyph stays lit until the open; out, it falls to the dark tile's level.
+GLYPH_BOX = 5  # half-side in small-frame pixels: inside the 12 px tile
+GLYPH_KEEPS = 0.7  # of its lit level
+GLYPH_SETTLE_S = 0.4  # the light is coming in as the helper takes over
 
 
 @dataclass
@@ -112,6 +118,7 @@ class Events:
     onefile: bool = False
     frame_times: list[float] = field(default_factory=list)
     frame_diffs: list[float] = field(default_factory=list)  # mean gray distance from empty
+    glyph_levels: list[float] = field(default_factory=list)  # the glyph's brightness per frame
 
 
 @dataclass
@@ -277,6 +284,12 @@ def analyse(samples: Sequence[Sample], ev: Events, scenario: str = "plain") -> R
             )
         )
 
+    # 4b. a mark lit from the still never goes out and comes back before the open
+    if ev.onefile and not ev.reduced:
+        verdict = _glyph_held(ev, seen.t if seen else None, part)
+        if verdict is not None:
+            checks.append(verdict)
+
     # 5. reduced motion: nothing glides
     if ev.reduced:
         spots = {s.splash_pos for s in part if s.splash and s.splash_pos is not None}
@@ -294,6 +307,31 @@ def analyse(samples: Sequence[Sample], ev: Events, scenario: str = "plain") -> R
 
 def _on_screen(s: Sample) -> bool:
     return bool(s.mains) and (s.opacity is None or s.opacity > 0)
+
+
+def _glyph_held(ev: Events, first_t: Optional[float], part: Sequence[Sample]) -> Optional[Check]:
+    """From the still to the open (the window's first opacity above 0), the glyph's brightness
+    never falls to the dark tile's: it is lit all along."""
+    if not ev.glyph_levels or first_t is None:
+        return None
+    opened = _first(part, lambda s: bool(s.mains) and (s.opacity or 0.0) > 0.0)
+    if opened is None:
+        return Check("glyph_held", False, "the window never opened")
+    span = [
+        lv
+        for t, lv in zip(ev.frame_times, ev.glyph_levels)
+        if first_t + GLYPH_SETTLE_S <= t <= opened.t - SAMPLE_S
+    ]
+    if len(span) < 3:
+        return None
+    ref = sorted(span)[len(span) // 2]
+    low = min(span)
+    return Check(
+        "glyph_held",
+        low >= GLYPH_KEEPS * ref,
+        f"the glyph's level from the still to the open: lowest {low:.1f}, typical {ref:.1f}"
+        f" (it must keep {GLYPH_KEEPS:.0%})",
+    )
 
 
 def _rises(flags: Sequence[bool]) -> int:
@@ -518,6 +556,19 @@ class Grabber:
         self.thread.join(5)
 
 
+def glyph_levels(frames: list[tuple[float, bytes]]) -> list[float]:
+    """The mean gray of the middle of the screen, where the mark's tile and glyph stand."""
+    cx, cy = GRAB_W // 2, GRAB_H // 2
+    out = []
+    for _, buf in frames:
+        total = 0
+        for y in range(cy - GLYPH_BOX, cy + GLYPH_BOX):
+            row = y * GRAB_W
+            total += sum(buf[row + cx - GLYPH_BOX : row + cx + GLYPH_BOX])
+        out.append(total / (4 * GLYPH_BOX * GLYPH_BOX))
+    return out
+
+
 def frame_diffs(frames: list[tuple[float, bytes]], base: bytes) -> list[float]:
     """Mean gray distance of each frame from the empty screen."""
     out = []
@@ -630,6 +681,7 @@ def record(scenario: str, out: Path, app: Path) -> tuple[list[Sample], Events, d
         frames = grab.frames
         ev.frame_times = [t for t, _ in frames]
         ev.frame_diffs = frame_diffs(frames, base)
+        ev.glyph_levels = glyph_levels(frames)
         files = _clip(out, scenario, capture, ev, origin, samples, work)
         files["log"] = str(work / "qitv.out")
         files["settings_log"] = str(next(cfg.rglob("*.log"), ""))
@@ -733,7 +785,13 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             {
                 "timeline": report.timeline,
                 "checks": [asdict(c) for c in report.checks],
-                "events": {k: v for k, v in asdict(ev).items() if not k.startswith("frame_")},
+                "events": {
+                    k: v
+                    for k, v in asdict(ev).items()
+                    if not k.startswith("frame_") and k != "glyph_levels"
+                },
+                "glyph_levels": [round(v, 1) for v in ev.glyph_levels],
+                "frame_times": [round(t - ev.t_exec, 3) for t in ev.frame_times],
                 "samples": [asdict(s) for s in samples],
             },
             indent=1,

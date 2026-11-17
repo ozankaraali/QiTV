@@ -349,6 +349,21 @@ class OverlayWidgetTests(unittest.TestCase):
         overlay.hold_mark(False)
         self.assertFalse(overlay.mark.isHidden())
 
+    def test_a_mark_after_a_still_is_held_lit_on_the_splashs_origin(self):
+        # the splash came from the bootloader's still and never goes out: nor does this one
+        overlay = self.page()
+        overlay.loop_origin = lambda: 42.0
+        overlay.loop_held = lambda: True
+        overlay.open_for(_Session(), "file:///Film.mkv")
+        self.assertEqual(overlay.mark.origin, 42.0)
+        self.assertTrue(overlay.mark._held)
+        frame = overlay.mark.frame(42.0 + 1000.0)
+        self.assertGreaterEqual(frame.t, 0.56)
+        self.assertLessEqual(frame.t, 0.88)
+        plain = self.page()
+        plain.open_for(_Session(), "file:///Film.mkv")  # no splash: the full loop
+        self.assertFalse(plain.mark._held)
+
     def test_a_mark_let_go_as_it_opens_out_stays_unseen(self):
         overlay = self.page()
         overlay.hold_mark(True)

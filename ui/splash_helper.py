@@ -23,7 +23,8 @@ Over PyInstaller's bootloader splash (the Windows and Linux one-file apps show t
 still while they unpack: the held, lit frame's bare tile and glyph, scripts/render_splash.py),
 start(lit=True) has the helper's mark begin on that frame, its tile where the still's is (both
 centred as Tk centres), its light and shadow coming in over LIGHT_IN_MS: the mark lights up as
-it takes over. Once "shown", QiTV closes the bootloader's (main.BootloaderSplash, through
+it takes over, and stays lit, its light breathing, until it opens (never out and drawn again).
+Once "shown", QiTV closes the bootloader's (main.BootloaderSplash, through
 `on_shown`, or `on_end` if the helper ends unshown).
 
 The helper process imports PySide6's GUI modules and the mark only (and ui.macos_window on
@@ -65,7 +66,7 @@ from PySide6.QtGui import QGuiApplication
 from PySide6.QtWidgets import QApplication, QWidget
 from shiboken6 import isValid
 
-from ui.opening_mark import LOOP_S, STAGE_PX, STILL_T, OpeningMark
+from ui.opening_mark import STAGE_PX, OpeningMark
 
 logger = logging.getLogger(__name__)
 
@@ -134,11 +135,13 @@ class Splash:
         self._target: Optional[QRect] = None  # where it glides: the player's mark on screen
         self._arrived = False  # the helper said its glide reached _target
         self._swapping = False
+        self._lit = False  # its mark is held lit over the bootloader's still (start(lit=True))
 
     def start(self, geometry: Optional[QRect] = None, *, lit: bool = False) -> bool:
         """Spawns the helper, its window at `geometry` (by default 240 px in the middle of the
         primary screen, where the bootloader's splash is), its mark's loop beginning on the
-        held, lit frame when `lit` (it shows over the bootloader's splash, that frame). False,
+        held, lit frame when `lit` (it shows over the bootloader's splash, that frame, and stays
+        lit, its light breathing, until it opens: it never goes out and draws again). False,
         and logged, when it couldn't: QiTV starts without a splash."""
         if self._process is not None:
             return False
@@ -166,6 +169,7 @@ class Splash:
                     end.close()
             return False
         self._process, self._watcher, self._place = process, watcher, QRect(rect)
+        self._lit = lit
         return True
 
     def before_show(self, window: QWidget) -> None:
@@ -192,6 +196,7 @@ class Splash:
         if overlay is not None:
             self._overlay = overlay
             overlay.loop_origin = lambda: self._origin
+            overlay.loop_held = lambda: self._lit  # lit from the still: the player's is held too
             overlay.hold_mark(True)
         _WhenDrawn(window, lambda: self._drawn(window))
 
@@ -281,6 +286,7 @@ class Splash:
         if self._overlay is not None:
             self._overlay.hold_mark(False)
             self._overlay.loop_origin = lambda: None
+            self._overlay.loop_held = lambda: False
 
     def _fade(self) -> None:
         """The window fades in, once; where it doesn't fade, its fade's time passes."""
@@ -638,7 +644,8 @@ class _SplashWindow(OpeningMark):
     once there, it draws only its tile and glyph. It then waits for "quit", or "open" (the
     player's mark went), and ends by itself HANDOVER_LIMIT_MS after its first glide. "quit" and
     a closed pipe end it at once. `on_end` quits the app. `lit`: its loop begins on the held,
-    lit frame (STILL_T), the bootloader's still it shows over, its light coming in.
+    lit frame, the bootloader's still it shows over, its light coming in and then breathing:
+    it stays lit (OpeningMark's `held`) until it opens, and never goes out and draws again.
     """
 
     def __init__(
@@ -686,10 +693,10 @@ class _SplashWindow(OpeningMark):
         if _platform_name() == "cocoa":
             _hide_from_dock()  # before the window shows: no Dock icon, no menu bar
         self.show()
-        # Over the bootloader's still: from that frame on (held lit, gone, drawn again), its
-        # light and shadow coming in.
+        # Over the bootloader's still: that frame held lit until it opens (it never goes out and
+        # draws again), its light and shadow coming in and then breathing.
         if self._lit:
-            self.start(time.monotonic() - STILL_T * LOOP_S, light_in_s=LIGHT_IN_MS / 1000)
+            self.start(time.monotonic(), light_in_s=LIGHT_IN_MS / 1000, held=True)
         else:
             self.start()
         self._poller.start()

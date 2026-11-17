@@ -67,9 +67,16 @@ OPEN_GROWTH = 0.12
 STILL_T = 0.7  # the held, lit frame (reduced motion, the build's still)
 FILLED_AT = 0.56  # the draw is complete: outlined and filled
 LIT_UNTIL = 0.88  # then the glyph fades, gone by 0.98
+HOLD_BREATH_S = 2.4  # a held-lit mark's light breathes once in this long
 CATCH_UP_SPEED = 2.0  # finish(): the rest of the draw at least twice as fast…
 CATCH_UP_MAX_S = 0.4  # …and never adding more than this
 FRAME_MS = 16
+# A mark lit from its first moment (the splash over the bootloader's still) never goes out: its
+# phase swings, eased as a sine is, between the fill (FILLED_AT) and where the glyph would
+# begin to fade (LIT_UNTIL), the light breathing with it, from STILL_T, the still's own frame.
+_HOLD_MID = (FILLED_AT + LIT_UNTIL) / 2
+_HOLD_AMP = (LIT_UNTIL - FILLED_AT) / 2
+_HOLD_START = math.asin((STILL_T - _HOLD_MID) / _HOLD_AMP)
 
 LOOP_S = LOOP_MS / 1000
 OPEN_S = OPEN_MS / 1000
@@ -100,6 +107,13 @@ _SHADOW_ALPHA, _SHADOW_SIGMA, _SHADOW_DY = 0.55, 10.0, 4.0
 def _cubic(s: float, a: float, b: float) -> float:
     """One coordinate of a CSS cubic-bezier(), from 0 to 1, with control values a and b."""
     return 3 * a * s * (1 - s) ** 2 + 3 * b * s * s * (1 - s) + s**3
+
+
+def held_phase(seconds: float) -> float:
+    """The loop phase of a held-lit mark `seconds` after it began: always in FILLED_AT..LIT_UNTIL,
+    so the glyph stays lit while the light breathes; STILL_T at 0."""
+    angle = _HOLD_START + 2 * math.pi * seconds / HOLD_BREATH_S
+    return min(max(_HOLD_MID + _HOLD_AMP * math.sin(angle), FILLED_AT), LIT_UNTIL)
 
 
 def _ease_in_out(u: float) -> float:
@@ -450,6 +464,7 @@ class OpeningMark(QWidget):
         # Only the tile and the glyph (paint_mark's `bare`): another mark's light shows under it.
         self.bare = False
         self._still = False
+        self._held = False  # lit from the first moment: held_phase, never out (start(held=))
         self._finish: Optional[_Finish] = None
         self._done = False
         self._then: list[Callable[[], None]] = []
@@ -472,19 +487,24 @@ class OpeningMark(QWidget):
         """When its loop began, on its clock (None before start())."""
         return self._started
 
-    def start(self, origin: Optional[float] = None, *, light_in_s: float = 0.0) -> None:
+    def start(
+        self, origin: Optional[float] = None, *, light_in_s: float = 0.0, held: bool = False
+    ) -> None:
         """Runs the loop from its beginning: now, or at `origin`, a time on its clock (by
         default time.monotonic, one clock for every process on the computer: another process's
         mark started at the same origin shows the same frame at the same moment). While it
         loops, or while a finish runs (its `then` always comes), this does nothing; once the
         mark is done it starts again. `light_in_s`: its light and shadow come in from none
         over that long from now, eased (the splash taking over from the bootloader's still,
-        which has neither); a plain fade under reduced motion too."""
+        which has neither); a plain fade under reduced motion too. `held`: the mark is lit from
+        `origin` on and stays lit, its light breathing, until it finishes (the still's own mark
+        never goes out and comes back); under reduced motion it holds still."""
         if not self._done and (self._started is not None or self._finish is not None):
             return
         now = self._clock()
         self._started = now if origin is None else origin
         self._light_in = (now, light_in_s) if light_in_s > 0.0 else None
+        self._held = held
         self._finish = None
         self._done = False
         self._then = []
@@ -557,6 +577,8 @@ class OpeningMark(QWidget):
 
     def _phase(self, now: float) -> float:
         started = now if self._started is None else self._started
+        if self._held:
+            return held_phase(now - started)
         return ((now - started) / LOOP_S) % 1.0
 
     def _tick(self) -> None:

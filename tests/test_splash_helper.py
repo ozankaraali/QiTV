@@ -29,7 +29,15 @@ from PySide6.QtWidgets import QApplication, QWidget
 from motion_fixtures import pin_motion
 
 from ui import macos_window, splash_helper
-from ui.opening_mark import CATCH_UP_MAX_S, LOOP_S, OPEN_S, STAGE_PX, STILL_T, OpeningMark
+from ui.opening_mark import (
+    CATCH_UP_MAX_S,
+    FILLED_AT,
+    LIT_UNTIL,
+    OPEN_S,
+    STAGE_PX,
+    STILL_T,
+    OpeningMark,
+)
 from ui.splash_helper import Splash, run_splash
 
 app = QApplication.instance() or QApplication([])
@@ -152,6 +160,7 @@ class FakeOverlay:
         self.mark.origin = origin
         self.holds = []
         self.loop_origin = None
+        self.loop_held = None
 
     def opening(self):
         return self.drawing
@@ -300,9 +309,10 @@ class SplashTests(unittest.TestCase):
         self.assertTrue(shown.wait(SPAWN_S))
         heard = time.monotonic()
         self.assertIsNotNone(splash._origin)
-        # its first paint was at most SPAWN_S ago, and painted phase STILL_T then
-        self.assertLessEqual(heard - splash._origin, STILL_T * LOOP_S + SPAWN_S)
-        self.assertGreaterEqual(heard - splash._origin, STILL_T * LOOP_S)
+        # held lit from its first paint (STILL_T then, the origin being now): at most SPAWN_S ago
+        self.assertLessEqual(heard - splash._origin, SPAWN_S)
+        self.assertGreaterEqual(heard - splash._origin, 0.0)
+        self.assertTrue(splash._lit)  # the player's mark is held lit on that origin too
         splash.close()
         splash._watcher.join(KILL_WAIT_S)
 
@@ -454,6 +464,7 @@ class SplashTests(unittest.TestCase):
                 splash.open_into(window, overlay)
                 self.assertEqual(overlay.holds, [(True, None)])  # unseen from now
                 self.assertEqual(overlay.loop_origin(), ORIGIN)  # on the splash's loop
+                self.assertFalse(overlay.loop_held())  # (not lit from a still)
                 self.assertTrue(pump_until(lambda: sent))
                 self.assertEqual(names(sent)[0], chosen)
                 if chosen == "handover":
@@ -478,6 +489,17 @@ class SplashTests(unittest.TestCase):
         splash.open_into(window, overlay)
         self.assertTrue(pump_until(lambda: sent))
         self.assertEqual(names(sent), ["open"])
+
+    def test_the_players_mark_is_held_lit_when_the_splash_came_from_a_still(self):
+        window = self.window()
+        splash, sent = unwatched(window)
+        splash._origin, splash._lit = ORIGIN, True
+        overlay = FakeOverlay(window)
+        window.show()
+        splash.open_into(window, overlay)
+        self.assertTrue(overlay.loop_held())
+        splash._let_go()
+        self.assertFalse(overlay.loop_held())  # a later file's draws as before
 
     def test_a_splash_dropped_with_its_fallback_due_still_fades_the_window(self):
         # PySide 6.11's singleShot keeps no reference to a bound method's object: once the
@@ -849,8 +871,8 @@ class HelperWindowTests(unittest.TestCase):
         before = time.monotonic()
         self.assertTrue(window.begin())
         after = time.monotonic()
-        self.assertGreaterEqual(window.origin, before - STILL_T * LOOP_S)
-        self.assertLessEqual(window.origin, after - STILL_T * LOOP_S)
+        self.assertGreaterEqual(window.origin, before)  # held lit from now: no shifted loop
+        self.assertLessEqual(window.origin, after)
         frame = window.frame()
         self.assertAlmostEqual(frame.t, STILL_T, delta=0.02)
         self.assertEqual((frame.opening, frame.fade), (0.0, 1.0))
@@ -860,6 +882,46 @@ class HelperWindowTests(unittest.TestCase):
         self.assertEqual(conn.recv(), ("shown", window.origin))
         light_in = splash_helper.LIGHT_IN_MS / 1000
         self.assertTrue(pump_until(lambda: window.frame().light == 1.0, timeout=10 * light_in))
+
+    def test_a_lit_helper_never_shows_the_glyph_out_before_it_opens(self):
+        # The owner's "opens, closes and opens": a mark lit from the first moment stays lit.
+        conn, child = multiprocessing.Pipe(duplex=True)
+        self.addCleanup(conn.close)
+        self.addCleanup(child.close)
+        window = splash_helper._SplashWindow(child, GEOMETRY, lambda: None, lit=True)
+        self.addCleanup(window.deleteLater)
+        self.assertTrue(window.begin())
+        origin = window.origin
+        for step in range(0, 3600 * 20):  # an hour of loop time, by the window's own clock
+            frame = window._frame(origin + step * 0.05)
+            self.assertFalse(frame.still)
+            self.assertGreaterEqual(frame.t, FILLED_AT)
+            self.assertLessEqual(frame.t, LIT_UNTIL)
+        # "open" from the held state: nothing to catch up, so "opening" goes back at once
+        conn.send(("open", (0, 0, 800, 600)))
+        self.assertTrue(pump_until(lambda: window._finish is not None))
+        self.assertEqual(window._finish.catch_up_s, 0.0)
+        self.assertFalse(window._finish.plain)
+        heard = []
+
+        def hear():
+            while conn.poll():
+                heard.append(conn.recv())
+            return ("opening",) in heard
+
+        self.assertTrue(pump_until(hear))
+
+    def test_under_reduced_motion_a_lit_helper_holds_still(self):
+        pin_motion(self, reduced=True)
+        conn, child = multiprocessing.Pipe(duplex=True)
+        self.addCleanup(conn.close)
+        self.addCleanup(child.close)
+        window = splash_helper._SplashWindow(child, GEOMETRY, lambda: None, lit=True)
+        self.addCleanup(window.deleteLater)
+        self.assertTrue(window.begin())
+        for later in (0.0, 0.9, 7.0, 3000.0):
+            frame = window._frame(window.origin + later)
+            self.assertEqual((frame.t, frame.still), (STILL_T, True))
 
     def test_under_reduced_motion_it_holds_the_lit_frame_and_fades_plainly(self):
         pin_motion(self, reduced=True)
