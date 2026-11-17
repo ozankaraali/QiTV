@@ -16,6 +16,8 @@ from PySide6.QtWidgets import QWidget
 import test_tv_controller as tv
 from test_tv_controller import CHANNELS, ControllerTestCase, play_context
 
+from ui.track_controls import SUBTITLES
+
 FILM = "/videos/Dizi Bölüm 1.mkv"
 NEXT = "/videos/Dizi Bölüm 2.mkv"
 SONG = "/music/Şarkı.mp3"
@@ -282,6 +284,61 @@ class LocalCaptionsTests(ControllerTestCase):
         self.assertEqual(self.session.subtitle_on, 3)
         self.assertFalse(self.captions.enabled())
         self.assertTrue(self.config.ai_captions_local_on)
+        self.captions.toggle()  # on again, then the panel's row for that track
+        self.panel_row(3)
+        self.assertEqual(self.session.subtitle_on, 3)
+        self.assertFalse(self.captions.enabled())
+        self.assertTrue(self.config.ai_captions_local_on)  # a choice for this file only
+
+    def panel_row(self, key):
+        """The Subtitles panel's row `key` chosen (its rowChosen). These fakes have no panel
+        to show again after it: without one, TrackControls._open steps to the next track,
+        as the S key does, so that re-show is left out."""
+        controls = self.controller.track_controls()
+        with mock.patch.object(controls, "_open"):
+            controls._on_row(SUBTITLES, key)
+
+    def choose_off(self, how):
+        """Off, from the phone's list (choose_subtitles) or the Subtitles panel's row."""
+        if how == "phone":
+            self.assertTrue(self.controller.track_controls().choose_subtitles(-1))
+        else:
+            self.panel_row(-1)
+        self.assertEqual(self.session.subtitle_on, -1)
+
+    def test_off_over_ones_that_came_on_by_themselves_is_kept_for_the_next_file(self):
+        # Review M3: Off only gave way, so captions that came on by themselves came back on
+        # for every next episode. Off during a video file is the viewer's no to subtitles.
+        for how in ("phone", "panel"):
+            with self.subTest(how=how):
+                self.config.ai_captions_local_on = True
+                self.film()
+                self.assertTrue(self.captions.enabled())  # on by themselves
+                self.choose_off(how)
+                self.assertFalse(self.captions.enabled())
+                self.assertFalse(self.config.ai_captions_local_on)
+                self.film(NEXT)
+                self.assertFalse(self.captions.enabled())  # the next episode: still off
+
+    def test_off_over_the_viewers_ones_is_kept_too(self):
+        self.film()
+        self.captions.toggle()  # on: the viewer's
+        self.assertTrue(self.config.ai_captions_local_on)
+        self.choose_off("panel")
+        self.assertFalse(self.config.ai_captions_local_on)
+
+    def test_off_over_a_channel_or_a_song_leaves_the_video_files_choice(self):
+        self.config.ai_captions_local_on = True
+        self.controller.tune_live(CHANNELS[0], group_key="10", channels=list(CHANNELS))
+        self.ready()
+        self.captions.toggle()  # on for the channel
+        self.choose_off("phone")
+        self.assertFalse(self.captions.enabled())
+        self.assertTrue(self.config.ai_captions_local_on)  # live TV is no video file
+        self.controller.play_file(SONG)
+        self.session.stateChanged.emit("playing")
+        self.choose_off("panel")
+        self.assertTrue(self.config.ai_captions_local_on)  # nor is a song
 
     def test_what_played_before_the_file_is_no_play_of_it(self):
         # A provider's film is stopped for the file; its input still closing, the file waits,

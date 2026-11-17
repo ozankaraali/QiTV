@@ -706,7 +706,7 @@ class TrackControls(QObject):
             return False
         self._session().set_subtitle_track(track_id)
         self._remember()
-        self._captions_off()
+        self._captions_off(off=track_id == -1)
         self._follow_player()
         return True
 
@@ -903,14 +903,15 @@ class TrackControls(QObject):
                 session.set_subtitle_track(-1)
         self._captions_on = on
 
-    def _captions_off(self) -> None:
+    def _captions_off(self, *, off: bool = False) -> None:
         """A subtitle track, Off or a file chosen: AI captions go off, a download on its way
         too (it resumes when they are turned on again), and none still to come on does (on by
-        themselves once this computer's speed is known). They give way: what the viewer asked
-        for video files stays as it was (CaptionsController.give_way)."""
+        themselves once this computer's speed is known). A track or a file gives way: what the
+        viewer asked for video files stays as it was. Off chosen (`off`) during a video file is
+        kept for the next one (CaptionsController.give_way)."""
         captions = self._captions_now()
         if captions is not None:
-            captions.give_way()
+            captions.give_way(off=off)
             self._captions_on = False
 
     def _captions_changed(self) -> None:
@@ -990,7 +991,7 @@ class TrackControls(QObject):
             session.set_audio_track(int(key))
         else:
             session.set_subtitle_track(int(key))
-            self._captions_off()  # one subtitle source at a time
+            self._captions_off(off=int(key) == -1)  # one subtitle source at a time
         self._remember()
         self._open(name)
 

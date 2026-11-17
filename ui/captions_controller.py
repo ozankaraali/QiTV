@@ -355,10 +355,15 @@ class CaptionsController(QObject):
         self._auto_pending = None
         self._toggle()
 
-    def give_way(self) -> None:
+    def give_way(self, *, off: bool = False) -> None:
         """A subtitle track, Off or a subtitle file chosen (TrackControls): they go off, a
-        download on its way too, and none waiting for this computer's speed comes on after it;
-        what the viewer asked for video files stays as it was."""
+        download on its way too, and none waiting for this computer's speed comes on after it.
+        A track or a file is a choice for this file: what the viewer asked for video files
+        stays as it was. Off (`off`) chosen during a video file is the viewer's no to every
+        subtitle: kept for the next one, as their own toggle's off is, so ones that came on by
+        themselves don't come back for the next episode."""
+        if off and self._plays_video_file():
+            self._config_set(_LOCAL_ON, False)
         self._auto_on = False
         self._auto_pending = None
         self._toggle_waits = False
