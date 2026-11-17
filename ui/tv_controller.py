@@ -13,7 +13,9 @@ LiveControls' (ui/live_controls.py).
 In external-player mode a zap step launches the player only once the zapping settles.
 
 Movies and episodes play through `play_vod` (the drawer and the Library), resuming where they
-stopped; Autoplay (ui/autoplay.py) offers what follows one that ended. While a movie or an
+stopped; Autoplay (ui/autoplay.py) offers what follows one that ended. A file opened in QiTV
+whose name is an episode has its folder listed on a thread as it opens (ui/episode_listing.py):
+the same show's next episode there follows it, as a file (spec §8). While a movie or an
 episode is current, also once it ended, the zap keys stay on it: ↑/↓ and the wheel change the
 volume, and number entry, the previous channel and the guide wait for live TV.
 
@@ -85,6 +87,7 @@ from services.i18n import N_, tr, translate
 from services.live import parts as live_parts
 from services.live.live_session import LiveSession
 from services.live.tuning import channel_key
+from services.local_episodes import next_in_folder, parse_episode
 from services.media_reporter import MediaReporter
 from services.navigation import (
     FAVORITES_GROUP,
@@ -95,8 +98,8 @@ from services.navigation import (
     payloads,
     recent_channel,
 )
-from services.next_episode import play_context
-from services.open_paths import is_music
+from services.next_episode import LOCAL_NEXT, play_context
+from services.open_paths import is_music, is_video
 from services.picture import SOURCE_DIRECT, ChannelPictures
 from services.provider_ids import (
     ALL_PROVIDERS,
@@ -117,6 +120,7 @@ from ui import item_provider
 from ui.autoplay import FINISHED_TEXT, Autoplay
 from ui.cast_controls import CastControls
 from ui.context_actions import ContextActions, Launcher, is_channel
+from ui.episode_listing import FolderListing
 from ui.grid_controls import LEAVE_FIRST, GridControls
 from ui.guide_controller import GuideController
 from ui.keymap import Action, as_int
@@ -393,16 +397,23 @@ class TVController(QObject):
         self._state = "idle"
         self._tuning_since = 0.0  # when the banner's keep-alive started (TUNING_CAP_S)
         self._guide = GuideController(overlays.guide, parent=self)
+        # A file's next episode in its folder (spec §8): the folder is listed on a thread as
+        # the episode opens; only the newest listing, for the file that still plays, counts.
+        self._listing = FolderListing(self)
+        self._listing.listed.connect(self._on_folder_listed)
+        self._listing_generation = 0
+        self._listing_for: Optional[tuple[Target, str]] = None  # the file listed for, its path
         self._autoplay = Autoplay(
             catalog=catalog,
             config=config,
             card=overlays.next_card,
-            play=self.play_vod,
+            play=self._play_following,
             is_current=self._still_current,
             external_mode=lambda: self._external_launcher() is not None,
             notify=self._notify,
             set_hint=self._flow.wait_hint,
             show_transport=overlays.transport.poke,
+            declined=self._release_file_hold,
             parent=self,
         )
         self._context = ContextActions(
@@ -821,7 +832,8 @@ class TVController(QObject):
         """A file opened in QiTV is on its way or plays (`on`): nothing opens over it (see
         ProviderFlow.hold_for_file), nor does the Next card's episode (it would count as a
         choice made since: TVWindow.file_gives_way). The controller lets go when the file
-        ends, is stopped, fails or gives way to another title (_before_new_target)."""
+        ends (after the Next card of its folder's next episode, unless that plays), is stopped,
+        fails or gives way to another title (_before_new_target)."""
         if on:
             self._autoplay.drop()
         self._flow.hold_for_file(on)
@@ -1035,7 +1047,13 @@ class TVController(QObject):
         key = local_key(name, size) if size is not None else None
         if key and is_music(path):
             self.watch.mark_audio(key)
-        self._play_local(path, name, resume_key=key)
+        target = self._play_local(path, name, resume_key=key)
+        if target is not None and target is self._current and is_video(path):
+            if parse_episode(name) is not None:
+                # An episode: its folder may name the next one (_on_folder_listed).
+                self._listing_generation += 1
+                self._listing_for = (target, path)
+                self._listing.start(self._listing_generation, str(Path(path).parent))
 
     def play_recording(self, item: dict, start_over: bool = False) -> None:
         """A recording from the Library (2.8): its file plays as a movie from where it stopped
@@ -1057,11 +1075,11 @@ class TVController(QObject):
         resume_key: Optional[str] = None,
         start_over: bool = False,
         item: Optional[dict] = None,
-    ) -> None:
+    ) -> Optional[Target]:
         """`item`: the Library's recording (2.8), kept on what plays so that a phone can
-        take it over (play_elsewhere)."""
+        take it over (play_elsewhere). The file's new target (None while QiTV closes)."""
         if self._closed:
-            return
+            return None
         self._flow.leave_library()
         url = Path(path).absolute().as_uri()
         target = Target({**(item or {}), "name": title, "cmd": url}, "movies", title, local=True)
@@ -1089,6 +1107,44 @@ class TVController(QObject):
         self.overlays.banner.dismiss()
         self.overlays.transport.set_next_available(False)
         self.overlays.transport.show_vod(title, "")
+        return target
+
+    def _on_folder_listed(self, generation: int, listing: list) -> None:
+        """The episode's folder, listed on its thread: the same show's next episode in it
+        becomes the file's play context ("local_next"), for the Next card and the transport's
+        Next. A listing that comes after another title was chosen changes nothing."""
+        listed_for = self._listing_for
+        if self._closed or generation != self._listing_generation or listed_for is None:
+            return
+        target, path = listed_for
+        self._listing_for = None
+        if target is not self._current:
+            return
+        following = next_in_folder(path, listing)
+        if following is None:
+            return  # the last one in its folder, or the folder could not be read
+        target.context = play_context({LOCAL_NEXT: following})
+        self.overlays.transport.set_next_available(self._autoplay.has_next(target))
+
+    def _play_following(self, item: dict, kind: str, context: dict) -> None:
+        """What follows a movie or an episode (Autoplay's play): a file's next episode plays
+        as a file opened in QiTV, held as Play again holds it, its play context only what its
+        own folder's listing gives it; a provider's title through play_vod."""
+        path = item.get("local_path")
+        if not path:
+            self.play_vod(item, kind, context)
+            return
+        size = item.get("size")
+        self._flow.hold_for_file(True)  # nothing opens over it (the welcome card) until it ends
+        self.play_file(str(path), size if isinstance(size, int) else None)
+
+    def _release_file_hold(self) -> None:
+        """The Next card over a file that ended closed without playing (Esc), or gave way to
+        another choice: the hold kept for the card goes (what waited for the film, the welcome
+        card). A provider's title's card leaves alone the hold of a file still looked at."""
+        current = self._current
+        if not self._closed and current is not None and current.local:
+            self._flow.hold_for_file(False)
 
     def settings_saved(self) -> None:
         """Settings were saved: a new live latency reaches the running channel at once.
@@ -1829,6 +1885,9 @@ class TVController(QObject):
         self._give_back_later = False  # the large picture has a newer choice
         self._cancel_external()
         self._flow.drop_autotune()  # a choice made before the live section loaded comes first
+        self._listing_generation += 1  # a folder's late listing gives the file no Next now
+        if self._autoplay.card_open():
+            self._release_file_hold()  # a file's end kept it for the card (its link may fail)
         self._autoplay.drop()  # a newer choice than what the Next card offers
         self._lanes.request(target)
 
@@ -3702,10 +3761,11 @@ class TVController(QObject):
             self.watch.flush()
         except Exception as e:
             self._log_failure("save the watch state", e)
-        if current.local:
-            self._flow.hold_for_file(False)  # the file played to its end
         if not self._autoplay.on_ended(current):
+            if current.local:
+                self._flow.hold_for_file(False)  # the file played to its end
             self._toast(translate(FINISHED_TEXT))
+        # Else the Next card offers what follows: a file's hold waits for it (Esc lets go).
 
     def _on_next_requested(self) -> None:
         """The transport's Next: what follows the movie or episode plays at once."""

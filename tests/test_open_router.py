@@ -1,7 +1,8 @@
 """Every file opened in QiTV goes through one router (TVWindow.open_paths): a dropped video
 plays, a subtitle file dropped with it loads once it opens, a file that is gone says so, the
 file that plays already only comes forward, and a multi-select's hand-overs play the first by
-name. Fictional files in a temporary folder; the controller's play_file is a fake."""
+name. Fictional files in a temporary folder; the controller's play_file is a fake, but for the
+real player's tests (libVLC with no picture or sound)."""
 
 import os
 from pathlib import Path
@@ -15,6 +16,7 @@ os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 from timer_fixtures import elapse, wait_until
 
+from services.next_episode import LOCAL_NEXT
 from services.playback import PlaybackState
 from tests import test_tv_window as base
 from tests.test_provider_drop import PANEL, drop
@@ -24,6 +26,8 @@ from ui.link_lanes import Target
 
 SETTLE_MS = 300  # a stat a wrong path would have started is back by then
 FILM = Path(__file__).parent / "fixtures" / "film" / "h264_aac.mkv"  # 8 s
+SMOKE = Path(__file__).parent / "fixtures" / "smoke.mp4"  # about 6 s
+TO_ITS_END_MS = 20_000  # the smoke film plays to its end, with margin for a loaded runner
 SUBTITLES = "1\n00:00:00,000 --> 00:00:08,000\nHallo\n"
 
 
@@ -547,6 +551,39 @@ class RealPlayerTests(base.WindowCase):
         play_file.assert_not_called()
         self.assertIs(controller.now_playing(), target)
         self.assertIs(controller.session.state(), PlaybackState.PAUSED)
+
+    def test_a_folder_episode_plays_on_through_the_card(self):
+        # Spec §8: the folder's next episode is offered at the end and plays as a file; one gone
+        # by the time Next is pressed fails as libVLC says, and the file's hold goes.
+        directory = tempfile.TemporaryDirectory()
+        self.addCleanup(directory.cleanup)
+        first = Path(directory.name) / "Show.S01E01.mkv"
+        shutil.copyfile(SMOKE, first)
+        second = Path(shutil.copyfile(SMOKE, first.with_name("Show.S01E02.mkv")))
+        gone = Path(shutil.copyfile(SMOKE, first.with_name("Show.S01E03.mkv")))
+        window, controller = self.window, self.window.controller
+        card, session = window.overlays.next_card, controller.session
+        self.show()
+        window.open_paths([str(first)], source="dialog")
+        self.assertTrue(wait_until(lambda: session.url == first.as_uri()))
+        self.assertTrue(wait_until(card.isVisible, TO_ITS_END_MS))  # it ended: the card
+        card.activate()  # Play now
+        self.assertTrue(wait_until(lambda: session.url == second.as_uri()))
+
+        def offered():
+            target = controller.now_playing()
+            following = (target.context or {}).get(LOCAL_NEXT) if target is not None else None
+            return isinstance(following, dict) and following["local_path"] == str(gone)
+
+        self.assertTrue(wait_until(offered))
+        gone.unlink()
+        runs: list[bool] = []
+        window.when_idle(lambda: runs.append(True))
+        self.assertEqual(runs, [])  # the file plays: held
+        window.overlays.transport.nextRequested.emit()  # the transport's Next
+        self.assertTrue(wait_until(lambda: runs == [True], TO_ITS_END_MS), self.toasts)
+        errors = [text for text, kind in self.toasts if kind == "error"]
+        self.assertTrue(errors and gone.name in errors[-1], self.toasts)
 
 
 if __name__ == "__main__":

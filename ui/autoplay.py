@@ -7,7 +7,8 @@ loaded yet is requested first, with a hint; Esc ends that wait, and a failure sa
 final episode of the final season offers nothing. External players never autoplay (as in
 v1.13.8). The transport's Next plays what follows at once, without the card.
 
-Autoplay never plays anything itself: it asks the shell's `play` (TVController.play_vod).
+Autoplay never plays anything itself: it asks the shell's `play` (TVController._play_following:
+play_vod, or play_file for a file's next episode).
 """
 
 from __future__ import annotations
