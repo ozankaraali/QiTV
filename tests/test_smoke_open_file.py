@@ -6,6 +6,7 @@ import contextlib
 import io
 import os
 from pathlib import Path
+import subprocess
 import tempfile
 import unittest
 from unittest import mock
@@ -79,6 +80,15 @@ class RegistrationTakenBackTests(unittest.TestCase):
         with self.assertRaises(RuntimeError):
             self.run_smoke(lambda: RegisterResult(True, True), one_qitv=one_qitv)
         self.assertTrue(one_qitv.call_args.args[2])
+        self.assertEqual([call[0] for call in self.backend.calls], ["register", "unregister"])
+
+    def test_a_registration_is_taken_back_when_stopping_the_starts_raises(self):
+        # A taskkill that times out (Windows) must not leave the runner's HKCU changed.
+        with mock.patch.object(
+            smoke_open_file.OpenFileSmoke, "close", side_effect=subprocess.TimeoutExpired("x", 30)
+        ):
+            with self.assertRaises(subprocess.TimeoutExpired):
+                self.run_smoke(lambda: RegisterResult(True, True))
         self.assertEqual([call[0] for call in self.backend.calls], ["register", "unregister"])
 
     def test_a_registration_that_worked_is_taken_back(self):

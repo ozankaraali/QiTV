@@ -62,7 +62,7 @@ DDE_LIMIT_S = 1.0  # Explorer's double-click on a running QiTV
 DDE_TIMEOUT_S = 10.0
 DDEEXEC_WAIT_S = 15.0  # the running QiTV writes the ddeexec on a worker at its start
 VLC_OPENED_WAIT_S = 15.0
-PARALLEL_TIMEOUT_S = 180.0  # N one-file builds unpacking themselves at once
+PARALLEL_TIMEOUT_S = 240.0  # N cold starts at once: a start waits up to 120 s for the first
 PARALLEL_MIN_S = 30.0  # the QiTVs are counted no sooner after the starts
 PARALLEL_SETTLE_S = 5.0  # and no sooner after all but one have exited
 POLL_S = 0.03  # dde_s is held to 1 s: the status is asked often
@@ -123,13 +123,16 @@ def _fresh_config(folder: Path, config: dict) -> None:
 def _kill_tree(process: subprocess.Popen) -> None:
     """Stop `process` and everything it started (it may have unpacked a child)."""
     if WINDOWS:
-        subprocess.run(
-            ["taskkill", "/T", "/F", "/PID", str(process.pid)],
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
-            check=False,
-            timeout=30,
-        )
+        try:
+            subprocess.run(
+                ["taskkill", "/T", "/F", "/PID", str(process.pid)],
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                check=False,
+                timeout=30,
+            )
+        except subprocess.TimeoutExpired:
+            pass  # the kill below, and the others' trees, still go
     else:
         try:
             os.killpg(process.pid, signal.SIGKILL)
@@ -224,9 +227,15 @@ class OpenFileSmoke:
         return process
 
     def stop_all(self) -> None:
-        for process in self.processes:
-            _kill_tree(process)
-        self.processes = []
+        processes, self.processes = self.processes, []
+        failed: Optional[BaseException] = None
+        for process in processes:
+            try:
+                _kill_tree(process)
+            except Exception as error:  # the other trees still go
+                failed = error
+        if failed is not None:
+            raise failed
 
     def close(self) -> None:
         self.stop_all()
@@ -553,11 +562,13 @@ def run(
         smoke.save()
         return smoke.result
     finally:
-        smoke.close()  # every start's tree, before the registration goes
-        if tried:
-            smoke.unregister(exe)
-        shutil.rmtree(extended_path(str(files)) if WINDOWS else files, ignore_errors=True)
-        smoke.save()
+        try:
+            smoke.close()  # every start's tree, before the registration goes
+        finally:  # and the registration goes even when stopping them raised
+            if tried:
+                smoke.unregister(exe)
+            shutil.rmtree(extended_path(str(files)) if WINDOWS else files, ignore_errors=True)
+            smoke.save()
 
 
 def main(argv: list[str]) -> int:

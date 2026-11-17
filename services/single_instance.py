@@ -12,10 +12,13 @@ is waited for up to START_WAIT_MS, and only one that hangs that long is taken ov
 
 Starts at the same instant (Ruling 31) all find nobody listening, and a listen is no proof of
 being alone: Qt's Unix server, with UserAccessOption, renames its socket over a name already
-taken, and on Windows two servers may listen on one pipe. So the QiTV that listens first takes
-an OS lock on LOCK_FILE in the settings folder (`_InstanceLock`); a start that finds it held
-asks again until its holder answers (CLAIM_WAIT_S at most), and takes over only one that never
-listens or hangs. The system lets go of the lock when its process ends, a crash too.
+taken, and on Windows two servers may listen on one pipe. So a QiTV holds an OS lock on
+LOCK_FILE in the settings folder (`_InstanceLock`) while it listens; the system lets go of it
+when its process ends, a crash too. While a live process holds it, a start never becomes a
+second QiTV (Ruling 32): it asks the holder until it answers (a cold start under load took
+38 s on CI before its event loop ran), HELD_WAIT_MS at most, and then ends without starting.
+Only a name no process holds the lock for is taken over: a crash's socket, or an older QiTV
+(it takes no lock) that hangs START_WAIT_MS.
 
 The hand-over: the new start sends `show` and the first answers `shown` once it came to the
 front. A start with files (a video double-clicked while QiTV runs) then sends one
@@ -34,6 +37,7 @@ from __future__ import annotations
 
 from collections.abc import Sequence
 import enum
+import errno
 import hashlib
 import logging
 import os
@@ -56,11 +60,11 @@ RAW = b"raw:"  # after OPEN: the path itself, its UTF-8 percent-encoded (`_open_
 DONE = b"done\n"  # no more files
 OPENED = b"opened\n"  # answered: the files were taken
 MAX_LINE = 65536  # a longer line (its newline not counted) drops its connection
-RETRY_MS = 1000  # a Windows update's copy listens again until the old QiTV is gone
+RETRY_MS = 250  # a Windows update's copy tries the old QiTV's lock again until it lets go
 LOCK_FILE = "qitv-instance.lock"  # in the settings folder: held by the QiTV that listens
-CLAIM_WAIT_S = 5.0  # a start that finds the lock held asks its holder that long (it listens in ms)
-CLAIM_RETRY_S = 0.05
-RETRIES = 30
+HELD_WAIT_MS = 120000  # a start that finds the lock held asks its holder that long, then ends
+CLAIM_RETRY_S = 0.05  # between asks while the holder doesn't listen yet
+RETRIES = 120  # RETRY_MS each: about 30 s, then it listens all the same
 
 
 def server_name(config_dir: str) -> str:
@@ -205,8 +209,11 @@ def hand_over(name: str, timeout_ms: int = ANSWER_MS, paths: Sequence[str] = ())
     return _ask(name, timeout_ms, paths) is _Asked.ANSWERED
 
 
-def _ask(name: str, timeout_ms: int, paths: Sequence[str]) -> _Asked:
-    """`hand_over`, saying why a QiTV that didn't come wasn't reached or didn't answer."""
+def _ask(
+    name: str, timeout_ms: int, paths: Sequence[str], answer_ms: Optional[int] = None
+) -> _Asked:
+    """`hand_over`, saying why a QiTV that didn't come wasn't reached or didn't answer. One
+    reached is waited for `answer_ms` (START_WAIT_MS unless given), or until it hangs up."""
     socket = QLocalSocket()
     try:
         socket.connectToServer(name)
@@ -216,7 +223,8 @@ def _ask(name: str, timeout_ms: int, paths: Sequence[str]) -> _Asked:
         asked = time.monotonic()
         socket.write(SHOW)
         socket.flush()
-        if _read_line(socket, asked + START_WAIT_MS / 1000) != SHOWN:
+        wait_ms = START_WAIT_MS if answer_ms is None else answer_ms
+        if _read_line(socket, asked + wait_ms / 1000) != SHOWN:
             if socket.state() == QLocalSocket.LocalSocketState.ConnectedState:
                 logger.warning("A QiTV with these settings was reached but didn't answer.")
             return _Asked.SILENT
@@ -294,10 +302,14 @@ def _lock(fd: int) -> _Lock:
 
         try:
             msvcrt.locking(fd, msvcrt.LK_NBLCK, 1)
-        except OSError:
-            # Held (EACCES), as any failure is read: a lock misread as free would let two
-            # starts listen, one misread as held only waits CLAIM_WAIT_S.
-            return _Lock.HELD
+        except OSError as error:
+            # _locking with _LK_NBLCK sets EACCES for a byte another holds (EDEADLOCK is
+            # _LK_LOCK's after its retries). Anything else is no lock: a start that read it as
+            # held would wait HELD_WAIT_MS and never start.
+            if error.errno == errno.EACCES:
+                return _Lock.HELD
+            logger.warning("QiTV's start lock isn't supported here (%s).", type(error).__name__)
+            return _Lock.UNAVAILABLE
         return _Lock.OURS
     import fcntl
 
@@ -345,6 +357,7 @@ class InstanceServer(QObject):
         self._server.newConnection.connect(self._on_connection)
         self._starts: dict[int, _Start] = {}
         self._tries = 0
+        self._closed = False
 
     def listen(self, *, take_over: bool = True) -> bool:
         """Listen on the name; one left by a crashed or hung QiTV is taken over (Unix: its
@@ -357,13 +370,33 @@ class InstanceServer(QObject):
         return self._server.listen(self.name)
 
     def listen_later(self) -> None:
-        """Listen once the QiTV holding the name has gone (a Windows update's new copy)."""
-        if self.listen(take_over=False) or self._tries >= RETRIES:
-            if not self._server.isListening():
-                self.listen()
+        """A Windows update's new copy: listen once the old QiTV let go of the settings' lock
+        (it quits), from the event loop every RETRY_MS, RETRIES times at most, then all the
+        same. (A listen is no sign the old one is gone: Qt lets two listen on one pipe.)"""
+        if self._closed:
             return
-        self._tries += 1
-        QTimer.singleShot(RETRY_MS, self, self.listen_later)
+        lock = self._lock
+        state = lock.acquire() if lock is not None else _Lock.UNAVAILABLE
+        if state is _Lock.HELD:
+            if self._tries < RETRIES:
+                self._tries += 1
+                QTimer.singleShot(RETRY_MS, self, self.listen_later)
+                return
+            logger.warning("The QiTV this one replaces still holds its settings: listening anyway.")
+        if lock is not None and not lock.held:
+            self._lock = None
+        self._listen_or_let_go()
+
+    def _listen_or_let_go(self) -> bool:
+        """Listen; one that can't lets the lock go (a start waiting for its answer would wait
+        in vain)."""
+        if self.listen():
+            return True
+        logger.warning("Couldn't watch for another start of QiTV with these settings.")
+        if self._lock is not None:
+            self._lock.release()
+            self._lock = None
+        return False
 
     def listening(self) -> bool:
         return self._server.isListening()
@@ -372,6 +405,7 @@ class InstanceServer(QObject):
         """Stops listening and drops a start still connected, so nothing of it is left for
         the garbage collector to delete outright (Qt warns, and may crash, on a socket so
         deleted)."""
+        self._closed = True  # a listen_later still due does nothing
         self._server.close()
         for socket in self._server.findChildren(QLocalSocket):
             socket.abort()
@@ -379,7 +413,10 @@ class InstanceServer(QObject):
         for start in self._starts.values():
             start.quiet.stop()
         self._starts.clear()
-        if self._lock is not None:  # after the server: the next QiTV may listen now
+        # The server first, then the lock: a start waiting for this QiTV's answer sees it hang
+        # up, finds the lock held a moment longer and waits on, then takes the lock once it
+        # is let go here (it never takes over while the lock is held).
+        if self._lock is not None:
             self._lock.release()
 
     def _on_connection(self) -> None:
@@ -464,51 +501,58 @@ class InstanceServer(QObject):
 def claim(
     config_dir: str, *, replacing: bool = False, paths: Sequence[str] = ()
 ) -> Optional[InstanceServer]:
-    """This QiTV's claim on its settings folder. None: another QiTV of that folder answered
-    and came to the front, and was handed `paths` (quit now). Else the listening server,
-    kept while QiTV runs. `replacing` (a Windows update's new copy) never hands over: it
-    listens once the old QiTV is gone."""
+    """This QiTV's claim on its settings folder. None: quit now. Another QiTV of that folder
+    answered and came to the front, and was handed `paths`; or one holds the folder's lock but
+    didn't answer within HELD_WAIT_MS (its files are lost: better than a second QiTV). Else
+    the listening server, kept while QiTV runs. `replacing` (a Windows update's new copy)
+    never hands over: it listens once the old QiTV is gone."""
     name = server_name(config_dir)
+    lock = _InstanceLock(config_dir)
     if replacing:
-        server = InstanceServer(name)
+        server = InstanceServer(name, lock=lock)
         server.listen_later()
         return server
-    asked = _ask(name, ANSWER_MS, paths)
-    lock = _InstanceLock(config_dir)
-    state: Optional[_Lock] = None
-    if asked is _Asked.UNREACHABLE:
-        state = lock.acquire()
+    if lock.acquire() is _Lock.HELD:
+        # A QiTV of these settings runs, or starts at this moment (a multi-select): it is
+        # asked until it answers, and never gets a second QiTV beside it.
+        asked, state = _wait_for_holder(name, paths, lock)
+        if asked is _Asked.ANSWERED:
+            logger.info("Another QiTV runs with these settings: it was brought to the front.")
+            return None
         if state is _Lock.HELD:
-            # Another start of these settings, at the same moment (a multi-select), listens in
-            # a moment: it is asked until it answers.
-            logger.info("Another QiTV with these settings is starting: it is asked.")
-            asked, state = _ask_the_holder(name, paths, lock)
-    if asked is _Asked.ANSWERED:
-        logger.info("Another QiTV runs with these settings: it was brought to the front.")
-        return None
-    if state is None:  # one was reached but hangs: taken over, as always; the lock if free
-        state = lock.acquire()
-    if state is _Lock.HELD:
-        logger.warning("The QiTV holding these settings doesn't answer: this one takes over.")
+            logger.warning(
+                "Another QiTV with these settings holds them but doesn't answer; this start ends."
+            )
+            return None
+        # its holder quit or crashed meanwhile: this start is the QiTV now
+    else:
+        # No QiTV of this version runs: an older one may (it takes no lock), or a crash left
+        # its socket. One that answers gets the files; one that hangs START_WAIT_MS, and a
+        # crash's socket, are taken over.
+        if _ask(name, ANSWER_MS, paths) is _Asked.ANSWERED:
+            lock.release()
+            logger.info("Another QiTV runs with these settings: it was brought to the front.")
+            return None
     server = InstanceServer(name, lock=lock if lock.held else None)
-    if not server.listen():
-        logger.warning("Couldn't watch for another start of QiTV with these settings.")
+    server._listen_or_let_go()
     return server
 
 
-def _ask_the_holder(name: str, paths: Sequence[str], lock: _InstanceLock) -> tuple[_Asked, _Lock]:
-    """While another start holds the lock: ask it every CLAIM_RETRY_S, CLAIM_WAIT_S at most
-    (it listens milliseconds after locking). What it answered, with the lock still HELD (SILENT:
-    reached, but it hangs; UNREACHABLE: it never listened); or UNREACHABLE with the lock's new
-    state once it came free (its holder quit or crashed meanwhile)."""
-    deadline = time.monotonic() + CLAIM_WAIT_S
-    while time.monotonic() < deadline:
-        time.sleep(CLAIM_RETRY_S)
-        asked = _ask(name, ANSWER_MS, paths)
-        if asked is not _Asked.UNREACHABLE:
+def _wait_for_holder(name: str, paths: Sequence[str], lock: _InstanceLock) -> tuple[_Asked, _Lock]:
+    """While a live process holds the lock: ask it, HELD_WAIT_MS at most, every CLAIM_RETRY_S
+    while it doesn't listen yet; one reached is waited for until it answers, hangs up or the
+    time runs out (one connection: no `show` piles up for it). ANSWERED once it came, with the
+    lock still HELD; the lock's new state once it came free (its holder quit or crashed); and
+    HELD when the time ran out."""
+    deadline = time.monotonic() + HELD_WAIT_MS / 1000
+    asked = _Asked.UNREACHABLE
+    while (left := _left_ms(deadline)) > 0:
+        asked = _ask(name, min(ANSWER_MS, left), paths, answer_ms=left)
+        if asked is _Asked.ANSWERED:
             return asked, _Lock.HELD
         state = lock.acquire()
         if state is not _Lock.HELD:
-            return _Asked.UNREACHABLE, state
-    return _Asked.UNREACHABLE, _Lock.HELD
+            return asked, state
+        time.sleep(CLAIM_RETRY_S)
+    return asked, _Lock.HELD
     return _Asked.UNREACHABLE

@@ -87,16 +87,19 @@ print(json.dumps({"shown": shown.decode(), "answer": answer.decode(errors="repla
                   "closed": closed, "ms": ms}), flush=True)
 """
 
-# A start of a multi-select, in a process of its own: it waits for the shared moment
-# (argv[2], wall-clock seconds), claims the settings folder (argv[1]) with its file (argv[3]);
-# one that listens serves RACE_SERVE_S, as a starting QiTV's event loop would. Then one JSON
+# A start of a multi-select, in a process of its own: it says "ready" once Qt is imported,
+# reads the shared moment (wall-clock seconds) from its stdin, and at that instant claims the
+# settings folder (argv[1]) with its file (argv[2]). One that listens serves until argv[3] files
+# were handed to it (RACE_BOUND_S at most), as a starting QiTV's event loop would. Then one JSON
 # line: whether it handed over, whether it listened, and the files handed to it.
 RACE = r"""
 import json, sys, time
 from PySide6.QtCore import QCoreApplication, QTimer
 from services.single_instance import claim
 app = QCoreApplication([])
-folder, moment, path, serve_s = sys.argv[1], float(sys.argv[2]), sys.argv[3], float(sys.argv[4])
+folder, path, expect, bound = sys.argv[1], sys.argv[2], int(sys.argv[3]), float(sys.argv[4])
+print("ready", flush=True)
+moment = float(sys.stdin.readline())
 time.sleep(max(0.0, moment - time.time() - 0.02))
 while time.time() < moment:
     pass  # the last few milliseconds spun: every start claims at the same instant
@@ -105,15 +108,50 @@ if server is None:
     print(json.dumps({"handed_over": True}), flush=True)
     sys.exit(0)
 opened = []
-server.opened.connect(opened.extend)
+def on_opened(paths):
+    opened.extend(paths)
+    if len(opened) >= expect:
+        QTimer.singleShot(100, app.quit)
+server.opened.connect(on_opened)
 listening = server.listening()
-QTimer.singleShot(int(serve_s * 1000), app.quit)
+QTimer.singleShot(0 if expect <= 0 else int(bound * 1000), app.quit)
 app.exec()
 server.close()
 print(json.dumps({"handed_over": False, "listening": listening, "opened": opened}), flush=True)
 """
 RACE_STARTS = 6
-RACE_SERVE_S = 6.0
+RACE_BOUND_S = 60.0  # a listening start ends sooner once every other start's file came
+
+# A QiTV of this version holding the settings folder's lock (argv[1]): it listens (but in
+# "unlistened") and says "ready", then stays without an event loop for argv[3] seconds, a cold
+# start under load. "slow" then serves 8 s, printing `opened <path as JSON>` for each file
+# handed to it; "quiet" and "unlistened" end without ever answering (their lock goes with
+# them); "closes" closes its server as a quitting QiTV does (the lock goes) and lives on 3 s.
+HOLDER = r"""
+import json, sys, time
+from PySide6.QtCore import QCoreApplication, QTimer
+from services.single_instance import InstanceServer, _InstanceLock, _Lock, server_name
+app = QCoreApplication([])
+folder, mode, delay = sys.argv[1], sys.argv[2], float(sys.argv[3])
+lock = _InstanceLock(folder)
+assert lock.acquire() is _Lock.OURS
+server = InstanceServer(server_name(folder), lock=lock)
+if mode != "unlistened":
+    assert server.listen()
+print("ready", flush=True)
+time.sleep(delay)
+if mode == "closes":
+    server.close()
+    time.sleep(3)
+if mode != "slow":
+    sys.exit(0)
+def on_opened(paths):
+    for path in paths:
+        print("opened " + json.dumps(path), flush=True)
+server.opened.connect(on_opened)
+QTimer.singleShot(8000, app.quit)
+app.exec()
+"""
 
 # What a start logs when the first didn't take its files.
 NOT_TAKEN = ("older", "didn't say")
@@ -246,15 +284,14 @@ class ClaimTests(unittest.TestCase):
         self.listening(claim(self.folder))
         self.assertLess(time.monotonic() - started, 1.5)  # not reached: not waited for
 
-    def test_starts_at_the_same_moment_leave_one_qitv(self):
-        # Ruling 31: a multi-select starts one QiTV per file at the same instant. Exactly one
-        # listens; every other start hands its file to it and ends.
+    def race(self, files, expect):
+        """One start per file, released at one instant once every one has said it is ready
+        (however long a loaded machine takes to import Qt); what each said."""
         env = dict(os.environ, PYTHONPATH=str(REPO), QT_QPA_PLATFORM="offscreen")
-        moment = time.time() + 3.0  # each child has imported Qt by then
-        files = [os.path.join(self.folder, f"Bölüm {i}.mkv") for i in range(RACE_STARTS)]
         starts = [
             subprocess.Popen(
-                [sys.executable, "-c", RACE, self.folder, str(moment), path, str(RACE_SERVE_S)],
+                [sys.executable, "-c", RACE, self.folder, path, str(expect), str(RACE_BOUND_S)],
+                stdin=subprocess.PIPE,
                 stdout=subprocess.PIPE,
                 stderr=subprocess.DEVNULL,
                 text=True,
@@ -265,10 +302,23 @@ class ClaimTests(unittest.TestCase):
         ]
         for start in starts:
             self.addCleanup(self.end, start)
+        for start in starts:
+            self.assertEqual(start.stdout.readline().strip(), "ready")
+        moment = time.time() + 0.3
+        for start in starts:
+            start.stdin.write(f"{moment}\n")
+            start.stdin.flush()
         said = []
         for start in starts:
-            out, _ = start.communicate(timeout=60)
+            out, _ = start.communicate(timeout=RACE_BOUND_S + 30)
             said.append(json.loads(out.strip().splitlines()[-1]))
+        return said
+
+    def test_starts_at_the_same_moment_leave_one_qitv(self):
+        # Ruling 31: a multi-select starts one QiTV per file at the same instant. Exactly one
+        # listens; every other start hands its file to it and ends.
+        files = [os.path.join(self.folder, f"Bölüm {i}.mkv") for i in range(RACE_STARTS)]
+        said = self.race(files, expect=RACE_STARTS - 1)
         stayed = [s for s in said if not s["handed_over"]]
         self.assertEqual(len(stayed), 1, said)
         self.assertTrue(stayed[0]["listening"])
@@ -285,6 +335,43 @@ class ClaimTests(unittest.TestCase):
         handed.assert_not_called()
         asked.assert_not_called()
 
+    def test_a_windows_updates_copy_listens_once_the_old_qitv_lets_go(self):
+        old = single_instance._InstanceLock(self.folder)  # the QiTV being replaced, quitting
+        self.assertIs(old.acquire(), single_instance._Lock.OURS)
+        with mock.patch.object(single_instance, "RETRY_MS", 50):
+            server = claim(self.folder, replacing=True)
+            self.addCleanup(self.dispose, server)
+            self.pump(lambda: False, 0.4)
+            self.assertFalse(server.listening())  # the old one still holds its settings
+            old.release()
+            self.pump(server.listening, 5)
+        self.assertTrue(server.listening())
+        other = single_instance._InstanceLock(self.folder)
+        self.assertIs(other.acquire(), single_instance._Lock.HELD)  # the new copy's now
+
+    def test_a_windows_updates_copy_listens_all_the_same_after_its_bound(self):
+        old = single_instance._InstanceLock(self.folder)  # an old QiTV that never quits
+        self.assertIs(old.acquire(), single_instance._Lock.OURS)
+        self.addCleanup(old.release)
+        with (
+            mock.patch.object(single_instance, "RETRY_MS", 50),
+            mock.patch.object(single_instance, "RETRIES", 4),
+            self.assertLogs("services.single_instance", "WARNING") as logs,
+        ):
+            server = claim(self.folder, replacing=True)
+            self.addCleanup(self.dispose, server)
+            self.pump(server.listening, 5)
+        self.assertTrue(server.listening())
+        self.assertTrue([line for line in logs.output if "listening anyway" in line], logs.output)
+
+    def test_a_qitv_that_cant_listen_lets_the_lock_go(self):
+        with mock.patch.object(InstanceServer, "listen", return_value=False):
+            server = claim(self.folder)
+        self.addCleanup(self.dispose, server)
+        other = single_instance._InstanceLock(self.folder)
+        self.assertIs(other.acquire(), single_instance._Lock.OURS)  # no start waits for it
+        other.release()
+
     def test_the_qitv_that_listens_holds_the_lock_until_it_closes(self):
         server = claim(self.folder)
         self.listening(server)
@@ -296,20 +383,75 @@ class ClaimTests(unittest.TestCase):
         # The file stays: removed, two starts could each lock a file of their own.
         self.assertTrue(os.path.exists(os.path.join(self.folder, single_instance.LOCK_FILE)))
 
-    def test_a_lock_holder_that_never_listens_is_taken_over(self):
-        held = single_instance._InstanceLock(self.folder)
-        self.assertIs(held.acquire(), single_instance._Lock.OURS)
-        self.addCleanup(held.release)
-        started = time.monotonic()
-        with (
-            mock.patch.object(single_instance, "CLAIM_WAIT_S", 0.5),
-            self.assertLogs("services.single_instance", "INFO") as logs,
-        ):
-            server = claim(self.folder)
-        self.assertGreaterEqual(time.monotonic() - started, 0.5)  # its holder was asked
-        self.assertLess(time.monotonic() - started, 3)
-        self.listening(server)
-        self.assertTrue([line for line in logs.output if "takes over" in line], logs.output)
+    def holder(self, mode, delay):
+        env = dict(os.environ, PYTHONPATH=str(REPO), QT_QPA_PLATFORM="offscreen")
+        process = subprocess.Popen(
+            [sys.executable, "-c", HOLDER, self.folder, mode, str(delay)],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.DEVNULL,
+            text=True,
+            env=env,
+            cwd=str(REPO),
+        )
+        self.addCleanup(self.end, process)
+        self.assertEqual(process.stdout.readline().strip(), "ready")
+        return process
+
+    def test_a_late_lock_holder_gets_every_start(self):
+        # Ruling 32: a holder whose event loop runs only after 25 s (past START_WAIT_MS; CI's
+        # Macs took 38 s with 8 starts at once) gets every start's file; none takes over.
+        holder = self.holder("slow", 25)
+        files = [os.path.join(self.folder, f"Geç {i}.mkv") for i in range(3)]
+        said = self.race(files, expect=0)  # one that listened would end at once, and show
+        self.assertEqual(said, [{"handed_over": True}] * 3)
+        got = sorted(json.loads(holder.stdout.readline().split(" ", 1)[1]) for _ in files)
+        self.assertEqual(got, sorted(files))
+
+    def test_a_lock_holder_that_never_answers_ends_the_start(self):
+        # Reached but never answering ("quiet"), or never listening (this process's own lock):
+        # after HELD_WAIT_MS the start ends without listening, never beside its holder.
+        for case in ("quiet", "unlistened"):
+            with self.subTest(case=case):
+                process, held = None, None
+                if case == "quiet":
+                    process = self.holder("quiet", 30)
+                else:
+                    held = single_instance._InstanceLock(self.folder)
+                    self.assertIs(held.acquire(), single_instance._Lock.OURS)
+                started = time.monotonic()
+                with (
+                    mock.patch.object(single_instance, "HELD_WAIT_MS", 1500),
+                    self.assertLogs("services.single_instance", "WARNING") as logs,
+                ):
+                    self.assertIsNone(claim(self.folder, paths=[self.turkish_path()]))
+                waited = time.monotonic() - started
+                self.assertGreaterEqual(waited, 1.4)
+                self.assertLess(waited, 5)
+                ends = "holds them but doesn't answer; this start ends"
+                self.assertTrue([line for line in logs.output if ends in line], logs.output)
+                self.assertFalse(hand_over(self.name, 300))  # nobody new listens
+                if held is not None:
+                    held.release()
+                if process is not None:
+                    self.end(process)  # its lock goes with it
+
+    def test_a_lock_holder_that_ends_mid_wait_passes_the_lock_on(self):
+        # Its holder quits or crashes while a start waits: the start takes the lock and runs.
+        # "closes": a quitting QiTV hangs up before it lets go of the lock; the start waits on,
+        # and takes the lock once it is let go, while that process still lives.
+        for mode in ("quiet", "unlistened", "closes"):
+            with self.subTest(mode=mode):
+                holder = self.holder(mode, 2)
+                started = time.monotonic()
+                server = claim(self.folder)
+                self.assertGreaterEqual(time.monotonic() - started, 1.5)  # it waited for it
+                self.listening(server)
+                if mode == "closes":
+                    self.assertIsNone(holder.poll())  # it took over from a live process
+                self.assertEqual(holder.wait(10), 0)
+                other = single_instance._InstanceLock(self.folder)
+                self.assertIs(other.acquire(), single_instance._Lock.HELD)  # the start's now
+                server.close()  # the lock goes: the next case starts free
 
     def test_the_server_answers_and_says_so(self):
         server = InstanceServer(self.name)
