@@ -350,9 +350,15 @@ class FakeSession(QObject):
     def set_subtitle_track(self, track_id):
         self.subtitle_set.append(track_id)
         self.subtitle_on = track_id
+        self.subtitle_chosen = None
 
     def subtitle_track(self):
         return self.subtitle_on
+
+    subtitle_chosen = None  # subtitle_file(): the file whose track is chosen
+
+    def subtitle_file(self):
+        return self.subtitle_chosen
 
     def subtitle_delay(self):
         return self.subtitle_ms
@@ -365,12 +371,12 @@ class FakeSession(QObject):
         self.files.append(path)
         track = max(i for i, _ in self.subtitles) + 1
         self.subtitles.append((track, os.path.basename(path)))
-        self.subtitle_on = track
+        self.subtitle_on, self.subtitle_chosen = track, path
         return True
 
     def clear_subtitles(self):
         self.clears += 1
-        self.files, self.subtitle_ms = [], 0
+        self.files, self.subtitle_ms, self.subtitle_chosen = [], 0, None
 
     def forget_tracks(self, *, keep_language=False):
         pass

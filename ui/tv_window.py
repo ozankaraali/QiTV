@@ -1563,6 +1563,12 @@ class TVWindow(QMainWindow):
         self._subtitles_due = None
         self._subtitles_wait.stop()
 
+    def subtitles_due(self) -> bool:
+        """Subtitle files opened with the video playing large are still to load into it (once
+        it plays): AI captions don't come on by themselves over them (TVController)."""
+        due = self._subtitles_due
+        return due is not None and due[0] is self.controller.now_playing()
+
     # ---- dropped files -------------------------------------------------------------------------
 
     @staticmethod

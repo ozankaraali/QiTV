@@ -3186,10 +3186,17 @@ class TVController(QObject):
             captions.local_video_playing()
 
     def own_subtitles_shown(self) -> bool:
-        """The large picture shows one of its own subtitle tracks (a file loaded for it too)."""
+        """The large picture shows one of its own subtitle tracks, or is about to: a subtitle
+        file chosen (libVLC lists its track a little later), or files opened with the video
+        that load once it plays (the window's)."""
         if self._closed:
             return False
-        return any(shown for _id, _name, shown in self._tracks.subtitle_choices())
+        if any(shown for _id, _name, shown in self._tracks.subtitle_choices()):
+            return True
+        if self.session.subtitle_file() is not None:
+            return True
+        due = getattr(self.window_actions, "subtitles_due", None)
+        return callable(due) and bool(due())
 
     def _prepare(self, session, target: Target, previous: Optional[Target]) -> None:
         """`target` is about to open in `session`, the large picture's player: its sound, its

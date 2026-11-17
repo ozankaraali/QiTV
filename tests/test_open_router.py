@@ -99,9 +99,11 @@ class OpenRouterTests(RouterCase):
         self.wait_for_plays(1)
         elapse(SETTLE_MS)
         self.assertEqual(self.calls, [("play", str(video), 10)])  # not before it opened
+        self.assertTrue(self.window.subtitles_due())  # AI captions don't come on over them
         self.state = PlaybackState.PLAYING
         self.assertTrue(wait_until(lambda: len(self.calls) == 2), self.calls)
         self.assertEqual(self.calls[1], ("subtitles", [str(srt)]))
+        self.assertFalse(self.window.subtitles_due())
 
     def test_subtitles_dropped_with_a_video_wait_for_that_video(self):
         video, other = self.film("ep.mkv"), self.film("other.mkv")

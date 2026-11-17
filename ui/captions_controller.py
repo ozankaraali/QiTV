@@ -356,10 +356,12 @@ class CaptionsController(QObject):
         self._toggle()
 
     def give_way(self) -> None:
-        """A subtitle track, Off or a subtitle file chosen over them (TrackControls): off, a
-        download on its way too, and what the viewer asked for video files stays as it was."""
+        """A subtitle track, Off or a subtitle file chosen (TrackControls): they go off, a
+        download on its way too, and none waiting for this computer's speed comes on after it;
+        what the viewer asked for video files stays as it was."""
         self._auto_on = False
         self._auto_pending = None
+        self._toggle_waits = False
         if self._enabled or self._download is not None:
             self._disable()
 
@@ -414,9 +416,8 @@ class CaptionsController(QObject):
         """On by themselves for the video file playing, as `local_video_playing` says. Automatic
         going by this computer's speed first (translated) while it isn't known yet, with a model
         here: it is measured in the background (no wait shown, nothing asked), and they come on
-        once it is, while the same file plays and all this still holds (`_on_scored`)."""
-        from services.captions import models
-
+        once it is, while the same file plays and all this still holds (`_on_scored`). Whether
+        a model is here is the one looked at last (`_here`: no disk on the GUI thread)."""
         if not self._config_get(_LOCAL_ON, False):
             return
         if self._enabled or self._download is not None or self._asking or self._toggle_waits:
@@ -429,7 +430,7 @@ class CaptionsController(QObject):
                 self._warm_tier()
             return
         tier = self._choose_tier()
-        if not models.installed(tier):
+        if not self._here(tier):
             return
         logger.info("AI captions: on again for a video file, as for the last one")
         self._enable(tier)
@@ -440,10 +441,17 @@ class CaptionsController(QObject):
         it opens; False too when a phone or an outside player takes it): captions that came on
         by themselves for a video file go off first, unless it is a video file too, so that no
         film relay and no hold behind live follow them. Asked again, nothing more happens. One
-        waiting for this computer's speed no longer comes on (the new one is asked anew)."""
+        waiting for this computer's speed no longer comes on (the new one is asked anew). What
+        they left on their way goes with them: a download's question QiTV asked for them again
+        (another model chosen), or their wait for the speed."""
         self._auto_pending = None
         if self._auto_on and not local_video:
             self._auto_on = False
+            self._toggle_waits = False
+            if self._asking:
+                self._asking = self._asking_step = False
+                if self._card is not None:
+                    self._card.withdraw()
             self._disable()
 
     def _plays_video_file(self) -> bool:

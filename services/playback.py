@@ -990,6 +990,11 @@ class PlaybackSession(QObject):
             return -1
         return int(self._player.video_get_spu())
 
+    def subtitle_file(self) -> Optional[str]:
+        """The subtitle file whose track is chosen (None: none), from the moment it is added:
+        libVLC lists its track a little later."""
+        return self._subtitle_on
+
     def subtitle_delay(self) -> int:
         """How many milliseconds the subtitles show after the picture (before it: negative)."""
         return self._subtitle_delay_ms
@@ -1671,6 +1676,8 @@ class Session(Protocol):
 
     def subtitle_track(self) -> int: ...
 
+    def subtitle_file(self) -> Optional[str]: ...
+
     def subtitle_delay(self) -> int: ...
 
     def set_subtitle_delay(self, ms: int) -> None: ...
@@ -1847,6 +1854,9 @@ class NullSession(QObject):
 
     def subtitle_track(self) -> int:
         return -1
+
+    def subtitle_file(self) -> Optional[str]:
+        return None
 
     def subtitle_delay(self) -> int:
         return 0

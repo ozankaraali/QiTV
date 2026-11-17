@@ -64,8 +64,15 @@ class LocalCaptionsTests(ControllerTestCase):
         self.captions._warm_tier = lambda: self.warmed.append(True)  # never a benchmark here
         self.window.captions = self.captions
         self.installed, self.score = True, 1.0
+        self.missing: set[str] = set()  # models not here though the others are
+        self.looked: list[str] = []  # each look on the disk (models.installed)
+
+        def installed(tier, root=None):
+            self.looked.append(tier)
+            return self.installed and tier not in self.missing
+
         for name, fake in (
-            ("services.captions.models.installed", lambda tier, root=None: self.installed),
+            ("services.captions.models.installed", installed),
             ("services.captions.models.download_size", lambda tier, root=None: 900_000_000),
             ("services.captions.models.full_size", lambda tier, root=None: 900_000_000),
             ("services.captions.tier.known_score", lambda: self.score),
@@ -98,6 +105,17 @@ class LocalCaptionsTests(ControllerTestCase):
         self.assertEqual(self.loads, ["large"])  # Automatic's, here and fast enough
         self.assertEqual((self.card.asked, self.warmed), ([], []))
         self.assertTrue(self.config.ai_captions_local_on)
+
+    def test_whether_their_model_is_here_is_not_looked_at_again_for_each_file(self):
+        # Review: no disk on the GUI thread at every file's play (the one looked at last; a
+        # download or Settings' Delete looks again).
+        self.config.ai_captions_local_on = True
+        self.film()
+        self.controller.tune_live(CHANNELS[0], group_key="10", channels=list(CHANNELS))
+        self.ready()  # off for the channel
+        self.film(NEXT)
+        self.assertTrue(self.captions.enabled())
+        self.assertEqual(self.looked, ["large"])  # once
 
     def test_off_for_the_last_one_they_stay_off(self):
         self.film()
@@ -171,6 +189,71 @@ class LocalCaptionsTests(ControllerTestCase):
         self.controller.tune_live(CHANNELS[0], group_key="10", channels=list(CHANNELS))
         self.ready()
         self.assertTrue(self.captions.enabled())  # the viewer's: on for live TV too
+
+    def test_off_by_the_title_their_model_question_goes_with_them(self):
+        # Review: on by themselves, another model chosen that isn't here asks its download's
+        # question; the channel tuned next takes it away (else Download turned them on there).
+        self.config.ai_captions_local_on = True
+        self.missing = {"small"}
+        self.film()
+        self.captions.set_model("small")
+        self.assertTrue(self.captions.asking())
+        self.assertEqual(len(self.card.asked), 1)
+        self.controller.tune_live(CHANNELS[0], group_key="10", channels=list(CHANNELS))
+        self.ready()
+        self.assertFalse(self.captions.asking())
+        self.assertEqual(self.card.withdrawn, 1)
+        self.assertFalse(self.captions.enabled())
+        self.assertTrue(self.config.ai_captions_local_on)
+
+    def test_off_by_the_title_their_wait_for_the_speed_goes_with_them(self):
+        # On by themselves with the 0.6B chosen; Automatic chosen then, translated, waits for
+        # this computer's speed: the channel tuned meanwhile ends the wait.
+        self.config.ai_captions_local_on = True
+        self.config.ai_captions_model = "small"
+        self.config.ai_captions_translate_to = "German"
+        self.score = None
+        self.film()
+        self.assertTrue(self.captions.enabled())
+        self.captions.set_model("auto")
+        self.assertTrue(self.captions._toggle_waits)
+        self.controller.tune_live(CHANNELS[0], group_key="10", channels=list(CHANNELS))
+        self.ready()
+        self.score = 1.0
+        self.captions._on_scored()
+        self.assertFalse(self.captions.enabled())
+
+    def test_subtitle_files_on_their_way_block_too(self):
+        # Review: files opened with the video load once it plays (the window's), and a file
+        # just added is chosen before libVLC lists its track.
+        self.config.ai_captions_local_on = True
+        self.window.subtitles_due = lambda: True
+        self.film()
+        self.assertFalse(self.captions.enabled())
+        self.window.subtitles_due = lambda: False
+        self.controller.play_file(NEXT, size=1234)
+        self.session.subtitle_chosen = "/videos/Dizi Bölüm 2.de.srt"  # added, not listed yet
+        self.assertEqual(self.session.subtitle_track(), -1)
+        self.session.stateChanged.emit("playing")
+        self.assertFalse(self.captions.enabled())
+
+    def test_off_chosen_while_the_speed_is_measured_wins(self):
+        # Review: Off picked during the silent measurement (or after the viewer's own on while
+        # it waits): nothing comes on once it is known.
+        self.translated_with_the_speed_unknown()
+        self.film()
+        self.assertIsNotNone(self.captions._auto_pending)
+        self.assertTrue(self.controller.track_controls().choose_subtitles(-1))
+        self.score = 1.0
+        self.captions._on_scored()
+        self.assertFalse(self.captions.enabled())
+        self.score = None
+        self.captions.toggle()  # the viewer's on: waits for the speed
+        self.assertTrue(self.captions._toggle_waits)
+        self.assertTrue(self.controller.track_controls().choose_subtitles(-1))
+        self.score = 1.0
+        self.captions._on_scored()
+        self.assertFalse(self.captions.enabled())
 
     def test_a_subtitle_file_loaded_over_auto_on_ones_keeps_the_field(self):
         # Ruling 14: subtitle files opened with the video load once it plays.

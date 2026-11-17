@@ -905,10 +905,11 @@ class TrackControls(QObject):
 
     def _captions_off(self) -> None:
         """A subtitle track, Off or a file chosen: AI captions go off, a download on its way
-        too (it resumes when they are turned on again). They give way: what the viewer asked
+        too (it resumes when they are turned on again), and none still to come on does (on by
+        themselves once this computer's speed is known). They give way: what the viewer asked
         for video files stays as it was (CaptionsController.give_way)."""
         captions = self._captions_now()
-        if captions is not None and _chosen(captions):
+        if captions is not None:
             captions.give_way()
             self._captions_on = False
 
