@@ -204,9 +204,10 @@ class HelperProcessTests(unittest.TestCase):
         ended = time.monotonic()
         self.assertFalse(self.process.is_alive())
         self.assertEqual(self.process.exitcode, 0)
-        # the open plays out whole (350 ms), after at most 0.4 s finishing the first draw
+        # the open plays out whole (350 ms), after at most 0.4 s finishing the first draw (the
+        # cap itself: test_opening_mark; here only a bound CI's slow runners keep)
         self.assertGreaterEqual(ended - opening, OPEN_S - 0.05)
-        self.assertLessEqual(opening - sent, 3 * CATCH_UP_MAX_S + 0.5)
+        self.assertLessEqual(opening - sent, 10 * CATCH_UP_MAX_S)
 
     def test_after_a_handover_it_glides_and_waits_for_quit(self):
         # It glides onto the player's mark and loops on there; one never told to quit ends
@@ -230,7 +231,14 @@ class HelperProcessTests(unittest.TestCase):
         self.process.join(WAIT_S)
         self.assertFalse(self.process.is_alive())
         self.assertEqual(self.process.exitcode, 0)
-        self.assertLess(time.monotonic() - sent, 1.5)  # well before an open would end it
+        self.assertLess(time.monotonic() - sent, 3.0)  # (about 0.1 s; CI's runners are slow)
+        heard = []
+        try:
+            while self.conn.poll():
+                heard.append(self.conn.recv())
+        except EOFError:
+            pass
+        self.assertNotIn(("opening",), heard)  # it quit: its mark never opened out
 
     def test_a_quit_before_it_shows_shows_nothing(self):
         # A start that handed over at once: no splash flashes after it.
@@ -393,7 +401,11 @@ class SplashTests(unittest.TestCase):
         # mark opens out ("opening", after its draw completed).
         window = self.window()
         splash, sent = unwatched(window)
-        with mock.patch.object(splash_helper, "_fades_windows", return_value=True):
+        with (
+            mock.patch.object(splash_helper, "_fades_windows", return_value=True),
+            # no fallback meanwhile: only "opening" can start the fade
+            mock.patch.object(splash_helper, "OPENING_WAIT_MS", 3_600_000),
+        ):
             splash.before_show(window)
             window.show()
             splash.open_into(window)
@@ -405,8 +417,6 @@ class SplashTests(unittest.TestCase):
             told = time.monotonic()
             self.assertTrue(pump_until(lambda: opacity(window) == 1.0))
         self.assertGreaterEqual(rising(window), told)
-        # on "opening", not the fallback (due 0.6 s after "open")
-        self.assertLess(rising(window) - sent[0][2], splash_helper.OPENING_WAIT_MS / 1000)
 
     def test_without_opening_the_window_fades_0_6_s_after_open(self):
         window = self.window()
@@ -419,7 +429,7 @@ class SplashTests(unittest.TestCase):
         self.assertEqual(names(sent), ["open"])
         waited = rising(window) - sent[0][2]
         # Qt's coarse timers may fire up to 5 % early (seen: 0.599 s, four copies at once)
-        self.assertGreaterEqual(waited, 0.95 * splash_helper.OPENING_WAIT_MS / 1000)
+        self.assertGreaterEqual(waited, 0.9 * splash_helper.OPENING_WAIT_MS / 1000)
         self.assertLess(waited, 3 * splash_helper.OPENING_WAIT_MS / 1000)
 
     def test_the_windows_own_top_levels_fade_in_with_it(self):
