@@ -331,13 +331,19 @@ class OpenFileSmoke:
             self.fail(f"After {after}, the QiTV answering is pid {pid}, not {self.pid}.")
 
     def register(self, exe: str) -> bool:
-        """Windows: QiTV registered for videos in this user's HKCU, for the packaged `exe`."""
+        """Windows: QiTV registered for videos in this user's HKCU, for the packaged `exe`.
+        False (a failure) when it wasn't, or raised; `run` unregisters either way, so a part
+        written before a failure goes too."""
         from services import file_types
 
-        registered = bool(file_types._windows.register("videos", exe))
+        try:
+            registered = bool(file_types._windows.register("videos", exe))
+            why = ""
+        except Exception as error:  # the run goes on without DDE
+            registered, why = False, f" ({type(error).__name__}: {error})"
         self.note("dde_registered", registered)
         if not registered:
-            self.fail("QiTV couldn't be registered for videos in HKCU.")
+            self.fail(f"QiTV couldn't be registered for videos in HKCU{why}.")
         return registered
 
     def unregister(self, exe: str) -> None:
@@ -525,7 +531,9 @@ def run(
     _fresh_config(folder, first_config)
     os.environ.update(QITV_CONFIG_DIR=str(folder), QITV_CONTROL="1", QITV_SMOKE_MUTE="1")
     smoke.save()
-    registered = False
+    # Once a registration was tried, whatever it answered, it is taken back at the end: one
+    # that failed or raised may have written a part (removing keys never written is harmless).
+    tried = registered = False
     try:
         if second:
             second_path = str(Path(second).resolve())
@@ -535,6 +543,7 @@ def run(
         if dde and not os.path.isfile(exe):
             smoke.fail(f"--dde needs the packaged QiTV's exe, not {app!r}.")
         elif dde:
+            tried = True
             registered = smoke.register(exe)
         smoke.one_qitv(source, second_path, registered)
         smoke.stop_all()
@@ -545,7 +554,7 @@ def run(
         return smoke.result
     finally:
         smoke.close()  # every start's tree, before the registration goes
-        if registered:
+        if tried:
             smoke.unregister(exe)
         shutil.rmtree(extended_path(str(files)) if WINDOWS else files, ignore_errors=True)
         smoke.save()
