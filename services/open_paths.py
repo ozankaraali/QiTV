@@ -5,8 +5,8 @@ from dataclasses import dataclass
 import logging
 import ntpath
 import os
-from pathlib import Path
 import re
+import sys
 
 logger = logging.getLogger(__name__)
 
@@ -20,10 +20,18 @@ MUSIC_EXTENSIONS = frozenset({"mp3", "m4a", "aac", "flac", "ogg", "opus", "wav"}
 MEDIA_EXTENSIONS = VIDEO_EXTENSIONS | MUSIC_EXTENSIONS  # Open File's filter
 # The other extensions a type QiTV registers for covers (services/file_types.py registers
 # VIDEO_EXTENSIONS): on macOS 13 the QuickTime movie is .mov and .qt, MPEG-4 .mp4 and .mpg4,
-# AVI .avi and .vfw, MPEG .mpe, .m75 and .m15 too, FLV .f4v, .f4p, .f4a and .f4b too (Linux's
-# MIME types bring .qt, .f4v and .mpe as well). The system may hand them over: they play too.
-EXTRA_VIDEO_EXTENSIONS = frozenset({"qt", "mpg4", "vfw", "mpe", "m75", "m15", "f4v", "f4p"})
-EXTRA_MUSIC_EXTENSIONS = frozenset({"f4a", "f4b"})
+# AVI .avi and .vfw, MPEG .mpe, .m75 and .m15 too, FLV .f4v, .f4p, .f4a and .f4b too, and an
+# Ogg video may be .ogm. Linux's MIME types (shared-mime-info's globs) bring: video/mpeg .vob,
+# .mpe and .mp2 (MPEG audio layer 2: music), video/vnd.avi .avf and .divx, video/quicktime .qt,
+# .moov and .qtvr, video/mp4 .f4v and .lrv, and video/mp2t (Open With) .m2t. The system may
+# hand them over: they play too.
+EXTRA_VIDEO_EXTENSIONS = frozenset(
+    {
+        "qt", "mpg4", "vfw", "mpe", "m75", "m15", "f4v", "f4p", "ogm",
+        "vob", "avf", "divx", "moov", "qtvr", "lrv", "m2t",
+    }
+)  # fmt: skip
+EXTRA_MUSIC_EXTENSIONS = frozenset({"f4a", "f4b", "mp2"})
 _VIDEO = VIDEO_EXTENSIONS | EXTRA_VIDEO_EXTENSIONS
 _MUSIC = MUSIC_EXTENSIONS | EXTRA_MUSIC_EXTENSIONS
 SUBTITLE_EXTENSIONS = (".srt", ".ass", ".ssa", ".vtt", ".sub")
@@ -46,10 +54,15 @@ class Sorted:
 
 
 def launch_paths(argv: Sequence[str]) -> list[str]:
-    """The absolute paths of the existing files among `argv[1:]`.
+    """The absolute paths of the existing files among `argv[1:]`, spelled as they were given
+    (a relative one made absolute): a link stays the link, not the file it points to, and a
+    mapped drive stays its letter (`Z:\\ep.mkv`, never `\\\\server\\share\\ep.mkv`), so a
+    launch names a file as a hand-over or DDE does.
 
     Anything starting with `-` is skipped (macOS's `-psn_...` too), and so is the value after
-    `--replace`.
+    `--replace`. On Windows a path past 260 characters may only be found in its extended
+    spelling (a QiTV that isn't long-path aware): that is looked at too, and the plain
+    spelling kept.
     """
     found: list[str] = []
     skip = False
@@ -63,12 +76,21 @@ def launch_paths(argv: Sequence[str]) -> list[str]:
         if not arg or arg.startswith("-"):
             continue
         try:
-            path = Path(arg).resolve()
-            if path.is_file():
-                found.append(str(path))
+            path = os.path.abspath(arg)
+            if _is_file(path):
+                found.append(path)
         except OSError, ValueError:
             logger.debug("launch argument is not a readable path: %r", arg)
     return found
+
+
+def _is_file(path: str) -> bool:
+    if os.path.isfile(path):
+        return True
+    if sys.platform != "win32":
+        return False
+    extended = extended_path(path)
+    return extended != path and os.path.isfile(extended)
 
 
 def extended_path(path: str) -> str:
@@ -94,10 +116,12 @@ def _extension(path: str) -> str:
 
 
 def natural_key(path: str) -> tuple:
-    """A natural, case-insensitive sort key on the file name (`Ep 2` before `Ep 10`)."""
+    """A natural, case-insensitive sort key on the file name (`Ep 2` before `Ep 10`). A run of
+    decimal digits counts as its number, in any script (`١٢`, `１２`); a superscript or circled
+    digit (`²`, `①`) is a digit to `str.isdigit` but no decimal one: it sorts as text."""
     name = re.split(r"[\\/]", path)[-1].casefold()
     return tuple(
-        (0, int(part), "") if part.isdigit() else (1, 0, part)
+        (0, int(part), "") if part.isdecimal() else (1, 0, part)
         for part in _DIGITS.split(name)
         if part
     )

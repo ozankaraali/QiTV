@@ -139,6 +139,18 @@ class OpenRouterTests(RouterCase):
         self.assertTrue(entered)  # a drag of one is taken too
         self.wait_for_plays(2)
 
+    def test_superscript_and_circled_digit_names_play(self):
+        # natural_key raised on '²' and '①' (str.isdigit, then int()): in the drag's check and
+        # in the hand-over's slot alike.
+        first, second = self.film("①1.mp4"), self.film("1²2.mkv")
+        self.handover(first, second)
+        self.wait_for_plays(1)
+        self.assertEqual(self.plays(), [(str(second), 4)])  # "1²2" sorts before "①1"
+        entered, _dropped = drop(self.window.host, paths=[self.film("²1 Film.mkv")])
+        self.assertTrue(entered)
+        self.wait_for_plays(2)
+        self.assertEqual(self.plays()[-1], (str(self.folder / "²1 Film.mkv"), 4))
+
     def test_a_file_qitv_wont_play_says_so_and_the_film_plays_on(self):
         on_now = self.film("on now.mkv")
         self.handover(on_now)

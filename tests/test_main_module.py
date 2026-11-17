@@ -75,7 +75,9 @@ class MainModuleTests(unittest.TestCase):
                 first.stdout.close()
         self.assertEqual(second.returncode, 0, second.stderr[-2000:])
         self.assertIn("this start ends here", second.stderr)
-        self.assertEqual(opened, "opened " + json.dumps(str(film.resolve())))
+        # spelled as given (never resolved: macOS's /var is /private/var, Windows' temp folder
+        # a short name), as a hand-over or DDE names it
+        self.assertEqual(opened, "opened " + json.dumps(str(film)))
         imported = {
             line.rsplit("|", 1)[1].strip()
             for line in second.stderr.splitlines()

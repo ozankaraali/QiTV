@@ -4,6 +4,7 @@ import os
 from pathlib import Path
 import tempfile
 import unittest
+from unittest import mock
 
 from services import open_paths
 
@@ -16,7 +17,7 @@ class LaunchPaths(unittest.TestCase):
             old = Path(d, "old.exe")
             old.write_bytes(b"x")
             argv = ["qitv", "--replace", str(old), "-psn_0_12345", str(film), "missing.mkv"]
-            self.assertEqual(open_paths.launch_paths(argv), [str(film.resolve())])
+            self.assertEqual(open_paths.launch_paths(argv), [str(film)])
 
     def test_relative_paths_become_absolute(self):
         with tempfile.TemporaryDirectory() as d:
@@ -25,9 +26,51 @@ class LaunchPaths(unittest.TestCase):
             before = os.getcwd()
             os.chdir(d)
             try:
-                self.assertEqual(open_paths.launch_paths(["qitv", "a.mp4"]), [str(film.resolve())])
+                expected = os.path.join(os.getcwd(), "a.mp4")  # the folder as the system says
+                self.assertEqual(open_paths.launch_paths(["qitv", "a.mp4"]), [expected])
             finally:
                 os.chdir(before)
+
+    def test_paths_are_kept_as_given_never_resolved(self):
+        # Review Focus 1: a launch names the file as a hand-over or DDE does. resolve() turned
+        # a link into its target (a mapped drive into its share on Windows).
+        with tempfile.TemporaryDirectory() as d:
+            film = Path(d, "Dizi Bölüm 1.mkv")
+            film.write_bytes(b"x")
+            given = os.path.join(d, ".", "Dizi Bölüm 1.mkv")
+            self.assertEqual(open_paths.launch_paths(["qitv", given]), [str(film)])
+            if os.name == "nt":
+                return  # a link takes a privilege there
+            folder = Path(d, "Kısayol")
+            folder.mkdir()
+            link = folder / "Bölüm 1.mkv"
+            link.symlink_to(film)
+            self.assertEqual(open_paths.launch_paths(["qitv", str(link)]), [str(link)])
+            broken = folder / "gone.mkv"
+            broken.symlink_to(Path(d, "deleted.mkv"))
+            self.assertEqual(open_paths.launch_paths(["qitv", str(broken)]), [])
+
+    def test_a_long_windows_path_is_looked_at_in_its_extended_spelling(self):
+        long = "C:\\" + "\\".join(["Sezon 1 uzun klasör"] * 14) + "\\Dizi Bölüm 1.mkv"
+        seen = []
+
+        def isfile(path):
+            seen.append(path)
+            return path.startswith("\\\\?\\")  # only the extended spelling is found
+
+        for system, expected, looked in (
+            ("win32", [long], [long, open_paths.extended_path(long)]),  # kept plain
+            ("linux", [], [long]),  # no second spelling elsewhere
+        ):
+            with (
+                self.subTest(system=system),
+                mock.patch.object(open_paths.sys, "platform", system),
+                mock.patch.object(open_paths.os.path, "abspath", side_effect=lambda p: p),
+                mock.patch.object(open_paths.os.path, "isfile", side_effect=isfile),
+            ):
+                seen.clear()
+                self.assertEqual(open_paths.launch_paths(["qitv", long]), expected)
+                self.assertEqual(seen, looked)
 
     def test_folders_and_first_argument_are_not_paths(self):
         with tempfile.TemporaryDirectory() as d:
@@ -47,6 +90,28 @@ class SortPaths(unittest.TestCase):
         self.assertLess(
             open_paths.natural_key("/z/ep 2.mkv"), open_paths.natural_key("/a/EP 10.mkv")
         )
+
+    def test_superscript_and_circled_digits_sort_as_text(self):
+        # '²' and '①' are digits to str.isdigit but no decimal ones: int() refused them, and a
+        # launch with such a file ended QiTV before its window showed (holds_the_start).
+        odd = ["/x/1²2.mkv", "/x/²1 Film.mkv", "/x/①1.mp4", "C:\\Filmler\\Bölüm ③.mkv"]
+        for path in odd:
+            with self.subTest(path=path):
+                open_paths.natural_key(path)  # no ValueError
+        kinds = open_paths.sort_paths([*odd, "/x/1.mkv"])
+        self.assertEqual(sorted(kinds.media), sorted([*odd, "/x/1.mkv"]))
+        self.assertTrue(open_paths.holds_the_start(odd))
+        # 1²2: the 1, then "²" as text, then the 2
+        key = open_paths.natural_key("/x/1²2.mkv")
+        self.assertEqual(key[:3], ((0, 1, ""), (1, 0, "²"), (0, 2, "")))
+
+    def test_decimal_digits_of_other_scripts_count_as_numbers(self):
+        # Arabic-Indic and fullwidth digits are decimal (\d matches them, int() reads them).
+        key = open_paths.natural_key
+        self.assertLess(key("/x/Bölüm ٣.mkv"), key("/x/Bölüm ١٠.mkv"))
+        self.assertLess(key("/x/Ep 2.mkv"), key("/x/Ep １２.mkv"))
+        mixed = open_paths.sort_paths(["/x/Ep １٠.mkv", "/x/Ep 9.mkv"])  # one run: ten
+        self.assertEqual(mixed.media, ("/x/Ep 9.mkv", "/x/Ep １٠.mkv"))
 
     def test_kinds(self):
         self.assertTrue(open_paths.is_video("/x/A.MKV"))
@@ -78,6 +143,32 @@ class SortPaths(unittest.TestCase):
         # what QiTV registers for, and the Open File filter, stay as they were
         self.assertNotIn("qt", open_paths.VIDEO_EXTENSIONS)
         self.assertNotIn("f4a", open_paths.MEDIA_EXTENSIONS)
+
+    def test_what_linuxs_mime_types_and_macos_ogg_bring_plays_too(self):
+        # shared-mime-info's globs for the MIME types QiTV registers on Linux: video/mpeg
+        # (.vob, .mp2), video/vnd.avi (.avf, .divx), video/quicktime (.moov, .qtvr), video/mp4
+        # (.lrv), video/mp2t (.m2t); and macOS's Ogg video (.ogm). They got "QiTV can't play".
+        videos = ["/x/DVD Bölüm 1.VOB", "/x/b.avf", "/x/c.divx", "/x/d.moov", "/x/e.qtvr"]
+        videos += ["/x/f.lrv", "/x/g.m2t", "/x/h.ogm"]
+        for path in videos:
+            with self.subTest(path=path):
+                self.assertTrue(open_paths.is_video(path))
+                self.assertFalse(open_paths.is_music(path))
+        # .mp2 is MPEG audio layer 2 (audio/mp2 too): music
+        self.assertTrue(open_paths.is_music("/x/Şarkı.mp2"))
+        self.assertFalse(open_paths.is_video("/x/Şarkı.mp2"))
+        kinds = open_paths.sort_paths([*videos, "/x/Şarkı.mp2"])
+        self.assertEqual((len(kinds.media), kinds.others), (9, ()))
+        self.assertTrue(open_paths.holds_the_start(["/x/f.lrv"]))
+        # what QiTV registers for (services/file_types.py) and the Open File filter stay
+        self.assertEqual(
+            open_paths.VIDEO_EXTENSIONS,
+            {"mp4", "m4v", "mkv", "avi", "mov", "webm", "ts", "m2ts", "mts", "mpg", "mpeg"}
+            | {"flv", "wmv", "ogv"},
+        )
+        self.assertEqual(
+            open_paths.MUSIC_EXTENSIONS, {"mp3", "m4a", "aac", "flac", "ogg", "opus", "wav"}
+        )
 
     def test_others_are_the_files_qitv_wont_play(self):
         s = open_paths.sort_paths(["/x/notes.txt", "/x/a.srt", "/x/b.mkv", "/x/c", "/x/l.m3u"])
