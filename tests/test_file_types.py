@@ -391,9 +391,14 @@ def _exec_argv(exec_value):
     return [a.replace("%%", "%") for a in args]
 
 
-GIO = shutil.which("gio")
+# GLib's launcher and xdg-mime read desktop files on Linux only (the unit tests also run on
+# macOS in CI, where a gio has no desktop files to launch).
+LINUX = sys.platform.startswith("linux")
+GIO = shutil.which("gio") if LINUX else None
+XDG_MIME = shutil.which("xdg-mime") if LINUX else None
 
 
+@unittest.skipIf(os.name == "nt", "the fake tools are sh scripts")
 class LinuxBackendTests(unittest.TestCase):
     def setUp(self):
         self.base = Path(tempfile.mkdtemp())
@@ -531,7 +536,7 @@ class LinuxBackendTests(unittest.TestCase):
                 self.assertEqual(exec_value, expected)
                 self.assertEqual(_exec_argv(exec_value), [exe, "%F"])
 
-    @unittest.skipUnless(GIO, "GLib's gio is not installed here")
+    @unittest.skipUnless(GIO, "GLib's gio is not installed here (or this isn't Linux)")
     def test_glib_starts_the_path_written_with_the_files(self):
         # GLib's own launcher reads the file: a folder with a space, $, `, \ and " in its name
         folder = self.base / 'Qi $TV `x` \\ "y"'
@@ -586,9 +591,10 @@ class LinuxBackendTests(unittest.TestCase):
         self.assertTrue(file_types._linux.unregister("videos", "/opt/qitv/qitv-linux"))
         self.assertEqual(self.icon.read_bytes(), b"the installer's")
 
-    @unittest.skipUnless(shutil.which("xdg-mime"), "xdg-mime is not installed here")
+    @unittest.skipUnless(XDG_MIME, "xdg-mime is not installed here (or this isn't Linux)")
     def test_linux_real_xdg_mime_when_present(self):
-        real_path = os.pathsep.join([os.path.dirname(shutil.which("xdg-mime")), "/usr/bin", "/bin"])
+        self.config.mkdir()  # a user's ~/.config is there; xdg-mime may not create it
+        real_path = os.pathsep.join([os.path.dirname(XDG_MIME), "/usr/bin", "/bin"])
         quiet = {"XDG_CURRENT_DESKTOP": "", "DESKTOP_SESSION": "", "KDE_FULL_SESSION": ""}
         with patch.dict(os.environ, {"PATH": real_path, **quiet}):
 
