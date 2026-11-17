@@ -626,6 +626,7 @@
   "No stream to spare at {provider}": "{provider} استریم آزاد ندارد",
   "No subtitles": "بدون زیرنویس",
   "No subtitles found for \"{query}\". Try another spelling, or fewer words.": "زیرنویسی برای «{query}» پیدا نشد. املای دیگری یا کلمات کمتری را امتحان کنید.",
+  "None of the files in this playlist are here": "",
   "Normal": "عادی",
   "Normal speed": "سرعت عادی",
   "North Korea": "کرهٔ شمالی",
@@ -1320,6 +1321,9 @@
   "{n} download left today, more in {time}": {
     "one": "{n} دانلود برای امروز مانده، بیشتر تا {time} دیگر",
     "other": "{n} دانلود برای امروز مانده، بیشتر تا {time} دیگر"
+  },
+  "{n} file in the playlist is missing": {
+    "other": ""
   },
   "{n} hour": {
     "one": "{n} ساعت",

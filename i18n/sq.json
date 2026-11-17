@@ -626,6 +626,7 @@
   "No stream to spare at {provider}": "S'ka transmetim të lirë te {provider}",
   "No subtitles": "S'ka titra",
   "No subtitles found for \"{query}\". Try another spelling, or fewer words.": "S'u gjetën titra për «{query}». Provoni një drejtshkrim tjetër ose më pak fjalë.",
+  "None of the files in this playlist are here": "",
   "Normal": "Normale",
   "Normal speed": "Shpejtësi normale",
   "North Korea": "Kore e Veriut",
@@ -1320,6 +1321,9 @@
   "{n} download left today, more in {time}": {
     "one": "Edhe {n} shkarkim sot, të tjera pas {time}",
     "other": "Edhe {n} shkarkime sot, të tjera pas {time}"
+  },
+  "{n} file in the playlist is missing": {
+    "other": ""
   },
   "{n} hour": {
     "one": "{n} orë",

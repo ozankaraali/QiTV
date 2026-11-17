@@ -626,6 +626,7 @@
   "No stream to spare at {provider}": "Καμία ελεύθερη ροή στον πάροχο {provider}",
   "No subtitles": "Χωρίς υπότιτλους",
   "No subtitles found for \"{query}\". Try another spelling, or fewer words.": "Δεν βρέθηκαν υπότιτλοι για «{query}». Δοκιμάστε άλλη ορθογραφία ή λιγότερες λέξεις.",
+  "None of the files in this playlist are here": "",
   "Normal": "Κανονική",
   "Normal speed": "Κανονική ταχύτητα",
   "North Korea": "Βόρεια Κορέα",
@@ -1320,6 +1321,9 @@
   "{n} download left today, more in {time}": {
     "one": "Απομένει {n} λήψη σήμερα, περισσότερες σε {time}",
     "other": "Απομένουν {n} λήψεις σήμερα, περισσότερες σε {time}"
+  },
+  "{n} file in the playlist is missing": {
+    "other": ""
   },
   "{n} hour": {
     "one": "{n} ώρα",

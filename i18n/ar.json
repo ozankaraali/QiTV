@@ -650,6 +650,7 @@
   "No stream to spare at {provider}": "لا يوجد بث متاح لدى {provider}",
   "No subtitles": "لا توجد ترجمة",
   "No subtitles found for \"{query}\". Try another spelling, or fewer words.": "لم يُعثر على ترجمة لـ«{query}». جرّب تهجئة أخرى أو كلمات أقل.",
+  "None of the files in this playlist are here": "",
   "Normal": "عادي",
   "Normal speed": "السرعة العادية",
   "North Korea": "كوريا الشمالية",
@@ -1408,6 +1409,9 @@
     "other": "تبقّى {n} تنزيل اليوم، والمزيد بعد {time}",
     "two": "تبقّى تنزيلان اليوم، والمزيد بعد {time}",
     "zero": "لم يتبقَّ أي تنزيل اليوم، والمزيد بعد {time}"
+  },
+  "{n} file in the playlist is missing": {
+    "other": ""
   },
   "{n} hour": {
     "few": "{n} ساعات",

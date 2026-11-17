@@ -632,6 +632,7 @@
   "No stream to spare at {provider}": "Niciun flux disponibil la {provider}",
   "No subtitles": "Fără subtitrări",
   "No subtitles found for \"{query}\". Try another spelling, or fewer words.": "Nu s-au găsit subtitrări pentru „{query}”. Încercați altă ortografie sau mai puține cuvinte.",
+  "None of the files in this playlist are here": "",
   "Normal": "Normal",
   "Normal speed": "Viteză normală",
   "North Korea": "Coreea de Nord",
@@ -1342,6 +1343,9 @@
     "few": "{n} descărcări rămase azi, altele peste {time}",
     "one": "{n} descărcare rămasă azi, altele peste {time}",
     "other": "{n} de descărcări rămase azi, altele peste {time}"
+  },
+  "{n} file in the playlist is missing": {
+    "other": ""
   },
   "{n} hour": {
     "few": "{n} ore",

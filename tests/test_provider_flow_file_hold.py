@@ -493,7 +493,8 @@ class WindowHoldTests(base.WindowCase):
         self.assertFalse(held)
         self.assertEqual(runs, [True])
         playlist = Path(self.config_dir) / "Kanallar.m3u"
-        playlist.write_text("#EXTM3U\n", encoding="utf-8")
+        # A link makes it a provider (one with no entries would say so and play nothing).
+        playlist.write_text("#EXTM3U\n#EXTINF:-1,Bir\nhttp://127.0.0.1:9/1.ts\n", encoding="utf-8")
         with mock.patch.object(self.window, "add_dropped_providers") as added:
             self.assertFalse(holds_the_start([str(playlist)]))
             self.window.open_paths([str(playlist)], source="launch")

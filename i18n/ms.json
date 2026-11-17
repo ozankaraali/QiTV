@@ -620,6 +620,7 @@
   "No stream to spare at {provider}": "Tiada strim yang tinggal di {provider}",
   "No subtitles": "Tiada sari kata",
   "No subtitles found for \"{query}\". Try another spelling, or fewer words.": "Tiada sari kata ditemui untuk “{query}”. Cuba ejaan lain, atau kurangkan perkataan.",
+  "None of the files in this playlist are here": "",
   "Normal": "Biasa",
   "Normal speed": "Kelajuan biasa",
   "North Korea": "Korea Utara",
@@ -1298,6 +1299,9 @@
   },
   "{n} download left today, more in {time}": {
     "other": "Baki {n} muat turun hari ini, lagi dalam {time}"
+  },
+  "{n} file in the playlist is missing": {
+    "other": ""
   },
   "{n} hour": {
     "other": "{n} jam"

@@ -626,6 +626,7 @@
   "No stream to spare at {provider}": "No quedan emisiones libres en {provider}",
   "No subtitles": "No hay subtítulos",
   "No subtitles found for \"{query}\". Try another spelling, or fewer words.": "No se encontraron subtítulos para \"{query}\". Prueba con otra ortografía o con menos palabras.",
+  "None of the files in this playlist are here": "No se encuentra ninguno de los archivos de esta lista",
   "Normal": "Normal",
   "Normal speed": "Velocidad normal",
   "North Korea": "Corea del Norte",
@@ -1320,6 +1321,10 @@
   "{n} download left today, more in {time}": {
     "one": "Queda {n} descarga hoy; más dentro de {time}",
     "other": "Quedan {n} descargas hoy; más dentro de {time}"
+  },
+  "{n} file in the playlist is missing": {
+    "one": "Falta {n} archivo de la lista",
+    "other": "Faltan {n} archivos de la lista"
   },
   "{n} hour": {
     "one": "{n} hora",

@@ -620,6 +620,7 @@
   "No stream to spare at {provider}": "{provider} không còn luồng trống",
   "No subtitles": "Không có phụ đề",
   "No subtitles found for \"{query}\". Try another spelling, or fewer words.": "Không tìm thấy phụ đề cho \"{query}\". Hãy thử cách viết khác hoặc ít từ hơn.",
+  "None of the files in this playlist are here": "",
   "Normal": "Bình thường",
   "Normal speed": "Tốc độ bình thường",
   "North Korea": "Triều Tiên",
@@ -1298,6 +1299,9 @@
   },
   "{n} download left today, more in {time}": {
     "other": "Còn {n} lượt tải hôm nay, thêm lượt sau {time}"
+  },
+  "{n} file in the playlist is missing": {
+    "other": ""
   },
   "{n} hour": {
     "other": "{n} giờ"

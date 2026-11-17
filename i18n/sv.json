@@ -626,6 +626,7 @@
   "No stream to spare at {provider}": "Ingen ledig ström hos {provider}",
   "No subtitles": "Inga undertexter",
   "No subtitles found for \"{query}\". Try another spelling, or fewer words.": "Inga undertexter hittades för ”{query}”. Prova en annan stavning eller färre ord.",
+  "None of the files in this playlist are here": "",
   "Normal": "Normal",
   "Normal speed": "Normal hastighet",
   "North Korea": "Nordkorea",
@@ -1320,6 +1321,9 @@
   "{n} download left today, more in {time}": {
     "one": "{n} nedladdning kvar i dag, fler om {time}",
     "other": "{n} nedladdningar kvar i dag, fler om {time}"
+  },
+  "{n} file in the playlist is missing": {
+    "other": ""
   },
   "{n} hour": {
     "one": "{n} timme",

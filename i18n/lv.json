@@ -632,6 +632,7 @@
   "No stream to spare at {provider}": "Pie {provider} nav brīvas straumes",
   "No subtitles": "Nav subtitru",
   "No subtitles found for \"{query}\". Try another spelling, or fewer words.": "Subtitri vaicājumam „{query}” nav atrasti. Mēģiniet citu rakstību vai mazāk vārdu.",
+  "None of the files in this playlist are here": "",
   "Normal": "Normāla",
   "Normal speed": "Normāls ātrums",
   "North Korea": "Ziemeļkoreja",
@@ -1342,6 +1343,9 @@
     "one": "Šodien atlikusi {n} lejupielāde, līdz jaunām: {time}",
     "other": "Šodien atlikušas {n} lejupielādes, līdz jaunām: {time}",
     "zero": "Šodien atlikušas {n} lejupielādes, līdz jaunām: {time}"
+  },
+  "{n} file in the playlist is missing": {
+    "other": ""
   },
   "{n} hour": {
     "one": "{n} stunda",

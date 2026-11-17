@@ -626,6 +626,7 @@
   "No stream to spare at {provider}": "Pakkujal {provider} pole vaba voogu",
   "No subtitles": "Subtiitrid puuduvad",
   "No subtitles found for \"{query}\". Try another spelling, or fewer words.": "Päringule „{query}“ subtiitreid ei leitud. Proovige teist kirjapilti või vähem sõnu.",
+  "None of the files in this playlist are here": "",
   "Normal": "Normaalne",
   "Normal speed": "Tavakiirus",
   "North Korea": "Põhja-Korea",
@@ -1320,6 +1321,9 @@
   "{n} download left today, more in {time}": {
     "one": "Täna on jäänud {n} allalaadimine, rohkem {time} pärast",
     "other": "Täna on jäänud {n} allalaadimist, rohkem {time} pärast"
+  },
+  "{n} file in the playlist is missing": {
+    "other": ""
   },
   "{n} hour": {
     "one": "{n} tund",

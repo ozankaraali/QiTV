@@ -626,6 +626,7 @@
   "No stream to spare at {provider}": "No queden fluxos lliures a {provider}",
   "No subtitles": "No hi ha subtítols",
   "No subtitles found for \"{query}\". Try another spelling, or fewer words.": "No s'han trobat subtítols per a «{query}». Prova una altra grafia o menys paraules.",
+  "None of the files in this playlist are here": "",
   "Normal": "Normal",
   "Normal speed": "Velocitat normal",
   "North Korea": "Corea del Nord",
@@ -1320,6 +1321,9 @@
   "{n} download left today, more in {time}": {
     "one": "Avui queda {n} baixada; més d'aquí a {time}",
     "other": "Avui queden {n} baixades; més d'aquí a {time}"
+  },
+  "{n} file in the playlist is missing": {
+    "other": ""
   },
   "{n} hour": {
     "one": "{n} hora",

@@ -620,6 +620,7 @@
   "No stream to spare at {provider}": "{provider} 沒有可用的串流",
   "No subtitles": "沒有字幕",
   "No subtitles found for \"{query}\". Try another spelling, or fewer words.": "找不到「{query}」的字幕。請嘗試其他拼法或減少關鍵字。",
+  "None of the files in this playlist are here": "",
   "Normal": "標準",
   "Normal speed": "正常速度",
   "North Korea": "北韓",
@@ -1298,6 +1299,9 @@
   },
   "{n} download left today, more in {time}": {
     "other": "今天還剩 {n} 次下載，{time}後補充"
+  },
+  "{n} file in the playlist is missing": {
+    "other": ""
   },
   "{n} hour": {
     "other": "{n} 小時"

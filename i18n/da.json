@@ -626,6 +626,7 @@
   "No stream to spare at {provider}": "Ingen ledig stream hos {provider}",
   "No subtitles": "Ingen undertekster",
   "No subtitles found for \"{query}\". Try another spelling, or fewer words.": "Ingen undertekster fundet for »{query}«. Prøv en anden stavemåde eller færre ord.",
+  "None of the files in this playlist are here": "",
   "Normal": "Normal",
   "Normal speed": "Normal hastighed",
   "North Korea": "Nordkorea",
@@ -1320,6 +1321,9 @@
   "{n} download left today, more in {time}": {
     "one": "{n} download tilbage i dag, flere om {time}",
     "other": "{n} downloads tilbage i dag, flere om {time}"
+  },
+  "{n} file in the playlist is missing": {
+    "other": ""
   },
   "{n} hour": {
     "one": "{n} time",

@@ -1,6 +1,8 @@
 """Providers dropped on the TV window (QiTV 2.2): a playlist file, or a provider's link.
 
-A dropped .m3u or .m3u8 file becomes an M3U playlist provider reading that file. A dropped link
+A dropped .m3u or .m3u8 file with a network link in it becomes an M3U playlist provider reading
+that file (the window reads it first: services/local_playlist.py; one of local files plays as a
+list, an HLS one as one film). A dropped link
 (a URL dragged from a browser, or text) is read as the add-provider form's Paste link reads it
 (services.provider_link): an Xtream link with its login, or a playlist's address, becomes a
 provider at once; a portal's address needs its MAC, so it opens the add-provider form filled

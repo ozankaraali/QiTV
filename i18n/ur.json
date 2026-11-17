@@ -626,6 +626,7 @@
   "No stream to spare at {provider}": "{provider} کے پاس کوئی فالتو اسٹریم نہیں",
   "No subtitles": "کوئی سب ٹائٹل نہیں",
   "No subtitles found for \"{query}\". Try another spelling, or fewer words.": "“{query}” کے لیے کوئی سب ٹائٹل نہیں ملا۔ دوسرا ہجے یا کم الفاظ آزمائیں۔",
+  "None of the files in this playlist are here": "",
   "Normal": "نارمل",
   "Normal speed": "نارمل رفتار",
   "North Korea": "شمالی کوریا",
@@ -1320,6 +1321,9 @@
   "{n} download left today, more in {time}": {
     "one": "آج {n} ڈاؤن لوڈ باقی، مزید {time} میں",
     "other": "آج {n} ڈاؤن لوڈز باقی، مزید {time} میں"
+  },
+  "{n} file in the playlist is missing": {
+    "other": ""
   },
   "{n} hour": {
     "one": "{n} گھنٹہ",

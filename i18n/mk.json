@@ -626,6 +626,7 @@
   "No stream to spare at {provider}": "Нема слободен стрим кај {provider}",
   "No subtitles": "Нема титлови",
   "No subtitles found for \"{query}\". Try another spelling, or fewer words.": "Не се најдени титлови за „{query}“. Обидете се со друго пишување или помалку зборови.",
+  "None of the files in this playlist are here": "",
   "Normal": "Нормално",
   "Normal speed": "Нормална брзина",
   "North Korea": "Северна Кореја",
@@ -1320,6 +1321,9 @@
   "{n} download left today, more in {time}": {
     "one": "Уште {n} преземање денес, повеќе за {time}",
     "other": "Уште {n} преземања денес, повеќе за {time}"
+  },
+  "{n} file in the playlist is missing": {
+    "other": ""
   },
   "{n} hour": {
     "one": "{n} час",

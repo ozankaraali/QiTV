@@ -638,6 +638,7 @@
   "No stream to spare at {provider}": "У {provider} немає вільного потоку",
   "No subtitles": "Немає субтитрів",
   "No subtitles found for \"{query}\". Try another spelling, or fewer words.": "Субтитри для «{query}» не знайдено. Спробуйте інше написання або менше слів.",
+  "None of the files in this playlist are here": "",
   "Normal": "Звичайна",
   "Normal speed": "Звичайна швидкість",
   "North Korea": "Північна Корея",
@@ -1364,6 +1365,9 @@
     "many": "Сьогодні залишилося {n} завантажень, ще — через {time}",
     "one": "Сьогодні залишилося {n} завантаження, ще — через {time}",
     "other": "Сьогодні залишилося {n} завантаження, ще — через {time}"
+  },
+  "{n} file in the playlist is missing": {
+    "other": ""
   },
   "{n} hour": {
     "few": "{n} години",

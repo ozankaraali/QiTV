@@ -620,6 +620,7 @@
   "No stream to spare at {provider}": "{provider} 没有空闲的流",
   "No subtitles": "没有字幕",
   "No subtitles found for \"{query}\". Try another spelling, or fewer words.": "未找到“{query}”的字幕。请尝试其他拼写或减少关键词。",
+  "None of the files in this playlist are here": "",
   "Normal": "标准",
   "Normal speed": "正常速度",
   "North Korea": "朝鲜",
@@ -1298,6 +1299,9 @@
   },
   "{n} download left today, more in {time}": {
     "other": "今天还剩 {n} 次下载，{time}后补充"
+  },
+  "{n} file in the playlist is missing": {
+    "other": ""
   },
   "{n} hour": {
     "other": "{n} 小时"

@@ -620,6 +620,7 @@
   "No stream to spare at {provider}": "{provider}に空きストリームがありません",
   "No subtitles": "字幕なし",
   "No subtitles found for \"{query}\". Try another spelling, or fewer words.": "「{query}」の字幕は見つかりませんでした。別の綴りか、少ない語で試してください。",
+  "None of the files in this playlist are here": "",
   "Normal": "標準",
   "Normal speed": "通常速度",
   "North Korea": "北朝鮮",
@@ -1298,6 +1299,9 @@
   },
   "{n} download left today, more in {time}": {
     "other": "今日の残り{n}件、{time}後に追加"
+  },
+  "{n} file in the playlist is missing": {
+    "other": ""
   },
   "{n} hour": {
     "other": "{n}時間"

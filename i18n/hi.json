@@ -626,6 +626,7 @@
   "No stream to spare at {provider}": "{provider} पर कोई स्ट्रीम खाली नहीं",
   "No subtitles": "कोई सबटाइटल नहीं",
   "No subtitles found for \"{query}\". Try another spelling, or fewer words.": "“{query}” के लिए कोई सबटाइटल नहीं मिला। दूसरी स्पेलिंग या कम शब्द आज़माएँ।",
+  "None of the files in this playlist are here": "",
   "Normal": "सामान्य",
   "Normal speed": "सामान्य गति",
   "North Korea": "उत्तर कोरिया",
@@ -1320,6 +1321,9 @@
   "{n} download left today, more in {time}": {
     "one": "आज {n} डाउनलोड बाकी, {time} में और",
     "other": "आज {n} डाउनलोड बाकी, {time} में और"
+  },
+  "{n} file in the playlist is missing": {
+    "other": ""
   },
   "{n} hour": {
     "one": "{n} घंटा",

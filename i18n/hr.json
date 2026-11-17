@@ -632,6 +632,7 @@
   "No stream to spare at {provider}": "{provider}: nema slobodnog streama",
   "No subtitles": "Nema titlova",
   "No subtitles found for \"{query}\". Try another spelling, or fewer words.": "Nema titlova za „{query}“. Pokušajte s drugim pravopisom ili s manje riječi.",
+  "None of the files in this playlist are here": "",
   "Normal": "Normalno",
   "Normal speed": "Normalna brzina",
   "North Korea": "Sjeverna Koreja",
@@ -1342,6 +1343,9 @@
     "few": "Danas su preostala {n} preuzimanja, još za {time}",
     "one": "Danas je preostalo {n} preuzimanje, još za {time}",
     "other": "Danas je preostalo {n} preuzimanja, još za {time}"
+  },
+  "{n} file in the playlist is missing": {
+    "other": ""
   },
   "{n} hour": {
     "few": "{n} sata",

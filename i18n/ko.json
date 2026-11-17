@@ -620,6 +620,7 @@
   "No stream to spare at {provider}": "{provider}에 남은 스트림이 없어요",
   "No subtitles": "자막 없음",
   "No subtitles found for \"{query}\". Try another spelling, or fewer words.": "“{query}”에 대한 자막을 찾지 못했어요. 다른 철자나 더 적은 단어로 시도해 보세요.",
+  "None of the files in this playlist are here": "",
   "Normal": "보통",
   "Normal speed": "보통 속도",
   "North Korea": "북한",
@@ -1298,6 +1299,9 @@
   },
   "{n} download left today, more in {time}": {
     "other": "오늘 {n}개 남음, {time} 후 추가"
+  },
+  "{n} file in the playlist is missing": {
+    "other": ""
   },
   "{n} hour": {
     "other": "{n}시간"

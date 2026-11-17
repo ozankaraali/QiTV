@@ -626,6 +626,7 @@
   "No stream to spare at {provider}": "Walang ekstrang stream sa {provider}",
   "No subtitles": "Walang subtitle",
   "No subtitles found for \"{query}\". Try another spelling, or fewer words.": "Walang nahanap na subtitle para sa “{query}”. Subukan ang ibang spelling, o mas kaunting salita.",
+  "None of the files in this playlist are here": "",
   "Normal": "Normal",
   "Normal speed": "Normal na bilis",
   "North Korea": "North Korea",
@@ -1320,6 +1321,9 @@
   "{n} download left today, more in {time}": {
     "one": "{n} download pa ang natitira ngayong araw, may dagdag sa loob ng {time}",
     "other": "{n} na download pa ang natitira ngayong araw, may dagdag sa loob ng {time}"
+  },
+  "{n} file in the playlist is missing": {
+    "other": ""
   },
   "{n} hour": {
     "one": "{n} oras",

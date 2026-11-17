@@ -361,6 +361,7 @@
     "No stream to spare at {provider}": "a multiview tile's card and a toast: the provider's connections are all in use",
     "No subtitles": "a toast; the phone remote's Subtitles, with none to show",
     "No subtitles found for \"{query}\". Try another spelling, or fewer words.": "the OpenSubtitles page's status line; {query}: what was searched for",
+    "None of the files in this playlist are here": "an error toast: a playlist opened in QiTV names no file that is there",
     "Normal": "the Live latency setting's choice",
     "Normal speed": "tooltip of the playback speed chip (back to 1x)",
     "Not Now": "a button",
@@ -800,6 +801,7 @@
     "{n} channel": "a genre's channel count beside it; {n} comes with its thousands separator; the REC sign when several channels record in the background",
     "{n} channel is recording. Quit and stop the recordings?": "a question when QiTV is quit while several channels record ({n} of them)",
     "{n} download left today, more in {time}": "{time}: a time span, \"8 hours and 38 minutes\"",
+    "{n} file in the playlist is missing": "a toast as a playlist plays: {n} of its files aren't there (skipped)",
     "{n} min": "an episode's running time in minutes, abbreviated",
     "{n} of {limit} stream": "a provider's streams in use on the Recordings page ({n} of {limit})",
     "{n} recorded": "the Recordings page's summary line: the recordings' files",
@@ -872,6 +874,7 @@
     "{n} download": "{n} downloads",
     "{n} download left today": "{n} downloads left today",
     "{n} download left today, more in {time}": "{n} downloads left today, more in {time}",
+    "{n} file in the playlist is missing": "{n} files in the playlist are missing",
     "{n} hour": "{n} hours",
     "{n} language": "{n} languages",
     "{n} minute": "{n} minutes",
@@ -1504,6 +1507,7 @@
   "No stream to spare at {provider}": "",
   "No subtitles": "",
   "No subtitles found for \"{query}\". Try another spelling, or fewer words.": "",
+  "None of the files in this playlist are here": "",
   "Normal": "",
   "Normal speed": "",
   "North Korea": "",
@@ -2196,6 +2200,10 @@
     "other": ""
   },
   "{n} download left today, more in {time}": {
+    "one": "",
+    "other": ""
+  },
+  "{n} file in the playlist is missing": {
     "one": "",
     "other": ""
   },

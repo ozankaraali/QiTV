@@ -626,6 +626,7 @@
   "No stream to spare at {provider}": "Hakuna mtiririko wa ziada kwa {provider}",
   "No subtitles": "Hakuna manukuu",
   "No subtitles found for \"{query}\". Try another spelling, or fewer words.": "Hakuna manukuu yaliyopatikana ya “{query}”. Jaribu tahajia nyingine, au maneno machache.",
+  "None of the files in this playlist are here": "",
   "Normal": "Kawaida",
   "Normal speed": "Kasi ya kawaida",
   "North Korea": "Korea Kaskazini",
@@ -1320,6 +1321,9 @@
   "{n} download left today, more in {time}": {
     "one": "Upakuaji {n} umebaki leo, zaidi baada ya {time}",
     "other": "Upakuaji {n} umebaki leo, zaidi baada ya {time}"
+  },
+  "{n} file in the playlist is missing": {
+    "other": ""
   },
   "{n} hour": {
     "one": "saa {n}",

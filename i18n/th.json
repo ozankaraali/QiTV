@@ -620,6 +620,7 @@
   "No stream to spare at {provider}": "{provider} ไม่มีสตรีมว่าง",
   "No subtitles": "ไม่มีคำบรรยาย",
   "No subtitles found for \"{query}\". Try another spelling, or fewer words.": "ไม่พบคำบรรยายสำหรับ \"{query}\" ลองสะกดแบบอื่นหรือใช้คำน้อยลง",
+  "None of the files in this playlist are here": "",
   "Normal": "ปกติ",
   "Normal speed": "ความเร็วปกติ",
   "North Korea": "เกาหลีเหนือ",
@@ -1298,6 +1299,9 @@
   },
   "{n} download left today, more in {time}": {
     "other": "เหลือ {n} ดาวน์โหลดวันนี้ เพิ่มอีกใน {time}"
+  },
+  "{n} file in the playlist is missing": {
+    "other": ""
   },
   "{n} hour": {
     "other": "{n} ชั่วโมง"

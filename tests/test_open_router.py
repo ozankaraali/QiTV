@@ -9,6 +9,7 @@ from pathlib import Path
 import shutil
 import stat
 import tempfile
+import threading
 import unittest
 from unittest import mock
 
@@ -446,6 +447,152 @@ class OpenRouterTests(RouterCase):
         self.assertTrue(entered)
 
 
+class PlaylistRouterTests(RouterCase):
+    """A playlist opened in QiTV is read on a thread first (spec §1): links make a provider,
+    an HLS one plays as one film, and local files play as a list (the controller's play_list
+    is a fake that records it)."""
+
+    def setUp(self):
+        super().setUp()
+
+        def play_list(name, entries, sizes=()):
+            self.calls.append(("list", name, list(entries), list(sizes)))
+            first = entries[0]
+            item = {"name": os.path.basename(first), "cmd": Path(first).absolute().as_uri()}
+            self.current = Target(item, "movies", item["name"], local=True)
+
+        patch = mock.patch.object(self.window.controller, "play_list", side_effect=play_list)
+        patch.start()
+        self.addCleanup(patch.stop)
+
+    def lists(self):
+        return [call[1:] for call in self.calls if call[0] == "list"]
+
+    def provider_names(self):
+        return [p.get("name") for p in self.window.provider_manager.providers]
+
+    def write(self, name, text, encoding="utf-8"):
+        path = self.folder / name
+        path.write_bytes(text.encode(encoding))
+        return path
+
+    def slow_reads(self, gate):
+        """Each playlist is read once `gate` is set (a playlist on a slow share)."""
+        from services.local_playlist import read_playlist
+
+        def slow(path):
+            gate.wait(10)
+            return read_playlist(path)
+
+        return mock.patch("ui.tv_window.read_playlist", side_effect=slow)
+
+    def test_a_local_playlist_plays_as_a_list_and_says_what_is_missing(self):
+        second, first = self.film("Bölüm 2.mkv", b"x" * 3), self.film("Bölüm 1.mkv", b"x" * 5)
+        path = self.write("Akşam.m3u", f"#EXTM3U\nBölüm 2.mkv\nyok.mkv\n{first}\nyok.mp3\n")
+        before = self.provider_names()
+        self.window.screens.open_library("movies")
+        self.handover(path)
+        self.assertTrue(wait_until(lambda: self.lists()), self.calls)
+        self.assertEqual(self.lists(), [("Akşam", [str(second), str(first)], [3, 5])])
+        self.assertIs(self.window.pages.currentWidget(), self.window.player_page)
+        text = "2 files in the playlist are missing"
+        self.assertTrue(wait_until(lambda: (text, "info") in self.toasts), self.toasts)
+        runs: list[bool] = []
+        self.window.when_idle(lambda: runs.append(True))
+        self.assertEqual(runs, [])  # held, as a file opened in QiTV is
+        self.assertEqual(self.plays(), [])
+        self.assertEqual(self.provider_names(), before)
+        self.assertEqual(self.fronts, 1)
+        # One missing: said in the singular.
+        self.handover(self.write("Tek.m3u8", f"{second}\nyok.mkv\n"))
+        self.assertTrue(wait_until(lambda: len(self.lists()) == 2), self.calls)
+        text = "1 file in the playlist is missing"
+        self.assertTrue(wait_until(lambda: (text, "info") in self.toasts), self.toasts)
+        # None missing: nothing said. A dropped playlist is read too.
+        self.toasts.clear()
+        whole = self.write("Tam.m3u", f"{first}\n")
+        self.assertEqual(drop(self.window, paths=[whole]), (True, True))
+        self.assertTrue(wait_until(lambda: len(self.lists()) == 3), self.calls)
+        self.assertEqual(self.lists()[-1], ("Tam", [str(first)], [5]))
+        elapse(SETTLE_MS)
+        self.assertEqual(self.toasts, [])
+
+    def test_an_empty_local_playlist_says_so_and_plays_nothing(self):
+        path = self.write("Boş.m3u", "#EXTM3U\n#EXTINF:1,Yok\nyok.mkv\n")
+        before = self.provider_names()
+        self.handover(path)
+        text = "None of the files in this playlist are here"
+        self.assertTrue(wait_until(lambda: (text, "error") in self.toasts), self.toasts)
+        elapse(SETTLE_MS)
+        self.assertEqual(self.calls, [])
+        self.assertEqual(self.provider_names(), before)
+        runs: list[bool] = []
+        self.window.when_idle(lambda: runs.append(True))
+        self.assertEqual(runs, [True])  # nothing held
+
+    def test_an_hls_playlist_plays_as_one_film(self):
+        text = "#EXTM3U\n#EXT-X-VERSION:3\n#EXT-X-TARGETDURATION:6\n#EXTINF:6,\nseg1.ts\n"
+        self.film("seg1.ts")
+        path = self.write("canlı.m3u8", text)
+        before = self.provider_names()
+        self.handover(path)
+        self.wait_for_plays(1)
+        self.assertEqual(self.plays(), [(str(path), path.stat().st_size)])
+        self.assertEqual(self.lists(), [])
+        self.assertEqual(self.provider_names(), before)
+
+    def test_a_network_playlist_still_becomes_a_provider(self):
+        # Any link makes a provider, beside local files too.
+        film = self.film("film.mkv")
+        path = self.write("Karışık.m3u", f"#EXTM3U\n{film}\n#EXTINF:-1,Bir\n{PANEL}/1.ts\n")
+        self.handover(path)
+        self.assertTrue(wait_until(lambda: "Karışık" in self.provider_names()))
+        self.assertIn(("Added Karışık to your providers", "info"), self.toasts)
+        elapse(SETTLE_MS)
+        self.assertEqual(self.calls, [])
+
+    def test_a_link_playlist_leaves_a_film_being_looked_at(self):
+        film = self.film("ep.mkv")
+        playlist = self.write("Kanallar.m3u", f"#EXTM3U\n#EXTINF:-1,Bir\n{PANEL}/1.ts\n")
+        gate = threading.Event()
+
+        def slow(path):
+            gate.wait(10)
+            return 4
+
+        with mock.patch("ui.tv_window._readable_size", side_effect=slow):
+            self.handover(film)
+            self.handover(playlist)  # handed over while the film is looked at
+            self.assertTrue(wait_until(lambda: "Kanallar" in self.provider_names()))
+            gate.set()
+            self.wait_for_plays(1)
+        self.assertEqual(self.plays(), [(str(film), 4)])
+        self.assertEqual(self.lists(), [])
+
+    def test_a_film_opened_while_a_list_is_read_wins(self):
+        film = self.film("ep.mkv")
+        playlist = self.write("Liste.m3u", f"{film}\n")
+        gate = threading.Event()
+        with self.slow_reads(gate):
+            self.handover(playlist)
+            drop(self.window, paths=[film])  # chosen while the list is read
+            self.wait_for_plays(1)
+            gate.set()
+            elapse(SETTLE_MS)
+        self.assertEqual(self.lists(), [])
+        self.assertEqual(self.plays(), [(str(film), 4)])
+
+    def test_a_list_read_gives_way_to_a_channel_chosen_meanwhile(self):
+        playlist = self.write("Liste.m3u", f"{self.film('ep.mkv')}\n")
+        gate = threading.Event()
+        with self.slow_reads(gate):
+            self.handover(playlist)
+            self.window.file_gives_way()  # a channel chosen (TVController._file_gives_way)
+            gate.set()
+            elapse(SETTLE_MS)
+        self.assertEqual(self.calls, [])
+
+
 class NoProviderRouterTests(RouterCase):
     def provider_list(self):
         return []
@@ -551,6 +698,29 @@ class RealPlayerTests(base.WindowCase):
         play_file.assert_not_called()
         self.assertIs(controller.now_playing(), target)
         self.assertIs(controller.session.state(), PlaybackState.PAUSED)
+
+    def test_a_local_playlist_plays_its_entries_in_order(self):
+        # Spec §11, end to end: read on its thread, played by the real player in the list's
+        # order (not by name), the transport's Next on to the list's next entry.
+        directory = tempfile.TemporaryDirectory()
+        self.addCleanup(directory.cleanup)
+        first = Path(shutil.copyfile(SMOKE, Path(directory.name) / "İkinci.mp4"))
+        second = Path(shutil.copyfile(SMOKE, first.with_name("Birinci.mp4")))
+        playlist = first.with_name("Akşam.m3u")
+        playlist.write_text("#EXTM3U\nİkinci.mp4\nyok.mkv\nBirinci.mp4\n", encoding="utf-8")
+        window, controller = self.window, self.window.controller
+        session = controller.session
+        self.show()
+        window.open_paths([str(playlist)], source="handover")
+        self.assertTrue(wait_until(lambda: session.url == first.as_uri()))
+        missing = ("1 file in the playlist is missing", "info")
+        self.assertTrue(wait_until(lambda: missing in self.toasts), self.toasts)
+        target = controller.now_playing()
+        self.assertEqual(target.context[LOCAL_NEXT]["local_path"], str(second))
+        window.overlays.transport.nextRequested.emit()  # the transport's Next
+        self.assertTrue(wait_until(lambda: session.url == second.as_uri()))
+        self.assertNotIn(LOCAL_NEXT, controller.now_playing().context or {})  # the last one
+        controller.stop()
 
     def test_a_folder_episode_plays_on_through_the_card(self):
         # Spec §8: the folder's next episode is offered at the end and plays as a file; one gone

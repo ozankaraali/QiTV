@@ -626,6 +626,7 @@
   "No stream to spare at {provider}": "Ei vapaata striimiä: {provider}",
   "No subtitles": "Ei tekstitystä",
   "No subtitles found for \"{query}\". Try another spelling, or fewer words.": "Haulla ”{query}” ei löytynyt tekstityksiä. Kokeile toista kirjoitusasua tai vähemmän sanoja.",
+  "None of the files in this playlist are here": "",
   "Normal": "Normaali",
   "Normal speed": "Normaali nopeus",
   "North Korea": "Pohjois-Korea",
@@ -1320,6 +1321,9 @@
   "{n} download left today, more in {time}": {
     "one": "{n} lataus jäljellä tänään; lisää, kun {time} on kulunut",
     "other": "{n} latausta jäljellä tänään; lisää, kun {time} on kulunut"
+  },
+  "{n} file in the playlist is missing": {
+    "other": ""
   },
   "{n} hour": {
     "one": "{n} tunti",

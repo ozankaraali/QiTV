@@ -632,6 +632,7 @@
   "No stream to spare at {provider}": "{provider} neturi laisvo srauto",
   "No subtitles": "Subtitrų nėra",
   "No subtitles found for \"{query}\". Try another spelling, or fewer words.": "Subtitrų pagal „{query}“ nerasta. Pabandykite parašyti kitaip arba mažiau žodžių.",
+  "None of the files in this playlist are here": "",
   "Normal": "Normalus",
   "Normal speed": "Normalus greitis",
   "North Korea": "Šiaurės Korėja",
@@ -1342,6 +1343,9 @@
     "few": "Šiandien liko {n} atsisiuntimai, iki naujų: {time}",
     "one": "Šiandien liko {n} atsisiuntimas, iki naujų: {time}",
     "other": "Šiandien liko {n} atsisiuntimų, iki naujų: {time}"
+  },
+  "{n} file in the playlist is missing": {
+    "other": ""
   },
   "{n} hour": {
     "few": "{n} valandos",

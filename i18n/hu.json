@@ -626,6 +626,7 @@
   "No stream to spare at {provider}": "Nincs szabad stream itt: {provider}",
   "No subtitles": "Nincs felirat",
   "No subtitles found for \"{query}\". Try another spelling, or fewer words.": "Nincs felirat erre: „{query}”. Próbálj más írásmódot vagy kevesebb szót.",
+  "None of the files in this playlist are here": "",
   "Normal": "Normál",
   "Normal speed": "Normál sebesség",
   "North Korea": "Észak-Korea",
@@ -1320,6 +1321,9 @@
   "{n} download left today, more in {time}": {
     "one": "Ma még {n} letöltés maradt, újabbak {time} múlva",
     "other": "Ma még {n} letöltés maradt, újabbak {time} múlva"
+  },
+  "{n} file in the playlist is missing": {
+    "other": ""
   },
   "{n} hour": {
     "one": "{n} óra",

@@ -626,6 +626,7 @@
   "No stream to spare at {provider}": "{provider} provayderində boş yayım yoxdur",
   "No subtitles": "Subtitr yoxdur",
   "No subtitles found for \"{query}\". Try another spelling, or fewer words.": "“{query}” üçün subtitr tapılmadı. Başqa yazılış və ya daha az söz yoxlayın.",
+  "None of the files in this playlist are here": "",
   "Normal": "Normal",
   "Normal speed": "Normal sürət",
   "North Korea": "Şimali Koreya",
@@ -1320,6 +1321,9 @@
   "{n} download left today, more in {time}": {
     "one": "Bu gün {n} yükləmə qalıb, daha çoxu {time} sonra",
     "other": "Bu gün {n} yükləmə qalıb, daha çoxu {time} sonra"
+  },
+  "{n} file in the playlist is missing": {
+    "other": ""
   },
   "{n} hour": {
     "one": "{n} saat",

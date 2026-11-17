@@ -632,6 +632,7 @@
   "No stream to spare at {provider}": "אין זרם פנוי אצל {provider}",
   "No subtitles": "אין כתוביות",
   "No subtitles found for \"{query}\". Try another spelling, or fewer words.": "לא נמצאו כתוביות עבור \"{query}\". אפשר לנסות איות אחר, או פחות מילים.",
+  "None of the files in this playlist are here": "",
   "Normal": "רגיל",
   "Normal speed": "מהירות רגילה",
   "North Korea": "קוריאה הצפונית",
@@ -1342,6 +1343,9 @@
     "one": "נותרה הורדה אחת היום, נוספות בעוד {time}",
     "other": "נותרו {n} הורדות היום, נוספות בעוד {time}",
     "two": "נותרו שתי הורדות היום, נוספות בעוד {time}"
+  },
+  "{n} file in the playlist is missing": {
+    "other": ""
   },
   "{n} hour": {
     "one": "שעה אחת",

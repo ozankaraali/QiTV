@@ -620,6 +620,7 @@
   "No stream to spare at {provider}": "{provider} sağlayıcısında boşta yayın yok",
   "No subtitles": "Altyazı yok",
   "No subtitles found for \"{query}\". Try another spelling, or fewer words.": "\"{query}\" için altyazı bulunamadı. Başka bir yazım ya da daha az sözcük deneyin.",
+  "None of the files in this playlist are here": "Bu oynatma listesindeki dosyaların hiçbiri bulunamadı",
   "Normal": "Normal",
   "Normal speed": "Normal hız",
   "North Korea": "Kuzey Kore",
@@ -1299,6 +1300,10 @@
   },
   "{n} download left today, more in {time}": {
     "other": "Bugün {n} indirme kaldı, {time} sonra yenilenecek"
+  },
+  "{n} file in the playlist is missing": {
+    "one": "Oynatma listesindeki {n} dosya bulunamadı",
+    "other": "Oynatma listesindeki {n} dosya bulunamadı"
   },
   "{n} hour": {
     "other": "{n} saat"

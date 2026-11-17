@@ -632,6 +632,7 @@
   "No stream to spare at {provider}": "U {provider} nie je voľný stream",
   "No subtitles": "Žiadne titulky",
   "No subtitles found for \"{query}\". Try another spelling, or fewer words.": "Pre „{query}“ sa nenašli žiadne titulky. Skúste iný pravopis alebo menej slov.",
+  "None of the files in this playlist are here": "",
   "Normal": "Normálne",
   "Normal speed": "Normálna rýchlosť",
   "North Korea": "Severná Kórea",
@@ -1342,6 +1343,9 @@
     "few": "Dnes zostávajú {n} stiahnutia, ďalšie o {time}",
     "one": "Dnes zostáva {n} stiahnutie, ďalšie o {time}",
     "other": "Dnes zostáva {n} stiahnutí, ďalšie o {time}"
+  },
+  "{n} file in the playlist is missing": {
+    "other": ""
   },
   "{n} hour": {
     "few": "{n} hodiny",

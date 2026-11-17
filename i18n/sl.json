@@ -638,6 +638,7 @@
   "No stream to spare at {provider}": "Pri {provider} ni prostega pretoka",
   "No subtitles": "Ni podnapisov",
   "No subtitles found for \"{query}\". Try another spelling, or fewer words.": "Za „{query}“ ni najdenih podnapisov. Poskusite drugačen zapis ali manj besed.",
+  "None of the files in this playlist are here": "",
   "Normal": "Normalna",
   "Normal speed": "Normalna hitrost",
   "North Korea": "Severna Koreja",
@@ -1364,6 +1365,9 @@
     "one": "Danes je ostal še {n} prenos, več čez {time}",
     "other": "Danes je ostalo še {n} prenosov, več čez {time}",
     "two": "Danes sta ostala še {n} prenosa, več čez {time}"
+  },
+  "{n} file in the playlist is missing": {
+    "other": ""
   },
   "{n} hour": {
     "few": "{n} ure",

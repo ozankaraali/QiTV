@@ -219,6 +219,18 @@ class Overlays:
     captions: Any = None  # 2.9: the AI captions over the picture (a CaptionsOverlay)
 
 
+@dataclass
+class _LocalList:
+    """A playlist of local files that plays (TVController.play_list): its name, its files with
+    their sizes (None: unknown), and the entry that plays, as its index and its target."""
+
+    name: str
+    entries: tuple[str, ...]
+    sizes: tuple[Optional[int], ...]
+    index: int = 0
+    target: Optional[Target] = None
+
+
 class TVController(QObject):
     # 2.6: QiTV's question for phone `sid` (its text, the answers' words), and that it is gone.
     phoneAsked = Signal(str, str, str, str)
@@ -403,6 +415,9 @@ class TVController(QObject):
         self._listing.listed.connect(self._on_folder_listed)
         self._listing_generation = 0
         self._listing_for: Optional[tuple[Target, str]] = None  # the file listed for, its path
+        # A playlist of local files (spec §11): each entry's next is the list's, never its
+        # folder's; it is followed while one of its entries is what plays.
+        self._list: Optional[_LocalList] = None
         self._autoplay = Autoplay(
             catalog=catalog,
             config=config,
@@ -1043,17 +1058,66 @@ class TVController(QObject):
         from where it stopped (its name and size are its resume key); without one, from the
         start and no position is kept.
         """
+        target = self._open_file(path, size)
         name = Path(path).name
-        key = local_key(name, size) if size is not None else None
-        if key and is_music(path):
-            self.watch.mark_audio(key)
-        target = self._play_local(path, name, resume_key=key)
         if target is not None and target is self._current and is_video(path):
             if parse_episode(name) is not None:
                 # An episode: its folder may name the next one (_on_folder_listed).
                 self._listing_generation += 1
                 self._listing_for = (target, path)
                 self._listing.start(self._listing_generation, str(Path(path).parent))
+
+    def _open_file(
+        self, path: str, size: Optional[int], *, start_over: bool = False
+    ) -> Optional[Target]:
+        """A local file plays (play_file's, a playlist entry's): resumed by its name and `size`
+        (unless `start_over`); a song's key is marked as audio. Its new target (None while
+        QiTV closes)."""
+        name = Path(path).name
+        key = local_key(name, size) if size is not None else None
+        if key and is_music(path):
+            self.watch.mark_audio(key)
+        return self._play_local(path, name, resume_key=key, start_over=start_over)
+
+    def play_list(
+        self, name: str, entries: Sequence[str], sizes: Sequence[Optional[int]] = ()
+    ) -> None:
+        """A playlist of local files, `name`d, plays from its first entry (spec §11): each
+        entry's next is the list's next entry ("local_next" in its play context, with no season
+        or number), for the transport's Next and, with "Auto-play next episode" on, the Next
+        card; no entry's folder is listed. `sizes` (the router read them off the GUI thread)
+        give each its resume key. Songs play on the same way for now."""
+        paths = tuple(str(entry) for entry in entries)
+        if not paths:
+            return
+        known = tuple(sizes)[: len(paths)]
+        self._list = _LocalList(name, paths, known + (None,) * (len(paths) - len(known)))
+        self._play_entry(0)
+
+    def _play_entry(self, index: int, *, start_over: bool = False) -> None:
+        """The list's entry at `index` plays (from its start with `start_over`: Play again),
+        its next entry as what follows it."""
+        listed = self._list
+        if listed is None:
+            return
+        # A folder's listing still on its way (a file before the list) never reaches it.
+        self._listing_generation += 1
+        self._listing_for = None
+        path = listed.entries[index]
+        target = self._open_file(path, listed.sizes[index], start_over=start_over)
+        listed.index, listed.target = index, target
+        if target is None or target is not self._current or index + 1 >= len(listed.entries):
+            return
+        following = listed.entries[index + 1]
+        entry = {
+            "name": Path(following).stem,
+            "season": None,
+            "number": None,
+            "local_path": following,
+            "size": listed.sizes[index + 1],
+        }
+        target.context = play_context({LOCAL_NEXT: entry})
+        self.overlays.transport.set_next_available(self._autoplay.has_next(target))
 
     def play_recording(self, item: dict, start_over: bool = False) -> None:
         """A recording from the Library (2.8): its file plays as a movie from where it stopped
@@ -1129,13 +1193,20 @@ class TVController(QObject):
     def _play_following(self, item: dict, kind: str, context: dict) -> None:
         """What follows a movie or an episode (Autoplay's play): a file's next episode plays
         as a file opened in QiTV, held as Play again holds it, its play context only what its
-        own folder's listing gives it; a provider's title through play_vod."""
+        own folder's listing gives it; a playlist's next entry as the list's (_play_entry); a
+        provider's title through play_vod."""
         path = item.get("local_path")
         if not path:
             self.play_vod(item, kind, context)
             return
         size = item.get("size")
         self._flow.hold_for_file(True)  # nothing opens over it (the welcome card) until it ends
+        listed = self._list
+        if listed is not None and listed.target is not None and listed.target is self._current:
+            following = listed.index + 1
+            if following < len(listed.entries) and listed.entries[following] == path:
+                self._play_entry(following)
+                return
         self.play_file(str(path), size if isinstance(size, int) else None)
 
     def _release_file_hold(self) -> None:
@@ -1391,6 +1462,10 @@ class TVController(QObject):
             return
         if target.local:
             self._flow.hold_for_file(True)  # a film again: the welcome card goes until it ends
+            listed = self._list
+            if listed is not None and listed.target is target:
+                self._play_entry(listed.index, start_over=True)  # its list goes on after it
+                return
             self.play_file(QUrl(str(target.item.get("cmd") or "")).toLocalFile())
         elif target.live:
             key = target.group_key or ALL_GROUP_ID
