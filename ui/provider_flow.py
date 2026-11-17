@@ -241,8 +241,8 @@ class ProviderFlow(QObject):
         self._held = False
         if self._closed():
             return
-        if self._loading:
-            self.overlays.toast.set_hint(self._loading_text)  # it still loads
+        if self._loading:  # it still loads: said once what ended the hold (an error) has been
+            self.overlays.toast.set_hint(self._loading_text, cut=False)
         due, self._welcome_due = self._welcome_due, False
         if due and not self.catalog.provider_names():
             self.welcome()

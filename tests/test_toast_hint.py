@@ -73,6 +73,18 @@ class ToastHintTests(unittest.TestCase):
         pause(100)
         self.assertEqual(self.toast.text(), "Loading Backup…")
 
+    def test_a_hint_given_back_waits_for_the_message_showing(self):
+        # Not new news (a setup's hint held back during a film, the film now over): the
+        # message showing (its error) ends first, then the hint shows.
+        self.toast.show_message("Couldn't open “Film.mkv”", "error", 120)
+        self.toast.set_hint("Loading Home…", cut=False)
+        self.assertEqual(self.toast.text(), "Couldn't open “Film.mkv”")
+        self.assertTrue(wait_until(lambda: self.toast.text() == "Loading Home…"))
+        self.assertTrue(self.toast.isVisible())
+        self.toast.set_hint(None)
+        self.toast.set_hint("Loading Home…", cut=False)  # no message: at once
+        self.assertEqual(self.toast.text(), "Loading Home…")
+
     def test_a_new_hint_replaces_the_old_one(self):
         self.toast.set_hint("Loading Home…")
         self.toast.set_hint("Loading Backup…")

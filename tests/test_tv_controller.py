@@ -675,9 +675,10 @@ class FakeToast(FakeOverlay):
     def show_message(self, text, kind="info", ms=3000):
         self.record("show_message", text, kind, ms)
 
-    def set_hint(self, text):
+    def set_hint(self, text, *, cut=True):
         self.record("set_hint", text)
         self.hint = text
+        self.cuts = [*getattr(self, "cuts", []), cut]  # whether each cuts a message short
 
     def messages(self):
         return [(text, kind) for text, kind, _ms in self.named("show_message")]

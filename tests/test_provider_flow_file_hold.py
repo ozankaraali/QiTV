@@ -13,12 +13,14 @@ from unittest import mock
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
+from PySide6.QtWidgets import QWidget
 from test_tv_controller import CHANNELS, HARBOR_ONE, ControllerTestCase, FakeOwnCatalog
 from timer_fixtures import elapse, wait_until
 
 from services.open_paths import holds_the_start
 from tests import test_tv_window as base
 from ui.keymap import Action
+from ui.overlays.toast import Toast
 
 LAST = {"provider_name": "Home", "group_id": "10", "item": CHANNELS[2]}
 FILM = "/videos/Dizi Bölüm 1.mkv"
@@ -132,6 +134,22 @@ class FileHoldTests(ControllerTestCase):
         self.session.ended.emit()
         self.assertIsNone(self.toast.hint)
         self.assertNotIn(("Loading Home…",), self.toast.named("set_hint")[1:])  # never again
+
+    def test_the_hint_given_back_never_cuts_the_error_that_ended_the_film_short(self):
+        # A start whose file is gone: "Couldn't open …" is said, then the hold is let go, the
+        # provider still loading. Its hint waits for that error to end (the real toast).
+        host = QWidget()
+        host.resize(1280, 720)
+        self.addCleanup(host.deleteLater)
+        toast = Toast(host)
+        host.show()
+        self.controller._flow.overlays.toast = toast
+        self.controller.hold_for_file(True)
+        self.controller.start()
+        toast.show_message("Couldn't open “Film.mkv”", "error", 150)
+        self.controller.hold_for_file(False)
+        self.assertEqual(toast.text(), "Couldn't open “Film.mkv”")
+        self.assertTrue(wait_until(lambda: toast.text() == "Loading Home…"))
 
     def test_a_failed_setup_still_says_so_over_the_film(self):
         self.controller.hold_for_file(True)

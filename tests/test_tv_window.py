@@ -385,9 +385,9 @@ class TVWindowTests(WindowCase):
         toast, hints = self.window.overlays.toast, []
         set_hint = toast.set_hint
 
-        def spy(text):
+        def spy(text, **how):
             hints.append(text)
-            set_hint(text)
+            set_hint(text, **how)
 
         toast.set_hint = spy
         self.show()
