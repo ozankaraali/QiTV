@@ -38,6 +38,23 @@ FAILED = "The stream could not be opened"
 # From a helper's end to its "ended" in QiTV: its exit, then the watcher's join (a recorded start
 # on hel: about 0.14 s).
 REAP_S = 0.1
+# A turn of the cross-fade test's loop longer than STALL_S held every timer up (a loaded runner):
+# the fades it samples catch up over the next SETTLE_S, which are not judged.
+STALL_S = 0.05
+SETTLE_S = 0.1
+
+
+def unmarked(levels, since):
+    """When, from `since` on, neither mark showed: the samples of `levels` ((when, one mark's
+    level, the other's)) with both at 0, except those less than SETTLE_S after a stall."""
+    found, stalled = [], None
+    for index, (when, theirs, mine) in enumerate(levels):
+        if index > 0 and when - levels[index - 1][0] > STALL_S:
+            stalled = when
+        steady = stalled is None or when - stalled >= SETTLE_S
+        if when >= since and steady and max(theirs, mine) <= 0.0:
+            found.append(when)
+    return found
 
 
 class OverlayCase(RouterCase):
@@ -483,10 +500,33 @@ class SplashOpenTests(unittest.TestCase):
         seen = next(when for when, _, mine in levels if mine > 0.0)
         self.assertLess(told["opening"], seen)  # it fades in from "opening" on
         self.assertLess(seen, told["ended"])  # not only once the splash has gone
-        for when, theirs, mine in levels:
-            if when >= told["opening"]:
-                after_opening = when - told["opening"]
-                self.assertGreater(max(theirs, mine), 0.0, f"no mark +{after_opening:.3f} s")
+        # Never a moment with no mark, from "opening" on (a stalled runner's samples aside).
+        gaps = [round(when - told["opening"], 3) for when in unmarked(levels, told["opening"])]
+        self.assertEqual(gaps, [], "s after opening with no mark")
+
+    def test_the_no_mark_check_skips_a_stalled_turn_only(self):
+        # The check above, on made-up timelines sampled every 5 ms: "opening" at 0.1 s, the
+        # splash's mark out from 0.3 s, the player's in from `player_ms`.
+        def timeline(player_ms, *, held=None):
+            levels = []
+            for ms in range(0, 800, 5):
+                if held is not None and held[0] < ms < held[1]:
+                    continue  # the turn is held up: nothing sampled meanwhile
+                levels.append((ms / 1000, float(ms < 300), float(ms >= player_ms)))
+            return levels
+
+        dip = unmarked(timeline(400), 0.1)  # the player's mark only 0.1 s later
+        self.assertAlmostEqual(dip[0], 0.3)
+        self.assertAlmostEqual(dip[-1], 0.395)
+        self.assertEqual(unmarked(timeline(300), 0.1), [])  # a cross-fade
+        # A turn held from 0.25 to 0.6 s: what shows until the fades catch up is not judged,
+        # and a dip that outlasts that still is.
+        self.assertEqual(unmarked(timeline(650, held=(250, 600)), 0.1), [])
+        late = unmarked(timeline(750, held=(250, 600)), 0.1)
+        self.assertAlmostEqual(late[0], 0.6 + SETTLE_S, delta=0.006)
+        self.assertAlmostEqual(late[-1], 0.745)
+        before = [(0.0, 0.0, 0.0), *timeline(300)[1:]]  # nothing yet, before "opening"
+        self.assertEqual(unmarked(before, 0.1), [])
 
 
 class _VoutPlayer(_ShapePlayer):

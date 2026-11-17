@@ -313,6 +313,7 @@ class Splash:
         splash's opens out, or has gone: never a pop), and a later file's draws from its
         beginning, as before the splash."""
         if self._overlay is not None:
+            # Not drawing yet at "opening": a film opened in the next ~0.5 s shows its mark unfaded.
             self._overlay.hold_mark(False, fade=fade)
             self._overlay.loop_origin = lambda: None
             self._overlay.loop_held = lambda: False
