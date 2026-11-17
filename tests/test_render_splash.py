@@ -25,6 +25,7 @@ from ui.opening_mark import (
     FILL_COLOR,
     LOOP_S,
     MARK_PX,
+    REDUCED_MOTION_ENV,
     STAGE_PX,
     STILL_T,
     TILE_COLOR,
@@ -77,7 +78,8 @@ def helper_first_frame() -> QImage:
     now = 1000.0
     mark = OpeningMark(clock=lambda: now)
     mark.resize(STAGE_PX, STAGE_PX)
-    mark.start(now - STILL_T * LOOP_S, light_in_s=splash_helper.LIGHT_IN_MS / 1000)
+    with mock.patch.dict(os.environ, {REDUCED_MOTION_ENV: "0"}):
+        mark.start(now - STILL_T * LOOP_S, light_in_s=splash_helper.LIGHT_IN_MS / 1000)
     image = QImage(STAGE_PX, STAGE_PX, QImage.Format.Format_ARGB32_Premultiplied)
     image.fill(Qt.GlobalColor.transparent)
     mark.render(image, QPoint(), QRegion(), QWidget.RenderFlag.DrawChildren)

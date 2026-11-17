@@ -572,6 +572,22 @@ class ReducedMotionTests(unittest.TestCase):
     def setUp(self):
         opening_mark._forget_reduced_motion()
         self.addCleanup(opening_mark._forget_reduced_motion)
+        self.enterContext(mock.patch.dict(os.environ))
+        os.environ.pop(opening_mark.REDUCED_MOTION_ENV, None)  # the system's answer here
+
+    def test_the_environment_decides_before_the_system(self):
+        asked = mock.Mock(return_value=True)
+        with (
+            mock.patch.object(opening_mark, "_platform", return_value="darwin"),
+            mock.patch.object(opening_mark, "_macos_reduces_motion", asked),
+        ):
+            for value, reduced in (("1", True), ("0", False)):
+                with mock.patch.dict(os.environ, {opening_mark.REDUCED_MOTION_ENV: value}):
+                    self.assertIs(opening_mark._reduced_motion(), reduced, value)
+            asked.assert_not_called()
+            with mock.patch.dict(os.environ, {opening_mark.REDUCED_MOTION_ENV: "yes"}):
+                self.assertTrue(opening_mark._reduced_motion())  # not 0 or 1: the system's
+            asked.assert_called_once_with()
 
     def linux(self, run):
         patches = [

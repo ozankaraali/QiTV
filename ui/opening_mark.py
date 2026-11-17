@@ -624,6 +624,8 @@ class OpeningMark(QWidget):
 # ---- whether the system asks for less motion ------------------------------------------------
 
 GSETTINGS_ANIMATIONS = ("gsettings", "get", "org.gnome.desktop.interface", "enable-animations")
+# "1" or "0" decides instead of the system (tests: a CI runner's macOS asks for less motion).
+REDUCED_MOTION_ENV = "QITV_REDUCED_MOTION"
 GSETTINGS_TIMEOUT_S = 1.0
 SPI_GETCLIENTAREAANIMATION = 0x1042
 
@@ -648,6 +650,9 @@ def _platform() -> str:
 
 
 def _reduced_motion() -> bool:
+    forced = os.environ.get(REDUCED_MOTION_ENV)
+    if forced in ("0", "1"):
+        return forced == "1"
     state = _motion
     if state.reduced is not None:
         return state.reduced

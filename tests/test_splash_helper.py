@@ -8,6 +8,7 @@ Timings: lower bounds and order prove the behaviour; upper bounds are generous (
 are slow) or left out."""
 
 import ctypes
+import gc
 import json
 import multiprocessing
 from multiprocessing import context as mp_context
@@ -25,6 +26,7 @@ os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 from PySide6.QtCore import QRect, Qt
 from PySide6.QtGui import QGuiApplication
 from PySide6.QtWidgets import QApplication, QWidget
+from motion_fixtures import pin_motion
 
 from ui import macos_window, splash_helper
 from ui.opening_mark import CATCH_UP_MAX_S, LOOP_S, OPEN_S, STAGE_PX, STILL_T, OpeningMark
@@ -122,6 +124,10 @@ def rising(window):
     return next((when for when, level in window.opacities if level > 0.0), None)
 
 
+class Litter:
+    """A plain object, made by the thousand to take the memory a freed one leaves."""
+
+
 class PaintedMark(QWidget):
     """A mark that keeps when it painted."""
 
@@ -159,6 +165,7 @@ class HelperProcessTests(unittest.TestCase):
     """run_splash in a process of its own, as main() starts it."""
 
     def setUp(self):
+        pin_motion(self)
         self.conn, self.process = spawn()
         self.addCleanup(self.process.kill)
 
@@ -232,6 +239,9 @@ class HelperProcessTests(unittest.TestCase):
 
 class SplashTests(unittest.TestCase):
     """The parent's side: Splash's start, its watcher thread, the window's opening."""
+
+    def setUp(self):
+        pin_motion(self)
 
     def window(self, layer=False):
         """A window (and, `layer`, a Tool window of its own that shows with it, as the player
@@ -456,6 +466,36 @@ class SplashTests(unittest.TestCase):
                 self.assertTrue(pump_until(lambda: len(overlay.holds) == 2))
                 self.assertFalse(overlay.holds[1][0])
                 self.assertIsNone(overlay.loop_origin())  # a later file's from its start
+
+    def test_under_reduced_motion_it_opens_and_never_glides(self):
+        # As the system asks (no mock): the mark stays where it is, and its open is plain.
+        pin_motion(self, reduced=True)
+        window = self.window()
+        splash, sent = unwatched(window)
+        splash._origin = ORIGIN
+        overlay = FakeOverlay(window)
+        window.show()
+        splash.open_into(window, overlay)
+        self.assertTrue(pump_until(lambda: sent))
+        self.assertEqual(names(sent), ["open"])
+
+    def test_a_splash_dropped_with_its_fallback_due_still_fades_the_window(self):
+        # PySide 6.11's singleShot keeps no reference to a bound method's object: once the
+        # Splash went, its fallback ran on whatever took its memory (CI: "'_SubTest' object
+        # has no attribute '_fade_step'"), and the window never faded in.
+        window = self.window()
+        splash, sent = unwatched(window)
+        with mock.patch.object(splash_helper, "_fades_windows", return_value=True):
+            splash.before_show(window)
+        window.show()
+        splash.open_into(window)
+        self.assertTrue(pump_until(lambda: sent))
+        self.assertEqual(names(sent), ["open"])
+        del splash
+        gc.collect()
+        litter = [Litter() for _ in range(5000)]  # the memory taken again
+        self.assertTrue(pump_until(lambda: opacity(window) == 1.0))
+        self.assertTrue(litter)
 
     def test_the_player_mark_shows_only_after_the_fade(self):
         window = self.window()
@@ -692,6 +732,7 @@ class HelperWindowTests(unittest.TestCase):
     the order of its first steps."""
 
     def setUp(self):
+        pin_motion(self)
         self.conn, child = multiprocessing.Pipe(duplex=True)
         self.addCleanup(self.conn.close)
         self.ended = []
@@ -819,6 +860,26 @@ class HelperWindowTests(unittest.TestCase):
         self.assertEqual(conn.recv(), ("shown", window.origin))
         light_in = splash_helper.LIGHT_IN_MS / 1000
         self.assertTrue(pump_until(lambda: window.frame().light == 1.0, timeout=10 * light_in))
+
+    def test_under_reduced_motion_it_holds_the_lit_frame_and_fades_plainly(self):
+        pin_motion(self, reduced=True)
+        conn, child = multiprocessing.Pipe(duplex=True)
+        self.addCleanup(conn.close)
+        self.addCleanup(child.close)
+        ended = []
+        window = splash_helper._SplashWindow(child, GEOMETRY, lambda: ended.append(1))
+        self.addCleanup(window.deleteLater)
+        self.assertTrue(window.begin())
+        frame = window.frame()
+        self.assertTrue(frame.still)
+        self.assertEqual(frame.t, STILL_T)
+        conn.send(("open", (0, 0, 800, 600)))
+        self.assertTrue(pump_until(lambda: window._finish is not None))
+        pump(OPEN_S / 2)
+        frame = window.frame()
+        self.assertEqual((frame.still, frame.opening), (True, 0.0))  # nothing grows
+        self.assertLess(frame.fade, 1.0)
+        self.assertTrue(pump_until(lambda: ended))
 
     def test_a_closed_pipe_ends_it(self):
         self.assertTrue(self.window.begin())

@@ -17,6 +17,7 @@ os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 from PySide6.QtCore import QObject, QRectF, QSize, Qt, Signal
 from PySide6.QtTest import QTest
 from PySide6.QtWidgets import QApplication, QWidget
+from motion_fixtures import pin_motion
 from timer_fixtures import elapse, wait_until
 
 from services.playback import NullSession, PlaybackSession, PlaybackState
@@ -25,7 +26,7 @@ from tests import test_tv_window as base
 from tests.test_open_router import FILM, SETTLE_MS, RouterCase
 from tests.test_playback_session import _FakeInstance, _HeldRunner, _ShapePlayer, vlc
 from ui.link_lanes import Target
-from ui.opening_mark import MARK_PX, STAGE_PX, OpeningMark
+from ui.opening_mark import MARK_PX, STAGE_PX, STILL_T, OpeningMark
 from ui.overlays.opening import OPENING_TIMEOUT_MS, OpeningOverlay
 
 FILM_URL = "http://provider.test/film.mp4"
@@ -38,6 +39,7 @@ class OverlayCase(RouterCase):
     test sets (`address`)."""
 
     def setUp(self):
+        pin_motion(self)  # as the system asks would differ by runner (a CI Mac asks for less)
         super().setUp()
         self.picture = False
         self.address = None
@@ -191,6 +193,16 @@ class OpeningOverlayTests(OverlayCase):
         self.session.pictureShown.emit()
         self.assertTrue(self.gone())
 
+    def test_under_reduced_motion_the_mark_holds_its_lit_frame(self):
+        pin_motion(self, reduced=True)
+        self.open_file("Film.mkv")
+        self.assertTrue(self.shown())
+        elapse(400)
+        frame = self.overlay.mark.frame()
+        self.assertEqual((frame.t, frame.still), (STILL_T, True))
+        self.session.pictureShown.emit()
+        self.assertTrue(self.gone())
+
     def test_a_file_that_cannot_be_opened_hides_it(self):
         self.open_file("Film.mkv")
         controller = self.window.controller
@@ -256,6 +268,10 @@ class RealPlayerOpeningTests(base.WindowCase):
     shows; a file opened over that picture opens with none."""
 
     vlc_instance = base.INSTANCE
+
+    def setUp(self):
+        pin_motion(self)
+        super().setUp()
 
     def test_the_mark_draws_until_the_real_players_picture(self):
         directory = tempfile.TemporaryDirectory()

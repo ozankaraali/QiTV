@@ -218,8 +218,10 @@ class Splash:
             # watcher's "ended"): one mark at a time.
             self._send_open()
             # The window fades as the mark opens out ("opening", after its draw completes),
-            # never later than this.
-            QTimer.singleShot(OPENING_WAIT_MS, window, self._fade)
+            # never later than this. (Lambdas, here and below: PySide 6.11's singleShot with a
+            # context keeps no reference to a bound method's object, and calls the method on
+            # whatever took its memory once that object has gone.)
+            QTimer.singleShot(OPENING_WAIT_MS, window, lambda: self._fade())
 
     def _hand_over_to(self) -> Optional[QRect]:
         """Where the splash's mark glides to, the player's on screen; None to open out: the
@@ -290,7 +292,7 @@ class Splash:
             self._transparent = None
             fade_in(self._layers, step=lambda _level: self._fade_step(), done=self._faded)
         else:
-            QTimer.singleShot(FADE_IN_MS, window, self._faded)
+            QTimer.singleShot(FADE_IN_MS, window, lambda: self._faded())
 
     def _fade_step(self) -> None:
         """Through the hand-over: the player's mark still draws (or the splash opens out),
@@ -329,7 +331,7 @@ class Splash:
         if self._handing:
             self._handing = False
             self._commands.put(("bare",))
-            QTimer.singleShot(HANDOVER_OVERLAP_MS, self._relay, self.close)
+            QTimer.singleShot(HANDOVER_OVERLAP_MS, self._relay, lambda: self.close())
 
     def _heard(self, message: tuple[Any, ...]) -> None:
         """What the watcher heard, on the GUI thread."""

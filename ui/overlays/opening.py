@@ -26,6 +26,7 @@ from PySide6.QtCore import QEvent, QObject, Qt, QTimer
 from PySide6.QtWidgets import QWidget
 from shiboken6 import isValid
 
+from services.i18n import N_
 from services.playback import PlaybackState
 from ui.opening_mark import STAGE_PX, OpeningMark
 from ui.overlays.base import Overlay
@@ -43,6 +44,8 @@ def _passive(widget: QWidget) -> None:
 class OpeningOverlay(Overlay):
     """The mark over the player page while a file opens (module docstring): open_for() shows
     it for a session's file, close_opening() opens it out of the page."""
+
+    accessible_name = N_("Loading…")
 
     def __init__(
         self, parent: Optional[QWidget] = None, *, clock: Callable[[], float] = time.monotonic
