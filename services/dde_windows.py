@@ -166,14 +166,19 @@ class DdeServer(QObject):
         self._pending: list[str] = []  # commands copied in the callback, for the event loop
 
     def start(self) -> bool:
-        """Serve; False (logged) when DDEML refused any step, and QiTV works as without."""
+        """Serve; False (logged) when DDEML refused or failed any step, and QiTV works as
+        without (it never raises: QiTV's start goes on)."""
         if self._inst:
             return True
         try:
-            lib = _user32()
-        except (AttributeError, OSError) as e:
-            logger.warning("No DDE (%s): a double-click starts QiTV again", type(e).__name__)
+            return self._start()
+        except Exception:
+            logger.warning("No DDE: a double-click starts QiTV again", exc_info=True)
+            self.stop()
             return False
+
+    def _start(self) -> bool:
+        lib = _user32()
         callback = CALLBACK(self._on_transaction)
         inst = DWORD(0)
         error = lib.DdeInitializeW(ctypes.pointer(inst), callback, SERVER_FLAGS, 0)

@@ -342,6 +342,23 @@ class DdeServerTests(unittest.TestCase):
             with self.assertLogs("services.dde_windows", "WARNING"):
                 self.assertFalse(DdeServer().start())
 
+    def test_a_call_that_raises_returns_false_and_leaves_nothing(self):
+        # QiTV's start goes on whatever DDEML does (a ctypes ArgumentError, say)
+        def raises(*args):
+            raise ctypes.ArgumentError("argument 2: wrong type")
+
+        for failing in ("DdeInitializeW", "DdeCreateStringHandleW", "DdeNameService"):
+            with self.subTest(failing=failing):
+                self.ddeml = FakeDdeml()
+                setattr(self.ddeml, failing, raises)
+                server = DdeServer()
+                with self.assertLogs("services.dde_windows", "WARNING"):
+                    self.assertFalse(server.start())
+                initialized = failing != "DdeInitializeW"
+                self.assertEqual(self.ddeml.calls.count("DdeUninitialize"), int(initialized))
+                server.stop()
+                self.assertEqual(self.ddeml.calls.count("DdeUninitialize"), int(initialized))
+
     def test_stop_unregisters_frees_and_uninitializes_once(self):
         self.server.stop()  # never started: nothing
         self.assertEqual(self.ddeml.calls, [])
