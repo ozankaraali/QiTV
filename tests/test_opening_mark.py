@@ -19,7 +19,14 @@ from PySide6.QtGui import QColor, QImage, QPainter, QPainterPath, QRegion, QTran
 from PySide6.QtWidgets import QApplication, QWidget
 
 from ui import opening_mark
-from ui.opening_mark import LOOP_MS, MARK_PATH, OpeningMark, paint_mark, parse_path
+from ui.opening_mark import (
+    LOOP_MS,
+    MARK_PATH,
+    OpeningMark,
+    mark_rect,
+    paint_mark,
+    parse_path,
+)
 
 app = QApplication.instance() or QApplication([])
 
@@ -386,6 +393,48 @@ class WidgetTests(unittest.TestCase):
         # the 104 px mark centred: the base's inside maps to 68 + 150/4, 68 + 290/4
         self.assertTrue(near(image.pixelColor(68 + 37, 68 + 72), FILL))
         self.assertEqual(image.pixelColor(0, 0).alpha(), 0)
+
+    def test_an_opening_mark_inside_a_window_lands_on_the_devices_pixels(self):
+        # the open's layer through a child widget's offset, at a fractional pixel ratio
+        parent = QWidget()
+        self.addCleanup(parent.deleteLater)
+        parent.resize(260, 260)
+        mark = OpeningMark(parent, clock=self.clock)
+        mark.move(7, 9)
+        mark.resize(240, 240)
+        mark.start()
+        self.clock.now += 0.7 * LOOP_S
+        mark.finish(self.then)
+        self.assertTrue(mark._timer.isActive())  # never shown: the finish still runs to `then`
+        self.clock.now += 0.1
+        frame = mark.frame()
+        self.assertTrue(0.0 < frame.opening < 1.0)
+
+        def image():
+            picture = QImage(390, 390, QImage.Format.Format_ARGB32_Premultiplied)
+            picture.setDevicePixelRatio(1.5)
+            picture.fill(Qt.GlobalColor.transparent)
+            return picture
+
+        through_window, direct = image(), image()
+        parent.render(through_window, QPoint(), QRegion(), QWidget.RenderFlag.DrawChildren)
+        painter = QPainter(direct)
+        rect = mark_rect(QRectF(7, 9, 240, 240))
+        paint_mark(painter, rect, frame.t, opening=frame.opening)
+        painter.end()
+        self.assertGreater(at(direct, rect.center(), 1.5).alpha(), 0)
+        worst = max(
+            max(
+                abs(a.red() - b.red()),
+                abs(a.green() - b.green()),
+                abs(a.blue() - b.blue()),
+                abs(a.alpha() - b.alpha()),
+            )
+            for y in range(0, 390, 3)
+            for x in range(0, 390, 3)
+            for a, b in [(through_window.pixelColor(x, y), direct.pixelColor(x, y))]
+        )
+        self.assertLessEqual(worst, 2)
 
 
 class ReducedMotionTests(unittest.TestCase):
