@@ -91,7 +91,8 @@ print(json.dumps({"shown": shown.decode(), "answer": answer.decode(errors="repla
 # reads the shared moment (wall-clock seconds) from its stdin, and at that instant claims the
 # settings folder (argv[1]) with its file (argv[2]). One that listens serves until argv[3] files
 # were handed to it (RACE_BOUND_S at most), as a starting QiTV's event loop would. Then one JSON
-# line: whether it handed over, whether it listened, and the files handed to it.
+# line: whether it handed over (and how long its claim took), whether it listened, and the
+# files handed to it.
 RACE = r"""
 import json, sys, time
 from PySide6.QtCore import QCoreApplication, QTimer
@@ -103,9 +104,11 @@ moment = float(sys.stdin.readline())
 time.sleep(max(0.0, moment - time.time() - 0.02))
 while time.time() < moment:
     pass  # the last few milliseconds spun: every start claims at the same instant
+began = time.monotonic()
 server = claim(folder, paths=[path])
+claim_s = time.monotonic() - began
 if server is None:
-    print(json.dumps({"handed_over": True}), flush=True)
+    print(json.dumps({"handed_over": True, "claim_s": claim_s}), flush=True)
     sys.exit(0)
 opened = []
 def on_opened(paths):
@@ -119,19 +122,22 @@ app.exec()
 server.close()
 print(json.dumps({"handed_over": False, "listening": listening, "opened": opened}), flush=True)
 """
+LATE_S = 22.0  # the late holder answers this long after the starts claimed (> START_WAIT_MS)
 RACE_STARTS = 6
 RACE_BOUND_S = 60.0  # a listening start ends sooner once every other start's file came
 
 # A QiTV of this version holding the settings folder's lock (argv[1]): it listens (but in
 # "unlistened") and says "ready", then stays without an event loop for argv[3] seconds, a cold
-# start under load, or until its stdin ends. "slow" then serves, printing `opened <path as
-# JSON>` for each file handed to it, until its stdin ends (8 s at most). Each quits as QiTV
-# does, letting go of its lock itself ("quits" and "unlistened" without ever answering):
-# Windows lets go of a killed process's lock only when it gets round to it, so the tests end a
-# holder through its stdin, never by a kill. "closes" closes its server first and lives on
-# 3 s; "crashes" ends without letting go (os._exit: the system lets go).
+# start under load, or until its stdin ends. "slow" waits instead until its stdin says "serve",
+# then serves, printing `opened <path as JSON>` for each file handed to it, until its stdin
+# ends (8 s at most). Each quits as QiTV does, letting go of its lock itself ("quits" and
+# "unlistened" without ever answering): Windows lets go of a killed process's lock only when
+# it gets round to it, so the tests end a holder through its stdin, never by a kill.
+# "closes" closes its server (a start connected to it is hung up on), holds the lock 2 s more,
+# prints `released <wall-clock time>` as it lets go, and lives on 3 s; "crashes" ends without
+# letting go (os._exit: the system lets go).
 HOLDER = r"""
-import json, os, sys, threading
+import json, os, sys, threading, time
 from PySide6.QtCore import QCoreApplication, QTimer
 from services.single_instance import InstanceServer, _InstanceLock, _Lock, server_name
 app = QCoreApplication([])
@@ -142,13 +148,27 @@ server = InstanceServer(server_name(folder), lock=lock)
 if mode != "unlistened":
     assert server.listen()
 done = threading.Event()  # the test is done with it: its stdin ended
-threading.Thread(target=lambda: (sys.stdin.read(), done.set()), daemon=True).start()
+serve = threading.Event()
+def read():
+    for line in sys.stdin:
+        if line.strip() == "serve":
+            serve.set()
+    done.set()
+    serve.set()
+threading.Thread(target=read, daemon=True).start()
 print("ready", flush=True)
-done.wait(delay)
+if mode == "slow":
+    serve.wait(delay)
+else:
+    done.wait(delay)
 if mode == "crashes":
     os._exit(0)
 if mode == "closes":
-    server.close()
+    server._server.close()  # the server only: the lock stays held
+    done.wait(2)
+    released_at = time.time()  # taken before it lets go: no start can listen sooner
+    lock.release()
+    print("released " + repr(released_at), flush=True)
     done.wait(3)
 if mode == "slow" and not done.is_set():
     def on_opened(paths):
@@ -196,12 +216,24 @@ class NameTests(unittest.TestCase):
                 self.assertEqual(main.settings_dir(), folder)
             self.assertFalse(os.path.exists(folder))
 
+    def test_an_updates_copy_waits_on_the_old_qitv_only_while_it_runs(self):
+        # Ruling 32 for an update: once its old file was replaced, the old QiTV has quit, and
+        # the copy claims as any start does (it hands over to a start that took the lock in
+        # the meantime); only when the old one never let go of its file does it wait on it.
+        import main
+
+        replaced, not_replaced = None, ("C:\\QiTV\\qitv.exe", "C:\\Downloads\\qitv.exe")
+        update = ["qitv.exe", "--replace", "C:\\QiTV\\qitv.exe"]
+        self.assertFalse(main.old_qitv_still_runs(update, replaced))
+        self.assertTrue(main.old_qitv_still_runs(update, not_replaced))
+        self.assertFalse(main.old_qitv_still_runs(["qitv.exe", "film.mkv"], None))
+
     def test_main_claims_only_in_main(self):
         source = (REPO / "main.py").read_text(encoding="utf-8")
         claim_at = source.index("instance = claim(")
         self.assertGreater(claim_at, source.index("def main()"))
         self.assertLess(claim_at, source.index("ConfigManager()"))  # before any config write
-        self.assertIn('replacing="--replace" in sys.argv', source)
+        self.assertIn("replacing=old_qitv_still_runs(sys.argv, not_replaced)", source)
         # The smoke test and the helper processes branch off before main().
         self.assertLess(source.index("smoke_main(smoke)"), source.rindex("sys.exit(main())"))
 
@@ -295,9 +327,10 @@ class ClaimTests(unittest.TestCase):
         self.listening(claim(self.folder))
         self.assertLess(time.monotonic() - started, 1.5)  # not reached: not waited for
 
-    def race(self, files, expect):
+    def race(self, files, expect, meanwhile=None):
         """One start per file, released at one instant once every one has said it is ready
-        (however long a loaded machine takes to import Qt); what each said."""
+        (however long a loaded machine takes to import Qt); `meanwhile(moment)` runs while they
+        claim; what each said."""
         env = dict(os.environ, PYTHONPATH=str(REPO), QT_QPA_PLATFORM="offscreen")
         starts = [
             subprocess.Popen(
@@ -319,6 +352,8 @@ class ClaimTests(unittest.TestCase):
         for start in starts:
             start.stdin.write(f"{moment}\n")
             start.stdin.flush()
+        if meanwhile is not None:
+            meanwhile(moment)
         said = []
         for start in starts:
             out, _ = start.communicate(timeout=RACE_BOUND_S + 30)
@@ -437,12 +472,21 @@ class ClaimTests(unittest.TestCase):
         lock.release()
 
     def test_a_late_lock_holder_gets_every_start(self):
-        # Ruling 32: a holder whose event loop runs only after 25 s (past START_WAIT_MS; CI's
-        # Macs took 38 s with 8 starts at once) gets every start's file; none takes over.
-        holder = self.holder("slow", 25)
+        # Ruling 32: a holder whose event loop runs only LATE_S after the starts claimed (past
+        # START_WAIT_MS; CI's Macs took 38 s with 8 starts at once) gets every start's file;
+        # none takes over.
+        holder = self.holder("slow", 60)
+
+        def serve_late(moment):
+            time.sleep(max(0.0, moment + LATE_S - time.time()))
+            holder.stdin.write("serve\n")
+            holder.stdin.flush()
+
         files = [os.path.join(self.folder, f"Geç {i}.mkv") for i in range(3)]
-        said = self.race(files, expect=0)  # one that listened would end at once, and show
-        self.assertEqual(said, [{"handed_over": True}] * 3)
+        said = self.race(files, expect=0, meanwhile=serve_late)  # one that listened would show
+        self.assertEqual([s["handed_over"] for s in said], [True] * 3, said)
+        for s in said:  # each waited past START_WAIT_MS: before Ruling 32 it took over then
+            self.assertGreater(s["claim_s"], single_instance.START_WAIT_MS / 1000, said)
         got = sorted(json.loads(holder.stdout.readline().split(" ", 1)[1]) for _ in files)
         self.assertEqual(got, sorted(files))
         self.stop_holder(holder)
@@ -473,13 +517,47 @@ class ClaimTests(unittest.TestCase):
                 self.assertLess(waited, 5)
                 ends = "holds them but doesn't answer; this start ends"
                 self.assertTrue([line for line in logs.output if ends in line], logs.output)
-                self.assertFalse(hand_over(self.name, 300))  # nobody new listens
                 if held is not None:
                     held.release()
                 if process is not None:
                     self.stop_holder(process)
                     self.assertEqual(process.returncode, 0)
                 self.assertLockFree()
+
+    def test_only_the_lock_ends_the_wait(self):
+        # A lock that reads HELD, then UNAVAILABLE (no descriptor left, a lock call failing a
+        # moment) is no sign its holder went: the start waits on, and ends without listening.
+        states = iter([single_instance._Lock.HELD])
+        with (
+            mock.patch.object(
+                single_instance._InstanceLock,
+                "acquire",
+                autospec=True,
+                side_effect=lambda lock: next(states, single_instance._Lock.UNAVAILABLE),
+            ),
+            mock.patch.object(single_instance, "HELD_WAIT_MS", 800),
+            self.assertLogs("services.single_instance", "WARNING") as logs,
+        ):
+            started = time.monotonic()
+            self.assertIsNone(claim(self.folder, paths=[self.turkish_path()]))
+        self.assertGreaterEqual(time.monotonic() - started, 0.75)  # the whole wait
+        ends = "holds them but doesn't answer; this start ends"
+        self.assertTrue([line for line in logs.output if ends in line], logs.output)
+        self.assertFalse(hand_over(self.name, 300))  # nobody listens: it never did
+
+    def test_an_updates_copy_hands_over_to_a_start_that_took_the_lock(self):
+        # A double-click during an update may take the lock between the old QiTV letting go
+        # and the update's copy (its old file replaced: it claims as any start does). The copy
+        # hands over to it and ends: never a second QiTV beside it.
+        holder = self.holder("slow", 0)  # serves at once
+        started = time.monotonic()
+        with self.assertLogs("services.single_instance", "INFO") as logs:
+            self.assertIsNone(claim(self.folder, replacing=False))
+        self.assertLess(time.monotonic() - started, 5)
+        self.assertTrue([line for line in logs.output if "brought to the front" in line])
+        self.stop_holder(holder)
+        self.assertEqual(holder.returncode, 0)
+        self.assertLockFree()
 
     def test_a_lock_holder_that_ends_mid_wait_passes_the_lock_on(self):
         # Its holder quits or crashes while a start waits: the start takes the lock and runs.
@@ -495,10 +573,17 @@ class ClaimTests(unittest.TestCase):
                 holder = self.holder(mode, 2)
                 started = time.monotonic()
                 server = claim(self.folder)
+                listened_at = time.time()
                 self.assertGreaterEqual(time.monotonic() - started, 1.5)  # it waited for it
                 self.listening(server)
                 if mode == "closes":
-                    self.assertIsNone(holder.poll())  # it took over from a live process
+                    # Hung up on 2 s before the lock went: it waited on, and listened only once
+                    # the lock was let go, the holder still alive.
+                    self.assertIsNone(holder.poll())
+                    released = holder.stdout.readline().split()
+                    self.assertEqual(released[0], "released")
+                    self.assertGreaterEqual(listened_at, float(released[1]))
+                    self.assertGreaterEqual(time.monotonic() - started, 3.5)
                 self.assertEqual(holder.wait(10), 0)
                 other = single_instance._InstanceLock(self.folder)
                 self.assertIs(other.acquire(), single_instance._Lock.HELD)  # the start's now

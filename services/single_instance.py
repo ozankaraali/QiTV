@@ -374,9 +374,10 @@ class InstanceServer(QObject):
         return self._server.listen(self.name)
 
     def listen_later(self) -> None:
-        """A Windows update's new copy: listen once the old QiTV let go of the settings' lock
-        (it quits), from the event loop every RETRY_MS, RETRIES times at most, then all the
-        same. (A listen is no sign the old one is gone: Qt lets two listen on one pipe.)"""
+        """A Windows update's new copy whose old QiTV still runs: listen once the old one let go
+        of the settings' lock (it quits), from the event loop every RETRY_MS, RETRIES times at
+        most, then all the same (an old version that hangs). A listen is no sign the old one is
+        gone: Qt lets two listen on one pipe."""
         if self._closed:
             return
         lock = self._lock
@@ -508,8 +509,13 @@ def claim(
     """This QiTV's claim on its settings folder. None: quit now. Another QiTV of that folder
     answered and came to the front, and was handed `paths`; or one holds the folder's lock but
     didn't answer within HELD_WAIT_MS (its files are lost: better than a second QiTV). Else
-    the listening server, kept while QiTV runs. `replacing` (a Windows update's new copy)
-    never hands over: it listens once the old QiTV is gone."""
+    the listening server, kept while QiTV runs.
+
+    `replacing`: a Windows update's new copy whose old QiTV still runs (its file couldn't be
+    replaced: main.old_qitv_still_runs). It never hands over (the old one is quitting, or
+    hangs), and listens once the old one lets go of its lock, about 30 s at most. Once the old
+    file was replaced the old QiTV has quit, and the copy claims as any start does: a start
+    that took the lock meanwhile (a double-click) gets the copy's files, and the copy ends."""
     name = server_name(config_dir)
     lock = _InstanceLock(config_dir)
     if replacing:
@@ -523,7 +529,7 @@ def claim(
         if asked is _Asked.ANSWERED:
             logger.info("Another QiTV runs with these settings: it was brought to the front.")
             return None
-        if state is _Lock.HELD:
+        if state is not _Lock.OURS:
             logger.warning(
                 "Another QiTV with these settings holds them but doesn't answer; this start ends."
             )
@@ -546,17 +552,17 @@ def _wait_for_holder(name: str, paths: Sequence[str], lock: _InstanceLock) -> tu
     """While a live process holds the lock: ask it, HELD_WAIT_MS at most, every CLAIM_RETRY_S
     while it doesn't listen yet; one reached is waited for until it answers, hangs up or the
     time runs out (one connection: no `show` piles up for it). ANSWERED once it came, with the
-    lock still HELD; the lock's new state once it came free (its holder quit or crashed); and
-    HELD when the time ran out."""
+    lock still HELD; OURS once this start got the lock (its holder quit or crashed); HELD when
+    the time ran out."""
     deadline = time.monotonic() + HELD_WAIT_MS / 1000
     asked = _Asked.UNREACHABLE
     while (left := _left_ms(deadline)) > 0:
         asked = _ask(name, min(ANSWER_MS, left), paths, answer_ms=left)
         if asked is _Asked.ANSWERED:
             return asked, _Lock.HELD
-        state = lock.acquire()
-        if state is not _Lock.HELD:
-            return asked, state
+        # Only the lock itself ends the wait: one that reads UNAVAILABLE now (no descriptor
+        # left, a lock call failing for a moment) is no sign its holder went.
+        if lock.acquire() is _Lock.OURS:
+            return asked, _Lock.OURS
         time.sleep(CLAIM_RETRY_S)
     return asked, _Lock.HELD
-    return _Asked.UNREACHABLE

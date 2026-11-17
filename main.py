@@ -115,6 +115,13 @@ def handle_replace_flag(
     return old_exe_path, current_exe
 
 
+def old_qitv_still_runs(argv: Sequence[str], not_replaced: Optional[tuple[str, str]]) -> bool:
+    """Whether this is a Windows update's copy whose old QiTV still runs: its file couldn't be
+    replaced (`handle_replace_flag` waited REPLACE_WAIT_S for it to quit). Once it was, the old
+    QiTV has quit, and this start claims its settings as any start does."""
+    return "--replace" in argv and not_replaced is not None
+
+
 def written_dirs(config_dir: str) -> list[str]:
     """Where QiTV writes files through services.atomic_write: the config (and the channel
     stores beside it), the cache (TMDB's, 2.8), the guide cache and the provider cache."""
@@ -188,7 +195,9 @@ def main() -> int:
     try:
         # The open events kept so far go too; they stay kept for the window if this is first.
         instance = claim(
-            settings_dir(), replacing="--replace" in sys.argv, paths=paths + app.kept_opened()
+            settings_dir(),
+            replacing=old_qitv_still_runs(sys.argv, not_replaced),
+            paths=paths + app.kept_opened(),
         )
         handed_over = instance is None
     except Exception as error:  # the check is never a reason for QiTV not to start
