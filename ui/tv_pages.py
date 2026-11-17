@@ -721,7 +721,8 @@ class TVPages(QObject):
             self.recordings.delete(str(item.get("path") or ""))
 
     def open_file(self) -> None:
-        """File → Open File…: a local media file plays as a movie."""
+        """File → Open File…: a local media file plays as a movie, once it is found there
+        (TVWindow.open_paths looks off the GUI thread)."""
         window = self._window
         if window.closing():
             return
@@ -729,9 +730,17 @@ class TVPages(QObject):
         path, _filter = QFileDialog.getOpenFileName(window, title, "", media_filter())
         if not path or window.closing():
             return
+        window.open_paths([path], source="dialog")
+
+    def play_path(self, path: str, size: Optional[int]) -> None:
+        """A local file plays as a movie on the player page (Open File…, a drop, a file opened
+        from the file manager); with its `size`, from where it stopped."""
+        window = self._window
+        if window.closing():
+            return
         self._show_page(window.player_page)
         self._set_return_to_library(False)
-        window.controller.play_file(path)
+        window.controller.play_file(path, size)
 
     def export(self, kind: ExportKind) -> None:
         window = self._window

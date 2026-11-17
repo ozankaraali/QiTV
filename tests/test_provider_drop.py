@@ -169,7 +169,8 @@ class WindowDropTests(base.WindowCase):
     def test_other_text_and_files_are_refused(self):
         before = self.names()
         self.assertEqual(drop(self.window, text="http://example.test/page.html"), (False, False))
-        self.assertEqual(drop(self.window, paths=[self.folder / "clip.mkv"]), (False, False))
+        # A media file plays (tests/test_open_router.py); other files are refused.
+        self.assertEqual(drop(self.window, paths=[self.folder / "notes.txt"]), (False, False))
         self.assertEqual(self.names(), before)
 
 

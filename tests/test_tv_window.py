@@ -1706,7 +1706,7 @@ class VlcWindowTests(WindowCase):
         srt = subtitle_file(self)
         self.open_first_channel()
         self.assertTrue(wait_until(self.session_on(channel_urls()[0], (PlaybackState.PLAYING,))))
-        self.assertEqual(drag_and_drop(window, [srt.with_suffix(".mkv")]), (False, False))
+        self.assertEqual(drag_and_drop(window, [srt.with_suffix(".txt")]), (False, False))
         self.assertEqual(drag_and_drop(window.host, [srt]), (True, True))  # over the overlays
         session = window.session
 
@@ -2463,8 +2463,14 @@ class LibraryReturnTests(WindowCase):
         self.window.overlays.transport.libraryRequested.emit()
         self.assertFalse(self.window.screens.library_shown())
         path = Path(self.config_dir) / "home video.mp4"
+        path.write_bytes(b"film")
         with mock.patch("ui.tv_pages.QFileDialog.getOpenFileName", return_value=(str(path), "")):
-            self.window.screens.open_file()  # a local file
+            self.window.screens.open_file()  # a local file, once found there (off this thread)
+
+        def opened():
+            return getattr(self.window.controller.now_playing(), "local", False)
+
+        self.assertTrue(wait_until(opened))
         self.assertTrue(self.window.controller.vod_current())
         self.assertIsNone(library_button(self.window))
 

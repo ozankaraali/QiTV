@@ -28,7 +28,9 @@ import logging
 import multiprocessing
 import os
 import platform
+import stat
 import sys
+import threading
 import time
 from typing import Any, Callable, Optional, Sequence
 
@@ -41,6 +43,8 @@ from PySide6.QtCore import (
     QRect,
     Qt,
     QTimer,
+    QUrl,
+    Signal,
 )
 from PySide6.QtGui import (
     QCloseEvent,
@@ -83,6 +87,7 @@ from services.live.tuning import FILE_NAME as TUNING_FILE, LiveTuning
 from services.media_keys import MediaKeys
 from services.media_reporter import MediaReporter
 from services.navigation import NavModel
+from services.open_paths import Sorted, natural_key, sort_paths
 from services.parental import Parental, install as install_parental
 from services.picture import FILE_NAME as PICTURE_FILE, ChannelPictures
 from services.playback import (
@@ -123,6 +128,7 @@ from ui.free_channels_menu import show_menu as show_free_channels_menu
 from ui.grid_frame import GridFrame
 from ui.keymap import Action, as_int, resolve
 from ui.library.library_screen import LibraryScreen
+from ui.link_lanes import Target
 from ui.live_tuner import LiveTuner, one_disk_ring, wait_for_each_other
 from ui.logos import LogoCache, PosterCache
 from ui.macos_window import reclaim_first_responder
@@ -191,6 +197,16 @@ SAVE_FAILED_TEXT = N_("Couldn't save the settings; changes will be lost when QiT
 # cancelled ({titles}: their programmes, comma-separated)
 DROPPED_RECORDINGS_TEXT = N_("Recordings of a removed provider were cancelled: {titles}")
 ABANDONED_EXIT_CODE = 3  # QiTV quit while background work still ran (see _exit_now)
+# Where open_paths' files come from: QiTV started with them, another start handed them on, a
+# drop, File → Open File….
+LAUNCH, HANDOVER, DROP, DIALOG = "launch", "handover", "drop", "dialog"
+# A multi-select opened from the file manager can come as one start per file, in any order
+# (Windows): a start's file this soon after the one chosen replaces it only if it sorts first.
+OPEN_BURST_S = 3.0
+OPENED_POLL_MS = 100  # subtitle files dropped with a video wait for it to open,
+OPENED_WAIT_S = 30.0  # this long at most
+# The film opened: its player takes subtitle files (it says OPENING before it has the input).
+_OPENED_STATES = frozenset({PlaybackState.BUFFERING, PlaybackState.PLAYING, PlaybackState.PAUSED})
 # The Qt platform whose window ids libVLC can draw into (NSView, HWND, X11 window).
 _NATIVE_PLATFORMS = {"Darwin": "cocoa", "Windows": "windows", "Linux": "xcb"}
 _MOUSE_EVENTS = (
@@ -223,6 +239,26 @@ def _macos_desktops() -> bool:
 def _native_video_handles() -> bool:
     """False on Qt platforms without real window ids (offscreen, Wayland): libVLC would crash."""
     return QGuiApplication.platformName() == _NATIVE_PLATFORMS.get(platform.system())
+
+
+def _readable_size(path: str) -> Optional[int]:
+    """The size of the file at `path`; None when it is gone, no file (a folder, a broken link)
+    or can't be read. It touches the disk: never on the GUI thread."""
+    try:
+        info = os.stat(path)
+        if not stat.S_ISREG(info.st_mode):
+            return None
+        with open(path, "rb"):
+            pass
+    except OSError, ValueError:
+        return None
+    return info.st_size
+
+
+def _same_file(a: str, b: str) -> bool:
+    """Whether two spellings of a path name one file, without the disk: "." and ".." anywhere,
+    and the case and separators on Windows."""
+    return os.path.normcase(os.path.abspath(a)) == os.path.normcase(os.path.abspath(b))
 
 
 def _pending_thread_names() -> list[str]:
@@ -321,6 +357,25 @@ class _PlatformStateWatch(QObject):
         return False
 
 
+class _FileCheck(QObject):
+    """A file opened in QiTV, looked at on a thread of its own: `checked` (the open's number,
+    its path, its size or None when it can't play) comes on the GUI thread."""
+
+    checked = Signal(int, str, object)
+
+    def start(self, generation: int, path: str) -> None:
+        threading.Thread(
+            target=self._check, args=(generation, path), name="qitv-open-file", daemon=True
+        ).start()
+
+    def _check(self, generation: int, path: str) -> None:
+        size = _readable_size(path)
+        try:
+            self.checked.emit(generation, path, size)
+        except RuntimeError:
+            pass  # QiTV closed meanwhile
+
+
 class _Geometry:
     """What ConfigManager.save_window_settings reads: a geometry to store."""
 
@@ -389,10 +444,23 @@ class TVWindow(QMainWindow):
         self._dragged = False  # the last press on the video moved the mini player
         self._pressed = False  # the left button is down on the video
         self._click_on_release = False  # a click that came while the button was still down
+        # Files opened in QiTV (open_paths): each looked at off the GUI thread, the newest plays.
+        self._file_check = _FileCheck(self)
+        self._file_check.checked.connect(self._on_file_checked)
+        self._clock: Callable[[], float] = time.monotonic  # OPEN_BURST_S's (tests set it)
+        self._open_generation = 0
+        # The newest open's (number, media file, the subtitle files dropped with it).
+        self._open_due: Optional[tuple[int, str, list[str]]] = None
+        self._burst: Optional[tuple[float, str]] = None  # (when, file): a start's choice
+        # The subtitle files dropped with a video, for its target once it opened, until when.
+        self._subtitles_due: Optional[tuple[Target, list[str], float]] = None
+        self._subtitles_wait = QTimer(self, interval=OPENED_POLL_MS)
+        self._subtitles_wait.timeout.connect(self._load_due_subtitles)
 
         self.setWindowTitle("QiTV")
         self.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
-        self.setAcceptDrops(True)  # subtitle files, playlists or provider links dropped on it
+        # Media, subtitle and playlist files or provider links dropped on it.
+        self.setAcceptDrops(True)
         # The player page is the video container: the large surface fills it, and picture in
         # picture puts the other one in a corner (the PiP frame lays them out). The page paints
         # the black behind the video; the surfaces paint nothing (see ui/video_surface.py).
@@ -1354,6 +1422,107 @@ class TVWindow(QMainWindow):
             return
         self.controller.video_clicked()
 
+    # ---- opened files -------------------------------------------------------------------------
+
+    def open_paths(self, paths: Sequence[str], *, source: str) -> None:
+        """Files opened in QiTV, from a `source` (LAUNCH, HANDOVER, DROP or DIALOG).
+
+        - Playlist files become providers, as dropped ones do.
+        - The first media file by name plays once a thread found it there (it is checked off
+          the GUI thread); one that is gone or can't be read says so, and nothing else changes.
+          The subtitle files with it load once it opened; without one, they go to what plays.
+        - The file that plays already only comes forward.
+        - A start's file within OPEN_BURST_S of the one a start chose (a multi-select, one
+          start per file) replaces it only when it sorts first by name; else it is left out.
+        - Open File plays what it picks, whatever its kind (an HLS playlist too).
+
+        A launch or a hand-over brings the window forward. The paths are passed on as given.
+        """
+        if self._closing:
+            return
+        started = source in (LAUNCH, HANDOVER)
+        if started:
+            self.come_to_front()
+        kinds = Sorted(tuple(paths[:1]), (), ()) if source == DIALOG else sort_paths(paths)
+        if kinds.playlists:
+            files = list(kinds.playlists)
+            # Afterwards, as a drop's: adding switches the list.
+            QTimer.singleShot(0, self, lambda: self.add_dropped_providers(files, []))
+        subtitles = list(kinds.subtitles)
+        if not kinds.media:
+            if subtitles:
+                self.controller.drop_subtitles(subtitles)
+            return
+        path = kinds.media[0]
+        if started:
+            now, burst = self._clock(), self._burst
+            if (
+                burst is not None
+                and now - burst[0] < OPEN_BURST_S
+                and natural_key(path) >= natural_key(burst[1])
+            ):
+                logger.info("A file opened with an earlier one by name is left out")
+                return
+            self._burst = (now, path)
+        else:
+            self._burst = None  # a drop or Open File is a choice of its own
+        self._open_generation += 1
+        self._open_due = None  # a file still looked at is not played
+        if self._plays_now(path):
+            if not started:
+                self.come_to_front()
+            if subtitles:
+                self.controller.drop_subtitles(subtitles)
+            return
+        self._open_due = (self._open_generation, path, subtitles)
+        self._file_check.start(self._open_generation, path)
+
+    def _plays_now(self, path: str) -> bool:
+        """Whether the file at `path` is what the large picture plays (opening, playing or
+        paused; one that ended or failed opens again)."""
+        target = self.controller.now_playing()
+        if target is None or not target.local or not self.controller.playing():
+            return False
+        playing = QUrl(str(target.item.get("cmd") or "")).toLocalFile()
+        return bool(playing) and _same_file(playing, path)
+
+    def _on_file_checked(self, generation: int, path: str, size: Optional[int]) -> None:
+        due = self._open_due
+        if self._closing or due is None or due[0] != generation:
+            return  # QiTV closes, or another file was opened since
+        self._open_due = None
+        if size is None:
+            logger.info("A file opened in QiTV is gone or can't be read")
+            name = os.path.basename(path)
+            # i18n: an error toast: a file opened in QiTV is gone or unreadable ({name}: its name)
+            self.screens.notify(tr("Couldn't open “{name}”", name=name), "error", ERROR_MS)
+            return
+        self.screens.play_path(path, size)
+        target = self.controller.now_playing()
+        if due[2] and target is not None and target.local:
+            self._subtitles_due = (target, due[2], self._clock() + OPENED_WAIT_S)
+            self._subtitles_wait.start()
+
+    def _load_due_subtitles(self) -> None:
+        """The subtitle files dropped with a video load once it opened, never into another
+        title; they are left after OPENED_WAIT_S, or when it fails."""
+        due, controller = self._subtitles_due, self.controller
+        if due is None or self._closing:
+            self._stop_subtitles_wait()
+            return
+        target, subtitles, until = due
+        if controller.now_playing() is not target:
+            self._stop_subtitles_wait()  # another title was chosen
+        elif controller.session.state() in _OPENED_STATES:
+            self._stop_subtitles_wait()
+            controller.drop_subtitles(subtitles)
+        elif not controller.playing() or self._clock() > until:
+            self._stop_subtitles_wait()  # it failed, or never opened
+
+    def _stop_subtitles_wait(self) -> None:
+        self._subtitles_due = None
+        self._subtitles_wait.stop()
+
     # ---- dropped files -------------------------------------------------------------------------
 
     @staticmethod
@@ -1380,27 +1549,35 @@ class TVWindow(QMainWindow):
         return files, provider_drop.links(self._dropped_texts(event))
 
     def _on_drag(self, event: QDropEvent) -> None:
-        """Dragged over the window (or its overlays): taken only when it would load: subtitle
-        files for what plays, or a playlist file or a provider's link (2.2)."""
+        """Dragged over the window (or its overlays): taken only when it would load: a media
+        file, subtitle files for what plays, or a playlist file or a provider's link (2.2)."""
+        paths = self._dropped_paths(event)
         files, links = self._dropped_providers(event)
-        subtitles = self.controller.accepts_subtitles(self._dropped_paths(event))
-        if not self._closing and (subtitles or files or links):
+        media = sort_paths(paths).media  # by its name: the disk is looked at once dropped
+        subtitles = self.controller.accepts_subtitles(paths)
+        if not self._closing and (media or subtitles or files or links):
             event.acceptProposedAction()
         else:
             event.ignore()
 
     def _on_drop(self, event: QDropEvent) -> None:
-        """Subtitle files go to what plays; playlist files and links become providers."""
+        """A media file plays, and the subtitle files dropped with it load for it; subtitle
+        files alone go to what plays (open_paths). Playlist files and links become providers."""
         if self._closing:
             event.ignore()
             return
-        subtitles = self.controller.drop_subtitles(self._dropped_paths(event))
+        kinds = sort_paths(self._dropped_paths(event))
+        subtitles = bool(kinds.subtitles) and (
+            bool(kinds.media) or self.controller.accepts_subtitles(kinds.subtitles)
+        )
+        if kinds.media or subtitles:
+            self.open_paths([*kinds.media, *kinds.subtitles], source=DROP)
         files, links = self._dropped_providers(event)
         added = bool(files or links)
         if added:
             # After the drop: adding switches the list, and a portal's form is a dialog.
             QTimer.singleShot(0, self, lambda: self.add_dropped_providers(files, links))
-        if subtitles or added:
+        if kinds.media or subtitles or added:
             event.acceptProposedAction()
         else:
             event.ignore()
@@ -2339,6 +2516,7 @@ class TVWindow(QMainWindow):
 
     def _shut_down(self) -> None:
         self.epg_refresh.stop()
+        self._stop_subtitles_wait()
         self._run_steps(
             ("let the next click through", self.screens.shutdown),
             ("stop the phone remote", self.remote.shutdown),
