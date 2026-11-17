@@ -137,16 +137,19 @@ class ReadPlaylistTests(Folder, unittest.TestCase):
             with self.subTest(text=text):
                 read = read_playlist(str(self.playlist(text)))
                 self.assertEqual(read, PlaylistRead("empty", "Akşam listesi", (), missing))
-        # One that can't be read says nothing more (and never raises).
+
+    def test_a_playlist_that_cant_be_read_is_told_apart(self):
+        # Gone or refused: "Couldn't open" it, never "none of its files are here".
         gone = self.folder / "Gitti.m3u"
-        self.assertEqual(read_playlist(str(gone)), PlaylistRead("empty", "Gitti", (), 0))
+        self.assertEqual(read_playlist(str(gone)), PlaylistRead("unreadable", "Gitti"))
         self.file("film.mkv")
         path = self.playlist("film.mkv\n")
         refused = mock.patch(
             "services.local_playlist.open", side_effect=PermissionError, create=True
         )
         with refused:
-            self.assertEqual(read_playlist(str(path)), PlaylistRead("empty", "Akşam listesi"))
+            read = read_playlist(str(path))
+        self.assertEqual(read, PlaylistRead("unreadable", "Akşam listesi"))
 
     def test_a_list_entry_has_no_season_label(self):
         entry = {"name": "b", "season": None, "number": None, "local_path": "/x/b.mkv", "size": 4}

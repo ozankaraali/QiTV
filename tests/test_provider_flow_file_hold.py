@@ -3,11 +3,14 @@
 While a file opened in QiTV is on its way or plays, a provider that becomes ready tunes nothing
 and opens no drawer, the welcome card waits, and what waits for QiTV to be idle (the startup
 update question) runs once the file ended, stopped, failed, turned out missing or gave way to
-another title. Fakes for the controller's catalog and player; a real window over no provider.
+another title. A start whose playlist is read waits for it (Ruling P4-3): one of local files
+holds it as a film does, a provider's list lets it run as any start. Fakes for the
+controller's catalog and player; a real window over no provider, and over the fixture's.
 """
 
 import os
 from pathlib import Path
+import threading
 import unittest
 from unittest import mock
 
@@ -17,13 +20,16 @@ from PySide6.QtWidgets import QWidget
 from test_tv_controller import CHANNELS, HARBOR_ONE, ControllerTestCase, FakeOwnCatalog
 from timer_fixtures import elapse, wait_until
 
+from services.local_playlist import read_playlist
 from services.open_paths import holds_the_start
 from tests import test_tv_window as base
+from tests.fixtures.local_provider import GROUP, PROVIDER_NAME, channel_urls, channels
 from ui.keymap import Action
 from ui.overlays.toast import Toast
 
 LAST = {"provider_name": "Home", "group_id": "10", "item": CHANNELS[2]}
 FILM = "/videos/Dizi Bölüm 1.mkv"
+SETTLE_MS = 300  # a start that wasn't held would have set up the fixture's provider by then
 
 
 class FileHoldTests(ControllerTestCase):
@@ -90,6 +96,63 @@ class FileHoldTests(ControllerTestCase):
         hub.own["Harbor IPTV"].loaded = True
         hub.contentChanged.emit("Harbor IPTV")
         self.assertEqual(self.catalog.links, [])
+
+    def test_a_start_read_defers_the_start_and_a_providers_list_starts_it_plainly(self):
+        # Ruling P4-3: while a start's playlist is read nothing of the start happens (no
+        # setup, no hint, the update question waits), and nothing of it is spent.
+        self.config.last_live_channel = dict(LAST)
+        self.controller.hold_for_read()  # main(), before the window shows
+        self.controller.start()
+        self.when_idle()
+        self.assertEqual(self.catalog.selected, [])
+        self.assertIsNone(self.toast.hint)  # no "Loading Home…"
+        self.controller.hold_for_file(False)  # a subtitle file's release never ends it
+        self.assertEqual(self.runs, [])
+        self.assertFalse(self.controller.read_over(as_file=False))  # a provider's list
+        self.assertEqual(self.catalog.selected, [None])
+        self.assertEqual(self.toast.hint, "Loading Home…")
+        self.assertEqual(self.runs, ["update question"])
+        self.catalog.hub_ready("Home")
+        self.catalog.sectionReady.emit("live")
+        self.assertEqual(self.tuned_names(), [CHANNELS[2]["name"]])  # its last channel
+
+    def test_a_start_read_that_names_files_holds_the_start_as_a_film(self):
+        self.config.last_live_channel = dict(LAST)
+        self.controller.hold_for_read()
+        self.controller.start()
+        self.when_idle()
+        self.assertTrue(self.controller.read_over(as_file=True))  # a list: its hold now
+        self.assertEqual(self.catalog.selected, [None])  # the setup goes on behind it
+        self.assertIsNone(self.toast.hint)  # its hint waits for the list
+        self.catalog.hub_ready("Home")
+        self.catalog.sectionReady.emit("live")
+        self.assertEqual(self.catalog.links, [])
+        self.assertEqual(self.drawer.named("open_drawer"), [])
+        self.assertEqual(self.runs, [])
+        self.controller.hold_for_file(False)  # the list ended
+        self.assertEqual(self.runs, ["update question"])
+
+    def test_a_read_after_the_start_holds_nothing(self):
+        # A playlist handed to a running QiTV: its start ran; the list holds once it plays.
+        self.controller.start()
+        self.controller.hold_for_read()
+        self.when_idle()
+        self.assertEqual(self.runs, ["update question"])
+        self.assertFalse(self.controller.read_over(as_file=True))
+
+    def test_a_film_opened_during_a_start_read_takes_it_over(self):
+        self.config.last_live_channel = dict(LAST)
+        self.controller.hold_for_read()
+        self.controller.start()
+        self.film()  # dropped while the playlist is read: the start is the film's
+        self.assertEqual(self.catalog.selected, [None])
+        self.assertFalse(self.controller.read_over(as_file=False))  # its read gave way
+        self.catalog.hub_ready("Home")
+        self.catalog.sectionReady.emit("live")
+        self.assertEqual(self.catalog.links, [])
+
+    def tuned_names(self):
+        return [item.get("name") for _id, item, _section, _episode in self.catalog.links]
 
     def test_welcome_waits_for_the_film(self):
         self.catalog.names = []
@@ -440,12 +503,77 @@ class FileHoldTests(ControllerTestCase):
         self.assertEqual(self.drawer.calls, [])
 
 
-class WindowHoldTests(base.WindowCase):
+class LaunchCase:
+    """A window test's start as main() makes it, with what main() holds before the window
+    shows."""
+
+    def launch(self, *paths):
+        """As main() starts: held when the start carries a film or a file QiTV won't play, and
+        while its playlists are read when it carries no film (Ruling P4-3)."""
+        from services.open_paths import reads_the_start
+
+        opened = [str(path) for path in paths]
+        if holds_the_start(opened):
+            self.window.controller.hold_for_file(True)
+        if reads_the_start(opened):
+            self.window.controller.hold_for_read()
+        runs = []
+        self.window.when_idle(lambda: runs.append(True))  # at once unless held
+        held = not runs
+        self.show()
+        self.window.open_paths(opened, source="launch")
+        return held, runs
+
+    @staticmethod
+    def slow_reads(gate):
+        """Each playlist is read once `gate` is set (a playlist on a slow share)."""
+
+        def slow(path):
+            gate.wait(10)
+            return read_playlist(path)
+
+        return mock.patch("ui.tv_window.read_playlist", side_effect=slow)
+
+    def local_playlist(self):
+        """A playlist of one film beside it: (the film, the playlist)."""
+        film = Path(self.config_dir) / "Bölüm 1.mkv"
+        film.write_bytes(b"film")
+        playlist = Path(self.config_dir) / "Akşam.m3u"
+        playlist.write_text("#EXTM3U\nBölüm 1.mkv\n", encoding="utf-8")
+        return film, playlist
+
+
+class WindowHoldTests(LaunchCase, base.WindowCase):
     """A launch with a file that is gone, over no provider: the toast names it, then the
     welcome card and what waited for the film come."""
 
     def provider_list(self):
         return []
+
+    def test_a_local_playlist_at_launch_is_held_while_it_is_read(self):
+        # Ruling P4-3: nothing opens over a start whose playlist is read (the welcome card, the
+        # update question), and one of local files keeps the hold, as a film does.
+        film, playlist = self.local_playlist()
+        window, gate = self.window, threading.Event()
+        card = window.overlays.welcome
+        with (
+            mock.patch.object(card, "show_card", wraps=card.show_card) as shown,
+            mock.patch.object(window.controller, "play_list") as played,
+            self.slow_reads(gate),
+        ):
+            held, runs = self.launch(playlist)
+            elapse(SETTLE_MS)
+            self.assertTrue(held)  # the update question waits for the read
+            self.assertFalse(card.isVisible())
+            gate.set()
+            self.assertTrue(wait_until(lambda: played.called))
+            elapse(SETTLE_MS)
+            shown.assert_not_called()
+        self.assertEqual(played.call_args.args[:2], ("Akşam", (str(film),)))
+        self.assertEqual(runs, [])  # the list holds as a film does
+        window.controller.hold_for_file(False)  # it ended (the list is a fake here)
+        self.assertEqual(runs, [True])
+        self.assertTrue(card.isVisible())
 
     def test_a_missing_file_at_launch_releases(self):
         window, runs = self.window, []
@@ -461,18 +589,6 @@ class WindowHoldTests(base.WindowCase):
         self.assertTrue(wait_until(lambda: (text, "error") in self.toasts), self.toasts)
         self.assertTrue(wait_until(card.isVisible))
         self.assertEqual(runs, [True])
-
-    def launch(self, *paths):
-        """As main() starts: held when the start carries a film or a file QiTV won't play."""
-        opened = [str(path) for path in paths]
-        if holds_the_start(opened):
-            self.window.controller.hold_for_file(True)
-        runs = []
-        self.window.when_idle(lambda: runs.append(True))  # at once unless held
-        held = not runs
-        self.show()
-        self.window.open_paths(opened, source="launch")
-        return held, runs
 
     def test_a_file_qitv_wont_play_at_launch_says_so_and_lets_go(self):
         notes = Path(self.config_dir) / "Notlar.txt"
@@ -536,6 +652,78 @@ class WindowHoldTests(base.WindowCase):
         )
         self.assertTrue(card.isVisible())
         self.assertEqual(runs, [True])
+
+
+class PlaylistStartTests(LaunchCase, base.WindowCase):
+    """A start with a playlist over the fixture's provider, its last channel saved (Ruling
+    P4-3): while the playlist is read nothing tunes, opens or says it loads; one of local files
+    holds the start as a film does, and a provider's list lets it run as any start does."""
+
+    def prepare_config(self):
+        self.config.last_live_channel = {
+            "provider_name": PROVIDER_NAME,
+            "group_id": GROUP,
+            "item": channels()[0],
+        }
+
+    def setUp(self):
+        super().setUp()
+        self.hints: list = []  # the toast's lasting hints, in order ("Loading …")
+        toast = self.window.overlays.toast
+        set_hint = toast.set_hint
+
+        def spy(text, **how):
+            self.hints.append(text)
+            set_hint(text, **how)
+
+        toast.set_hint = spy
+        tune = mock.patch.object(self.window.controller, "tune")  # what the start tunes
+        self.tunes = tune.start()
+        self.addCleanup(tune.stop)
+
+    def test_a_local_playlist_read_at_launch_lets_nothing_open_over_it(self):
+        _film, playlist = self.local_playlist()
+        sections: list[str] = []
+        self.window.catalog.sectionReady.connect(sections.append)
+        drawer, gate = self.window.overlays.drawer, threading.Event()
+        with (
+            mock.patch.object(self.window.controller, "play_list") as played,
+            self.slow_reads(gate),
+        ):
+            held, runs = self.launch(playlist)
+            elapse(SETTLE_MS)
+            self.assertTrue(held)
+            self.assertEqual(self.hints, [])  # no "Loading Local fixture…"
+            self.assertFalse(drawer.isVisible())
+            self.tunes.assert_not_called()
+            gate.set()
+            self.assertTrue(wait_until(lambda: played.called))
+        self.assertTrue(wait_until(lambda: "live" in sections))  # set up behind the list
+        elapse(SETTLE_MS)
+        self.tunes.assert_not_called()  # no last channel over the list
+        self.assertFalse(drawer.isVisible())
+        self.assertEqual(runs, [])
+
+    def test_a_start_whose_playlist_is_a_provider_runs_as_a_plain_start(self):
+        playlist = Path(self.config_dir) / "Kanallar.m3u"
+        playlist.write_text("#EXTM3U\n#EXTINF:-1,Bir\nhttp://127.0.0.1:9/1.ts\n", encoding="utf-8")
+        gate = threading.Event()
+        with (
+            mock.patch.object(self.window, "add_dropped_providers") as added,
+            self.slow_reads(gate),
+        ):
+            held, runs = self.launch(playlist)
+            elapse(SETTLE_MS)
+            self.assertTrue(held)
+            self.assertEqual(self.hints, [])
+            self.tunes.assert_not_called()
+            gate.set()
+            self.assertTrue(wait_until(lambda: added.called))
+        self.assertEqual(added.call_args.args, ([str(playlist)], []))
+        self.assertEqual(runs, [True])  # the update question comes as at any start
+        self.assertIn(f"Loading {PROVIDER_NAME}…", self.hints)
+        self.assertTrue(wait_until(lambda: self.tunes.called))  # its last channel, unspent
+        self.assertEqual(self.tunes.call_args.args[0]["cmd"], channel_urls()[0])
 
 
 if __name__ == "__main__":

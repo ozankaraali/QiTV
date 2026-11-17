@@ -28,6 +28,7 @@ from services.open_paths import extended_path, is_music, is_video
 logger = logging.getLogger(__name__)
 
 PROVIDER, HLS, LOCAL, EMPTY = "provider", "hls", "local", "empty"
+UNREADABLE = "unreadable"  # gone, or refused: the playlist itself couldn't be read
 
 # A link's scheme (RFC 3986). One letter is a Windows drive ("C://x"), never a link.
 _LINK = re.compile(r"([A-Za-z][A-Za-z0-9+.-]+)://")
@@ -38,10 +39,10 @@ MAX_BYTES = 32 * 1024 * 1024
 
 @dataclass(frozen=True)
 class PlaylistRead:
-    """What a playlist is: `kind` (PROVIDER, HLS, LOCAL or EMPTY), its `name` (the file's stem),
-    the absolute paths of its local media files that are there (`entries`, in its order) with
-    their `sizes` (None where it couldn't be read), and how many of its lines name nothing that
-    plays (`missing`)."""
+    """What a playlist is: `kind` (PROVIDER, HLS, LOCAL, EMPTY or UNREADABLE), its `name` (the
+    file's stem), the absolute paths of its local media files that are there (`entries`, in
+    its order) with their `sizes` (None where it couldn't be read), and how many of its lines
+    name nothing that plays (`missing`)."""
 
     kind: str
     name: str
@@ -51,15 +52,15 @@ class PlaylistRead:
 
 
 def read_playlist(path: str) -> PlaylistRead:
-    """What the playlist at `path` is. Never raises: one that can't be read is EMPTY. Blocking
-    disk I/O: call on a worker."""
+    """What the playlist at `path` is. Never raises: one that can't be read (gone, refused) is
+    UNREADABLE. Blocking disk I/O: call on a worker."""
     name = os.path.splitext(os.path.basename(path))[0]
     try:
         with open(path, "rb") as file:
             data = file.read(MAX_BYTES + 1)
     except Exception as error:
         logger.info("A playlist opened in QiTV could not be read (%s)", type(error).__name__)
-        return PlaylistRead(EMPTY, name)
+        return PlaylistRead(UNREADABLE, name)
     if len(data) > MAX_BYTES:
         return PlaylistRead(PROVIDER, name)
     lines = [line.strip() for line in _decode(data).splitlines()]

@@ -84,7 +84,15 @@ from services.live.engine import LiveEngine
 from services.live.kept import KeptBuffers
 from services.live.live_session import LiveSession
 from services.live.tuning import FILE_NAME as TUNING_FILE, LiveTuning
-from services.local_playlist import EMPTY, HLS, LOCAL, PROVIDER, PlaylistRead, read_playlist
+from services.local_playlist import (
+    EMPTY,
+    HLS,
+    LOCAL,
+    PROVIDER,
+    UNREADABLE,
+    PlaylistRead,
+    read_playlist,
+)
 from services.media_keys import MediaKeys
 from services.media_reporter import MediaReporter
 from services.navigation import NavModel
@@ -504,11 +512,13 @@ class TVWindow(QMainWindow):
         # The newest open's (number, media file, the subtitle files dropped with it).
         self._open_due: Optional[tuple[int, str, list[str]]] = None
         # Playlist files opened in QiTV, read off the GUI thread first (_on_playlists_read):
-        # the reads' count, and the read that may still play (None: a newer choice came).
+        # the reads' count, the read that may still play (None: a newer choice came), and the
+        # provider links dropped with each read's files (added with its providers, at once).
         self._playlist_read = _PlaylistRead(self)
         self._playlist_read.read.connect(self._on_playlists_read)
         self._playlist_reads = 0
         self._playlist_due: Optional[int] = None
+        self._read_links: dict[int, list[ProviderLink]] = {}
         self._burst: Optional[tuple[float, str]] = None  # (when, file): a start's choice
         # A file is being played and QiTV's mark is to draw over it (opening_over says no).
         self._opening_due = False
@@ -1522,7 +1532,12 @@ class TVWindow(QMainWindow):
             self.come_to_front()
         kinds = Sorted(tuple(paths[:1]), (), ()) if source == DIALOG else sort_paths(paths)
         if kinds.playlists:
-            self._read_playlists(list(kinds.playlists), playable=not kinds.media)
+            playable = not kinds.media
+            if started and playable:
+                # A start waits for its playlist (main() held it before the window showed):
+                # nothing of it is spent until the read says what it is (_on_playlists_read).
+                self.controller.hold_for_read()
+            self._read_playlists(list(kinds.playlists), playable=playable)
         subtitles = list(kinds.subtitles)
         if kinds.others:
             name = os.path.basename(kinds.others[0])
@@ -1551,7 +1566,9 @@ class TVWindow(QMainWindow):
             self._burst = None  # a drop or Open File is a choice of its own
         self._open_generation += 1
         self._open_due = None  # a file still looked at is not played
-        self._playlist_due = None  # nor a playlist still read
+        if self._playlist_due is not None:
+            self._playlist_due = None  # nor a playlist still read
+            self.controller.read_over(as_file=True)  # a start that waited for it is the film's
         if self._plays_now(path):
             if not started:
                 self.come_to_front()
@@ -1562,42 +1579,53 @@ class TVWindow(QMainWindow):
         self.controller.hold_for_file(True)  # while it is looked at, it counts as playing
         self._file_check.start(self._open_generation, path)
 
-    def _read_playlists(self, paths: list[str], *, playable: bool) -> None:
+    def _read_playlists(
+        self, paths: list[str], *, playable: bool, links: Sequence[ProviderLink] = ()
+    ) -> None:
         """Playlist files opened in QiTV (`paths`), read on a thread (_on_playlists_read). With
         `playable` (no media file came with them), the first that names local files or is one
-        HLS stream plays once read, unless a newer choice came meanwhile. Nothing is held while
-        they are read (a start's playlists don't hold it either: holds_the_start): what was
-        chosen before, a film still looked at too, is left alone until one turns out to play."""
+        HLS stream plays once read, unless a newer choice came meanwhile. A running QiTV holds
+        nothing while they are read: what was chosen before, a film still looked at too, is
+        left alone until one turns out to play; a start waits (hold_for_read). Provider
+        `links` dropped with them are added with their providers, in one go."""
         self._playlist_reads += 1
         if playable:
             self._playlist_due = self._playlist_reads
+        if links:
+            self._read_links[self._playlist_reads] = list(links)
         self._playlist_read.start(self._playlist_reads, paths)
 
     def _on_playlists_read(self, serial: int, reads: list[tuple[str, PlaylistRead]]) -> None:
         """Playlist files read (_read_playlists): each with a network link becomes a provider,
-        as a dropped one does (adding switches the list). Then, unless a newer choice came:
+        as a dropped one does, with the links dropped beside them (adding switches the list
+        to the last). Then, unless a newer choice came:
         - an HLS one plays as one film, as Open File plays it;
         - one of local files plays as a list (TVController.play_list), held and drawn over as
           a file opened in QiTV is; the entries that aren't there are counted in a toast;
-        - one with none of its files there says so, and nothing plays.
-        Of several, the first that plays does."""
+        - one with none of its files there says so, and so does one that can't be read
+          ("Couldn't open"); nothing plays.
+        Of several, the first that plays does. A start that waited for them (hold_for_read) is
+        held as a film's by any of these; by providers alone it starts as any start does."""
         if self._closing:
             return
+        links = self._read_links.pop(serial, [])
         providers = [path for path, read in reads if read.kind == PROVIDER]
-        if providers:
-            self.add_dropped_providers(providers, [])
         if self._playlist_due != serial:
             if any(read.kind != PROVIDER for _path, read in reads):
                 logger.info("A playlist opened in QiTV gave way to a newer choice")
+            self._add_read_providers(providers, links)
             return
         self._playlist_due = None
         playable = [(path, read) for path, read in reads if read.kind in (LOCAL, HLS)]
+        failed = [(path, read) for path, read in reads if read.kind in (EMPTY, UNREADABLE)]
+        # The start that waited: a film's from here, or a plain start before the providers.
+        held = self.controller.read_over(as_file=bool(playable or failed))
+        self._add_read_providers(providers, links)
         if not playable:
-            if any(read.kind == EMPTY for _path, read in reads):
-                logger.info("None of a playlist's files are there")
-                # i18n: an error toast: a playlist opened in QiTV names no file that is there
-                text = tr("None of the files in this playlist are here")
-                self.screens.notify(text, "error", ERROR_MS)
+            if failed:
+                self._say_unplayable(*failed[0])
+                if held and self._open_due is None and self._playing_file() is None:
+                    self.controller.hold_for_file(False)  # nothing plays: the start goes on
             return
         if len(playable) > 1:
             logger.info("Playlists opened together: the first plays")
@@ -1619,6 +1647,27 @@ class TVWindow(QMainWindow):
                 n=number(read.missing),
             )
             self.screens.notify(text, "info", ERROR_MS)
+
+    def _add_read_providers(self, files: list[str], links: list[ProviderLink]) -> None:
+        """The read's provider playlists and the links dropped with them become providers, in
+        one go, afterwards as a drop's are: after the window's start (it is posted before), as
+        adding switches the list, and a portal's form is a dialog."""
+        if files or links:
+            QTimer.singleShot(0, self, lambda: self.add_dropped_providers(files, links))
+
+    def _say_unplayable(self, path: str, read: PlaylistRead) -> None:
+        """A playlist that plays nothing says why: it couldn't be read (gone, refused), as a
+        file that couldn't be opened says it, or none of its files are there."""
+        if read.kind == UNREADABLE:
+            logger.info("A playlist opened in QiTV is gone or can't be read")
+            name = os.path.basename(path)
+            # i18n: an error toast: a file opened in QiTV is gone or unreadable ({name}: its name)
+            self.screens.notify(tr("Couldn't open “{name}”", name=name), "error", ERROR_MS)
+            return
+        logger.info("None of a playlist's files are there")
+        # i18n: an error toast: a playlist opened in QiTV names no file that is there
+        text = tr("None of the files in this playlist are here")
+        self.screens.notify(text, "error", ERROR_MS)
 
     def _plays_now(self, path: str) -> bool:
         """Whether the file at `path` is what the large picture plays (opening, playing or
@@ -1690,8 +1739,11 @@ class TVWindow(QMainWindow):
         TVController): the file still being looked at (a slow share) isn't played when its
         check is back; the later choice wins. Its hold goes with it unless a film still plays
         (that one's hold goes once it gives way, ends or stops). A playlist still read plays
-        nothing either (its links still make a provider)."""
-        self._playlist_due = None
+        nothing either (its links still make a provider), and a start that waited for it
+        starts."""
+        if self._playlist_due is not None:
+            self._playlist_due = None
+            self.controller.read_over(as_file=False)
         if self._open_due is None:
             return
         self._open_due = None
@@ -1771,7 +1823,8 @@ class TVWindow(QMainWindow):
         """A media file plays, and the subtitle files dropped with it load for it; subtitle
         files alone go to what plays (open_paths). Playlist files are read first, as opened
         ones are (_read_playlists): their links make a provider, local files play as a list.
-        Provider links become providers."""
+        Provider links become providers, with the playlists' when some came along (one toast,
+        the link's shown last)."""
         if self._closing:
             event.ignore()
             return
@@ -1783,8 +1836,8 @@ class TVWindow(QMainWindow):
             self.open_paths([*kinds.media, *kinds.subtitles], source=DROP)
         files, links = self._dropped_providers(event)
         if files:
-            self._read_playlists(files, playable=not kinds.media)
-        if links:
+            self._read_playlists(files, playable=not kinds.media, links=links)
+        elif links:
             # After the drop: adding switches the list, and a portal's form is a dialog.
             QTimer.singleShot(0, self, lambda: self.add_dropped_providers([], links))
         added = bool(files or links)

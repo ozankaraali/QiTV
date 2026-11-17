@@ -257,7 +257,7 @@ def main() -> int:
 
     from services import log_file
     from services.config_manager import get_app_version
-    from services.open_paths import holds_the_start, launch_paths
+    from services.open_paths import holds_the_start, launch_paths, reads_the_start
     from ui.quit_reason import QiTVApplication
 
     # Basic logging configuration (tweak level as needed); the console's lines are masked as
@@ -439,6 +439,10 @@ def main() -> int:
             # over it, from the window's first moment (open_paths holds too, once it shows).
             # A file QiTV won't play holds too: open_paths says so, then lets go.
             window.controller.hold_for_file(True)
+        if reads_the_start(opened):
+            # A start with a playlist (and no film) waits until it is read: a list of files
+            # holds it as a film does, a provider's list lets it start as any start.
+            window.controller.hold_for_read()
         # Transparent over a splash on screen: it fades in as the splash opens into it.
         splash.before_show(window)
         window.show()

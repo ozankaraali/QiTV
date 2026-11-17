@@ -853,6 +853,24 @@ class TVController(QObject):
             self._autoplay.drop()
         self._flow.hold_for_file(on)
 
+    def hold_for_read(self) -> None:
+        """A start's playlist is read (Ruling P4-3): the start waits for it, without spending
+        it (ProviderFlow.hold_for_read), until read_over."""
+        self._flow.hold_for_read()
+
+    def read_over(self, *, as_file: bool) -> bool:
+        """The start's playlist was read. `as_file` (a list of files, one HLS stream, one with
+        none of its files there, one that couldn't be read): the start is held as a film's
+        (hold_for_file); else (a provider's list, a newer choice) it starts as any start. True
+        when a read held the start and it is now held as a file's; False when none did."""
+        if not self._flow.reading():
+            return False
+        if as_file:
+            self.hold_for_file(True)
+            return True
+        self._flow.read_over()
+        return False
+
     def when_idle(self, callback: Callable[[], None]) -> None:
         """`callback` now, or once the file held for is over."""
         self._flow.when_idle(callback)

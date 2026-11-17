@@ -102,6 +102,9 @@ class MainModuleTests(unittest.TestCase):
         self.assertLess(body.index("window.controller.hold_for_file(True)"), show)
         # held for a film, and for a file QiTV won't play (its message comes instead)
         self.assertLess(body.index("if holds_the_start(opened):"), show)
+        # and, with no film, while its playlists are read (Ruling P4-3)
+        self.assertLess(body.index("if reads_the_start(opened):"), show)
+        self.assertLess(body.index("window.controller.hold_for_read()"), show)
         self.assertLess(show, body.index("window.open_paths(opened, source=LAUNCH)"))
         # the check starts once the film is over, and its question waits for any film opened
         # while the network answers (ui.update_dialogs._AfterTheFilm)

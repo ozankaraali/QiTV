@@ -23,6 +23,11 @@ welcome card nor the start's own "Loading <provider>…" (the setup goes on behi
 the viewer chooses says it loads, film or not), and what waits for QiTV to be idle
 (`when_idle`: the startup update question) runs once it is over.
 
+A start whose playlist is read first waits for it (`hold_for_read`, Ruling P4-3): the start
+itself (its setup, its hint, the welcome card, the last channel, the drawer) waits, and so
+does `when_idle`, but nothing of it is spent. A list of files then holds it as a film does
+(`hold_for_file(True)` takes the read's place); a provider's list lets it start as any start.
+
 TVController owns the links, the zapping and the player, and hands this unit callbacks.
 """
 
@@ -111,6 +116,9 @@ class ProviderFlow(QObject):
         # opened, unless the viewer went back to live TV during the setup.
         self._list_on_ready = True
         self._idle_waits: list[Callable[[], None]] = []  # when_idle's, until released
+        self._started = False  # the start ran (start): a read no longer holds it
+        self._reading = False  # the start's playlist is read (hold_for_read)
+        self._start_due = False  # the start came while it was read: it runs once it is over
 
     def wire(self) -> None:
         catalog = self.catalog
@@ -138,6 +146,12 @@ class ProviderFlow(QObject):
     # ---- the shell's calls --------------------------------------------------------------------
 
     def start(self) -> None:
+        """The start: the selected provider's setup (or the welcome card). While the start's
+        playlist is read it waits (hold_for_read), and runs once that is over."""
+        if self._reading:
+            self._start_due = True
+            return
+        self._started = True
         if not self.catalog.provider_names():
             # ProviderManager cannot set up without providers; the setup would only fail.
             self.welcome()
@@ -219,6 +233,35 @@ class ProviderFlow(QObject):
         self._loading = False
         self._welcome_due = False
         self._idle_waits.clear()
+        self._reading = self._start_due = False
+
+    def hold_for_read(self) -> None:
+        """A start's playlist is read (main() before the window shows; the window as it reads
+        one): until read_over, or a file's hold takes its place (hold_for_file), the start
+        waits (start), and so do the welcome card and what waits for QiTV to be idle; nothing
+        of the start is spent. Once the start ran (a playlist handed to a running QiTV), it
+        holds nothing: the list holds once it plays."""
+        if not self._started:
+            self._reading = True
+
+    def reading(self) -> bool:
+        """A start's playlist is still read (hold_for_read)."""
+        return self._reading
+
+    def read_over(self) -> None:
+        """The start's playlist was read and plays nothing (a provider's list, or another
+        choice came first): the start runs as any start does, and what waited runs, unless a
+        file holds QiTV meanwhile (then once it is over)."""
+        if not self._reading:
+            return
+        self._reading = False
+        if self._closed():
+            return
+        if self._start_due:
+            self._start_due = False
+            self.start()
+        if not self._held:
+            self._released(start_hint=False)
 
     def hold_for_file(self, on: bool) -> None:
         """A file opened in QiTV is on its way or plays (`on`), or it is over: it ended, was
@@ -231,22 +274,35 @@ class ProviderFlow(QObject):
         last channel on its way, or waited for at its own provider, is dropped, and "start
         with the last channel" is spent for this run, as the list a ready provider opens on an
         idle player is. Released, the welcome card asked meanwhile shows and what waited
-        (when_idle) runs; nothing tunes and no drawer opens."""
+        (when_idle) runs; nothing tunes and no drawer opens.
+
+        A start waiting for its playlist to be read (hold_for_read) is the file's from `on`:
+        the start runs now, held. Released while that playlist is still read (a subtitle
+        file's open, a file QiTV won't play), what waits goes on waiting for the read."""
         start_hint = self._loading and not self._loading_chosen  # it waits for the file
         if on:
             self._held = self._file_opened = True
+            self._reading = False  # a read that held the start: the file's hold takes over
             if self._welcome_up:
                 self._dismiss_welcome()
                 self._welcome_due = True
             if start_hint:
                 self.overlays.toast.set_hint(None)  # the setup goes on behind the file
             self.drop_autotune()
+            if self._start_due:
+                self._start_due = False
+                self.start()  # held: its hint and the welcome card wait for the file
             return
         if not self._held:
             return
         self._held = False
-        if self._closed():
-            return
+        if self._closed() or self._reading:
+            return  # a start's playlist still read: what waits waits for it (read_over)
+        self._released(start_hint)
+
+    def _released(self, start_hint: bool) -> None:
+        """Nothing holds QiTV any more: the start's hint again while it still loads, the
+        welcome card asked meanwhile, and what waited (when_idle)."""
         if start_hint:  # it still loads: said once what ended the hold (an error) has been
             self.overlays.toast.set_hint(self._loading_text, cut=False)
         due, self._welcome_due = self._welcome_due, False
@@ -260,8 +316,9 @@ class ProviderFlow(QObject):
                 logger.exception("What waited for the film to end failed")
 
     def when_idle(self, callback: Callable[[], None]) -> None:
-        """`callback` now, or once the file held for is over (hold_for_file)."""
-        if self._held:
+        """`callback` now, or once the file held for is over (hold_for_file), or the start's
+        playlist was read and plays nothing (read_over)."""
+        if self._held or self._reading:
             self._idle_waits.append(callback)
         else:
             callback()
@@ -271,9 +328,10 @@ class ProviderFlow(QObject):
     def welcome(self, *, chosen: bool = False) -> None:
         """Until a provider exists: the welcome card, whose button adds one (spec §8).
 
-        While a file is held for (hold_for_file) it is only noted, and shows once that is
-        over; `chosen` (the list asked for, with no provider) shows it at once."""
-        if self._held and not chosen:
+        While a file is held for (hold_for_file), or the start's playlist is read, it is only
+        noted, and shows once that is over; `chosen` (the list asked for, with no provider)
+        shows it at once."""
+        if (self._held or self._reading) and not chosen:
             self._welcome_due = True
             return
         self._welcome_due = False
@@ -340,8 +398,10 @@ class ProviderFlow(QObject):
         self._welcome_due = False
         back_to_live, self._live_on_ready = self._live_on_ready, False
         last = self._last_channel(name)
-        # A file on its way (it is looked at off the GUI thread) counts as playing.
-        idle = not self._held and not self._has_media() and not self._links_busy()
+        # A file on its way (it is looked at off the GUI thread) counts as playing, and so
+        # does a start's playlist still read (a setup chosen meanwhile tunes nothing).
+        held = self._held or self._reading
+        idle = not held and not self._has_media() and not self._links_busy()
         on_start = self.config.start_with_last_channel and not self._file_opened
         wanted = idle and not self._in_library and (back_to_live or on_start)
         self._list_on_ready = back_to_live or not self._file_opened

@@ -185,6 +185,16 @@ class SortPaths(unittest.TestCase):
         self.assertFalse(open_paths.holds_the_start(["/x/list.m3u", "/x/b.m3u8"]))
         self.assertFalse(open_paths.holds_the_start([]))
 
+    def test_a_start_waits_for_its_playlists_when_it_carries_no_film(self):
+        # Ruling P4-3: read first (a list of files holds the start, a provider's doesn't);
+        # with a film the film plays, and its playlists only add their providers.
+        self.assertTrue(open_paths.reads_the_start(["/x/list.m3u"]))
+        self.assertTrue(open_paths.reads_the_start(["/x/a.srt", "/x/B.M3U8"]))
+        self.assertTrue(open_paths.reads_the_start(["/x/notes.txt", "/x/list.m3u"]))
+        self.assertFalse(open_paths.reads_the_start(["/x/film.mkv", "/x/list.m3u"]))
+        self.assertFalse(open_paths.reads_the_start(["/x/a.srt", "/x/notes.txt"]))
+        self.assertFalse(open_paths.reads_the_start([]))
+
 
 class Filter(unittest.TestCase):
     def test_open_file_patterns_are_unchanged(self):

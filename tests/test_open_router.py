@@ -30,6 +30,7 @@ FILM = Path(__file__).parent / "fixtures" / "film" / "h264_aac.mkv"  # 8 s
 SMOKE = Path(__file__).parent / "fixtures" / "smoke.mp4"  # about 6 s
 TO_ITS_END_MS = 20_000  # the smoke film plays to its end, with margin for a loaded runner
 SUBTITLES = "1\n00:00:00,000 --> 00:00:08,000\nHallo\n"
+GAVE_WAY = "INFO:ui.tv_window:A playlist opened in QiTV gave way to a newer choice"
 
 
 class RouterCase(base.WindowCase):
@@ -573,24 +574,49 @@ class PlaylistRouterTests(RouterCase):
         film = self.film("ep.mkv")
         playlist = self.write("Liste.m3u", f"{film}\n")
         gate = threading.Event()
-        with self.slow_reads(gate):
+        with self.slow_reads(gate), self.assertLogs("ui.tv_window", "INFO") as logs:
             self.handover(playlist)
             drop(self.window, paths=[film])  # chosen while the list is read
             self.wait_for_plays(1)
             gate.set()
-            elapse(SETTLE_MS)
+            self.assertTrue(wait_until(lambda: GAVE_WAY in logs.output), logs.output)
         self.assertEqual(self.lists(), [])
         self.assertEqual(self.plays(), [(str(film), 4)])
 
     def test_a_list_read_gives_way_to_a_channel_chosen_meanwhile(self):
         playlist = self.write("Liste.m3u", f"{self.film('ep.mkv')}\n")
         gate = threading.Event()
-        with self.slow_reads(gate):
+        with self.slow_reads(gate), self.assertLogs("ui.tv_window", "INFO") as logs:
             self.handover(playlist)
             self.window.file_gives_way()  # a channel chosen (TVController._file_gives_way)
             gate.set()
-            elapse(SETTLE_MS)
+            self.assertTrue(wait_until(lambda: GAVE_WAY in logs.output), logs.output)
         self.assertEqual(self.calls, [])
+
+    def test_a_drop_of_a_playlist_and_a_link_adds_both_at_once(self):
+        # One toast for both, and the link's provider is the one shown, as before the read.
+        path = self.write("Kanallar.m3u", f"#EXTM3U\n#EXTINF:-1,Bir\n{PANEL}/1.ts\n")
+        link = f"{PANEL}/player_api.php?username=ann&password=pw1"
+        self.assertEqual(drop(self.window, paths=[path], urls=[link], text=link), (True, True))
+        names = self.provider_names
+        self.assertTrue(wait_until(lambda: {"Kanallar", "127.0.0.1"} <= set(names())), names())
+        elapse(SETTLE_MS)
+        added = [text for text, _kind in self.toasts if text.startswith("Added ")]
+        self.assertEqual(added, ["Added Kanallar, 127.0.0.1 to your providers"])
+        self.assertEqual(self.window.config_manager.selected_provider_name, "127.0.0.1")
+
+    def test_a_playlist_that_cant_be_read_says_so(self):
+        gone = self.folder / "Gitti.m3u"  # handed over, then moved before it was read
+        before = self.provider_names()
+        self.handover(gone)
+        text = "Couldn't open “Gitti.m3u”"
+        self.assertTrue(wait_until(lambda: (text, "error") in self.toasts), self.toasts)
+        elapse(SETTLE_MS)
+        self.assertEqual(self.calls, [])
+        self.assertEqual(self.provider_names(), before)
+        runs: list[bool] = []
+        self.window.when_idle(lambda: runs.append(True))
+        self.assertEqual(runs, [True])  # nothing held
 
 
 class NoProviderRouterTests(RouterCase):

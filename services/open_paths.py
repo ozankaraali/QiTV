@@ -164,3 +164,12 @@ def holds_the_start(paths: Iterable[str]) -> bool:
     message comes instead. Subtitle and playlist files alone start as any start does."""
     kinds = sort_paths(paths)
     return bool(kinds.media or kinds.others)
+
+
+def reads_the_start(paths: Iterable[str]) -> bool:
+    """Whether a start with `paths` waits for its playlists to be read before it starts: it
+    carries one and no media file (a media file plays instead, and its playlists only add
+    their providers). One of local files then holds the start as a film does; a provider's
+    lets it start as any start does (TVWindow._on_playlists_read)."""
+    kinds = sort_paths(paths)
+    return bool(kinds.playlists) and not kinds.media
