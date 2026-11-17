@@ -213,6 +213,7 @@ def main() -> int:
     from services.image_manager import ImageManager
     from services.provider_manager import ProviderManager
     from services.sleep_manager import allow_sleep, prevent_sleep
+    from ui.file_types_settings import refresh_at_start
     from ui.theme import focus_qss
     from ui.tv_window import HANDOVER, LAUNCH, TVWindow
     from ui.update_dialogs import check_for_updates, replace_failed
@@ -294,6 +295,9 @@ def main() -> int:
         window.show()
         if opened:
             window.open_paths(opened, source=LAUNCH)
+        # A QiTV moved or renamed since it registered for videos registers again where it is
+        # now, on a thread of its own (never from source); the config is saved once it changed.
+        refresh_at_start(config_manager, window)
         if not_replaced is not None:  # where the new version is, and where the old one stayed
             old_path, new_path = not_replaced
             QTimer.singleShot(0, window, lambda: replace_failed(old_path, new_path, window))

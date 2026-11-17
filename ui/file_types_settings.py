@@ -1,0 +1,222 @@
+"""Settings → General → Open videos with QiTV: one button registers QiTV with the system for
+video files, or takes it back (services.file_types), on a thread of its own; the hint under it
+says what the system does then. At start, a QiTV that was moved registers itself again where
+it is now (`refresh_at_start`).
+
+The service only records what it did in the config; it is saved here, on the GUI thread."""
+
+from __future__ import annotations
+
+import logging
+import sys
+import threading
+from typing import Any, Callable, Optional
+
+from PySide6.QtCore import QObject, Qt, Signal, Slot
+from PySide6.QtWidgets import QFormLayout, QLabel, QPushButton, QVBoxLayout, QWidget
+from shiboken6 import isValid
+
+from services import file_types
+from services.file_types import Status
+from services.i18n import N_, tr, translate
+from services.redact import safe_message
+
+logger = logging.getLogger(__name__)
+
+KIND = "videos"
+PRESS_THREAD = "qitv-file-types"
+REFRESH_THREAD = "qitv-file-types-refresh"
+ERROR_STYLE = "color: red;"  # as Settings' other failures (Verify Provider, Paste link)
+
+# The button (Settings → General → Open videos with QiTV) and the hints under it.
+# i18n: a button (Settings → General): video files open in QiTV, as with a double-click
+USE_TEXT = N_("Use QiTV for videos")
+# i18n: a button (Settings → General): video files no longer open in QiTV
+STOP_TEXT = N_("Stop using QiTV for videos")
+# i18n: a hint on Windows; "Default Apps": Windows Settings' page, as Windows names it
+WINDOWS_HINT = N_("Windows then asks you to confirm in its Default Apps settings.")
+# i18n: a hint on macOS (the button makes QiTV their default); keep the formats' names
+MAC_HINT = N_("QiTV becomes the default for MKV, MP4, MOV, AVI and WebM.")
+# macOS gives the files no app back by itself when QiTV stops.
+# i18n: a hint on macOS; Get Info, Open with, Change All: Finder's own names for them
+MAC_REGISTERED_HINT = N_("To pick another app, use Get Info → Open with → Change All in Finder.")
+# i18n: a hint on Linux (the button makes QiTV the default video player)
+LINUX_HINT = N_("QiTV becomes the default video player.")
+LINUX_OPEN_WITH_HINT = N_(
+    # i18n: a hint on Linux when the system took no default; "Open With": the file manager's menu
+    "QiTV is in Open With now. To make it the default, choose it in your file manager's Open With."
+)
+# i18n: a hint under the disabled button: QiTV runs from a temporary folder or a zip
+TEMPORARY_HINT = N_("Move QiTV out of the temporary folder first.")
+# i18n: a hint on macOS (QiTV runs from Downloads or its disk image): the Applications folder
+MAC_TEMPORARY_HINT = N_("Move QiTV into Applications first.")
+# i18n: a hint under the button: telling the system failed (QiTV's log says why)
+FAILED_HINT = N_("Couldn't change it. See the log.")
+
+_HINTS = {
+    (Status.NOT_REGISTERED, "win32"): WINDOWS_HINT,
+    (Status.NOT_REGISTERED, "darwin"): MAC_HINT,
+    (Status.NOT_REGISTERED, "linux"): LINUX_HINT,
+    (Status.REGISTERED, "darwin"): MAC_REGISTERED_HINT,
+    (Status.TEMPORARY, "darwin"): MAC_TEMPORARY_HINT,
+}
+
+
+def _system() -> str:
+    """The system the hints are for: "win32", "darwin" or "linux"."""
+    return "linux" if sys.platform.startswith("linux") else sys.platform
+
+
+def hint_text(state: Status, system: str, open_with_only: bool = False) -> str:
+    """The hint under the button ("": none). `open_with_only`: this window registered QiTV on
+    Linux without making it the default (no xdg-mime)."""
+    if state is Status.REGISTERED and system == "linux" and open_with_only:
+        return translate(LINUX_OPEN_WITH_HINT)
+    hint = _HINTS.get((state, system))
+    if hint is None and state is Status.TEMPORARY:
+        hint = TEMPORARY_HINT
+    return translate(hint) if hint else ""
+
+
+def _save(config: Any) -> None:
+    try:
+        config.save_config()  # written off the GUI thread (ConfigManager.write_in_background)
+    except Exception as e:  # a locked config: kept for this run only
+        logger.warning("Couldn't save which files QiTV opens: %s", safe_message(e))
+
+
+class _Answer(QObject):
+    """A worker's answer, heard on the GUI thread (this object's) through a queued signal."""
+
+    answered = Signal(object)
+
+    def __init__(self, parent: QObject, handle: Callable[[object], None]) -> None:
+        super().__init__(parent)
+        self._handle = handle
+        self.answered.connect(self._deliver, Qt.ConnectionType.QueuedConnection)
+
+    def run(self, work: Callable[[], object], name: str) -> None:
+        """`work()` on a thread of its own; its answer (None when it raised) is handled here."""
+
+        def body() -> None:
+            try:
+                answer = work()
+            except Exception:  # never unanswered: the button would stay disabled
+                logger.warning("Telling the system which files QiTV opens failed", exc_info=True)
+                answer = None
+            try:
+                self.answered.emit(answer)
+            except RuntimeError:
+                pass  # the window closed meanwhile
+
+        threading.Thread(target=body, name=name, daemon=True).start()
+
+    @Slot(object)
+    def _deliver(self, answer: object) -> None:
+        self._handle(answer)
+
+
+class FileTypesRow:
+    """The row: its button and hint (`button`, `hint`), hidden where QiTV can't register (a
+    run from source)."""
+
+    def __init__(self, dialog: Any, layout: QFormLayout, parent: QWidget) -> None:
+        self._config = dialog.config_manager
+        self._layout = layout
+        self._busy = False  # a press's answer is on its way
+        self._failed = False  # the last press failed: the hint says so
+        self._open_with_only = False  # Linux: this window's register took no default
+        self.box = QWidget(parent)
+        column = QVBoxLayout(self.box)
+        column.setContentsMargins(0, 0, 0, 0)
+        self.button = QPushButton(self.box)
+        self.button.setObjectName("fileTypesButton")
+        self.button.setAutoDefault(False)  # Enter in a field still saves
+        self.button.clicked.connect(self.press)
+        column.addWidget(self.button, 0, Qt.AlignmentFlag.AlignLeft)
+        self.hint = QLabel(self.box)
+        self.hint.setObjectName("fileTypesHint")
+        self.hint.setWordWrap(True)
+        column.addWidget(self.hint)
+        # i18n: a setting (General): QiTV opens video files, as with a double-click on one
+        layout.addRow(tr("Open videos with QiTV"), self.box)
+        # Settings' own: an answer that comes after it closed still saves the config.
+        self._answer = _Answer(dialog, self._answered)
+        self.show()
+
+    def show(self) -> None:
+        """The button and hint as the record says now."""
+        state = file_types.status(KIND, self._config)
+        self._layout.setRowVisible(self.box, state is not Status.UNAVAILABLE)
+        registered = state is Status.REGISTERED
+        if not registered:
+            self._open_with_only = False
+        self.button.setText(translate(STOP_TEXT if registered else USE_TEXT))
+        can_press = state in (Status.REGISTERED, Status.NOT_REGISTERED)
+        self.button.setEnabled(can_press and not self._busy)
+        if self._failed:
+            text = translate(FAILED_HINT)
+        else:
+            text = hint_text(state, _system(), self._open_with_only)
+        self.hint.setText(text)
+        self.hint.setStyleSheet(ERROR_STYLE if self._failed else "")
+        self.hint.setVisible(bool(text))  # (an empty line's height until it says something)
+
+    def press(self) -> None:
+        """Use QiTV for videos, or Stop using it: the system is told on a worker."""
+        if self._busy:
+            return
+        config = self._config
+        state = file_types.status(KIND, config)
+        work: Callable[[], object]
+        if state is Status.REGISTERED:
+            work = lambda: (False, file_types.unregister(KIND, config))  # noqa: E731
+        elif state is Status.NOT_REGISTERED:
+            work = lambda: (True, file_types.register(KIND, config))  # noqa: E731
+        else:
+            return
+        self._busy = True
+        self.button.setEnabled(False)
+        self._answer.run(work, PRESS_THREAD)
+
+    def _answered(self, answer: object) -> None:
+        """On the GUI thread: saved when it worked (the service recorded it), Windows' Default
+        Apps opened after a register; the row follows while Settings is still there."""
+        self._busy = False
+        registering, result = answer if isinstance(answer, tuple) else (False, None)
+        if result:
+            _save(self._config)
+            if registering and _system() == "win32":
+                file_types.open_default_apps()  # where Windows asks the user to confirm
+        if not (isValid(self.button) and isValid(self.hint)):
+            return  # Settings is gone
+        self._failed = not result
+        if result and registering:
+            self._open_with_only = not getattr(result, "defaults", True)
+        self.show()
+
+
+def add_file_types_row(dialog: Any, layout: QFormLayout, parent: QWidget) -> FileTypesRow:
+    """The row, at the end of `layout`; `dialog.file_types_button` and `file_types_hint`."""
+    row = FileTypesRow(dialog, layout, parent)
+    dialog.file_types_row = row
+    dialog.file_types_button = row.button
+    dialog.file_types_hint = row.hint
+    return row
+
+
+def refresh_at_start(config: Any, parent: QObject, frozen: Optional[bool] = None) -> None:
+    """At start, on a thread of its own: a QiTV that was moved or renamed registers itself
+    again where it is now (`file_types.refresh`); the config is saved here once that changed
+    the record. Nothing from source, nor with nothing registered."""
+    packaged = bool(getattr(sys, "frozen", False)) if frozen is None else frozen
+    if not packaged or not config.file_types:
+        return
+
+    def work() -> bool:
+        before = dict(config.file_types)
+        file_types.refresh(config, frozen=packaged)
+        return bool(config.file_types != before)
+
+    answer = _Answer(parent, lambda changed: _save(config) if changed else None)
+    answer.run(work, REFRESH_THREAD)

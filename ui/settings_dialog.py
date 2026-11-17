@@ -73,6 +73,7 @@ from services.redact import safe_exc
 from services.thread_cleanup import ThreadCleanup
 from services.tmdb import built_in_token as tmdb_built_in_token
 from ui.captions_texts import size_text
+from ui.file_types_settings import add_file_types_row
 from ui.free_channels_menu import show_menu as show_free_channels_menu
 from ui.hidden_groups_settings import add_hidden_groups_box
 from ui.parental_settings import build_parental_tab, pin_allows
@@ -769,6 +770,8 @@ class OptionsDialog(QDialog):
         )
         self.start_last_channel_checkbox.setChecked(self.config_manager.start_with_last_channel)
         self.settings_layout.addRow(self.start_last_channel_checkbox)
+        # Video files open in QiTV (a button acting at once, not at Save); no row from source.
+        add_file_types_row(self, self.settings_layout, self.settings_tab)
 
         # External players as a mode: every channel opens there instead of the TV screen.
         self.play_in_vlc_checkbox = QCheckBox(tr("Always play in VLC"), self.settings_tab)
