@@ -1,0 +1,6 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 416 416">
+  <!-- QiTV's mark: the coral glyph of assets/qitv.png on the logo's 416 grid (the icon at half
+       size, 48 pixels cut from each side), its straight edges square and its hook two smooth
+       curves. ui/opening_mark.py draws it from the first point, along the bottom first. -->
+  <path fill="#ff6656" d="M348 325.5 L77.5 325.5 L77.5 255.5 L107.5 255.5 L107.5 176 C107.5 150.7 86.4 151.4 68.5 159.7 L68.5 99.5 C85.6 89.3 103.4 84.2 123.7 84.2 C172.3 84.2 197 107.8 197 157 L197 255.5 L229 255.5 L229 88.5 L337.5 88.5 L337.5 158.5 L318.5 158.5 L318.5 255.5 L348 255.5 Z"/>
+</svg>

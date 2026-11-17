@@ -40,6 +40,7 @@ a = Analysis(
         ('pyproject.toml', '.'),  # Include pyproject.toml so version can be read
         ('assets/qitv.png', 'assets'),  # the logo the Library, welcome card and About show
         ('assets/tmdb.png', 'assets'),  # TMDB's logo: About credits it, as its terms ask
+        ('assets/qitv-mark.svg', 'assets'),  # QiTV's mark the opening draws (ui/opening_mark.py)
         # QiTV's license, and those of what the app ships (VLC, Qt, Python libraries).
         ('LICENSE', '.'),
         ('THIRD-PARTY-NOTICES.md', '.'),
