@@ -151,6 +151,36 @@ class FileHoldTests(ControllerTestCase):
         self.assertEqual(toast.text(), "Couldn't open “Film.mkv”")
         self.assertTrue(wait_until(lambda: toast.text() == "Loading Home…"))
 
+    def test_the_viewers_own_provider_choice_shows_loading_during_a_film(self):
+        # Only start()'s own hint waits for the film. A provider the viewer chooses over it (the
+        # menu bar, a Settings save or refresh, the drawer's sources) says it loads, at once, and
+        # stays said: another file opened meanwhile leaves it, and the film's end says it no
+        # second time.
+        self.catalog.names = ["Home", "Two"]
+        self.controller.hold_for_file(True)  # main(), before the window shows
+        self.controller.start()
+        self.assertEqual(self.toast.named("set_hint"), [])  # start()'s waits
+        self.film()
+        self.assertIsNone(self.toast.hint)
+        choices = (
+            ("Loading Two…", lambda: self.controller.select_provider("Two")),  # the menu bar
+            ("Loading Home…", lambda: self.controller.select_provider(force_refresh=True)),
+            ("Loading Two…", lambda: self.nav.providerRequested.emit("Two")),  # the drawer
+        )
+        for hint, choose in choices:
+            self.toast.calls.clear()
+            choose()
+            self.assertEqual(self.toast.named("set_hint"), [(hint,)], hint)
+            self.film("/videos/Dizi Bölüm 2.mkv")  # another file opened meanwhile
+            self.assertEqual(self.toast.hint, hint)
+        self.toast.calls.clear()
+        self.when_idle()
+        self.session.stateChanged.emit("ended")
+        self.session.ended.emit()
+        self.assertEqual(self.runs, ["update question"])  # the film is over
+        self.assertEqual(self.toast.named("set_hint"), [])  # up all along: not said again
+        self.assertEqual(self.toast.hint, "Loading Two…")
+
     def test_a_failed_setup_still_says_so_over_the_film(self):
         self.controller.hold_for_file(True)
         self.controller.start()

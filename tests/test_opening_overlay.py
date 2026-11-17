@@ -5,10 +5,12 @@ unless a picture shows already, and opens out of the page once the file's pictur
 pressed, or after 20 s. It takes no click, key or focus. Fictional files; the controller's
 play_file is the router tests' fake, and the session's picture is said by the test."""
 
+import multiprocessing
 import os
 from pathlib import Path
 import shutil
 import tempfile
+import time
 import unittest
 from unittest import mock
 
@@ -25,12 +27,17 @@ from services.vlc_profile import PlayKind
 from tests import test_tv_window as base
 from tests.test_open_router import FILM, SETTLE_MS, RouterCase
 from tests.test_playback_session import _FakeInstance, _HeldRunner, _ShapePlayer, vlc
+from tests.test_splash_helper import GEOMETRY, WAIT_S, OpacityWindow, opacity, unwatched
+from ui import splash_helper
 from ui.link_lanes import Target
 from ui.opening_mark import MARK_PX, STAGE_PX, STILL_T, OpeningMark
 from ui.overlays.opening import APPEAR_MS, OPENING_TIMEOUT_MS, OpeningOverlay
 
 FILM_URL = "http://provider.test/film.mp4"
 FAILED = "The stream could not be opened"
+# From a helper's end to its "ended" in QiTV: its exit, then the watcher's join (a recorded start
+# on hel: about 0.14 s).
+REAP_S = 0.1
 
 
 class OverlayCase(RouterCase):
@@ -400,6 +407,86 @@ class OverlayWidgetTests(unittest.TestCase):
         self.assertTrue(overlay.mark.isHidden())  # its open-out is not seen
         overlay.open_for(_Session(), "file:///Film 2.mkv")  # the next file's shows
         self.assertFalse(overlay.mark.isHidden())
+
+
+class SplashOpenTests(unittest.TestCase):
+    """The player's mark as the splash opens out into the window (ui/splash_helper.py), both
+    marks real: the helper's window in this process, the test its watcher."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.app = QApplication.instance() or QApplication([])
+
+    def test_reduced_motion_marks_cross_fade_on_opening(self):
+        # Less motion asked for: a film's start opens plainly, the splash's lit mark fading out
+        # where it is. The player's fades in from "opening" on, as that one fades: let go only
+        # at "ended" (the helper ended, then reaped), it left the screen with no mark between
+        # the two (lit, out, lit).
+        pin_motion(self, reduced=True)
+        conn, child = multiprocessing.Pipe(duplex=True)
+        self.addCleanup(conn.close)
+        self.addCleanup(child.close)
+        gone = []  # when the helper ended (its window hidden)
+        helper = splash_helper._SplashWindow(child, GEOMETRY, lambda: gone.append(time.monotonic()))
+        self.addCleanup(helper.deleteLater)
+        self.assertTrue(helper.begin())
+        self.assertTrue(wait_until(conn.poll))
+        self.assertEqual(conn.recv()[0], "shown")
+        window = OpacityWindow()
+        self.addCleanup(window.deleteLater)
+        window.resize(800, 600)
+        overlay = OpeningOverlay(window)
+        splash, _ = unwatched(window)
+        splash._origin = helper.origin
+        sent = []
+
+        class Pipe:
+            """The watcher's part: what QiTV queues reaches the helper."""
+
+            def put(self, message):
+                sent.append(message[0])
+                conn.send(message)
+
+        splash._commands = Pipe()
+        told = {}  # when "opening" and "ended" were passed on to QiTV
+        levels = []  # (when, the splash's mark, the player's as it shows on screen)
+
+        def turn():
+            while conn.poll():
+                message = conn.recv()
+                if message[0] == "opening":
+                    told["opening"] = time.monotonic()
+                    splash._relay.tell(message)
+            if gone and "ended" not in told and time.monotonic() >= gone[0] + REAP_S:
+                told["ended"] = time.monotonic()
+                splash._relay.tell(("ended",))
+            self.app.processEvents()
+            mark = overlay.mark
+            theirs = helper.frame().fade if helper.isVisible() else 0.0
+            mine = opacity(window) * mark.frame().fade if mark.isVisible() else 0.0
+            levels.append((time.monotonic(), theirs, mine))
+            time.sleep(0.005)
+
+        with mock.patch.object(splash_helper, "_fades_windows", return_value=True):
+            splash.before_show(window)
+            window.show()
+            splash.open_into(window, overlay)
+            overlay.open_for(_Session(), "file:///Film.mkv")  # the router plays the film
+            deadline = time.monotonic() + WAIT_S
+            while "ended" not in told and time.monotonic() < deadline:
+                turn()
+            after = time.monotonic() + APPEAR_MS / 1000
+            while time.monotonic() < after:
+                turn()  # through "ended" and what comes after it
+        self.assertEqual(sent, ["open"])  # a plain open: nothing glides
+        self.assertIn("ended", told)
+        seen = next(when for when, _, mine in levels if mine > 0.0)
+        self.assertLess(told["opening"], seen)  # it fades in from "opening" on
+        self.assertLess(seen, told["ended"])  # not only once the splash has gone
+        for when, theirs, mine in levels:
+            if when >= told["opening"]:
+                after_opening = when - told["opening"]
+                self.assertGreater(max(theirs, mine), 0.0, f"no mark +{after_opening:.3f} s")
 
 
 class _VoutPlayer(_ShapePlayer):

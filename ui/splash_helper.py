@@ -5,11 +5,11 @@ main() builds the window on its GUI thread before the event loop runs, so it can
 anything meanwhile. Splash.start() spawns run_splash (multiprocessing, "spawn"), which loops the
 mark (ui.opening_mark) in a frameless, translucent window that stays on top, centred on the
 primary screen. Once the shown window is on screen, open_into(window, overlay) either tells it
-"open" (the mark completes its draw and opens out, and the window fades in as it does) or, on a
-file's start, where the player page draws the same mark on the same loop, "handover": the
-splash glides onto the player's mark as the window fades in, and the player's own mark takes
-over in place, one mark from the double-click into the player. close() tells it "quit": a
-start that handed over, or QiTV's end.
+"open" (the mark completes its draw and opens out, and the window fades in as it does, with a
+file's mark on the player page) or, on a file's start, where the player page draws the same
+mark on the same loop, "handover": the splash glides onto the player's mark as the window fades
+in, and the player's own mark takes over in place, one mark from the double-click into the
+player. close() tells it "quit": a start that handed over, or QiTV's end.
 
 The pipe carries ("open", frame), ("handover", rect), ("bare",) and ("quit",) to the helper
 (rectangles as (x, y, width, height)), and ("shown", loop origin), ("opening",),
@@ -247,8 +247,8 @@ class Splash:
             self._glide_to(target)
             self._fade()  # the window fades in as the mark glides
         else:
-            # The splash's mark opens out; the player's stays unseen until it has gone (the
-            # watcher's "ended"): one mark at a time.
+            # The splash's mark opens out; the player's stays unseen until it does ("opening"),
+            # then fades in as it goes: the two cross-fade, never a moment with no mark.
             self._send_open()
             # The window fades as the mark opens out ("opening", after its draw completes),
             # never later than this. (Lambdas, here and below: PySide 6.11's singleShot with a
@@ -310,8 +310,8 @@ class Splash:
 
     def _let_go(self, *, fade: bool = False) -> None:
         """The player's mark shows again (where it still draws), fading in with `fade` (the
-        splash's has gone: never a pop), and a later file's draws from its beginning, as
-        before the splash."""
+        splash's opens out, or has gone: never a pop), and a later file's draws from its
+        beginning, as before the splash."""
         if self._overlay is not None:
             self._overlay.hold_mark(False, fade=fade)
             self._overlay.loop_origin = lambda: None
@@ -337,8 +337,8 @@ class Splash:
             return
         if not overlay.opening():
             # The file showed its picture (or failed) during the glide: the splash's mark
-            # opens out where it is; the player's has opened out unseen (it shows again only
-            # once the splash has gone).
+            # opens out where it is; the player's has opened out unseen (let go, nothing of it
+            # shows: the next file's does).
             self._handing = False
             self._send_open()
         elif not self._swapping:
@@ -371,6 +371,9 @@ class Splash:
     def _heard(self, message: tuple[Any, ...]) -> None:
         """What the watcher heard, on the GUI thread."""
         if message[0] == "opening":
+            # The splash's mark opens out ("open" goes once nothing glides): the player's fades
+            # in as it goes, as the window does, the two cross-fading.
+            self._let_go(fade=True)
             self._fade()
         elif message[0] == "arrived":
             target = self._target
@@ -386,7 +389,9 @@ class Splash:
             self._ended = True
             if self._window is not None:  # nothing glides or opens any more
                 self._handing = False
-                self._let_go(fade=True)  # the player's mark, if it draws, now the only one
+                # The player's mark, if it draws, now the only one (where no "opening" let it go
+                # already: the splash ended unseen, or crashed).
+                self._let_go(fade=True)
                 self._fade()
 
     # ---- the watcher thread ----

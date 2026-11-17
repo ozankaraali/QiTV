@@ -548,13 +548,13 @@ class SplashTests(unittest.TestCase):
                 if chosen == "handover":
                     self.assertEqual(sent[0][0][1], (*NEAR, STAGE_PX, STAGE_PX))
                     continue
-                # One mark at a time: the player's shows once the splash's has gone.
+                # The player's shows as the splash's opens out ("opening"), never before.
                 pump(0.1)
                 self.assertEqual(overlay.holds, [(True, None)])
-                splash._relay.tell(("ended",))
+                splash._relay.tell(("opening",))
                 self.assertTrue(pump_until(lambda: len(overlay.holds) == 2))
                 self.assertFalse(overlay.holds[1][0])
-                self.assertEqual(overlay.fades, [True])  # it fades in: the splash's has gone
+                self.assertEqual(overlay.fades, [True])  # fading in as the splash's goes
                 self.assertIsNone(overlay.loop_origin())  # a later file's from its start
 
     def test_under_reduced_motion_it_opens_and_never_glides(self):
@@ -696,7 +696,7 @@ class SplashTests(unittest.TestCase):
             self.assertTrue(pump_until(lambda: len(sent) == 2))
             self.assertTrue(pump_until(lambda: opacity(window) == 1.0))
         self.assertEqual(names(sent), ["handover", "open"])
-        self.assertEqual(overlay.holds, [(True, 0.0)])  # unseen until the splash has gone
+        self.assertEqual(overlay.holds, [(True, 0.0)])  # unseen until the splash's opens out
 
     def test_an_overlay_that_closes_during_the_glide_falls_back_to_the_open(self):
         window = self.window()
