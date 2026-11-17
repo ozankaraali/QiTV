@@ -78,6 +78,20 @@ class WindowsUpdateTests(unittest.TestCase):
         )
         close_all.assert_called_once_with()
 
+    def test_an_updates_copy_updates_the_installed_qitv_again(self):
+        # A run that is itself an update's copy (it replaced the installed QiTV and runs on
+        # from Downloads): a newer update replaces the installed QiTV again, never the copy.
+        from services import file_types
+
+        installed = "C:\\Users\\Ayşe\\QiTV\\qitv-windows.exe"
+        self.addCleanup(file_types.use_installed, None)
+        file_types.use_installed(installed)
+        self.pending[0] = False  # no background thread to wait for
+        process, _close_all = self.update()
+        self.assertEqual(
+            process.Popen.call_args[0][0], ["C:/Downloads/qitv.exe", "--replace", installed]
+        )
+
     def test_a_launch_that_fails_runs_the_undo_hooks_before_the_error_dialog(self):
         holder = Holder(self.calls, self.pending)
         update_checker.call_before_update(holder.stop_live, holder.restart_live)

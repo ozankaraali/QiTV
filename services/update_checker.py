@@ -558,9 +558,12 @@ def _perform_windows_update(downloaded_path: str, release_url: str, ui: Optional
         )
         return
 
-    # Get the path to the original executable (not the temp extraction folder)
-    # For PyInstaller, sys.executable points to the original .exe file
-    original_exe = sys.executable
+    # The installed QiTV, which the new copy writes itself over: for PyInstaller,
+    # sys.executable is the original .exe (not the temp extraction folder); in a run that is
+    # itself an update's copy, it is the installed one that copy replaced (file_types).
+    from services.file_types import own_executable
+
+    original_exe = own_executable()
 
     try:
         # Launch the downloaded exe with --replace flag
