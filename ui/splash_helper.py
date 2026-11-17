@@ -26,7 +26,9 @@ start(lit=True) has the helper's mark begin on that frame, its tile where the st
 centred as Tk centres), its light and shadow coming in over LIGHT_IN_MS: the mark lights up as
 it takes over, and stays lit, its light breathing, until it opens (never out and drawn again).
 Once "shown", QiTV closes the bootloader's (main.BootloaderSplash, through
-`on_shown`, or `on_end` if the helper ends unshown).
+`on_shown`, or `on_end` if the helper ends unshown); a helper not shown by the time the window
+is ready leaves the still on top until the window is drawn (when_drawn), and the window shows
+as it is (never transparent behind nothing).
 
 The helper process imports PySide6's GUI modules and the mark only (and ui.macos_window on
 macOS, where it takes no Dock icon or menu bar).
@@ -122,6 +124,7 @@ class Splash:
         # The helper's mark's loop origin (time.monotonic), from its "shown": the watcher
         # writes it, the GUI thread reads it.
         self._origin: Optional[float] = None
+        self._shown = False  # the helper said its window is on screen (the watcher writes it)
         self._opened = False
         self._closed = False
         self._ended = False  # the helper has ended
@@ -174,11 +177,19 @@ class Splash:
         return True
 
     def before_show(self, window: QWidget) -> None:
-        """Before the window first shows: it starts transparent, with the top-levels that show
-        with it (the player page's OverlayHost: its title, controls and toasts), to fade in as
-        one as the splash opens into it (open_into). Where the platform fades no window, they
-        show as they are."""
-        if self._process is not None and self._transparent is None and _fades_windows():
+        """Before the window first shows: over a splash on screen ("shown"), it starts
+        transparent, with the top-levels that show with it (the player page's OverlayHost: its
+        title, controls and toasts), to fade in as one as the splash opens into it
+        (open_into). A splash not on screen yet would leave nothing there meanwhile (or
+        PyInstaller's still, which main() keeps until the window is drawn: when_drawn): the
+        window shows as it is, and the splash, told to open before it showed, ends unseen.
+        Where the platform fades no window, they show as they are."""
+        if (
+            self._process is not None
+            and self._shown
+            and self._transparent is None
+            and _fades_windows()
+        ):
             self._layers = [window, *glued_layers(window)]
             for layer in self._layers:
                 layer.setWindowOpacity(0.0)
@@ -384,6 +395,7 @@ class Splash:
                         shown = True
                         if len(message) > 1 and isinstance(message[1], float):
                             self._origin = message[1]
+                        self._shown = True
                         self._call(self._on_shown, "shown")
                     elif name == "opening":
                         self._relay.tell(("opening",))
@@ -472,6 +484,12 @@ class _Relay(QObject):
     @Slot(object)
     def _deliver(self, message: tuple[Any, ...]) -> None:
         self._handler(message)
+
+
+def when_drawn(window: QWidget, then: Callable[[], None]) -> None:
+    """`then` once the shown `window` is on screen with its first paint done (_WhenDrawn):
+    main() closes PyInstaller's still then, unless the splash took its place already."""
+    _WhenDrawn(window, then)
 
 
 class _WhenDrawn(QObject):

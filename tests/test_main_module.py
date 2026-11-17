@@ -504,9 +504,14 @@ class BootloaderSplashTests(unittest.TestCase):
         # a start that handed over: right after the claim
         handed_over = body[body.index("if handed_over:") : body.index("return 0")]
         self.assertTrue(handed_over.split("\n", 1)[1].strip().startswith("bootloader.close("))
-        # before the window shows (it would cover it), and at the end
+        # once the window is on screen (it would cover it; closed before, a splash not shown
+        # yet would leave an empty screen until the window is drawn), and at the end
         show = body.index("window.show()")
-        self.assertIn('bootloader.close("', body[body.index("splash.before_show(window)") : show])
+        shows = body[body.index("splash.before_show(window)") : show]
+        self.assertNotIn('bootloader.close("', shows)
+        drawn = body.index('when_drawn(window, lambda: bootloader.close("')
+        self.assertLess(show, drawn)
+        self.assertLess(drawn, body.index("splash.open_into(window"))
         self.assertIn('bootloader.close("', body.rsplit("finally:", 1)[1])
 
     def test_the_smoke_test_closes_it_first(self):

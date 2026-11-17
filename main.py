@@ -289,7 +289,7 @@ def main() -> int:
     # thread builds the window until it shows. It shows while another QiTV is asked, too. Over
     # the bootloader's splash, it begins on that frame, and that one goes once it shows (or
     # it ended without showing).
-    from ui.splash_helper import Splash
+    from ui.splash_helper import Splash, when_drawn
 
     splash = Splash(
         on_shown=lambda: bootloader.close("the splash shows over it"),
@@ -424,9 +424,12 @@ def main() -> int:
             # over it, from the window's first moment (open_paths holds too, once it shows).
             # A file QiTV won't play holds too: open_paths says so, then lets go.
             window.controller.hold_for_file(True)
-        splash.before_show(window)  # transparent: it fades in as the splash opens into it
-        bootloader.close("the window shows")  # by now (it stays on top of the window)
+        # Transparent over a splash on screen: it fades in as the splash opens into it.
+        splash.before_show(window)
         window.show()
+        # PyInstaller's still, where the splash hasn't taken its place yet, stays on top until
+        # the window is on screen: never an empty screen between them.
+        when_drawn(window, lambda: bootloader.close("the window shows"))
         # A film's start: the splash's mark glides onto the player page's, which draws on.
         splash.open_into(window, window.opening_overlay)
         if opened:

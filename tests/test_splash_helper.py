@@ -68,6 +68,15 @@ def stubborn(conn, geometry, lit=False):
     time.sleep(60)
 
 
+LATE_S = 1.5  # a helper that shows this late: after the window is on screen
+
+
+def late(conn, geometry, lit=False):
+    """The real helper, slow to start (a busy computer, a slow disk)."""
+    time.sleep(LATE_S)
+    run_splash(conn, geometry, lit)
+
+
 def dockless(conn, geometry, lit=False):
     """The real helper on a Mac whose activation-policy call fails."""
     with (
@@ -112,12 +121,14 @@ class OpacityWindow(QWidget):
         self.opacities.append((time.monotonic(), level))
 
 
-def unwatched(window):
-    """A started Splash with no helper and no watcher, its window at GEOMETRY: each message
-    it queues is kept, with `window`'s opacity and the time at that moment."""
+def unwatched(window, *, shown=True):
+    """A started Splash with no helper and no watcher, its window at GEOMETRY (on screen once
+    `shown`, as its "shown" says): each message it queues is kept, with `window`'s opacity
+    and the time at that moment."""
     splash = Splash()
     splash._process = mock.Mock()
     splash._place = QRect(*GEOMETRY)
+    splash._shown = shown
     sent = []
 
     class Queue:
@@ -404,6 +415,48 @@ class SplashTests(unittest.TestCase):
         self.assertGreaterEqual(window.opacities[-1][0] - rising(window), 0.3)
         splash._watcher.join(WAIT_S)
         self.assertEqual(splash._process.exitcode, 0)  # it opened and quit by itself
+
+    def test_a_window_ready_before_the_splash_shows_shows_as_it_is(self):
+        # Nothing of the splash is on screen yet (PyInstaller's still may be): the window
+        # never waits transparent behind nothing. It shows as it is, and the splash, told to
+        # open before it showed, ends unseen.
+        window = self.window()
+        splash, sent = unwatched(window, shown=False)
+        overlay = FakeOverlay(window)
+        with mock.patch.object(splash_helper, "_fades_windows", return_value=True):
+            splash.before_show(window)
+            window.show()
+            splash.open_into(window, overlay)
+            self.assertTrue(pump_until(lambda: sent))
+            splash._relay.tell(("ended",))
+            self.assertTrue(pump_until(lambda: len(overlay.holds) == 2))
+        self.assertEqual(names(sent), ["open"])
+        self.assertEqual(window.opacities, [])  # never transparent
+
+    def test_a_splash_that_shows_late_never_comes_after_the_window(self):
+        # A real helper that starts after the window is on screen, in main()'s order: the
+        # window is never transparent, the helper ends unseen, and PyInstaller's still goes
+        # only once the window is drawn (never an empty screen between them).
+        shown, closed, drawn = [], [], []
+        window = self.window()
+        window.paintEvent = lambda event: drawn.append(time.monotonic())
+        with (
+            mock.patch.object(splash_helper, "run_splash", late),
+            mock.patch.object(splash_helper, "_fades_windows", return_value=True),
+        ):
+            splash = Splash(on_shown=lambda: shown.append(1))
+            self.assertTrue(splash.start(QRect(*GEOMETRY)))
+            self.addCleanup(splash._process.kill)
+            splash.before_show(window)
+            window.show()
+            splash_helper.when_drawn(window, lambda: closed.append(time.monotonic()))
+            splash.open_into(window)
+            self.assertTrue(pump_until(lambda: not splash._watcher.is_alive(), SPAWN_S))
+        self.assertEqual(window.opacities, [])
+        self.assertEqual(shown, [])  # it ended unseen
+        self.assertEqual(splash._process.exitcode, 0)
+        self.assertTrue(drawn and closed)
+        self.assertGreater(closed[0], drawn[0])  # the still went once the window was drawn
 
     def test_the_window_fades_as_the_mark_opens_out(self):
         # "open" goes once the window is on screen; the window fades as the helper says its
@@ -1086,10 +1139,12 @@ class MainTests(unittest.TestCase):
         # a start that handed over ends it
         handed_over = body[body.index("if handed_over:") : body.index("return 0")]
         self.assertIn("splash.close()", handed_over)
-        # the window starts transparent, then the splash opens into it
+        # the window starts transparent (over a splash on screen), then the splash opens into
+        # it; PyInstaller's still stays until the window is drawn
         show = body.index("window.show()")
         self.assertLess(body.index("splash.before_show(window)"), show)
         self.assertLess(show, body.index("splash.open_into(window, window.opening_overlay)"))
+        self.assertLess(show, body.index('when_drawn(window, lambda: bootloader.close("'))
         self.assertIn("splash.close()", body.rsplit("finally:", 1)[1])
 
     def test_no_splash_for_smoke_or_replace(self):
