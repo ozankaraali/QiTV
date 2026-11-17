@@ -249,10 +249,17 @@ def mark_rect(area: QRectF, side: float = MARK_PX) -> QRectF:
 
 
 def paint_mark(
-    p: QPainter, rect: QRectF, t: float, *, still: bool = False, opening: float = 0.0
+    p: QPainter,
+    rect: QRectF,
+    t: float,
+    *,
+    still: bool = False,
+    opening: float = 0.0,
+    bare: bool = False,
 ) -> None:
     """QiTV's mark at loop phase `t` (0..1): its light, the tile and its shadow, the outline
-    drawn so far and the fill.
+    drawn so far and the fill; `bare`, the tile and the glyph only (the opaque parts: where the
+    same mark's light and shadow show under it, they are not drawn twice).
 
     `rect` is the mark's square, its tile's 416 grid (MARK_PX on screen; a non-square rect
     uses the square in its middle). The light spills out of it, to LIGHT_PX/MARK_PX of its side
@@ -274,9 +281,9 @@ def paint_mark(
         p.scale(scale, scale)
         p.translate(-GRID / 2, -GRID / 2)
         if opening > 0.0 or p.opacity() < 1.0:
-            _in_layer(p, _stage_bounds(phase), 1.0 - opening, lambda q: _paint_all(q, phase))
+            _in_layer(p, _stage_bounds(phase), 1.0 - opening, lambda q: _paint_all(q, phase, bare))
         else:
-            _paint_all(p, phase)
+            _paint_all(p, phase, bare)
     finally:
         p.restore()
 
@@ -319,14 +326,16 @@ def _in_layer(
         p.restore()
 
 
-def _paint_all(p: QPainter, t: float) -> None:
-    _paint_light(p, t)
+def _paint_all(p: QPainter, t: float, bare: bool = False) -> None:
     p.setPen(Qt.PenStyle.NoPen)
-    shadow = QRectF(TILE).translated(0, _SHADOW_DY)
-    for growth, alpha in _SHADOW_RINGS:
-        p.setBrush(QColor.fromRgbF(0.0, 0.0, 0.0, alpha))
-        radius = TILE_RADIUS + growth
-        p.drawRoundedRect(shadow.adjusted(-growth, -growth, growth, growth), radius, radius)
+    if not bare:
+        _paint_light(p, t)
+        p.setPen(Qt.PenStyle.NoPen)
+        shadow = QRectF(TILE).translated(0, _SHADOW_DY)
+        for growth, alpha in _SHADOW_RINGS:
+            p.setBrush(QColor.fromRgbF(0.0, 0.0, 0.0, alpha))
+            radius = TILE_RADIUS + growth
+            p.drawRoundedRect(shadow.adjusted(-growth, -growth, growth, growth), radius, radius)
     p.setBrush(TILE_COLOR)
     p.drawRoundedRect(TILE, TILE_RADIUS, TILE_RADIUS)
     _paint_glyph(p, t)
@@ -423,6 +432,8 @@ class OpeningMark(QWidget):
         self._clock = clock
         self._mark_px = float(mark_px)
         self._started: Optional[float] = None
+        # Only the tile and the glyph (paint_mark's `bare`): another mark's light shows under it.
+        self.bare = False
         self._still = False
         self._finish: Optional[_Finish] = None
         self._done = False
@@ -562,7 +573,7 @@ class OpeningMark(QWidget):
         try:
             p.setOpacity(frame.fade)
             rect = mark_rect(QRectF(self.rect()), self._mark_px)
-            paint_mark(p, rect, frame.t, still=frame.still, opening=frame.opening)
+            paint_mark(p, rect, frame.t, still=frame.still, opening=frame.opening, bare=self.bare)
         finally:
             p.end()
 

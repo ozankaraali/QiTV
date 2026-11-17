@@ -100,6 +100,25 @@ class FramesTests(unittest.TestCase):
     def test_still_is_the_held_frame_at_0_7(self):
         self.assertEqual(render(0.0, still=True), render(0.7))
 
+    def test_a_bare_mark_paints_its_tile_and_glyph_alone(self):
+        # The splash standing on the player's mark: their light and shadow aren't drawn twice.
+        def stage(bare):
+            image = QImage(240, 240, QImage.Format.Format_ARGB32_Premultiplied)
+            image.fill(Qt.GlobalColor.transparent)
+            painter = QPainter(image)
+            rect = mark_rect(QRectF(0, 0, 240, 240), opening_mark.MARK_PX)
+            paint_mark(painter, rect, 0.56, bare=bare)  # the bloom
+            painter.end()
+            return image
+
+        full, bare = stage(False), stage(True)
+        for outside in ((50, 120), (120, 172)):  # the light beside the tile; its shadow below
+            self.assertGreater(full.pixelColor(*outside).alpha(), 10, outside)
+            self.assertEqual(bare.pixelColor(*outside).alpha(), 0, outside)
+        for inside in ((120, 124), (80, 80), (150, 100)):  # the tile and the glyph
+            self.assertEqual(bare.pixelColor(*inside), full.pixelColor(*inside), inside)
+        self.assertFalse(OpeningMark().bare)  # a mark paints all of itself unless told
+
     def test_the_mark_is_gone_at_98_percent_but_the_tile_stays(self):
         image = render(0.985)
         self.assertTrue(near(at(image, BASE_INSIDE), TILE), at(image, BASE_INSIDE).name())

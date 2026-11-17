@@ -11,8 +11,9 @@ splash glides onto the player's mark as the window fades in, and the player's ow
 over in place, one mark from the double-click into the player. close() tells it "quit": a
 start that handed over, or QiTV's end.
 
-The pipe carries ("open", frame), ("handover", rect) and ("quit",) to the helper (rectangles
-as (x, y, width, height)), and ("shown", loop origin) and ("opening",) back. In QiTV, a watcher
+The pipe carries ("open", frame), ("handover", rect), ("bare",) and ("quit",) to the helper
+(rectangles as (x, y, width, height)), and ("shown", loop origin), ("opening",) and
+("arrived", rect) back. In QiTV, a watcher
 thread is the pipe's only user: it sends what the GUI thread queued, calls `on_shown` (on that
 thread) at "shown", passes "opening" on to the GUI thread, and joins the helper, killing it
 KILL_AFTER_S after its first command if it hasn't ended by then. The helper ends by itself once
@@ -24,14 +25,16 @@ macOS, where it takes no Dock icon or menu bar).
 
 from __future__ import annotations
 
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 import ctypes
 import logging
+import math
 import multiprocessing
 from multiprocessing.connection import Connection, wait
 from multiprocessing.process import BaseProcess
 import os
 import queue
+import signal
 import sys
 import threading
 import time
@@ -53,6 +56,7 @@ from PySide6.QtCore import (
 )
 from PySide6.QtGui import QGuiApplication
 from PySide6.QtWidgets import QApplication, QWidget
+from shiboken6 import isValid
 
 from ui.opening_mark import STAGE_PX, OpeningMark
 
@@ -63,13 +67,21 @@ KILL_AFTER_S = 3.0  # after the first command: a helper still running then is ki
 FADE_IN_MS = 350  # the window's fade as the mark opens into it, and the mark's glide
 OPENING_WAIT_MS = 600  # after "open": the window fades even if "opening" never came
 WINDOW_WAIT_MS = 500  # the most the open waits for the window to be on screen
-HANDOVER_OVERLAP_MS = 50  # the player's mark shows, then the splash quits
+# The swap onto the player's mark: once the player's mark has painted (PAINT_WAIT_MS at most),
+# the splash's stops drawing its light ("bare"), and quits HANDOVER_OVERLAP_MS later. Meanwhile
+# the pipe is read every SWAP_POLL_MS at both ends, so the light is drawn twice a moment only.
+PAINT_WAIT_MS = 100
+SWAP_POLL_MS = 5
+HANDOVER_OVERLAP_MS = 50
 HANDOVER_LIMIT_MS = 1000  # after its glide: a helper never told to quit ends by itself
+GLIDE_MAX_PX = 160  # farther (another screen, a window off the middle): it opens out instead
 FADING_PLATFORMS = ("xcb", "windows", "cocoa")  # Qt platforms that fade a window
 # NSApplicationActivationPolicyAccessory: no Dock icon and no menu bar, windows allowed.
 NS_ACTIVATION_POLICY_ACCESSORY = 1
 # Without it, Qt makes a plain executable a Dock app as it starts (macOS).
 _MAC_NO_FOREGROUND = "QT_MAC_DISABLE_FOREGROUND_APPLICATION_TRANSFORM"
+# How QiTV's end stops its children (multiprocessing's exit handler, tv_window's): no failure.
+_TERMINATED = (-signal.SIGTERM, 0x10000)
 
 Geometry = tuple[int, int, int, int]  # x, y, width, height
 
@@ -98,10 +110,16 @@ class Splash:
         self._closed = False
         self._ended = False  # the helper has ended
         self._transparent: Optional[QWidget] = None  # the window before_show made transparent
+        self._layers: list[QWidget] = []  # it and its own top-levels, fading in as one
+        self._place: Optional[QRect] = None  # where the helper's window shows
         self._window: Optional[QWidget] = None  # the window, once on screen (_drawn)
         self._overlay: Any = None  # the player's mark (ui.overlays.opening.OpeningOverlay)
         self._fading = False
+        self._faded_in = False  # the window's fade has ended
         self._handing = False  # the splash's mark glides onto the player's
+        self._target: Optional[QRect] = None  # where it glides: the player's mark on screen
+        self._arrived = False  # the helper said its glide reached _target
+        self._swapping = False
 
     def start(self, geometry: Optional[QRect] = None) -> bool:
         """Spawns the helper, its window at `geometry` (by default 240 px in the middle of the
@@ -131,14 +149,18 @@ class Splash:
                 if end is not None:
                     end.close()
             return False
-        self._process, self._watcher = process, watcher
+        self._process, self._watcher, self._place = process, watcher, QRect(rect)
         return True
 
     def before_show(self, window: QWidget) -> None:
-        """Before the window first shows: it starts transparent, to fade in as the splash opens
-        into it (open_into). Where the platform fades no window, it shows as it is."""
+        """Before the window first shows: it starts transparent, with the top-levels that show
+        with it (the player page's OverlayHost: its title, controls and toasts), to fade in as
+        one as the splash opens into it (open_into). Where the platform fades no window, they
+        show as they are."""
         if self._process is not None and self._transparent is None and _fades_windows():
-            window.setWindowOpacity(0.0)
+            self._layers = [window, *glued_layers(window)]
+            for layer in self._layers:
+                layer.setWindowOpacity(0.0)
             self._transparent = window
 
     def open_into(self, window: QWidget, overlay: Any = None) -> None:
@@ -167,33 +189,66 @@ class Splash:
 
     def _drawn(self, window: QWidget) -> None:
         self._window = window
+        target = self._hand_over_to()
         if self._ended or self._closed:  # no splash to open (any more)
             self._let_go()
             self._fade()
-        elif self._can_hand_over():
-            mark = self._overlay.mark
-            corner = mark.mapToGlobal(QPoint(0, 0))
+        elif target is not None:
             self._handing = True
-            self._commands.put(("handover", (corner.x(), corner.y(), mark.width(), mark.height())))
+            self._glide_to(target)
             self._fade()  # the window fades in as the mark glides
         else:
-            self._let_go()
+            # The splash's mark opens out; the player's stays unseen until it has gone (the
+            # watcher's "ended"): one mark at a time.
             self._send_open()
             # The window fades as the mark opens out ("opening", after its draw completes),
             # never later than this.
             QTimer.singleShot(OPENING_WAIT_MS, window, self._fade)
 
-    def _can_hand_over(self) -> bool:
-        """The player's mark draws a file's opening on the splash's loop, and the splash's
-        window can place itself (a Wayland window can't)."""
+    def _hand_over_to(self) -> Optional[QRect]:
+        """Where the splash's mark glides to, the player's on screen; None to open out: the
+        player's mark draws no file's opening on the splash's loop, the system asks for less
+        motion (nothing moves: the open is a plain fade), it is farther than GLIDE_MAX_PX, or
+        the splash's window can't place itself (Wayland)."""
         overlay = self._overlay
-        return (
-            overlay is not None
-            and overlay.opening()
-            and self._origin is not None
-            and overlay.mark.origin == self._origin
-            and not _platform_name().startswith("wayland")
-        )
+        if (
+            overlay is None
+            or not overlay.opening()
+            or self._origin is None
+            or overlay.mark.origin != self._origin
+            or OpeningMark.reduced_motion()
+            or _platform_name().startswith("wayland")
+        ):
+            return None
+        target = self._mark_on_screen()
+        return target if self._near(target) else None
+
+    def _mark_on_screen(self) -> QRect:
+        mark = self._overlay.mark
+        return QRect(mark.mapToGlobal(QPoint(0, 0)), mark.size())
+
+    def _near(self, target: QRect) -> bool:
+        place = self._place
+        if place is None:
+            return False
+        return math.hypot(target.x() - place.x(), target.y() - place.y()) <= GLIDE_MAX_PX
+
+    def _glide_to(self, target: QRect) -> None:
+        self._target, self._arrived = target, False
+        self._commands.put(("handover", (target.x(), target.y(), target.width(), target.height())))
+
+    def _follow(self) -> None:
+        """The player's mark moved (its OverlayHost follows the window as the window manager
+        places it, after the window was on screen): the splash glides on to where it is now;
+        too far, it opens out instead."""
+        target = self._mark_on_screen()
+        if target == self._target:
+            return
+        if self._near(target):
+            self._glide_to(target)
+        else:
+            self._handing = False
+            self._send_open()
 
     def _send_open(self) -> None:
         window = self._window
@@ -217,35 +272,68 @@ class Splash:
         self._fading = True
         if self._transparent is window:
             self._transparent = None
-            fade_in(window, step=lambda _level: self._fade_step(), done=self._faded)
+            fade_in(self._layers, step=lambda _level: self._fade_step(), done=self._faded)
         else:
             QTimer.singleShot(FADE_IN_MS, window, self._faded)
 
     def _fade_step(self) -> None:
+        """Through the hand-over: the player's mark still draws (or the splash opens out),
+        and the splash glides to where it is."""
         overlay = self._overlay
-        if self._handing and overlay is not None and not overlay.opening():
+        if not self._handing or overlay is None:
+            return
+        if not overlay.opening():
             # The file showed its picture (or failed) during the glide: the splash's mark
-            # opens out where it is; the player's has opened out unseen.
+            # opens out where it is; the player's has opened out unseen (it shows again only
+            # once the splash has gone).
             self._handing = False
-            self._let_go()
             self._send_open()
+        elif not self._swapping:
+            self._follow()
 
     def _faded(self) -> None:
+        self._faded_in = True
         self._fade_step()
+        self._swap_when_ready()
+
+    def _swap_when_ready(self) -> None:
+        """Once the window has faded in and the splash's mark stands on the player's: the
+        player's shows under it (same place and frame); once that is on screen, the splash's
+        draws its opaque tile and glyph only, so the light is the player's, never missing (a
+        moment on the shared clock for both, a real start showed, blinked it off a frame:
+        QiTV's loop is the busier) and doubled a moment only."""
+        self._fade_step()
+        if self._handing and self._faded_in and self._arrived and not self._swapping:
+            self._swapping = True
+            self._let_go()
+            _AfterPaint(self._overlay.mark, self._relay, self._swap)
+
+    def _swap(self) -> None:
+        self._fade_step()  # the player's mark may have gone meanwhile: the splash opens out
         if self._handing:
             self._handing = False
-            self._let_go()  # the player's mark, where the splash's stands: same frame
+            self._commands.put(("bare",))
             QTimer.singleShot(HANDOVER_OVERLAP_MS, self._relay, self.close)
 
     def _heard(self, message: tuple[Any, ...]) -> None:
         """What the watcher heard, on the GUI thread."""
         if message[0] == "opening":
             self._fade()
+        elif message[0] == "arrived":
+            target = self._target
+            if target is not None and message[1] == (
+                target.x(),
+                target.y(),
+                target.width(),
+                target.height(),
+            ):
+                self._arrived = True
+                self._swap_when_ready()
         elif message[0] == "ended":
             self._ended = True
             if self._window is not None:  # nothing glides or opens any more
                 self._handing = False
-                self._let_go()
+                self._let_go()  # the player's mark, if it draws, now the only one
                 self._fade()
 
     # ---- the watcher thread ----
@@ -257,7 +345,7 @@ class Splash:
         try:
             while True:
                 deadline = self._send_queued(conn, deadline)
-                timeout = POLL_MS / 1000
+                timeout = (SWAP_POLL_MS if self._handing else POLL_MS) / 1000
                 if deadline is not None:
                     timeout = max(0.0, min(timeout, deadline - time.monotonic()))
                 ready = wait([conn, process.sentinel], timeout)
@@ -274,6 +362,8 @@ class Splash:
                         self._call_on_shown()
                     elif name == "opening":
                         self._relay.tell(("opening",))
+                    elif name == "arrived" and len(message) > 1:
+                        self._relay.tell(("arrived", tuple(message[1])))
                 if process.sentinel in ready:
                     break
                 if deadline is not None and time.monotonic() >= deadline:
@@ -317,11 +407,16 @@ class Splash:
         tv_window._end_child_processes), which is also why the Process is left unclosed."""
         if deadline is None:
             deadline = time.monotonic() + KILL_AFTER_S
-        if not wait([process.sentinel], max(0.0, deadline - time.monotonic())):
+        killed = not wait([process.sentinel], max(0.0, deadline - time.monotonic()))
+        if killed:
             logger.warning("The splash did not end; it is stopped.")
             process.kill()
         # Reaped here, unless QiTV's exit did: its sentinel closes a moment before its exit.
         process.join(1.0)
+        code = process.exitcode
+        if not killed and code not in (None, 0, *_TERMINATED):
+            # Its own lines went to its stderr, which a packaged QiTV has not.
+            logger.warning("The splash ended with exit code %s.", code)
 
 
 class _Relay(QObject):
@@ -355,7 +450,8 @@ class _WhenDrawn(QObject):
         super().__init__(window)
         self._then: Optional[Callable[[], None]] = then
         self._handle = window.windowHandle()
-        QTimer.singleShot(WINDOW_WAIT_MS, self, self._go)
+        # Counted from the loop's first turn: main()'s work after show() comes first.
+        QTimer.singleShot(0, self, lambda: QTimer.singleShot(WINDOW_WAIT_MS, self, self._go))
         if self._handle is None or self._handle.isExposed():
             QTimer.singleShot(0, self, self._go)
         else:
@@ -377,6 +473,33 @@ class _WhenDrawn(QObject):
         then()
 
 
+class _AfterPaint(QObject):
+    """Calls `then` once, on the event loop's turn after `widget` paints (its frame is out by
+    then), or PAINT_WAIT_MS on whatever came (a widget that doesn't paint: it went)."""
+
+    def __init__(self, widget: QWidget, owner: QObject, then: Callable[[], None]) -> None:
+        super().__init__(owner)
+        self._widget = widget
+        self._then: Optional[Callable[[], None]] = then
+        widget.installEventFilter(self)
+        widget.update()
+        QTimer.singleShot(PAINT_WAIT_MS, self, self._go)
+
+    def eventFilter(self, watched: QObject, event: QEvent) -> bool:
+        if event.type() == QEvent.Type.Paint:
+            QTimer.singleShot(0, self, self._go)
+        return False
+
+    def _go(self) -> None:
+        then, self._then = self._then, None
+        if then is None:
+            return
+        if isValid(self._widget):
+            self._widget.removeEventFilter(self)
+        self.deleteLater()
+        then()
+
+
 def centred_on_primary(size: int = STAGE_PX) -> QRect:
     """A `size` square in the middle of the primary screen."""
     rect = QRect(0, 0, size, size)
@@ -393,18 +516,30 @@ def ease_in_out() -> QEasingCurve:
     return curve
 
 
+def glued_layers(window: QWidget) -> list[QWidget]:
+    """The window's own top-levels that show with it: its Tool windows (the player page's
+    OverlayHost, glued over the video)."""
+    return [
+        child
+        for child in window.findChildren(QWidget)
+        if child.isWindow() and child.windowType() == Qt.WindowType.Tool
+    ]
+
+
 def fade_in(
-    window: QWidget,
+    windows: Sequence[QWidget],
     duration_ms: int = FADE_IN_MS,
     *,
     step: Optional[Callable[[float], None]] = None,
     done: Optional[Callable[[], None]] = None,
 ) -> None:
-    """The window's opacity from 0 to 1 over `duration_ms`, eased as the mark's own open; it
-    always ends at 1. `step` is called after each change, `done` at the end."""
+    """The windows' opacity from 0 to 1 together over `duration_ms`, eased as the mark's own
+    open; they always end at 1. `step` is called after each change, `done` at the end."""
 
     def change(level: Any) -> None:
-        window.setWindowOpacity(float(level))
+        for window in windows:
+            if isValid(window):
+                window.setWindowOpacity(float(level))
         if step is not None:
             step(float(level))
 
@@ -413,7 +548,7 @@ def fade_in(
         if done is not None:
             done()
 
-    animation = QVariantAnimation(window)
+    animation = QVariantAnimation(windows[0])
     animation.setStartValue(0.0)
     animation.setEndValue(1.0)
     animation.setDuration(duration_ms)
@@ -468,9 +603,12 @@ class _SplashWindow(OpeningMark):
     ("shown", origin) goes back once it has painted: its loop's origin (time.monotonic), which
     the player's mark follows. "open" finishes the mark (the draw completes, then it opens out)
     and ends; ("opening",) goes back as it opens out. ("handover", rect) glides the window onto
-    rect (the player's mark, on the same loop) over FADE_IN_MS, looping on; it then waits for
-    "quit", or "open" (the player's mark went), and ends by itself HANDOVER_LIMIT_MS after the
-    glide. "quit" and a closed pipe end it at once. `on_end` quits the app.
+    rect (the player's mark, on the same loop) over FADE_IN_MS, looping on, reading its pipe
+    every SWAP_POLL_MS; ("arrived", rect) goes back once there. Another "handover" glides it
+    on from where it is (the player's mark moved). "bare" (the player's mark shows under it):
+    once there, it draws only its tile and glyph. It then waits for "quit", or "open" (the
+    player's mark went), and ends by itself HANDOVER_LIMIT_MS after its first glide. "quit" and
+    a closed pipe end it at once. `on_end` quits the app.
     """
 
     def __init__(self, conn: Connection, geometry: Geometry, on_end: Callable[[], None]) -> None:
@@ -479,6 +617,10 @@ class _SplashWindow(OpeningMark):
         self._on_end = on_end
         self._opening = False
         self._gliding = False
+        self._arrived = False  # its glide has ended
+        self._bare_due = False  # the player's mark shows under it
+        self._glide: Optional[QVariantAnimation] = None
+        self._limit_set = False  # its own end, HANDOVER_LIMIT_MS after its first glide
         self._ended = False
         self._painted = False
         self.setWindowFlags(
@@ -516,33 +658,59 @@ class _SplashWindow(OpeningMark):
                 self._handle(self._conn.recv())
         except EOFError, OSError:
             # QiTV closed its end or died (Windows can report that from poll() too)
-            self._end()
+            self._quit_splash()
 
     def _handle(self, message: Any) -> None:
         name = message[0] if isinstance(message, tuple) and message else None
         if name == "quit" or (name in ("open", "handover") and not self.isVisible()):
-            self._end()
+            self._quit_splash()
         elif name == "open" and not self._opening:
             self._opening = True
-            self.finish(self._end)
+            self.finish(self._quit_splash)
             # It opens out once its draw has completed (OpeningMark.finish's catch-up).
             catch_up = self._finish.catch_up_s if self._finish is not None else 0.0
             QTimer.singleShot(round(catch_up * 1000), self, lambda: self._say(("opening",)))
-        elif name == "handover" and not self._opening and not self._gliding:
+        elif name == "handover" and not self._opening:
+            # (again: the player's mark moved, as the window manager placed its window)
             self._gliding = True
+            self._poller.setInterval(SWAP_POLL_MS)  # the swap's "bare" is read at once
             self._glide_to(QRect(*message[1]))
+        elif name == "bare" and self._gliding:
+            self._bare_due = True
+            if self._arrived:
+                self._go_bare()
 
     def _glide_to(self, target: QRect) -> None:
+        """From where it is to `target` over FADE_IN_MS; a glide under way gives way."""
+        if self._glide is not None and isValid(self._glide):
+            self._glide.stop()  # it deletes itself
+        self._arrived = False
         glide = QVariantAnimation(self)
         glide.setStartValue(self.geometry())
         glide.setEndValue(target)
         glide.setDuration(FADE_IN_MS)
         glide.setEasingCurve(ease_in_out())
         glide.valueChanged.connect(self.setGeometry)
-        glide.finished.connect(lambda: QTimer.singleShot(HANDOVER_LIMIT_MS, self, self._end))
+        glide.finished.connect(lambda: self._glided(target))
         glide.start(QAbstractAnimation.DeletionPolicy.DeleteWhenStopped)
+        self._glide = glide
 
-    def _end(self) -> None:
+    def _glided(self, target: QRect) -> None:
+        self._arrived = True
+        self._say(("arrived", (target.x(), target.y(), target.width(), target.height())))
+        if self._bare_due:
+            self._go_bare()
+        if not self._limit_set:
+            self._limit_set = True
+            QTimer.singleShot(HANDOVER_LIMIT_MS, self, self._quit_splash)
+
+    def _go_bare(self) -> None:
+        """On the player's mark, which shows under it: only its tile and glyph from now on,
+        opaque and the same as the player's, so the light and the shadow are the player's."""
+        self.bare = True
+        self.update()
+
+    def _quit_splash(self) -> None:
         if self._ended:
             return
         self._ended = True
