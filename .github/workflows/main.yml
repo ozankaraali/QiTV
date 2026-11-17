@@ -144,10 +144,11 @@ jobs:
         env:
           QT_QPA_PLATFORM: xcb
           QITV_SMOKE: '1'
-      - name: Time the hand-over to a running app (packaged)
+      - name: Open files in the packaged app; time the hand-over
         if: ${{ !cancelled() && steps.package.outcome == 'success' }}
-        # A second start of the one-file build unpacks itself, then hands over to the first
-        # and exits; open-file.json has both times (it rides along with smoke-frozen).
+        # A start with a file plays it; a second start with another (a copy named in Turkish)
+        # unpacks itself, hands it over to the first and exits; eight starts at once leave one
+        # QiTV. open-file.json has the times (it rides along with smoke-frozen).
         run: |
           dbus-run-session -- xvfb-run -a -s "-screen 0 1920x1080x24" sh -c '
             openbox &
@@ -155,9 +156,10 @@ jobs:
               xprop -root _NET_SUPPORTING_WM_CHECK | grep -q "window id" && break
               sleep 0.2
             done
-            uv run python scripts/smoke_open_file.py --app dist/qitv-linux --out smoke-frozen
+            uv run python scripts/smoke_open_file.py --app dist/qitv-linux --out smoke-frozen \
+              --file tests/fixtures/smoke.mp4 --parallel 8
           '
-        timeout-minutes: 5
+        timeout-minutes: 15
         env:
           QT_QPA_PLATFORM: xcb
       - name: Restore the system VLC
@@ -171,6 +173,18 @@ jobs:
             done < "$hidden/paths"
           fi
           if [ -d "$hidden/plugins" ]; then sudo mv "$hidden/plugins" "$(cat "$hidden/plugins-path")"; fi
+      - name: The file types tests with the real xdg-mime
+        if: ${{ !cancelled() && steps.sync.outcome == 'success' }}
+        # The tests job runs on macOS, where the real xdg-mime check is skipped.
+        timeout-minutes: 10
+        run: |
+          apt="-o Acquire::Retries=3 -o Acquire::http::Timeout=30"
+          sudo apt-get $apt install -y xdg-utils
+          uv run python -m unittest tests.test_file_types
+        env:
+          QT_QPA_PLATFORM: offscreen
+          PYTHONPATH: .:tests
+          QITV_CAPTIONS_DIR: ${{ runner.temp }}/captions-tests  # as run_tests.py keeps it
       - name: Upload packaged smoke results
         if: always()
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
@@ -292,13 +306,19 @@ jobs:
         timeout-minutes: 8
         env:
           QITV_SMOKE: '1'
-      - name: Time the hand-over to a running app (packaged)
+      - name: Open files in the packaged app; time the hand-over and DDE
         if: ${{ !cancelled() && steps.package.outcome == 'success' }}
-        # A second start of the one-file build unpacks itself, then hands over to the first
-        # and exits; open-file.json has both times (it rides along with smoke-frozen).
+        # A start with a file plays it; a second start with another (a copy named in Turkish)
+        # unpacks itself, hands it over to the first and exits; a third comes over DDE as
+        # Explorer sends it (--dde registers QiTV in the runner's HKCU, and unregisters it); a
+        # fourth's path is longer than 260 characters; eight starts at once leave one QiTV.
+        # open-file.json has the times (it rides along with smoke-frozen).
         shell: pwsh
-        run: uv run python scripts/smoke_open_file.py --app dist\qitv-windows.exe --out smoke-frozen
-        timeout-minutes: 5
+        run: |
+          uv run python scripts/smoke_open_file.py --app dist\qitv-windows.exe --out smoke-frozen `
+            --file tests\fixtures\smoke.mp4 --parallel 8 --dde
+          exit $LASTEXITCODE
+        timeout-minutes: 15
       - name: Restore the system VLC
         if: always()
         shell: pwsh
@@ -306,6 +326,16 @@ jobs:
           if (Test-Path "C:\Program Files\VideoLAN.hidden") {
             Rename-Item -Path "C:\Program Files\VideoLAN.hidden" -NewName "VideoLAN"
           }
+      - name: The open-file tests on Windows
+        if: ${{ !cancelled() && steps.sync.outcome == 'success' }}
+        # Their Windows-only cases (the live DDEML server and client, Windows file URLs,
+        # ntpath) are skipped in the tests job, which runs on macOS.
+        timeout-minutes: 10
+        run: uv run python -m unittest tests.test_dde_windows tests.test_single_instance tests.test_open_paths tests.test_file_types
+        env:
+          QT_QPA_PLATFORM: offscreen
+          PYTHONPATH: .;tests
+          QITV_CAPTIONS_DIR: ${{ runner.temp }}\captions-tests  # as run_tests.py keeps it
       - name: Upload packaged smoke results
         if: always()
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
@@ -363,6 +393,10 @@ jobs:
       - name: Package App with PyInstaller for macOS
         id: package
         run: uv run pyinstaller qitv-macos.spec
+      - name: The bundle's Info.plist is well-formed
+        if: ${{ !cancelled() && steps.package.outcome == 'success' }}
+        # The document types and imported types QiTV declares for Finder's Open With.
+        run: plutil -lint dist/QiTV.app/Contents/Info.plist
       - name: Ad-Hoc Sign the app
         if: ${{ !cancelled() && steps.package.outcome == 'success' }}
         run: |
@@ -395,12 +429,15 @@ jobs:
         timeout-minutes: 8
         env:
           QITV_SMOKE: '1'
-      - name: Time the hand-over to a running app (packaged)
+      - name: Open files in the packaged app; time the hand-over
         if: ${{ !cancelled() && steps.package.outcome == 'success' }}
-        # A second start hands over to the first and exits; open-file.json has both times
-        # (it rides along with smoke-frozen).
-        run: uv run python scripts/smoke_open_file.py --app dist/QiTV.app/Contents/MacOS/QiTV --out smoke-frozen
-        timeout-minutes: 5
+        # A start with a file plays it; a second start with another (a copy named in Turkish)
+        # hands it over to the first and exits; eight starts at once leave one QiTV.
+        # open-file.json has the times (it rides along with smoke-frozen).
+        run: |
+          uv run python scripts/smoke_open_file.py --app dist/QiTV.app/Contents/MacOS/QiTV \
+            --out smoke-frozen --file tests/fixtures/smoke.mp4 --parallel 8
+        timeout-minutes: 15
       - name: The packaged app's plugin cache is current
         if: ${{ !cancelled() && steps.package.outcome == 'success' }}
         run: |
@@ -493,6 +530,10 @@ jobs:
       - name: Package App with PyInstaller for macOS (Intel)
         id: package
         run: uv run pyinstaller qitv-macos.spec
+      - name: The bundle's Info.plist is well-formed
+        if: ${{ !cancelled() && steps.package.outcome == 'success' }}
+        # The document types and imported types QiTV declares for Finder's Open With.
+        run: plutil -lint dist/QiTV.app/Contents/Info.plist
       - name: Ad-Hoc Sign the app
         if: ${{ !cancelled() && steps.package.outcome == 'success' }}
         run: |
@@ -525,12 +566,15 @@ jobs:
         timeout-minutes: 8
         env:
           QITV_SMOKE: '1'
-      - name: Time the hand-over to a running app (packaged)
+      - name: Open files in the packaged app; time the hand-over
         if: ${{ !cancelled() && steps.package.outcome == 'success' }}
-        # A second start hands over to the first and exits; open-file.json has both times
-        # (it rides along with smoke-frozen).
-        run: uv run python scripts/smoke_open_file.py --app dist/QiTV.app/Contents/MacOS/QiTV --out smoke-frozen
-        timeout-minutes: 5
+        # A start with a file plays it; a second start with another (a copy named in Turkish)
+        # hands it over to the first and exits; eight starts at once leave one QiTV.
+        # open-file.json has the times (it rides along with smoke-frozen).
+        run: |
+          uv run python scripts/smoke_open_file.py --app dist/QiTV.app/Contents/MacOS/QiTV \
+            --out smoke-frozen --file tests/fixtures/smoke.mp4 --parallel 8
+        timeout-minutes: 15
       - name: The packaged app's plugin cache is current
         if: ${{ !cancelled() && steps.package.outcome == 'success' }}
         run: |
