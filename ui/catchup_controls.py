@@ -175,7 +175,7 @@ class CatchUp(QObject):
         memory: CatchupMemory,
         now: Callable[[], datetime],
         toast: Callable[..., None],
-        request: Callable[[Target], None],
+        request: Callable[..., None],  # request(target, chosen_now=False)
         changed: Callable[[], None],
         limit: Callable[[dict], Optional[int]],
         prepare: Callable[[Any, Target], None] = lambda session, target: None,
@@ -297,8 +297,9 @@ class CatchUp(QObject):
             self._generation += 1
             self._probing, self._asked, self._linking = False, None, None
             if ask is not None and not ask.live_playing and self._playing is None:
-                self._request(
-                    replace(ask.target, archive_at=None, archive_until=None, zapped=False)
+                self._request(  # Go live or a seek dropped it: the viewer's choice
+                    replace(ask.target, archive_at=None, archive_until=None, zapped=False),
+                    chosen_now=True,
                 )
 
     def offered(self, target: Optional[Target]) -> Optional[Archive]:
@@ -763,7 +764,7 @@ class CatchUp(QObject):
             return
         now = self._now().timestamp()
         if moment >= now - LIVE_S:
-            self.go_live()
+            self.go_live(chosen_now=True)  # a seek to now: the viewer's
             return
         ask = playing.ask
         moment = max(moment, now - ask.archive.seconds + EDGE_S)
@@ -788,9 +789,10 @@ class CatchUp(QObject):
             playing.rate = rate
             self._changed()
 
-    def go_live(self) -> None:
+    def go_live(self, *, chosen_now: bool = False) -> None:
         """Back to the channel live: tuned again, its live stream opens once the archive's is
-        let go."""
+        let go. `chosen_now`: the viewer asked (Go live, a seek to now); False when it
+        happens by itself (the archive ended or failed): a file still looked at stays."""
         playing = self._playing
         if playing is None:
             return
@@ -802,7 +804,10 @@ class CatchUp(QObject):
         # The archive stops now, one still waiting for the live stream's release included: a
         # slow live link can't let it open meanwhile.
         self._tuner.stop()
-        self._request(replace(target, archive_at=None, archive_until=None, zapped=False))
+        self._request(
+            replace(target, archive_at=None, archive_until=None, zapped=False),
+            chosen_now=chosen_now,
+        )
 
     def _reopen(self, playing: _Playing, moment: float, *, retried: bool = False) -> None:
         ask = playing.ask

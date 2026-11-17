@@ -1117,7 +1117,7 @@ class LiveControls(QObject):
     def go_live(self) -> None:
         current = self._current()
         if self.catchup.active():
-            self.catchup.go_live()  # the channel tunes again
+            self.catchup.go_live(chosen_now=True)  # the channel tunes again
             self._show_transport()
         elif current is not None and current.live and self._tuner.go_live():
             self.catchup.cancel()  # a probe for the archive is dropped

@@ -216,6 +216,83 @@ class OpenRouterTests(RouterCase):
         self.window.when_idle(lambda: runs.append(True))
         self.assertEqual(runs, [])  # held again for it
 
+    def channel_on(self):
+        """A channel playing under the file's check: the controller's lane is faked."""
+        channel = Target({"name": "Kanal 1", "cmd": "http://x/1"}, "live", "Kanal 1")
+        lanes = mock.patch.object(self.window.controller._lanes, "request")
+        self.lanes = lanes.start()
+        self.addCleanup(lanes.stop)
+        return channel
+
+    def file_still_plays(self, generation, path):
+        self.window._file_check.checked.emit(generation, path, 4)
+        self.wait_for_plays(1)
+        self.assertEqual(self.plays(), [(path, 4)])
+
+    def test_an_automatic_retry_while_a_file_is_looked_at_leaves_the_file(self):
+        # Review of plan 1: a stream failure retried by itself during the check dropped the
+        # file (the retry asked as if the viewer had chosen it).
+        generation, path = self.looked_at(self.film("ep.mkv"))
+        channel = self.channel_on()
+        controls = self.window.controller._live_controls
+        with (
+            mock.patch.object(controls, "_current", return_value=channel),
+            mock.patch.object(controls, "may_retry", return_value=True),
+            mock.patch.object(controls, "stop_tune"),
+            mock.patch("ui.live_controls.item_provider.sign_in_again"),
+        ):
+            controls._on_live_failed("boom")
+        self.lanes.assert_called_once()  # the retry was asked for
+        self.file_still_plays(generation, path)
+
+    def test_an_archive_that_ends_while_a_file_is_looked_at_leaves_the_file(self):
+        generation, path = self.looked_at(self.film("ep.mkv"))
+        channel = self.channel_on()
+        catchup = self.window.controller._live_controls.catchup
+        ask = mock.Mock(target=channel, moment=0.0, ends=0.0, programme=False)
+        playing = mock.Mock(ask=ask, played=True)
+        with (
+            mock.patch.object(
+                type(catchup), "_playing", new_callable=mock.PropertyMock, return_value=playing
+            ),
+            mock.patch.object(catchup, "position", return_value=4e9),
+            mock.patch.object(catchup, "_set_playing"),
+            mock.patch.object(catchup._tuner, "stop"),
+        ):
+            self.assertTrue(catchup.on_ended())  # back to live by itself
+        self.lanes.assert_called_once()
+        self.file_still_plays(generation, path)
+
+    def test_a_channel_chosen_while_a_file_is_looked_at_wins_over_a_retry_too(self):
+        # The viewer's own choice (a channel pressed) still beats the file, after a retry.
+        generation, path = self.looked_at(self.film("ep.mkv"))
+        channel = self.channel_on()
+        controller = self.window.controller
+        controller._request(channel, chosen_now=True)
+        self.window._file_check.checked.emit(generation, path, 4)
+        elapse(SETTLE_MS)
+        self.assertEqual(self.plays(), [])
+        runs = []
+        self.window.when_idle(lambda: runs.append(True))
+        self.assertEqual(runs, [True])  # its hold went too
+
+    def test_go_live_pressed_while_a_file_is_looked_at_wins(self):
+        generation, path = self.looked_at(self.film("ep.mkv"))
+        channel = self.channel_on()
+        catchup = self.window.controller._live_controls.catchup
+        playing = mock.Mock(ask=mock.Mock(target=channel))
+        with (
+            mock.patch.object(
+                type(catchup), "_playing", new_callable=mock.PropertyMock, return_value=playing
+            ),
+            mock.patch.object(catchup, "_set_playing"),
+            mock.patch.object(catchup._tuner, "stop"),
+        ):
+            catchup.go_live(chosen_now=True)  # LiveControls.go_live, the viewer's button
+        self.window._file_check.checked.emit(generation, path, 4)
+        elapse(SETTLE_MS)
+        self.assertEqual(self.plays(), [])
+
     def test_a_film_that_plays_keeps_its_hold_when_the_next_file_gives_way(self):
         on_now = self.film("on now.mkv")
         self.handover(on_now)

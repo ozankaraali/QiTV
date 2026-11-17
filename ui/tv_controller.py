@@ -1532,7 +1532,8 @@ class TVController(QObject):
                 zapped=from_zap,
                 archive_at=archive[0] if archive is not None else None,
                 archive_until=archive[1] if archive is not None else None,
-            )
+            ),
+            chosen_now=True,
         )
         self._tuning_since = time.monotonic()
         self._tuning.start(TUNING_KEEP_MS)
@@ -1658,7 +1659,7 @@ class TVController(QObject):
         self._freed_for = target if kept else None
         self._room_for = target if self._pip is not None and self._pip.has_room() else None
         self._lanes.supersede()  # a newer choice than an external play waiting for its link
-        self._request(target)
+        self._request(target, chosen_now=True)
 
     def _media_menu(self, item: dict) -> Optional[dict]:
         """What the ⚙ quality menu offers for a title (the catalog's media_menu; None: none)."""
@@ -1680,7 +1681,8 @@ class TVController(QObject):
             self._media_quality.pop(provider, None)
         start = max(0, int(self.session.time_ms() or 0)) if self._has_media() else None
         self._request(
-            replace(target, quality=quality, start_ms=start, start_over=False, zapped=False)
+            replace(target, quality=quality, start_ms=start, start_over=False, zapped=False),
+            chosen_now=True,
         )
 
     # ---- AI captions on a provider's film (2.9) ----------------------------------------------
@@ -1764,7 +1766,7 @@ class TVController(QObject):
         if live is not None and live.recording():
             self._toast(SIZE_WHILE_RECORDING)
             return
-        self._request(replace(target, max_height=cap, zapped=False, retried=False))
+        self._request(replace(target, max_height=cap, zapped=False, retried=False), chosen_now=True)
         self._live_controls.choose_size(target, cap)
 
     def _title_beside_channel(self) -> bool:
@@ -1815,10 +1817,11 @@ class TVController(QObject):
                 return channel
         return kept
 
-    def _request(self, target: Target, *, chosen_now: bool = True) -> None:
-        """Ask for `target`'s link. `chosen_now`: the viewer chose it now; False when it was
-        chosen earlier and is only asked for again (queued behind another link, or held by
-        its provider's setup)."""
+    def _request(self, target: Target, *, chosen_now: bool = False) -> None:
+        """Ask for `target`'s link. `chosen_now`: the viewer chose it now (pressing a channel,
+        the guide, the quality menu); False, the default, for anything automatic (a retry,
+        an archive's end) or chosen earlier and only asked for again (queued behind another
+        link, or held by its provider's setup): a file still looked at is not dropped by it."""
         if chosen_now and not target.local:
             self._file_gives_way()  # a file still looked at is older than this choice
         self._forget_stopped()  # 2.6: a newer choice than what Stop stopped
