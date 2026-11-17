@@ -145,5 +145,52 @@ app = BUNDLE(
             'QiTV never records sound. macOS may ask when QiTV starts its sound while a '
             'Bluetooth audio device is connected; QiTV works the same if you don\'t allow it.'
         ),
+        # Finder's Open With lists QiTV for every video type (services/file_types.py's
+        # MAC_UTIS, one entry per type). Alternate: installing never takes a default; the
+        # Settings button makes QiTV the default for five (MAC_DEFAULT_VIDEO).
+        'CFBundleDocumentTypes': [
+            {
+                'CFBundleTypeName': 'Video',
+                'CFBundleTypeRole': 'Viewer',
+                'LSHandlerRank': 'Alternate',
+                'LSItemContentTypes': [
+                    'public.mpeg-4',  # mp4
+                    'com.apple.m4v-video',  # m4v
+                    'org.matroska.mkv',  # mkv
+                    'public.avi',  # avi
+                    'com.apple.quicktime-movie',  # mov
+                    'org.webmproject.webm',  # webm
+                    'public.mpeg-2-transport-stream',  # ts (Open With only)
+                    'public.avchd-mpeg-2-transport-stream',  # m2ts, mts
+                    'public.mpeg',  # mpg, mpeg
+                    'com.adobe.flash.video',  # flv
+                    'com.microsoft.windows-media-wmv',  # wmv
+                    'org.xiph.ogg-video',  # ogv
+                    'org.xiph.ogv',  # ogv, as some apps declare it
+                ],
+            },
+        ],
+        # The types macOS 13 (the oldest QiTV runs on) doesn't declare itself, under the
+        # identifiers other apps use for them; macOS declares every other type above.
+        'UTImportedTypeDeclarations': [
+            {
+                'UTTypeIdentifier': 'org.matroska.mkv',
+                'UTTypeDescription': 'Matroska video',
+                'UTTypeConformsTo': ['public.movie'],
+                'UTTypeTagSpecification': {
+                    'public.filename-extension': ['mkv'],
+                    'public.mime-type': ['video/x-matroska'],
+                },
+            },
+            {
+                'UTTypeIdentifier': 'org.xiph.ogg-video',
+                'UTTypeDescription': 'Ogg video',
+                'UTTypeConformsTo': ['public.movie'],
+                'UTTypeTagSpecification': {
+                    'public.filename-extension': ['ogv'],
+                    'public.mime-type': ['video/ogg'],
+                },
+            },
+        ],
     }
 )

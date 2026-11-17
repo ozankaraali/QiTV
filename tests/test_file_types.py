@@ -3,9 +3,11 @@
 Windows' registry is a strict fake (a key with subkeys can't be deleted, missing ones raise,
 writes need a handle opened for writing, names compare without case); Linux writes into
 throwaway XDG folders, with xdg-mime and update-desktop-database faked on PATH (the real
-xdg-mime, where installed, answers one query).
+xdg-mime, where installed, answers one query); macOS's Launch Services is a fake that records
+its calls (the real one is never loaded: CI runs these tests on macOS too).
 """
 
+import ctypes
 import json
 import os
 from pathlib import Path
@@ -15,6 +17,7 @@ import subprocess
 import sys
 import tempfile
 import time
+from types import SimpleNamespace
 import unittest
 from unittest.mock import patch
 
@@ -27,6 +30,23 @@ HKCU_CLASSES = "Software\\Classes"
 CAPABILITIES = "Software\\QiTV\\Capabilities"
 WINDOWS_EXE = "C:\\Users\\Ayşe\\Apps\\Qi TV\\qitv-windows.exe"
 ICON = Path(__file__).resolve().parent.parent / "assets" / "qitv.png"
+MAC_APP = "/Applications/QiTV.app"
+
+# the real loader, for the one test that reads the C types it gives (with ctypes faked)
+_REAL_CORE_SERVICES = file_types._core_services
+
+
+def setUpModule():
+    # Never the real Launch Services: on a Mac (CI runs these tests on macOS) a call would
+    # change that machine's default apps. The macOS tests put their fake over this.
+    guard = patch.object(
+        file_types,
+        "_core_services",
+        side_effect=AssertionError("a test reached the real CoreServices"),
+        create=True,
+    )
+    guard.start()
+    unittest.addModuleCleanup(guard.stop)
 
 
 # --- a strict fake winreg -------------------------------------------------------------------
@@ -75,7 +95,10 @@ class FakeWinreg:
     def __init__(self):
         self.root = _Node("HKEY_CURRENT_USER")
         self.other_roots = []  # any root but HKCU that was asked for
-        self.fail_under = None  # SetValueEx below this path raises PermissionError
+        # below this path, the operations in `failing` raise PermissionError: "set"
+        # (SetValueEx), "open" (OpenKey) and "delete" (DeleteValue, DeleteKey)
+        self.fail_under = None
+        self.failing = {"set"}
 
     # the module's functions
 
@@ -88,6 +111,7 @@ class FakeWinreg:
 
     def OpenKey(self, key, sub_key, reserved=0, access=KEY_READ):
         node, path = self._walk(key, sub_key, create=False)
+        self._fail("open", path)
         return _Handle(node, path, access)
 
     OpenKeyEx = OpenKey
@@ -97,8 +121,7 @@ class FakeWinreg:
 
     def SetValueEx(self, handle, name, reserved, kind, value):
         self._allowed(handle, self.KEY_SET_VALUE)
-        if self.fail_under and handle.path.lower().startswith(self.fail_under.lower()):
-            raise PermissionError(5, "Access is denied")
+        self._fail("set", handle.path)
         if kind in (self.REG_SZ, self.REG_EXPAND_SZ) and not isinstance(value, str):
             raise TypeError("a string value takes a str")
         name = name or ""
@@ -113,10 +136,12 @@ class FakeWinreg:
 
     def DeleteValue(self, handle, name):
         self._allowed(handle, self.KEY_SET_VALUE)
+        self._fail("delete", handle.path)
         if handle.node.values.pop((name or "").lower(), None) is None:
             raise FileNotFoundError(2, "The system cannot find the file specified")
 
     def DeleteKey(self, key, sub_key):
+        self._fail("delete", sub_key)
         parent_path, _, leaf = sub_key.rpartition("\\")
         parent, _ = self._walk(key, parent_path, create=False)
         node = parent.keys.get(leaf.lower())
@@ -202,11 +227,16 @@ class FakeWinreg:
         if handle.access & right != right:
             raise PermissionError(5, "Access is denied")
 
+    def _fail(self, operation, path):
+        under = self.fail_under
+        if under and operation in self.failing and path.lower().startswith(under.lower()):
+            raise PermissionError(5, "Access is denied")
+
 
 class WindowsBackendTests(unittest.TestCase):
     def setUp(self):
         self.reg = FakeWinreg()
-        self.notified = []
+        self.notified: list[int] = []
         patches = (
             patch.object(file_types, "_winreg", return_value=self.reg),
             patch.object(file_types, "_assoc_changed", side_effect=lambda: self.notified.append(1)),
@@ -322,6 +352,82 @@ class WindowsBackendTests(unittest.TestCase):
             self.reg.values(f"{HKCU_CLASSES}\\QiTV.Video\\shell\\open\\command"),
             {"": f'"{new}" "%1"'},
         )
+
+    def test_windows_unregister_keeps_going_past_a_key_it_cannot_change(self):
+        self.seed_other_apps()
+        before = self.reg.tree()
+        self.assertTrue(file_types._windows.register("videos", WINDOWS_EXE))
+        # .mkv sits mid-way through the types (sorted): its key can't be opened or deleted
+        self.reg.fail_under = f"{HKCU_CLASSES}\\.mkv"
+        self.reg.failing = {"open", "delete"}
+        with self.assertLogs("services.file_types", "WARNING"):
+            self.assertFalse(file_types._windows.unregister("videos", WINDOWS_EXE))
+        self.assertEqual(
+            self.reg.values(f"{HKCU_CLASSES}\\.mkv\\OpenWithProgids"),
+            {"OtherPlayer.mkv": "", "QiTV.Video": ""},
+        )
+        # everything else of QiTV's went, the types after .mkv too
+        self.assertIsNone(self.reg.values(f"{HKCU_CLASSES}\\QiTV.Video"))
+        for ext in VIDEO_EXTENSIONS - {"mkv"}:
+            self.assertIsNone(self.reg.values(f"{HKCU_CLASSES}\\.{ext}"), ext)
+        self.assertIsNone(
+            self.reg.values(f"{HKCU_CLASSES}\\Applications\\qitv-windows.exe\\SupportedTypes")
+        )
+        self.assertIsNone(self.reg.values(CAPABILITIES))
+        self.assertEqual(
+            self.reg.values("Software\\RegisteredApplications"),
+            {"OtherPlayer": "Software\\Other\\Caps"},
+        )
+        self.assertEqual(self.notified, [1, 1])
+
+        self.reg.fail_under = None  # tried again: the rest goes
+        self.assertTrue(file_types._windows.unregister("videos", WINDOWS_EXE))
+        self.assertEqual(self.reg.tree(), before)
+
+    def test_a_first_register_that_fails_takes_back_what_it_could(self):
+        self.seed_other_apps()
+        before = self.reg.tree()
+        self.reg.fail_under = "Software\\RegisteredApplications"
+        self.reg.failing = {"set", "open"}  # the take-back can't open it either
+        with self.assertLogs("services.file_types", "WARNING"):
+            self.assertFalse(file_types._windows.register("videos", WINDOWS_EXE))
+        self.reg.fail_under = None
+        self.assertEqual(self.reg.tree(), before)
+
+    def test_register_again_that_fails_keeps_the_working_registration(self):
+        config = Config({"videos": WINDOWS_EXE})
+        self.seed_other_apps()
+        self.assertTrue(file_types._windows.register("videos", WINDOWS_EXE))
+        working = self.reg.tree()
+        self.reg.fail_under = "Software\\RegisteredApplications"
+        with patch.object(file_types, "_backend", return_value=file_types._windows):
+            with self.assertLogs("services.file_types", "WARNING"):
+                self.assertFalse(file_types.register("videos", config, WINDOWS_EXE, frozen=True))
+        self.reg.fail_under = None
+        self.assertEqual(self.reg.tree(), working)
+        self.assertEqual(config.file_types, {"videos": WINDOWS_EXE})
+
+    def test_register_from_a_renamed_exe_moves_its_supported_types(self):
+        old = "C:\\Tools\\qitv-windows.exe"
+        new = "C:\\Tools\\qitv-windows-2.10.2.exe"
+        config = Config({"videos": old})
+        self.assertTrue(file_types._windows.register("videos", old))
+        apps = f"{HKCU_CLASSES}\\Applications"
+        with patch.object(file_types, "_backend", return_value=file_types._windows):
+            # a failure keeps the old name's entry: it's what still works
+            self.reg.fail_under = "Software\\RegisteredApplications"
+            with self.assertLogs("services.file_types", "WARNING"):
+                self.assertFalse(file_types.register("videos", config, new, frozen=True))
+            self.assertTrue(self.reg.values(f"{apps}\\qitv-windows.exe\\SupportedTypes"))
+            self.reg.fail_under = None
+
+            self.assertTrue(file_types.register("videos", config, new, frozen=True))
+        self.assertIsNone(self.reg.values(f"{apps}\\qitv-windows.exe"))
+        self.assertEqual(
+            len(self.reg.values(f"{apps}\\qitv-windows-2.10.2.exe\\SupportedTypes")),
+            len(VIDEO_EXTENSIONS),
+        )
+        self.assertEqual(config.file_types, {"videos": new})
 
     def test_open_default_apps_falls_back_to_the_plain_page(self):
         opened = []
@@ -440,7 +546,9 @@ class LinuxBackendTests(unittest.TestCase):
     def test_linux_register_in_temp_xdg(self):
         self.fake_tools("xdg-mime", "update-desktop-database")
         exe = "/home/ayşe/Qi TV/qitv-linux"
-        self.assertTrue(file_types._linux.register("videos", exe))
+        result = file_types._linux.register("videos", exe)
+        self.assertTrue(result)
+        self.assertTrue(result.defaults)
 
         entry = self.entry()
         self.assertEqual(entry["Type"], "Application")
@@ -550,6 +658,7 @@ class LinuxBackendTests(unittest.TestCase):
         film = self.base / "Dizi Bölüm $1.mkv"
         film.touch()
         self.assertTrue(file_types._linux.register("videos", str(exe)))
+        assert GIO  # skipped without it
         subprocess.run([GIO, "launch", str(self.desktop), str(film)], timeout=10, check=True)
         for _ in range(50):
             if argv_log.exists() and argv_log.read_text().count("\n") == 2:
@@ -559,16 +668,39 @@ class LinuxBackendTests(unittest.TestCase):
 
     def test_missing_tools_are_skipped(self):
         with self.assertLogs("services.file_types", "INFO") as logs:
-            self.assertTrue(file_types._linux.register("videos", "/opt/qitv/qitv-linux"))
+            result = file_types._linux.register("videos", "/opt/qitv/qitv-linux")
+        self.assertTrue(result)
+        self.assertFalse(result.defaults)  # Open With only: the hint says to choose it by hand
         self.assertTrue(self.desktop.exists())
         self.assertTrue(any("xdg-mime" in line for line in logs.output))
         self.assertTrue(file_types._linux.unregister("videos", "/opt/qitv/qitv-linux"))
         self.assertFalse(self.desktop.exists())
 
-    def test_xdg_mime_failing_for_every_type_takes_it_all_back(self):
+    def test_xdg_mime_failing_for_every_type_keeps_open_with(self):
         self.fake_tools("xdg-mime", "update-desktop-database")
         with patch.dict(os.environ, {"QITV_FAKE_EXIT": "4"}):
-            self.assertFalse(file_types._linux.register("videos", "/opt/qitv/qitv-linux"))
+            result = file_types._linux.register("videos", "/opt/qitv/qitv-linux")
+        self.assertTrue(result)
+        self.assertFalse(result.defaults)
+        self.assertEqual(self.entry()["Exec"], '"/opt/qitv/qitv-linux" %F')
+        self.assertTrue(self.icon.exists())
+
+    def test_a_failed_rewrite_keeps_the_working_desktop_file(self):
+        exe = "/opt/qitv/qitv-linux"
+        self.assertTrue(file_types._linux.register("videos", exe))
+        working = self.desktop.read_bytes()
+        failing = patch.object(
+            file_types._LinuxBackend, "_write_desktop", side_effect=PermissionError(13, "denied")
+        )
+        with failing, self.assertLogs("services.file_types", "WARNING"):
+            self.assertFalse(file_types._linux.register("videos", exe, previous=exe))
+        self.assertEqual(self.desktop.read_bytes(), working)
+        self.assertTrue(self.icon.exists())
+
+        # a first registration that fails takes back what it wrote
+        self.assertTrue(file_types._linux.unregister("videos", exe))
+        with failing, self.assertLogs("services.file_types", "WARNING"):
+            self.assertFalse(file_types._linux.register("videos", exe))
         self.assertFalse(self.desktop.exists())
         self.assertFalse(self.icon.exists())
 
@@ -593,6 +725,7 @@ class LinuxBackendTests(unittest.TestCase):
 
     @unittest.skipUnless(XDG_MIME, "xdg-mime is not installed here (or this isn't Linux)")
     def test_linux_real_xdg_mime_when_present(self):
+        assert XDG_MIME  # skipped without it
         self.config.mkdir()  # a user's ~/.config is there; xdg-mime may not create it
         real_path = os.pathsep.join([os.path.dirname(XDG_MIME), "/usr/bin", "/bin"])
         quiet = {"XDG_CURRENT_DESKTOP": "", "DESKTOP_SESSION": "", "KDE_FULL_SESSION": ""}
@@ -610,6 +743,189 @@ class LinuxBackendTests(unittest.TestCase):
             self.assertEqual(query(), "qitv-open.desktop")
             self.assertTrue(file_types._linux.unregister("videos", "/opt/qitv/qitv-linux"))
             self.assertNotEqual(query(), "qitv-open.desktop")
+
+
+# --- macOS with a fake Launch Services ------------------------------------------------------
+
+# Apple's headers: CFString.h (kCFStringEncodingUTF8) and LaunchServices' LSConstants.h
+# (kLSRolesViewer); the values are written out here, not taken from the module.
+UTF8 = 0x08000100
+ROLES_VIEWER = 0x00000002
+BUNDLE_ID = "com.ozankaraali.QiTV"
+FIVE = [
+    "org.matroska.mkv",
+    "public.mpeg-4",
+    "com.apple.quicktime-movie",
+    "public.avi",
+    "org.webmproject.webm",
+]
+
+
+class FakeCoreServices:
+    """CoreFoundation's CFString calls and Launch Services' default-handler call: each string
+    is a numbered reference that must be released once, and every call is recorded."""
+
+    def __init__(self, answers=None):
+        self.answers = answers or {}  # UTI (or "*" for every one) -> OSStatus; 0 otherwise
+        self.null_for = set()  # texts CFStringCreateWithCString answers NULL for
+        self.strings = {}  # reference -> text
+        self.released = []
+        self.calls = []
+
+    def CFStringCreateWithCString(self, alloc, c_str, encoding):
+        assert alloc is None, alloc
+        assert encoding == UTF8, hex(encoding)
+        text = c_str.decode("utf-8")
+        if text in self.null_for:
+            return None
+        ref = 0x7F0000001000 + 16 * len(self.strings)
+        self.strings[ref] = text
+        return ref
+
+    def CFRelease(self, ref):
+        assert ref in self.strings, f"CFRelease({ref!r}) of no string"
+        assert ref not in self.released, "released twice"
+        self.released.append(ref)
+
+    def LSSetDefaultRoleHandlerForContentType(self, content_type, role, handler):
+        for ref in (content_type, handler):
+            assert ref in self.strings and ref not in self.released, "a string used freed"
+        uti = self.strings[content_type]
+        self.calls.append((uti, role, self.strings[handler]))
+        return self.answers.get(uti, self.answers.get("*", 0))
+
+    def all_released(self):
+        return sorted(self.released) == sorted(self.strings)
+
+
+class MacBackendTests(unittest.TestCase):
+    def use(self, fake):
+        p = patch.object(file_types, "_core_services", return_value=fake)
+        p.start()
+        self.addCleanup(p.stop)
+        return fake
+
+    def test_mac_register_calls_ls_for_short_list(self):
+        fake = self.use(FakeCoreServices())
+        result = file_types._mac.register("videos", MAC_APP)
+        self.assertTrue(result)
+        self.assertTrue(result.defaults)
+        self.assertEqual(fake.calls, [(uti, ROLES_VIEWER, BUNDLE_ID) for uti in FIVE])
+        self.assertEqual(
+            [file_types.MAC_UTIS[ext][0] for ext in file_types.MAC_DEFAULT_VIDEO], FIVE
+        )
+        self.assertTrue(fake.all_released())
+
+    def test_mac_failure_returns_false(self):
+        fake = self.use(FakeCoreServices({"*": -54}))
+        with self.assertLogs("services.file_types", "WARNING") as logs:
+            result = file_types._mac.register("videos", MAC_APP)
+        self.assertFalse(result)
+        self.assertFalse(result.defaults)
+        self.assertEqual(len(fake.calls), 5)
+        self.assertTrue(all("-54" in line for line in logs.output), logs.output)
+        self.assertTrue(fake.all_released())
+
+    def test_mac_one_refusal_keeps_the_others(self):
+        fake = self.use(FakeCoreServices({"org.matroska.mkv": -54}))
+        with self.assertLogs("services.file_types", "WARNING") as logs:
+            result = file_types._mac.register("videos", MAC_APP)
+        self.assertTrue(result)
+        self.assertTrue(result.defaults)
+        self.assertEqual([call[0] for call in fake.calls], FIVE)
+        self.assertEqual(len(logs.output), 1)
+        self.assertIn("org.matroska.mkv", logs.output[0])
+        self.assertTrue(fake.all_released())
+
+    def test_mac_a_string_macos_cannot_make(self):
+        fake = self.use(FakeCoreServices())
+        fake.null_for = {BUNDLE_ID}
+        with self.assertLogs("services.file_types", "WARNING"):
+            self.assertFalse(file_types._mac.register("videos", MAC_APP))
+        self.assertEqual(fake.calls, [])
+        self.assertTrue(fake.all_released())  # no CFRelease of NULL
+
+        fake = self.use(FakeCoreServices())
+        fake.null_for = {"public.avi"}
+        with self.assertLogs("services.file_types", "WARNING"):
+            self.assertTrue(file_types._mac.register("videos", MAC_APP))
+        self.assertEqual([call[0] for call in fake.calls], [u for u in FIVE if u != "public.avi"])
+        self.assertTrue(fake.all_released())
+
+    def test_mac_refresh_and_unregister_call_nothing(self):
+        # the bundle declares the types itself; Launch Services knows QiTV by its bundle id
+        result = file_types._mac.register("videos", MAC_APP, defaults=False, previous="/x.app")
+        self.assertTrue(result)
+        with self.assertLogs("services.file_types", "INFO"):
+            self.assertTrue(file_types._mac.unregister("videos", MAC_APP))
+        # the module's guard raises on any load: nothing was loaded
+
+    def test_mac_backend_on_macos(self):
+        with patch.object(sys, "platform", "darwin"):
+            self.assertIs(file_types._backend(), file_types._mac)
+
+    def test_mac_loader_gives_the_c_types(self):
+        loaded = {}
+
+        class Library:
+            def __init__(self, path):
+                loaded[path] = self
+
+            def __getattr__(self, name):
+                function = SimpleNamespace(argtypes=None, restype="unset")
+                setattr(self, name, function)
+                return function
+
+        with patch.object(ctypes, "CDLL", Library):
+            lib = _REAL_CORE_SERVICES()
+        cf = loaded.pop("/System/Library/Frameworks/CoreFoundation.framework/CoreFoundation")
+        cs = loaded.pop("/System/Library/Frameworks/CoreServices.framework/CoreServices")
+        self.assertEqual(loaded, {})
+        self.assertIs(lib.CFStringCreateWithCString, cf.CFStringCreateWithCString)
+        self.assertIs(lib.CFRelease, cf.CFRelease)
+        self.assertIs(
+            lib.LSSetDefaultRoleHandlerForContentType, cs.LSSetDefaultRoleHandlerForContentType
+        )
+        # a CFStringRef is a pointer: read as a C int it would be cut to 32 bits
+        create = lib.CFStringCreateWithCString
+        self.assertEqual(create.argtypes, [ctypes.c_void_p, ctypes.c_char_p, ctypes.c_uint32])
+        self.assertIs(create.restype, ctypes.c_void_p)
+        self.assertEqual(lib.CFRelease.argtypes, [ctypes.c_void_p])
+        self.assertIsNone(lib.CFRelease.restype)
+        set_default = lib.LSSetDefaultRoleHandlerForContentType
+        self.assertEqual(set_default.argtypes, [ctypes.c_void_p, ctypes.c_uint32, ctypes.c_void_p])
+        self.assertIs(set_default.restype, ctypes.c_int32)  # OSStatus
+
+    def test_mac_records_the_app_and_its_place(self):
+        backend = RecordingBackend()
+        config = Config()
+        inside = f"{MAC_APP}/Contents/MacOS/QiTV"
+        with (
+            patch.object(sys, "platform", "darwin"),
+            patch.object(file_types, "_backend", return_value=backend),
+            patch.object(sys, "executable", inside),
+        ):
+            self.assertTrue(file_types.register("videos", config, inside, frozen=True))
+            self.assertEqual(config.file_types, {"videos": MAC_APP})
+            self.assertIs(file_types.status("videos", config, frozen=True), Status.REGISTERED)
+            file_types.refresh(config, inside, frozen=True)  # the same app: nothing to do
+            self.assertEqual(backend.calls, [("register", "videos", MAC_APP, {"previous": None})])
+
+            moved = "/Users/ayşe/Applications/QiTV.app"
+            file_types.refresh(config, f"{moved}/Contents/MacOS/QiTV", frozen=True)
+            self.assertEqual(config.file_types, {"videos": moved})
+            self.assertEqual(
+                backend.calls[-1],
+                ("register", "videos", moved, {"defaults": False, "previous": MAC_APP}),
+            )
+            config.file_types = {}
+            self.assertTrue(file_types.unregister("videos", config, frozen=True))
+            self.assertEqual(backend.calls[-1], ("unregister", "videos", MAC_APP))
+
+            dmg = "/Volumes/QiTV/QiTV.app/Contents/MacOS/QiTV"
+            with patch.object(sys, "executable", dmg):
+                self.assertIs(file_types.status("videos", config, frozen=True), Status.TEMPORARY)
+            self.assertFalse(file_types.register("videos", config, dmg, frozen=True))
 
 
 # --- the service --------------------------------------------------------------------------
@@ -636,7 +952,7 @@ class Config:
 
 class ServiceTests(unittest.TestCase):
     def setUp(self):
-        self.backend = RecordingBackend()
+        self.backend: RecordingBackend | None = RecordingBackend()  # None: no backend
         p = patch.object(file_types, "_backend", side_effect=lambda: self.backend)
         p.start()
         self.addCleanup(p.stop)
@@ -659,6 +975,10 @@ class ServiceTests(unittest.TestCase):
             "C:\\Users\\x\\AppData\\Local\\Temp\\Temp1_qitv.zip\\qitv-windows.exe",
             "c:\\users\\X\\appdata\\local\\temp\\7zO12\\qitv-windows.exe",
             "/private/var/folders/ab/cd/T/AppTranslocation/1A2B/d/QiTV.app/Contents/MacOS/QiTV",
+            "/private/var/folders/ab/cd/T/AppTranslocation/1A2B/d/QiTV.app",  # the bundle
+            # run from the mounted disk image (scripts/make_dmg.py puts it at the root)
+            "/Volumes/QiTV/QiTV.app/Contents/MacOS/QiTV",
+            "/Volumes/QiTV 1/QiTV.app",
             "C:\\Users\\x\\Downloads\\qitv.zip\\qitv-windows.exe",
             "C:\\Users\\x\\Downloads\\QiTV.ZIP\\inner\\qitv-windows.exe",
             "/tmp/qitv-linux",
@@ -670,6 +990,12 @@ class ServiceTests(unittest.TestCase):
             "C:\\zipper\\qitv-windows.exe",
             "/home/user/Templates/qitv-linux",
             "/home/user/tmpfiles/qitv-linux",
+            "/Applications/QiTV.app/Contents/MacOS/QiTV",
+            "/Applications/QiTV.app",
+            "/Users/ayşe/Applications/QiTV.app/Contents/MacOS/QiTV",
+            # a disk of the user's own, with QiTV in a folder there
+            "/Volumes/Macintosh HD/Applications/QiTV.app/Contents/MacOS/QiTV",
+            "/Volumes/Archive/Apps/QiTV.app",
             "",
         ]
         no_io = AssertionError("temporary_location touched the disk")
@@ -700,6 +1026,15 @@ class ServiceTests(unittest.TestCase):
         self.assertEqual(self.backend.calls, [])
         self.assertEqual(config.file_types, {"videos": "/a/qitv"})
 
+    def test_source_run_never_unregisters(self):
+        # a run from source may share the packaged app's settings: its registration stays
+        config = Config({"videos": "/a/qitv"})
+        with self.assertLogs("services.file_types", "INFO"):
+            self.assertFalse(file_types.unregister("videos", config, frozen=False))
+        self.assertFalse(file_types.unregister("videos", config))  # this test run is one
+        self.assertEqual(self.backend.calls, [])
+        self.assertEqual(config.file_types, {"videos": "/a/qitv"})
+
     def test_status_follows_the_record(self):
         config = Config()
         with patch.object(sys, "executable", "/opt/qitv/qitv-linux"):
@@ -708,20 +1043,58 @@ class ServiceTests(unittest.TestCase):
             self.assertIs(file_types.status("videos", config, frozen=True), Status.REGISTERED)
         with patch.object(sys, "executable", "/tmp/qitv-linux"):
             self.assertIs(file_types.status("videos", config, frozen=True), Status.TEMPORARY)
-        self.backend = None  # a system without a backend (macOS until its own)
+        self.backend = None  # a system without a backend
         self.assertIs(file_types.status("videos", config, frozen=True), Status.UNAVAILABLE)
 
     def test_register_records_and_unregister_forgets(self):
         config = Config()
         self.assertTrue(file_types.register("videos", config, "/opt/qitv/qitv-linux", True))
         self.assertEqual(config.file_types, {"videos": "/opt/qitv/qitv-linux"})
-        self.assertEqual(self.backend.calls, [("register", "videos", "/opt/qitv/qitv-linux", {})])
+        self.assertEqual(
+            self.backend.calls,
+            [("register", "videos", "/opt/qitv/qitv-linux", {"previous": None})],
+        )
         self.backend.calls.clear()
         with patch.object(sys, "executable", "/elsewhere/qitv-linux"):
-            self.assertTrue(file_types.unregister("videos", config))
+            self.assertTrue(file_types.unregister("videos", config, frozen=True))
         # what was registered is what's removed
         self.assertEqual(self.backend.calls, [("unregister", "videos", "/opt/qitv/qitv-linux")])
         self.assertEqual(config.file_types, {})
+
+    def test_register_again_tells_the_backend_what_was_registered(self):
+        config = Config({"videos": "/a/qitv"})
+        self.assertTrue(file_types.register("videos", config, "/b/qitv", True))
+        self.assertEqual(
+            self.backend.calls, [("register", "videos", "/b/qitv", {"previous": "/a/qitv"})]
+        )
+        self.assertEqual(config.file_types, {"videos": "/b/qitv"})
+
+    def test_register_answers_whether_the_defaults_were_taken(self):
+        config = Config()
+        result = file_types.register("videos", config, "/opt/qitv/qitv-linux", True)
+        self.assertEqual(result, file_types.RegisterResult(ok=True, defaults=True))
+
+        # Open With only (Linux without xdg-mime): registered, and recorded, without defaults
+        self.backend.ok = file_types.RegisterResult(ok=True, defaults=False)
+        config = Config()
+        result = file_types.register("videos", config, "/opt/qitv/qitv-linux", True)
+        self.assertTrue(result)
+        self.assertFalse(result.defaults)
+        self.assertEqual(config.file_types, {"videos": "/opt/qitv/qitv-linux"})
+
+        # every refusal is a falsy result without defaults
+        self.backend.ok = False
+        refusals = [
+            file_types.register("videos", Config(), "/opt/qitv/qitv-linux", True),
+            file_types.register("videos", Config(), "/opt/qitv/qitv-linux", False),
+            file_types.register("videos", Config(), "/tmp/qitv-linux", True),
+        ]
+        self.backend = None
+        refusals.append(file_types.register("videos", Config(), "/opt/qitv/qitv-linux", True))
+        for refused in refusals:
+            self.assertIsInstance(refused, file_types.RegisterResult)
+            self.assertFalse(refused)
+            self.assertFalse(refused.defaults)
 
     def test_a_failure_changes_no_record(self):
         config = Config()
@@ -729,14 +1102,16 @@ class ServiceTests(unittest.TestCase):
         self.assertFalse(file_types.register("videos", config, "/opt/qitv/qitv-linux", True))
         self.assertEqual(config.file_types, {})
         config.file_types = {"videos": "/opt/qitv/qitv-linux"}
-        self.assertFalse(file_types.unregister("videos", config))
+        self.assertFalse(file_types.unregister("videos", config, frozen=True))
         self.assertEqual(config.file_types, {"videos": "/opt/qitv/qitv-linux"})
 
     def test_a_backend_that_raises_answers_false(self):
         config = Config()
-        self.backend.register = lambda *a, **k: 1 / 0
-        with self.assertLogs("services.file_types", "WARNING"):
-            self.assertFalse(file_types.register("videos", config, "/opt/qitv/qitv-linux", True))
+        raising = patch.object(self.backend, "register", side_effect=ZeroDivisionError)
+        with raising, self.assertLogs("services.file_types", "WARNING"):
+            result = file_types.register("videos", config, "/opt/qitv/qitv-linux", True)
+        self.assertFalse(result)
+        self.assertFalse(result.defaults)
         self.assertEqual(config.file_types, {})
 
     def test_a_temporary_exe_is_never_registered(self):
@@ -783,7 +1158,7 @@ class ServiceTests(unittest.TestCase):
             other.write_text("{}", encoding="utf-8")
             with patch.object(ConfigManager, "_get_config_path", return_value=str(other)):
                 self.assertEqual(ConfigManager().file_types, {})
-            self.assertTrue(file_types.unregister("videos", config))
+            self.assertTrue(file_types.unregister("videos", config, frozen=True))
             config.save_config(wait=True)
             written = json.loads(path.read_text(encoding="utf-8"))
             self.assertEqual(written["file_types"], {})

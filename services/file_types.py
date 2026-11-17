@@ -2,25 +2,30 @@
 and can be made the default player. No admin is ever asked, and unregistering removes exactly
 what QiTV wrote.
 
-Everything here may touch the disk, the registry or start a program, so it runs on a worker
-thread, except `status` and `temporary_location`, which only look at strings. Nothing here
-saves the config: `register`, `unregister` and `refresh` assign `config.file_types` a new dict
-(`{kind: the executable registered}`), and the caller saves it on the GUI thread.
+Everything here may touch the disk, the registry, a system framework or start a program, so it
+runs on a worker thread, except `status` and `temporary_location`, which only look at strings.
+Nothing here saves the config: `register`, `unregister` and `refresh` assign
+`config.file_types` a new dict (`{kind: the executable registered}`, on macOS the `.app`), and
+the caller saves it on the GUI thread.
 
 - **Windows** (HKEY_CURRENT_USER only): the ProgID `QiTV.Video`, `OpenWithProgids` for every
   type, the exe's `Applications` entry, and Default Programs' `Capabilities` with its
   `RegisteredApplications` value; Windows' own Default Apps page then lets the user choose.
 - **Linux**: `$XDG_DATA_HOME/applications/qitv-open.desktop`, the icon in the user's hicolor
   theme, and `xdg-mime default` for the default types (which writes the user's mimeapps.list).
-- **macOS**: none yet; a later backend.
+- **macOS**: the bundle's Info.plist declares the types (qitv-macos.spec), so Open With lists
+  QiTV with nothing registered; registering makes it the default for a short list through
+  Launch Services. macOS can't give a default back to the app before: unregistering forgets
+  the record, and Finder's Get Info → Open with → Change All picks another app.
 
-A source run never registers: there `sys.executable` is Python, and it may share the packaged
-app's settings. Neither does a QiTV started from a place that goes away (a temporary folder,
-inside a zip, macOS's App Translocation).
+A source run never registers or unregisters: there `sys.executable` is Python, and it may share
+the packaged app's settings. Nor does a QiTV started from a place that goes away register (a
+temporary folder, inside a zip, macOS's App Translocation or a mounted disk image).
 """
 
 from __future__ import annotations
 
+from dataclasses import dataclass
 import enum
 import logging
 import ntpath
@@ -33,6 +38,7 @@ import stat
 import subprocess
 import sys
 import tempfile
+from types import SimpleNamespace
 from typing import Any, Callable, Optional, Protocol
 from urllib.parse import quote
 
@@ -73,6 +79,27 @@ MIME_TYPES: dict[str, tuple[str, ...]] = {
     "ogv": ("video/ogg",),
 }
 
+# Each type's Uniform Type Identifiers on macOS (qitv-macos.spec claims them all): the one
+# Launch Services is told for a default first, then another that apps declare for it too.
+# macOS 13, the oldest QiTV runs on, declares all but mkv and ogv itself (CoreTypes, and
+# QuickTime Player for m2ts and mts); the bundle imports those two.
+MAC_UTIS: dict[str, tuple[str, ...]] = {
+    "mp4": ("public.mpeg-4",),
+    "m4v": ("com.apple.m4v-video",),
+    "mkv": ("org.matroska.mkv",),
+    "avi": ("public.avi",),
+    "mov": ("com.apple.quicktime-movie",),
+    "webm": ("org.webmproject.webm",),
+    "ts": ("public.mpeg-2-transport-stream",),
+    "m2ts": ("public.avchd-mpeg-2-transport-stream",),
+    "mts": ("public.avchd-mpeg-2-transport-stream",),
+    "mpg": ("public.mpeg",),
+    "mpeg": ("public.mpeg",),
+    "flv": ("com.adobe.flash.video",),
+    "wmv": ("com.microsoft.windows-media-wmv",),
+    "ogv": ("org.xiph.ogg-video", "org.xiph.ogv"),
+}
+
 SUBPROCESS_TIMEOUT_S = 10
 
 
@@ -83,10 +110,30 @@ class Status(enum.Enum):
     UNAVAILABLE = "unavailable"  # a source run, or a system without a backend
 
 
+@dataclass(frozen=True)
+class RegisterResult:
+    """What `register` did; truthy exactly when `ok`.
+
+    - `ok`: QiTV is registered for the kind, and recorded.
+    - `defaults`: the system took QiTV as the default for the kind's default types. False
+      when QiTV is in Open With only and the user chooses it by hand: on Linux without
+      xdg-mime, or when xdg-mime failed for every type. On macOS a registration is its
+      defaults (the bundle's Open With needs none), so Launch Services refusing every type
+      makes `ok` False too. On Windows it is True once Default Programs lists QiTV, and
+      Windows' own Default Apps page then asks the user (`open_default_apps`).
+    """
+
+    ok: bool
+    defaults: bool = False
+
+    def __bool__(self) -> bool:
+        return self.ok
+
+
 class _Backend(Protocol):
     def register(
         self, kind: str, exe: str, *, defaults: bool = True, previous: Optional[str] = None
-    ) -> bool: ...
+    ) -> RegisterResult: ...
 
     def unregister(self, kind: str, exe: str) -> bool: ...
 
@@ -117,36 +164,52 @@ def status(kind: str, config: Any, frozen: Optional[bool] = None) -> Status:
 
 def register(
     kind: str, config: Any, exe: str = sys.executable, frozen: Optional[bool] = None
-) -> bool:
-    """Register `exe` for `kind`, and record it; False (nothing recorded) when it could not be,
-    or must not be: a source run, a temporary place, a system without a backend."""
+) -> RegisterResult:
+    """Register `exe` (on macOS the app holding it) for `kind`, and record it.
+
+    The answer is a `RegisterResult`: truthy when QiTV was registered, and its `defaults` say
+    whether the system also took QiTV as the default (else the Settings hint says to choose it
+    by hand). It is falsy, with nothing recorded, when QiTV could not be registered or must not
+    be: a source run, a temporary place, a system without a backend. Registering again tells
+    the backend what was registered before, so a failure leaves that one working (only a first
+    registration is taken back), and a renamed Windows exe's old entry goes once the new one
+    is in."""
     _kind_types(kind)
+    refused = RegisterResult(False)
     if not _frozen(frozen):
         logger.info("A run from source doesn't register itself for %s", kind)
-        return False
+        return refused
+    exe = _own_path(exe)
     if temporary_location(exe):
         logger.info("QiTV runs from a temporary place; not registered for %s", kind)
-        return False
+        return refused
     backend = _backend()
     if backend is None:
-        return False
-    if not _attempt("register", lambda: backend.register(kind, exe), kind):
-        return False
+        return refused
     record = _recorded(config)
-    record[kind] = exe
-    config.file_types = record
-    return True
+    previous = record.get(kind)
+    result = _as_result(
+        _attempt("register", lambda: backend.register(kind, exe, previous=previous), kind)
+    )
+    if result:
+        record[kind] = exe
+        config.file_types = record
+    return result
 
 
-def unregister(kind: str, config: Any) -> bool:
+def unregister(kind: str, config: Any, frozen: Optional[bool] = None) -> bool:
     """Remove what registering for `kind` wrote (for the executable recorded), and the record;
-    False (the record kept, to try again) when that failed."""
+    False (the record kept, to try again) when that failed, and from a source run (which may
+    share the packaged app's settings: its registration stays)."""
     _kind_types(kind)
+    if not _frozen(frozen):
+        logger.info("A run from source doesn't unregister %s", kind)
+        return False
     backend = _backend()
     if backend is None:
         return False
     record = _recorded(config)
-    exe = record.get(kind, sys.executable)
+    exe = record.get(kind) or _own_path(sys.executable)
     if not _attempt("unregister", lambda: backend.unregister(kind, exe), kind):
         return False
     record.pop(kind, None)
@@ -158,7 +221,10 @@ def refresh(config: Any, exe: str = sys.executable, frozen: Optional[bool] = Non
     """At start: each kind recorded for another executable (QiTV was moved or renamed) is
     registered for `exe` instead, without taking any default again (the user may have chosen
     another app since). Nothing from source or from a temporary place."""
-    if not _frozen(frozen) or temporary_location(exe):
+    if not _frozen(frozen):
+        return
+    exe = _own_path(exe)
+    if temporary_location(exe):
         return
     backend = _backend()
     if backend is None:
@@ -193,14 +259,17 @@ def open_default_apps() -> None:
 def temporary_location(exe: str) -> bool:
     """Whether `exe` sits where it won't stay: the system's temporary folder or below it
     (Windows' `AppData\\Local\\Temp` too), inside a `.zip` (Explorer's zip view, and the
-    `Temp1_x.zip` folder it extracts to), or in macOS's App Translocation. Strings only: no
-    disk is touched (the Settings row asks this)."""
+    `Temp1_x.zip` folder it extracts to), in macOS's App Translocation, or in an app at the
+    top of a mounted volume (the disk image QiTV comes in: `/Volumes/QiTV/QiTV.app`; an app in
+    a folder of a disk stays). Strings only: no disk is touched (the Settings row asks this)."""
     if not exe:
         return False
     windows = _windows_shaped(exe)
     slashed = exe.replace("\\", "/")
     folded = slashed.lower()
     if "/apptranslocation/" in folded:
+        return True
+    if not windows and _DISK_IMAGE_APP.match(slashed):
         return True
     if windows and "/appdata/local/temp/" in folded:
         return True
@@ -225,9 +294,23 @@ def temporary_location(exe: str) -> bool:
 def _backend() -> Optional[_Backend]:
     if sys.platform == "win32":
         return _windows
+    if sys.platform == "darwin":
+        return _mac
     if sys.platform.startswith("linux"):
         return _linux
     return None
+
+
+def _own_path(exe: str) -> str:
+    """What registering records for `exe`: the app that holds a macOS executable
+    (`<name>.app/Contents/MacOS/<exe>`), which Launch Services knows QiTV by and Finder moves
+    as one; any other path as it is."""
+    parts = exe.split("/")
+    for i in range(len(parts) - 4, 0, -1):  # the innermost app
+        inside = (parts[i + 1], parts[i + 2])
+        if parts[i].lower().endswith(".app") and inside == ("Contents", "MacOS"):
+            return "/".join(parts[: i + 1])
+    return exe
 
 
 def _frozen(frozen: Optional[bool]) -> bool:
@@ -249,13 +332,20 @@ def _recorded(config: Any) -> dict[str, str]:
     return {k: v for k, v in record.items() if isinstance(k, str) and isinstance(v, str)}
 
 
-def _attempt(action: str, call: Callable[[], object], kind: str) -> bool:
+def _attempt(action: str, call: Callable[[], object], kind: str) -> object:
     """`call()`'s answer; False, logged, when it raised (a worker must still answer)."""
     try:
-        return bool(call())
+        return call()
     except Exception:
         logger.warning("Couldn't %s QiTV for %s", action, kind, exc_info=True)
         return False
+
+
+def _as_result(answer: object) -> RegisterResult:
+    """A backend's answer as a RegisterResult (a plain bool: the defaults went as it did)."""
+    if isinstance(answer, RegisterResult):
+        return answer
+    return RegisterResult(bool(answer), bool(answer))
 
 
 def _mimes(extensions: frozenset[str]) -> list[str]:
@@ -267,6 +357,7 @@ def _mimes(extensions: frozenset[str]) -> list[str]:
 
 
 _WINDOWS_PATH = re.compile(r"^(?:[A-Za-z]:[\\/]|\\\\)")
+_DISK_IMAGE_APP = re.compile(r"^/Volumes/[^/]+/[^/]+\.app(?:/|$)", re.IGNORECASE)
 
 
 def _windows_shaped(path: str) -> bool:
@@ -337,35 +428,29 @@ class _WindowsBackend:
 
     def register(
         self, kind: str, exe: str, *, defaults: bool = True, previous: Optional[str] = None
-    ) -> bool:
+    ) -> RegisterResult:
+        """Write the registration for `exe`. When it fails, only a first registration
+        (`previous` None) is taken back: one that worked before stays as it was."""
         reg = _winreg()
         try:
             self._write(reg, kind, exe)
         except OSError as e:
             logger.warning("Couldn't register QiTV for %s (%s)", kind, type(e).__name__)
-            if previous is None:  # a first registration: take back what was written
-                try:
-                    self._remove(reg, kind, exe)
-                except OSError:
-                    logger.warning("Couldn't take back a part of QiTV's registration")
+            if previous is None and not self._remove(reg, kind, exe):
+                logger.warning("Couldn't take back all of QiTV's registration")
             _assoc_changed()
-            return False
+            return RegisterResult(False)
         if previous and _exe_name(previous).lower() != _exe_name(exe).lower():
             try:
                 self._remove_supported_types(reg, kind, previous)
             except OSError as e:
                 logger.info("The renamed executable's old entry stays (%s)", type(e).__name__)
         _assoc_changed()
-        return True
+        return RegisterResult(True, True)
 
     def unregister(self, kind: str, exe: str) -> bool:
         reg = _winreg()
-        try:
-            self._remove(reg, kind, exe)
-            ok = True
-        except OSError as e:
-            logger.warning("Couldn't unregister QiTV for %s (%s)", kind, type(e).__name__)
-            ok = False
+        ok = self._remove(reg, kind, exe)
         _assoc_changed()
         return ok
 
@@ -389,22 +474,48 @@ class _WindowsBackend:
         _set_values(reg, _FILE_ASSOCIATIONS, {f".{ext}": progid for ext in sorted(chosen)})
         _set_values(reg, _REGISTERED_APPLICATIONS, {APP_NAME: _CAPABILITIES})
 
-    def _remove(self, reg: Any, kind: str, exe: str) -> None:
+    def _remove(self, reg: Any, kind: str, exe: str) -> bool:
+        """Remove what `_write` wrote for `kind`, a key at a time: one that can't be changed is
+        logged and the rest still goes. True when everything went."""
         every, chosen = _kind_types(kind)
         progid = PROGIDS[kind]
-        _delete_tree(reg, f"{_CLASSES}\\{progid}")
+        ok = True
+
+        def step(what: str, call: Callable[..., object], *args: Any) -> object:
+            nonlocal ok
+            try:
+                return call(*args)
+            except OSError as e:
+                logger.warning("Couldn't remove QiTV's %s (%s)", what, type(e).__name__)
+                ok = False
+                return None
+
+        step(progid, _delete_tree, reg, f"{_CLASSES}\\{progid}")
         for ext in sorted(every):
             path = f"{_CLASSES}\\.{ext}\\OpenWithProgids"
-            _delete_values(reg, path, [progid])
-            _prune(reg, path, _CLASSES)
-        self._remove_supported_types(reg, kind, exe)
-        _delete_values(reg, _FILE_ASSOCIATIONS, [f".{ext}" for ext in chosen])
-        _prune(reg, _FILE_ASSOCIATIONS, _CAPABILITIES)
-        if not _exists(reg, _FILE_ASSOCIATIONS):  # no kind left: QiTV leaves Default Programs
-            _delete_values(reg, _CAPABILITIES, ["ApplicationName", "ApplicationDescription"])
-            _prune(reg, _CAPABILITIES, "Software")
-            _delete_values(reg, _REGISTERED_APPLICATIONS, [APP_NAME])
-            _prune(reg, _REGISTERED_APPLICATIONS, "Software")
+            step(f".{ext} Open With entry", _drop_values, reg, path, [progid], _CLASSES)
+        step("supported types", self._remove_supported_types, reg, kind, exe)
+        step(
+            "file associations",
+            _drop_values,
+            reg,
+            _FILE_ASSOCIATIONS,
+            [f".{ext}" for ext in chosen],
+            _CAPABILITIES,
+        )
+        # no kind left: QiTV leaves Default Programs
+        if step("Default Programs entry", _exists, reg, _FILE_ASSOCIATIONS) is False:
+            names = ["ApplicationName", "ApplicationDescription"]
+            step("capabilities", _drop_values, reg, _CAPABILITIES, names, "Software")
+            step(
+                "Default Programs entry",
+                _drop_values,
+                reg,
+                _REGISTERED_APPLICATIONS,
+                [APP_NAME],
+                "Software",
+            )
+        return ok
 
     def _remove_supported_types(self, reg: Any, kind: str, exe: str) -> None:
         """The exe's SupportedTypes; its Applications key stays when it holds more (Windows
@@ -435,6 +546,12 @@ def _delete_values(reg: Any, path: str, names: list[str]) -> None:
                 reg.DeleteValue(key, name)
             except FileNotFoundError:
                 pass
+
+
+def _drop_values(reg: Any, path: str, names: list[str], stop: str) -> None:
+    """Delete these values at `path`, then the keys left empty up to `stop`."""
+    _delete_values(reg, path, names)
+    _prune(reg, path, stop)
 
 
 def _exists(reg: Any, path: str) -> bool:
@@ -515,7 +632,10 @@ class _LinuxBackend:
 
     def register(
         self, kind: str, exe: str, *, defaults: bool = True, previous: Optional[str] = None
-    ) -> bool:
+    ) -> RegisterResult:
+        """Write the desktop file (and the icon), then take the defaults. A write that fails
+        takes back only a first registration (`previous` None): one that worked stays. When
+        no default could be taken, QiTV stays in Open With (`defaults` False)."""
         desktop = self._desktop_path()
         icon_ours = False
         try:
@@ -524,14 +644,11 @@ class _LinuxBackend:
             self._write_desktop(desktop, exe, mime_types(kind), icon_ours)
         except OSError as e:
             logger.warning("Couldn't write QiTV's desktop file (%s)", type(e).__name__)
-            self._remove_files(icon=icon_ours)
-            return False
+            if previous is None:
+                self._remove_files(icon=icon_ours)
+            return RegisterResult(False)
         self._run("update-desktop-database", str(desktop.parent))
-        if defaults and not self._take_defaults(kind):
-            self._remove_files()
-            self._run("update-desktop-database", str(desktop.parent))
-            return False
-        return True
+        return RegisterResult(True, defaults and self._take_defaults(kind))
 
     def unregister(self, kind: str, exe: str) -> bool:
         ok = self._remove_files()
@@ -619,14 +736,16 @@ class _LinuxBackend:
         return ok
 
     def _take_defaults(self, kind: str) -> bool:
-        """`xdg-mime default` for each default MIME type; False only when it ran and failed for
-        every one (when it isn't installed, QiTV is only in Open With)."""
+        """`xdg-mime default` for each default MIME type; whether it took at least one (False
+        when it isn't installed, or failed for every one: QiTV is then in Open With only)."""
         answers = []
         for mime in default_mime_types(kind):
             answer = self._run("xdg-mime", "default", DESKTOP_ID, mime)
             if answer is None:
-                return True  # not installed (logged)
+                return False  # not installed (logged)
             answers.append(answer)
+        if 0 not in answers:
+            logger.warning("xdg-mime took no default; QiTV is in Open With only")
         return 0 in answers
 
     def _run(self, tool: str, *args: str) -> Optional[int]:
@@ -699,3 +818,105 @@ def _drop_from_mimeapps(path: Path, desktop_id: str) -> None:
 
 
 _linux = _LinuxBackend()
+
+
+# --- macOS ----------------------------------------------------------------------------------
+
+# Apple's LaunchServices headers (LSInfo.h: LSSetDefaultRoleHandlerForContentType, deprecated
+# since macOS 12 for an Objective-C call; LSConstants.h: kLSRolesViewer), CoreFoundation's
+# CFString.h (CFStringCreateWithCString, kCFStringEncodingUTF8), and "Defining file and data
+# types for your app" (a type the system declares isn't declared again; see qitv-macos.spec).
+MAC_BUNDLE_ID = "com.ozankaraali.QiTV"  # qitv-macos.spec's bundle_identifier
+LS_ROLES_VIEWER = 0x00000002
+CF_STRING_ENCODING_UTF8 = 0x08000100
+_CORE_FOUNDATION = "/System/Library/Frameworks/CoreFoundation.framework/CoreFoundation"
+_CORE_SERVICES = "/System/Library/Frameworks/CoreServices.framework/CoreServices"
+_MAC_DEFAULTS = {"videos": MAC_DEFAULT_VIDEO}  # each kind's short list (one question each)
+
+
+def _core_services() -> Any:
+    """CoreFoundation's CFStringCreateWithCString and CFRelease, and Launch Services'
+    LSSetDefaultRoleHandlerForContentType, with their C types (a CFStringRef is a pointer,
+    which ctypes would otherwise cut to a C int; an OSStatus is 32 bits). macOS only."""
+    import ctypes  # loaded where it's used
+
+    foundation = ctypes.CDLL(_CORE_FOUNDATION)
+    services = ctypes.CDLL(_CORE_SERVICES)
+    create = foundation.CFStringCreateWithCString
+    create.argtypes = [ctypes.c_void_p, ctypes.c_char_p, ctypes.c_uint32]
+    create.restype = ctypes.c_void_p
+    release = foundation.CFRelease
+    release.argtypes = [ctypes.c_void_p]
+    release.restype = None
+    set_default = services.LSSetDefaultRoleHandlerForContentType
+    set_default.argtypes = [ctypes.c_void_p, ctypes.c_uint32, ctypes.c_void_p]
+    set_default.restype = ctypes.c_int32
+    return SimpleNamespace(
+        CFStringCreateWithCString=create,
+        CFRelease=release,
+        LSSetDefaultRoleHandlerForContentType=set_default,
+    )
+
+
+class _MacBackend:
+    """The bundle declares the types, so Open With lists QiTV with nothing written.
+    Registering makes QiTV the default viewer for the kind's short list (what Finder's Get
+    Info → Open with → Change All does); macOS 26.4 and later ask the user once for each."""
+
+    def register(
+        self, kind: str, exe: str, *, defaults: bool = True, previous: Optional[str] = None
+    ) -> RegisterResult:
+        """Truthy when Launch Services took at least one type (each refusal is logged with its
+        OSStatus). With `defaults` False (a moved app), there's nothing to do: Launch Services
+        knows QiTV by its bundle id."""
+        if not defaults:
+            return RegisterResult(True)
+        try:
+            lib = _core_services()
+        except (OSError, AttributeError) as e:
+            logger.warning("Couldn't reach Launch Services (%s)", type(e).__name__)
+            return RegisterResult(False)
+        handler = _cf_string(lib, MAC_BUNDLE_ID)
+        if not handler:
+            return RegisterResult(False)
+        short_list = _MAC_DEFAULTS[kind]
+        taken = 0
+        try:
+            for ext in short_list:
+                taken += _take_default(lib, MAC_UTIS[ext][0], handler)
+        finally:
+            lib.CFRelease(handler)
+        logger.info("QiTV is the default for %d of %d %s types", taken, len(short_list), kind)
+        return RegisterResult(taken > 0, taken > 0)
+
+    def unregister(self, kind: str, exe: str) -> bool:
+        """Nothing to remove: the defaults stay QiTV's until the user picks another app in
+        Finder (Launch Services can't give one back), and Open With lists QiTV as before."""
+        logger.info("macOS keeps QiTV's %s defaults until Finder's Change All picks another", kind)
+        return True
+
+
+def _cf_string(lib: Any, text: str) -> Any:
+    """A new CFString of `text` (the caller releases it); None, logged, when macOS made none."""
+    ref = lib.CFStringCreateWithCString(None, text.encode("utf-8"), CF_STRING_ENCODING_UTF8)
+    if not ref:
+        logger.warning("macOS made no string of %s", text)
+    return ref
+
+
+def _take_default(lib: Any, uti: str, handler: Any) -> bool:
+    """Make the bundle `handler` names the default viewer for `uti`; whether macOS did."""
+    content_type = _cf_string(lib, uti)
+    if not content_type:
+        return False
+    try:
+        status = lib.LSSetDefaultRoleHandlerForContentType(content_type, LS_ROLES_VIEWER, handler)
+    finally:
+        lib.CFRelease(content_type)
+    if status:
+        logger.warning("macOS didn't make QiTV the default for %s (OSStatus %d)", uti, status)
+        return False
+    return True
+
+
+_mac = _MacBackend()
