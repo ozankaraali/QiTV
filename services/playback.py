@@ -151,6 +151,8 @@ _PLAYS_HERE = frozenset(
     {PlaybackState.OPENING, PlaybackState.BUFFERING, PlaybackState.PLAYING, PlaybackState.PAUSED}
 )
 _OPENED = frozenset({PlaybackState.PLAYING, PlaybackState.PAUSED})
+# A picture that showed stays up (shows_picture): playing, paused on it, or waiting for media.
+_SHOWS_PICTURE = frozenset({PlaybackState.PLAYING, PlaybackState.PAUSED, PlaybackState.BUFFERING})
 
 
 @dataclass(frozen=True)
@@ -350,6 +352,10 @@ class PlaybackSession(QObject):
     # software now (reopened, unless it is a time-shift stream; see the module docstring).
     pictureFroze = Signal()
     soundLost = Signal()  # 2.8.8: a time-shift stream's sound did not come back (cycled track)
+    # The media's picture shows: VLC's video output for it appeared (once per open; not for a
+    # song with no picture, nor while it casts). A file opened in QiTV shows QiTV's mark until
+    # then (ui/overlays/opening.py).
+    pictureShown = Signal()
 
     def __init__(
         self,
@@ -442,6 +448,8 @@ class PlaybackSession(QObject):
         # leaves it so, as this player then deinterlaces until QiTV starts again.
         self._deinterlace_method: Optional[str] = None
         self._picture_due = False  # set again once this media's video output exists
+        self._shown_due = False  # this open's picture is still to show (pictureShown)
+        self._shown = False  # it showed (shows_picture)
         self._picture_set = False  # libVLC was given a shape or deinterlacing on this player
         # On leaves a picture taller than 1080i alone (services.picture): its height is read
         # once per media, as soon as libVLC knows it.
@@ -497,6 +505,12 @@ class PlaybackSession(QObject):
 
     def state(self) -> PlaybackState:
         return self._state
+
+    def shows_picture(self) -> bool:
+        """What plays shows its picture (pictureShown came for this open): it plays, is paused
+        or buffers on it. Not while it opens, once it ended, failed or stopped, nor when it has
+        no picture (a song)."""
+        return self._shown and self._state in _SHOWS_PICTURE
 
     def time_ms(self) -> int:
         if not self._player_free():
@@ -655,6 +669,7 @@ class PlaybackSession(QObject):
         self._poll.stop()
         self._set_seekable(False)
         self._ever_played = False
+        self._shown_due = self._shown = False  # black until this open's picture shows
         self._frozen.restart()
         self._sound.restart()
         self._last_time = -1
@@ -702,6 +717,7 @@ class PlaybackSession(QObject):
         if self._subtitle_delay_ms:
             self._player.video_set_spu_delay(self._subtitle_delay_ms * 1000)
         self._height_due, self._too_tall = True, False
+        self._shown_due = True  # pictureShown once its video output appears
         if self._picture_wanted():
             self._apply_picture()  # the player's, for a new video output
             self._picture_due = True  # and again for a kept one, once it is this media's
@@ -1392,9 +1408,13 @@ class PlaybackSession(QObject):
                 self._replay_files()
             if self._tracks_due:
                 self._choose_tracks()
-        if self._picture_due and int(self._player.has_vout() or 0) > 0:
-            self._picture_due = False
-            self._apply_picture()
+        if (self._picture_due or self._shown_due) and int(self._player.has_vout() or 0) > 0:
+            if self._picture_due:
+                self._picture_due = False
+                self._apply_picture()
+            if self._shown_due:  # only once per open (a shape set later re-arms _picture_due)
+                self._shown_due, self._shown = False, True
+                self.pictureShown.emit()
         if self._height_due and self._deinterlace_method:
             self._check_height()
         if self._spu_waiting:
@@ -1583,6 +1603,7 @@ class Session(Protocol):
     inputEnded: Any
     pictureFroze: Any
     soundLost: Any
+    pictureShown: Any
 
     @property
     def url(self) -> Optional[str]: ...
@@ -1594,6 +1615,8 @@ class Session(Protocol):
     def hardware(self) -> bool: ...
 
     def state(self) -> PlaybackState: ...
+
+    def shows_picture(self) -> bool: ...
 
     def time_ms(self) -> int: ...
 
@@ -1722,6 +1745,7 @@ class NullSession(QObject):
     inputEnded = Signal()
     pictureFroze = Signal()
     soundLost = Signal()
+    pictureShown = Signal()
 
     @property
     def url(self) -> Optional[str]:
@@ -1737,6 +1761,9 @@ class NullSession(QObject):
 
     def state(self) -> PlaybackState:
         return PlaybackState.IDLE
+
+    def shows_picture(self) -> bool:
+        return False
 
     def time_ms(self) -> int:
         return 0

@@ -387,6 +387,12 @@ class _FakePlayer:
         self._call("get_state")
         return vlc.State.Opening if vlc is not None else 1
 
+    def has_vout(self):
+        # libVLC counts the input's video outputs under its lock; none here (no picture)
+        if self.joining:
+            raise AssertionError("has_vout on the GUI thread while libVLC joins the input")
+        return 0
+
     def get_time(self):
         self._call("get_time")
         return 0

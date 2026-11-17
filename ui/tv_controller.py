@@ -924,6 +924,7 @@ class TVController(QObject):
         self._set_recording_aside()  # 2.6: a recording records on in the background
         self._live_controls.stop_tune()
         self._current, self._cid = None, None
+        self._opening_over()
         if stopped is not None and stopped.local:
             # A file stopped (not one still looked at: it plays once found, held for).
             self._flow.hold_for_file(False)
@@ -2137,6 +2138,7 @@ class TVController(QObject):
                 self._current, self._cid = None, None
                 if target.local:
                     self._flow.hold_for_file(False)  # the file could not open
+                    self._opening_over()
                 self._log_failure(f"play {target.title}", e)
                 if not target.live:
                     self._give_small_channel_large()
@@ -3177,18 +3179,27 @@ class TVController(QObject):
     def _before_new_target(self, target: Optional[Target], *, delivered: bool = False) -> None:
         """`target` replaces what the large picture shows (None: an outside player or a phone
         takes it, nothing plays here). A file opened in QiTV gives way to anything but another
-        file: what waited for it (the welcome card, the update question) may come now. A file
-        still being looked at gives way too, to a choice made now (a swap, a bring-back, an
-        outside player), not to a link `delivered` for a choice made before it was opened.
+        file: what waited for it (the welcome card, the update question) may come now, and
+        QiTV's mark over it goes (_opening_over). A file still being looked at gives way too,
+        to a choice made now (a swap, a bring-back, an outside player), not to a link
+        `delivered` for a choice made before it was opened.
         AI captions that came on by themselves for a video file go off before anything else
         opens (CaptionsController.target_changing)."""
         if target is None or not target.local:
             if not delivered:
                 self._file_gives_way()
             self._flow.hold_for_file(False)
+            self._opening_over()
         captions = getattr(self.window_actions, "captions", None)
         if captions is not None:
             captions.target_changing(target is not None and target.video_file)
+
+    def _opening_over(self) -> None:
+        """A file opened in QiTV no longer opens in the large picture (it failed or ended,
+        another title replaces it, Stop): QiTV's mark over it goes (TVWindow.opening_over)."""
+        over = getattr(self.window_actions, "opening_over", None)
+        if callable(over):
+            over()
 
     def _file_gives_way(self) -> None:
         """Something other than a file was chosen for the large picture: a file opened before
@@ -3629,6 +3640,7 @@ class TVController(QObject):
     def _on_error(self, message: str) -> None:
         if self._closed:
             return
+        self._opening_over()  # the error toast shows instead (even as the file is played)
         current = self._current
         if current is not None and current.local:
             self._flow.hold_for_file(False)  # the file failed to play
@@ -3662,7 +3674,10 @@ class TVController(QObject):
             pip.close()  # the failed title, small now
 
     def _on_ended(self) -> None:
-        if self._closed or self._current is None:
+        if self._closed:
+            return
+        self._opening_over()  # a file that ended before any picture
+        if self._current is None:
             return
         current = self._current
         if not current.live and self._media is not None:

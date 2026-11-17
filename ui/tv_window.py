@@ -87,7 +87,7 @@ from services.live.tuning import FILE_NAME as TUNING_FILE, LiveTuning
 from services.media_keys import MediaKeys
 from services.media_reporter import MediaReporter
 from services.navigation import NavModel
-from services.open_paths import Sorted, extended_path, natural_key, sort_paths
+from services.open_paths import Sorted, extended_path, is_music, natural_key, sort_paths
 from services.parental import Parental, install as install_parental
 from services.picture import FILE_NAME as PICTURE_FILE, ChannelPictures
 from services.playback import (
@@ -144,6 +144,7 @@ from ui.overlays.guide import Guide
 from ui.overlays.layout_row import LayoutRow
 from ui.overlays.mixer import Mixer
 from ui.overlays.next_card import NextCard
+from ui.overlays.opening import OpeningOverlay
 from ui.overlays.painting import fmt_clock
 from ui.overlays.pip_label import PipLabel
 from ui.overlays.question_card import QuestionCard
@@ -474,6 +475,8 @@ class TVWindow(QMainWindow):
         # The newest open's (number, media file, the subtitle files dropped with it).
         self._open_due: Optional[tuple[int, str, list[str]]] = None
         self._burst: Optional[tuple[float, str]] = None  # (when, file): a start's choice
+        # A file is being played and QiTV's mark is to draw over it (opening_over says no).
+        self._opening_due = False
         # The subtitle files dropped with a video, for its target once it opened, until when.
         self._subtitles_due: Optional[tuple[Target, list[str], float]] = None
         self._subtitles_wait = QTimer(self, interval=OPENED_POLL_MS)
@@ -663,6 +666,7 @@ class TVWindow(QMainWindow):
         self.subtitle_search = SubtitleSearchPage(host)
         self.corner_controls = CornerControls(host)
         self.captions_overlay = CaptionsOverlay(host)  # 2.9: AI captions over the picture
+        self.opening_overlay = OpeningOverlay(host)  # QiTV's mark while a file opens
         # 2.8: the recordings scheduled from the guide (a small file beside the config).
         self.recording_schedule = Schedule(
             os.path.join(config_manager.get_config_dir(), SCHEDULE_FILE)
@@ -727,7 +731,8 @@ class TVWindow(QMainWindow):
         # small picture (OverlayHost.set_hole). The multiview's tiles are drawn under all of
         # them, and take their clicks over the transport but for its buttons and bar
         # (GridTiles.hits); AI captions just above the tiles, under everything else (they sit
-        # above the player controls while those show, and take no click). The mixer shows over
+        # above the player controls while those show, and take no click), and QiTV's mark
+        # while a file opens over them (it takes no click either). The mixer shows over
         # them (it sits above the transport's controls and beside the PiP), and the Sound,
         # Subtitles and Picture panels and the multiview's layouts over it (above their
         # buttons). The statistics sit over the transport, under its title row (they take no
@@ -737,6 +742,7 @@ class TVWindow(QMainWindow):
         for overlay in (
             self.grid_tiles,
             self.captions_overlay,
+            self.opening_overlay,
             self.overlays.banner,
             self.overlays.column,
             self.overlays.transport,
@@ -1457,6 +1463,8 @@ class TVWindow(QMainWindow):
         - A start's file within OPEN_BURST_S of the one a start chose (a multi-select, one
           start per file) replaces it only when it sorts first by name; else it is left out.
         - Open File plays what it picks, whatever its kind (an HLS playlist too).
+        - As a media file is played, QiTV's mark draws in the middle of the page until its
+          picture shows (ui/overlays/opening.py), unless a picture shows already.
         - A file QiTV won't play (none of these kinds) says so; the first one is named.
 
         A launch or a hand-over brings the window forward. The paths are passed on as given.
@@ -1550,11 +1558,30 @@ class TVWindow(QMainWindow):
         # ended, the link of a channel chosen before it) leaves it this file's. A choice made
         # after it dropped the file instead (file_gives_way).
         self.controller.hold_for_file(True)
+        before = self.controller.now_playing()
+        # QiTV's mark draws while it opens, unless a picture shows (a film's, a channel's): an
+        # error as it is played (opening_over) leaves it out.
+        self._opening_due = not self.controller.session.shows_picture()
         self.screens.play_path(path, size)
         target = self.controller.now_playing()
+        if self._opening_due and target is not None and target is not before and target.local:
+            session = self.controller.session  # the large picture's, which plays it
+            self.opening_overlay.open_for(
+                session,
+                str(target.item.get("cmd") or ""),
+                sound_only=is_music(path) or session.casting(),
+            )
+        self._opening_due = False
         if due[2] and target is not None and target.local:
             self._subtitles_due = (target, due[2], self._clock() + OPENED_WAIT_S)
             self._subtitles_wait.start()
+
+    def opening_over(self) -> None:
+        """What the large picture opens is no longer the file QiTV's mark draws for: it
+        failed or ended, another title was chosen, or Stop was pressed (TVController). The
+        mark opens out of the page (and one about to show for it does not)."""
+        self._opening_due = False
+        self.opening_overlay.close_opening()
 
     def file_gives_way(self) -> None:
         """Something other than a file was chosen for the large picture since a file was
