@@ -23,6 +23,8 @@ _LEADING_GROUP = re.compile(r"^\s*(?:\[[^\]]*\]|\([^)]*\))")
 _NXMM = re.compile(r"(?<![a-z0-9])(\d{1,2})x(\d{2,3})(?![a-z0-9])", re.IGNORECASE)
 _NON_ALNUM = re.compile(r"[\W_]+")
 _TITLE_TRIM = " -_.(["
+# A season folder, read on a show key: "season 4", "s04", "sezon", ... (the number is optional).
+_SEASON_FOLDER = re.compile(r"^(?:(?:season|sezon|staffel|saison)(?: \d{1,3})?|s\d{1,3})$")
 
 
 @dataclass(frozen=True)
@@ -40,6 +42,26 @@ def _show_key(text: str) -> str:
     text = "".join(c for c in text if not unicodedata.combining(c))
     text = text.casefold().replace("ı", "i")
     return _NON_ALNUM.sub(" ", text).strip()
+
+
+def _same_show(a: str, b: str) -> bool:
+    """Equal keys, or one's words lead the other's with at least two words in common."""
+    if not a or not b:
+        return False
+    if a == b:
+        return True
+    wa, wb = a.split(), b.split()
+    n = min(len(wa), len(wb))
+    return n >= 2 and wa[:n] == wb[:n]
+
+
+def _folder_show(folder: str) -> str:
+    """The show key a bare name takes from its folder (the folder above a season folder)."""
+    folder = folder.rstrip("/\\")
+    key = _show_key(os.path.basename(folder))
+    if _SEASON_FOLDER.match(key):
+        key = _show_key(os.path.basename(os.path.dirname(folder).rstrip("/\\")))
+    return key
 
 
 def parse_episode(file_name: str) -> Optional[EpisodeName]:
@@ -98,6 +120,9 @@ def next_in_folder(
 ) -> Optional[dict]:
     """The same show's next episode in `listing` (the current file's folder), or None.
 
+    The same show: equal keys, or one's leading words are the other's (two words at least).
+    A bare name takes its folder's show (above a season folder), derived from `current_path`.
+
     (season, last + 1) when present; else (season + 1, 1), but only when no later episode of
     this season is listed: a gap offers nothing rather than skipping an episode.
     """
@@ -105,15 +130,20 @@ def next_in_folder(
     current = parse_episode(current_name)
     if current is None:
         return None
+    # A bare name (nothing before the pattern) takes its show from its folder; a bare 1x02
+    # has no such footing and never links.
+    folder_show = _folder_show(folder)
+    if not current.show and not current.sxxeyy:
+        return None
+    current_show = current.show or folder_show
     same_show: list[tuple[str, Optional[int], EpisodeName]] = []
     for name, size in listing:
         if name == current_name or name.startswith("."):
             continue
         ep = parse_episode(name)
-        if ep is None or ep.show != current.show:
+        if ep is None or (not ep.show and not ep.sxxeyy):
             continue
-        # With no show named, only the S01E02 form links to its own kind.
-        if not current.show and not (current.sxxeyy and ep.sxxeyy):
+        if not _same_show(current_show, ep.show or folder_show):
             continue
         same_show.append((name, size, ep))
 

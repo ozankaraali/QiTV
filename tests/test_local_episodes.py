@@ -140,11 +140,81 @@ class NextTests(unittest.TestCase):
         self.assertEqual(nxt["local_path"], "/m/Show.S01E02.mkv")
 
     def test_bare_names_link_only_in_the_sxxeyy_form(self):
+        # Was P3-3 (an empty key links only SxxEyy to SxxEyy). Now a bare SxxEyy takes its
+        # folder's show and links under the same-show rule; a bare 1x02 still never links.
         nxt = next_in_folder("/m/S01E01.mkv", _listing("S01E02 - Title.mkv"))
         assert nxt is not None
         self.assertEqual(nxt["local_path"], "/m/S01E02 - Title.mkv")
         self.assertIsNone(next_in_folder("/m/S01E01.mkv", _listing("1x02 Other.mkv")))
         self.assertIsNone(next_in_folder("/m/1x01.mkv", _listing("1x02.mkv")))
+
+
+class SameShowTests(unittest.TestCase):
+    LONG = "The.Long.Show.Title.A.Name.Story.S04E08.1080p.SRC.WEB-DL.H.265.DDP5.1-GRP.mkv"
+    SHORT = "The.Long.Show.Title.S04E09.720p.WEB-DL.x264-OTHER.mkv"
+
+    def test_a_shorter_spelling_of_the_same_show_is_the_same_show(self):
+        nxt = next_in_folder("/m/" + self.LONG, _listing(self.SHORT))
+        assert nxt is not None
+        self.assertEqual(nxt["local_path"], "/m/" + self.SHORT)
+        short_first = "The.Long.Show.Title.S04E08.720p.mkv"
+        longer_next = "The.Long.Show.Title.A.Name.Story.S04E09.1080p.mkv"
+        nxt = next_in_folder("/m/" + short_first, _listing(longer_next))
+        assert nxt is not None
+        self.assertEqual(nxt["local_path"], "/m/" + longer_next)
+
+    def test_one_shared_word_is_not_the_same_show(self):
+        self.assertIsNone(next_in_folder("/m/Show.S01E01.mkv", _listing("Show.Name.S01E02.mkv")))
+        self.assertIsNone(next_in_folder("/m/Show.Name.S01E01.mkv", _listing("Show.S01E02.mkv")))
+        self.assertIsNone(next_in_folder("/m/The.Cat.S01E01.mkv", _listing("The.Dog.S01E02.mkv")))
+        self.assertIsNone(next_in_folder("/m/The.S01E01.mkv", _listing("The.Cat.S01E02.mkv")))
+
+    def test_bare_names_take_the_folders_show(self):
+        for folder in ("/Shows/Long Show Title", "/Shows/Long Show Title/Season 4"):
+            with self.subTest(folder=folder):
+                cur = folder + "/S04E08.mkv"
+                nxt = next_in_folder(cur, _listing("S04E09 - Title.mkv"))
+                assert nxt is not None
+                self.assertEqual(nxt["local_path"], folder + "/S04E09 - Title.mkv")
+                named = "Long.Show.Title.S04E09.720p.mkv"
+                nxt = next_in_folder(cur, _listing(named))
+                assert nxt is not None
+                self.assertEqual(nxt["local_path"], folder + "/" + named)
+                nxt = next_in_folder(
+                    folder + "/Long.Show.Title.A.Name.S04E08.mkv", _listing("S04E09.mkv")
+                )
+                assert nxt is not None
+                self.assertEqual(nxt["local_path"], folder + "/S04E09.mkv")
+
+    def test_a_bare_name_in_an_unrelated_folder_never_links_to_another_show(self):
+        self.assertIsNone(
+            next_in_folder("/Downloads/S01E01.mkv", _listing("Other.Show.S01E02.mkv"))
+        )
+        self.assertIsNone(
+            next_in_folder("/Downloads/Other.Show.S01E01.mkv", _listing("S01E02.mkv"))
+        )
+
+    def test_bare_nxnn_still_never_links(self):
+        folder = "/Shows/Long Show Title"
+        self.assertIsNone(next_in_folder(folder + "/1x01.mkv", _listing("1x02.mkv")))
+        self.assertIsNone(next_in_folder(folder + "/S01E01.mkv", _listing("1x02 Other.mkv")))
+        self.assertIsNone(
+            next_in_folder(folder + "/Long.Show.Title.S01E01.mkv", _listing("1x02.mkv"))
+        )
+
+    def test_specials_is_not_a_season_folder(self):
+        # "Specials" is the show here, so the bare name does not take "Long Show Title".
+        cur = "/Shows/Long Show Title/Specials/S00E01.mkv"
+        self.assertIsNone(next_in_folder(cur, _listing("Long.Show.Title.S00E02.mkv")))
+        nxt = next_in_folder(cur, _listing("S00E02.mkv"))
+        assert nxt is not None
+
+    def test_season_folder_spellings(self):
+        for name in ("Season 4", "season 04", "S04", "Sezon 4", "Staffel 4", "SAISON 4", "Season"):
+            with self.subTest(name=name):
+                cur = "/Shows/Long Show Title/" + name + "/S04E08.mkv"
+                nxt = next_in_folder(cur, _listing("Long.Show.Title.S04E09.mkv"))
+                self.assertIsNotNone(nxt)
 
 
 class ListFolderTests(unittest.TestCase):
