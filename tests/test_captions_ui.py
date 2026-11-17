@@ -248,6 +248,10 @@ class FakeCaptions(QObject):
             return
         self.on = True
 
+    def give_way(self):
+        """A subtitle track or file chosen over them: off, a download too (no toggle)."""
+        self.on = self.going = False
+
     def release(self, then):
         """Settings' Delete: off, then the files (CaptionsController.release)."""
         self.on = False

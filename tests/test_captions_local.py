@@ -116,19 +116,89 @@ class LocalCaptionsTests(ControllerTestCase):
         self.assertEqual(self.warmed, [])  # nor a benchmark started for it
         self.assertEqual(self.card.asked, [])
 
-    def test_translated_they_wait_for_this_computers_speed(self):
-        # Translated, Automatic's model goes by this computer's speed first (_speed_unknown):
-        # known (measured in this run), they come back on; not yet, they stay off, unmeasured.
+    def translated_with_the_speed_unknown(self):
+        """Translated, Automatic goes by this computer's speed first (_speed_unknown); QiTV
+        has just started: not measured yet. Its models are here."""
         self.config.ai_captions_local_on = True
-        self.config.ai_captions_translate_to = "German"  # its model is here too
+        self.config.ai_captions_translate_to = "German"
         self.score = None
+
+    def test_translated_they_come_on_once_the_speed_is_measured(self):
+        # Ruling 13, the friend's setup: a Turkish series translated into German, double-clicked
+        # as QiTV starts. Measured in the background, nothing shown or asked meanwhile.
+        self.translated_with_the_speed_unknown()
         self.film()
+        self.assertEqual(self.warmed, [True])
         self.assertFalse(self.captions.enabled())
-        self.assertEqual((self.warmed, self.card.asked), ([], []))
+        self.assertFalse(self.captions._toggle_waits)  # no wait of the viewer's
+        self.assertEqual((self.captions.status_text(), self.card.asked), ("", []))
         self.score = 1.0
-        self.film(NEXT)
+        self.captions._on_scored()  # (the benchmark's signal)
         self.assertTrue(self.captions.enabled())
         self.assertEqual(self.card.asked, [])
+        self.assertTrue(self.config.ai_captions_local_on)
+        self.controller.tune_live(CHANNELS[0], group_key="10", channels=list(CHANNELS))
+        self.ready()
+        self.assertFalse(self.captions.enabled())  # on by themselves: off for live TV
+
+    def test_translated_a_title_changed_before_the_speed_is_known_brings_nothing_on(self):
+        self.translated_with_the_speed_unknown()
+        self.film()
+        self.controller.tune_live(CHANNELS[0], group_key="10", channels=list(CHANNELS))
+        self.ready()
+        self.score = 1.0
+        self.captions._on_scored()
+        self.assertFalse(self.captions.enabled())
+
+    def test_translated_what_changed_before_the_speed_is_known_keeps_them_off(self):
+        # Still the same film, but its own subtitles were turned on meanwhile, or the viewer
+        # turned AI captions off and on (theirs, then: not by themselves).
+        self.translated_with_the_speed_unknown()
+        self.film()
+        self.session.subtitle_on = 3
+        self.score = 1.0
+        self.captions._on_scored()
+        self.assertFalse(self.captions.enabled())
+        self.session.subtitle_on = -1
+        self.score = None
+        self.film(NEXT)
+        self.captions.toggle()  # the viewer's: waits for the speed as before
+        self.assertTrue(self.captions._toggle_waits)
+        self.assertIsNone(self.captions._auto_pending)
+        self.score = 1.0
+        self.captions._on_scored()
+        self.assertTrue(self.captions.enabled())
+        self.controller.tune_live(CHANNELS[0], group_key="10", channels=list(CHANNELS))
+        self.ready()
+        self.assertTrue(self.captions.enabled())  # the viewer's: on for live TV too
+
+    def test_a_subtitle_file_loaded_over_auto_on_ones_keeps_the_field(self):
+        # Ruling 14: subtitle files opened with the video load once it plays.
+        self.config.ai_captions_local_on = True
+        self.film()
+        self.assertTrue(self.captions.enabled())
+        self.assertTrue(self.controller.drop_subtitles(["/videos/Dizi Bölüm 1.de.srt"]))
+        self.assertFalse(self.captions.enabled())
+        self.assertTrue(self.config.ai_captions_local_on)  # the next video file: on again
+        self.session.subtitle_on = -1  # (it has no subtitles of its own)
+        self.film(NEXT)
+        self.assertTrue(self.captions.enabled())
+        self.controller.tune_live(CHANNELS[0], group_key="10", channels=list(CHANNELS))
+        self.ready()
+        self.assertFalse(self.captions.enabled())
+
+    def test_a_subtitle_file_or_track_over_the_viewers_ones_keeps_the_field(self):
+        self.film()
+        self.captions.toggle()  # on: the viewer's
+        self.assertTrue(self.config.ai_captions_local_on)
+        self.assertTrue(self.controller.drop_subtitles(["/videos/Dizi Bölüm 1.de.srt"]))
+        self.assertFalse(self.captions.enabled())
+        self.assertTrue(self.config.ai_captions_local_on)
+        self.captions.toggle()  # on again, then a track of the film's own chosen over them
+        self.assertTrue(self.controller.track_controls().choose_subtitles(3))
+        self.assertEqual(self.session.subtitle_on, 3)
+        self.assertFalse(self.captions.enabled())
+        self.assertTrue(self.config.ai_captions_local_on)
 
     def test_what_played_before_the_file_is_no_play_of_it(self):
         # A provider's film is stopped for the file; its input still closing, the file waits,
