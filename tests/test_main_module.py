@@ -393,9 +393,10 @@ class BootloaderSplashTests(unittest.TestCase):
         for environ in ({}, {"_PYI_SPLASH_IPC": "0"}, {"_PYI_SPLASH_IPC": ""}):
             with self.subTest(environ=environ):
                 module = mock.Mock()
-                bootloader = self.take(environ, module)
-                self.assertFalse(bootloader.shows)
-                bootloader.close("test")
+                with self.assertNoLogs("qitv", "DEBUG"):  # nothing to say: none shows
+                    bootloader = self.take(environ, module)
+                    self.assertFalse(bootloader.shows)
+                    bootloader.close("test")
                 self.assertEqual(module.mock_calls, [])
 
     def test_a_splash_that_shows_closes_once_from_any_thread(self):
@@ -414,19 +415,60 @@ class BootloaderSplashTests(unittest.TestCase):
         self.assertEqual(logs.output, ["INFO:qitv:PyInstaller's splash closed: test."])
 
     def test_a_splash_that_cannot_close_is_never_a_reason_not_to_start(self):
+        # It may stay on top of QiTV for the whole run: the log says so.
         module = FakePyiSplash(fails=ConnectionResetError("gone"))
         bootloader = self.take(PORT, module)
-        bootloader.close("test")  # no exception
-        bootloader.close("test")
+        with self.assertLogs("qitv", "WARNING") as logs:
+            bootloader.close("test")  # no exception
+            bootloader.close("test")
         self.assertEqual(len(module.closes), 1)
+        self.assertEqual(len(logs.output), 1)
+        self.assertIn("ConnectionResetError", logs.output[0])
 
-    def test_a_splash_that_isnt_there_is_none(self):
-        # The bootloader's splash failed to start (no X display), or its module is missing.
+    def test_a_port_with_no_splash_to_reach_says_so(self):
+        # Its port is set, so the still shows, but QiTV can't reach it (its module missing, or
+        # the connection refused): nothing can close it, and the log says so.
         for module in (FakePyiSplash(alive=False), None):
             with self.subTest(module=module):
-                bootloader = self.take(PORT, module)
+                with self.assertLogs("qitv", "WARNING") as logs:
+                    bootloader = self.take(PORT, module)
+                self.assertEqual(len(logs.output), 1)
                 self.assertFalse(bootloader.shows)
                 bootloader.close("test")
+
+    def test_an_unhandled_error_closes_it_after_its_log(self):
+        # An exception that ends main() before its `finally` (or one a slot raised): the still
+        # goes as it is logged, before a windowed build's error dialog shows under it.
+        module = FakePyiSplash()
+        bootloader = self.take(PORT, module)
+        self.addCleanup(setattr, sys, "excepthook", sys.excepthook)
+        logged = []
+        sys.excepthook = lambda *exc: logged.append((exc[0], len(module.closes)))
+        bootloader.close_on_crash()
+        try:
+            raise ValueError("boom")
+        except ValueError:
+            sys.excepthook(*sys.exc_info())
+        self.assertEqual(logged, [(ValueError, 0)])  # logged first, then closed
+        self.assertEqual(len(module.closes), 1)
+        self.assertFalse(bootloader.shows)
+
+        def failing_log(*_exc):
+            raise RuntimeError("the log failed")
+
+        again = FakePyiSplash()
+        bootloader = self.take(PORT, again)
+        sys.excepthook = failing_log
+        bootloader.close_on_crash()
+        with self.assertRaises(RuntimeError):
+            sys.excepthook(ValueError, ValueError("boom"), None)
+        self.assertEqual(len(again.closes), 1)  # closed all the same
+
+    def test_with_none_showing_the_excepthook_is_left_alone(self):
+        self.addCleanup(setattr, sys, "excepthook", sys.excepthook)
+        hook = sys.excepthook
+        self.take({}, mock.Mock()).close_on_crash()
+        self.assertIs(sys.excepthook, hook)
 
     def test_main_imports_pyi_splash_by_name(self):
         # PyInstaller bundles pyi_splash only where an import statement names it: without it
@@ -445,6 +487,11 @@ class BootloaderSplashTests(unittest.TestCase):
         take = body.index("bootloader = BootloaderSplash()")
         replace = body.index("not_replaced = handle_replace_flag()")
         self.assertLess(take, replace)
+        # an unhandled error closes it too, once the log's own excepthook is in place
+        crash = body.index("bootloader.close_on_crash()")
+        self.assertLess(body.index("log_file.install()"), crash)
+        self.assertLess(take, crash)
+        self.assertLess(crash, replace)
         # no splash of QiTV's own (--replace, --smoke, no screen): at once, before an update's
         # copy waits up to 30 s for the old QiTV to quit
         self.assertIn('if not with_splash:\n        bootloader.close("', body[take:replace])

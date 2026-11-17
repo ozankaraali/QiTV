@@ -7,12 +7,14 @@ light and shadow come in as it takes over.
     uv run python scripts/render_splash.py [--style windows|linux] [OUT]   # build/splash.png
     uv run python scripts/render_splash.py --check-tcl-tk
 
-MARK_PX square, one pixel per pixel, with no light and no shadow: Tk can't show them. On Windows
-it keys out one colour, so every pixel is opaque or transparent (a partly transparent one would
+The tile's own square (TILE_PX, the tile's 400 of the mark's 416 grid units: 100 px of
+MARK_PX), one pixel per pixel, with no light and no shadow: Tk can't show them. On Windows it
+keys out one colour, so every pixel is opaque or transparent (a partly transparent one would
 show that colour as a fringe); on Linux it shows no transparency, so the tile's colour fills the
-corners. The style is this system's unless given. It draws offscreen, with no screen.
---check-tcl-tk says whether this Python has the Tcl/Tk that PyInstaller's splash needs
-(tkinter, a threaded Tcl, shared libraries) and exits 1 if not: CI runs both before packaging.
+corners: at the swap only they round off. The style is this system's unless given. It draws
+offscreen, with no screen. --check-tcl-tk says whether this Python has the Tcl/Tk that
+PyInstaller's splash needs (tkinter, a threaded Tcl, shared libraries) and exits 1 if not: CI
+runs both before packaging.
 """
 
 from __future__ import annotations
@@ -31,6 +33,21 @@ _APP: list[Any] = []  # the QGuiApplication the painting needs, for the run
 
 
 STYLES = ("windows", "linux")
+
+
+def _tile_px() -> int:
+    """The tile's side in pixels: 100 (of MARK_PX 104), on whole pixels, so the still's edges
+    are the tile's own."""
+    from ui.opening_mark import GRID, MARK_PX, TILE
+
+    side = TILE.width() * MARK_PX / GRID
+    offset = TILE.x() * MARK_PX / GRID
+    if side != round(side) or offset != round(offset):
+        raise ValueError("the tile is not on whole pixels")
+    return round(side)
+
+
+TILE_PX = _tile_px()
 OPAQUE_FROM = 128  # Windows: a pixel at least half covered is opaque, any other transparent
 
 
@@ -45,7 +62,7 @@ def render(out: Path, style: Optional[str] = None) -> Path:
     from PySide6.QtCore import QRectF, Qt
     from PySide6.QtGui import QColor, QGuiApplication, QImage, QPainter
 
-    from ui.opening_mark import MARK_PX, STILL_T, TILE_COLOR, paint_mark
+    from ui.opening_mark import GRID, MARK_PX, STILL_T, TILE, TILE_COLOR, paint_mark
 
     style = style or system_style()
     if style not in STYLES:
@@ -60,6 +77,8 @@ def render(out: Path, style: Optional[str] = None) -> Path:
         paint_mark(painter, QRectF(image.rect()), STILL_T, still=True, bare=True)
     finally:
         painter.end()
+    inset = round(TILE.x() * MARK_PX / GRID)  # the tile's own square, 2 px in
+    image = image.copy(inset, inset, TILE_PX, TILE_PX)
     image = image.convertToFormat(QImage.Format.Format_ARGB32)
     if style == "windows":
         for y in range(image.height()):

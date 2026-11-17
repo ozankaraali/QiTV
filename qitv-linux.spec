@@ -102,7 +102,7 @@ a.datas = [entry for entry in a.datas if ships(entry)]
 
 pyz = PYZ(a.pure)
 
-# PyInstaller's bootloader splash: the tile and lit glyph of QiTV's held, lit mark, 104 px
+# PyInstaller's bootloader splash: the tile and lit glyph of QiTV's held, lit mark, 100 px
 # (scripts/render_splash.py renders it first: its corners keyed out on Windows, the tile's
 # colour on Linux), from the double-click while the one file unpacks, before Python runs. On top
 # of everything until main.py closes it, once the splash helper's window stands over it: the

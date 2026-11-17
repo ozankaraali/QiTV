@@ -71,7 +71,8 @@ class BootloaderSplash:
 
     It is there only while its port is set (none in a run from source or the macOS app, 0 in
     a process the app spawned): pyi_splash, which warns without it, is imported only then, and
-    takes the port out of the environment as it connects."""
+    takes the port out of the environment as it connects. A still QiTV can't reach or close
+    may stay on top for the whole run: the log says so."""
 
     def __init__(self, environ: Mapping[str, str] = os.environ) -> None:
         self._lock = threading.Lock()
@@ -84,10 +85,13 @@ class BootloaderSplash:
 
             if pyi_splash.is_alive():
                 self._module = pyi_splash
+                return
+            why = "no connection"
         except Exception as error:  # never a reason for QiTV not to start
-            logging.getLogger("qitv").debug(
-                "PyInstaller's splash is not there (%s).", type(error).__name__
-            )
+            why = type(error).__name__
+        logging.getLogger("qitv").warning(
+            "PyInstaller's splash shows, but QiTV can't reach it to close it (%s).", why
+        )
 
     @property
     def shows(self) -> bool:
@@ -102,12 +106,28 @@ class BootloaderSplash:
             return
         try:
             module.close()
-        except Exception as error:  # it may have gone already
-            logging.getLogger("qitv").debug(
-                "PyInstaller's splash did not close cleanly (%s).", type(error).__name__
+        except Exception as error:  # never a reason for QiTV not to start
+            logging.getLogger("qitv").warning(
+                "PyInstaller's splash may not have closed (%s).", type(error).__name__
             )
             return
         logging.getLogger("qitv").info("PyInstaller's splash closed: %s.", why)
+
+    def close_on_crash(self) -> None:
+        """An exception nothing handles closes it too, once logged (sys.excepthook, which also
+        runs before a windowed Windows build's error dialog, and before atexit's own close): a
+        start that fails before main()'s `finally` leaves no still on top."""
+        if self._module is None:
+            return
+        logged = sys.excepthook
+
+        def hook(kind: Any, error: Any, frames: Any) -> None:
+            try:
+                logged(kind, error, frames)
+            finally:
+                self.close("an unhandled error")
+
+        sys.excepthook = hook
 
 
 def replace_executable(
@@ -240,6 +260,7 @@ def main() -> int:
     # own splash stands over it, and goes at once on a start that shows none (before an
     # update's copy waits for the old QiTV to quit).
     bootloader = BootloaderSplash()
+    bootloader.close_on_crash()
     with_splash = wants_splash(sys.argv, os.environ)
     if not with_splash:
         bootloader.close("this start shows no splash")
