@@ -249,6 +249,7 @@
   "Days": "Ngày",
   "Decode video with your graphics chip instead of the processor: it uses less CPU. A channel whose picture freezes while its sound plays switches to software decoding by itself, for a day. Applies after QiTV restarts.": "Giải mã video bằng chip đồ họa thay cho bộ xử lý: tốn ít CPU hơn. Kênh nào bị đứng hình mà vẫn có tiếng sẽ tự chuyển sang giải mã phần mềm trong một ngày. Có hiệu lực sau khi khởi động lại QiTV.",
   "Decoding": "Giải mã",
+  "Default Apps…": "Ứng dụng mặc định…",
   "Default language": "Ngôn ngữ mặc định",
   "Deinterlacing": "Khử xen kẽ",
   "Deinterlacing is back on Auto when QiTV starts again": "Khử xen kẽ sẽ về Tự động khi QiTV khởi động lại",

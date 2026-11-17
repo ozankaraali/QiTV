@@ -253,6 +253,7 @@
   "Days": "ימים",
   "Decode video with your graphics chip instead of the processor: it uses less CPU. A channel whose picture freezes while its sound plays switches to software decoding by itself, for a day. Applies after QiTV restarts.": "פענוח הווידאו בשבב הגרפי במקום במעבד: פחות עומס על המעבד. ערוץ שהתמונה שלו קופאת בזמן שהקול ממשיך עובר מעצמו לפענוח בתוכנה, ליום אחד. ייכנס לתוקף אחרי הפעלה מחדש של QiTV.",
   "Decoding": "פענוח",
+  "Default Apps…": "אפליקציות ברירת מחדל…",
   "Default language": "שפת ברירת מחדל",
   "Deinterlacing": "ביטול שזירה",
   "Deinterlacing is back on Auto when QiTV starts again": "ביטול השזירה יחזור ל\"אוטומטי\" בהפעלה הבאה של QiTV",

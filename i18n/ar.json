@@ -259,6 +259,7 @@
   "Days": "أيام",
   "Decode video with your graphics chip instead of the processor: it uses less CPU. A channel whose picture freezes while its sound plays switches to software decoding by itself, for a day. Applies after QiTV restarts.": "فك ترميز الفيديو بمعالج الرسوميات بدلًا من المعالج: يستهلك موارد أقل من المعالج. القناة التي تتجمد صورتها بينما يستمر صوتها تنتقل تلقائيًا إلى فك الترميز البرمجي ليوم واحد. يُطبَّق بعد إعادة تشغيل QiTV.",
   "Decoding": "فك الترميز",
+  "Default Apps…": "التطبيقات الافتراضية…",
   "Default language": "اللغة الافتراضية",
   "Deinterlacing": "إزالة التشابك",
   "Deinterlacing is back on Auto when QiTV starts again": "تعود إزالة التشابك إلى «تلقائي» عند إعادة تشغيل QiTV",

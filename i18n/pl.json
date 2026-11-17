@@ -255,6 +255,7 @@
   "Days": "Dni",
   "Decode video with your graphics chip instead of the processor: it uses less CPU. A channel whose picture freezes while its sound plays switches to software decoding by itself, for a day. Applies after QiTV restarts.": "Dekoduj wideo układem graficznym zamiast procesorem: mniej obciąża CPU. Kanał, którego obraz zamarza, gdy dźwięk gra dalej, sam przełącza się na dekodowanie programowe na jeden dzień. Działa po ponownym uruchomieniu QiTV.",
   "Decoding": "Dekodowanie",
+  "Default Apps…": "Aplikacje domyślne…",
   "Default language": "Domyślny język",
   "Deinterlacing": "Usuwanie przeplotu",
   "Deinterlacing is back on Auto when QiTV starts again": "Usuwanie przeplotu wróci do Auto po ponownym uruchomieniu QiTV",

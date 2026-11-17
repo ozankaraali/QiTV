@@ -253,6 +253,7 @@
   "Days": "Dienām",
   "Decode video with your graphics chip instead of the processor: it uses less CPU. A channel whose picture freezes while its sound plays switches to software decoding by itself, for a day. Applies after QiTV restarts.": "Dekodēt video ar grafisko procesoru, nevis centrālo procesoru: tas mazāk noslogo CPU. Kanāls, kura attēls sastingst, kamēr skaņa turpinās, uz dienu pats pārslēdzas uz programmatūras dekodēšanu. Stājas spēkā pēc QiTV restartēšanas.",
   "Decoding": "Dekodēšana",
+  "Default Apps…": "Noklusējuma programmas…",
   "Default language": "Noklusējuma valoda",
   "Deinterlacing": "Rindpārlēces novēršana",
   "Deinterlacing is back on Auto when QiTV starts again": "Rindpārlēces novēršana atkal būs „Auto”, kad QiTV tiks restartēta",

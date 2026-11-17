@@ -253,6 +253,7 @@
   "Days": "Dana",
   "Decode video with your graphics chip instead of the processor: it uses less CPU. A channel whose picture freezes while its sound plays switches to software decoding by itself, for a day. Applies after QiTV restarts.": "Dekodira video grafičkim čipom umjesto procesorom: manje opterećuje CPU. Kanal kojem se slika zamrzne dok zvuk ide sam prelazi na softversko dekodiranje na jedan dan. Primjenjuje se nakon ponovnog pokretanja QiTV-a.",
   "Decoding": "Dekodiranje",
+  "Default Apps…": "Zadane aplikacije…",
   "Default language": "Zadani jezik",
   "Deinterlacing": "Uklanjanje preplitanja",
   "Deinterlacing is back on Auto when QiTV starts again": "Uklanjanje preplitanja vraća se na Automatski pri sljedećem pokretanju QiTV-a",

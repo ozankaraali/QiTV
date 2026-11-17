@@ -253,6 +253,7 @@
   "Days": "Zile",
   "Decode video with your graphics chip instead of the processor: it uses less CPU. A channel whose picture freezes while its sound plays switches to software decoding by itself, for a day. Applies after QiTV restarts.": "Decodează video cu cipul grafic în locul procesorului: folosește mai puțin CPU. Un canal a cărui imagine îngheață în timp ce sunetul continuă trece singur la decodare software, pentru o zi. Se aplică după repornirea QiTV.",
   "Decoding": "Decodare",
+  "Default Apps…": "Aplicații implicite…",
   "Default language": "Limba implicită",
   "Deinterlacing": "Deîntrețesere",
   "Deinterlacing is back on Auto when QiTV starts again": "Deîntrețeserea revine la Automat la următoarea pornire a QiTV",

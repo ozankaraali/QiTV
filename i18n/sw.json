@@ -251,6 +251,7 @@
   "Days": "Siku",
   "Decode video with your graphics chip instead of the processor: it uses less CPU. A channel whose picture freezes while its sound plays switches to software decoding by itself, for a day. Applies after QiTV restarts.": "Simbua video kwa chipu ya michoro badala ya kichakataji: hutumia CPU kidogo. Chaneli ambayo picha yake inaganda huku sauti ikicheza hubadili yenyewe kwenda usimbuaji wa programu kwa siku moja. Itatumika QiTV ikianza upya.",
   "Decoding": "Usimbuaji",
+  "Default Apps…": "Programu chaguo-msingi…",
   "Default language": "Lugha chaguomsingi",
   "Deinterlacing": "Kuondoa mistari",
   "Deinterlacing is back on Auto when QiTV starts again": "Kuondoa mistari kunarudi kwenye Otomatiki QiTV ikianza tena",

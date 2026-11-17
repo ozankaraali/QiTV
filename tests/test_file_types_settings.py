@@ -110,10 +110,36 @@ class FileTypesRowTests(base.WindowCase):
                 self.assertEqual(dialog.file_types_button.text(), translate(button))
                 self.assertEqual(dialog.file_types_button.isEnabled(), enabled)
                 self.assertEqual(self.hint(dialog), translate(hint) if hint else "")
+                default_apps = dialog.file_types_default_apps_button
+                windows_registered = (state, system) == (Status.REGISTERED, "win32")
+                self.assertEqual(not default_apps.isHidden(), windows_registered)
         dialog = self.dialog(Status.UNAVAILABLE)  # a source run: no row at all
         self.assertFalse(
             dialog.settings_layout.isRowVisible(dialog.file_types_button.parentWidget())
         )
+
+    def test_windows_default_apps_stays_reachable_once_registered(self):  # Ruling 26
+        dialog = self.dialog(Status.REGISTERED, "win32")
+        button = dialog.file_types_default_apps_button
+        self.assertEqual(button.text(), "Default Apps…")
+        self.assertFalse(button.autoDefault())
+        with mock.patch.object(file_types, "open_default_apps") as default_apps:
+            button.click()
+        default_apps.assert_called_once_with()
+        self.assertEqual(dialog.file_types_button.text(), translate(STOP_TEXT))  # no press
+
+    def test_default_apps_goes_once_windows_stops_using_qitv(self):
+        self.config.file_types = {"videos": EXE}
+        dialog = self.dialog(system="win32")
+        self.assertFalse(dialog.file_types_default_apps_button.isHidden())
+
+        def unregister(kind, config, *args, **kwargs):
+            config.file_types = {}
+            return True
+
+        with mock.patch.object(file_types, "unregister", side_effect=unregister):
+            self.press(dialog, "win32")
+        self.assertTrue(dialog.file_types_default_apps_button.isHidden())
 
     def test_the_row_sits_under_start_with_the_last_channel(self):
         dialog = self.dialog(Status.NOT_REGISTERED)

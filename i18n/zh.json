@@ -249,6 +249,7 @@
   "Days": "天",
   "Decode video with your graphics chip instead of the processor: it uses less CPU. A channel whose picture freezes while its sound plays switches to software decoding by itself, for a day. Applies after QiTV restarts.": "用显卡而不是处理器解码视频：占用更少 CPU。若某个频道画面冻结而声音仍在播放，它会自动改用软件解码一天。重启 QiTV 后生效。",
   "Decoding": "解码",
+  "Default Apps…": "默认应用…",
   "Default language": "默认语言",
   "Deinterlacing": "去隔行",
   "Deinterlacing is back on Auto when QiTV starts again": "重启 QiTV 后去隔行将恢复为“自动”",

@@ -251,6 +251,7 @@
   "Days": "päeva tagant",
   "Decode video with your graphics chip instead of the processor: it uses less CPU. A channel whose picture freezes while its sound plays switches to software decoding by itself, for a day. Applies after QiTV restarts.": "Dekodeerib videot protsessori asemel graafikakiibiga: see koormab protsessorit vähem. Kanal, mille pilt hangub, kuigi heli mängib, lülitub ise päevaks tarkvaralisele dekodeerimisele. Rakendub pärast QiTV taaskäivitamist.",
   "Decoding": "Dekodeerimine",
+  "Default Apps…": "Vaikerakendused…",
   "Default language": "Vaikekeel",
   "Deinterlacing": "Reavahelduse eemaldus",
   "Deinterlacing is back on Auto when QiTV starts again": "Reavahelduse eemaldus on QiTV järgmisel käivitamisel jälle automaatne",

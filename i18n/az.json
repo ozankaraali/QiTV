@@ -251,6 +251,7 @@
   "Days": "Gün",
   "Decode video with your graphics chip instead of the processor: it uses less CPU. A channel whose picture freezes while its sound plays switches to software decoding by itself, for a day. Applies after QiTV restarts.": "Videonu prosessor əvəzinə qrafik çiplə dekodlayır: CPU-nu az yükləyir. Səsi gedərkən görüntüsü donan kanal bir günlük öz-özünə proqram dekodlamasına keçir. QiTV yenidən başlayandan sonra tətbiq olunur.",
   "Decoding": "Dekodlama",
+  "Default Apps…": "Standart tətbiqlər…",
   "Default language": "Defolt dil",
   "Deinterlacing": "Deinterleys",
   "Deinterlacing is back on Auto when QiTV starts again": "QiTV yenidən başlayanda deinterleys yenə Avtomatik olur",

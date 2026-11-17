@@ -253,6 +253,7 @@
   "Days": "Dienas",
   "Decode video with your graphics chip instead of the processor: it uses less CPU. A channel whose picture freezes while its sound plays switches to software decoding by itself, for a day. Applies after QiTV restarts.": "Dekoduoti vaizdą vaizdo plokšte, o ne procesoriumi: mažiau apkraunamas CPU. Kanalas, kurio vaizdas užstringa, kol garsas groja, pats vienai dienai pereina prie programinio dekodavimo. Įsigalioja iš naujo paleidus QiTV.",
   "Decoding": "Dekodavimas",
+  "Default Apps…": "Numatytosios programos…",
   "Default language": "Numatytoji kalba",
   "Deinterlacing": "Pynimo šalinimas",
   "Deinterlacing is back on Auto when QiTV starts again": "Pynimo šalinimas vėl bus „Auto“, kai QiTV bus paleista iš naujo",

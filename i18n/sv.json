@@ -251,6 +251,7 @@
   "Days": "Dagar",
   "Decode video with your graphics chip instead of the processor: it uses less CPU. A channel whose picture freezes while its sound plays switches to software decoding by itself, for a day. Applies after QiTV restarts.": "Avkoda video med grafikkretsen i stället för processorn: det använder mindre CPU. En kanal vars bild fryser medan ljudet spelas byter själv till mjukvaruavkodning i en dag. Gäller efter att QiTV startats om.",
   "Decoding": "Avkodning",
+  "Default Apps…": "Standardappar…",
   "Default language": "Standardspråk",
   "Deinterlacing": "Avflätning",
   "Deinterlacing is back on Auto when QiTV starts again": "Avflätning är tillbaka på Auto när QiTV startar igen",

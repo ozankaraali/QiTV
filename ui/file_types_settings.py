@@ -13,7 +13,14 @@ import threading
 from typing import Any, Callable, Optional
 
 from PySide6.QtCore import QObject, Qt, Signal, Slot
-from PySide6.QtWidgets import QFormLayout, QLabel, QPushButton, QVBoxLayout, QWidget
+from PySide6.QtWidgets import (
+    QFormLayout,
+    QHBoxLayout,
+    QLabel,
+    QPushButton,
+    QVBoxLayout,
+    QWidget,
+)
 from shiboken6 import isValid
 
 from services import file_types
@@ -33,6 +40,9 @@ ERROR_STYLE = "color: red;"  # as Settings' other failures (Verify Provider, Pas
 USE_TEXT = N_("Use QiTV for videos")
 # i18n: a button (Settings → General): video files no longer open in QiTV
 STOP_TEXT = N_("Stop using QiTV for videos")
+# Windows, once registered: back to the page where Windows asks (closed unconfirmed, or later).
+# i18n: a button on Windows: opens Windows' Default Apps settings on QiTV's page (its own name)
+DEFAULT_APPS_TEXT = N_("Default Apps…")
 # i18n: a hint on Windows; "Default Apps": Windows Settings' page, as Windows names it
 WINDOWS_HINT = N_("Windows then asks you to confirm in its Default Apps settings.")
 # i18n: a hint on macOS (the button makes QiTV their default); keep the formats' names
@@ -117,8 +127,9 @@ class _Answer(QObject):
 
 
 class FileTypesRow:
-    """The row: its button and hint (`button`, `hint`), hidden where QiTV can't register (a
-    run from source)."""
+    """The row: its button and hint (`button`, `hint`), with Windows' Default Apps beside the
+    button once QiTV is registered there (`default_apps_button`); hidden where QiTV can't
+    register (a run from source)."""
 
     def __init__(self, dialog: Any, layout: QFormLayout, parent: QWidget) -> None:
         self._config = dialog.config_manager
@@ -133,7 +144,16 @@ class FileTypesRow:
         self.button.setObjectName("fileTypesButton")
         self.button.setAutoDefault(False)  # Enter in a field still saves
         self.button.clicked.connect(self.press)
-        column.addWidget(self.button, 0, Qt.AlignmentFlag.AlignLeft)
+        self.default_apps_button = QPushButton(translate(DEFAULT_APPS_TEXT), self.box)
+        self.default_apps_button.setObjectName("fileTypesDefaultApps")
+        self.default_apps_button.setAutoDefault(False)
+        self.default_apps_button.setFlat(True)  # the row's second action, quieter
+        self.default_apps_button.clicked.connect(lambda: file_types.open_default_apps())
+        buttons = QHBoxLayout()
+        buttons.addWidget(self.button)
+        buttons.addWidget(self.default_apps_button)
+        buttons.addStretch(1)
+        column.addLayout(buttons)
         self.hint = QLabel(self.box)
         self.hint.setObjectName("fileTypesHint")
         self.hint.setWordWrap(True)
@@ -154,6 +174,7 @@ class FileTypesRow:
         self.button.setText(translate(STOP_TEXT if registered else USE_TEXT))
         can_press = state in (Status.REGISTERED, Status.NOT_REGISTERED)
         self.button.setEnabled(can_press and not self._busy)
+        self.default_apps_button.setVisible(registered and _system() == "win32")
         if self._failed:
             text = translate(FAILED_HINT)
         else:
@@ -202,6 +223,7 @@ def add_file_types_row(dialog: Any, layout: QFormLayout, parent: QWidget) -> Fil
     dialog.file_types_row = row
     dialog.file_types_button = row.button
     dialog.file_types_hint = row.hint
+    dialog.file_types_default_apps_button = row.default_apps_button
     return row
 
 

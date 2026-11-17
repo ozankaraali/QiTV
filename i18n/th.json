@@ -249,6 +249,7 @@
   "Days": "วัน",
   "Decode video with your graphics chip instead of the processor: it uses less CPU. A channel whose picture freezes while its sound plays switches to software decoding by itself, for a day. Applies after QiTV restarts.": "ถอดรหัสวิดีโอด้วยชิปกราฟิกแทนโปรเซสเซอร์ ใช้ CPU น้อยลง ช่องที่ภาพค้างแต่เสียงยังเล่นจะเปลี่ยนไปถอดรหัสด้วยซอฟต์แวร์เองเป็นเวลาหนึ่งวัน มีผลหลังเปิด QiTV ใหม่",
   "Decoding": "การถอดรหัส",
+  "Default Apps…": "แอปเริ่มต้น…",
   "Default language": "ภาษาเริ่มต้น",
   "Deinterlacing": "ดีอินเทอร์เลซ",
   "Deinterlacing is back on Auto when QiTV starts again": "ดีอินเทอร์เลซจะกลับเป็นอัตโนมัติเมื่อเปิด QiTV ใหม่",

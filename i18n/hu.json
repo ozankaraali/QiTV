@@ -251,6 +251,7 @@
   "Days": "naponként",
   "Decode video with your graphics chip instead of the processor: it uses less CPU. A channel whose picture freezes while its sound plays switches to software decoding by itself, for a day. Applies after QiTV restarts.": "A videót a grafikus chip dekódolja a processzor helyett: kevesebb CPU-t használ. Ha egy csatorna képe megfagy, miközben a hangja szól, az egy napra magától szoftveres dekódolásra vált. A QiTV újraindítása után lép életbe.",
   "Decoding": "Dekódolás",
+  "Default Apps…": "Alapértelmezett alkalmazások…",
   "Default language": "Alapértelmezett nyelv",
   "Deinterlacing": "Deinterlace",
   "Deinterlacing is back on Auto when QiTV starts again": "A deinterlace a QiTV következő indításakor újra Auto lesz",
