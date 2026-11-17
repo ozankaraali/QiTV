@@ -14,7 +14,7 @@ from unittest import mock
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 from test_tv_controller import CHANNELS, HARBOR_ONE, ControllerTestCase, FakeOwnCatalog
-from timer_fixtures import wait_until
+from timer_fixtures import elapse, wait_until
 
 from services.open_paths import holds_the_start
 from tests import test_tv_window as base
@@ -210,6 +210,63 @@ class FileHoldTests(ControllerTestCase):
         self.tune(1)
         self.ready("http://stream/2")
         self.assertEqual(self.runs, ["update question"])
+
+    def startup_check(self):
+        """main()'s startup check, its network answering now that an update exists: the
+        questions shown are recorded."""
+        from ui import update_dialogs
+
+        shown: list[tuple] = []
+        mocks = []
+        for patch in (
+            mock.patch("services.update_checker.check_for_updates"),
+            mock.patch.object(
+                update_dialogs, "show_update_dialog", side_effect=lambda *a: shown.append(a)
+            ),
+        ):
+            mocks.append(patch.start())
+            self.addCleanup(patch.stop)
+        update_dialogs.check_for_updates(self.config, when_idle=self.controller.when_idle)
+        ui = mocks[0].call_args.args[2]  # what the service reports to
+        self.assertIsNot(ui, update_dialogs.DIALOGS)
+        return ui, shown
+
+    def test_a_startup_check_that_answers_during_the_film_asks_after_it(self):
+        # Review I2: only the check's start waited for the film; its question opened over a
+        # film that came after it (a Finder double-click's open event comes after the window).
+        self.controller.start()
+        ui, shown = self.startup_check()
+        self.film()  # after the check started
+        ui.update_available({"version": "9.9.9"}, self.config, False)  # the network answers
+        elapse(50)
+        self.assertEqual(shown, [])  # nothing over the film
+        self.tune(0)
+        self.ready()  # a channel replaces the film: released inside the tune
+        self.assertEqual(shown, [])  # never inside the release itself
+        elapse(50)
+        self.assertEqual(shown, [({"version": "9.9.9"}, self.config, False)])
+        elapse(50)
+        self.assertEqual(len(shown), 1)  # once
+
+    def test_a_file_opened_as_the_question_comes_holds_it_again(self):
+        self.controller.start()
+        ui, shown = self.startup_check()
+        self.film()
+        ui.update_available({"version": "9.9.9"}, self.config, False)
+        self.session.stateChanged.emit("ended")
+        self.session.ended.emit()  # over: the question is on its way from the event loop
+        self.film("/videos/Dizi Bölüm 2.mkv")  # the next episode, double-clicked at once
+        elapse(50)
+        self.assertEqual(shown, [])
+        self.controller.stop()
+        elapse(50)
+        self.assertEqual(len(shown), 1)
+
+    def test_with_nothing_held_the_startup_question_comes_at_once(self):
+        self.controller.start()
+        ui, shown = self.startup_check()
+        ui.update_available({"version": "9.9.9"}, self.config, False)
+        self.assertEqual(len(shown), 1)
 
     def test_after_the_release_nothing_tunes_by_itself(self):
         # A file that turned out missing at launch released the hold before the provider

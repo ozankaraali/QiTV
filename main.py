@@ -358,7 +358,11 @@ def main() -> int:
             control.start()
 
         if config_manager.check_updates:  # after the film a start opened, if it has one
-            window.when_idle(lambda: check_for_updates(config_manager=config_manager))
+            # Its question too waits for a film opened while the network answers (a Finder
+            # double-click's open event comes after the window; a double-click meanwhile).
+            window.when_idle(
+                lambda: check_for_updates(config_manager=config_manager, when_idle=window.when_idle)
+            )
 
         code = app.exec()
         log.info("QiTV's event loop ended (%d).", code)

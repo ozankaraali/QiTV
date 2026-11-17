@@ -102,8 +102,13 @@ class MainModuleTests(unittest.TestCase):
         # held for a film, and for a file QiTV won't play (its message comes instead)
         self.assertLess(body.index("if holds_the_start(opened):"), show)
         self.assertLess(show, body.index("window.open_paths(opened, source=LAUNCH)"))
+        # the check starts once the film is over, and its question waits for any film opened
+        # while the network answers (ui.update_dialogs._AfterTheFilm)
         self.assertIn(
-            "window.when_idle(lambda: check_for_updates(config_manager=config_manager))", body
+            "window.when_idle(\n"
+            "                lambda: check_for_updates(config_manager=config_manager, "
+            "when_idle=window.when_idle)\n",
+            body,
         )
 
     def test_windows_hears_double_clicks_over_dde_while_it_runs(self):
