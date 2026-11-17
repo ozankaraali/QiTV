@@ -1,6 +1,7 @@
 import os
 import tempfile
 import unittest
+from unittest import mock
 
 from services.local_episodes import list_folder, next_in_folder, parse_episode
 
@@ -11,23 +12,23 @@ def _listing(*names):
 
 class ParseTests(unittest.TestCase):
     def test_season_and_episode_forms(self):
-        first = parse_episode("Kuzey Yolu.S01E02.1080p.mkv")
+        first = parse_episode("Taşlı Dere Postası.S01E02.1080p.mkv")
         assert first is not None
         self.assertEqual((first.season, first.first, first.last), (1, 2, 2))
-        self.assertEqual(first.show, "kuzey yolu")
-        self.assertEqual(first.title, "Kuzey Yolu")
+        self.assertEqual(first.show, "tasli dere postasi")
+        self.assertEqual(first.title, "Taşlı Dere Postası")
         for name in (
-            "kuzey_yolu_s01e02.mkv",
-            "Kuzey Yolu - S01 E02.mp4",
-            "Kuzey.Yolu.S01.E02.mkv",
-            "KUZEY YOLU s1e2.avi",
-            "Kuzey Yolu 1x02.mkv",
+            "tasli_dere_postasi_s01e02.mkv",
+            "Taşlı Dere Postası - S01 E02.mp4",
+            "Taşlı.Dere.Postası.S01.E02.mkv",
+            "TAŞLI DERE POSTASI s1e2.avi",
+            "Taşlı Dere Postası 1x02.mkv",
         ):
             with self.subTest(name=name):
                 ep = parse_episode(name)
                 assert ep is not None
                 self.assertEqual((ep.season, ep.first, ep.last), (1, 2, 2))
-                self.assertEqual(ep.show, "kuzey yolu")
+                self.assertEqual(ep.show, "tasli dere postasi")
 
     def test_double_episode(self):
         for name in ("Show.S02E05E06.mkv", "Show.S02E05-E06.mkv"):
@@ -53,10 +54,37 @@ class ParseTests(unittest.TestCase):
                 self.assertIsNone(parse_episode(name))
 
     def test_show_key_ignores_case_accents_and_separators(self):
-        a = parse_episode("Kızılcık.Şerbeti.S01E01.mkv")
-        b = parse_episode("KIZILCIK ŞERBETİ - s01e02.mkv")
+        a = parse_episode("İpek Şırıl Işığı.S01E01.mkv")
+        b = parse_episode("İPEK ŞIRIL IŞIĞI - s01e02.mkv")
         assert a is not None and b is not None
         self.assertEqual(a.show, b.show)
+        self.assertEqual(a.show, "ipek siril isigi")
+
+    def test_bracketed_group_is_not_in_the_title(self):
+        ep = parse_episode("[Grp] Show - S01E02.mkv")
+        assert ep is not None
+        self.assertEqual(ep.title, "Show")
+        ep = parse_episode("(Grp) Show - S01E02.mkv")
+        assert ep is not None
+        self.assertEqual(ep.title, "Show")
+
+    def test_dash_double_episode_only_when_consecutive(self):
+        ep = parse_episode("Show.S01E01-02.mkv")
+        assert ep is not None
+        self.assertEqual((ep.first, ep.last), (1, 2))
+        for name in ("Show.S01E02-720p.mkv", "Show.S01E02-2019.mkv", "Show.S01E02-03x.mkv"):
+            with self.subTest(name=name):
+                ep = parse_episode(name)
+                assert ep is not None
+                self.assertEqual((ep.first, ep.last), (2, 2))
+
+    def test_bare_name_and_s00e00(self):
+        ep = parse_episode("S01E02.mkv")
+        assert ep is not None
+        self.assertEqual((ep.show, ep.title, ep.season, ep.first), ("", "S01E02", 1, 2))
+        ep = parse_episode("Show.S00E00.mkv")
+        assert ep is not None
+        self.assertEqual((ep.season, ep.first, ep.last), (0, 0, 0))
 
 
 class NextTests(unittest.TestCase):
@@ -96,6 +124,28 @@ class NextTests(unittest.TestCase):
         assert nxt is not None
         self.assertEqual(nxt["number"], 3)
 
+    def test_the_last_episode_of_the_last_season_has_none(self):
+        listing = _listing("Show.S01E01.mkv", "Show.S02E01.mkv", "Show.S02E02.mkv")
+        self.assertIsNone(next_in_folder("/m/Show.S02E02.mkv", listing))
+
+    def test_next_across_spellings(self):
+        nxt = next_in_folder("/m/Show.S01E02.mkv", _listing("show_s01e03.mkv"))
+        assert nxt is not None
+        self.assertEqual(nxt["local_path"], "/m/show_s01e03.mkv")
+
+    def test_a_hidden_companion_is_never_the_next(self):
+        listing = _listing("._Show.S01E02.mkv", ".Show.S01E02.mkv", "Show.S01E02.mkv")
+        nxt = next_in_folder("/m/Show.S01E01.mkv", listing)
+        assert nxt is not None
+        self.assertEqual(nxt["local_path"], "/m/Show.S01E02.mkv")
+
+    def test_bare_names_link_only_in_the_sxxeyy_form(self):
+        nxt = next_in_folder("/m/S01E01.mkv", _listing("S01E02 - Title.mkv"))
+        assert nxt is not None
+        self.assertEqual(nxt["local_path"], "/m/S01E02 - Title.mkv")
+        self.assertIsNone(next_in_folder("/m/S01E01.mkv", _listing("1x02 Other.mkv")))
+        self.assertIsNone(next_in_folder("/m/1x01.mkv", _listing("1x02.mkv")))
+
 
 class ListFolderTests(unittest.TestCase):
     def test_only_videos_are_offered(self):
@@ -103,14 +153,39 @@ class ListFolderTests(unittest.TestCase):
             for n in ("Show.S01E02.srt", "Show.S01E02.nfo", "Show.S01E02.jpg"):
                 open(os.path.join(tmp, n), "wb").close()
             os.mkdir(os.path.join(tmp, "Show.S01E02.mkv"))
+            for n in ("._Show.S01E02.mkv", ".Show.S01E02.mkv"):
+                open(os.path.join(tmp, n), "wb").close()
             self.assertEqual(list_folder(tmp), [])
             os.rmdir(os.path.join(tmp, "Show.S01E02.mkv"))
             with open(os.path.join(tmp, "Show.S01E02.mkv"), "wb") as f:
                 f.write(b"12345")
             self.assertEqual(list_folder(tmp), [("Show.S01E02.mkv", 5)])
 
-    def test_an_unreadable_folder_is_empty(self):
-        self.assertEqual(list_folder("/no/such/folder"), [])
+    def test_an_unreadable_folder_is_empty_and_its_path_is_not_logged(self):
+        with self.assertLogs("services.local_episodes", level="DEBUG") as logs:
+            self.assertEqual(list_folder("/no/such/secret-folder"), [])
+        self.assertNotIn("secret-folder", "\n".join(logs.output))
+        self.assertNotIn("secret-folder", str([r.exc_text for r in logs.records]))
+
+    def test_size_is_none_when_stat_fails(self):
+        class Entry:
+            name = "Show.S01E02.mkv"
+
+            def is_file(self):
+                return True
+
+            def stat(self):
+                raise OSError("gone")
+
+        class Scan(list):
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *a):
+                return False
+
+        with mock.patch("os.scandir", return_value=Scan([Entry()])):
+            self.assertEqual(list_folder("/m"), [("Show.S01E02.mkv", None)])
 
 
 if __name__ == "__main__":

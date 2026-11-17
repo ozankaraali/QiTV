@@ -16,8 +16,10 @@ from services.open_paths import is_video, natural_key
 logger = logging.getLogger(__name__)
 
 _SXXEYY = re.compile(
-    r"(?<![a-z0-9])s(\d{1,3})[ ._-]?e(\d{1,4})(?:-?e(\d{1,4}))?(?![0-9])", re.IGNORECASE
+    r"(?<![a-z0-9])s(\d{1,3})[ ._-]?e(\d{1,4})(?:-?e(\d{1,4})|-(\d{1,4})(?![a-z0-9]))?(?![0-9])",
+    re.IGNORECASE,
 )
+_LEADING_GROUP = re.compile(r"^\s*(?:\[[^\]]*\]|\([^)]*\))")
 _NXMM = re.compile(r"(?<![a-z0-9])(\d{1,2})x(\d{2,3})(?![a-z0-9])", re.IGNORECASE)
 _NON_ALNUM = re.compile(r"[\W_]+")
 _TITLE_TRIM = " -_.(["
@@ -29,7 +31,8 @@ class EpisodeName:
     title: str  # the show as the card names it
     season: int
     first: int
-    last: int  # a double episode (S01E01E02, S01E01-E02) is first 1, last 2
+    last: int  # a double episode (S01E01E02, S01E01-E02, S01E01-02) is first 1, last 2
+    sxxeyy: bool = True  # written S01E02, not 1x02
 
 
 def _show_key(text: str) -> str:
@@ -43,9 +46,14 @@ def parse_episode(file_name: str) -> Optional[EpisodeName]:
     """The episode a file name states, or None (resolutions, codecs and years never count)."""
     stem = os.path.splitext(file_name)[0]
     match = _SXXEYY.search(stem)
+    sxxeyy = match is not None
     if match:
         season, first = int(match.group(1)), int(match.group(2))
-        last = int(match.group(3)) if match.group(3) else first
+        last = first
+        if match.group(3):
+            last = int(match.group(3))
+        elif match.group(4) and int(match.group(4)) == first + 1:
+            last = first + 1
     else:
         match = _NXMM.search(stem)
         if not match:
@@ -53,8 +61,9 @@ def parse_episode(file_name: str) -> Optional[EpisodeName]:
         season, first = int(match.group(1)), int(match.group(2))
         last = first
     before = stem[: match.start()]
-    title = before.replace(".", " ").replace("_", " ").strip(_TITLE_TRIM) or stem
-    return EpisodeName(_show_key(before), title, season, first, max(first, last))
+    named = _LEADING_GROUP.sub("", before, count=1)
+    title = named.replace(".", " ").replace("_", " ").strip(_TITLE_TRIM) or stem
+    return EpisodeName(_show_key(before), title, season, first, max(first, last), sxxeyy)
 
 
 def list_folder(folder: str) -> list[tuple[str, Optional[int]]]:
@@ -65,7 +74,11 @@ def list_folder(folder: str) -> list[tuple[str, Optional[int]]]:
         with os.scandir(folder) as entries:
             for entry in entries:
                 try:
-                    if not is_video(entry.name) or not entry.is_file():
+                    if (
+                        entry.name.startswith(".")
+                        or not is_video(entry.name)
+                        or not entry.is_file()
+                    ):
                         continue
                     try:
                         size: Optional[int] = entry.stat().st_size
@@ -74,8 +87,8 @@ def list_folder(folder: str) -> list[tuple[str, Optional[int]]]:
                     found.append((entry.name, size))
                 except OSError:
                     continue
-    except Exception:
-        logger.debug("Could not list %r", folder, exc_info=True)
+    except Exception as exc:
+        logger.debug("Could not list a folder: %s", type(exc).__name__)
         return []
     return found
 
@@ -94,11 +107,15 @@ def next_in_folder(
         return None
     same_show: list[tuple[str, Optional[int], EpisodeName]] = []
     for name, size in listing:
-        if name == current_name:
+        if name == current_name or name.startswith("."):
             continue
         ep = parse_episode(name)
-        if ep is not None and ep.show == current.show:
-            same_show.append((name, size, ep))
+        if ep is None or ep.show != current.show:
+            continue
+        # With no show named, only the S01E02 form links to its own kind.
+        if not current.show and not (current.sxxeyy and ep.sxxeyy):
+            continue
+        same_show.append((name, size, ep))
 
     def pick(season: int, number: int) -> Optional[tuple[str, Optional[int], EpisodeName]]:
         hits = [h for h in same_show if h[2].season == season and h[2].first == number]
