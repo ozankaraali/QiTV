@@ -3580,7 +3580,7 @@ class TVController(QObject):
     def _on_position(self, position_ms: int, length_ms: int) -> None:
         if self._closed or self._current is None or self._current.live:
             return
-        if self._cid is not None:  # a local file has no resume key
+        if self._cid is not None:  # a channel has none; a title or a local file has one
             try:
                 self.watch.update_position(self._cid, position_ms, length_ms)
             except Exception as e:

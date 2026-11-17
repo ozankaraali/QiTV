@@ -28,6 +28,9 @@ RESUME_MIN_MS = 5000
 RESUME_MAX_RATIO = 0.90
 _EPISODE_CID = re.compile(r":s[^:]*:e[^:]*$")  # content_id()'s for an episode
 LOCAL_PREFIX = "local:"  # resume keys of local files (File → Open File, double-clicked files)
+# A local key's whole shape: a provider named "local" has keys starting "local:" too (its
+# content_id()'s), which are never pruned or taken for a song.
+_LOCAL_KEY = re.compile(r"local:[0-9a-f]{16}")
 LOCAL_KEEP = 300  # local files' points kept (the newest by time)
 SHORT_AUDIO_MS = 1_200_000  # a song shorter than this never keeps a point
 
@@ -36,6 +39,11 @@ def local_key(name: str, size: int) -> str:
     """A local file's resume key: from its base name and size, so a moved file goes on."""
     digest = hashlib.sha1(f"{name}\0{size}".encode("utf-8")).hexdigest()
     return f"{LOCAL_PREFIX}{digest[:16]}"
+
+
+def is_local_key(key: str) -> bool:
+    """Whether `key` is a local file's (`local_key`), not a provider's named "local"."""
+    return isinstance(key, str) and _LOCAL_KEY.fullmatch(key) is not None
 
 
 def film_tmdb(item: dict) -> str:
@@ -204,7 +212,7 @@ class WatchState:
     def _prune_local(self) -> None:
         """Keep the newest LOCAL_KEEP local points (by time; one without counts oldest)."""
         positions = getattr(self.config, "playback_positions", None) or {}
-        local = [key for key in positions if key.startswith(LOCAL_PREFIX)]
+        local = [key for key in positions if is_local_key(key)]
         if len(local) <= LOCAL_KEEP:
             return
 
@@ -217,7 +225,7 @@ class WatchState:
         self.config.playback_positions = positions
 
     def update_position(self, cid: str, position_ms: int, duration_ms: int) -> None:
-        is_local = cid.startswith(LOCAL_PREFIX)
+        is_local = is_local_key(cid)
         if is_local and self._short_audio.get(cid) and duration_ms < SHORT_AUDIO_MS:
             return  # a song, or a music file whose length isn't known yet
         self.config.save_playback_position(cid, position_ms, duration_ms)
