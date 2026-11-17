@@ -1,9 +1,10 @@
-"""The build's splash image (scripts/render_splash.py): the bare tile and lit glyph of QiTV's held,
-lit mark, the tile's own 100 px square, which PyInstaller's bootloader shows on Windows (its
-corners keyed out: every pixel opaque or transparent) and Linux (its corners the tile's colour:
-Tk there has no transparency) while the one file unpacks; the splash helper's first frame has
-the same tile and glyph in the same place, its light and shadow then coming in. The macOS app
-has none, and CI renders it (and checks for Tcl/Tk) before packaging."""
+"""The build's splash image (scripts/render_splash.py): the bare tile and the glyph's outline,
+drawn whole and not yet filled (the loop at DRAWN_AT, ruling P2-12), the tile's own 100 px
+square, which PyInstaller's bootloader shows on Windows (its corners keyed out: every pixel
+opaque or transparent) and Linux (its corners the tile's colour: Tk there has no transparency)
+while the one file unpacks; the splash helper's first frame has the same tile and outline in the
+same place, then fills, its light and shadow coming in. The macOS app has none, and CI renders
+it (and checks for Tcl/Tk) before packaging."""
 
 import ast
 import os
@@ -24,11 +25,10 @@ from scripts.render_splash import TILE_PX
 from ui import splash_helper
 from ui.opening_mark import (
     FILL_COLOR,
-    LOOP_S,
     MARK_PX,
     REDUCED_MOTION_ENV,
     STAGE_PX,
-    STILL_T,
+    STROKE_COLOR,
     TILE_COLOR,
     OpeningMark,
 )
@@ -74,13 +74,13 @@ def pixels(image: QImage) -> list[tuple[int, int, QColor]]:
 
 def helper_first_frame() -> QImage:
     """What the splash helper's window paints first over the bootloader's still: its mark
-    started at the lit frame's origin, its light coming in from none, onto a transparent
-    window, at one device pixel per pixel."""
+    started held from now (as _SplashWindow.begin starts it over a still), its light coming in
+    from none, onto a transparent window, at one device pixel per pixel."""
     now = 1000.0
     mark = OpeningMark(clock=lambda: now)
     mark.resize(STAGE_PX, STAGE_PX)
     with mock.patch.dict(os.environ, {REDUCED_MOTION_ENV: "0"}):
-        mark.start(now - STILL_T * LOOP_S, light_in_s=splash_helper.LIGHT_IN_MS / 1000)
+        mark.start(now, light_in_s=splash_helper.LIGHT_IN_MS / 1000, held=True)
     image = QImage(STAGE_PX, STAGE_PX, QImage.Format.Format_ARGB32_Premultiplied)
     image.fill(Qt.GlobalColor.transparent)
     mark.render(image, QPoint(), QRegion(), QWidget.RenderFlag.DrawChildren)
@@ -97,11 +97,12 @@ class RenderSplashTests(unittest.TestCase):
         cls.linux = render(Path(folder.name) / "linux.png", "linux")
         cls.shown = helper_first_frame()
 
-    def lit_tile(self, image):
-        """The glyph filled (lit) on the tile."""
+    def outlined_tile(self, image):
+        """The glyph's outline, drawn whole and not filled, on the tile."""
         opaque = [color for _x, _y, color in pixels(image) if color.alpha() == 255]
-        self.assertGreater(sum(near(c, FILL_COLOR) for c in opaque), 500)
-        self.assertGreater(sum(near(c, TILE_COLOR) for c in opaque), 2000)
+        self.assertGreater(sum(near(c, STROKE_COLOR) for c in opaque), 300)
+        self.assertLess(sum(near(c, FILL_COLOR) for c in opaque), 20)  # no fill yet
+        self.assertGreater(sum(near(c, TILE_COLOR) for c in opaque), 6000)
 
     def test_on_windows_every_pixel_is_opaque_or_keyed_out(self):
         # Tk keys out one colour there: a pixel partly transparent would show it as a fringe.
@@ -111,7 +112,7 @@ class RenderSplashTests(unittest.TestCase):
         last = TILE_PX - 1
         for x, y in ((0, 0), (last, 0), (0, last), (last, last)):
             self.assertEqual(image.pixelColor(x, y).alpha(), 0, (x, y))
-        self.lit_tile(image)
+        self.outlined_tile(image)
 
     def test_on_linux_the_corners_are_the_tiles_colour(self):
         # Tk there shows no transparency: a square dark tile, never a grey box around it.
@@ -121,9 +122,9 @@ class RenderSplashTests(unittest.TestCase):
         last = TILE_PX - 1
         for x, y in ((0, 0), (last, 0), (0, last), (last, last), (1, 50), (50, last)):
             self.assertEqual(image.pixelColor(x, y).rgb(), TILE_COLOR.rgb(), (x, y))
-        self.lit_tile(image)
+        self.outlined_tile(image)
 
-    def test_the_helper_first_shows_the_same_tile_and_glyph_with_no_light(self):
+    def test_the_helper_first_shows_the_same_tile_and_outline_with_no_light(self):
         # Where the still is opaque and so is the helper's first frame, the pixels are the
         # same; around the tile the helper draws nothing yet (its light and shadow come in).
         for name, still in (("windows", self.windows), ("linux", self.linux)):

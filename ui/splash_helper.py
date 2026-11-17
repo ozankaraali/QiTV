@@ -21,10 +21,11 @@ KILL_AFTER_S after its first command if it hasn't ended by then. The helper ends
 it finds the pipe closed (QiTV died, or ended before its window showed).
 
 Over PyInstaller's bootloader splash (the Windows and Linux one-file apps show the build's
-still while they unpack: the held, lit frame's bare tile and glyph, scripts/render_splash.py),
-start(lit=True) has the helper's mark begin on that frame, its tile where the still's is (both
-centred as Tk centres), its light and shadow coming in over LIGHT_IN_MS: the mark lights up as
-it takes over, and stays lit, its light breathing, until it opens (never out and drawn again).
+still while they unpack: the bare tile with the mark's outline drawn whole, unfilled,
+scripts/render_splash.py), start(lit=True) has the helper's mark begin on that frame, its tile
+where the still's is (both centred as Tk centres): it fills and blooms as it takes over, its
+light and shadow coming in over LIGHT_IN_MS, and stays lit, its light breathing, until it opens
+(never out and drawn again).
 Once "shown", QiTV closes the bootloader's (main.BootloaderSplash, through
 `on_shown`, or `on_end` if the helper ends unshown); a helper not shown by the time the window
 is ready leaves the still on top until the window is drawn (when_drawn), and the window shows
@@ -140,14 +141,14 @@ class Splash:
         self._target: Optional[QRect] = None  # where it glides: the player's mark on screen
         self._arrived = False  # the helper said its glide reached _target
         self._swapping = False
-        self._lit = False  # its mark is held lit over the bootloader's still (start(lit=True))
+        self._lit = False  # its mark takes over from the bootloader's still (start(lit=True))
 
     def start(self, geometry: Optional[QRect] = None, *, lit: bool = False) -> bool:
         """Spawns the helper, its window at `geometry` (by default 240 px in the middle of the
-        primary screen, where the bootloader's splash is), its mark's loop beginning on the
-        held, lit frame when `lit` (it shows over the bootloader's splash, that frame, and stays
-        lit, its light breathing, until it opens: it never goes out and draws again). False,
-        and logged, when it couldn't: QiTV starts without a splash."""
+        primary screen, where the bootloader's splash is), its mark beginning on the still's
+        frame when `lit` (it shows over the bootloader's splash, the outline drawn whole, fills
+        and blooms, then stays lit, its light breathing, until it opens: it never goes out and
+        draws again). False, and logged, when it couldn't: QiTV starts without a splash."""
         if self._process is not None:
             return False
         conn = child = process = None
@@ -209,7 +210,7 @@ class Splash:
         if overlay is not None:
             self._overlay = overlay
             overlay.loop_origin = lambda: self._origin
-            overlay.loop_held = lambda: self._lit  # lit from the still: the player's is held too
+            overlay.loop_held = lambda: self._lit  # over the still: the player's is held too
             overlay.hold_mark(True)
         _WhenDrawn(window, lambda: self._drawn(window))
 
@@ -644,9 +645,9 @@ def _fades_windows() -> bool:
 
 def run_splash(conn: Connection, geometry: Geometry, lit: bool = False) -> None:
     """The helper process (multiprocessing's spawn target): the mark at `geometry` until "open"
-    has played, or "quit" or a closed pipe ends it; `lit`, its loop begins on the held, lit
-    frame. It ends with os._exit, so nothing in the interpreter's teardown keeps it going once
-    its window is hidden."""
+    has played, or "quit" or a closed pipe ends it; `lit`, it takes over from the bootloader's
+    still (OpeningMark's `held`). It ends with os._exit, so nothing in the interpreter's
+    teardown keeps it going once its window is hidden."""
     code = 0
     try:
         if sys.platform == "darwin":
@@ -684,9 +685,10 @@ class _SplashWindow(OpeningMark):
     on from where it is (the player's mark moved). "bare" (the player's mark shows under it):
     once there, it draws only its tile and glyph. It then waits for "quit", or "open" (the
     player's mark went), and ends by itself HANDOVER_LIMIT_MS after its first glide. "quit" and
-    a closed pipe end it at once. `on_end` quits the app. `lit`: its loop begins on the held,
-    lit frame, the bootloader's still it shows over, its light coming in and then breathing:
-    it stays lit (OpeningMark's `held`) until it opens, and never goes out and draws again.
+    a closed pipe end it at once. `on_end` quits the app. `lit`: it begins on the frame of the
+    bootloader's still it shows over (the outline drawn whole), fills and blooms, its light
+    coming in, then stays lit, breathing (OpeningMark's `held`), until it opens: it never goes
+    out and draws again.
     """
 
     def __init__(
@@ -736,8 +738,9 @@ class _SplashWindow(OpeningMark):
             if why is not None:
                 self._say(("dock", why))  # this process has no log: QiTV's says so
         self.show()
-        # Over the bootloader's still: that frame held lit until it opens (it never goes out and
-        # draws again), its light and shadow coming in and then breathing.
+        # Over the bootloader's still: from its frame (the outline), the fill and the bloom,
+        # then held lit until it opens (it never goes out and draws again), its light and
+        # shadow coming in and then breathing.
         if self._lit:
             self.start(time.monotonic(), light_in_s=LIGHT_IN_MS / 1000, held=True)
         else:

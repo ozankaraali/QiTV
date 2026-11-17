@@ -20,7 +20,9 @@ from PySide6.QtWidgets import QApplication, QWidget
 
 from ui import opening_mark
 from ui.opening_mark import (
+    DRAWN_AT,
     FILLED_AT,
+    HOLD_FILL_S,
     LIT_UNTIL,
     LOOP_MS,
     MARK_PATH,
@@ -601,8 +603,9 @@ class WidgetTests(unittest.TestCase):
 
 
 class HeldLitTests(unittest.TestCase):
-    """A mark lit from its first moment (the splash over the bootloader's still) stays lit until
-    it opens: its glyph never goes out and is drawn again."""
+    """A mark that takes over from the bootloader's still (its outline drawn whole, unfilled)
+    plays the fill and the bloom from that frame, then stays lit until it opens, its light
+    breathing: its glyph never goes out and is drawn again (rulings P2-11, P2-12)."""
 
     def setUp(self):
         self.clock = Clock()
@@ -612,29 +615,49 @@ class HeldLitTests(unittest.TestCase):
         self.mark = OpeningMark(clock=self.clock)
         self.addCleanup(self.mark.deleteLater)
 
-    def test_it_begins_on_the_stills_frame(self):
-        self.assertAlmostEqual(held_phase(0.0), STILL_T)
+    def test_it_begins_on_the_stills_frame_and_fills_at_the_loops_pace(self):
+        # the still: the outline drawn whole, not yet filled
+        self.assertEqual(DRAWN_AT, 0.46)
+        self.assertAlmostEqual(held_phase(0.0), DRAWN_AT)
+        self.assertEqual(opening_mark._value(opening_mark._DRAWN, DRAWN_AT), 1.0)
+        self.assertEqual(opening_mark._value(opening_mark._FILLED, DRAWN_AT), 0.0)
+        self.assertAlmostEqual(HOLD_FILL_S, (FILLED_AT - DRAWN_AT) * LOOP_S)
+        self.assertAlmostEqual(held_phase(HOLD_FILL_S / 2), (DRAWN_AT + FILLED_AT) / 2)
+        self.assertAlmostEqual(held_phase(HOLD_FILL_S), FILLED_AT)
 
     def test_the_glyph_is_never_out_after_an_hour_of_loop_time(self):
-        self.mark.start(self.clock.now, held=True)
-        low, high = 1.0, 0.0
+        self.clock.now = 0.0
+        self.mark.start(0.0, held=True)
+        low, high, lit_low = 1.0, 0.0, 1.0
         for step in range(0, 3600 * 20):  # an hour, every 50 ms
             self.clock.now = step * 0.05
             frame = self.mark.frame()
             self.assertFalse(frame.still)
             self.assertEqual((frame.opening, frame.fade), (0.0, 1.0))
             low, high = min(low, frame.t), max(high, frame.t)
-        # filled from FILLED_AT, and not yet fading at LIT_UNTIL: lit the whole hour
-        self.assertGreaterEqual(low, FILLED_AT)
+            if self.clock.now >= HOLD_FILL_S:
+                lit_low = min(lit_low, frame.t)
+        # the outline whole from the first moment, filled from HOLD_FILL_S, and never fading
+        # at LIT_UNTIL: lit the whole hour once filled
+        self.assertGreaterEqual(low, DRAWN_AT)
+        self.assertGreaterEqual(lit_low, FILLED_AT)
         self.assertLessEqual(high, LIT_UNTIL)
-        self.assertGreater(high - low, 0.25)  # the light does breathe
+        self.assertGreater(high - lit_low, 0.25)  # the light does breathe
 
     def test_the_glyph_paints_whole_at_every_held_phase(self):
-        for i in range(0, 101):
-            t = held_phase(i * opening_mark.HOLD_BREATH_S / 100)
+        # never less than its whole outline; filling once, then filled
+        filled = 0.0
+        for i in range(0, 201):
+            seconds = i * (HOLD_FILL_S + opening_mark.HOLD_BREATH_S) / 200
+            t = held_phase(seconds)
             self.assertEqual(opening_mark._value(opening_mark._SHOWN, t), 1.0)
             self.assertEqual(opening_mark._value(opening_mark._DRAWN, t), 1.0)
-            self.assertEqual(opening_mark._value(opening_mark._FILLED, t), 1.0)
+            now = opening_mark._value(opening_mark._FILLED, t)
+            if seconds < HOLD_FILL_S:
+                self.assertGreaterEqual(now, filled)  # it fills, never empties
+            else:
+                self.assertEqual(now, 1.0)
+            filled = now
 
     def test_two_marks_on_one_origin_show_one_frame(self):
         # the splash's and the player's, another process, the same clock
@@ -646,8 +669,18 @@ class HeldLitTests(unittest.TestCase):
             self.clock.now = now
             self.assertAlmostEqual(other.frame().t, self.mark.frame().t)
 
+    def test_a_finish_during_the_fill_completes_it_first(self):
+        self.mark.start(self.clock.now, held=True)
+        self.clock.now += HOLD_FILL_S / 4
+        phase = self.mark.frame().t
+        self.mark.finish(lambda: None)
+        self.assertAlmostEqual(self.mark._finish.catch_up_s, (FILLED_AT - phase) * LOOP_S / 2)
+        self.assertLessEqual(self.mark._finish.catch_up_s, HOLD_FILL_S / 2)
+        self.clock.now += self.mark._finish.catch_up_s
+        self.assertAlmostEqual(self.mark.frame().t, FILLED_AT)  # it opens out filled
+
     def test_finish_opens_at_once_with_nothing_to_catch_up(self):
-        for at in (0.0, 0.4, 1.1, 1.9, 2.3):
+        for at in (0.4, 1.1, 1.9, 2.3, 3.0):  # (filled from HOLD_FILL_S, 0.32 s, on)
             with self.subTest(at=at):
                 mark = OpeningMark(clock=self.clock)
                 self.addCleanup(mark.deleteLater)

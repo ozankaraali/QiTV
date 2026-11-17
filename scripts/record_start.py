@@ -23,7 +23,8 @@ counted as a second appearance of the window.
 --check asserts (exit 1 when one fails):
     the splash shows within 1.5 s of the start (a one-file build: of the exec, the still counts);
     the main window appears once, with one id;
-    a one-file start: from the still the glyph never goes out before the open;
+    a one-file start: from the still (the outline) the glyph never goes out, and it fills
+    before the open;
     the visible window count (splash, still, main) never goes 1 -> 0 -> 1, on the windows and on
         the filmed frames (an empty frame between the first mark and the shown window);
     the splash is gone at most 0.5 s after the window is fully shown (its opacity is 1);
@@ -78,11 +79,14 @@ SPLASH_WITHIN_S = 1.5
 SPLASH_AFTER_FULL_S = 0.5
 OCCUPIED_DIFF = 0.3  # mean gray levels away from the empty screen: a mark, a window
 FULL_OPACITY = 0.999
-# The glyph's brightness: the mean gray of the middle of the tile in the small frames. From the
-# still the glyph stays lit until the open; out, it falls to the dark tile's level.
+# The glyph's brightness: the mean gray of the middle of the tile in the small frames. The still
+# is the mark's outline drawn whole, unfilled (ruling P2-12): from it to the open the level never
+# falls below the outline's (out, it falls to the dark tile's), and the fill brings it to the
+# filled level before the open.
 GLYPH_BOX = 5  # half-side in small-frame pixels: inside the 12 px tile
-GLYPH_KEEPS = 0.7  # of its lit level
-GLYPH_SETTLE_S = 0.4  # the light is coming in as the helper takes over
+GLYPH_KEEPS = 0.9  # of the outline's level (the still's, filmed alone)
+GLYPH_FILLED = 1.6  # times the outline's level: filled
+GLYPH_SETTLE_S = 0.1  # the still's first filmed frame may be half drawn
 
 
 @dataclass
@@ -284,7 +288,7 @@ def analyse(samples: Sequence[Sample], ev: Events, scenario: str = "plain") -> R
             )
         )
 
-    # 4b. a mark lit from the still never goes out and comes back before the open
+    # 4b. from the still (its outline), the mark never goes out, and it fills before the open
     if ev.onefile and not ev.reduced:
         checks.append(_glyph_held(ev, seen.t if seen else None, part))
 
@@ -309,8 +313,9 @@ def _on_screen(s: Sample) -> bool:
 
 def _glyph_held(ev: Events, first_t: Optional[float], part: Sequence[Sample]) -> Check:
     """From the still to the open (the window's first opacity above 0), the glyph's brightness
-    never falls to the dark tile's: it is lit all along. A recording that cannot say is a
-    failed check, with its reason."""
+    never falls below the outline's (the still's level, filmed while it shows alone): it never
+    goes out; and it reaches the filled level (GLYPH_FILLED times that) before the open. A
+    recording that cannot say is a failed check, with its reason."""
     if not ev.glyph_levels:
         return Check("glyph_held", False, "not measured: no frames were filmed")
     if first_t is None:
@@ -318,24 +323,27 @@ def _glyph_held(ev: Events, first_t: Optional[float], part: Sequence[Sample]) ->
     opened = _first(part, lambda s: bool(s.mains) and (s.opacity or 0.0) > 0.0)
     if opened is None:
         return Check("glyph_held", False, "the window never opened")
-    span = [
-        lv
-        for t, lv in zip(ev.frame_times, ev.glyph_levels)
-        if first_t + GLYPH_SETTLE_S <= t <= opened.t - SAMPLE_S
-    ]
-    if len(span) < 3:
+    helper = _first(part, lambda s: s.splash)
+    alone_until = helper.t if helper is not None else opened.t
+    frames = list(zip(ev.frame_times, ev.glyph_levels))
+    begin = first_t + GLYPH_SETTLE_S
+    alone = [lv for t, lv in frames if begin <= t <= alone_until - SAMPLE_S]
+    span = [lv for t, lv in frames if begin <= t <= opened.t - SAMPLE_S]
+    if len(alone) < 3 or len(span) < 3:
         return Check(
             "glyph_held",
             False,
-            f"not measured: {len(span)} frame(s) between the still and the open (need 3)",
+            f"not measured: {len(alone)} frame(s) of the still alone, {len(span)} frame(s)"
+            " between the still and the open (need 3 each)",
         )
-    ref = sorted(span)[len(span) // 2]
-    low = min(span)
+    outline = sorted(alone)[len(alone) // 2]
+    low, peak = min(span), max(span)
     return Check(
         "glyph_held",
-        low >= GLYPH_KEEPS * ref,
-        f"the glyph's level from the still to the open: lowest {low:.1f}, typical {ref:.1f}"
-        f" (it must keep {GLYPH_KEEPS:.0%})",
+        low >= GLYPH_KEEPS * outline and peak >= GLYPH_FILLED * outline,
+        f"the glyph's level from the still to the open: the outline's {outline:.1f}, lowest"
+        f" {low:.1f}, highest {peak:.1f} (it must keep {GLYPH_KEEPS:.0%} of the outline's,"
+        f" and reach {GLYPH_FILLED}x it, filled)",
     )
 
 

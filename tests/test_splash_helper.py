@@ -32,7 +32,9 @@ from motion_fixtures import pin_motion
 from ui import macos_window, splash_helper
 from ui.opening_mark import (
     CATCH_UP_MAX_S,
+    DRAWN_AT,
     FILLED_AT,
+    HOLD_FILL_S,
     LIT_UNTIL,
     OPEN_S,
     STAGE_PX,
@@ -341,7 +343,8 @@ class SplashTests(unittest.TestCase):
         self.assertTrue(shown.wait(SPAWN_S))
         heard = time.monotonic()
         self.assertIsNotNone(splash._origin)
-        # held lit from its first paint (STILL_T then, the origin being now): at most SPAWN_S ago
+        # held from its first paint (the still's frame then, the origin being now): at most
+        # SPAWN_S ago
         self.assertLessEqual(heard - splash._origin, SPAWN_S)
         self.assertGreaterEqual(heard - splash._origin, 0.0)
         self.assertTrue(splash._lit)  # the player's mark is held lit on that origin too
@@ -1006,8 +1009,9 @@ class HelperWindowTests(unittest.TestCase):
                 conn.close()
                 child.close()
 
-    def test_a_lit_helper_starts_on_the_held_lit_frame(self):
-        # Over the bootloader's splash (the build's still): its first frame is that frame.
+    def test_a_lit_helper_starts_on_the_stills_frame(self):
+        # Over the bootloader's splash (the build's still: the outline drawn whole, unfilled,
+        # no light): its first frame is that frame, which then fills and blooms.
         conn, child = multiprocessing.Pipe(duplex=True)
         self.addCleanup(conn.close)
         self.addCleanup(child.close)
@@ -1019,7 +1023,7 @@ class HelperWindowTests(unittest.TestCase):
         self.assertGreaterEqual(window.origin, before)  # held lit from now: no shifted loop
         self.assertLessEqual(window.origin, after)
         frame = window.frame()
-        self.assertAlmostEqual(frame.t, STILL_T, delta=0.02)
+        self.assertAlmostEqual(frame.t, DRAWN_AT, delta=0.02)
         self.assertEqual((frame.opening, frame.fade), (0.0, 1.0))
         # The still is its bare tile and glyph: its light and shadow come in as it takes over.
         self.assertLess(frame.light, 0.2)
@@ -1040,9 +1044,11 @@ class HelperWindowTests(unittest.TestCase):
         for step in range(0, 3600 * 20):  # an hour of loop time, by the window's own clock
             frame = window._frame(origin + step * 0.05)
             self.assertFalse(frame.still)
-            self.assertGreaterEqual(frame.t, FILLED_AT)
+            self.assertGreaterEqual(frame.t, FILLED_AT if step * 0.05 >= HOLD_FILL_S else DRAWN_AT)
             self.assertLessEqual(frame.t, LIT_UNTIL)
-        # "open" from the held state: nothing to catch up, so "opening" goes back at once
+        # "open" from the held state, once filled: nothing to catch up, so "opening" goes back
+        # at once
+        pump(HOLD_FILL_S + 0.05)
         conn.send(("open", (0, 0, 800, 600)))
         self.assertTrue(pump_until(lambda: window._finish is not None))
         self.assertEqual(window._finish.catch_up_s, 0.0)

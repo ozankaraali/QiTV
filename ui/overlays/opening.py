@@ -72,8 +72,9 @@ class OpeningOverlay(Overlay):
         # Where its loop begins (ui/splash_helper.py: the splash's own mark's, so that the two
         # show the same frame); None: as it starts.
         self.loop_origin: Callable[[], Optional[float]] = lambda: None
-        # Whether that mark is held lit (the splash came from the bootloader's still): this one
-        # is too, on the same origin, so that the two show the same frame.
+        # Whether that mark is held (it took over from the bootloader's still: it fills from the
+        # still's outline, then stays lit): this one is too, on the same origin, so that the two
+        # show the same frame.
         self.loop_held: Callable[[], bool] = lambda: False
         if parent is not None:
             parent.installEventFilter(self)

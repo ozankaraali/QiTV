@@ -1,8 +1,9 @@
-"""The build's splash image: the tile and lit glyph of QiTV's held, lit mark (ui.opening_mark),
-which PyInstaller's bootloader shows on Windows and Linux from the double-click while the
-one-file app unpacks, before Python runs (qitv-windows.spec, qitv-linux.spec). The splash
-helper's first frame has the same tile and glyph in the same place (ui/splash_helper.py); its
-light and shadow come in as it takes over.
+"""The build's splash image: QiTV's mark (ui.opening_mark) at DRAWN_AT, its tile and its
+glyph's outline drawn whole, not yet filled, which PyInstaller's bootloader shows on Windows and
+Linux from the double-click while the one-file app unpacks, before Python runs
+(qitv-windows.spec, qitv-linux.spec). The splash helper's first frame has the same tile and
+outline in the same place (ui/splash_helper.py); it then fills and blooms, its light and shadow
+coming in, and stays lit until the window opens (ruling P2-12).
 
     uv run python scripts/render_splash.py [--style windows|linux] [OUT]   # build/splash.png
     uv run python scripts/render_splash.py --check-tcl-tk
@@ -56,13 +57,13 @@ def system_style() -> str:
 
 
 def render(out: Path, style: Optional[str] = None) -> Path:
-    """Paints the held, lit frame's tile and glyph into `out` (a PNG) in `style` (by default
-    this system's), its folders made as needed."""
+    """Paints the drawn outline's tile and glyph (DRAWN_AT) into `out` (a PNG) in `style` (by
+    default this system's), its folders made as needed."""
     os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
     from PySide6.QtCore import QRectF, Qt
     from PySide6.QtGui import QColor, QGuiApplication, QImage, QPainter
 
-    from ui.opening_mark import GRID, MARK_PX, STILL_T, TILE, TILE_COLOR, paint_mark
+    from ui.opening_mark import DRAWN_AT, GRID, MARK_PX, TILE, TILE_COLOR, paint_mark
 
     style = style or system_style()
     if style not in STYLES:
@@ -74,7 +75,7 @@ def render(out: Path, style: Optional[str] = None) -> Path:
     painter = QPainter(image)
     try:
         # As the helper's window paints its mark (MARK_PX in the middle of its stage), bare.
-        paint_mark(painter, QRectF(image.rect()), STILL_T, still=True, bare=True)
+        paint_mark(painter, QRectF(image.rect()), DRAWN_AT, bare=True)
     finally:
         painter.end()
     inset = round(TILE.x() * MARK_PX / GRID)  # the tile's own square, 2 px in

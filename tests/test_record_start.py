@@ -126,15 +126,33 @@ class AnalyseTest(unittest.TestCase):
 
 
 class GlyphTest(unittest.TestCase):
-    def levels(self, out_from=None, out_to=None):
+    """A one-file start: the still is the mark's outline drawn whole (ruling P2-12); the helper
+    takes over at 2.0 s and fills it; the window opens at 3.0 s."""
+
+    OUTLINE, FILLED, OUT = 40.0, 97.0, 28.0  # the tile's middle, as filmed
+
+    def levels(self, out_from=None, out_to=None, filled_at=2.3):
         times = [T0 + i / 30 for i in range(150)]
-        levels = [60.0 if not (out_from and out_from <= t - T0 < out_to) else 28.0 for t in times]
+        levels = []
+        for t in times:
+            if out_from is not None and out_from <= t - T0 < out_to:
+                levels.append(self.OUT)
+            elif t - T0 < 2.0:
+                levels.append(self.OUTLINE)
+            elif t - T0 < filled_at:
+                share = (t - T0 - 2.0) / (filled_at - 2.0)
+                levels.append(self.OUTLINE + (self.FILLED - self.OUTLINE) * share)
+            else:
+                levels.append(self.FILLED)
         return times, levels
 
     def samples(self):
-        # the still from 0.1 s, the window at opacity > 0 from 3.0 s
-        out = [smp(i / 10, still=True) for i in range(1, 30)]
-        out += [smp(i / 10, still=True, mains=["a"], opacity=0.1 * (i - 29)) for i in range(30, 40)]
+        # the still from 0.1 s, the helper over it from 2.0 s, the window at opacity > 0 from 3.0
+        out = [smp(i / 10, still=True) for i in range(1, 20)]
+        out += [smp(i / 10, splash=True) for i in range(20, 30)]
+        out += [
+            smp(i / 10, splash=True, mains=["a"], opacity=0.1 * (i - 29)) for i in range(30, 40)
+        ]
         out += [smp(i / 10, mains=["a"]) for i in range(40, 50)]
         return out
 
@@ -142,13 +160,20 @@ class GlyphTest(unittest.TestCase):
         times, lv = self.levels(**levels)
         return Events(t_exec=T0, onefile=True, frame_times=times, glyph_levels=lv)
 
-    def test_a_glyph_lit_to_the_open_passes(self):
+    def test_an_outline_that_fills_before_the_open_passes(self):
         report = analyse(self.samples(), self.ev())
-        self.assertTrue(by(report)["glyph_held"].ok)
+        self.assertTrue(by(report)["glyph_held"].ok, by(report)["glyph_held"].detail)
 
     def test_a_glyph_that_goes_out_and_comes_back_fails(self):
-        report = analyse(self.samples(), self.ev(out_from=1.5, out_to=2.2))
-        self.assertFalse(by(report)["glyph_held"].ok)
+        for out_from, out_to in ((1.5, 2.2), (2.4, 2.8)):  # under the still, or once filled
+            with self.subTest(out_from=out_from):
+                report = analyse(self.samples(), self.ev(out_from=out_from, out_to=out_to))
+                self.assertFalse(by(report)["glyph_held"].ok)
+
+    def test_an_outline_never_filled_before_the_open_fails(self):
+        check = by(analyse(self.samples(), self.ev(filled_at=99.0)))["glyph_held"]
+        self.assertFalse(check.ok)
+        self.assertIn("highest", check.detail)
 
     def test_the_open_may_dim_it(self):
         ev = self.ev(out_from=3.0, out_to=4.0)  # from the open on: not judged
@@ -165,8 +190,8 @@ class GlyphTest(unittest.TestCase):
         check = by(analyse(none, ev))["glyph_held"]
         self.assertFalse(check.ok)
         self.assertIn("not measured", check.detail)
-        ev = self.ev()  # too few frames between the still and the open
-        ev.frame_times, ev.glyph_levels = ev.frame_times[:16], ev.glyph_levels[:16]
+        ev = self.ev()  # too few frames of the still alone
+        ev.frame_times, ev.glyph_levels = ev.frame_times[:4], ev.glyph_levels[:4]
         check = by(analyse(self.samples(), ev))["glyph_held"]
         self.assertFalse(check.ok)
         self.assertIn("frame(s)", check.detail)

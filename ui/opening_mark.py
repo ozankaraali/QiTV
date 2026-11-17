@@ -64,22 +64,23 @@ STAGE_PX = 240  # the room a MARK_PX mark needs for its light at the bloom and a
 LOOP_MS = 3200
 OPEN_MS = 350  # the open: the lit mark grows by OPEN_GROWTH and fades
 OPEN_GROWTH = 0.12
-STILL_T = 0.7  # the held, lit frame (reduced motion, the build's still)
+STILL_T = 0.7  # the held, lit frame (reduced motion)
+DRAWN_AT = 0.46  # the outline drawn whole, not yet filled: the build's still (render_splash)
 FILLED_AT = 0.56  # the draw is complete: outlined and filled
 LIT_UNTIL = 0.88  # then the glyph fades, gone by 0.98
 HOLD_BREATH_S = 2.4  # a held-lit mark's light breathes once in this long
 CATCH_UP_SPEED = 2.0  # finish(): the rest of the draw at least twice as fast…
 CATCH_UP_MAX_S = 0.4  # …and never adding more than this
 FRAME_MS = 16
-# A mark lit from its first moment (the splash over the bootloader's still) never goes out: its
-# phase swings, eased as a sine is, between the fill (FILLED_AT) and where the glyph would
-# begin to fade (LIT_UNTIL), the light breathing with it, from STILL_T, the still's own frame.
-_HOLD_MID = (FILLED_AT + LIT_UNTIL) / 2
-_HOLD_AMP = (LIT_UNTIL - FILLED_AT) / 2
-_HOLD_START = math.asin((STILL_T - _HOLD_MID) / _HOLD_AMP)
-
 LOOP_S = LOOP_MS / 1000
 OPEN_S = OPEN_MS / 1000
+# A mark that takes over from the bootloader's still (the splash over it, and the player's on
+# its origin) begins on the still's frame (DRAWN_AT), fills and blooms at the loop's own pace,
+# then never goes out: its phase swings, eased as a sine is, between the fill (FILLED_AT) and
+# where the glyph would begin to fade (LIT_UNTIL), the light breathing with it.
+HOLD_FILL_S = (FILLED_AT - DRAWN_AT) * LOOP_S
+_HOLD_MID = (FILLED_AT + LIT_UNTIL) / 2
+_HOLD_AMP = (LIT_UNTIL - FILLED_AT) / 2
 
 # The keyframes as (phase, value): how much of the outline is drawn, the fill's opacity, the
 # glyph's opacity.
@@ -110,9 +111,13 @@ def _cubic(s: float, a: float, b: float) -> float:
 
 
 def held_phase(seconds: float) -> float:
-    """The loop phase of a held-lit mark `seconds` after it began: always in FILLED_AT..LIT_UNTIL,
-    so the glyph stays lit while the light breathes; STILL_T at 0."""
-    angle = _HOLD_START + 2 * math.pi * seconds / HOLD_BREATH_S
+    """The loop phase of a held mark `seconds` after it began: DRAWN_AT at 0 (the still's
+    frame: the outline whole), the fill and the bloom over HOLD_FILL_S, then always in
+    FILLED_AT..LIT_UNTIL, so the glyph stays lit while the light breathes."""
+    if seconds < HOLD_FILL_S:
+        return DRAWN_AT + max(seconds, 0.0) / LOOP_S
+    # from the swing's low point, the fill: no jump in phase
+    angle = 2 * math.pi * (seconds - HOLD_FILL_S) / HOLD_BREATH_S - math.pi / 2
     return min(max(_HOLD_MID + _HOLD_AMP * math.sin(angle), FILLED_AT), LIT_UNTIL)
 
 
@@ -506,9 +511,10 @@ class OpeningMark(QWidget):
         loops, or while a finish runs (its `then` always comes), this does nothing; once the
         mark is done it starts again. `light_in_s`: its light and shadow come in from none
         over that long from now, eased (the splash taking over from the bootloader's still,
-        which has neither); a plain fade under reduced motion too. `held`: the mark is lit from
-        `origin` on and stays lit, its light breathing, until it finishes (the still's own mark
-        never goes out and comes back); under reduced motion it holds still."""
+        which has neither); a plain fade under reduced motion too. `held`: from `origin` the
+        mark plays on from the still's frame (its outline drawn whole), fills and blooms, then
+        stays lit, its light breathing, until it finishes (held_phase: it never goes out and
+        comes back); under reduced motion it holds the lit frame, still."""
         if not self._done and (self._started is not None or self._finish is not None):
             return
         now = self._clock()
