@@ -12,8 +12,9 @@ over in place, one mark from the double-click into the player. close() tells it 
 start that handed over, or QiTV's end.
 
 The pipe carries ("open", frame), ("handover", rect), ("bare",) and ("quit",) to the helper
-(rectangles as (x, y, width, height)), and ("shown", loop origin), ("opening",) and
-("arrived", rect) back. In QiTV, a watcher
+(rectangles as (x, y, width, height)), and ("shown", loop origin), ("opening",),
+("arrived", rect) and ("dock", why) back (the helper has no log of its own: QiTV's says why
+it could not leave the Dock). In QiTV, a watcher
 thread is the pipe's only user: it sends what the GUI thread queued, calls `on_shown` (on that
 thread) at "shown", passes "opening" on to the GUI thread, and joins the helper, killing it
 KILL_AFTER_S after its first command if it hasn't ended by then. The helper ends by itself once
@@ -388,6 +389,12 @@ class Splash:
                         self._relay.tell(("opening",))
                     elif name == "arrived" and len(message) > 1:
                         self._relay.tell(("arrived", tuple(message[1])))
+                    elif name == "dock" and len(message) > 1:
+                        logger.warning(
+                            "The splash could not leave the Dock (%s): it may show an icon "
+                            "there while QiTV starts.",
+                            message[1],
+                        )
                 if process.sentinel in ready:
                     break
                 if deadline is not None and time.monotonic() >= deadline:
@@ -691,7 +698,9 @@ class _SplashWindow(OpeningMark):
         if self._ended:
             return False
         if _platform_name() == "cocoa":
-            _hide_from_dock()  # before the window shows: no Dock icon, no menu bar
+            why = _hide_from_dock()  # before the window shows: no Dock icon, no menu bar
+            if why is not None:
+                self._say(("dock", why))  # this process has no log: QiTV's says so
         self.show()
         # Over the bootloader's still: that frame held lit until it opens (it never goes out and
         # draws again), its light and shadow coming in and then breathing.
@@ -786,9 +795,10 @@ def _platform_name() -> str:
     return QGuiApplication.platformName()
 
 
-def _hide_from_dock() -> bool:
+def _hide_from_dock() -> Optional[str]:
     """macOS: [[NSApplication sharedApplication] setActivationPolicy:Accessory], so the
-    helper has no Dock icon and no menu bar. False when that couldn't be done."""
+    helper has no Dock icon and no menu bar. None once done; else why it couldn't be (never a
+    reason for the splash not to show)."""
     try:
         from ui import macos_window
 
@@ -797,9 +807,9 @@ def _hide_from_dock() -> bool:
         objc.objc_getClass.argtypes = [ctypes.c_char_p]
         application = macos_window._send(objc.objc_getClass(b"NSApplication"), b"sharedApplication")
         if not application:
-            return False
+            return "no NSApplication"
         policy = (ctypes.c_long, NS_ACTIVATION_POLICY_ACCESSORY)
-        return bool(macos_window._send(application, b"setActivationPolicy:", ctypes.c_bool, policy))
-    except Exception as e:  # never a reason for the splash not to show
-        logger.debug("The splash could not leave the Dock: %s", e)
-        return False
+        done = macos_window._send(application, b"setActivationPolicy:", ctypes.c_bool, policy)
+        return None if done else "the policy was refused"
+    except Exception as e:
+        return type(e).__name__

@@ -68,6 +68,15 @@ def stubborn(conn, geometry, lit=False):
     time.sleep(60)
 
 
+def dockless(conn, geometry, lit=False):
+    """The real helper on a Mac whose activation-policy call fails."""
+    with (
+        mock.patch.object(splash_helper, "_platform_name", return_value="cocoa"),
+        mock.patch.object(macos_window, "_objc", side_effect=OSError("no objc")),
+    ):
+        run_splash(conn, geometry, lit)
+
+
 def failing(conn, geometry, lit=False):
     """A helper that fails as it starts, as a crash would: only its exit code says so."""
     os._exit(3)
@@ -718,6 +727,26 @@ class SplashTests(unittest.TestCase):
         self.assertGreaterEqual(time.monotonic() - sent, 0.5)
         self.assertNotEqual(splash._process.exitcode, 0)  # killed
 
+    def test_a_helper_that_cannot_leave_the_dock_says_so_in_qitvs_log(self):
+        # Its own process has no log handler: a Dock icon would leave no trace otherwise.
+        shown = threading.Event()
+        with mock.patch.object(splash_helper, "run_splash", dockless):
+            splash = Splash(on_shown=shown.set)
+            with self.assertLogs("ui.splash_helper", "WARNING") as logs:
+                self.assertTrue(splash.start(QRect(*GEOMETRY)))
+                self.addCleanup(splash._process.kill)
+                self.assertTrue(shown.wait(SPAWN_S))
+                splash.close()
+                splash._watcher.join(KILL_WAIT_S)
+        self.assertEqual(
+            logs.output,
+            [
+                "WARNING:ui.splash_helper:The splash could not leave the Dock (OSError): it may "
+                "show an icon there while QiTV starts."
+            ],
+        )
+        self.assertEqual(splash._process.exitcode, 0)  # it showed, then quit
+
     def test_a_helper_that_fails_says_so_in_qitvs_log(self):
         # A packaged QiTV has no stderr: the helper's own lines are lost, its exit code isn't.
         with mock.patch.object(splash_helper, "run_splash", failing):
@@ -974,6 +1003,17 @@ class HelperWindowTests(unittest.TestCase):
         self.assertEqual(visible_then, [False])
         self.assertTrue(self.window.isVisible())
 
+    def test_a_mac_splash_that_cannot_leave_the_dock_tells_qitv_why(self):
+        with (
+            mock.patch.object(splash_helper, "_platform_name", return_value="cocoa"),
+            mock.patch.object(macos_window, "_objc", side_effect=OSError("no objc")),
+        ):
+            self.assertTrue(self.window.begin())  # it shows all the same
+        self.assertTrue(pump_until(self.conn.poll))
+        self.assertEqual(self.conn.recv(), ("dock", "OSError"))  # before it shows
+        self.assertTrue(pump_until(self.conn.poll))
+        self.assertEqual(self.conn.recv()[0], "shown")
+
     def test_elsewhere_the_dock_is_left_alone(self):
         with (
             mock.patch.object(splash_helper, "_platform_name", return_value="xcb"),
@@ -998,7 +1038,7 @@ class DockTests(unittest.TestCase):
             mock.patch.object(macos_window, "_objc", return_value=objc),
             mock.patch.object(macos_window, "_send", side_effect=send),
         ):
-            self.assertTrue(splash_helper._hide_from_dock())
+            self.assertIsNone(splash_helper._hide_from_dock())  # done: nothing to say
         objc.objc_getClass.assert_called_once_with(b"NSApplication")
         self.assertEqual(
             sent,
@@ -1009,8 +1049,25 @@ class DockTests(unittest.TestCase):
         )
 
     def test_a_failed_call_is_never_a_reason_not_to_show(self):
+        # It says why instead (the helper tells QiTV's log: it has none of its own).
         with mock.patch.object(macos_window, "_objc", side_effect=OSError("no objc")):
-            self.assertFalse(splash_helper._hide_from_dock())
+            self.assertEqual(splash_helper._hide_from_dock(), "OSError")
+        objc = mock.Mock()
+        objc.objc_getClass.return_value = 0x1000
+        with (
+            mock.patch.object(macos_window, "_objc", return_value=objc),
+            mock.patch.object(macos_window, "_send", return_value=False),
+        ):
+            self.assertEqual(splash_helper._hide_from_dock(), "no NSApplication")
+        with (
+            mock.patch.object(macos_window, "_objc", return_value=objc),
+            mock.patch.object(
+                macos_window,
+                "_send",
+                side_effect=lambda receiver, selector, *args: selector == b"sharedApplication",
+            ),
+        ):
+            self.assertEqual(splash_helper._hide_from_dock(), "the policy was refused")
 
 
 class MainTests(unittest.TestCase):
