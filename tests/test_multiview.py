@@ -780,6 +780,36 @@ class MultiviewTests(MultiviewCase):
                 self.assertFalse(self.grid.shown())
                 self.controller.leave_library_playing()
 
+    def film_over_the_pictures(self, focus=None):
+        """Task 6: the grid (tile `focus` focused; None: no grid) and the small picture close
+        for a film opened in QiTV (a drop, a hand-over); no channel takes the large picture
+        meanwhile, so the film's hold stays until it is over."""
+        self.two_pictures()
+        if focus is None:
+            self.v()  # the grid leaves: the small picture stays
+            self.assertTrue(self.sessions.pip_open())
+        elif focus != "main":
+            self.assertTrue(self.controller.focus_tile(focus))
+        self.controller.hold_for_file(True)  # TVWindow.open_paths, as it checks the file
+        runs = []
+        self.controller.when_idle(lambda: runs.append(True))
+        self.controller.play_file("/tmp/film.mkv", size=4)
+        self.assertFalse(self.grid.shown())
+        self.assertFalse(self.sessions.pip_open())
+        self.assertTrue(self.controller.now_playing().local)
+        self.assertEqual(runs, [])
+        self.controller.stop()
+        self.assertEqual(runs, [True])
+
+    def test_a_film_keeps_its_hold_as_the_grid_and_the_pip_close(self):
+        self.film_over_the_pictures("main")
+
+    def test_a_film_keeps_its_hold_when_the_small_pictures_tile_had_the_focus(self):
+        self.film_over_the_pictures("pip")
+
+    def test_a_film_keeps_its_hold_as_the_small_picture_closes(self):
+        self.film_over_the_pictures()
+
     def test_p_and_s_in_the_grid_say_to_leave_it_first(self):
         self.start_large(0)
         self.v()
