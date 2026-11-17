@@ -9,6 +9,7 @@ another title. Fakes for the controller's catalog and player; a real window over
 import os
 from pathlib import Path
 import unittest
+from unittest import mock
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
@@ -171,6 +172,21 @@ class FileHoldTests(ControllerTestCase):
         self.assertEqual(self.runs, ["update question"])
         self.assertTrue(self.welcome.visible)
 
+    def test_play_again_holds_as_the_first_play_did(self):
+        # Review: Play again after a Stop (the card up again) would play under the card.
+        self.catalog.names = []
+        self.controller.start()
+        self.film()
+        self.controller.stop()
+        self.assertTrue(self.welcome.visible)
+        self.controller.play_again()
+        self.assertEqual(self.session.plays[-1][0], Path(FILM).absolute().as_uri())
+        self.assertFalse(self.welcome.visible)
+        self.session.stateChanged.emit("playing")
+        self.session.stateChanged.emit("ended")
+        self.session.ended.emit()
+        self.assertTrue(self.welcome.visible)
+
     def test_a_stop_before_the_file_opens_keeps_the_hold(self):
         # Its check runs on a thread: the Library opened meanwhile stops nothing of it.
         self.catalog.names = []
@@ -205,6 +221,19 @@ class FileHoldTests(ControllerTestCase):
         self.catalog.hub_ready("Home")
         self.catalog.sectionReady.emit("live")
         self.assertEqual(self.catalog.links, [])
+        self.assertEqual(self.drawer.calls, [])  # nor does the list open by itself
+
+    def test_after_the_release_back_to_live_tv_still_opens_the_list(self):
+        # The viewer's own way back from the Library during the setup is not "by itself".
+        self.controller.hold_for_file(True)
+        self.controller.start()
+        self.controller.hold_for_file(False)
+        self.catalog.loading = True
+        self.controller.resume_live()  # tuned or listed once the provider is ready
+        self.catalog.loading = False
+        self.catalog.hub_ready("Home")
+        self.catalog.sectionReady.emit("live")
+        self.assertEqual(self.drawer.named("open_drawer"), [(None,)])
 
     def test_a_provider_failure_while_held_opens_no_drawer(self):
         self.controller.hold_for_file(True)
@@ -234,6 +263,30 @@ class WindowHoldTests(base.WindowCase):
         text = "Couldn't open “Dizi Bölüm 9.mkv”"
         self.assertTrue(wait_until(lambda: (text, "error") in self.toasts), self.toasts)
         self.assertTrue(wait_until(card.isVisible))
+        self.assertEqual(runs, [True])
+
+    def test_a_check_that_raises_still_lets_go(self):
+        # Review: an unexpected error on the check's thread said nothing, and the hold stayed.
+        window, runs = self.window, []
+        self.show()
+        film = Path(self.config_dir) / "Dizi Bölüm 1.mkv"
+        film.write_bytes(b"film")
+        card = window.overlays.welcome
+        self.assertTrue(wait_until(card.isVisible))
+        with (
+            mock.patch("ui.tv_window._readable_size", side_effect=RuntimeError("odd disk")),
+            self.assertLogs("ui.tv_window", "WARNING") as logs,
+        ):
+            window.open_paths([str(film)], source="handover")
+            self.assertFalse(card.isVisible())
+            window.when_idle(lambda: runs.append(True))
+            text = "Couldn't open “Dizi Bölüm 1.mkv”"
+            self.assertTrue(wait_until(lambda: (text, "error") in self.toasts), self.toasts)
+        self.assertIn(
+            "WARNING:ui.tv_window:A file opened in QiTV could not be looked at (RuntimeError)",
+            logs.output,
+        )
+        self.assertTrue(card.isVisible())
         self.assertEqual(runs, [True])
 
 

@@ -1317,6 +1317,7 @@ class TVController(QObject):
         if target is None or self._closed:
             return
         if target.local:
+            self._flow.hold_for_file(True)  # a film again: the welcome card goes until it ends
             self.play_file(QUrl(str(target.item.get("cmd") or "")).toLocalFile())
         elif target.live:
             key = target.group_key or ALL_GROUP_ID

@@ -380,7 +380,12 @@ class _FileCheck(QObject):
         ).start()
 
     def _check(self, generation: int, path: str) -> None:
-        size = _readable_size(path)
+        try:
+            size = _readable_size(path)
+        except Exception as error:  # never unanswered: the open would hold for good
+            name = type(error).__name__
+            logger.warning("A file opened in QiTV could not be looked at (%s)", name)
+            size = None
         try:
             self.checked.emit(generation, path, size)
         except RuntimeError:

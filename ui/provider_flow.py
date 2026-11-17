@@ -104,6 +104,9 @@ class ProviderFlow(QObject):
         self._file_opened = False  # one was: "start with the last channel" is spent this run
         self._welcome_up = False  # the welcome card shows
         self._welcome_due = False  # it was asked while held: it shows once released
+        # A provider becoming ready opens the list on an idle player: not once a file was
+        # opened, unless the viewer went back to live TV during the setup.
+        self._list_on_ready = True
         self._idle_waits: list[Callable[[], None]] = []  # when_idle's, until released
 
     def wire(self) -> None:
@@ -219,8 +222,9 @@ class ProviderFlow(QObject):
         While held QiTV is busy: a provider that becomes ready tunes nothing and opens no
         drawer, and the welcome card waits (one already up is withdrawn until then). A last
         channel on its way, or waited for at its own provider, is dropped, and "start with the
-        last channel" is spent for this run. Released, the welcome card asked meanwhile shows
-        and what waited (when_idle) runs; nothing tunes and no drawer opens."""
+        last channel" is spent for this run, as the list a ready provider opens on an idle
+        player is. Released, the welcome card asked meanwhile shows and what waited
+        (when_idle) runs; nothing tunes and no drawer opens."""
         if on:
             self._held = self._file_opened = True
             if self._welcome_up:
@@ -323,6 +327,7 @@ class ProviderFlow(QObject):
         idle = not self._held and not self._has_media() and not self._links_busy()
         on_start = self.config.start_with_last_channel and not self._file_opened
         wanted = idle and not self._in_library and (back_to_live or on_start)
+        self._list_on_ready = back_to_live or not self._file_opened
         self._autotune = last if wanted else None
         self._foreign = None
         self._foreign_timer.stop()
@@ -333,7 +338,7 @@ class ProviderFlow(QObject):
             self.nav.focus_source(name or self.catalog.current_provider_name())
             self._autotune = None
             self._end_loading()
-            if self._foreign is None and not self._in_library:
+            if self._foreign is None and not self._in_library and self._list_on_ready:
                 self._open_drawer_if_idle()  # (the last channel of another, else the list)
             return
         self._await_live = True
@@ -500,7 +505,8 @@ class ProviderFlow(QObject):
             return
         if self._foreign is not None:
             return  # the last channel of another provider is on its way
-        self._open_drawer_if_idle()
+        if self._list_on_ready:
+            self._open_drawer_if_idle()
 
     def _on_section_failed(self, section: str, message: str) -> None:
         if self._closed() or section != "live" or not self._await_live:
