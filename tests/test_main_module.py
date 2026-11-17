@@ -111,6 +111,15 @@ class MainModuleTests(unittest.TestCase):
             body,
         )
 
+    def test_the_settings_lock_goes_last(self):
+        # Review M4: the window's close stops answering other starts (TVWindow); the lock stays
+        # until the settings are written, so a start that waited for it reads the last save.
+        body = (REPO / "main.py").read_text(encoding="utf-8").split("def main()", 1)[1]
+        self.assertIn("window.instance = instance", body)
+        last = body.rsplit("finally:", 1)[1]
+        self.assertLess(last.index("config_manager.flush_saves()"), last.index("instance.close()"))
+        self.assertLess(last.index("instance.close()"), last.index("log_file.close()"))
+
     def test_windows_hears_double_clicks_over_dde_while_it_runs(self):
         # Registered on Windows: a double-click reaches this QiTV over DDE once its window
         # shows, as another start's hand-over does; at quit Explorer is told first, before

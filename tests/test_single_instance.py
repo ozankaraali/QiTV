@@ -133,9 +133,11 @@ RACE_BOUND_S = 60.0  # a listening start ends sooner once every other start's fi
 # ends (8 s at most). Each quits as QiTV does, letting go of its lock itself ("quits" and
 # "unlistened" without ever answering): Windows lets go of a killed process's lock only when
 # it gets round to it, so the tests end a holder through its stdin, never by a kill.
-# "closes" closes its server (a start connected to it is hung up on), holds the lock 2 s more,
-# prints `released <wall-clock time>` as it lets go, and lives on 3 s; "crashes" ends without
-# letting go (os._exit: the system lets go).
+# "closes" stops listening as QiTV's close begins (a start connected to it is hung up on),
+# holds the lock 2 s more, prints `released <wall-clock time>` as it lets go, and lives on 3 s;
+# "closing" stops listening before it says "ready" (a start comes during the close), holds the
+# lock argv[3] seconds, then lets go as "closes" does; "crashes" ends without letting go
+# (os._exit: the system lets go).
 HOLDER = r"""
 import json, os, sys, threading, time
 from PySide6.QtCore import QCoreApplication, QTimer
@@ -147,6 +149,8 @@ assert lock.acquire() is _Lock.OURS
 server = InstanceServer(server_name(folder), lock=lock)
 if mode != "unlistened":
     assert server.listen()
+if mode == "closing":
+    server.stop_listening()  # the window's close began: nobody answers, the lock stays held
 done = threading.Event()  # the test is done with it: its stdin ended
 serve = threading.Event()
 def read():
@@ -163,9 +167,9 @@ else:
     done.wait(delay)
 if mode == "crashes":
     os._exit(0)
-if mode == "closes":
-    server._server.close()  # the server only: the lock stays held
-    done.wait(2)
+if mode in ("closes", "closing"):
+    server.stop_listening()  # the lock stays held (again for "closing": nothing more)
+    done.wait(2 if mode == "closes" else 0)
     released_at = time.time()  # taken before it lets go: no start can listen sooner
     lock.release()
     print("released " + repr(released_at), flush=True)
@@ -429,6 +433,44 @@ class ClaimTests(unittest.TestCase):
         other.release()
         # The file stays: removed, two starts could each lock a file of their own.
         self.assertTrue(os.path.exists(os.path.join(self.folder, single_instance.LOCK_FILE)))
+
+    def test_a_closing_qitv_answers_no_start_but_keeps_its_lock(self):
+        # Review M4: the window's close began (TVWindow, its first step). Nothing hands a file
+        # to it any more, and the lock stays until main() lets go of it, last.
+        server = claim(self.folder)
+        self.listening(server)
+        seen = []
+        server.activated.connect(lambda: seen.append("activated"))
+        server.stop_listening()
+        self.assertFalse(server.listening())
+        self.assertFalse(hand_over(self.name, 300, paths=[self.turkish_path()]))
+        self.pump(lambda: False, 0.3)
+        self.assertEqual(seen, [])
+        other = single_instance._InstanceLock(self.folder)
+        self.assertIs(other.acquire(), single_instance._Lock.HELD)
+        server.stop_listening()  # again: nothing more
+        server.close()  # the lock goes now
+        self.assertIs(other.acquire(), single_instance._Lock.OURS)
+        other.release()
+
+    def test_a_start_during_the_close_waits_and_then_runs(self):
+        # Review M4: QiTV closed, then the next episode double-clicked: the start found the
+        # closing QiTV still answering, and the file was lost. Now it finds nobody listening
+        # and the lock held: it waits, and becomes the QiTV (with its file) once the closing
+        # one lets go, while that process still lives.
+        holder = self.holder("closing", 2)
+        started = time.monotonic()
+        server = claim(self.folder, paths=[self.turkish_path()])
+        listened_at = time.time()
+        self.listening(server)  # this start runs: main() opens its files
+        self.assertGreaterEqual(time.monotonic() - started, 1.5)  # it waited for the lock
+        self.assertIsNone(holder.poll())  # the closing QiTV still lives
+        released = holder.stdout.readline().split()
+        self.assertEqual(released[0], "released")
+        self.assertGreaterEqual(listened_at, float(released[1]))
+        self.assertEqual(holder.wait(10), 0)
+        server.close()
+        self.assertLockFree()
 
     def fresh_folder(self):
         """A settings folder of its own for a subcase (nothing an earlier one held)."""

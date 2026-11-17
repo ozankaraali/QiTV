@@ -428,6 +428,9 @@ class TVWindow(QMainWindow):
         # Windows: the run's DDE owner (services.dde_windows.Serving), set by main(); None
         # elsewhere and from source
         self.dde: Any = None
+        # This QiTV's claim on its settings folder (services.single_instance.InstanceServer),
+        # set by main(): it stops answering other starts once the close begins.
+        self.instance: Any = None
         self._close_retries = 0
         self._video_released = False
         self._closed = False
@@ -2584,6 +2587,11 @@ class TVWindow(QMainWindow):
         self.epg_refresh.stop()
         self._stop_subtitles_wait()
         self._run_steps(
+            # First: a start of QiTV during the close (QiTV closed, then the next episode
+            # double-clicked) is no longer handed to this window, which is going; it waits for
+            # the settings' lock, kept until main() lets go last, and starts with its file.
+            ("stop answering other starts", self._answer_no_starts),
+            ("take Explorer's DDE back", self._close_dde),  # Explorer starts QiTV again
             ("let the next click through", self.screens.shutdown),
             ("stop the phone remote", self.remote.shutdown),
             ("leave Now Playing", self.media_keys.stop),  # the media keys go back to others
@@ -2603,6 +2611,14 @@ class TVWindow(QMainWindow):
             ("stop loading posters", self.posters.shutdown),
             ("save the window geometry", self._save_geometry),
         )
+
+    def _answer_no_starts(self) -> None:
+        if self.instance is not None:
+            self.instance.stop_listening()  # its lock stays held (services.single_instance)
+
+    def _close_dde(self) -> None:
+        if self.dde is not None:
+            self.dde.close()  # once: aboutToQuit and main()'s `finally` find it closed
 
     @staticmethod
     def _run_steps(*steps: tuple[str, Callable[[], None]]) -> None:

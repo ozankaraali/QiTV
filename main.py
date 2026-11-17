@@ -311,6 +311,7 @@ def main() -> int:
         window = TVWindow(app, config_manager, provider_manager, image_manager, epg_manager)
         if instance is not None:
             instance.activated.connect(window.come_to_front)
+            window.instance = instance  # it answers no start once the window's close begins
         # This start's files, and those that came before the window (macOS's open event,
         # another start's hand-over), taken once; from now on each plays as it comes.
         opened = paths + app.take_opened()
@@ -370,13 +371,15 @@ def main() -> int:
     finally:
         if dde is not None:  # first: Explorer starts QiTV again (it never raises)
             dde.close()
-        if instance is not None:
-            instance.close()
         if control is not None:
             control.stop()
         allow_sleep()
         if not config_manager.flush_saves():  # the window's last save among them
             log.warning("QiTV quits before config.json was written: the last change is lost.")
+        if instance is not None:
+            # Last: a start waiting for the settings' lock (one during the close) takes it
+            # only once the settings are written, the film's resume point among them.
+            instance.close()
         log_file.close()
 
 

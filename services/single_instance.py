@@ -406,10 +406,14 @@ class InstanceServer(QObject):
     def listening(self) -> bool:
         return self._server.isListening()
 
-    def close(self) -> None:
-        """Stops listening and drops a start still connected, so nothing of it is left for
-        the garbage collector to delete outright (Qt warns, and may crash, on a socket so
-        deleted)."""
+    def stop_listening(self) -> None:
+        """QiTV closes (it can take seconds): no start is answered from now on, and the lock
+        stays held until `close` (main() lets go of it last, once the settings are written).
+        A start meanwhile (QiTV closed, then the next episode double-clicked) finds the lock
+        held and nobody listening: it waits for the lock (Ruling 32), then starts afresh with
+        its file, instead of handing it to a window that is going. A start still connected is
+        dropped, so nothing of it is left for the garbage collector to delete outright (Qt
+        warns, and may crash, on a socket so deleted)."""
         self._closed = True  # a listen_later still due does nothing
         self._server.close()
         for socket in self._server.findChildren(QLocalSocket):
@@ -418,6 +422,10 @@ class InstanceServer(QObject):
         for start in self._starts.values():
             start.quiet.stop()
         self._starts.clear()
+
+    def close(self) -> None:
+        """Stops listening (`stop_listening`), then lets go of the lock."""
+        self.stop_listening()
         # The server first, then the lock: a start waiting for this QiTV's answer sees it hang
         # up, finds the lock held a moment longer and waits on, then takes the lock once it
         # is let go here (it never takes over while the lock is held).

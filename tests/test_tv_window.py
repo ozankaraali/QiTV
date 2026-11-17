@@ -352,6 +352,25 @@ class TVWindowTests(WindowCase):
         saved = ConfigManager().config["window_positions"]["tv_window"]
         self.assertEqual(saved, {"x": 150, "y": 120, "width": 960, "height": 540})
 
+    def test_the_close_answers_no_other_start_from_its_first_step(self):
+        # Review M4: the close lasts seconds, and a start meanwhile (the next episode
+        # double-clicked) was handed to the window that was going. Its first step stops the
+        # instance server (its lock stays: main() lets go last) and takes Windows' DDE back.
+        window, order = self.window, []
+        window.instance = mock.Mock(spec=["stop_listening", "close"])
+        window.instance.stop_listening.side_effect = lambda: order.append("instance")
+        window.dde = mock.Mock(spec=["close", "follow"])
+        window.dde.close.side_effect = lambda: order.append("dde")
+        shutdown = window.screens.shutdown
+        with mock.patch.object(
+            window.screens, "shutdown", side_effect=lambda: (order.append("screens"), shutdown())
+        ):
+            self.close_window()
+        self.assertEqual(order[:3], ["instance", "dde", "screens"])
+        window.instance.stop_listening.assert_called_once_with()
+        window.instance.close.assert_not_called()  # the lock is main()'s to let go, last
+        window.dde.close.assert_called_once_with()
+
     def test_without_libvlc_playing_explains_why(self):
         self.open_first_channel()
         self.assertTrue(
