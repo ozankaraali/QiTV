@@ -3,6 +3,7 @@
 from collections.abc import Iterable, Sequence
 from dataclasses import dataclass
 import logging
+import ntpath
 import os
 from pathlib import Path
 import re
@@ -21,6 +22,8 @@ SUBTITLE_EXTENSIONS = (".srt", ".ass", ".ssa", ".vtt", ".sub")
 PLAYLIST_EXTENSIONS = (".m3u", ".m3u8")
 
 _DIGITS = re.compile(r"(\d+)")
+_EXTENDED = "\\\\?\\"  # Windows' extended-length prefix, \\?\
+_DEVICE = "\\\\.\\"
 
 
 @dataclass(frozen=True)
@@ -56,6 +59,24 @@ def launch_paths(argv: Sequence[str]) -> list[str]:
         except OSError, ValueError:
             logger.debug("launch argument is not a readable path: %r", arg)
     return found
+
+
+def extended_path(path: str) -> str:
+    """Windows path `path` with the extended-length prefix: `\\\\?\\C:\\…`, or
+    `\\\\?\\UNC\\server\\share\\…` for a share. Windows' file calls take it past 260
+    characters in a process that isn't long-path aware. The prefix turns Windows' own clean-up
+    off, so the path is first made absolute, with backslashes and no "." or "..". A path that
+    is prefixed already (or a device's) stays; so does one without a drive or a share.
+    """
+    if path.startswith((_EXTENDED, _DEVICE)):
+        return path
+    full = ntpath.normpath(ntpath.abspath(path))
+    if full.startswith((_EXTENDED, _DEVICE)):
+        return full  # one spelled with forward slashes
+    drive, _rest = ntpath.splitdrive(full)
+    if drive.startswith("\\\\"):
+        return f"{_EXTENDED}UNC\\{full[2:]}"
+    return f"{_EXTENDED}{full}" if drive else path
 
 
 def _extension(path: str) -> str:

@@ -76,5 +76,31 @@ class Filter(unittest.TestCase):
         self.assertIs(track_controls.SUBTITLE_EXTENSIONS, open_paths.SUBTITLE_EXTENSIONS)
 
 
+class ExtendedPath(unittest.TestCase):
+    r"""Windows' extended-length spelling (`\\?\`), for a path past 260 characters in a QiTV
+    that isn't long-path aware; worked out with ntpath, so on any system."""
+
+    def test_a_drive_path(self):
+        self.assertEqual(
+            open_paths.extended_path(r"C:\Films\Dizi Bölüm 1.mkv"), r"\\?\C:\Films\Dizi Bölüm 1.mkv"
+        )
+
+    def test_forward_slashes_and_dots_are_written_out(self):
+        # The prefix turns Windows' own clean-up off: the path is spelled out first.
+        self.assertEqual(
+            open_paths.extended_path("C:/Films/Sezon 1/../Ep 1.mkv"), r"\\?\C:\Films\Ep 1.mkv"
+        )
+
+    def test_a_unc_path(self):
+        expected = r"\\?\UNC\server\share\Dizi\Ep 1.mkv"
+        self.assertEqual(open_paths.extended_path(r"\\server\share\Dizi\Ep 1.mkv"), expected)
+        self.assertEqual(open_paths.extended_path("//server/share/Dizi/Ep 1.mkv"), expected)
+
+    def test_a_prefixed_path_stays(self):
+        for path in (r"\\?\C:\Films\Ep 1.mkv", r"\\?\UNC\server\share\Ep 1.mkv"):
+            with self.subTest(path=path):
+                self.assertEqual(open_paths.extended_path(path), path)
+
+
 if __name__ == "__main__":
     unittest.main()

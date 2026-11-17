@@ -87,7 +87,7 @@ from services.live.tuning import FILE_NAME as TUNING_FILE, LiveTuning
 from services.media_keys import MediaKeys
 from services.media_reporter import MediaReporter
 from services.navigation import NavModel
-from services.open_paths import Sorted, natural_key, sort_paths
+from services.open_paths import Sorted, extended_path, natural_key, sort_paths
 from services.parental import Parental, install as install_parental
 from services.picture import FILE_NAME as PICTURE_FILE, ChannelPictures
 from services.playback import (
@@ -243,7 +243,18 @@ def _native_video_handles() -> bool:
 
 def _readable_size(path: str) -> Optional[int]:
     """The size of the file at `path`; None when it is gone, no file (a folder, a broken link)
-    or can't be read. It touches the disk: never on the GUI thread."""
+    or can't be read. On Windows a path past 260 characters may only be found in its
+    extended spelling (a QiTV that isn't long-path aware): that is tried too. It touches the
+    disk: never on the GUI thread."""
+    size = _file_size(path)
+    if size is None and sys.platform == "win32":
+        extended = extended_path(path)
+        if extended != path:
+            size = _file_size(extended)
+    return size
+
+
+def _file_size(path: str) -> Optional[int]:
     try:
         info = os.stat(path)
         if not stat.S_ISREG(info.st_mode):

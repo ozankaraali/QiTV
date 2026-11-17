@@ -6,6 +6,7 @@ name. Fictional files in a temporary folder; the controller's play_file is a fak
 import os
 from pathlib import Path
 import shutil
+import stat
 import tempfile
 import unittest
 from unittest import mock
@@ -17,6 +18,7 @@ from timer_fixtures import elapse, wait_until
 from services.playback import PlaybackState
 from tests import test_tv_window as base
 from tests.test_provider_drop import PANEL, drop
+from ui import tv_window
 from ui.keymap import Action
 from ui.link_lanes import Target
 
@@ -224,6 +226,48 @@ class OpenRouterTests(base.WindowCase):
         self.assertEqual(drop(self.window, paths=[self.folder / "notes.txt"]), (False, False))
         entered, _dropped = drop(self.window.host, paths=[self.folder / "clip.webm"])
         self.assertTrue(entered)
+
+
+class LongWindowsPathTests(unittest.TestCase):
+    """Windows: a QiTV that isn't long-path aware can't stat a path past 260 characters as it
+    is spelled; the check tries its extended spelling, and the path plays as given."""
+
+    LONG = "C:\\Films\\" + "Dizi Bölüm klasörü\\" * 14 + "Ep 1.mkv"
+
+    def check(self, plain_works):
+        seen = []
+
+        def fake_stat(path):
+            seen.append(path)
+            if path.startswith("\\\\?\\") or plain_works:
+                return os.stat_result((stat.S_IFREG | 0o644, 0, 0, 1, 0, 0, 1234, 0, 0, 0))
+            raise FileNotFoundError(path)
+
+        with (
+            mock.patch("sys.platform", "win32"),
+            mock.patch.object(os, "stat", side_effect=fake_stat),
+            mock.patch("ui.tv_window.open", mock.mock_open(), create=True),
+        ):
+            size = tv_window._readable_size(self.LONG)
+        return size, seen
+
+    def test_the_extended_spelling_is_tried_when_the_plain_one_fails(self):
+        self.assertGreater(len(self.LONG), 260)
+        size, seen = self.check(plain_works=False)
+        self.assertEqual(size, 1234)
+        self.assertEqual(seen, [self.LONG, "\\\\?\\" + self.LONG])
+
+    def test_a_path_that_works_is_looked_at_once(self):
+        size, seen = self.check(plain_works=True)
+        self.assertEqual((size, seen), (1234, [self.LONG]))
+
+    def test_elsewhere_there_is_no_second_try(self):
+        with (
+            mock.patch("sys.platform", "linux"),
+            mock.patch.object(os, "stat", side_effect=FileNotFoundError) as fake_stat,
+        ):
+            self.assertIsNone(tv_window._readable_size(self.LONG))
+        fake_stat.assert_called_once_with(self.LONG)
 
 
 @unittest.skipIf(base.INSTANCE is None, "libVLC is not available")
