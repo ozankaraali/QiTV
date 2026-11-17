@@ -114,6 +114,7 @@ _LANGUAGE_MODELS_OK = "ai_captions_language_models"
 _BACKLOG_S = 2.0  # ... or this much sound read waits for it (2.9.1)
 _SLOW_FOR_S = 30.0
 _TRANSLATE_TO = "ai_captions_translate_to"  # 2.10: the language they are translated into
+_LOCAL_ON = "ai_captions_local_on"  # turned on (or off) during the last video file
 
 from ui.captions_texts import (  # noqa: E402  (the texts, with their translations)
     CANT_KEEP_UP,
@@ -217,6 +218,9 @@ class CaptionsController(QObject):
         self._warming = False  # the speed benchmark started (once)
         self._unmeasured = False  # it failed: Automatic doesn't wait for it
         self._toggle_waits = False  # turned on before the speed was known: on once it is
+        # on by themselves for a video file (local_video_playing): off again before anything but
+        # a video file opens (target_changing), until the viewer turns them on or off
+        self._auto_on = False
         self._scored.connect(self._on_scored)
         self._download: Any = None
         self._percent = 0
@@ -307,7 +311,7 @@ class CaptionsController(QObject):
         self.changed.emit()  # "Automatic (1.7B)" or "(0.6B)": known now
         if self._toggle_waits:
             self._toggle_waits = False
-            self.toggle()
+            self._toggle()
 
     def enabled(self) -> bool:
         return self._enabled
@@ -333,6 +337,21 @@ class CaptionsController(QObject):
         return ""
 
     def toggle(self) -> None:
+        """The viewer turns them on or off (their row, a phone's, a subtitle track chosen over
+        them). During a video file, what they asked for is kept for the next one: on while on
+        their way too (asked for, downloading, waiting for the speed). Either way they are the
+        viewer's from now on, not on by themselves (`local_video_playing`)."""
+        if self._plays_video_file():
+            was_on = (
+                self._enabled or self._download is not None or self._asking or self._toggle_waits
+            )
+            self._config_set(_LOCAL_ON, not was_on)
+        self._auto_on = False
+        self._toggle()
+
+    def _toggle(self) -> None:
+        """On or off, as the viewer's toggle, for QiTV's own turning them on again (another
+        model, a translation, the speed known): what the viewer asked for stays as it was."""
         if self._enabled or self._download is not None:
             self._disable()
             return
@@ -368,6 +387,46 @@ class CaptionsController(QObject):
                 translate(NOT_NOW),
             )
             self._card.ask(*self._question)
+
+    # ---- video files ---------------------------------------------------------------------
+    def local_video_playing(self) -> None:
+        """A video file plays (TVController, once per file): turned on during the last one,
+        they come on by themselves when nothing would be asked, downloaded or measured first
+        (their model here, this computer's speed known) and the film shows none of its own
+        subtitles; else nothing happens."""
+        from services.captions import models
+
+        if not self._config_get(_LOCAL_ON, False):
+            return
+        if self._enabled or self._download is not None or self._asking or self._toggle_waits:
+            return
+        if self._speed_unknown():
+            return  # (before the tier: Automatic's would start the benchmark)
+        tier = self._choose_tier()
+        if self._own_subtitles_shown() or not models.installed(tier):
+            return
+        logger.info("AI captions: on again for a video file, as for the last one")
+        self._enable(tier)
+        self._auto_on = True
+
+    def target_changing(self, local_video: bool) -> None:
+        """Something new is about to replace what the large picture shows (TVController, before
+        it opens; False too when a phone or an outside player takes it): captions that came on
+        by themselves for a video file go off first, unless it is a video file too, so that no
+        film relay and no hold behind live follow them. Asked again, nothing more happens."""
+        if self._auto_on and not local_video:
+            self._auto_on = False
+            self._disable()
+
+    def _plays_video_file(self) -> bool:
+        """The large picture plays a video file (a song is no video)."""
+        return bool(getattr(self._target(), "video_file", False))
+
+    def _own_subtitles_shown(self) -> bool:
+        """The large picture shows one of its own subtitle tracks (TVController)."""
+        controller = getattr(self._window, "controller", None)
+        shown = getattr(controller, "own_subtitles_shown", None)
+        return callable(shown) and bool(shown())
 
     def downloading(self) -> bool:
         """The speech model downloads: they are on their way (the row's tap calls them off)."""
@@ -512,7 +571,7 @@ class CaptionsController(QObject):
                 switched = True
             elif tier != self._tier:
                 self._disable()
-                self.toggle()
+                self._toggle()
                 return
         if self._process.running() and not switched:
             self._process.send(*self._translate_message())
@@ -586,14 +645,14 @@ class CaptionsController(QObject):
         self._config_set("ai_captions_model", name)
         if (self._enabled or self._download is not None) and self._choose_tier() != self._tier:
             self._disable()
-            self.toggle()
+            self._toggle()
         elif self._asking and not self._asking_step and self._choose_tier() != self._fetching:
             # Asked to download another one (2.9, the review: the phone stepped to Faster
             # while the TV asked for the 1.7B, and Download fetched the 1.7B): asked again.
             self._asking = False
             if self._card is not None:
                 self._card.withdraw()
-            self.toggle()
+            self._toggle()
         self.changed.emit()
 
     def _auto_tier(self) -> str:

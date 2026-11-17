@@ -2068,7 +2068,9 @@ class VodTests(ControllerTestCase):
         self.assertIsNone(self.session.plays[0][1].get("user_agent"))  # VLC's own
 
     def captions_on(self, on=True):
-        self.window.captions = SimpleNamespace(enabled=lambda: on)
+        self.window.captions = SimpleNamespace(
+            enabled=lambda: on, target_changing=lambda local_video: None
+        )
 
     def relay_of_play(self):
         relay = self.session.plays[-1][1].get("relay")

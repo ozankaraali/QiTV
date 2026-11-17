@@ -843,7 +843,7 @@ class SpeechModelTests(unittest.TestCase):
         self.captions._here = lambda name: self.disk[name]
         self.restarts = []
         self.captions._disable = lambda: self.restarts.append("off")
-        self.captions.toggle = lambda: self.restarts.append("on")
+        self.captions._toggle = lambda: self.restarts.append("on")  # (not the viewer's toggle)
 
     def test_the_steps_name_what_automatic_takes_and_go_round(self):
         self.assertEqual(

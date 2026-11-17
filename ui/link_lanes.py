@@ -25,9 +25,10 @@ from dataclasses import dataclass, field
 import logging
 from typing import Any, Callable, Optional
 
-from PySide6.QtCore import QObject, Signal
+from PySide6.QtCore import QObject, QUrl, Signal
 
 from services.navigation import episode_key
+from services.open_paths import is_video
 from services.redact import safe_traceback
 from services.zapping import ZapContext
 
@@ -64,6 +65,12 @@ class Target:
     start_ms: Optional[int] = None
     # 2.8: a channel's size cap chosen in the ⚙ (lines; 0: its best; None: the one it keeps).
     max_height: Optional[int] = None
+
+    @property
+    def video_file(self) -> bool:
+        """A video file opened from the disk (a recording too), not a song: AI captions come
+        back on for one when they were on for the last (CaptionsController)."""
+        return self.local and is_video(QUrl(str(self.item.get("cmd") or "")).toLocalFile())
 
     @property
     def live(self) -> bool:

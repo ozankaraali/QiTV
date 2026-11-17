@@ -603,6 +603,12 @@ class ConfigManager:
     ai_captions_translate_to = _config_property(
         "ai_captions_translate_to", "", coerce=_one_of(("", *MT_LANGUAGES), "")
     )
+    # Optional (older builds ignore it): AI captions were turned on (true) or off during the
+    # last video file played; the next one comes on with them when nothing has to be asked,
+    # downloaded or measured first (CaptionsController.local_video_playing).
+    ai_captions_local_on = _config_property(
+        "ai_captions_local_on", False, coerce=lambda v: v is True
+    )
     watch_history = _config_property("watch_history", [])
     playback_positions = _config_property("playback_positions", {})
 

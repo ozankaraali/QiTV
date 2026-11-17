@@ -386,6 +386,8 @@ class TVController(QObject):
         # its link comes; said then (PipControls.make_room), never if the link fails.
         self._room_for: Optional[Target] = None
         self._cid: Optional[str] = None  # resume key of the VOD being played
+        # The video file whose first "playing" AI captions heard (_video_file_playing)
+        self._video_played: Optional[Target] = None
         self._channel: Optional[dict] = None  # the channel tuned last, for INFO and the drawer
         self._digits = ""  # number entry under way
         self._state = "idle"
@@ -3161,9 +3163,33 @@ class TVController(QObject):
     def _before_new_target(self, target: Optional[Target]) -> None:
         """`target` replaces what the large picture shows (None: an outside player or a phone
         takes it, nothing plays here). A file opened in QiTV gives way to anything but another
-        file: what waited for it (the welcome card, the update question) may come now."""
+        file: what waited for it (the welcome card, the update question) may come now. AI
+        captions that came on by themselves for a video file go off before anything else
+        opens (CaptionsController.target_changing)."""
         if target is None or not target.local:
             self._flow.hold_for_file(False)
+        captions = getattr(self.window_actions, "captions", None)
+        if captions is not None:
+            captions.target_changing(target is not None and target.video_file)
+
+    def _video_file_playing(self) -> None:
+        """The large picture's player plays: a video file's first time (not a pause's end, nor
+        a song) lets AI captions come back on for it (CaptionsController.local_video_playing)."""
+        target = self._current
+        if target is None or target is self._video_played or not target.video_file:
+            return
+        if self.session.url != target.item.get("cmd"):
+            return  # what played before it, still reported
+        self._video_played = target
+        captions = getattr(self.window_actions, "captions", None)
+        if captions is not None:
+            captions.local_video_playing()
+
+    def own_subtitles_shown(self) -> bool:
+        """The large picture shows one of its own subtitle tracks (a file loaded for it too)."""
+        if self._closed:
+            return False
+        return any(shown for _id, _name, shown in self._tracks.subtitle_choices())
 
     def _prepare(self, session, target: Target, previous: Optional[Target]) -> None:
         """`target` is about to open in `session`, the large picture's player: its sound, its
@@ -3523,6 +3549,7 @@ class TVController(QObject):
         if state == "playing":
             self._live_controls.on_playing()  # direct play: a held "unavailable" shows now
             self._picture.on_playing()  # after the sleep timer: the computer stays awake again
+            self._video_file_playing()
 
     def _on_position(self, position_ms: int, length_ms: int) -> None:
         if self._closed or self._current is None or self._current.live:

@@ -77,6 +77,23 @@ class WindowConfigMigrationTests(unittest.TestCase):
         for key, value in saved.items():
             self.assertEqual(written[key], value)
 
+    def test_ai_captions_for_video_files_are_off_until_turned_on_and_kept(self):
+        # An older config has none: off. Only true turns it on.
+        with tempfile.TemporaryDirectory() as directory:
+            config_path = Path(directory) / "config.json"
+            config_path.write_text(json.dumps({"ai_captions_model": "small"}), encoding="utf-8")
+            with patch.object(ConfigManager, "_get_config_path", return_value=str(config_path)):
+                config = ConfigManager()
+                self.assertFalse(config.ai_captions_local_on)
+                for stored in ("yes", 1, None, ["on"]):
+                    config.config["ai_captions_local_on"] = stored
+                    self.assertFalse(config.ai_captions_local_on, stored)
+                config.ai_captions_local_on = True
+                config.save_config(wait=True)
+                reloaded = ConfigManager()
+                self.assertTrue(reloaded.ai_captions_local_on)
+                self.assertEqual(reloaded.ai_captions_model, "small")
+
     def test_a_1x_config_gains_the_tv_window_without_resetting_saved_state(self):
         # A 1.x config names only the old windows. A missing window entry once kept the
         # player from starting (KeyError in 1.13.7); the TV window's entry is added instead.

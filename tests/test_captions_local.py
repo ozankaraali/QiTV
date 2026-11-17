@@ -1,0 +1,275 @@
+"""AI captions come back for a video file: turned on for the last one, they come on again by
+themselves once the next one plays, when nothing would be asked, downloaded or measured for it
+and the video shows none of its own subtitles; ones that came on by themselves go off before
+anything that isn't a video file opens. A real CaptionsController (its process and its speed
+benchmark faked) over the TV controller's fakes."""
+
+import os
+import shutil
+import tempfile
+import unittest
+from unittest import mock
+
+os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+
+from PySide6.QtWidgets import QWidget
+import test_tv_controller as tv
+from test_tv_controller import CHANNELS, ControllerTestCase, play_context
+
+FILM = "/videos/Dizi Bölüm 1.mkv"
+NEXT = "/videos/Dizi Bölüm 2.mkv"
+SONG = "/music/Şarkı.mp3"
+
+
+def setUpModule():
+    """AI captions' files in a folder of this module's own (never the developer's own)."""
+    if not os.environ.get("QITV_CAPTIONS_DIR"):
+        folder = tempfile.mkdtemp(prefix="qitv-captions-")
+        patch = mock.patch.dict(os.environ, {"QITV_CAPTIONS_DIR": folder})
+        patch.start()
+        unittest.addModuleCleanup(patch.stop)
+        unittest.addModuleCleanup(shutil.rmtree, folder, True)
+
+
+class _Card:
+    """The download question's card: what it was asked."""
+
+    def __init__(self):
+        self.answered = mock.Mock()
+        self.asked, self.withdrawn = [], 0
+
+    def ask(self, text, yes, no):
+        self.asked.append(text)
+
+    def withdraw(self):
+        self.withdrawn += 1
+
+
+class LocalCaptionsTests(ControllerTestCase):
+    def setUp(self):
+        super().setUp()
+        from ui.captions_controller import CaptionsController
+
+        self.controller.start()
+        self.config.ai_captions_local_on = False
+        self.host = QWidget()  # the window, as the captions controller reads it
+        self.addCleanup(self.host.deleteLater)
+        self.host.controller = self.controller
+        self.host.config_manager = self.config
+        self.card = _Card()
+        self.captions = CaptionsController(self.host, card=self.card)
+        self.addCleanup(self.captions._timer.stop)
+        self.loads, self.warmed = [], []
+        self.captions._load_model = lambda: self.loads.append(self.captions._tier)
+        self.captions._warm_tier = lambda: self.warmed.append(True)  # never a benchmark here
+        self.window.captions = self.captions
+        self.installed, self.score = True, 1.0
+        for name, fake in (
+            ("services.captions.models.installed", lambda tier, root=None: self.installed),
+            ("services.captions.models.download_size", lambda tier, root=None: 900_000_000),
+            ("services.captions.models.full_size", lambda tier, root=None: 900_000_000),
+            ("services.captions.tier.known_score", lambda: self.score),
+        ):
+            patch = mock.patch(name, side_effect=fake)
+            patch.start()
+            self.addCleanup(patch.stop)
+
+    def film(self, path=FILM):
+        """A video file opens and plays."""
+        self.controller.play_file(path, size=1234)
+        self.session.stateChanged.emit("playing")
+
+    def recorded_play(self):
+        """What `captions.enabled()` said as each open reached the player."""
+        seen = []
+        play = self.session.play
+
+        def recording(url, **kwargs):
+            seen.append(self.captions.enabled())
+            play(url, **kwargs)
+
+        self.session.play = recording
+        return seen
+
+    def test_comes_back_on_for_local_video(self):
+        self.config.ai_captions_local_on = True
+        self.film()
+        self.assertTrue(self.captions.enabled())
+        self.assertEqual(self.loads, ["large"])  # Automatic's, here and fast enough
+        self.assertEqual((self.card.asked, self.warmed), ([], []))
+        self.assertTrue(self.config.ai_captions_local_on)
+
+    def test_off_for_the_last_one_they_stay_off(self):
+        self.film()
+        self.assertFalse(self.captions.enabled())
+
+    def test_stays_off_without_model_or_speed(self):
+        self.config.ai_captions_local_on = True
+        self.installed = False
+        self.film()
+        self.assertFalse(self.captions.enabled())
+        self.assertFalse(self.captions.downloading())
+        self.assertEqual(self.card.asked, [])  # no question over the film
+        self.score = None  # this computer's speed not measured yet
+        self.film(NEXT)
+        self.assertFalse(self.captions.enabled())
+        self.assertEqual(self.warmed, [])  # nor a benchmark started for it
+        self.assertEqual(self.card.asked, [])
+
+    def test_translated_they_wait_for_this_computers_speed(self):
+        # Translated, Automatic's model goes by this computer's speed first (_speed_unknown):
+        # known (measured in this run), they come back on; not yet, they stay off, unmeasured.
+        self.config.ai_captions_local_on = True
+        self.config.ai_captions_translate_to = "German"  # its model is here too
+        self.score = None
+        self.film()
+        self.assertFalse(self.captions.enabled())
+        self.assertEqual((self.warmed, self.card.asked), ([], []))
+        self.score = 1.0
+        self.film(NEXT)
+        self.assertTrue(self.captions.enabled())
+        self.assertEqual(self.card.asked, [])
+
+    def test_what_played_before_the_file_is_no_play_of_it(self):
+        # A provider's film is stopped for the file; its input still closing, the file waits,
+        # and a "playing" still reported meanwhile is the film's.
+        self.config.ai_captions_local_on = True
+        self.controller.play_vod(tv.VodTests.MOVIE, "movie", play_context())
+        self.catalog.linkReady.emit(self.catalog.links[-1][0], "http://vod/heat.mkv")
+        self.session.holding = True
+        self.controller.play_file(FILM, size=1234)
+        self.session.stateChanged.emit("playing")
+        self.assertFalse(self.captions.enabled())
+        self.session.let_go()  # released: the file opens
+        self.assertTrue(self.session.url.endswith(".mkv") and self.session.url.startswith("file:"))
+        self.session.stateChanged.emit("playing")
+        self.assertTrue(self.captions.enabled())
+
+    def test_own_subtitles_block(self):
+        self.config.ai_captions_local_on = True
+        self.session.subtitle_on = 3  # the file's own subtitles show
+        self.film()
+        self.assertFalse(self.captions.enabled())
+        self.assertTrue(self.controller.own_subtitles_shown())
+        self.session.subtitle_on = -1
+        self.assertFalse(self.controller.own_subtitles_shown())
+
+    def test_once_per_video_not_at_every_play(self):
+        # The viewer turned the film's own subtitles off after they blocked the captions: a
+        # pause and its play again bring nothing on.
+        self.config.ai_captions_local_on = True
+        self.session.subtitle_on = 3
+        self.film()
+        self.session.subtitle_on = -1
+        self.session.stateChanged.emit("paused")
+        self.session.stateChanged.emit("playing")
+        self.assertFalse(self.captions.enabled())
+
+    def test_auto_on_turns_off_before_next_open(self):
+        self.config.ai_captions_local_on = True
+        self.film()
+        self.assertTrue(self.captions.enabled())
+        seen = self.recorded_play()
+        self.controller.tune_live(CHANNELS[0], group_key="10", channels=list(CHANNELS))
+        self.ready()
+        self.assertEqual(seen, [False])  # off before the channel opened: no hold behind live
+        self.assertTrue(self.config.ai_captions_local_on)  # kept for the next video file
+
+    def test_auto_on_never_relays_the_next_providers_film(self):
+        self.config.ai_captions_local_on = True
+        self.film()
+        self.assertTrue(self.captions.enabled())
+        self.controller.play_vod(tv.VodTests.MOVIE, "movie", play_context())
+        self.catalog.linkReady.emit(self.catalog.links[-1][0], "http://vod/heat.mkv")
+        relay = self.session.plays[-1][1].get("relay")
+        if relay is not None:
+            self.addCleanup(relay.stop)
+        self.assertIsNone(relay)
+        self.assertFalse(self.captions.enabled())
+
+    def test_the_next_video_keeps_them_and_a_phone_taking_over_turns_them_off(self):
+        self.config.ai_captions_local_on = True
+        self.film()
+        seen = self.recorded_play()
+        self.film(NEXT)
+        self.assertEqual(seen, [True])  # the next episode opens with them
+        self.assertEqual(self.loads, ["large"])  # loaded once
+        self.captions.target_changing(True)  # (asked again: as before)
+        self.assertTrue(self.captions.enabled())
+        self.controller._before_new_target(None)  # a phone's Watch takes the title
+        self.assertFalse(self.captions.enabled())
+        self.controller._before_new_target(None)  # asked again: nothing more
+        self.assertFalse(self.captions.enabled())
+        self.assertTrue(self.config.ai_captions_local_on)
+
+    def test_toggle_records_intent_while_waiting(self):
+        self.score, self.installed = None, False
+        self.film()
+        self.captions.toggle()  # on: Automatic waits for this computer's speed
+        self.assertEqual(self.warmed, [True])
+        self.assertFalse(self.captions.enabled())
+        self.assertTrue(self.config.ai_captions_local_on)  # what the viewer asked for
+        self.captions.toggle()  # pressed again before it was known: off
+        self.assertFalse(self.config.ai_captions_local_on)
+
+    def test_a_toggle_that_asks_records_on_and_one_while_asked_off(self):
+        self.installed = False
+        self.film()
+        self.captions.toggle()  # on: the download's question
+        self.assertTrue(self.captions.asking())
+        self.assertTrue(self.config.ai_captions_local_on)
+        self.captions.toggle()  # while it is up
+        self.assertFalse(self.config.ai_captions_local_on)
+
+    def test_user_toggle_records_field_and_owns_state(self):
+        self.film()
+        self.captions.toggle()
+        self.assertTrue(self.captions.enabled())
+        self.assertTrue(self.config.ai_captions_local_on)
+        self.controller.tune_live(CHANNELS[0], group_key="10", channels=list(CHANNELS))
+        self.ready()
+        self.assertTrue(self.captions.enabled())  # the viewer's: on for the channel too
+        self.captions.toggle()  # off on live TV: the video files' choice stays
+        self.assertTrue(self.config.ai_captions_local_on)
+
+    def test_a_user_toggle_makes_auto_on_ones_the_viewers(self):
+        self.config.ai_captions_local_on = True
+        self.film()
+        self.captions.toggle()  # off
+        self.assertFalse(self.config.ai_captions_local_on)
+        self.captions.toggle()  # on again: the viewer's now
+        self.assertTrue(self.config.ai_captions_local_on)
+        self.controller.tune_live(CHANNELS[0], group_key="10", channels=list(CHANNELS))
+        self.ready()
+        self.assertTrue(self.captions.enabled())
+
+    def test_another_model_chosen_is_no_toggle(self):
+        # Auto-on, then the 0.6B chosen: they come on again with it, still by themselves, and
+        # what the viewer asked for stays.
+        self.config.ai_captions_local_on = True
+        self.film()
+        self.captions.set_model("small")
+        self.assertTrue(self.captions.enabled())
+        self.assertEqual(self.loads, ["large", "small"])
+        self.assertTrue(self.config.ai_captions_local_on)
+        self.controller.tune_live(CHANNELS[0], group_key="10", channels=list(CHANNELS))
+        self.ready()
+        self.assertFalse(self.captions.enabled())
+
+    def test_songs_never_touch_field(self):
+        for kept in (False, True):
+            with self.subTest(kept=kept):
+                self.config.ai_captions_local_on = kept
+                self.controller.play_file(SONG)
+                with mock.patch.object(self.captions, "local_video_playing") as asked:
+                    self.session.stateChanged.emit("playing")
+                asked.assert_not_called()
+                self.assertFalse(self.captions.enabled())
+                self.captions.toggle()  # on for the song
+                self.assertTrue(self.captions.enabled())
+                self.captions.toggle()
+                self.assertEqual(self.config.ai_captions_local_on, kept)
+
+
+if __name__ == "__main__":
+    unittest.main()
