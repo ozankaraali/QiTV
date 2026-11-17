@@ -32,6 +32,7 @@ from ui.opening_mark import STAGE_PX, OpeningMark
 from ui.overlays.base import Overlay
 
 OPENING_TIMEOUT_MS = 20_000  # the mark goes after this long, whatever came of the file
+APPEAR_MS = 300  # a mark let go once the splash's has gone fades in this long
 _PLAYING = PlaybackState.PLAYING.value
 
 
@@ -103,15 +104,19 @@ class OpeningOverlay(Overlay):
         self._layout()
         self.show()
 
-    def hold_mark(self, held: bool) -> None:
+    def hold_mark(self, held: bool, *, fade: bool = False) -> None:
         """The splash's mark stands where this one draws (ui/splash_helper.py): this one draws
         on unseen, on the same loop, until it is let go; one that opens out by then stays
-        unseen until its next file."""
-        self._held = held
+        unseen until its next file. Let go with `fade` (the splash's mark has gone: it opened
+        out elsewhere, or ended), it fades in over APPEAR_MS; without (the hand-over's swap:
+        the splash's stands on it, the same frame), it shows at once."""
+        was_held, self._held = self._held, held
         if held:
             self._mark.hide()
-        elif self._opening:
+        elif self._opening and was_held:
             self._mark.show()
+            if fade:
+                self._mark.appear(APPEAR_MS / 1000)
 
     def close_opening(self) -> None:
         """The mark opens out of the page, then hides; nothing when it does not draw."""

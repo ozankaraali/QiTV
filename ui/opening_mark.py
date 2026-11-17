@@ -419,6 +419,15 @@ def _draw_glyph(p: QPainter, drawn: float, filled: float) -> None:
 # ---- the widget ----------------------------------------------------------------------------
 
 
+def _coming_in(span: Optional[tuple[float, float]], now: float) -> float:
+    """How far something that comes in over `span` (from when, for how long) is at `now`,
+    eased: 1.0 with none."""
+    if span is None:
+        return 1.0
+    since, length = span
+    return _ease_in_out((now - since) / length)
+
+
 class Frame(NamedTuple):
     """What OpeningMark paints at a moment: paint_mark's `t`, `still`, `opening` and `light`,
     and the plain fade's opacity (reduced motion; 1.0 otherwise)."""
@@ -461,6 +470,7 @@ class OpeningMark(QWidget):
         self._mark_px = float(mark_px)
         self._started: Optional[float] = None
         self._light_in: Optional[tuple[float, float]] = None  # (from when, for how long)
+        self._appear: Optional[tuple[float, float]] = None  # it fades in (appear()): as above
         # Only the tile and the glyph (paint_mark's `bare`): another mark's light shows under it.
         self.bare = False
         self._still = False
@@ -504,11 +514,20 @@ class OpeningMark(QWidget):
         now = self._clock()
         self._started = now if origin is None else origin
         self._light_in = (now, light_in_s) if light_in_s > 0.0 else None
+        self._appear = None
         self._held = held
         self._finish = None
         self._done = False
         self._then = []
         self._still = self.reduced_motion()
+        self._update_timer()
+        self.update()
+
+    def appear(self, seconds: float) -> None:
+        """It fades in from nothing over `seconds` from now, eased: a mark that shows once
+        another has gone (the splash's, ui/overlays/opening.py), never at full strength at
+        once. A plain fade under reduced motion too."""
+        self._appear = (self._clock(), seconds) if seconds > 0.0 else None
         self._update_timer()
         self.update()
 
@@ -544,17 +563,18 @@ class OpeningMark(QWidget):
     def frame(self, now: Optional[float] = None) -> Frame:
         """What the mark shows at `now` (the clock's time; by default, now)."""
         now = self._clock() if now is None else now
-        return self._frame(now)._replace(light=self._light(now))
+        frame = self._frame(now)._replace(light=self._light(now))
+        shown = _coming_in(self._appear, now)
+        return frame._replace(fade=frame.fade * shown) if shown < 1.0 else frame
 
     def _light(self, now: float) -> float:
         """How much of its light shows at `now`: all of it, unless it is coming in."""
-        if self._light_in is None:
-            return 1.0
-        since, span = self._light_in
-        return _ease_in_out((now - since) / span)
+        return _coming_in(self._light_in, now)
 
     def _lighting(self) -> bool:
-        return self._light_in is not None and self._light(self._clock()) < 1.0
+        """Its light or the mark itself comes in (the timer runs, even held still)."""
+        now = self._clock()
+        return _coming_in(self._light_in, now) < 1.0 or _coming_in(self._appear, now) < 1.0
 
     def _frame(self, now: float) -> Frame:
         finish = self._finish

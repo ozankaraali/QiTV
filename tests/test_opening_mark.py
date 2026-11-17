@@ -477,6 +477,33 @@ class WidgetTests(unittest.TestCase):
         self.assertEqual(self.mark.frame().light, 1.0)
         self.assertFalse(self.mark._timer.isActive())
 
+    def test_an_appearance_fades_the_mark_in(self):
+        # A mark shown once another has gone (the splash's): never at full strength at once.
+        self.mark.start()
+        self.mark.appear(0.3)
+        self.assertEqual(self.mark.frame().fade, 0.0)
+        self.clock.now += 0.15
+        self.assertAlmostEqual(self.mark.frame().fade, 0.5, delta=0.01)  # eased: half way
+        self.clock.now += 0.15
+        self.assertEqual(self.mark.frame().fade, 1.0)
+        self.mark.start()  # (once it is done, a new start shows at once, as before)
+
+    def test_an_appearance_under_reduced_motion_is_a_plain_fade(self):
+        self.reduced.return_value = True
+        self.mark.start()
+        self.mark.show()
+        self.assertFalse(self.mark._timer.isActive())  # the held frame: nothing moves
+        self.mark.appear(0.3)
+        self.assertTrue(self.mark._timer.isActive())
+        self.clock.now += 0.15
+        frame = self.mark.frame()
+        self.assertTrue(frame.still)
+        self.assertTrue(0.0 < frame.fade < 1.0)
+        self.clock.now += 0.16
+        self.mark._tick()
+        self.assertEqual(self.mark.frame().fade, 1.0)
+        self.assertFalse(self.mark._timer.isActive())
+
     def test_it_paints_the_light_its_frame_says(self):
         self.mark.resize(240, 240)
         self.mark.start(light_in_s=0.3)

@@ -239,7 +239,7 @@ class Splash:
         self._window = window
         target = self._hand_over_to()
         if self._ended or self._closed:  # no splash to open (any more)
-            self._let_go()
+            self._let_go(fade=True)
             self._fade()
         elif target is not None:
             self._handing = True
@@ -307,11 +307,12 @@ class Splash:
             frame = window.frameGeometry()
             self._commands.put(("open", (frame.x(), frame.y(), frame.width(), frame.height())))
 
-    def _let_go(self) -> None:
-        """The player's mark shows again (where it still draws), and a later file's draws from
-        its beginning, as before the splash."""
+    def _let_go(self, *, fade: bool = False) -> None:
+        """The player's mark shows again (where it still draws), fading in with `fade` (the
+        splash's has gone: never a pop), and a later file's draws from its beginning, as
+        before the splash."""
         if self._overlay is not None:
-            self._overlay.hold_mark(False)
+            self._overlay.hold_mark(False, fade=fade)
             self._overlay.loop_origin = lambda: None
             self._overlay.loop_held = lambda: False
 
@@ -384,7 +385,7 @@ class Splash:
             self._ended = True
             if self._window is not None:  # nothing glides or opens any more
                 self._handing = False
-                self._let_go()  # the player's mark, if it draws, now the only one
+                self._let_go(fade=True)  # the player's mark, if it draws, now the only one
                 self._fade()
 
     # ---- the watcher thread ----

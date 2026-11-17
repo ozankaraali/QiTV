@@ -27,7 +27,7 @@ from tests.test_open_router import FILM, SETTLE_MS, RouterCase
 from tests.test_playback_session import _FakeInstance, _HeldRunner, _ShapePlayer, vlc
 from ui.link_lanes import Target
 from ui.opening_mark import MARK_PX, STAGE_PX, STILL_T, OpeningMark
-from ui.overlays.opening import OPENING_TIMEOUT_MS, OpeningOverlay
+from ui.overlays.opening import APPEAR_MS, OPENING_TIMEOUT_MS, OpeningOverlay
 
 FILM_URL = "http://provider.test/film.mp4"
 FAILED = "The stream could not be opened"
@@ -328,11 +328,11 @@ class OverlayWidgetTests(unittest.TestCase):
             overlay.close_opening()
         finish.assert_not_called()
 
-    def page(self):
+    def page(self, clock=lambda: 50.0):
         page = QWidget()
         page.resize(800, 600)
         self.addCleanup(page.deleteLater)
-        overlay = OpeningOverlay(page, clock=lambda: 50.0)
+        overlay = OpeningOverlay(page, clock=clock)
         page.show()
         return overlay
 
@@ -363,6 +363,32 @@ class OverlayWidgetTests(unittest.TestCase):
         plain = self.page()
         plain.open_for(_Session(), "file:///Film.mkv")  # no splash: the full loop
         self.assertFalse(plain.mark._held)
+
+    def test_a_mark_let_go_once_the_splash_has_gone_fades_in(self):
+        # The splash's mark opened out elsewhere (off the middle, another screen, less motion
+        # asked for, a late splash): this one fades in, never pops in at full strength.
+        now = [50.0]
+        overlay = self.page(clock=lambda: now[0])
+        overlay.hold_mark(True)
+        overlay.open_for(_Session(), "file:///Film.mkv")
+        overlay.hold_mark(False, fade=True)
+        self.assertFalse(overlay.mark.isHidden())
+        self.assertEqual(overlay.mark.frame().fade, 0.0)
+        now[0] += APPEAR_MS / 2000
+        self.assertTrue(0.0 < overlay.mark.frame().fade < 1.0)
+        now[0] += APPEAR_MS / 2000
+        self.assertEqual(overlay.mark.frame().fade, 1.0)
+        overlay.hold_mark(False, fade=True)  # let go again (the splash's end): no new fade
+        self.assertEqual(overlay.mark.frame().fade, 1.0)
+
+    def test_a_mark_let_go_at_the_swap_shows_at_once(self):
+        # The hand-over: the splash's mark stands on this one, on the same frame.
+        overlay = self.page()
+        overlay.hold_mark(True)
+        overlay.open_for(_Session(), "file:///Film.mkv")
+        overlay.hold_mark(False)
+        self.assertFalse(overlay.mark.isHidden())
+        self.assertEqual(overlay.mark.frame().fade, 1.0)
 
     def test_a_mark_let_go_as_it_opens_out_stays_unseen(self):
         overlay = self.page()

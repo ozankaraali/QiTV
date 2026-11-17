@@ -180,14 +180,17 @@ class FakeOverlay:
         self.mark.setGeometry(*at, STAGE_PX, STAGE_PX)
         self.mark.origin = origin
         self.holds = []
+        self.fades = []  # whether each let-go fades the mark in
         self.loop_origin = None
         self.loop_held = None
 
     def opening(self):
         return self.drawing
 
-    def hold_mark(self, held):
+    def hold_mark(self, held, *, fade=False):
         self.holds.append((held, opacity(self.window)))
+        if not held:
+            self.fades.append(fade)
         self.mark.setVisible(not held and self.drawing)
 
 
@@ -433,6 +436,7 @@ class SplashTests(unittest.TestCase):
             self.assertTrue(pump_until(lambda: len(overlay.holds) == 2))
         self.assertEqual(names(sent), ["open"])
         self.assertEqual(window.opacities, [])  # never transparent
+        self.assertEqual(overlay.fades, [True])  # the player's mark fades in
 
     def test_a_splash_that_shows_late_never_comes_after_the_window(self):
         # A real helper that starts after the window is on screen, in main()'s order: the
@@ -549,6 +553,7 @@ class SplashTests(unittest.TestCase):
                 splash._relay.tell(("ended",))
                 self.assertTrue(pump_until(lambda: len(overlay.holds) == 2))
                 self.assertFalse(overlay.holds[1][0])
+                self.assertEqual(overlay.fades, [True])  # it fades in: the splash's has gone
                 self.assertIsNone(overlay.loop_origin())  # a later file's from its start
 
     def test_under_reduced_motion_it_opens_and_never_glides(self):
@@ -608,6 +613,7 @@ class SplashTests(unittest.TestCase):
             splash._relay.tell(("arrived", sent[0][0][1]))  # the helper's glide reached it
             self.assertTrue(pump_until(lambda: "quit" in names(sent)))
         self.assertEqual(overlay.holds, [(True, 0.0), (False, 1.0)])  # shown once faded in
+        self.assertEqual(overlay.fades, [False])  # at once: the splash's stands on it
         self.assertIsNone(overlay.loop_origin())  # a later file's draws from its start
         self.assertEqual(names(sent), ["handover", "bare", "quit"])  # then the splash goes
         # the splash drops its light only once the player's mark has painted: never neither
