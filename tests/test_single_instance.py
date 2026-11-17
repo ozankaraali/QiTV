@@ -1,6 +1,8 @@
-"""One QiTV per settings folder (2.8.12): a second start hands over to the first and quits; a
-first that never answers (hung, or a socket left by a crash) is not waited for. A start with
-files hands them over too; a first of 2.10, which only knows `show`, still comes forward."""
+"""One QiTV per settings folder (2.8.12): a second start hands over to the first and quits. A
+first that can't be reached (a socket left by a crash) is not waited for; one reached while it
+still starts is, up to START_WAIT_MS, and one that never answers is taken over after that. A
+start with files hands them over too; a first of 2.10, which only knows `show`, still comes
+forward. The first QiTV's stand-in (FIRST) is in instance_fixtures."""
 
 import json
 import os
@@ -19,68 +21,13 @@ os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 from PySide6.QtCore import QCoreApplication, QEvent, QEventLoop, Qt, QTimer
 from PySide6.QtNetwork import QLocalServer
 from PySide6.QtWidgets import QApplication
+from instance_fixtures import FIRST
 
 from services import single_instance
 from services.single_instance import InstanceServer, claim, hand_over, server_name
 
 REPO = Path(__file__).resolve().parents[1]
 app = QApplication.instance() or QApplication([])
-
-# The first QiTV, in a process of its own: it listens, says "ready", and once asked to come
-# to the front says "activated" and ends. With "hang" it listens and never answers. With
-# "files" it prints `opened <path as JSON>` for each file a start handed over, and ends. With
-# "old" it is QiTV 2.10's server: it answers "shown" to "show" and hangs up at once.
-FIRST = r"""
-import json, sys, time
-from PySide6.QtCore import QCoreApplication, QTimer
-app = QCoreApplication([])
-mode = sys.argv[2]
-if mode == "old":
-    from PySide6.QtNetwork import QLocalServer
-    server = QLocalServer()
-    server.setSocketOptions(QLocalServer.SocketOption.UserAccessOption)
-    read = {}
-    def on_read(socket):
-        data = read.get(id(socket), b"") + bytes(socket.readAll().data())
-        if b"\n" not in data:
-            read[id(socket)] = data[-64:]
-            return
-        read.pop(id(socket), None)
-        if data.startswith(b"show\n"):
-            print("activated", flush=True)
-            QTimer.singleShot(300, app.quit)
-            socket.write(b"shown\n")
-            socket.flush()
-        socket.disconnectFromServer()
-    def on_connection():
-        while server.hasPendingConnections():
-            socket = server.nextPendingConnection()
-            socket.readyRead.connect(lambda s=socket: on_read(s))
-            socket.disconnected.connect(socket.deleteLater)
-            if socket.bytesAvailable():
-                on_read(socket)
-    server.newConnection.connect(on_connection)
-    assert server.listen(sys.argv[1])
-else:
-    from services.single_instance import InstanceServer
-    server = InstanceServer(sys.argv[1])
-    assert server.listen()
-print("ready", flush=True)
-if mode == "hang":
-    time.sleep(8)
-    sys.exit(0)
-if mode == "files":
-    def on_opened(paths):
-        for path in paths:
-            print("opened " + json.dumps(path), flush=True)
-        QTimer.singleShot(200, app.quit)
-    server.opened.connect(on_opened)
-elif mode == "answer":
-    server.activated.connect(lambda: print("activated", flush=True))
-    server.activated.connect(lambda: QTimer.singleShot(200, app.quit))
-QTimer.singleShot(8000, app.quit)
-app.exec()
-"""
 
 # A second start, in a process of its own: hand_over(name, paths=<JSON list>), then one JSON
 # line with what it returned, how long the call took and what it logged.
@@ -224,10 +171,28 @@ class ClaimTests(unittest.TestCase):
     def test_a_first_that_never_answers_is_not_waited_for(self):
         self.first("hang")
         started = time.monotonic()
-        with mock.patch.object(single_instance, "ANSWER_MS", 400):
+        with (
+            mock.patch.object(single_instance, "ANSWER_MS", 400),
+            mock.patch.object(single_instance, "START_WAIT_MS", 800),
+        ):
             server = claim(self.folder)
-        self.assertLess(time.monotonic() - started, 3)
+        waited = time.monotonic() - started
+        self.assertGreaterEqual(waited, 0.75)  # reached: given START_WAIT_MS to answer
+        self.assertLess(waited, 3)  # and no longer
         self.listening(server)  # the name is taken over
+
+    def test_a_first_still_starting_is_waited_for(self):
+        # Ruling 8: a multi-select starts one QiTV per file at once, and the first may listen
+        # seconds before its event loop runs. A start that reached it waits for its answer
+        # instead of taking the name over (two QiTVs on one settings folder).
+        first = self.first("slow")
+        p1 = self.turkish_path()
+        started = time.monotonic()
+        with self.assertLogs("services.single_instance", "INFO") as logs:
+            self.assertIsNone(claim(self.folder, paths=[p1]))
+        self.assertGreater(time.monotonic() - started, single_instance.ANSWER_MS / 1000)
+        self.assertEqual(first.stdout.readline().strip(), "opened " + json.dumps(p1))
+        self.assertTrue([line for line in logs.output if "it was starting" in line], logs.output)
 
     @unittest.skipIf(os.name == "nt", "Windows pipes leave nothing behind")
     def test_a_socket_left_by_a_crash_is_taken_over(self):
@@ -239,7 +204,9 @@ class ClaimTests(unittest.TestCase):
         stale.bind(path)  # a socket file nobody listens on, as a crash leaves it
         stale.close()
         self.addCleanup(lambda: os.path.exists(path) and os.unlink(path))
+        started = time.monotonic()
         self.listening(claim(self.folder))
+        self.assertLess(time.monotonic() - started, 1.5)  # not reached: not waited for
 
     def test_a_windows_updates_copy_never_hands_over(self):
         with mock.patch.object(single_instance, "hand_over") as asked:

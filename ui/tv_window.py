@@ -1448,8 +1448,12 @@ class TVWindow(QMainWindow):
         - Open File plays what it picks, whatever its kind (an HLS playlist too).
 
         A launch or a hand-over brings the window forward. The paths are passed on as given.
+        While QiTV closes nothing opens (the log names each film left out).
         """
         if self._closing:
+            for path in sort_paths(paths).media:
+                name = os.path.basename(path)
+                logger.info("QiTV is closing: a file it was handed isn't opened (%s)", name)
             return
         started = source in (LAUNCH, HANDOVER)
         if started:

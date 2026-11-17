@@ -141,22 +141,14 @@ def settings_dir() -> str:
 
 
 def main() -> int:
-    from PySide6 import QtGui
-    from PySide6.QtCore import QLocale, QLoggingCategory, QTimer, qInstallMessageHandler
-    import qdarktheme
+    # Only what the claim on the settings folder needs loads first: a second start hands over
+    # (its files too) before the UI's modules load, which takes seconds on Windows.
+    from PySide6.QtCore import QLoggingCategory
 
-    from services import i18n, log_file, private_files
-    from services.atomic_write import sweep_in_background
-    from services.config_manager import ConfigManager, get_app_version
-    from services.epg_manager import EpgManager
-    from services.gc_guard import GcGuard
-    from services.image_manager import ImageManager
-    from services.provider_manager import ProviderManager
-    from services.sleep_manager import allow_sleep, prevent_sleep
+    from services import log_file
+    from services.config_manager import get_app_version
+    from services.open_paths import launch_paths
     from ui.quit_reason import QiTVApplication
-    from ui.theme import focus_qss
-    from ui.tv_window import TVWindow
-    from ui.update_dialogs import check_for_updates, replace_failed
 
     # Basic logging configuration (tweak level as needed); the console's lines are masked as
     # the file's are (addresses, Xtream paths, sign-in headers, MAC addresses).
@@ -180,13 +172,17 @@ def main() -> int:
     # thread waiting up to 5 ms at every callback it makes: a 0.5 ms switch interval keeps
     # the window responsive while it works.
     sys.setswitchinterval(0.0005)
-    app = QiTVApplication(sys.argv)  # notes a quit request the system sends (2.8)
+    # It notes a quit request the system sends (2.8), and keeps the files QiTV is asked to
+    # open until the window takes them.
+    app = QiTVApplication(sys.argv)
+    # The files this start was given (a double-click while QiTV runs hands them over).
+    paths = launch_paths(sys.argv)
     # 2.8.12: one QiTV per settings folder (a second start would record and stream twice and
     # save over the first's settings): it brings the first to the front and quits.
     from services.single_instance import claim
 
     try:
-        instance = claim(settings_dir(), replacing="--replace" in sys.argv)
+        instance = claim(settings_dir(), replacing="--replace" in sys.argv, paths=paths)
         handed_over = instance is None
     except Exception as error:  # the check is never a reason for QiTV not to start
         log.warning("The check for another QiTV failed (%s); starting.", type(error).__name__)
@@ -195,6 +191,29 @@ def main() -> int:
         log.info("Another QiTV runs with these settings; this start ends here.")
         log_file.close()
         return 0
+    if instance is not None:  # a start's files while the window is built are kept for it
+        instance.opened.connect(app.add_opened)
+    if platform.system() == "Darwin":
+        # A double-click in Finder gives no argument: the file comes as an open event, sent
+        # at launch. Taken now, it is kept for the window.
+        app.processEvents()
+
+    from PySide6 import QtGui
+    from PySide6.QtCore import QLocale, QTimer, qInstallMessageHandler
+    import qdarktheme
+
+    from services import i18n, private_files
+    from services.atomic_write import sweep_in_background
+    from services.config_manager import ConfigManager
+    from services.epg_manager import EpgManager
+    from services.gc_guard import GcGuard
+    from services.image_manager import ImageManager
+    from services.provider_manager import ProviderManager
+    from services.sleep_manager import allow_sleep, prevent_sleep
+    from ui.theme import focus_qss
+    from ui.tv_window import HANDOVER, LAUNCH, TVWindow
+    from ui.update_dialogs import check_for_updates, replace_failed
+
     # Why QiTV ended, in its log: the window closed (tv_window says how), or its last one.
     app.lastWindowClosed.connect(lambda: log.info("The last window closed."))
     app.aboutToQuit.connect(lambda: log.info("QiTV quits."))
@@ -261,6 +280,12 @@ def main() -> int:
         if instance is not None:
             instance.activated.connect(window.come_to_front)
         window.show()
+        # This start's files, and those that came before the window (macOS's open event,
+        # another start's hand-over); from now on each plays as it comes.
+        opened = paths + app.take_opened()
+        app.filesOpened.connect(lambda files: window.open_paths(files, source=HANDOVER))
+        if opened:
+            window.open_paths(opened, source=LAUNCH)
         if not_replaced is not None:  # where the new version is, and where the old one stayed
             old_path, new_path = not_replaced
             QTimer.singleShot(0, window, lambda: replace_failed(old_path, new_path, window))

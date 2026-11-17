@@ -1,4 +1,5 @@
 import ast
+import json
 import os
 from pathlib import Path
 import subprocess
@@ -28,6 +29,62 @@ class MainModuleTests(unittest.TestCase):
         )
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertEqual(result.stdout.strip(), "[]")
+
+    def test_claim_runs_before_tv_window_import(self):
+        # A second start hands its file to the running QiTV before the UI's modules load
+        # (seconds on Windows): `-X importtime` lists every module this start imported.
+        from instance_fixtures import FIRST
+
+        from services.single_instance import server_name
+
+        with tempfile.TemporaryDirectory() as folder:
+            config = Path(folder, "config")
+            film = Path(folder, "Dizi Bölüm 1.mkv")
+            film.write_bytes(b"film")
+            script = Path(folder, "first.py")
+            script.write_text(FIRST, encoding="utf-8")
+            env = dict(
+                os.environ,
+                PYTHONPATH=str(REPO),
+                QT_QPA_PLATFORM="offscreen",
+                QITV_CONFIG_DIR=str(config),
+                QITV_SMOKE_MUTE="1",
+            )
+            first = subprocess.Popen(
+                [sys.executable, str(script), server_name(str(config)), "files"],
+                stdout=subprocess.PIPE,
+                stderr=subprocess.DEVNULL,
+                text=True,
+                env=env,
+                cwd=REPO,
+            )
+            try:
+                self.assertEqual(first.stdout.readline().strip(), "ready")
+                second = subprocess.run(  # a failed hand-over would start QiTV: killed then
+                    [sys.executable, "-X", "importtime", "main.py", str(film)],
+                    cwd=REPO,
+                    env=env,
+                    capture_output=True,
+                    text=True,
+                    timeout=60,
+                )
+                opened = first.stdout.readline().strip()
+            finally:
+                first.kill()
+                first.wait(15)
+                first.stdout.close()
+        self.assertEqual(second.returncode, 0, second.stderr[-2000:])
+        self.assertIn("this start ends here", second.stderr)
+        self.assertEqual(opened, "opened " + json.dumps(str(film.resolve())))
+        imported = {
+            line.rsplit("|", 1)[1].strip()
+            for line in second.stderr.splitlines()
+            if line.startswith("import time:") and "|" in line
+        }
+        self.assertIn("ui.quit_reason", imported)  # the list is there
+        self.assertIn("services.single_instance", imported)
+        self.assertNotIn("ui.tv_window", imported)
+        self.assertNotIn("qdarktheme", imported)
 
     def test_freeze_support_comes_first_when_run_as_a_script(self):
         source = (REPO / "main.py").read_text(encoding="utf-8")

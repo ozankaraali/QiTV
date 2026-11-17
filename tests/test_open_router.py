@@ -222,6 +222,28 @@ class OpenRouterTests(base.WindowCase):
         self.assertEqual(self.plays(), [])
         self.assertEqual(self.fronts, 1)
 
+    def test_a_file_handed_over_while_closing_is_logged(self):
+        # Ruling 7: lost (QiTV quits), but the log says so, once for each film.
+        film = self.film("Dizi Bölüm 2.mkv")
+        srt = self.folder / "Dizi Bölüm 2.srt"
+        srt.write_text(SUBTITLES, encoding="utf-8")
+        with (
+            mock.patch.object(self.window, "_closing", True),
+            self.assertLogs("ui.tv_window", "INFO") as logs,
+        ):
+            self.handover(film, srt)
+        elapse(SETTLE_MS)
+        said = [line for line in logs.output if "QiTV is closing" in line]
+        self.assertEqual(
+            said,
+            [
+                "INFO:ui.tv_window:QiTV is closing: a file it was handed isn't opened"
+                " (Dizi Bölüm 2.mkv)"
+            ],
+        )
+        self.assertEqual(self.calls, [])
+        self.assertEqual(self.fronts, 0)
+
     def test_a_media_drag_is_taken(self):
         self.assertEqual(drop(self.window, paths=[self.folder / "notes.txt"]), (False, False))
         entered, _dropped = drop(self.window.host, paths=[self.folder / "clip.webm"])

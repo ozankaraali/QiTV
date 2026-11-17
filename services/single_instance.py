@@ -5,8 +5,10 @@ recorded twice), each count a provider's streams by itself (two streams where it
 and save the settings over each other. So a QiTV listens on a local socket named after its
 settings folder (QITV_CONFIG_DIR, or the system's), and a second start of QiTV with that
 folder hands over to it (`claim`): the first comes to the front, the second quits. A first
-that doesn't answer within ANSWER_MS (it hangs, or a crash left its socket behind) is not
-waited for: the new one starts as usual and takes the name over.
+that can't be reached within ANSWER_MS (a crash left its socket behind) is not waited for: the
+new one starts as usual and takes the name over. One that was reached may still be starting,
+its event loop not running yet (a multi-select starts one QiTV per file at once): its answer
+is waited for up to START_WAIT_MS, and only one that hangs that long is taken over.
 
 The hand-over: the new start sends `show` and the first answers `shown` once it came to the
 front. A start with files (a video double-clicked while QiTV runs) then sends one
@@ -35,7 +37,8 @@ from PySide6.QtNetwork import QLocalServer, QLocalSocket
 
 logger = logging.getLogger(__name__)
 
-ANSWER_MS = 2000  # a first QiTV that doesn't answer within this is not waited for
+ANSWER_MS = 2000  # to reach the first QiTV, and for it to take the files once it came forward
+START_WAIT_MS = 20000  # a first QiTV reached while it still starts is waited for that long
 SHOW = b"show\n"  # asked: come to the front
 SHOWN = b"shown\n"  # answered
 OPEN = b"open "  # and a file URL (percent-encoded: no newline in it), then a newline
@@ -146,18 +149,26 @@ def _send_files(socket: QLocalSocket, paths: Sequence[str], timeout_ms: int) -> 
 
 def hand_over(name: str, timeout_ms: int = ANSWER_MS, paths: Sequence[str] = ()) -> bool:
     """Ask the QiTV listening on `name` to come to the front and open `paths`; True once it
-    said it came (an older QiTV, which takes no files, too: this start quits all the same)."""
+    said it came (an older QiTV, which takes no files, too: this start quits all the same).
+
+    One that can't be reached within `timeout_ms` is not waited for. One that was reached may
+    still be starting (no event loop yet): its answer is waited for up to START_WAIT_MS."""
     socket = QLocalSocket()
-    deadline = time.monotonic() + timeout_ms / 1000
     try:
         socket.connectToServer(name)
         if not socket.waitForConnected(timeout_ms):
             return False
         _allow_foreground()
+        asked = time.monotonic()
         socket.write(SHOW)
         socket.flush()
-        if _read_line(socket, deadline) != SHOWN:
+        if _read_line(socket, asked + START_WAIT_MS / 1000) != SHOWN:
+            if socket.state() == QLocalSocket.LocalSocketState.ConnectedState:
+                logger.warning("A QiTV with these settings was reached but didn't answer.")
             return False
+        waited_ms = int((time.monotonic() - asked) * 1000)
+        if waited_ms > timeout_ms:
+            logger.info("The running QiTV answered after %d ms: it was starting.", waited_ms)
         if paths:
             try:
                 _send_files(socket, paths, timeout_ms)
