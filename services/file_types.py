@@ -430,18 +430,25 @@ class _WindowsBackend:
     def register(
         self, kind: str, exe: str, *, defaults: bool = True, previous: Optional[str] = None
     ) -> RegisterResult:
-        """Write the registration for `exe`. When it fails, only a first registration
-        (`previous` None) is taken back: one that worked before stays as it was."""
+        """Write the registration for `exe`. When it fails, a first registration (`previous`
+        None) is taken back, and so is a renamed exe's own entry: one that worked before stays
+        as it was."""
         reg = _winreg()
         try:
             self._write(reg, kind, exe)
         except OSError as e:
             logger.warning("Couldn't register QiTV for %s (%s)", kind, type(e).__name__)
-            if previous is None and not self._remove(reg, kind, exe):
-                logger.warning("Couldn't take back all of QiTV's registration")
+            if previous is None:
+                if not self._remove(reg, kind, exe):
+                    logger.warning("Couldn't take back all of QiTV's registration")
+            elif _renamed(previous, exe):  # the old name's entry is the one that works
+                try:
+                    self._remove_supported_types(reg, kind, exe)
+                except OSError as error:
+                    logger.warning("The new name's entry stays (%s)", type(error).__name__)
             _assoc_changed()
             return RegisterResult(False)
-        if previous and _exe_name(previous).lower() != _exe_name(exe).lower():
+        if previous and _renamed(previous, exe):
             try:
                 self._remove_supported_types(reg, kind, previous)
             except OSError as e:
@@ -528,6 +535,12 @@ class _WindowsBackend:
 
 def _exe_name(exe: str) -> str:
     return ntpath.basename(exe)
+
+
+def _renamed(previous: str, exe: str) -> bool:
+    """Whether `exe` has another file name than `previous` (so its own Applications entry):
+    a moved exe of the same name shares the entry."""
+    return _exe_name(previous).lower() != _exe_name(exe).lower()
 
 
 def _set_values(reg: Any, path: str, values: dict[str, str]) -> None:

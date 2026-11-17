@@ -97,6 +97,8 @@ class MainModuleTests(unittest.TestCase):
         self.assertLess(body.index("opened = paths + app.take_opened()"), show)
         self.assertLess(body.index("app.filesOpened.connect("), show)
         self.assertLess(body.index("window.controller.hold_for_file(True)"), show)
+        # held for a film, and for a file QiTV won't play (its message comes instead)
+        self.assertLess(body.index("if holds_the_start(opened):"), show)
         self.assertLess(show, body.index("window.open_paths(opened, source=LAUNCH)"))
         self.assertIn(
             "window.when_idle(lambda: check_for_updates(config_manager=config_manager))", body

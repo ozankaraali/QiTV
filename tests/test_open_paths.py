@@ -59,6 +59,41 @@ class SortPaths(unittest.TestCase):
             open_paths.MEDIA_EXTENSIONS, open_paths.VIDEO_EXTENSIONS | open_paths.MUSIC_EXTENSIONS
         )
 
+    def test_what_the_claimed_types_bring_plays_too(self):
+        # A type QiTV registers for covers these as well (macOS's QuickTime movie is .mov and
+        # .qt; its FLV video .flv, .f4v, .f4p, .f4a and .f4b): the system may hand them over.
+        videos = ["/x/a.qt", "/x/b.MPG4", "/x/c.vfw", "/x/d.mpe", "/x/e.m75", "/x/f.m15"]
+        videos += ["/x/Dizi Bölüm 1.f4v", "/x/h.f4p"]
+        for path in videos:
+            with self.subTest(path=path):
+                self.assertTrue(open_paths.is_video(path))
+                self.assertFalse(open_paths.is_music(path))
+        for path in ("/x/a.f4a", "/x/b.F4B"):
+            with self.subTest(path=path):
+                self.assertTrue(open_paths.is_music(path))
+                self.assertFalse(open_paths.is_video(path))
+        kinds = open_paths.sort_paths([*videos, "/x/a.f4a", "/x/b.F4B"])
+        self.assertEqual(len(kinds.media), 10)
+        self.assertEqual(kinds.others, ())
+        # what QiTV registers for, and the Open File filter, stay as they were
+        self.assertNotIn("qt", open_paths.VIDEO_EXTENSIONS)
+        self.assertNotIn("f4a", open_paths.MEDIA_EXTENSIONS)
+
+    def test_others_are_the_files_qitv_wont_play(self):
+        s = open_paths.sort_paths(["/x/notes.txt", "/x/a.srt", "/x/b.mkv", "/x/c", "/x/l.m3u"])
+        self.assertEqual(s.others, ("/x/notes.txt", "/x/c"))
+        self.assertEqual(s.media, ("/x/b.mkv",))
+
+    def test_a_start_holds_for_a_film_or_a_file_qitv_wont_play(self):
+        # held: a film plays, or the message about the file comes, before anything else;
+        # subtitle and playlist files alone start as they always did
+        self.assertTrue(open_paths.holds_the_start(["/x/film.qt"]))
+        self.assertTrue(open_paths.holds_the_start(["/x/notes.txt"]))
+        self.assertTrue(open_paths.holds_the_start(["/x/a.srt", "/x/notes.txt"]))
+        self.assertFalse(open_paths.holds_the_start(["/x/a.srt"]))
+        self.assertFalse(open_paths.holds_the_start(["/x/list.m3u", "/x/b.m3u8"]))
+        self.assertFalse(open_paths.holds_the_start([]))
+
 
 class Filter(unittest.TestCase):
     def test_open_file_patterns_are_unchanged(self):

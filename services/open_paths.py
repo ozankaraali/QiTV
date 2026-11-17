@@ -17,7 +17,15 @@ VIDEO_EXTENSIONS = frozenset(
     }
 )  # fmt: skip
 MUSIC_EXTENSIONS = frozenset({"mp3", "m4a", "aac", "flac", "ogg", "opus", "wav"})
-MEDIA_EXTENSIONS = VIDEO_EXTENSIONS | MUSIC_EXTENSIONS
+MEDIA_EXTENSIONS = VIDEO_EXTENSIONS | MUSIC_EXTENSIONS  # Open File's filter
+# The other extensions a type QiTV registers for covers (services/file_types.py registers
+# VIDEO_EXTENSIONS): on macOS 13 the QuickTime movie is .mov and .qt, MPEG-4 .mp4 and .mpg4,
+# AVI .avi and .vfw, MPEG .mpe, .m75 and .m15 too, FLV .f4v, .f4p, .f4a and .f4b too (Linux's
+# MIME types bring .qt, .f4v and .mpe as well). The system may hand them over: they play too.
+EXTRA_VIDEO_EXTENSIONS = frozenset({"qt", "mpg4", "vfw", "mpe", "m75", "m15", "f4v", "f4p"})
+EXTRA_MUSIC_EXTENSIONS = frozenset({"f4a", "f4b"})
+_VIDEO = VIDEO_EXTENSIONS | EXTRA_VIDEO_EXTENSIONS
+_MUSIC = MUSIC_EXTENSIONS | EXTRA_MUSIC_EXTENSIONS
 SUBTITLE_EXTENSIONS = (".srt", ".ass", ".ssa", ".vtt", ".sub")
 PLAYLIST_EXTENSIONS = (".m3u", ".m3u8")
 
@@ -28,11 +36,13 @@ _DEVICE = "\\\\.\\"
 
 @dataclass(frozen=True)
 class Sorted:
-    """Opened paths by kind: media in natural order, subtitles, playlists."""
+    """Opened paths by kind: media in natural order, subtitles, playlists, and the others
+    (files QiTV won't play), as given."""
 
     media: tuple[str, ...]
     subtitles: tuple[str, ...]
     playlists: tuple[str, ...]
+    others: tuple[str, ...] = ()
 
 
 def launch_paths(argv: Sequence[str]) -> list[str]:
@@ -94,18 +104,20 @@ def natural_key(path: str) -> tuple:
 
 
 def is_video(path: str) -> bool:
-    return _extension(path)[1:] in VIDEO_EXTENSIONS
+    return _extension(path)[1:] in _VIDEO
 
 
 def is_music(path: str) -> bool:
-    return _extension(path)[1:] in MUSIC_EXTENSIONS
+    return _extension(path)[1:] in _MUSIC
 
 
 def sort_paths(paths: Iterable[str]) -> Sorted:
-    """Split `paths` by kind; playlists are checked first, anything else is dropped."""
+    """Split `paths` by kind; playlists are checked first, and what is none of the kinds is
+    one of the others."""
     media: list[str] = []
     subtitles: list[str] = []
     playlists: list[str] = []
+    others: list[str] = []
     for path in paths:
         if not path:
             continue
@@ -114,7 +126,17 @@ def sort_paths(paths: Iterable[str]) -> Sorted:
             playlists.append(path)
         elif ext in SUBTITLE_EXTENSIONS:
             subtitles.append(path)
-        elif ext[1:] in MEDIA_EXTENSIONS:
+        elif is_video(path) or is_music(path):
             media.append(path)
+        else:
+            others.append(path)
     media.sort(key=natural_key)
-    return Sorted(tuple(media), tuple(subtitles), tuple(playlists))
+    return Sorted(tuple(media), tuple(subtitles), tuple(playlists), tuple(others))
+
+
+def holds_the_start(paths: Iterable[str]) -> bool:
+    """Whether a start with `paths` holds what would open over a film (the last channel, the
+    drawer, the welcome card): it carries a media file, or a file QiTV won't play, whose
+    message comes instead. Subtitle and playlist files alone start as any start does."""
+    kinds = sort_paths(paths)
+    return bool(kinds.media or kinds.others)

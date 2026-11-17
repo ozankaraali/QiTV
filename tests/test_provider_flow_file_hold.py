@@ -16,6 +16,7 @@ os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 from test_tv_controller import CHANNELS, HARBOR_ONE, ControllerTestCase, FakeOwnCatalog
 from timer_fixtures import wait_until
 
+from services.open_paths import holds_the_start
 from tests import test_tv_window as base
 from ui.keymap import Action
 
@@ -223,6 +224,18 @@ class FileHoldTests(ControllerTestCase):
         self.assertEqual(self.catalog.links, [])
         self.assertEqual(self.drawer.calls, [])  # nor does the list open by itself
 
+    def test_a_start_with_a_file_qitv_wont_play_tunes_nothing(self):
+        # main() holds for it as for a film; open_paths says so and lets go
+        self.config.last_live_channel = dict(LAST)
+        if holds_the_start(["/x/notes.txt"]):
+            self.controller.hold_for_file(True)
+        self.controller.start()
+        self.controller.hold_for_file(False)
+        self.catalog.hub_ready("Home")
+        self.catalog.sectionReady.emit("live")
+        self.assertEqual(self.catalog.links, [])
+        self.assertEqual(self.drawer.calls, [])
+
     def test_after_the_release_back_to_live_tv_still_opens_the_list(self):
         # The viewer's own way back from the Library during the setup is not "by itself".
         self.controller.hold_for_file(True)
@@ -263,6 +276,56 @@ class WindowHoldTests(base.WindowCase):
         text = "Couldn't open “Dizi Bölüm 9.mkv”"
         self.assertTrue(wait_until(lambda: (text, "error") in self.toasts), self.toasts)
         self.assertTrue(wait_until(card.isVisible))
+        self.assertEqual(runs, [True])
+
+    def launch(self, *paths):
+        """As main() starts: held when the start carries a film or a file QiTV won't play."""
+        opened = [str(path) for path in paths]
+        if holds_the_start(opened):
+            self.window.controller.hold_for_file(True)
+        runs = []
+        self.window.when_idle(lambda: runs.append(True))  # at once unless held
+        held = not runs
+        self.show()
+        self.window.open_paths(opened, source="launch")
+        return held, runs
+
+    def test_a_file_qitv_wont_play_at_launch_says_so_and_lets_go(self):
+        notes = Path(self.config_dir) / "Notlar.txt"
+        notes.write_text("x", encoding="utf-8")
+        srt = Path(self.config_dir) / "Dizi Bölüm 1.srt"
+        srt.write_text("1\n00:00:00,000 --> 00:00:02,000\nHallo\n", encoding="utf-8")
+        held, runs = self.launch(notes, srt)
+        self.assertTrue(held)  # nothing opened over the message, from the first moment
+        text = "QiTV can't play “Notlar.txt”"
+        self.assertTrue(wait_until(lambda: (text, "error") in self.toasts), self.toasts)
+        self.assertTrue(wait_until(self.window.overlays.welcome.isVisible))
+        self.assertEqual(runs, [True])
+
+    def test_subtitles_or_a_playlist_alone_at_launch_leave_no_hold(self):
+        srt = Path(self.config_dir) / "Dizi Bölüm 1.srt"
+        srt.write_text("1\n00:00:00,000 --> 00:00:02,000\nHallo\n", encoding="utf-8")
+        held, runs = self.launch(srt)
+        self.assertFalse(held)
+        self.assertEqual(runs, [True])
+        playlist = Path(self.config_dir) / "Kanallar.m3u"
+        playlist.write_text("#EXTM3U\n", encoding="utf-8")
+        with mock.patch.object(self.window, "add_dropped_providers") as added:
+            self.assertFalse(holds_the_start([str(playlist)]))
+            self.window.open_paths([str(playlist)], source="launch")
+            self.assertTrue(wait_until(lambda: added.called))
+        after = []
+        self.window.when_idle(lambda: after.append(True))
+        self.assertEqual(after, [True])
+
+    def test_a_hold_taken_before_subtitles_alone_is_let_go(self):
+        srt = Path(self.config_dir) / "Dizi Bölüm 1.srt"
+        srt.write_text("1\n00:00:00,000 --> 00:00:02,000\nHallo\n", encoding="utf-8")
+        self.window.controller.hold_for_file(True)
+        runs = []
+        self.window.when_idle(lambda: runs.append(True))
+        self.show()
+        self.window.open_paths([str(srt)], source="launch")
         self.assertEqual(runs, [True])
 
     def test_a_check_that_raises_still_lets_go(self):

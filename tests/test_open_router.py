@@ -123,6 +123,50 @@ class OpenRouterTests(RouterCase):
         self.handover(srt)
         self.assertEqual(self.calls, [("subtitles", [str(srt)])])
 
+    def test_a_launch_with_a_qt_film_plays_it(self):
+        # .qt is a QuickTime movie, as .mov is: the type QiTV claims brings it along
+        path = self.film("Dizi Bölüm 1.qt")
+        self.window.open_paths([str(path)], source="launch")
+        self.wait_for_plays(1)
+        self.assertEqual(self.plays(), [(str(path), 4)])
+
+    def test_a_handed_over_f4v_plays(self):
+        path = self.film("x.f4v")
+        self.handover(path)
+        self.wait_for_plays(1)
+        self.assertEqual(self.plays(), [(str(path), 4)])
+        entered, _dropped = drop(self.window.host, paths=[self.film("y.f4v")])
+        self.assertTrue(entered)  # a drag of one is taken too
+        self.wait_for_plays(2)
+
+    def test_a_file_qitv_wont_play_says_so_and_the_film_plays_on(self):
+        on_now = self.film("on now.mkv")
+        self.handover(on_now)
+        self.wait_for_plays(1)
+        runs = []
+        self.window.when_idle(lambda: runs.append(True))  # the update question waits
+        notes, srt = self.folder / "Notlar ğ.txt", self.folder / "on now.srt"
+        notes.write_text("x", encoding="utf-8")
+        srt.write_text(SUBTITLES, encoding="utf-8")
+        self.handover(notes, srt)
+        text = "QiTV can't play “Notlar ğ.txt”"
+        self.assertTrue(wait_until(lambda: (text, "error") in self.toasts), self.toasts)
+        self.assertEqual(self.calls[-1], ("subtitles", [str(srt)]))  # to what plays
+        elapse(SETTLE_MS)
+        self.assertEqual(self.plays(), [(str(on_now), 4)])
+        self.assertEqual(runs, [])  # the film on keeps its hold
+
+    def test_subtitles_handed_over_while_a_film_is_looked_at_keep_its_hold(self):
+        film = self.film("ep.mkv")
+        runs = []
+        with mock.patch.object(self.window._file_check, "start"):  # still being looked at
+            self.handover(film)
+            self.window.when_idle(lambda: runs.append(True))
+            srt = self.folder / "ep.srt"
+            srt.write_text(SUBTITLES, encoding="utf-8")
+            self.handover(srt)
+        self.assertEqual(runs, [])
+
     def test_missing_file_toasts_and_keeps_playing(self):
         on_now = self.film("on now.mkv")
         self.handover(on_now)

@@ -43,7 +43,6 @@ def setUpModule():
         file_types,
         "_core_services",
         side_effect=AssertionError("a test reached the real CoreServices"),
-        create=True,
     )
     guard.start()
     unittest.addModuleCleanup(guard.stop)
@@ -407,6 +406,34 @@ class WindowsBackendTests(unittest.TestCase):
         self.assertEqual(self.reg.tree(), working)
         self.assertEqual(config.file_types, {"videos": WINDOWS_EXE})
 
+    def test_a_renamed_exe_that_fails_leaves_only_the_working_entry(self):
+        old = "C:\\Tools\\qitv-windows.exe"
+        new = "C:\\Tools\\qitv-windows-2.10.2.exe"
+        self.assertTrue(file_types._windows.register("videos", old))
+        self.reg.fail_under = "Software\\RegisteredApplications"
+        with self.assertLogs("services.file_types", "WARNING"):
+            self.assertFalse(file_types._windows.register("videos", new, previous=old))
+        self.reg.fail_under = None
+        apps = f"{HKCU_CLASSES}\\Applications"
+        self.assertIsNone(self.reg.values(f"{apps}\\qitv-windows-2.10.2.exe"))  # none of it
+        self.assertEqual(
+            len(self.reg.values(f"{apps}\\qitv-windows.exe\\SupportedTypes")),
+            len(VIDEO_EXTENSIONS),
+        )
+
+    def test_a_moved_exe_that_fails_keeps_the_entry_it_shares(self):
+        # the same file name: Applications\<name> is the working registration's too
+        old = "C:\\Tools\\qitv-windows.exe"
+        new = "D:\\Apps\\QITV-WINDOWS.EXE"
+        self.assertTrue(file_types._windows.register("videos", old))
+        self.reg.fail_under = "Software\\RegisteredApplications"
+        with self.assertLogs("services.file_types", "WARNING"):
+            self.assertFalse(file_types._windows.register("videos", new, previous=old))
+        self.reg.fail_under = None
+        apps = f"{HKCU_CLASSES}\\Applications"
+        supported = self.reg.values(f"{apps}\\qitv-windows.exe\\SupportedTypes")
+        self.assertEqual(len(supported), len(VIDEO_EXTENSIONS))
+
     def test_register_from_a_renamed_exe_moves_its_supported_types(self):
         old = "C:\\Tools\\qitv-windows.exe"
         new = "C:\\Tools\\qitv-windows-2.10.2.exe"
@@ -419,6 +446,7 @@ class WindowsBackendTests(unittest.TestCase):
             with self.assertLogs("services.file_types", "WARNING"):
                 self.assertFalse(file_types.register("videos", config, new, frozen=True))
             self.assertTrue(self.reg.values(f"{apps}\\qitv-windows.exe\\SupportedTypes"))
+            self.assertIsNone(self.reg.values(f"{apps}\\qitv-windows-2.10.2.exe"))
             self.reg.fail_under = None
 
             self.assertTrue(file_types.register("videos", config, new, frozen=True))

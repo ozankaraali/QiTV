@@ -147,7 +147,7 @@ def main() -> int:
 
     from services import log_file
     from services.config_manager import get_app_version
-    from services.open_paths import launch_paths, sort_paths
+    from services.open_paths import holds_the_start, launch_paths
     from ui.quit_reason import QiTVApplication
 
     # Basic logging configuration (tweak level as needed); the console's lines are masked as
@@ -286,9 +286,10 @@ def main() -> int:
         # another start's hand-over), taken once; from now on each plays as it comes.
         opened = paths + app.take_opened()
         app.filesOpened.connect(lambda files: window.open_paths(files, source=HANDOVER))
-        if sort_paths(opened).media:
+        if holds_the_start(opened):
             # A start with a film plays only the film: no last channel, drawer or welcome card
             # over it, from the window's first moment (open_paths holds too, once it shows).
+            # A file QiTV won't play holds too: open_paths says so, then lets go.
             window.controller.hold_for_file(True)
         window.show()
         if opened:

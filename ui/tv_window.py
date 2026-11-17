@@ -1451,13 +1451,15 @@ class TVWindow(QMainWindow):
         - A start's file within OPEN_BURST_S of the one a start chose (a multi-select, one
           start per file) replaces it only when it sorts first by name; else it is left out.
         - Open File plays what it picks, whatever its kind (an HLS playlist too).
+        - A file QiTV won't play (none of these kinds) says so; the first one is named.
 
         A launch or a hand-over brings the window forward. The paths are passed on as given.
         While QiTV closes nothing opens (the log names each film left out).
 
         From the moment a file is to be looked at, nothing opens over it (the controller's
         hold_for_file): no last channel, no drawer, no welcome card, and what waits for QiTV to
-        be idle (when_idle) waits. A file that's gone lets go, unless a file plays on.
+        be idle (when_idle) waits. A file that's gone lets go, unless a file plays on, and so
+        does a start with nothing to play (main() holds for a file QiTV won't play too).
         """
         if self._closing:
             for path in sort_paths(paths).media:
@@ -1473,9 +1475,17 @@ class TVWindow(QMainWindow):
             # Afterwards, as a drop's: adding switches the list.
             QTimer.singleShot(0, self, lambda: self.add_dropped_providers(files, []))
         subtitles = list(kinds.subtitles)
+        if kinds.others:
+            name = os.path.basename(kinds.others[0])
+            kind = os.path.splitext(name)[1] or "no extension"
+            logger.info("A file QiTV can't play was opened in it (%s)", kind)
+            # i18n: an error toast: a file opened in QiTV isn't a kind it plays ({name}: its name)
+            self.screens.notify(tr("QiTV can't play “{name}”", name=name), "error", ERROR_MS)
         if not kinds.media:
             if subtitles:
                 self.controller.drop_subtitles(subtitles)
+            if self._open_due is None and self._playing_file() is None:
+                self.controller.hold_for_file(False)  # nothing to play: a start's hold ends
             return
         path = kinds.media[0]
         if started:
