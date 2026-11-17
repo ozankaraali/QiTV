@@ -302,11 +302,13 @@ class DdeServer(QObject):
 class Serving:
     """The run's one DDE server and the ddeexec that points Explorer at it, following the
     registration: on while QiTV is registered for videos (from the start, or once Settings
-    registered it), off once Settings unregistered it. On the GUI thread."""
+    registered it), off once Settings unregistered it. On the GUI thread. `exe`: the QiTV the
+    registration's command names, by default this one's (file_types.own_executable: after a
+    Windows update, the installed QiTV the copy in Downloads wrote itself over)."""
 
     def __init__(self, server: Optional[DdeServer] = None, exe: str = "") -> None:
         self.server = server if server is not None else DdeServer()
-        self._exe = exe or sys.executable
+        self._exe = exe or file_types.own_executable()
         self._served = False  # it served once: the quit takes the ddeexec back
         self._closed = False
 

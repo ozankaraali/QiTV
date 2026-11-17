@@ -234,6 +234,27 @@ class MainModuleTests(unittest.TestCase):
             self.assertIsNone(main.handle_replace_flag(argv, str(new), replace=lambda o, n: True))
             self.assertIsNone(main.handle_replace_flag(["qitv.exe"], str(new)))
 
+    def test_an_updates_copy_registers_the_qitv_it_replaced(self):
+        # Review I1: the update's copy wrote itself over the installed QiTV but runs on from
+        # Downloads; what it registers (refresh_at_start, Settings, Explorer's DDE command)
+        # names the installed one. Every other start registers where it runs (a QiTV the user
+        # moved registers again where it is now).
+        import main
+
+        installed = "C:\\Users\\Ayşe\\QiTV\\qitv-windows.exe"
+        downloads = "C:\\Users\\Ayşe\\Downloads\\qitv-windows.exe"
+        update = [downloads, "--replace", installed]
+        self.assertEqual(main.replaced_qitv(update, None), installed)  # it replaced it
+        self.assertIsNone(main.replaced_qitv(update, (installed, downloads)))  # it couldn't
+        self.assertIsNone(main.replaced_qitv(["qitv-windows.exe", "Dizi Bölüm 1.mkv"], None))
+        self.assertIsNone(main.replaced_qitv([downloads, "--replace"], None))
+        body = (REPO / "main.py").read_text(encoding="utf-8").split("def main()", 1)[1]
+        self.assertIn("replaced = replaced_qitv(sys.argv, not_replaced)", body)
+        chosen = body.index("file_types.use_installed(replaced)")
+        self.assertLess(chosen, body.index("window = TVWindow("))  # before Settings can open
+        self.assertLess(chosen, body.index("refresh_at_start(config_manager, window)"))
+        self.assertLess(chosen, body.index("dde_windows.serve(config_manager)"))
+
     def test_the_frozen_apps_bundle_the_live_helper(self):
         # The helper process is spawned from the bundle; its source imports these lazily.
         wanted = {"services.live.worker", "m3u8", "Cryptodome.Cipher.AES"}

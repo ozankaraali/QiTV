@@ -53,6 +53,8 @@ from services.open_paths import VIDEO_EXTENSIONS
 
 logger = logging.getLogger(__name__)
 
+_installed: Optional[str] = None  # use_installed
+
 KINDS = ("videos",)  # music comes with its own row
 DEFAULT_VIDEO = VIDEO_EXTENSIONS - {"ts"}  # .ts is Open With only: code files share it
 MAC_DEFAULT_VIDEO = ("mkv", "mp4", "mov", "avi", "webm")
@@ -157,21 +159,38 @@ def default_mime_types(kind: str) -> list[str]:
     return [m for m in _mimes(chosen) if m not in shared]
 
 
+def use_installed(exe: Optional[str]) -> None:
+    """This run is the QiTV installed at `exe` (None: the one `sys.executable` names). A
+    Windows update's new copy writes itself over the installed QiTV but runs on from where it
+    was downloaded: what it registers (and Explorer's DDE command) names the installed one, so
+    the next double-click starts the QiTV that stays (main(); once, at start, before any
+    worker reads it)."""
+    global _installed
+    _installed = exe or None
+
+
+def own_executable() -> str:
+    """The executable this QiTV registers as itself: the installed one an update wrote itself
+    over (`use_installed`), else `sys.executable`."""
+    return _installed or sys.executable
+
+
 def status(kind: str, config: Any, frozen: Optional[bool] = None) -> Status:
     """Whether QiTV is registered for `kind`, from the record (the truth: `refresh` repairs a
     moved executable). No disk, registry or program is touched."""
     _kind_types(kind)
     if not _frozen(frozen) or _backend() is None:
         return Status.UNAVAILABLE
-    if temporary_location(sys.executable):
+    if temporary_location(own_executable()):
         return Status.TEMPORARY
     return Status.REGISTERED if kind in _recorded(config) else Status.NOT_REGISTERED
 
 
 def register(
-    kind: str, config: Any, exe: str = sys.executable, frozen: Optional[bool] = None
+    kind: str, config: Any, exe: Optional[str] = None, frozen: Optional[bool] = None
 ) -> RegisterResult:
-    """Register `exe` (on macOS the app holding it) for `kind`, and record it.
+    """Register `exe` (by default this QiTV's: `own_executable`; on macOS the app holding it)
+    for `kind`, and record it.
 
     The answer is a `RegisterResult`: truthy when QiTV was registered, and its `defaults` say
     whether the system also took QiTV as the default (else the Settings hint says to choose it
@@ -185,7 +204,7 @@ def register(
     if not _frozen(frozen):
         logger.info("A run from source doesn't register itself for %s", kind)
         return refused
-    exe = _own_path(exe)
+    exe = _own_path(exe or own_executable())
     if temporary_location(exe):
         logger.info("QiTV runs from a temporary place; not registered for %s", kind)
         return refused
@@ -215,7 +234,7 @@ def unregister(kind: str, config: Any, frozen: Optional[bool] = None) -> bool:
     if backend is None:
         return False
     record = _recorded(config)
-    exe = record.get(kind) or _own_path(sys.executable)
+    exe = record.get(kind) or _own_path(own_executable())
     if not _attempt("unregister", lambda: backend.unregister(kind, exe), kind):
         return False
     record.pop(kind, None)
@@ -223,13 +242,15 @@ def unregister(kind: str, config: Any, frozen: Optional[bool] = None) -> bool:
     return True
 
 
-def refresh(config: Any, exe: str = sys.executable, frozen: Optional[bool] = None) -> None:
+def refresh(config: Any, exe: Optional[str] = None, frozen: Optional[bool] = None) -> None:
     """At start: each kind recorded for another executable (QiTV was moved or renamed) is
-    registered for `exe` instead, without taking any default again (the user may have chosen
-    another app since). Nothing from source or from a temporary place."""
+    registered for `exe` (by default this QiTV's: `own_executable`) instead, without taking
+    any default again (the user may have chosen another app since). Nothing from source or
+    from a temporary place. After a Windows update that replaced the installed QiTV, that one
+    is this QiTV's executable: the copy in Downloads is never registered."""
     if not _frozen(frozen):
         return
-    exe = _own_path(exe)
+    exe = _own_path(exe or own_executable())
     if temporary_location(exe):
         return
     backend = _backend()

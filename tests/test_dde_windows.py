@@ -485,6 +485,37 @@ class ServeTests(unittest.TestCase):
         serving.close()  # twice: nothing more
         self.assertEqual(self.ddeml.calls.count("DdeUninitialize"), 1)
 
+    def test_an_updates_copy_points_explorer_at_the_qitv_it_replaced(self):
+        # The update's copy runs from Downloads (sys.executable) once it replaced the installed
+        # QiTV (registered as WINDOWS_EXE): its DDE owner names the installed one, and the
+        # command Explorer starts QiTV with stays the installed QiTV's.
+        downloads = "C:\\Users\\Ayşe\\Downloads\\qitv-windows.exe"
+        self.addCleanup(file_types.use_installed, None)
+        file_types.use_installed(WINDOWS_EXE)
+        written = []
+        real_add = file_types.add_ddeexec
+        with (
+            patch.object(sys, "executable", downloads),
+            patch.object(
+                file_types,
+                "add_ddeexec",
+                side_effect=lambda exe, wanted=None: written.append(exe) or real_add(exe, wanted),
+            ),
+            self.assertNoLogs("services.file_types", "INFO"),  # "names another QiTV": none
+        ):
+            serving = dde_windows.serve(self.registered, frozen=True)
+            self.assertIsNotNone(serving)
+            self.addCleanup(serving.close)
+            self.join_writers()
+        self.assertEqual(written, [WINDOWS_EXE])
+        self.assertEqual(self.reg.values(DDEEXEC), {"": COMMAND})
+        command = self.reg.values(f"{PROGID}\\shell\\open\\command")[""]
+        self.assertIn(WINDOWS_EXE, command)
+        self.assertNotIn("Downloads", command)
+        file_types.use_installed(None)  # any other start: the exe it runs as
+        with patch.object(sys, "executable", downloads):
+            self.assertEqual(dde_windows.Serving(server=DdeServer())._exe, downloads)
+
     def test_opened_comes_from_the_server(self):
         serving = dde_windows.serve(self.registered, frozen=True)
         self.addCleanup(serving.close)

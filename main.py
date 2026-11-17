@@ -115,6 +115,17 @@ def handle_replace_flag(
     return old_exe_path, current_exe
 
 
+def replaced_qitv(argv: Sequence[str], not_replaced: Optional[tuple[str, str]]) -> Optional[str]:
+    """The installed QiTV a Windows update's copy wrote itself over (`--replace <path>`, and
+    the replace worked): this run is that QiTV from now on, though it runs from where it was
+    downloaded, so it registers that one (services.file_types.use_installed). None for any
+    other start (the old file kept: the copy is QiTV where it is)."""
+    if not_replaced is not None or "--replace" not in argv:
+        return None
+    index = list(argv).index("--replace")
+    return argv[index + 1] if index + 1 < len(argv) and argv[index + 1] else None
+
+
 def old_qitv_still_runs(argv: Sequence[str], not_replaced: Optional[tuple[str, str]]) -> bool:
     """Whether this is a Windows update's copy whose old QiTV still runs: its file couldn't be
     replaced (`handle_replace_flag` waited REPLACE_WAIT_S for it to quit). Once it was, the old
@@ -166,7 +177,10 @@ def main() -> int:
     log.info("QiTV %s starts.", get_app_version())
 
     # Windows's self-update: this new version takes the old one's place, once it quit.
-    not_replaced = handle_replace_flag() if platform.system() == "Windows" else None
+    not_replaced, replaced = None, None
+    if platform.system() == "Windows":
+        not_replaced = handle_replace_flag()
+        replaced = replaced_qitv(sys.argv, not_replaced)
 
     # Suppress noisy third-party warnings
     warnings.filterwarnings("ignore", category=SyntaxWarning, module="vlc")
@@ -214,7 +228,7 @@ def main() -> int:
     from PySide6.QtCore import QLocale, QTimer, qInstallMessageHandler
     import qdarktheme
 
-    from services import i18n, private_files
+    from services import file_types, i18n, private_files
     from services.atomic_write import sweep_in_background
     from services.config_manager import ConfigManager
     from services.epg_manager import EpgManager
@@ -281,6 +295,10 @@ def main() -> int:
 
     if platform.system() == "Windows":
         ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID(APP_USER_MODEL_ID)
+    # An update's copy that replaced the installed QiTV registers (at start, from Settings, and
+    # in Explorer's DDE command) the installed one, never itself in Downloads; any other start
+    # registers where it runs, so a QiTV the user moved registers again where it is now.
+    file_types.use_installed(replaced)
 
     app.setWindowIcon(QtGui.QIcon(icon_path))
     # The keyboard's focus shows on buttons, check boxes, tabs and sliders too (ui/theme.py).

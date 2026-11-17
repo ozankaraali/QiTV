@@ -1173,6 +1173,47 @@ class ServiceTests(unittest.TestCase):
         file_types.refresh(Config(), "/c/qitv", frozen=True)  # nothing registered: nothing
         self.assertEqual(len(self.backend.calls), 1)
 
+    def test_an_updates_copy_registers_the_qitv_it_replaced(self):
+        # Windows' self-update runs Downloads\qitv-windows.exe --replace <installed>: the copy
+        # writes itself over the installed QiTV and runs on from Downloads. It registers the
+        # installed one (main: use_installed), at start and from Settings alike.
+        installed = "C:\\Users\\Ayşe\\QiTV\\qitv-windows.exe"
+        downloads = "C:\\Users\\Ayşe\\Downloads\\qitv-windows.exe"
+        self.addCleanup(file_types.use_installed, None)
+        config = Config({"videos": installed})
+        with patch.object(sys, "executable", downloads):
+            file_types.use_installed(installed)
+            self.assertEqual(file_types.own_executable(), installed)
+            file_types.refresh(config, frozen=True)
+            self.assertEqual(self.backend.calls, [])  # registered there already: nothing moves
+            self.assertEqual(config.file_types, {"videos": installed})
+            # one an earlier update moved to Downloads comes back to the installed QiTV
+            config.file_types = {"videos": downloads}
+            file_types.refresh(config, frozen=True)
+            self.assertEqual(config.file_types, {"videos": installed})
+            self.assertEqual(self.backend.calls[-1][:3], ("register", "videos", installed))
+            # Settings' press in that run, and its unregister with nothing recorded
+            config.file_types = {}
+            self.assertTrue(file_types.register("videos", config, frozen=True))
+            self.assertEqual(config.file_types, {"videos": installed})
+            self.assertIs(file_types.status("videos", config, frozen=True), Status.REGISTERED)
+            config.file_types = {}
+            self.assertTrue(file_types.unregister("videos", config, frozen=True))
+            self.assertEqual(self.backend.calls[-1], ("unregister", "videos", installed))
+
+    def test_a_qitv_the_user_moved_registers_where_it_runs_now(self):
+        # Any other start (no update, or one whose replace failed: main passes None) is QiTV
+        # where it runs: moved by the user, it registers there again.
+        moved = "D:\\Programlar\\QiTV\\qitv-windows.exe"
+        config = Config({"videos": "C:\\Users\\Ayşe\\QiTV\\qitv-windows.exe"})
+        self.addCleanup(file_types.use_installed, None)
+        file_types.use_installed(None)
+        with patch.object(sys, "executable", moved):
+            self.assertEqual(file_types.own_executable(), moved)
+            file_types.refresh(config, frozen=True)
+        self.assertEqual(config.file_types, {"videos": moved})
+        self.assertEqual(self.backend.calls[-1][:3], ("register", "videos", moved))
+
     def test_the_record_reaches_config_json(self):
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / "config.json"
