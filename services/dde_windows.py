@@ -2,8 +2,9 @@
 second start unpacks the whole single-file app first: 6.7 s on CI before it could hand over).
 
 While a QiTV registered for videos runs, its ProgID's open verb has a `ddeexec`
-(file_types.add_ddeexec): Explorer then connects to the service `SERVICE` on `TOPIC` and
-executes `COMMAND` with `%1` replaced by the file. When no QiTV runs (the key goes at quit),
+(file_types.add_ddeexec), from the start or from the moment Settings registers it, until
+Settings unregisters it or QiTV quits. Explorer then connects to the service `SERVICE` on
+`TOPIC` and executes `COMMAND` with `%1` replaced by the file. When no QiTV runs (the key goes),
 Windows starts QiTV with the file on its command line, which plays it. A crash leaves the key:
 Explorer, finding no server, starts QiTV with the file all the same and then sends `[noop]`,
 which opens nothing; that start writes the key again.
@@ -27,6 +28,7 @@ import logging
 import re
 import sys
 import threading
+import time
 from typing import Any, Callable, Optional
 
 from PySide6.QtCore import QObject, QTimer, Signal
@@ -165,6 +167,10 @@ class DdeServer(QObject):
         self._registered = False
         self._pending: list[str] = []  # commands copied in the callback, for the event loop
 
+    @property
+    def running(self) -> bool:
+        return bool(self._inst)
+
     def start(self) -> bool:
         """Serve; False (logged) when DDEML refused or failed any step, and QiTV works as
         without (it never raises: QiTV's start goes on)."""
@@ -290,40 +296,77 @@ class DdeServer(QObject):
 
 
 class Serving:
-    """A started server and the ddeexec that points Explorer at it."""
+    """The run's one DDE server and the ddeexec that points Explorer at it, following the
+    registration: on while QiTV is registered for videos (from the start, or once Settings
+    registered it), off once Settings unregistered it. On the GUI thread."""
 
-    def __init__(self, server: DdeServer, writer: threading.Thread) -> None:
-        self.server = server
-        self._writer = writer
+    def __init__(self, server: Optional[DdeServer] = None, exe: str = "") -> None:
+        self.server = server if server is not None else DdeServer()
+        self._exe = exe or sys.executable
+        self._writers: list[threading.Thread] = []
+        self._served = False  # it served once: the quit takes the ddeexec back
         self._closed = False
+
+    @property
+    def running(self) -> bool:
+        return self.server.running
+
+    def follow(self, registered: bool) -> bool:
+        """Registered: the server starts unless it runs (never a second one), and the
+        ddeexec is written on a worker; a server that can't start takes a stale ddeexec back
+        instead. Not registered: the server stops (unregistering took the ddeexec with the
+        ProgID). True while it serves."""
+        if self._closed:
+            return False
+        if not registered:
+            self.server.stop()
+            return False
+        if self.server.running:
+            return True
+        if not self.server.start():
+            self._on_worker(file_types.remove_ddeexec)
+            return False
+        self._served = True
+        exe = self._exe
+        self._on_worker(lambda: file_types.add_ddeexec(exe))
+        return True
 
     def close(self) -> None:
         """At quit, on the GUI thread: the ddeexec goes first (a few registry calls, once the
-        start's write is through), so Explorer starts QiTV again; then the server stops. It
-        never raises."""
+        writes on their way are through), so Explorer starts QiTV again; then the server
+        stops. It never raises."""
         if self._closed:
             return
         self._closed = True
-        self._writer.join(WRITER_JOIN_S)
-        try:
-            file_types.remove_ddeexec()
-        except Exception as e:
-            logger.warning("QiTV's DDE key stays (%s): the next start writes it", type(e).__name__)
+        deadline = time.monotonic() + WRITER_JOIN_S
+        for writer in self._writers:
+            writer.join(max(0.0, deadline - time.monotonic()))
+        if self._served:
+            try:
+                file_types.remove_ddeexec()
+            except Exception as e:
+                logger.warning(
+                    "QiTV's DDE key stays (%s): the next start writes it", type(e).__name__
+                )
         self.server.stop()
+
+    def _on_worker(self, work: Callable[[], object]) -> None:
+        self._writers = [w for w in self._writers if w.is_alive()]
+        self._writers.append(_on_worker(work))
 
 
 def serve(config: Any, frozen: Optional[bool] = None) -> Optional[Serving]:
-    """While QiTV runs registered for videos on Windows (file_types.status: never from source
-    or a temporary place), the server, with the ddeexec written on a worker. None elsewhere,
-    and when the server didn't start: a stale ddeexec is then taken back, on a worker."""
-    if sys.platform != "win32" or file_types.status(KIND, config, frozen) is not Status.REGISTERED:
+    """On Windows, where QiTV can register for videos (file_types.status: never from source or
+    a temporary place), the run's DDE owner, serving already when QiTV is registered. None
+    elsewhere."""
+    if sys.platform != "win32":
         return None
-    server = DdeServer()
-    if not server.start():
-        _on_worker(file_types.remove_ddeexec)
+    state = file_types.status(KIND, config, frozen)
+    if state not in (Status.REGISTERED, Status.NOT_REGISTERED):
         return None
-    exe = sys.executable
-    return Serving(server, _on_worker(lambda: file_types.add_ddeexec(exe)))
+    serving = Serving()
+    serving.follow(state is Status.REGISTERED)
+    return serving
 
 
 def _on_worker(work: Callable[[], object]) -> threading.Thread:

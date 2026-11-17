@@ -107,9 +107,10 @@ class MainModuleTests(unittest.TestCase):
     def test_windows_hears_double_clicks_over_dde_while_it_runs(self):
         # Registered on Windows: a double-click reaches this QiTV over DDE once its window
         # shows, as another start's hand-over does; at quit Explorer is told first, before
-        # anything else closes (services/dde_windows.py).
+        # anything else closes (services/dde_windows.py). The window keeps the run's one
+        # server, which Settings turns on and off (Ruling 27).
         body = (REPO / "main.py").read_text(encoding="utf-8").split("def main()", 1)[1]
-        serve = body.index("dde = dde_windows.serve(config_manager)")
+        serve = body.index("dde = window.dde = dde_windows.serve(config_manager)")
         self.assertLess(body.index("window.show()"), serve)
         self.assertLess(body.rindex('if sys.platform == "win32":', 0, serve), serve)
         self.assertIn(

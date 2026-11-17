@@ -133,6 +133,7 @@ class FileTypesRow:
 
     def __init__(self, dialog: Any, layout: QFormLayout, parent: QWidget) -> None:
         self._config = dialog.config_manager
+        self._window = dialog.parent()  # TVWindow: its DDE follows a press (Windows)
         self._layout = layout
         self._busy = False  # a press's answer is on its way
         self._failed = False  # the last press failed: the hint says so
@@ -201,12 +202,16 @@ class FileTypesRow:
         self._answer.run(work, PRESS_THREAD)
 
     def _answered(self, answer: object) -> None:
-        """On the GUI thread: saved when it worked (the service recorded it), Windows' Default
-        Apps opened after a register; the row follows while Settings is still there."""
+        """On the GUI thread: saved when it worked (the service recorded it), the window's DDE
+        following it (Windows: a double-click reaches this QiTV, or no more), and Windows'
+        Default Apps opened after a register; the row follows while Settings is still there."""
         self._busy = False
         registering, result = answer if isinstance(answer, tuple) else (False, None)
         if result:
             _save(self._config)
+            follow = getattr(self._window, "dde_follow_registration", None)
+            if follow is not None and isValid(self._window):
+                follow(registering)
             if registering and _system() == "win32":
                 file_types.open_default_apps()  # where Windows asks the user to confirm
         if not (isValid(self.button) and isValid(self.hint)):

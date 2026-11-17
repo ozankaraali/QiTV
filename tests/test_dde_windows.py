@@ -461,10 +461,9 @@ class ServeTests(unittest.TestCase):
         self.assertTrue(wait_until(lambda: got, 2000))
         self.assertEqual(got, [["C:\\x\\a b.mkv"]])
 
-    def test_nothing_unregistered_from_source_or_elsewhere(self):
+    def test_nothing_from_source_or_elsewhere(self):
         before = self.reg.tree()
         cases = (
-            (Config(), True, "win32"),  # not registered
             (self.registered, False, "win32"),  # a run from source
             (self.registered, True, "linux"),
             (self.registered, True, "darwin"),
@@ -476,13 +475,62 @@ class ServeTests(unittest.TestCase):
         self.assertEqual(self.ddeml.calls, [])
         self.assertEqual(self.reg.tree(), before)
 
+    def test_unregistered_the_owner_waits_without_serving(self):
+        before = self.reg.tree()
+        serving = dde_windows.serve(Config(), frozen=True)  # Settings may register it later
+        self.assertIsNotNone(serving)
+        self.assertFalse(serving.running)
+        serving.close()  # it never served: the registry isn't touched
+        self.join_writers()
+        self.assertEqual(self.ddeml.calls, [])
+        self.assertEqual(self.reg.tree(), before)
+
     def test_a_server_that_cannot_start_takes_a_stale_ddeexec_back(self):
         self.assertTrue(file_types.add_ddeexec(WINDOWS_EXE))  # a crash left it
         self.ddeml.fail.add("DdeInitializeW")
         with self.assertLogs("services.dde_windows", "WARNING"):
-            self.assertIsNone(dde_windows.serve(self.registered, frozen=True))
+            serving = dde_windows.serve(self.registered, frozen=True)
+        self.assertFalse(serving.running)
         self.join_writers()
         self.assertIsNone(self.reg.values(DDEEXEC))  # Explorer starts QiTV normally
+
+    def test_follow_turns_it_on_once_and_off(self):  # Ruling 27: Settings' press
+        serving = dde_windows.serve(Config(), frozen=True)
+        self.addCleanup(serving.close)
+        added = []
+        with patch.object(file_types, "add_ddeexec", side_effect=added.append):
+            self.assertTrue(serving.follow(True))  # registered in Settings
+            self.join_writers()
+            self.assertTrue(serving.running)
+            self.assertEqual(added, [WINDOWS_EXE])
+            self.assertTrue(serving.follow(True))  # again while it runs: no second server
+            self.join_writers()
+        self.assertEqual(self.ddeml.calls.count("DdeInitializeW"), 1)
+        self.assertEqual(added, [WINDOWS_EXE])
+        self.assertFalse(serving.follow(False))  # unregistered: it stops
+        self.assertFalse(serving.running)
+        self.assertEqual(self.ddeml.calls.count("DdeUninitialize"), 1)
+        with patch.object(file_types, "add_ddeexec", side_effect=added.append):
+            self.assertTrue(serving.follow(True))  # registered again: the same server
+            self.join_writers()
+        self.assertEqual(added, [WINDOWS_EXE, WINDOWS_EXE])
+        serving.close()
+        self.assertFalse(serving.follow(True))  # once quitting, never again
+        self.assertEqual(self.ddeml.calls.count("DdeInitializeW"), 2)
+
+    def test_the_key_waits_for_a_registration_on_its_way(self):
+        # Settings' press, the start's refresh and the DDE key: one at a time
+        written = threading.Event()
+        with file_types._windows_lock:
+            writer = threading.Thread(
+                target=lambda: file_types.add_ddeexec(WINDOWS_EXE) and written.set()
+            )
+            writer.start()
+            self.assertFalse(written.wait(0.2))
+            self.assertIsNone(self.reg.values(DDEEXEC))
+        writer.join(5)
+        self.assertTrue(written.is_set())
+        self.assertEqual(self.reg.values(DDEEXEC), {"": COMMAND})
 
     def test_close_never_raises(self):
         serving = dde_windows.serve(self.registered, frozen=True)

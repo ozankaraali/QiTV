@@ -302,9 +302,10 @@ def main() -> int:
         if sys.platform == "win32":
             # Registered for videos: a double-click reaches this QiTV over DDE, with no second
             # start (which unpacks the whole app first); Explorer is told so while it runs.
+            # The run's one server: Settings turns it on and off (dde_follow_registration).
             from services import dde_windows
 
-            dde = dde_windows.serve(config_manager)
+            dde = window.dde = dde_windows.serve(config_manager)
             if dde is not None:
                 dde.server.opened.connect(lambda files: window.open_paths(files, source=HANDOVER))
         if not_replaced is not None:  # where the new version is, and where the old one stayed

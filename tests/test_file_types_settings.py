@@ -9,9 +9,10 @@ from unittest import mock
 
 from PySide6.QtCore import QCoreApplication, QEvent
 from shiboken6 import isValid
+from test_dde_windows import FakeDdeml
 from timer_fixtures import wait_until
 
-from services import file_types
+from services import dde_windows, file_types
 from services.config_manager import ConfigManager
 from services.file_types import RegisterResult, Status
 from services.i18n import translate
@@ -46,7 +47,9 @@ def worker(name):
     return [t for t in threading.enumerate() if t.name == name]
 
 
-class FileTypesRowTests(base.WindowCase):
+class RowCase(base.WindowCase):
+    """Settings' row on a real window: its dialog, a press and its answer."""
+
     def setUp(self):
         super().setUp()
         self.threads: list[threading.Thread] = []
@@ -90,6 +93,8 @@ class FileTypesRowTests(base.WindowCase):
 
         return mock.patch.object(file_types, "register", side_effect=register)
 
+
+class FileTypesRowTests(RowCase):
     def test_row_follows_status(self):
         expected = {
             (Status.NOT_REGISTERED, "win32"): (USE_TEXT, WINDOWS_HINT, True),
@@ -295,6 +300,88 @@ class FileTypesRowTests(base.WindowCase):
             QCoreApplication.processEvents()
         raised.assert_not_called()  # the worker's answer found no one: nothing raised
         self.assertEqual(self.config.file_types, {"videos": EXE})  # the service recorded it
+
+
+class DdeFollowsSettingsTests(RowCase):
+    """Ruling 27: on Windows, Settings' press turns the running QiTV's DDE on, or off."""
+
+    def setUp(self):
+        super().setUp()
+        self.ddeml = FakeDdeml()
+        self.added: list[str] = []
+        patches = (
+            mock.patch.object(dde_windows, "_user32", side_effect=lambda: self.ddeml),
+            mock.patch.object(file_types, "add_ddeexec", side_effect=self.added.append),
+            mock.patch.object(file_types, "remove_ddeexec", return_value=True),
+            mock.patch.object(file_types, "open_default_apps"),
+        )
+        for p in patches:
+            p.start()
+            self.addCleanup(p.stop)
+
+    def serving(self):
+        """The run's DDE owner, as main() gives the window on Windows (not registered yet)."""
+        serving = self.window.dde = dde_windows.Serving(exe=EXE)
+        self.addCleanup(serving.close)
+        return serving
+
+    def settle(self):
+        for thread in worker(dde_windows.WRITER_THREAD):
+            thread.join(5)
+
+    def test_windows_register_starts_the_server_and_writes_the_key_once(self):
+        serving = self.serving()
+        dialog = self.dialog(system="win32")
+        with self.registering():
+            self.press(dialog, "win32")
+        self.settle()
+        self.assertTrue(serving.running)
+        self.assertEqual(self.added, [EXE])  # on a worker, once
+        # a second register while it runs (QiTV unregistered behind its back, say)
+        self.config.file_types = {}
+        dialog = self.dialog(system="win32")
+        with self.registering():
+            self.press(dialog, "win32")
+        self.settle()
+        self.assertEqual(self.ddeml.calls.count("DdeInitializeW"), 1)  # no second server
+        self.assertEqual(self.added, [EXE])
+
+    def test_unregister_stops_the_server(self):
+        serving = self.serving()
+        self.assertTrue(serving.follow(True))
+        self.config.file_types = {"videos": EXE}
+        dialog = self.dialog(system="win32")
+
+        def unregister(kind, config, *args, **kwargs):
+            config.file_types = {}
+            return True
+
+        with mock.patch.object(file_types, "unregister", side_effect=unregister):
+            self.press(dialog, "win32")
+        self.assertFalse(serving.running)
+        self.assertEqual(self.ddeml.calls.count("DdeUninitialize"), 1)
+
+    def test_a_failed_press_leaves_it_as_it_was(self):
+        serving = self.serving()
+        dialog = self.dialog(system="win32")
+        with self.registering(RegisterResult(False)):
+            self.press(dialog, "win32")
+        self.settle()
+        self.assertFalse(serving.running)
+        self.assertEqual(self.ddeml.calls, [])
+        self.assertEqual(self.added, [])
+
+    def test_elsewhere_the_press_has_no_dde(self):
+        self.assertIsNone(self.window.dde)  # main() gives it one on Windows only
+        for system in ("darwin", "linux"):
+            with self.subTest(system=system):
+                self.config.file_types = {}
+                dialog = self.dialog(system=system)
+                with self.registering():
+                    self.press(dialog, system)
+                self.assertEqual(dialog.file_types_button.text(), translate(STOP_TEXT))
+        self.assertEqual(self.ddeml.calls, [])
+        self.assertEqual(self.added, [])
 
 
 class StartRefreshTests(base.WindowCase):

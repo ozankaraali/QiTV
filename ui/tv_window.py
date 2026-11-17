@@ -425,6 +425,9 @@ class TVWindow(QMainWindow):
         self.epg_manager = epg_manager
         self._started = False
         self._closing = False
+        # Windows: the run's DDE owner (services.dde_windows.Serving), set by main(); None
+        # elsewhere and from source
+        self.dde: Any = None
         self._close_retries = 0
         self._video_released = False
         self._closed = False
@@ -2312,6 +2315,13 @@ class TVWindow(QMainWindow):
         self.catalog.refresh_epg(force=True)
 
     # ---- lifecycle ----------------------------------------------------------------------------
+
+    def dde_follow_registration(self, registered: bool) -> None:
+        """Settings registered QiTV for videos, or stopped using it: on Windows, double-clicks
+        reach this QiTV over DDE from now on, or no more (services.dde_windows). Nothing
+        elsewhere."""
+        if self.dde is not None and not self._closing:
+            self.dde.follow(registered)
 
     def come_to_front(self) -> None:
         """QiTV was started again with these settings (2.8.12, services.single_instance):

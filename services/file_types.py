@@ -30,6 +30,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 import enum
+import functools
 import logging
 import ntpath
 import os
@@ -41,8 +42,9 @@ import stat
 import subprocess
 import sys
 import tempfile
+import threading
 from types import SimpleNamespace
-from typing import Any, Callable, Optional, Protocol
+from typing import Any, Callable, Optional, Protocol, TypeVar, cast
 from urllib.parse import quote
 
 from services.atomic_write import atomic_write
@@ -444,10 +446,26 @@ def _assoc_changed() -> None:
         logger.warning("Couldn't tell Windows the file types changed (%s)", type(e).__name__)
 
 
+_Method = TypeVar("_Method", bound=Callable[..., Any])
+# Settings' press, the start's refresh and the DDE key's writes run on workers of their own:
+# one at a time, so a key written meanwhile never stops an unregister from taking the ProgID.
+_windows_lock = threading.RLock()
+
+
+def _one_at_a_time(method: _Method) -> _Method:
+    @functools.wraps(method)
+    def locked(*args: Any, **kwargs: Any) -> Any:
+        with _windows_lock:
+            return method(*args, **kwargs)
+
+    return cast(_Method, locked)
+
+
 class _WindowsBackend:
     """HKEY_CURRENT_USER\\Software\\Classes and HKEY_CURRENT_USER\\Software only. Registering
     takes no default: Windows asks in its Default Apps page (`open_default_apps`)."""
 
+    @_one_at_a_time
     def register(
         self, kind: str, exe: str, *, defaults: bool = True, previous: Optional[str] = None
     ) -> RegisterResult:
@@ -477,12 +495,14 @@ class _WindowsBackend:
         _assoc_changed()
         return RegisterResult(True, True)
 
+    @_one_at_a_time
     def unregister(self, kind: str, exe: str) -> bool:
         reg = _winreg()
         ok = self._remove(reg, kind, exe)
         _assoc_changed()
         return ok
 
+    @_one_at_a_time
     def add_ddeexec(self, exe: str) -> bool:
         """The open verb's ddeexec, in each ProgID QiTV is registered with (its command is
         there: a ProgID is never made for it). A stale one, left by a crash, is written over;
@@ -519,6 +539,7 @@ class _WindowsBackend:
         _assoc_changed()
         return ok
 
+    @_one_at_a_time
     def remove_ddeexec(self) -> bool:
         """Each ProgID's ddeexec, and the keys that leaves empty (a ProgID unregistered
         meanwhile leaves none); the shell is told only when one was there."""
