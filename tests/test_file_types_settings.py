@@ -240,9 +240,13 @@ class FileTypesRowTests(base.WindowCase):
     def test_closing_settings_mid_press_still_saves(self):
         dialog = self.dialog()
         gate = threading.Event()
-        with self.registering(gate=gate):
-            with mock.patch.object(file_types, "status", side_effect=recorded_status):
-                dialog.file_types_button.click()
+        with (
+            self.registering(gate=gate),
+            mock.patch.object(file_types, "status", side_effect=recorded_status),
+            mock.patch.object(row_module, "_system", return_value="linux"),
+            mock.patch.object(file_types, "open_default_apps"),
+        ):
+            dialog.file_types_button.click()
             dialog.done(0)  # Settings closed while the system is told
             gate.set()
             self.assertTrue(wait_until(lambda: ConfigManager().file_types == {"videos": EXE}))
