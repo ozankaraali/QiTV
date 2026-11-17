@@ -90,6 +90,16 @@ print(json.dumps({"shown": shown.decode(), "answer": answer.decode(errors="repla
 # What a start logs when the first didn't take its files.
 NOT_TAKEN = ("older", "didn't say")
 
+# Windows' extended-length and device spellings, as ntpath writes them: they go raw on every
+# system (Ruling 29: QUrl dropped \\?\UNC\'s prefix on Windows).
+LONG_DIR = "\\".join(["Sezon 1 Bölümler uzun klasör adı"] * 9)
+EXTENDED = [
+    "\\\\?\\C:\\" + LONG_DIR + "\\Dizi Bölüm 1.mkv",  # over 260 characters
+    "\\\\?\\UNC\\SERVER\\Share\\Dizi Bölüm 1.mkv",
+    "\\\\.\\C:\\Videos\\a%20b #1 ;x=y&[z]{w}~'.mkv",
+    "\\\\?\\C:\\Videos\\lone \ud800 surrogate.mkv",  # a name Windows allows
+]
+
 
 class NameTests(unittest.TestCase):
     def test_one_folder_one_name_however_it_is_spelled(self):
@@ -307,6 +317,18 @@ class ClaimTests(unittest.TestCase):
         self.assertEqual([json.loads(line.split(" ", 1)[1]) for line in got], [p1, p2])
         self.assertFalse([line for line in logs.output if any(n in line for n in NOT_TAKEN)])
 
+    def test_extended_paths_reach_the_first_as_they_are(self):
+        # Ruling 29: \\?\ and \\.\ paths (ntpath's spelling; any system carries them) arrive
+        # byte for byte, through the protocol as a real hand-over sends them.
+        first = self.first("files")
+        # (Not the lone surrogate's: the line carries it, Qt's signal after it doesn't, as before.)
+        paths = EXTENDED[:3]
+        with self.assertLogs("services.single_instance", "INFO") as logs:
+            self.assertIsNone(claim(self.folder, paths=paths))
+        got = [first.stdout.readline().strip() for _ in paths]
+        self.assertEqual([json.loads(line.split(" ", 1)[1]) for line in got], paths)
+        self.assertFalse([line for line in logs.output if any(n in line for n in NOT_TAKEN)])
+
     def test_a_path_too_long_to_hand_over_is_left_out(self):
         first = self.first("files")
         p1 = self.turkish_path()
@@ -423,7 +445,8 @@ class ClaimTests(unittest.TestCase):
 
 
 class FileUrlTests(unittest.TestCase):
-    """An `open` line's URL carries a path byte for byte (Review Focus 1)."""
+    """An `open` line carries a path byte for byte (Review Focus 1): a file URL, or the path
+    itself (raw) for a Windows path with the extended-length or device prefix."""
 
     def cases(self):
         if os.name == "nt":
@@ -448,10 +471,26 @@ class FileUrlTests(unittest.TestCase):
     def test_paths_cross_byte_for_byte(self):
         for path in self.cases():
             with self.subTest(path=path):
-                url = single_instance._file_url(path)
-                self.assertNotIn(b"\n", url)
-                self.assertTrue(url.startswith(b"file:"))
-                self.assertEqual(single_instance._local_path(url), path)
+                payload = single_instance._open_payload(path)
+                self.assertNotIn(b"\n", payload)
+                extended = path.startswith(("\\\\?\\", "\\\\.\\"))
+                form = single_instance.RAW if extended else b"file:"
+                self.assertTrue(payload.startswith(form), payload)
+                self.assertEqual(single_instance._opened_path(payload), path)
+
+    def test_extended_paths_go_raw_on_every_system(self):
+        for path in EXTENDED:
+            with self.subTest(path=path):
+                payload = single_instance._open_payload(path)
+                self.assertTrue(payload.startswith(single_instance.RAW), payload)
+                payload.decode("ascii")  # percent-encoded: no space, newline or other byte
+                self.assertNotIn(b" ", payload)
+                self.assertEqual(single_instance._opened_path(payload), path)
+
+    def test_a_raw_path_that_doesnt_decode_is_skipped(self):
+        for payload in (b"raw:", b"raw:%FF.mkv", b"raw:\xff", b"raw:C%3A%5Ca%00b.mkv"):
+            with self.subTest(payload=payload):
+                self.assertEqual(single_instance._opened_path(payload), "")
 
     def test_a_relative_path_is_made_absolute(self):
         url = single_instance._file_url("Dizi Bölüm 1.mkv")
@@ -461,6 +500,7 @@ class FileUrlTests(unittest.TestCase):
         for url in (b"http://host/a.mkv", b"file:", b"", b"garbage \xff"):
             with self.subTest(url=url):
                 self.assertEqual(single_instance._local_path(url), "")
+                self.assertEqual(single_instance._opened_path(url), "")
 
 
 from tests.test_tv_window import WindowCase  # noqa: E402

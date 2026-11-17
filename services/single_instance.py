@@ -12,7 +12,8 @@ is waited for up to START_WAIT_MS, and only one that hangs that long is taken ov
 
 The hand-over: the new start sends `show` and the first answers `shown` once it came to the
 front. A start with files (a video double-clicked while QiTV runs) then sends one
-`open <file URL>` line for each, and `done`; the first answers `opened` and opens them. A QiTV
+`open <file URL>` line for each (`open raw:<path>` for a Windows path a URL would change), and
+`done`; the first answers `opened` and opens them. A QiTV
 of 2.10 or before hangs up after `shown`: it came to the front without the files, and the
 new start quits all the same (never a second QiTV on one settings folder).
 
@@ -31,6 +32,7 @@ import os
 import sys
 import time
 from typing import Optional
+from urllib.parse import quote, unquote_to_bytes
 
 from PySide6.QtCore import QByteArray, QDir, QObject, QTimer, QUrl, Signal
 from PySide6.QtNetwork import QLocalServer, QLocalSocket
@@ -42,6 +44,7 @@ START_WAIT_MS = 20000  # a first QiTV reached while it still starts is waited fo
 SHOW = b"show\n"  # asked: come to the front
 SHOWN = b"shown\n"  # answered
 OPEN = b"open "  # and a file URL (percent-encoded: no newline in it), then a newline
+RAW = b"raw:"  # after OPEN: the path itself, its UTF-8 percent-encoded (`_open_payload`)
 DONE = b"done\n"  # no more files
 OPENED = b"opened\n"  # answered: the files were taken
 MAX_LINE = 65536  # a longer line (its newline not counted) drops its connection
@@ -80,8 +83,8 @@ def _file_url(path: str) -> bytes:
     slashed = QDir.fromNativeSeparators(path)
     if slashed.startswith("//"):
         # \\server\share\…: QUrl would make the server's name the URL's host and lower-case
-        # it. The whole path goes into the URL's path behind an empty host, as QUrl itself
-        # does for \\?\… paths.
+        # it. The whole path goes into the URL's path behind an empty host. (A \\?\… path
+        # never comes here: `_open_payload` sends it raw.)
         url = QUrl()
         url.setScheme("file")
         url.setHost("")
@@ -89,6 +92,35 @@ def _file_url(path: str) -> bytes:
     else:
         url = QUrl.fromLocalFile(path)
     return bytes(url.toEncoded().data())
+
+
+# Windows' extended-length (\\?\) and device (\\.\) spellings: QUrl drops the prefix
+# (\\?\UNC\server\share\… came back \\server\share\…), so these paths go raw.
+_UNCHANGED_PREFIXES = ("\\\\?\\", "\\\\.\\")
+
+
+def _open_payload(path: str) -> bytes:
+    """What follows `open ` for `path`, read back by `_opened_path` byte for byte: its file URL,
+    or for a Windows path with the extended-length or device prefix the path itself (RAW, its
+    UTF-8 percent-encoded, lone surrogates too). Such a path is absolute as it is."""
+    if path.startswith(_UNCHANGED_PREFIXES):
+        encoded = quote(path.encode("utf-8", "surrogatepass"), safe="")
+        return RAW + encoded.encode("ascii")
+    return _file_url(path)
+
+
+def _opened_path(payload: bytes) -> str:
+    """The path in an `open` line (either of `_open_payload`'s forms); "" for a URL that isn't
+    a local file's, and for a raw path that doesn't decode or holds a NUL (it is skipped)."""
+    if not payload.startswith(RAW):
+        return _local_path(payload)
+    try:
+        path = unquote_to_bytes(payload[len(RAW) :].decode("ascii")).decode(
+            "utf-8", "surrogatepass"
+        )
+    except UnicodeDecodeError:
+        return ""
+    return "" if "\0" in path else path
 
 
 def _local_path(url: bytes) -> str:
@@ -125,7 +157,7 @@ def _send_files(socket: QLocalSocket, paths: Sequence[str], timeout_ms: int) -> 
     for path in paths:
         if not path:
             continue
-        line = OPEN + _file_url(path)
+        line = OPEN + _open_payload(path)
         if _too_long(line):
             logger.warning("A file's path is too long to hand over (%d characters).", len(path))
             continue
@@ -301,7 +333,7 @@ class InstanceServer(QObject):
             socket.write(SHOWN)
             socket.flush()
         elif line.startswith(OPEN):
-            path = _local_path(line.removeprefix(OPEN))
+            path = _opened_path(line.removeprefix(OPEN))
             if path:
                 start.paths.append(path)
             else:
