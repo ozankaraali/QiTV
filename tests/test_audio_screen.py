@@ -435,7 +435,7 @@ class CaptionsRoomTests(ScreenCase):
 
     LINE = "The night ferries pass by in silence, the harbour lights go out."  # two lines
 
-    def scene(self, size, view):
+    def scene(self, size, view, tracks=ALBUM):
         """The screen, the captions over the picture and the audio dock, as the window stacks
         them (the captions follow the dock; the screen leaves them room)."""
         page = QWidget()
@@ -447,7 +447,7 @@ class CaptionsRoomTests(ScreenCase):
         transport = Transport(page)
         screen.show_song("Ferries at Night", "Mira Sol", "Harbour Lights", year="2024")
         screen.set_cover(None, BRAND_COLOURS)
-        screen.set_tracks(ALBUM, 1)
+        screen.set_tracks(tracks, 1)
         screen.set_view(view)
         page.show()
         screen.show()
@@ -483,6 +483,22 @@ class CaptionsRoomTests(ScreenCase):
                     self.assertEqual(screen._lay_out(), laid)
                     captions.show_text("Evet.")
                     self.assertEqual(screen._lay_out(), laid)
+
+    def test_with_words_on_the_albums_list_ends_above_the_captions(self):
+        # No row under a caption either; a long list still scrolls.
+        long = [track(i, f"Song {i + 1}", 200_000) for i in range(30)]
+        for size in ((1280, 720), (640, 360)):
+            with self.subTest(size=size):
+                screen, captions = self.scene(size, "album", long)
+                captions.show_text(self.LINE)
+                box = QRectF(captions.geometry())
+                screen.set_words(True, "English")
+                lay = screen._layout()
+                self.assertFalse(box.intersects(lay.rows[-1][1]), (box, lay.rows[-1][1]))
+                self.assertFalse(box.intersects(lay.list_area))
+                self.assertTrue(lay.more_below)  # the rest is a scroll away
+                self.assertTrue(wheel(screen, lay.rows[0][1].center().toPoint(), -120))
+                self.assertGreater(screen._layout().first, 0)
 
     def test_with_words_off_the_layout_is_as_before(self):
         for size in ((1280, 720), (640, 360)):

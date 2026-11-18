@@ -494,9 +494,10 @@ class AudioScreen(Overlay):
             self._relayout()  # the room left for the captions follows the controls' top
 
     def leave_room_for(self, captions: Any) -> None:
-        """While Words is on, Cover and Album lift the cover and its title so that two lines of
-        `captions` (the captions over the picture: CaptionsOverlay.reach, at their real size)
-        fit between them and the player controls; Words off, nothing moves (ruling P4-10). The
+        """While Words is on, Cover and Album lift the cover and its title, and Album's list ends
+        higher, so that two lines of `captions` (the captions over the picture:
+        CaptionsOverlay.reach, at their real size) fit between them and the player controls;
+        Words off, nothing moves (ruling P4-10). The
         room is Words', not a caption's: nothing moves as captions come and go."""
         self._captions = captions
         self._relayout()
@@ -510,8 +511,8 @@ class AudioScreen(Overlay):
         return int(transport.controls_top()) - self.geometry().top()
 
     def _column_bottom(self, m: _Mock, dock_top: float) -> float:
-        """Where Cover's column and Album's left one end: `dock_top`, or with Words on, above
-        two lines of the captions over the picture (`leave_room_for`)."""
+        """Where Cover's column and Album's two end: `dock_top`, or with Words on, above two
+        lines of the captions over the picture (`leave_room_for`)."""
         captions = self._captions
         self._room = self._words_on and captions is not None and isValid(captions)
         if not self._room:
@@ -841,7 +842,7 @@ class AudioScreen(Overlay):
         # Right (56%): "ALBUM · N TRACKS", then a row per track.
         right = QRectF(w * 0.44 + m(18), max(m(62), top_bar + m(12)), 0.0, 0.0)
         right.setRight(w - m(34))
-        right.setBottom(min(h - m(110), dock_top))
+        right.setBottom(min(h - m(110), dock_top, column_bottom))  # Words: above the captions
         cap = line_height(m.font(10.5, spacing_em=0.14))
         lay.caption = QRectF(right.left() + m(10), right.top(), right.width() - m(10), cap)
         row_h = 2 * m(7) + line_height(m.font(13))
