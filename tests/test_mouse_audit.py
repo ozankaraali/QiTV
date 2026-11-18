@@ -31,8 +31,8 @@ Screens and their controls:
   highlighted title's strip buttons ("favorite", "play") and the A–Z "rail";
 - "series" (2.9.3): the series view's "back" (‹), its season "chips", its episode "rows" and a
   begun episode's "start_over" pill;
-- "folders" (Plan 4): the Library's Folders tab: its "tiles", a tile's "remove" (×), the "add"
-  tile (Add folder: Open Folder…) and "clear".
+- "folders" (Plan 4): the Library's Folders tab (always there, 2.11.1): its "tiles", a tile's
+  "remove" (×), the "add" tile (Add folder: Open Folder…; an empty tab has it too) and "clear".
 
 The audio screen (a song: Plan 4) is checked on its own: AUDIO_ON_SCREEN gives, per "player"
 and "menu" row, what does the same there, on these screens, and AUDIO_EXEMPT the rows that need
@@ -192,9 +192,9 @@ ON_SCREEN: dict[tuple[str, str], tuple[tuple[str, str], ...]] = {
     ("menu", "Ctrl+4"): (("transport", "grid"),),
     ("menu", "Ctrl+5"): (("library", "recordings"), ("drawer", "Recordings")),  # 2.9.7
     ("menu", "Ctrl+O"): (("drawer", "Open file"),),
-    # Plan 4: Open Folder…, the channel list's row under Open file (an empty shelf too: the tab
-    # shows once a folder was opened) and the Folders tab's Add folder tile
-    ("menu", "Ctrl+Shift+O"): (("drawer", "Open a folder"), ("folders", "add")),
+    # Plan 4: File → Open Folder…: the Folders tab's Add folder tile (2.11.1: the tab is always
+    # there, an empty one too) and the channel list's row under Open file
+    ("menu", "Ctrl+Shift+O"): (("folders", "add"), ("drawer", "Open a folder")),
     ("menu", "Ctrl+,"): (("drawer", "settings"), ("drawer", "Settings")),
     ("menu", "Ctrl+R"): (("drawer", "refresh"),),
     ("menu", "Ctrl+Shift+R"): (("library", "refresh"),),  # 2.8: films and series
@@ -641,12 +641,14 @@ class MouseOnlyAuditTests(unittest.TestCase):
 
     def test_open_folder_has_an_on_screen_control(self):
         """Ctrl/⌘+Shift+O (File → Open Folder…): the Folders tab's Add folder tile asks for
-        a folder as the menu does; each tile has its × and the shelf its Clear."""
+        a folder as the menu does, the tab always there (2.11.1: an empty shelf's too, its
+        Add folder tile alone); each tile has its × and the shelf its Clear."""
         self.assertIn(("Ctrl+Shift+O", "Open a folder"), SHORTCUTS["menu"])
         self.assertEqual(
-            ON_SCREEN[("menu", "Ctrl+Shift+O")], (("drawer", "Open a folder"), ("folders", "add"))
+            ON_SCREEN[("menu", "Ctrl+Shift+O")], (("folders", "add"), ("drawer", "Open a folder"))
         )
-        # P4-25: the channel list's row holds with an empty shelf (no Folders tab then)
+        self.assertIn("folders", self.screens["library"])  # the top bar's tab
+        # P4-25: and the channel list's row under Open file
         self.assertIn("Open a folder", self.screens["drawer"])
         self.assertEqual(self.screens["folders"], {"tiles", "remove", "add", "clear"})
         view = FoldersView()

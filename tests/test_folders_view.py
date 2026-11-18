@@ -3,8 +3,8 @@
 are read on a worker (services.local_playlist.read_folder, no tags): "S2 · E5 next" for a
 series, "Album · 12 songs", "8 videos"; a folder that is gone shows as missing with Remove. A
 click plays the folder from where it stopped (Task 11's start rule, through the router); Clear
-asks first, on the app's question card. The tab shows only while the shelf has a folder.
-Fictional folders in a temporary place."""
+asks first, on the app's question card. The tab is always there (2.11.1): empty, it has its
+Add folder tile and a line that says what it is for. Fictional folders in a temporary place."""
 
 import os
 from pathlib import Path
@@ -339,9 +339,39 @@ class FoldersViewTests(DeskCase):
         self.view.move_by(0, -1)
         self.assertEqual(ups, [True])  # on to the top bar
 
+    def test_an_empty_tab_has_add_folder_and_says_what_it_is_for(self):
+        # 2.11.1, the controller's ruling: the tab is always there; empty, its Add folder tile
+        # and a line that says what the tab is for (no Clear, no count)
+        empty = "Folders you open stay here, to play again with a click."
+        empty += " Videos and episodes go on from where you stopped."
+        self.desk.show()
+        self.assertEqual(self.view.summary(), empty)
+        self.assertEqual(self.view.tiles(), [])
+        controls = self.view.controls()
+        self.assertFalse(controls["add"].isEmpty())
+        self.assertTrue(controls["clear"].isEmpty())
+        self.assertTrue(controls["tiles"].isEmpty())
+        self.assertEqual(self.view.current(), "add")
+        self.assertEqual(self.view.accessibleDescription(), f"Add folder. {empty}")
+        self.view.activate()  # Enter on it, as a click
+        self.click(self.view.add_rect())
+        self.assertEqual(self.asked, [True, True])
+        ups = []
+        self.view.upEdge.connect(lambda: ups.append(True))
+        self.view.move_by(0, -1)  # no Clear to go to: the top bar
+        self.assertEqual(ups, [True])
+        self.add(self.root / "Tidewick Isle", VIDEOS)  # a folder opened: the tab's own line
+        self.assertEqual(
+            self.view.summary(),
+            "The folders you opened. Videos and episodes play on from where you stopped.",
+        )
+        self.shelf.clear()
+        self.assertEqual((self.view.summary(), self.view.current()), (empty, "add"))
+
 
 class FoldersTabTests(unittest.TestCase):
-    """The Library's tab (LibraryController): it shows only while the shelf has a folder."""
+    """The Library's tab (LibraryController): always there (2.11.1, the controller's ruling:
+    before, it showed only while the shelf had a folder), after Recordings."""
 
     def setUp(self):
         library_tests.LibraryControllerTests.setUp(self)  # its fakes, not its tests
@@ -362,32 +392,49 @@ class FoldersTabTests(unittest.TestCase):
     def tabs(self):
         return list(self.screen.nav._tabs)
 
-    def test_the_tab_shows_only_with_a_folder(self):
-        self.assertNotIn("folders", self.tabs())
-        self.shelf.add("/media/Tidewick Isle", "Tidewick Isle", VIDEOS)
-        self.assertEqual(self.tabs()[-1], "folders")
+    def test_the_tab_is_there_with_an_empty_shelf_and_stays_when_its_last_folder_goes(self):
+        self.assertEqual(self.tabs()[-1], "folders")  # nothing opened yet
         self.ctl.open("movies")
         self.screen.nav.tabRequested.emit("folders")  # its tab, clicked
         self.assertEqual((self.ctl.mode, self.ctl.zone), ("folders", "folders"))
         self.assertTrue(self.screen.folders.isVisible())
         self.assertFalse(self.screen.grid.isVisible())
+        self.assertEqual(self.screen.folders.current(), "add")  # its Add folder tile
         self.assertNotIn("source", self.screen.nav._order())  # every provider's, as Recordings
         self.assertEqual(self.ctl.section, "movies")  # never a section of the providers'
-        # The last one removed: the tab goes, and the Library shows the section it came from.
+        self.shelf.add("/media/Tidewick Isle", "Tidewick Isle", VIDEOS)
+        self.assertEqual(len(self.screen.folders.tiles()), 1)
+        self.assertEqual(self.tabs()[-1], "folders")
+        # The last one removed: the tab stays, empty, its Add folder tile in the keys' focus.
+        self.screen.folders.home()
         self.ctl.handle(Action.NAV_DELETE)
-        self.assertNotIn("folders", self.tabs())
-        self.assertEqual((self.ctl.mode, self.screen.nav._active), ("browse", "movies"))
-        self.assertFalse(self.screen.folders.isVisible())
+        self.assertEqual(self.tabs()[-1], "folders")
+        self.assertEqual((self.ctl.mode, self.screen.nav._active), ("folders", "folders"))
+        self.assertTrue(self.screen.folders.isVisible())
+        self.assertEqual((self.screen.folders.tiles(), self.screen.folders.current()), ([], "add"))
 
-    def test_after_clear_with_no_section_opened_the_recordings_tab_shows(self):
+    def test_after_clear_the_empty_tab_stays(self):
         self.ctl.set_recordings_desk(library_tests.FakeDesk())
+        self.assertEqual(self.tabs()[-2:], ["recordings", "folders"])  # after Recordings
         self.shelf.add("/media/Tidewick Isle", "Tidewick Isle", VIDEOS)
         self.ctl.open("folders")
         self.screen.folders.clearRequested.emit()
         for action in (Action.NAV_RIGHT, Action.NAV_ACTIVATE):  # the card has the keys
             self.assertTrue(self.ctl.handle(action))
-        self.assertNotIn("folders", self.tabs())
-        self.assertEqual(self.ctl.mode, "recordings")
+        self.assertEqual(len(self.shelf), 0)
+        self.assertEqual(self.tabs()[-1], "folders")
+        self.assertEqual((self.ctl.mode, self.screen.nav._active), ("folders", "folders"))
+        self.assertEqual(self.screen.folders.current(), "add")
+
+    def test_an_empty_tab_opens_and_a_search_from_it_comes_back(self):
+        self.ctl.open("folders")
+        self.assertEqual((self.ctl.mode, self.ctl.zone), ("folders", "folders"))
+        self.assertTrue(self.desk.shown())
+        self.ctl.handle(Action.NAV_TEXT, "t")  # typing searches, as on every tab
+        self.assertEqual(self.ctl.mode, "search")
+        self.ctl.handle(Action.NAV_BACKSPACE)
+        self.ctl.handle(Action.ESCAPE)
+        self.assertEqual(self.ctl.mode, "folders")  # back where the search came from
 
     def test_the_tab_keeps_its_place_as_providers_come_and_go(self):
         self.shelf.add("/media/Tidewick Isle", "Tidewick Isle", VIDEOS)
@@ -461,6 +508,25 @@ class ShelfWindowTests(ListCase):
         self.assertEqual(len(self.lists()), 1)
         # P4-26: a folder chosen so plays as a dropped one: Esc doesn't bring the Library
         self.assertFalse(self.window.screens.escape_to_library())
+
+    def test_the_tab_is_there_before_any_folder_and_its_add_folder_picks_one(self):
+        """2.11.1, the controller's ruling: the Folders tab shows with an empty shelf."""
+        self.show()
+        screens, library = self.window.screens, self.window.library_controller
+        screens.open_library("folders")
+        self.assertEqual((screens.library_shown(), library.mode), (True, "folders"))
+        view = self.window.library_page.folders
+        self.assertTrue(view.isVisible())
+        self.assertEqual(view.tiles(), [])
+        with mock.patch(
+            "ui.tv_pages.QFileDialog.getExistingDirectory", return_value=str(self.season)
+        ) as pick:
+            QTest.mouseClick(
+                view, Qt.MouseButton.LeftButton, pos=view.add_rect().center().toPoint()
+            )
+            self.assertTrue(wait_until(lambda: self.lists()), self.calls)
+        pick.assert_called_once()
+        self.assertEqual([e["name"] for e in self.window.folder_shelf.folders()], ["Lantern Coast"])
 
     def test_add_folders_play_goes_back_to_the_folders_tab(self):
         """Ruling P4-29: the tab's Add folder is a start from the Library, as a tile is: Esc

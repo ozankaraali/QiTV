@@ -442,11 +442,11 @@ A **playlist** (`.m3u`, `.m3u8`) of files on your computer plays the same way, i
 
 ### The Folders tab
 
-Once you have opened a folder as a folder, the Library has a **Folders** tab after Recordings: the last 30 folders you opened that way (dropped, or with **Open Folder…**), the newest first. A single file, several files or a playlist never add their folder.
+The Library's **Folders** tab, after Recordings, keeps the last 30 folders you opened as folders (dropped, or with **Open Folder…**), the newest first. A single file, several files or a playlist never add their folder. Before you have opened one, the tab shows its **Add folder** tile and says what it is for.
 
 - **Each tile** shows the folder's name, what it plays next or holds ("S2 · E5 next", "Album · 12 songs", "8 videos") and its picture: a `cover`, `folder` or `front` image in it, else a drawn one with its name.
 - **Click a tile** (or press <kbd>Enter</kbd>) and the folder plays from where you stopped, as above; <kbd>Esc</kbd> then comes back to the tab. **Add folder**, the last tile, picks another, as **Open Folder…** does.
-- **Its ×** (or <kbd>Delete</kbd>) takes the folder off the tab, and **Clear** takes them all off after asking: nothing is deleted from the disk. A folder that was moved or deleted, or is on an unplugged drive, says **Missing**, with **Remove**.
+- **Its ×** (or <kbd>Delete</kbd>) takes the folder off the tab, and **Clear** takes them all off after asking (the tab stays, with **Add folder**): nothing is deleted from the disk. A folder that was moved or deleted, or is on an unplugged drive, says **Missing**, with **Remove**.
 - **Nothing more.** QiTV reads only these folders' own files, scans no drive and fetches nothing for them, and the list stays on your computer.
 
 ### Music on the audio screen

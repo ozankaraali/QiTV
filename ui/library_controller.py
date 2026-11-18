@@ -26,12 +26,12 @@ Recordings (2.9.7): the top bar's last tab (once the shell gives it its page) op
 Recordings page (`ui.library.recordings_view`, filled by `ui.recordings_desk`): the keys go to
 it (zone "recordings"), ↑ from its chips to the top bar, Esc from its chips back to live TV.
 
-Folders (Plan 4): the tab after it, while the shelf of the folders opened has one
-(`ui.library.folders_view`'s FoldersDesk): the keys go to its tiles (zone "folders"), ↑ from
-its Clear to the top bar, Esc back to live TV, Delete takes the folder off the shelf. Its last
-folder gone (Remove, Clear), the Library shows the section it came from (else Recordings,
-else Movies or Series, else live TV). It is no section of the providers': the Library's source
-pill hides there, as on Recordings.
+Folders (Plan 4): the tab after it, always there (2.11.1, the controller's ruling: before, only
+while the shelf of the folders opened had one), `ui.library.folders_view`'s FoldersDesk: the
+keys go to its tiles (zone "folders"), ↑ from its Clear to the top bar, Esc back to live TV,
+Delete takes the folder off the shelf. Its last folder gone (Remove, Clear), the tab stays,
+empty: its Add folder tile and a line that says what it is for. It is no section of the
+providers': the Library's source pill hides there, as on Recordings.
 
 A right-click on a film's poster or an episode row asks the shell for its menu (Play in VLC,
 Play in MPV, Copy stream link: `context_menu(item, section, global position)`, section "movies"
@@ -403,17 +403,17 @@ class LibraryController(QObject):
     # ---- Plan 4: the Folders tab ---------------------------------------------------------------
 
     def set_folders(self, desk: Any) -> None:
-        """The Folders tab's desk (ui.library.folders_view.FoldersDesk): its tab shows while
-        its shelf has a folder."""
+        """The Folders tab's desk (ui.library.folders_view.FoldersDesk): its tab shows from
+        now on, with or without a folder on its shelf."""
         self._folders = desk
         desk.changed.connect(self._on_folders_changed)
         self._screen.folders.upEdge.connect(lambda: self._focus("nav"))
         self._screen.nav.set_tabs(self._tabs())
 
     def open_folders(self) -> None:
-        """The Folders tab, its folders read again (none on the shelf: nothing)."""
+        """The Folders tab, its folders read again (none on the shelf: its Add folder tile)."""
         folders = self._folders
-        if self._closed or folders is None or not folders.count():
+        if self._closed or folders is None:
             return
         self._series = None
         self._set_mode("folders")
@@ -423,27 +423,10 @@ class LibraryController(QObject):
         self._focus("folders")
 
     def _on_folders_changed(self) -> None:
-        """The shelf changed: its tab shows or goes; gone while it shows, another tab."""
+        """The shelf changed: the tab stays, its last folder gone too (2.11.1)."""
         if self._closed:
             return
         self._screen.nav.set_tabs(self._tabs())
-        if self._mode == "folders" and self._folders is not None and not self._folders.count():
-            self._leave_folders()
-
-    def _leave_folders(self) -> None:
-        """The Folders tab's last folder went: the section it came from, else Recordings,
-        else Movies or Series, else live TV."""
-        tabs = self._tabs()
-        if self._section in tabs:
-            self.open(str(self._section))
-        elif self._desk is not None:
-            self.open_recordings()
-        else:
-            sections = [tab for tab in ("movies", "series") if tab in tabs]
-            if sections:
-                self.open(sections[0])
-            else:
-                self._go_back_to_tv()
 
     def _handle_folders(self, action: Action, payload: str) -> bool:
         """Plan 4: the Folders tab's tiles: the arrows, Enter plays a folder (or Add folder,
@@ -792,8 +775,8 @@ class LibraryController(QObject):
                 tabs.append(section)
         if self._desk is not None:
             tabs.append("recordings")  # 2.9.7: whatever the providers have
-        if self._folders is not None and self._folders.count():
-            tabs.append("folders")  # Plan 4: while the shelf has a folder
+        if self._folders is not None:
+            tabs.append("folders")  # Plan 4; 2.11.1: an empty shelf's too
         return tabs
 
     def _others_with(self, section: str) -> list[str]:
@@ -1282,7 +1265,7 @@ class LibraryController(QObject):
         if self._search_from == "recordings" and self._desk is not None:
             self._search_from = ""
             self.open_recordings()  # 2.9.7: the page the search came from
-        elif self._search_from == "folders" and self._folders is not None and self._folders.count():
+        elif self._search_from == "folders" and self._folders is not None:
             self._search_from = ""
             self.open_folders()  # Plan 4: the tab the search came from
         elif self._section is None:
