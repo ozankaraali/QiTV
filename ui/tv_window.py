@@ -1678,8 +1678,14 @@ class TVWindow(QMainWindow):
         if not kinds.media:
             if subtitles:
                 self.controller.drop_subtitles(subtitles)
-            if not kinds.others and self._open_due is None and self._playing_file() is None:
-                # Nothing to play: a start's hold ends (a folder's, once it is read).
+            if (
+                not kinds.others
+                and self._playlist_due is None
+                and self._open_due is None
+                and self._playing_file() is None
+            ):
+                # Nothing to play: a start's hold ends (one whose folder is still read, once
+                # that read is over: _on_playlists_read).
                 self.controller.hold_for_file(False)
             return
         path = kinds.media[0]
@@ -1773,14 +1779,14 @@ class TVWindow(QMainWindow):
         playable = [(path, read) for path, read in reads if read.kind in (LOCAL, HLS)]
         failed = [(path, read) for path, read in reads if read.kind in (EMPTY, UNREADABLE)]
         # The start that waited: a film's from here, or a plain start before the providers.
-        held = self.controller.read_over(as_file=bool(playable or failed or unplayable))
+        self.controller.read_over(as_file=bool(playable or failed or unplayable))
         self._add_read_providers(providers, links)
         if not playable:
             if failed:
                 self._say_unplayable(*failed[0])
-            # A start held for a folder (holds_the_start) or for its playlist (held) goes on.
-            looked = any(not _is_playlist(path) for path, _read in reads)
-            if (held or looked) and self._open_due is None and self._playing_file() is None:
+            # A start held for its playlist or for a folder (holds_the_start), this read's or
+            # one that gave way to it, goes on, as an open with nothing to play lets go.
+            if self._open_due is None and self._playing_file() is None:
                 self.controller.hold_for_file(False)  # nothing plays: the start goes on
             return
         if len(playable) > 1:

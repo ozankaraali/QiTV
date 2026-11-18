@@ -859,6 +859,46 @@ class FolderStartTests(LaunchCase, base.WindowCase):
         self.assertTrue(wait_until(self.window.overlays.welcome.isVisible))
         self.assertEqual(runs, [True])
 
+    def test_subtitles_handed_over_while_the_folder_is_read_keep_its_hold(self):
+        # Ruling P4-3: a subtitle file's open never lets go of a start that waits for a read.
+        show = Path(self.config_dir) / "Lantern Coast"
+        series(show)
+        srt = show / "Lantern Coast S01E01.srt"
+        srt.write_text(SUBTITLES, encoding="utf-8")
+        window, gate = self.window, threading.Event()
+        card = window.overlays.welcome
+        with mock.patch.object(window.controller, "play_list") as played, gated_folder_reads(gate):
+            held, runs = self.launch(show)
+            window.open_paths([str(srt)], source="handover")
+            elapse(SETTLE_MS)
+            self.assertTrue(held)
+            self.assertEqual(runs, [])
+            self.assertFalse(card.isVisible())
+            gate.set()
+            self.assertTrue(wait_until(lambda: played.called))
+        self.assertEqual(runs, [])  # the list holds it now
+
+    def test_a_folder_read_given_way_to_a_providers_list_lets_the_start_go(self):
+        show = Path(self.config_dir) / "Lantern Coast"
+        series(show)
+        playlist = Path(self.config_dir) / "Kanallar.m3u"
+        playlist.write_text(f"#EXTM3U\n#EXTINF:-1,Bir\n{PANEL}/1.ts\n", encoding="utf-8")
+        window, gate = self.window, threading.Event()
+        with (
+            mock.patch.object(window.controller, "play_list") as played,
+            mock.patch.object(window, "add_dropped_providers") as added,
+            gated_folder_reads(gate),
+        ):
+            held, runs = self.launch(show)
+            self.assertTrue(held)
+            window.open_paths([str(playlist)], source="handover")  # a newer choice
+            self.assertTrue(wait_until(lambda: added.called))
+            self.assertTrue(wait_until(lambda: runs == [True]), runs)  # nothing holds it now
+            gate.set()
+            elapse(SETTLE_MS)
+        played.assert_not_called()  # the folder gave way
+        self.assertTrue(wait_until(window.overlays.welcome.isVisible))
+
 
 class NoProviderRouterTests(RouterCase):
     def provider_list(self):
