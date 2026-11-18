@@ -133,6 +133,125 @@ class ReadPlaylistTests(Folder, unittest.TestCase):
         read = read_playlist(str(with_bom))
         self.assertEqual((read.kind, read.name, read.entries), ("local", "Liste", (str(song),)))
 
+    def test_a_legacy_playlist_is_read_in_the_code_page_its_files_are_named_in(self):
+        # Ruling P4-31: past UTF-8, the code page under which the most entries are there.
+        turkish = [self.file(name) for name in ("Gölgeli Şehir.mp3", "Dağ İzi.mp3", "Işık.flac")]
+        text = "#EXTM3U\r\n" + "".join(f"{path.name}\r\n" for path in turkish)
+        read = read_playlist(str(self.playlist(text, name="Türkçe.m3u", encoding="cp1254")))
+        self.assertEqual((read.kind, read.entries), ("local", tuple(map(str, turkish))))
+        cyrillic = self.file("Ночной берег.mp3")
+        read = read_playlist(str(self.playlist(f"{cyrillic.name}\n", encoding="cp1251")))
+        self.assertEqual(read.entries, (str(cyrillic),))
+        # cp1254 reads these bytes too, as other letters (Ş, ğ): cp1252's are the files'
+        western = self.file("Þoka við sjó.mp3")
+        read = read_playlist(str(self.playlist(f"{western.name}\n", encoding="cp1252")))
+        self.assertEqual(read.entries, (str(western),))
+
+    def test_a_tie_or_nothing_there_keeps_the_first_code_page(self):
+        sehir = self.file("Şehir.mp3")  # cp1254's 0xDE; cp1252 reads it as Þ
+        self.file("Þoka.mp3")  # cp1252's 0xDE again: cp1254 reads it as Ş
+        data = "Şehir.mp3\n".encode("cp1254") + "Þoka.mp3\n".encode("cp1252")
+        (self.folder / "Liste.m3u").write_bytes(data)
+        read = read_playlist(str(self.folder / "Liste.m3u"))
+        self.assertEqual((read.entries, read.missing), ((str(sehir),), 1))  # one each: cp1254
+        (self.folder / "Yok.m3u").write_bytes("Yok ğ.mp3\n".encode("cp1254"))
+        read = read_playlist(str(self.folder / "Yok.m3u"))
+        self.assertEqual(read, PlaylistRead("empty", "Yok", (), 1))
+
+    def test_a_utf8_playlist_is_read_as_utf8_only(self):
+        # Its entry is gone; its cp1252 misreading's twin is there, and stays unread.
+        self.file("GÃ¶lge.mp3")
+        read = read_playlist(str(self.playlist("Gölge.mp3\n")))
+        self.assertEqual(read, PlaylistRead("empty", "Akşam listesi", (), 1))
+
+    def test_each_file_is_looked_at_once_and_the_read_stops_once_all_are_there(self):
+        plain = self.file("film.mkv")
+        song = self.file("Şarkı.mp3")
+        data = b"film.mkv\n" + "Şarkı.mp3\n".encode("cp1254") + b"yok.mp3\n"
+        (self.folder / "Liste.m3u").write_bytes(data)
+        stat = os.stat
+        looked: list[str] = []
+
+        def spy(path, *args, **kwargs):
+            looked.append(str(path))
+            return stat(path, *args, **kwargs)
+
+        with mock.patch.object(local_playlist.os, "stat", side_effect=spy):
+            read = read_playlist(str(self.folder / "Liste.m3u"))
+        self.assertEqual((read.entries, read.missing), ((str(plain), str(song)), 1))
+        self.assertEqual(len(looked), len(set(looked)))  # each path once, whatever the code page
+        self.assertEqual(looked.count(str(plain)), 1)
+        (self.folder / "Tamam.m3u").write_bytes(b"film.mkv\n" + "Şarkı.mp3\n".encode("cp1254"))
+        looked.clear()
+        with mock.patch.object(local_playlist.os, "stat", side_effect=spy):
+            read_playlist(str(self.folder / "Tamam.m3u"))
+        self.assertEqual(looked, [str(plain), str(song)])  # all there: no other code page
+
+    def test_the_code_pages_tried_start_with_windows_own(self):
+        later = ["cp1254", "cp1252", "cp1251", "cp1253", "cp1250"]
+        with mock.patch.object(local_playlist.sys, "platform", "linux"):
+            self.assertEqual(local_playlist._code_pages(), later)
+        for system, pages in (
+            ("cp1251", ["cp1251", "cp1254", "cp1252", "cp1253", "cp1250"]),
+            ("cp932", ["cp932", *later]),
+            ("cp65001", later),  # the system's UTF-8: read first already
+            ("cp1254", later),
+        ):
+            with self.subTest(system=system):
+                with (
+                    mock.patch.object(local_playlist.sys, "platform", "win32"),
+                    mock.patch.object(local_playlist.locale, "getencoding", return_value=system),
+                ):
+                    self.assertEqual(local_playlist._code_pages(), pages)
+
+    def test_entries_on_another_computer_are_never_looked_at(self):
+        # Item 9: a share's file is checked as it plays, never while the list is read.
+        film = self.file("film.mkv", b"x" * 4)
+        text = (
+            "\\\\nas\\share\\a.mp3\n"
+            "//nas/share/b%20c.mp3\n"
+            "file://nas/share/d%20e.mp3\n"
+            "\\\\nas\\share\\notes.txt\n"
+            "film.mkv\n"
+        )
+        path = self.playlist(text)
+        stat = os.stat
+        looked: list[str] = []
+
+        def spy(path, *args, **kwargs):
+            looked.append(str(path))
+            return stat(path, *args, **kwargs)
+
+        for platform in ("win32", "linux"):
+            looked.clear()
+            with (
+                self.subTest(platform=platform),
+                mock.patch.object(local_playlist.sys, "platform", platform),
+                mock.patch.object(local_playlist.os, "stat", side_effect=spy),
+            ):
+                read = read_playlist(str(path))
+                self.assertEqual(looked, [str(film)])  # the share's never
+                if platform == "win32":  # there, as far as the read can tell
+                    shared = ("\\\\nas\\share\\a.mp3", "\\\\nas\\share\\b%20c.mp3")
+                    shared += ("\\\\nas\\share\\d e.mp3",)
+                    self.assertEqual(read.entries, (*shared, str(film)))
+                    self.assertEqual((read.sizes, read.missing), ((None, None, None, 4), 1))
+                else:  # a Windows share's path names nothing this system opens
+                    self.assertEqual((read.entries, read.missing), ((str(film),), 4))
+
+    def test_which_paths_are_another_computers(self):
+        for path, other in (
+            ("\\\\nas\\share\\a.mp3", True),
+            ("//nas/share/a.mp3", True),
+            ("\\\\?\\UNC\\nas\\share\\a.mp3", True),
+            ("\\\\?\\C:\\Music\\a.mp3", False),  # extended: this computer's drive
+            ("\\\\.\\C:\\Music\\a.mp3", False),
+            ("C:\\Music\\a.mp3", False),
+            ("/home/ayse/a.mp3", False),
+        ):
+            with self.subTest(path=path):
+                self.assertIs(local_playlist._other_host(path), other)
+
     def test_a_playlist_with_nothing_left_is_empty(self):
         for text, missing in (("#EXTM3U\n", 0), ("", 0), ("#EXTM3U\nyok.mkv\nyok.mp3\n", 2)):
             with self.subTest(text=text):

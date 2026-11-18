@@ -6,7 +6,10 @@
 - Otherwise its lines name local files: file URLs, absolute paths or paths relative to the
   playlist's folder (`\\` taken as a separator too, as a list written on Windows has it). The
   media files among them that are there play as a list, in its order; the others are counted
-  as missing.
+  as missing. A file on another computer (a Windows share's, `\\\\host\\share\\…`) is never
+  looked at here: on Windows it counts as there, and is checked as it plays.
+- A list that isn't UTF-8 was written in its system's code page: of the likely ones (on
+  Windows its own first), the one under which the most of its files are there is its own.
 
 A folder opened in QiTV (`read_folder`, Task 11) is read as such a list too, and so are several
 media files dropped together (`read_files`), in one order for the whole list:
@@ -26,8 +29,10 @@ it only on a worker; `subtitles_for` alone is pure.
 
 from __future__ import annotations
 
+import codecs
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass
+import locale
 import logging
 import ntpath
 import os
@@ -61,6 +66,9 @@ _LINK = re.compile(r"([A-Za-z][A-Za-z0-9+.-]+)://")
 # A list this large is a provider's (a local one names a few thousand files at most): it is
 # not read, and becomes a provider as before.
 MAX_BYTES = 32 * 1024 * 1024
+# The code pages a list that isn't UTF-8 may be in, after Windows' own (ruling P4-31): Turkish,
+# Western, Cyrillic, Greek, Central European.
+LEGACY_CODE_PAGES = ("cp1254", "cp1252", "cp1251", "cp1253", "cp1250")
 
 
 @dataclass(frozen=True)
@@ -91,42 +99,117 @@ def read_playlist(path: str) -> PlaylistRead:
         return PlaylistRead(UNREADABLE, name)
     if len(data) > MAX_BYTES:
         return PlaylistRead(PROVIDER, name)
-    lines = [line.strip() for line in _decode(data).splitlines()]
+    try:
+        text: Optional[str] = data.decode("utf-8-sig")
+    except UnicodeDecodeError:
+        text = None  # an older player's list, in its system's code page
+    # What makes it a stream or a provider's list is ASCII: Latin-1 tells it in any code page.
+    shown = text if text is not None else data.decode("latin-1")
+    lines = [line.strip() for line in shown.splitlines()]
     if any(line.startswith("#EXT-X-") for line in lines):
         return PlaylistRead(HLS, name)
-    named = [line for line in lines if line and not line.startswith("#")]
-    for line in named:
-        link = _LINK.match(line)
+    for line in lines:
+        link = _LINK.match(line) if line and not line.startswith("#") else None
         if link is not None and link.group(1).lower() != "file":
             return PlaylistRead(PROVIDER, name)
     folder = os.path.dirname(os.path.abspath(path))
+    seen: dict[str, Optional[int]] = {}  # each file's size, looked at once whatever the reading
+    if text is not None:
+        return _listed(name, _named(text.splitlines()), folder, seen)[1]
+    rows = data.splitlines()
+    best: Optional[tuple[int, PlaylistRead]] = None
+    for encoding in _code_pages():
+        found, read = _listed(name, _named(rows, encoding), folder, seen)
+        if best is None or found > best[0]:
+            best = (found, read)  # a tie keeps the code page tried first
+        if not read.missing:
+            break  # every file it names is there
+    assert best is not None  # (LEGACY_CODE_PAGES is never empty)
+    return best[1]
+
+
+def _code_pages() -> list[str]:
+    """The code pages a list that isn't UTF-8 is read in, in order: on Windows its own (the
+    ANSI code page, whatever Python's UTF-8 mode says), then LEGACY_CODE_PAGES; each once."""
+    pages: list[str] = []
+    if sys.platform == "win32":
+        try:
+            own = codecs.lookup(locale.getencoding()).name
+        except LookupError, ValueError:
+            own = ""
+        if own and own != "utf-8":  # (a system set to UTF-8: tried first already)
+            pages.append(own)
+    for page in LEGACY_CODE_PAGES:
+        if codecs.lookup(page).name not in pages:
+            pages.append(codecs.lookup(page).name)
+    return pages
+
+
+def _named(rows: Sequence[Any], encoding: str = "") -> list[Optional[str]]:
+    """The lines that name something (no blank line, no `#` tag or comment), stripped: `rows`
+    as text, or as bytes read in `encoding` (None: a line that code page can't read)."""
+    named: list[Optional[str]] = []
+    for row in rows:
+        if isinstance(row, bytes):
+            try:
+                line: Optional[str] = row.decode(encoding).strip()
+            except UnicodeDecodeError:
+                line = None
+        else:
+            line = row.strip()
+        if line is None or (line and not line.startswith("#")):
+            named.append(line)
+    return named
+
+
+def _listed(
+    name: str, named: Sequence[Optional[str]], folder: str, seen: dict[str, Optional[int]]
+) -> tuple[int, PlaylistRead]:
+    """The list `named` lines give (LOCAL, or EMPTY when none of its files is there), and how
+    many of its files were found on this computer's disk (another computer's count as there,
+    unlooked at, but never as found). `seen` keeps each file's size across readings."""
     entries: list[str] = []
     sizes: list[Optional[int]] = []
+    found = 0
     for line in named:
+        if line is None:
+            continue  # not in this code page: missing
         try:
             entry = _local_path(line, folder)
-            size = _media_size(entry) if entry is not None else None
+            if entry is None:
+                continue
+            if sys.platform == "win32" and _other_host(entry):
+                if is_video(entry) or is_music(entry):
+                    entries.append(entry)  # checked as it plays, never at the read
+                    sizes.append(None)
+                continue
+            if entry not in seen:
+                seen[entry] = _media_size(entry)
+            size = seen[entry]
         except Exception as error:  # an odd line never ends the read
             logger.debug("A playlist line could not be looked at (%s)", type(error).__name__)
-            entry, size = None, None
-        if entry is not None and size is not None:
+            continue
+        if size is not None:
             entries.append(entry)
             sizes.append(size)
+            found += 1
     missing = len(named) - len(entries)
     if not entries:
-        return PlaylistRead(EMPTY, name, missing=missing)
-    return PlaylistRead(LOCAL, name, tuple(entries), missing, tuple(sizes))
+        return found, PlaylistRead(EMPTY, name, missing=missing)
+    return found, PlaylistRead(LOCAL, name, tuple(entries), missing, tuple(sizes))
 
 
-def _decode(data: bytes) -> str:
-    """UTF-8 (with or without its BOM), else Windows' Western code page, as older players wrote
-    .m3u files; Latin-1 never fails."""
-    for encoding in ("utf-8-sig", "cp1252"):
-        try:
-            return data.decode(encoding)
-        except UnicodeDecodeError:
-            continue
-    return data.decode("latin-1")
+def _other_host(path: str) -> bool:
+    """Whether `path`, in Windows' spelling, is another computer's file: a share's
+    (\\\\host\\share\\…, //host/share/…, \\\\?\\UNC\\host\\share\\…), never a drive's, nor an
+    extended or a device path on this one (\\\\?\\C:\\…, \\\\.\\…). Pure: the disk and the
+    network aren't asked."""
+    spelled = path.replace("/", "\\")
+    if not spelled.startswith("\\\\"):
+        return False
+    if spelled.startswith(("\\\\?\\", "\\\\.\\")):
+        return spelled[4:8].upper() == "UNC\\"
+    return True
 
 
 def _local_path(line: str, folder: str) -> Optional[str]:
@@ -134,6 +217,8 @@ def _local_path(line: str, folder: str) -> Optional[str]:
     if _LINK.match(line):
         return _file_url_path(line)
     if sys.platform == "win32":
+        if _other_host(line):
+            return ntpath.normpath(line)  # a share's (abspath would make the same, unasked)
         return os.path.abspath(os.path.join(folder, line))
     if ntpath.splitdrive(line)[0]:
         return None  # a Windows drive's ("C:\\…"), on another system
