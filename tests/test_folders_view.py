@@ -176,6 +176,62 @@ class FoldersViewTests(DeskCase):
             self.assertIsNot(thread, threading.main_thread())
             self.assertEqual(how.get("cap"), 0)  # no song's tags are read for a line
 
+    def test_a_folder_opened_while_the_shelf_is_read_is_the_only_one_read_again(self):
+        # M1: the shelf changing while its folders are read reads the new folder alone: the
+        # ones still being read aren't read a second time on a thread of their own.
+        names = ("Tidewick Isle", "Brannow Fell", "Lantern Coast")
+        for name in names:
+            make_videos(self.root / name, count=1)
+        for name in names[:2]:
+            self.add(self.root / name, VIDEOS)
+        gate = threading.Event()
+        reads: list[str] = []
+
+        def slow(path, **how):
+            reads.append(path)
+            gate.wait(10)
+            return read_folder(path, **how)
+
+        def threads_done():
+            return not any(t.name == "qitv-folder-shelf" for t in threading.enumerate())
+
+        with mock.patch.object(folders_view, "read_folder", side_effect=slow):
+            self.desk.show()
+            self.add(self.root / names[2], VIDEOS)  # opened while the tab shows
+            gate.set()
+            self.wait_for_lines(3)
+            self.assertTrue(wait_until(threads_done))
+            self.assertEqual(sorted(reads), sorted(str(self.root / name) for name in names))
+            # Left and opened again: every folder is read again, once.
+            gate.clear()
+            self.desk.hide()
+            self.desk.show()
+            gate.set()
+            self.assertTrue(wait_until(lambda: len(reads) >= 6 and threads_done()))
+        self.assertEqual(sorted(reads[3:]), sorted(str(self.root / name) for name in names))
+
+    def test_a_cover_is_read_as_large_as_its_tile_shows_it(self):
+        # M3+M4: a large cover is read at its tile's size on this screen (its short side
+        # filling the tile, in the screen's pixels), and never past COVER_MAX_PX.
+        folder = self.root / "Brannow Fell"
+        make_album(folder, count=2, cover=False)
+        image = QImage(1600, 1200, QImage.Format.Format_RGB32)
+        image.fill(QColor("#336699"))
+        image.save(str(folder / "Cover.JPG"), "JPG")
+        self.add(folder, ALBUM)
+        self.desk.show()
+        self.wait_for_lines(1)
+        cover = self.view.tiles()[0].cover
+        side = self.view.cover_px()
+        shown = self.view.tile_rect(0).width() * self.view.devicePixelRatioF()
+        self.assertEqual(side, round(shown))
+        self.assertEqual((cover.width(), cover.height()), (round(side * 4 / 3), side))
+        look = folders_view.look_at(str(folder), cover_px=5000)  # a tile larger than the cap
+        self.assertEqual(look.cover.height(), folders_view.COVER_MAX_PX)
+        small = self.root / "Tidewick Isle"
+        make_album(small, count=1)  # a 64 px cover: never made larger
+        self.assertEqual(folders_view.look_at(str(small), cover_px=300).cover.width(), 64)
+
     def test_a_gone_folder_shows_missing_and_can_be_removed(self):
         make_videos(self.root / "Tidewick Isle")
         self.add(self.root / "Marrow Sound", VIDEOS)  # gone since

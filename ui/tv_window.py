@@ -98,6 +98,7 @@ from services.local_playlist import (
     read_folder,
     read_playlist,
     subtitles_for,
+    where_it_starts,
 )
 from services.media_keys import MediaKeys
 from services.media_reporter import MediaReporter
@@ -150,7 +151,6 @@ from ui.find_session import FindSession
 from ui.free_channels_menu import show_menu as show_free_channels_menu
 from ui.grid_frame import GridFrame
 from ui.keymap import Action, as_int, resolve
-from ui.library.folders_view import where_it_starts
 from ui.library.library_screen import LibraryScreen
 from ui.link_lanes import Target
 from ui.live_tuner import LiveTuner, one_disk_ring, wait_for_each_other
@@ -1973,7 +1973,7 @@ class TVWindow(QMainWindow):
         seen to its end), which resumes there as any file does; else (Plan 4, Task 12) at the
         one after the last entry seen to its end; None when there is neither (it starts as any
         list: its first entry, or a song of its own picking when shuffled). The Folders tab's
-        "next" is this entry (folders_view.where_it_starts, one rule)."""
+        "next" is this entry (local_playlist.where_it_starts, one rule)."""
         return where_it_starts(self.watch, read.entries, read.sizes)
 
     def list_entry_opens(self, target: Target, path: str) -> None:

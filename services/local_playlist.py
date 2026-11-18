@@ -423,6 +423,26 @@ def start_index(
     return None
 
 
+def where_it_starts(
+    watch: Any, entries: Sequence[str], sizes: Sequence[Optional[int]]
+) -> Optional[int]:
+    """Where a folder's list starts by what `watch` (the WatchState, or anything with its
+    resume_position and seen_finished) kept of its files: start_index, for the router's start
+    and a Folders tile's "next" alike. Pure but for what `watch` reads."""
+    # (watch_state's module holds a QTimer and the media servers': this one stays light)
+    from services.watch_state import local_key
+
+    def key(path: str, size: int) -> str:
+        return local_key(os.path.basename(path), size)
+
+    return start_index(
+        entries,
+        sizes,
+        part_way=lambda path, size: watch.resume_position(key(path, size)) is not None,
+        finished=lambda path, size: watch.seen_finished(key(path, size)),
+    )
+
+
 def _by_tags(songs: list[_File], deadline: float, cap: int) -> list[_File]:
     """`songs` (in natural order) by disc and track (no disc: the first), when libVLC read each
     one (album_listing.read_tracks, within what is left until `deadline`) with a track number

@@ -3,7 +3,7 @@ one opened last first (services.folder_shelf keeps them).
 
 A light shelf, not a media library: nothing is scanned, no picture is decoded from a video,
 nothing is fetched. A tile shows the folder's name, one line of what it holds ("S2 · E5 next"
-for a series: the episode the start rule plays, `where_it_starts`; "Album · 12 songs"; "8
+for a series: the episode the start rule plays, local_playlist.where_it_starts; "Album · 12
 videos") and its cover: its own cover, folder or front picture (song_facts.folder_cover), else
 the audio screen's drawn stand-in with its name. The tab shows at once with each folder's name
 and the kind kept on the shelf; then the folders are read on a worker, no song's tags among
@@ -51,11 +51,10 @@ from services.local_playlist import (
     UNREADABLE,
     PlaylistRead,
     read_folder,
-    start_index,
+    where_it_starts,
 )
 from services.open_paths import is_video
 from services.song_facts import folder_cover
-from services.watch_state import local_key
 from ui.keymap import key_hint
 from ui.library.top_nav import TAB_LABELS
 from ui.overlays.audio_screen import name_upper, paint_stand_in
@@ -91,7 +90,9 @@ WHEEL_STEP_U = 6.0
 RING_PX = 1.5
 HOVER_ALPHA = 0.1  # under the pointer, as the grid's chips
 MISSING_SHADE = 0.62  # a missing folder's cover, under the canvas
-COVER_PX = 360  # a cover is read at most this large a side (a tile's on a 2× screen)
+# A cover is read at its tile's size on this screen (FoldersView.cover_px: its short side fills
+# the tile, in the screen's pixels), never larger than this (a 5K screen's tile, about).
+COVER_MAX_PX = 640
 PAGE_ROWS = 2
 
 TITLE_TEXT = TAB_LABELS["folders"]  # the tab's name is its title
@@ -140,20 +141,22 @@ class FolderLook:
     cover: Optional[QImage] = None
 
 
-def look_at(path: str) -> FolderLook:
+def look_at(path: str, cover_px: int = COVER_MAX_PX) -> FolderLook:
     """The folder at `path`, read as a dropped folder is (no song's tags: their count is
-    enough), and its cover read to at most COVER_PX a side. Never raises; blocking disk I/O
-    (call on a worker: a QImage is the only Qt object it makes)."""
+    enough), and its cover read with its short side `cover_px` at most (COVER_MAX_PX: the
+    tile crops it square). Never raises; blocking disk I/O (call on a worker: a QImage is the
+    only Qt object it makes)."""
     try:
         read = read_folder(path, cap=0)
     except Exception as error:  # it never raises; a tile is never left unanswered all the same
         logger.warning("A shelf folder could not be read (%s)", type(error).__name__)
         read = PlaylistRead(UNREADABLE, os.path.basename(path.rstrip("/\\")))
-    cover = _cover(path) if read.kind in (LOCAL, EMPTY) else None
+    side = max(1, min(int(cover_px), COVER_MAX_PX))
+    cover = _cover(path, side) if read.kind in (LOCAL, EMPTY) else None
     return FolderLook(read, cover)
 
 
-def _cover(path: str) -> Optional[QImage]:
+def _cover(path: str, side: int) -> Optional[QImage]:
     try:
         name = folder_cover(os.listdir(path))
         if name is None:
@@ -161,32 +164,14 @@ def _cover(path: str) -> Optional[QImage]:
         reader = QImageReader(os.path.join(path, name))
         reader.setAutoTransform(True)
         size = reader.size()
-        if size.isValid() and max(size.width(), size.height()) > COVER_PX:
-            reader.setScaledSize(
-                size.scaled(COVER_PX, COVER_PX, Qt.AspectRatioMode.KeepAspectRatio)
-            )
+        if size.isValid() and min(size.width(), size.height()) > side:
+            expand = Qt.AspectRatioMode.KeepAspectRatioByExpanding
+            reader.setScaledSize(size.scaled(side, side, expand))  # never made larger
         image = reader.read()
     except Exception as error:  # an odd picture: the stand-in
         logger.info("A shelf folder's cover could not be read (%s)", type(error).__name__)
         return None
     return None if image.isNull() else image
-
-
-def where_it_starts(
-    watch: Any, entries: Sequence[str], sizes: Sequence[Optional[int]]
-) -> Optional[int]:
-    """Where a folder's list starts by what `watch` (the WatchState) kept of its files:
-    services.local_playlist.start_index, the router's start and a tile's "next" alike."""
-
-    def key(path: str, size: int) -> str:
-        return local_key(os.path.basename(path), size)
-
-    return start_index(
-        entries,
-        sizes,
-        part_way=lambda path, size: watch.resume_position(key(path, size)) is not None,
-        finished=lambda path, size: watch.seen_finished(key(path, size)),
-    )
 
 
 def tile_line(read: PlaylistRead, start: Optional[int]) -> str:
@@ -233,11 +218,12 @@ class FolderLooks(QObject):
         super().__init__(parent)
         self._wanted = _Wanted()
 
-    def look(self, serial: int, paths: Sequence[str]) -> None:
+    def look(self, serial: int, paths: Sequence[str], cover_px: int = COVER_MAX_PX) -> None:
+        """Read `paths` (their covers `cover_px` on their short side, at most)."""
         self._wanted.serial = serial
         threading.Thread(
             target=self._run,
-            args=(serial, list(paths), self._wanted),
+            args=(serial, list(paths), int(cover_px), self._wanted),
             name="qitv-folder-shelf",
             daemon=True,
         ).start()
@@ -245,11 +231,11 @@ class FolderLooks(QObject):
     def stop(self) -> None:
         self._wanted.serial = -1
 
-    def _run(self, serial: int, paths: list[str], wanted: _Wanted) -> None:
+    def _run(self, serial: int, paths: list[str], cover_px: int, wanted: _Wanted) -> None:
         for path in paths:
             if wanted.serial != serial:
                 return
-            look = look_at(path)
+            look = look_at(path, cover_px)
             try:
                 self.looked.emit(serial, path, look)
             except RuntimeError:
@@ -357,6 +343,12 @@ class FoldersView(TooltipWidget):
 
     def tiles(self) -> list[Tile]:
         return list(self._tiles)
+
+    def cover_px(self) -> int:
+        """A tile's cover side in this screen's pixels, as the tiles are laid out now: how
+        large a cover is read (look_at)."""
+        side = self._cells()[0].cover.width()
+        return max(1, round(side * self.devicePixelRatioF()))
 
     # ---- the keys -----------------------------------------------------------------------------
 
@@ -847,6 +839,7 @@ class FoldersDesk(QObject):
         self._watch = watch
         self._open_folder = open_folder
         self._known: dict[str, FolderLook] = {}  # by path: the last look at each folder
+        self._reading: set[str] = set()  # the paths the newest look reads still (M1)
         self._serial = 0
         self._shown = False
         self._asking = False
@@ -870,17 +863,23 @@ class FoldersDesk(QObject):
         watched since)."""
         self._shown = True
         self._serial += 1
+        self._reading.clear()  # an older look's are no longer answered
         self._fill()
-        paths = [entry["path"] for entry in self._shelf.folders()]
-        if paths:
-            self._looks.look(self._serial, paths)
+        self._look([entry["path"] for entry in self._shelf.folders()])
 
     def hide(self) -> None:
         """The tab is left (or the Library): reads under way are dropped, the question too."""
         self._shown = False
         self._serial += 1
+        self._reading.clear()
         self._looks.stop()
         self.withdraw()
+
+    def _look(self, paths: Sequence[str]) -> None:
+        """Read `paths` on the looks' thread, their covers at the tiles' size on this screen."""
+        if paths:
+            self._reading.update(paths)
+            self._looks.look(self._serial, paths, self._view.cover_px())
 
     def withdraw(self) -> None:
         if self._asking:
@@ -912,9 +911,8 @@ class FoldersDesk(QObject):
         self._known = {path: look for path, look in self._known.items() if path in paths}
         if self._shown:
             self._fill()
-            unread = [path for path in paths if path not in self._known]
-            if unread:  # a folder opened while the tab shows
-                self._looks.look(self._serial, unread)
+            # a folder opened while the tab shows (not one still read: never twice at once)
+            self._look([p for p in paths if p not in self._known and p not in self._reading])
             if not paths:
                 self.withdraw()
         self.changed.emit()
@@ -928,6 +926,7 @@ class FoldersDesk(QObject):
     def _on_looked(self, serial: int, path: str, look: FolderLook) -> None:
         if serial != self._serial:
             return  # an older read's (the tab was left since)
+        self._reading.discard(path)
         entry = next((e for e in self._shelf.folders() if e["path"] == path), None)
         if entry is None:
             return  # taken off meanwhile
