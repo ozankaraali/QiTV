@@ -103,8 +103,10 @@ def _status(media: Any) -> int:
 
 
 def music_files(folder: str) -> list[tuple[str, Optional[int]]]:
-    """The audio files directly in `folder` as (name, size or None), in natural order; hidden
-    ones left out. [] when the folder can't be read."""
+    """The audio files directly in `folder` as (name, size or None), in natural order, names
+    natural order can't tell apart ("01", "1") as written: never in the order the disk lists
+    them (APFS, NTFS and ext4 each have their own). Hidden ones left out; [] when the folder
+    can't be read."""
     found: list[tuple[str, Optional[int]]] = []
     try:
         with os.scandir(folder) as entries:
@@ -126,7 +128,7 @@ def music_files(folder: str) -> list[tuple[str, Optional[int]]]:
     except Exception as error:
         logger.debug("Could not list a song's folder: %s", type(error).__name__)
         return []
-    found.sort(key=lambda item: natural_key(item[0]))
+    found.sort(key=lambda item: (natural_key(item[0]), item[0]))
     return found
 
 

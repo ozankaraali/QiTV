@@ -159,6 +159,7 @@ def _order(track: Mapping[str, Any]) -> tuple:
         number is None,  # no track number: after those with one
         number or 0,
         natural_key(str(track.get("name") or "")),
+        str(track.get("name") or ""),  # "01" and "1" as written: never as they came
     )
 
 

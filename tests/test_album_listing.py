@@ -1,17 +1,20 @@
 """A song's album and cover, read off the GUI thread (services.album_listing, ui.song_jobs).
 
-The folder listing and its budget run on fakes (an injected parse); the legs that read real
-files make tiny tagged songs with ffmpeg (skipped without it) and parse them with libVLC.
+The folder listing and its budget run on fakes (an injected parse, and a clock that moves only
+as that parse says, so a runner's disk and speed never decide a budget test); the legs that read
+real files make tiny tagged songs with ffmpeg (skipped without it) and parse them with libVLC.
 Every artist, album and song name here is made up, with a suffix per run: libVLC caches a
 song's art under its artist and album, and a stale entry must never decide a test.
 """
 
+import contextlib
 import os
 from pathlib import Path
+import random
 import shutil
 import subprocess
 import tempfile
-import time
+import threading
 import unittest
 from unittest import mock
 import uuid
@@ -102,6 +105,26 @@ def _fake_tags(album=""):
     return dict(song_tags({}), album=album)  # what libVLC read: only an album tag
 
 
+class _Clock:
+    """album_listing's clock in a test (its `time`): it moves only as the fake parse says, so
+    the budget is tested exactly, whatever the runner's disk and speed (binary fractions of a
+    second: no rounding)."""
+
+    def __init__(self):
+        self._now = 1024.0
+        self._lock = threading.Lock()
+
+    def monotonic(self):
+        with self._lock:
+            return self._now
+
+    def sleep(self, seconds):
+        with self._lock:
+            self._now += seconds
+
+    advance = sleep
+
+
 class AlbumListingTests(unittest.TestCase):
     """The folder's audio files, each parsed in turn, within a budget and a cap."""
 
@@ -114,6 +137,29 @@ class AlbumListingTests(unittest.TestCase):
             patcher = mock.patch.object(album_listing, target, value)
             patcher.start()
             self.addCleanup(patcher.stop)
+
+    def _clocked(self):
+        clock = _Clock()
+        patcher = mock.patch.object(album_listing, "time", clock)
+        patcher.start()
+        self.addCleanup(patcher.stop)
+        return clock
+
+    @contextlib.contextmanager
+    def _scandir_in(self, folder, order):
+        """`folder` listed by the disk in another order (APFS, NTFS and ext4 each have theirs)."""
+        real = os.scandir
+
+        @contextlib.contextmanager
+        def scandir(path):
+            with real(path) as entries:
+                found = list(entries)
+            if os.path.samefile(path, folder):
+                found = order(found)
+            yield iter(found)
+
+        with mock.patch.object(album_listing.os, "scandir", scandir):
+            yield
 
     def test_only_the_folders_own_audio_files_in_natural_order(self):
         folder = _Folder(self)
@@ -130,52 +176,114 @@ class AlbumListingTests(unittest.TestCase):
     def test_the_album_listing_is_capped_and_never_blocks(self):
         folder = _Folder(self)
         folder.touch(*(f"{n:04d} Song.mp3" for n in range(1, 2001)), "._0001 Song.mp3")
+        clock = self._clocked()
         parsed = []
 
         def slow(_instance, path, timeout_ms, *, fetch=False):
             name = os.path.basename(path)
             parsed.append((name, timeout_ms))
-            # Each file takes a while, and the fifth hangs until libVLC's timeout gives up.
-            time.sleep(timeout_ms / 1000 if name == "0005 Song.mp3" else 0.05)
+            # Each file takes 1/16 s, and the fifth hangs until libVLC's timeout gives up.
+            clock.advance(timeout_ms / 1000 if name == "0005 Song.mp3" else 0.0625)
             return _fake_tags("Wexlo Tide")
 
         self._patched(slow)
-        started = time.monotonic()
-        tracks = list_album(folder.path, budget_s=0.6)
-        took = time.monotonic() - started
-        # A file's own 2 s timeout is cut to what is left of the budget.
-        self.assertLess(took, 1.5, "the listing overran its budget (uncut, it takes 2.2 s)")
-        self.assertTrue(0 < len(tracks) < 2000)
+        started = clock.monotonic()
+        tracks = list_album(folder.path, budget_s=0.5)
+        # Four files in 1/4 s, then the fifth's own 2 s timeout cut to the 1/4 s left: the
+        # listing ends with its budget (uncut, it would have taken 2.25 s).
+        self.assertEqual(clock.monotonic() - started, 0.5)
+        self.assertEqual(
+            parsed, [(f"{n:04d} Song.mp3", ms) for n, ms in enumerate((500, 437, 375, 312, 250), 1)]
+        )
+        self.assertEqual([t["name"] for t in tracks], [name for name, _ms in parsed])
         self.assertTrue(all(t["parsed"] for t in tracks))
-        self.assertEqual(tracks[0]["name"], "0001 Song.mp3")
-        self.assertEqual([t["name"] for t in tracks], [n for n, _ms in parsed])
-        self.assertTrue(all(0 < ms <= album_listing.PARSE_TIMEOUT_MS for _n, ms in parsed))
-        self.assertLessEqual(dict(parsed)["0005 Song.mp3"], 600)
         self.assertEqual(tracks[0]["album"], "Wexlo Tide")
         self.assertEqual(tracks[0]["path"], folder / "0001 Song.mp3")
         self.assertEqual(tracks[0]["size"], 16)
 
         parsed.clear()
-        self._patched(lambda _i, path, _ms, *, fetch=False: _fake_tags("Wexlo Tide"))
+        self._patched(
+            lambda _i, path, _ms, *, fetch=False: parsed.append(path) or _fake_tags("Wexlo Tide")
+        )
         tracks = list_album(folder.path, cap=25)
         self.assertEqual([t["name"] for t in tracks], [f"{n:04d} Song.mp3" for n in range(1, 26)])
+        self.assertEqual(len(parsed), 25)  # the cap: no file past it is read
 
-        # From the GUI: the job returns at once, the album comes later, as plain data.
-        self._patched(slow)
+        # From the GUI: start() returns while the first parse still waits, and the album comes
+        # later, as plain data; the playing song (far past the cap) is read first.
+        parsed.clear()
+        go = threading.Event()
+
+        def gated(_instance, path, timeout_ms, *, fetch=False):
+            go.wait(10)
+            parsed.append((os.path.basename(path), timeout_ms))
+            clock.advance(0.0625)  # eight files fill the 1/2 s budget
+            return _fake_tags("Wexlo Tide")
+
+        self._patched(gated)
         job = AlbumJob()
         got = []
         job.listed.connect(lambda generation, album: got.append((generation, album)))
-        playing = folder / "1500 Song.mp3"  # far past the cap: read first all the same
-        started = time.monotonic()
         with mock.patch.object(album_listing, "LIST_BUDGET_S", 0.5):
-            job.start(7, playing)
-            self.assertLess(time.monotonic() - started, 0.5)  # returns at once: no parse here
-            self.assertTrue(wait_until(lambda: got, 5000))
+            job.start(7, folder / "1500 Song.mp3")
+            self.assertEqual((parsed, got), ([], []))  # never waits for the listing
+            go.set()
+            self.assertTrue(wait_until(lambda: got, 10_000))
+        self.assertEqual(
+            [name for name, _ms in parsed],
+            ["1500 Song.mp3", *(f"{n:04d} Song.mp3" for n in range(1, 8))],
+        )
         generation, album = got[0]
         self.assertEqual(generation, 7)
         self.assertIsInstance(album, list)
-        self.assertIn("1500 Song.mp3", [t["name"] for t in album])
+        self.assertEqual(
+            [t["name"] for t in album],
+            [*(f"{n:04d} Song.mp3" for n in range(1, 8)), "1500 Song.mp3"],
+        )
         self.assertTrue(all(t["album"] == "Wexlo Tide" for t in album))
+
+    def test_files_are_read_in_name_order_whatever_the_disk_lists(self):
+        folder = _Folder(self)
+        names = [
+            "10 Quist.mp3",
+            "Bonus.mp3",
+            "2 Pell.mp3",
+            "1 Arn.mp3",
+            "01 Arn.mp3",
+            "001 Arn.mp3",
+        ]
+        folder.touch(*names)
+        parsed = []
+        self._patched(
+            lambda _i, path, _ms, *, fetch=False: parsed.append(os.path.basename(path))
+            or _fake_tags()
+        )
+        # "001", "01" and "1" are the same number: their names, as written, tell them apart.
+        in_order = [
+            "001 Arn.mp3",
+            "01 Arn.mp3",
+            "1 Arn.mp3",
+            "2 Pell.mp3",
+            "10 Quist.mp3",
+            "Bonus.mp3",
+        ]
+        orders = {
+            "reversed": lambda found: found[::-1],
+            "by name": lambda found: sorted(found, key=lambda e: e.name),
+            "by name, reversed": lambda found: sorted(found, key=lambda e: e.name, reverse=True),
+            "shuffled": lambda found: random.Random(3).sample(found, len(found)),
+        }
+        for label, order in orders.items():
+            with self.subTest(order=label), self._scandir_in(folder.path, order):
+                parsed.clear()
+                self.assertEqual([n for n, _size in music_files(folder.path)], in_order)
+                self.assertEqual([t["name"] for t in list_album(folder.path)], in_order)
+                self.assertEqual(parsed, in_order)
+                parsed.clear()
+                album_of(folder / "2 Pell.mp3")  # the playing song first, then the rest in order
+                self.assertEqual(
+                    parsed, ["2 Pell.mp3", *(n for n in in_order if n != "2 Pell.mp3")]
+                )
 
     def test_a_listing_cut_short_says_so(self):
         # Review item 12 (Task 5): an album its time, its cap or a newer start cut short can't
@@ -213,25 +321,41 @@ class AlbumListingTests(unittest.TestCase):
     def test_a_newer_start_stops_the_older_listing(self):
         folder = _Folder(self)
         folder.touch(*(f"{n:03d} Song.mp3" for n in range(1, 400)))
+        clock = self._clocked()
+        reading, go = threading.Event(), threading.Event()
+        parsed = []  # (the listing's thread, the file)
+        lock = threading.Lock()
 
-        def slow(_instance, _path, _timeout_ms, *, fetch=False):
-            time.sleep(0.02)
+        def slow(_instance, path, _timeout_ms, *, fetch=False):
+            with lock:
+                parsed.append((threading.get_ident(), os.path.basename(path)))
+            if os.path.basename(path) == "001 Song.mp3" and not go.is_set():
+                reading.set()  # the older listing reads its song: the newer start comes now
+                go.wait(10)
+            clock.advance(0.0625)
             return _fake_tags("Wexlo Tide")
 
         self._patched(slow)
         job = AlbumJob()
         got = []
-        started = time.monotonic()
-        job.listed.connect(lambda generation, _album: got.append((generation, time.monotonic())))
+        job.listed.connect(lambda generation, album: got.append((generation, len(album))))
         with mock.patch.object(album_listing, "LIST_BUDGET_S", 2.0):
             job.start(1, folder / "001 Song.mp3")
-            time.sleep(0.1)
+            self.assertTrue(reading.wait(10))
             job.start(2, folder / "002 Song.mp3")
+            go.set()
             self.assertTrue(wait_until(lambda: len(got) == 2, 15_000))
         answered = dict(got)
         self.assertEqual(sorted(answered), [1, 2])  # the older one is answered all the same
-        self.assertLess(answered[1] - started, 1.0, "the older listing went on after a newer start")
-        self.assertGreater(answered[2] - started, 1.5)  # the newer one ran its budget
+        threads = {}
+        for thread, name in parsed:
+            threads.setdefault(thread, []).append(name)
+        older = next(names for names in threads.values() if names[0] == "001 Song.mp3")
+        newer = next(names for names in threads.values() if names[0] == "002 Song.mp3")
+        self.assertEqual(older, ["001 Song.mp3"], "the older listing went on after a newer start")
+        self.assertEqual(answered[1], 0)  # its song alone: no list
+        self.assertGreater(len(newer), 2)  # the newer one reads on
+        self.assertEqual(newer[:3], ["002 Song.mp3", "001 Song.mp3", "003 Song.mp3"])
 
     def test_the_listing_never_raises_and_a_file_not_read_is_no_albums(self):
         folder = _Folder(self)

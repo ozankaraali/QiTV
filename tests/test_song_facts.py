@@ -156,6 +156,16 @@ class AlbumTracksTests(unittest.TestCase):
                 "d2t1.mp3",
             ],
         )
+        # Names natural order can't tell apart ("01", "1") go as written, whichever plays.
+        same = [_track("1 Arn.mp3"), _track("01 Arn.mp3"), _track("001 Arn.mp3")]
+        for current in same:
+            with self.subTest(current=current["name"]):
+                self.assertEqual(
+                    _names(
+                        album_tracks(current, [current, *(t for t in same if t is not current)])
+                    ),
+                    ["001 Arn.mp3", "01 Arn.mp3", "1 Arn.mp3"],
+                )
 
     def test_track_and_disc_numbers(self):
         for text, number in (
