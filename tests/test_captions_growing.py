@@ -730,7 +730,7 @@ class TitlePrefixTest(unittest.TestCase):
     def test_a_language_the_viewer_chose_stays_theirs(self) -> None:
         captions = self.controller("TR: Channel One")
         captions._config_get = lambda key, default=None: (
-            {captions._channel_key(): "English"} if key == "ai_captions_picks" else default
+            {captions._language_key(): "English"} if key == "ai_captions_picks" else default
         )
         captions._resolve_language()
         self.assertEqual(captions._language[0], "English")
@@ -788,3 +788,39 @@ class TitlePrefixTest(unittest.TestCase):
         self.assertEqual(run.language, "")  # not known: Qwen tells it, as without a prefix
         self.assertIsNone(run.writer)
         self.assertFalse([m for m in sent if m[0] == "detected"])
+
+    def test_turkish_heard_on_a_file_goes_to_our_turkish_model_as_on_a_channel(self) -> None:
+        # 2.11.1: a file's run (a song, a video file) starts with no language unless the viewer
+        # or its audio track named one. Its pieces vote as a channel's do: Turkish locked, our
+        # Turkish Moonshine takes the sound over (the growing writer) and the controller hears
+        # it (which asks for that model when it isn't here: _offer_specialist).
+        from types import SimpleNamespace
+        from unittest import mock
+
+        from services.captions.worker import TURKISH, _FilmRun, _Run
+
+        said = "Bu akşam tarih konuşacağız ve Osmanlı devletini anlatacağız."
+        for kind in (_Run, _FilmRun):
+            with self.subTest(run=kind.__name__):
+                sent: list[tuple] = []
+                prepared: list[str] = []
+                model = SimpleNamespace(
+                    moonshine=True,
+                    turkish=object(),
+                    prepare=prepared.append,
+                    is_speech=lambda window: False,
+                    is_voiced=lambda window: False,
+                )
+                run = object.__new__(kind)
+                with mock.patch("services.captions.decoder.AudioDecoder"):
+                    _Run.__init__(
+                        run, SimpleNamespace(send=sent.append), model, 7, "", 0.0, None, "", [0.0]
+                    )
+                self.assertIsNone(run.writer)  # no language: Qwen's pieces first
+                with mock.patch("services.captions.worker.threading.Thread"):
+                    for _ in range(3):
+                        run._heard(said, 3.0)
+                self.assertEqual(run.language, TURKISH)
+                self.assertIn(TURKISH, prepared)
+                self.assertIsInstance(run.writer, GrowingWriter)
+                self.assertIn(("detected", 7, TURKISH), sent)

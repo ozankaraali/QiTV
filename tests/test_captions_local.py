@@ -47,7 +47,9 @@ class _Card:
         self.withdrawn += 1
 
 
-class LocalCaptionsTests(ControllerTestCase):
+class _LocalCase(ControllerTestCase):
+    """A real CaptionsController over the TV controller's fakes (its models here, fast)."""
+
     def setUp(self):
         super().setUp()
         from ui.captions_controller import CaptionsController
@@ -100,6 +102,8 @@ class LocalCaptionsTests(ControllerTestCase):
         self.session.play = recording
         return seen
 
+
+class LocalCaptionsTests(_LocalCase):
     def test_comes_back_on_for_local_video(self):
         self.config.ai_captions_local_on = True
         self.film()
@@ -479,6 +483,122 @@ class LocalCaptionsTests(ControllerTestCase):
                 self.assertTrue(self.captions.enabled())
                 self.captions.toggle()
                 self.assertEqual(self.config.ai_captions_local_on, kept)
+
+
+TIDE = "/music/Wexlo Tide/01 Tide.mp3"
+HARBOUR = "/music/Wexlo Tide/02 Harbour.flac"  # the same album (folder)
+QUAY = "/music/Brannow Fell/01 Quay.mp3"  # another one
+
+
+class LocalLanguageTests(_LocalCase):
+    """2.11.1, the owner: Words on an English song started in Turkish, Settings' default. The
+    language a file's captions hear: the viewer's pick (a song's for its folder, its album; a
+    video file's for itself), else its audio track's, else what was heard there before (a
+    song: in its folder), else the model's own detection. Settings' default is for channels
+    and provider films only."""
+
+    def setUp(self):
+        super().setUp()
+        self.config.ai_captions_language = "Turkish"  # the owner's Settings
+        self.sent = []
+        self.captions._process.send = lambda *message: self.sent.append(message)
+
+    def play(self, path):
+        self.controller.play_file(path)  # (no size: no resume key, as a song's tests here)
+        self.session.stateChanged.emit("playing")
+        self.captions._resolve_language()
+
+    def heard(self):
+        return self.captions.language()
+
+    def test_settings_default_is_for_channels_and_films_not_the_viewers_own_files(self):
+        from ui.captions_texts import FROM_DEFAULT
+
+        for path in (TIDE, FILM):
+            with self.subTest(path=path):
+                self.play(path)
+                self.assertEqual(self.heard(), ("auto", "automatic"))
+        self.controller.tune_live(CHANNELS[0], group_key="10", channels=list(CHANNELS))
+        self.ready()
+        self.captions._resolve_language()
+        self.assertEqual(self.captions._language, ("Turkish", FROM_DEFAULT))  # as before
+        self.controller.play_vod(tv.VodTests.MOVIE, "movie", play_context())
+        self.catalog.linkReady.emit(self.catalog.links[-1][0], "http://vod/heat.mkv")
+        self.captions._resolve_language()
+        self.assertEqual(self.captions._language, ("Turkish", FROM_DEFAULT))  # a provider's film
+
+    def test_a_song_is_read_with_no_language_and_the_words_say_none_yet(self):
+        from ui.tv_controller import TVController
+
+        self.play(TIDE)
+        self.captions.toggle()  # Words: on for the song
+        self.captions._on_ready()  # (the model loaded)
+        [film] = [message for message in self.sent if message[0] == "film"]
+        self.assertEqual(film[5], "")  # the model hears it
+        self.assertEqual(TVController._words_language(self.captions), "")  # "Words" alone
+        changed = []
+        self.captions.changed.connect(lambda: changed.append(True))
+        self.captions._on_detected(self.captions._run, "English")
+        self.assertEqual(self.heard(), ("English", "automatic"))
+        self.assertTrue(changed)  # the pill follows: "Words · English"
+        self.assertEqual(TVController._words_language(self.captions), "English")
+
+    def test_what_was_heard_on_a_song_starts_its_albums_other_songs(self):
+        self.play(TIDE)
+        self.captions.toggle()
+        self.captions._on_ready()
+        self.captions._on_detected(self.captions._run, "English")
+        self.play(HARBOUR)  # the same folder
+        self.assertEqual(self.heard(), ("English", "automatic"))
+        self.play(QUAY)  # another album: heard anew
+        self.assertEqual(self.heard(), ("auto", "automatic"))
+
+    def test_a_language_picked_on_a_song_is_its_albums(self):
+        self.play(TIDE)
+        self.captions.set_language("English")
+        self.assertEqual(self.heard(), ("English", "you chose"))
+        self.play(HARBOUR)
+        self.assertEqual(self.heard(), ("English", "you chose"))  # one pick for the album
+        self.play(QUAY)
+        self.assertEqual(self.heard(), ("auto", "automatic"))
+        self.play(HARBOUR)
+        self.captions.set_language("auto")  # Auto: the album's pick goes
+        self.play(TIDE)
+        self.assertEqual(self.heard(), ("auto", "automatic"))
+        self.assertEqual(self.config.ai_captions_picks, {})
+
+    def test_a_language_picked_on_a_video_file_is_that_files(self):
+        self.play(FILM)
+        self.captions.set_language("German")
+        self.play(NEXT)  # the next episode, in the same folder: its own
+        self.assertEqual(self.heard(), ("auto", "automatic"))
+        self.play(FILM)
+        self.assertEqual(self.heard(), ("German", "you chose"))
+
+    def test_the_audio_tracks_language_comes_before_what_was_heard(self):
+        self.play(TIDE)
+        self.captions.toggle()
+        self.captions._on_ready()
+        self.captions._on_detected(self.captions._run, "English")
+        self.captions._track_language = lambda: "Spanish"
+        self.play(HARBOUR)
+        self.assertEqual(self.heard(), ("Spanish", "audio track"))
+        self.captions.set_language("French")  # the viewer's pick before both
+        self.assertEqual(self.heard(), ("French", "you chose"))
+
+    def test_turkish_heard_on_a_song_brings_the_turkish_model_as_on_a_channel(self):
+        # The same path as a channel's (_on_detected → _offer_specialist): the Turkish model,
+        # not here, is asked for once; Settings' default is no part of it.
+        self.config.ai_captions_language = "auto"
+        self.missing = {"turkish"}
+        self.play(TIDE)
+        self.captions.toggle()
+        self.captions._on_ready()
+        self.captions._on_detected(self.captions._run, "Turkish")
+        self.assertEqual(self.heard(), ("Turkish", "automatic"))
+        [question] = self.card.asked
+        self.assertIn("Türkçe", question)
+        self.assertEqual(self.captions._fetching, "turkish")
 
 
 if __name__ == "__main__":
