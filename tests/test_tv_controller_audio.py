@@ -1102,11 +1102,13 @@ class MediaPanel:
     def listen(self):
         pass
 
-    def now_playing(self, state, title, live, *, artist="", album="", art_path=""):
-        self.shown.append((state, title, live, artist, album, art_path))
+    def now_playing(
+        self, state, title, live, *, artist="", album="", art_path="", art_bytes=b"", music=False
+    ):
+        self.shown.append((state, title, live, artist, album, art_path, music))
 
     def last(self):
-        return self.shown[-1] if self.shown else ("", "", False, "", "", "")
+        return self.shown[-1] if self.shown else ("", "", False, "", "", "", False)
 
     def close(self):
         pass
@@ -1142,16 +1144,14 @@ class WindowSongTests(base.WindowCase):
         window.media_keys._system = panel  # as on macOS
         self.play_song()
         self.assertTrue(wait_until(lambda: bool(panel.last()[5])), panel.shown)  # the cover
-        state, title, live, artist, album, art = panel.last()
-        self.assertEqual(
-            (state, title, live, artist, album),
-            ("playing", "Pell", False, "Wexlo Tide", f"Kesh {RUN}"),
-        )
+        state, title, live, artist, album, art, music = panel.last()
+        song = ("playing", "Pell", False, "Wexlo Tide", f"Kesh {RUN}", True)
+        self.assertEqual((state, title, live, artist, album, music), song)
         self.assertTrue(os.path.isfile(art))
         self.assertEqual(QImage(art).size().width(), 64)  # the song's own (never made larger)
         folder = os.path.dirname(art)
         window.controller.stop()
-        self.assertTrue(wait_until(lambda: panel.last() == ("", "", False, "", "", "")))
+        self.assertTrue(wait_until(lambda: panel.last() == ("", "", False, "", "", "", False)))
         self.close_window()
         self.assertFalse(os.path.exists(folder))
 

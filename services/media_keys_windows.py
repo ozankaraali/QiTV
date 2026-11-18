@@ -212,9 +212,11 @@ class WindowsMediaControls:
         self._smtc: Optional[int] = None
         self._video: Optional[int] = None  # the display updater's video properties
         # ... and its music properties, with their album's interface (fetched once a song
-        # plays; False: Windows gave none, the song shows as a film does).
-        self._music: Any = None
+        # plays, the updater's type Music by then; none given: songs show as films do).
+        self._music: Optional[int] = None
         self._album: Optional[int] = None
+        self._no_music = False  # Windows gave no music properties
+        self._as_music = False  # the panel shows the music properties (report's title)
         # The cover file the thumbnail was asked for, and whether one shows.
         self._thumbnail: tuple[str, bool] = ("", False)
         self._thumbnail_said = False  # a thumbnail Windows couldn't make was logged
@@ -306,16 +308,15 @@ class WindowsMediaControls:
         artist: str = "",
         album: str = "",
         art_path: str = "",
+        art_bytes: bytes = b"",
+        music: bool = False,
     ) -> None:
+        """(Windows reads the cover's file itself, when it shows it: `art_bytes` aren't
+        needed.)"""
         if state:
             updater = self._updater or 0
-            if (artist or album or art_path) and self._music_properties():
-                _call(updater, PUT_TYPE, "put_Type", (c_int32, MEDIA_TYPE_MUSIC))
-                self._put_text(self._music, PUT_TITLE, "put_Title", title or "QiTV")
-                self._put_text(self._music, PUT_ARTIST, "put_Artist", artist)
-                if self._album:
-                    self._put_text(self._album, PUT_ALBUM_TITLE, "put_AlbumTitle", album)
-            else:
+            self._as_music = music and self._music_shown(title, artist, album)
+            if not self._as_music:
                 _call(updater, PUT_TYPE, "put_Type", (c_int32, MEDIA_TYPE_VIDEO))
                 self._put_text(self._video or 0, PUT_TITLE, "put_Title", title or "QiTV")
             self._show_thumbnail(art_path)
@@ -331,10 +332,27 @@ class WindowsMediaControls:
         finally:
             self._combase.WindowsDeleteString(made)
 
-    def _music_properties(self) -> bool:
-        """The display updater's music properties, fetched the first time a song plays (False:
-        Windows gave none; its album's interface may be missing alone)."""
-        if self._music is None:
+    def _music_shown(self, title: str, artist: str, album: str) -> bool:
+        """The updater as Music with the song's title, artist and album (False: Windows has
+        no music properties; the caller shows it as a film)."""
+        if self._no_music:
+            return False
+        # The type first: the updater gives the properties of its type (as listen() sets
+        # Video before it asks for the video properties).
+        _call(self._updater or 0, PUT_TYPE, "put_Type", (c_int32, MEDIA_TYPE_MUSIC))
+        music = self._music_properties()
+        if music is None:
+            return False
+        self._put_text(music, PUT_TITLE, "put_Title", title or "QiTV")
+        self._put_text(music, PUT_ARTIST, "put_Artist", artist)
+        if self._album:
+            self._put_text(self._album, PUT_ALBUM_TITLE, "put_AlbumTitle", album)
+        return True
+
+    def _music_properties(self) -> Optional[int]:
+        """The display updater's music properties, fetched the first time a song plays (None:
+        Windows gave none, said once; its album's interface may be missing alone)."""
+        if self._music is None and not self._no_music:
             music = c_void_p()
             try:
                 _call(
@@ -347,14 +365,14 @@ class WindowsMediaControls:
                     raise OSError("get_MusicProperties gave nothing")
             except OSError as e:
                 logger.debug("Windows shows songs as films (no music properties): %s", e)
-                self._music = False
-                return False
+                self._no_music = True
+                return None
             self._music = music.value
             try:
                 self._album = _query(music.value, IID_MUSIC_2, "IMusicDisplayProperties2")
             except OSError as e:
                 logger.debug("Windows shows no album titles: %s", e)
-        return bool(self._music)
+        return self._music
 
     def _show_thumbnail(self, path: str) -> None:
         """The cover at `path` as the thumbnail ("": none). One Windows can't make leaves none
@@ -428,8 +446,7 @@ class WindowsMediaControls:
             self._smtc_call(PUT_PLAYBACK_STATUS, "put_PlaybackStatus", (c_int32, _STATUS[""]))
             self._smtc_call(PUT_IS_ENABLED, "put_IsEnabled", (ctypes.c_ubyte, 0))
         finally:
-            music = self._music or None
-            for this in (self._album, music, self._video, self._updater, self._smtc):
+            for this in (self._album, self._music, self._video, self._updater, self._smtc):
                 _release(this)
             self._album = self._music = self._video = self._updater = self._smtc = None
 
@@ -440,7 +457,8 @@ class WindowsMediaControls:
         )
         self._smtc_call(GET_IS_ENABLED, "get_IsEnabled", (POINTER(ctypes.c_ubyte), byref(enabled)))
         text = c_void_p()
-        _call(self._video or 0, GET_TITLE, "get_Title", (POINTER(c_void_p), byref(text)))
+        shown = self._music if self._as_music and self._music else self._video  # a song's
+        _call(shown or 0, GET_TITLE, "get_Title", (POINTER(c_void_p), byref(text)))
         try:
             length = c_uint32(0)
             title = self._combase.WindowsGetStringRawBuffer(text, byref(length)) or ""

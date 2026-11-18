@@ -169,7 +169,10 @@ class Mpris:
         artist: str = "",
         album: str = "",
         art_path: str = "",
+        art_bytes: bytes = b"",
+        music: bool = False,
     ) -> None:
+        """(MPRIS has no media type, and the desktop reads the cover's file itself.)"""
         self._state, self._title, self._live = state, title, live
         self._artist, self._album, self._art_path = artist, album, art_path
         changed = {

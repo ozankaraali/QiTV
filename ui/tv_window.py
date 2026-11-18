@@ -1496,13 +1496,22 @@ class TVWindow(QMainWindow):
         facts = self.controller.panel_facts() if target is not None else None
         if target is None:
             self.media_keys.show(state, "", False)
-        elif facts is None:  # a film, a channel: its title alone
+        elif facts is None:  # a film, a channel with its picture: a video, its title alone
             self.media_keys.show(state, target.title, target.live)
-        else:
+        else:  # sound: a song (tagged or not, with a cover or not), a radio channel
             title, artist, album = facts
-            art = self.panel_cover.path_for(self.audio_screen.cover())  # "" until written
+            # The screen's cover as a file (and its bytes, for macOS): the last one until a
+            # new picture's is written, none for QiTV's drawn stand-in.
+            art_path, art_bytes = self.panel_cover.file_for(self.audio_screen.cover())
             self.media_keys.show(
-                state, title or target.title, target.live, artist=artist, album=album, art_path=art
+                state,
+                title or target.title,
+                target.live,
+                artist=artist,
+                album=album,
+                art_path=art_path,
+                art_bytes=art_bytes,
+                music=True,
             )
 
     def _refresh_now_playing(self) -> None:

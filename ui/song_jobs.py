@@ -10,11 +10,13 @@ services.image_loader does for logos (a QImage is safe there; the GUI thread mak
 
 from __future__ import annotations
 
+import hashlib
 import logging
 import os
 import shutil
 import tempfile
 import threading
+import time
 from typing import Optional
 
 from PySide6.QtCore import QObject, Qt, Signal
@@ -30,6 +32,8 @@ COVER_SIDE = 1024  # the cover is decoded at most this many pixels a side
 COLOUR_SIDE = 32  # its colours are read from a copy this small
 PANEL_SIDE = 512  # the media panel's cover file is at most this many pixels a side
 PANEL_QUALITY = 90  # ... a JPEG at this quality (a PNG when it has see-through parts)
+PANEL_PREFIX = "qitv-panel-"  # its private temporary folder's name starts so
+STALE_PANEL_S = 24 * 3600  # a folder of an earlier QiTV's this old is swept (one that crashed)
 
 
 def cover_colours(image: Optional[QImage]) -> list[tuple[int, int, int]]:
@@ -129,9 +133,37 @@ def _see_through(image: QImage) -> bool:
     return any(min(raw[row * stride : row * stride + width]) < 255 for row in range(height))
 
 
+def _content_key(image: QImage) -> str:
+    """A name for `image`'s pixels: the same picture (an album's next track's cover, a logo
+    drawn again) is the same file."""
+    pixels = image.convertToFormat(QImage.Format.Format_ARGB32_Premultiplied)
+    digest = hashlib.sha1(f"{pixels.width()}x{pixels.height()}".encode())
+    digest.update(bytes(pixels.constBits())[: pixels.bytesPerLine() * pixels.height()])
+    return digest.hexdigest()[:16]
+
+
+def _sweep_stale(root: str, now: float) -> None:
+    """Earlier QiTVs' panel folders (one that crashed keeps its own) older than a day."""
+    try:
+        entries = list(os.scandir(root))
+    except OSError:
+        return
+    for entry in entries:
+        try:
+            if (
+                entry.name.startswith(PANEL_PREFIX)
+                and entry.is_dir(follow_symlinks=False)
+                and now - entry.stat(follow_symlinks=False).st_mtime > STALE_PANEL_S
+            ):
+                shutil.rmtree(entry.path, ignore_errors=True)
+        except OSError:
+            continue
+
+
 class _CoverFiles:
     """The panel's cover files, as PanelCover's threads share them (never the QObject): one
-    write at a time, the newest asked for only; the folder made by the first."""
+    write at a time, the newest asked for only; the folder made by the first (which sweeps
+    earlier QiTVs' stale ones first)."""
 
     def __init__(self) -> None:
         self.lock = threading.Lock()
@@ -139,16 +171,18 @@ class _CoverFiles:
         self.folder = ""  # the private temporary folder ("": not made yet)
         self.closed = False
 
-    def write(self, generation: int, image: QImage) -> str:
-        """`image` as this write's file (its own name), the folder's only one: its path, or ""
-        when a newer write was asked for meanwhile, QiTV closes, or it can't be written."""
+    def write(self, generation: int, image: QImage, keep: str) -> Optional[tuple[str, bytes]]:
+        """`image` as a file named by its pixels, and that file's bytes; the folder keeps it
+        and `keep` (the file the panel shows until this one lands) only. None when a newer
+        write was asked for meanwhile, QiTV closes, or it can't be written."""
         with self.lock:
             if self.closed or generation != self.newest:
-                return ""
-            path = ""
+                return None
             try:
                 if not self.folder:
-                    self.folder = tempfile.mkdtemp(prefix="qitv-panel-")
+                    root = tempfile.gettempdir()
+                    _sweep_stale(root, time.time())
+                    self.folder = tempfile.mkdtemp(prefix=PANEL_PREFIX, dir=root)
                 if image.width() > PANEL_SIDE or image.height() > PANEL_SIDE:
                     image = image.scaled(
                         PANEL_SIDE,
@@ -157,85 +191,106 @@ class _CoverFiles:
                         Qt.TransformationMode.SmoothTransformation,
                     )
                 see_through = _see_through(image)  # a logo's: a JPEG would blacken it
-                name = f"cover-{generation}.{'png' if see_through else 'jpg'}"
+                name = f"cover-{_content_key(image)}.{'png' if see_through else 'jpg'}"
                 target = os.path.join(self.folder, name)
-                quality = -1 if see_through else PANEL_QUALITY
-                if not image.save(target, "PNG" if see_through else "JPEG", quality):
-                    raise OSError("not written")
-                path = target
-                for other in os.listdir(self.folder):
-                    if other != name:
-                        os.remove(os.path.join(self.folder, other))
+                if not os.path.isfile(target):  # the same picture: its file as it is
+                    quality = -1 if see_through else PANEL_QUALITY
+                    if not image.save(target, "PNG" if see_through else "JPEG", quality):
+                        raise OSError("not written")
+                with open(target, "rb") as file:
+                    data = file.read()
+                self._remove_but(name, os.path.basename(keep))
+                return target, data
             except OSError as error:
                 logger.warning("The media panel's cover could not be written (%s)", error)
-            if self.closed:  # QiTV closed while it wrote: nothing stays
-                shutil.rmtree(self.folder, ignore_errors=True)
-                return ""
-            return path
+                return None
+
+    def keep_only(self, generation: int, path: str) -> None:
+        """The panel shows `path` now: the folder's other file goes (unless a newer write was
+        asked for since: that one sweeps)."""
+        with self.lock:
+            if self.closed or generation != self.newest:
+                return
+            try:
+                self._remove_but(os.path.basename(path))
+            except OSError as error:
+                logger.warning("An old media panel cover stays (%s)", error)
+
+    def _remove_but(self, *names: str) -> None:
+        for other in os.listdir(self.folder):
+            if other not in names:
+                os.remove(os.path.join(self.folder, other))
 
     def close(self) -> None:
-        self.closed = True
-        if self.folder:
-            shutil.rmtree(self.folder, ignore_errors=True)
+        with self.lock:  # (a write under way finishes first: at most one small file)
+            self.closed = True
+            if self.folder:
+                shutil.rmtree(self.folder, ignore_errors=True)
 
 
 class PanelCover(QObject):
     """The cover the system's media panel shows (TVWindow._show_now_playing): the audio
     screen's, as a small file (PANEL_SIDE) written on a daemon thread into a private temporary
-    folder. One file at a time, each with a name of its own (a panel that keeps a picture by its
-    file's name sees the new one); the folder goes when QiTV closes (close)."""
+    folder, with its bytes (macOS makes its picture of them). The file is named by its pixels:
+    an album's next track, whose cover is the same picture, keeps it and nothing is sent again;
+    another picture is a file of its own (a panel that keeps a picture by its file's name sees
+    the new one), the last one shown until it lands. The folder goes when QiTV closes."""
 
-    written = Signal()  # the cover asked for last has its file now (path_for gives it)
-    _ready = Signal(int, object, str)  # a write's generation, cover (cacheKey) and file
+    written = Signal()  # the cover asked for last has its file now (file_for gives it)
+    _ready = Signal(int, object, str, object)  # a write's generation, cover key, file, bytes
 
     def __init__(self, parent: Optional[QObject] = None) -> None:
         super().__init__(parent)
         self._files = _CoverFiles()
         self._asked = 0  # the cacheKey of the cover asked for last (0: none)
-        self._written = ""  # its file, once written
+        self._written: tuple[str, bytes] = ("", b"")  # the last one's file and bytes
         self._ready.connect(self._on_ready)
 
-    def path_for(self, image: Optional[QImage]) -> str:
-        """`image`'s file, or "" (none, or not written yet: its write starts here; `written`
-        says when it is). QiTV's drawn stand-in (None) has none: the panel shows QiTV's."""
+    def file_for(self, image: Optional[QImage]) -> tuple[str, bytes]:
+        """`image`'s file and its bytes: until it is written (its write starts here; `written`
+        says when it is), the last cover's. QiTV's drawn stand-in (None) has none: the panel
+        shows QiTV's."""
         files = self._files
         if image is None or image.isNull() or files.closed:
-            if self._asked:  # a write still to come is for nothing now
-                self._asked, self._written = 0, ""
+            if self._asked or self._written[0]:  # a write still to come is for nothing now
+                self._asked, self._written = 0, ("", b"")
                 files.newest += 1
-            return ""
+            return ("", b"")
         key = image.cacheKey()
-        if key == self._asked:
-            return self._written
-        # Another cover: its own write (an older one's file goes with it, so a cover asked
-        # for again is written again).
-        self._asked, self._written = key, ""
-        files.newest += 1
-        threading.Thread(
-            target=self._write,
-            args=(files, files.newest, key, image),
-            name="qitv-panel-cover",
-            daemon=True,
-        ).start()
-        return ""
+        if key != self._asked:
+            self._asked = key
+            files.newest += 1
+            threading.Thread(
+                target=self._write,
+                # A copy of the screen's picture (shared until either changes it).
+                args=(files, files.newest, key, QImage(image), self._written[0]),
+                name="qitv-panel-cover",
+                daemon=True,
+            ).start()
+        return self._written
 
-    def _write(self, files: _CoverFiles, generation: int, key: int, image: QImage) -> None:
-        path = files.write(generation, image)
-        if not path:
+    def _write(
+        self, files: _CoverFiles, generation: int, key: int, image: QImage, keep: str
+    ) -> None:
+        written = files.write(generation, image, keep)
+        if written is None:
             return
         try:
-            self._ready.emit(generation, key, path)
+            self._ready.emit(generation, key, *written)
         except RuntimeError:
             pass  # QiTV closed meanwhile
 
-    def _on_ready(self, generation: int, key: int, path: str) -> None:
+    def _on_ready(self, generation: int, key: int, path: str, data: bytes) -> None:
         files = self._files
         if files.closed or generation != files.newest or key != self._asked:
             return  # another cover was asked for since (its own file follows)
-        self._written = path
+        self._written = (path, data)
+        threading.Thread(
+            target=files.keep_only, args=(generation, path), name="qitv-panel-cover", daemon=True
+        ).start()
         self.written.emit()
 
     def close(self) -> None:
         """QiTV closes: the folder goes with its file."""
-        self._asked, self._written = 0, ""
+        self._asked, self._written = 0, ("", b"")
         self._files.close()

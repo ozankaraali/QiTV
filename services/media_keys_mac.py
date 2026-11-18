@@ -3,8 +3,10 @@ MPNowPlayingInfoCenter, through the Objective-C runtime: no native build). See
 services.media_keys.
 
 A song's cover is an MPMediaItemArtwork made with initWithImage: (deprecated, but answered on
-macOS); its other initializer takes a block, which ctypes can't make. A macOS that no longer
-answers it shows the song without its cover (said once in the log).
+macOS); its other initializer takes a block, which ctypes can't make. Its NSImage is made of
+the cover file's bytes (NSData, read on TVWindow's thread with the file): no file is read on
+the GUI thread. A macOS that no longer answers it shows the song without its cover (each
+reason said once in the log).
 """
 
 from __future__ import annotations
@@ -91,6 +93,7 @@ class MacNowPlaying:
         self._target: Optional[int] = None
         self._artwork: tuple[str, Optional[int]] = ("", None)  # the cover file's, kept (+1)
         self._artwork_answered: Optional[bool] = None  # initWithImage: is answered
+        self._said: set[str] = set()  # why a cover didn't show, each logged once
 
     def _class(self, name: bytes) -> int:
         found = self._objc.objc_getClass(name)
@@ -156,13 +159,14 @@ class MacNowPlaying:
         artist: str = "",
         album: str = "",
         art_path: str = "",
+        art_bytes: bytes = b"",
+        music: bool = False,
     ) -> None:
         pool = self._objc.objc_autoreleasePoolPush()
         try:
             info = None
-            artwork = self._artwork_of(art_path if state else "")
+            artwork = self._artwork_of(art_path, art_bytes) if state else self._artwork_of("", b"")
             if state:
-                music = bool(artist or album or art_path)
                 number = self._class(b"NSNumber")
                 pairs = [
                     (self._title_key, self._string(title or "QiTV")),
@@ -206,10 +210,10 @@ class MacNowPlaying:
         finally:
             self._objc.objc_autoreleasePoolPop(pool)
 
-    def _artwork_of(self, path: str) -> Optional[int]:
-        """The cover at `path` as an MPMediaItemArtwork, made once per file and kept until
-        another (None: none, or none can be made; Now Playing shows the song all the same).
-        The file is TVWindow's own small one (ui.song_jobs.PanelCover)."""
+    def _artwork_of(self, path: str, data: bytes) -> Optional[int]:
+        """The cover file at `path` (its bytes `data`) as an MPMediaItemArtwork, made once per
+        file and kept until another (None: none, or none can be made; Now Playing shows the
+        song all the same). The file is TVWindow's own small one (ui.song_jobs.PanelCover)."""
         kept_path, kept = self._artwork
         if path == kept_path:
             return kept
@@ -219,18 +223,9 @@ class MacNowPlaying:
         if not path or not self._answers_artwork():
             return None
         try:
-            name = self._string(path)
-            image = (
-                self._send(
-                    self._send(self._class(b"NSImage"), b"alloc"),
-                    b"initWithContentsOfFile:",
-                    ctypes.c_void_p,
-                    (ctypes.c_void_p, name),
-                )
-                if name
-                else None
-            )
+            image = self._image_of(data)
             if not image:
+                self._say("image", "Now Playing shows no cover: its picture couldn't be read")
                 return None
             artwork = self._send(
                 self._send(self._class(b"MPMediaItemArtwork"), b"alloc"),
@@ -240,10 +235,37 @@ class MacNowPlaying:
             )
             self._send(image, b"release", None)  # the artwork keeps it
         except Exception as e:  # never in the way of the song's title
-            logger.debug("Now Playing shows no cover: %s", e)
+            self._say("failed", f"Now Playing shows no cover: {e}")
             return None
         self._artwork = (path, int(artwork) if artwork else None)
         return self._artwork[1]
+
+    def _image_of(self, data: bytes) -> Optional[int]:
+        """An NSImage of a picture file's bytes (+1; None: none): NSData copies them."""
+        if not data:
+            return None
+        made = self._send(
+            self._class(b"NSData"),
+            b"dataWithBytes:length:",
+            ctypes.c_void_p,
+            (ctypes.c_char_p, data),
+            (ctypes.c_ulong, len(data)),
+        )
+        if not made:
+            return None
+        image = self._send(
+            self._send(self._class(b"NSImage"), b"alloc"),
+            b"initWithData:",
+            ctypes.c_void_p,
+            (ctypes.c_void_p, made),
+        )
+        return int(image) if image else None
+
+    def _say(self, kind: str, message: str) -> None:
+        """A reason a cover didn't show, logged once a session."""
+        if kind not in self._said:
+            self._said.add(kind)
+            logger.debug("%s", message)
 
     def _answers_artwork(self) -> bool:
         if self._artwork_answered is None:
@@ -259,7 +281,10 @@ class MacNowPlaying:
             except Exception:  # no such class: an older or a stripped macOS
                 self._artwork_answered = False
             if not self._artwork_answered:
-                logger.debug("Now Playing shows no covers: no MPMediaItemArtwork initWithImage:")
+                self._say(
+                    "initializer",
+                    "Now Playing shows no covers: no MPMediaItemArtwork initWithImage:",
+                )
         return self._artwork_answered
 
     def playback_state(self) -> int:
@@ -313,6 +338,6 @@ class MacNowPlaying:
                 self._target = None
             self._send(self._info, b"setNowPlayingInfo:", None, (ctypes.c_void_p, None))
             self._send(self._info, b"setPlaybackState:", None, (ctypes.c_ulong, _STATES[""]))
-            self._artwork_of("")  # the cover's artwork goes with it
+            self._artwork_of("", b"")  # the cover's artwork goes with it
         finally:
             self._objc.objc_autoreleasePoolPop(pool)

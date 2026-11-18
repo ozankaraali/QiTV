@@ -12,9 +12,10 @@ keyboard's key (TVWindow.remote_key).
 - Linux: MPRIS on the session bus (services.media_keys_linux), which GNOME, KDE and the other
   desktops send their media keys to.
 
-A song on the audio screen (Plan 4) shows there with its artist, its album and its cover (a
-file TVWindow writes for it, ui.song_jobs.PanelCover): with any of them it is music to the
-system, else (a film, a channel) its title alone, as before.
+What shows on the audio screen (Plan 4) is music to the system: a song with its artist, its
+album and its cover (a file TVWindow writes for it, and its bytes for macOS:
+ui.song_jobs.PanelCover), a radio channel with its logo. A film or a channel with its picture
+is a video with its title alone, as before.
 
 All of it through ctypes or Qt: no native build.
 """
@@ -24,7 +25,7 @@ from __future__ import annotations
 import logging
 import sys
 import time
-from typing import Optional, Protocol
+from typing import NamedTuple, Optional, Protocol
 
 from PySide6.QtCore import QObject, Qt, Signal
 from PySide6.QtGui import QGuiApplication
@@ -59,8 +60,17 @@ SAME_PRESS_S = 0.5
 # stream opening or waiting for data still plays; idle, ended and failed play nothing.
 _PLAYING_STATES = frozenset({"opening", "buffering", "playing"})
 
-# What the system was told: the state, title, live, artist, album and cover file.
-_Shown = tuple[str, str, bool, str, str, str]
+
+class _Shown(NamedTuple):
+    """What the system was told (its cover's bytes go with its file: not compared)."""
+
+    state: str
+    title: str
+    live: bool
+    artist: str
+    album: str
+    art_path: str
+    music: bool
 
 
 class System(Protocol):
@@ -77,9 +87,13 @@ class System(Protocol):
         artist: str = "",
         album: str = "",
         art_path: str = "",
+        art_bytes: bytes = b"",
+        music: bool = False,
     ) -> None:
-        """`state` "playing", "paused" or "" (nothing plays: the rest are empty). A song's
-        `artist`, `album` and `art_path` (its cover's file) make it music; none: as a film."""
+        """`state` "playing", "paused" or "" (nothing plays: the rest are empty). `music`:
+        what plays is sound (a song, a radio channel), else a video (a film, a channel's
+        picture); a song's `artist` and `album`; its cover's file `art_path` and that file's
+        bytes `art_bytes` (macOS makes its picture of them: no file read on the GUI thread)."""
         ...
 
     def close(self) -> None: ...
@@ -142,6 +156,7 @@ class MediaKeys(QObject):
         self._system = system
         self._state = ""  # "playing", "paused" or "" (nothing plays)
         self._shown: Optional[_Shown] = None
+        self._art_bytes = b""  # the shown cover file's bytes
         self._keyboard: tuple[int, float] = (0, 0.0)  # the keyboard's last media key, when
 
     @property
@@ -165,8 +180,16 @@ class MediaKeys(QObject):
         _receiver = self
         if self._shown is not None:  # what plays, told before the system listened
             shown, self._shown = self._shown, None
-            state, title, live, artist, album, art_path = shown
-            self.show(state, title, live, artist=artist, album=album, art_path=art_path)
+            self.show(
+                shown.state,
+                shown.title,
+                shown.live,
+                artist=shown.artist,
+                album=shown.album,
+                art_path=shown.art_path,
+                art_bytes=self._art_bytes,
+                music=shown.music,
+            )
         return True
 
     def listening(self) -> bool:
@@ -181,23 +204,34 @@ class MediaKeys(QObject):
         artist: str = "",
         album: str = "",
         art_path: str = "",
+        art_bytes: bytes = b"",
+        music: bool = False,
     ) -> None:
-        """The large picture's state (a PlaybackState value) and what it plays: a song's
-        artist, album and cover file too. Told once per change of any of them."""
+        """The large picture's state (a PlaybackState value) and what it plays (System's
+        now_playing). Told once per change of any of them (the cover's bytes go with its
+        file)."""
         if state in _PLAYING_STATES:
             state = "playing"
         elif state != "paused":
             state, title, live, artist, album, art_path = "", "", False, "", "", ""
+            art_bytes, music = b"", False
         self._state = state
-        shown = (state, title, live, artist, album, art_path)
+        shown = _Shown(state, title, live, artist, album, art_path, music)
         if shown == self._shown:
             return
-        self._shown = shown
+        self._shown, self._art_bytes = shown, art_bytes
         if self._system is None:
             return
         try:
             self._system.now_playing(
-                state, title, live, artist=artist, album=album, art_path=art_path
+                state,
+                title,
+                live,
+                artist=artist,
+                album=album,
+                art_path=art_path,
+                art_bytes=art_bytes,
+                music=music,
             )
         except Exception as e:
             logger.warning("Couldn't tell the system what plays: %s", e)
