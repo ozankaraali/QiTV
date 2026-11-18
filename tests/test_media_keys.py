@@ -9,6 +9,7 @@ from pathlib import Path
 import sys
 from types import SimpleNamespace
 import unittest
+from unittest import mock
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
@@ -770,6 +771,40 @@ class WindowMediaKeysTests(WindowCase):
         self.window.overlays.drawer.close_drawer()
         self.window.media_keys.pressed.emit(_K.Key_MediaNext.value)  # ⏭: the next channel
         self.assertTrue(wait_until(lambda: zap.context.current()["name"] == "Channel 2"))
+
+    def test_the_panel_hears_the_audio_screen_as_it_changes(self):
+        # Task 8: a song's facts and cover reach its screen after its state, and the screen
+        # goes when a picture shows, with no state change: the panel hears each, its cover as
+        # a file of its own once written (no libVLC: the controller's answers are the test's).
+        window, screen = self.window, self.window.audio_screen
+        system = FakeSystem()
+        window.media_keys._system = system
+        target = SimpleNamespace(title="02 Pell", live=False)
+        facts = [("Pell", "Wexlo Tide", "Harbour Lights")]
+        controller = window.controller
+        with (
+            mock.patch.object(controller, "now_playing", return_value=target),
+            mock.patch.object(controller, "panel_facts", side_effect=lambda: facts[0]),
+        ):
+            window._show_now_playing("playing")
+            song = ("playing", "Pell", False, "Wexlo Tide", "Harbour Lights")
+            self.assertEqual(system.shown[-1], (*song, ""))
+            cover = QImage(64, 64, QImage.Format.Format_RGB32)
+            cover.fill(QColor("#d8653f"))
+            screen.set_cover(cover, [])
+            self.assertTrue(wait_until(lambda: bool(system.shown[-1][5])))
+            art = system.shown[-1][5]
+            self.assertEqual(system.shown[-1][:5], song)
+            self.assertTrue(os.path.isfile(art))
+            facts[0] = ("Rook", "Wexlo Tide", "Harbour Lights")
+            screen.show_song("Rook", "Wexlo Tide", "Harbour Lights")
+            self.assertTrue(wait_until(lambda: system.shown[-1][1] == "Rook"))
+            self.assertEqual(system.shown[-1][5], art)  # the same cover: the same file
+            facts[0] = None  # a picture shows: the screen goes, its facts with it
+            screen.hide()
+            self.assertTrue(
+                wait_until(lambda: system.shown[-1] == ("playing", "02 Pell", False, "", "", ""))
+            )
 
 
 if __name__ == "__main__":
