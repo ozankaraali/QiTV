@@ -31,10 +31,12 @@ from timer_fixtures import pause, wait_until
 from services.local_episodes import list_folder
 from services.playback import PlaybackState
 from services.song_facts import song_tags
+from services.watch_state import local_key
 from tests import test_tv_pip, test_tv_window as base
 from ui.keymap import Action
 from ui.overlays.audio_screen import AudioScreen
 from ui.page_stack import PageStack
+from ui.song_jobs import AlbumJob
 from ui.tv_controller import NO_PICTURE_S
 
 FINISHED = ("Finished", "info")
@@ -261,6 +263,8 @@ class AudioCase(ControllerTestCase):
         self.addCleanup(directory.cleanup)
         self.folder = Path(directory.name)
         self.albums = mock.patch.object(self.controller._album_job, "start").start()
+        # A playlist's songs, read by name (AlbumJob.start_files): answered by hand too.
+        self.list_reads = mock.patch.object(AlbumJob, "start_files", create=True).start()
         self.covers = mock.patch.object(self.controller._cover_job, "start").start()
         self.addCleanup(mock.patch.stopall)
         self.runs: list[str] = []
@@ -728,16 +732,6 @@ class AlbumTests(AudioCase):
         self.end()  # the last
         self.assertIn(FINISHED, self.toast.messages())
 
-    def test_songs_of_a_playlist_have_no_album_of_their_own(self):
-        # Until Task 9 a playlist's songs follow the list (Ruling P4-1), not their folders.
-        tracks = self.album(2)
-        self.controller.play_list("Evening", [t["path"] for t in tracks], [1001, 1002])
-        self.session.stateChanged.emit("playing")
-        self.assertTrue(self.screen.visible)
-        self.albums.assert_not_called()
-        self.end()
-        self.assertEqual(len(self.next_card.named("show_next")), 1)  # the list's next
-
     def test_media_keys_go_to_tracks_with_a_queue_and_seek_without(self):
         self.session.seekable = True
         # A lone song: ±10 s, as a film.
@@ -835,6 +829,332 @@ class AlbumTests(AudioCase):
         self.assertEqual(self.session.level, 30)
         self.assertEqual(self.transport.named("set_level")[-1], (30,))
         self.assertFalse(self.controller._mixer.visible())
+
+
+FILM = "Harbour Film.mkv"
+
+
+class PlaylistTests(AudioCase):
+    """A playlist of songs plays as an album named after it; a mixed one plays each entry on
+    its own screen (Plan 4, Task 9). Its songs' tags are read by name (AlbumJob.start_files,
+    captured), never from their folders (AlbumJob.start)."""
+
+    def songs(self, *numbers):
+        """Songs of the test's folder, in the playlist's order (`numbers`), with their sizes."""
+        return [track(self.folder, n, f"Song {n}", size=1000 + n) for n in numbers]
+
+    def play_list(self, name, entries, sizes):
+        """A playlist opened in QiTV (TVWindow.open_paths holds for its first file first)."""
+        self.controller.hold_for_file(True)
+        self.controller.play_list(name, [str(e) for e in entries], sizes)
+
+    def read_list(self, tracks, *, whole=True):
+        """The newest playlist read answers (as AlbumJob.start_files' thread would)."""
+        generation, _files = self.list_reads.call_args.args
+        self.controller._list_job.read.emit(generation, list(tracks), whole)
+
+    def rows(self):
+        return [AudioScreen._row_title(t) for t in self.screen.tracks]
+
+    def test_a_song_playlist_is_an_album_named_after_it(self):
+        third, first, second = songs = self.songs(3, 1, 2)  # the list's order, not the tags'
+        entries = [t["path"] for t in songs]
+        self.play_list("Evening Drive", entries, [1003, 1001, 1002])
+        self.when_idle()
+        # Just the files it names are read, in its order, with the sizes the router gave:
+        # never a folder's listing (ruling 2).
+        self.assertEqual(self.list_reads.call_count, 1)
+        self.assertEqual(
+            self.list_reads.call_args.args[1],
+            [(entries[0], 1003), (entries[1], 1001), (entries[2], 1002)],
+        )
+        self.albums.assert_not_called()
+        # Its list at once, in its order: the files' names until their tags are read.
+        self.assertEqual([t["path"] for t in self.screen.tracks], entries)
+        self.assertEqual(self.rows(), ["03 Song 3", "01 Song 1", "02 Song 2"])
+        self.assertEqual(self.screen.current, 0)
+        self.assertEqual(self.screen.view(), "album")  # nothing picked: Album
+        self.assertEqual(self.transport.named("set_audio_state")[-1], (False, "off", True))
+        self.session.meta = {
+            "title": "Song 3",
+            "artist": "Wexlo Tide",
+            "album": "Harbour Lights",
+            "year": "2019",
+        }
+        self.session.stateChanged.emit("playing")
+        self.assertTrue(self.screen.visible)
+        # The album it shows is the playlist (no year: that was the song's album's), and the
+        # system's media panel says what the screen says.
+        self.assertEqual(self.screen.song, ("Song 3", "Wexlo Tide", "Evening Drive", ""))
+        self.assertEqual(self.controller.panel_facts(), ("Song 3", "Wexlo Tide", "Evening Drive"))
+        # The tags read: the rows keep the list's order (never sorted by track number).
+        self.read_list([third, first, second])
+        self.assertEqual(self.rows(), ["Song 3", "Song 1", "Song 2"])
+        self.assertEqual(self.screen.current, 0)
+        self.session.meta = {}
+        self.screen.calls.clear()
+        self.end()
+        self.assertEqual(self.played()[-1], Path(entries[1]))
+        self.assertEqual(self.session.plays[-1][1]["start_ms"], 0)
+        self.assertEqual(self.next_card.named("show_next"), [])  # no card between songs
+        self.assertNotIn(FINISHED, self.toast.messages())
+        self.assertEqual(self.runs, [])  # held: what waits for the film waits on
+        self.assertNotIn(("hide",), self.screen.calls)
+        self.assertNotIn(("end_audio",), self.transport.calls)
+        self.assertEqual(self.screen.current, 1)
+        self.assertEqual(self.screen.song, ("Song 1", "Wexlo Tide", "Evening Drive", ""))
+        self.session.stateChanged.emit("playing")
+        self.assertEqual(self.controller.panel_facts(), ("Song 1", "Wexlo Tide", "Evening Drive"))
+        self.end()
+        self.assertEqual(self.played()[-1], Path(entries[2]))
+        self.session.stateChanged.emit("playing")
+        self.end()  # the last, repeat off: "Finished", and the hold goes
+        self.assertIn(FINISHED, self.toast.messages())
+        self.assertEqual(len(self.session.plays), 3)
+        self.assertEqual(self.runs, ["update question"])
+        self.assertEqual(self.next_card.named("show_next"), [])
+        self.albums.assert_not_called()
+        self.assertEqual(self.list_reads.call_count, 1)
+
+    def test_a_mixed_playlist_plays_each_on_its_screen(self):
+        # Ruling 4: a song entry is a lone song (its own tags, no list, no shuffle or repeat:
+        # those remembered are left as they are); after it the next entry plays with no card;
+        # ⏭ and the media key's next go to the list's next. After a video: Task 1's card.
+        self.config.audio_shuffle, self.config.audio_repeat = True, "one"
+        one, two, three, four = (t["path"] for t in self.songs(1, 2, 3, 4))
+        film = str(self.folder / FILM)
+        self.play_list("Mixed Bag", [one, two, film, three, four], [1001, 1002, 5000, 1003, 1004])
+        self.list_reads.assert_not_called()  # a mixed list: no album of its own
+        self.session.meta = {
+            "title": "Song 1",
+            "artist": "Wexlo Tide",
+            "album": "Harbour Lights",
+            "year": "2019",
+        }
+        self.session.stateChanged.emit("playing")
+        self.assertTrue(self.screen.visible)
+        self.assertEqual(self.screen.song, ("Song 1", "Wexlo Tide", "Harbour Lights", "2019"))
+        self.assertEqual(self.screen.tracks, [])
+        self.assertEqual(self.screen.shown_view(), "cover")
+        self.assertIsNone(self.controller._queue)
+        self.assertEqual(self.transport.named("set_audio_state")[-1], (False, "off", False))
+        self.assertTrue(self.transport.next_on)  # ⏭: the list's next entry
+        saves = self.config.saves
+        self.transport.repeatRequested.emit()
+        self.transport.shuffleRequested.emit()
+        self.assertEqual((self.config.audio_shuffle, self.config.audio_repeat), (True, "one"))
+        self.assertEqual(self.config.saves, saves)
+        # Its end: the next entry at once (not the song again: repeat one is not its own).
+        self.session.meta = {}
+        self.end()
+        self.assertEqual(self.played()[-1], Path(two))
+        self.assertEqual(self.next_card.named("show_next"), [])
+        self.assertNotIn(FINISHED, self.toast.messages())
+        self.session.stateChanged.emit("playing")
+        self.assertEqual(self.screen.song[0], "02 Song 2")  # untagged: its file's name
+        self.assertEqual(self.screen.tracks, [])
+        # The dock's ⏭: the list's next, a film, with a film's controls.
+        self.session.video = True
+        self.transport.nextTrackRequested.emit()
+        self.assertEqual(self.played()[-1], Path(film))
+        self.session.stateChanged.emit("playing")
+        self.assertFalse(self.screen.visible)
+        self.assertEqual(self.last_mode(), ("show_vod", FILM))
+        self.end()  # after a video, Task 1's card offers the list's next
+        self.assertEqual(self.next_card.named("show_next"), [("03 Song 3", "", "episode")])
+        self.session.video = None
+        self.next_card.activate()
+        self.assertEqual(self.played()[-1], Path(three))
+        self.session.stateChanged.emit("playing")
+        self.assertTrue(self.screen.visible)
+        self.assertEqual(self.screen.tracks, [])
+        # The media key's next: the list's next too.
+        self.controller.handle(Action.MEDIA_NEXT)
+        self.assertEqual(self.played()[-1], Path(four))
+        self.session.stateChanged.emit("playing")
+        self.end()  # the last
+        self.assertIn(FINISHED, self.toast.messages())
+        self.assertEqual(len(self.next_card.named("show_next")), 1)
+        self.albums.assert_not_called()
+        self.list_reads.assert_not_called()
+
+    def test_a_mixed_playlists_song_plays_on_with_auto_play_off(self):
+        # A song's next entry plays on as an album's track does, whatever "Auto-play next
+        # episode" says; a video's is Task 1's (off: it stops there).
+        self.config.auto_play_episodes = False
+        one, two = (t["path"] for t in self.songs(1, 2))
+        film = str(self.folder / FILM)
+        self.play_list("Mixed Bag", [one, film, two], [1001, 5000, 1002])
+        self.session.stateChanged.emit("playing")
+        self.end()
+        self.assertEqual(self.played()[-1], Path(film))
+        self.assertNotIn(FINISHED, self.toast.messages())
+        self.session.video = True
+        self.session.stateChanged.emit("playing")
+        self.end()
+        self.assertIn(FINISHED, self.toast.messages())
+        self.assertEqual(len(self.session.plays), 2)
+        self.assertEqual(self.next_card.named("show_next"), [])
+
+    def test_shuffle_and_repeat_apply_to_a_song_playlist(self):
+        self.config.audio_shuffle, self.config.audio_repeat = True, "all"
+        songs = self.songs(1, 2, 3, 4)
+        entries = [t["path"] for t in songs]
+        self.play_list("Evening Drive", entries, [t["size"] for t in songs])
+        queue = self.controller._queue
+        self.assertEqual((queue.shuffle, queue.repeat), (True, "all"))
+        order = queue.order()
+        self.assertEqual(order[0], 0)  # the list's first plays first, the rest in a new order
+        self.assertEqual(sorted(order), [0, 1, 2, 3])
+        self.assertEqual(self.transport.named("set_audio_state")[-1], (True, "all", True))
+        self.session.stateChanged.emit("playing")
+        for index in order[1:]:
+            self.end()
+            self.assertEqual(self.played()[-1], Path(entries[index]))
+            self.assertEqual(self.screen.current, index)
+            self.session.stateChanged.emit("playing")
+        self.end()  # repeat all: round again, the same order
+        self.assertEqual(self.played()[-1], Path(entries[0]))
+        self.session.stateChanged.emit("playing")
+        # Repeat one: the same song again at its end, from its start.
+        self.transport.repeatRequested.emit()
+        self.assertEqual(self.config.audio_repeat, "one")
+        self.end()
+        self.assertEqual(self.played()[-1], Path(entries[0]))
+        self.assertEqual(self.session.plays[-1][1]["start_ms"], 0)
+        self.session.stateChanged.emit("playing")
+        # Shuffle off: the list's own order from the song playing; repeat off: the last stops.
+        self.transport.shuffleRequested.emit()
+        self.transport.repeatRequested.emit()  # one → off
+        self.assertEqual(self.transport.named("set_audio_state")[-1], (False, "off", True))
+        self.assertIs(self.controller._queue, queue)
+        self.assertEqual(queue.order(), [0, 1, 2, 3])
+        for index in (1, 2, 3):
+            self.end()
+            self.assertEqual(self.played()[-1], Path(entries[index]))
+            self.session.stateChanged.emit("playing")
+        self.end()
+        self.assertIn(FINISHED, self.toast.messages())
+        self.assertEqual(self.next_card.named("show_next"), [])
+        self.albums.assert_not_called()
+
+    def test_a_song_playlist_read_in_part_still_plays_its_tail(self):
+        # Ruling 2: past the read's cap or budget (or with no libVLC at all), the songs still
+        # play and still show, their files' names their titles.
+        songs = self.songs(1, 2, 3)
+        entries = [t["path"] for t in songs]
+        self.play_list("Evening Drive", entries, [1001, 1002, 1003])
+        self.session.stateChanged.emit("playing")
+        self.read_list([], whole=False)  # nothing read (no libVLC): nothing changes
+        self.assertEqual(self.rows(), ["01 Song 1", "02 Song 2", "03 Song 3"])
+        self.play_list("Night Shift", entries, [1001, 1002, 1003])
+        self.session.stateChanged.emit("playing")
+        self.read_list(songs[:1], whole=False)  # cut short after the first
+        self.assertEqual(self.rows(), ["Song 1", "02 Song 2", "03 Song 3"])
+        for index in (1, 2):
+            self.end()
+            self.assertEqual(self.played()[-1], Path(entries[index]))
+            self.session.stateChanged.emit("playing")
+            self.assertEqual(self.screen.current, index)
+        self.assertEqual(self.screen.song, ("03 Song 3", "", "Night Shift", ""))
+        self.assertEqual(self.controller.panel_facts(), ("03 Song 3", "", "Night Shift"))
+        self.end()
+        self.assertIn(FINISHED, self.toast.messages())
+        self.albums.assert_not_called()
+
+    def test_a_song_twice_in_a_playlist_plays_in_its_order(self):
+        one, two = self.songs(1, 2)
+        entries = [one["path"], two["path"], one["path"]]
+        self.play_list("Twice", entries, [1001, 1002, 1001])
+        self.session.stateChanged.emit("playing")
+        self.read_list([one, two, one])
+        for index in (1, 2):
+            self.end()
+            self.assertEqual(self.played()[-1], Path(entries[index]))
+            self.session.stateChanged.emit("playing")
+            self.assertEqual(self.screen.current, index)  # its own row, not the first's
+        self.end()  # the third, the last
+        self.assertIn(FINISHED, self.toast.messages())
+        self.assertEqual(len(self.session.plays), 3)
+
+    def test_playlists_resume_by_their_sizes_and_keep_their_list_after_stop(self):
+        # Ruling 5: each entry's name and size are its resume key (a long mix keeps a point).
+        songs = self.songs(1, 2, 3)
+        entries = [t["path"] for t in songs]
+        self.watch.resume[local_key(songs[0]["name"], 1001)] = 600_000
+        self.watch.resume[local_key(songs[1]["name"], 1002)] = 90_000
+        self.play_list("Long Mixes", entries, [1001, 1002, 1003])
+        self.assertEqual(self.session.plays[-1][1]["start_ms"], 600_000)
+        self.session.stateChanged.emit("playing")
+        self.end()
+        self.assertEqual(self.played()[-1], Path(entries[1]))
+        self.assertEqual(self.session.plays[-1][1]["start_ms"], 90_000)
+        self.session.stateChanged.emit("playing")
+        # Stop, then Play again: that song from its start, its list after it.
+        self.controller.stop()
+        self.assertFalse(self.screen.visible)
+        self.controller.play_again()
+        url, kwargs = self.session.plays[-1]
+        self.assertEqual((Path.from_uri(url), kwargs["start_ms"]), (Path(entries[1]), 0))
+        self.assertEqual((len(self.screen.tracks), self.screen.current), (3, 1))
+        self.session.stateChanged.emit("playing")
+        self.assertEqual(self.screen.song[2], "Long Mixes")
+        self.end()
+        self.assertEqual(self.played()[-1], Path(entries[2]))
+        self.assertEqual(self.next_card.named("show_next"), [])
+        self.albums.assert_not_called()
+        # A mixed list's song: its key as well.
+        self.play_list("Mixed Bag", [entries[1], str(self.folder / FILM)], [1002, 5000])
+        self.assertEqual(self.session.plays[-1][1]["start_ms"], 90_000)
+
+    def test_a_playlists_songs_never_list_their_folders(self):
+        # Ruling 2 (privacy): only the files the list names are read, whatever played before.
+        songs = self.songs(1, 2)
+        entries = [t["path"] for t in songs]
+        self.open(self.folder / "film.mkv", video=True)
+        self.session.video = None
+        self.play_list("Evening Drive", entries, [1001, 1002])
+        self.session.stateChanged.emit("playing")
+        self.assertTrue(self.screen.visible)
+        self.assertEqual(len(self.screen.tracks), 2)
+        late = self.list_reads.call_args.args
+        # A newer list: the older one's read never reaches it.
+        others = self.songs(3, 4)
+        self.play_list("Night Shift", [t["path"] for t in others], [1003, 1004])
+        self.controller._list_job.read.emit(late[0], songs, True)
+        self.assertEqual(self.rows(), ["03 Song 3", "04 Song 4"])
+        self.albums.assert_not_called()
+        # One of its songs opened by hand gives the list up: that song's own folder's album,
+        # as any song opened by hand has.
+        self.open(Path(others[1]["path"]))
+        self.assertEqual(self.albums.call_count, 1)
+        self.assertEqual(self.screen.tracks, [])
+        self.assertIsNone(self.controller._queue)
+        self.end()
+        self.assertEqual(len(self.session.plays), 4)  # the list's next isn't followed
+
+    def test_a_song_playlists_entry_with_a_picture_goes_on_as_a_film(self):
+        # An .m4a whose media has a picture: a film's controls, and the list goes on after it
+        # as after any video (Task 1's card); the next song is the list's album again.
+        clip = str(self.folder / "clip.m4a")
+        song = track(self.folder, 2, "Song 2")["path"]
+        self.play_list("Evening Drive", [clip, song], [500, 1002])
+        self.session.video = True
+        self.session.stateChanged.emit("playing")
+        self.assertFalse(self.screen.visible)
+        self.assertEqual(self.last_mode(), ("show_vod", "clip.m4a"))
+        self.end()
+        self.assertEqual(self.next_card.named("show_next"), [("02 Song 2", "", "episode")])
+        self.session.video = None
+        self.next_card.activate()
+        self.assertEqual(self.played()[-1], Path(song))
+        self.session.stateChanged.emit("playing")
+        self.assertTrue(self.screen.visible)
+        self.assertEqual((len(self.screen.tracks), self.screen.current), (2, 1))
+        self.assertEqual(self.screen.song[2], "Evening Drive")
+        self.end()
+        self.assertIn(FINISHED, self.toast.messages())
+        self.albums.assert_not_called()
 
 
 class RememberedTests(AudioCase):
@@ -1154,6 +1474,35 @@ class WindowSongTests(base.WindowCase):
         self.assertTrue(wait_until(lambda: panel.last() == ("", "", False, "", "", "", False)))
         self.close_window()
         self.assertFalse(os.path.exists(folder))
+
+    def test_a_playlist_of_songs_plays_as_an_album_named_after_it(self):
+        # Task 9 end to end: the router reads the playlist, its songs' tags are read by name on
+        # a thread (libVLC), and the screen's list keeps the playlist's order under its name,
+        # as the system's media panel does.
+        window = self.window
+        panel = MediaPanel()
+        window.media_keys._system = panel
+        rook = make_song(self.folder / "02 Rook.mp3", title="Rook", album="Kesh", number=2)
+        playlist = self.folder / "Evening Drive.m3u"
+        playlist.write_text(f"#EXTM3U\n{rook.name}\n{self.song.name}\n", encoding="utf-8")
+        self.show()
+        window.open_paths([str(playlist)], source="handover")
+        screen = window.audio_screen
+        self.assertTrue(wait_until(lambda: screen.isVisible()), "the audio screen")
+
+        def titles():
+            return [t.get("title") for t in screen._tracks]
+
+        def panel_song():
+            _state, title, _live, _artist, album, _art, _music = panel.last()
+            return title, album
+
+        self.assertTrue(wait_until(lambda: titles() == ["Rook", "Pell"]), titles())
+        self.assertEqual(screen.view(), "album")
+        self.assertEqual(screen._caption_text(), "EVENING DRIVE · 2 TRACKS")
+        self.assertTrue(wait_until(lambda: panel_song() == ("Rook", "Evening Drive")), panel.shown)
+        self.assertEqual(window.controller.session.url, rook.as_uri())
+        window.controller.stop()
 
     def click(self, widget, rect):
         QTest.mouseClick(widget, Qt.MouseButton.LeftButton, pos=rect.center())

@@ -318,6 +318,36 @@ class AlbumListingTests(unittest.TestCase):
             self.assertTrue(wait_until(lambda: len(got) == 2, 5000))
         self.assertEqual(got[1], (4, 10, False))
 
+    def test_a_playlists_songs_are_read_by_name_in_its_order(self):
+        # Task 9: a playlist's songs are read as it names them: those files only, in its order
+        # (never sorted, never another file of their folders), the first LIST_CAP within
+        # LIST_BUDGET_S; `read` says whether every one was.
+        first, second = _Folder(self), _Folder(self)
+        first.touch("01 Arn.mp3", "02 Pell.mp3", "Other.mp3")
+        second.touch("09 Rook.mp3")
+        parsed = []
+        self._patched(
+            lambda _i, path, _ms, *, fetch=False: parsed.append(os.path.basename(path))
+            or _fake_tags("Harbour Lights")
+        )
+        files = [(second / "09 Rook.mp3", 9), (first / "02 Pell.mp3", 2), (first / "01 Arn.mp3", 1)]
+        job = AlbumJob()
+        got = []
+        job.read.connect(lambda generation, tracks, whole: got.append((generation, tracks, whole)))
+        with mock.patch.object(album_listing, "music_files", side_effect=AssertionError("listed")):
+            job.start_files(5, files)
+            self.assertTrue(wait_until(lambda: got, 5000))
+            with mock.patch.object(album_listing, "LIST_CAP", 2):
+                job.start_files(6, files)
+                self.assertTrue(wait_until(lambda: len(got) == 2, 5000))
+        generation, tracks, whole = got[0]
+        self.assertEqual((generation, whole), (5, True))
+        self.assertEqual([(t["path"], t["size"]) for t in tracks], files)
+        self.assertTrue(all(t["parsed"] and t["album"] == "Harbour Lights" for t in tracks))
+        self.assertEqual(parsed[:3], ["09 Rook.mp3", "02 Pell.mp3", "01 Arn.mp3"])
+        generation, tracks, whole = got[1]
+        self.assertEqual((generation, len(tracks), whole), (6, 2, False))
+
     def test_a_newer_start_stops_the_older_listing(self):
         folder = _Folder(self)
         folder.touch(*(f"{n:03d} Song.mp3" for n in range(1, 400)))

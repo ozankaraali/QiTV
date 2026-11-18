@@ -11,7 +11,9 @@ thousands of files, or one on a slow share, is read for LIST_BUDGET_S at most an
 LIST_CAP files at most, in natural order: what was read by then is the listing (`read_album`
 says whether it was cut short: such an album can't say what follows its last). A file's own
 parse gives up after PARSE_TIMEOUT_MS, or sooner when the budget runs out; a file not read is
-listed as such ("parsed": False) and matches no album. Nothing here raises.
+listed as such ("parsed": False) and matches no album. A playlist's songs are read by name
+(`read_tracks`): the files it names only, in its order, within the same budget and cap. Nothing
+here raises.
 """
 
 from __future__ import annotations
@@ -132,6 +134,14 @@ def music_files(folder: str) -> list[tuple[str, Optional[int]]]:
     return found
 
 
+def unread_track(path: str, size: Optional[int]) -> Track:
+    """The Track of a file whose tags are not read (not yet, or they could not be): its path,
+    its name and `size`, no tags ("parsed": False). A list names it by its file's name."""
+    track = song_tags({})
+    track.update(path=path, name=os.path.basename(path), size=size, parsed=False)
+    return track
+
+
 def read_tracks(
     files: Sequence[tuple[str, Optional[int]]],
     *,
@@ -179,8 +189,9 @@ def _read_some(
             except Exception as error:  # a file libVLC fails on: its tags are not known
                 logger.info("A song's tags could not be read (%s)", type(error).__name__)
                 tags = None
-            track = song_tags({}) if tags is None else dict(tags)
-            track.update(path=path, name=os.path.basename(path), size=size, parsed=tags is not None)
+            track = unread_track(path, size)
+            if tags is not None:
+                track.update(tags, parsed=True)
             tracks.append(track)
         whole = len(tracks) == len(files)
     except Exception as error:  # never raises: what was read stays

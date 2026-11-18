@@ -10,6 +10,7 @@ services.image_loader does for logos (a QImage is safe there; the GUI thread mak
 
 from __future__ import annotations
 
+from collections.abc import Sequence
 import hashlib
 import logging
 import os
@@ -88,7 +89,11 @@ class AlbumJob(QObject):
     or [] for a lone song) comes on the GUI thread, and `read` with it says whether the folder
     was read whole (album_listing.read_album: a listing cut short can't say what follows its
     last track). A newer start stops an older listing between two files; the older one is
-    still answered, with what it had (and as cut short)."""
+    still answered, with what it had (and as cut short).
+
+    A playlist's songs (start_files) are read the same way, by name: the files it names only,
+    in its order, never their folders; `read` answers with their Tracks (the first LIST_CAP,
+    within LIST_BUDGET_S) and whether every one was read."""
 
     listed = Signal(int, list)
     read = Signal(int, list, bool)  # listed's, and whether the folder was read whole
@@ -118,6 +123,37 @@ class AlbumJob(QObject):
         try:
             self.read.emit(generation, album, whole)
             self.listed.emit(generation, album)
+        except RuntimeError:
+            pass  # QiTV closed meanwhile
+
+    def start_files(self, generation: int, files: Sequence[tuple[str, Optional[int]]]) -> None:
+        """Read the songs `files` names ((path, size or None), a playlist's, in its order)."""
+        self._newest[0] = generation
+        threading.Thread(
+            target=self._read_files,
+            args=(generation, list(files), self._newest),
+            name="qitv-songs",
+            daemon=True,
+        ).start()
+
+    def _read_files(
+        self,
+        generation: int,
+        files: list[tuple[str, Optional[int]]],
+        newest: list[Optional[int]],
+    ) -> None:
+        try:
+            tracks = album_listing.read_tracks(
+                files,
+                budget_s=album_listing.LIST_BUDGET_S,
+                cap=album_listing.LIST_CAP,
+                stop=lambda: newest[0] != generation,
+            )
+        except Exception as error:  # read_tracks never raises; never unanswered all the same
+            logger.warning("A playlist's songs could not be read (%s)", type(error).__name__)
+            tracks = []
+        try:
+            self.read.emit(generation, tracks, len(tracks) == len(files))
         except RuntimeError:
             pass  # QiTV closed meanwhile
 
