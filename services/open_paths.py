@@ -49,7 +49,7 @@ _DEVICE = "\\\\.\\"
 @dataclass(frozen=True)
 class Sorted:
     """Opened paths by kind: media in natural order, subtitles, playlists, and the others
-    (files QiTV won't play), as given."""
+    (files QiTV won't play, or folders: only the disk tells them apart), as given."""
 
     media: tuple[str, ...]
     subtitles: tuple[str, ...]
@@ -58,7 +58,8 @@ class Sorted:
 
 
 def launch_paths(argv: Sequence[str]) -> list[str]:
-    """The absolute paths of the existing files among `argv[1:]`, spelled as they were given
+    """The absolute paths of the existing files and folders among `argv[1:]` (a folder plays
+    as a list: TVWindow.open_paths), spelled as they were given
     (a relative one made absolute): a link stays the link, not the file it points to, and a
     mapped drive stays its letter (`Z:\\ep.mkv`, never `\\\\server\\share\\ep.mkv`), so a
     launch names a file as a hand-over or DDE does.
@@ -81,7 +82,7 @@ def launch_paths(argv: Sequence[str]) -> list[str]:
             continue
         try:
             path = os.path.abspath(arg)
-            if _is_file(path):
+            if _is_file(path) or _is_folder(path):
                 found.append(path)
         except OSError, ValueError:
             logger.debug("launch argument is not a readable path: %r", arg)
@@ -95,6 +96,15 @@ def _is_file(path: str) -> bool:
         return False
     extended = extended_path(path)
     return extended != path and os.path.isfile(extended)
+
+
+def _is_folder(path: str) -> bool:
+    if os.path.isdir(path):
+        return True
+    if sys.platform != "win32":
+        return False
+    extended = extended_path(path)
+    return extended != path and os.path.isdir(extended)
 
 
 def extended_path(path: str) -> str:
@@ -172,7 +182,9 @@ def sort_paths(paths: Iterable[str]) -> Sorted:
 def holds_the_start(paths: Iterable[str]) -> bool:
     """Whether a start with `paths` holds what would open over a film (the last channel, the
     drawer, the welcome card): it carries a media file, or a file QiTV won't play, whose
-    message comes instead. Subtitle and playlist files alone start as any start does."""
+    message comes instead, or a folder (one of the others too), which plays as a list or says
+    it has nothing to play (Ruling P4-3: such a read always holds the start as a film's).
+    Subtitle and playlist files alone start as any start does."""
     kinds = sort_paths(paths)
     return bool(kinds.media or kinds.others)
 

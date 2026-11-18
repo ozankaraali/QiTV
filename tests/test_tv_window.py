@@ -1735,7 +1735,13 @@ class VlcWindowTests(WindowCase):
         srt = subtitle_file(self)
         self.open_first_channel()
         self.assertTrue(wait_until(self.session_on(channel_urls()[0], (PlaybackState.PLAYING,))))
-        self.assertEqual(drag_and_drop(window, [srt.with_suffix(".txt")]), (False, False))
+        # No subtitle file: taken all the same, as it may be a folder only the disk tells (Task
+        # 11); it is none (gone), and says so. The channel plays on.
+        notes = srt.with_suffix(".txt")
+        self.assertEqual(drag_and_drop(window, [notes]), (True, True))
+        text = f"Couldn't open “{notes.name}”"
+        self.assertTrue(wait_until(lambda: (text, "error") in self.toasts), self.toasts)
+        self.assertEqual(window.session.state(), PlaybackState.PLAYING)
         self.assertEqual(drag_and_drop(window.host, [srt]), (True, True))  # over the overlays
         session = window.session
 

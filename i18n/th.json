@@ -623,6 +623,7 @@
   "No stream to spare at {provider}": "{provider} ไม่มีสตรีมว่าง",
   "No subtitles": "ไม่มีคำบรรยาย",
   "No subtitles found for \"{query}\". Try another spelling, or fewer words.": "ไม่พบคำบรรยายสำหรับ \"{query}\" ลองสะกดแบบอื่นหรือใช้คำน้อยลง",
+  "No videos or music in “{name}”": "",
   "None of the files in this playlist are here": "",
   "Normal": "ปกติ",
   "Normal speed": "ความเร็วปกติ",

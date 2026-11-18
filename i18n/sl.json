@@ -641,6 +641,7 @@
   "No stream to spare at {provider}": "Pri {provider} ni prostega pretoka",
   "No subtitles": "Ni podnapisov",
   "No subtitles found for \"{query}\". Try another spelling, or fewer words.": "Za „{query}“ ni najdenih podnapisov. Poskusite drugačen zapis ali manj besed.",
+  "No videos or music in “{name}”": "",
   "None of the files in this playlist are here": "",
   "Normal": "Normalna",
   "Normal speed": "Normalna hitrost",

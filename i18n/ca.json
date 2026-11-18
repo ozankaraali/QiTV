@@ -629,6 +629,7 @@
   "No stream to spare at {provider}": "No queden fluxos lliures a {provider}",
   "No subtitles": "No hi ha subtítols",
   "No subtitles found for \"{query}\". Try another spelling, or fewer words.": "No s'han trobat subtítols per a «{query}». Prova una altra grafia o menys paraules.",
+  "No videos or music in “{name}”": "",
   "None of the files in this playlist are here": "",
   "Normal": "Normal",
   "Normal speed": "Velocitat normal",

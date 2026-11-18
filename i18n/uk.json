@@ -641,6 +641,7 @@
   "No stream to spare at {provider}": "У {provider} немає вільного потоку",
   "No subtitles": "Немає субтитрів",
   "No subtitles found for \"{query}\". Try another spelling, or fewer words.": "Субтитри для «{query}» не знайдено. Спробуйте інше написання або менше слів.",
+  "No videos or music in “{name}”": "",
   "None of the files in this playlist are here": "",
   "Normal": "Звичайна",
   "Normal speed": "Звичайна швидкість",

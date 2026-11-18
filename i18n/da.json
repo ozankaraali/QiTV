@@ -629,6 +629,7 @@
   "No stream to spare at {provider}": "Ingen ledig stream hos {provider}",
   "No subtitles": "Ingen undertekster",
   "No subtitles found for \"{query}\". Try another spelling, or fewer words.": "Ingen undertekster fundet for »{query}«. Prøv en anden stavemåde eller færre ord.",
+  "No videos or music in “{name}”": "",
   "None of the files in this playlist are here": "",
   "Normal": "Normal",
   "Normal speed": "Normal hastighed",

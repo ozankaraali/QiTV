@@ -623,6 +623,7 @@
   "No stream to spare at {provider}": "{provider} 没有空闲的流",
   "No subtitles": "没有字幕",
   "No subtitles found for \"{query}\". Try another spelling, or fewer words.": "未找到“{query}”的字幕。请尝试其他拼写或减少关键词。",
+  "No videos or music in “{name}”": "",
   "None of the files in this playlist are here": "",
   "Normal": "标准",
   "Normal speed": "正常速度",

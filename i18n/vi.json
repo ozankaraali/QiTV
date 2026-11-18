@@ -623,6 +623,7 @@
   "No stream to spare at {provider}": "{provider} không còn luồng trống",
   "No subtitles": "Không có phụ đề",
   "No subtitles found for \"{query}\". Try another spelling, or fewer words.": "Không tìm thấy phụ đề cho \"{query}\". Hãy thử cách viết khác hoặc ít từ hơn.",
+  "No videos or music in “{name}”": "",
   "None of the files in this playlist are here": "",
   "Normal": "Bình thường",
   "Normal speed": "Tốc độ bình thường",

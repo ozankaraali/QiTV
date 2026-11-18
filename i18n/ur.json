@@ -629,6 +629,7 @@
   "No stream to spare at {provider}": "{provider} کے پاس کوئی فالتو اسٹریم نہیں",
   "No subtitles": "کوئی سب ٹائٹل نہیں",
   "No subtitles found for \"{query}\". Try another spelling, or fewer words.": "“{query}” کے لیے کوئی سب ٹائٹل نہیں ملا۔ دوسرا ہجے یا کم الفاظ آزمائیں۔",
+  "No videos or music in “{name}”": "",
   "None of the files in this playlist are here": "",
   "Normal": "نارمل",
   "Normal speed": "نارمل رفتار",

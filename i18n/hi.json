@@ -629,6 +629,7 @@
   "No stream to spare at {provider}": "{provider} पर कोई स्ट्रीम खाली नहीं",
   "No subtitles": "कोई सबटाइटल नहीं",
   "No subtitles found for \"{query}\". Try another spelling, or fewer words.": "“{query}” के लिए कोई सबटाइटल नहीं मिला। दूसरी स्पेलिंग या कम शब्द आज़माएँ।",
+  "No videos or music in “{name}”": "",
   "None of the files in this playlist are here": "",
   "Normal": "सामान्य",
   "Normal speed": "सामान्य गति",

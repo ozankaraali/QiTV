@@ -623,6 +623,7 @@
   "No stream to spare at {provider}": "Tidak ada stream tersisa di {provider}",
   "No subtitles": "Tidak ada subtitle",
   "No subtitles found for \"{query}\". Try another spelling, or fewer words.": "Tidak ada subtitle untuk “{query}”. Coba ejaan lain, atau lebih sedikit kata.",
+  "No videos or music in “{name}”": "",
   "None of the files in this playlist are here": "",
   "Normal": "Normal",
   "Normal speed": "Kecepatan normal",

@@ -629,6 +629,7 @@
   "No stream to spare at {provider}": "Nenhum stream livre em {provider}",
   "No subtitles": "Sem legendas",
   "No subtitles found for \"{query}\". Try another spelling, or fewer words.": "Nenhuma legenda encontrada para “{query}”. Tente outra grafia ou menos palavras.",
+  "No videos or music in “{name}”": "",
   "None of the files in this playlist are here": "",
   "Normal": "Normal",
   "Normal speed": "Velocidade normal",

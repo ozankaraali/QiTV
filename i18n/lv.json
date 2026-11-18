@@ -635,6 +635,7 @@
   "No stream to spare at {provider}": "Pie {provider} nav brīvas straumes",
   "No subtitles": "Nav subtitru",
   "No subtitles found for \"{query}\". Try another spelling, or fewer words.": "Subtitri vaicājumam „{query}” nav atrasti. Mēģiniet citu rakstību vai mazāk vārdu.",
+  "No videos or music in “{name}”": "",
   "None of the files in this playlist are here": "",
   "Normal": "Normāla",
   "Normal speed": "Normāls ātrums",

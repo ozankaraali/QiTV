@@ -635,6 +635,7 @@
   "No stream to spare at {provider}": "U {provider} nie je voľný stream",
   "No subtitles": "Žiadne titulky",
   "No subtitles found for \"{query}\". Try another spelling, or fewer words.": "Pre „{query}“ sa nenašli žiadne titulky. Skúste iný pravopis alebo menej slov.",
+  "No videos or music in “{name}”": "",
   "None of the files in this playlist are here": "",
   "Normal": "Normálne",
   "Normal speed": "Normálna rýchlosť",

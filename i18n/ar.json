@@ -653,6 +653,7 @@
   "No stream to spare at {provider}": "لا يوجد بث متاح لدى {provider}",
   "No subtitles": "لا توجد ترجمة",
   "No subtitles found for \"{query}\". Try another spelling, or fewer words.": "لم يُعثر على ترجمة لـ«{query}». جرّب تهجئة أخرى أو كلمات أقل.",
+  "No videos or music in “{name}”": "",
   "None of the files in this playlist are here": "",
   "Normal": "عادي",
   "Normal speed": "السرعة العادية",

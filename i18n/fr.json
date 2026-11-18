@@ -629,6 +629,7 @@
   "No stream to spare at {provider}": "Aucun flux disponible chez {provider}",
   "No subtitles": "Aucun sous-titre",
   "No subtitles found for \"{query}\". Try another spelling, or fewer words.": "Aucun sous-titre trouvé pour « {query} ». Essayez une autre orthographe ou moins de mots.",
+  "No videos or music in “{name}”": "Aucune vidéo ni musique dans « {name} »",
   "None of the files in this playlist are here": "Aucun fichier de cette liste de lecture n’a été trouvé",
   "Normal": "Normale",
   "Normal speed": "Vitesse normale",

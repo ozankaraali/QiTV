@@ -641,6 +641,7 @@
   "No stream to spare at {provider}": "Brak wolnego strumienia u {provider}",
   "No subtitles": "Brak napisów",
   "No subtitles found for \"{query}\". Try another spelling, or fewer words.": "Nie znaleziono napisów dla „{query}”. Spróbuj innej pisowni lub mniej słów.",
+  "No videos or music in “{name}”": "",
   "None of the files in this playlist are here": "",
   "Normal": "Normalne",
   "Normal speed": "Normalna prędkość",

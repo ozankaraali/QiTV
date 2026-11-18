@@ -629,6 +629,7 @@
   "No stream to spare at {provider}": "{provider}-এ কোনো স্ট্রিম খালি নেই",
   "No subtitles": "কোনো সাবটাইটেল নেই",
   "No subtitles found for \"{query}\". Try another spelling, or fewer words.": "“{query}”-এর জন্য কোনো সাবটাইটেল পাওয়া যায়নি। অন্য বানান বা কম শব্দ দিয়ে চেষ্টা করুন।",
+  "No videos or music in “{name}”": "",
   "None of the files in this playlist are here": "",
   "Normal": "সাধারণ",
   "Normal speed": "স্বাভাবিক গতি",

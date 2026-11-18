@@ -629,6 +629,7 @@
   "No stream to spare at {provider}": "{provider} provayderində boş yayım yoxdur",
   "No subtitles": "Subtitr yoxdur",
   "No subtitles found for \"{query}\". Try another spelling, or fewer words.": "“{query}” üçün subtitr tapılmadı. Başqa yazılış və ya daha az söz yoxlayın.",
+  "No videos or music in “{name}”": "",
   "None of the files in this playlist are here": "",
   "Normal": "Normal",
   "Normal speed": "Normal sürət",

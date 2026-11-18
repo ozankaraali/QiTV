@@ -629,6 +629,7 @@
   "No stream to spare at {provider}": "Geen stream over bij {provider}",
   "No subtitles": "Geen ondertitels",
   "No subtitles found for \"{query}\". Try another spelling, or fewer words.": "Geen ondertitels gevonden voor “{query}”. Probeer een andere spelling of minder woorden.",
+  "No videos or music in “{name}”": "",
   "None of the files in this playlist are here": "",
   "Normal": "Normaal",
   "Normal speed": "Normale snelheid",

@@ -635,6 +635,7 @@
   "No stream to spare at {provider}": "{provider} neturi laisvo srauto",
   "No subtitles": "Subtitrų nėra",
   "No subtitles found for \"{query}\". Try another spelling, or fewer words.": "Subtitrų pagal „{query}“ nerasta. Pabandykite parašyti kitaip arba mažiau žodžių.",
+  "No videos or music in “{name}”": "",
   "None of the files in this playlist are here": "",
   "Normal": "Normalus",
   "Normal speed": "Normalus greitis",

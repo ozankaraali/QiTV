@@ -72,9 +72,12 @@ class LaunchPaths(unittest.TestCase):
                 self.assertEqual(open_paths.launch_paths(["qitv", long]), expected)
                 self.assertEqual(seen, looked)
 
-    def test_folders_and_first_argument_are_not_paths(self):
+    def test_the_first_argument_is_no_path_and_a_folder_is_one(self):
+        # Task 11: a folder (dropped on QiTV's icon, Windows starts it with it) plays as a list.
         with tempfile.TemporaryDirectory() as d:
-            self.assertEqual(open_paths.launch_paths([d, d]), [])
+            self.assertEqual(open_paths.launch_paths([d]), [])
+            self.assertEqual(open_paths.launch_paths([d, d]), [d])
+            self.assertEqual(open_paths.launch_paths(["qitv", os.path.join(d, "gone")]), [])
 
 
 class SortPaths(unittest.TestCase):

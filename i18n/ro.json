@@ -635,6 +635,7 @@
   "No stream to spare at {provider}": "Niciun flux disponibil la {provider}",
   "No subtitles": "Fără subtitrări",
   "No subtitles found for \"{query}\". Try another spelling, or fewer words.": "Nu s-au găsit subtitrări pentru „{query}”. Încercați altă ortografie sau mai puține cuvinte.",
+  "No videos or music in “{name}”": "",
   "None of the files in this playlist are here": "",
   "Normal": "Normal",
   "Normal speed": "Viteză normală",

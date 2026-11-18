@@ -629,6 +629,7 @@
   "No stream to spare at {provider}": "{provider} استریم آزاد ندارد",
   "No subtitles": "بدون زیرنویس",
   "No subtitles found for \"{query}\". Try another spelling, or fewer words.": "زیرنویسی برای «{query}» پیدا نشد. املای دیگری یا کلمات کمتری را امتحان کنید.",
+  "No videos or music in “{name}”": "",
   "None of the files in this playlist are here": "",
   "Normal": "عادی",
   "Normal speed": "سرعت عادی",

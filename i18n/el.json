@@ -629,6 +629,7 @@
   "No stream to spare at {provider}": "Καμία ελεύθερη ροή στον πάροχο {provider}",
   "No subtitles": "Χωρίς υπότιτλους",
   "No subtitles found for \"{query}\". Try another spelling, or fewer words.": "Δεν βρέθηκαν υπότιτλοι για «{query}». Δοκιμάστε άλλη ορθογραφία ή λιγότερες λέξεις.",
+  "No videos or music in “{name}”": "",
   "None of the files in this playlist are here": "",
   "Normal": "Κανονική",
   "Normal speed": "Κανονική ταχύτητα",

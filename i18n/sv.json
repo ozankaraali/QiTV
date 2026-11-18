@@ -629,6 +629,7 @@
   "No stream to spare at {provider}": "Ingen ledig ström hos {provider}",
   "No subtitles": "Inga undertexter",
   "No subtitles found for \"{query}\". Try another spelling, or fewer words.": "Inga undertexter hittades för ”{query}”. Prova en annan stavning eller färre ord.",
+  "No videos or music in “{name}”": "",
   "None of the files in this playlist are here": "",
   "Normal": "Normal",
   "Normal speed": "Normal hastighet",

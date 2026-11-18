@@ -11,6 +11,7 @@ from urllib.parse import quote
 
 from test_tv_controller import ControllerTestCase
 
+from services import local_playlist
 from services.local_episodes import list_folder
 from services.local_playlist import PlaylistRead, read_playlist
 from services.next_episode import LOCAL_NEXT, episode_label
@@ -154,6 +155,255 @@ class ReadPlaylistTests(Folder, unittest.TestCase):
     def test_a_list_entry_has_no_season_label(self):
         entry = {"name": "b", "season": None, "number": None, "local_path": "/x/b.mkv", "size": 4}
         self.assertEqual(episode_label(None, entry), "")
+
+
+def fake_tracks(tags):
+    """A stand-in for album_listing.read_tracks: each file's `tags` by its name (a name not in
+    `tags` is a file libVLC could not read); its calls are kept in `.calls`."""
+    calls = []
+
+    def read(files, *, budget_s, cap, stop=None):
+        calls.append(([path for path, _size in files], budget_s, cap))
+        tracks = []
+        for path, size in list(files)[:cap]:
+            name = os.path.basename(path)
+            known = tags.get(name)
+            track = {"album": "", "disc": None, "track": None, **(known or {})}
+            track.update(path=path, name=name, size=size, parsed=known is not None)
+            tracks.append(track)
+        return tracks
+
+    read.calls = calls
+    return read
+
+
+class _Clock:
+    """local_playlist's clock in a test (its `time`): each look at it is a second later."""
+
+    def __init__(self):
+        self.now = 0.0
+
+    def monotonic(self):
+        self.now += 1.0
+        return self.now
+
+
+class ReadFolderTests(Folder, unittest.TestCase):
+    """read_folder and read_files: a folder opened in QiTV, or several files dropped together,
+    as a list (Task 11). The tags are a fake's (read_tracks)."""
+
+    def setUp(self):
+        self.make_folder()
+
+    def read(self, relative, **how):
+        return local_playlist.read_folder(str(self.folder / relative), **how)
+
+    def names(self, read):
+        return [os.path.basename(entry) for entry in read.entries]
+
+    def songs(self, tags):
+        """read_tracks answers with `tags` (fake_tracks)."""
+        return mock.patch.object(local_playlist, "read_tracks", side_effect=fake_tracks(tags))
+
+    def test_one_shows_episodes_go_by_season_and_episode(self):
+        # Spelt four ways: natural order would put the spaced ones first, S02E01 among them.
+        for name, size in (
+            ("Lantern.Coast.S01E02.720p.mkv", 2),
+            ("lantern_coast_s01e10.mkv", 10),
+            ("Lantern Coast - S01E01 - Pilot.mkv", 1),
+            ("LANTERN COAST S02E01.mp4", 21),
+            ("Lantern Coast S01E03E04.mkv", 3),
+        ):
+            self.file(f"Lantern Coast/{name}", b"x" * size)
+        read = self.read("Lantern Coast")
+        self.assertEqual((read.kind, read.name, read.missing), ("local", "Lantern Coast", 0))
+        self.assertEqual(
+            self.names(read),
+            [
+                "Lantern Coast - S01E01 - Pilot.mkv",
+                "Lantern.Coast.S01E02.720p.mkv",
+                "Lantern Coast S01E03E04.mkv",
+                "lantern_coast_s01e10.mkv",
+                "LANTERN COAST S02E01.mp4",
+            ],
+        )
+        self.assertEqual(read.entries[0], str(self.folder / "Lantern Coast" / self.names(read)[0]))
+        self.assertEqual(read.sizes, (1, 2, 3, 10, 21))
+
+    def test_bare_names_in_a_season_folder_are_its_shows(self):
+        # Plan 3's rule: a bare S01E02 takes its show from the folder (above "Season 1").
+        for name in ("S01E10.mkv", "Lantern Coast S01E02.mkv", "S01E01.mkv"):
+            self.file(f"Lantern Coast/Season 1/{name}")
+        read = self.read("Lantern Coast/Season 1")
+        self.assertEqual(read.name, "Season 1")
+        self.assertEqual(self.names(read), ["S01E01.mkv", "Lantern Coast S01E02.mkv", "S01E10.mkv"])
+
+    def test_two_shows_or_an_extra_keep_natural_order(self):
+        # Ruling 3: season and episode order only when every video is one show's episode.
+        for name in (
+            "Lantern Coast S01E01.mkv",
+            "Brannow Fell S01E10.mkv",
+            "Brannow Fell S01E2.mkv",
+        ):
+            self.file(f"Two/{name}")
+        self.assertEqual(
+            self.names(self.read("Two")),
+            ["Brannow Fell S01E2.mkv", "Brannow Fell S01E10.mkv", "Lantern Coast S01E01.mkv"],
+        )
+        for name in ("Making of.mkv", "Lantern Coast S01E02.mkv", "Lantern.Coast.S01E01.mkv"):
+            self.file(f"Extra/{name}")
+        self.assertEqual(
+            self.names(self.read("Extra")),
+            ["Lantern Coast S01E02.mkv", "Lantern.Coast.S01E01.mkv", "Making of.mkv"],
+        )
+
+    def test_songs_in_a_mixed_folder_keep_their_natural_places(self):
+        # One order for the whole list: the episodes take the places natural order gives the
+        # videos, in season and episode order; the songs stay where natural order puts them.
+        for name in (
+            "Lantern.Coast.S01E01.mkv",
+            "Lantern Coast Theme.mp3",
+            "Lantern Coast S01E02.mkv",
+        ):
+            self.file(f"Mixed/{name}")
+        tags = fake_tracks({})
+        with mock.patch.object(local_playlist, "read_tracks", side_effect=tags):
+            read = self.read("Mixed")
+        self.assertEqual(  # natural order: S01E02, the theme, S01E01
+            self.names(read),
+            ["Lantern.Coast.S01E01.mkv", "Lantern Coast Theme.mp3", "Lantern Coast S01E02.mkv"],
+        )
+        self.assertEqual(tags.calls, [])  # no tags are read for a list with videos
+
+    def test_a_folder_of_songs_is_an_album_named_after_it(self):
+        for name in ("Harbour.flac", "Tide.mp3", "Lanterns.ogg", "Quay.opus"):
+            self.file(f"Brannow Fell/{name}")
+        tags = fake_tracks(
+            {
+                "Tide.mp3": {"album": "Brannow Fell", "track": 1},
+                "Harbour.flac": {"album": "Brannow Fell", "disc": 2, "track": 1},
+                "Lanterns.ogg": {"album": "Brannow Fell", "track": 2},
+                "Quay.opus": {"album": "brannow  fell", "disc": 1, "track": 3},
+            }
+        )
+        with mock.patch.object(local_playlist, "read_tracks", side_effect=tags):
+            read = self.read("Brannow Fell")
+        self.assertEqual((read.kind, read.name), ("local", "Brannow Fell"))
+        self.assertEqual(  # by disc (none is the first), then track
+            self.names(read), ["Tide.mp3", "Lanterns.ogg", "Quay.opus", "Harbour.flac"]
+        )
+        self.assertEqual(read.sizes, (5, 5, 5, 5))
+        [(files, budget_s, cap)] = tags.calls
+        self.assertEqual(len(files), 4)
+        self.assertGreater(budget_s, 0)
+        self.assertLessEqual(budget_s, local_playlist.READ_BUDGET_S)
+        self.assertEqual(cap, local_playlist.TAGS_CAP)
+
+    def test_songs_go_by_name_unless_each_is_read_numbered_and_of_one_album(self):
+        names = ("10 Quay.mp3", "2 Tide.mp3", "1 Harbour.mp3")
+        for name in names:
+            self.file(f"Songs/{name}")
+        by_name = ["1 Harbour.mp3", "2 Tide.mp3", "10 Quay.mp3"]
+        numbered = {"10 Quay.mp3": {"track": 1}, "2 Tide.mp3": {"track": 2}}
+        for case, tags in (
+            ("untagged", {name: {} for name in names}),
+            ("one not read", numbered),
+            ("one with no number", {**numbered, "1 Harbour.mp3": {}}),
+            ("two albums", {n: {"album": n[-8:], "track": i} for i, n in enumerate(names)}),
+        ):
+            with self.subTest(case=case), self.songs(tags):
+                self.assertEqual(self.names(self.read("Songs")), by_name)
+        with self.songs({**numbered, "1 Harbour.mp3": {"track": 3}}):
+            read = self.read("Songs")
+        self.assertEqual(self.names(read), ["10 Quay.mp3", "2 Tide.mp3", "1 Harbour.mp3"])
+
+    def test_past_the_cap_songs_are_not_read_and_go_by_name(self):
+        for number in (3, 1, 2):
+            self.file(f"Many/{number} Song.mp3")
+        tags = fake_tracks({f"{n} Song.mp3": {"track": 4 - n} for n in (1, 2, 3)})
+        with mock.patch.object(local_playlist, "read_tracks", side_effect=tags):
+            read = self.read("Many", cap=2)
+        self.assertEqual(tags.calls, [])
+        self.assertEqual(self.names(read), ["1 Song.mp3", "2 Song.mp3", "3 Song.mp3"])
+
+    def test_the_tags_get_what_is_left_of_the_budget(self):
+        for number in (2, 1):
+            self.file(f"Slow/{number} Song.mp3")
+        tags = fake_tracks({"1 Song.mp3": {"track": 2}, "2 Song.mp3": {"track": 1}})
+        with (
+            mock.patch.object(local_playlist, "time", _Clock()),
+            mock.patch.object(local_playlist, "read_tracks", side_effect=tags),
+        ):
+            self.read("Slow", budget_s=10.0)
+        [(_files, budget_s, _cap)] = tags.calls
+        self.assertLess(budget_s, 10.0)  # the listing took its share first
+        tags.calls.clear()
+        with (
+            mock.patch.object(local_playlist, "time", _Clock()),
+            mock.patch.object(local_playlist, "read_tracks", side_effect=tags),
+        ):
+            read = self.read("Slow", budget_s=2.0)  # spent on the listing: no tags read
+        self.assertEqual(tags.calls, [])
+        self.assertEqual(read.kind, "local")
+
+    def test_subfolders_are_never_read(self):
+        self.file("Lantern Coast/Lantern Coast S01E02.mkv")
+        self.file("Lantern Coast/Season 2/Lantern Coast S02E01.mkv")  # a subfolder's
+        self.file("Lantern Coast/Extras/Lantern Coast S01E01.mkv")
+        (self.folder / "Lantern Coast" / "Lantern Coast S01E01.mkv").mkdir()  # named like one
+        self.file("Lantern Coast/._Lantern Coast S01E03.mkv")  # macOS's companion: hidden
+        self.file("Lantern Coast/.Lantern Coast S01E04.mkv")
+        self.file("Lantern Coast/notes.txt")
+        self.file("Lantern Coast/Lantern Coast S01E02.srt")
+        self.file("Lantern Coast/Lantern Coast.m3u")
+        read = self.read("Lantern Coast")
+        self.assertEqual(
+            read.entries, (str(self.folder / "Lantern Coast/Lantern Coast S01E02.mkv"),)
+        )
+
+    def test_an_empty_folder_says_so(self):
+        self.file("Empty Shelf/notes.txt")
+        self.file("Empty Shelf/Inner/Lantern Coast S01E01.mkv")
+        self.assertEqual(self.read("Empty Shelf"), PlaylistRead("empty", "Empty Shelf"))
+        (self.folder / "Bare").mkdir()
+        self.assertEqual(self.read("Bare"), PlaylistRead("empty", "Bare"))
+
+    def test_a_trailing_separator_still_names_the_folder(self):
+        # macOS's Finder hands a dropped folder over as ".../Lantern Coast/".
+        film = self.file("Lantern Coast/Lantern Coast S01E01.mkv")
+        read = local_playlist.read_folder(str(self.folder / "Lantern Coast") + os.sep)
+        self.assertEqual((read.name, read.entries), ("Lantern Coast", (str(film),)))
+
+    def test_a_gone_or_refused_folder_is_unreadable_and_a_file_is_other(self):
+        self.assertEqual(self.read("Gone Shelf"), PlaylistRead("unreadable", "Gone Shelf"))
+        self.file("notes.txt")
+        self.assertEqual(self.read("notes.txt"), PlaylistRead("other", "notes.txt"))
+        self.file("Refused/Lantern Coast S01E01.mkv")
+        with mock.patch.object(local_playlist.os, "scandir", side_effect=PermissionError):
+            self.assertEqual(self.read("Refused"), PlaylistRead("unreadable", "Refused"))
+
+    def test_the_listing_stops_at_the_budget(self):
+        # A slow share: what was listed by the deadline plays; nothing waits past it.
+        for number in (1, 2, 3, 4):
+            self.file(f"Slow/Lantern Coast S01E0{number}.mkv")
+        with mock.patch.object(local_playlist, "time", _Clock()):
+            read = self.read("Slow", budget_s=2.5)
+        self.assertEqual(read.kind, "local")
+        self.assertLess(len(read.entries), 4)
+
+    def test_several_files_read_as_a_list(self):
+        # Natural order is the other way round: the spaced name, the dotted, the underscored.
+        third = self.file("Lantern Coast/Lantern Coast S01E03.mkv", b"x" * 3)
+        first = self.file("Lantern Coast/Lantern_Coast_S01E01.mkv", b"x" * 1)
+        second = self.file("Lantern Coast/Lantern.Coast.S01E02.mkv", b"x" * 2)
+        gone = self.folder / "Lantern Coast" / "Lantern Coast S01E04.mkv"
+        read = local_playlist.read_files([str(third), str(gone), str(second), str(first)])
+        entries = (str(first), str(second), str(third))
+        self.assertEqual(read, PlaylistRead("local", "Lantern Coast", entries, 1, (1, 2, 3)))
+        self.assertEqual(
+            local_playlist.read_files([str(gone)]),
+            PlaylistRead("unreadable", "Lantern Coast", missing=1),
+        )
 
 
 class VideoListTests(Folder, ControllerTestCase):

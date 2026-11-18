@@ -629,6 +629,7 @@
   "No stream to spare at {provider}": "S'ka transmetim të lirë te {provider}",
   "No subtitles": "S'ka titra",
   "No subtitles found for \"{query}\". Try another spelling, or fewer words.": "S'u gjetën titra për «{query}». Provoni një drejtshkrim tjetër ose më pak fjalë.",
+  "No videos or music in “{name}”": "",
   "None of the files in this playlist are here": "",
   "Normal": "Normale",
   "Normal speed": "Shpejtësi normale",

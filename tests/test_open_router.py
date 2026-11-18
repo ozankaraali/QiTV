@@ -15,10 +15,14 @@ from unittest import mock
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
+from test_local_playlist import fake_tracks
+from test_provider_flow_file_hold import LaunchCase
 from timer_fixtures import elapse, wait_until
 
+from services import local_playlist
 from services.next_episode import LOCAL_NEXT
 from services.playback import PlaybackState
+from services.watch_state import local_key
 from tests import test_tv_window as base
 from tests.test_provider_drop import PANEL, drop
 from ui import tv_window
@@ -443,15 +447,15 @@ class OpenRouterTests(RouterCase):
         self.assertEqual(self.fronts, 0)
 
     def test_a_media_drag_is_taken(self):
-        self.assertEqual(drop(self.window, paths=[self.folder / "notes.txt"]), (False, False))
         entered, _dropped = drop(self.window.host, paths=[self.folder / "clip.webm"])
         self.assertTrue(entered)
+        # Task 11: a file of no kind QiTV knows may be a folder, which only the disk tells (off
+        # the GUI thread, once dropped): it is taken too (FolderRouterTests). Words are not.
+        self.assertEqual(drop(self.window, text="just words"), (False, False))
 
 
-class PlaylistRouterTests(RouterCase):
-    """A playlist opened in QiTV is read on a thread first (spec §1): links make a provider,
-    an HLS one plays as one film, and local files play as a list (the controller's play_list
-    is a fake that records it)."""
+class ListCase(RouterCase):
+    """The router over a fake play_list too, which records what it is given."""
 
     def setUp(self):
         super().setUp()
@@ -468,6 +472,12 @@ class PlaylistRouterTests(RouterCase):
 
     def lists(self):
         return [call[1:] for call in self.calls if call[0] == "list"]
+
+
+class PlaylistRouterTests(ListCase):
+    """A playlist opened in QiTV is read on a thread first (spec §1): links make a provider,
+    an HLS one plays as one film, and local files play as a list (the controller's play_list
+    is a fake that records it)."""
 
     def provider_names(self):
         return [p.get("name") for p in self.window.provider_manager.providers]
@@ -617,6 +627,237 @@ class PlaylistRouterTests(RouterCase):
         runs: list[bool] = []
         self.window.when_idle(lambda: runs.append(True))
         self.assertEqual(runs, [True])  # nothing held
+
+
+def gated_folder_reads(gate):
+    """Each folder is read once `gate` is set (a folder on a slow share)."""
+    from services.local_playlist import read_folder
+
+    def slow(path):
+        gate.wait(10)
+        return read_folder(path)
+
+    return mock.patch("ui.tv_window.read_folder", side_effect=slow)
+
+
+def series(folder):
+    """A season of a fictional show in `folder` (natural order is the other way round: the
+    spaced name, the dotted, the underscored), with a subfolder's episode and a hidden file
+    that never play: its episodes, in order."""
+    folder.mkdir(parents=True, exist_ok=True)
+    episodes = []
+    for name, size in (
+        ("Lantern_Coast_S01E01.mkv", 1),
+        ("Lantern.Coast.S01E02.mkv", 2),
+        ("Lantern Coast S01E03.mkv", 3),
+    ):
+        (folder / name).write_bytes(b"x" * size)
+        episodes.append(folder / name)
+    (folder / "Extras").mkdir()
+    (folder / "Extras" / "Lantern Coast S01E00.mkv").write_bytes(b"x")
+    (folder / "._Lantern Coast S01E01.mkv").write_bytes(b"x")
+    return episodes
+
+
+class FolderRouterTests(ListCase):
+    """A folder opened in QiTV, and several files dropped together, play as a list (Task 11):
+    read on the playlists' thread, in season and episode order, from the episode the viewer
+    stopped part-way into. A launch or a hand-over of several files plays one, as before."""
+
+    def setUp(self):
+        super().setUp()
+        self.season = self.folder / "Lantern Coast"
+        self.episodes = series(self.season)
+        self.entries = [str(path) for path in self.episodes]
+
+    def assert_held(self, held=True):
+        runs: list[bool] = []
+        self.window.when_idle(lambda: runs.append(True))
+        self.assertEqual(runs, [] if held else [True])
+
+    def test_a_dropped_series_folder_plays_in_episode_order(self):
+        self.window.screens.open_library("movies")
+        self.assertEqual(drop(self.window, paths=[self.season]), (True, True))
+        self.assertTrue(wait_until(lambda: self.lists()), self.calls)
+        self.assertEqual(self.lists(), [("Lantern Coast", self.entries, [1, 2, 3])])
+        self.assertIs(self.window.pages.currentWidget(), self.window.player_page)
+        self.assert_held()  # as a file opened in QiTV is
+        elapse(SETTLE_MS)
+        self.assertEqual((self.plays(), self.toasts), ([], []))
+        self.assertEqual(self.fronts, 0)
+
+    def test_a_dropped_folder_starts_where_it_stopped(self):
+        watch = self.window.watch
+        first, second, third = self.episodes
+        watch.update_position(local_key(first.name, 1), 1_150_000, 1_200_000)  # past 90%: seen
+        watch.update_position(local_key(second.name, 2), 600_000, 1_200_000)  # part-way
+        watch.update_position(local_key(third.name, 3), 60_000, 1_200_000)  # part-way too
+        drop(self.window, paths=[self.season])
+        self.assertTrue(wait_until(lambda: self.lists()), self.calls)
+        self.assertEqual(self.lists(), [("Lantern Coast", self.entries[1:], [2, 3])])
+        # None part-way (one seen, one barely begun): from its first episode.
+        watch.update_position(local_key(second.name, 2), 1_190_000, 1_200_000)
+        watch.update_position(local_key(third.name, 3), 3_000, 1_200_000)
+        self.handover(self.season)
+        self.assertTrue(wait_until(lambda: len(self.lists()) == 2), self.calls)
+        self.assertEqual(self.lists()[-1], ("Lantern Coast", self.entries, [1, 2, 3]))
+
+    def test_a_handed_over_folder_of_songs_plays_as_its_album(self):
+        album = self.folder / "Brannow Fell"
+        album.mkdir()
+        for name in ("Tide.mp3", "Harbour.flac"):
+            (album / name).write_bytes(b"song")
+        tags = {"Tide.mp3": {"track": 1}, "Harbour.flac": {"track": 2}}
+        with mock.patch.object(local_playlist, "read_tracks", side_effect=fake_tracks(tags)):
+            self.handover(album)
+            self.assertTrue(wait_until(lambda: self.lists()), self.calls)
+        entries = [str(album / "Tide.mp3"), str(album / "Harbour.flac")]
+        self.assertEqual(self.lists(), [("Brannow Fell", entries, [4, 4])])
+        self.assertEqual(self.fronts, 1)
+
+    def test_an_empty_folder_says_so(self):
+        empty = self.folder / "Empty Shelf"
+        (empty / "Inner").mkdir(parents=True)
+        (empty / "Inner" / "Lantern Coast S01E04.mkv").write_bytes(b"x")  # a subfolder's
+        (empty / "notes.txt").write_text("x", encoding="utf-8")
+        self.assertEqual(drop(self.window, paths=[empty]), (True, True))
+        text = "No videos or music in “Empty Shelf”"
+        self.assertTrue(wait_until(lambda: (text, "error") in self.toasts), self.toasts)
+        elapse(SETTLE_MS)
+        self.assertEqual(self.calls, [])
+        self.assert_held(False)
+
+    def test_a_folder_is_read_off_the_gui_thread(self):
+        from services.local_playlist import read_folder
+
+        threads = []
+
+        def spy(path):
+            threads.append(threading.current_thread())
+            return read_folder(path)
+
+        with mock.patch("ui.tv_window.read_folder", side_effect=spy):
+            self.handover(self.season)
+            self.assertTrue(wait_until(lambda: self.lists()), self.calls)
+        self.assertEqual(len(threads), 1)
+        self.assertIsNot(threads[0], threading.main_thread())
+
+    def test_a_list_read_gives_way_to_a_film_chosen_meanwhile(self):
+        film = self.film("ep.mkv")
+        gate = threading.Event()
+        with gated_folder_reads(gate), self.assertLogs("ui.tv_window", "INFO") as logs:
+            drop(self.window, paths=[self.season])
+            drop(self.window, paths=[film])  # chosen while the folder is read
+            self.wait_for_plays(1)
+            gate.set()
+            self.assertTrue(wait_until(lambda: GAVE_WAY in logs.output), logs.output)
+        self.assertEqual(self.lists(), [])
+        self.assertEqual(self.plays(), [(str(film), 4)])
+
+    def test_a_folder_dropped_with_a_film_leaves_the_film_alone(self):
+        film = self.film("ep.mkv")
+        self.assertEqual(drop(self.window, paths=[self.season, film]), (True, True))
+        self.wait_for_plays(1)
+        elapse(SETTLE_MS)
+        self.assertEqual(self.plays(), [(str(film), 4)])
+        self.assertEqual((self.lists(), self.toasts), ([], []))
+
+    def test_a_dropped_file_of_no_kind_says_qitv_cant_play_it(self):
+        notes = self.folder / "Notlar ğ.txt"
+        notes.write_text("x", encoding="utf-8")
+        self.assertEqual(drop(self.window, paths=[notes]), (True, True))
+        text = "QiTV can't play “Notlar ğ.txt”"
+        self.assertTrue(wait_until(lambda: (text, "error") in self.toasts), self.toasts)
+        elapse(SETTLE_MS)
+        self.assertEqual(self.calls, [])
+        self.assert_held(False)
+
+    def test_several_dropped_files_play_as_a_list(self):
+        srt = self.season / "Lantern Coast S01E01.srt"
+        srt.write_text(SUBTITLES, encoding="utf-8")
+        third, first, second = self.episodes[2], self.episodes[0], self.episodes[1]
+        self.assertEqual(drop(self.window, paths=[third, srt, first, second]), (True, True))
+        self.assertTrue(wait_until(lambda: self.lists()), self.calls)
+        self.assertEqual(self.lists(), [("Lantern Coast", self.entries, [1, 2, 3])])
+        self.assertEqual(self.plays(), [])
+        self.assert_held()
+        # The subtitle file dropped with them loads into the first, once it opened.
+        self.assertTrue(self.window.subtitles_due())
+        self.state = PlaybackState.PLAYING
+        self.assertTrue(wait_until(lambda: self.calls[-1] == ("subtitles", [str(srt)])))
+        # One file dropped alone plays as a file (its folder names its next episode).
+        drop(self.window, paths=[third])
+        self.wait_for_plays(1)
+        self.assertEqual(self.plays(), [(str(third), 3)])
+
+    def test_several_dropped_files_start_where_they_stopped(self):
+        first, second, third = self.episodes
+        self.window.watch.update_position(local_key(third.name, 3), 600_000, 1_200_000)
+        drop(self.window, paths=[third, second, first])
+        self.assertTrue(wait_until(lambda: self.lists()), self.calls)
+        self.assertEqual(self.lists(), [("Lantern Coast", self.entries[2:], [3])])
+
+    def test_a_launch_with_several_files_keeps_the_burst_rule(self):
+        # Plan 1: a start plays the first by name; a hand-over in its burst that sorts later
+        # is left out, and neither ever becomes a list.
+        now = [100.0]
+        self.window._clock = lambda: now[0]
+        ep2, ep1, ep3 = self.film("Ep 2.mkv"), self.film("Ep 1.mkv"), self.film("Ep 3.mkv")
+        self.window.open_paths([str(ep2), str(ep1), str(ep3)], source="launch")
+        self.wait_for_plays(1)
+        now[0] = 101.0
+        self.handover(ep3, ep2)
+        elapse(SETTLE_MS)
+        self.assertEqual(self.plays(), [(str(ep1), 4)])
+        self.assertEqual(self.lists(), [])
+
+
+class FolderStartTests(LaunchCase, base.WindowCase):
+    """A start with a folder, over no provider (Ruling P4-3): held while the folder is read and
+    while its list plays; one with nothing to play says so and lets go."""
+
+    def provider_list(self):
+        return []
+
+    def test_a_start_with_a_folder_is_held(self):
+        show = Path(self.config_dir) / "Lantern Coast"
+        episodes = [str(path) for path in series(show)]
+        window, gate = self.window, threading.Event()
+        card = window.overlays.welcome
+        with (
+            mock.patch.object(card, "show_card", wraps=card.show_card) as shown,
+            mock.patch.object(window.controller, "play_list") as played,
+            gated_folder_reads(gate),
+        ):
+            held, runs = self.launch(show)
+            elapse(SETTLE_MS)
+            self.assertTrue(held)  # from the first moment (main())
+            self.assertFalse(card.isVisible())
+            self.assertEqual(runs, [])  # the update question waits for the read
+            gate.set()
+            self.assertTrue(wait_until(lambda: played.called))
+            elapse(SETTLE_MS)
+            shown.assert_not_called()
+        self.assertEqual(played.call_args.args, ("Lantern Coast", tuple(episodes), (1, 2, 3)))
+        self.assertEqual(runs, [])  # the list holds as a film does
+        window.controller.hold_for_file(False)  # it ended (the list is a fake here)
+        self.assertEqual(runs, [True])
+        self.assertTrue(card.isVisible())
+
+    def test_a_start_with_an_empty_folder_says_so_and_lets_go(self):
+        empty = Path(self.config_dir) / "Empty Shelf"
+        empty.mkdir()
+        gate = threading.Event()
+        with gated_folder_reads(gate):
+            held, runs = self.launch(empty)
+            elapse(SETTLE_MS)
+            self.assertTrue(held)
+            self.assertEqual(runs, [])  # not let go before the read says so
+            gate.set()
+            text = "No videos or music in “Empty Shelf”"
+            self.assertTrue(wait_until(lambda: (text, "error") in self.toasts), self.toasts)
+        self.assertTrue(wait_until(self.window.overlays.welcome.isVisible))
+        self.assertEqual(runs, [True])
 
 
 class NoProviderRouterTests(RouterCase):

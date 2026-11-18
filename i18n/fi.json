@@ -629,6 +629,7 @@
   "No stream to spare at {provider}": "Ei vapaata striimiä: {provider}",
   "No subtitles": "Ei tekstitystä",
   "No subtitles found for \"{query}\". Try another spelling, or fewer words.": "Haulla ”{query}” ei löytynyt tekstityksiä. Kokeile toista kirjoitusasua tai vähemmän sanoja.",
+  "No videos or music in “{name}”": "",
   "None of the files in this playlist are here": "",
   "Normal": "Normaali",
   "Normal speed": "Normaali nopeus",
