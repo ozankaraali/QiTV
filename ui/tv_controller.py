@@ -475,6 +475,9 @@ class TVController(QObject):
         self._album_job.read.connect(self._on_album_read)
         self._album_generation = 0
         self._album_for: Optional[tuple[Target, str]] = None  # the song listed for, its path
+        # The track a song that couldn't be played skipped to (item 4): its own failure before
+        # it plays is a second in a row, and ends the album.
+        self._skipped_to: Optional[Target] = None
         # A playlist of songs' tags, read by name on a thread of its own (an album opened
         # meanwhile never cuts it short); only the newest list's answer counts.
         self._list_job = AlbumJob(self)
@@ -1481,6 +1484,8 @@ class TVController(QObject):
                 return  # the drawer is browsing; play/pause still works
             if self._album_plays() or self._keys_follow_dock():  # the dock's ⏮ ⏭ (Plan 4)
                 self._next_track() if delta > 0 else self._previous_track()
+            elif delta < 0 and self._audio_dock_shows():
+                self._previous_track()  # a lone song's ⏮, as the dock's: from its start
             elif self._on_demand():
                 self._seek(delta * SEEK_STEP_MS)
             else:
@@ -3904,6 +3909,7 @@ class TVController(QObject):
         if state in ("paused", "playing"):
             self.overlays.transport.set_paused(state == "paused")
         if state == "playing":
+            self._skipped_to = None  # it plays: no longer a row of songs that can't
             self._live_controls.on_playing()  # direct play: a held "unavailable" shows now
             self._picture.on_playing()  # after the sleep timer: the computer stays awake again
             self._video_file_playing()
@@ -3957,6 +3963,8 @@ class TVController(QObject):
         self._opening_over()  # the error toast shows instead (even as the file is played)
         current = self._current
         if current is not None and current.local:
+            if self._skip_unplayable(current):
+                return  # its album's next song plays instead
             self._flow.hold_for_file(False)  # the file failed to play
             self._end_sound()  # a song's screen and dock (an album stops there)
         if self._tuner.running():
@@ -3987,6 +3995,29 @@ class TVController(QObject):
             return
         if self.swap():
             pip.close()  # the failed title, small now
+
+    def _skip_unplayable(self, current: Target) -> bool:
+        """A song of an album or of a list of songs (a folder's too) can't be played (gone
+        since the listing, broken): its next one plays, held, after a short toast, as a music
+        player skips it (item 4). False, and the error ends the album as before, for a second
+        in a row (the song a skip opened fails before it plays), with nothing after it, or
+        with a newer choice on its way. A video's or a mixed list's error ends its list."""
+        skipped_to, self._skipped_to = self._skipped_to, None
+        queue = self._queue
+        if current is skipped_to or queue is None or not self._album_plays():
+            return False
+        if self._lanes.busy():
+            return False  # the newer choice plays when its link comes
+        before = queue.current
+        index = queue.next(auto=False)  # (repeat one: the next song, not this one again)
+        if index is None or index == before:
+            return False
+        logger.info("A song that can't be played is skipped")
+        # i18n: an error toast: a file opened in QiTV is gone or unreadable ({name}: its name)
+        self._error(tr("Couldn't open “{name}”", name=current.title))
+        self._play_track(index, start_over=False)
+        self._skipped_to = self._current
+        return True
 
     def _on_ended(self) -> None:
         if self._closed:
@@ -4180,7 +4211,11 @@ class TVController(QObject):
             set_state(False, "off", False, has_next=self._follows(), has_repeat=False)
         else:  # ⏭ still acts when its folder's next episode or its playlist's entry follows
             set_state(
-                self._shuffle_setting(), self._repeat_setting(), False, has_next=self._follows()
+                self._shuffle_setting(),
+                self._repeat_setting(),
+                False,
+                has_next=self._follows(),
+                has_repeat=self._sound_kind == "song",  # a file with no picture: no repeat
             )
 
     def _follows(self) -> bool:
@@ -4192,7 +4227,18 @@ class TVController(QObject):
     def _keys_follow_dock(self) -> bool:
         """The audio dock shows with its ⏭ lit by what follows (_follows): the media keys do
         what its ⏮ and ⏭ do (a film still opening, its dock not up yet, seeks as a film)."""
-        return bool(getattr(self.overlays.transport, "audio", lambda: False)()) and self._follows()
+        return self._audio_dock_shows() and self._follows()
+
+    def _audio_dock_shows(self) -> bool:
+        """The audio dock shows for what plays (a song, a file with no picture): the media
+        keys' ⏮ is its ⏮ (item 6); ⏭ is its own only while it is lit."""
+        current = self._current
+        return (
+            bool(getattr(self.overlays.transport, "audio", lambda: False)())
+            and current is not None
+            and current is self._sound
+            and self._sound_kind in ("song", "file")
+        )
 
     def _shuffle_setting(self) -> bool:
         return getattr(self.config, "audio_shuffle", False) is True
@@ -4231,7 +4277,7 @@ class TVController(QObject):
 
     def _end_sound(self) -> None:
         """The audio screen goes with its dock and its album (a stop, an error, a film or a
-        channel instead); a late album or cover reaches nothing."""
+        channel instead): its album's read stops, and a late album or cover reaches nothing."""
         self._sound_poll.stop()
         self._sound, self._sound_kind, self._sound_played = None, "", None
         self._sound_path = ""
@@ -4239,6 +4285,7 @@ class TVController(QObject):
         self._silent_since = None
         self._queue = None
         self._album_generation += 1
+        self._album_job.stop()  # a slow share's listing is read no longer
         self._album_for = None
         self._cover_generation += 1
         self._cover_for = None
@@ -4568,7 +4615,8 @@ class TVController(QObject):
         QiTV, with no card (or itself again with repeat one; a lone song with repeat on); a
         list of songs is its album. False when nothing follows (the last with repeat off says
         "Finished"), and while a newer choice is on its way: it plays when its link comes, as
-        Autoplay never offers over one."""
+        Autoplay never offers over one. A file with no picture has no repeat (item 5): its
+        folder's next episode follows it as a film's does."""
         if current is not self._sound or self._sound_kind not in ("song", "file"):
             return False
         if self._lanes.busy():
@@ -4583,7 +4631,7 @@ class TVController(QObject):
                 return False
             self._play_track(index, start_over=index == before)
             return True
-        if self._sound_shown and self._repeat_setting() != "off":
+        if self._sound_shown and self._sound_kind == "song" and self._repeat_setting() != "off":
             self._replay(current)
             return True
         return False
@@ -4701,8 +4749,8 @@ class TVController(QObject):
         self._show_audio_state()
 
     def _cycle_repeat(self) -> None:
-        if self._single_in_list():
-            return  # a mixed list's entry: its list's next follows it, never itself again
+        if self._single_in_list() or self._sound_kind == "file":
+            return  # a mixed list's entry, a file with no picture: never itself again
         queue = self._queue
         if queue is not None:
             repeat = queue.cycle_repeat()

@@ -301,6 +301,11 @@ class AudioCase(ControllerTestCase):
         self.session.stateChanged.emit("ended")
         self.session.ended.emit()
 
+    def cant_play(self):
+        """The file playing can't be played (gone, broken), as PlaybackSession says it."""
+        self.session.stateChanged.emit("error")
+        self.session.errorOccurred.emit("The stream could not be played")
+
     def played(self):
         urls = self.played_urls()
         return [Path.from_uri(url) if url.startswith("file:") else url for url in urls]
@@ -457,6 +462,25 @@ class ScreenFollowsTheMediaTests(AudioCase):
         self.play(0)  # a channel's link came: it replaces the song
         self.assertFalse(self.screen.visible)
         self.assertFalse(self.transport.audio())
+
+    def test_the_songs_album_stops_being_read_when_its_screen_goes(self):
+        # Item 13: a stop, an error or a film stop the album's read itself (not only its
+        # answer: a slow share is read no longer).
+        stops = mock.patch.object(AlbumJob, "stop", autospec=True).start()
+
+        def album_stops():
+            return [c for c in stops.call_args_list if c.args[0] is self.controller._album_job]
+
+        for name, end in (
+            ("a stop", self.controller.stop),
+            ("an error", lambda: self.session.errorOccurred.emit("The stream could not be played")),
+            ("a film", lambda: self.open(self.folder / "film.mkv", video=True)),
+        ):
+            with self.subTest(name):
+                self.open(self.folder / "01 Arn.mp3")
+                stops.reset_mock()
+                end()
+                self.assertEqual(len(album_stops()), 1)
 
 
 class RadioTests(AudioCase):
@@ -741,12 +765,16 @@ class AlbumTests(AudioCase):
 
     def test_media_keys_go_to_tracks_with_a_queue_and_seek_without(self):
         self.session.seekable = True
-        # A lone song: ±10 s, as a film.
+        # A lone song: ⏭ goes 10 s on, as a film (the dock's ⏭ is dim); ⏮ is the dock's,
+        # from its start (item 6).
         self.open(self.folder / "Lone.mp3")
         self.list_album([])
+        self.session.now_ms = 40_000
         self.controller.handle(Action.MEDIA_NEXT)
         self.controller.handle(Action.MEDIA_PREV)
-        self.assertEqual(self.session.relative, [10_000, -10_000])
+        self.assertEqual(self.session.relative, [10_000])
+        self.assertEqual(self.session.seeks, [0])
+        self.assertEqual(len(self.session.plays), 1)
         # An album: the next track, and back.
         tracks = self.album(3)
         self.open(Path(tracks[0]["path"]))
@@ -766,7 +794,7 @@ class AlbumTests(AudioCase):
         self.controller.handle(Action.MEDIA_PREV)  # the first: from its start
         self.assertEqual(len(self.session.seeks), seeks + 1)
         self.assertEqual(self.played()[-1], Path(tracks[0]["path"]))
-        self.assertEqual(self.session.relative, [10_000, -10_000])  # no seek by 10 s
+        self.assertEqual(self.session.relative, [10_000])  # no seek by 10 s
         # The dock's buttons go the same way.
         self.transport.nextTrackRequested.emit()
         self.assertEqual(self.played()[-1], Path(tracks[1]["path"]))
@@ -782,7 +810,8 @@ class AlbumTests(AudioCase):
         # A film: ±10 s again.
         self.open(self.folder / "film.mkv", video=True)
         self.controller.handle(Action.MEDIA_NEXT)
-        self.assertEqual(self.session.relative[-1], 10_000)
+        self.controller.handle(Action.MEDIA_PREV)
+        self.assertEqual(self.session.relative[-2:], [10_000, -10_000])
 
     def test_the_docks_next_plays_an_audio_only_episodes_next_one(self):
         # Review M8: no album, but the folder's next episode follows it: ⏭ lights and plays it,
@@ -829,6 +858,90 @@ class AlbumTests(AudioCase):
         self.assertEqual(self.session.seeks, [0])
         self.transport.nextTrackRequested.emit()  # no list: nothing
         self.assertEqual(len(self.session.plays), 1)
+
+    def test_an_audio_only_episode_goes_on_to_its_next_one_whatever_the_repeat(self):
+        # Item 5: the lit ⏭ promises the folder's next episode, so its end brings it (the
+        # Next card, as a film's); the remembered repeat is a song's: dim, and never replays.
+        self.config.audio_repeat = "all"
+        listings = mock.patch.object(self.controller._listing, "start").start()
+        first, second = self.folder / "Show.S01E01.mkv", self.folder / "Show.S01E02.mkv"
+        first.write_bytes(b"one")
+        second.write_bytes(b"two!")
+        self.open(first, size=3, video=False)
+        generation, folder = listings.call_args.args
+        self.controller._on_folder_listed(generation, list_folder(folder))
+        self.assertTrue(self.transport.next_on)
+        self.assertFalse(self.transport.repeat_on)
+        self.transport.repeatRequested.emit()
+        self.assertEqual(self.config.audio_repeat, "all")  # unchanged: it asks nothing
+        self.end()
+        self.assertEqual(len(self.session.plays), 1)  # not itself again
+        self.assertEqual(len(self.next_card.named("show_next")), 1)  # its next episode
+        self.next_card.activate()
+        self.assertEqual(self.played()[-1], second)
+        # With nothing after it: "Finished", not itself again.
+        self.open(self.folder / "Concert.mkv", size=9, video=False)
+        self.assertFalse(self.transport.repeat_on)
+        plays = len(self.session.plays)
+        self.end()
+        self.assertEqual(len(self.session.plays), plays)
+        self.assertIn(FINISHED, self.toast.messages())
+        # A song's repeat acts again.
+        self.open(self.folder / "Lone.mp3")
+        self.assertTrue(self.transport.repeat_on)
+
+    def test_an_unreadable_track_is_skipped_and_two_in_a_row_stop(self):
+        # Item 4: an album goes on past a track that can't be played (gone since the listing,
+        # or broken), with a short toast; two in a row, and it stops as before.
+        tracks = self.album(5)
+        paths = [Path(t["path"]) for t in tracks]
+        self.open(paths[0], size=1001)
+        self.when_idle()
+        self.list_album(tracks)
+        self.end()
+        self.assertEqual(self.played()[-1], paths[1])
+        self.screen.calls.clear()
+        self.cant_play()
+        self.assertEqual(self.played()[-1], paths[2])
+        self.assertIn(("Couldn't open “02 Song 2.mp3”", "error"), self.toast.messages())
+        self.assertNotIn(("hide",), self.screen.calls)
+        self.assertNotIn(("end_audio",), self.transport.calls)
+        self.assertEqual((self.screen.current, self.runs), (2, []))  # held, as a next track
+        self.session.stateChanged.emit("playing")  # it plays: no longer a row of failures
+        self.end()
+        self.assertEqual(self.played()[-1], paths[3])
+        self.cant_play()
+        self.assertEqual(self.played()[-1], paths[4])
+        self.cant_play()  # a second in a row: the album stops, as one track's error did
+        self.assertEqual(len(self.session.plays), 5)
+        self.assertFalse(self.screen.visible)
+        self.assertIsNone(self.controller._queue)
+        self.assertIn(
+            ("05 Song 5.mp3: The stream could not be played", "error"), self.toast.messages()
+        )
+        self.assertEqual(self.runs, ["update question"])
+        # A new album's first failure is skipped again.
+        self.open(paths[0], size=1001)
+        self.list_album(tracks)
+        self.cant_play()
+        self.assertEqual(self.played()[-1], paths[1])
+
+    def test_an_unreadable_track_on_repeat_one_goes_to_the_next(self):
+        self.config.audio_repeat = "one"
+        tracks = self.album(2)
+        self.open(Path(tracks[0]["path"]), size=1001, playing=False)
+        self.list_album(tracks)
+        self.cant_play()  # not itself again
+        self.assertEqual(self.played()[-1], Path(tracks[1]["path"]))
+        # The last, repeat off: nothing after it, it stops as before.
+        self.controller.stop()
+        self.config.audio_repeat = "off"
+        self.open(Path(tracks[0]["path"]), size=1001)
+        self.list_album(tracks)
+        self.end()
+        self.cant_play()
+        self.assertEqual(len(self.session.plays), 4)
+        self.assertFalse(self.screen.visible)
 
     def test_the_docks_volume_bar_sets_the_level(self):
         self.open(self.folder / "Lone.mp3")
@@ -1150,6 +1263,23 @@ class PlaylistTests(AudioCase):
         self.end()
         self.assertIn(FINISHED, self.toast.messages())
         self.albums.assert_not_called()
+
+    def test_a_song_playlists_unreadable_song_is_skipped(self):
+        # Item 4: a list of songs (a folder of songs too) goes on past one that can't be
+        # played; a mixed list's song, or a video list's video, ends it as before.
+        songs = self.songs(1, 2, 3)
+        entries = [t["path"] for t in songs]
+        self.play_list("Evening Drive", entries, [1001, 1002, 1003])
+        self.cant_play()
+        self.assertEqual(self.played()[-1], Path(entries[1]))
+        self.assertEqual(self.screen.current, 1)
+        self.assertIn(("Couldn't open “01 Song 1.mp3”", "error"), self.toast.messages())
+        film = str(self.folder / FILM)
+        self.play_list("Mixed Bag", [entries[0], film], [1001, 5000])
+        plays = len(self.session.plays)
+        self.cant_play()
+        self.assertEqual(len(self.session.plays), plays)
+        self.assertFalse(self.screen.visible)
 
     def test_a_song_twice_in_a_playlist_plays_in_its_order(self):
         one, two = self.songs(1, 2)
