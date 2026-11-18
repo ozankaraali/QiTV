@@ -15,7 +15,7 @@ def fail_inside(conn, location, detailed_log=False):
 
     class Broken:
         def __init__(self, *args, **kwargs):
-            raise RuntimeError("no libVLC here")
+            raise RuntimeError(f"no libVLC here for {location}")  # its text names the file
 
     helper.FileLevels = Broken
     helper.helper_main(conn, location, detailed_log)

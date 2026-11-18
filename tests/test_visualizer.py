@@ -298,7 +298,10 @@ class HelperTroubleTests(unittest.TestCase):
     def test_a_helper_that_fails_says_why(self):
         message, logged, _ = self.hear("fail_inside")
         self.assertEqual(message, ("failed", "RuntimeError"))
-        self.assertIn("the helper failed: RuntimeError: no libVLC here", logged)
+        self.assertIn("the helper failed: RuntimeError", logged)
+        # Item 12: the error's name only; its text may name the file
+        self.assertNotIn("no libVLC here", logged)
+        self.assertNotIn("none.mp3", logged)
 
     def test_a_blocks_trouble_is_said_once(self):
         import ctypes

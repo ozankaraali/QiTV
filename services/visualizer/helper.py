@@ -486,8 +486,8 @@ def helper_main(conn: Connection, location: str, detailed_log: bool = False) -> 
         use_bundled_vlc()  # before anything imports vlc, as main.py does
         _serve(link, location)
     except Exception as error:
-        name = type(error).__name__
-        link.send(("log", logging.WARNING, f"Visualizer: the helper failed: {name}: {error}"))
+        name = type(error).__name__  # its name only: its text may name the file
+        link.send(("log", logging.WARNING, f"Visualizer: the helper failed: {name}"))
         link.send(("failed", name))
     finally:
         os._exit(0)
