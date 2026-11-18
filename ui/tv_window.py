@@ -77,6 +77,7 @@ from services.catchup_memory import FILE_NAME as CATCHUP_FILE, CatchupMemory
 from services.connection_budget import ConnectionBudget
 from services.epg_view import Programme
 from services.find import Preferences, preferences_for
+from services.folder_shelf import FILE_NAME as SHELF_FILE, FolderShelf, folder_kind, shelf_key
 from services.hidden_groups import HiddenGroups
 from services.i18n import N_, number, tr, tr_n, translate
 from services.jobs import JobRunner
@@ -106,6 +107,7 @@ from services.open_paths import (
     Sorted,
     extended_path,
     is_music,
+    is_video,
     natural_key,
     sort_paths,
 )
@@ -137,7 +139,7 @@ from services.subtitle_picks import FILE_NAME as SUBTITLE_PICKS_FILE, SubtitlePi
 from services.thread_cleanup import has_pending_threads
 from services.track_memory import FILE_NAME as TRACKS_FILE, TrackMemory
 from services.update_checker import call_before_update, set_quit_note
-from services.watch_state import WatchState, local_key
+from services.watch_state import WatchState
 from services.zapping import ZapController
 from ui import item_provider, macos_window, provider_drop, quit_reason
 from ui.bottom_band import BottomBand
@@ -148,6 +150,7 @@ from ui.find_session import FindSession
 from ui.free_channels_menu import show_menu as show_free_channels_menu
 from ui.grid_frame import GridFrame
 from ui.keymap import Action, as_int, resolve
+from ui.library.folders_view import where_it_starts
 from ui.library.library_screen import LibraryScreen
 from ui.link_lanes import Target
 from ui.live_tuner import LiveTuner, one_disk_ring, wait_for_each_other
@@ -422,6 +425,14 @@ def _is_playlist(path: str) -> bool:
     return os.path.splitext(path)[1].lower() in PLAYLIST_EXTENSIONS
 
 
+def _is_folder_read(path: str) -> bool:
+    """Whether a read that plays (_play_read) is a folder's (read_folder): a playlist file's
+    path is a playlist, and several media files read together come under their first one's
+    path (a media file: sort_paths put it among the media); a folder's never is either (it was
+    among the others)."""
+    return not _is_playlist(path) and not (is_video(path) or is_music(path))
+
+
 def _shown_name(path: str) -> str:
     """A file's or a folder's name as a message says it (macOS ends a folder with "/")."""
     trimmed = path.rstrip("/\\") or path
@@ -577,6 +588,9 @@ class TVWindow(QMainWindow):
         # until another list or file plays.
         self._read_subtitles: dict[int, list[str]] = {}
         self._entry_subtitles: dict[str, list[str]] = {}
+        # Plan 4: the shelf's key of the folder whose list plays (None: no folder's): its
+        # entries opening are kept as its last entry (list_entry_opens).
+        self._shelf_folder: Optional[str] = None
         self._burst: Optional[tuple[float, str]] = None  # (when, file): a start's choice
         # A file is being played and QiTV's mark is to draw over it (opening_over says no).
         self._opening_due = False
@@ -709,6 +723,8 @@ class TVWindow(QMainWindow):
         self.sound_sync = SoundSync(os.path.join(config_manager.get_config_dir(), SOUND_SYNC_FILE))
         # The tracks chosen for each film, series and channel (2.9.1), alike.
         self.track_memory = TrackMemory(os.path.join(config_manager.get_config_dir(), TRACKS_FILE))
+        # Plan 4: the folders opened as folders, for the Library's Folders tab, alike.
+        self.folder_shelf = FolderShelf(os.path.join(config_manager.get_config_dir(), SHELF_FILE))
         # Each channel's aspect ratio (the Picture panel, 2.3), alike.
         self.channel_pictures = ChannelPictures(
             os.path.join(config_manager.get_config_dir(), PICTURE_FILE)
@@ -1872,6 +1888,13 @@ class TVWindow(QMainWindow):
         start = None if playlist else self._where_it_starts(read)
         first = start or 0
         self._entry_subtitles = subtitles_for(read.entries, subtitles, first) if subtitles else {}
+        # Plan 4: a folder that plays as one goes on the Folders tab (at its front, once); a
+        # playlist's or several files' list never puts its folder there.
+        folder = _is_folder_read(path)
+        self._shelf_folder = shelf_key(path) if folder else None
+        if folder:
+            entry = os.path.basename(read.entries[first])
+            self.folder_shelf.add(path, read.name, folder_kind(read.entries), entry)
         self._play_opened(
             read.entries[first],
             lambda: self.screens.play_list(read.name, read.entries, read.sizes, start),
@@ -1924,19 +1947,20 @@ class TVWindow(QMainWindow):
     def _where_it_starts(self, read: PlaylistRead) -> Optional[int]:
         """Where a folder's list (or several files dropped together) starts: at the first entry
         the viewer stopped part-way into (one with a resume point: neither barely begun nor
-        seen to its end), which resumes there as any file does; None when there is none (it
-        starts as any list: its first entry, or a song of its own picking when shuffled)."""
-        for index, (path, size) in enumerate(zip(read.entries, read.sizes)):
-            if size is None:
-                continue
-            if self.watch.resume_position(local_key(os.path.basename(path), size)) is not None:
-                return index
-        return None
+        seen to its end), which resumes there as any file does; else (Plan 4, Task 12) at the
+        one after the last entry seen to its end; None when there is neither (it starts as any
+        list: its first entry, or a song of its own picking when shuffled). The Folders tab's
+        "next" is this entry (folders_view.where_it_starts, one rule)."""
+        return where_it_starts(self.watch, read.entries, read.sizes)
 
     def list_entry_opens(self, target: Target, path: str) -> None:
         """A list's entry at `path` opens as `target` (TVController._play_entry): the subtitle
         files dropped for it load once it opened (subtitles_for), as a video's dropped with
-        it do; each time it opens (Play again, back to it), until another list or file plays."""
+        it do; each time it opens (Play again, back to it), until another list or file plays.
+        A folder's entry is kept as its last on the Folders tab (Plan 4)."""
+        folder = os.path.dirname(path)
+        if self._shelf_folder is not None and shelf_key(folder) == self._shelf_folder:
+            self.folder_shelf.played(folder, os.path.basename(path))  # Plan 4: its last entry
         subtitles = self._entry_subtitles.get(path)
         if subtitles and target.local:
             self._subtitles_due = (target, subtitles, self._clock() + OPENED_WAIT_S)
@@ -1971,6 +1995,7 @@ class TVWindow(QMainWindow):
                 self.controller.hold_for_file(False)
             return
         self._entry_subtitles = {}  # a list's, for its entries: never this file's
+        self._shelf_folder = None  # nor its folder's, on the Folders tab
         target = self._play_opened(path, lambda: self.screens.play_path(path, size))
         if due[2] and target is not None and target.local:
             self._subtitles_due = (target, due[2], self._clock() + OPENED_WAIT_S)

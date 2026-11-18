@@ -30,7 +30,9 @@ Screens and their controls:
 - "library": the top bar's items ("live", "search", "fullscreen" …), the grid's "posters", the
   highlighted title's strip buttons ("favorite", "play") and the A–Z "rail";
 - "series" (2.9.3): the series view's "back" (‹), its season "chips", its episode "rows" and a
-  begun episode's "start_over" pill.
+  begun episode's "start_over" pill;
+- "folders" (Plan 4): the Library's Folders tab: its "tiles", a tile's "remove" (×), the "add"
+  tile (Add folder: Open Folder…) and "clear".
 
 The audio screen (a song: Plan 4) is checked on its own: AUDIO_ON_SCREEN gives, per "player"
 and "menu" row, what does the same there, on these screens, and AUDIO_EXEMPT the rows that need
@@ -49,7 +51,8 @@ import unittest
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
-from PySide6.QtCore import QSize
+from PySide6.QtCore import QSize, Qt
+from PySide6.QtTest import QTest
 from PySide6.QtWidgets import QApplication, QWidget
 
 from services.navigation import RECENT_GROUP, NavModel
@@ -58,6 +61,7 @@ from tests.test_navigation import FakeCatalog
 from tests.test_poster_grid import FakePosters, details, titles
 from ui.context_actions import OPEN_PIP_TEXT, REMOVE_RECENT_TEXT, ContextActions
 from ui.keymap import SHORTCUTS
+from ui.library.folders_view import FoldersView, Tile
 from ui.library.poster_grid import PosterGrid
 from ui.library.series_view import SeriesView
 from ui.library.top_nav import ALL_TABS, TopNav
@@ -187,6 +191,9 @@ ON_SCREEN: dict[tuple[str, str], tuple[tuple[str, str], ...]] = {
     ("menu", "Ctrl+4"): (("transport", "grid"),),
     ("menu", "Ctrl+5"): (("library", "recordings"), ("drawer", "Recordings")),  # 2.9.7
     ("menu", "Ctrl+O"): (("drawer", "Open file"),),
+    # Plan 4: Open Folder…, the Folders tab's Add folder tile (the tab shows once a folder was
+    # opened: dropped, handed to QiTV or chosen in the File menu)
+    ("menu", "Ctrl+Shift+O"): (("folders", "add"),),
     ("menu", "Ctrl+,"): (("drawer", "settings"), ("drawer", "Settings")),
     ("menu", "Ctrl+R"): (("drawer", "refresh"),),
     ("menu", "Ctrl+Shift+R"): (("library", "refresh"),),  # 2.8: films and series
@@ -252,6 +259,7 @@ AUDIO_ON_SCREEN: dict[tuple[str, str], tuple[tuple[str, str], ...]] = {
     # The channel list (Return) and what it holds: Live TV, then a click on the picture.
     ("player", "Return"): _LIBRARY,
     ("menu", "Ctrl+O"): _LIBRARY,  # its Open file
+    ("menu", "Ctrl+Shift+O"): _LIBRARY,  # its Folders tab's Add folder
     ("menu", "Ctrl+,"): _LIBRARY,  # its Settings
     ("menu", "Ctrl+R"): _LIBRARY,  # its ↻
 }
@@ -569,6 +577,15 @@ def _series(host: QWidget) -> set[str]:
     return found
 
 
+def _folders(host: QWidget) -> set[str]:
+    """The Folders tab (Plan 4): a folder's tile and its ×, the Add folder tile, Clear."""
+    view = FoldersView(host)
+    view.setGeometry(0, 0, 1280, 720)
+    view.show()
+    view.set_tiles([Tile("/media/Tidewick Isle", "Tidewick Isle", "8 videos", read=True)])
+    return {name for name, rect in view.controls().items() if not rect.isEmpty()}
+
+
 class MouseOnlyAuditTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
@@ -591,6 +608,7 @@ class MouseOnlyAuditTests(unittest.TestCase):
             "guide": _guide(_child(host)),
             "library": _library(_child(host)),
             "series": _series(_child(host)),
+            "folders": _folders(_child(host)),
         }
 
     def test_every_key_has_a_control_on_screen_or_a_reason(self):
@@ -611,6 +629,22 @@ class MouseOnlyAuditTests(unittest.TestCase):
         listed = {(context, keys) for context, rows in SHORTCUTS.items() for keys, _ in rows}
         self.assertEqual(set(ON_SCREEN) - listed, set())
         self.assertEqual(set(EXEMPT) - listed, set())
+
+    def test_open_folder_has_an_on_screen_control(self):
+        """Ctrl/⌘+Shift+O (File → Open Folder…): the Folders tab's Add folder tile asks for
+        a folder as the menu does; each tile has its × and the shelf its Clear."""
+        self.assertIn(("Ctrl+Shift+O", "Open a folder"), SHORTCUTS["menu"])
+        self.assertEqual(ON_SCREEN[("menu", "Ctrl+Shift+O")], (("folders", "add"),))
+        self.assertEqual(self.screens["folders"], {"tiles", "remove", "add", "clear"})
+        view = FoldersView()
+        self.addCleanup(view.deleteLater)
+        self.addCleanup(view.close)
+        view.resize(1280, 720)
+        view.show()
+        asked = []
+        view.addRequested.connect(lambda: asked.append(True))
+        QTest.mouseClick(view, Qt.MouseButton.LeftButton, pos=view.add_rect().center().toPoint())
+        self.assertEqual(asked, [True])  # an empty shelf has it too
 
 
 class AudioScreenAuditTests(unittest.TestCase):

@@ -215,6 +215,8 @@ class TVMenus(QObject):
         add(app_menu, tr("Quit"), "Ctrl+Q", window.quit_chosen, role.QuitRole)  # i18n: a menu entry
         file_menu = bar.addMenu(tr("File"))  # i18n: the menu bar's File menu
         add(file_menu, tr("Open File…"), "Ctrl+O", screens.open_file)
+        # i18n: a menu entry (Plan 4): a folder chosen plays, and goes on the Library's Folders tab
+        add(file_menu, tr("Open Folder…"), "Ctrl+Shift+O", screens.open_folder)
         export = file_menu.addMenu(tr("Export"))  # i18n: a submenu of File (verb)
         for text, kind in (
             (tr("Cached Content…"), ExportKind.CACHED),  # i18n: File → Export's entries

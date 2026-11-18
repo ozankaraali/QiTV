@@ -300,6 +300,55 @@ def _view_icon(p: QPainter, view: str, rect: QRectF, colour: QColor) -> None:
     p.restore()
 
 
+def paint_stand_in(p: QPainter, rect: QRectF, side: float, label: str) -> None:
+    """The mockup's drawn cover in QiTV's colours: a sunset over the sea, the sun, its light on
+    the water, and `label` (an album's name in capitals) in the label's small capitals. `rect`
+    is in the pixmap's device pixels; `side` is the cover's size on the page (the label shows
+    on a large one only, whatever the screen's pixel ratio). The Library's Folders tab draws a
+    folder without a cover of its own so too (Task 12)."""
+    s = rect.width()
+    sky = QLinearGradient(rect.topLeft(), rect.bottomLeft())
+    for at, colour in _STAND_IN_SKY:
+        sky.setColorAt(at, QColor(colour))
+    sky.setColorAt(1.0, QColor(_STAND_IN_SEA))
+    p.fillRect(rect, sky)
+    # The light on the water: 2 px lines every 9 px (at 200 px) over the CSS's band.
+    p.setPen(Qt.PenStyle.NoPen)
+    p.setBrush(QColor(255, 255, 255, 26))
+    y, end = s * _STAND_IN_STRIPES[0], s * _STAND_IN_STRIPES[1]
+    step, line = s * 9 / 200, s * 2 / 200
+    while y < end:
+        p.drawRect(QRectF(0, y, s, min(line, end - y)))
+        y += step
+    # The sun: radial-gradient(circle at 50% 36%, #ffe2a8 0 15%, #ffb36b 16%, transparent 17%)
+    centre = QPointF(s * 0.5, s * 0.36)
+    reach = math.hypot(s * 0.5, s * 0.64)  # to the farthest corner
+    sun = QRadialGradient(centre, reach * 0.17)
+    core, rim = (QColor(c) for c in _STAND_IN_SUN)
+    sun.setColorAt(0.0, core)
+    sun.setColorAt(0.15 / 0.17, core)
+    sun.setColorAt(0.16 / 0.17, rim)
+    clear = QColor(rim)
+    clear.setAlpha(0)
+    sun.setColorAt(1.0, clear)
+    p.setBrush(QBrush(sun))
+    p.drawEllipse(centre, reach * 0.17, reach * 0.17)
+    if not label or side * 11 / 200 < LABEL_MIN_PX:
+        return
+    px = s * 11 / 200  # drawn in device pixels
+    font = QFont()
+    font.setFamilies(_LABEL_FAMILIES)
+    font.setStyleHint(QFont.StyleHint.Serif)
+    font.setWeight(QFont.Weight.Bold)
+    font.setPixelSize(round(px))
+    font.setLetterSpacing(QFont.SpacingType.AbsoluteSpacing, 0.14 * px)
+    p.setFont(font)
+    p.setPen(QColor(255, 255, 255, 217))
+    box = QRectF(s * 0.08, s * 0.93 - px * 1.5, s * 0.84, px * 1.5)
+    text = QFontMetricsF(font).elidedText(label, Qt.TextElideMode.ElideRight, box.width())
+    p.drawText(box, Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter, text)
+
+
 @dataclass
 class _Layout:
     """Where everything goes, for one size and state (the controls, hits and paint read it)."""
@@ -1297,52 +1346,7 @@ class AudioScreen(Overlay):
         )
 
     def _paint_stand_in(self, p: QPainter, rect: QRectF, side: float) -> None:
-        """The mockup's drawn cover in QiTV's colours: a sunset over the sea, the sun, its
-        light on the water, and the album's name in the label's small capitals. `rect` is in
-        the pixmap's device pixels; `side` is the cover's size on the page (the label shows
-        on a large one only, whatever the screen's pixel ratio)."""
-        s = rect.width()
-        sky = QLinearGradient(rect.topLeft(), rect.bottomLeft())
-        for at, colour in _STAND_IN_SKY:
-            sky.setColorAt(at, QColor(colour))
-        sky.setColorAt(1.0, QColor(_STAND_IN_SEA))
-        p.fillRect(rect, sky)
-        # The light on the water: 2 px lines every 9 px (at 200 px) over the CSS's band.
-        p.setPen(Qt.PenStyle.NoPen)
-        p.setBrush(QColor(255, 255, 255, 26))
-        y, end = s * _STAND_IN_STRIPES[0], s * _STAND_IN_STRIPES[1]
-        step, line = s * 9 / 200, s * 2 / 200
-        while y < end:
-            p.drawRect(QRectF(0, y, s, min(line, end - y)))
-            y += step
-        # The sun: radial-gradient(circle at 50% 36%, #ffe2a8 0 15%, #ffb36b 16%, transparent 17%)
-        centre = QPointF(s * 0.5, s * 0.36)
-        reach = math.hypot(s * 0.5, s * 0.64)  # to the farthest corner
-        sun = QRadialGradient(centre, reach * 0.17)
-        core, rim = (QColor(c) for c in _STAND_IN_SUN)
-        sun.setColorAt(0.0, core)
-        sun.setColorAt(0.15 / 0.17, core)
-        sun.setColorAt(0.16 / 0.17, rim)
-        clear = QColor(rim)
-        clear.setAlpha(0)
-        sun.setColorAt(1.0, clear)
-        p.setBrush(QBrush(sun))
-        p.drawEllipse(centre, reach * 0.17, reach * 0.17)
-        label = self._label()
-        if not label or side * 11 / 200 < LABEL_MIN_PX:
-            return
-        px = s * 11 / 200  # drawn in device pixels
-        font = QFont()
-        font.setFamilies(_LABEL_FAMILIES)
-        font.setStyleHint(QFont.StyleHint.Serif)
-        font.setWeight(QFont.Weight.Bold)
-        font.setPixelSize(round(px))
-        font.setLetterSpacing(QFont.SpacingType.AbsoluteSpacing, 0.14 * px)
-        p.setFont(font)
-        p.setPen(QColor(255, 255, 255, 217))
-        box = QRectF(s * 0.08, s * 0.93 - px * 1.5, s * 0.84, px * 1.5)
-        text = QFontMetricsF(font).elidedText(label, Qt.TextElideMode.ElideRight, box.width())
-        p.drawText(box, Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter, text)
+        paint_stand_in(p, rect, side, self._label())
 
     # the title and artist
 

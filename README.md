@@ -199,6 +199,7 @@ These are also in the app under Help → Keyboard Shortcuts. <kbd>Ctrl/⌘</kbd>
 | <kbd>Ctrl/⌘+4</kbd> | Multiview |
 | <kbd>Ctrl/⌘+5</kbd> | Recordings |
 | <kbd>Ctrl/⌘+O</kbd> | Open a file |
+| <kbd>Ctrl/⌘+Shift+O</kbd> | Open a folder |
 | <kbd>Ctrl/⌘+,</kbd> | Settings |
 | <kbd>Ctrl/⌘+R</kbd> | Refresh channels and guide |
 | <kbd>Ctrl/⌘+Shift+R</kbd> | Refresh films and series |

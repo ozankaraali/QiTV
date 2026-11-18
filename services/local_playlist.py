@@ -26,7 +26,7 @@ it only on a worker; `subtitles_for` alone is pure.
 
 from __future__ import annotations
 
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 import logging
 import ntpath
@@ -303,6 +303,39 @@ def _by_episode(videos: Sequence[_File]) -> Optional[list[_File]]:
         return None  # two shows
     keyed.sort(key=lambda k: (k[1].season, k[1].first, k[1].last, *_by_name((k[2], k[3]))))
     return [(path, size) for _show, _episode, path, size in keyed]
+
+
+def one_show(videos: Sequence[str]) -> bool:
+    """Whether the `videos` (paths) are every one an episode of one show, as a folder's list
+    tells a series (it plays by season and episode). Pure."""
+    return bool(videos) and _by_episode([(path, None) for path in videos]) is not None
+
+
+def start_index(
+    entries: Sequence[str],
+    sizes: Sequence[Optional[int]],
+    *,
+    part_way: Callable[[str, int], bool],
+    finished: Callable[[str, int], bool],
+) -> Optional[int]:
+    """Where a folder's list (or several files dropped together) starts, and what the Folders
+    shelf says is next (Task 12, ruling 3): the first entry the viewer stopped part-way into
+    (`part_way(path, size)`: it resumes there), else the one after the last entry seen to its
+    end (`finished(path, size)`), else None (as any list starts: its first entry, or a song of
+    its own picking when shuffled). An entry whose size is unknown has no resume key: it
+    never counts. Pure (the callables read the watch state)."""
+    known: list[tuple[int, str, int]] = [
+        (index, path, size)
+        for index, (path, size) in enumerate(zip(entries, sizes))
+        if size is not None
+    ]
+    for index, path, size in known:
+        if part_way(path, size):
+            return index
+    seen = [index for index, path, size in known if finished(path, size)]
+    if seen and seen[-1] + 1 < len(entries):
+        return seen[-1] + 1
+    return None
 
 
 def _by_tags(songs: list[_File], deadline: float, cap: int) -> list[_File]:

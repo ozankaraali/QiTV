@@ -710,13 +710,19 @@ class FolderRouterTests(ListCase):
         self.assertEqual(self.lists(), [("Lantern Coast", self.entries, [1, 2, 3])])
         self.assertEqual(self.starts, [1])
         self.assertEqual(self.current.item["cmd"], second.absolute().as_uri())  # it plays
-        # None part-way (one seen, one barely begun): as any list starts (its first).
+        # None part-way (two seen, one barely begun): the one after the last seen (Task 12's
+        # ruling 3, which the Folders shelf's "next" says too).
         watch.update_position(local_key(second.name, 2), 1_190_000, 1_200_000)
         watch.update_position(local_key(third.name, 3), 3_000, 1_200_000)
         self.handover(self.season)
         self.assertTrue(wait_until(lambda: len(self.lists()) == 2), self.calls)
         self.assertEqual(self.lists()[-1], ("Lantern Coast", self.entries, [1, 2, 3]))
-        self.assertEqual(self.starts, [1, None])
+        self.assertEqual(self.starts, [1, 2])
+        # The last one seen too: as any list starts (its first).
+        watch.update_position(local_key(third.name, 3), 1_190_000, 1_200_000)
+        self.handover(self.season)
+        self.assertTrue(wait_until(lambda: len(self.lists()) == 3), self.calls)
+        self.assertEqual(self.starts, [1, 2, None])
 
     def test_a_handed_over_folder_of_songs_plays_as_its_album(self):
         album = self.folder / "Brannow Fell"

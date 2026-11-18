@@ -1,11 +1,12 @@
 """A small versioned file of what QiTV keeps per live channel (no Qt): the base of
 `services.live.tuning.LiveTuning` and `services.sound_sync.SoundSync`.
 
-The file is {"version": VERSION, "channels": {key: entry}}. It is read once, and the entries
-are kept in memory; each change writes the file on one background thread, the newest state
-only, through a temporary file swapped in. A missing, unreadable or corrupt file, or one of
-another version, counts as empty, and an entry the subclass's `_entry` does not read is left
-out. A write that fails is logged (without its path).
+The file is {"version": VERSION, "channels": {key: entry}} (a subclass may name its `FIELD`
+otherwise: the Folders shelf's is "folders"). It is read once, and the entries are kept in
+memory; each change writes the file on one background thread, the newest state only, through
+a temporary file swapped in. A missing, unreadable or corrupt file, or one of another version,
+counts as empty, and an entry the subclass's `_entry` does not read is left out. A write that
+fails is logged (without its path).
 """
 
 from __future__ import annotations
@@ -44,6 +45,7 @@ class ChannelStore:
 
     WHAT = ""
     VERSION = 1
+    FIELD = "channels"  # the file's entries are under this key
     MAX_ENTRIES = 0
     LOG = logging.getLogger(__name__)
 
@@ -62,6 +64,7 @@ class ChannelStore:
         self._generation = 0
         self._writer: Optional[ThreadPoolExecutor] = None
         self._written: Optional[Future] = None
+        self._other_version: Any = None  # the version of a file of another version read
         self._entries: dict[str, dict[str, Any]] = self._load()
         self._trim()
 
@@ -104,12 +107,13 @@ class ChannelStore:
         except (OSError, json.JSONDecodeError) as e:
             self.LOG.info("Ignoring the saved %s: %s", self.WHAT, safe_message(e))
             return {}
-        channels = data.get("channels") if isinstance(data, dict) else None
+        channels = data.get(self.FIELD) if isinstance(data, dict) else None
         if not isinstance(channels, dict):
             self.LOG.info("Ignoring the saved %s: it is not QiTV's", self.WHAT)
             return {}
         if data.get("version") != self.VERSION:
             self.LOG.info("Ignoring the saved %s: it is of another version", self.WHAT)
+            self._other_version = data.get("version")
             return {}
         entries = {}
         for key, value in channels.items():
@@ -121,7 +125,7 @@ class ChannelStore:
     def _save(self) -> None:
         if self._path is None:
             return
-        snapshot = {"version": self.VERSION, "channels": dict(self._entries)}
+        snapshot = {"version": self.VERSION, self.FIELD: dict(self._entries)}
         with self._lock:
             self._generation += 1
             generation = self._generation

@@ -38,7 +38,9 @@ from services.recording_thumbs import FOLDER as THUMBS_FOLDER, Thumbnails
 from services.recordings_library import RecordingsLibrary
 from services.recordings_list import RecordingsList
 from ui.keymap import Action
+from ui.library.folders_view import FoldersDesk
 from ui.library_controller import LibraryController
+from ui.overlays.question_card import QuestionCard
 from ui.overlays.rec_sign import MANAGE_TEXT
 from ui.page_stack import PageStack
 from ui.pointer import SecondClickGuard
@@ -163,8 +165,21 @@ class TVPages(QObject):
         )
         self.recordings.changed.connect(self.library_controller.recordings_changed)
         self._wire_home()  # 2.9.7: the Recordings tab's home
+        # Plan 4: the Folders tab: the folders opened, each played as a dropped folder plays;
+        # Clear asks on a question card of its own
+        self.folders_desk = FoldersDesk(
+            window.folder_shelf,
+            window.library_page.folders,
+            QuestionCard(window.library_page),
+            window.watch,
+            open_folder=self._open_shelf_folder,
+            add_folder=self.open_folder,
+            parent=self,
+        )
+        self.library_controller.set_folders(self.folders_desk)
         window.library_page.recordings.avoid(window.player_page)  # the corner player
         window.library_page.home.avoid(window.player_page)
+        window.library_page.folders.avoid(window.player_page)  # Plan 4: the Folders tab
         for sign in (window.overlays.rec_sign, getattr(window.overlays, "library_rec_sign", None)):
             if sign is not None:
                 sign.manageRequested.connect(lambda: self.open_recordings(NOW))
@@ -407,6 +422,8 @@ class TVPages(QObject):
             stack.show_library(corner=corner)
             if self.library_controller.mode == "recordings" and not self.recordings_desk.shown():
                 self.recordings_desk.show()  # 2.9.7: back on the Recordings tab: it follows
+            elif self.library_controller.mode == "folders" and not self.folders_desk.shown():
+                self.folders_desk.show()  # Plan 4: back on the Folders tab: read again
         else:
             if stack.mode() == PageStack.CORNER:
                 window.controller.leave_library_playing()
@@ -743,6 +760,25 @@ class TVPages(QObject):
         if not path or window.closing():
             return
         window.open_paths([path], source="dialog")
+
+    def open_folder(self) -> None:
+        """File → Open Folder… and the Folders tab's Add folder (Plan 4): the folder chosen
+        plays as a dropped folder does (TVWindow.open_paths reads it off the GUI thread), from
+        where it stopped, and goes on the Folders tab."""
+        window = self._window
+        if window.closing():
+            return
+        title = tr("Open Folder")  # i18n: the title of the dialog that picks a folder to play
+        path = QFileDialog.getExistingDirectory(window, title, "")
+        if not path or window.closing():
+            return
+        window.open_paths([path], source="drop")
+
+    def _open_shelf_folder(self, path: str) -> None:
+        """A Folders tab tile: its folder plays as a dropped folder does, from where it
+        stopped."""
+        if not self._window.closing():
+            self._window.open_paths([path], source="drop")
 
     def play_path(self, path: str, size: Optional[int]) -> None:
         """A local file plays as a movie on the player page (Open File…, a drop, a file opened
