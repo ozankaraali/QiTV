@@ -4557,6 +4557,8 @@ class TVController(QObject):
         "Finished"."""
         if current is not self._sound or self._sound_kind not in ("song", "file"):
             return False
+        if self._sound_in_list and self._lanes.busy():
+            return False  # a newer choice is on its way: a list's next never drops it
         if self._single_in_list():
             return self._entry_goes_on(current)
         queue = self._queue

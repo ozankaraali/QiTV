@@ -264,7 +264,7 @@ class AudioCase(ControllerTestCase):
         self.folder = Path(directory.name)
         self.albums = mock.patch.object(self.controller._album_job, "start").start()
         # A playlist's songs, read by name (AlbumJob.start_files): answered by hand too.
-        self.list_reads = mock.patch.object(AlbumJob, "start_files", create=True).start()
+        self.list_reads = mock.patch.object(AlbumJob, "start_files").start()
         self.covers = mock.patch.object(self.controller._cover_job, "start").start()
         self.addCleanup(mock.patch.stopall)
         self.runs: list[str] = []
@@ -1047,7 +1047,7 @@ class PlaylistTests(AudioCase):
         self.session.stateChanged.emit("playing")
         self.read_list([], whole=False)  # nothing read (no libVLC): nothing changes
         self.assertEqual(self.rows(), ["01 Song 1", "02 Song 2", "03 Song 3"])
-        self.play_list("Night Shift", entries, [1001, 1002, 1003])
+        self.play_list("Late Tide Mix", entries, [1001, 1002, 1003])
         self.session.stateChanged.emit("playing")
         self.read_list(songs[:1], whole=False)  # cut short after the first
         self.assertEqual(self.rows(), ["Song 1", "02 Song 2", "03 Song 3"])
@@ -1056,8 +1056,8 @@ class PlaylistTests(AudioCase):
             self.assertEqual(self.played()[-1], Path(entries[index]))
             self.session.stateChanged.emit("playing")
             self.assertEqual(self.screen.current, index)
-        self.assertEqual(self.screen.song, ("03 Song 3", "", "Night Shift", ""))
-        self.assertEqual(self.controller.panel_facts(), ("03 Song 3", "", "Night Shift"))
+        self.assertEqual(self.screen.song, ("03 Song 3", "", "Late Tide Mix", ""))
+        self.assertEqual(self.controller.panel_facts(), ("03 Song 3", "", "Late Tide Mix"))
         self.end()
         self.assertIn(FINISHED, self.toast.messages())
         self.albums.assert_not_called()
@@ -1076,6 +1076,7 @@ class PlaylistTests(AudioCase):
         self.end()  # the third, the last
         self.assertIn(FINISHED, self.toast.messages())
         self.assertEqual(len(self.session.plays), 3)
+        self.albums.assert_not_called()
 
     def test_playlists_resume_by_their_sizes_and_keep_their_list_after_stop(self):
         # Ruling 5: each entry's name and size are its resume key (a long mix keeps a point).
@@ -1120,7 +1121,7 @@ class PlaylistTests(AudioCase):
         late = self.list_reads.call_args.args
         # A newer list: the older one's read never reaches it.
         others = self.songs(3, 4)
-        self.play_list("Night Shift", [t["path"] for t in others], [1003, 1004])
+        self.play_list("Late Tide Mix", [t["path"] for t in others], [1003, 1004])
         self.controller._list_job.read.emit(late[0], songs, True)
         self.assertEqual(self.rows(), ["03 Song 3", "04 Song 4"])
         self.albums.assert_not_called()
@@ -1132,6 +1133,47 @@ class PlaylistTests(AudioCase):
         self.assertIsNone(self.controller._queue)
         self.end()
         self.assertEqual(len(self.session.plays), 4)  # the list's next isn't followed
+
+    def test_a_channel_chosen_as_a_playlists_song_ends_is_never_dropped(self):
+        # As Task 1's card never offered over a newer choice on its way: a channel chosen just
+        # before a list's song ends plays once its link comes; the list's next never opens.
+        one, two = (t["path"] for t in self.songs(1, 2))
+        film = str(self.folder / FILM)
+        for name, entries in (("Evening Drive", [one, two]), ("Mixed Bag", [one, two, film])):
+            with self.subTest(name):
+                self.play_list(name, entries, [1001, 1002, 5000][: len(entries)])
+                self.session.stateChanged.emit("playing")
+                plays = len(self.session.plays)
+                self.tune(1)  # its link on its way
+                self.end()
+                self.assertEqual(len(self.session.plays), plays)
+                self.ready("http://stream/2")
+                self.assertEqual(self.played_urls()[-1], "http://stream/2")
+                self.assertFalse(self.screen.visible)
+
+    def test_a_row_or_the_docks_buttons_play_a_song_playlists_unread_tail(self):
+        # Ruling 2 from the list itself: a row past what was read plays, and ⏮/⏭ go by the
+        # list's rows.
+        songs = self.songs(1, 2, 3)
+        entries = [t["path"] for t in songs]
+        self.session.seekable = True
+        self.play_list("Evening Drive", entries, [1001, 1002, 1003])
+        self.session.stateChanged.emit("playing")
+        self.read_list(songs[:1], whole=False)
+        self.screen.trackPicked.emit(2)  # an unread row
+        self.assertEqual(self.played()[-1], Path(entries[2]))
+        self.session.stateChanged.emit("playing")
+        self.assertEqual(self.screen.current, 2)
+        self.transport.prevTrackRequested.emit()  # near its start: the row before
+        self.assertEqual(self.played()[-1], Path(entries[1]))
+        self.session.stateChanged.emit("playing")
+        self.transport.nextTrackRequested.emit()
+        self.assertEqual(self.played()[-1], Path(entries[2]))
+        self.session.stateChanged.emit("playing")
+        self.transport.nextTrackRequested.emit()  # the last, repeat off: nothing after it
+        self.assertEqual(len(self.session.plays), 4)
+        self.assertEqual(self.next_card.named("show_next"), [])
+        self.albums.assert_not_called()
 
     def test_a_song_playlists_entry_with_a_picture_goes_on_as_a_film(self):
         # An .m4a whose media has a picture: a film's controls, and the list goes on after it
