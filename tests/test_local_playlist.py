@@ -148,6 +148,9 @@ class ReadPlaylistTests(Folder, unittest.TestCase):
         self.assertEqual(read.entries, (str(western),))
 
     def test_a_tie_or_nothing_there_keeps_the_first_code_page(self):
+        self.enterContext(
+            mock.patch.object(local_playlist, "_code_pages", return_value=["cp1254", "cp1252"])
+        )  # (a Windows runner tries its own first)
         sehir = self.file("Şehir.mp3")  # cp1254's 0xDE; cp1252 reads it as Þ
         self.file("Þoka.mp3")  # cp1252's 0xDE again: cp1254 reads it as Ş
         data = "Şehir.mp3\n".encode("cp1254") + "Þoka.mp3\n".encode("cp1252")
@@ -165,6 +168,8 @@ class ReadPlaylistTests(Folder, unittest.TestCase):
         self.assertEqual(read, PlaylistRead("empty", "Akşam listesi", (), 1))
 
     def test_each_file_is_looked_at_once_and_the_read_stops_once_all_are_there(self):
+        pages = list(local_playlist.LEGACY_CODE_PAGES)  # (a Windows runner tries its own first)
+        self.enterContext(mock.patch.object(local_playlist, "_code_pages", return_value=pages))
         plain = self.file("film.mkv")
         song = self.file("Şarkı.mp3")
         data = b"film.mkv\n" + "Şarkı.mp3\n".encode("cp1254") + b"yok.mp3\n"
@@ -238,6 +243,21 @@ class ReadPlaylistTests(Folder, unittest.TestCase):
                     self.assertEqual((read.sizes, read.missing), ((None, None, None, 4), 1))
                 else:  # a Windows share's path names nothing this system opens
                     self.assertEqual((read.entries, read.missing), ((str(film),), 4))
+
+    def test_a_playlist_on_a_share_looks_at_its_own_shares_files(self):
+        # That computer was asked for the list already: its share's files are looked at as
+        # any list's are (sizes, resume keys, the vote); another share's or computer's aren't.
+        home = "\\\\nas\\share\\Lists"
+        for path, other in (
+            ("\\\\nas\\share\\Music\\a.mp3", False),
+            ("\\\\NAS\\Share\\b.mp3", False),
+            ("//nas/share/c.mp3", False),
+            ("\\\\nas\\other\\a.mp3", True),
+            ("\\\\box\\share\\a.mp3", True),
+        ):
+            with self.subTest(path=path):
+                self.assertIs(local_playlist._other_host(path, home), other)
+        self.assertTrue(local_playlist._other_host("\\\\nas\\share\\a.mp3", "C:\\Lists"))
 
     def test_which_paths_are_another_computers(self):
         for path, other in (

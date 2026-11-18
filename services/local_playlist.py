@@ -178,7 +178,7 @@ def _listed(
             entry = _local_path(line, folder)
             if entry is None:
                 continue
-            if sys.platform == "win32" and _other_host(entry):
+            if sys.platform == "win32" and _other_host(entry, folder):
                 if is_video(entry) or is_music(entry):
                     entries.append(entry)  # checked as it plays, never at the read
                     sizes.append(None)
@@ -199,17 +199,19 @@ def _listed(
     return found, PlaylistRead(LOCAL, name, tuple(entries), missing, tuple(sizes))
 
 
-def _other_host(path: str) -> bool:
+def _other_host(path: str, home: str = "") -> bool:
     """Whether `path`, in Windows' spelling, is another computer's file: a share's
     (\\\\host\\share\\…, //host/share/…, \\\\?\\UNC\\host\\share\\…), never a drive's, nor an
-    extended or a device path on this one (\\\\?\\C:\\…, \\\\.\\…). Pure: the disk and the
-    network aren't asked."""
+    extended or a device path on this one (\\\\?\\C:\\…, \\\\.\\…), nor one on the share `home`
+    (the playlist's folder) is on: that computer was asked for the list already. Pure: the disk
+    and the network aren't asked."""
     spelled = path.replace("/", "\\")
     if not spelled.startswith("\\\\"):
         return False
-    if spelled.startswith(("\\\\?\\", "\\\\.\\")):
-        return spelled[4:8].upper() == "UNC\\"
-    return True
+    if spelled.startswith(("\\\\?\\", "\\\\.\\")) and spelled[4:8].upper() != "UNC\\":
+        return False
+    share = ntpath.splitdrive(spelled)[0].casefold()
+    return not home or share != ntpath.splitdrive(home.replace("/", "\\"))[0].casefold()
 
 
 def _local_path(line: str, folder: str) -> Optional[str]:
