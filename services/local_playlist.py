@@ -21,7 +21,9 @@ media files dropped together (`read_files`), in one order for the whole list:
   (`natural_key`: numbered names in their numbers' order).
 Only the folder's own files are read, never its subfolders, and no hidden one (".…"). The
 folder is always listed whole (as album_listing.music_files lists a song's): only the songs'
-tags have a time (READ_BUDGET_S), past which they go by name.
+tags have a time (READ_BUDGET_S), past which they go by name. 2.11.1 (ruling M2): a video's
+side audio track (an audio file named as a video beside it, then maybe more: "Show S01E01.mka",
+"Show S01E01.eng.ac3") is that video's, never an entry of its own (`side_track`).
 
 Pure logic: no Qt. Each read touches the disk (the songs' tags are read by libVLC), so call
 it only on a worker; `subtitles_for` alone is pure.
@@ -327,6 +329,7 @@ def _listing(spelling: str, path: str) -> list[tuple[str, Optional[int]]]:
     named like a film) nor a hidden file (".…", macOS's "._" companions). Raises OSError when
     the folder can't be listed."""
     found: list[tuple[str, Optional[int]]] = []
+    videos: list[str] = []  # their names' stems, for the side tracks
     with os.scandir(spelling) as entries:
         for entry in entries:
             name = entry.name
@@ -342,7 +345,27 @@ def _listing(spelling: str, path: str) -> list[tuple[str, Optional[int]]]:
             except OSError:
                 size = None  # it plays all the same, from its start (no resume key)
             found.append((os.path.join(path, name), size))
-    return found
+            if is_video(name):
+                videos.append(_stem(name))
+    return [file for file in found if not side_track(file[0], videos)]
+
+
+def _stem(name: str) -> str:
+    return os.path.splitext(os.path.basename(name))[0].casefold()
+
+
+def side_track(path: str, video_stems: Sequence[str]) -> bool:
+    """Whether the audio file at `path` is a side track of one of the videos beside it (their
+    names' stems, casefolded): its own stem is a video's, or starts with one and goes on
+    after a mark that is no letter or digit ("Show S01E01.eng", "Show S01E01 - Dub"; never
+    "Intro" for "In")."""
+    if is_video(path) or not is_music(path):
+        return False
+    stem = _stem(path)
+    for video in video_stems:
+        if stem == video or (stem.startswith(video) and not stem[len(video)].isalnum()):
+            return True
+    return False
 
 
 def _folder_name(path: str) -> str:

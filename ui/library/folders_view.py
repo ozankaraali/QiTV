@@ -7,9 +7,11 @@ for a series: the episode the start rule plays, local_playlist.where_it_starts; 
 videos") and its cover: its own cover, folder or front picture (song_facts.folder_cover), else
 the audio screen's drawn stand-in with its name. The tab shows at once with each folder's name
 and the kind kept on the shelf; then the folders are read on a worker, no song's tags among
-them (`FolderLook`), and each tile fills in. A folder that is gone shows as missing, with
-Remove; no dialog says so. A click on a tile plays its folder from where it stopped, as a
-dropped folder plays (the router's read, the start rule, the hold); its × takes it off the
+them (`FolderLook`), and each tile fills in. The tab is always there (2.11.1): with no folder
+on the shelf it shows its Add folder tile and a line that says what it is for (`summary`). A
+folder that is gone shows as missing, with Remove; no dialog says so. A click on a tile plays
+its folder from where it stopped, as a dropped folder plays (the router's read, the start rule,
+the hold); its × takes it off the
 shelf (its files stay where they are), the last tile, Add folder, picks one as File → Open
 Folder… does (a start from the tab, as a tile's play: Esc comes back to it), and Clear asks
 first, on the app's question card.
@@ -98,6 +100,12 @@ PAGE_ROWS = 2
 TITLE_TEXT = TAB_LABELS["folders"]  # the tab's name is its title
 # i18n: under the Folders tab's title (an album starts at its first song: only videos resume)
 SUMMARY_TEXT = N_("The folders you opened. Videos and episodes play on from where you stopped.")
+# 2.11.1: the empty tab's line (an album starts at its first song: only videos resume)
+# i18n: under the Folders tab's title while it holds no folder: what the tab is for
+EMPTY_SUMMARY_TEXT = N_(
+    "Folders you open stay here, to play again with a click. Videos and episodes go on from"
+    " where you stopped."
+)
 # i18n: the Folders tab's last tile: choose a folder to play (File → Open Folder…)
 ADD_TEXT = N_("Add folder")
 # i18n: a Folders tab tile's line: its folder is gone (moved, deleted, a drive unplugged)
@@ -343,6 +351,11 @@ class FoldersView(TooltipWidget):
     def tiles(self) -> list[Tile]:
         return list(self._tiles)
 
+    def summary(self) -> str:
+        """The line under the title: what the tab is for while it holds no folder (2.11.1),
+        else what its folders are."""
+        return translate(SUMMARY_TEXT if self._tiles else EMPTY_SUMMARY_TEXT)
+
     def cover_px(self) -> int:
         """A tile's cover side in this screen's pixels, as the tiles are laid out now: how
         large a cover is read (look_at)."""
@@ -430,6 +443,8 @@ class FoldersView(TooltipWidget):
             text = tr("Clear")
         elif target == "add":
             text = translate(ADD_TEXT)
+            if not self._tiles:  # an empty tab's one control: what the tab is for, too
+                text = f"{text}. {self.summary()}"
         else:
             tile = self._tiles[self._current]
             text = f"{tile.name}, {tile.line}"
@@ -689,7 +704,7 @@ class FoldersView(TooltipWidget):
         p.drawText(
             summary,
             Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter,
-            elided(p, translate(SUMMARY_TEXT), summary.width()),
+            elided(p, self.summary(), summary.width()),
         )
         if clear.isEmpty():
             return

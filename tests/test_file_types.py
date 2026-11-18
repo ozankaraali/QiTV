@@ -1274,8 +1274,23 @@ class RecordingBackend:
 
 
 class Config:
-    def __init__(self, file_types=None):
+    """The record: each kind's executable and (ruling M4) the types it was registered with, by
+    default this version's (`registered`: as an older QiTV left it, {} for 2.11.0's none)."""
+
+    def __init__(self, file_types=None, registered=None):
         self.file_types = file_types or {}
+        if registered is None:
+            registered = {
+                kind: sorted(_kind_types(kind)[0]) for kind in self.file_types if kind in KINDS
+            }
+        self.file_types_registered = registered
+
+
+def _kind_types(kind):
+    return file_types._kind_types(kind)
+
+
+KINDS = file_types.KINDS
 
 
 class _RecordedBackend(unittest.TestCase):
@@ -1309,6 +1324,36 @@ class TypesTests(_RecordedBackend):
         for mime in ("audio/mpeg", "audio/mp4", "audio/aac", "audio/flac", "audio/x-opus+ogg"):
             self.assertIn(mime, music)
 
+    def test_aiff_is_registered_as_music(self):
+        # 2.11.1: shared-mime-info names AIFF (.aif, .aiff) audio/x-aiff and AIFF-C (.aifc,
+        # .aiffc) audio/x-aifc; macOS 13 declares (exports) public.aiff-audio for .aif and
+        # .aiff, a kind of public.aifc-audio, which is .aifc. Windows registers the
+        # extensions themselves (MusicWindowsBackendTests).
+        for ext, mime, uti in (
+            ("aif", "audio/x-aiff", "public.aiff-audio"),
+            ("aiff", "audio/x-aiff", "public.aiff-audio"),
+            ("aifc", "audio/x-aifc", "public.aifc-audio"),
+        ):
+            with self.subTest(ext=ext):
+                self.assertEqual(file_types.MIME_TYPES[ext], (mime,))
+                self.assertEqual(file_types.MAC_UTIS[ext], (uti,))
+                every, chosen = file_types._kind_types("music")
+                self.assertIn(ext, every)
+                self.assertIn(ext, chosen)  # it may become QiTV's, as every music type
+                self.assertIn(mime, file_types.default_mime_types("music"))
+                self.assertNotIn(ext, file_types._kind_types("videos")[0])
+        self.assertEqual(file_types.MAC_DEFAULT_MUSIC, ("mp3", "m4a", "flac"))  # as before
+
+    def test_the_other_audio_formats_are_never_registered(self):
+        # They play when handed over, dropped or opened (open_paths), but QiTV never claims
+        # them: nothing of theirs is written on any system.
+        for ext in open_paths.OTHER_MUSIC_EXTENSIONS:
+            with self.subTest(ext=ext):
+                self.assertNotIn(ext, file_types.MIME_TYPES)
+                self.assertNotIn(ext, file_types.MAC_UTIS)
+                for kind in file_types.KINDS:
+                    self.assertNotIn(ext, file_types._kind_types(kind)[0])
+
     def test_each_kind_has_its_own_types(self):
         # one desktop file holds both kinds: a type of one never belongs to the other (a
         # playlist's are both kinds', and tell neither apart)
@@ -1335,7 +1380,7 @@ class TypesTests(_RecordedBackend):
         # the system hands QiTV these too: macOS's types for mp3, aac and wav and the Ogg
         # import cover them, and so do Linux's MIME types (shared-mime-info's globs); an
         # audiobook's .m4b is audio/x-m4b there, a kind of audio/mp4
-        for ext in ("mpga", "adts", "wave", "bwf", "oga", "spx", "m4b"):
+        for ext in ("mpga", "adts", "wave", "bwf", "oga", "spx", "m4b", "aiffc"):
             self.assertTrue(open_paths.is_music(f"/x/song.{ext}"), ext)
         self.assertNotIn("m4b", open_paths.MUSIC_EXTENSIONS)  # registered for: as before
 
@@ -1494,6 +1539,36 @@ class ServiceTests(_RecordedBackend):
         config = Config()
         self.assertFalse(file_types.register(self.KIND, config, "/tmp/x/qitv-linux", True))
         self.assertEqual(self.backend.calls, [])
+
+    def test_a_registration_keeps_the_types_it_registered(self):
+        # Ruling M4: what was registered, kept beside the record (an optional field)
+        config = Config()
+        self.assertTrue(file_types.register(self.KIND, config, "/opt/qitv/qitv-linux", True))
+        every = sorted(file_types._kind_types(self.KIND)[0])
+        self.assertEqual(config.file_types_registered, {self.KIND: every})
+        self.assertTrue(file_types.unregister(self.KIND, config, frozen=True))
+        self.assertEqual(config.file_types_registered, {})
+
+    def test_refresh_registers_again_when_the_types_changed(self):
+        # Ruling M4: 2.11.0 registered music without AIFF and kept no list of its types; at
+        # start a QiTV registered with another list registers again, never taking a default
+        exe = "/opt/qitv/qitv-linux"
+        every = sorted(file_types._kind_types(self.KIND)[0])
+        for registered in ({}, {self.KIND: ["m3u", "mp3"]}):
+            with self.subTest(registered=registered):
+                self.backend.calls.clear()
+                config = Config({self.KIND: exe}, registered=dict(registered))
+                file_types.refresh(config, exe, frozen=True)
+                again = {"defaults": False, "previous": exe}
+                self.assertEqual(self.backend.calls, [("register", self.KIND, exe, again)])
+                self.assertEqual(config.file_types, {self.KIND: exe})
+                self.assertEqual(config.file_types_registered, {self.KIND: every})
+                file_types.refresh(config, exe, frozen=True)  # once
+                self.assertEqual(len(self.backend.calls), 1)
+        self.backend.ok = False  # it failed: tried again at the next start
+        config = Config({self.KIND: exe}, registered={})
+        file_types.refresh(config, exe, frozen=True)
+        self.assertEqual(config.file_types_registered, {})
 
     def test_refresh_moves_registration(self):
         config = Config({self.KIND: "/a/qitv"})

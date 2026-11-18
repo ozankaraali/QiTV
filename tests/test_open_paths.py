@@ -119,7 +119,8 @@ class SortPaths(unittest.TestCase):
     def test_kinds(self):
         self.assertTrue(open_paths.is_video("/x/A.MKV"))
         self.assertTrue(open_paths.is_music("/x/b.flac"))
-        # A song (a playlist of these is an album): MUSIC_EXTENSIONS only, in any case.
+        # A song (a playlist of these is an album): MUSIC_EXTENSIONS and the other audio
+        # formats (OTHER_MUSIC_EXTENSIONS), in any case; not what a registered type brings.
         self.assertTrue(open_paths.is_song("/x/C.FLAC"))
         self.assertTrue(open_paths.is_song("C:\\Müzik\\d.Opus"))
         for path in ("/x/a.f4a", "/x/b.mp2", "/x/c.mkv", "/x/mp3"):
@@ -128,9 +129,49 @@ class SortPaths(unittest.TestCase):
         self.assertFalse(open_paths.is_video("/x/b.flac"))
         self.assertTrue(open_paths.is_video("/x/c.ts"))
 
-    def test_media_is_both_kinds(self):
+    def test_aiff_is_music_qitv_registers(self):
+        # 2.11.1, the owner: an .aif said "QiTV can't play". AIFF (.aif, .aiff) and AIFF-C
+        # (.aifc) are registered with the system as music, as MP3 or FLAC are.
+        self.assertLessEqual({"aif", "aiff", "aifc"}, open_paths.MUSIC_EXTENSIONS)
+        for path in ("/x/Tide.aif", "/x/Harbour.AIFF", "C:\\Müzik\\Quay.aifc"):
+            with self.subTest(path=path):
+                self.assertTrue(open_paths.is_music(path))
+                self.assertTrue(open_paths.is_song(path))
+                self.assertFalse(open_paths.is_video(path))
+        # Linux's AIFF-C type brings .aiffc: handed over, it plays, a song as AIFF-C is
+        # (ruling M3: an album holding one is still an album)
+        self.assertTrue(open_paths.is_music("/x/Tide.aiffc"))
+        self.assertTrue(open_paths.is_song("/x/Tide.AIFFC"))
+        self.assertNotIn("aiffc", open_paths.MUSIC_EXTENSIONS)
+        kinds = open_paths.sort_paths(["/x/b.aiff", "/x/a.aif", "/x/c.aifc"])
+        self.assertEqual((kinds.media, kinds.others), (("/x/a.aif", "/x/b.aiff", "/x/c.aifc"), ()))
+
+    def test_the_other_audio_formats_libvlc_plays_are_songs(self):
+        # Each checked with a test tone through libVLC (the 2.11.1 fix's table); never
+        # registered with the system, they play when handed over, dropped, opened with Open
+        # File… or in a folder or a playlist, and are songs as the registered ones are (a
+        # folder or a playlist of them is an album).
+        other = {"wma", "wv", "mka", "caf", "mpc", "tta", "au", "snd", "amr", "ac3", "dts"}
+        self.assertEqual(open_paths.OTHER_MUSIC_EXTENSIONS, other)
+        self.assertLessEqual(other, open_paths.EXTRA_MUSIC_EXTENSIONS)
+        self.assertFalse(other & open_paths.MUSIC_EXTENSIONS)  # not registered
+        self.assertFalse(other & (open_paths.VIDEO_EXTENSIONS | open_paths.EXTRA_VIDEO_EXTENSIONS))
+        paths = [f"/x/Şarkı {n}.{e.upper() if n % 2 else e}" for n, e in enumerate(sorted(other))]
+        for path in paths:
+            with self.subTest(path=path):
+                self.assertTrue(open_paths.is_music(path))
+                self.assertTrue(open_paths.is_song(path))
+                self.assertFalse(open_paths.is_video(path))
+        kinds = open_paths.sort_paths(paths)
+        self.assertEqual((len(kinds.media), kinds.others), (len(other), ()))
+        self.assertTrue(open_paths.holds_the_start(["/x/a.wma"]))
+
+    def test_open_files_filter_is_what_qitv_registers_and_the_other_audio(self):
         self.assertEqual(
-            open_paths.MEDIA_EXTENSIONS, open_paths.VIDEO_EXTENSIONS | open_paths.MUSIC_EXTENSIONS
+            open_paths.MEDIA_EXTENSIONS,
+            open_paths.VIDEO_EXTENSIONS
+            | open_paths.MUSIC_EXTENSIONS
+            | open_paths.OTHER_MUSIC_EXTENSIONS,
         )
 
     def test_what_the_claimed_types_bring_plays_too(self):
@@ -176,7 +217,8 @@ class SortPaths(unittest.TestCase):
             | {"flv", "wmv", "ogv"},
         )
         self.assertEqual(
-            open_paths.MUSIC_EXTENSIONS, {"mp3", "m4a", "aac", "flac", "ogg", "opus", "wav"}
+            open_paths.MUSIC_EXTENSIONS,
+            {"mp3", "m4a", "aac", "flac", "ogg", "opus", "wav", "aif", "aiff", "aifc"},
         )
 
     def test_others_are_the_files_qitv_wont_play(self):
@@ -206,12 +248,14 @@ class SortPaths(unittest.TestCase):
 
 
 class Filter(unittest.TestCase):
-    def test_open_file_patterns_are_unchanged(self):
+    def test_open_file_patterns(self):
         from ui.tv_pages import MEDIA_PATTERNS
 
         today = (
             "*.mp4 *.m4v *.mkv *.avi *.mov *.webm *.ts *.m2ts *.mts *.mpg *.mpeg *.flv"
             " *.wmv *.ogv *.mp3 *.m4a *.aac *.flac *.ogg *.opus *.wav *.m3u8"
+            # 2.11.1: AIFF, and the other audio formats libVLC plays
+            " *.aif *.aiff *.aifc *.wma *.wv *.mka *.caf *.mpc *.tta *.au *.snd *.amr *.ac3 *.dts"
         )
         self.assertEqual(set(MEDIA_PATTERNS.split()), set(today.split()))
 

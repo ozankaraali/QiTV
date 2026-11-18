@@ -71,16 +71,20 @@ def _song(path, *, cover=None, **tags):
     for key, value in tags.items():
         meta += ["-metadata", f"{key}={value}"]
     tone = ["-f", "lavfi", "-i", "sine=frequency=440:duration=1"]
+    # an AIFF's tags are an ID3 chunk (ffmpeg writes one when asked), an MP3's its ID3 tag
+    aiff = str(path).lower().endswith((".aif", ".aiff"))
+    audio = ["-c:a", "pcm_s16be", "-write_id3v2", "1"] if aiff else ["-c:a", "libmp3lame"]
     if cover is None:
-        _run(FFMPEG, "-y", *tone, "-c:a", "libmp3lame", *meta, path)
+        _run(FFMPEG, "-y", *tone, *audio, *meta, path)
         return
     picture = os.path.join(os.path.dirname(path), f".pic-{uuid.uuid4().hex}.png")
     _picture(picture, cover)
+    attached = ["-disposition:v", "attached_pic"] if aiff else []
     try:
         _run(
-            FFMPEG, "-y", *tone, "-i", picture, "-map", "0", "-map", "1", "-c:a", "libmp3lame",
-            "-c:v", "png", "-id3v2_version", "3", "-metadata:s:v", "comment=Cover (front)",
-            *meta, path,
+            FFMPEG, "-y", *tone, "-i", picture, "-map", "0", "-map", "1", *audio,
+            "-c:v", "png", *attached, "-id3v2_version", "3",
+            "-metadata:s:v", "comment=Cover (front)", *meta, path,
         )  # fmt: skip
     finally:
         os.remove(picture)
@@ -172,6 +176,14 @@ class AlbumListingTests(unittest.TestCase):
         )
         self.assertEqual(music_files(folder / "missing"), [])
         self.assertEqual(list_album(folder / "missing"), [])
+
+    def test_aiff_and_the_other_audio_formats_are_the_folders_songs(self):
+        # 2.11.1: an album of AIFF, WMA, Musepack … files is listed as one of MP3s is
+        folder = _Folder(self)
+        names = ["01 Arn.aif", "02 Pell.AIFF", "03 Quist.aifc", "04 Vale.wma", "05 Rook.mka"]
+        names += ["06 Deep.caf", "07 Tern.mpc", "08 Wick.tta", "09 Moss.wv", "10 Fen.ape"]
+        folder.touch(*names, "11 Notes.txt")
+        self.assertEqual([name for name, _size in music_files(folder.path)], names[:-1])
 
     def test_the_album_listing_is_capped_and_never_blocks(self):
         folder = _Folder(self)
@@ -512,6 +524,26 @@ class RealSongTests(unittest.TestCase):
                 self.assertIsNotNone(image)
                 self.assertLessEqual(max(image.width(), image.height()), 1024)
                 self.assertTrue(_near(colours[0], _rgb(TEAL)), colours)
+
+    def test_an_aiffs_tags_and_picture_are_read(self):
+        # 2.11.1: libVLC reads an AIFF's ID3 chunk (its tag reader): the album is listed, the
+        # embedded picture is the cover, as an MP3's
+        folder = _Folder(self)
+        album, artist = f"Wexlo Tide {RUN}", f"Brannow Fell {RUN}"
+        first = folder / "01 Arn.aif"
+        _song(first, cover=TEAL, title="Arn", artist=artist, album=album, track="1")
+        _song(folder / "02 Pell.aiff", title="Pell", artist=artist, album=album, track="2")
+        tracks = list_album(folder.path)
+        self.assertEqual(
+            [(t["name"], t["title"], t["album"], t["track"]) for t in tracks],
+            [("01 Arn.aif", "Arn", album, 1), ("02 Pell.aiff", "Pell", album, 2)],
+        )
+        self.assertEqual(tracks[0]["artist"], artist)
+        self.assertGreater(tracks[0]["duration_ms"], 500)
+        self.assertEqual([t["name"] for t in album_of(first)], ["01 Arn.aif", "02 Pell.aiff"])
+        image, colours = self._cover(first)
+        self.assertIsNotNone(image)
+        self.assertTrue(_near(colours[0], _rgb(TEAL)), colours)
 
     def test_the_folders_cover_in_any_case_and_qitvs_order(self):
         folder = _Folder(self)

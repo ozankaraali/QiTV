@@ -624,6 +624,12 @@ class ConfigManager:
     file_types = _config_property(
         "file_types", {}, coerce=lambda v: v if isinstance(v, dict) else {}
     )
+    # 2.11.1, optional (older builds ignore it): the file types (extensions) each kind was
+    # registered with ({"music": ["aac", "aif", …]}); a kind registered with others (2.11.0's
+    # music had no AIFF) registers again at start (services.file_types.refresh).
+    file_types_registered = _config_property(
+        "file_types_registered", {}, coerce=lambda v: v if isinstance(v, dict) else {}
+    )
     watch_history = _config_property("watch_history", [])
     playback_positions = _config_property("playback_positions", {})
 

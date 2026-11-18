@@ -187,6 +187,8 @@ app = BUNDLE(
                     'org.xiph.ogg-audio',  # ogg
                     'org.xiph.opus',  # opus
                     'com.microsoft.waveform-audio',  # wav
+                    'public.aiff-audio',  # aif, aiff (2.11.1; macOS's own, as is AIFF-C)
+                    'public.aifc-audio',  # aifc
                 ],
             },
             {

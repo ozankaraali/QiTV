@@ -51,6 +51,7 @@ from __future__ import annotations
 
 import bisect
 import logging
+import os
 import time
 from typing import Any, Optional
 
@@ -576,16 +577,25 @@ class CaptionsController(QObject):
         return (name or "auto", translate(source))
 
     def set_language(self, name: str) -> None:
-        """The viewer's pick for this channel ("auto": the model's own detection)."""
-        key = self._channel_key()
+        """The viewer's pick for this channel, film or video file, and for a song's folder
+        (`_pick_key`; "auto": the model's own detection). 2.11.1 (ruling I1): Auto on the
+        viewer's own file also forgets what was heard on it, and its run reads it again with
+        no language (a run's vote, once it agreed, stays): Auto hears it anew."""
+        key = self._pick_key()
         picks = dict(self._config_get("ai_captions_picks", {}) or {})
         if name == "auto":
             picks.pop(key, None)
         elif key:
             picks[key] = name
         self._config_set("ai_captions_picks", picks)
+        again = name == "auto" and self._own_file(self._target()) is not None
+        if again:
+            self._detected.pop(self._heard_key(), None)
         self._resolve_language()
-        self._process.send("language", self._language[0])
+        if again and self._enabled and self._ready:
+            self._read_again()
+        else:
+            self._process.send("language", self._language[0])
         self.changed.emit()
         self._offer_specialist()
 
@@ -1258,7 +1268,7 @@ class CaptionsController(QObject):
         url, _seq, start = source
         self._run += 1
         self._run_began = time.monotonic()
-        self._run_channel = self._channel_key()
+        self._run_channel = self._heard_key()
         self._run_start = start
         self._run_track = self._audio_track()
         self._resolve_language()  # the language of the track it reads, as it begins
@@ -1286,7 +1296,7 @@ class CaptionsController(QObject):
         location, options = film
         start = self._position() + self._film_ahead()
         self._run += 1
-        self._run_channel = self._channel_key()
+        self._run_channel = self._heard_key()
         self._run_start = start
         self._run_track = self._audio_track()
         self._resolve_language()  # the language of the track it reads, as it begins
@@ -1299,6 +1309,11 @@ class CaptionsController(QObject):
         )
         self._process.send("viewer", self._position())
         self.soundRead.emit()  # the visualizer reads no further than where this run reads from
+        if self._language[0] == "Turkish" and self._own_file(self._target()) is not None:
+            # 2.11.1 (ruling M1): a file of the viewer's that starts in Turkish (its track's,
+            # or heard on it before) asks for our Turkish model as a channel's run does; one
+            # asked while another question showed comes now. A provider's film as before.
+            self._offer_specialist()
 
     def _on_caption(
         self,
@@ -1396,8 +1411,9 @@ class CaptionsController(QObject):
             self._slow_since = None
 
     def _on_detected(self, run: int, language: str) -> None:
-        """No language was given and the pieces agreed on one: kept for the channel while QiTV
-        runs (the next run there starts with it), and the panel says it."""
+        """No language was given and the pieces agreed on one: kept for the channel (the file:
+        `_heard_key`) while QiTV runs (the next run there starts with it), and the panel says
+        it."""
         if run != self._run:
             return
         key = self._run_channel  # the run's channel, not the one a zap just tuned
@@ -1524,12 +1540,17 @@ class CaptionsController(QObject):
         language (the one the model heard was the other track's); what was written from the
         other track goes."""
         logger.info("AI captions: audio track %s, read again", self._audio_track())
-        self._detected.pop(self._channel_key(), None)
+        self._detected.pop(self._heard_key(), None)
+        self._read_again()  # in the language of the track it reads
+        self.changed.emit()  # the panel's language row says the track's
+
+    def _read_again(self) -> None:
+        """A new run from where the picture is, in the language resolved now; what was
+        written goes."""
         self._forget_cues()
         self._last = None
         self._show("")
-        self._start_run()  # in the language of the track it reads
-        self.changed.emit()  # the panel's language row says the track's
+        self._start_run()
 
     def _waiting(self) -> bool:
         """The live picture waits for the captions' distance behind live (LiveSession)."""
@@ -1915,11 +1936,58 @@ class CaptionsController(QObject):
         session = getattr(controller, "session", None)
         return session if session is not None else getattr(self._window, "session", None)
 
-    def _channel_key(self) -> str:
+    def _pick_key(self) -> str:
+        """What the viewer's pick (`ai_captions_picks`) is kept under: a channel, a film or a
+        recording by its source and title (2.9's "<source>|<title>"); 2.11.1: the viewer's own
+        video file by its path (ruling I2: two S01E01.mkv in two shows are two files), a song by
+        its folder ("|album|<folder>": one pick for the folder's songs)."""
         target = self._target()
         if target is None:
             return ""
+        path = self._own_file(target)
+        if path:
+            from services.folder_shelf import shelf_key
+            from services.open_paths import is_music
+
+            if is_music(path):
+                return f"|album|{shelf_key(os.path.dirname(path))}"
+            return f"|file|{shelf_key(path)}"
+        return self._title_key(target)
+
+    def _heard_key(self) -> str:
+        """What the language a run heard (`_detected`) is kept under, while QiTV runs: a
+        channel, a film or a recording as its pick is; 2.11.1 (ruling I1): the viewer's own
+        file, a song too, by its path (a folder may mix languages). "|album|" and "|file|" keys
+        are no channel's: no file's name holds both | and /, and a channel's source is never
+        empty."""
+        target = self._target()
+        if target is None:
+            return ""
+        path = self._own_file(target)
+        if path:
+            from services.folder_shelf import shelf_key
+
+            return f"|file|{shelf_key(path)}"
+        return self._title_key(target)
+
+    @staticmethod
+    def _title_key(target: Any) -> str:
         return f"{getattr(target, 'source', '')}|{getattr(target, 'title', '')}"
+
+    @staticmethod
+    def _own_file(target: Any) -> Optional[str]:
+        """The path of the viewer's own file `target` plays (a song, a video file), else None:
+        a channel, a provider's or a media server's film, and a recording, which is a
+        channel's broadcast (2.11.1, ruling I3: it keeps the channel's rule). "" for one whose
+        address names no path."""
+        if not getattr(target, "local", False):
+            return None
+        item = getattr(target, "item", None)
+        if not isinstance(item, dict) or item.get("_recording"):
+            return None
+        from services.song_facts import local_path
+
+        return local_path(str(item.get("cmd") or "")) or ""
 
     def _audio_track(self) -> Optional[int]:
         session = self._session()
@@ -1933,11 +2001,17 @@ class CaptionsController(QObject):
         """The viewer's pick for the channel, else the audio track's, else Settings', else
         the model's own detection: what it detected on the channel before, else a guess from a
         prefix on the channel's title or group ("TR: …", 2026-11-07), which the captions
-        process may still correct (`_guessed`)."""
+        process may still correct (`_guessed`).
+
+        2.11.1 (the owner: Words on an English song started in Settings' Turkish): Settings'
+        default is for channels, their recordings and provider films (a media server's too).
+        The viewer's own file, a song or a video file, has the viewer's pick (a song's: its
+        folder's), else its audio track's, else what was heard on that file before (while QiTV
+        runs), else the model's own detection, with no guess from its name."""
         from services.captions.languages import language_from_title, qwen_name
 
         self._guessed = False
-        pick = (self._config_get("ai_captions_picks", {}) or {}).get(self._channel_key())
+        pick = (self._config_get("ai_captions_picks", {}) or {}).get(self._pick_key())
         if pick:
             self._language = (pick, FROM_VIEWER)
             return
@@ -1945,13 +2019,14 @@ class CaptionsController(QObject):
         if heard:
             self._language = (heard, FROM_AUDIO_TRACK)
             return
+        target = self._target()
+        own_file = self._own_file(target) is not None
         default = self._config_get("ai_captions_language", "auto")
-        if default and default != "auto":
+        if default and default != "auto" and not own_file:
             self._language = (str(qwen_name(default) or default), FROM_DEFAULT)
             return
-        detected = self._detected.get(self._channel_key(), "")
-        if not detected:
-            target = self._target()
+        detected = self._detected.get(self._heard_key(), "")
+        if not detected and not own_file:
             item = getattr(target, "item", None)
             group = item.get("group") or item.get("category_name") if isinstance(item, dict) else ""
             detected = language_from_title(getattr(target, "title", ""), group)

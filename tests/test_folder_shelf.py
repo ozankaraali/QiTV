@@ -187,6 +187,13 @@ class FolderShelfTests(ShelfFileCase):
         two_shows = ["/m/Lantern Coast S01E01.mkv", "/m/Brannow Fell S01E01.mkv"]
         self.assertEqual(folder_kind(two_shows), VIDEOS)
 
+    def test_a_folder_of_aiff_and_other_audio_formats_is_an_album(self):
+        # 2.11.1: AIFF, and the other audio formats libVLC plays, are songs as an MP3 is
+        songs = ["/m/01 Tide.aif", "/m/02 Harbour.AIFF", "/m/03 Quay.wma", "/m/04 Arn.mka"]
+        songs += ["/m/05 Pell.caf", "/m/06 Vale.mpc", "/m/07 Rook.wv", "/m/08 Deep.ac3"]
+        self.assertEqual(folder_kind(songs), ALBUM)
+        self.assertEqual(folder_kind(["/m/Beach day.mp4", "/m/Tide.aif"]), VIDEOS)
+
 
 class StartRuleTests(unittest.TestCase):
     """Where a folder's list starts, and so what its tile says is next (ruling 3): the entry

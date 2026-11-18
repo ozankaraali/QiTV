@@ -102,6 +102,19 @@ class OpenRouterTests(RouterCase):
         self.assertIs(self.window.pages.currentWidget(), self.window.player_page)
         self.assertEqual(self.fronts, 0)  # a drop is on the window already
 
+    def test_an_aiff_and_the_other_audio_formats_play_when_dropped_or_handed_over(self):
+        # 2.11.1, the owner: an .aif said "QiTV can't play"
+        song = self.film("Gece Şarkısı.aif", b"song")
+        self.handover(song)
+        self.wait_for_plays(1)
+        self.assertEqual(self.plays(), [(str(song), 4)])
+        for n, name in enumerate(("Akşam.AIFF", "Sabah.wma", "Yol.mka", "Deniz.mpc"), start=2):
+            other = self.film(name, b"song")
+            self.assertEqual(drop(self.window, paths=[other]), (True, True))
+            self.wait_for_plays(n)
+            self.assertEqual(self.plays()[-1], (str(other), 4))
+        self.assertEqual([text for text, kind in self.toasts if kind == "error"], [])
+
     def test_drop_video_and_subtitle(self):
         video = self.film("ep.mkv", b"x" * 10)
         srt = self.folder / "ep.de.srt"

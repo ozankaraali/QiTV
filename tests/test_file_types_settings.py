@@ -611,6 +611,22 @@ class StartRefreshTests(base.WindowCase):
             )
         self.assertIsNot(self.threads[0], threading.main_thread())
 
+    def test_types_registered_again_at_start_are_saved(self):
+        # Ruling M4: the kind registered again with this version's types, the path the same
+        self.config.file_types = {"music": "/opt/qitv"}
+        self.config.save_config()
+
+        def refresh(config, *args, **kwargs):
+            config.file_types_registered = {"music": ["aif", "mp3"]}
+
+        with mock.patch.object(file_types, "refresh", side_effect=refresh):
+            refresh_at_start(self.config, self.window, frozen=True)
+            self.assertTrue(
+                wait_until(
+                    lambda: ConfigManager().file_types_registered == {"music": ["aif", "mp3"]}
+                )
+            )
+
     def test_nothing_changed_saves_nothing(self):
         self.config.file_types = {"videos": "/opt/qitv"}
         with self.refreshing(), mock.patch.object(self.config, "save_config") as save:
