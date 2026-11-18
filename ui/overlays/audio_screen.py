@@ -30,8 +30,9 @@ the mouse's moves (the controls show at a move). It never takes the focus.
 It holds no playback state of its own: the controller says what plays (show_song, set_cover,
 set_tracks, set_playing), which view shows (set_view: never a pick; a click on the switch is,
 and says so with viewPicked), the words (set_words, show_lines) and the sound's bands
-(set_levels). The AI captions feed its lines (ui.captions_controller: a place that shows
-lines); while its Stage shows (takes_words, stageShown) the captions over the picture give way.
+(set_levels: ui.visualizer feeds them while its Stage moves, stageMoving). The AI captions feed
+its lines (ui.captions_controller: a place that shows lines); while its Stage shows
+(takes_words, stageShown) the captions over the picture give way.
 """
 
 from __future__ import annotations
@@ -335,12 +336,16 @@ class AudioScreen(Overlay):
     backRequested = Signal()  # ‹ (the controller takes it to the Library)
     # Its Stage shows (True) or no longer does: the words are its own then (takes_words)
     stageShown = Signal(bool)
+    # Its Stage shows and moves (it plays, its window shows, the system allows the motion), or
+    # no longer does: the bars are fed only then (stage_moving; ui.visualizer)
+    stageMoving = Signal(bool)
 
     def __init__(
         self, parent: Optional[QWidget] = None, *, clock: Callable[[], float] = time.monotonic
     ) -> None:
         super().__init__(parent)
         self._takes = False  # takes_words() as stageShown last said
+        self._stage_moves = False  # stage_moving() as stageMoving last said
         self.setAttribute(Qt.WidgetAttribute.WA_OpaquePaintEvent)
         self.setFocusPolicy(Qt.FocusPolicy.NoFocus)
         self.setMouseTracking(True)
@@ -364,6 +369,8 @@ class AudioScreen(Overlay):
         self._hover: Optional[str] = None
         self._laid: Optional[_Layout] = None
         self._backdrop: Optional[QImage] = None
+        # ... scaled up to the screen (from that small one, at that size)
+        self._backdrop_scaled: Optional[tuple[QImage, tuple[int, int], QImage]] = None
         self._covers: dict[tuple, QPixmap] = {}  # the cover drawn at a size (two views' sizes)
         self._shadows: dict[tuple, QPixmap] = {}
         self._words: Optional[tuple[tuple, QPixmap, QRectF]] = None
@@ -450,6 +457,18 @@ class AudioScreen(Overlay):
         if takes != self._takes:
             self._takes = takes
             self.stageShown.emit(takes)
+        self._say_moving()
+
+    def stage_moving(self) -> bool:
+        """Its Stage shows and moves: shown, on the Stage, playing, its window not covered, and
+        the system allows the motion (the bars move only then: ui.visualizer)."""
+        return self._moving() and self.takes_words()
+
+    def _say_moving(self) -> None:
+        moves = self.stage_moving()
+        if moves != self._stage_moves:
+            self._stage_moves = moves
+            self.stageMoving.emit(moves)
 
     def shown_view(self) -> str:
         """The view drawn: view(), but Cover for Album with no list, and in the corner."""
@@ -691,6 +710,7 @@ class AudioScreen(Overlay):
             self._mini_timer.start()
         elif not mini:
             self._mini_timer.stop()
+        self._say_moving()
 
     def _glow_tick(self) -> None:
         if OpeningMark.reduced_motion():  # known late (Linux asks on a worker): hold it still
@@ -992,7 +1012,7 @@ class AudioScreen(Overlay):
             p.setRenderHint(QPainter.RenderHint.Antialiasing, True)
             p.setRenderHint(QPainter.RenderHint.TextAntialiasing, True)
             p.setRenderHint(QPainter.RenderHint.SmoothPixmapTransform, True)
-            p.drawImage(QRectF(self.rect()), self._backdrop_image())
+            p.drawImage(0, 0, self._backdrop_full())
             self._paint_cover(p, lay, m, dirty)
             self._paint_info(p, lay, m, dirty)
             if lay.view == "album":
@@ -1010,6 +1030,24 @@ class AudioScreen(Overlay):
         if self._backdrop is None or self._backdrop.isNull():
             self._backdrop = self._render_backdrop()
         return self._backdrop
+
+    def _backdrop_full(self) -> QImage:
+        """The backdrop at the screen's size (its device pixels), scaled up once a light frame:
+        a repaint of a part of the screen (the Stage's bars, 30 a second) copies its part."""
+        small = self._backdrop_image()
+        ratio = self.devicePixelRatioF()
+        size = (max(1, math.ceil(self.width() * ratio)), max(1, math.ceil(self.height() * ratio)))
+        held = self._backdrop_scaled
+        if held is None or held[0] is not small or held[1] != size:
+            full = small.scaled(
+                size[0],
+                size[1],
+                Qt.AspectRatioMode.IgnoreAspectRatio,
+                Qt.TransformationMode.SmoothTransformation,
+            )
+            full.setDevicePixelRatio(ratio)
+            held = self._backdrop_scaled = (small, size, full)
+        return held[2]
 
     def _glow_colours(self) -> list[QColor]:
         """The light's three colours, the most vivid first; one or two are made three."""

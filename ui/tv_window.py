@@ -185,6 +185,7 @@ from ui.tv_controller import ERROR_MS, INFO_MS, Overlays, TVController
 from ui.tv_menus import TVMenus
 from ui.tv_pages import TVPages
 from ui.video_surface import VideoSurface
+from ui.visualizer import Visualizer
 
 logger = logging.getLogger(__name__)
 
@@ -952,6 +953,11 @@ class TVWindow(QMainWindow):
         # said, its translation), and while it does the captions over the picture give way.
         self.captions.add_overlay(self.audio_screen)
         self.audio_screen.stageShown.connect(lambda _shown: self.captions.words_moved())
+        # The Stage's bars, read from the song's own sound: its helper process, or the
+        # captions' film run when they read the same file (one decode).
+        self.visualizer = Visualizer(
+            self.audio_screen, lambda: self.controller.session, self.captions, parent=self
+        )
         self.media_keys.raiseRequested.connect(self.come_to_front)
         self.session.stateChanged.connect(self._show_now_playing)
         self.screens = TVPages(self, self)  # the Library's controller and the page moves
@@ -2849,6 +2855,7 @@ class TVWindow(QMainWindow):
             ("stop the phone remote", self.remote.shutdown),
             ("leave Now Playing", self.media_keys.stop),  # the media keys go back to others
             ("stop AI captions", self.captions.shutdown),  # its process and any download
+            ("stop the Stage's bars", self.visualizer.shutdown),  # their helper process
             ("cancel the export", self.exports.shutdown),
             ("close the Library", self.library_controller.shutdown),  # its search, its pending
             ("stop the channel list's find", self.finder.shutdown),

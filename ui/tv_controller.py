@@ -106,7 +106,7 @@ from services.navigation import (
     recent_channel,
 )
 from services.next_episode import LOCAL_NEXT, play_context
-from services.open_paths import is_music, is_video
+from services.open_paths import PLAYLIST_EXTENSIONS, is_music, is_video
 from services.picture import SOURCE_DIRECT, ChannelPictures
 from services.provider_ids import (
     ALL_PROVIDERS,
@@ -4100,6 +4100,9 @@ class TVController(QObject):
         next song's tags take the old ones' place as it plays)."""
         if self._is_song(target) and self._sound_kind in ("song", "file"):
             self._sound_poll.stop()
+            visualizer = self._visualizer()
+            if visualizer is not None:
+                visualizer.rest()  # (its bars rest until the next one's sound is read)
             return
         self._end_sound()
 
@@ -4115,10 +4118,26 @@ class TVController(QObject):
         self._album_for = None
         self._cover_generation += 1
         self._cover_for = None
+        self._visualize("")
         self._hide_sound()
         transport = self.overlays.transport
         if getattr(transport, "audio", lambda: False)():
             transport.end_audio()
+
+    def _visualizer(self) -> Any:
+        """The Stage's bars (ui.visualizer; None: none)."""
+        return getattr(self.window_actions, "visualizer", None)
+
+    def _visualize(self, path: str) -> None:
+        """The Stage's bars follow `path`, the local file shown on the audio screen ("": none,
+        as for a radio channel; and a local HLS playlist's stream, which a helper would open a
+        second time)."""
+        visualizer = self._visualizer()
+        if visualizer is None:
+            return
+        if Path(path).suffix.lower() in PLAYLIST_EXTENSIONS:
+            path = ""
+        visualizer.follow(path, str(self.session.url or "") if path else "")
 
     def _hide_sound(self) -> None:
         self._sound_shown = False
@@ -4264,8 +4283,10 @@ class TVController(QObject):
             self._radio_texts = ("", "")
             self._refresh_radio(target)
             self._radio_cover(target)
+            self._visualize("")  # no bars for a live channel
         else:
             path = self._sound_file(target)
+            self._visualize(path)
             tags = self._tags()
             queue = self._queue
             index = queue.index_of(path) if queue is not None else None

@@ -60,6 +60,9 @@ a = Analysis(
         # by the user with the model and put on that process's path, never bundled.
         'services.captions.worker',
         'services.captions.decoder',
+        # Plan 4: the audio screen's visualizer helper (spawned) and its levels.
+        'services.visualizer.helper',
+        'services.levels',
         'm3u8',
         'Cryptodome.Cipher.AES',
         # Loaded on first use (services/lazy_import.py): no import statement names them.

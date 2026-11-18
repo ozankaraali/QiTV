@@ -14,13 +14,17 @@ guessed, read_on),
 ("film", run, location, start_s, audio_track, language, vlc_options): a film's run,
 ("viewer", position), ("language", name), ("translate", target[, folder]) (2.10: the language
 lines are translated into, MiLMMT's name, None off; the translation model's folder when it came
-after the load; the load's "translate_to" and "translation" start them), ("stop",), ("quit",).
+after the load; the load's "translate_to" and "translation" start them), ("levels", on) (Plan 4:
+a film's run sends its sound's band levels too, for the audio screen's Stage), ("stop",),
+("quit",).
 From it: ("ready",), ("failed", reason), ("caption", run, start, end, text[, parts[, original]])
 (parts, a line of more than one: [(text, start, end), ...], services.captions.parts; a
 translated line, `translated_caption`: the translation as its text, its parts as heard ([] for
 a line of one), and the line as heard, the original, last),
 ("progress", run, newest, rtf, written_to, qwen_writes), ("resync", run, newest),
 ("ended", run, reason),
+("levels", run, start_ms, frame_ms, blob) while levels are on, from a film's sound as it is read
+(services.levels.LevelStream: the visualizer decodes nothing these captions read),
 ("detected", run, language) once the pieces agree on one (none was given),
 ("log", level, text); loaded without a model (`load` with "model": None, the packaged smoke
 test's probe), ("piece", run, start, end, speech_share) for each piece instead. No traceback
@@ -833,6 +837,10 @@ class _FilmRun(_Run):
     ahead of the picture, placed on the film's own clock (the main player's time); held while
     far enough ahead, ended with the film."""
 
+    # Plan 4: the film's sound as band levels too, while the process's [on] says so
+    levels_on: Sequence = (False,)
+    levels: Any = None
+
     def __init__(
         self,
         link: _Link,
@@ -845,15 +853,27 @@ class _FilmRun(_Run):
         viewer: list,
         options: tuple[str, ...] = (),
         translation: Optional[_Translation] = None,
+        levels_on: Optional[list] = None,
     ) -> None:
         super().__init__(
             link, model, run, "", start_s, audio_track, language, viewer, translation=translation
         )
         from services.captions.film import FilmReader
+        from services.levels import LevelStream
 
+        if levels_on is not None:
+            self.levels_on = levels_on
+        self.levels = LevelStream(lambda *chunk: link.send(("levels", run) + chunk))
         self.reader = FilmReader(
             location, start_s, self._take, audio_track=audio_track, options=options
         )
+
+    def _take(self, at: float, floats: array) -> None:
+        """The film's sound (libVLC's thread): its band levels too while asked (the audio
+        screen's Stage reads them instead of decoding it again), then the captions'."""
+        if self.levels is not None and self.levels_on[0] and not self.stopped.is_set():
+            self.levels.push(at, floats)
+        super()._take(at, floats)
 
     def start(self) -> None:
         self._announce()
@@ -879,6 +899,8 @@ class _FilmRun(_Run):
                 held = False
                 self.reader.hold(False)
             if self.reader.finished():
+                if self.levels is not None and self.levels_on[0]:
+                    self.levels.flush()  # (libVLC is done: its last levels go)
                 self.pieces.put(None)
                 self._end("ended")
                 return
@@ -1198,6 +1220,7 @@ def _serve(link: _Link) -> None:
     seen: list = [None]  # (position, clock) the rate is measured from
     language = ""
     translation = _Translation(link, viewer)  # 2.10: one for the process, across its runs
+    levels_on = [False]  # Plan 4: a film's run sends its band levels too
     while True:
         try:
             message: Any = link.conn.recv()
@@ -1265,9 +1288,12 @@ def _serve(link: _Link) -> None:
                 viewer,
                 tuple(options),
                 translation=translation,
+                levels_on=levels_on,
             )
             translation.follow(run)
             run.start()
+        elif kind == "levels":
+            levels_on[0] = bool(message[1])
         elif kind == "viewer":
             position = float(message[1])
             if position != viewer[0]:

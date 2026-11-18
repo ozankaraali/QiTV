@@ -101,6 +101,8 @@ class CaptionsProcess(QObject):
     ended = Signal(int, str)  # run, reason
     detected = Signal(int, str)  # run, the language the pieces agreed on (none was given)
     piece = Signal(int, float, float, float)  # run, start, end, speech share (no model loaded)
+    # Plan 4: run, start_ms, frame_ms, a chunk of a film's band levels (services.levels.pack)
+    levels = Signal(int, int, int, object)
 
     def __init__(self, parent: Optional[QObject] = None) -> None:
         super().__init__(parent)
@@ -176,6 +178,8 @@ class CaptionsProcess(QObject):
             )
         elif kind == "detected":
             self.detected.emit(int(message[1]), str(message[2]))
+        elif kind == "levels":
+            self.levels.emit(int(message[1]), int(message[2]), int(message[3]), bytes(message[4]))
         elif kind == "piece":
             self.piece.emit(
                 int(message[1]), float(message[2]), float(message[3]), float(message[4])

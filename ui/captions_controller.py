@@ -42,7 +42,9 @@ Plan 4 (Words on the audio screen): a place that shows lines (a sink with `show_
 audio screen's Stage) gets the line before, in its own language, the line said (as heard, part
 by part as said) and its translation ("" when it isn't), not the caption's text; the others get
 the caption as before. While a Stage takes the words (`takes_words`), the captions over its page
-give them to it (`_show`, `words_moved`).
+give them to it (`_show`, `words_moved`). While the audio screen's visualizer asks
+(`want_levels`), a film's run sends its sound's band levels too (`levels`, `levels_from`): the
+Stage's bars are read from the sound the captions read, never decoded twice (ui.visualizer).
 """
 
 from __future__ import annotations
@@ -204,6 +206,10 @@ class CaptionsController(QObject):
 
     changed = Signal()  # the row's state or text changed: the panel shows it again
     _scored = Signal()  # this computer's speed is measured (from the benchmark's thread)
+    # Plan 4: a chunk of the film's band levels (its location, start_ms, frame_ms, the chunk),
+    # while asked (want_levels); and a film's run began or they went off (levels_from moved)
+    levels = Signal(str, int, int, object)
+    soundRead = Signal()
 
     def __init__(self, window: Any, card: Any = None, overlay: Any = None) -> None:
         super().__init__(window)
@@ -222,6 +228,8 @@ class CaptionsController(QObject):
         self._process.resync.connect(self._on_resync)
         self._process.ended.connect(self._on_ended)
         self._process.detected.connect(self._on_detected)
+        self._process.levels.connect(self._on_levels)
+        self._levels_wanted = False  # the audio screen's bars read a film run's sound
         if card is not None:
             card.answered.connect(self._on_answer)
         self._enabled = False
@@ -360,6 +368,25 @@ class CaptionsController(QObject):
         return bool(
             self._enabled or self._download is not None or self._asking or self._toggle_waits
         )
+
+    def want_levels(self, on: bool) -> None:
+        """The audio screen's visualizer reads a film run's band levels (on), or no longer."""
+        if on != self._levels_wanted:
+            self._levels_wanted = on
+            self._process.send("levels", on)
+
+    def levels_from(self, location: str) -> Optional[float]:
+        """The film second the run reading `location` reads it from, while it sends its band
+        levels (want_levels); None while none does (off, still loading, live, another title)."""
+        if not (self._enabled and self._ready and self._levels_wanted and location):
+            return None
+        if self._is_live() or self._session_key != location or not self._process.running():
+            return None
+        return self._run_start
+
+    def _on_levels(self, run: int, start_ms: int, frame_ms: int, blob: Any) -> None:
+        if run == self._run and self._enabled and self._session_key and not self._is_live():
+            self.levels.emit(self._session_key, start_ms, frame_ms, blob)
 
     def status_text(self) -> str:
         if self._download is not None:
@@ -1169,6 +1196,7 @@ class CaptionsController(QObject):
         self._drop_floor()
         self._show("")
         self.changed.emit()
+        self.soundRead.emit()  # (no run reads a film now: the visualizer reads it)
 
     # ---- the process ---------------------------------------------------------------------
     def _on_ready(self) -> None:
@@ -1264,10 +1292,13 @@ class CaptionsController(QObject):
         self._resolve_language()  # the language of the track it reads, as it begins
         self._session_key = location
         self._newest = self._written = None
+        if self._levels_wanted:  # (a process started anew has them off)
+            self._process.send("levels", True)
         self._process.send(
             "film", self._run, location, start, self._run_track, self._language[0], options
         )
         self._process.send("viewer", self._position())
+        self.soundRead.emit()  # the visualizer reads no further than where this run reads from
 
     def _on_caption(
         self,
