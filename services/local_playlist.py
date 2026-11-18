@@ -16,10 +16,12 @@ media files dropped together (`read_files`), in one order for the whole list:
 - a list of songs only goes by its tags (disc, then track) when every song was read, has a
   track number and they name one album at most; otherwise, and for anything else, by name
   (`natural_key`: numbered names in their numbers' order).
-Only the folder's own files are read, never its subfolders, and no hidden one (".…").
+Only the folder's own files are read, never its subfolders, and no hidden one (".…"). The
+folder is always listed whole (as album_listing.music_files lists a song's): only the songs'
+tags have a time (READ_BUDGET_S), past which they go by name.
 
 Pure logic: no Qt. Each read touches the disk (the songs' tags are read by libVLC), so call
-it only on a worker.
+it only on a worker; `subtitles_for` alone is pure.
 """
 
 from __future__ import annotations
@@ -37,8 +39,8 @@ from typing import Any, Optional
 from urllib.parse import unquote, urlsplit
 
 from services.album_listing import LIST_CAP, read_tracks
-from services.local_episodes import _folder_show, _same_show, parse_episode
-from services.open_paths import extended_path, is_music, is_video, natural_key
+from services.local_episodes import folder_show, parse_episode, same_show
+from services.open_paths import extended_path, folder_spelling, is_music, is_video, natural_key
 from services.song_facts import album_key, track_number
 
 logger = logging.getLogger(__name__)
@@ -47,10 +49,10 @@ PROVIDER, HLS, LOCAL, EMPTY = "provider", "hls", "local", "empty"
 UNREADABLE = "unreadable"  # gone, or refused: the playlist itself couldn't be read
 OTHER = "other"  # opened as a folder, but a file QiTV won't play (read_folder)
 
-# A folder's read (its listing and its songs' tags) stops after this long: what was read by
-# then is the list. It comes before the first sound (the album's listing comes after it, with
-# album_listing.LIST_BUDGET_S), so it is shorter. A listing that hangs in the system (a share
-# gone dead) is not cut short.
+# A list's songs' tags (after its listing, which is never cut short: a share waking up says no
+# folder is empty) are read for this long at most, then they go by name. It comes before the
+# first sound (the album's listing comes after it, with album_listing.LIST_BUDGET_S), so it
+# is shorter.
 READ_BUDGET_S = 3.0
 TAGS_CAP = LIST_CAP  # more songs than this: by name, no tag read
 
@@ -180,24 +182,22 @@ def _file_size(path: str) -> Optional[int]:
 def read_folder(path: str, *, budget_s: float = READ_BUDGET_S, cap: int = TAGS_CAP) -> PlaylistRead:
     """The folder at `path` as a list (the module docstring), named after it: LOCAL, EMPTY when
     none of its own files plays, UNREADABLE when it is gone or refused, OTHER when `path` is a
-    file (one QiTV won't play: the router opens media files itself). Read within `budget_s`
-    from the call (its listing, then its songs' tags, `cap` songs at most). Never raises;
-    blocking disk I/O: call on a worker."""
+    file (one QiTV won't play: the router opens media files itself). It is listed whole; its
+    songs' tags are read for `budget_s` from then on, `cap` songs at most (0: none, by name).
+    Never raises; blocking disk I/O: call on a worker."""
     folder = path.rstrip("/\\") or path  # macOS's Finder ends a dropped folder with "/"
     name = os.path.basename(folder) or folder
-    deadline = time.monotonic() + budget_s
     try:
-        spelling = _folder_spelling(path)
+        spelling = folder_spelling(path)
         if spelling is None:
             return PlaylistRead(OTHER if os.path.exists(path) else UNREADABLE, name)
-        found = _listing(spelling, path, deadline)
-        if not found:
-            return PlaylistRead(EMPTY, name)
-        ordered = _in_order(found, deadline, cap)
+        found = _listing(spelling, path)
     except Exception as error:  # gone meanwhile, or refused: it says it can't be opened
         logger.info("A folder opened in QiTV could not be read (%s)", type(error).__name__)
         return PlaylistRead(UNREADABLE, name)
-    return PlaylistRead(LOCAL, name, *_columns(ordered))
+    if not found:
+        return PlaylistRead(EMPTY, name)
+    return PlaylistRead(LOCAL, name, *_columns(_ordered(found, budget_s, cap)))
 
 
 def read_files(
@@ -205,9 +205,9 @@ def read_files(
 ) -> PlaylistRead:
     """Several media files opened together (a drop) as one list in the module docstring's
     order, named after its first one's folder: LOCAL with those not there counted as
-    `missing`, or UNREADABLE when none is. Never raises; blocking: call on a worker."""
-    deadline = time.monotonic() + budget_s
-    found: list[tuple[str, int]] = []
+    `missing`, or UNREADABLE when none is. Its songs' tags are read as read_folder reads a
+    folder's. Never raises; blocking: call on a worker."""
+    found: list[tuple[str, Optional[int]]] = []
     for path in paths:
         try:
             size = _media_size(path)
@@ -218,46 +218,42 @@ def read_files(
     missing = len(paths) - len(found)
     if not found:
         return PlaylistRead(UNREADABLE, _folder_name(paths[0] if paths else ""), missing=missing)
-    try:
-        ordered = _in_order(found, deadline, cap)
-    except Exception as error:  # never raises: by name, then
-        logger.warning("Files opened together could not be ordered (%s)", type(error).__name__)
-        ordered = sorted(found, key=_by_name)
-    entries, _missing, sizes = _columns(ordered)
+    entries, _missing, sizes = _columns(_ordered(found, budget_s, cap))
     return PlaylistRead(LOCAL, _folder_name(entries[0]), entries, missing, sizes)
 
 
-def _folder_spelling(path: str) -> Optional[str]:
-    """`path` as the disk reads it as a folder (on Windows, a path past 260 characters may
-    only be read in its extended spelling), or None when it is no folder."""
-    if os.path.isdir(path):
-        return path
-    if sys.platform == "win32":
-        extended = extended_path(path)
-        if extended != path and os.path.isdir(extended):
-            return extended
-    return None
+def _ordered(
+    files: Sequence[tuple[str, Optional[int]]], budget_s: float, cap: int
+) -> list[tuple[str, Optional[int]]]:
+    """`files` in a list's one order (_in_order), its songs' tags read for `budget_s` from now:
+    by name, and said in the log, should the ordering itself fail."""
+    try:
+        return _in_order(files, time.monotonic() + budget_s, cap)
+    except Exception as error:  # never raises: by name, then
+        logger.warning("A list's files could not be put in order (%s)", type(error).__name__)
+        return sorted(files, key=_by_name)
 
 
-def _listing(spelling: str, path: str, deadline: float) -> list[tuple[str, int]]:
+def _listing(spelling: str, path: str) -> list[tuple[str, Optional[int]]]:
     """The media files directly in the folder (read at `spelling`, named in `path`) as
-    (path, size), listed until `deadline`: never a subfolder (nor a folder named like a
-    film), a hidden file (".…", macOS's "._" companions) or one whose size can't be read."""
-    found: list[tuple[str, int]] = []
+    (path, size or None when it can't be read), all of them: never a subfolder (nor a folder
+    named like a film) nor a hidden file (".…", macOS's "._" companions). Raises OSError when
+    the folder can't be listed."""
+    found: list[tuple[str, Optional[int]]] = []
     with os.scandir(spelling) as entries:
         for entry in entries:
-            if time.monotonic() > deadline:
-                logger.info("A folder opened in QiTV is listed in part (its time ran out)")
-                break
             name = entry.name
             if name.startswith(".") or not (is_video(name) or is_music(name)):
                 continue
             try:
                 if not entry.is_file():  # a link to a file counts
                     continue
-                size = entry.stat().st_size
             except OSError:
-                continue
+                continue  # neither a file nor a folder it can tell
+            try:
+                size: Optional[int] = entry.stat().st_size
+            except OSError:
+                size = None  # it plays all the same, from its start (no resume key)
             found.append((os.path.join(path, name), size))
     return found
 
@@ -267,7 +263,10 @@ def _folder_name(path: str) -> str:
     return os.path.basename(folder) or folder
 
 
-def _columns(files: Sequence[tuple[str, int]]) -> tuple[tuple[str, ...], int, tuple[int, ...]]:
+_File = tuple[str, Optional[int]]  # a list's file: its path, and its size (None: unknown)
+
+
+def _columns(files: Sequence[_File]) -> tuple[tuple[str, ...], int, tuple[Optional[int], ...]]:
     """(entries, missing, sizes) of `files`: what a PlaylistRead holds after its name."""
     return tuple(path for path, _size in files), 0, tuple(size for _path, size in files)
 
@@ -276,7 +275,7 @@ def _by_name(file: tuple[str, Any]) -> tuple:
     return natural_key(file[0]), file[0]  # names natural order can't tell apart: as written
 
 
-def _in_order(files: Sequence[tuple[str, int]], deadline: float, cap: int) -> list[tuple[str, int]]:
+def _in_order(files: Sequence[_File], deadline: float, cap: int) -> list[_File]:
     """`files` ((path, size)) in a list's one order (the module docstring)."""
     by_name = sorted(files, key=_by_name)
     videos = [file for file in by_name if is_video(file[0])]
@@ -289,24 +288,24 @@ def _in_order(files: Sequence[tuple[str, int]], deadline: float, cap: int) -> li
     return [next(following) if is_video(file[0]) else file for file in by_name]
 
 
-def _by_episode(videos: Sequence[tuple[str, int]]) -> Optional[list[tuple[str, int]]]:
+def _by_episode(videos: Sequence[_File]) -> Optional[list[_File]]:
     """`videos` by season and episode, when every one is an episode of one show (Plan 3's
     parse; a bare name is its folder's show's); else None. A double episode (S01E03E04) goes
     by its first; the same episode twice (two releases) both play, by name."""
-    keyed: list[tuple[str, Any, str, int]] = []
+    keyed: list[tuple[str, Any, str, Optional[int]]] = []
     for path, size in videos:
         episode = parse_episode(os.path.basename(path))
         if episode is None or not (episode.show or episode.sxxeyy):
             return None  # an extra, or a bare 1x02 (no show to tell it by)
-        keyed.append((episode.show or _folder_show(os.path.dirname(path)), episode, path, size))
+        keyed.append((episode.show or folder_show(os.path.dirname(path)), episode, path, size))
     shows = {show for show, _episode, _path, _size in keyed}
-    if not all(_same_show(a, b) for a in shows for b in shows):
+    if not all(same_show(a, b) for a in shows for b in shows):
         return None  # two shows
     keyed.sort(key=lambda k: (k[1].season, k[1].first, k[1].last, *_by_name((k[2], k[3]))))
     return [(path, size) for _show, _episode, path, size in keyed]
 
 
-def _by_tags(songs: list[tuple[str, int]], deadline: float, cap: int) -> list[tuple[str, int]]:
+def _by_tags(songs: list[_File], deadline: float, cap: int) -> list[_File]:
     """`songs` (in natural order) by disc and track (no disc: the first), when libVLC read each
     one (album_listing.read_tracks, within what is left until `deadline`) with a track number
     and they name one album at most; else as they are. More than `cap`: as they are, unread."""
@@ -326,3 +325,35 @@ def _by_tags(songs: list[tuple[str, int]], deadline: float, cap: int) -> list[tu
         return songs  # several albums: track 1s side by side would make no sense
     order = sorted(range(len(songs)), key=lambda i: (numbers[i], *_by_name(songs[i])))
     return [songs[i] for i in order]
+
+
+def subtitles_for(
+    entries: Sequence[str], subtitles: Sequence[str], start: int = 0
+) -> dict[str, list[str]]:
+    """The subtitle files dropped with a list's `entries`, by the entry each is for: the one
+    whose name it bears ("Ep 1.srt", "Ep 1.de.srt" for "Ep 1.mkv"; the longest such name),
+    else the only one of its episode (S01E02 in both names), else the entry the list starts
+    at (`start`), as one video dropped with subtitles takes them all. Pure."""
+    if not entries:
+        return {}
+    stems = [os.path.splitext(os.path.basename(entry))[0].casefold() for entry in entries]
+    episodes = [parse_episode(os.path.basename(entry)) for entry in entries]
+    found: dict[str, list[str]] = {}
+    for subtitle in subtitles:
+        name = os.path.basename(subtitle)
+        stem = os.path.splitext(name)[0].casefold()
+        named = [i for i, own in enumerate(stems) if stem == own or stem.startswith(own + ".")]
+        if named:
+            index = max(named, key=lambda i: len(stems[i]))
+        else:
+            episode = parse_episode(name)
+            same = [
+                i
+                for i, own in enumerate(episodes)
+                if episode is not None
+                and own is not None
+                and (own.season, own.first) == (episode.season, episode.first)
+            ]
+            index = same[0] if len(same) == 1 else min(max(start, 0), len(entries) - 1)
+        found.setdefault(entries[index], []).append(subtitle)
+    return found

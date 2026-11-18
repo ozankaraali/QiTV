@@ -326,7 +326,9 @@ class ReadFolderTests(Folder, unittest.TestCase):
         self.assertEqual(tags.calls, [])
         self.assertEqual(self.names(read), ["1 Song.mp3", "2 Song.mp3", "3 Song.mp3"])
 
-    def test_the_tags_get_what_is_left_of_the_budget(self):
+    def test_only_the_tags_have_a_time(self):
+        # The listing never looks at the clock: the tags get the whole budget, from the moment
+        # the folder was listed (one tick of the fake clock later).
         for number in (2, 1):
             self.file(f"Slow/{number} Song.mp3")
         tags = fake_tracks({"1 Song.mp3": {"track": 2}, "2 Song.mp3": {"track": 1}})
@@ -334,17 +336,10 @@ class ReadFolderTests(Folder, unittest.TestCase):
             mock.patch.object(local_playlist, "time", _Clock()),
             mock.patch.object(local_playlist, "read_tracks", side_effect=tags),
         ):
-            self.read("Slow", budget_s=10.0)
+            read = self.read("Slow", budget_s=10.0)
         [(_files, budget_s, _cap)] = tags.calls
-        self.assertLess(budget_s, 10.0)  # the listing took its share first
-        tags.calls.clear()
-        with (
-            mock.patch.object(local_playlist, "time", _Clock()),
-            mock.patch.object(local_playlist, "read_tracks", side_effect=tags),
-        ):
-            read = self.read("Slow", budget_s=2.0)  # spent on the listing: no tags read
-        self.assertEqual(tags.calls, [])
-        self.assertEqual(read.kind, "local")
+        self.assertEqual(budget_s, 9.0)
+        self.assertEqual(self.names(read), ["2 Song.mp3", "1 Song.mp3"])  # by their tags
 
     def test_subfolders_are_never_read(self):
         self.file("Lantern Coast/Lantern Coast S01E02.mkv")
@@ -382,14 +377,90 @@ class ReadFolderTests(Folder, unittest.TestCase):
         with mock.patch.object(local_playlist.os, "scandir", side_effect=PermissionError):
             self.assertEqual(self.read("Refused"), PlaylistRead("unreadable", "Refused"))
 
-    def test_the_listing_stops_at_the_budget(self):
-        # A slow share: what was listed by the deadline plays; nothing waits past it.
-        for number in (1, 2, 3, 4):
-            self.file(f"Slow/Lantern Coast S01E0{number}.mkv")
+    def test_a_slow_share_is_listed_whole_and_only_its_tags_are_cut(self):
+        # Review I1: a share waking up (each look at the clock a second later, past a half
+        # second's budget) said a full folder had nothing to play, or listed it with holes.
+        for number in (4, 1, 3, 2):
+            self.file(f"Slow show/Lantern Coast S01E0{number}.mkv")
+            self.file(f"Slow songs/{number} Song.mp3")
         with mock.patch.object(local_playlist, "time", _Clock()):
-            read = self.read("Slow", budget_s=2.5)
+            read = self.read("Slow show", budget_s=0.5)
         self.assertEqual(read.kind, "local")
-        self.assertLess(len(read.entries), 4)
+        self.assertEqual(self.names(read), [f"Lantern Coast S01E0{n}.mkv" for n in (1, 2, 3, 4)])
+        tags = fake_tracks({f"{n} Song.mp3": {"track": 5 - n} for n in (1, 2, 3, 4)})
+        with (
+            mock.patch.object(local_playlist, "time", _Clock()),
+            mock.patch.object(local_playlist, "read_tracks", side_effect=tags),
+        ):
+            read = self.read("Slow songs", budget_s=0.5)
+        self.assertEqual(tags.calls, [])  # no time left for the tags: by name
+        self.assertEqual(self.names(read), [f"{n} Song.mp3" for n in (1, 2, 3, 4)])
+
+    def test_a_file_whose_size_cant_be_read_plays_without_one(self):
+        # M6: kept, as album_listing.music_files keeps it (it plays from its start).
+        film = self.file("Odd/Lantern Coast S01E01.mkv")
+        real = os.scandir
+
+        class Entry:
+            def __init__(self, entry):
+                self.name, self._entry = entry.name, entry
+
+            def is_file(self):
+                return self._entry.is_file()
+
+            def stat(self):
+                raise PermissionError
+
+        class Listing:
+            def __init__(self, path):
+                with real(path) as entries:
+                    self._entries = [Entry(entry) for entry in entries]
+
+            def __enter__(self):
+                return iter(self._entries)
+
+            def __exit__(self, *_exc):
+                return False
+
+        with mock.patch.object(local_playlist.os, "scandir", side_effect=Listing):
+            read = self.read("Odd")
+        self.assertEqual(read, PlaylistRead("local", "Odd", (str(film),), 0, (None,)))
+
+    def test_an_ordering_error_falls_back_to_names_and_says_so(self):
+        # M5: a fault in the order is no "Couldn't open": by name, and a warning in the log.
+        first, second = self.file("Bugs/Lantern Coast S01E01.mkv"), self.file("Bugs/B.mkv")
+        for read in (
+            lambda: self.read("Bugs"),
+            lambda: local_playlist.read_files([str(first), str(second)]),
+        ):
+            with (
+                mock.patch.object(local_playlist, "_by_episode", side_effect=RuntimeError),
+                self.assertLogs("services.local_playlist", "WARNING") as logs,
+            ):
+                got = read()
+            self.assertEqual((got.kind, self.names(got)), ("local", ["B.mkv", first.name]))
+            self.assertIn("could not be put in order (RuntimeError)", logs.output[0])
+
+    def test_subtitles_go_to_the_entries_they_are_for(self):
+        # M4: by the entry's name (the longest that leads the subtitle's), else its episode,
+        # else the entry the list starts at.
+        entries = ["/s/Ep 1.mkv", "/s/Ep 10.mkv", "/s/Lantern.Coast.S01E03.mkv", "/s/Other.mkv"]
+        subtitles = [
+            "/d/Ep 10.de.srt",
+            "/d/ep 1.srt",  # in any case
+            "/d/Lantern Coast S01E03.tr.srt",
+            "/d/Notes.srt",
+        ]
+        self.assertEqual(
+            local_playlist.subtitles_for(entries, subtitles, start=3),
+            {
+                "/s/Ep 10.mkv": ["/d/Ep 10.de.srt"],
+                "/s/Ep 1.mkv": ["/d/ep 1.srt"],
+                "/s/Lantern.Coast.S01E03.mkv": ["/d/Lantern Coast S01E03.tr.srt"],
+                "/s/Other.mkv": ["/d/Notes.srt"],
+            },
+        )
+        self.assertEqual(local_playlist.subtitles_for([], ["/d/a.srt"]), {})
 
     def test_several_files_read_as_a_list(self):
         # Natural order is the other way round: the spaced name, the dotted, the underscored.
@@ -503,6 +574,28 @@ class VideoListTests(Folder, ControllerTestCase):
         self.assertEqual(self.context()[LOCAL_NEXT]["local_path"], str(second))
         self.assertEqual(self.next_states()[-1], True)
         self.listings.assert_not_called()
+
+    def test_a_series_folder_resumed_mid_way_keeps_its_earlier_episodes(self):
+        # Review I3: a folder's list starts at the episode stopped part-way into (it resumes
+        # there), and the list still holds the ones before it, which play on in its order.
+        self.controller.start()
+        first, second, third = (self.file(f"Fell.S01E0{n}.mkv", b"x" * n) for n in (1, 2, 3))
+        self.watch.resume[local_key(second.name, 2)] = 600_000
+        entries = [str(first), str(second), str(third)]
+        self.controller.hold_for_file(True)
+        self.controller.play_list("Brannow Fell", entries, [1, 2, 3], start=1)
+        url, kwargs = self.session.plays[-1]
+        self.assertEqual((url, kwargs["start_ms"]), (second.absolute().as_uri(), 600_000))
+        self.session.stateChanged.emit("playing")
+        self.assertEqual(self.context()[LOCAL_NEXT]["local_path"], str(third))
+        self.assertEqual(self.controller._list.entries, tuple(entries))  # none left out
+        self.controller._play_entry(0)  # the list's first (its own entry, as a list row plays)
+        self.assertEqual(self.session.plays[-1][0], first.absolute().as_uri())
+        self.session.stateChanged.emit("playing")
+        self.assertEqual(self.context()[LOCAL_NEXT]["local_path"], str(second))
+        # A start out of the list's range is its last (or first) entry.
+        self.controller.play_list("Brannow Fell", entries, [1, 2, 3], start=7)
+        self.assertEqual(self.session.plays[-1][0], third.absolute().as_uri())
 
     def test_a_list_given_up_for_another_file_is_not_followed(self):
         self.controller.start()

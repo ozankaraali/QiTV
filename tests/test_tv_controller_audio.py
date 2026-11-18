@@ -1061,6 +1061,30 @@ class PlaylistTests(AudioCase):
         self.play_list("Evening Drive", entries, [t["size"] for t in songs])
         self.assertEqual((picks, self.played()[-1]), ([4], Path(entries[0])))
 
+    def test_a_songs_folder_resumed_at_entry_3_shows_all_its_songs(self):
+        # Review I3 (Task 11): a folder's list started where the viewer stopped keeps every
+        # song, the one it starts at playing (resumed), the songs before it there to go back to.
+        songs = self.songs(1, 2, 3, 4)
+        entries = [t["path"] for t in songs]
+        sizes = [t["size"] for t in songs]
+        self.watch.resume[local_key(songs[2]["name"], sizes[2])] = 1_500_000  # a long mix
+        self.controller.hold_for_file(True)
+        self.controller.play_list("Brannow Fell", entries, sizes, start=2)
+        self.assertEqual(self.played()[-1], Path(entries[2]))
+        self.assertEqual(self.session.plays[-1][1]["start_ms"], 1_500_000)
+        self.assertEqual([t["path"] for t in self.screen.tracks], entries)  # all four
+        self.assertEqual(self.screen.current, 2)
+        self.session.stateChanged.emit("playing")
+        self.transport.prevTrackRequested.emit()
+        self.assertEqual(self.played()[-1], Path(entries[1]))
+        # Shuffled, the folder's start wins over a song of the list's own picking.
+        self.config.audio_shuffle = True
+        self.controller._shuffle_rng = mock.Mock(randrange=mock.Mock(return_value=0))
+        self.controller.play_list("Brannow Fell", entries, sizes, start=2)
+        self.controller._shuffle_rng.randrange.assert_not_called()
+        self.assertEqual(self.played()[-1], Path(entries[2]))
+        self.assertEqual(self.controller._queue.order()[0], 2)
+
     def test_an_album_opened_from_a_file_starts_at_that_file_shuffled(self):
         # Only a playlist picks its own first song: an album's is the song opened.
         self.config.audio_shuffle = True

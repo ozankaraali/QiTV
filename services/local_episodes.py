@@ -44,7 +44,7 @@ def _show_key(text: str) -> str:
     return _NON_ALNUM.sub(" ", text).strip()
 
 
-def _same_show(a: str, b: str) -> bool:
+def same_show(a: str, b: str) -> bool:
     """Equal keys, or one's words lead the other's with at least two words in common."""
     if not a or not b:
         return False
@@ -55,7 +55,7 @@ def _same_show(a: str, b: str) -> bool:
     return n >= 2 and wa[:n] == wb[:n]
 
 
-def _folder_show(folder: str) -> str:
+def folder_show(folder: str) -> str:
     """The show key a bare name takes from its folder (the folder above a season folder)."""
     folder = folder.rstrip("/\\")
     key = _show_key(os.path.basename(folder))
@@ -132,28 +132,28 @@ def next_in_folder(
         return None
     # A bare name (nothing before the pattern) takes its show from its folder; a bare 1x02
     # has no such footing and never links.
-    folder_show = _folder_show(folder)
+    folders_show = folder_show(folder)
     if not current.show and not current.sxxeyy:
         return None
-    current_show = current.show or folder_show
-    same_show: list[tuple[str, Optional[int], EpisodeName]] = []
+    current_show = current.show or folders_show
+    followers: list[tuple[str, Optional[int], EpisodeName]] = []
     for name, size in listing:
         if name == current_name or name.startswith("."):
             continue
         ep = parse_episode(name)
         if ep is None or (not ep.show and not ep.sxxeyy):
             continue
-        if not _same_show(current_show, ep.show or folder_show):
+        if not same_show(current_show, ep.show or folders_show):
             continue
-        same_show.append((name, size, ep))
+        followers.append((name, size, ep))
 
     def pick(season: int, number: int) -> Optional[tuple[str, Optional[int], EpisodeName]]:
-        hits = [h for h in same_show if h[2].season == season and h[2].first == number]
+        hits = [h for h in followers if h[2].season == season and h[2].first == number]
         return min(hits, key=lambda h: natural_key(h[0])) if hits else None
 
     chosen = pick(current.season, current.last + 1)
     if chosen is None and not any(
-        h[2].season == current.season and h[2].first > current.last for h in same_show
+        h[2].season == current.season and h[2].first > current.last for h in followers
     ):
         chosen = pick(current.season + 1, 1)
     if chosen is None:

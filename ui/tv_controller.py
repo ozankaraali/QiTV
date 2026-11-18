@@ -1186,20 +1186,25 @@ class TVController(QObject):
         return self._play_local(path, name, resume_key=key, start_over=start_over, in_list=in_list)
 
     def play_list(
-        self, name: str, entries: Sequence[str], sizes: Sequence[Optional[int]] = ()
+        self,
+        name: str,
+        entries: Sequence[str],
+        sizes: Sequence[Optional[int]] = (),
+        start: Optional[int] = None,
     ) -> None:
-        """A playlist of local files, `name`d, plays from its first entry (spec §11): each
-        entry's next is the list's next entry ("local_next" in its play context, with no season
-        or number), for the transport's Next and, with "Auto-play next episode" on, the Next
-        card; no entry's folder is listed. `sizes` (the router read them off the GUI thread)
-        give each its resume key.
+        """A playlist of local files, `name`d, plays from its first entry (spec §11), or from
+        `start` (a folder's: the entry the viewer stopped part-way into, which resumes there;
+        the list keeps the entries before it): each entry's next is the list's next entry
+        ("local_next" in its play context, with no season or number), for the transport's Next
+        and, with "Auto-play next episode" on, the Next card; no entry's folder is listed.
+        `sizes` (the router read them off the GUI thread) give each its resume key.
 
         A list of songs only (by their extensions) is an album named after it on the audio
         screen (Plan 4, Task 9): its entries in its order, their tags read by name on a thread
         (those files only, never their folders), shuffle and repeat as an album's, no card
-        between two songs; shuffled, it starts at a song of its own picking. In any other list
-        a song is a lone song on its screen, and the list's next entry plays after it with no
-        card."""
+        between two songs; shuffled with no `start`, it starts at a song of its own picking.
+        In any other list a song is a lone song on its screen, and the list's next entry plays
+        after it with no card."""
         paths = tuple(str(entry) for entry in entries)
         if not paths:
             return
@@ -1208,12 +1213,12 @@ class TVController(QObject):
         self._list = listed
         self._list_generation += 1  # an older list's songs, read late, reach nothing
         self._list_job.stop()  # (they stop being read between two files)
-        first = 0
+        first = 0 if start is None else min(max(start, 0), len(paths) - 1)
         if self._screen() is not None and all(is_song(p) for p in paths):
             listed.songs = True
             listed.tracks = [unread_track(p, s) for p, s in zip(paths, listed.sizes)]
             self._list_job.start_files(self._list_generation, list(zip(paths, listed.sizes)))
-            if self._shuffle_setting():
+            if start is None and self._shuffle_setting():
                 first = self._shuffle_rng.randrange(len(paths))
         self._play_entry(first)
 
@@ -1230,6 +1235,9 @@ class TVController(QObject):
         listed.index = index  # (a list of songs' queue opens on its row: _list_song_opens)
         target = self._open_file(path, listed.sizes[index], start_over=start_over, in_list=True)
         listed.target = target
+        opens = getattr(self.window_actions, "list_entry_opens", None)
+        if target is not None and target is self._current and callable(opens):
+            opens(target, path)  # the subtitle files dropped for this entry load once it opens
         if target is not None and target is self._current and not listed.songs:
             self._list_follows(listed, target)
 

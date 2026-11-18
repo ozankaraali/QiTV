@@ -755,15 +755,20 @@ class TVPages(QObject):
         window.controller.play_file(path, size)
 
     def play_list(
-        self, name: str, entries: tuple[str, ...], sizes: tuple[Optional[int], ...]
+        self,
+        name: str,
+        entries: tuple[str, ...],
+        sizes: tuple[Optional[int], ...],
+        start: Optional[int] = None,
     ) -> None:
-        """A playlist of local files plays on the player page, as a file does (play_path)."""
+        """A playlist of local files plays on the player page, as a file does (play_path), from
+        its first entry or `start` (TVController.play_list)."""
         window = self._window
         if window.closing():
             return
         self._show_page(window.player_page)
         self._set_return_to_library(False)
-        window.controller.play_list(name, entries, sizes)
+        window.controller.play_list(name, entries, sizes, start=start)
 
     def export(self, kind: ExportKind) -> None:
         window = self._window

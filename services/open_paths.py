@@ -7,6 +7,7 @@ import ntpath
 import os
 import re
 import sys
+from typing import Optional
 
 logger = logging.getLogger(__name__)
 
@@ -82,7 +83,7 @@ def launch_paths(argv: Sequence[str]) -> list[str]:
             continue
         try:
             path = os.path.abspath(arg)
-            if _is_file(path) or _is_folder(path):
+            if _is_file(path) or folder_spelling(path) is not None:
                 found.append(path)
         except OSError, ValueError:
             logger.debug("launch argument is not a readable path: %r", arg)
@@ -98,13 +99,16 @@ def _is_file(path: str) -> bool:
     return extended != path and os.path.isfile(extended)
 
 
-def _is_folder(path: str) -> bool:
+def folder_spelling(path: str) -> Optional[str]:
+    """`path` as the disk reads it as a folder, or None when it is no folder: on Windows a
+    path past 260 characters may only be read in its extended spelling. It touches the disk:
+    never on the GUI thread but at a start (launch_paths)."""
     if os.path.isdir(path):
-        return True
+        return path
     if sys.platform != "win32":
-        return False
+        return None
     extended = extended_path(path)
-    return extended != path and os.path.isdir(extended)
+    return extended if extended != path and os.path.isdir(extended) else None
 
 
 def extended_path(path: str) -> str:
