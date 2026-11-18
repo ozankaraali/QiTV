@@ -102,6 +102,9 @@ MIME_TYPES: dict[str, tuple[str, ...]] = {
     "ogg": ("audio/ogg", "audio/x-vorbis+ogg", "audio/x-flac+ogg", "audio/x-speex+ogg"),
     "opus": ("audio/x-opus+ogg", "audio/ogg"),
     "wav": ("audio/vnd.wave", "audio/x-wav"),  # audio/vnd.wave since 2.3
+    "aif": ("audio/x-aiff",),  # 2.11.1: AIFF (.aif, .aiff); AIFF-C has its own (.aifc, .aiffc)
+    "aiff": ("audio/x-aiff",),
+    "aifc": ("audio/x-aifc",),
     # both name both extensions (an HLS playlist's is the second)
     "m3u": ("audio/x-mpegurl", "application/vnd.apple.mpegurl"),
     "m3u8": ("application/vnd.apple.mpegurl", "audio/x-mpegurl"),
@@ -114,6 +117,7 @@ MIME_TYPES: dict[str, tuple[str, ...]] = {
 # other apps use, and also the six that macOS declares only as imports (webm, flv, wmv,
 # m2ts/mts, flac and wav), saying what macOS says. An .m4a is macOS's own m4a type, which is
 # an MPEG-4 audio (whose own extensions are .mp4 and .mpg4); both playlists are one type.
+# 2.11.1: AIFF (.aif, .aiff) is macOS's own too, a kind of its AIFF-C (.aifc).
 MAC_UTIS: dict[str, tuple[str, ...]] = {
     "mp4": ("public.mpeg-4",),
     "m4v": ("com.apple.m4v-video",),
@@ -136,6 +140,9 @@ MAC_UTIS: dict[str, tuple[str, ...]] = {
     "ogg": ("org.xiph.ogg-audio",),
     "opus": ("org.xiph.opus",),
     "wav": ("com.microsoft.waveform-audio",),
+    "aif": ("public.aiff-audio",),
+    "aiff": ("public.aiff-audio",),
+    "aifc": ("public.aifc-audio",),
     "m3u": ("public.m3u-playlist",),
     "m3u8": ("public.m3u-playlist",),
 }

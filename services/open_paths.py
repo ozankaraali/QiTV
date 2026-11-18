@@ -17,30 +17,45 @@ VIDEO_EXTENSIONS = frozenset(
         "mpg", "mpeg", "flv", "wmv", "ogv",
     }
 )  # fmt: skip
-MUSIC_EXTENSIONS = frozenset({"mp3", "m4a", "aac", "flac", "ogg", "opus", "wav"})
-MEDIA_EXTENSIONS = VIDEO_EXTENSIONS | MUSIC_EXTENSIONS  # Open File's filter
+MUSIC_EXTENSIONS = frozenset(
+    {"mp3", "m4a", "aac", "flac", "ogg", "opus", "wav", "aif", "aiff", "aifc"}
+)
+# 2.11.1: the other audio formats libVLC 3 plays that people keep music in, each checked with
+# a test tone (Windows Media Audio, WavPack, Matroska audio, Core Audio, Musepack, True Audio,
+# Sun audio, AMR, AC-3, DTS). QiTV registers none of them with the system: they play when they
+# are handed over, dropped, opened with Open File… or in a folder or a playlist, and they are
+# songs as the registered ones are. (Monkey's Audio's .ape is left out: none could be made to
+# check it.)
+OTHER_MUSIC_EXTENSIONS = frozenset(
+    {"wma", "wv", "mka", "caf", "mpc", "tta", "au", "snd", "amr", "ac3", "dts"}
+)
+# Open File's filter
+MEDIA_EXTENSIONS = VIDEO_EXTENSIONS | MUSIC_EXTENSIONS | OTHER_MUSIC_EXTENSIONS
 # The other extensions a type QiTV registers for covers (services/file_types.py registers
 # VIDEO_EXTENSIONS and MUSIC_EXTENSIONS): on macOS 13 the QuickTime movie is .mov and .qt,
 # MPEG-4 .mp4 and .mpg4, AVI .avi and .vfw, MPEG .mpe, .m75 and .m15 too, FLV .f4v, .f4p, .f4a
 # and .f4b too, and an Ogg video may be .ogm; MP3 is .mpga too, AAC .adts, a wave .wave and
-# .bwf, and Ogg audio .oga. Linux's MIME types (shared-mime-info's globs) bring: video/mpeg
-# .vob, .mpe and .mp2 (MPEG audio layer 2: music), video/vnd.avi .avf and .divx,
-# video/quicktime .qt, .moov and .qtvr, video/mp4 .f4v and .lrv, video/mp2t (Open With) .m2t,
-# audio/mpeg .mpga, audio/aac .adts, the Ogg audio types .oga and Speex's .spx, and an
-# audiobook's .m4b (audio/x-m4b, a kind of audio/mp4: Open With offers QiTV for it). The
-# system may hand them over: they play too. (On macOS 13 an .m4b is protected MPEG-4 audio,
-# and Windows lists the extensions QiTV registers: there only a drop or "Other…" opens one.)
+# .bwf, and Ogg audio .oga (AIFF is .aif and .aiff, AIFF-C .aifc: nothing more). Linux's MIME
+# types (shared-mime-info's globs) bring: video/mpeg .vob, .mpe and .mp2 (MPEG audio layer 2:
+# music), video/vnd.avi .avf and .divx, video/quicktime .qt, .moov and .qtvr, video/mp4 .f4v
+# and .lrv, video/mp2t (Open With) .m2t, audio/mpeg .mpga, audio/aac .adts, the Ogg audio
+# types .oga and Speex's .spx, audio/x-aifc .aiffc, and an audiobook's .m4b (audio/x-m4b, a
+# kind of audio/mp4: Open With offers QiTV for it). The system may hand them over: they play
+# too. (On macOS 13 an .m4b is protected MPEG-4 audio, and Windows lists the extensions QiTV
+# registers: there only a drop or "Other…" opens one.)
 EXTRA_VIDEO_EXTENSIONS = frozenset(
     {
         "qt", "mpg4", "vfw", "mpe", "m75", "m15", "f4v", "f4p", "ogm",
         "vob", "avf", "divx", "moov", "qtvr", "lrv", "m2t",
     }
 )  # fmt: skip
-EXTRA_MUSIC_EXTENSIONS = frozenset(
-    {"f4a", "f4b", "mp2", "mpga", "adts", "wave", "bwf", "oga", "spx", "m4b"}
+EXTRA_MUSIC_EXTENSIONS = (
+    frozenset({"f4a", "f4b", "mp2", "mpga", "adts", "wave", "bwf", "oga", "spx", "aiffc", "m4b"})
+    | OTHER_MUSIC_EXTENSIONS
 )
 _VIDEO = VIDEO_EXTENSIONS | EXTRA_VIDEO_EXTENSIONS
 _MUSIC = MUSIC_EXTENSIONS | EXTRA_MUSIC_EXTENSIONS
+_SONGS = MUSIC_EXTENSIONS | OTHER_MUSIC_EXTENSIONS
 SUBTITLE_EXTENSIONS = (".srt", ".ass", ".ssa", ".vtt", ".sub")
 PLAYLIST_EXTENSIONS = (".m3u", ".m3u8")
 
@@ -156,10 +171,10 @@ def is_music(path: str) -> bool:
 
 
 def is_song(path: str) -> bool:
-    """A song by its extension (MUSIC_EXTENSIONS, in any case): a playlist of these only is an
-    album (TVController.play_list). is_music also takes the kinds a type QiTV registers
-    brings (.f4a, .f4b, .mp2)."""
-    return _extension(path)[1:] in MUSIC_EXTENSIONS
+    """A song by its extension (MUSIC_EXTENSIONS and OTHER_MUSIC_EXTENSIONS, in any case): a
+    playlist of these only is an album (TVController.play_list). is_music also takes the kinds
+    a type QiTV registers brings (.f4a, .f4b, .mp2)."""
+    return _extension(path)[1:] in _SONGS
 
 
 def sort_paths(paths: Iterable[str]) -> Sorted:

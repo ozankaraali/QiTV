@@ -141,6 +141,16 @@ class MacBundleTypesTests(unittest.TestCase):
                     self.assertEqual(file_types.MAC_UTIS[ext][0], uti)
         self.assertNotIn("UTExportedTypeDeclarations", self.plist)  # QiTV owns no type
 
+    def test_aiff_is_in_open_with_as_music(self):
+        # 2.11.1: macOS 13 exports both (CoreTypes): public.aiff-audio (.aif, .aiff) is a
+        # public.aifc-audio (.aifc). Claimed by the Audio type, imported by none.
+        audio = self.document_types()["Audio"]["LSItemContentTypes"]
+        imported = {d["UTTypeIdentifier"] for d in self.plist["UTImportedTypeDeclarations"]}
+        for uti in ("public.aiff-audio", "public.aifc-audio"):
+            with self.subTest(uti=uti):
+                self.assertIn(uti, audio)
+                self.assertNotIn(uti, imported)
+
     def test_the_bundle_is_the_one_launch_services_is_told(self):
         bundle_id = ast.literal_eval(_keyword(_bundle_call(), "bundle_identifier"))
         self.assertEqual(bundle_id, file_types.MAC_BUNDLE_ID)

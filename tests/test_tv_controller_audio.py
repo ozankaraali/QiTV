@@ -1036,6 +1036,20 @@ class PlaylistTests(AudioCase):
         self.albums.assert_not_called()
         self.assertEqual(self.list_reads.call_count, 1)
 
+    def test_a_playlist_of_aiff_and_other_audio_files_is_an_album(self):
+        # 2.11.1: AIFF, and the other audio formats libVLC plays (WMA, Matroska audio, Core
+        # Audio …), are songs as MP3s are: their playlist is an album named after it
+        names = ["01 Tide.aif", "02 Harbour.aiff", "03 Quay.wma", "04 Arn.mka", "05 Pell.caf"]
+        entries = [str(self.folder / name) for name in names]
+        self.play_list("Night Tide", entries, [1001, 1002, 1003, 1004, 1005])
+        self.when_idle()
+        self.assertEqual(self.list_reads.call_count, 1)  # its songs' tags, by name
+        self.assertEqual([t["path"] for t in self.screen.tracks], entries)
+        self.assertEqual(self.screen.view(), "album")
+        self.session.stateChanged.emit("playing")
+        self.assertTrue(self.screen.visible)
+        self.assertEqual(self.screen.song[2], "Night Tide")  # the album it shows: the playlist
+
     def test_a_mixed_playlist_plays_each_on_its_screen(self):
         # Ruling 4: a song entry is a lone song (its own tags, no list, no shuffle or repeat:
         # those remembered are left as they are); after it the next entry plays with no card;

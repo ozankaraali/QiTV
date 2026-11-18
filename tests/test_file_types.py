@@ -1309,6 +1309,36 @@ class TypesTests(_RecordedBackend):
         for mime in ("audio/mpeg", "audio/mp4", "audio/aac", "audio/flac", "audio/x-opus+ogg"):
             self.assertIn(mime, music)
 
+    def test_aiff_is_registered_as_music(self):
+        # 2.11.1: shared-mime-info names AIFF (.aif, .aiff) audio/x-aiff and AIFF-C (.aifc,
+        # .aiffc) audio/x-aifc; macOS 13 declares (exports) public.aiff-audio for .aif and
+        # .aiff, a kind of public.aifc-audio, which is .aifc. Windows registers the
+        # extensions themselves (MusicWindowsBackendTests).
+        for ext, mime, uti in (
+            ("aif", "audio/x-aiff", "public.aiff-audio"),
+            ("aiff", "audio/x-aiff", "public.aiff-audio"),
+            ("aifc", "audio/x-aifc", "public.aifc-audio"),
+        ):
+            with self.subTest(ext=ext):
+                self.assertEqual(file_types.MIME_TYPES[ext], (mime,))
+                self.assertEqual(file_types.MAC_UTIS[ext], (uti,))
+                every, chosen = file_types._kind_types("music")
+                self.assertIn(ext, every)
+                self.assertIn(ext, chosen)  # it may become QiTV's, as every music type
+                self.assertIn(mime, file_types.default_mime_types("music"))
+                self.assertNotIn(ext, file_types._kind_types("videos")[0])
+        self.assertEqual(file_types.MAC_DEFAULT_MUSIC, ("mp3", "m4a", "flac"))  # as before
+
+    def test_the_other_audio_formats_are_never_registered(self):
+        # They play when handed over, dropped or opened (open_paths), but QiTV never claims
+        # them: nothing of theirs is written on any system.
+        for ext in open_paths.OTHER_MUSIC_EXTENSIONS:
+            with self.subTest(ext=ext):
+                self.assertNotIn(ext, file_types.MIME_TYPES)
+                self.assertNotIn(ext, file_types.MAC_UTIS)
+                for kind in file_types.KINDS:
+                    self.assertNotIn(ext, file_types._kind_types(kind)[0])
+
     def test_each_kind_has_its_own_types(self):
         # one desktop file holds both kinds: a type of one never belongs to the other (a
         # playlist's are both kinds', and tell neither apart)
@@ -1335,7 +1365,7 @@ class TypesTests(_RecordedBackend):
         # the system hands QiTV these too: macOS's types for mp3, aac and wav and the Ogg
         # import cover them, and so do Linux's MIME types (shared-mime-info's globs); an
         # audiobook's .m4b is audio/x-m4b there, a kind of audio/mp4
-        for ext in ("mpga", "adts", "wave", "bwf", "oga", "spx", "m4b"):
+        for ext in ("mpga", "adts", "wave", "bwf", "oga", "spx", "m4b", "aiffc"):
             self.assertTrue(open_paths.is_music(f"/x/song.{ext}"), ext)
         self.assertNotIn("m4b", open_paths.MUSIC_EXTENSIONS)  # registered for: as before
 

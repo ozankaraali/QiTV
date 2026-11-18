@@ -124,6 +124,15 @@ class ReadPlaylistTests(Folder, unittest.TestCase):
         read = read_playlist(str(self.playlist(text)))
         self.assertEqual(read, PlaylistRead("local", "Akşam listesi", (str(film),), 6, (5,)))
 
+    def test_aiff_and_the_other_audio_formats_are_a_playlists_entries(self):
+        # 2.11.1: they were "missing" from a playlist as files QiTV doesn't play
+        names = ("Gece.aif", "Sabah.AIFF", "Öğle.aifc", "Akşam.wma", "Yol.mka", "Deniz.mpc")
+        songs = [self.file(name) for name in names]
+        text = "#EXTM3U\n" + "".join(f"{name}\n" for name in names)
+        read = read_playlist(str(self.playlist(text)))
+        self.assertEqual((read.kind, read.missing), ("local", 0))
+        self.assertEqual(read.entries, tuple(str(song) for song in songs))
+
     def test_cp1252_playlist_is_read(self):
         song = self.file("Müzik çö.mp3")
         text = "#EXTM3U\r\n#EXTINF:1,Müzik\r\nMüzik çö.mp3\r\n"
@@ -437,6 +446,24 @@ class ReadFolderTests(Folder, unittest.TestCase):
         self.assertGreater(budget_s, 0)
         self.assertLessEqual(budget_s, local_playlist.READ_BUDGET_S)
         self.assertEqual(cap, local_playlist.TAGS_CAP)
+
+    def test_a_folder_of_aiff_and_other_audio_files_is_an_album_too(self):
+        # 2.11.1: an AIFF album said "No videos or music"; WMA, Musepack … are songs too
+        for name in ("Tide.aif", "Harbour.AIFF", "Quay.wma", "Arn.mpc", "notes.txt"):
+            self.file(f"Wexlo Tide/{name}")
+        tags = fake_tracks(
+            {
+                "Tide.aif": {"album": "Wexlo Tide", "track": 1},
+                "Harbour.AIFF": {"album": "Wexlo Tide", "track": 2},
+                "Quay.wma": {"album": "Wexlo Tide", "track": 3},
+                "Arn.mpc": {"album": "Wexlo Tide", "track": 4},
+            }
+        )
+        with mock.patch.object(local_playlist, "read_tracks", side_effect=tags):
+            read = self.read("Wexlo Tide")
+        self.assertEqual((read.kind, read.name), ("local", "Wexlo Tide"))
+        self.assertEqual(self.names(read), ["Tide.aif", "Harbour.AIFF", "Quay.wma", "Arn.mpc"])
+        self.assertEqual(len(tags.calls), 1)  # read as an album's songs
 
     def test_songs_go_by_name_unless_each_is_read_numbered_and_of_one_album(self):
         names = ("10 Quay.mp3", "2 Tide.mp3", "1 Harbour.mp3")
