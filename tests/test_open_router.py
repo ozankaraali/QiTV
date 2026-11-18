@@ -832,6 +832,32 @@ class FolderRouterTests(ListCase):
         self.assertTrue(self.window.subtitles_due())
         self.state = PlaybackState.PLAYING
         self.assertTrue(wait_until(lambda: self.calls[-1] == ("subtitles", [str(srt)])))
+        # Review N3: each time it opens again (Play again, back to it), until another list.
+        loaded = len(self.subtitle_loads())
+        self.state = PlaybackState.OPENING
+        self.open_entry(self.entries[1])
+        self.assertTrue(self.window.subtitles_due())
+        self.state = PlaybackState.PLAYING
+        self.assertTrue(wait_until(lambda: len(self.subtitle_loads()) == loaded + 1))
+        drop(self.window, paths=list(self.episodes[:2]))  # another list, with no subtitle
+        self.assertTrue(wait_until(lambda: len(self.lists()) == 2), self.calls)
+        self.state = PlaybackState.OPENING
+        self.open_entry(self.entries[1])
+        self.assertFalse(self.window.subtitles_due())
+
+    def subtitle_loads(self):
+        return [call for call in self.calls if call[0] == "subtitles"]
+
+    def test_links_dropped_with_a_folder_still_make_providers(self):
+        # Review N2: a folder's read (tentative) adds the links dropped with it, as before.
+        link = f"{PANEL}/player_api.php?username=ann&password=pw1"
+        self.assertEqual(
+            drop(self.window, paths=[self.season], urls=[link], text=link), (True, True)
+        )
+        providers = self.window.provider_manager.providers
+        self.assertTrue(wait_until(lambda: "127.0.0.1" in [p.get("name") for p in providers]))
+        self.assertTrue(wait_until(lambda: self.lists()), self.calls)
+        self.assertEqual(self.lists(), [("Lantern Coast", self.entries, [1, 2, 3])])
 
     def test_a_dropped_file_of_no_kind_says_qitv_cant_play_it(self):
         notes = self.folder / "Notlar ğ.txt"
@@ -941,6 +967,32 @@ class FolderStartTests(LaunchCase, base.WindowCase):
         self.assertEqual(runs, [])  # the list holds it now
         window.controller.hold_for_file(False)  # it ended (the list is a fake here)
         self.assertEqual(runs, [True])
+
+    def test_a_missing_file_opened_while_a_handed_over_folder_is_read_lets_the_start_run(self):
+        # Review N1: the file is a newer choice than the folder the start waits for; it is
+        # gone, so nothing plays, and the start runs (the folder's late read gives way).
+        show = Path(self.config_dir) / "Lantern Coast"
+        series(show)
+        gone = Path(self.config_dir) / "Gone S01E09.mkv"
+        window, gate, runs = self.window, threading.Event(), []
+        with (
+            mock.patch.object(window.controller, "play_list") as played,
+            gated_folder_reads(gate),
+        ):
+            window.open_paths([str(show)], source="handover")  # before the start ran
+            window.when_idle(lambda: runs.append(True))
+            self.show()
+            elapse(SETTLE_MS)
+            self.assertEqual(runs, [])
+            window.open_paths([str(gone)], source="handover")
+            text = "Couldn't open “Gone S01E09.mkv”"
+            self.assertTrue(wait_until(lambda: (text, "error") in self.toasts), self.toasts)
+            self.assertTrue(wait_until(lambda: runs == [True]), runs)
+            self.assertTrue(wait_until(window.overlays.welcome.isVisible))
+            self.assertFalse(window.controller._flow.reading())
+            gate.set()
+            elapse(SETTLE_MS)
+        played.assert_not_called()
 
     def test_a_start_with_an_empty_folder_says_so_and_lets_go(self):
         empty = Path(self.config_dir) / "Empty Shelf"

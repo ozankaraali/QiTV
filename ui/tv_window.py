@@ -573,7 +573,8 @@ class TVWindow(QMainWindow):
         # QiTV won't play leaves alone what is read before it (_on_paths_read).
         self._tentative: set[int] = set()
         # The subtitle files dropped with several media files, for their list (by its read's
-        # number), then by the entry each is for, until that entry opens (list_entry_opens).
+        # number), then by the entry each is for, for each time it opens (list_entry_opens),
+        # until another list or file plays.
         self._read_subtitles: dict[int, list[str]] = {}
         self._entry_subtitles: dict[str, list[str]] = {}
         self._burst: Optional[tuple[float, str]] = None  # (when, file): a start's choice
@@ -1720,9 +1721,9 @@ class TVWindow(QMainWindow):
             self._burst = None  # a drop or Open File is a choice of its own
         self._open_generation += 1
         self._open_due = None  # a file still looked at is not played
-        self._tentative.clear()  # nor a folder still read
-        if self._playlist_due is not None:
-            self._playlist_due = None  # nor a playlist still read
+        if self._reads_pending():
+            self._playlist_due = None  # nor a playlist still read,
+            self._tentative.clear()  # nor a folder
             self.controller.read_over(as_file=True)  # a start that waited for it is the film's
         if source == DROP and len(kinds.media) > 1:
             # Several dropped together: a list, whose order and sizes are read off the GUI
@@ -1807,6 +1808,7 @@ class TVWindow(QMainWindow):
         if serial in self._tentative:
             self._tentative.discard(serial)
             self._on_paths_read(serial, playable, failed, subtitles)
+            self._add_read_providers(providers, links)  # the links dropped with its folders
             return
         if self._playlist_due != serial:
             if any(read.kind not in (PROVIDER, OTHER) for _path, read in reads):
@@ -1934,8 +1936,8 @@ class TVWindow(QMainWindow):
     def list_entry_opens(self, target: Target, path: str) -> None:
         """A list's entry at `path` opens as `target` (TVController._play_entry): the subtitle
         files dropped for it load once it opened (subtitles_for), as a video's dropped with
-        it do."""
-        subtitles = self._entry_subtitles.pop(path, None)
+        it do; each time it opens (Play again, back to it), until another list or file plays."""
+        subtitles = self._entry_subtitles.get(path)
         if subtitles and target.local:
             self._subtitles_due = (target, subtitles, self._clock() + OPENED_WAIT_S)
             self._subtitles_wait.start()
