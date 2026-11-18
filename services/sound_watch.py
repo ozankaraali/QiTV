@@ -3,8 +3,8 @@
 A channel whose source left gaps every minute or two (VLC ran dry at each, and libVLC 3.0.20
 flushes every decoder when media comes late after one) lost its sound for good while the
 picture played on; the stream QiTV served still carried the sound, in step with the picture,
-and tuning again brought it back. Android's player rebuilds its audio output when the sound
-stops while frames still reach it, and Kodi flushes and seeks to where it plays.
+and tuning again brought it back. Other players rebuild their audio output when the sound
+stops while frames still reach it, or flush and seek to where they play.
 
 `SoundWatch` reads libVLC's media statistics (`services.picture_watch.Counters`) once a tick.
 Once VLC plays, has an audio track and played sound in this stream, a stretch of `SILENT_S`
