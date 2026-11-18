@@ -14,6 +14,8 @@ from pathlib import Path
 import shutil
 import subprocess
 import tempfile
+import threading
+from types import SimpleNamespace
 import unittest
 from unittest import mock
 import uuid
@@ -26,9 +28,10 @@ from PySide6.QtTest import QTest
 from test_tv_controller import ControllerTestCase, FakeOverlay, FakeSession, FakeTransport
 from timer_fixtures import pause, wait_until
 
+from services.local_episodes import list_folder
 from services.playback import PlaybackState
 from services.song_facts import song_tags
-from tests import test_tv_window as base
+from tests import test_tv_pip, test_tv_window as base
 from ui.keymap import Action
 from ui.overlays.audio_screen import AudioScreen
 from ui.page_stack import PageStack
@@ -76,8 +79,11 @@ class AudioTransport(FakeTransport):
         self.record("show_audio", title, subtitle)
         self.visible, self.docked = True, True
 
-    def set_audio_state(self, shuffle, repeat, has_list):
+    next_on = False  # its ⏭ acts (set_audio_state's has_next, else has_list)
+
+    def set_audio_state(self, shuffle, repeat, has_list, has_next=None):
         self.record("set_audio_state", shuffle, repeat, has_list)
+        self.next_on = has_list if has_next is None else has_next
 
     def audio(self):
         return self.docked
@@ -173,17 +179,32 @@ class FakeCaptions(QObject):
         self.toggles = 0
         self.target = "Turkish"
         self.can = True  # available(): this computer runs the model, and the stream is read
+        self.slow = False  # this computer's speed isn't known yet: turned on, they wait for it
+        self.waits = False
 
     def available(self):
         return self.can
 
     def toggle(self):
         self.toggles += 1
-        self.on = not self.on
+        if self.slow and not self.on:
+            self.waits = not self.waits  # pressed again while it is measured: off
+        else:
+            self.on = not self.on
         self.changed.emit()
+
+    def scored(self):
+        """The speed is known: one turned on while it was measured comes on."""
+        self.slow = False
+        if self.waits:
+            self.waits, self.on = False, True
+            self.changed.emit()
 
     def enabled(self):
         return self.on
+
+    def wanted(self):
+        return self.on or self.waits
 
     def downloading(self):
         return False
@@ -340,12 +361,25 @@ class ScreenFollowsTheMediaTests(AudioCase):
         self.assertFalse(self.screen.visible)
         self.assertEqual(self.last_mode(), ("show_vod", "02 Pell.mp3"))
 
-    def test_an_attached_cover_counts_as_no_picture(self):
-        # Review item 14, at the controller: libVLC lists an .m4a's attached cover as no video
-        # track (checked on the real player in test_open_router's album leg).
-        self.open(self.folder / "01 Arn.m4a", video=False)
-        self.assertTrue(self.screen.visible)
-        self.assertTrue(self.transport.audio())
+    def test_a_windows_path_keeps_its_album_row_and_cover(self):
+        # Review M5: the album lists a song as play_file was given it; a file URL's round trip
+        # spells it otherwise (Windows: slashes for backslashes). The song's own spelling is
+        # what's looked up, so the next track keeps its row, its listing's tags and its cover.
+        tracks = self.album(3)
+        for t in tracks:
+            t["path"] = "C:\\Music\\Harbour Lights\\" + t["name"]
+        self.open(tracks[0]["path"], size=1001)
+        self.list_album(tracks)
+        generation = self.covers.call_args.args[0]
+        image = QImage(4, 4, QImage.Format.Format_RGB32)
+        self.controller._on_cover_ready(generation, image, [(10, 20, 30)])
+        self.end()
+        self.assertEqual(self.session.plays[-1][0], Path(tracks[1]["path"]).absolute().as_uri())
+        self.session.stateChanged.emit("playing")
+        self.assertEqual(self.screen.current, 1)
+        self.assertEqual(self.screen.song[0], "Song 2")
+        self.assertIs(self.screen.cover[0], image)  # no stand-in between the album's songs
+        self.assertEqual(self.albums.call_count, 1)
 
     def test_tags_are_read_once_it_plays_and_the_cover_follows(self):
         # Review item 15: libVLC has read nothing before it plays.
@@ -393,43 +427,60 @@ class RadioTests(AudioCase):
         self.session.video = False
         self.session.stateChanged.emit("playing")
 
+    def reopen(self):
+        """The same channel opens again (a reconnect): its next `playing`."""
+        self.session.stateChanged.emit("opening")
+        self.session.stateChanged.emit("playing")
+
     def test_radio_screen_follows_the_picture(self):
         # Review focus 4 and item 13: a live stream may list its sound before its picture, so
         # the screen waits until there has been no picture for NO_PICTURE_S while it plays.
+        # libVLC 3's track list only grows within an open (measured on hel, fix round 1): a
+        # picture listed, or shown, ends the watch until the channel's next `playing`.
+        poll = self.controller._sound_poll
         self.tune_radio()
+        self.assertTrue(poll.isActive())
         self.assertFalse(self.screen.visible)
         self.clock.now += NO_PICTURE_S - 0.5
         self.controller._sound_watch()
         self.assertFalse(self.screen.visible)
-        self.session.video = True  # its picture is listed after all: nothing, and counted anew
+        self.session.video = True  # its picture is listed after all: a TV channel
         self.controller._sound_watch()
+        self.assertFalse(poll.isActive())  # the watch rests (review M7)
         self.session.video = False
+        self.clock.now += 5 * NO_PICTURE_S
         self.controller._sound_watch()
+        self.assertFalse(self.screen.visible)  # never for this open
+        # A reopen with no picture: counted anew, shown after NO_PICTURE_S.
+        self.reopen()
+        self.assertTrue(poll.isActive())
         self.clock.now += NO_PICTURE_S - 0.5
         self.controller._sound_watch()
         self.assertFalse(self.screen.visible)
         self.clock.now += 1.0
         self.controller._sound_watch()
         self.assertTrue(self.screen.visible)
+        self.assertTrue(self.screen.playing)
         # The Cover view, the channel's name, and the live controls unchanged (no dock).
         self.assertEqual(self.screen.view(), "cover")
         self.assertEqual(self.screen.song[0], "One")
         self.assertNotIn("show_audio", [c[0] for c in self.transport.calls])
-        # Its picture shows: the screen goes at once.
+        # Its picture shows: the screen goes at once, and the watch rests for this open.
         self.session.pictureShown.emit()
         self.assertFalse(self.screen.visible)
-        # It goes away again (libVLC lists no picture): back after NO_PICTURE_S.
-        self.session.video = False
-        self.controller._sound_watch()
+        self.assertFalse(poll.isActive())
+        # Back after a reopen with no picture; a picture listed then hides it at once too.
+        self.reopen()
         self.clock.now += NO_PICTURE_S + 0.1
         self.controller._sound_watch()
         self.assertTrue(self.screen.visible)
-        # Comes back once more (no second pictureShown for this open): gone at once again.
         self.session.video = True
         self.controller._sound_watch()
         self.assertFalse(self.screen.visible)
+        self.assertFalse(poll.isActive())
         # Paused or not listed (None): nothing changes, nothing counts.
         self.session.video = False
+        self.reopen()
         self.session.stateChanged.emit("paused")
         self.clock.now += 10 * NO_PICTURE_S
         self.controller._sound_watch()
@@ -450,6 +501,38 @@ class RadioTests(AudioCase):
         self.controller._sound_watch()
         self.assertFalse(self.screen.visible)
 
+    def test_a_stream_that_ends_rests_its_screen_and_its_watch(self):
+        # Review I1 and M7: ended (or failed) with no reconnect, the light holds still and the
+        # watch stops; a reconnect's `playing` starts both again.
+        self.tune_radio()
+        self.clock.now += NO_PICTURE_S + 0.1
+        self.controller._sound_watch()
+        self.assertTrue(self.screen.playing)
+        self.session.stateChanged.emit("ended")
+        self.assertFalse(self.screen.playing)
+        self.assertFalse(self.controller._sound_poll.isActive())
+        self.reopen()
+        self.assertTrue(self.screen.playing)
+        self.assertTrue(self.controller._sound_poll.isActive())
+        self.session.stateChanged.emit("error")
+        self.assertFalse(self.screen.playing)
+        self.assertFalse(self.controller._sound_poll.isActive())
+
+    def test_a_radio_screen_never_sticks_when_its_channel_goes_without_a_new_one(self):
+        # Review I2: a provider that keeps only its newest stream stops the large picture for
+        # a recording (RecordGuard): nothing new comes, and the screen goes at the next look.
+        self.tune_radio()
+        self.clock.now += NO_PICTURE_S + 0.1
+        self.controller._sound_watch()
+        self.assertTrue(self.screen.visible)
+        slot = SimpleNamespace(name="main")
+        with mock.patch.object(self.controller, "sessions", SimpleNamespace(large=lambda: slot)):
+            self.controller._stop_for_guard(slot)
+        self.assertIsNone(self.controller.now_playing())
+        self.controller._sound_watch()
+        self.assertFalse(self.screen.visible)
+        self.assertFalse(self.controller._sound_poll.isActive())
+
     def test_a_radio_channel_has_no_album_dock_or_queue(self):
         self.tune_radio()
         self.clock.now += NO_PICTURE_S + 0.1
@@ -461,6 +544,41 @@ class RadioTests(AudioCase):
         self.assertEqual(self.screen.cover, (None, self.screen.cover[1]))  # no logo: drawn
         self.controller.handle(Action.MEDIA_NEXT)  # live TV's: the next channel
         self.assertEqual(self.requested()[-1], "Two")
+
+
+class SwapTests(test_tv_pip.PipCase):
+    """A radio channel taken from the small picture: the real SessionManager and tuners (the
+    picture-in-picture tests' harness), over the audio fakes."""
+
+    def setUp(self):
+        self.screen = FakeScreen()
+        with (
+            mock.patch("tests.test_tv_controller.FakeSession", AudioSession),
+            mock.patch("tests.test_tv_pip.FakeSession", AudioSession),
+        ):
+            super().setUp()
+        self.controller._sound_clock = self.clock
+
+    def overlays(self, column):
+        overlays = super().overlays(column)
+        overlays.audio_screen = getattr(self, "screen", None)
+        return overlays
+
+    def test_a_radio_channel_swapped_in_shows_its_screen_without_a_new_state(self):
+        # Review M3: the small picture plays a radio channel (its `playing` heard small). ⇄
+        # brings no state change with it: its screen comes all the same, NO_PICTURE_S on.
+        self.start_large(0)
+        self.session.video = True
+        self.open_small(test_tv_pip.GROUP_B[0], "20", test_tv_pip.GROUP_B)
+        self.pip_session.video = False
+        self.pip_session.stateChanged.emit("playing")
+        self.controller.handle(Action.SWAP)
+        self.assertIs(self.controller.session, self.pip_session)
+        self.assertTrue(self.controller._sound_poll.isActive())
+        self.clock.now += NO_PICTURE_S + 0.1
+        self.controller._sound_watch()
+        self.assertTrue(self.screen.visible)
+        self.assertEqual(self.screen.song[0], "Five")
 
 
 class AlbumTests(AudioCase):
@@ -493,11 +611,13 @@ class AlbumTests(AudioCase):
         self.end()
         self.assertEqual(self.played()[-1], third)
         self.session.stateChanged.emit("playing")
+        self.assertTrue(self.screen.playing)
         self.end()  # the last: "Finished", and the hold goes
         self.assertEqual(self.played()[-1], third)
         self.assertIn(FINISHED, self.toast.messages())
         self.assertEqual(self.runs, ["update question"])
         self.assertEqual(self.next_card.named("show_next"), [])
+        self.assertFalse(self.screen.playing)  # review I1: its light and row bars rest
 
     def test_a_cut_album_listing_is_no_album(self):
         # Review item 12: a listing its time or cap cut short can't say what comes after its
@@ -624,6 +744,23 @@ class AlbumTests(AudioCase):
         self.controller.handle(Action.MEDIA_NEXT)
         self.assertEqual(self.session.relative[-1], 10_000)
 
+    def test_the_docks_next_plays_an_audio_only_episodes_next_one(self):
+        # Review M8: no album, but the folder's next episode follows it: ⏭ lights and plays it,
+        # as a film's Next does.
+        listings = mock.patch.object(self.controller._listing, "start").start()
+        first, second = self.folder / "Show.S01E01.mkv", self.folder / "Show.S01E02.mkv"
+        first.write_bytes(b"one")
+        second.write_bytes(b"two!")
+        self.open(first, size=3, video=False)
+        self.assertTrue(self.screen.visible)
+        self.assertTrue(self.transport.audio())
+        self.assertFalse(self.transport.next_on)
+        generation, folder = listings.call_args.args
+        self.controller._on_folder_listed(generation, list_folder(folder))
+        self.assertTrue(self.transport.next_on)
+        self.transport.nextTrackRequested.emit()
+        self.assertEqual(self.played()[-1], second)
+
     def test_the_docks_previous_restarts_a_lone_song(self):
         self.session.seekable = True
         self.open(self.folder / "Lone.mp3")
@@ -680,6 +817,38 @@ class RememberedTests(AudioCase):
         self.assertEqual(self.window.captions.toggles, 0)
         self.assertEqual(self.screen.view(), "cover")
         self.assertIn(("Not available for this stream", "info"), self.toast.messages())
+
+    def test_words_waiting_for_the_speed_keep_their_stage(self):
+        # Review M9: turned on before this computer's speed is known, AI captions wait for it
+        # (CaptionsController.wanted). The Stage they opened stays their opening view through
+        # the wait; pressed again meanwhile, they're called off.
+        captions = self.window.captions
+        captions.slow = True
+        tracks = self.album(2)
+        self.open(Path(tracks[0]["path"]))
+        self.list_album(tracks)
+        self.screen.wordsRequested.emit()
+        self.assertTrue(captions.waits)
+        self.assertEqual(self.screen.view(), "stage")
+        self.controller.words_changed()  # their `changed`, as the window wires it
+        self.assertEqual(self.screen.words, (False, ""))
+        captions.scored()
+        self.controller.words_changed()
+        self.assertEqual(self.screen.words, (True, "Türkçe"))
+        other = Path(tempfile.mkdtemp(dir=self.folder))
+        others = [track(other, n, f"Other {n}") for n in (1, 2)]
+        self.open(Path(others[0]["path"]))
+        self.assertEqual(self.screen.view(), "stage")  # while those Words stay on
+        self.list_album(others)
+        self.assertEqual(self.screen.view(), "stage")
+        self.screen.wordsRequested.emit()  # off
+        self.assertFalse(captions.on)
+        captions.slow = True
+        self.screen.wordsRequested.emit()  # on, waiting for the speed
+        self.assertTrue(captions.waits)
+        self.screen.wordsRequested.emit()  # pressed again meanwhile: called off
+        self.assertFalse(captions.waits or captions.on)
+        self.assertEqual(captions.toggles, 4)
 
     def test_words_from_the_screen_open_stage_unless_a_view_was_picked(self):
         tracks = self.album(2)
@@ -862,22 +1031,69 @@ class WindowSongTests(base.WindowCase):
         # The real pill and the real CaptionsController. Where no speech model can run (hel: no
         # runtime for its processor) it says so and changes nothing, even a moment later; where
         # one can, the Stage opens and their first question (or they) come.
+        # It cleans up before it ends: no speed measure's answer can ask its question after
+        # the window is gone (a slow runner).
         window = self.window
         screen = self.play_song()
         captions = window.captions
+
+        def measuring():
+            return any(t.name == "qitv-captions-tier" for t in threading.enumerate())
+
         self.click(screen, screen.controls()["words"])
-        pause(500)  # a speed measure's answer, had one started
+        self.assertTrue(wait_until(lambda: not measuring(), 20_000))  # its speed, if measured
+        pause(100)  # its answer, on the GUI thread
         if not captions.available():
             self.assertEqual(screen.view(), "cover")
             self.assertIn(("Not available for this stream", "info"), self.toasts)
-            self.assertFalse(captions.enabled() or captions.downloading() or captions.asking())
         else:
             self.assertEqual(screen.view(), "stage")
+            settled = (captions.asking, captions.enabled, captions.downloading)
+            self.assertTrue(
+                wait_until(lambda: any(f() for f in settled) or not captions.wanted(), 20_000)
+            )
             if captions.asking():
                 captions.answer(False)
             elif captions.enabled() or captions.downloading():
                 captions.toggle()
+        self.assertFalse(captions.wanted())
+        self.assertFalse(measuring())
         window.controller.stop()
+
+    def test_an_m4a_whose_cover_is_an_attached_picture_plays_on_the_screen(self):
+        # Review item 14 and M10, on the real player: libVLC lists the .m4a's attached cover as
+        # no video track, and no picture shows: the screen and the dock.
+        window, controller = self.window, self.window.controller
+        song = make_song(self.folder / "Arn.m4a", title="Arn", album="Kesh", number=2)
+        self.show()
+        window.open_paths([str(song)], source="dialog")
+        self.assertTrue(wait_until(window.audio_screen.isVisible))
+        session = controller.session
+        self.assertEqual(session.url, song.as_uri())
+        self.assertIs(session.has_video_track(), False)
+        self.assertFalse(session.shows_picture())
+        self.assertTrue(window.overlays.transport.audio())
+        controller.stop()
+
+    def test_qitvs_mark_is_left_out_only_over_a_songs_screen(self):
+        # Review M4: a song opened over a song's screen keeps it (no mark over it); over a
+        # radio channel's, which goes, QiTV's mark draws on the black as for any file.
+        window, controller = self.window, self.window.controller
+        self.show()
+        marks = mock.patch.object(
+            window.opening_overlay, "open_for", wraps=window.opening_overlay.open_for
+        ).start()
+        self.addCleanup(mock.patch.stopall)
+        controller._sound_shown, controller._sound_kind = True, "radio"  # a radio's screen
+        window.open_paths([str(self.song)], source="dialog")
+        self.assertTrue(wait_until(lambda: marks.called))
+        self.assertTrue(wait_until(window.audio_screen.isVisible))  # the song's, as it plays
+        marks.reset_mock()
+        other = make_song(self.folder / "Rook.mp3", title="Rook", album="Kesh", number=3)
+        window.open_paths([str(other)], source="dialog")
+        self.assertTrue(wait_until(lambda: controller.session.url == other.as_uri()))
+        marks.assert_not_called()
+        controller.stop()
 
     def test_the_pointer_hides_off_the_dock_and_never_while_its_menu_shows(self):
         # Review item 6: the dock never fades, so the pointer goes when it rests off its band.

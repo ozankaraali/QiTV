@@ -394,6 +394,16 @@ class DockLayoutTests(AudioCase):
         spy = QSignalSpy(t.prevTrackRequested)  # previous still starts the song again
         self.click(t, rects["prev_track"].center())
         self.assertEqual(spy.count(), 1)
+        # Task 5 review M8: no list, but something follows (an audio-only episode's next one, a
+        # playlist's next entry): next is lit and acts; shuffle stays dim and asks nothing.
+        t.set_audio_state(False, "off", False, has_next=True)
+        image = t.grab().toImage()
+        self.assertGreaterEqual(brightest(rects["next_track"]), brightest(rects["prev_track"]) - 5)
+        for name, wanted in (("next_track", 1), ("shuffle", 0)):
+            QTest.qWait(QApplication.doubleClickInterval() + 20)
+            spy = QSignalSpy(t.nextTrackRequested if name == "next_track" else t.shuffleRequested)
+            self.click(t, rects[name].center())
+            self.assertEqual(spy.count(), wanted, name)
 
 
 class DockBehaviourTests(AudioCase):

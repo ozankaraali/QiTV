@@ -692,10 +692,14 @@ class AudioScreen(Overlay):
         self._lay_out_top(lay, m, w)
         dock_top = h * (1 - DOCK_FRACTION)
         top_bar = lay.controls["back"].bottom()
+        # The cover and the list hold still as live TV's controls show and fade over a radio
+        # channel: they're laid out below the bar where it rests. Only Stage's small head,
+        # which the stepped bar would cover, moves with it.
+        resting = top_bar - (lay.controls["back"].top() - m(14))
         if view == "cover":
-            self._lay_out_cover(lay, m, w, top_bar, dock_top)
+            self._lay_out_cover(lay, m, w, resting, dock_top)
         elif view == "album":
-            self._lay_out_album(lay, m, w, h, top_bar, dock_top)
+            self._lay_out_album(lay, m, w, h, resting, dock_top)
         else:
             self._lay_out_stage(lay, m, w, h, top_bar, dock_top)
         return lay

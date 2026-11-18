@@ -409,10 +409,12 @@ class FollowAndCornerTests(ScreenCase):
         transport = Transport(page)
         screen.follow(transport)
         top = screen.controls()["back"].top()
+        cover = screen.cover_rect()
         transport.show_live("Night Ferry FM", "The Long Pier")
         self.assertTrue(transport.isVisible())
         band = transport.top_band_bottom()
         self.assertGreater(band, top)
+        self.assertEqual(screen.cover_rect(), cover)  # review M6: only the bar moves
         rows = [r.toAlignedRect() for r in transport.title_rects().values() if not r.isEmpty()]
         for name, rect in screen.controls().items():
             with self.subTest(name):
@@ -421,6 +423,7 @@ class FollowAndCornerTests(ScreenCase):
         self.assert_laid_out(screen)
         transport.dismiss()  # they fade: the bar goes back up
         self.assertEqual(screen.controls()["back"].top(), top)
+        self.assertEqual(screen.cover_rect(), cover)
         transport.show_audio("Ferries at Night", "")  # a song's dock has no title row
         self.assertEqual(transport.top_band_bottom(), 0)
         self.assertEqual(screen.controls()["back"].top(), top)

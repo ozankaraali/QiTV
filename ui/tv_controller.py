@@ -446,6 +446,7 @@ class TVController(QObject):
         self._sound_kind = ""
         self._sound_shown = False
         self._sound_in_list = False  # a playlist's song: its list's next, not an album's
+        self._sound_path = ""  # its file's path, as play_file was given it
         self._sound_played: Optional[Target] = None  # whose first `playing` the screen heard
         self._silent_since: Optional[float] = None  # a channel with no picture listed, since
         self._sound_since = 0.0  # when a file's tracks were first looked for
@@ -1205,6 +1206,7 @@ class TVController(QObject):
         }
         target.context = play_context({LOCAL_NEXT: entry})
         self.overlays.transport.set_next_available(self._autoplay.has_next(target))
+        self._dock_follows()
 
     def play_recording(self, item: dict, start_over: bool = False) -> None:
         """A recording from the Library (2.8): its file plays as a movie from where it stopped
@@ -1282,6 +1284,13 @@ class TVController(QObject):
             return  # the last one in its folder, or the folder could not be read
         target.context = play_context({LOCAL_NEXT: following})
         self.overlays.transport.set_next_available(self._autoplay.has_next(target))
+        self._dock_follows()
+
+    def _dock_follows(self) -> None:
+        """What follows changed (a folder's next episode, a playlist's next entry): the audio
+        dock's ⏭ says so, while it shows."""
+        if getattr(self.overlays.transport, "audio", lambda: False)():
+            self._show_audio_state()
 
     def _play_following(self, item: dict, kind: str, context: dict) -> None:
         """What follows a movie or an episode (Autoplay's play): a file's next episode plays
@@ -2927,6 +2936,7 @@ class TVController(QObject):
         self._before_new_target(target)
         self._current, self._cid, self._current_url = target, view.cid, view.url
         self._state = self._states.get(name, "idle")
+        self._sound_after_swap()  # a radio channel brought back: its screen as it plays
         self._tuning.stop()
         self._autoplay.drop()  # the Next card was the stand-in's
         if self._digits:
@@ -3289,6 +3299,7 @@ class TVController(QObject):
         channel = self._channel
         transport = self.overlays.transport
         transport.set_paused(self._state == "paused")
+        self._sound_after_swap()  # a radio channel swapped in: its screen, without a new state
         grid = self.multiview_shown()  # a tile took the focus: the grid shows it
         if channel is not None:
             self.zap.tuned(channel)
@@ -3976,12 +3987,23 @@ class TVController(QObject):
         """The audio screen shows what plays (a song, a file with no picture, a radio channel)."""
         return not self._closed and self._sound_shown
 
+    def song_shown(self) -> bool:
+        """The audio screen shows a song or a file with no picture (not a radio channel's): a
+        song opened now keeps it (the window draws no mark over it)."""
+        return self.sound_shown() and self._sound_kind in ("song", "file")
+
     def _screen(self) -> Any:
         return self.overlays.audio_screen
 
     @staticmethod
     def _local_path(target: Target) -> str:
         return QUrl(str(target.item.get("cmd") or "")).toLocalFile()
+
+    def _sound_file(self, target: Target) -> str:
+        """`target`'s file, as it was opened (the album lists it so), else from its URL."""
+        if target is self._sound and self._sound_path:
+            return self._sound_path
+        return self._local_path(target)
 
     def _is_song(self, target: Optional[Target]) -> bool:
         return target is not None and target.local and is_music(self._local_path(target))
@@ -3997,6 +4019,9 @@ class TVController(QObject):
             return False
         self._sound_poll.stop()
         self._sound, self._sound_in_list = target, in_list
+        # Its path as given (the album's own spelling: a file URL's round trip turns Windows'
+        # backslashes into slashes, and the album's list would no longer know it).
+        self._sound_path = path
         if not is_music(path):
             self._sound_kind = "file"
             return False
@@ -4035,8 +4060,16 @@ class TVController(QObject):
         queue = self._queue
         if queue is not None:
             set_state(queue.shuffle, queue.repeat, len(queue) >= 2)
-        else:
-            set_state(self._shuffle_setting(), self._repeat_setting(), False)
+        else:  # ⏭ still acts when its folder's next episode or its playlist's entry follows
+            set_state(
+                self._shuffle_setting(), self._repeat_setting(), False, has_next=self._follows()
+            )
+
+    def _follows(self) -> bool:
+        """What plays on the audio screen has a next of its own, with no album: an audio-only
+        episode's next one in its folder, a playlist's next entry (Autoplay's)."""
+        current = self._current
+        return current is not None and current is self._sound and self._autoplay.has_next(current)
 
     def _shuffle_setting(self) -> bool:
         return getattr(self.config, "audio_shuffle", False) is True
@@ -4075,6 +4108,7 @@ class TVController(QObject):
         channel instead); a late album or cover reaches nothing."""
         self._sound_poll.stop()
         self._sound, self._sound_kind, self._sound_played = None, "", None
+        self._sound_path = ""
         self._silent_since = None
         self._queue = None
         self._album_generation += 1
@@ -4108,8 +4142,8 @@ class TVController(QObject):
         screen = self._screen()
         if screen is None or self._closed:
             return
-        if state in ("playing", "paused"):
-            screen.set_playing(state == "playing")
+        if state not in ("opening", "buffering"):  # (between two tracks: nothing flickers)
+            screen.set_playing(state == "playing")  # ended, failed or stopped: it rests
         target = self._current
         if target is None:
             return
@@ -4120,16 +4154,25 @@ class TVController(QObject):
                 self._file_playing(target)
 
     def _channel_state(self, target: Target, state: str) -> None:
-        """A live channel's state: watched for its picture while it plays (_sound_watch)."""
+        """A live channel's state: watched for its picture while it plays (_sound_watch). Its
+        stream ended or failed: the watch stops (a reconnect's `playing` starts it again)."""
         if state != "playing":
             self._silent_since = None  # only playing time counts
+            if state in ("ended", "error", "idle"):
+                self._sound_poll.stop()
             return
-        if self._sound is not target:
+        if self._sound is not target or self._sound_kind != "radio":
             self._sound, self._sound_kind, self._sound_played = target, "radio", None
             self._sound_in_list, self._silent_since = False, None
         if not self._sound_poll.isActive():
             self._sound_poll.start()
         self._sound_watch()
+
+    def _sound_after_swap(self) -> None:
+        """Another player is large now (a swap, a bring-back): a channel already playing there
+        is watched for its picture from now, not from its next state change."""
+        if self._state == "playing":
+            self._sound_state("playing")
 
     def _file_playing(self, target: Target) -> None:
         """A local file's first `playing`: a song shows its screen (unless its media has a
@@ -4152,12 +4195,17 @@ class TVController(QObject):
 
     def _sound_watch(self) -> None:
         """The poll (SOUND_POLL_MS): a channel playing with no picture listed for NO_PICTURE_S
-        is radio (its screen shows), and its picture listed again hides it at once (its
-        pictureShown comes once an open); a file is shown once its tracks say no picture.
-        Not listed (None): nothing changes."""
+        is radio (its screen shows); a picture listed hides it at once and the watch rests
+        until the channel's next `playing` (libVLC 3's track list only grows within an open:
+        a picture that goes away stays listed); a file is shown once its tracks say no
+        picture. Not listed (None): nothing changes. What it watched gone without a new
+        target (a recording's guard, the grid): the screen goes with it."""
         target = self._current
-        if self._closed or target is None or target is not self._sound:
+        if self._closed:
             self._sound_poll.stop()
+            return
+        if target is None or target is not self._sound:
+            self._end_sound()
             return
         if self._state != "playing":
             if target.live:
@@ -4170,10 +4218,20 @@ class TVController(QObject):
         else:
             self._sound_poll.stop()
 
+    def _picture_listed(self) -> None:
+        """A live channel shows a picture (listed, or pictureShown): its screen goes, and its
+        watch rests until its next `playing` (_channel_state)."""
+        self._silent_since = None
+        self._sound_poll.stop()
+        self._sound_kind = "picture"
+        self._hide_sound()
+
     def _watch_channel(self, target: Target, has: Optional[bool]) -> None:
-        if has is True or self.multiview_shown():
+        if has is True:
+            self._picture_listed()
+        elif self.multiview_shown():
             self._silent_since = None
-            self._hide_sound()  # its picture is back (or the grid's tiles are the pictures)
+            self._hide_sound()  # the grid's tiles are the pictures
         elif has is False:
             now = self._sound_clock()
             if self._silent_since is None:
@@ -4207,7 +4265,7 @@ class TVController(QObject):
             self._refresh_radio(target)
             self._radio_cover(target)
         else:
-            path = self._local_path(target)
+            path = self._sound_file(target)
             tags = self._tags()
             queue = self._queue
             index = queue.index_of(path) if queue is not None else None
@@ -4274,13 +4332,12 @@ class TVController(QObject):
 
     def _on_picture_shown(self) -> None:
         """The large picture's first picture of this open: the audio screen goes at once (a
-        radio channel's comes back once it has gone, _sound_watch)."""
+        live channel's watch rests until its next `playing`: _picture_listed)."""
         target = self._current
         if self._closed or target is None or target is not self._sound:
             return
-        if self._sound_kind == "radio":
-            self._silent_since = None
-            self._hide_sound()
+        if target.live:
+            self._picture_listed()
         elif self._sound_shown or getattr(self.overlays.transport, "audio", lambda: False)():
             self._sound_is_film(target)  # the screen or the dock was up: the film's controls
         else:  # a film whose tracks weren't listed yet: its controls stay as they are
@@ -4371,7 +4428,7 @@ class TVController(QObject):
 
     def _replay(self, target: Target) -> None:
         self._flow.hold_for_file(True)
-        self.play_file(self._local_path(target), start_over=True)
+        self.play_file(self._sound_file(target), start_over=True)
 
     def _restart_sound(self, target: Target) -> None:
         """The song from its start: a seek, or played again once it can't seek (it ended)."""
@@ -4401,9 +4458,12 @@ class TVController(QObject):
 
     def _next_track(self) -> None:
         """⏭ (the dock's; the media key's with an album): the album's next track (none after
-        the last with repeat off)."""
+        the last with repeat off); with no album, the next episode or playlist entry, as the
+        film's Next."""
         queue = self._queue
         if not self._album_plays() or queue is None:
+            if queue is None and self._follows():
+                self._on_next_requested()
             return
         before = queue.current
         index = queue.next(auto=False)
@@ -4453,12 +4513,19 @@ class TVController(QObject):
             self._remember("audio_view", view)
 
     @staticmethod
-    def _words_on(captions: Any) -> bool:
-        """AI captions are on, or on their way (downloading, their question asked)."""
+    def _words_shown(captions: Any) -> bool:
+        """AI captions are on, downloading, or their question is asked."""
         return any(
             bool(getattr(captions, name, lambda: False)())
             for name in ("enabled", "downloading", "asking")
         )
+
+    @classmethod
+    def _words_on(cls, captions: Any) -> bool:
+        """AI captions are on, or on their way: downloading, their question asked, or waiting
+        for this computer's speed (CaptionsController.wanted)."""
+        wanted = getattr(captions, "wanted", None)
+        return bool(wanted()) if callable(wanted) else cls._words_shown(captions)
 
     def _on_words_requested(self) -> None:
         """The screen's Words pill: AI captions on or off, as the Subtitles panel's row turns
@@ -4471,7 +4538,10 @@ class TVController(QObject):
             self._toast(translate(NOT_AVAILABLE))
             return
         was_on = self._words_on(captions)
-        self._tracks.set_captions(not was_on)
+        if was_on and not self._words_shown(captions):
+            captions.toggle()  # pressed again while the speed is measured: not wanted now
+        else:
+            self._tracks.set_captions(not was_on)
         self._stage_for_words = not was_on
         screen = self._screen()
         if not was_on and screen is not None and not self._picked_view():

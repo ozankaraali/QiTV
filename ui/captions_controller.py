@@ -321,6 +321,13 @@ class CaptionsController(QObject):
     def enabled(self) -> bool:
         return self._enabled
 
+    def wanted(self) -> bool:
+        """They are on, or on their way: asked for (their question up), downloading, or
+        waiting for this computer's speed (the audio screen's Words pill reads it)."""
+        return bool(
+            self._enabled or self._download is not None or self._asking or self._toggle_waits
+        )
+
     def status_text(self) -> str:
         if self._download is not None:
             if self._unpacking:
@@ -347,10 +354,7 @@ class CaptionsController(QObject):
         downloading, waiting for the speed). Either way they are the viewer's from now on, not
         on by themselves (`local_video_playing`)."""
         if self._plays_video_file():
-            was_on = (
-                self._enabled or self._download is not None or self._asking or self._toggle_waits
-            )
-            self._config_set(_LOCAL_ON, not was_on)
+            self._config_set(_LOCAL_ON, not self.wanted())
         self._auto_on = False
         self._auto_pending = None
         self._toggle()

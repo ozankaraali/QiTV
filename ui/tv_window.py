@@ -1755,10 +1755,10 @@ class TVWindow(QMainWindow):
         self.controller.hold_for_file(True)
         before = self.controller.now_playing()
         # QiTV's mark draws while it opens, unless a picture shows (a film's, a channel's) or a
-        # song's screen does for the song after it (it stays): an error as it is played
-        # (opening_over) leaves it out.
+        # song's screen does for the song after it (it stays; a radio channel's goes, so the
+        # mark draws): an error as it is played (opening_over) leaves it out.
         self._opening_due = not self.controller.session.shows_picture() and not (
-            is_music(path) and self.controller.sound_shown()
+            is_music(path) and self.controller.song_shown()
         )
         play()
         target = self.controller.now_playing()

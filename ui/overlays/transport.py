@@ -502,6 +502,7 @@ class Transport(Overlay):
         self._shuffle = False
         self._repeat = "off"  # REPEAT_MODES
         self._has_list = False  # an album list: shuffle and the next track act
+        self._has_next = False  # something follows: the next track acts (set_audio_state)
         self._level_drag = False  # the volume's bar is being pressed or dragged
         self._title = ""
         self._logo: QPixmap | None = None
@@ -591,14 +592,19 @@ class Transport(Overlay):
         shows them, the dock draws none). It stays up until another mode or end_audio()."""
         self._set_mode(False, title, subtitle, audio=True)
 
-    def set_audio_state(self, shuffle: bool, repeat: str, has_list: bool) -> None:
+    def set_audio_state(
+        self, shuffle: bool, repeat: str, has_list: bool, has_next: Optional[bool] = None
+    ) -> None:
         """The dock's toggles: shuffle on, `repeat` one of REPEAT_MODES, and whether there is
-        an album list (without one shuffle and the next track are dim and do nothing)."""
+        an album list (without one shuffle and the next track are dim and do nothing).
+        `has_next`: whether something follows all the same (default: the list's; with no
+        list, an audio-only episode's next one in its folder, a playlist's next entry)."""
         if repeat not in REPEAT_MODES:
             raise ValueError(f"Unknown repeat: {repeat!r}")
-        state = (bool(shuffle), repeat, bool(has_list))
-        if state != (self._shuffle, self._repeat, self._has_list):
-            self._shuffle, self._repeat, self._has_list = state
+        following = bool(has_list) if has_next is None else bool(has_next)
+        state = (bool(shuffle), repeat, bool(has_list), following)
+        if state != (self._shuffle, self._repeat, self._has_list, self._has_next):
+            self._shuffle, self._repeat, self._has_list, self._has_next = state
             self.update()
             self._controls_changed()
 
@@ -1853,7 +1859,7 @@ class Transport(Overlay):
             draw_icon(p, self.icon(name), rects[name], color)
         draw_icon(p, "prev", rects["prev_track"], qcolor(_DOCK_TEXT))
         inert = qcolor(_DOCK_TEXT, _DOCK_INERT_ALPHA)
-        draw_icon(p, "next", rects["next_track"], qcolor(_DOCK_TEXT) if self._has_list else inert)
+        draw_icon(p, "next", rects["next_track"], qcolor(_DOCK_TEXT) if self._has_next else inert)
         self._paint_dock_play(p, rects["play"], k)
         # The volume: the speaker (lit while the mixer shows, as a film's), then its level.
         held = self._held == "volume"
@@ -2494,7 +2500,7 @@ class Transport(Overlay):
             elif name == "prev_track":
                 self.prevTrackRequested.emit()
             elif name == "next_track":
-                if self._has_list:  # dim without an album list: nothing after this song
+                if self._has_next:  # dim when nothing follows (no list, no next episode)
                     self.nextTrackRequested.emit()
             elif name == "shuffle":
                 if self._has_list:
