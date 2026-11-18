@@ -162,7 +162,7 @@ def subtitle_paths(paths: Iterable[str]) -> list[str]:
 
 def auto_language_text() -> str:
     """AI captions' Auto: the language the audio track or the channel names, else the default
-    one, else the speech model's guess."""
+    one (channels and providers' films only, 2.11.1), else the speech model's guess."""
     return tr("Auto", ctx="a language")  # i18n: the language AI captions hear: found by itself
 
 

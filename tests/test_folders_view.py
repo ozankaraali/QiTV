@@ -532,7 +532,7 @@ class ShelfWindowTests(ListCase):
         """Ruling P4-29: the tab's Add folder is a start from the Library, as a tile is: Esc
         after its play goes back to the Folders tab."""
         self.show()
-        drop(self.window, paths=[self.season])  # a folder on the shelf: the tab shows
+        drop(self.window, paths=[self.season])  # a folder on the shelf
         self.assertTrue(wait_until(lambda: self.lists()), self.calls)
         album = self.folder / "Brannow Fell"
         album.mkdir()
