@@ -42,6 +42,7 @@
   "Afghanistan": "아프가니스탄",
   "After a movie ends, suggest another from the same category. Shows a 10-second countdown.": "영화가 끝나면 같은 카테고리의 다른 영화를 추천해요. 10초 카운트다운을 표시해요.",
   "Albania": "알바니아",
+  "Album": "",
   "Algeria": "알제리",
   "All": "전체",
   "All Live Channels…": "모든 라이브 채널…",
@@ -238,6 +239,7 @@
   "Couldn't start: {why}. QiTV tries again every minute until {until}.": "시작하지 못했어요: {why}. QiTV가 {until}까지 매분 다시 시도해요.",
   "Couldn’t reach the provider to fetch episodes.": "제공자에 연결하지 못해 에피소드를 가져올 수 없었어요.",
   "Country:": "국가:",
+  "Cover": "",
   "Credits and licenses": "크레딧 및 라이선스",
   "Croatia": "크로아티아",
   "Ctrl/⌘ + wheel always changes the volume.": "Ctrl/⌘ + 휠은 항상 볼륨을 바꿔요.",
@@ -644,6 +646,7 @@
   "Nothing was missed.": "놓친 녹화가 없어요.",
   "Nothing was recorded": "녹화된 내용이 없어요",
   "Now": "지금",
+  "Now playing": "",
   "Now playing on the TV": "TV에서 재생 중",
   "OK": "확인",
   "Off": "끔",
@@ -936,6 +939,7 @@
   "Speech model": "음성 모델",
   "Sri Lanka": "스리랑카",
   "Stable": "안정",
+  "Stage": "",
   "Start over": "처음부터 재생",
   "Start with the last channel": "마지막 채널로 시작",
   "Starting captions…": "자막 시작 중…",
@@ -1129,6 +1133,7 @@
   "Unmute this tile": "이 타일 음소거 해제",
   "Untitled": "제목 없음",
   "Up": "위",
+  "Up next · {n}": "",
   "Update Available": "업데이트 있음",
   "Update Check Failed": "업데이트 확인 실패",
   "Update Downloaded": "업데이트 다운로드 완료",
@@ -1183,6 +1188,8 @@
   "Where your provider gives a film or series no poster, story, year, running time, genres, rating or cast, the Library shows TMDB's. QiTV sends TMDB the title and its year, nothing about you.": "제공자가 영화나 시리즈의 포스터, 줄거리, 연도, 상영 시간, 장르, 평점, 출연진을 주지 않으면 라이브러리에 TMDB 정보를 표시해요. QiTV는 TMDB에 제목과 연도만 보내고, 사용자에 대한 정보는 보내지 않아요.",
   "Windows then asks you to confirm in its Default Apps settings.": "그다음 Windows의 “기본 앱” 설정에서 확인하라는 요청이 나와요.",
   "Without disk, each picture keeps its memory per stream (picture-in-picture's small picture always does), and only the channel left last keeps its buffer.\n\nThis is temporary playback history, not a permanent recording. The cache size is the total for every channel's buffer: when it fills, the oldest content goes first; anything older than 24 hours goes too. The buffer keeps filling while paused or rewound, and stops when you leave the channel.\n\nAfter Save, enabling and size changes apply on the next channel you open; turning the disk off removes what it kept.": "디스크를 쓰지 않으면 각 화면은 스트림당 메모리를 쓰고(PIP의 작은 화면은 항상 그래요), 마지막으로 떠난 채널만 버퍼를 보관해요.\n\n이것은 임시 재생 기록이지 영구 녹화가 아니에요. 캐시 크기는 모든 채널 버퍼의 합계예요: 가득 차면 오래된 것부터 지워지고, 24시간보다 오래된 것도 지워져요. 버퍼는 일시정지나 되감기 중에도 계속 채워지고, 채널을 떠나면 멈춰요.\n\n“저장” 후 사용 설정과 크기 변경은 다음에 여는 채널부터 적용돼요. 디스크를 끄면 보관하던 내용이 지워져요.",
+  "Words": "",
+  "Words · {language}": "",
   "Would you like to download and install the update?": "업데이트를 다운로드해 설치할까요?",
   "Would you like to open the release page?": "릴리스 페이지를 열까요?",
   "Writing": "쓰는 중",
@@ -1342,6 +1349,9 @@
   },
   "{n} title": {
     "other": "{n}개 작품"
+  },
+  "{n} track": {
+    "other": ""
   },
   "{provider}: {message}": "{provider}: {message}",
   "{quality}, converted": "{quality}, 변환",

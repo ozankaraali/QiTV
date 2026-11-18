@@ -42,6 +42,7 @@
   "Afghanistan": "Afghanistani",
   "After a movie ends, suggest another from the same category. Shows a 10-second countdown.": "Filamu ikiisha, pendekeza nyingine ya kategoria hiyo hiyo. Huonyesha muda wa kuhesabu wa sekunde 10.",
   "Albania": "Albania",
+  "Album": "",
   "Algeria": "Aljeria",
   "All": "Zote",
   "All Live Channels…": "Chaneli zote za moja kwa moja…",
@@ -240,6 +241,7 @@
   "Couldn't start: {why}. QiTV tries again every minute until {until}.": "Imeshindwa kuanza: {why}. QiTV hujaribu tena kila dakika hadi {until}.",
   "Couldn’t reach the provider to fetch episodes.": "Haikuweza kufikia mtoa huduma ili kuleta sehemu.",
   "Country:": "Nchi:",
+  "Cover": "",
   "Credits and licenses": "Shukrani na leseni",
   "Croatia": "Kroatia",
   "Ctrl/⌘ + wheel always changes the volume.": "Ctrl/⌘ + gurudumu hubadilisha sauti kila mara.",
@@ -650,6 +652,7 @@
   "Nothing was missed.": "Hakuna kilichokosekana.",
   "Nothing was recorded": "Hakuna kilichorekodiwa",
   "Now": "Sasa",
+  "Now playing": "",
   "Now playing on the TV": "Sasa kinacheza kwenye TV",
   "OK": "Sawa",
   "Off": "Imezimwa",
@@ -945,6 +948,7 @@
   "Speech model": "Modeli ya usemi",
   "Sri Lanka": "Sri Lanka",
   "Stable": "Imara",
+  "Stage": "",
   "Start over": "Anza mwanzo",
   "Start with the last channel": "Anza na chaneli ya mwisho",
   "Starting captions…": "Inaanzisha manukuu…",
@@ -1139,6 +1143,7 @@
   "Unmute this tile": "Washa sauti ya kigae hiki",
   "Untitled": "Bila jina",
   "Up": "Juu",
+  "Up next · {n}": "",
   "Update Available": "Sasisho linapatikana",
   "Update Check Failed": "Kuangalia masasisho kumeshindwa",
   "Update Downloaded": "Sasisho limepakuliwa",
@@ -1193,6 +1198,8 @@
   "Where your provider gives a film or series no poster, story, year, running time, genres, rating or cast, the Library shows TMDB's. QiTV sends TMDB the title and its year, nothing about you.": "Pale mtoa huduma wako hatoi bango, hadithi, mwaka, muda, aina, ukadiriaji au waigizaji wa filamu au mfululizo, Maktaba huonyesha vya TMDB. QiTV hutuma kwa TMDB jina na mwaka wake tu, hakuna chochote kukuhusu.",
   "Windows then asks you to confirm in its Default Apps settings.": "Kisha Windows itakuomba uthibitishe kwenye mipangilio yake ya Programu chaguo-msingi.",
   "Without disk, each picture keeps its memory per stream (picture-in-picture's small picture always does), and only the channel left last keeps its buffer.\n\nThis is temporary playback history, not a permanent recording. The cache size is the total for every channel's buffer: when it fills, the oldest content goes first; anything older than 24 hours goes too. The buffer keeps filling while paused or rewound, and stops when you leave the channel.\n\nAfter Save, enabling and size changes apply on the next channel you open; turning the disk off removes what it kept.": "Bila diski, kila picha huweka RAM yake kwa kila mtiririko (picha ndogo ya picha ndani ya picha hufanya hivyo kila mara), na chaneli iliyoachwa mwisho pekee ndiyo huweka bafa yake.\n\nHii ni historia ya muda ya uchezaji, si rekodi ya kudumu. Ukubwa wa akiba ni jumla ya bafa za chaneli zote: ikijaa, maudhui ya zamani zaidi huondoka kwanza; chochote chenye zaidi ya saa 24 huondoka pia. Bafa huendelea kujaa ukisitisha au ukirudisha nyuma, na husimama unapoiacha chaneli.\n\nBaada ya Hifadhi, kuwasha na mabadiliko ya ukubwa hutumika kwenye chaneli inayofuata utakayofungua; kuzima diski huondoa kilichohifadhiwa.",
+  "Words": "",
+  "Words · {language}": "",
   "Would you like to download and install the update?": "Je, ungependa kupakua na kusakinisha sasisho?",
   "Would you like to open the release page?": "Je, ungependa kufungua ukurasa wa toleo?",
   "Writing": "Inaandikwa",
@@ -1377,6 +1384,9 @@
   "{n} title": {
     "one": "kipengee {n}",
     "other": "vipengee {n}"
+  },
+  "{n} track": {
+    "other": ""
   },
   "{provider}: {message}": "{provider}: {message}",
   "{quality}, converted": "{quality}, imegeuzwa",

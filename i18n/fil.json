@@ -42,6 +42,7 @@
   "Afghanistan": "Afghanistan",
   "After a movie ends, suggest another from the same category. Shows a 10-second countdown.": "Pagkatapos ng pelikula, magmungkahi ng isa pa mula sa parehong kategorya. May 10 segundong countdown.",
   "Albania": "Albania",
+  "Album": "",
   "Algeria": "Algeria",
   "All": "Lahat",
   "All Live Channels…": "Lahat ng Live Channel…",
@@ -240,6 +241,7 @@
   "Couldn't start: {why}. QiTV tries again every minute until {until}.": "Hindi makapagsimula: {why}. Sinusubukan ulit ng QiTV bawat minuto hanggang {until}.",
   "Couldn’t reach the provider to fetch episodes.": "Hindi maabot ang provider para kunin ang mga episode.",
   "Country:": "Bansa:",
+  "Cover": "",
   "Credits and licenses": "Mga credit at lisensya",
   "Croatia": "Croatia",
   "Ctrl/⌘ + wheel always changes the volume.": "Palaging binabago ng Ctrl/⌘ + wheel ang volume.",
@@ -650,6 +652,7 @@
   "Nothing was missed.": "Walang nalampasan.",
   "Nothing was recorded": "Walang na-record",
   "Now": "Ngayon",
+  "Now playing": "",
   "Now playing on the TV": "Nagpe-play na sa TV",
   "OK": "OK",
   "Off": "Off",
@@ -945,6 +948,7 @@
   "Speech model": "Speech model",
   "Sri Lanka": "Sri Lanka",
   "Stable": "Matatag",
+  "Stage": "",
   "Start over": "Simulan mula umpisa",
   "Start with the last channel": "Magsimula sa huling channel",
   "Starting captions…": "Sinisimulan ang mga caption…",
@@ -1139,6 +1143,7 @@
   "Unmute this tile": "I-unmute ang tile na ito",
   "Untitled": "Walang pamagat",
   "Up": "Pataas",
+  "Up next · {n}": "",
   "Update Available": "May Update",
   "Update Check Failed": "Hindi Na-check ang Update",
   "Update Downloaded": "Na-download ang Update",
@@ -1193,6 +1198,8 @@
   "Where your provider gives a film or series no poster, story, year, running time, genres, rating or cast, the Library shows TMDB's. QiTV sends TMDB the title and its year, nothing about you.": "Kapag walang poster, kuwento, taon, haba, genre, rating o cast ang isang pelikula o serye mula sa provider mo, ang sa TMDB ang ipinapakita ng Library. Ipinapadala lang ng QiTV sa TMDB ang title at taon nito, walang tungkol sa iyo.",
   "Windows then asks you to confirm in its Default Apps settings.": "Pagkatapos, hihilingin ng Windows na kumpirmahin mo ito sa Default apps settings nito.",
   "Without disk, each picture keeps its memory per stream (picture-in-picture's small picture always does), and only the channel left last keeps its buffer.\n\nThis is temporary playback history, not a permanent recording. The cache size is the total for every channel's buffer: when it fills, the oldest content goes first; anything older than 24 hours goes too. The buffer keeps filling while paused or rewound, and stops when you leave the channel.\n\nAfter Save, enabling and size changes apply on the next channel you open; turning the disk off removes what it kept.": "Kung walang disk, pinapanatili ng bawat larawan ang memory nito bawat stream (palagi itong ginagawa ng maliit na larawan ng picture-in-picture), at ang huling iniwang channel lang ang nagpapanatili ng buffer nito.\n\nPansamantalang history ito ng playback, hindi permanenteng recording. Ang laki ng cache ay ang kabuuan para sa buffer ng lahat ng channel: kapag napuno, ang pinakalumang content ang unang aalisin; aalisin din ang anumang mas luma sa 24 oras. Patuloy na napupuno ang buffer habang naka-pause o naka-rewind, at humihinto kapag umalis ka sa channel.\n\nPagkatapos ng I-save, ilalapat ang pag-enable at mga pagbabago sa laki sa susunod na channel na bubuksan mo; binubura ng pag-off sa disk ang naitabi nito.",
+  "Words": "",
+  "Words · {language}": "",
   "Would you like to download and install the update?": "Gusto mo bang i-download at i-install ang update?",
   "Would you like to open the release page?": "Gusto mo bang buksan ang release page?",
   "Writing": "Isinusulat",
@@ -1377,6 +1384,9 @@
   "{n} title": {
     "one": "{n} title",
     "other": "{n} na title"
+  },
+  "{n} track": {
+    "other": ""
   },
   "{provider}: {message}": "{provider}: {message}",
   "{quality}, converted": "{quality}, na-convert",

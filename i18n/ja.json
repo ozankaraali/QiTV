@@ -42,6 +42,7 @@
   "Afghanistan": "アフガニスタン",
   "After a movie ends, suggest another from the same category. Shows a 10-second countdown.": "映画の終了後、同じカテゴリーから別の作品をおすすめします。10秒のカウントダウンを表示します。",
   "Albania": "アルバニア",
+  "Album": "",
   "Algeria": "アルジェリア",
   "All": "すべて",
   "All Live Channels…": "すべてのライブチャンネル…",
@@ -238,6 +239,7 @@
   "Couldn't start: {why}. QiTV tries again every minute until {until}.": "開始できませんでした: {why}。QiTVは{until}まで毎分再試行します。",
   "Couldn’t reach the provider to fetch episodes.": "プロバイダーに接続できず、エピソードを取得できませんでした。",
   "Country:": "国:",
+  "Cover": "",
   "Credits and licenses": "クレジットとライセンス",
   "Croatia": "クロアチア",
   "Ctrl/⌘ + wheel always changes the volume.": "Ctrl/⌘ + ホイールは常に音量を変えます。",
@@ -644,6 +646,7 @@
   "Nothing was missed.": "見逃した録画はありません。",
   "Nothing was recorded": "何も録画されませんでした",
   "Now": "現在",
+  "Now playing": "",
   "Now playing on the TV": "テレビで再生中",
   "OK": "OK",
   "Off": "オフ",
@@ -936,6 +939,7 @@
   "Speech model": "音声モデル",
   "Sri Lanka": "スリランカ",
   "Stable": "安定",
+  "Stage": "",
   "Start over": "最初から再生",
   "Start with the last channel": "前回のチャンネルで起動",
   "Starting captions…": "字幕を開始しています…",
@@ -1129,6 +1133,7 @@
   "Unmute this tile": "このタイルのミュートを解除",
   "Untitled": "無題",
   "Up": "上",
+  "Up next · {n}": "",
   "Update Available": "アップデートがあります",
   "Update Check Failed": "アップデートの確認に失敗",
   "Update Downloaded": "アップデートをダウンロードしました",
@@ -1183,6 +1188,8 @@
   "Where your provider gives a film or series no poster, story, year, running time, genres, rating or cast, the Library shows TMDB's. QiTV sends TMDB the title and its year, nothing about you.": "プロバイダーが映画やシリーズのポスター、あらすじ、年、上映時間、ジャンル、評価、出演者を提供していない場合、ライブラリはTMDBの情報を表示します。QiTVがTMDBに送るのはタイトルと年だけで、利用者に関する情報は一切送りません。",
   "Windows then asks you to confirm in its Default Apps settings.": "このあとWindowsの「既定のアプリ」設定で確認を求められます。",
   "Without disk, each picture keeps its memory per stream (picture-in-picture's small picture always does), and only the channel left last keeps its buffer.\n\nThis is temporary playback history, not a permanent recording. The cache size is the total for every channel's buffer: when it fills, the oldest content goes first; anything older than 24 hours goes too. The buffer keeps filling while paused or rewound, and stops when you leave the channel.\n\nAfter Save, enabling and size changes apply on the next channel you open; turning the disk off removes what it kept.": "ディスクを使わない場合、各画面はストリームごとのメモリを使い（ピクチャ・イン・ピクチャの小画面は常にそう）、バッファを保持するのは最後に離れたチャンネルだけです。\n\nこれは一時的な再生履歴で、永続的な録画ではありません。キャッシュサイズはすべてのチャンネルのバッファの合計です。いっぱいになると古いものから削除され、24時間より古いものも削除されます。バッファは一時停止中や巻き戻し中も増え続け、チャンネルを離れると止まります。\n\n「保存」後、有効化とサイズの変更は次に開くチャンネルから適用されます。ディスクをオフにすると、保持していた内容は削除されます。",
+  "Words": "",
+  "Words · {language}": "",
   "Would you like to download and install the update?": "アップデートをダウンロードしてインストールしますか？",
   "Would you like to open the release page?": "リリースページを開きますか？",
   "Writing": "書き込み中",
@@ -1342,6 +1349,9 @@
   },
   "{n} title": {
     "other": "{n}作品"
+  },
+  "{n} track": {
+    "other": ""
   },
   "{provider}: {message}": "{provider}: {message}",
   "{quality}, converted": "{quality}（変換）",

@@ -42,6 +42,7 @@
   "Afghanistan": "Afganistan",
   "After a movie ends, suggest another from the same category. Shows a 10-second countdown.": "Bir film bitince aynı kategoriden başka bir film önerir. 10 saniyelik geri sayım gösterir.",
   "Albania": "Arnavutluk",
+  "Album": "Albüm",
   "Algeria": "Cezayir",
   "All": "Tümü",
   "All Live Channels…": "Tüm canlı kanallar…",
@@ -238,6 +239,7 @@
   "Couldn't start: {why}. QiTV tries again every minute until {until}.": "Başlatılamadı: {why}. QiTV {until} saatine kadar her dakika yeniden dener.",
   "Couldn’t reach the provider to fetch episodes.": "Bölümleri almak için sağlayıcıya ulaşılamadı.",
   "Country:": "Ülke:",
+  "Cover": "Kapak",
   "Credits and licenses": "Emeği geçenler ve lisanslar",
   "Croatia": "Hırvatistan",
   "Ctrl/⌘ + wheel always changes the volume.": "Ctrl/⌘ + tekerlek her zaman ses düzeyini değiştirir.",
@@ -644,6 +646,7 @@
   "Nothing was missed.": "Kaçırılan bir şey yok.",
   "Nothing was recorded": "Hiçbir şey kaydedilmedi",
   "Now": "Şimdi",
+  "Now playing": "Şimdi çalıyor",
   "Now playing on the TV": "Şimdi TV'de oynatılıyor",
   "OK": "Tamam",
   "Off": "Kapalı",
@@ -936,6 +939,7 @@
   "Speech model": "Konuşma modeli",
   "Sri Lanka": "Sri Lanka",
   "Stable": "Kararlı",
+  "Stage": "Sahne",
   "Start over": "Baştan başla",
   "Start with the last channel": "Son kanalla başla",
   "Starting captions…": "Altyazılar başlatılıyor…",
@@ -1129,6 +1133,7 @@
   "Unmute this tile": "Bu ekranın sesini aç",
   "Untitled": "Adsız",
   "Up": "Yukarı",
+  "Up next · {n}": "Sıradaki · {n}",
   "Update Available": "Güncelleme mevcut",
   "Update Check Failed": "Güncelleme denetimi başarısız",
   "Update Downloaded": "Güncelleme indirildi",
@@ -1183,6 +1188,8 @@
   "Where your provider gives a film or series no poster, story, year, running time, genres, rating or cast, the Library shows TMDB's. QiTV sends TMDB the title and its year, nothing about you.": "Sağlayıcınız bir film ya da diziye afiş, konu, yıl, süre, tür, puan ya da oyuncu vermediğinde Kitaplık TMDB'dekileri gösterir. QiTV, TMDB'ye yalnızca adı ve yılını gönderir; sizin hakkınızda hiçbir şey göndermez.",
   "Windows then asks you to confirm in its Default Apps settings.": "Windows ardından bunu Varsayılan uygulamalar ayarlarında onaylamanızı ister.",
   "Without disk, each picture keeps its memory per stream (picture-in-picture's small picture always does), and only the channel left last keeps its buffer.\n\nThis is temporary playback history, not a permanent recording. The cache size is the total for every channel's buffer: when it fills, the oldest content goes first; anything older than 24 hours goes too. The buffer keeps filling while paused or rewound, and stops when you leave the channel.\n\nAfter Save, enabling and size changes apply on the next channel you open; turning the disk off removes what it kept.": "Disk olmadan her resim yalnızca kendi yayın başına belleğini kullanır (resim içinde resmin küçük resmi her zaman böyle yapar) ve arabelleğini yalnızca en son ayrılınan kanal korur.\n\nBu kalıcı bir kayıt değil, geçici bir oynatma geçmişidir. Önbellek boyutu tüm kanalların arabellekleri için toplamdır: dolduğunda önce en eski içerik silinir; 24 saatten eski olan da silinir. Arabellek duraklatıldığında veya geri sarıldığında dolmaya devam eder, kanaldan ayrıldığınızda durur.\n\nKaydet'ten sonra açıp kapatma ve boyut değişiklikleri açtığınız bir sonraki kanalda uygulanır; diski kapatmak orada saklananları siler.",
+  "Words": "Sözler",
+  "Words · {language}": "Sözler · {language}",
   "Would you like to download and install the update?": "Güncellemeyi indirip yüklemek ister misiniz?",
   "Would you like to open the release page?": "Sürüm sayfasını açmak ister misiniz?",
   "Writing": "Yazılıyor",
@@ -1344,6 +1351,9 @@
   },
   "{n} title": {
     "other": "{n} başlık"
+  },
+  "{n} track": {
+    "other": "{n} parça"
   },
   "{provider}: {message}": "{provider}: {message}",
   "{quality}, converted": "{quality}, dönüştürülmüş",

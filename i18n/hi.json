@@ -42,6 +42,7 @@
   "Afghanistan": "अफ़ग़ानिस्तान",
   "After a movie ends, suggest another from the same category. Shows a 10-second countdown.": "फ़िल्म खत्म होने पर उसी कैटेगरी से दूसरी फ़िल्म सुझाएँ। 10 सेकंड का काउंटडाउन दिखता है।",
   "Albania": "अल्बानिया",
+  "Album": "",
   "Algeria": "अल्जीरिया",
   "All": "सभी",
   "All Live Channels…": "सभी लाइव चैनल…",
@@ -240,6 +241,7 @@
   "Couldn't start: {why}. QiTV tries again every minute until {until}.": "शुरू नहीं हो सका: {why}। QiTV {until} तक हर मिनट फिर कोशिश करता है।",
   "Couldn’t reach the provider to fetch episodes.": "एपिसोड लाने के लिए प्रोवाइडर तक नहीं पहुँच सके।",
   "Country:": "देश:",
+  "Cover": "",
   "Credits and licenses": "आभार और लाइसेंस",
   "Croatia": "क्रोएशिया",
   "Ctrl/⌘ + wheel always changes the volume.": "Ctrl/⌘ + व्हील से हमेशा वॉल्यूम बदलता है।",
@@ -650,6 +652,7 @@
   "Nothing was missed.": "कुछ नहीं छूटा।",
   "Nothing was recorded": "कुछ रिकॉर्ड नहीं हुआ",
   "Now": "अभी",
+  "Now playing": "",
   "Now playing on the TV": "अब टीवी पर चल रहा है",
   "OK": "OK",
   "Off": "बंद",
@@ -945,6 +948,7 @@
   "Speech model": "स्पीच मॉडल",
   "Sri Lanka": "श्रीलंका",
   "Stable": "स्थिर",
+  "Stage": "",
   "Start over": "शुरू से चलाएँ",
   "Start with the last channel": "आखिरी चैनल से शुरू करें",
   "Starting captions…": "सबटाइटल शुरू हो रहे हैं…",
@@ -1139,6 +1143,7 @@
   "Unmute this tile": "यह टाइल अनम्यूट करें",
   "Untitled": "बिना नाम",
   "Up": "ऊपर",
+  "Up next · {n}": "",
   "Update Available": "अपडेट उपलब्ध",
   "Update Check Failed": "अपडेट जाँच विफल",
   "Update Downloaded": "अपडेट डाउनलोड हुआ",
@@ -1193,6 +1198,8 @@
   "Where your provider gives a film or series no poster, story, year, running time, genres, rating or cast, the Library shows TMDB's. QiTV sends TMDB the title and its year, nothing about you.": "जहाँ आपका प्रोवाइडर किसी फ़िल्म या सीरीज़ का पोस्टर, कहानी, साल, अवधि, शैलियाँ, रेटिंग या कलाकार नहीं देता, वहाँ लाइब्रेरी TMDB की जानकारी दिखाती है। QiTV, TMDB को सिर्फ़ टाइटल और उसका साल भेजता है, आपके बारे में कुछ नहीं।",
   "Windows then asks you to confirm in its Default Apps settings.": "इसके बाद Windows अपनी “डिफ़ॉल्ट ऐप्स” सेटिंग्स में पुष्टि करने को कहेगा।",
   "Without disk, each picture keeps its memory per stream (picture-in-picture's small picture always does), and only the channel left last keeps its buffer.\n\nThis is temporary playback history, not a permanent recording. The cache size is the total for every channel's buffer: when it fills, the oldest content goes first; anything older than 24 hours goes too. The buffer keeps filling while paused or rewound, and stops when you leave the channel.\n\nAfter Save, enabling and size changes apply on the next channel you open; turning the disk off removes what it kept.": "डिस्क के बिना, हर पिक्चर अपनी “हर स्ट्रीम की मेमोरी” रखती है (पिक्चर-इन-पिक्चर की छोटी पिक्चर हमेशा ऐसा करती है), और सिर्फ़ आखिर में छोड़ा गया चैनल अपना बफ़र रखता है।\n\nयह अस्थायी प्लेबैक हिस्ट्री है, स्थायी रिकॉर्डिंग नहीं। कैश आकार सभी चैनलों के बफ़र का कुल योग है: भरने पर सबसे पुरानी सामग्री पहले हटती है; 24 घंटे से पुरानी सामग्री भी हट जाती है। पॉज़ या रिवाइंड करने पर भी बफ़र भरता रहता है, और चैनल छोड़ने पर रुक जाता है।\n\nसेव करने के बाद, चालू करना और आकार के बदलाव अगले खोले गए चैनल पर लागू होते हैं; डिस्क बंद करने से उसमें रखा सब हट जाता है।",
+  "Words": "",
+  "Words · {language}": "",
   "Would you like to download and install the update?": "क्या आप अपडेट डाउनलोड और इंस्टॉल करना चाहते हैं?",
   "Would you like to open the release page?": "क्या आप रिलीज़ पेज खोलना चाहते हैं?",
   "Writing": "लिखी जा रही है",
@@ -1377,6 +1384,9 @@
   "{n} title": {
     "one": "{n} टाइटल",
     "other": "{n} टाइटल"
+  },
+  "{n} track": {
+    "other": ""
   },
   "{provider}: {message}": "{provider}: {message}",
   "{quality}, converted": "{quality}, कन्वर्ट किया हुआ",

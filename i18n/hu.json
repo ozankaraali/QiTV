@@ -42,6 +42,7 @@
   "Afghanistan": "Afganisztán",
   "After a movie ends, suggest another from the same category. Shows a 10-second countdown.": "Egy film vége után ajánl egy másikat ugyanabból a kategóriából. 10 másodperces visszaszámlálást mutat.",
   "Albania": "Albánia",
+  "Album": "",
   "Algeria": "Algéria",
   "All": "Összes",
   "All Live Channels…": "Összes élő csatorna…",
@@ -240,6 +241,7 @@
   "Couldn't start: {why}. QiTV tries again every minute until {until}.": "Nem sikerült elindítani: {why}. A QiTV {until}-ig percenként újrapróbálja.",
   "Couldn’t reach the provider to fetch episodes.": "Nem sikerült elérni a szolgáltatót az epizódok lekéréséhez.",
   "Country:": "Ország:",
+  "Cover": "",
   "Credits and licenses": "Köszönetnyilvánítás és licencek",
   "Croatia": "Horvátország",
   "Ctrl/⌘ + wheel always changes the volume.": "A Ctrl/⌘ + görgő mindig a hangerőt állítja.",
@@ -650,6 +652,7 @@
   "Nothing was missed.": "Semmi sem maradt ki.",
   "Nothing was recorded": "Semmi sem lett rögzítve",
   "Now": "Most",
+  "Now playing": "",
   "Now playing on the TV": "Most a TV-n megy",
   "OK": "OK",
   "Off": "Ki",
@@ -945,6 +948,7 @@
   "Speech model": "Beszédmodell",
   "Sri Lanka": "Srí Lanka",
   "Stable": "Stabil",
+  "Stage": "",
   "Start over": "Elölről",
   "Start with the last channel": "Indítás az utolsó csatornával",
   "Starting captions…": "Feliratok indítása…",
@@ -1139,6 +1143,7 @@
   "Unmute this tile": "Kép némításának feloldása",
   "Untitled": "Névtelen",
   "Up": "Fel",
+  "Up next · {n}": "",
   "Update Available": "Frissítés érhető el",
   "Update Check Failed": "Frissítéskeresési hiba",
   "Update Downloaded": "Frissítés letöltve",
@@ -1193,6 +1198,8 @@
   "Where your provider gives a film or series no poster, story, year, running time, genres, rating or cast, the Library shows TMDB's. QiTV sends TMDB the title and its year, nothing about you.": "Ha a szolgáltatód egy filmhez vagy sorozathoz nem ad plakátot, történetet, évet, játékidőt, műfajt, értékelést vagy szereplőket, a Médiatár a TMDB adatait mutatja. A QiTV csak a címet és az évet küldi el a TMDB-nek, rólad semmit.",
   "Windows then asks you to confirm in its Default Apps settings.": "A Windows ezután az Alapértelmezett alkalmazások beállításaiban kér megerősítést.",
   "Without disk, each picture keeps its memory per stream (picture-in-picture's small picture always does), and only the channel left last keeps its buffer.\n\nThis is temporary playback history, not a permanent recording. The cache size is the total for every channel's buffer: when it fills, the oldest content goes first; anything older than 24 hours goes too. The buffer keeps filling while paused or rewound, and stops when you leave the channel.\n\nAfter Save, enabling and size changes apply on the next channel you open; turning the disk off removes what it kept.": "Lemez nélkül minden kép a streamenkénti memóriáját használja (a kép a képben kis képe mindig így tesz), és csak az utoljára elhagyott csatorna tartja meg a pufferét.\n\nEz ideiglenes lejátszási előzmény, nem állandó felvétel. A gyorsítótár mérete az összes csatorna pufferének együttes mérete: ha megtelik, a legrégebbi tartalom törlődik először; a 24 óránál régebbi is törlődik. A puffer szüneteltetés vagy visszatekerés közben is töltődik, és leáll, amikor elhagyod a csatornát.\n\nMentés után a bekapcsolás és a méretváltozás a következő megnyitott csatornán lép életbe; a lemez kikapcsolása törli, amit tárolt.",
+  "Words": "",
+  "Words · {language}": "",
   "Would you like to download and install the update?": "Szeretnéd letölteni és telepíteni a frissítést?",
   "Would you like to open the release page?": "Szeretnéd megnyitni a kiadási oldalt?",
   "Writing": "Írás folyamatban",
@@ -1377,6 +1384,9 @@
   "{n} title": {
     "one": "{n} cím",
     "other": "{n} cím"
+  },
+  "{n} track": {
+    "other": ""
   },
   "{provider}: {message}": "{provider}: {message}",
   "{quality}, converted": "{quality}, átalakítva",

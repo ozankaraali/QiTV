@@ -42,6 +42,7 @@
   "Afghanistan": "อัฟกานิสถาน",
   "After a movie ends, suggest another from the same category. Shows a 10-second countdown.": "เมื่อภาพยนตร์จบ จะแนะนำเรื่องอื่นจากหมวดเดียวกัน พร้อมนับถอยหลัง 10 วินาที",
   "Albania": "แอลเบเนีย",
+  "Album": "",
   "Algeria": "แอลจีเรีย",
   "All": "ทั้งหมด",
   "All Live Channels…": "ช่องสดทั้งหมด…",
@@ -238,6 +239,7 @@
   "Couldn't start: {why}. QiTV tries again every minute until {until}.": "เริ่มไม่ได้: {why} QiTV จะลองใหม่ทุกนาทีจนถึง {until}",
   "Couldn’t reach the provider to fetch episodes.": "เชื่อมต่อผู้ให้บริการเพื่อดึงตอนต่างๆ ไม่ได้",
   "Country:": "ประเทศ:",
+  "Cover": "",
   "Credits and licenses": "เครดิตและสัญญาอนุญาต",
   "Croatia": "โครเอเชีย",
   "Ctrl/⌘ + wheel always changes the volume.": "Ctrl/⌘ + ล้อเมาส์ จะปรับเสียงเสมอ",
@@ -644,6 +646,7 @@
   "Nothing was missed.": "ไม่มีอะไรพลาด",
   "Nothing was recorded": "ไม่มีอะไรถูกบันทึก",
   "Now": "ตอนนี้",
+  "Now playing": "",
   "Now playing on the TV": "กำลังเล่นบนทีวี",
   "OK": "ตกลง",
   "Off": "ปิด",
@@ -936,6 +939,7 @@
   "Speech model": "โมเดลเสียงพูด",
   "Sri Lanka": "ศรีลังกา",
   "Stable": "เสถียร",
+  "Stage": "",
   "Start over": "เริ่มใหม่",
   "Start with the last channel": "เริ่มด้วยช่องล่าสุด",
   "Starting captions…": "กำลังเริ่มคำบรรยาย…",
@@ -1129,6 +1133,7 @@
   "Unmute this tile": "เปิดเสียงจอนี้",
   "Untitled": "ไม่มีชื่อ",
   "Up": "ขึ้น",
+  "Up next · {n}": "",
   "Update Available": "มีอัปเดต",
   "Update Check Failed": "ตรวจหาอัปเดตไม่สำเร็จ",
   "Update Downloaded": "ดาวน์โหลดอัปเดตแล้ว",
@@ -1183,6 +1188,8 @@
   "Where your provider gives a film or series no poster, story, year, running time, genres, rating or cast, the Library shows TMDB's. QiTV sends TMDB the title and its year, nothing about you.": "เมื่อผู้ให้บริการไม่มีโปสเตอร์ เรื่องย่อ ปี ความยาว ประเภท คะแนน หรือนักแสดงของภาพยนตร์หรือซีรีส์ คลังสื่อจะแสดงข้อมูลจาก TMDB แทน QiTV ส่งเพียงชื่อเรื่องและปีให้ TMDB ไม่มีข้อมูลใดเกี่ยวกับคุณ",
   "Windows then asks you to confirm in its Default Apps settings.": "จากนั้น Windows จะให้คุณยืนยันในการตั้งค่า “แอปเริ่มต้น”",
   "Without disk, each picture keeps its memory per stream (picture-in-picture's small picture always does), and only the channel left last keeps its buffer.\n\nThis is temporary playback history, not a permanent recording. The cache size is the total for every channel's buffer: when it fills, the oldest content goes first; anything older than 24 hours goes too. The buffer keeps filling while paused or rewound, and stops when you leave the channel.\n\nAfter Save, enabling and size changes apply on the next channel you open; turning the disk off removes what it kept.": "หากไม่ใช้ดิสก์ แต่ละภาพจะใช้หน่วยความจำต่อสตรีมของตัวเอง (ภาพเล็กของภาพซ้อนภาพใช้แบบนี้เสมอ) และมีเพียงช่องที่ออกล่าสุดที่เก็บบัฟเฟอร์ไว้\n\nนี่คือประวัติการเล่นชั่วคราว ไม่ใช่การบันทึกถาวร ขนาดแคชคือขนาดรวมของบัฟเฟอร์ทุกช่อง: เมื่อเต็ม เนื้อหาเก่าที่สุดจะถูกลบก่อน และส่วนที่เก่ากว่า 24 ชั่วโมงก็จะถูกลบด้วย บัฟเฟอร์จะเติมต่อไปขณะหยุดชั่วคราวหรือย้อนกลับ และหยุดเมื่อคุณออกจากช่อง\n\nหลังบันทึก การเปิดใช้และการเปลี่ยนขนาดจะมีผลกับช่องถัดไปที่คุณเปิด การปิดดิสก์จะลบสิ่งที่เก็บไว้",
+  "Words": "",
+  "Words · {language}": "",
   "Would you like to download and install the update?": "ต้องการดาวน์โหลดและติดตั้งอัปเดตไหม?",
   "Would you like to open the release page?": "ต้องการเปิดหน้ารุ่นที่เผยแพร่ไหม?",
   "Writing": "กำลังเขียน",
@@ -1342,6 +1349,9 @@
   },
   "{n} title": {
     "other": "{n} เรื่อง"
+  },
+  "{n} track": {
+    "other": ""
   },
   "{provider}: {message}": "{provider}: {message}",
   "{quality}, converted": "{quality}, แปลงแล้ว",

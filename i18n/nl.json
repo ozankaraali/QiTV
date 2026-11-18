@@ -42,6 +42,7 @@
   "Afghanistan": "Afghanistan",
   "After a movie ends, suggest another from the same category. Shows a 10-second countdown.": "Stel na afloop van een film een andere uit dezelfde categorie voor. Toont 10 seconden aftellen.",
   "Albania": "Albanië",
+  "Album": "",
   "Algeria": "Algerije",
   "All": "Alle",
   "All Live Channels…": "Alle livezenders…",
@@ -240,6 +241,7 @@
   "Couldn't start: {why}. QiTV tries again every minute until {until}.": "Kon niet starten: {why}. QiTV probeert het elke minuut opnieuw tot {until}.",
   "Couldn’t reach the provider to fetch episodes.": "Kon de provider niet bereiken om afleveringen op te halen.",
   "Country:": "Land:",
+  "Cover": "",
   "Credits and licenses": "Credits en licenties",
   "Croatia": "Kroatië",
   "Ctrl/⌘ + wheel always changes the volume.": "Ctrl/⌘ + scrollwiel wijzigt altijd het volume.",
@@ -650,6 +652,7 @@
   "Nothing was missed.": "Er is niets gemist.",
   "Nothing was recorded": "Er is niets opgenomen",
   "Now": "Nu",
+  "Now playing": "",
   "Now playing on the TV": "Speelt nu op de tv",
   "OK": "OK",
   "Off": "Uit",
@@ -945,6 +948,7 @@
   "Speech model": "Spraakmodel",
   "Sri Lanka": "Sri Lanka",
   "Stable": "Stabiel",
+  "Stage": "",
   "Start over": "Vanaf het begin",
   "Start with the last channel": "Beginnen met de laatste zender",
   "Starting captions…": "Ondertitels starten…",
@@ -1139,6 +1143,7 @@
   "Unmute this tile": "Geluid van deze tegel aan",
   "Untitled": "Zonder titel",
   "Up": "Omhoog",
+  "Up next · {n}": "",
   "Update Available": "Update beschikbaar",
   "Update Check Failed": "Zoeken naar updates mislukt",
   "Update Downloaded": "Update gedownload",
@@ -1193,6 +1198,8 @@
   "Where your provider gives a film or series no poster, story, year, running time, genres, rating or cast, the Library shows TMDB's. QiTV sends TMDB the title and its year, nothing about you.": "Als je provider een film of serie geen poster, verhaal, jaar, speelduur, genres, waardering of cast geeft, toont de bibliotheek die van TMDB. QiTV stuurt TMDB de titel en het jaar, niets over jou.",
   "Windows then asks you to confirm in its Default Apps settings.": "Windows vraagt je daarna om te bevestigen in de instellingen voor Standaard-apps.",
   "Without disk, each picture keeps its memory per stream (picture-in-picture's small picture always does), and only the channel left last keeps its buffer.\n\nThis is temporary playback history, not a permanent recording. The cache size is the total for every channel's buffer: when it fills, the oldest content goes first; anything older than 24 hours goes too. The buffer keeps filling while paused or rewound, and stops when you leave the channel.\n\nAfter Save, enabling and size changes apply on the next channel you open; turning the disk off removes what it kept.": "Zonder schijf houdt elk beeld zijn geheugen per stream (het kleine beeld van beeld-in-beeld altijd), en alleen de laatst verlaten zender houdt zijn buffer.\n\nDit is een tijdelijke afspeelgeschiedenis, geen blijvende opname. De cachegrootte is het totaal voor de buffers van alle zenders: als die vol is, gaat het oudste eerst weg; alles ouder dan 24 uur ook. De buffer blijft vullen tijdens pauzeren of terugspoelen, en stopt als je de zender verlaat.\n\nNa Opslaan gelden inschakelen en groottewijzigingen voor de volgende zender die je opent; de schijf uitzetten verwijdert wat hij bewaarde.",
+  "Words": "",
+  "Words · {language}": "",
   "Would you like to download and install the update?": "Wil je de update downloaden en installeren?",
   "Would you like to open the release page?": "Wil je de releasepagina openen?",
   "Writing": "Wordt geschreven",
@@ -1377,6 +1384,9 @@
   "{n} title": {
     "one": "{n} titel",
     "other": "{n} titels"
+  },
+  "{n} track": {
+    "other": ""
   },
   "{provider}: {message}": "{provider}: {message}",
   "{quality}, converted": "{quality}, geconverteerd",

@@ -42,6 +42,7 @@
   "Afghanistan": "阿富汗",
   "After a movie ends, suggest another from the same category. Shows a 10-second countdown.": "電影結束後，推薦同一分類的另一部。顯示 10 秒倒數。",
   "Albania": "阿爾巴尼亞",
+  "Album": "",
   "Algeria": "阿爾及利亞",
   "All": "全部",
   "All Live Channels…": "所有直播頻道…",
@@ -238,6 +239,7 @@
   "Couldn't start: {why}. QiTV tries again every minute until {until}.": "無法開始：{why}。QiTV 會每分鐘重試一次，直到 {until}。",
   "Couldn’t reach the provider to fetch episodes.": "無法連線到供應商取得各集。",
   "Country:": "國家/地區：",
+  "Cover": "",
   "Credits and licenses": "致謝與授權",
   "Croatia": "克羅埃西亞",
   "Ctrl/⌘ + wheel always changes the volume.": "Ctrl/⌘ + 滾輪一律調整音量。",
@@ -644,6 +646,7 @@
   "Nothing was missed.": "沒有錯過任何錄影。",
   "Nothing was recorded": "未錄到任何內容",
   "Now": "現在",
+  "Now playing": "",
   "Now playing on the TV": "正在電視上播放",
   "OK": "確定",
   "Off": "關閉",
@@ -936,6 +939,7 @@
   "Speech model": "語音模型",
   "Sri Lanka": "斯里蘭卡",
   "Stable": "穩定",
+  "Stage": "",
   "Start over": "從頭播放",
   "Start with the last channel": "啟動時播放上次的頻道",
   "Starting captions…": "正在啟動字幕…",
@@ -1129,6 +1133,7 @@
   "Unmute this tile": "取消此畫面靜音",
   "Untitled": "無標題",
   "Up": "向上",
+  "Up next · {n}": "",
   "Update Available": "有可用的更新",
   "Update Check Failed": "檢查更新失敗",
   "Update Downloaded": "更新已下載",
@@ -1183,6 +1188,8 @@
   "Where your provider gives a film or series no poster, story, year, running time, genres, rating or cast, the Library shows TMDB's. QiTV sends TMDB the title and its year, nothing about you.": "若供應商沒有提供電影或影集的海報、簡介、年份、片長、類型、評分或演員，媒體庫會顯示 TMDB 的資料。QiTV 只向 TMDB 傳送片名和年份，不會傳送任何關於你的資訊。",
   "Windows then asks you to confirm in its Default Apps settings.": "接著 Windows 會請你在「預設應用程式」設定中確認。",
   "Without disk, each picture keeps its memory per stream (picture-in-picture's small picture always does), and only the channel left last keeps its buffer.\n\nThis is temporary playback history, not a permanent recording. The cache size is the total for every channel's buffer: when it fills, the oldest content goes first; anything older than 24 hours goes too. The buffer keeps filling while paused or rewound, and stops when you leave the channel.\n\nAfter Save, enabling and size changes apply on the next channel you open; turning the disk off removes what it kept.": "不使用磁碟時，每個畫面使用「每個串流的記憶體」（子母畫面的小畫面一律如此），而且只有最後離開的頻道會保留其緩衝。\n\n這是暫時的播放紀錄，而非永久錄影。快取大小是所有頻道緩衝的總和：快取滿時，最舊的內容會先刪除；超過 24 小時的內容也會刪除。暫停或倒轉時緩衝仍會持續填入，離開頻道時停止。\n\n儲存後，啟用和大小變更會在你開啟下一個頻道時生效；關閉磁碟快取會刪除其保留的內容。",
+  "Words": "",
+  "Words · {language}": "",
   "Would you like to download and install the update?": "要下載並安裝更新嗎？",
   "Would you like to open the release page?": "要開啟發行頁面嗎？",
   "Writing": "正在寫入",
@@ -1342,6 +1349,9 @@
   },
   "{n} title": {
     "other": "{n} 部"
+  },
+  "{n} track": {
+    "other": ""
   },
   "{provider}: {message}": "{provider}：{message}",
   "{quality}, converted": "{quality}，已轉換",

@@ -42,6 +42,7 @@
   "Afghanistan": "Afghanistan",
   "After a movie ends, suggest another from the same category. Shows a 10-second countdown.": "Khi phim kết thúc, gợi ý phim khác cùng thể loại. Hiện đếm ngược 10 giây.",
   "Albania": "Albania",
+  "Album": "",
   "Algeria": "Algérie",
   "All": "Tất cả",
   "All Live Channels…": "Tất cả kênh trực tiếp…",
@@ -238,6 +239,7 @@
   "Couldn't start: {why}. QiTV tries again every minute until {until}.": "Không bắt đầu được: {why}. QiTV thử lại mỗi phút cho đến {until}.",
   "Couldn’t reach the provider to fetch episodes.": "Không kết nối được nhà cung cấp để tải danh sách tập.",
   "Country:": "Quốc gia:",
+  "Cover": "",
   "Credits and licenses": "Ghi công và giấy phép",
   "Croatia": "Croatia",
   "Ctrl/⌘ + wheel always changes the volume.": "Ctrl/⌘ + con lăn luôn chỉnh âm lượng.",
@@ -644,6 +646,7 @@
   "Nothing was missed.": "Không bỏ lỡ gì.",
   "Nothing was recorded": "Không ghi được gì",
   "Now": "Bây giờ",
+  "Now playing": "",
   "Now playing on the TV": "Đang phát trên TV",
   "OK": "OK",
   "Off": "Tắt",
@@ -936,6 +939,7 @@
   "Speech model": "Mô hình giọng nói",
   "Sri Lanka": "Sri Lanka",
   "Stable": "Ổn định",
+  "Stage": "",
   "Start over": "Xem từ đầu",
   "Start with the last channel": "Bắt đầu với kênh gần nhất",
   "Starting captions…": "Đang khởi động phụ đề…",
@@ -1129,6 +1133,7 @@
   "Unmute this tile": "Bật tiếng ô này",
   "Untitled": "Không có tên",
   "Up": "Lên",
+  "Up next · {n}": "",
   "Update Available": "Có bản cập nhật",
   "Update Check Failed": "Kiểm tra cập nhật thất bại",
   "Update Downloaded": "Đã tải bản cập nhật",
@@ -1183,6 +1188,8 @@
   "Where your provider gives a film or series no poster, story, year, running time, genres, rating or cast, the Library shows TMDB's. QiTV sends TMDB the title and its year, nothing about you.": "Khi nhà cung cấp không có áp phích, nội dung, năm, thời lượng, thể loại, đánh giá hay diễn viên của phim, Thư viện sẽ hiện thông tin từ TMDB. QiTV chỉ gửi cho TMDB tên phim và năm, không gì về bạn.",
   "Windows then asks you to confirm in its Default Apps settings.": "Sau đó Windows sẽ yêu cầu bạn xác nhận trong phần cài đặt Ứng dụng mặc định.",
   "Without disk, each picture keeps its memory per stream (picture-in-picture's small picture always does), and only the channel left last keeps its buffer.\n\nThis is temporary playback history, not a permanent recording. The cache size is the total for every channel's buffer: when it fills, the oldest content goes first; anything older than 24 hours goes too. The buffer keeps filling while paused or rewound, and stops when you leave the channel.\n\nAfter Save, enabling and size changes apply on the next channel you open; turning the disk off removes what it kept.": "Không dùng ổ đĩa, mỗi hình giữ bộ nhớ riêng cho mỗi luồng (hình nhỏ của hình trong hình luôn như vậy), và chỉ kênh rời đi gần nhất giữ được bộ đệm.\n\nĐây là lịch sử phát tạm thời, không phải bản ghi vĩnh viễn. Dung lượng bộ nhớ đệm là tổng cho bộ đệm của mọi kênh: khi đầy, nội dung cũ nhất bị xóa trước; nội dung cũ hơn 24 giờ cũng bị xóa. Bộ đệm vẫn tiếp tục nạp khi tạm dừng hoặc tua lại, và dừng khi bạn rời kênh.\n\nSau khi Lưu, việc bật và thay đổi dung lượng áp dụng cho kênh tiếp theo bạn mở; tắt ổ đĩa sẽ xóa những gì đã giữ.",
+  "Words": "",
+  "Words · {language}": "",
   "Would you like to download and install the update?": "Bạn có muốn tải về và cài đặt bản cập nhật?",
   "Would you like to open the release page?": "Bạn có muốn mở trang phát hành?",
   "Writing": "Đang ghi tệp",
@@ -1342,6 +1349,9 @@
   },
   "{n} title": {
     "other": "{n} phim"
+  },
+  "{n} track": {
+    "other": ""
   },
   "{provider}: {message}": "{provider}: {message}",
   "{quality}, converted": "{quality}, đã chuyển đổi",

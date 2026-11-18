@@ -42,6 +42,7 @@
   "Afghanistan": "Afganistan",
   "After a movie ends, suggest another from the same category. Shows a 10-second countdown.": "Quan acaba una pel·lícula, en suggereix una altra de la mateixa categoria. Mostra un compte enrere de 10 segons.",
   "Albania": "Albània",
+  "Album": "",
   "Algeria": "Algèria",
   "All": "Tots",
   "All Live Channels…": "Tots els canals en directe…",
@@ -240,6 +241,7 @@
   "Couldn't start: {why}. QiTV tries again every minute until {until}.": "No s'ha pogut iniciar: {why}. QiTV ho torna a provar cada minut fins a les {until}.",
   "Couldn’t reach the provider to fetch episodes.": "No s'ha pogut connectar amb el proveïdor per obtenir els episodis.",
   "Country:": "País:",
+  "Cover": "",
   "Credits and licenses": "Crèdits i llicències",
   "Croatia": "Croàcia",
   "Ctrl/⌘ + wheel always changes the volume.": "Ctrl/⌘ + roda sempre canvia el volum.",
@@ -650,6 +652,7 @@
   "Nothing was missed.": "No s'ha perdut res.",
   "Nothing was recorded": "No s'ha gravat res",
   "Now": "Ara",
+  "Now playing": "",
   "Now playing on the TV": "Ara es reprodueix al televisor",
   "OK": "D'acord",
   "Off": "Desactivat",
@@ -945,6 +948,7 @@
   "Speech model": "Model de veu",
   "Sri Lanka": "Sri Lanka",
   "Stable": "Estable",
+  "Stage": "",
   "Start over": "Des del principi",
   "Start with the last channel": "Comença amb l'últim canal",
   "Starting captions…": "S'estan iniciant els subtítols…",
@@ -1139,6 +1143,7 @@
   "Unmute this tile": "Activa el so d'aquest quadre",
   "Untitled": "Sense títol",
   "Up": "Amunt",
+  "Up next · {n}": "",
   "Update Available": "Actualització disponible",
   "Update Check Failed": "Error en cercar actualitzacions",
   "Update Downloaded": "Actualització baixada",
@@ -1193,6 +1198,8 @@
   "Where your provider gives a film or series no poster, story, year, running time, genres, rating or cast, the Library shows TMDB's. QiTV sends TMDB the title and its year, nothing about you.": "Quan el teu proveïdor no dona a una pel·lícula o sèrie pòster, sinopsi, any, durada, gèneres, valoració o repartiment, la biblioteca mostra els de TMDB. QiTV envia a TMDB el títol i l'any, res sobre tu.",
   "Windows then asks you to confirm in its Default Apps settings.": "Després, Windows et demana que ho confirmis a la configuració d'Aplicacions predeterminades.",
   "Without disk, each picture keeps its memory per stream (picture-in-picture's small picture always does), and only the channel left last keeps its buffer.\n\nThis is temporary playback history, not a permanent recording. The cache size is the total for every channel's buffer: when it fills, the oldest content goes first; anything older than 24 hours goes too. The buffer keeps filling while paused or rewound, and stops when you leave the channel.\n\nAfter Save, enabling and size changes apply on the next channel you open; turning the disk off removes what it kept.": "Sense disc, cada imatge conserva la seva memòria per flux (la imatge petita de la imatge en imatge sempre ho fa), i només l'últim canal que has deixat conserva el seu búfer.\n\nAixò és un historial temporal de reproducció, no una gravació permanent. La mida de la memòria cau és el total per als búfers de tots els canals: quan s'omple, el contingut més antic se'n va primer; el que tingui més de 24 hores també. El búfer es continua omplint en pausa o en retrocedir, i s'atura quan deixes el canal.\n\nDesprés de Desa, l'activació i els canvis de mida s'apliquen al següent canal que obris; desactivar el disc esborra el que hi havia.",
+  "Words": "",
+  "Words · {language}": "",
   "Would you like to download and install the update?": "Vols baixar i instal·lar l'actualització?",
   "Would you like to open the release page?": "Vols obrir la pàgina de la versió?",
   "Writing": "S'està escrivint",
@@ -1377,6 +1384,9 @@
   "{n} title": {
     "one": "{n} títol",
     "other": "{n} títols"
+  },
+  "{n} track": {
+    "other": ""
   },
   "{provider}: {message}": "{provider}: {message}",
   "{quality}, converted": "{quality}, convertida",

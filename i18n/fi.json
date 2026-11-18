@@ -42,6 +42,7 @@
   "Afghanistan": "Afganistan",
   "After a movie ends, suggest another from the same category. Shows a 10-second countdown.": "Kun elokuva päättyy, ehdottaa toista samasta kategoriasta. Näyttää 10 sekunnin lähtölaskennan.",
   "Albania": "Albania",
+  "Album": "",
   "Algeria": "Algeria",
   "All": "Kaikki",
   "All Live Channels…": "Kaikki suorat kanavat…",
@@ -240,6 +241,7 @@
   "Couldn't start: {why}. QiTV tries again every minute until {until}.": "Ei voitu aloittaa: {why}. QiTV yrittää uudelleen minuutin välein {until} asti.",
   "Couldn’t reach the provider to fetch episodes.": "Palveluntarjoajaan ei saatu yhteyttä jaksojen hakemiseksi.",
   "Country:": "Maa:",
+  "Cover": "",
   "Credits and licenses": "Tekijät ja lisenssit",
   "Croatia": "Kroatia",
   "Ctrl/⌘ + wheel always changes the volume.": "Ctrl/⌘ + rulla muuttaa aina äänenvoimakkuutta.",
@@ -650,6 +652,7 @@
   "Nothing was missed.": "Mitään ei jäänyt väliin.",
   "Nothing was recorded": "Mitään ei tallennettu",
   "Now": "Nyt",
+  "Now playing": "",
   "Now playing on the TV": "Toistetaan nyt televisiossa",
   "OK": "OK",
   "Off": "Pois",
@@ -945,6 +948,7 @@
   "Speech model": "Puhemalli",
   "Sri Lanka": "Sri Lanka",
   "Stable": "Vakaa",
+  "Stage": "",
   "Start over": "Alusta",
   "Start with the last channel": "Aloita viimeisimmällä kanavalla",
   "Starting captions…": "Tekstitys käynnistyy…",
@@ -1139,6 +1143,7 @@
   "Unmute this tile": "Poista tämän ruudun mykistys",
   "Untitled": "Nimetön",
   "Up": "Ylös",
+  "Up next · {n}": "",
   "Update Available": "Päivitys saatavilla",
   "Update Check Failed": "Päivitysten tarkistus epäonnistui",
   "Update Downloaded": "Päivitys ladattu",
@@ -1193,6 +1198,8 @@
   "Where your provider gives a film or series no poster, story, year, running time, genres, rating or cast, the Library shows TMDB's. QiTV sends TMDB the title and its year, nothing about you.": "Jos palveluntarjoajasi ei anna elokuvalle tai sarjalle julistetta, juonta, vuotta, kestoa, lajityyppejä, arviota tai näyttelijöitä, kirjasto näyttää TMDB:n tiedot. QiTV lähettää TMDB:lle nimikkeen ja sen vuoden, ei mitään sinusta.",
   "Windows then asks you to confirm in its Default Apps settings.": "Windows pyytää sen jälkeen vahvistamaan valinnan Oletussovellukset-asetuksissa.",
   "Without disk, each picture keeps its memory per stream (picture-in-picture's small picture always does), and only the channel left last keeps its buffer.\n\nThis is temporary playback history, not a permanent recording. The cache size is the total for every channel's buffer: when it fills, the oldest content goes first; anything older than 24 hours goes too. The buffer keeps filling while paused or rewound, and stops when you leave the channel.\n\nAfter Save, enabling and size changes apply on the next channel you open; turning the disk off removes what it kept.": "Ilman levyä jokainen kuva käyttää omaa muistiaan striimiä kohden (kuva kuvassa -tilan pieni kuva aina), ja vain viimeksi jätetty kanava säilyttää puskurinsa.\n\nTämä on väliaikainen toistohistoria, ei pysyvä tallenne. Välimuistin koko on kaikkien kanavien puskurien yhteiskoko: kun se täyttyy, vanhin sisältö poistuu ensin; myös yli 24 tuntia vanha poistuu. Puskuri täyttyy edelleen tauon tai taaksekelauksen aikana ja pysähtyy, kun poistut kanavalta.\n\nTallennuksen jälkeen käyttöönotto ja koon muutokset koskevat seuraavaa avaamaasi kanavaa; levyn poistaminen käytöstä poistaa siihen säilytetyn.",
+  "Words": "",
+  "Words · {language}": "",
   "Would you like to download and install the update?": "Haluatko ladata ja asentaa päivityksen?",
   "Would you like to open the release page?": "Haluatko avata julkaisusivun?",
   "Writing": "Kirjoitetaan",
@@ -1377,6 +1384,9 @@
   "{n} title": {
     "one": "{n} nimike",
     "other": "{n} nimikettä"
+  },
+  "{n} track": {
+    "other": ""
   },
   "{provider}: {message}": "{provider}: {message}",
   "{quality}, converted": "{quality}, muunnettu",

@@ -42,6 +42,7 @@
   "Afghanistan": "Afganistan",
   "After a movie ends, suggest another from the same category. Shows a 10-second countdown.": "Kui film lõpeb, soovitab sama kategooria teist filmi. Näitab 10-sekundilist loendust.",
   "Albania": "Albaania",
+  "Album": "",
   "Algeria": "Alžeeria",
   "All": "Kõik",
   "All Live Channels…": "Kõik otsekanalid…",
@@ -240,6 +241,7 @@
   "Couldn't start: {why}. QiTV tries again every minute until {until}.": "Ei saanud alustada: {why}. QiTV proovib iga minut uuesti kuni {until}.",
   "Couldn’t reach the provider to fetch episodes.": "Osade toomiseks ei saa pakkujaga ühendust.",
   "Country:": "Riik:",
+  "Cover": "",
   "Credits and licenses": "Tänuavaldused ja litsentsid",
   "Croatia": "Horvaatia",
   "Ctrl/⌘ + wheel always changes the volume.": "Ctrl/⌘ + ratas muudab alati helitugevust.",
@@ -650,6 +652,7 @@
   "Nothing was missed.": "Midagi ei jäänud vahele.",
   "Nothing was recorded": "Midagi ei salvestatud",
   "Now": "Praegu",
+  "Now playing": "",
   "Now playing on the TV": "Mängib nüüd teleris",
   "OK": "OK",
   "Off": "Väljas",
@@ -945,6 +948,7 @@
   "Speech model": "Kõnemudel",
   "Sri Lanka": "Sri Lanka",
   "Stable": "Stabiilne",
+  "Stage": "",
   "Start over": "Alusta otsast",
   "Start with the last channel": "Alusta viimase kanaliga",
   "Starting captions…": "Subtiitrite käivitamine…",
@@ -1139,6 +1143,7 @@
   "Unmute this tile": "Tühista selle paani vaigistus",
   "Untitled": "Pealkirjata",
   "Up": "Üles",
+  "Up next · {n}": "",
   "Update Available": "Värskendus saadaval",
   "Update Check Failed": "Värskenduste kontroll ebaõnnestus",
   "Update Downloaded": "Värskendus alla laaditud",
@@ -1193,6 +1198,8 @@
   "Where your provider gives a film or series no poster, story, year, running time, genres, rating or cast, the Library shows TMDB's. QiTV sends TMDB the title and its year, nothing about you.": "Kui teie pakkuja ei anna filmile või sarjale plakatit, sisukokkuvõtet, aastat, kestust, žanre, hinnet ega osatäitjaid, näitab meediakogu TMDB omi. QiTV saadab TMDB-le pealkirja ja aasta, mitte midagi teie kohta.",
   "Windows then asks you to confirm in its Default Apps settings.": "Seejärel palub Windows teil seda kinnitada vaikerakenduste sätetes.",
   "Without disk, each picture keeps its memory per stream (picture-in-picture's small picture always does), and only the channel left last keeps its buffer.\n\nThis is temporary playback history, not a permanent recording. The cache size is the total for every channel's buffer: when it fills, the oldest content goes first; anything older than 24 hours goes too. The buffer keeps filling while paused or rewound, and stops when you leave the channel.\n\nAfter Save, enabling and size changes apply on the next channel you open; turning the disk off removes what it kept.": "Ilma kettata kasutab iga pilt oma mälu voo kohta (pilt pildis väike pilt alati nii) ja oma puhvri säilitab ainult viimasena lahkutud kanal.\n\nSee on ajutine esitusajalugu, mitte püsiv salvestis. Vahemälu suurus on kõigi kanalite puhvrite kogusumma: kui see täitub, kustub esmalt vanim sisu; üle 24 tunni vanune kustub samuti. Puhver täitub ka pausi või tagasikerimise ajal ja peatub, kui lahkute kanalilt.\n\nPärast salvestamist rakenduvad sisselülitamine ja suuruse muudatused järgmisel avataval kanalil; ketta väljalülitamine eemaldab sinna säilitatu.",
+  "Words": "",
+  "Words · {language}": "",
   "Would you like to download and install the update?": "Kas soovite värskenduse alla laadida ja paigaldada?",
   "Would you like to open the release page?": "Kas soovite avada väljalaske lehe?",
   "Writing": "Kirjutamisel",
@@ -1377,6 +1384,9 @@
   "{n} title": {
     "one": "{n} pealkiri",
     "other": "{n} pealkirja"
+  },
+  "{n} track": {
+    "other": ""
   },
   "{provider}: {message}": "{provider}: {message}",
   "{quality}, converted": "{quality}, teisendatud",

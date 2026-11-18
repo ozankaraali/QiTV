@@ -20,7 +20,13 @@ from PySide6.QtWidgets import QApplication, QWidget
 
 from services import failure_reasons, i18n
 from services.epg_view import Programme
-from tests import test_drawer, test_picture_panel, test_track_panel, test_transport
+from tests import (
+    test_audio_screen,
+    test_drawer,
+    test_picture_panel,
+    test_track_panel,
+    test_transport,
+)
 from ui.overlays import guide
 from ui.overlays.painting import Units
 from ui.overlays.welcome import WelcomeCard
@@ -242,6 +248,54 @@ class TurkishPicturePanelTests(PicturePanelChecks, test_picture_panel.PictureCas
             rows, ["En boy oranı", "Geçmeli tarama giderme", "Uyku zamanlayıcısı", "İstatistikler"]
         )
         self.assertEqual(self.notice.text(), "Oynatma 0:30 sonra duracak")
+
+
+class AudioScreenChecks:
+    """The audio screen's busiest top bar (Words lit with its language, Up next) and the
+    Album's caption read whole, from the default window down to a small one, and nothing of the
+    screen overlaps or reaches into the dock's room."""
+
+    words_language = ""  # the captions' language, as the Words pill names it
+    expected: dict[str, tuple[str, ...]] = {}
+
+    def test_the_audio_screen_reads_whole(self):
+        cut, painted = Elisions(self), Painted(self)
+        for size in ((1280, 720), (640, 360)):
+            for view in ("cover", "album"):
+                with self.subTest(size=size, view=view):
+                    cut.cut.clear()
+                    painted.texts.clear()
+                    screen = self.make(size, view=view)
+                    screen.set_words(True, self.words_language)
+                    screen.grab()
+                    self.assertEqual(cut.cut, [])
+                    self.assert_laid_out(screen)
+                    for text in self.expected[view]:
+                        self.assertIn(text, painted.texts)
+
+
+class TurkishAudioScreenTests(AudioScreenChecks, test_audio_screen.ScreenCase):
+    words_language = "Türkçe"
+    expected = {
+        "cover": ("Sözler · Türkçe", "Sıradaki · 7"),
+        "album": ("Sözler · Türkçe", "HARBOUR LIGHTS · 8 PARÇA"),
+    }
+
+    def setUp(self):
+        super().setUp()
+        turkish(self)
+
+
+class FrenchAudioScreenTests(AudioScreenChecks, test_audio_screen.ScreenCase):
+    words_language = "Français"
+    expected = {
+        "cover": ("Paroles · Français", "À suivre · 7"),
+        "album": ("Paroles · Français", "HARBOUR LIGHTS · 8 TITRES"),
+    }
+
+    def setUp(self):
+        super().setUp()
+        french(self)
 
 
 class TurkishCardsTests(unittest.TestCase):

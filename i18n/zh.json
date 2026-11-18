@@ -42,6 +42,7 @@
   "Afghanistan": "阿富汗",
   "After a movie ends, suggest another from the same category. Shows a 10-second countdown.": "电影结束后，推荐同一分类中的另一部。显示 10 秒倒计时。",
   "Albania": "阿尔巴尼亚",
+  "Album": "",
   "Algeria": "阿尔及利亚",
   "All": "全部",
   "All Live Channels…": "所有直播频道…",
@@ -238,6 +239,7 @@
   "Couldn't start: {why}. QiTV tries again every minute until {until}.": "无法开始：{why}。QiTV 会每分钟重试一次，直到 {until}。",
   "Couldn’t reach the provider to fetch episodes.": "无法连接提供商来获取各集。",
   "Country:": "国家/地区：",
+  "Cover": "",
   "Credits and licenses": "致谢与许可",
   "Croatia": "克罗地亚",
   "Ctrl/⌘ + wheel always changes the volume.": "Ctrl/⌘ + 滚轮始终调节音量。",
@@ -644,6 +646,7 @@
   "Nothing was missed.": "没有错过任何录制。",
   "Nothing was recorded": "未录制到任何内容",
   "Now": "现在",
+  "Now playing": "",
   "Now playing on the TV": "正在电视上播放",
   "OK": "确定",
   "Off": "关闭",
@@ -936,6 +939,7 @@
   "Speech model": "语音模型",
   "Sri Lanka": "斯里兰卡",
   "Stable": "稳定",
+  "Stage": "",
   "Start over": "从头播放",
   "Start with the last channel": "启动时播放上次的频道",
   "Starting captions…": "正在启动字幕…",
@@ -1129,6 +1133,7 @@
   "Unmute this tile": "取消此画面静音",
   "Untitled": "无标题",
   "Up": "向上",
+  "Up next · {n}": "",
   "Update Available": "有可用更新",
   "Update Check Failed": "检查更新失败",
   "Update Downloaded": "更新已下载",
@@ -1183,6 +1188,8 @@
   "Where your provider gives a film or series no poster, story, year, running time, genres, rating or cast, the Library shows TMDB's. QiTV sends TMDB the title and its year, nothing about you.": "如果提供商没有提供电影或剧集的海报、简介、年份、时长、类型、评分或演员，媒体库会显示 TMDB 的信息。QiTV 只向 TMDB 发送片名和年份，不会发送任何关于你的信息。",
   "Windows then asks you to confirm in its Default Apps settings.": "随后 Windows 会请你在“默认应用”设置中确认。",
   "Without disk, each picture keeps its memory per stream (picture-in-picture's small picture always does), and only the channel left last keeps its buffer.\n\nThis is temporary playback history, not a permanent recording. The cache size is the total for every channel's buffer: when it fills, the oldest content goes first; anything older than 24 hours goes too. The buffer keeps filling while paused or rewound, and stops when you leave the channel.\n\nAfter Save, enabling and size changes apply on the next channel you open; turning the disk off removes what it kept.": "不使用磁盘时，每个画面使用“每路流内存”（画中画的小画面始终如此），并且只有最后离开的频道会保留其缓冲。\n\n这是临时的播放历史，而非永久录像。缓存大小是所有频道缓冲的总和：缓存满时，最早的内容先被删除；超过 24 小时的内容也会被删除。暂停或回退时缓冲仍会继续填充，离开频道时停止。\n\n保存后，启用和大小更改将在你打开下一个频道时生效；关闭磁盘缓存会删除其已保留的内容。",
+  "Words": "",
+  "Words · {language}": "",
   "Would you like to download and install the update?": "要下载并安装更新吗？",
   "Would you like to open the release page?": "要打开发布页面吗？",
   "Writing": "正在写入",
@@ -1342,6 +1349,9 @@
   },
   "{n} title": {
     "other": "{n} 部"
+  },
+  "{n} track": {
+    "other": ""
   },
   "{provider}: {message}": "{provider}：{message}",
   "{quality}, converted": "{quality}，已转换",

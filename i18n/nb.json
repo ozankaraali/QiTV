@@ -42,6 +42,7 @@
   "Afghanistan": "Afghanistan",
   "After a movie ends, suggest another from the same category. Shows a 10-second countdown.": "Når en film slutter, foreslås en annen fra samme kategori. Viser en nedtelling på 10 sekunder.",
   "Albania": "Albania",
+  "Album": "",
   "Algeria": "Algerie",
   "All": "Alle",
   "All Live Channels…": "Alle direktekanaler…",
@@ -240,6 +241,7 @@
   "Couldn't start: {why}. QiTV tries again every minute until {until}.": "Kunne ikke starte: {why}. QiTV prøver igjen hvert minutt til {until}.",
   "Couldn’t reach the provider to fetch episodes.": "Fikk ikke kontakt med leverandøren for å hente episoder.",
   "Country:": "Land:",
+  "Cover": "",
   "Credits and licenses": "Kreditering og lisenser",
   "Croatia": "Kroatia",
   "Ctrl/⌘ + wheel always changes the volume.": "Ctrl/⌘ + hjul endrer alltid volumet.",
@@ -650,6 +652,7 @@
   "Nothing was missed.": "Ingen opptak gikk tapt.",
   "Nothing was recorded": "Ingenting ble tatt opp",
   "Now": "Nå",
+  "Now playing": "",
   "Now playing on the TV": "Spilles nå på TV-en",
   "OK": "OK",
   "Off": "Av",
@@ -945,6 +948,7 @@
   "Speech model": "Talemodell",
   "Sri Lanka": "Sri Lanka",
   "Stable": "Stabil",
+  "Stage": "",
   "Start over": "Start på nytt",
   "Start with the last channel": "Start med den siste kanalen",
   "Starting captions…": "Starter undertekster…",
@@ -1139,6 +1143,7 @@
   "Unmute this tile": "Slå på lyden i denne ruten",
   "Untitled": "Uten navn",
   "Up": "Opp",
+  "Up next · {n}": "",
   "Update Available": "Oppdatering tilgjengelig",
   "Update Check Failed": "Oppdateringssjekken mislyktes",
   "Update Downloaded": "Oppdatering lastet ned",
@@ -1193,6 +1198,8 @@
   "Where your provider gives a film or series no poster, story, year, running time, genres, rating or cast, the Library shows TMDB's. QiTV sends TMDB the title and its year, nothing about you.": "Der leverandøren din ikke gir en film eller serie plakat, handling, år, spilletid, sjangre, vurdering eller rollebesetning, viser biblioteket TMDBs. QiTV sender TMDB tittelen og året, ingenting om deg.",
   "Windows then asks you to confirm in its Default Apps settings.": "Windows ber deg deretter bekrefte i innstillingene for Standardapper.",
   "Without disk, each picture keeps its memory per stream (picture-in-picture's small picture always does), and only the channel left last keeps its buffer.\n\nThis is temporary playback history, not a permanent recording. The cache size is the total for every channel's buffer: when it fills, the oldest content goes first; anything older than 24 hours goes too. The buffer keeps filling while paused or rewound, and stops when you leave the channel.\n\nAfter Save, enabling and size changes apply on the next channel you open; turning the disk off removes what it kept.": "Uten disk beholder hvert bilde minnet sitt per strøm (det lille bildet i bilde-i-bilde gjør det alltid), og bare kanalen du forlot sist, beholder bufferen sin.\n\nDette er midlertidig avspillingshistorikk, ikke et permanent opptak. Størrelsen på mellomlageret er totalen for alle kanalers buffere: når det blir fullt, forsvinner det eldste innholdet først; alt eldre enn 24 timer forsvinner også. Bufferen fortsetter å fylles mens du pauser eller spoler tilbake, og stopper når du forlater kanalen.\n\nEtter Lagre gjelder aktivering og størrelsesendringer for neste kanal du åpner; å slå av disken fjerner det den har tatt vare på.",
+  "Words": "",
+  "Words · {language}": "",
   "Would you like to download and install the update?": "Vil du laste ned og installere oppdateringen?",
   "Would you like to open the release page?": "Vil du åpne versjonssiden?",
   "Writing": "Skrives",
@@ -1377,6 +1384,9 @@
   "{n} title": {
     "one": "{n} tittel",
     "other": "{n} titler"
+  },
+  "{n} track": {
+    "other": ""
   },
   "{provider}: {message}": "{provider}: {message}",
   "{quality}, converted": "{quality}, konvertert",

@@ -42,6 +42,7 @@
   "Afghanistan": "Afghanistan",
   "After a movie ends, suggest another from the same category. Shows a 10-second countdown.": "Selepas filem tamat, cadangkan filem lain daripada kategori yang sama. Menunjukkan kira detik 10 saat.",
   "Albania": "Albania",
+  "Album": "",
   "Algeria": "Algeria",
   "All": "Semua",
   "All Live Channels…": "Semua Saluran Langsung…",
@@ -238,6 +239,7 @@
   "Couldn't start: {why}. QiTV tries again every minute until {until}.": "Gagal bermula: {why}. QiTV mencuba lagi setiap minit hingga {until}.",
   "Couldn’t reach the provider to fetch episodes.": "Tidak dapat mencapai pembekal untuk mengambil episod.",
   "Country:": "Negara:",
+  "Cover": "",
   "Credits and licenses": "Penghargaan dan lesen",
   "Croatia": "Croatia",
   "Ctrl/⌘ + wheel always changes the volume.": "Ctrl/⌘ + roda sentiasa menukar kelantangan.",
@@ -644,6 +646,7 @@
   "Nothing was missed.": "Tiada apa-apa yang terlepas.",
   "Nothing was recorded": "Tiada apa-apa dirakam",
   "Now": "Sekarang",
+  "Now playing": "",
   "Now playing on the TV": "Sedang dimainkan di TV",
   "OK": "OK",
   "Off": "Mati",
@@ -936,6 +939,7 @@
   "Speech model": "Model pertuturan",
   "Sri Lanka": "Sri Lanka",
   "Stable": "Stabil",
+  "Stage": "",
   "Start over": "Mula semula",
   "Start with the last channel": "Mula dengan saluran terakhir",
   "Starting captions…": "Memulakan sari kata…",
@@ -1129,6 +1133,7 @@
   "Unmute this tile": "Nyahredam petak ini",
   "Untitled": "Tanpa tajuk",
   "Up": "Atas",
+  "Up next · {n}": "",
   "Update Available": "Kemas Kini Tersedia",
   "Update Check Failed": "Semakan Kemas Kini Gagal",
   "Update Downloaded": "Kemas Kini Dimuat Turun",
@@ -1183,6 +1188,8 @@
   "Where your provider gives a film or series no poster, story, year, running time, genres, rating or cast, the Library shows TMDB's. QiTV sends TMDB the title and its year, nothing about you.": "Jika pembekal anda tidak memberikan poster, jalan cerita, tahun, tempoh tayangan, genre, penilaian atau pelakon bagi filem atau siri, Pustaka menunjukkan milik TMDB. QiTV menghantar tajuk dan tahunnya kepada TMDB, tiada apa-apa tentang anda.",
   "Windows then asks you to confirm in its Default Apps settings.": "Kemudian Windows meminta anda mengesahkannya dalam tetapan Apl lalai.",
   "Without disk, each picture keeps its memory per stream (picture-in-picture's small picture always does), and only the channel left last keeps its buffer.\n\nThis is temporary playback history, not a permanent recording. The cache size is the total for every channel's buffer: when it fills, the oldest content goes first; anything older than 24 hours goes too. The buffer keeps filling while paused or rewound, and stops when you leave the channel.\n\nAfter Save, enabling and size changes apply on the next channel you open; turning the disk off removes what it kept.": "Tanpa cakera, setiap gambar menyimpan memori setiap strimnya (gambar kecil gambar dalam gambar sentiasa begitu), dan hanya saluran yang terakhir ditinggalkan menyimpan penimbalnya.\n\nIni sejarah main balik sementara, bukan rakaman kekal. Saiz cache ialah jumlah untuk penimbal setiap saluran: apabila penuh, kandungan tertua dibuang dahulu; apa-apa yang lebih lama daripada 24 jam juga dibuang. Penimbal terus diisi semasa dijeda atau diundur, dan berhenti apabila anda meninggalkan saluran.\n\nSelepas Simpan, pendayaan dan perubahan saiz berkuat kuasa pada saluran seterusnya yang anda buka; mematikan cakera membuang apa yang disimpannya.",
+  "Words": "",
+  "Words · {language}": "",
   "Would you like to download and install the update?": "Adakah anda mahu memuat turun dan memasang kemas kini?",
   "Would you like to open the release page?": "Adakah anda mahu membuka halaman keluaran?",
   "Writing": "Sedang ditulis",
@@ -1342,6 +1349,9 @@
   },
   "{n} title": {
     "other": "{n} tajuk"
+  },
+  "{n} track": {
+    "other": ""
   },
   "{provider}: {message}": "{provider}: {message}",
   "{quality}, converted": "{quality}, ditukar",

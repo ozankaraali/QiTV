@@ -42,6 +42,7 @@
   "Afghanistan": "Afeganistão",
   "After a movie ends, suggest another from the same category. Shows a 10-second countdown.": "Quando um filme termina, sugere outro da mesma categoria. Mostra uma contagem regressiva de 10 segundos.",
   "Albania": "Albânia",
+  "Album": "",
   "Algeria": "Argélia",
   "All": "Todos",
   "All Live Channels…": "Todos os canais ao vivo…",
@@ -240,6 +241,7 @@
   "Couldn't start: {why}. QiTV tries again every minute until {until}.": "Não foi possível iniciar: {why}. O QiTV tenta de novo a cada minuto até {until}.",
   "Couldn’t reach the provider to fetch episodes.": "Não foi possível acessar o provedor para buscar os episódios.",
   "Country:": "País:",
+  "Cover": "",
   "Credits and licenses": "Créditos e licenças",
   "Croatia": "Croácia",
   "Ctrl/⌘ + wheel always changes the volume.": "Ctrl/⌘ + roda do mouse sempre altera o volume.",
@@ -650,6 +652,7 @@
   "Nothing was missed.": "Nada foi perdido.",
   "Nothing was recorded": "Nada foi gravado",
   "Now": "Agora",
+  "Now playing": "",
   "Now playing on the TV": "Reproduzindo agora na TV",
   "OK": "OK",
   "Off": "Desativado",
@@ -945,6 +948,7 @@
   "Speech model": "Modelo de fala",
   "Sri Lanka": "Sri Lanka",
   "Stable": "Estável",
+  "Stage": "",
   "Start over": "Do início",
   "Start with the last channel": "Começar com o último canal",
   "Starting captions…": "Iniciando legendas…",
@@ -1139,6 +1143,7 @@
   "Unmute this tile": "Ativar o som deste quadro",
   "Untitled": "Sem título",
   "Up": "Para cima",
+  "Up next · {n}": "",
   "Update Available": "Atualização disponível",
   "Update Check Failed": "Falha ao verificar atualizações",
   "Update Downloaded": "Atualização baixada",
@@ -1193,6 +1198,8 @@
   "Where your provider gives a film or series no poster, story, year, running time, genres, rating or cast, the Library shows TMDB's. QiTV sends TMDB the title and its year, nothing about you.": "Quando seu provedor não dá a um filme ou série pôster, sinopse, ano, duração, gêneros, avaliação ou elenco, a Biblioteca mostra os do TMDB. O QiTV envia ao TMDB o título e o ano, nada sobre você.",
   "Windows then asks you to confirm in its Default Apps settings.": "Depois, o Windows pede que você confirme nas configurações de Aplicativos padrão.",
   "Without disk, each picture keeps its memory per stream (picture-in-picture's small picture always does), and only the channel left last keeps its buffer.\n\nThis is temporary playback history, not a permanent recording. The cache size is the total for every channel's buffer: when it fills, the oldest content goes first; anything older than 24 hours goes too. The buffer keeps filling while paused or rewound, and stops when you leave the channel.\n\nAfter Save, enabling and size changes apply on the next channel you open; turning the disk off removes what it kept.": "Sem disco, cada imagem mantém sua memória por stream (a imagem pequena do picture-in-picture sempre faz isso), e só o último canal deixado mantém o buffer.\n\nIsto é um histórico temporário de reprodução, não uma gravação permanente. O tamanho do cache é o total para o buffer de todos os canais: quando enche, o conteúdo mais antigo sai primeiro; o que tiver mais de 24 horas também sai. O buffer continua enchendo em pausa ou ao voltar, e para quando você sai do canal.\n\nDepois de Salvar, a ativação e as mudanças de tamanho valem no próximo canal que você abrir; desativar o disco apaga o que ele guardou.",
+  "Words": "",
+  "Words · {language}": "",
   "Would you like to download and install the update?": "Deseja baixar e instalar a atualização?",
   "Would you like to open the release page?": "Deseja abrir a página da versão?",
   "Writing": "Salvando",
@@ -1377,6 +1384,9 @@
   "{n} title": {
     "one": "{n} título",
     "other": "{n} títulos"
+  },
+  "{n} track": {
+    "other": ""
   },
   "{provider}: {message}": "{provider}: {message}",
   "{quality}, converted": "{quality}, convertida",

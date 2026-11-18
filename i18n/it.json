@@ -42,6 +42,7 @@
   "Afghanistan": "Afghanistan",
   "After a movie ends, suggest another from the same category. Shows a 10-second countdown.": "Al termine di un film, ne suggerisce un altro della stessa categoria. Mostra un conto alla rovescia di 10 secondi.",
   "Albania": "Albania",
+  "Album": "",
   "Algeria": "Algeria",
   "All": "Tutti",
   "All Live Channels…": "Tutti i canali in diretta…",
@@ -240,6 +241,7 @@
   "Couldn't start: {why}. QiTV tries again every minute until {until}.": "Avvio non riuscito: {why}. QiTV riprova ogni minuto fino alle {until}.",
   "Couldn’t reach the provider to fetch episodes.": "Impossibile raggiungere il provider per scaricare gli episodi.",
   "Country:": "Paese:",
+  "Cover": "",
   "Credits and licenses": "Riconoscimenti e licenze",
   "Croatia": "Croazia",
   "Ctrl/⌘ + wheel always changes the volume.": "Ctrl/⌘ + rotella cambia sempre il volume.",
@@ -650,6 +652,7 @@
   "Nothing was missed.": "Nulla è stato perso.",
   "Nothing was recorded": "Non è stato registrato nulla",
   "Now": "Ora",
+  "Now playing": "",
   "Now playing on the TV": "Ora in riproduzione sulla TV",
   "OK": "OK",
   "Off": "Disattivato",
@@ -945,6 +948,7 @@
   "Speech model": "Modello vocale",
   "Sri Lanka": "Sri Lanka",
   "Stable": "Stabile",
+  "Stage": "",
   "Start over": "Dall'inizio",
   "Start with the last channel": "Inizia con l'ultimo canale",
   "Starting captions…": "Avvio dei sottotitoli…",
@@ -1139,6 +1143,7 @@
   "Unmute this tile": "Riattiva audio del riquadro",
   "Untitled": "Senza titolo",
   "Up": "Su",
+  "Up next · {n}": "",
   "Update Available": "Aggiornamento disponibile",
   "Update Check Failed": "Controllo aggiornamenti non riuscito",
   "Update Downloaded": "Aggiornamento scaricato",
@@ -1193,6 +1198,8 @@
   "Where your provider gives a film or series no poster, story, year, running time, genres, rating or cast, the Library shows TMDB's. QiTV sends TMDB the title and its year, nothing about you.": "Se il tuo provider non fornisce per un film o una serie locandina, trama, anno, durata, generi, valutazione o cast, la Libreria mostra quelli di TMDB. QiTV invia a TMDB il titolo e l'anno, niente su di te.",
   "Windows then asks you to confirm in its Default Apps settings.": "Windows ti chiede poi di confermare nelle impostazioni App predefinite.",
   "Without disk, each picture keeps its memory per stream (picture-in-picture's small picture always does), and only the channel left last keeps its buffer.\n\nThis is temporary playback history, not a permanent recording. The cache size is the total for every channel's buffer: when it fills, the oldest content goes first; anything older than 24 hours goes too. The buffer keeps filling while paused or rewound, and stops when you leave the channel.\n\nAfter Save, enabling and size changes apply on the next channel you open; turning the disk off removes what it kept.": "Senza disco, ogni immagine usa la sua memoria per stream (l'immagine piccola del picture-in-picture lo fa sempre), e solo l'ultimo canale lasciato conserva il suo buffer.\n\nÈ una cronologia temporanea di riproduzione, non una registrazione permanente. La dimensione della cache è il totale per i buffer di tutti i canali: quando è piena, si elimina prima il contenuto più vecchio; anche ciò che ha più di 24 ore viene eliminato. Il buffer continua a riempirsi in pausa o durante il riavvolgimento, e si ferma quando lasci il canale.\n\nDopo Salva, l'attivazione e le modifiche alla dimensione valgono dal prossimo canale che apri; disattivare il disco elimina ciò che conservava.",
+  "Words": "",
+  "Words · {language}": "",
   "Would you like to download and install the update?": "Vuoi scaricare e installare l'aggiornamento?",
   "Would you like to open the release page?": "Vuoi aprire la pagina della versione?",
   "Writing": "In scrittura",
@@ -1377,6 +1384,9 @@
   "{n} title": {
     "one": "{n} titolo",
     "other": "{n} titoli"
+  },
+  "{n} track": {
+    "other": ""
   },
   "{provider}: {message}": "{provider}: {message}",
   "{quality}, converted": "{quality}, convertita",

@@ -42,6 +42,7 @@
   "Afghanistan": "Afghanistan",
   "After a movie ends, suggest another from the same category. Shows a 10-second countdown.": "Schlägt nach einem Film einen weiteren aus derselben Kategorie vor. Zeigt einen 10-Sekunden-Countdown.",
   "Albania": "Albanien",
+  "Album": "Album",
   "Algeria": "Algerien",
   "All": "Alle",
   "All Live Channels…": "Alle Live-Sender…",
@@ -240,6 +241,7 @@
   "Couldn't start: {why}. QiTV tries again every minute until {until}.": "Start fehlgeschlagen: {why}. QiTV versucht es bis {until} jede Minute erneut.",
   "Couldn’t reach the provider to fetch episodes.": "Der Anbieter war nicht erreichbar, um die Folgen abzurufen.",
   "Country:": "Land:",
+  "Cover": "Cover",
   "Credits and licenses": "Danksagungen und Lizenzen",
   "Croatia": "Kroatien",
   "Ctrl/⌘ + wheel always changes the volume.": "Ctrl/⌘ + Mausrad ändert immer die Lautstärke.",
@@ -650,6 +652,7 @@
   "Nothing was missed.": "Nichts verpasst.",
   "Nothing was recorded": "Es wurde nichts aufgenommen",
   "Now": "Jetzt",
+  "Now playing": "Jetzt läuft",
   "Now playing on the TV": "Läuft jetzt auf dem Fernseher",
   "OK": "OK",
   "Off": "Aus",
@@ -945,6 +948,7 @@
   "Speech model": "Sprachmodell",
   "Sri Lanka": "Sri Lanka",
   "Stable": "Stabil",
+  "Stage": "Bühne",
   "Start over": "Von vorn",
   "Start with the last channel": "Mit dem letzten Sender starten",
   "Starting captions…": "Untertitel werden gestartet…",
@@ -1139,6 +1143,7 @@
   "Unmute this tile": "Ton dieser Kachel einschalten",
   "Untitled": "Ohne Titel",
   "Up": "Hoch",
+  "Up next · {n}": "Als Nächstes · {n}",
   "Update Available": "Update verfügbar",
   "Update Check Failed": "Update-Prüfung fehlgeschlagen",
   "Update Downloaded": "Update heruntergeladen",
@@ -1193,6 +1198,8 @@
   "Where your provider gives a film or series no poster, story, year, running time, genres, rating or cast, the Library shows TMDB's. QiTV sends TMDB the title and its year, nothing about you.": "Wo Ihr Anbieter einem Film oder einer Serie kein Poster, keine Handlung, kein Jahr, keine Laufzeit, keine Genres, keine Bewertung oder keine Besetzung gibt, zeigt die Mediathek die von TMDB. QiTV schickt TMDB den Titel und sein Jahr, nichts über Sie.",
   "Windows then asks you to confirm in its Default Apps settings.": "Windows bittet Sie dann, dies in den Einstellungen unter „Standard-Apps“ zu bestätigen.",
   "Without disk, each picture keeps its memory per stream (picture-in-picture's small picture always does), and only the channel left last keeps its buffer.\n\nThis is temporary playback history, not a permanent recording. The cache size is the total for every channel's buffer: when it fills, the oldest content goes first; anything older than 24 hours goes too. The buffer keeps filling while paused or rewound, and stops when you leave the channel.\n\nAfter Save, enabling and size changes apply on the next channel you open; turning the disk off removes what it kept.": "Ohne Festplatte nutzt jedes Bild seinen Speicher pro Stream (das kleine Bild bei Bild-in-Bild immer), und nur der zuletzt verlassene Sender behält seinen Puffer.\n\nDies ist ein vorübergehender Wiedergabeverlauf, keine dauerhafte Aufnahme. Die Cache-Größe gilt für die Puffer aller Sender zusammen: Ist er voll, geht das Älteste zuerst; was älter als 24 Stunden ist, geht ebenfalls. Der Puffer füllt sich weiter, während pausiert oder zurückgespult wird, und hört auf, wenn Sie den Sender verlassen.\n\nNach dem Speichern gelten das Aktivieren und Größenänderungen ab dem nächsten Sender, den Sie öffnen; das Ausschalten der Festplatte entfernt, was dort aufbewahrt wurde.",
+  "Words": "Text",
+  "Words · {language}": "Text · {language}",
   "Would you like to download and install the update?": "Möchten Sie das Update herunterladen und installieren?",
   "Would you like to open the release page?": "Möchten Sie die Versionsseite öffnen?",
   "Writing": "Wird geschrieben",
@@ -1376,6 +1383,10 @@
     "other": "{n} Untertitel"
   },
   "{n} title": {
+    "one": "{n} Titel",
+    "other": "{n} Titel"
+  },
+  "{n} track": {
     "one": "{n} Titel",
     "other": "{n} Titel"
   },

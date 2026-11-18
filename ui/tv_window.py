@@ -142,6 +142,7 @@ from ui.live_tuner import LiveTuner, one_disk_ring, wait_for_each_other
 from ui.logos import LogoCache, PosterCache
 from ui.macos_window import reclaim_first_responder
 from ui.overlay_host import OverlayHost
+from ui.overlays.audio_screen import AudioScreen
 from ui.overlays.back_notice import BackNotice
 from ui.overlays.captions import CaptionsOverlay
 from ui.overlays.cast_notice import CastNotice
@@ -710,6 +711,9 @@ class TVWindow(QMainWindow):
         self.layout_row = LayoutRow(host)  # the multiview's layouts, above its layout chip
         self.subtitle_search = SubtitleSearchPage(host)
         self.corner_controls = CornerControls(host)
+        # What a song (or a radio channel) shows where the black picture was: its cover, album
+        # and words, lit by the cover's colours (spec §10).
+        self.audio_screen = AudioScreen(host)
         self.captions_overlay = CaptionsOverlay(host)  # 2.9: AI captions over the picture
         self.opening_overlay = OpeningOverlay(host)  # QiTV's mark while a file opens
         # 2.8: the recordings scheduled from the guide (a small file beside the config).
@@ -775,8 +779,10 @@ class TVWindow(QMainWindow):
         # PiP the transport keeps only its own buttons and bar, and other clicks reach the
         # small picture (OverlayHost.set_hole). The multiview's tiles are drawn under all of
         # them, and take their clicks over the transport but for its buttons and bar
-        # (GridTiles.hits); AI captions just above the tiles, under everything else (they sit
-        # above the player controls while those show, and take no click), and QiTV's mark
+        # (GridTiles.hits); a song's screen above the tiles, over the black (it leaves the
+        # bottom to the player controls, and all but its own controls' clicks to the host); AI
+        # captions just above it, under everything else (they sit above the player controls
+        # while those show, and take no click), and QiTV's mark
         # while a file opens over them (it takes no click either). The mixer shows over
         # them (it sits above the transport's controls and beside the PiP), and the Sound,
         # Subtitles and Picture panels and the multiview's layouts over it (above their
@@ -786,6 +792,7 @@ class TVWindow(QMainWindow):
         # minute, Resume and the question (2.6) and the toast.
         for overlay in (
             self.grid_tiles,
+            self.audio_screen,
             self.captions_overlay,
             self.opening_overlay,
             self.overlays.banner,

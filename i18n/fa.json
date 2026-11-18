@@ -42,6 +42,7 @@
   "Afghanistan": "افغانستان",
   "After a movie ends, suggest another from the same category. Shows a 10-second countdown.": "پس از پایان فیلم، فیلم دیگری از همان دسته پیشنهاد می‌شود. شمارش معکوس 10 ثانیه‌ای نشان می‌دهد.",
   "Albania": "آلبانی",
+  "Album": "",
   "Algeria": "الجزایر",
   "All": "همه",
   "All Live Channels…": "همهٔ کانال‌های زنده…",
@@ -240,6 +241,7 @@
   "Couldn't start: {why}. QiTV tries again every minute until {until}.": "شروع نشد: {why}. QiTV تا {until} هر دقیقه دوباره تلاش می‌کند.",
   "Couldn’t reach the provider to fetch episodes.": "برای دریافت قسمت‌ها به ارائه‌دهنده دسترسی نشد.",
   "Country:": "کشور:",
+  "Cover": "",
   "Credits and licenses": "سازندگان و مجوزها",
   "Croatia": "کرواسی",
   "Ctrl/⌘ + wheel always changes the volume.": "Ctrl/⌘ + چرخ ماوس همیشه بلندی صدا را تغییر می‌دهد.",
@@ -650,6 +652,7 @@
   "Nothing was missed.": "چیزی از دست نرفت.",
   "Nothing was recorded": "چیزی ضبط نشد",
   "Now": "اکنون",
+  "Now playing": "",
   "Now playing on the TV": "اکنون روی تلویزیون پخش می‌شود",
   "OK": "تأیید",
   "Off": "خاموش",
@@ -945,6 +948,7 @@
   "Speech model": "مدل گفتار",
   "Sri Lanka": "سری‌لانکا",
   "Stable": "پایدار",
+  "Stage": "",
   "Start over": "از اول",
   "Start with the last channel": "شروع با آخرین کانال",
   "Starting captions…": "در حال شروع زیرنویس…",
@@ -1139,6 +1143,7 @@
   "Unmute this tile": "باصدا کردن این کاشی",
   "Untitled": "بی‌نام",
   "Up": "بالا",
+  "Up next · {n}": "",
   "Update Available": "به‌روزرسانی موجود است",
   "Update Check Failed": "بررسی به‌روزرسانی ناموفق بود",
   "Update Downloaded": "به‌روزرسانی دانلود شد",
@@ -1193,6 +1198,8 @@
   "Where your provider gives a film or series no poster, story, year, running time, genres, rating or cast, the Library shows TMDB's. QiTV sends TMDB the title and its year, nothing about you.": "هرجا ارائه‌دهنده برای فیلم یا سریالی پوستر، داستان، سال، مدت، ژانر، امتیاز یا بازیگران ندهد، کتابخانه موارد TMDB را نشان می‌دهد. QiTV فقط عنوان و سال آن را به TMDB می‌فرستد، نه چیزی دربارهٔ شما.",
   "Windows then asks you to confirm in its Default Apps settings.": "سپس Windows از شما می‌خواهد آن را در تنظیمات «برنامه‌های پیش‌فرض» تأیید کنید.",
   "Without disk, each picture keeps its memory per stream (picture-in-picture's small picture always does), and only the channel left last keeps its buffer.\n\nThis is temporary playback history, not a permanent recording. The cache size is the total for every channel's buffer: when it fills, the oldest content goes first; anything older than 24 hours goes too. The buffer keeps filling while paused or rewound, and stops when you leave the channel.\n\nAfter Save, enabling and size changes apply on the next channel you open; turning the disk off removes what it kept.": "بدون دیسک، هر تصویر به اندازهٔ «حافظه برای هر استریم» نگه می‌دارد (تصویر کوچکِ تصویر در تصویر همیشه همین‌طور است)، و فقط آخرین کانالی که ترک کرده‌اید بافرش را نگه می‌دارد.\n\nاین سابقهٔ موقت پخش است، نه ضبط دائمی. اندازهٔ حافظهٔ نهان مجموع بافر همهٔ کانال‌هاست: وقتی پر شود، قدیمی‌ترین محتوا اول پاک می‌شود؛ هر چیز قدیمی‌تر از 24 ساعت هم پاک می‌شود. بافر هنگام مکث یا عقب‌بردن همچنان پر می‌شود و وقتی کانال را ترک کنید متوقف می‌شود.\n\nپس از «ذخیره»، فعال‌سازی و تغییر اندازه روی کانال بعدی که باز می‌کنید اعمال می‌شود؛ خاموش کردن دیسک آنچه را نگه داشته پاک می‌کند.",
+  "Words": "",
+  "Words · {language}": "",
   "Would you like to download and install the update?": "می‌خواهید به‌روزرسانی را دانلود و نصب کنید؟",
   "Would you like to open the release page?": "می‌خواهید صفحهٔ انتشار را باز کنید؟",
   "Writing": "در حال نوشتن",
@@ -1377,6 +1384,9 @@
   "{n} title": {
     "one": "{n} عنوان",
     "other": "{n} عنوان"
+  },
+  "{n} track": {
+    "other": ""
   },
   "{provider}: {message}": "{provider}: {message}",
   "{quality}, converted": "{quality}، تبدیل‌شده",

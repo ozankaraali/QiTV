@@ -42,6 +42,7 @@
   "Afghanistan": "Afganistan",
   "After a movie ends, suggest another from the same category. Shows a 10-second countdown.": "Kur mbaron një film, sugjeron një tjetër nga e njëjta kategori. Shfaq një numërim mbrapsht prej 10 sekondash.",
   "Albania": "Shqipëri",
+  "Album": "",
   "Algeria": "Algjeri",
   "All": "Të gjitha",
   "All Live Channels…": "Të gjitha kanalet në direkt…",
@@ -240,6 +241,7 @@
   "Couldn't start: {why}. QiTV tries again every minute until {until}.": "Nuk nisi dot: {why}. QiTV provon sërish çdo minutë deri në {until}.",
   "Couldn’t reach the provider to fetch episodes.": "Ofruesi nuk u arrit për të marrë episodet.",
   "Country:": "Vendi:",
+  "Cover": "",
   "Credits and licenses": "Meritat dhe licencat",
   "Croatia": "Kroaci",
   "Ctrl/⌘ + wheel always changes the volume.": "Ctrl/⌘ + rrota ndryshon gjithmonë volumin.",
@@ -650,6 +652,7 @@
   "Nothing was missed.": "S'u humb asgjë.",
   "Nothing was recorded": "S'u regjistrua asgjë",
   "Now": "Tani",
+  "Now playing": "",
   "Now playing on the TV": "Tani po luhet në TV",
   "OK": "OK",
   "Off": "Fikur",
@@ -945,6 +948,7 @@
   "Speech model": "Modeli i të folurit",
   "Sri Lanka": "Sri-Lankë",
   "Stable": "Stabile",
+  "Stage": "",
   "Start over": "Nga fillimi",
   "Start with the last channel": "Nis me kanalin e fundit",
   "Starting captions…": "Po nisin titrat…",
@@ -1139,6 +1143,7 @@
   "Unmute this tile": "Riktheji zërin kësaj pamjeje",
   "Untitled": "Pa titull",
   "Up": "Lart",
+  "Up next · {n}": "",
   "Update Available": "Ka përditësim",
   "Update Check Failed": "Kontrolli për përditësim dështoi",
   "Update Downloaded": "Përditësimi u shkarkua",
@@ -1193,6 +1198,8 @@
   "Where your provider gives a film or series no poster, story, year, running time, genres, rating or cast, the Library shows TMDB's. QiTV sends TMDB the title and its year, nothing about you.": "Kur ofruesi juaj nuk jep për një film ose serial poster, përmbledhje, vit, kohëzgjatje, zhanre, vlerësim apo aktorë, Biblioteka shfaq ato të TMDB. QiTV i dërgon TMDB titullin dhe vitin, asgjë për ju.",
   "Windows then asks you to confirm in its Default Apps settings.": "Më pas Windows do t'ju kërkojë ta konfirmoni te cilësimet «Aplikacionet e parazgjedhura».",
   "Without disk, each picture keeps its memory per stream (picture-in-picture's small picture always does), and only the channel left last keeps its buffer.\n\nThis is temporary playback history, not a permanent recording. The cache size is the total for every channel's buffer: when it fills, the oldest content goes first; anything older than 24 hours goes too. The buffer keeps filling while paused or rewound, and stops when you leave the channel.\n\nAfter Save, enabling and size changes apply on the next channel you open; turning the disk off removes what it kept.": "Pa disk, çdo figurë mban memorien e saj për transmetim (figura e vogël e figurë në figurë gjithmonë kështu bën), dhe vetëm kanali i lënë i fundit e mban buferin.\n\nKjo është histori e përkohshme e luajtjes, jo regjistrim i përhershëm. Madhësia e fshehtinës është totali për buferin e çdo kanali: kur mbushet, përmbajtja më e vjetër shkon e para; çdo gjë më e vjetër se 24 orë shkon gjithashtu. Buferi vazhdon të mbushet gjatë pauzës ose kthimit prapa dhe ndalon kur largoheni nga kanali.\n\nPas Ruaj, aktivizimi dhe ndryshimet e madhësisë zbatohen te kanali i ardhshëm që hapni; fikja e diskut fshin atë që ai mbante.",
+  "Words": "",
+  "Words · {language}": "",
   "Would you like to download and install the update?": "Dëshironi ta shkarkoni dhe instaloni përditësimin?",
   "Would you like to open the release page?": "Dëshironi të hapni faqen e versionit?",
   "Writing": "Po shkruhet",
@@ -1377,6 +1384,9 @@
   "{n} title": {
     "one": "{n} titull",
     "other": "{n} tituj"
+  },
+  "{n} track": {
+    "other": ""
   },
   "{provider}: {message}": "{provider}: {message}",
   "{quality}, converted": "{quality}, i konvertuar",

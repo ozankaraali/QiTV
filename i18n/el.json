@@ -42,6 +42,7 @@
   "Afghanistan": "Αφγανιστάν",
   "After a movie ends, suggest another from the same category. Shows a 10-second countdown.": "Όταν τελειώνει μια ταινία, προτείνει άλλη από την ίδια κατηγορία. Δείχνει αντίστροφη μέτρηση 10 δευτερολέπτων.",
   "Albania": "Αλβανία",
+  "Album": "",
   "Algeria": "Αλγερία",
   "All": "Όλα",
   "All Live Channels…": "Όλα τα ζωντανά κανάλια…",
@@ -240,6 +241,7 @@
   "Couldn't start: {why}. QiTV tries again every minute until {until}.": "Δεν ξεκίνησε: {why}. Το QiTV ξαναδοκιμάζει κάθε λεπτό έως τις {until}.",
   "Couldn’t reach the provider to fetch episodes.": "Δεν ήταν δυνατή η σύνδεση με τον πάροχο για λήψη επεισοδίων.",
   "Country:": "Χώρα:",
+  "Cover": "",
   "Credits and licenses": "Συντελεστές και άδειες",
   "Croatia": "Κροατία",
   "Ctrl/⌘ + wheel always changes the volume.": "Ctrl/⌘ + ροδέλα αλλάζει πάντα την ένταση.",
@@ -650,6 +652,7 @@
   "Nothing was missed.": "Δεν χάθηκε τίποτα.",
   "Nothing was recorded": "Δεν εγγράφηκε τίποτα",
   "Now": "Τώρα",
+  "Now playing": "",
   "Now playing on the TV": "Παίζει τώρα στην τηλεόραση",
   "OK": "OK",
   "Off": "Ανενεργό",
@@ -945,6 +948,7 @@
   "Speech model": "Μοντέλο ομιλίας",
   "Sri Lanka": "Σρι Λάνκα",
   "Stable": "Σταθερή",
+  "Stage": "",
   "Start over": "Από την αρχή",
   "Start with the last channel": "Εκκίνηση με το τελευταίο κανάλι",
   "Starting captions…": "Έναρξη υποτίτλων…",
@@ -1139,6 +1143,7 @@
   "Unmute this tile": "Κατάργηση σίγασης αυτής της εικόνας",
   "Untitled": "Χωρίς τίτλο",
   "Up": "Πάνω",
+  "Up next · {n}": "",
   "Update Available": "Διαθέσιμη ενημέρωση",
   "Update Check Failed": "Αποτυχία ελέγχου ενημέρωσης",
   "Update Downloaded": "Η ενημέρωση λήφθηκε",
@@ -1193,6 +1198,8 @@
   "Where your provider gives a film or series no poster, story, year, running time, genres, rating or cast, the Library shows TMDB's. QiTV sends TMDB the title and its year, nothing about you.": "Όταν ο πάροχός σας δεν δίνει σε μια ταινία ή σειρά αφίσα, υπόθεση, έτος, διάρκεια, είδη, βαθμολογία ή ηθοποιούς, η Βιβλιοθήκη δείχνει αυτά του TMDB. Το QiTV στέλνει στο TMDB τον τίτλο και το έτος του, τίποτα για εσάς.",
   "Windows then asks you to confirm in its Default Apps settings.": "Στη συνέχεια, τα Windows θα σας ζητήσουν επιβεβαίωση στις ρυθμίσεις «Προεπιλεγμένες εφαρμογές».",
   "Without disk, each picture keeps its memory per stream (picture-in-picture's small picture always does), and only the channel left last keeps its buffer.\n\nThis is temporary playback history, not a permanent recording. The cache size is the total for every channel's buffer: when it fills, the oldest content goes first; anything older than 24 hours goes too. The buffer keeps filling while paused or rewound, and stops when you leave the channel.\n\nAfter Save, enabling and size changes apply on the next channel you open; turning the disk off removes what it kept.": "Χωρίς δίσκο, κάθε εικόνα κρατά τη μνήμη της ανά ροή (η μικρή εικόνα της εικόνας σε εικόνα πάντα έτσι κάνει), και μόνο το κανάλι που αφήσατε τελευταίο κρατά το buffer του.\n\nΠρόκειται για προσωρινό ιστορικό αναπαραγωγής, όχι μόνιμη εγγραφή. Το μέγεθος της προσωρινής μνήμης είναι το σύνολο για τα buffer όλων των καναλιών: όταν γεμίσει, φεύγει πρώτα το παλαιότερο περιεχόμενο· ό,τι είναι παλαιότερο από 24 ώρες φεύγει επίσης. Το buffer συνεχίζει να γεμίζει σε παύση ή επιστροφή, και σταματά όταν αφήνετε το κανάλι.\n\nΜετά την Αποθήκευση, η ενεργοποίηση και οι αλλαγές μεγέθους ισχύουν στο επόμενο κανάλι που ανοίγετε· η απενεργοποίηση του δίσκου αφαιρεί ό,τι κράτησε.",
+  "Words": "",
+  "Words · {language}": "",
   "Would you like to download and install the update?": "Θέλετε να κατεβάσετε και να εγκαταστήσετε την ενημέρωση;",
   "Would you like to open the release page?": "Θέλετε να ανοίξετε τη σελίδα της έκδοσης;",
   "Writing": "Γράφεται",
@@ -1377,6 +1384,9 @@
   "{n} title": {
     "one": "{n} τίτλος",
     "other": "{n} τίτλοι"
+  },
+  "{n} track": {
+    "other": ""
   },
   "{provider}: {message}": "{provider}: {message}",
   "{quality}, converted": "{quality}, με μετατροπή",

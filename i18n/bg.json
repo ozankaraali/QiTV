@@ -42,6 +42,7 @@
   "Afghanistan": "Афганистан",
   "After a movie ends, suggest another from the same category. Shows a 10-second countdown.": "След края на филм предлага друг от същата категория. Показва 10-секундно отброяване.",
   "Albania": "Албания",
+  "Album": "",
   "Algeria": "Алжир",
   "All": "Всички",
   "All Live Channels…": "Всички канали на живо…",
@@ -240,6 +241,7 @@
   "Couldn't start: {why}. QiTV tries again every minute until {until}.": "Не можа да започне: {why}. QiTV опитва отново всяка минута до {until}.",
   "Couldn’t reach the provider to fetch episodes.": "Няма връзка с доставчика за изтегляне на епизодите.",
   "Country:": "Държава:",
+  "Cover": "",
   "Credits and licenses": "Благодарности и лицензи",
   "Croatia": "Хърватия",
   "Ctrl/⌘ + wheel always changes the volume.": "Ctrl/⌘ + колелце винаги променя силата на звука.",
@@ -650,6 +652,7 @@
   "Nothing was missed.": "Нищо не е пропуснато.",
   "Nothing was recorded": "Нищо не беше записано",
   "Now": "Сега",
+  "Now playing": "",
   "Now playing on the TV": "Пуска се на телевизора",
   "OK": "OK",
   "Off": "Изкл.",
@@ -945,6 +948,7 @@
   "Speech model": "Речеви модел",
   "Sri Lanka": "Шри Ланка",
   "Stable": "Стабилно",
+  "Stage": "",
   "Start over": "Отначало",
   "Start with the last channel": "Стартирай с последния канал",
   "Starting captions…": "Стартиране на субтитрите…",
@@ -1139,6 +1143,7 @@
   "Unmute this tile": "Включи звука на това поле",
   "Untitled": "Без заглавие",
   "Up": "Нагоре",
+  "Up next · {n}": "",
   "Update Available": "Има актуализация",
   "Update Check Failed": "Неуспешна проверка за актуализации",
   "Update Downloaded": "Актуализацията е изтеглена",
@@ -1193,6 +1198,8 @@
   "Where your provider gives a film or series no poster, story, year, running time, genres, rating or cast, the Library shows TMDB's. QiTV sends TMDB the title and its year, nothing about you.": "Когато доставчикът не дава на филм или сериал постер, сюжет, година, продължителност, жанрове, рейтинг или актьори, библиотеката показва тези от TMDB. QiTV изпраща на TMDB заглавието и годината му, нищо за вас.",
   "Windows then asks you to confirm in its Default Apps settings.": "След това Windows ще поиска да потвърдите в настройките „Приложения по подразбиране“.",
   "Without disk, each picture keeps its memory per stream (picture-in-picture's small picture always does), and only the channel left last keeps its buffer.\n\nThis is temporary playback history, not a permanent recording. The cache size is the total for every channel's buffer: when it fills, the oldest content goes first; anything older than 24 hours goes too. The buffer keeps filling while paused or rewound, and stops when you leave the channel.\n\nAfter Save, enabling and size changes apply on the next channel you open; turning the disk off removes what it kept.": "Без диск всяка картина пази своята памет на поток (малката картина в картина винаги го прави) и само последно напуснатият канал пази буфера си.\n\nТова е временна история на възпроизвеждането, а не постоянен запис. Размерът на кеша е общ за буферите на всички канали: когато се напълни, най-старото съдържание се изтрива първо; всичко по-старо от 24 часа също се изтрива. Буферът продължава да се пълни при пауза или превъртане назад и спира, когато напуснете канала.\n\nСлед „Запази“ включването и промените в размера важат за следващия отворен канал; изключването на диска премахва запазеното.",
+  "Words": "",
+  "Words · {language}": "",
   "Would you like to download and install the update?": "Искате ли да изтеглите и инсталирате актуализацията?",
   "Would you like to open the release page?": "Искате ли да отворите страницата на версията?",
   "Writing": "Пише се",
@@ -1377,6 +1384,9 @@
   "{n} title": {
     "one": "{n} заглавие",
     "other": "{n} заглавия"
+  },
+  "{n} track": {
+    "other": ""
   },
   "{provider}: {message}": "{provider}: {message}",
   "{quality}, converted": "{quality}, конвертирано",

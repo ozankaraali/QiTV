@@ -42,6 +42,7 @@
   "Afghanistan": "Əfqanıstan",
   "After a movie ends, suggest another from the same category. Shows a 10-second countdown.": "Film bitəndə eyni kateqoriyadan başqa film təklif edir. 10 saniyəlik geri sayım göstərir.",
   "Albania": "Albaniya",
+  "Album": "",
   "Algeria": "Əlcəzair",
   "All": "Hamısı",
   "All Live Channels…": "Bütün canlı kanallar…",
@@ -240,6 +241,7 @@
   "Couldn't start: {why}. QiTV tries again every minute until {until}.": "Başlamadı: {why}. QiTV {until} vaxtına qədər hər dəqiqə yenidən cəhd edir.",
   "Couldn’t reach the provider to fetch episodes.": "Seriyaları almaq üçün provayderlə əlaqə alınmadı.",
   "Country:": "Ölkə:",
+  "Cover": "",
   "Credits and licenses": "Müəlliflər və lisenziyalar",
   "Croatia": "Xorvatiya",
   "Ctrl/⌘ + wheel always changes the volume.": "Ctrl/⌘ + təkər həmişə səs səviyyəsini dəyişir.",
@@ -650,6 +652,7 @@
   "Nothing was missed.": "Heç nə buraxılmayıb.",
   "Nothing was recorded": "Heç nə yazılmadı",
   "Now": "İndi",
+  "Now playing": "",
   "Now playing on the TV": "İndi TV-də oynayır",
   "OK": "OK",
   "Off": "Deaktiv",
@@ -945,6 +948,7 @@
   "Speech model": "Nitq modeli",
   "Sri Lanka": "Şri-Lanka",
   "Stable": "Stabil",
+  "Stage": "",
   "Start over": "Əvvəldən başla",
   "Start with the last channel": "Son kanalla başla",
   "Starting captions…": "Subtitrlər başladılır…",
@@ -1139,6 +1143,7 @@
   "Unmute this tile": "Bu ekranın səsini aç",
   "Untitled": "Adsız",
   "Up": "Yuxarı",
+  "Up next · {n}": "",
   "Update Available": "Yeniləmə mövcuddur",
   "Update Check Failed": "Yeniləmə yoxlaması alınmadı",
   "Update Downloaded": "Yeniləmə yükləndi",
@@ -1193,6 +1198,8 @@
   "Where your provider gives a film or series no poster, story, year, running time, genres, rating or cast, the Library shows TMDB's. QiTV sends TMDB the title and its year, nothing about you.": "Provayderiniz filmə və ya seriala afişa, məzmun, il, müddət, janr, reytinq və ya aktyor heyəti vermədikdə Kitabxana TMDB-dəkiləri göstərir. QiTV TMDB-yə yalnız adı və ilini göndərir, sizin haqqınızda heç nə göndərmir.",
   "Windows then asks you to confirm in its Default Apps settings.": "Sonra Windows bunu “Standart tətbiqlər” ayarlarında təsdiqləməyinizi istəyəcək.",
   "Without disk, each picture keeps its memory per stream (picture-in-picture's small picture always does), and only the channel left last keeps its buffer.\n\nThis is temporary playback history, not a permanent recording. The cache size is the total for every channel's buffer: when it fills, the oldest content goes first; anything older than 24 hours goes too. The buffer keeps filling while paused or rewound, and stops when you leave the channel.\n\nAfter Save, enabling and size changes apply on the next channel you open; turning the disk off removes what it kept.": "Disk olmadan hər şəkil yalnız öz hər yayım üçün yaddaşını işlədir (şəkil içində şəklin kiçik şəkli həmişə belə edir) və buferini yalnız sonuncu tərk edilən kanal saxlayır.\n\nBu, daimi yazı deyil, müvəqqəti oynatma tarixçəsidir. Keş ölçüsü bütün kanalların buferləri üçün cəmdir: dolanda əvvəlcə ən köhnə məzmun silinir; 24 saatdan köhnə olan da silinir. Bufer fasilə və ya geri çəkmə zamanı dolmağa davam edir və kanalı tərk edəndə dayanır.\n\n“Yadda saxla”dan sonra yandırma və ölçü dəyişiklikləri açdığınız növbəti kanalda tətbiq olunur; diski söndürmək orada saxlananları silir.",
+  "Words": "",
+  "Words · {language}": "",
   "Would you like to download and install the update?": "Yeniləməni yükləyib quraşdırmaq istəyirsiniz?",
   "Would you like to open the release page?": "Buraxılış səhifəsini açmaq istəyirsiniz?",
   "Writing": "Yazılır",
@@ -1377,6 +1384,9 @@
   "{n} title": {
     "one": "{n} başlıq",
     "other": "{n} başlıq"
+  },
+  "{n} track": {
+    "other": ""
   },
   "{provider}: {message}": "{provider}: {message}",
   "{quality}, converted": "{quality}, çevrilmiş",

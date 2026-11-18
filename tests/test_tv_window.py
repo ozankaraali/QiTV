@@ -440,6 +440,16 @@ class TVWindowTests(WindowCase):
         self.assertLess(sound, subtitles)
         self.assertLess(subtitles, drawer)
 
+    def test_the_audio_screen_sits_over_the_tiles_under_the_captions_and_controls(self):
+        # Words show over a song's screen (Cover, Album) and the dock over all of it.
+        window, host = self.window, self.window.host
+        order = [w for w in host.children() if isinstance(w, QWidget) and w in host._overlays]
+        screen = order.index(window.audio_screen)
+        self.assertLess(order.index(window.grid_tiles), screen)
+        self.assertLess(screen, order.index(window.captions_overlay))
+        self.assertLess(screen, order.index(window.overlays.transport))
+        self.assertTrue(window.audio_screen.isHidden())  # until something plays sound only
+
     def test_the_transport_covers_the_overlay_host(self):
         self.show()
         drawer = self.wait_for_drawer()
