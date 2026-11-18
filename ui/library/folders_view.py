@@ -10,8 +10,9 @@ and the kind kept on the shelf; then the folders are read on a worker, no song's
 them (`FolderLook`), and each tile fills in. A folder that is gone shows as missing, with
 Remove; no dialog says so. A click on a tile plays its folder from where it stopped, as a
 dropped folder plays (the router's read, the start rule, the hold); its × takes it off the
-shelf (its files stay where they are), the last tile, Add folder, is File → Open Folder…, and
-Clear asks first, on the app's question card.
+shelf (its files stay where they are), the last tile, Add folder, picks one as File → Open
+Folder… does (a start from the tab, as a tile's play: Esc comes back to it), and Clear asks
+first, on the app's question card.
 
 Units: 1 u = 1% of this view's width (the Library screen's: the tab has no rail). Everything is
 painted. The widget never takes keyboard focus: the Library controller routes keys to
@@ -823,8 +824,8 @@ class FoldersDesk(QObject):
     """The Folders tab's controller: the shelf (services.folder_shelf) on its view, each
     folder read on a worker when the tab opens (FolderLooks), what its tiles ask, and Clear's
     question on its own card (`card`, a QuestionCard on the Library page). `open_folder(path)`
-    plays a folder as a dropped one plays; `add_folder()` is File → Open Folder…. `changed`:
-    the shelf changed (the Library's tabs follow)."""
+    plays a folder as a dropped one plays; `add_folder()` picks one as File → Open Folder…
+    does. `changed`: the shelf changed (the Library's tabs follow)."""
 
     changed = Signal()
 

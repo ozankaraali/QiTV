@@ -229,7 +229,7 @@ ABANDONED_EXIT_CODE = 3  # QiTV quit while background work still ran (see _exit_
 # Where open_paths' files come from: QiTV started with them, another start handed them on, a
 # drop, File → Open File….
 LAUNCH, HANDOVER, DROP, DIALOG = "launch", "handover", "drop", "dialog"
-SHELF = "shelf"  # Plan 4: a Folders tile's folder: as a drop, and Esc goes back to that tab
+SHELF = "shelf"  # Plan 4: the Folders tab's (a tile, Add folder): as a drop; Esc goes back there
 # A multi-select opened from the file manager can come as one start per file, in any order
 # (Windows): a start's file this soon after the one chosen replaces it only if it sorts first.
 OPEN_BURST_S = 3.0
@@ -1677,8 +1677,9 @@ class TVWindow(QMainWindow):
         - A start's file within OPEN_BURST_S of the one a start chose (a multi-select, one
           start per file) replaces it only when it sorts first by name; else it is left out.
         - Open File plays what it picks, whatever its kind (an HLS playlist too).
-        - A Folders tile's folder (SHELF) is read and played as a dropped one; Esc (and the
-          player's ‹ Library) then goes back to that tab, as a Recordings tile's does (P4-26).
+        - A Folders tile's folder, and one Add folder picks (SHELF), is read and played as a
+          dropped one; Esc (and the player's ‹ Library) then goes back to that tab, as a
+          Recordings tile's does (P4-26, P4-29).
         - As a media file is played, QiTV's mark draws in the middle of the page until its
           picture shows (ui/overlays/opening.py), unless a picture shows already.
 

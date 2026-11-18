@@ -173,7 +173,7 @@ class TVPages(QObject):
             QuestionCard(window.library_page),
             window.watch,
             open_folder=self._open_shelf_folder,
-            add_folder=self.open_folder,
+            add_folder=self.add_folder,
             parent=self,
         )
         self.library_controller.set_folders(self.folders_desk)
@@ -762,9 +762,17 @@ class TVPages(QObject):
         window.open_paths([path], source="dialog")
 
     def open_folder(self) -> None:
-        """File → Open Folder… and the Folders tab's Add folder (Plan 4): the folder chosen
+        """File → Open Folder… and the channel list's Open a folder (Plan 4): the folder chosen
         plays as a dropped folder does (TVWindow.open_paths reads it off the GUI thread), from
         where it stopped, and goes on the Folders tab."""
+        self._pick_folder("drop")
+
+    def add_folder(self) -> None:
+        """The Folders tab's Add folder: as Open Folder…, but a start from the Library, as a
+        tile's play is: Esc and ‹ Library then go back to the tab (P4-29)."""
+        self._pick_folder("shelf")
+
+    def _pick_folder(self, source: str) -> None:
         window = self._window
         if window.closing():
             return
@@ -772,7 +780,7 @@ class TVPages(QObject):
         path = QFileDialog.getExistingDirectory(window, title, "")
         if not path or window.closing():
             return
-        window.open_paths([path], source="drop")
+        window.open_paths([path], source=source)
 
     def _open_shelf_folder(self, path: str) -> None:
         """A Folders tab tile: its folder plays as a dropped folder does, from where it

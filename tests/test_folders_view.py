@@ -406,6 +406,32 @@ class ShelfWindowTests(ListCase):
         # P4-26: a folder chosen so plays as a dropped one: Esc doesn't bring the Library
         self.assertFalse(self.window.screens.escape_to_library())
 
+    def test_add_folders_play_goes_back_to_the_folders_tab(self):
+        """Ruling P4-29: the tab's Add folder is a start from the Library, as a tile is: Esc
+        after its play goes back to the Folders tab."""
+        self.show()
+        drop(self.window, paths=[self.season])  # a folder on the shelf: the tab shows
+        self.assertTrue(wait_until(lambda: self.lists()), self.calls)
+        album = self.folder / "Brannow Fell"
+        album.mkdir()
+        for name in ("01 Tide.mp3", "02 Harbour.mp3"):
+            (album / name).write_bytes(b"song")
+        screens, library = self.window.screens, self.window.library_controller
+        screens.open_library("folders")
+        view = self.window.library_page.folders
+        with mock.patch(
+            "ui.tv_pages.QFileDialog.getExistingDirectory", return_value=str(album)
+        ) as pick:
+            QTest.mouseClick(
+                view, Qt.MouseButton.LeftButton, pos=view.add_rect().center().toPoint()
+            )
+            self.assertTrue(wait_until(lambda: len(self.lists()) == 2), self.calls)
+        pick.assert_called_once()
+        self.assertEqual(self.lists()[-1][0], "Brannow Fell")
+        self.assertEqual(self.window.folder_shelf.folders()[0]["name"], "Brannow Fell")
+        self.assertTrue(screens.escape_to_library())
+        self.assertEqual((screens.library_shown(), library.mode), (True, "folders"))
+
     def test_the_channel_lists_open_a_folder_row_asks_for_one(self):
         """P4-25: the channel list's row under Open file, as File → Open Folder…."""
         with mock.patch(
@@ -415,6 +441,7 @@ class ShelfWindowTests(ListCase):
             self.assertTrue(wait_until(lambda: self.lists()), self.calls)
         pick.assert_called_once()
         self.assertEqual([e["name"] for e in self.window.folder_shelf.folders()], ["Lantern Coast"])
+        self.assertFalse(self.window.screens.escape_to_library())  # as File → Open Folder…
 
     def click_tile(self, index=0):
         view = self.window.library_page.folders
