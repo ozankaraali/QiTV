@@ -14,6 +14,10 @@ Before the close the app records which libVLC it loaded (libvlc, libvlccore and 
 paths, as the loader sees them, and python-vlc's choice) in smoke.json; a packaged app must
 have loaded them all from its own bundle (an installed VLC would mix in or stand in).
 
+After the system's media keys, the audio screen's levels helper (Plan 4: a process of its own,
+spawned as the app spawns it, so the packaged app's own spawn path) decodes the fixture's
+sound and its levels must arrive; it plays nothing, and quits once its pipe closes.
+
 `--pipeline` adds the live time-shift pipeline before the close. This script serves
 tests/fixtures/live.ts on 127.0.0.1 as an endless real-time channel (live_source.LiveSource),
 Channel 3 of the playlist, and the app has time-shift consent (its buffer on disk). Down zaps
@@ -201,6 +205,13 @@ FAULTS = "faults.txt"  # Python stacks of a hang or crash when there is no stder
 # the system delivers it: macOS's command center, Windows's ButtonPressed, a desktop's MPRIS call
 # through the session bus) pauses and plays it.
 MEDIA_KEYS_CHECK = "the system's media panel lists QiTV playing Channel 2; its ⏯ pauses and plays"
+# Plan 4: the audio screen's levels helper (services/visualizer/helper.py) is a process of its
+# own, spawned as the app spawns it (the packaged app: its frozen executable's own spawn path).
+# It decodes the fixture's sound (no sound plays: it only decodes) and its levels arrive; it
+# quits once its pipe closes.
+LEVELS_HELPER_CHECK = "the visualizer's levels helper starts and hears the fixture's sound"
+LEVELS_HELPER_MS = 30_000  # its process's start (a frozen one unpacks first) and its decode
+LEVELS_HELPER_GONE_MS = 5_000
 PIPELINE_PREFIX = "pipeline: "
 PIPELINE_SCREENSHOTS = ("04-timeshift.png", "05-catching-up.png")
 PIPELINE_VIDEO = "04-video.png"
@@ -549,6 +560,7 @@ def _hang_budget(seconds: float, pipeline: bool, pip: bool = False) -> float:
     extra = (PIPELINE_BUDGET_S if pipeline else 0.0) + (PIP_BUDGET_S if pip else 0.0)
     if pipeline and os.environ.get("QITV_CAPTIONS_LIVE") == "1":
         extra += CAPTIONS_LIVE_S + 30.0  # the developer's AI captions check, and its model load
+    extra += (LEVELS_HELPER_MS + LEVELS_HELPER_GONE_MS) / 1000  # the levels helper's leg
     return HANG_DUMP_S + seconds + extra
 
 
@@ -1406,6 +1418,34 @@ class Driver:
             problem or f"listed {listed}, system {held}, paused {paused}, played again {played}",
         )
 
+    def _check_levels_helper(self) -> Generator[int, None, None]:
+        """The audio screen's levels helper decodes smoke.mp4's sound in its own process and
+        its levels arrive (LEVELS_HELPER_CHECK); nothing here waits for it on the GUI thread."""
+        heard: list[tuple] = []  # appended on the helper's own thread: plain data
+        facts: dict[str, Any] = {}
+        self.report.data["levels_helper"] = facts
+        helper: Any = None
+        try:
+            from services.visualizer.helper import LevelsHelper
+
+            helper = LevelsHelper(str(self.fixtures / "smoke.mp4"), heard.append)
+            helper.start()
+            helper.decode(0)
+        except Exception as e:
+            facts["problem"] = f"{type(e).__name__}: {e}"
+
+        def kinds() -> set[str]:
+            return {str(message[0]) for message in list(heard) if message}
+
+        if helper is not None:
+            yield from self._wait(lambda: bool(kinds() & {"levels", "failed"}), LEVELS_HELPER_MS)
+            helper.stop()
+            facts["gone"] = yield from self._wait(lambda: not helper.alive(), LEVELS_HELPER_GONE_MS)
+            facts.update(pid=helper.pid, exitcode=helper.exitcode)
+        facts["heard"] = sorted(kinds())
+        levels = "levels" in facts["heard"]
+        self.report.check(LEVELS_HELPER_CHECK, levels and facts.get("gone") is True, facts)
+
     def _check_glued(self, when: str, since: Optional[float] = None, quiet: bool = True) -> None:
         """The host sits exactly over the surface, and no overlay re-synced it since `since`."""
         host, surface = self.window.host, self.window.surface
@@ -1561,6 +1601,9 @@ class Driver:
 
         report.step("the system's media keys")
         yield from self._check_media_keys()
+
+        report.step("the visualizer's levels helper")
+        yield from self._check_levels_helper()
 
         # The transport: a mouse move over the playing video shows it over the whole host.
         report.step("show the transport")
