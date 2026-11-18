@@ -1045,7 +1045,7 @@
   "The file holds your sign-in: keep it private.": "इस फ़ाइल में आपका साइन-इन है: इसे निजी रखें।",
   "The file may hold your sign-in: keep it private.": "इस फ़ाइल में आपका साइन-इन हो सकता है: इसे निजी रखें।",
   "The film didn't open. Tap TV to watch it there.": "फ़िल्म नहीं खुली। उसे टीवी पर देखने के लिए “टीवी” पर टैप करें।",
-  "The folders you opened. Each plays on from where you stopped.": "",
+  "The folders you opened. Videos and episodes play on from where you stopped.": "",
   "The mixer's other row (while it shows)": "मिक्सर की दूसरी पंक्ति (जब दिख रही हो)",
   "The more accurate speech model couldn't be downloaded. Download the faster one ({size}) instead?": "अधिक सटीक स्पीच मॉडल डाउनलोड नहीं हो सका। इसके बजाय तेज़ वाला ({size}) डाउनलोड करें?",
   "The new version has been saved to:\n{path}\n\nPlease replace the current application with the downloaded file.": "नया वर्ज़न यहाँ सेव हुआ है:\n{path}\n\nकृपया मौजूदा ऐप्लिकेशन को डाउनलोड की गई फ़ाइल से बदलें।",

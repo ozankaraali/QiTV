@@ -1045,7 +1045,7 @@
   "The file holds your sign-in: keep it private.": "Skedari përmban të dhënat tuaja të hyrjes: mbajeni privat.",
   "The file may hold your sign-in: keep it private.": "Skedari mund të përmbajë të dhënat tuaja të hyrjes: mbajeni privat.",
   "The film didn't open. Tap TV to watch it there.": "Filmi nuk u hap. Prekni TV për ta parë atje.",
-  "The folders you opened. Each plays on from where you stopped.": "",
+  "The folders you opened. Videos and episodes play on from where you stopped.": "",
   "The mixer's other row (while it shows)": "Rreshti tjetër i mikserit (kur shfaqet)",
   "The more accurate speech model couldn't be downloaded. Download the faster one ({size}) instead?": "Modeli më i saktë i të folurit nuk u shkarkua dot. Ta shkarkojmë në vend të tij atë më të shpejtin ({size})?",
   "The new version has been saved to:\n{path}\n\nPlease replace the current application with the downloaded file.": "Versioni i ri u ruajt në:\n{path}\n\nJu lutemi, zëvendësoni aplikacionin aktual me skedarin e shkarkuar.",

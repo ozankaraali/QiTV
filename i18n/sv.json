@@ -1045,7 +1045,7 @@
   "The file holds your sign-in: keep it private.": "Filen innehåller din inloggning: håll den privat.",
   "The file may hold your sign-in: keep it private.": "Filen kan innehålla din inloggning: håll den privat.",
   "The film didn't open. Tap TV to watch it there.": "Filmen öppnades inte. Tryck på TV för att titta på den där.",
-  "The folders you opened. Each plays on from where you stopped.": "",
+  "The folders you opened. Videos and episodes play on from where you stopped.": "",
   "The mixer's other row (while it shows)": "Mixerns andra rad (när den visas)",
   "The more accurate speech model couldn't be downloaded. Download the faster one ({size}) instead?": "Den noggrannare talmodellen kunde inte hämtas. Vill du hämta den snabbare ({size}) i stället?",
   "The new version has been saved to:\n{path}\n\nPlease replace the current application with the downloaded file.": "Den nya versionen har sparats i:\n{path}\n\nErsätt det nuvarande programmet med den nedladdade filen.",

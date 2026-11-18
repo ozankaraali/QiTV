@@ -1036,7 +1036,7 @@
   "The file holds your sign-in: keep it private.": "Dosya oturum açma bilgilerinizi içerir: kimseyle paylaşmayın.",
   "The file may hold your sign-in: keep it private.": "Dosya oturum açma bilgilerinizi içerebilir: kimseyle paylaşmayın.",
   "The film didn't open. Tap TV to watch it there.": "Film açılamadı. TV'de izlemek için TV'ye dokunun.",
-  "The folders you opened. Each plays on from where you stopped.": "Açtığınız klasörler. Her biri kaldığınız yerden devam eder.",
+  "The folders you opened. Videos and episodes play on from where you stopped.": "Açtığınız klasörler. Videolar ve bölümler kaldığınız yerden devam eder.",
   "The mixer's other row (while it shows)": "Mikserin diğer satırı (göründüğü sürece)",
   "The more accurate speech model couldn't be downloaded. Download the faster one ({size}) instead?": "Daha doğru konuşma modeli indirilemedi. Bunun yerine daha hızlısı ({size}) indirilsin mi?",
   "The new version has been saved to:\n{path}\n\nPlease replace the current application with the downloaded file.": "Yeni sürüm şuraya kaydedildi:\n{path}\n\nLütfen mevcut uygulamayı indirilen dosyayla değiştirin.",

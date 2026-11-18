@@ -1054,7 +1054,7 @@
   "The file holds your sign-in: keep it private.": "Soubor obsahuje vaše přihlašovací údaje: nesdílejte ho.",
   "The file may hold your sign-in: keep it private.": "Soubor může obsahovat vaše přihlašovací údaje: nesdílejte ho.",
   "The film didn't open. Tap TV to watch it there.": "Film se neotevřel. Klepněte na TV a sledujte ho tam.",
-  "The folders you opened. Each plays on from where you stopped.": "",
+  "The folders you opened. Videos and episodes play on from where you stopped.": "",
   "The mixer's other row (while it shows)": "Druhý řádek mixéru (když je zobrazený)",
   "The more accurate speech model couldn't be downloaded. Download the faster one ({size}) instead?": "Přesnější model řeči se nepodařilo stáhnout. Stáhnout místo něj rychlejší ({size})?",
   "The new version has been saved to:\n{path}\n\nPlease replace the current application with the downloaded file.": "Nová verze byla uložena do:\n{path}\n\nNahraďte prosím současnou aplikaci staženým souborem.",

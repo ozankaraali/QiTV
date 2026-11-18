@@ -1045,7 +1045,7 @@
   "The file holds your sign-in: keep it private.": "Tiedosto sisältää kirjautumistietosi: pidä se yksityisenä.",
   "The file may hold your sign-in: keep it private.": "Tiedosto voi sisältää kirjautumistietosi: pidä se yksityisenä.",
   "The film didn't open. Tap TV to watch it there.": "Elokuva ei auennut. Napauta TV katsoaksesi sitä siellä.",
-  "The folders you opened. Each plays on from where you stopped.": "",
+  "The folders you opened. Videos and episodes play on from where you stopped.": "",
   "The mixer's other row (while it shows)": "Mikserin toinen rivi (kun se näkyy)",
   "The more accurate speech model couldn't be downloaded. Download the faster one ({size}) instead?": "Tarkempaa puhemallia ei voitu ladata. Ladataanko sen sijaan nopeampi ({size})?",
   "The new version has been saved to:\n{path}\n\nPlease replace the current application with the downloaded file.": "Uusi versio on tallennettu sijaintiin:\n{path}\n\nKorvaa nykyinen sovellus ladatulla tiedostolla.",

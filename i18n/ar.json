@@ -1081,7 +1081,7 @@
   "The file holds your sign-in: keep it private.": "يحتوي الملف على بيانات تسجيل دخولك: احتفظ به لنفسك.",
   "The file may hold your sign-in: keep it private.": "قد يحتوي الملف على بيانات تسجيل دخولك: احتفظ به لنفسك.",
   "The film didn't open. Tap TV to watch it there.": "لم يُفتح الفيلم. اضغط «التلفزيون» لمشاهدته هناك.",
-  "The folders you opened. Each plays on from where you stopped.": "",
+  "The folders you opened. Videos and episodes play on from where you stopped.": "",
   "The mixer's other row (while it shows)": "الصف الآخر في الخلّاط (حين يظهر)",
   "The more accurate speech model couldn't be downloaded. Download the faster one ({size}) instead?": "تعذّر تنزيل نموذج الكلام الأدق. أتنزّل الأسرع ({size}) بدلًا منه؟",
   "The new version has been saved to:\n{path}\n\nPlease replace the current application with the downloaded file.": "حُفظ الإصدار الجديد في:\n{path}\n\nيُرجى استبدال التطبيق الحالي بالملف الذي نُزّل.",

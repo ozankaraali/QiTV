@@ -1054,7 +1054,7 @@
   "The file holds your sign-in: keep it private.": "Faile yra jūsų prisijungimo duomenys: niekam jo nerodykite.",
   "The file may hold your sign-in: keep it private.": "Faile gali būti jūsų prisijungimo duomenys: niekam jo nerodykite.",
   "The film didn't open. Tap TV to watch it there.": "Filmas neatsidarė. Bakstelėkite TV, kad žiūrėtumėte ten.",
-  "The folders you opened. Each plays on from where you stopped.": "",
+  "The folders you opened. Videos and episodes play on from where you stopped.": "",
   "The mixer's other row (while it shows)": "Kita maišiklio eilutė (kol jis rodomas)",
   "The more accurate speech model couldn't be downloaded. Download the faster one ({size}) instead?": "Tikslesnio kalbos modelio atsisiųsti nepavyko. Atsisiųsti greitesnį ({size}) vietoj jo?",
   "The new version has been saved to:\n{path}\n\nPlease replace the current application with the downloaded file.": "Nauja versija išsaugota:\n{path}\n\nPakeiskite dabartinę programą atsisiųstu failu.",

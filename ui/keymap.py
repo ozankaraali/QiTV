@@ -416,8 +416,7 @@ SHORTCUTS: dict[str, list[tuple[str, str]]] = {
         ("Ctrl+4", N_("Multiview")),
         ("Ctrl+5", N_("Recordings")),  # i18n: what a key does: the Library's Recordings page
         ("Ctrl+O", N_("Open a file")),
-        # i18n: what a key does (Plan 4): File → Open Folder…, a folder plays and goes on the
-        # Library's Folders tab
+        # i18n: what a key does: File → Open Folder… (it plays, and goes on the Folders tab)
         ("Ctrl+Shift+O", N_("Open a folder")),
         ("Ctrl+,", N_("Settings")),
         ("Ctrl+R", N_("Refresh channels and guide")),

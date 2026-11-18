@@ -1063,7 +1063,7 @@
   "The file holds your sign-in: keep it private.": "Datoteka vsebuje vaše prijavne podatke: hranite jo zasebno.",
   "The file may hold your sign-in: keep it private.": "Datoteka lahko vsebuje vaše prijavne podatke: hranite jo zasebno.",
   "The film didn't open. Tap TV to watch it there.": "Film se ni odprl. Tapnite TV in ga glejte tam.",
-  "The folders you opened. Each plays on from where you stopped.": "",
+  "The folders you opened. Videos and episodes play on from where you stopped.": "",
   "The mixer's other row (while it shows)": "Druga vrstica mešalnika (ko je prikazan)",
   "The more accurate speech model couldn't be downloaded. Download the faster one ({size}) instead?": "Natančnejšega govornega modela ni bilo mogoče prenesti. Ali naj namesto njega prenesem hitrejšega ({size})?",
   "The new version has been saved to:\n{path}\n\nPlease replace the current application with the downloaded file.": "Nova različica je shranjena v:\n{path}\n\nTrenutno aplikacijo zamenjajte s preneseno datoteko.",

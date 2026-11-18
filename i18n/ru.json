@@ -1063,7 +1063,7 @@
   "The file holds your sign-in: keep it private.": "Файл содержит ваши данные для входа: не передавайте его никому.",
   "The file may hold your sign-in: keep it private.": "Файл может содержать ваши данные для входа: не передавайте его никому.",
   "The film didn't open. Tap TV to watch it there.": "Фильм не открылся. Нажмите «ТВ», чтобы смотреть его там.",
-  "The folders you opened. Each plays on from where you stopped.": "",
+  "The folders you opened. Videos and episodes play on from where you stopped.": "",
   "The mixer's other row (while it shows)": "Другая строка микшера (пока он показан)",
   "The more accurate speech model couldn't be downloaded. Download the faster one ({size}) instead?": "Не удалось загрузить более точную речевую модель. Загрузить вместо неё более быструю ({size})?",
   "The new version has been saved to:\n{path}\n\nPlease replace the current application with the downloaded file.": "Новая версия сохранена в:\n{path}\n\nЗамените текущее приложение загруженным файлом.",

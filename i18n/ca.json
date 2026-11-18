@@ -1045,7 +1045,7 @@
   "The file holds your sign-in: keep it private.": "El fitxer conté les teves dades d'accés: no el comparteixis.",
   "The file may hold your sign-in: keep it private.": "El fitxer pot contenir les teves dades d'accés: no el comparteixis.",
   "The film didn't open. Tap TV to watch it there.": "La pel·lícula no s'ha obert. Toca TV per veure-la allà.",
-  "The folders you opened. Each plays on from where you stopped.": "",
+  "The folders you opened. Videos and episodes play on from where you stopped.": "",
   "The mixer's other row (while it shows)": "L'altra fila del mesclador (mentre es mostra)",
   "The more accurate speech model couldn't be downloaded. Download the faster one ({size}) instead?": "No s'ha pogut baixar el model de veu més precís. Voleu baixar el més ràpid ({size}) en lloc seu?",
   "The new version has been saved to:\n{path}\n\nPlease replace the current application with the downloaded file.": "La versió nova s'ha desat a:\n{path}\n\nSubstitueix l'aplicació actual pel fitxer baixat.",

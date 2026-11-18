@@ -1045,7 +1045,7 @@
   "The file holds your sign-in: keep it private.": "Faylda giriş məlumatlarınız var: onu heç kimlə paylaşmayın.",
   "The file may hold your sign-in: keep it private.": "Faylda giriş məlumatlarınız ola bilər: onu heç kimlə paylaşmayın.",
   "The film didn't open. Tap TV to watch it there.": "Film açılmadı. TV-də baxmaq üçün TV-yə toxunun.",
-  "The folders you opened. Each plays on from where you stopped.": "",
+  "The folders you opened. Videos and episodes play on from where you stopped.": "",
   "The mixer's other row (while it shows)": "Mikserin digər sətri (göründüyü müddətdə)",
   "The more accurate speech model couldn't be downloaded. Download the faster one ({size}) instead?": "Daha dəqiq nitq modeli yüklənə bilmədi. Əvəzində daha sürətlisi ({size}) yüklənsin?",
   "The new version has been saved to:\n{path}\n\nPlease replace the current application with the downloaded file.": "Yeni versiya bura saxlanıldı:\n{path}\n\nZəhmət olmasa, cari tətbiqi yüklənmiş faylla əvəz edin.",

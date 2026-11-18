@@ -1045,7 +1045,7 @@
   "The file holds your sign-in: keep it private.": "A fájl tartalmazza a bejelentkezési adataidat: ne oszd meg.",
   "The file may hold your sign-in: keep it private.": "A fájl tartalmazhatja a bejelentkezési adataidat: ne oszd meg.",
   "The film didn't open. Tap TV to watch it there.": "A film nem nyílt meg. Koppints a TV-re, hogy ott nézd.",
-  "The folders you opened. Each plays on from where you stopped.": "",
+  "The folders you opened. Videos and episodes play on from where you stopped.": "",
   "The mixer's other row (while it shows)": "A keverő másik sora (amíg látszik)",
   "The more accurate speech model couldn't be downloaded. Download the faster one ({size}) instead?": "A pontosabb beszédmodellt nem sikerült letölteni. Letöltöd helyette a gyorsabbat ({size})?",
   "The new version has been saved to:\n{path}\n\nPlease replace the current application with the downloaded file.": "Az új verzió ide lett mentve:\n{path}\n\nCseréld le a jelenlegi alkalmazást a letöltött fájlra.",

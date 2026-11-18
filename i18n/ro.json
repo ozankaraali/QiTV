@@ -1054,7 +1054,7 @@
   "The file holds your sign-in: keep it private.": "Fișierul conține datele dvs. de conectare: păstrați-l privat.",
   "The file may hold your sign-in: keep it private.": "Fișierul poate conține datele dvs. de conectare: păstrați-l privat.",
   "The film didn't open. Tap TV to watch it there.": "Filmul nu s-a deschis. Atingeți TV pentru a-l viziona acolo.",
-  "The folders you opened. Each plays on from where you stopped.": "",
+  "The folders you opened. Videos and episodes play on from where you stopped.": "",
   "The mixer's other row (while it shows)": "Celălalt rând al mixerului (cât este afișat)",
   "The more accurate speech model couldn't be downloaded. Download the faster one ({size}) instead?": "Modelul de vorbire mai precis nu a putut fi descărcat. Îl descărcați în schimb pe cel mai rapid ({size})?",
   "The new version has been saved to:\n{path}\n\nPlease replace the current application with the downloaded file.": "Noua versiune a fost salvată în:\n{path}\n\nÎnlocuiți aplicația curentă cu fișierul descărcat.",

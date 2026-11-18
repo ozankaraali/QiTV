@@ -96,8 +96,8 @@ COVER_MAX_PX = 640
 PAGE_ROWS = 2
 
 TITLE_TEXT = TAB_LABELS["folders"]  # the tab's name is its title
-# i18n: under the Folders tab's title
-SUMMARY_TEXT = N_("The folders you opened. Each plays on from where you stopped.")
+# i18n: under the Folders tab's title (an album starts at its first song: only videos resume)
+SUMMARY_TEXT = N_("The folders you opened. Videos and episodes play on from where you stopped.")
 # i18n: the Folders tab's last tile: choose a folder to play (File → Open Folder…)
 ADD_TEXT = N_("Add folder")
 # i18n: a Folders tab tile's line: its folder is gone (moved, deleted, a drive unplugged)
@@ -190,10 +190,9 @@ def tile_line(read: PlaylistRead, start: Optional[int]) -> str:
         following = [entry for entry in entries[start or 0 :] if is_video(entry)] or videos
         episode = parse_episode(os.path.basename(following[0]))
         if episode is not None:
-            # i18n: a Folders tab tile's line: a series' episode that plays next ({season},
-            # {episode}: its numbers), "S2 · E5 next"
+            # i18n: a Folders tab tile's line: a series' episode that plays next, "S2 · E5 next"
             return tr(
-                "S{season} · E{episode} next",
+                "S{season} · E{episode} next",  # i18n: {season}, {episode}: its numbers
                 season=number(episode.season),
                 episode=number(episode.first),
             )

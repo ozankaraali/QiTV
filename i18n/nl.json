@@ -1045,7 +1045,7 @@
   "The file holds your sign-in: keep it private.": "Het bestand bevat je inloggegevens: houd het privé.",
   "The file may hold your sign-in: keep it private.": "Het bestand kan je inloggegevens bevatten: houd het privé.",
   "The film didn't open. Tap TV to watch it there.": "De film ging niet open. Tik op TV om hem daar te kijken.",
-  "The folders you opened. Each plays on from where you stopped.": "",
+  "The folders you opened. Videos and episodes play on from where you stopped.": "",
   "The mixer's other row (while it shows)": "De andere rij van de mixer (als die zichtbaar is)",
   "The more accurate speech model couldn't be downloaded. Download the faster one ({size}) instead?": "Het nauwkeurigere spraakmodel kon niet worden gedownload. In plaats daarvan het snellere ({size}) downloaden?",
   "The new version has been saved to:\n{path}\n\nPlease replace the current application with the downloaded file.": "De nieuwe versie is opgeslagen in:\n{path}\n\nVervang de huidige app door het gedownloade bestand.",

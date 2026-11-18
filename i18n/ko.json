@@ -1036,7 +1036,7 @@
   "The file holds your sign-in: keep it private.": "이 파일에는 로그인 정보가 들어 있어요. 다른 사람과 공유하지 마세요.",
   "The file may hold your sign-in: keep it private.": "이 파일에 로그인 정보가 들어 있을 수 있어요. 다른 사람과 공유하지 마세요.",
   "The film didn't open. Tap TV to watch it there.": "영화를 열지 못했어요. “TV”를 탭해 TV에서 보세요.",
-  "The folders you opened. Each plays on from where you stopped.": "",
+  "The folders you opened. Videos and episodes play on from where you stopped.": "",
   "The mixer's other row (while it shows)": "믹서의 다른 행 (표시 중일 때)",
   "The more accurate speech model couldn't be downloaded. Download the faster one ({size}) instead?": "더 정확한 음성 모델을 내려받지 못했어요. 대신 더 빠른 모델({size})을 내려받을까요?",
   "The new version has been saved to:\n{path}\n\nPlease replace the current application with the downloaded file.": "새 버전을 저장한 위치:\n{path}\n\n현재 앱을 다운로드한 파일로 바꿔 주세요.",

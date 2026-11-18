@@ -1045,7 +1045,7 @@
   "The file holds your sign-in: keep it private.": "Датотеката ја содржи вашата најава: чувајте ја приватно.",
   "The file may hold your sign-in: keep it private.": "Датотеката можеби ја содржи вашата најава: чувајте ја приватно.",
   "The film didn't open. Tap TV to watch it there.": "Филмот не се отвори. Допрете ТВ за да го гледате таму.",
-  "The folders you opened. Each plays on from where you stopped.": "",
+  "The folders you opened. Videos and episodes play on from where you stopped.": "",
   "The mixer's other row (while it shows)": "Другиот ред на миксерот (додека се прикажува)",
   "The more accurate speech model couldn't be downloaded. Download the faster one ({size}) instead?": "Попрецизниот говорен модел не можеше да се преземе. Да се преземе побрзиот ({size}) наместо него?",
   "The new version has been saved to:\n{path}\n\nPlease replace the current application with the downloaded file.": "Новата верзија е зачувана во:\n{path}\n\nЗаменете ја тековната апликација со преземената датотека.",

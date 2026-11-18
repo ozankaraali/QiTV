@@ -1036,7 +1036,7 @@
   "The file holds your sign-in: keep it private.": "このファイルにはサインイン情報が含まれます。他人と共有しないでください。",
   "The file may hold your sign-in: keep it private.": "このファイルにはサインイン情報が含まれる場合があります。他人と共有しないでください。",
   "The film didn't open. Tap TV to watch it there.": "映画を開けませんでした。「テレビ」をタップしてテレビで視聴してください。",
-  "The folders you opened. Each plays on from where you stopped.": "",
+  "The folders you opened. Videos and episodes play on from where you stopped.": "",
   "The mixer's other row (while it shows)": "ミキサーのもう一方の行（表示中）",
   "The more accurate speech model couldn't be downloaded. Download the faster one ({size}) instead?": "より正確な音声モデルをダウンロードできませんでした。代わりに高速なモデル ({size}) をダウンロードしますか？",
   "The new version has been saved to:\n{path}\n\nPlease replace the current application with the downloaded file.": "新しいバージョンの保存先:\n{path}\n\n現在のアプリをダウンロードしたファイルで置き換えてください。",

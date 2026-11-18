@@ -1036,7 +1036,7 @@
   "The file holds your sign-in: keep it private.": "ไฟล์นี้มีข้อมูลลงชื่อเข้าใช้ของคุณ: เก็บไว้เป็นความลับ",
   "The file may hold your sign-in: keep it private.": "ไฟล์นี้อาจมีข้อมูลลงชื่อเข้าใช้ของคุณ: เก็บไว้เป็นความลับ",
   "The film didn't open. Tap TV to watch it there.": "เปิดภาพยนตร์ไม่ได้ แตะทีวีเพื่อดูบนทีวี",
-  "The folders you opened. Each plays on from where you stopped.": "",
+  "The folders you opened. Videos and episodes play on from where you stopped.": "",
   "The mixer's other row (while it shows)": "อีกแถวของมิกเซอร์ (ขณะแสดงอยู่)",
   "The more accurate speech model couldn't be downloaded. Download the faster one ({size}) instead?": "ดาวน์โหลดโมเดลเสียงพูดที่แม่นยำกว่าไม่ได้ ดาวน์โหลดตัวที่เร็วกว่า ({size}) แทนไหม?",
   "The new version has been saved to:\n{path}\n\nPlease replace the current application with the downloaded file.": "บันทึกเวอร์ชันใหม่ไว้ที่:\n{path}\n\nโปรดแทนที่แอปปัจจุบันด้วยไฟล์ที่ดาวน์โหลดมา",

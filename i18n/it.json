@@ -1045,7 +1045,7 @@
   "The file holds your sign-in: keep it private.": "Il file contiene i tuoi dati di accesso: non condividerlo.",
   "The file may hold your sign-in: keep it private.": "Il file potrebbe contenere i tuoi dati di accesso: non condividerlo.",
   "The film didn't open. Tap TV to watch it there.": "Il film non si è aperto. Tocca TV per guardarlo lì.",
-  "The folders you opened. Each plays on from where you stopped.": "",
+  "The folders you opened. Videos and episodes play on from where you stopped.": "",
   "The mixer's other row (while it shows)": "L'altra riga del mixer (quando è visibile)",
   "The more accurate speech model couldn't be downloaded. Download the faster one ({size}) instead?": "Non è stato possibile scaricare il modello vocale più preciso. Scaricare invece quello più veloce ({size})?",
   "The new version has been saved to:\n{path}\n\nPlease replace the current application with the downloaded file.": "La nuova versione è stata salvata in:\n{path}\n\nSostituisci l'applicazione attuale con il file scaricato.",

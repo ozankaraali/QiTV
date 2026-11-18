@@ -1036,7 +1036,7 @@
   "The file holds your sign-in: keep it private.": "此檔案包含你的登入資訊：請妥善保管。",
   "The file may hold your sign-in: keep it private.": "此檔案可能包含你的登入資訊：請妥善保管。",
   "The film didn't open. Tap TV to watch it there.": "電影無法開啟。點一下「電視」在電視上觀看。",
-  "The folders you opened. Each plays on from where you stopped.": "",
+  "The folders you opened. Videos and episodes play on from where you stopped.": "",
   "The mixer's other row (while it shows)": "混音器的另一列（顯示時）",
   "The more accurate speech model couldn't be downloaded. Download the faster one ({size}) instead?": "無法下載較準確的語音模型。改為下載較快的模型（{size}）嗎？",
   "The new version has been saved to:\n{path}\n\nPlease replace the current application with the downloaded file.": "新版本已儲存到：\n{path}\n\n請用下載的檔案取代目前的應用程式。",
