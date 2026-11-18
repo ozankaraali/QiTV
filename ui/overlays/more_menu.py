@@ -14,7 +14,10 @@ a row closes it, then the row acts. It closes as the multiview's layouts do
 more, but on another of the dock's buttons it closes it and that button acts; "⋯" itself only
 closes it. The mouse's Back and Forward buttons go on to the shell. The keys reach it through
 the shell while it shows (`handle`): Esc closes it, and only it; any other key closes it and
-goes on. It goes with its dock: when the transport leaves audio mode or hides.
+goes on. It goes with its dock: when the transport leaves audio mode or hides. It is sized in
+the dock's unit (capped by a 16:9 page as tall as the window): as many rows as fit above "⋯"
+show, and in a short window the rest scroll (the wheel; ▴ and ▾ say rows lie beyond), as the
+Sound panel's do.
 
 It is painted as the mixer and the layouts are: the same panel, outline, radius and focus fill.
 """
@@ -25,13 +28,23 @@ import math
 from typing import Optional
 
 from PySide6.QtCore import QElapsedTimer, QEvent, QObject, QPoint, QPointF, QRect, QRectF, Qt
-from PySide6.QtGui import QFont, QFontMetricsF, QMouseEvent, QPainter, QPaintEvent, QPen
+from PySide6.QtGui import (
+    QFont,
+    QFontMetricsF,
+    QMouseEvent,
+    QPainter,
+    QPainterPath,
+    QPaintEvent,
+    QPen,
+    QWheelEvent,
+)
 from PySide6.QtWidgets import QApplication, QWidget
 
 from services.i18n import N_
 from ui.keymap import Action
+from ui.overlays.audio_screen import screen_units
 from ui.overlays.base import Overlay
-from ui.overlays.painting import Units, draw_icon, fill_round, ui_units
+from ui.overlays.painting import Units, draw_icon, fill_round
 from ui.overlays.transport import MENU_CONTROLS, Transport
 from ui.pointer import NAV_BUTTONS
 from ui.theme import FOCUS_FILL_ALPHA, PALETTE, qcolor
@@ -57,6 +70,8 @@ _ICON_U = 1.7
 _ICON_GAP_U = 1.0  # between a row's icon and its text
 _FLOOR_GAP_U = 0.8  # above "⋯"
 _EDGE_U = 1.0  # from the host's sides
+_ARROW_U = 1.0  # the "more rows" arrows
+_WHEEL_STEP = 120  # one notch: one row
 _EVENTS_OUTSIDE = (QEvent.Type.MouseButtonPress, QEvent.Type.MouseButtonDblClick)
 
 
@@ -74,6 +89,9 @@ class MoreMenu(Overlay):
         self._hover: Optional[str] = None
         self._shown = QElapsedTimer()  # since it showed: a double-click's second press
         self._filtering = False
+        self._fit = len(MENU_CONTROLS)  # the rows that fit above "⋯"
+        self._scroll = 0  # the first row shown
+        self._wheel = 0
         transport.bandChanged.connect(self._follow_dock)
         if parent is not None:
             parent.installEventFilter(self)
@@ -89,6 +107,7 @@ class MoreMenu(Overlay):
         fresh = self.isHidden()
         if fresh:
             self._hover = None
+            self._scroll = 0
         self._layout()
         if fresh:
             self._shown.start()
@@ -121,14 +140,26 @@ class MoreMenu(Overlay):
         return self._transport.control_text(name)
 
     def controls(self) -> dict[str, QRect]:
-        """Its rows by name (MENU_CONTROLS, top to bottom), in its own coordinates."""
+        """Its rows by name (MENU_CONTROLS, top to bottom), in its own coordinates: those in
+        sight (a short window shows fewer and scrolls)."""
         return {name: rect.toAlignedRect() for name, rect in self._rows().items()}
+
+    def scroll_by(self, rows: int) -> None:
+        """Show the rows `rows` further down (up when negative), within the list."""
+        scroll = self._clamped(self._scroll + rows)
+        if scroll != self._scroll:
+            self._scroll = scroll
+            self.update()
 
     # ---- layout -------------------------------------------------------------------------
 
     def _units(self) -> Units:
+        """The dock's: capped by a 16:9 page as tall as the host, so a short window keeps the
+        menu as small as its dock."""
         parent = self.parentWidget()
-        return ui_units(parent.width() if parent is not None else _FALLBACK_HOST_WIDTH)
+        if parent is None:
+            return Units(_FALLBACK_HOST_WIDTH)
+        return screen_units(parent.width(), parent.height())
 
     @staticmethod
     def _font(un: Units) -> QFont:
@@ -141,37 +172,42 @@ class MoreMenu(Overlay):
         """Where a row's text starts, from the row's left."""
         return un.px(_ROW_PAD_U) + un.px(_ICON_U) + un.px(_ICON_GAP_U)
 
-    def _size(self) -> tuple[int, int]:
-        un = self._units()
-        fm = QFontMetricsF(self._font(un))
-        text = max(fm.horizontalAdvance(self.label(name)) for name in MENU_CONTROLS)
-        row = self._text_left(un) + text + un.px(_ROW_PAD_U)
-        width = 2 * un.px(_PAD_U) + row
-        height = 2 * un.px(_PAD_U) + len(MENU_CONTROLS) * self._row_height(un)
-        return math.ceil(width), math.ceil(height)
+    def _clamped(self, scroll: int) -> int:
+        return max(0, min(scroll, len(MENU_CONTROLS) - self._fit))
 
     def _layout(self) -> None:
+        """Above "⋯", as many rows as fit between the host's top and it (at least one); the
+        rest scroll."""
         parent = self.parentWidget()
         if parent is None:
             return
-        un = ui_units(parent.width())
-        width, height = self._size()
-        width = min(width, parent.width())
+        un = self._units()
         edge = un.px(_EDGE_U)
         anchor = self._anchor if self._anchor is not None else QPoint(edge, parent.height())
-        x = max(min(anchor.x(), parent.width() - width - edge), min(edge, parent.width() - width))
         bottom = anchor.y() - un.px(_FLOOR_GAP_U)
+        pad, row_h = un.px(_PAD_U), self._row_height(un)
+        room = bottom - edge - 2 * pad
+        self._fit = max(1, min(len(MENU_CONTROLS), math.floor(room / row_h)))
+        self._scroll = self._clamped(self._scroll)
+        fm = QFontMetricsF(self._font(un))
+        text = max(fm.horizontalAdvance(self.label(name)) for name in MENU_CONTROLS)
+        arrow = un.px(_ARROW_U) + un.px(_ROW_PAD_U) if self._fit < len(MENU_CONTROLS) else 0
+        width = math.ceil(2 * pad + self._text_left(un) + text + un.px(_ROW_PAD_U) + arrow)
+        width = min(width, parent.width())
+        height = math.ceil(2 * pad + self._fit * row_h)
+        x = max(min(anchor.x(), parent.width() - width - edge), min(edge, parent.width() - width))
         rect = QRect(x, max(0, bottom - height), width, height)
         if rect != self.geometry():
             self.setGeometry(rect)
 
     def _rows(self) -> dict[str, QRectF]:
+        """The rows in sight, by name."""
         un = self._units()
         pad, row_h = float(un.px(_PAD_U)), self._row_height(un)
         width = self.width() - 2 * pad
+        shown = MENU_CONTROLS[self._scroll : self._scroll + self._fit]
         return {
-            name: QRectF(pad, pad + index * row_h, width, row_h)
-            for index, name in enumerate(MENU_CONTROLS)
+            name: QRectF(pad, pad + index * row_h, width, row_h) for index, name in enumerate(shown)
         }
 
     # ---- painting -----------------------------------------------------------------------
@@ -190,7 +226,10 @@ class MoreMenu(Overlay):
         icon = float(un.px(_ICON_U))
         fm = QFontMetricsF(font)
         p.setFont(font)
-        for name, rect in self._rows().items():
+        rows = self._rows()
+        scrolls = self._fit < len(MENU_CONTROLS)
+        arrow = un.px(_ARROW_U) + un.px(_ROW_PAD_U) if scrolls else 0.0
+        for name, rect in rows.items():
             if name == self._hover:
                 fill_round(p, rect, qcolor(PALETTE.accent, FOCUS_FILL_ALPHA), un.u * 0.8)
             x = rect.left() + un.px(_ROW_PAD_U)
@@ -198,13 +237,41 @@ class MoreMenu(Overlay):
             glyph = _ICONS.get(name) or self._transport.icon(name)
             draw_icon(p, glyph, box, qcolor(PALETTE.text))
             left = rect.left() + self._text_left(un)
-            text = QRectF(left, rect.top(), rect.right() - left, rect.height())
+            text = QRectF(left, rect.top(), rect.right() - left - arrow, rect.height())
             label = self.label(name)
             if fm.horizontalAdvance(label) > text.width():  # only in a window too small for it
                 label = fm.elidedText(label, Qt.TextElideMode.ElideRight, text.width())
             p.setPen(qcolor(PALETTE.text))
             p.drawText(text, Qt.AlignmentFlag.AlignVCenter | Qt.AlignmentFlag.AlignLeft, label)
+        if scrolls:
+            self._paint_arrows(p, un, list(rows.values()))
         p.end()
+
+    def _paint_arrows(self, p: QPainter, un: Units, rects: list[QRectF]) -> None:
+        """A small ▴ on the first row shown when rows are above it, ▾ on the last for below
+        (as the Sound panel's)."""
+        size = float(un.px(_ARROW_U))
+        half = size / 2
+        ends = ((rects[0], self._scroll > 0, True), (rects[-1], self._more_below(), False))
+        for rect, beyond, up in ends:
+            if not beyond:
+                continue
+            cx, cy = rect.right() - un.px(_ROW_PAD_U) - half, rect.center().y()
+            tip, base = (
+                (cy - half * 0.6, cy + half * 0.6) if up else (cy + half * 0.6, cy - half * 0.6)
+            )
+            path = QPainterPath(QPointF(cx - half, base))
+            path.lineTo(cx + half, base)
+            path.lineTo(cx, tip)
+            path.closeSubpath()
+            p.save()
+            p.setPen(Qt.PenStyle.NoPen)
+            p.setBrush(qcolor(PALETTE.text, 0.6))
+            p.drawPath(path)
+            p.restore()
+
+    def _more_below(self) -> bool:
+        return self._scroll + self._fit < len(MENU_CONTROLS)
 
     # ---- input --------------------------------------------------------------------------
 
@@ -251,6 +318,15 @@ class MoreMenu(Overlay):
             self._hover = None
             self.update()
         super().leaveEvent(event)
+
+    def wheelEvent(self, event: QWheelEvent) -> None:
+        """Its rows scroll, when not all fit; never the host's volume under it."""
+        event.accept()
+        self._wheel += event.angleDelta().y()
+        rows = int(self._wheel / _WHEEL_STEP)  # towards zero: a notch up shows the rows above
+        if rows:
+            self._wheel -= rows * _WHEEL_STEP
+            self.scroll_by(-rows)
 
     def tooltip_at(self, pos: QPointF) -> str:
         return ""  # its rows say what they do

@@ -35,7 +35,8 @@ Screens and their controls:
 The audio screen (a song: Plan 4) is checked on its own: AUDIO_ON_SCREEN gives, per "player"
 and "menu" row, what does the same there, on these screens, and AUDIO_EXEMPT the rows that need
 nothing there, and why:
-- "dock": the player controls in audio mode by name (the scrub is "seek");
+- "dock": the player controls in audio mode by name (the scrub is "seek", the volume's bar
+  "level", its speaker "volume");
 - "more": the dock's "⋯" menu, by item ("stop", "audio", "subtitles", "picture", "fullscreen",
   "mini", "library", "search");
 - "audio_screen": the screen's own controls in its three views ("back", "words", "up_next",
@@ -217,13 +218,19 @@ EXEMPT: dict[tuple[str, str], str] = {
 }
 
 # On the audio screen (a song plays: on demand, as a film), every player and menu key's action.
-# The Library rows go through it: the screen's ‹ and ⋯'s Library open it, with its tabs and ↻.
+# The Library rows go through it: the screen's ‹ and ⋯'s Library open it, with its tabs and ↻,
+# and its Live TV, where a click opens the channel list (Open file, Settings, ↻), as the film
+# audit's chain. NOT YET WIRED for every song: Task 5 makes ‹ and ⋯'s Library open the Library
+# at its last tab for any song, a folder's included (Ruling P4-8 a), pinned by Task 5's
+# test_back_and_more_library_open_the_library_for_a_folder_song
+# (tests/test_tv_controller_audio.py). Until then libraryRequested returns only to titles that
+# came from the Library.
 _LIBRARY = (("audio_screen", "back"), ("more", "library"))
 AUDIO_ON_SCREEN: dict[tuple[str, str], tuple[tuple[str, str], ...]] = {
-    # On demand ↑/↓, + and − are the volume, M mutes: the speaker opens the mixer (its slider,
-    # its speaker; Tab's other row is a click on it).
-    ("player", "Up, Down"): (("dock", "volume"),),
-    ("player", "+, -"): (("dock", "volume"),),
+    # On demand ↑/↓, + and − are the volume: the dock's bar sets it (a slider). M mutes: the
+    # speaker opens the mixer (its speaker; Tab's other row is a click on it).
+    ("player", "Up, Down"): (("dock", "level"),),
+    ("player", "+, -"): (("dock", "level"),),
     ("player", "M"): (("dock", "volume"),),
     ("player", "Tab"): (("dock", "volume"),),
     ("player", "Left, Right"): (("dock", "seek"),),  # no ◀10 10▶: the scrub reaches any moment
@@ -243,6 +250,11 @@ AUDIO_ON_SCREEN: dict[tuple[str, str], tuple[tuple[str, str], ...]] = {
     ("menu", "Ctrl+3"): _LIBRARY,  # Series
     ("menu", "Ctrl+5"): _LIBRARY,  # Recordings
     ("menu", "Ctrl+Shift+R"): _LIBRARY,  # its ↻
+    # The channel list (Return) and what it holds: Live TV, then a click on the picture.
+    ("player", "Return"): _LIBRARY,
+    ("menu", "Ctrl+O"): _LIBRARY,  # its Open file
+    ("menu", "Ctrl+,"): _LIBRARY,  # its Settings
+    ("menu", "Ctrl+R"): _LIBRARY,  # its ↻
 }
 
 # On demand (a song, as a film) these do nothing, or say they are live TV's (P, S, V).
@@ -260,12 +272,6 @@ AUDIO_EXEMPT: dict[tuple[str, str], str] = {
     ("player", "S"): _LIVE + " (swaps the second channel's small picture)",
     ("player", "V"): _LIVE + " (the multiview)",
     ("menu", "Ctrl+4"): _LIVE + " (the multiview)",
-    # The channel list: the host's gesture opens it over a song (the mouse's Back button, as
-    # Return does); there are Open file, Settings and Refresh. The Library's Live TV has it too.
-    ("player", "Return"): "the channel list: the mouse's Back button opens it (the host's)",
-    ("menu", "Ctrl+O"): "the channel list's Open file (the mouse's Back button opens the list)",
-    ("menu", "Ctrl+,"): "the channel list's Settings (the mouse's Back button opens the list)",
-    ("menu", "Ctrl+R"): "the channel list's ↻ (the mouse's Back button opens the list)",
     ("menu", "Ctrl+Q"): EXEMPT[("menu", "Ctrl+Q")],
 }
 
@@ -317,7 +323,7 @@ def _transport(host: QWidget) -> set[str]:
 def _audio_dock(host: QWidget) -> Transport:
     t = Transport(host)
     t.show_audio("Ferries at Night", "Mira Sol · Harbour Lights")
-    t.set_audio_state(False, "off", False, True)  # a song of an album
+    t.set_audio_state(False, "off", True)  # a song of an album
     t.update_position(84_000, 221_000)
     return t
 
@@ -645,10 +651,13 @@ class AudioScreenAuditTests(unittest.TestCase):
 
     def test_the_dock_and_its_menu_show_what_they_hold(self):
         dock = {"seek", "shuffle", "prev_track", "play", "next_track", "repeat", "volume"}
-        self.assertEqual(self.screens["dock"], dock | {"words", "more"})
+        self.assertEqual(self.screens["dock"], dock | {"level", "more"})
         menu = {"stop", "audio", "subtitles", "picture", "fullscreen", "mini", "library"}
         self.assertEqual(self.screens["more"], menu | {"search"})
+        # Words (the AI captions) is the screen's own pill, once (Ruling P4-7): no key of
+        # SHORTCUTS turns the captions on, so no row names it; it is here.
         self.assertLessEqual({"back", "words", "up_next"}, self.screens["audio_screen"])
+        self.assertNotIn("words", self.screens["dock"])
 
 
 def _child(host: QWidget) -> QWidget:

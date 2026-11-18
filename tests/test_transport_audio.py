@@ -1,10 +1,10 @@
 """The player controls' audio mode (the audio screen's dock) and its "⋯" menu (Task 4).
 
 The dock is the mockup's: the scrub across the whole width, then shuffle, previous, play (an
-accent circle), next and repeat in the middle, the volume at the right, Words and ⋯ at the
-left. It never fades, it takes only its own band's clicks (the screen under it keeps its top
-bar's), and what the panels and the captions anchor on keeps working. Every other mode lays out
-as before.
+accent circle), next and repeat in the middle, the volume at the right (the speaker opens the
+mixer, the bar is a slider), ⋯ at the left; Words is the screen's own pill. It never fades, it
+takes only its own band's clicks (the screen under it keeps its top bar's), and what the panels
+and the captions anchor on keeps working. Every other mode lays out as before.
 """
 
 from datetime import datetime
@@ -13,8 +13,8 @@ import unittest
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
-from PySide6.QtCore import QPoint, QPointF, QRectF, Qt
-from PySide6.QtGui import QColor, QImage, QMouseEvent
+from PySide6.QtCore import QEvent, QPoint, QPointF, QRectF, Qt
+from PySide6.QtGui import QColor, QImage, QMouseEvent, QWheelEvent
 from PySide6.QtTest import QSignalSpy, QTest
 from PySide6.QtWidgets import QApplication, QWidget
 from timer_fixtures import elapse
@@ -28,7 +28,7 @@ from ui.overlays.transport import MENU_CONTROLS, Transport
 
 MOCK_W = 920.0  # the mockup's page width (its px are fractions of it)
 DOCK = {"seek", "times", "shuffle", "prev_track", "play", "next_track", "repeat", "volume"}
-DOCK |= {"words", "more"}
+DOCK |= {"level", "more"}
 MENU = ("stop", "audio", "subtitles", "picture", "fullscreen", "mini", "library", "search")
 TIMELINE = {
     "start": 0.0,
@@ -111,6 +111,21 @@ def snapshot(t: Transport) -> dict:
     }
 
 
+def double_press(widget: QWidget, point: QPointF) -> None:
+    """A quick double-click as Qt delivers it: press, release, the second press as a
+    double-click, release."""
+    local = QPointF(point)
+    world = QPointF(widget.mapToGlobal(local.toPoint()))
+    for kind, buttons in (
+        (QEvent.Type.MouseButtonPress, Qt.LeftButton),
+        (QEvent.Type.MouseButtonRelease, Qt.NoButton),
+        (QEvent.Type.MouseButtonDblClick, Qt.LeftButton),
+        (QEvent.Type.MouseButtonRelease, Qt.NoButton),
+    ):
+        event = QMouseEvent(kind, local, world, Qt.LeftButton, buttons, Qt.NoModifier)
+        QApplication.sendEvent(widget, event)
+
+
 def accent_ink(image: QImage, rect: QRectF) -> int:
     """How far the reddest pixel in `rect` leans to the accent (red minus blue): the accent
     #e08a5f reads about 130, the dim grey #8d98a4 and the dark shade below zero."""
@@ -139,7 +154,7 @@ class AudioCase(unittest.TestCase):
     def dock(self, host=None, idle_ms=3000, *, has_list=True) -> Transport:
         t = Transport(host if host is not None else self.host(), idle_ms=idle_ms)
         t.show_audio("Ferries at Night", "Mira Sol · Harbour Lights")
-        t.set_audio_state(False, "off", False, has_list)
+        t.set_audio_state(False, "off", has_list)
         t.update_position(84_000, 221_000)
         return t
 
@@ -177,10 +192,12 @@ class DockLayoutTests(AudioCase):
         self.assertGreater(rects["seek"].left(), rects["times"].left())
         self.assertLess(rects["seek"].right(), rects["times"].right())
         self.assertGreater(rects["seek"].width(), 1000)  # the scrub runs across the dock
-        # The volume at the right; Words then ⋯ at the left, clear of the middle.
-        self.assertAlmostEqual(rects["volume"].right(), 1280 - 26 * k, delta=1.0)
-        self.assertAlmostEqual(rects["words"].left(), 26 * k, delta=1.0)
-        self.assertLess(rects["words"].right(), rects["more"].left())
+        # The volume at the right: the speaker, 8 px, then its 90 px bar; ⋯ at the left.
+        self.assertAlmostEqual(rects["level"].right(), 1280 - 26 * k, delta=1.0)
+        self.assertAlmostEqual(rects["level"].width(), 90 * k, delta=1.0)
+        self.assertAlmostEqual(rects["level"].left() - rects["volume"].right(), 8 * k, delta=1.0)
+        self.assertAlmostEqual(rects["volume"].width(), 18 * k, delta=1.0)
+        self.assertAlmostEqual(rects["more"].left(), 26 * k, delta=1.0)
         self.assertLess(rects["more"].right(), rects["shuffle"].left())
         self.assertGreater(rects["volume"].left(), rects["repeat"].right())
         self.assertEqual(t.texts(), ("1:24", "3:41"))  # elapsed, and the song's length
@@ -230,16 +247,8 @@ class DockLayoutTests(AudioCase):
             for width in (300, 360, 480):
                 with self.subTest(language=language, width=width):
                     t = self.dock(self.host(width, width * 9 // 16))
-                    self.assertEqual(set(t._layout()), DOCK)  # Words and ⋯ both fit
+                    self.assertEqual(set(t._layout()), DOCK)
                     assert_apart(t, (language, width))
-        # A Words too long for the room beside the middle five leaves ⋯ alone at the left.
-        i18n.set_language("en")
-        t = self.dock(self.host(360, 202))
-        t._words_label = lambda: "Words of a language that writes it very long"
-        rects = t._layout()
-        self.assertNotIn("words", rects)
-        self.assertLess(rects["more"].right(), rects["shuffle"].left())
-        assert_apart(t, "long Words")
 
     def test_shuffle_and_repeat_show_their_state_and_say_what_they_do(self):
         t = self.dock()
@@ -248,34 +257,27 @@ class DockLayoutTests(AudioCase):
         self.assertLess(accent_ink(dim, rects["shuffle"]), 20)
         self.assertLess(accent_ink(dim, rects["repeat"]), 20)
         self.assertEqual(t.icon("repeat"), "repeat")
-        t.set_audio_state(True, "all", False, True)
+        t.set_audio_state(True, "all", True)
         lit = t.grab().toImage()
         self.assertGreater(accent_ink(lit, rects["shuffle"]), 90)
         self.assertGreater(accent_ink(lit, rects["repeat"]), 90)
-        t.set_audio_state(True, "one", False, True)
+        t.set_audio_state(True, "one", True)
         self.assertEqual(t.icon("repeat"), "repeat_one")
         self.assertEqual(t.tooltip_at(rects["repeat"].center()), "Repeat one")
-        t.set_audio_state(False, "off", False, True)
+        t.set_audio_state(False, "off", True)
         for name, text in (
             ("shuffle", "Shuffle"),
             ("repeat", "Repeat"),
             ("prev_track", "Previous track"),
             ("next_track", "Next track"),
             ("more", "More"),
-            ("words", "AI captions"),
             ("play", key_hint("Play / pause", "Space")),
             ("volume", "Volume (+/−, M)"),
+            ("level", "Volume (+/−, M)"),
         ):
             self.assertEqual(t.tooltip_at(rects[name].center()), text, name)
         with self.assertRaises(ValueError):
-            t.set_audio_state(False, "twice", False, True)
-
-    def test_the_words_pill_is_lit_while_the_words_show(self):
-        t = self.dock()
-        words = t._layout()["words"]
-        self.assertLess(accent_ink(t.grab().toImage(), words), 60)
-        t.set_audio_state(False, "off", True, True)
-        self.assertGreater(accent_ink(t.grab().toImage(), words), 60)
+            t.set_audio_state(False, "twice", True)
 
     def test_each_dock_control_asks_for_its_action(self):
         host = self.host()
@@ -287,8 +289,7 @@ class DockLayoutTests(AudioCase):
             ("play", t.playPauseRequested),
             ("next_track", t.nextTrackRequested),
             ("repeat", t.repeatRequested),
-            ("volume", t.volumeRequested),
-            ("words", t.wordsRequested),
+            ("volume", t.volumeRequested),  # the speaker: the mixer
         ):
             spy = QSignalSpy(signal)
             self.click(t, rects[name].center())
@@ -305,6 +306,68 @@ class DockLayoutTests(AudioCase):
         self.assertEqual(spy.count(), 1)
         self.assertAlmostEqual(spy.at(0)[0], 110_500, delta=400)
         self.assertFalse(t.nextRequested is t.nextTrackRequested)  # a film's Next stays its own
+
+    def test_a_quick_second_press_on_previous_or_next_counts(self):
+        # ⏮⏮: the song from its start, then the one before; ⏭⏭: two songs on. A toggle (repeat)
+        # still counts once: a second press would undo the first.
+        t = self.dock()
+        rects = t._layout()
+        for name, signal, presses in (
+            ("prev_track", t.prevTrackRequested, 2),
+            ("next_track", t.nextTrackRequested, 2),
+            ("repeat", t.repeatRequested, 1),
+        ):
+            QTest.qWait(QApplication.doubleClickInterval() + 20)
+            spy = QSignalSpy(signal)
+            double_press(t, rects[name].center())
+            self.assertEqual(spy.count(), presses, name)
+
+    def test_the_volume_bar_is_a_slider_and_the_speaker_opens_the_mixer(self):
+        t = self.dock()
+        rects = t._layout()
+        bar = rects["level"]
+        y = round(bar.center().y())
+
+        def at(fraction: float) -> QPoint:
+            return QPoint(round(bar.left() + bar.width() * fraction), y)
+
+        sets, mixer = QSignalSpy(t.volumeSetRequested), QSignalSpy(t.volumeRequested)
+        QTest.mousePress(t, Qt.LeftButton, Qt.NoModifier, at(0.25))
+        self.assertEqual(sets.count(), 1)
+        self.assertAlmostEqual(sets.at(0)[0], 25, delta=1)
+        QTest.mouseMove(t, at(0.75))
+        self.assertAlmostEqual(sets.at(sets.count() - 1)[0], 75, delta=1)
+        QTest.mouseMove(t, QPoint(round(bar.right()) + 40, y))  # past its end: all the way
+        self.assertEqual(sets.at(sets.count() - 1)[0], 100)
+        QTest.mouseRelease(t, Qt.LeftButton, Qt.NoModifier, QPoint(round(bar.right()) + 40, y))
+        self.assertEqual(t.icon("volume"), "volume_3")  # the speaker shows the level set
+        self.assertEqual(mixer.count(), 0)
+        self.assertEqual(t.tooltip_at(QPointF(at(0.5))), "Volume (+/−, M)")
+        count = sets.count()
+        QTest.qWait(QApplication.doubleClickInterval() + 20)
+        self.click(t, rects["volume"].center())  # the speaker: the mixer, no level
+        self.assertEqual(mixer.count(), 1)
+        self.assertEqual(sets.count(), count)
+
+    def test_the_scrubs_press_area_never_reaches_the_buttons(self):
+        for width, height in ((360, 203), (300, 169)):
+            with self.subTest(size=(width, height)):
+                t = self.dock(self.host(width, height))
+                rects = t._layout()
+                hits = t._hits(rects)
+                press = t._seek_hit(rects)
+                self.assertTrue(press.contains(rects["seek"].center()))
+                for name, hit in hits.items():
+                    if name not in ("seek", "times"):
+                        both = press.intersected(hit)
+                        touch = min(both.width(), both.height()) < 0.01
+                        self.assertTrue(both.isEmpty() or touch, name)
+                # A press just inside a button's hit area acts there, never seeks.
+                QTest.qWait(QApplication.doubleClickInterval() + 20)
+                seeks, previous = QSignalSpy(t.seekRequested), QSignalSpy(t.prevTrackRequested)
+                top = QPointF(hits["prev_track"].center().x(), hits["prev_track"].top() + 1)
+                self.click(t, top)
+                self.assertEqual((seeks.count(), previous.count()), (0, 1))
 
     def test_without_an_album_list_shuffle_and_next_are_dim_and_ask_nothing(self):
         t = self.dock(has_list=False)
@@ -408,7 +471,7 @@ class DockBehaviourTests(AudioCase):
                     fresh = Transport(self.host(width, height), now=lambda: NOON)
                     mode(fresh)
                     visited.show_audio("Song", "Artist")
-                    visited.set_audio_state(True, "one", True, True)
+                    visited.set_audio_state(True, "one", True)
                     visited.update_position(84_000, 221_000)
                     self.assertNotEqual(snapshot(visited)["layout"], snapshot(fresh)["layout"])
                     mode(visited)
@@ -576,6 +639,46 @@ class MoreMenuTests(AudioCase):
                     self.assertFalse(menu.isVisible())
                     self.assertEqual(t.held(), "")
 
+    def test_the_menu_fits_a_short_window_and_scrolls(self):
+        # Sized with the dock's unit (capped by the window's height), its rows fit the room
+        # above ⋯; with less room than its rows need, they scroll (the wheel), as the Sound
+        # panel's do. It never covers ⋯ and stays inside the window.
+        for height in (360, 150):
+            with self.subTest(height=height):
+                host = self.host(1280, height)
+                t = self.dock(host)
+                menu = MoreMenu(t, host)
+                menu.open_at(t.mapToGlobal(t.button_rect("more").topLeft().toPoint()))
+                more = t.button_rect("more").translated(QPointF(t.pos()))
+                self.assertTrue(host.rect().contains(menu.geometry()), menu.geometry())
+                self.assertLessEqual(menu.geometry().bottom(), more.top())
+                inside = QRectF(menu.rect())
+                for rect in menu.controls().values():
+                    self.assertTrue(inside.contains(QRectF(rect)))
+                if height == 360:
+                    self.assertEqual(tuple(menu.controls()), MENU)  # all of them fit
+                    continue
+                shown = tuple(menu.controls())
+                self.assertLess(len(shown), len(MENU))
+                self.assertEqual(shown, MENU[: len(shown)])
+                centre = QPointF(menu.rect().center())
+                wheel = QWheelEvent(
+                    centre,
+                    QPointF(menu.mapToGlobal(centre.toPoint())),
+                    QPoint(),
+                    QPoint(0, -120 * len(MENU)),  # down, past the end
+                    Qt.NoButton,
+                    Qt.NoModifier,
+                    Qt.NoScrollPhase,
+                    False,
+                )
+                QApplication.sendEvent(menu, wheel)
+                shown = tuple(menu.controls())
+                self.assertEqual(shown, MENU[-len(shown) :])  # the last rows, Search included
+                spy = QSignalSpy(t.searchRequested)
+                self.click(menu, menu.controls()["search"].center())
+                self.assertEqual(spy.count(), 1)
+
     def test_the_dock_speaks_turkish(self):
         self.assertEqual(i18n.set_language("tr"), "tr")
         self.addCleanup(i18n.set_language, "en")
@@ -583,7 +686,10 @@ class MoreMenuTests(AudioCase):
         rects = t._layout()
         self.assertEqual(t.tooltip_at(rects["shuffle"].center()), "Karıştır")
         self.assertEqual(t.tooltip_at(rects["next_track"].center()), "Sonraki parça")
-        t.set_audio_state(False, "one", False, True)
+        # The button's verb; the record timer's field keeps the noun.
+        self.assertEqual(t.tooltip_at(rects["repeat"].center()), "Tekrarla")
+        self.assertEqual(i18n.tr("Repeat"), "Tekrar")
+        t.set_audio_state(False, "one", True)
         self.assertEqual(t.tooltip_at(rects["repeat"].center()), "Bu parçayı tekrarla")
 
 

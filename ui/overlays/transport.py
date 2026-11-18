@@ -66,12 +66,14 @@ Audio (Plan 4, `show_audio`): over the audio screen (ui/overlays/audio_screen.py
 screen's dock, as the approved mockup draws it, in the screen's unit: the scrub across the whole
 width (the time played at its left, the song's length at its right), then shuffle, the previous
 track, play (an accent circle), the next track and repeat in the middle, the volume at the
-right, and Words and "⋯" at the left. The rest of the player's controls are in the "⋯" menu
+right (its speaker opens the mixer, its bar is a slider), and "⋯" at the left; Words is the
+screen's own pill. The rest of the player's controls are in the "⋯" menu
 (ui/overlays/more_menu.py): their panels open above "⋯" (`button_rect`), which is lit while one
 shows. It never fades, it is only its own band (the screen's top bar, its album rows and the
 page under it take their clicks), and it draws no title row: the screen shows the song. Without
-an album list shuffle and the next track are dim and do nothing. Any other mode ends it, and
-`end_audio` ends it and hides it.
+an album list shuffle and the next track are dim and do nothing. A quick second press on the
+previous or the next track counts (restart, then the song before; two songs on). Any other
+mode ends it, and `end_audio` ends it and hides it.
 """
 
 from dataclasses import dataclass
@@ -180,7 +182,6 @@ TOOLTIPS = {
     # The audio screen's dock (Plan 4).
     # i18n: tooltip of the music player's shuffle button: the album's songs in a random order
     "shuffle": N_("Shuffle"),
-    "repeat": N_("Repeat"),  # i18n: tooltip of the music player's repeat button
     # i18n: tooltip of the music player's repeat button while it repeats the song playing
     "repeat_one": N_("Repeat one"),
     "prev_track": N_("Previous track"),  # i18n: tooltip: the album's song before (music player)
@@ -239,10 +240,11 @@ _ICONS = {
 }
 _LABELS = ("live", "indicator", "times")  # shown, not clicked: over the PiP, clicks go on
 # A quick second click (a double-click) repeats these steps; on any other control it counts
-# once: a toggle (★, ⛶, ▶) would undo itself, a jump (⟲, Next) go one further.
-_REPEATS = ("back10", "fwd10", "fwd60", "slower", "faster")
+# once: a toggle (★, ⛶, ▶) would undo itself, a jump (⟲, Next) go one further. The audio dock's
+# previous and next tracks count twice (Plan 4): restart, then the song before; two songs on.
+_REPEATS = ("back10", "fwd10", "fwd60", "slower", "faster", "prev_track", "next_track")
 # The audio dock's (Plan 4): its buttons take clicks past their icons as the icon buttons do.
-_DOCK_BUTTONS = ("shuffle", "prev_track", "next_track", "repeat", "words", "more")
+_DOCK_BUTTONS = ("shuffle", "prev_track", "next_track", "repeat", "more", "level")
 # Its sizes are the approved mockup's px at its 920 px wide page (the audio screen's unit).
 _DOCK_TOP, _DOCK_SIDE, _DOCK_BOTTOM = 14.0, 26.0, 18.0  # its padding
 _DOCK_GAP = 18.0  # between the scrub's row and the buttons'
@@ -256,8 +258,7 @@ _DOCK_PLAY, _DOCK_GLYPH = 54.0, 20.0
 _DOCK_ICON, _DOCK_DIM_ICON = 22.0, 18.0  # previous and next; shuffle and repeat
 _DOCK_CTL_GAP = 22.0  # between the middle buttons
 _DOCK_VOL_ICON, _DOCK_VOL_GAP, _DOCK_VOL_BAR = 18.0, 8.0, 90.0  # the speaker, then its level
-_DOCK_PILL_H, _DOCK_PILL_PAD, _DOCK_PILL_PX = 30.0, 12.0, 12.0  # Words (as the screen's pills)
-_DOCK_LEFT_GAP = 10.0  # between Words and ⋯
+_DOCK_MORE = 30.0  # ⋯: a pill as the screen's (its back button's size)
 _DOCK_SHADOW_Y, _DOCK_SHADOW_BLUR = 10.0, 30.0  # play's glow: 0 10px 30px
 _DOCK_SHADE_AT = 0.4  # the dock's shade is whole 40% down its box, as the mockup's
 _DOCK_TEXT = "#e6ebf0"  # previous and next
@@ -270,11 +271,9 @@ _DOCK_SHADE_ALPHA = 0.85
 _DOCK_TRACK = "rgba(255,255,255,0.14)"
 _DOCK_GLOW_ALPHA = 0.35  # the knob's halo and play's glow, in the accent
 _DOCK_INERT_ALPHA = 0.35  # shuffle and the next track without an album list
-_PILL_FILL = "rgba(255,255,255,0.08)"  # the audio screen's pills, Words lit or not
-_PILL_TEXT = "#d9dfe5"
+_PILL_FILL = "rgba(255,255,255,0.08)"  # the audio screen's pills (⋯ is one), lit or not
 _PILL_ON_FILL = "rgba(224,138,95,0.22)"
 _PILL_ON_RING = "rgba(224,138,95,0.55)"
-_PILL_ON_TEXT = "#ffd9c6"
 _ICON_BUTTONS = (  # painted as icons
     "previous",
     "guide",
@@ -476,9 +475,9 @@ class Transport(Overlay):
     nextTrackRequested = Signal()  # the album's next song
     shuffleRequested = Signal()
     repeatRequested = Signal()  # the next of off, the album, the song
-    wordsRequested = Signal()  # Words: the AI captions on or off
     # ⋯: its menu opens from this point (the button's top-left, global coordinates).
     moreRequested = Signal(QPoint)
+    volumeSetRequested = Signal(int)  # the volume's bar, pressed or dragged: this level (0-100)
 
     def __init__(
         self,
@@ -502,8 +501,8 @@ class Transport(Overlay):
         self._audio = False  # the audio screen's dock (show_audio)
         self._shuffle = False
         self._repeat = "off"  # REPEAT_MODES
-        self._words = False  # the AI captions show: Words is lit
         self._has_list = False  # an album list: shuffle and the next track act
+        self._level_drag = False  # the volume's bar is being pressed or dragged
         self._title = ""
         self._logo: QPixmap | None = None
         self._subtitle = ""
@@ -592,15 +591,14 @@ class Transport(Overlay):
         shows them, the dock draws none). It stays up until another mode or end_audio()."""
         self._set_mode(False, title, subtitle, audio=True)
 
-    def set_audio_state(self, shuffle: bool, repeat: str, words: bool, has_list: bool) -> None:
-        """The dock's toggles: shuffle on, `repeat` one of REPEAT_MODES, Words lit (the AI
-        captions show), and whether there is an album list (without one shuffle and the next
-        track are dim and do nothing)."""
+    def set_audio_state(self, shuffle: bool, repeat: str, has_list: bool) -> None:
+        """The dock's toggles: shuffle on, `repeat` one of REPEAT_MODES, and whether there is
+        an album list (without one shuffle and the next track are dim and do nothing)."""
         if repeat not in REPEAT_MODES:
             raise ValueError(f"Unknown repeat: {repeat!r}")
-        state = (bool(shuffle), repeat, bool(words), bool(has_list))
-        if state != (self._shuffle, self._repeat, self._words, self._has_list):
-            self._shuffle, self._repeat, self._words, self._has_list = state
+        state = (bool(shuffle), repeat, bool(has_list))
+        if state != (self._shuffle, self._repeat, self._has_list):
+            self._shuffle, self._repeat, self._has_list = state
             self.update()
             self._controls_changed()
 
@@ -857,11 +855,12 @@ class Transport(Overlay):
         on live TV the channel's name and star. Over the multiview's grid (the whole picture)
         also what it only says (LIVE, the times, the subtitle, the clock), so it shows whole."""
         region = QRegion()
-        for name, rect in self._hits(self._layout()).items():
+        layout = self._layout()
+        for name, rect in self._hits(layout).items():
             if name in _LABELS and not self._grid_shown:
                 continue
             if name == "seek":
-                rect = rect.adjusted(0, -rect.height(), 0, rect.height())  # its hit area
+                rect = self._seek_hit(layout)  # its hit area
             region = region.united(QRegion(rect.toAlignedRect()))
         for rect in self.title_rects().values():
             region = region.united(QRegion(rect.toAlignedRect()))
@@ -959,10 +958,13 @@ class Transport(Overlay):
             return key_hint(translate(what), key)
         if (name == "mini" and self._mini) or (name == "fullscreen" and self._fullscreen):
             return translate(TOOLTIPS[f"{name}_back"])
-        if name == "repeat" and self._repeat == "one":
-            return translate(TOOLTIPS["repeat_one"])
-        if name == "words":
-            return tr("AI captions")  # i18n: tooltip of Words (the AI captions of a song)
+        if name == "repeat":
+            if self._repeat == "one":
+                return translate(TOOLTIPS["repeat_one"])
+            # i18n: tooltip of the music player's repeat button (verb: play again, round)
+            return tr("Repeat", ctx="music player")
+        if name == "level":
+            name = "volume"  # the volume's bar: the speaker's keys
         text = TOOLTIPS.get(name, "")
         return translate(text) if text else ""
 
@@ -1497,14 +1499,11 @@ class Transport(Overlay):
             font.setFeature(QFont.Tag("tnum"), 1)
         return font
 
-    def _words_label(self) -> str:
-        return tr("Words")  # i18n: the music player's button for the AI captions (lyrics)
-
     def _dock_layout(self) -> dict[str, QRectF]:
         """The mockup's dock from the bottom up: the buttons' row 18 px over the bottom (play's
         circle its height), the scrub's 18 px above it, both 26 px in from the sides. The middle
-        five centred, 22 px apart; the volume at the right; Words then ⋯ at the left (with no
-        room for both beside the middle five, ⋯ alone: the screen's top bar has Words too)."""
+        five centred, 22 px apart; the volume at the right (the speaker, "volume", then its
+        bar, "level"); ⋯ at the left."""
         w, h = float(self.width()), float(self.height())
         k = self._dock_unit()
         side, play = _DOCK_SIDE * k, _DOCK_PLAY * k
@@ -1534,20 +1533,13 @@ class Transport(Overlay):
         for name, size in middle:
             rects[name] = QRectF(x, cy - size * k / 2, size * k, size * k)
             x += size * k + gap
-        volume_w = (_DOCK_VOL_ICON + _DOCK_VOL_GAP + _DOCK_VOL_BAR) * k
-        volume_h = _DOCK_VOL_ICON * k
-        rects["volume"] = QRectF(w - side - volume_w, cy - volume_h / 2, volume_w, volume_h)
-        pill = _DOCK_PILL_H * k
-        words_w = QFontMetricsF(self._dock_font(_DOCK_PILL_PX)).horizontalAdvance(
-            self._words_label()
-        )
-        words = QRectF(side, cy - pill / 2, words_w + 2 * _DOCK_PILL_PAD * k, pill)
-        more = QRectF(words.right() + _DOCK_LEFT_GAP * k, cy - pill / 2, pill, pill)
-        room = rects["shuffle"].left() - gap
-        if more.right() <= room:
-            rects["words"], rects["more"] = words, more
-        elif side + pill <= room:
-            rects["more"] = QRectF(side, cy - pill / 2, pill, pill)
+        speaker = _DOCK_VOL_ICON * k
+        bar = QRectF(w - side - _DOCK_VOL_BAR * k, cy - speaker / 2, _DOCK_VOL_BAR * k, speaker)
+        rects["level"] = bar  # the slider: its line runs through the middle of this box
+        left = bar.left() - _DOCK_VOL_GAP * k - speaker
+        rects["volume"] = QRectF(left, cy - speaker / 2, speaker, speaker)
+        more = _DOCK_MORE * k
+        rects["more"] = QRectF(side, cy - more / 2, more, more)
         return rects
 
     def _dock_band(self) -> QRect:
@@ -1851,32 +1843,25 @@ class Transport(Overlay):
         inert = qcolor(_DOCK_TEXT, _DOCK_INERT_ALPHA)
         draw_icon(p, "next", rects["next_track"], qcolor(_DOCK_TEXT) if self._has_list else inert)
         self._paint_dock_play(p, rects["play"], k)
-        # The volume: the speaker, then its level.
-        volume = rects["volume"]
-        speaker = QRectF(volume.left(), volume.top(), volume.height(), volume.height())
-        held = self._held == "volume"  # lit while the mixer shows, as the films' speaker
-        draw_icon(p, self.icon("volume"), speaker, qcolor(PALETTE.accent if held else _DOCK_TIMES))
-        level = QRectF(volume.right() - _DOCK_VOL_BAR * k, volume.center().y() - line / 2, 0, line)
-        level.setRight(volume.right())
+        # The volume: the speaker (lit while the mixer shows, as a film's), then its level.
+        held = self._held == "volume"
+        color = qcolor(PALETTE.accent if held else _DOCK_TIMES)
+        draw_icon(p, self.icon("volume"), rects["volume"], color)
+        bar = rects["level"]
+        level = QRectF(bar.left(), bar.center().y() - line / 2, bar.width(), line)
         fill_round(p, level, qcolor(_DOCK_TRACK), line / 2)
-        shown = 0.0 if self._muted else min(1.0, max(0.0, self._level / 100.0))
+        muted = self._muted and not self._level_drag  # a drag shows the level it sets
+        shown = 0.0 if muted else min(1.0, max(0.0, self._level / 100.0))
         if shown > 0:
             done = QRectF(level.left(), level.top(), level.width() * shown, line)
             fill_round(p, done, qcolor(_DOCK_LEVEL), line / 2)
-        # Words and ⋯: pills as the screen's, lit as its Words is.
-        words = rects.get("words")
-        if words is not None:
-            self._paint_pill(p, words, self._words)
-            p.setFont(self._dock_font(_DOCK_PILL_PX))
-            p.setPen(qcolor(_PILL_ON_TEXT if self._words else _PILL_TEXT))
-            p.drawText(words, Qt.AlignCenter, self._words_label())
-        more = rects.get("more")
-        if more is not None:
-            lit = self._held == "more" or self._held in MENU_CONTROLS
-            self._paint_pill(p, more, lit)
-            side = _DOCK_DIM_ICON * k
-            dots = QRectF(more.center().x() - side / 2, more.center().y() - side / 2, side, side)
-            draw_icon(p, "more", dots, qcolor(PALETTE.accent) if lit else qcolor(_DOCK_TEXT))
+        # ⋯: a pill as the screen's, lit while its menu or one of its panels shows.
+        more = rects["more"]
+        lit = self._held == "more" or self._held in MENU_CONTROLS
+        self._paint_pill(p, more, lit)
+        side = _DOCK_DIM_ICON * k
+        dots = QRectF(more.center().x() - side / 2, more.center().y() - side / 2, side, side)
+        draw_icon(p, "more", dots, qcolor(PALETTE.accent) if lit else qcolor(_DOCK_TEXT))
 
     @staticmethod
     def _paint_pill(p: QPainter, rect: QRectF, lit: bool) -> None:
@@ -2251,21 +2236,51 @@ class Transport(Overlay):
             return
         pos = event.position()
         rects = self._layout()
+        if self._audio and self._hits(rects)["level"].contains(pos):
+            self._level_drag = True  # the volume's bar: this level, and on with a drag
+            self._set_level_at(pos.x(), always=True)
+            return
         seek = rects.get("seek")
         if seek is not None and self._seekable():
-            hit = seek.adjusted(0, -seek.height(), 0, seek.height())
-            if hit.contains(pos):
+            if self._seek_hit(rects).contains(pos):
                 self._drag = self._frac_at(pos.x())
                 self._idle.stop()
                 self.update()
                 return
         self._click(rects, pos)
 
+    def _seek_hit(self, rects: dict[str, QRectF]) -> QRectF:
+        """Where a press takes the bar: its box and as much again above and below. On the
+        audio dock never down into the buttons' hit areas (a small window brings them close)."""
+        seek = rects["seek"]
+        hit = seek.adjusted(0, -seek.height(), 0, seek.height())
+        if self._audio:
+            tops = [r.top() for n, r in self._hits(rects).items() if n not in ("seek", "times")]
+            hit.setBottom(min([hit.bottom(), *tops]))
+        return hit
+
+    def _set_level_at(self, x: float, always: bool) -> None:
+        """The volume's bar pressed or dragged at `x`: that level (0-100) shows and is asked
+        for (`always`: even when it is the level already, as a press)."""
+        bar = self._layout()["level"]
+        level = round(100 * min(1.0, max(0.0, (x - bar.left()) / max(1.0, bar.width()))))
+        if level == self._level and not always:
+            return
+        self._level = level
+        self.update()
+        self.volumeSetRequested.emit(level)
+
+    def _end_level_drag(self) -> None:
+        if self._level_drag:
+            self._level_drag = False
+            self.update()
+
     def mouseDoubleClickEvent(self, event: QMouseEvent) -> None:
         """The second press of a quick double-click: a step again, else nothing more."""
         if event.button() == Qt.LeftButton and self._control_at(event.position()) not in (
             *_REPEATS,
             "seek",
+            "level",
         ):
             event.accept()  # never the video's fullscreen toggle either
             self.poke()
@@ -2282,9 +2297,10 @@ class Transport(Overlay):
         for name, rect in self.title_rects().items():
             if rect.contains(pos):
                 return name
-        for name, rect in self._hits(self._layout()).items():
+        layout = self._layout()
+        for name, rect in self._hits(layout).items():
             if name == "seek":
-                rect = rect.adjusted(0, -rect.height(), 0, rect.height())
+                rect = self._seek_hit(layout)
             if name not in _LABELS and rect.contains(pos):
                 return name
         return None
@@ -2327,6 +2343,11 @@ class Transport(Overlay):
                 self._poked_at = QPointF(pos)
                 self.poke()
             self._point_at(pos)
+        if self._level_drag:
+            if not event.buttons() & Qt.LeftButton:
+                self._end_level_drag()  # its release went elsewhere
+                return
+            self._set_level_at(pos.x(), always=False)
         if self._drag is not None:
             if not event.buttons() & Qt.LeftButton:
                 self._end_drag()  # its release went elsewhere (a focus switch, a lost grab)
@@ -2351,6 +2372,7 @@ class Transport(Overlay):
     def hideEvent(self, event: QHideEvent) -> None:
         # Hidden mid-drag (the host hides with a minimized window): no release will come.
         self._end_drag()
+        self._end_level_drag()
         super().hideEvent(event)
 
     def _end_drag(self) -> None:
@@ -2363,6 +2385,10 @@ class Transport(Overlay):
         self._controls_changed()
 
     def mouseReleaseEvent(self, event: QMouseEvent) -> None:
+        if event.button() == Qt.LeftButton and self._level_drag:
+            self._set_level_at(event.position().x(), always=False)
+            self._end_level_drag()
+            return
         if event.button() == Qt.LeftButton and self._drag is not None:
             self._drag = self._frac_at(event.position().x())
             timeshift = self._timeshift
@@ -2463,8 +2489,6 @@ class Transport(Overlay):
                     self.shuffleRequested.emit()
             elif name == "repeat":
                 self.repeatRequested.emit()
-            elif name == "words":
-                self.wordsRequested.emit()
             elif name == "more":
                 self.moreRequested.emit(self.mapToGlobal(rect.topLeft().toPoint()))
             return
