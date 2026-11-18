@@ -423,6 +423,42 @@ class ReadFolderTests(Folder, unittest.TestCase):
         )
         self.assertEqual(tags.calls, [])  # no tags are read for a list with videos
 
+    def test_a_videos_side_audio_tracks_are_no_entries(self):
+        # Ruling M2: a dub or a surround track beside its video (the video's name, then more)
+        # is that video's, never an entry of its own (natural order put E01.mka before E01.mkv)
+        names = (
+            "Lantern Coast S01E01.mkv",
+            "Lantern Coast S01E01.mka",
+            "Lantern Coast S01E01.eng.ac3",
+            "Lantern Coast S01E02.mkv",
+            "lantern coast s01e02 - Dub.DTS",
+            "Lantern Coast Theme.mp3",  # a song beside them: an entry, as in 2.11.0
+            "In.mp4",
+            "Intro.mp3",  # "In" then a letter: another name, not "In"'s track
+        )
+        for name in names:
+            self.file(f"Lantern Coast/{name}")
+        with mock.patch.object(local_playlist, "read_tracks", side_effect=fake_tracks({})):
+            read = self.read("Lantern Coast")
+        self.assertEqual(
+            sorted(self.names(read)),
+            sorted(
+                [
+                    "Lantern Coast S01E01.mkv",
+                    "Lantern Coast S01E02.mkv",
+                    "Lantern Coast Theme.mp3",
+                    "In.mp4",
+                    "Intro.mp3",
+                ]
+            ),
+        )
+        self.assertEqual(len(read.sizes), 5)
+        # a folder of songs alone is as it was
+        for name in ("Tide.mp3", "Tide (Live).mp3"):
+            self.file(f"Wexlo Tide/{name}")
+        with mock.patch.object(local_playlist, "read_tracks", side_effect=fake_tracks({})):
+            self.assertEqual(len(self.read("Wexlo Tide").entries), 2)
+
     def test_a_folder_of_songs_is_an_album_named_after_it(self):
         for name in ("Harbour.flac", "Tide.mp3", "Lanterns.ogg", "Quay.opus"):
             self.file(f"Brannow Fell/{name}")
