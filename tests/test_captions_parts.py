@@ -302,6 +302,8 @@ class ControllerTests(unittest.TestCase):
         self.captions.add_overlay(sink)
         self.captions._on_caption(self.number, 10.0, 11.5, SHORE)
         self.captions._on_caption(self.number, 12.0, 15.0, FERRIES_DE, FERRIES_PARTS, FERRIES)
+        self.captions._on_caption(self.number, 20.0, 21.0, "Yes.", [], "Evet.")
+        self.captions._on_caption(self.number, 21.1, 22.0, "Good.", [], "İyi.")  # joins it
         self.assertEqual(self.at(10.5), SHORE)
         self.assertEqual(sink.lines, ("", SHORE, ""))  # no line before: nothing, no stand-in
         self.assertEqual(self.at(12.5), FERRIES_DE)
@@ -309,22 +311,37 @@ class ControllerTests(unittest.TestCase):
         self.assertEqual(self.at(14.2), FERRIES_DE)
         self.assertEqual(sink.lines, (SHORE, "Işıklar yanıyor.", FERRIES_DE))
         self.assertEqual(len(sink.calls), 3)  # each change once
-        self.assertEqual(self.at(25.0), "")
+        self.assertEqual(self.at(17.0), "")
         self.assertEqual(sink.lines, ("", "", ""))
         # Two translated lines joined: their originals too.
-        self.captions._on_caption(self.number, 30.0, 31.0, "Yes.", [], "Evet.")
-        self.captions._on_caption(self.number, 31.1, 32.0, "Good.", [], "İyi.")
-        self.assertEqual(self.at(30.5), "Yes. Good.")
+        self.assertEqual(self.at(20.5), "Yes. Good.")
         self.assertEqual(sink.lines, (FERRIES, "Evet. İyi.", "Yes. Good."))
         # A line read again over the same stretch, as heard this time: no translation left.
-        self.captions._on_caption(self.number, 30.0, 32.0, "Evet, iyi.")
-        self.assertEqual(self.at(30.6), "Evet, iyi.")
+        self.captions._on_caption(self.number, 20.0, 22.0, "Evet, iyi.")
+        self.assertEqual(self.at(20.6), "Evet, iyi.")
         self.assertEqual(sink.lines, (FERRIES, "Evet, iyi.", ""))
         # What the captions say of themselves ("Starting captions…") is the line said.
         self.captions._starting = time.monotonic()
-        self.at(30.7)
+        self.at(20.7)
         self.assertEqual(sink.lines, ("", self.overlay.text, ""))
         self.assertTrue(self.overlay.text)
+
+    def test_the_line_above_is_a_recent_one(self):
+        # Ruling P4-10: the Stage's dimmed line is the one before only when it ended within
+        # PREVIOUS_LINE_S of the line said starting; an older one (a long pause, an
+        # instrumental) is no line above.
+        from ui.captions_controller import PREVIOUS_LINE_S
+
+        self.assertEqual(PREVIOUS_LINE_S, 10.0)
+        sink = _Lines()
+        self.captions.add_overlay(sink)
+        self.captions._on_caption(self.number, 10.0, 11.5, SHORE)
+        self.captions._on_caption(self.number, 21.4, 23.0, "Rüzgâr dindi.")  # 9.9 s after it
+        self.captions._on_caption(self.number, 40.0, 41.5, FERRIES_DE, [], FERRIES)  # 17 s after
+        self.at(21.8)
+        self.assertEqual(sink.lines, (SHORE, "Rüzgâr dindi.", ""))
+        self.at(40.4)
+        self.assertEqual(sink.lines, ("", FERRIES, FERRIES_DE))
 
     def test_the_film_captions_overlay_is_unchanged_by_the_original(self):
         # The captions over a film's picture show what they showed before the original rode

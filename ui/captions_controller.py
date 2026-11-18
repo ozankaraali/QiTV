@@ -104,6 +104,9 @@ SEEK_S = 2.0  # the position moved this much more than the clock: a seek, read a
 KEEP_S = 30 * 60.0  # cues kept this far behind the picture
 _RESTART_MS = 1000
 NO_LINES = ("", "", "")  # a Stage's (previous, current, translation) with none to show
+# a Stage's dimmed line above is the cue before only when it ended this close before the line
+# said started (ruling P4-10: not one from before a long pause or an instrumental)
+PREVIOUS_LINE_S = 10.0
 # 2026-11-09, the owner's channel: its clock leapt, every run read again from the same second
 # (25 runs in 27 s), and the second it waited for stayed past the next channel's tune (no run
 # there for minutes, "Can't keep up" for a run that never read). A run read again past a jump
@@ -1536,13 +1539,15 @@ class CaptionsController(QObject):
         return page, self._lines_of(i, position, shows, page)
 
     def _lines_of(self, i: int, position: float, shows: float, page: str) -> tuple[str, str, str]:
-        """A Stage's lines while cue `i` shows `page` (Plan 4): the cue before, as heard ("" for
-        none); the line said, as heard, its part said by then (by its parts' times, as the
-        captions page theirs); and the translation shown ("" when it isn't one)."""
+        """A Stage's lines while cue `i` shows `page` (Plan 4): the cue before, as heard, when it
+        ended at most PREVIOUS_LINE_S before this one started ("" otherwise, and for none); the
+        line said, as heard, its part said by then (by its parts' times, as the captions page
+        theirs); and the translation shown ("" when it isn't one)."""
         if not page:
             return NO_LINES
         start, end, _text = self._cues[i]
-        previous = self._heard(i - 1) if i > 0 else ""
+        recent = i > 0 and self._cues[i - 1][1] >= start - PREVIOUS_LINE_S
+        previous = self._heard(i - 1) if recent else ""
         original = self._originals.get(start)
         if original is None:
             return previous, page, ""

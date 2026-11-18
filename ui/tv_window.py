@@ -837,6 +837,7 @@ class TVWindow(QMainWindow):
         # A radio channel keeps live TV's controls: the screen's top bar sits below their title
         # row while they show.
         self.audio_screen.follow(self.overlays.transport)
+        self.audio_screen.leave_room_for(self.captions_overlay)  # Words on: title kept clear
         self.overlays.transport.moreRequested.connect(self.more_menu.open_at)
         # After the window's surface filters: the frame takes the small surface's left button
         # before the window (its mini-player drag) and the surface (the drawer) see it.

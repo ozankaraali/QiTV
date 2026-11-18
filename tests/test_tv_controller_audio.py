@@ -997,6 +997,16 @@ class WindowWordsTests(base.WindowCase):
         captions._show("")
         self.assertEqual(screen._lines, ("", "", ""))
         self.assertTrue(bottom.isHidden())
+        # Ruling P4-10: in Cover, with Words on, the screen leaves the captions their room.
+        self.assertIs(screen._captions, bottom)
+        screen.show()
+        screen.set_view("cover")
+        screen.set_words(True, "English")
+        captions._show(lines[2], lines)
+        self.assertFalse(bottom.isHidden())
+        lay = screen._layout()
+        self.assertFalse(bottom.geometry().intersects(lay.subtitle.toAlignedRect()))
+        captions._show("")
 
 
 def make_song(path: Path, *, title: str, album: str, number: int, seconds: float = 20) -> Path:

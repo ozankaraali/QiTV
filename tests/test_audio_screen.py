@@ -10,7 +10,7 @@ from unittest import mock
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
-from PySide6.QtCore import QPoint, QPointF, QRect, Qt
+from PySide6.QtCore import QPoint, QPointF, QRect, QRectF, Qt
 from PySide6.QtGui import QColor, QImage, QPainter, QRegion, QWheelEvent
 from PySide6.QtTest import QTest
 from PySide6.QtWidgets import QApplication, QWidget
@@ -21,6 +21,8 @@ from services import i18n
 from services.song_facts import BRAND_COLOURS
 from ui.overlay_host import SETTLE_CHECK_MS, OverlayHost
 from ui.overlays.audio_screen import DOCK_FRACTION, AudioScreen, name_upper
+from ui.overlays.captions import CaptionsOverlay
+from ui.overlays.transport import Transport
 
 SONGS = [
     ("Low Tide", 242_000),
@@ -424,6 +426,75 @@ class WordsTests(ScreenCase):
         self.assertEqual(said[-1], True)
         screen.show_lines("", "", "")  # its words change nothing of it
         self.assertEqual(len(said), 7)
+
+
+class CaptionsRoomTests(ScreenCase):
+    """Ruling P4-10: with Words on, Cover and Album lift the cover and its title so that two
+    lines of the captions over the picture fit between them and the dock; Words off, the layout
+    is as it was."""
+
+    LINE = "The night ferries pass by in silence, the harbour lights go out."  # two lines
+
+    def scene(self, size, view):
+        """The screen, the captions over the picture and the audio dock, as the window stacks
+        them (the captions follow the dock; the screen leaves them room)."""
+        page = QWidget()
+        page.resize(*size)
+        self.addCleanup(page.deleteLater)
+        self.addCleanup(page.close)
+        screen = AudioScreen(page, clock=lambda: self.now[0])
+        captions = CaptionsOverlay(page)
+        transport = Transport(page)
+        screen.show_song("Ferries at Night", "Mira Sol", "Harbour Lights", year="2024")
+        screen.set_cover(None, BRAND_COLOURS)
+        screen.set_tracks(ALBUM, 1)
+        screen.set_view(view)
+        page.show()
+        screen.show()
+        transport.show_audio("Ferries at Night", "Mira Sol · Harbour Lights")
+        transport.set_audio_state(False, "off", True)
+        captions.follow(transport)
+        screen.follow(transport)
+        screen.leave_room_for(captions)
+        return screen, captions
+
+    @staticmethod
+    def info(screen: AudioScreen) -> QRectF:
+        lay = screen._layout()
+        return lay.title.united(lay.subtitle)
+
+    def test_with_words_on_two_caption_lines_never_cover_the_title(self):
+        for size in ((1280, 720), (640, 360)):
+            for view in ("cover", "album"):
+                with self.subTest(size=size, view=view):
+                    screen, captions = self.scene(size, view)
+                    captions.show_text(self.LINE)
+                    self.assertEqual(len(captions.lines()), 2)
+                    box = QRectF(captions.geometry())
+                    if size == (1280, 720):  # as the shot showed: over the artist · album line
+                        self.assertTrue(box.intersects(self.info(screen)))
+                    screen.set_words(True, "English")
+                    self.assertFalse(box.intersects(self.info(screen)), (box, self.info(screen)))
+                    self.assertTrue(screen.rect().contains(screen.cover_rect()))
+                    self.assert_laid_out(screen)
+                    # It holds still as captions come and go: Words decide, not a caption.
+                    laid = screen._lay_out()
+                    captions.clear()
+                    self.assertEqual(screen._lay_out(), laid)
+                    captions.show_text("Evet.")
+                    self.assertEqual(screen._lay_out(), laid)
+
+    def test_with_words_off_the_layout_is_as_before(self):
+        for size in ((1280, 720), (640, 360)):
+            for view in ("cover", "album"):
+                with self.subTest(size=size, view=view):
+                    screen, _captions = self.scene(size, view)
+                    plain = self.make(size, view=view)
+                    self.assertEqual(screen._lay_out(), plain._lay_out())
+                    screen.set_words(True, "English")
+                    self.assertNotEqual(screen._lay_out().cover, plain._lay_out().cover)
+                    screen.set_words(False, "")
+                    self.assertEqual(screen._lay_out(), plain._lay_out())
 
 
 class FollowAndCornerTests(ScreenCase):

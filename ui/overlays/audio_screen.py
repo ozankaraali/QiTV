@@ -380,6 +380,9 @@ class AudioScreen(Overlay):
         self._compact = False  # the Library's corner player: the cover and the title only
         self._inset = 0  # the top bar's top, below live TV's title row while it shows (follow)
         self._transport: Any = None
+        self._captions: Any = None  # the captions over the picture, given room (leave_room_for)
+        self._room = False  # the last layout left the captions room (Words on)
+        self._floor_seen: Optional[int] = None  # ... above this controls' top
         self._unexposed = False  # its window was found covered: the light waits for an Expose
         self._exposure: Optional[QObject] = None  # the window (QWindow) whose Expose it hears
         self._watched: Optional[QWidget] = None
@@ -487,6 +490,36 @@ class AudioScreen(Overlay):
             self._inset = inset
             self._relayout()
             self._update_timers()
+        elif self._room and self._controls_top() != self._floor_seen:
+            self._relayout()  # the room left for the captions follows the controls' top
+
+    def leave_room_for(self, captions: Any) -> None:
+        """While Words is on, Cover and Album lift the cover and its title so that two lines of
+        `captions` (the captions over the picture: CaptionsOverlay.reach, at their real size)
+        fit between them and the player controls; Words off, nothing moves (ruling P4-10). The
+        room is Words', not a caption's: nothing moves as captions come and go."""
+        self._captions = captions
+        self._relayout()
+
+    def _controls_top(self) -> Optional[int]:
+        """The player controls' top (this screen's coordinates) the captions sit on: the dock's,
+        or live TV's as when they show (so nothing moves as they fade); None without them."""
+        transport = self._transport
+        if transport is None or not isValid(transport) or transport.width() <= 0:
+            return None
+        return int(transport.controls_top()) - self.geometry().top()
+
+    def _column_bottom(self, m: _Mock, dock_top: float) -> float:
+        """Where Cover's column and Album's left one end: `dock_top`, or with Words on, above
+        two lines of the captions over the picture (`leave_room_for`)."""
+        captions = self._captions
+        self._room = self._words_on and captions is not None and isValid(captions)
+        if not self._room:
+            return dock_top
+        floor = self._controls_top()
+        self._floor_seen = floor
+        top = (floor if floor is not None and floor > 0 else dock_top) - float(captions.reach())
+        return min(dock_top, top - m(8))
 
     def set_words(self, on: bool, language: str) -> None:
         """Words (the AI captions) on or off, and the language they're shown in."""
@@ -707,6 +740,7 @@ class AudioScreen(Overlay):
         m = _Mock(w, h)
         view = self.shown_view()
         lay = _Layout(view)
+        self._room = False  # (Cover and Album: _column_bottom)
         if self._compact:
             self._lay_out_compact(lay, m, w, h)
             return lay
@@ -718,9 +752,9 @@ class AudioScreen(Overlay):
         # which the stepped bar would cover, moves with it.
         resting = top_bar - (lay.controls["back"].top() - m(14))
         if view == "cover":
-            self._lay_out_cover(lay, m, w, resting, dock_top)
+            self._lay_out_cover(lay, m, w, resting, self._column_bottom(m, dock_top))
         elif view == "album":
-            self._lay_out_album(lay, m, w, h, resting, dock_top)
+            self._lay_out_album(lay, m, w, h, resting, dock_top, self._column_bottom(m, dock_top))
         else:
             self._lay_out_stage(lay, m, w, h, top_bar, dock_top)
         return lay
@@ -770,27 +804,35 @@ class AudioScreen(Overlay):
     def _info_heights(self, m: _Mock, title_px: float) -> tuple[float, float]:
         return line_height(m.font(title_px, QFont.Weight.Bold)), line_height(m.font(13.5))
 
-    def _lay_out_cover(
-        self, lay: _Layout, m: _Mock, w: int, top_bar: float, dock_top: float
-    ) -> None:
+    def _lay_out_cover(self, lay: _Layout, m: _Mock, w: int, top_bar: float, bottom: float) -> None:
+        # The cover, the title and artist · album, in the middle above `bottom` (the dock's top,
+        # or the captions' room: _column_bottom).
         t1, t2 = self._info_heights(m, 22)
         info = m(16) + t1 + m(3) + t2
-        room = dock_top - top_bar - 2 * m(10)
+        room = bottom - top_bar - 2 * m(10)
         side = max(m(48), min(m(200), room - info))
-        y = max(top_bar + m(10), (dock_top - side - info) / 2)
+        y = max(top_bar + m(10), (bottom - side - info) / 2)
         lay.cover = QRectF((w - side) / 2, y, side, side)
         text_w = min(w * 0.8, m(560))
         lay.title = QRectF((w - text_w) / 2, lay.cover.bottom() + m(16), text_w, t1)
         lay.subtitle = QRectF(lay.title.left(), lay.title.bottom() + m(3), text_w, t2)
 
     def _lay_out_album(
-        self, lay: _Layout, m: _Mock, w: int, h: int, top_bar: float, dock_top: float
+        self,
+        lay: _Layout,
+        m: _Mock,
+        w: int,
+        h: int,
+        top_bar: float,
+        dock_top: float,
+        column_bottom: float,
     ) -> None:
-        # Left (44%): the cover and its info, in the middle of the mockup's padding.
+        # Left (44%): the cover and its info, in the middle of the mockup's padding, above
+        # `column_bottom` (the dock's top, or the captions' room: _column_bottom).
         t1, t2 = self._info_heights(m, 22)
         info = m(14) + t1 + m(3) + t2
         box = QRectF(m(30), max(m(30), top_bar), w * 0.44 - m(40), 0.0)
-        box.setBottom(min(h - m(120), dock_top))
+        box.setBottom(min(h - m(120), dock_top, column_bottom))
         side = max(m(48), min(m(200), box.width(), box.height() - info))
         y = box.top() + max(0.0, (box.height() - side - info) / 2)
         lay.cover = QRectF(box.center().x() - side / 2, y, side, side)
