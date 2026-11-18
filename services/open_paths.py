@@ -26,8 +26,10 @@ MEDIA_EXTENSIONS = VIDEO_EXTENSIONS | MUSIC_EXTENSIONS  # Open File's filter
 # .bwf, and Ogg audio .oga. Linux's MIME types (shared-mime-info's globs) bring: video/mpeg
 # .vob, .mpe and .mp2 (MPEG audio layer 2: music), video/vnd.avi .avf and .divx,
 # video/quicktime .qt, .moov and .qtvr, video/mp4 .f4v and .lrv, video/mp2t (Open With) .m2t,
-# audio/mpeg .mpga, audio/aac .adts, the Ogg audio types .oga and Speex's .spx. The system may
-# hand them over: they play too.
+# audio/mpeg .mpga, audio/aac .adts, the Ogg audio types .oga and Speex's .spx, and an
+# audiobook's .m4b (audio/x-m4b, a kind of audio/mp4: Open With offers QiTV for it). The
+# system may hand them over: they play too. (On macOS 13 an .m4b is protected MPEG-4 audio,
+# and Windows lists the extensions QiTV registers: there only a drop or "Other…" opens one.)
 EXTRA_VIDEO_EXTENSIONS = frozenset(
     {
         "qt", "mpg4", "vfw", "mpe", "m75", "m15", "f4v", "f4p", "ogm",
@@ -35,7 +37,7 @@ EXTRA_VIDEO_EXTENSIONS = frozenset(
     }
 )  # fmt: skip
 EXTRA_MUSIC_EXTENSIONS = frozenset(
-    {"f4a", "f4b", "mp2", "mpga", "adts", "wave", "bwf", "oga", "spx"}
+    {"f4a", "f4b", "mp2", "mpga", "adts", "wave", "bwf", "oga", "spx", "m4b"}
 )
 _VIDEO = VIDEO_EXTENSIONS | EXTRA_VIDEO_EXTENSIONS
 _MUSIC = MUSIC_EXTENSIONS | EXTRA_MUSIC_EXTENSIONS

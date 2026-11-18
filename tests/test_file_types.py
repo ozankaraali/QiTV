@@ -729,7 +729,8 @@ class LinuxBackendTests(_XdgFolders):
         self.assertEqual(entry["Name"], "QiTV")
         self.assertEqual(entry["Exec"], f'"{exe}" %F')
         self.assertEqual(entry["Icon"], "qitv")
-        self.assertEqual(entry["Categories"], "AudioVideo;Video;Player;")
+        self.assertEqual(entry["Categories"], "AudioVideo;Audio;Video;Player;")  # music too
+        self.assertEqual(entry["Comment"], "Video, music and IPTV player")
         mimes = entry["MimeType"].split(";")
         self.assertEqual(mimes[-1], "")  # ends in a semicolon
         self.assertIn(self.OPEN_WITH_MIME, mimes)
@@ -1332,9 +1333,11 @@ class TypesTests(_RecordedBackend):
 
     def test_what_the_music_types_also_cover_plays(self):
         # the system hands QiTV these too: macOS's types for mp3, aac and wav and the Ogg
-        # import cover them, and so do Linux's MIME types (shared-mime-info's globs)
-        for ext in ("mpga", "adts", "wave", "bwf", "oga", "spx"):
+        # import cover them, and so do Linux's MIME types (shared-mime-info's globs); an
+        # audiobook's .m4b is audio/x-m4b there, a kind of audio/mp4
+        for ext in ("mpga", "adts", "wave", "bwf", "oga", "spx", "m4b"):
             self.assertTrue(open_paths.is_music(f"/x/song.{ext}"), ext)
+        self.assertNotIn("m4b", open_paths.MUSIC_EXTENSIONS)  # registered for: as before
 
     def test_temporary_locations(self):
         temporary = [

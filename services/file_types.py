@@ -991,11 +991,11 @@ class _LinuxBackend:
             "[Desktop Entry]",
             "Type=Application",
             f"Name={APP_NAME}",
-            "Comment=Video and IPTV player",
+            "Comment=Video, music and IPTV player",
             f"Exec={desktop_exec(exe)}",
             f"Icon={ICON_NAME}",
             "Terminal=false",
-            "Categories=AudioVideo;Video;Player;",
+            "Categories=AudioVideo;Audio;Video;Player;",
             _MIME_KEY + "".join(f"{m};" for m in mimes),
             "StartupWMClass=qitv",
         ]
