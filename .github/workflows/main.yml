@@ -470,6 +470,18 @@ jobs:
       - name: Restore the system VLC
         if: always()
         run: if [ -d "$RUNNER_TEMP/VLC.app" ]; then sudo mv "$RUNNER_TEMP/VLC.app" /Applications/VLC.app; fi
+      - name: Keep QiTV's crash reports with the smoke results
+        if: always()
+        # A QiTV that crashed, in its exit too, leaves macOS's report (every thread's native
+        # stack): it rides along with smoke-frozen.
+        run: |
+          shopt -s nullglob
+          reports=("$HOME"/Library/Logs/DiagnosticReports/QiTV*.ips /Library/Logs/DiagnosticReports/QiTV*.ips)
+          echo "${#reports[@]} crash report(s)"
+          if [ ${#reports[@]} -gt 0 ]; then
+            mkdir -p smoke-frozen/crash-reports
+            cp "${reports[@]}" smoke-frozen/crash-reports/ || true
+          fi
       - name: Upload packaged smoke results
         if: always()
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
@@ -607,6 +619,18 @@ jobs:
       - name: Restore the system VLC
         if: always()
         run: if [ -d "$RUNNER_TEMP/VLC.app" ]; then sudo mv "$RUNNER_TEMP/VLC.app" /Applications/VLC.app; fi
+      - name: Keep QiTV's crash reports with the smoke results
+        if: always()
+        # A QiTV that crashed, in its exit too, leaves macOS's report (every thread's native
+        # stack): it rides along with smoke-frozen.
+        run: |
+          shopt -s nullglob
+          reports=("$HOME"/Library/Logs/DiagnosticReports/QiTV*.ips /Library/Logs/DiagnosticReports/QiTV*.ips)
+          echo "${#reports[@]} crash report(s)"
+          if [ ${#reports[@]} -gt 0 ]; then
+            mkdir -p smoke-frozen/crash-reports
+            cp "${reports[@]}" smoke-frozen/crash-reports/ || true
+          fi
       - name: Upload packaged smoke results
         if: always()
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1

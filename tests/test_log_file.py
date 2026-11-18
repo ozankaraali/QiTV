@@ -111,6 +111,23 @@ class InstallTests(unittest.TestCase):
         self.assertTrue(faulthandler.is_enabled())
         self.assertTrue((self.directory / log_file.CRASH_NAME).exists())
 
+    def test_a_crash_in_qitvs_exit_still_dumps_its_stacks(self):
+        # main() closes the crash log before QiTV's exit: a crash there (the splash's watcher,
+        # 2026-11-18) left an empty crash.log. From then on the stacks go to stderr: a
+        # terminal's, or the output CI keeps.
+        with tempfile.TemporaryFile("w+") as stderr, patch.object(sys, "stderr", stderr):
+            log_file.install(self.directory)
+            log_file.close()
+            self.assertTrue(faulthandler.is_enabled())
+            faulthandler.disable()  # before its file closes
+
+    def test_with_no_stderr_the_close_leaves_it_off(self):
+        # A windowed Windows build has no stderr: nowhere to write them, and no error.
+        log_file.install(self.directory)
+        with patch.object(sys, "stderr", None):
+            log_file.close()
+        self.assertFalse(faulthandler.is_enabled())
+
     def test_an_unhandled_exception_is_logged_without_its_message(self):
         log_file.install(self.directory)
         try:
