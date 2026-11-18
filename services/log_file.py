@@ -4,7 +4,8 @@ A packaged QiTV started from the Finder, the Start menu or a desktop has no term
 log went nowhere and why it quit could not be read afterwards. `install` also writes the log
 to a small rotating file in `log_dir()`, every line with addresses and query strings masked
 (QiTV's own lines name none; a library's might), logs an unhandled exception's frames without
-its message, and has a native crash dump its threads' stacks to `CRASH_NAME` beside it.
+its message, and has a native crash dump its threads' stacks to `CRASH_NAME` beside it (and to
+stderr once that file closes, for a crash in QiTV's exit).
 """
 
 from __future__ import annotations
@@ -127,9 +128,15 @@ def set_detailed(on: bool) -> None:
 
 
 def close() -> None:
-    """The crash log closes (the process is ending; tests)."""
+    """The crash log closes (the process is ending; tests). A native crash from then on, in
+    QiTV's exit, still dumps its threads' stacks: to stderr (a terminal's, the output CI keeps),
+    where there is one."""
     global _crash_file
     if _crash_file is not None:
         faulthandler.disable()
         _crash_file.close()
         _crash_file = None
+        try:
+            faulthandler.enable(sys.stderr)
+        except AttributeError, OSError, RuntimeError, ValueError:
+            pass  # no stderr (a windowed Windows build), or one with no file behind it

@@ -22,6 +22,17 @@ _POLL_S = 0.2
 _QUIT_GRACE_S = 3.0
 
 
+def caption_of(message: tuple) -> tuple[int, float, float, str, list, str]:
+    """A ("caption", run, start, end, text[, parts[, original]]) message read by its length, as
+    any captions process sends it: (run, start, end, text, parts, original), parts [] and
+    original "" where it has none (a None there too). A translated line's text is its
+    translation, its parts and original the line as heard (services.captions.worker
+    .translated_caption)."""
+    parts = list(message[5] or ()) if len(message) > 5 else []
+    original = str(message[6] or "") if len(message) > 6 else ""
+    return int(message[1]), float(message[2]), float(message[3]), message[4], parts, original
+
+
 class _Supervisor(QThread):
     message = Signal(int, object)  # its serial, what the child said
 
@@ -81,14 +92,17 @@ class CaptionsProcess(QObject):
     ready = Signal()
     failed = Signal(str)
     # run, start, end, text, and a line of more than one part its parts (2026-11-08,
-    # services.captions.parts): [(text, start, end), ...] (else [])
-    caption = Signal(int, float, float, str, object)
+    # services.captions.parts): [(text, start, end), ...] (else []), and a translated line its
+    # original (Plan 4: the line as heard; else ""): caption_of
+    caption = Signal(int, float, float, str, object, str)
     # run, newest second decoded, real-time factor, the second the captions are written to
     progress = Signal(int, float, float, float, bool)  # ..., written to, Qwen writes
     resync = Signal(int, float)  # run, newest second: read again from there
     ended = Signal(int, str)  # run, reason
     detected = Signal(int, str)  # run, the language the pieces agreed on (none was given)
     piece = Signal(int, float, float, float)  # run, start, end, speech share (no model loaded)
+    # Plan 4: run, start_ms, frame_ms, a chunk of a film's band levels (services.levels.pack)
+    levels = Signal(int, int, int, object)
 
     def __init__(self, parent: Optional[QObject] = None) -> None:
         super().__init__(parent)
@@ -155,10 +169,7 @@ class CaptionsProcess(QObject):
             # its "gone" would forget the new one, its "ready" would be the new one's.
             return
         if kind == "caption":
-            parts = list(message[5]) if len(message) > 5 else []
-            self.caption.emit(
-                int(message[1]), float(message[2]), float(message[3]), message[4], parts
-            )
+            self.caption.emit(*caption_of(message))
         elif kind == "progress":
             written = message[4] if len(message) > 4 else message[2]
             qwen = bool(message[5]) if len(message) > 5 else True
@@ -167,6 +178,8 @@ class CaptionsProcess(QObject):
             )
         elif kind == "detected":
             self.detected.emit(int(message[1]), str(message[2]))
+        elif kind == "levels":
+            self.levels.emit(int(message[1]), int(message[2]), int(message[3]), bytes(message[4]))
         elif kind == "piece":
             self.piece.emit(
                 int(message[1]), float(message[2]), float(message[3]), float(message[4])

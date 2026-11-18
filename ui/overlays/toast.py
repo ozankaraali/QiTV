@@ -90,15 +90,18 @@ class Toast(Overlay):
         # Clicks reach the toast only while it has a button; else they go on to what is under.
         self.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents, not shown)
 
-    def set_hint(self, text: str | None) -> None:
+    def set_hint(self, text: str | None, *, cut: bool = True) -> None:
         """A message that stays up until it is cleared (None), e.g. "Loading Home…".
 
         Messages show over it and give it back when they end. A new hint shows at once,
         cutting a message short (it is about what came before); the same hint again, or
-        None, leaves a message to end on its own.
+        None, leaves a message to end on its own. `cut` False: a hint given back (held back
+        meanwhile, not news): a message showing ends first, then it shows.
         """
         text = text or None
         changed, self._hint = text != self._hint, text
+        if text is not None and not cut and self._timer.isActive():
+            return  # the message gives it back as it ends (_message_ended)
         if text is not None and (changed or not self._timer.isActive()):
             self._timer.stop()
             self._set_action("", None)

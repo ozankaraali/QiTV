@@ -166,10 +166,16 @@ class WindowDropTests(base.WindowCase):
             ProviderLink("STB", "http://portal.example.test/stalker_portal/c/")
         )
 
-    def test_other_text_and_files_are_refused(self):
+    def test_other_text_is_refused_and_another_file_adds_no_provider(self):
         before = self.names()
         self.assertEqual(drop(self.window, text="http://example.test/page.html"), (False, False))
-        self.assertEqual(drop(self.window, paths=[self.folder / "clip.mkv"]), (False, False))
+        # A media file plays (tests/test_open_router.py). Another file is taken, as it may be a
+        # folder, which only the disk tells (Task 11): it says QiTV can't play it.
+        notes = self.folder / "notes.txt"
+        notes.write_text("x", encoding="utf-8")
+        self.assertEqual(drop(self.window, paths=[notes]), (True, True))
+        text = "QiTV can't play “notes.txt”"
+        self.assertTrue(wait_until(lambda: (text, "error") in self.toasts), self.toasts)
         self.assertEqual(self.names(), before)
 
 

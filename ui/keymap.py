@@ -394,7 +394,8 @@ SHORTCUTS: dict[str, list[tuple[str, str]]] = {
         ("Ctrl+F", N_("Search")),
         ("/", N_("Search, or type it in the search")),
         ("Ctrl+D", N_("Add to or remove from My list")),
-        ("Delete", N_("Delete the recording (it asks first)")),  # 2.9.7: the Recordings tab
+        # 2.9.7: a recording's strip on the Recordings tab; Plan 4: a Folders tab tile (P4-27)
+        ("Delete", N_("Delete a recording (it asks first), or take a folder off Folders")),
         ("F11, Ctrl+Meta+F", N_("Fullscreen")),
         ("Esc", N_("Back; from the genres, back to live TV")),
     ],
@@ -415,6 +416,8 @@ SHORTCUTS: dict[str, list[tuple[str, str]]] = {
         ("Ctrl+4", N_("Multiview")),
         ("Ctrl+5", N_("Recordings")),  # i18n: what a key does: the Library's Recordings page
         ("Ctrl+O", N_("Open a file")),
+        # i18n: what a key does: File → Open Folder… (it plays, and goes on the Folders tab)
+        ("Ctrl+Shift+O", N_("Open a folder")),
         ("Ctrl+,", N_("Settings")),
         ("Ctrl+R", N_("Refresh channels and guide")),
         ("Ctrl+Shift+R", N_("Refresh films and series")),

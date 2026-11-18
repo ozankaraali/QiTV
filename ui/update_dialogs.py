@@ -2,14 +2,16 @@
 does the checking, downloading and launching).
 
 `check_for_updates` is what the app calls (at startup, Help → Check for Updates, Settings):
-the service checks on a QThread and reports to `DIALOGS`.
+the service checks on a QThread and reports to `DIALOGS` (the startup check's question waits
+for a film opened in QiTV: `_AfterTheFilm`).
 """
 
 import logging
 import os
 import sys
-from typing import Optional
+from typing import Callable, Optional
 
+from PySide6.QtCore import QTimer
 from PySide6.QtWidgets import QCheckBox, QGridLayout, QMessageBox, QProgressDialog
 
 from services import i18n, system_open, update_checker
@@ -18,10 +20,21 @@ from services.i18n import tr, translate
 
 logger = logging.getLogger(__name__)
 
+WhenIdle = Callable[[Callable[[], None]], None]  # TVWindow.when_idle
 
-def check_for_updates(config_manager: Optional[ConfigManager] = None, manual: bool = False):
-    """Check for updates in the background; `manual` also says when there is none."""
-    update_checker.check_for_updates(config_manager, manual, DIALOGS)
+
+def check_for_updates(
+    config_manager: Optional[ConfigManager] = None,
+    manual: bool = False,
+    when_idle: Optional[WhenIdle] = None,
+):
+    """Check for updates in the background; `manual` also says when there is none.
+
+    `when_idle` (the startup check: TVWindow.when_idle): the question waits while a file opened
+    in QiTV plays or is on its way, however late the network answers. A check the user asks
+    for (Help → Check for Updates) answers at once."""
+    ui = DIALOGS if when_idle is None else _AfterTheFilm(when_idle)
+    update_checker.check_for_updates(config_manager, manual, ui)
 
 
 class _Dialogs:
@@ -120,6 +133,34 @@ class _Dialogs:
 
 
 DIALOGS = _Dialogs()
+
+
+class _AfterTheFilm(_Dialogs):
+    """The startup check's dialogs: its update question never opens over a film opened in
+    QiTV. While one plays or is on its way (`when_idle` holds), the question waits for it to be
+    over, then comes from the event loop: never inside the release itself, which may come in
+    the middle of a tune (a channel replacing the film), and once more after a file opened
+    meanwhile (a double-click on the next episode)."""
+
+    def __init__(self, when_idle: WhenIdle) -> None:
+        self._when_idle = when_idle
+
+    def update_available(self, info: dict, config_manager, manual: bool) -> None:
+        self._when_still_idle(lambda: DIALOGS.update_available(info, config_manager, manual))
+
+    def _when_still_idle(self, show: Callable[[], None]) -> None:
+        """`show` now when nothing is held; else once the held file is over, from the event
+        loop and asked again then."""
+        waiting = False
+
+        def ready() -> None:
+            if waiting:  # the release runs it: the event loop shows it, if still idle then
+                QTimer.singleShot(0, lambda: self._when_still_idle(show))
+            else:
+                show()
+
+        self._when_idle(ready)  # at once when nothing is held
+        waiting = True
 
 
 def replace_failed(old_path: str, new_path: str, parent=None) -> None:

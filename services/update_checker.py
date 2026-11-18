@@ -558,15 +558,21 @@ def _perform_windows_update(downloaded_path: str, release_url: str, ui: Optional
         )
         return
 
-    # Get the path to the original executable (not the temp extraction folder)
-    # For PyInstaller, sys.executable points to the original .exe file
-    original_exe = sys.executable
+    # The installed QiTV, which the new copy writes itself over: for PyInstaller,
+    # sys.executable is the original .exe (not the temp extraction folder); in a run that is
+    # itself an update's copy, it is the installed one that copy replaced (file_types).
+    from services.file_types import own_executable
+
+    original_exe = own_executable()
 
     try:
-        # Launch the downloaded exe with --replace flag
+        # Launch the downloaded exe with --replace flag. It shows no splash (main.wants_splash),
+        # nor its bootloader's: that one would stand on top for its whole unpack, before its
+        # Python could close it (PyInstaller reads the variable as the exe starts).
         subprocess.Popen(
             [downloaded_path, "--replace", original_exe],
             creationflags=subprocess.DETACHED_PROCESS | subprocess.CREATE_NEW_PROCESS_GROUP,
+            env=dict(os.environ, PYINSTALLER_SUPPRESS_SPLASH_SCREEN="1"),
         )
 
         _close_all_windows(app)

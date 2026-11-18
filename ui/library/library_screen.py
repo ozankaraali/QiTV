@@ -5,6 +5,8 @@ paints the search field; the LibraryController decides what they show and routes
 2.9.7: the Recordings tab (`recordings`): a rail of its own on the left, like the genre column,
 and to its right one of its views: the home, its recordings' tiles, or a list (coming up, series
 and timers, problems, folders and streams).
+Plan 4: the Folders tab (`folders`): the shelf of the folders opened (`ui.library.folders_view`),
+across the whole screen under the top bar.
 """
 
 from datetime import datetime
@@ -17,6 +19,7 @@ from PySide6.QtWidgets import QWidget
 from services.i18n import tr, translate
 from services.recordings_library import FIND_TEXT, RAIL_ICONS
 from ui.keymap import key_hint
+from ui.library.folders_view import FoldersView
 from ui.library.genre_list import GenreList
 from ui.library.poster_grid import PosterGrid
 from ui.library.recorder_home import RecorderHome
@@ -30,7 +33,7 @@ from ui.theme import FOCUS_FILL_ALPHA, PALETTE, qcolor
 
 logger = logging.getLogger(__name__)
 
-MODES = ("browse", "series", "search", "recordings")
+MODES = ("browse", "series", "search", "recordings", "folders")
 RECORDINGS_CONTENTS = ("home", "grid", "list", "find")  # 2.9.7: what the Recordings tab shows
 REC_TILE_ASPECT = 9 / 16  # 2.9.7: its recordings' tiles
 REC_TILE_TARGET_U = 16.0
@@ -265,6 +268,7 @@ class LibraryScreen(QWidget):
         # the recorder's home: its guide reads the page's programmes once it has them
         self.home = RecorderHome(lambda channel, start, limit: [], _now, self)
         self.recordings_content = "home"
+        self.folders = FoldersView(self)  # Plan 4: the Folders tab's shelf
         self.search_field = SearchField(self.nav)
         self.nav.attach_search(self.search_field)  # the top bar places it on its search
         self.set_mode("browse")
@@ -280,6 +284,7 @@ class LibraryScreen(QWidget):
         self.genres.setVisible(mode == "browse")
         self.grid.setVisible(mode in ("browse", "search"))
         self.series.setVisible(mode == "series")
+        self.folders.setVisible(mode == "folders")
         self._show_recordings()
         self.search_field.setVisible(mode == "search")
         self._layout()
@@ -320,6 +325,7 @@ class LibraryScreen(QWidget):
         self.recordings.setGeometry(*content)
         self.rec_grid.setGeometry(*content)
         self.home.setGeometry(*content)
+        self.folders.setGeometry(*content)
 
     def paintEvent(self, event) -> None:
         p = QPainter(self)

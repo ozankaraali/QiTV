@@ -37,6 +37,14 @@ While they are translated the picture is held TRANSLATE_LEAD_S further back (a f
 that much further ahead), on every channel. On a computer too slow for the 1.7B and the
 translator both, Automatic takes the 0.6B (services.captions.tier.TRANSLATE_SMALL_BELOW) and
 Turkish is read with its best path alone while translating (the load's "slow_to_translate").
+
+Plan 4 (Words on the audio screen): a place that shows lines (a sink with `show_lines`: the
+audio screen's Stage) gets the line before, in its own language, the line said (as heard, part
+by part as said) and its translation ("" when it isn't), not the caption's text; the others get
+the caption as before. While a Stage takes the words (`takes_words`), the captions over its page
+give them to it (`_show`, `words_moved`). While the audio screen's visualizer asks
+(`want_levels`), a film's run sends its sound's band levels too (`levels`, `levels_from`): the
+Stage's bars are read from the sound the captions read, never decoded twice (ui.visualizer).
 """
 
 from __future__ import annotations
@@ -97,6 +105,10 @@ TICK_MS = 250
 SEEK_S = 2.0  # the position moved this much more than the clock: a seek, read again there
 KEEP_S = 30 * 60.0  # cues kept this far behind the picture
 _RESTART_MS = 1000
+NO_LINES = ("", "", "")  # a Stage's (previous, current, translation) with none to show
+# a Stage's dimmed line above is the cue before only when it ended this close before the line
+# said started (ruling P4-10: not one from before a long pause or an instrumental)
+PREVIOUS_LINE_S = 10.0
 # 2026-11-09, the owner's channel: its clock leapt, every run read again from the same second
 # (25 runs in 27 s), and the second it waited for stayed past the next channel's tune (no run
 # there for minutes, "Can't keep up" for a run that never read). A run read again past a jump
@@ -114,6 +126,7 @@ _LANGUAGE_MODELS_OK = "ai_captions_language_models"
 _BACKLOG_S = 2.0  # ... or this much sound read waits for it (2.9.1)
 _SLOW_FOR_S = 30.0
 _TRANSLATE_TO = "ai_captions_translate_to"  # 2.10: the language they are translated into
+_LOCAL_ON = "ai_captions_local_on"  # turned on (or off) during the last video file
 
 from ui.captions_texts import (  # noqa: E402  (the texts, with their translations)
     CANT_KEEP_UP,
@@ -157,6 +170,24 @@ def _word_time(timing: list[tuple[int, float, float]], k: int) -> float:
     return timing[-1][2] if timing else 0.0
 
 
+def _alive(sink: Any) -> bool:
+    """A place the captions show is still there (the floating picture's goes as QiTV closes)."""
+    from shiboken6 import isValid
+
+    return not isinstance(sink, QObject) or isValid(sink)
+
+
+def _shows_lines(sink: Any) -> bool:
+    """A place that shows lines (Plan 4: the audio screen's Stage), not the caption's text."""
+    return callable(getattr(sink, "show_lines", None))
+
+
+def _page_of(sink: Any) -> Any:
+    """The page (overlay host) a place the captions show is on; None when it says none."""
+    parent = getattr(sink, "parentWidget", None)
+    return parent() if callable(parent) else None
+
+
 def model_texts() -> dict[str, str]:
     """The speech models' names, as Settings names them."""
     return {
@@ -175,6 +206,10 @@ class CaptionsController(QObject):
 
     changed = Signal()  # the row's state or text changed: the panel shows it again
     _scored = Signal()  # this computer's speed is measured (from the benchmark's thread)
+    # Plan 4: a chunk of the film's band levels (its location, start_ms, frame_ms, the chunk),
+    # while asked (want_levels); and a film's run began or they went off (levels_from moved)
+    levels = Signal(str, int, int, object)
+    soundRead = Signal()
 
     def __init__(self, window: Any, card: Any = None, overlay: Any = None) -> None:
         super().__init__(window)
@@ -193,6 +228,8 @@ class CaptionsController(QObject):
         self._process.resync.connect(self._on_resync)
         self._process.ended.connect(self._on_ended)
         self._process.detected.connect(self._on_detected)
+        self._process.levels.connect(self._on_levels)
+        self._levels_wanted = False  # the audio screen's bars read a film run's sound
         if card is not None:
             card.answered.connect(self._on_answer)
         self._enabled = False
@@ -217,6 +254,11 @@ class CaptionsController(QObject):
         self._warming = False  # the speed benchmark started (once)
         self._unmeasured = False  # it failed: Automatic doesn't wait for it
         self._toggle_waits = False  # turned on before the speed was known: on once it is
+        # on by themselves for a video file (local_video_playing): off again before anything but
+        # a video file opens (target_changing), until the viewer turns them on or off
+        self._auto_on = False
+        # the video file they come back on for once this computer's speed is known (_on_scored)
+        self._auto_pending: Any = None
         self._scored.connect(self._on_scored)
         self._download: Any = None
         self._percent = 0
@@ -231,6 +273,9 @@ class CaptionsController(QObject):
         self._cues: list[tuple[float, float, str]] = []  # (start, end, text) by start
         # each cue's words' times, by its start: (words, start, end) of each part said in it
         self._timing: dict[float, list[tuple[int, float, float]]] = {}
+        # a translated cue's line as heard and its words' times, by its start (Plan 4: the
+        # audio screen's Stage shows it, its translation under it)
+        self._originals: dict[float, tuple[str, list[tuple[int, float, float]]]] = {}
         self._gone = float("-inf")  # the start of the latest cue whose time on screen ended
         self._newest: Optional[float] = None  # the newest second the run has read
         self._written: Optional[float] = None  # the second its captions are written to
@@ -246,6 +291,8 @@ class CaptionsController(QObject):
         # it is)
         self._starting: Optional[float] = None
         self._shown = ""
+        self._lines = NO_LINES  # what the sinks with show_lines show (_show)
+        self._staged: tuple = ()  # the pages whose captions give the words to a Stage (_show)
         self._language: tuple[str, str] = ("", FROM_MODEL)  # (qwen name or "", source)
         self._guessed = False  # the language is a guess from the channel's title prefix
         self._detected: dict[str, str] = {}  # channel: the language the model's pieces agreed on
@@ -307,10 +354,39 @@ class CaptionsController(QObject):
         self.changed.emit()  # "Automatic (1.7B)" or "(0.6B)": known now
         if self._toggle_waits:
             self._toggle_waits = False
-            self.toggle()
+            self._toggle()
+        pending, self._auto_pending = self._auto_pending, None
+        if pending is not None and pending is self._target():
+            self._come_back_on()  # the same video file still plays: on, if all still holds
 
     def enabled(self) -> bool:
         return self._enabled
+
+    def wanted(self) -> bool:
+        """They are on, or on their way: asked for (their question up), downloading, or
+        waiting for this computer's speed (the audio screen's Words pill reads it)."""
+        return bool(
+            self._enabled or self._download is not None or self._asking or self._toggle_waits
+        )
+
+    def want_levels(self, on: bool) -> None:
+        """The audio screen's visualizer reads a film run's band levels (on), or no longer."""
+        if on != self._levels_wanted:
+            self._levels_wanted = on
+            self._process.send("levels", on)
+
+    def levels_from(self, location: str) -> Optional[float]:
+        """The film second the run reading `location` reads it from, while it sends its band
+        levels (want_levels); None while none does (off, still loading, live, another title)."""
+        if not (self._enabled and self._ready and self._levels_wanted and location):
+            return None
+        if self._is_live() or self._session_key != location or not self._process.running():
+            return None
+        return self._run_start
+
+    def _on_levels(self, run: int, start_ms: int, frame_ms: int, blob: Any) -> None:
+        if run == self._run and self._enabled and self._session_key and not self._is_live():
+            self.levels.emit(self._session_key, start_ms, frame_ms, blob)
 
     def status_text(self) -> str:
         if self._download is not None:
@@ -333,6 +409,34 @@ class CaptionsController(QObject):
         return ""
 
     def toggle(self) -> None:
+        """The viewer turns them on or off (their row, a phone's). During a video file, what
+        they asked for is kept for the next one: on while on their way too (asked for,
+        downloading, waiting for the speed). Either way they are the viewer's from now on, not
+        on by themselves (`local_video_playing`)."""
+        if self._plays_video_file():
+            self._config_set(_LOCAL_ON, not self.wanted())
+        self._auto_on = False
+        self._auto_pending = None
+        self._toggle()
+
+    def give_way(self, *, off: bool = False) -> None:
+        """A subtitle track, Off or a subtitle file chosen (TrackControls): they go off, a
+        download on its way too, and none waiting for this computer's speed comes on after it.
+        A track or a file is a choice for this file: what the viewer asked for video files
+        stays as it was. Off (`off`) chosen during a video file is the viewer's no to every
+        subtitle: kept for the next one, as their own toggle's off is, so ones that came on by
+        themselves don't come back for the next episode."""
+        if off and self._plays_video_file():
+            self._config_set(_LOCAL_ON, False)
+        self._auto_on = False
+        self._auto_pending = None
+        self._toggle_waits = False
+        if self._enabled or self._download is not None:
+            self._disable()
+
+    def _toggle(self) -> None:
+        """On or off, as the viewer's toggle, for QiTV's own turning them on again (another
+        model, a translation, the speed known): what the viewer asked for stays as it was."""
         if self._enabled or self._download is not None:
             self._disable()
             return
@@ -368,6 +472,66 @@ class CaptionsController(QObject):
                 translate(NOT_NOW),
             )
             self._card.ask(*self._question)
+
+    # ---- video files ---------------------------------------------------------------------
+    def local_video_playing(self) -> None:
+        """A video file plays (TVController, once per file): turned on during the last one,
+        they come on by themselves when nothing would be asked or downloaded first (their model
+        here) and the film shows none of its own subtitles; else nothing happens."""
+        self._auto_pending = None
+        self._come_back_on()
+
+    def _come_back_on(self) -> None:
+        """On by themselves for the video file playing, as `local_video_playing` says. Automatic
+        going by this computer's speed first (translated) while it isn't known yet, with a model
+        here: it is measured in the background (no wait shown, nothing asked), and they come on
+        once it is, while the same file plays and all this still holds (`_on_scored`). Whether
+        a model is here is the one looked at last (`_here`: no disk on the GUI thread)."""
+        if not self._config_get(_LOCAL_ON, False):
+            return
+        if self._enabled or self._download is not None or self._asking or self._toggle_waits:
+            return
+        if self._own_subtitles_shown():
+            return
+        if self._speed_unknown():  # (before the tier: Automatic's would start the benchmark)
+            if self._here("large") or self._here("small"):  # what it takes once known is here
+                self._auto_pending = self._target()
+                self._warm_tier()
+            return
+        tier = self._choose_tier()
+        if not self._here(tier):
+            return
+        logger.info("AI captions: on again for a video file, as for the last one")
+        self._enable(tier)
+        self._auto_on = True
+
+    def target_changing(self, local_video: bool) -> None:
+        """Something new is about to replace what the large picture shows (TVController, before
+        it opens; False too when a phone or an outside player takes it): captions that came on
+        by themselves for a video file go off first, unless it is a video file too, so that no
+        film relay and no hold behind live follow them. Asked again, nothing more happens. One
+        waiting for this computer's speed no longer comes on (the new one is asked anew). What
+        they left on their way goes with them: a download's question QiTV asked for them again
+        (another model chosen), or their wait for the speed."""
+        self._auto_pending = None
+        if self._auto_on and not local_video:
+            self._auto_on = False
+            self._toggle_waits = False
+            if self._asking:
+                self._asking = self._asking_step = False
+                if self._card is not None:
+                    self._card.withdraw()
+            self._disable()
+
+    def _plays_video_file(self) -> bool:
+        """The large picture plays a video file (a song is no video)."""
+        return bool(getattr(self._target(), "video_file", False))
+
+    def _own_subtitles_shown(self) -> bool:
+        """The large picture shows one of its own subtitle tracks (TVController)."""
+        controller = getattr(self._window, "controller", None)
+        shown = getattr(controller, "own_subtitles_shown", None)
+        return callable(shown) and bool(shown())
 
     def downloading(self) -> bool:
         """The speech model downloads: they are on their way (the row's tap calls them off)."""
@@ -512,7 +676,7 @@ class CaptionsController(QObject):
                 switched = True
             elif tier != self._tier:
                 self._disable()
-                self.toggle()
+                self._toggle()
                 return
         if self._process.running() and not switched:
             self._process.send(*self._translate_message())
@@ -586,14 +750,14 @@ class CaptionsController(QObject):
         self._config_set("ai_captions_model", name)
         if (self._enabled or self._download is not None) and self._choose_tier() != self._tier:
             self._disable()
-            self.toggle()
+            self._toggle()
         elif self._asking and not self._asking_step and self._choose_tier() != self._fetching:
             # Asked to download another one (2.9, the review: the phone stepped to Faster
             # while the TV asked for the 1.7B, and Download fetched the 1.7B): asked again.
             self._asking = False
             if self._card is not None:
                 self._card.withdraw()
-            self.toggle()
+            self._toggle()
         self.changed.emit()
 
     def _auto_tier(self) -> str:
@@ -1032,6 +1196,7 @@ class CaptionsController(QObject):
         self._drop_floor()
         self._show("")
         self.changed.emit()
+        self.soundRead.emit()  # (no run reads a film now: the visualizer reads it)
 
     # ---- the process ---------------------------------------------------------------------
     def _on_ready(self) -> None:
@@ -1127,20 +1292,37 @@ class CaptionsController(QObject):
         self._resolve_language()  # the language of the track it reads, as it begins
         self._session_key = location
         self._newest = self._written = None
+        if self._levels_wanted:  # (a process started anew has them off)
+            self._process.send("levels", True)
         self._process.send(
             "film", self._run, location, start, self._run_track, self._language[0], options
         )
         self._process.send("viewer", self._position())
+        self.soundRead.emit()  # the visualizer reads no further than where this run reads from
 
-    def _on_caption(self, run: int, start: float, end: float, text: str, parts: Any = ()) -> None:
+    def _on_caption(
+        self,
+        run: int,
+        start: float,
+        end: float,
+        text: str,
+        parts: Any = (),
+        original: str = "",
+    ) -> None:
         """A line written. A line of more than one part (`parts`: (text, start, end) each, its
         sentences and the stretches between long pauses) shows its parts as each is said, by
-        their times (`_page_at`)."""
+        their times (`_page_at`). A translated one (`original`: the line as heard; its parts
+        are the original's) shows its translation as a line of one part did before, and keeps
+        the original, timed by its parts, for a Stage (`_lines_of`)."""
         if run != self._run or not self._enabled:
             return
-        said = [tuple(part) for part in parts] or [(text, start, end)]
-        text = " ".join(str(part[0]) for part in said)
-        timing = [(_words(str(part[0])), float(part[1]), float(part[2])) for part in said]
+        said = [tuple(part) for part in parts] or [(original or text, start, end)]
+        heard = " ".join(str(part[0]) for part in said)
+        heard_timing = [(_words(str(part[0])), float(part[1]), float(part[2])) for part in said]
+        if original:
+            timing = [(_words(text), start, end)]
+        else:
+            text, timing = heard, heard_timing
         i = bisect.bisect_left(self._cues, (start, end, text))
         if i < len(self._cues) and self._cues[i][0] == start:
             self._cues[i] = (start, end, text)  # read again over a stretch: the newer words
@@ -1149,6 +1331,10 @@ class CaptionsController(QObject):
         else:
             self._cues.insert(i, (start, end, text))
         self._timing[start] = timing
+        if original:
+            self._originals[start] = (heard, heard_timing)
+        else:
+            self._originals.pop(start, None)
         if (
             i > 0
             and self._shows(i - 1) > self._position()
@@ -1159,6 +1345,12 @@ class CaptionsController(QObject):
             del self._cues[i]
             known = self._timing.pop(before[0], [(_words(before[2]), before[0], before[1])])
             self._timing[before[0]] = known + self._timing.pop(start, timing)
+            first = self._originals.pop(before[0], None)
+            second = self._originals.pop(start, None)
+            if first is not None or second is not None:
+                first = first or (before[2], known)
+                second = second or (text, timing)
+                self._originals[before[0]] = (f"{first[0]} {second[0]}", first[1] + second[1])
 
     def _joins(self, before: tuple[float, float, str], line: tuple[float, float, str]) -> bool:
         """Whether `line` is the end of `before`, on its own (2.9.5, JOIN_GAP_S)."""
@@ -1306,9 +1498,15 @@ class CaptionsController(QObject):
         self._last = (position, now)
         self._measure_rate(position, now)
         self._process.send("viewer", position)
-        # 2.10.1: "Starting captions…" until their first words are written, the picture playing
-        self._show(translate(STARTING) if self._starting is not None else self._cue_at(position))
+        self._show(*self._showing(position))
         self._forget(position)
+
+    def _showing(self, position: float) -> tuple[str, Optional[tuple[str, str, str]]]:
+        """What shows at `position`: 2.10.1, "Starting captions…" until their first words are
+        written (the picture playing), else the caption there and a Stage's lines."""
+        if self._starting is not None:
+            return translate(STARTING), None
+        return self._caption_at(position)
 
     def _track_changed(self) -> bool:
         """Another audio track plays than the run reads (2.9: the owner switched a film's
@@ -1342,14 +1540,19 @@ class CaptionsController(QObject):
         return bool(waiting()) if callable(waiting) else False
 
     def _cue_at(self, position: float) -> str:
+        return self._caption_at(position)[0]
+
+    def _caption_at(self, position: float) -> tuple[str, tuple[str, str, str]]:
+        """What shows at `position`: the caption's text (its page said by then; "" for none),
+        and a Stage's lines (`_lines_of`)."""
         i = bisect.bisect_right(self._cues, (position - FIRST_WORD_S, float("inf"), "")) - 1
         while i >= 0 and self._shows(i) > position:
             i -= 1  # it waits for the one before to be read
         if i < 0:
-            return ""
+            return "", NO_LINES
         start, end, text = self._cues[i]
         if start <= self._gone:
-            return ""  # it went: a later line that came late can't bring it back (2.9.6)
+            return "", NO_LINES  # it went: a later line that came late can't bring it back
         shows = self._shows(i)
         following = self._shows(i + 1) if i + 1 < len(self._cues) else None
         if following is not None and following - end <= BRIDGE_S:
@@ -1360,14 +1563,38 @@ class CaptionsController(QObject):
                 until = min(until, following)
         if position >= until:
             self._gone = max(self._gone, start)  # 2.9.6, the real-use review: it came back
-            return ""
+            return "", NO_LINES
         if position < shows:
-            return ""
-        return self._page_at(i, position, shows)
+            return "", NO_LINES
+        page = self._page_at(i, position, shows)
+        return page, self._lines_of(i, position, shows, page)
+
+    def _lines_of(self, i: int, position: float, shows: float, page: str) -> tuple[str, str, str]:
+        """A Stage's lines while cue `i` shows `page` (Plan 4): the cue before, as heard, when it
+        ended at most PREVIOUS_LINE_S before this one started ("" otherwise, and for none); the
+        line said, as heard, its part said by then (by its parts' times, as the captions page
+        theirs); and the translation shown ("" when it isn't one)."""
+        if not page:
+            return NO_LINES
+        start, end, _text = self._cues[i]
+        recent = i > 0 and self._cues[i - 1][1] >= start - PREVIOUS_LINE_S
+        previous = self._heard(i - 1) if recent else ""
+        original = self._originals.get(start)
+        if original is None:
+            return previous, page, ""
+        heard, timing = original
+        return previous, self._paged(heard, timing, start, end, position, shows), page
+
+    def _heard(self, i: int) -> str:
+        """Cue `i` as heard: its original when it was translated."""
+        start, _end, text = self._cues[i]
+        original = self._originals.get(start)
+        return original[0] if original is not None else text
 
     def _forget_cues(self) -> None:
         self._cues.clear()
         self._timing.clear()
+        self._originals.clear()
         self._gone = float("-inf")
 
     def _shows(self, i: int) -> float:
@@ -1417,11 +1644,23 @@ class CaptionsController(QObject):
         time (by at most LAG_S past its words) and PAGE_S at least; with no times, each for its
         share of the words by its letters. The last one is held."""
         start, end, text = self._cues[i]
+        return self._paged(text, self._timing.get(start, []), start, end, position, shows)
+
+    def _paged(
+        self,
+        text: str,
+        timing: list[tuple[int, float, float]],
+        start: float,
+        end: float,
+        position: float,
+        shows: float,
+    ) -> str:
+        """`text` of a cue of [start, end), its words' times `timing`, as `_page_at` shows it
+        (a translated cue's original too: `_lines_of`)."""
         overlay = next((o for o in self._overlays if hasattr(o, "pages")), None)
         pages = overlay.pages(text) if overlay is not None else [text]
         if len(pages) <= 1:
             return text
-        timing = self._timing.get(start, [])
         if sum(n for n, _a, _b in timing) != sum(_words(page) for page in pages):
             return self._share_at(pages, position - shows, end - start - FIRST_WORD_S)
         on, said = shows, 0
@@ -1455,7 +1694,9 @@ class CaptionsController(QObject):
 
     def _forget(self, position: float) -> None:
         while self._cues and self._cues[0][1] < position - KEEP_S:
-            self._timing.pop(self._cues.pop(0)[0], None)
+            start = self._cues.pop(0)[0]
+            self._timing.pop(start, None)
+            self._originals.pop(start, None)
 
     def _lead(self) -> Optional[float]:
         """How far ahead of the picture the captions are written (2.9, the review: not how far
@@ -1466,20 +1707,68 @@ class CaptionsController(QObject):
 
     def add_overlay(self, overlay: Any) -> None:
         """Another place the captions show, as over the picture (2.9: the floating picture's,
-        which had none: the captions showed on the fullscreen desktop left)."""
+        which had none: the captions showed on the fullscreen desktop left). Plan 4: one that
+        shows lines (`show_lines`: the audio screen's Stage) gets those instead."""
         self._overlays.append(overlay)
-        if self._shown:
+        if _shows_lines(overlay):
+            if self._lines != NO_LINES:
+                overlay.show_lines(*self._lines)
+            self.words_moved()  # its Stage may take the words already
+        elif self._shown:
             overlay.show_text(self._shown)
 
-    def _show(self, text: str) -> None:
-        if text == self._shown:
-            return
-        self._shown = text
-        from shiboken6 import isValid
+    def words_moved(self) -> None:
+        """A Stage took the words or gave them back (AudioScreen.stageShown: its Stage shown or
+        gone): the captions show where they go now, at once (each tick looks again too)."""
+        self._show(self._shown, self._lines)
 
+    def _staging(self) -> tuple:
+        """The pages (overlay hosts) where a sink shows the words itself now (`takes_words`: the
+        audio screen while its Stage shows): the captions over the picture there give way."""
+        pages = []
+        for sink in self._overlays:
+            takes = getattr(sink, "takes_words", None)
+            if callable(takes) and _alive(sink) and takes():
+                page = _page_of(sink)
+                if page is not None:
+                    pages.append(page)
+        return tuple(pages)
+
+    def _show(self, text: str, lines: Optional[tuple[str, str, str]] = None) -> None:
+        """`text` over the picture, and `lines` (previous, current, translation) where lines
+        show: `text` as the line said by default (what the captions say of themselves:
+        "Starting captions…", a download's progress). The captions on a page whose Stage takes
+        the words are cleared, and show what is said again once it gives them back."""
+        if lines is None:
+            lines = ("", text, "") if text else NO_LINES
+        staged = self._staging()
+        if text == self._shown and lines == self._lines and staged == self._staged:
+            return
+        shown, was_staged, new_lines = self._shown, self._staged, lines != self._lines
+        self._shown, self._lines, self._staged = text, lines, staged
         for overlay in self._overlays:
-            if isinstance(overlay, QObject) and not isValid(overlay):
+            if not _alive(overlay):
                 continue  # the floating picture's, gone as QiTV closes
+            if not _shows_lines(overlay):
+                self._show_text(overlay, (shown, text), (was_staged, staged))
+            elif new_lines:
+                overlay.show_lines(*lines)
+
+    @staticmethod
+    def _show_text(overlay: Any, texts: tuple[str, str], staged: tuple[tuple, tuple]) -> None:
+        """The caption over the picture on `overlay` as it changes (`texts`: before, now);
+        while a Stage on its page takes the words (`staged`: the pages whose Stage took them,
+        before and now), cleared, and the caption again once it gives them back."""
+        shown, text = texts
+        page = _page_of(overlay)
+        was_given, given = page in staged[0], page in staged[1]
+        if given:
+            if not was_given and shown:
+                overlay.clear()  # the Stage has them
+        elif was_given:
+            if text:
+                overlay.show_text(text)  # given back
+        elif text != shown:
             if text:
                 overlay.show_text(text)
             else:

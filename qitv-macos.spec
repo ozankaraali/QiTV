@@ -40,6 +40,7 @@ a = Analysis(
         ('pyproject.toml', '.'),  # Include pyproject.toml so version can be read
         ('assets/qitv.png', 'assets'),  # the logo the Library, welcome card and About show
         ('assets/tmdb.png', 'assets'),  # TMDB's logo: About credits it, as its terms ask
+        ('assets/qitv-mark.svg', 'assets'),  # QiTV's mark the opening draws (ui/opening_mark.py)
         # QiTV's license, and those of what the app ships (VLC, Qt, Python libraries).
         ('LICENSE', '.'),
         ('THIRD-PARTY-NOTICES.md', '.'),
@@ -59,6 +60,9 @@ a = Analysis(
         # by the user with the model and put on that process's path, never bundled.
         'services.captions.worker',
         'services.captions.decoder',
+        # Plan 4: the audio screen's visualizer helper (spawned) and its levels.
+        'services.visualizer.helper',
+        'services.levels',
         'm3u8',
         'Cryptodome.Cipher.AES',
         # Loaded on first use (services/lazy_import.py): no import statement names them.
@@ -145,5 +149,156 @@ app = BUNDLE(
             'QiTV never records sound. macOS may ask when QiTV starts its sound while a '
             'Bluetooth audio device is connected; QiTV works the same if you don\'t allow it.'
         ),
+        # Finder's Open With lists QiTV for every video, music and playlist type
+        # (services/file_types.py's MAC_UTIS, one entry per type). Alternate: installing never
+        # takes a default; the Settings buttons make QiTV the default for five videos
+        # (MAC_DEFAULT_VIDEO) and three music types (MAC_DEFAULT_MUSIC), never for a playlist.
+        'CFBundleDocumentTypes': [
+            {
+                'CFBundleTypeName': 'Video',
+                'CFBundleTypeRole': 'Viewer',
+                'LSHandlerRank': 'Alternate',
+                'LSItemContentTypes': [
+                    'public.mpeg-4',  # mp4
+                    'com.apple.m4v-video',  # m4v
+                    'org.matroska.mkv',  # mkv
+                    'public.avi',  # avi
+                    'com.apple.quicktime-movie',  # mov
+                    'org.webmproject.webm',  # webm
+                    'public.mpeg-2-transport-stream',  # ts (Open With only)
+                    'public.avchd-mpeg-2-transport-stream',  # m2ts, mts
+                    'public.mpeg',  # mpg, mpeg
+                    'com.adobe.flash.video',  # flv
+                    'com.microsoft.windows-media-wmv',  # wmv
+                    'org.xiph.ogg-video',  # ogv
+                    'org.xiph.ogv',  # ogv, as some apps declare it
+                ],
+            },
+            {
+                'CFBundleTypeName': 'Audio',
+                'CFBundleTypeRole': 'Viewer',
+                'LSHandlerRank': 'Alternate',
+                'LSItemContentTypes': [
+                    'public.mp3',  # mp3
+                    'com.apple.m4a-audio',  # m4a
+                    'public.mpeg-4-audio',  # m4a: what an m4a is, as other apps claim it
+                    'public.aac-audio',  # aac
+                    'org.xiph.flac',  # flac
+                    'org.xiph.ogg-audio',  # ogg
+                    'org.xiph.opus',  # opus
+                    'com.microsoft.waveform-audio',  # wav
+                ],
+            },
+            {
+                'CFBundleTypeName': 'Playlist',
+                'CFBundleTypeRole': 'Viewer',
+                'LSHandlerRank': 'Alternate',
+                'LSItemContentTypes': [
+                    'public.m3u-playlist',  # m3u, m3u8 (Open With only)
+                ],
+            },
+        ],
+        # mkv, ogv, ogg and opus: macOS 13 (the oldest QiTV runs on) doesn't declare them; the
+        # identifiers are those other apps use. webm, flv, wmv, m2ts/mts, flac and wav: macOS
+        # 13 declares them only as imports itself (CoreTypes, QuickTime Player); these say
+        # exactly what it says, for a Mac without them. The other types are the system's own
+        # (exported).
+        'UTImportedTypeDeclarations': [
+            {
+                'UTTypeIdentifier': 'org.matroska.mkv',
+                'UTTypeDescription': 'Matroska video',
+                'UTTypeConformsTo': ['public.movie'],
+                'UTTypeTagSpecification': {
+                    'public.filename-extension': ['mkv'],
+                    'public.mime-type': ['video/x-matroska'],
+                },
+            },
+            {
+                'UTTypeIdentifier': 'org.xiph.ogg-video',
+                'UTTypeDescription': 'Ogg video',
+                'UTTypeConformsTo': ['public.movie'],
+                'UTTypeTagSpecification': {
+                    'public.filename-extension': ['ogv'],
+                    'public.mime-type': ['video/ogg'],
+                },
+            },
+            {
+                'UTTypeIdentifier': 'org.webmproject.webm',
+                'UTTypeDescription': 'WebM video',
+                'UTTypeConformsTo': ['public.movie'],
+                'UTTypeTagSpecification': {
+                    'public.filename-extension': ['webm'],
+                    'public.mime-type': ['video/webm', 'audio/webm'],
+                },
+            },
+            {
+                'UTTypeIdentifier': 'com.adobe.flash.video',
+                'UTTypeDescription': 'FLV video',
+                'UTTypeConformsTo': ['public.movie'],
+                'UTTypeTagSpecification': {
+                    'public.filename-extension': ['flv', 'f4v', 'f4p', 'f4a', 'f4b'],
+                    'public.mime-type': ['video/x-flv'],
+                },
+            },
+            {
+                'UTTypeIdentifier': 'com.microsoft.windows-media-wmv',
+                'UTTypeDescription': 'WMV video',
+                'UTTypeConformsTo': ['public.movie', 'com.microsoft.advanced-systems-format'],
+                'UTTypeTagSpecification': {
+                    'public.filename-extension': ['wmv'],
+                    'public.mime-type': ['video/x-ms-wmv'],
+                },
+            },
+            {
+                # a transport stream (which is a public.movie), as QuickTime Player says
+                'UTTypeIdentifier': 'public.avchd-mpeg-2-transport-stream',
+                'UTTypeDescription': 'M2TS video',
+                'UTTypeConformsTo': ['public.mpeg-2-transport-stream'],
+                'UTTypeTagSpecification': {
+                    'public.filename-extension': ['mts', 'm2ts'],
+                },
+            },
+            {
+                'UTTypeIdentifier': 'org.xiph.ogg-audio',
+                'UTTypeDescription': 'Ogg audio',
+                'UTTypeConformsTo': ['public.audio'],
+                'UTTypeTagSpecification': {
+                    'public.filename-extension': ['ogg', 'oga'],
+                    'public.mime-type': ['audio/ogg'],
+                },
+            },
+            {
+                'UTTypeIdentifier': 'org.xiph.opus',
+                'UTTypeDescription': 'Opus audio',
+                'UTTypeConformsTo': ['public.audio'],
+                'UTTypeTagSpecification': {
+                    'public.filename-extension': ['opus'],
+                },
+            },
+            {
+                'UTTypeIdentifier': 'org.xiph.flac',
+                'UTTypeDescription': 'FLAC audio',
+                'UTTypeConformsTo': ['public.audio'],
+                'UTTypeTagSpecification': {
+                    'public.filename-extension': ['flac'],
+                    'public.mime-type': ['audio/flac'],
+                },
+            },
+            {
+                'UTTypeIdentifier': 'com.microsoft.waveform-audio',
+                'UTTypeDescription': 'Waveform audio',
+                'UTTypeConformsTo': ['public.audio'],
+                'UTTypeTagSpecification': {
+                    'com.apple.ostype': ['.WAV', 'WAVE'],
+                    'public.mime-type': [
+                        'audio/vnd.wave',
+                        'audio/wav',
+                        'audio/wave',
+                        'audio/x-wav',
+                    ],
+                    'public.filename-extension': ['wav', 'wave', 'bwf'],
+                },
+            },
+        ],
     }
 )

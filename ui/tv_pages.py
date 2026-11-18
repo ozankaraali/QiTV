@@ -31,13 +31,16 @@ from services.failure_reasons import shown_message
 from services.i18n import tr, translate
 from services.library import LibraryModel
 from services.navigation import FAVORITES_GROUP, RECENT_GROUP
+from services.open_paths import MEDIA_EXTENSIONS
 from services.provider_ids import provider_of
 from services.recording_desk import COMING, NOW, RECORDED
 from services.recording_thumbs import FOLDER as THUMBS_FOLDER, Thumbnails
 from services.recordings_library import RecordingsLibrary
 from services.recordings_list import RecordingsList
 from ui.keymap import Action
+from ui.library.folders_view import FoldersDesk
 from ui.library_controller import LibraryController
+from ui.overlays.question_card import QuestionCard
 from ui.overlays.rec_sign import MANAGE_TEXT
 from ui.page_stack import PageStack
 from ui.pointer import SecondClickGuard
@@ -48,10 +51,7 @@ from ui.tv_controller import ERROR_MS, INFO_MS, scrub
 logger = logging.getLogger(__name__)
 
 # File → Open File…'s files (the dialog's filter, after its name).
-MEDIA_PATTERNS = (
-    "*.mp4 *.m4v *.mkv *.avi *.mov *.webm *.ts *.m2ts *.mts *.mpg *.mpeg *.flv"
-    " *.wmv *.ogv *.mp3 *.m4a *.aac *.flac *.ogg *.opus *.wav *.m3u8"
-)
+MEDIA_PATTERNS = " ".join(f"*.{ext}" for ext in (*sorted(MEDIA_EXTENSIONS), "m3u8"))
 
 
 def _loop_level() -> int:
@@ -165,8 +165,21 @@ class TVPages(QObject):
         )
         self.recordings.changed.connect(self.library_controller.recordings_changed)
         self._wire_home()  # 2.9.7: the Recordings tab's home
+        # Plan 4: the Folders tab: the folders opened, each played as a dropped folder plays;
+        # Clear asks on a question card of its own
+        self.folders_desk = FoldersDesk(
+            window.folder_shelf,
+            window.library_page.folders,
+            QuestionCard(window.library_page),
+            window.watch,
+            open_folder=self._open_shelf_folder,
+            add_folder=self.add_folder,
+            parent=self,
+        )
+        self.library_controller.set_folders(self.folders_desk)
         window.library_page.recordings.avoid(window.player_page)  # the corner player
         window.library_page.home.avoid(window.player_page)
+        window.library_page.folders.avoid(window.player_page)  # Plan 4: the Folders tab
         for sign in (window.overlays.rec_sign, getattr(window.overlays, "library_rec_sign", None)):
             if sign is not None:
                 sign.manageRequested.connect(lambda: self.open_recordings(NOW))
@@ -409,6 +422,8 @@ class TVPages(QObject):
             stack.show_library(corner=corner)
             if self.library_controller.mode == "recordings" and not self.recordings_desk.shown():
                 self.recordings_desk.show()  # 2.9.7: back on the Recordings tab: it follows
+            elif self.library_controller.mode == "folders" and not self.folders_desk.shown():
+                self.folders_desk.show()  # Plan 4: back on the Folders tab: read again
         else:
             if stack.mode() == PageStack.CORNER:
                 window.controller.leave_library_playing()
@@ -649,7 +664,19 @@ class TVPages(QObject):
         leaves). A double-click's second click would land on the Library under the pointer
         (a click on an episode plays it): it reaches nothing.
         """
+        if self._window.controller.sound_shown():
+            self.library_from_sound()  # the audio dock's ⋯ Library: any song's (P4-8 a)
+            return
         if not self._window.closing() and self._can_return():
+            self._enter_library()
+            self._guard_second_click()
+
+    def library_from_sound(self) -> None:
+        """The audio screen's ‹ and its dock's ⋯ Library (Ruling P4-8 a): the Library, as it was
+        left, for any song or radio channel, one opened from a folder too (no Library it came
+        from: films keep `_can_return`); the sound plays on in its corner. A double-click's
+        second click reaches nothing there, as in back_to_library."""
+        if not self._window.closing() and not self.library_shown():
             self._enter_library()
             self._guard_second_click()
 
@@ -723,7 +750,8 @@ class TVPages(QObject):
             self.recordings.delete(str(item.get("path") or ""))
 
     def open_file(self) -> None:
-        """File → Open File…: a local media file plays as a movie."""
+        """File → Open File…: a local media file plays as a movie, once it is found there
+        (TVWindow.open_paths looks off the GUI thread)."""
         window = self._window
         if window.closing():
             return
@@ -731,9 +759,63 @@ class TVPages(QObject):
         path, _filter = QFileDialog.getOpenFileName(window, title, "", media_filter())
         if not path or window.closing():
             return
+        window.open_paths([path], source="dialog")
+
+    def open_folder(self) -> None:
+        """File → Open Folder… and the channel list's Open a folder (Plan 4): the folder chosen
+        plays as a dropped folder does (TVWindow.open_paths reads it off the GUI thread), from
+        where it stopped, and goes on the Folders tab."""
+        self._pick_folder("drop")
+
+    def add_folder(self) -> None:
+        """The Folders tab's Add folder: as Open Folder…, but a start from the Library, as a
+        tile's play is: Esc and ‹ Library then go back to the tab (P4-29)."""
+        self._pick_folder("shelf")
+
+    def _pick_folder(self, source: str) -> None:
+        window = self._window
+        if window.closing():
+            return
+        title = tr("Open Folder")  # i18n: the title of the dialog that picks a folder to play
+        path = QFileDialog.getExistingDirectory(window, title, "")
+        if not path or window.closing():
+            return
+        window.open_paths([path], source=source)
+
+    def _open_shelf_folder(self, path: str) -> None:
+        """A Folders tab tile: its folder plays as a dropped folder does, from where it
+        stopped; Esc and ‹ Library then go back to the tab, as from a Recordings tile (P4-26)."""
+        if not self._window.closing():
+            self._window.open_paths([path], source="shelf")
+
+    def play_path(self, path: str, size: Optional[int]) -> None:
+        """A local file plays as a movie on the player page (Open File…, a drop, a file opened
+        from the file manager); with its `size`, from where it stopped."""
+        window = self._window
+        if window.closing():
+            return
         self._show_page(window.player_page)
         self._set_return_to_library(False)
-        window.controller.play_file(path)
+        window.controller.play_file(path, size)
+
+    def play_list(
+        self,
+        name: str,
+        entries: tuple[str, ...],
+        sizes: tuple[Optional[int], ...],
+        start: Optional[int] = None,
+        *,
+        from_library: bool = False,
+    ) -> None:
+        """A playlist of local files plays on the player page, as a file does (play_path), from
+        its first entry or `start` (TVController.play_list). `from_library`: a Folders tile's
+        folder (P4-26): Esc and ‹ Library go back to the Library, as from a Recordings tile."""
+        window = self._window
+        if window.closing():
+            return
+        self._show_page(window.player_page)
+        self._set_return_to_library(from_library)
+        window.controller.play_list(name, entries, sizes, start=start)
 
     def export(self, kind: ExportKind) -> None:
         window = self._window

@@ -20,7 +20,14 @@ from PySide6.QtWidgets import QApplication, QWidget
 
 from services import failure_reasons, i18n
 from services.epg_view import Programme
-from tests import test_drawer, test_picture_panel, test_track_panel, test_transport
+from tests import (
+    test_audio_screen,
+    test_drawer,
+    test_picture_panel,
+    test_track_panel,
+    test_transport,
+    test_transport_audio,
+)
 from ui.overlays import guide
 from ui.overlays.painting import Units
 from ui.overlays.welcome import WelcomeCard
@@ -242,6 +249,104 @@ class TurkishPicturePanelTests(PicturePanelChecks, test_picture_panel.PictureCas
             rows, ["En boy oranı", "Geçmeli tarama giderme", "Uyku zamanlayıcısı", "İstatistikler"]
         )
         self.assertEqual(self.notice.text(), "Oynatma 0:30 sonra duracak")
+
+
+class AudioScreenChecks:
+    """The audio screen's busiest top bar (Words lit with its language, Up next) and the
+    Album's caption read whole, from the default window down to a small one, and nothing of the
+    screen overlaps or reaches into the dock's room."""
+
+    words_language = ""  # the captions' language, as the Words pill names it
+    expected: dict[str, tuple[str, ...]] = {}
+
+    def test_the_audio_screen_reads_whole(self):
+        cut, painted = Elisions(self), Painted(self)
+        for size in ((1280, 720), (640, 360)):
+            for view in ("cover", "album"):
+                with self.subTest(size=size, view=view):
+                    cut.cut.clear()
+                    painted.texts.clear()
+                    screen = self.make(size, view=view)
+                    screen.set_words(True, self.words_language)
+                    screen.grab()
+                    self.assertEqual(cut.cut, [])
+                    self.assert_laid_out(screen)
+                    for text in self.expected[view]:
+                        self.assertIn(text, painted.texts)
+
+
+class TurkishAudioScreenTests(AudioScreenChecks, test_audio_screen.ScreenCase):
+    words_language = "Türkçe"
+    expected = {
+        "cover": ("Sözler · Türkçe", "Sıradaki · 7"),
+        "album": ("Sözler · Türkçe", "TIDEWICK ISLE · 8 PARÇA"),
+    }
+
+    def setUp(self):
+        super().setUp()
+        turkish(self)
+
+
+class FrenchAudioScreenTests(AudioScreenChecks, test_audio_screen.ScreenCase):
+    words_language = "Français"
+    expected = {
+        "cover": ("Paroles · Français", "À suivre · 7"),
+        "album": ("Paroles · Français", "TIDEWICK ISLE · 8 TITRES"),
+    }
+
+    def setUp(self):
+        super().setUp()
+        french(self)
+
+
+class DockChecks:
+    """The audio screen's dock and its "⋯" menu read whole in the language, from the default
+    window down to a small one, the menu inside the window."""
+
+    stop = ""  # the menu's first item, in the language
+
+    @classmethod
+    def setUpClass(cls):
+        cls.app = QApplication.instance() or QApplication([])
+
+    def test_the_dock_and_its_menu_read_whole(self):
+        cut, painted = Elisions(self), Painted(self)
+        for width, height in ((1280, 720), (640, 360)):
+            with self.subTest(size=(width, height)):
+                cut.cut.clear()
+                painted.texts.clear()
+                host = QWidget()
+                host.resize(width, height)
+                host.show()
+                self.addCleanup(host.deleteLater)
+                self.addCleanup(host.close)
+                t = test_transport_audio.Transport(host)
+                t.show_audio("Ferries at Night", "Mira Sol")
+                t.set_audio_state(True, "all", True)
+                t.update_position(84_000, 221_000)
+                menu = test_transport_audio.MoreMenu(t, host)
+                menu.open_at(t.mapToGlobal(t.button_rect("more").topLeft().toPoint()))
+                t.grab()
+                menu.grab()
+                self.assertEqual(cut.cut, [])
+                self.assertTrue(t.control_text("stop").startswith(self.stop))
+                for name in test_transport_audio.MENU:
+                    self.assertIn(t.control_text(name), painted.texts)
+                self.assertTrue(host.rect().contains(menu.geometry()), menu.geometry())
+
+
+class TurkishDockTests(DockChecks, unittest.TestCase):
+    stop = "Durdur"
+
+    def setUp(self):
+        turkish(self)
+
+
+class FrenchDockTests(DockChecks, unittest.TestCase):
+    stop = "Arrêter"
+
+    def setUp(self):
+        french(self)
 
 
 class TurkishCardsTests(unittest.TestCase):

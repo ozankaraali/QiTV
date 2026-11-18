@@ -20,6 +20,7 @@ from services.navigation import (
     FAVORITES_GROUP,
     FREE_CHANNELS_ROW,
     OPEN_FILE_ROW,
+    OPEN_FOLDER_ROW,
     RECENT_GROUP,
     RECORDINGS_ROW,
     SETTINGS_ROW,
@@ -688,6 +689,7 @@ class DrawerTests(unittest.TestCase):
                 ("Add provider", "plus"),
                 ("Free channels…", "plus"),
                 ("Open file", "file"),  # Ctrl/⌘+O without the menu bar (2.0.1)
+                ("Open a folder", "folder"),  # Plan 4: Ctrl/⌘+Shift+O, an empty shelf too
                 ("Recordings", "record"),  # 2.9.7: the Library's Recordings page
             ],
         )
@@ -699,6 +701,9 @@ class DrawerTests(unittest.TestCase):
         self.drawer._on_row_clicked("left", 6)
         self.assertEqual(self.actions, [OPEN_FILE_ROW])
         self.assertEqual(column.current.key, OPEN_FILE_ROW)
+        self.assertEqual((self.nav.path, self.catalog.selected, self.library), (path, [], []))
+        self.drawer._on_row_clicked("left", 7)  # Plan 4: Open a folder, right under it
+        self.assertEqual(self.actions, [OPEN_FILE_ROW, OPEN_FOLDER_ROW])
         self.assertEqual((self.nav.path, self.catalog.selected, self.library), (path, [], []))
 
     def test_arrows_and_enter_reach_settings_and_add_provider(self):
@@ -723,7 +728,14 @@ class DrawerTests(unittest.TestCase):
         column = self.open_on_the_sources()
         self.assertEqual(
             [n.key for n in column.nodes[3:]],
-            [SETTINGS_ROW, ADD_PROVIDER_ROW, FREE_CHANNELS_ROW, OPEN_FILE_ROW, RECORDINGS_ROW],
+            [
+                SETTINGS_ROW,
+                ADD_PROVIDER_ROW,
+                FREE_CHANNELS_ROW,
+                OPEN_FILE_ROW,
+                OPEN_FOLDER_ROW,
+                RECORDINGS_ROW,
+            ],
         )
         self.drawer._on_row_clicked("left", 5)
         self.assertEqual(self.actions, [FREE_CHANNELS_ROW])

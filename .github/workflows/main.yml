@@ -86,6 +86,14 @@ jobs:
       - name: Sync dependencies
         id: sync
         run: uv sync --frozen --dev
+      - name: Check the packaging Python's Tcl/Tk
+        # PyInstaller's splash (the build's still of QiTV's mark, shown while the one file
+        # unpacks) runs on the Tcl/Tk of this Python's tkinter: it must be there, threaded,
+        # in shared libraries. It prints which Python and Tcl/Tk the build uses.
+        run: uv run python scripts/render_splash.py --check-tcl-tk
+      - name: Render the splash image
+        # build/splash.png (offscreen), which the spec's Splash target bundles.
+        run: uv run python scripts/render_splash.py
       - name: Write the build's keys
         # services/_build_keys.py gets the OpenSubtitles key and the TMDB token from the
         # secrets, never printed; without a secret (a fork) its key stays empty. Nothing here
@@ -144,6 +152,24 @@ jobs:
         env:
           QT_QPA_PLATFORM: xcb
           QITV_SMOKE: '1'
+      - name: Open files in the packaged app; time the hand-over
+        if: ${{ !cancelled() && steps.package.outcome == 'success' }}
+        # A start with a file plays it; a second start with another (a copy named in Turkish)
+        # unpacks itself, hands it over to the first and exits; eight starts at once leave one
+        # QiTV. open-file.json has the times (it rides along with smoke-frozen).
+        run: |
+          dbus-run-session -- xvfb-run -a -s "-screen 0 1920x1080x24" sh -c '
+            openbox &
+            for i in $(seq 50); do
+              xprop -root _NET_SUPPORTING_WM_CHECK | grep -q "window id" && break
+              sleep 0.2
+            done
+            uv run python scripts/smoke_open_file.py --app dist/qitv-linux --out smoke-frozen \
+              --file tests/fixtures/smoke.mp4 --parallel 8
+          '
+        timeout-minutes: 20
+        env:
+          QT_QPA_PLATFORM: xcb
       - name: Restore the system VLC
         if: always()
         run: |
@@ -155,6 +181,24 @@ jobs:
             done < "$hidden/paths"
           fi
           if [ -d "$hidden/plugins" ]; then sudo mv "$hidden/plugins" "$(cat "$hidden/plugins-path")"; fi
+      - name: Install xdg-utils for the real xdg-mime test
+        if: ${{ !cancelled() && steps.sync.outcome == 'success' }}
+        # A mirror that fails here never holds up a release: without xdg-mime the tests below
+        # skip the real check and still run the rest.
+        continue-on-error: true
+        timeout-minutes: 5
+        run: |
+          apt="-o Acquire::Retries=3 -o Acquire::http::Timeout=30"
+          sudo apt-get $apt install -y xdg-utils
+      - name: The file types tests with the real xdg-mime
+        if: ${{ !cancelled() && steps.sync.outcome == 'success' }}
+        # The tests job runs on macOS, where the real xdg-mime check is skipped.
+        timeout-minutes: 10
+        run: uv run python -m unittest tests.test_file_types
+        env:
+          QT_QPA_PLATFORM: offscreen
+          PYTHONPATH: .:tests
+          QITV_CAPTIONS_DIR: ${{ runner.temp }}/captions-tests  # as run_tests.py keeps it
       - name: Upload packaged smoke results
         if: always()
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
@@ -234,6 +278,14 @@ jobs:
       - name: Sync dependencies
         id: sync
         run: uv sync --frozen --dev
+      - name: Check the packaging Python's Tcl/Tk
+        # PyInstaller's splash (the build's still of QiTV's mark, shown while the one file
+        # unpacks) runs on the Tcl/Tk of this Python's tkinter: it must be there, threaded,
+        # in shared libraries. It prints which Python and Tcl/Tk the build uses.
+        run: uv run python scripts/render_splash.py --check-tcl-tk
+      - name: Render the splash image
+        # build/splash.png (offscreen), which the spec's Splash target bundles.
+        run: uv run python scripts/render_splash.py
       - name: Write the build's keys
         # services/_build_keys.py gets the OpenSubtitles key and the TMDB token from the
         # secrets, never printed; without a secret (a fork) its key stays empty. Nothing here
@@ -276,6 +328,19 @@ jobs:
         timeout-minutes: 8
         env:
           QITV_SMOKE: '1'
+      - name: Open files in the packaged app; time the hand-over and DDE
+        if: ${{ !cancelled() && steps.package.outcome == 'success' }}
+        # A start with a file plays it; a second start with another (a copy named in Turkish)
+        # unpacks itself, hands it over to the first and exits; a third comes over DDE as
+        # Explorer sends it (--dde registers QiTV in the runner's HKCU, and unregisters it); a
+        # fourth's path is longer than 260 characters; eight starts at once leave one QiTV.
+        # open-file.json has the times (it rides along with smoke-frozen).
+        shell: pwsh
+        run: |
+          uv run python scripts/smoke_open_file.py --app dist\qitv-windows.exe --out smoke-frozen `
+            --file tests\fixtures\smoke.mp4 --parallel 8 --dde
+          exit $LASTEXITCODE
+        timeout-minutes: 20
       - name: Restore the system VLC
         if: always()
         shell: pwsh
@@ -283,6 +348,16 @@ jobs:
           if (Test-Path "C:\Program Files\VideoLAN.hidden") {
             Rename-Item -Path "C:\Program Files\VideoLAN.hidden" -NewName "VideoLAN"
           }
+      - name: The open-file tests on Windows
+        if: ${{ !cancelled() && steps.sync.outcome == 'success' }}
+        # Their Windows-only cases (the live DDEML server and client, Windows file URLs,
+        # ntpath) are skipped in the tests job, which runs on macOS.
+        timeout-minutes: 10
+        run: uv run python -m unittest tests.test_dde_windows tests.test_single_instance tests.test_open_paths tests.test_file_types
+        env:
+          QT_QPA_PLATFORM: offscreen
+          PYTHONPATH: .;tests
+          QITV_CAPTIONS_DIR: ${{ runner.temp }}\captions-tests  # as run_tests.py keeps it
       - name: Upload packaged smoke results
         if: always()
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
@@ -340,6 +415,10 @@ jobs:
       - name: Package App with PyInstaller for macOS
         id: package
         run: uv run pyinstaller qitv-macos.spec
+      - name: The bundle's Info.plist is well-formed
+        if: ${{ !cancelled() && steps.package.outcome == 'success' }}
+        # The document types and imported types QiTV declares for Finder's Open With.
+        run: plutil -lint dist/QiTV.app/Contents/Info.plist
       - name: Ad-Hoc Sign the app
         if: ${{ !cancelled() && steps.package.outcome == 'success' }}
         run: |
@@ -372,6 +451,15 @@ jobs:
         timeout-minutes: 8
         env:
           QITV_SMOKE: '1'
+      - name: Open files in the packaged app; time the hand-over
+        if: ${{ !cancelled() && steps.package.outcome == 'success' }}
+        # A start with a file plays it; a second start with another (a copy named in Turkish)
+        # hands it over to the first and exits; eight starts at once leave one QiTV.
+        # open-file.json has the times (it rides along with smoke-frozen).
+        run: |
+          uv run python scripts/smoke_open_file.py --app dist/QiTV.app/Contents/MacOS/QiTV \
+            --out smoke-frozen --file tests/fixtures/smoke.mp4 --parallel 8
+        timeout-minutes: 20
       - name: The packaged app's plugin cache is current
         if: ${{ !cancelled() && steps.package.outcome == 'success' }}
         run: |
@@ -382,6 +470,18 @@ jobs:
       - name: Restore the system VLC
         if: always()
         run: if [ -d "$RUNNER_TEMP/VLC.app" ]; then sudo mv "$RUNNER_TEMP/VLC.app" /Applications/VLC.app; fi
+      - name: Keep QiTV's crash reports with the smoke results
+        if: always()
+        # A QiTV that crashed, in its exit too, leaves macOS's report (every thread's native
+        # stack): it rides along with smoke-frozen.
+        run: |
+          shopt -s nullglob
+          reports=("$HOME"/Library/Logs/DiagnosticReports/QiTV*.ips /Library/Logs/DiagnosticReports/QiTV*.ips)
+          echo "${#reports[@]} crash report(s)"
+          if [ ${#reports[@]} -gt 0 ]; then
+            mkdir -p smoke-frozen/crash-reports
+            cp "${reports[@]}" smoke-frozen/crash-reports/ || true
+          fi
       - name: Upload packaged smoke results
         if: always()
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
@@ -464,6 +564,10 @@ jobs:
       - name: Package App with PyInstaller for macOS (Intel)
         id: package
         run: uv run pyinstaller qitv-macos.spec
+      - name: The bundle's Info.plist is well-formed
+        if: ${{ !cancelled() && steps.package.outcome == 'success' }}
+        # The document types and imported types QiTV declares for Finder's Open With.
+        run: plutil -lint dist/QiTV.app/Contents/Info.plist
       - name: Ad-Hoc Sign the app
         if: ${{ !cancelled() && steps.package.outcome == 'success' }}
         run: |
@@ -496,6 +600,15 @@ jobs:
         timeout-minutes: 8
         env:
           QITV_SMOKE: '1'
+      - name: Open files in the packaged app; time the hand-over
+        if: ${{ !cancelled() && steps.package.outcome == 'success' }}
+        # A start with a file plays it; a second start with another (a copy named in Turkish)
+        # hands it over to the first and exits; eight starts at once leave one QiTV.
+        # open-file.json has the times (it rides along with smoke-frozen).
+        run: |
+          uv run python scripts/smoke_open_file.py --app dist/QiTV.app/Contents/MacOS/QiTV \
+            --out smoke-frozen --file tests/fixtures/smoke.mp4 --parallel 8
+        timeout-minutes: 20
       - name: The packaged app's plugin cache is current
         if: ${{ !cancelled() && steps.package.outcome == 'success' }}
         run: |
@@ -506,6 +619,18 @@ jobs:
       - name: Restore the system VLC
         if: always()
         run: if [ -d "$RUNNER_TEMP/VLC.app" ]; then sudo mv "$RUNNER_TEMP/VLC.app" /Applications/VLC.app; fi
+      - name: Keep QiTV's crash reports with the smoke results
+        if: always()
+        # A QiTV that crashed, in its exit too, leaves macOS's report (every thread's native
+        # stack): it rides along with smoke-frozen.
+        run: |
+          shopt -s nullglob
+          reports=("$HOME"/Library/Logs/DiagnosticReports/QiTV*.ips /Library/Logs/DiagnosticReports/QiTV*.ips)
+          echo "${#reports[@]} crash report(s)"
+          if [ ${#reports[@]} -gt 0 ]; then
+            mkdir -p smoke-frozen/crash-reports
+            cp "${reports[@]}" smoke-frozen/crash-reports/ || true
+          fi
       - name: Upload packaged smoke results
         if: always()
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1

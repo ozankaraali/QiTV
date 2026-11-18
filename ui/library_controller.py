@@ -26,6 +26,13 @@ Recordings (2.9.7): the top bar's last tab (once the shell gives it its page) op
 Recordings page (`ui.library.recordings_view`, filled by `ui.recordings_desk`): the keys go to
 it (zone "recordings"), ↑ from its chips to the top bar, Esc from its chips back to live TV.
 
+Folders (Plan 4): the tab after it, while the shelf of the folders opened has one
+(`ui.library.folders_view`'s FoldersDesk): the keys go to its tiles (zone "folders"), ↑ from
+its Clear to the top bar, Esc back to live TV, Delete takes the folder off the shelf. Its last
+folder gone (Remove, Clear), the Library shows the section it came from (else Recordings,
+else Movies or Series, else live TV). It is no section of the providers': the Library's source
+pill hides there, as on Recordings.
+
 A right-click on a film's poster or an episode row asks the shell for its menu (Play in VLC,
 Play in MPV, Copy stream link: `context_menu(item, section, global position)`, section "movies"
 or "series"). Links are asked of the provider QiTV is on, so a title of another provider, or
@@ -170,6 +177,7 @@ class LibraryController(QObject):
         super().__init__(parent)
         self._cancel_scheduled = cancel_scheduled
         self._desk: Optional[Any] = None  # 2.9.7: the Recordings page's (`set_recordings_desk`)
+        self._folders: Optional[Any] = None  # Plan 4: the Folders tab's desk (`set_folders`)
         # 2.9.7: the Recordings tab's rail and tiles (`set_recordings_library`), its row shown,
         # and what its strip's Delete… and Show in Folder do (the pages')
         self._rec_library: Optional[Any] = None
@@ -379,6 +387,8 @@ class LibraryController(QObject):
         self._guide_search.cancel()  # 2.9.7: the rail's find stops looking
         if self._desk is not None:
             self._desk.hide()
+        if self._folders is not None:
+            self._folders.hide()  # Plan 4: its reads, and Clear's question, go
 
     # ---- 2.9.7: the Recordings page ----------------------------------------------------------
 
@@ -389,6 +399,75 @@ class LibraryController(QObject):
         refreshed = getattr(desk, "refreshed", None)
         if refreshed is not None:  # 2.9.7: the recorder's tiles follow the page
             refreshed.connect(self._on_desk_refreshed)
+
+    # ---- Plan 4: the Folders tab ---------------------------------------------------------------
+
+    def set_folders(self, desk: Any) -> None:
+        """The Folders tab's desk (ui.library.folders_view.FoldersDesk): its tab shows while
+        its shelf has a folder."""
+        self._folders = desk
+        desk.changed.connect(self._on_folders_changed)
+        self._screen.folders.upEdge.connect(lambda: self._focus("nav"))
+        self._screen.nav.set_tabs(self._tabs())
+
+    def open_folders(self) -> None:
+        """The Folders tab, its folders read again (none on the shelf: nothing)."""
+        folders = self._folders
+        if self._closed or folders is None or not folders.count():
+            return
+        self._series = None
+        self._set_mode("folders")
+        self._sync_nav("folders")
+        if not folders.shown():
+            folders.show()
+        self._focus("folders")
+
+    def _on_folders_changed(self) -> None:
+        """The shelf changed: its tab shows or goes; gone while it shows, another tab."""
+        if self._closed:
+            return
+        self._screen.nav.set_tabs(self._tabs())
+        if self._mode == "folders" and self._folders is not None and not self._folders.count():
+            self._leave_folders()
+
+    def _leave_folders(self) -> None:
+        """The Folders tab's last folder went: the section it came from, else Recordings,
+        else Movies or Series, else live TV."""
+        tabs = self._tabs()
+        if self._section in tabs:
+            self.open(str(self._section))
+        elif self._desk is not None:
+            self.open_recordings()
+        else:
+            sections = [tab for tab in ("movies", "series") if tab in tabs]
+            if sections:
+                self.open(sections[0])
+            else:
+                self._go_back_to_tv()
+
+    def _handle_folders(self, action: Action, payload: str) -> bool:
+        """Plan 4: the Folders tab's tiles: the arrows, Enter plays a folder (or Add folder,
+        Clear), Delete takes it off the shelf, Esc back to the TV."""
+        view = self._screen.folders
+        if action in _MOVES:
+            view.move_by(*_MOVES[action])  # ↑ from Clear: upEdge, the top bar
+        elif action in (Action.NAV_PAGE_UP, Action.NAV_PAGE_DOWN):
+            view.page(-1 if action is Action.NAV_PAGE_UP else 1)
+        elif action is Action.NAV_HOME:
+            view.home()
+        elif action is Action.NAV_END:
+            view.end()
+        elif action is Action.NAV_ACTIVATE:
+            view.activate()
+        elif action is Action.NAV_DELETE:
+            view.remove_current()
+        elif action is Action.ESCAPE:
+            self._go_back_to_tv()
+        elif action in (Action.NAV_TEXT, Action.NAV_BACKSPACE, Action.PASTE):
+            return self._type_in_search(action, payload)
+        else:
+            return False
+        return True
 
     def set_recordings_library(self, library: Any) -> None:
         """2.9.7: the Recordings tab's rail and tiles (services.recordings_library)."""
@@ -683,6 +762,7 @@ class LibraryController(QObject):
         self._screen.rec_rail.set_focused(zone == "rec_rail", field=self._rec_field)  # 2.9.7
         self._screen.rec_grid.set_focused(zone == "rec_content")
         self._screen.home.set_focused(zone == "rec_content")
+        self._screen.folders.set_focused(zone == "folders")  # Plan 4
         self._sync_search_focus()
 
     def _sync_search_focus(self) -> None:
@@ -699,6 +779,8 @@ class LibraryController(QObject):
             self._guide_search.cancel()  # 2.9.7: the rail's find stops looking
             if self._desk is not None:
                 self._desk.hide()  # 2.9.7: the page stops looking while it is hidden
+        if mode != "folders" and self._folders is not None:
+            self._folders.hide()  # Plan 4: its reads under way, and its question, go
 
     def _tabs(self) -> list[str]:
         """The provider's sections (2.9.7: recordings have their own tab, not Movies);
@@ -710,6 +792,8 @@ class LibraryController(QObject):
                 tabs.append(section)
         if self._desk is not None:
             tabs.append("recordings")  # 2.9.7: whatever the providers have
+        if self._folders is not None and self._folders.count():
+            tabs.append("folders")  # Plan 4: while the shelf has a folder
         return tabs
 
     def _others_with(self, section: str) -> list[str]:
@@ -735,7 +819,8 @@ class LibraryController(QObject):
 
     def _sync_nav(self, active: str) -> None:
         nav = self._screen.nav
-        nav.set_source_visible(active != "recordings")  # 2.9.7: it covers every provider
+        # 2.9.7: Recordings covers every provider; Plan 4: Folders is none of theirs
+        nav.set_source_visible(active not in ("recordings", "folders"))
         nav.set_tabs(self._tabs())
         nav.set_source_name(self._source_title())
         nav.set_active(active)
@@ -768,6 +853,9 @@ class LibraryController(QObject):
             return
         if section == "recordings":
             self.open_recordings()
+            return
+        if section == "folders":  # Plan 4
+            self.open_folders()
             return
         self._source_for(section)
         self._section = section
@@ -837,7 +925,7 @@ class LibraryController(QObject):
         if self._grid_content == "browse":  # the series view keeps its series current
             self._restore_item = self._current_item()
         if self._mode != "search":  # 2.9.7: Esc from the search goes back to that page
-            self._search_from = "recordings" if self._mode == "recordings" else ""
+            self._search_from = self._mode if self._mode in ("recordings", "folders") else ""
         self._series = None
         self._set_mode("search")
         self._sync_nav("search")
@@ -889,6 +977,8 @@ class LibraryController(QObject):
         """Route a resolved key to the focused zone; False when the Library has no use for it."""
         if self._closed:
             return False
+        if self._folders is not None and self._folders.answer_key(action):
+            return True  # Plan 4: Clear's question has the keys while it shows
         if action is Action.SEARCH:
             if payload and (self._zone == "search" or self._genre_field):
                 return self.handle(Action.NAV_TEXT, payload)  # "/" types where text goes
@@ -902,6 +992,7 @@ class LibraryController(QObject):
             "search": self._handle_search,
             "rec_rail": self._handle_rec_rail,  # 2.9.7
             "rec_content": self._handle_rec_content,
+            "folders": self._handle_folders,  # Plan 4
         }[self._zone]
         return handler(action, payload)
 
@@ -997,7 +1088,9 @@ class LibraryController(QObject):
                 back = "grid"
             if self._mode == "recordings":  # 2.9.7: its content (its rail if it was there)
                 back = "rec_rail" if back == "rec_rail" else "rec_content"
-            elif back in ("rec_rail", "rec_content"):
+            elif self._mode == "folders":  # Plan 4: its tiles
+                back = "folders"
+            elif back in ("rec_rail", "rec_content", "folders"):
                 back = "grid"
             self._focus(back if back != "nav" else "grid")
         elif action is Action.ESCAPE:
@@ -1189,6 +1282,9 @@ class LibraryController(QObject):
         if self._search_from == "recordings" and self._desk is not None:
             self._search_from = ""
             self.open_recordings()  # 2.9.7: the page the search came from
+        elif self._search_from == "folders" and self._folders is not None and self._folders.count():
+            self._search_from = ""
+            self.open_folders()  # Plan 4: the tab the search came from
         elif self._section is None:
             self._go_back_to_tv()
         else:
@@ -1614,7 +1710,9 @@ class LibraryController(QObject):
             and not (ran and self._series_provider == name)
         ):
             self._leave_series()
-        active = {"search": "search", "recordings": "recordings"}.get(self._mode)
+        active = {"search": "search", "recordings": "recordings", "folders": "folders"}.get(
+            self._mode
+        )
         self._sync_nav(active or self._model.section)  # 2.9.7: Recordings stays as it is
         if self._grid_content == "search":
             self._search.rerun()

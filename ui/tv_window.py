@@ -28,7 +28,9 @@ import logging
 import multiprocessing
 import os
 import platform
+import stat
 import sys
+import threading
 import time
 from typing import Any, Callable, Optional, Sequence
 
@@ -38,9 +40,12 @@ from PySide6.QtCore import (
     QMargins,
     QObject,
     QPoint,
+    QPointF,
     QRect,
     Qt,
     QTimer,
+    QUrl,
+    Signal,
 )
 from PySide6.QtGui import (
     QCloseEvent,
@@ -72,17 +77,41 @@ from services.catchup_memory import FILE_NAME as CATCHUP_FILE, CatchupMemory
 from services.connection_budget import ConnectionBudget
 from services.epg_view import Programme
 from services.find import Preferences, preferences_for
+from services.folder_shelf import FILE_NAME as SHELF_FILE, FolderShelf, folder_kind, shelf_key
 from services.hidden_groups import HiddenGroups
-from services.i18n import N_, tr, translate
+from services.i18n import N_, number, tr, tr_n, translate
 from services.jobs import JobRunner
 from services.lazy_import import deferred_modules, load_module
 from services.live.engine import LiveEngine
 from services.live.kept import KeptBuffers
 from services.live.live_session import LiveSession
 from services.live.tuning import FILE_NAME as TUNING_FILE, LiveTuning
+from services.local_playlist import (
+    EMPTY,
+    HLS,
+    LOCAL,
+    OTHER,
+    PROVIDER,
+    UNREADABLE,
+    PlaylistRead,
+    read_files,
+    read_folder,
+    read_playlist,
+    subtitles_for,
+    where_it_starts,
+)
 from services.media_keys import MediaKeys
 from services.media_reporter import MediaReporter
 from services.navigation import NavModel
+from services.open_paths import (
+    PLAYLIST_EXTENSIONS,
+    Sorted,
+    extended_path,
+    is_music,
+    is_video,
+    natural_key,
+    sort_paths,
+)
 from services.parental import Parental, install as install_parental
 from services.picture import FILE_NAME as PICTURE_FILE, ChannelPictures
 from services.playback import (
@@ -123,10 +152,12 @@ from ui.free_channels_menu import show_menu as show_free_channels_menu
 from ui.grid_frame import GridFrame
 from ui.keymap import Action, as_int, resolve
 from ui.library.library_screen import LibraryScreen
+from ui.link_lanes import Target
 from ui.live_tuner import LiveTuner, one_disk_ring, wait_for_each_other
 from ui.logos import LogoCache, PosterCache
 from ui.macos_window import reclaim_first_responder
 from ui.overlay_host import OverlayHost
+from ui.overlays.audio_screen import AudioScreen
 from ui.overlays.back_notice import BackNotice
 from ui.overlays.captions import CaptionsOverlay
 from ui.overlays.cast_notice import CastNotice
@@ -137,7 +168,9 @@ from ui.overlays.grid_tiles import GridTiles
 from ui.overlays.guide import Guide
 from ui.overlays.layout_row import LayoutRow
 from ui.overlays.mixer import Mixer
+from ui.overlays.more_menu import MoreMenu
 from ui.overlays.next_card import NextCard
+from ui.overlays.opening import OpeningOverlay
 from ui.overlays.painting import fmt_clock
 from ui.overlays.pip_label import PipLabel
 from ui.overlays.question_card import QuestionCard
@@ -160,12 +193,14 @@ from ui.record_timer_dialog import RecordTimerDialog, TimerChoice
 from ui.recording_scheduler import RecordingScheduler
 from ui.remote_controller import RemoteController
 from ui.settings_dialog import OptionsDialog
+from ui.song_jobs import PanelCover
 from ui.subtitle_search import OnlineSetup
 from ui.track_controls import SUBTITLE_FILTER
 from ui.tv_controller import ERROR_MS, INFO_MS, Overlays, TVController
 from ui.tv_menus import TVMenus
 from ui.tv_pages import TVPages
 from ui.video_surface import VideoSurface
+from ui.visualizer import Visualizer
 
 logger = logging.getLogger(__name__)
 
@@ -191,6 +226,17 @@ SAVE_FAILED_TEXT = N_("Couldn't save the settings; changes will be lost when QiT
 # cancelled ({titles}: their programmes, comma-separated)
 DROPPED_RECORDINGS_TEXT = N_("Recordings of a removed provider were cancelled: {titles}")
 ABANDONED_EXIT_CODE = 3  # QiTV quit while background work still ran (see _exit_now)
+# Where open_paths' files come from: QiTV started with them, another start handed them on, a
+# drop, File → Open File….
+LAUNCH, HANDOVER, DROP, DIALOG = "launch", "handover", "drop", "dialog"
+SHELF = "shelf"  # Plan 4: the Folders tab's (a tile, Add folder): as a drop; Esc goes back there
+# A multi-select opened from the file manager can come as one start per file, in any order
+# (Windows): a start's file this soon after the one chosen replaces it only if it sorts first.
+OPEN_BURST_S = 3.0
+OPENED_POLL_MS = 100  # subtitle files dropped with a video wait for it to open,
+OPENED_WAIT_S = 30.0  # this long at most
+# The film opened: its player takes subtitle files (it says OPENING before it has the input).
+_OPENED_STATES = frozenset({PlaybackState.BUFFERING, PlaybackState.PLAYING, PlaybackState.PAUSED})
 # The Qt platform whose window ids libVLC can draw into (NSView, HWND, X11 window).
 _NATIVE_PLATFORMS = {"Darwin": "cocoa", "Windows": "windows", "Linux": "xcb"}
 _MOUSE_EVENTS = (
@@ -223,6 +269,37 @@ def _macos_desktops() -> bool:
 def _native_video_handles() -> bool:
     """False on Qt platforms without real window ids (offscreen, Wayland): libVLC would crash."""
     return QGuiApplication.platformName() == _NATIVE_PLATFORMS.get(platform.system())
+
+
+def _readable_size(path: str) -> Optional[int]:
+    """The size of the file at `path`; None when it is gone, no file (a folder, a broken link)
+    or can't be read. On Windows a path past 260 characters may only be found in its
+    extended spelling (a QiTV that isn't long-path aware): that is tried too. It touches the
+    disk: never on the GUI thread."""
+    size = _file_size(path)
+    if size is None and sys.platform == "win32":
+        extended = extended_path(path)
+        if extended != path:
+            size = _file_size(extended)
+    return size
+
+
+def _file_size(path: str) -> Optional[int]:
+    try:
+        info = os.stat(path)
+        if not stat.S_ISREG(info.st_mode):
+            return None
+        with open(path, "rb"):
+            pass
+    except OSError, ValueError:
+        return None
+    return info.st_size
+
+
+def _same_file(a: str, b: str) -> bool:
+    """Whether two spellings of a path name one file, without the disk: "." and ".." anywhere,
+    and the case and separators on Windows."""
+    return os.path.normcase(os.path.abspath(a)) == os.path.normcase(os.path.abspath(b))
 
 
 def _pending_thread_names() -> list[str]:
@@ -321,6 +398,99 @@ class _PlatformStateWatch(QObject):
         return False
 
 
+class _FileCheck(QObject):
+    """A file opened in QiTV, looked at on a thread of its own: `checked` (the open's number,
+    its path, its size or None when it can't play) comes on the GUI thread."""
+
+    checked = Signal(int, str, object)
+
+    def start(self, generation: int, path: str) -> None:
+        threading.Thread(
+            target=self._check, args=(generation, path), name="qitv-open-file", daemon=True
+        ).start()
+
+    def _check(self, generation: int, path: str) -> None:
+        try:
+            size = _readable_size(path)
+        except Exception as error:  # never unanswered: the open would hold for good
+            name = type(error).__name__
+            logger.warning("A file opened in QiTV could not be looked at (%s)", name)
+            size = None
+        try:
+            self.checked.emit(generation, path, size)
+        except RuntimeError:
+            pass  # QiTV closed meanwhile
+
+
+def _is_playlist(path: str) -> bool:
+    return os.path.splitext(path)[1].lower() in PLAYLIST_EXTENSIONS
+
+
+def _is_folder_read(path: str) -> bool:
+    """Whether a read that plays (_play_read) is a folder's (read_folder): a playlist file's
+    path is a playlist, and several media files read together come under their first one's
+    path (a media file: sort_paths put it among the media); a folder's never is either (it was
+    among the others)."""
+    return not _is_playlist(path) and not (is_video(path) or is_music(path))
+
+
+def _shown_name(path: str) -> str:
+    """A file's or a folder's name as a message says it (macOS ends a folder with "/")."""
+    trimmed = path.rstrip("/\\") or path
+    return os.path.basename(trimmed) or trimmed
+
+
+class _PlaylistRead(QObject):
+    """What an open names that only the disk tells, read on a thread of its own: `read` (the
+    read's number, [(each path, its PlaylistRead)]) comes on the GUI thread. A playlist file is
+    read as one (read_playlist), any other path as a folder (read_folder: a file QiTV won't
+    play is OTHER), and media `files` opened together as one list (read_files, given under
+    the first one's path): the kind of each path (open_paths.sort_paths) says which read it
+    has. Without `tags` (nothing of it will play: a film came with it) a folder's songs'
+    tags are not read."""
+
+    read = Signal(int, object)
+
+    def start(
+        self, serial: int, paths: list[str], files: Sequence[str] = (), *, tags: bool = True
+    ) -> None:
+        threading.Thread(
+            target=self._read,
+            args=(serial, list(paths), list(files), tags),
+            name="qitv-open-playlist",
+            daemon=True,
+        ).start()
+
+    def _read(self, serial: int, paths: list[str], files: list[str], tags: bool) -> None:
+        reads: list[tuple[str, PlaylistRead]] = []
+        for path in paths:
+            playlist = _is_playlist(path)
+            try:
+                if playlist:
+                    read = read_playlist(path)
+                else:
+                    read = read_folder(path) if tags else read_folder(path, cap=0)
+            except Exception as error:  # neither raises; never unanswered all the same
+                name = type(error).__name__
+                logger.warning("A playlist or folder opened in QiTV could not be read (%s)", name)
+                # As before playlists were read: a provider, whose loader says what is wrong.
+                stem = os.path.splitext(os.path.basename(path))[0]
+                read = PlaylistRead(PROVIDER, stem) if playlist else PlaylistRead(UNREADABLE, "")
+            reads.append((path, read))
+        if files:
+            try:
+                read = read_files(files)
+            except Exception as error:  # it never raises; never unanswered all the same
+                name = type(error).__name__
+                logger.warning("Files opened together could not be read (%s)", name)
+                read = PlaylistRead(UNREADABLE, "")
+            reads.append((files[0], read))
+        try:
+            self.read.emit(serial, reads)
+        except RuntimeError:
+            pass  # QiTV closed meanwhile
+
+
 class _Geometry:
     """What ConfigManager.save_window_settings reads: a geometry to store."""
 
@@ -354,6 +524,12 @@ class TVWindow(QMainWindow):
         self.epg_manager = epg_manager
         self._started = False
         self._closing = False
+        # Windows: the run's DDE owner (services.dde_windows.Serving), set by main(); None
+        # elsewhere and from source
+        self.dde: Any = None
+        # This QiTV's claim on its settings folder (services.single_instance.InstanceServer),
+        # set by main(): it stops answering other starts once the close begins.
+        self.instance: Any = None
         self._close_retries = 0
         self._video_released = False
         self._closed = False
@@ -389,10 +565,46 @@ class TVWindow(QMainWindow):
         self._dragged = False  # the last press on the video moved the mini player
         self._pressed = False  # the left button is down on the video
         self._click_on_release = False  # a click that came while the button was still down
+        # Files opened in QiTV (open_paths): each looked at off the GUI thread, the newest plays.
+        self._file_check = _FileCheck(self)
+        self._file_check.checked.connect(self._on_file_checked)
+        self._clock: Callable[[], float] = time.monotonic  # OPEN_BURST_S's (tests set it)
+        self._open_generation = 0
+        # The newest open's (number, media file, the subtitle files dropped with it).
+        self._open_due: Optional[tuple[int, str, list[str]]] = None
+        # Playlist files opened in QiTV, read off the GUI thread first (_on_playlists_read):
+        # the reads' count, the read that may still play (None: a newer choice came), and the
+        # provider links dropped with each read's files (added with its providers, at once).
+        self._playlist_read = _PlaylistRead(self)
+        self._playlist_read.read.connect(self._on_playlists_read)
+        self._playlist_reads = 0
+        self._playlist_due: Optional[int] = None
+        self._read_links: dict[int, list[ProviderLink]] = {}
+        # The reads of paths of no known kind alone (folders, or files QiTV won't play: only
+        # the disk tells), which become the choice only once one turns out to play: a file
+        # QiTV won't play leaves alone what is read before it (_on_paths_read).
+        self._tentative: set[int] = set()
+        # The subtitle files dropped with several media files, for their list (by its read's
+        # number), then by the entry each is for, for each time it opens (list_entry_opens),
+        # until another list or file plays.
+        self._read_subtitles: dict[int, list[str]] = {}
+        self._entry_subtitles: dict[str, list[str]] = {}
+        self._shelf_reads: set[int] = set()  # Plan 4: the reads of a Folders tile (P4-26)
+        # Plan 4: the shelf's key of the folder whose list plays (None: no folder's): its
+        # entries opening are kept as its last entry (list_entry_opens).
+        self._shelf_folder: Optional[str] = None
+        self._burst: Optional[tuple[float, str]] = None  # (when, file): a start's choice
+        # A file is being played and QiTV's mark is to draw over it (opening_over says no).
+        self._opening_due = False
+        # The subtitle files dropped with a video, for its target once it opened, until when.
+        self._subtitles_due: Optional[tuple[Target, list[str], float]] = None
+        self._subtitles_wait = QTimer(self, interval=OPENED_POLL_MS)
+        self._subtitles_wait.timeout.connect(self._load_due_subtitles)
 
         self.setWindowTitle("QiTV")
         self.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
-        self.setAcceptDrops(True)  # subtitle files, playlists or provider links dropped on it
+        # Media, subtitle and playlist files or provider links dropped on it.
+        self.setAcceptDrops(True)
         # The player page is the video container: the large surface fills it, and picture in
         # picture puts the other one in a corner (the PiP frame lays them out). The page paints
         # the black behind the video; the surfaces paint nothing (see ui/video_surface.py).
@@ -513,6 +725,8 @@ class TVWindow(QMainWindow):
         self.sound_sync = SoundSync(os.path.join(config_manager.get_config_dir(), SOUND_SYNC_FILE))
         # The tracks chosen for each film, series and channel (2.9.1), alike.
         self.track_memory = TrackMemory(os.path.join(config_manager.get_config_dir(), TRACKS_FILE))
+        # Plan 4: the folders opened as folders, for the Library's Folders tab, alike.
+        self.folder_shelf = FolderShelf(os.path.join(config_manager.get_config_dir(), SHELF_FILE))
         # Each channel's aspect ratio (the Picture panel, 2.3), alike.
         self.channel_pictures = ChannelPictures(
             os.path.join(config_manager.get_config_dir(), PICTURE_FILE)
@@ -572,7 +786,11 @@ class TVWindow(QMainWindow):
         self.layout_row = LayoutRow(host)  # the multiview's layouts, above its layout chip
         self.subtitle_search = SubtitleSearchPage(host)
         self.corner_controls = CornerControls(host)
+        # What a song (or a radio channel) shows where the black picture was: its cover, album
+        # and words, lit by the cover's colours (spec §10).
+        self.audio_screen = AudioScreen(host)
         self.captions_overlay = CaptionsOverlay(host)  # 2.9: AI captions over the picture
+        self.opening_overlay = OpeningOverlay(host)  # QiTV's mark while a file opens
         # 2.8: the recordings scheduled from the guide (a small file beside the config).
         self.recording_schedule = Schedule(
             os.path.join(config_manager.get_config_dir(), SCHEDULE_FILE)
@@ -625,7 +843,11 @@ class TVWindow(QMainWindow):
             library_toast=self.library_toast,
             layout_row=self.layout_row,
             captions=self.captions_overlay,
+            audio_screen=self.audio_screen,
         )
+        # The audio dock's "⋯": the player's controls the dock has no button for (Plan 4).
+        self.more_menu = MoreMenu(self.overlays.transport, host)
+        self.overlays.more_menu = self.more_menu
         # 2.8.12: the REC sign showed through the channel list, the guide and the grid's tiles.
         self.rec_sign.cover_with(self.overlays.drawer, self.overlays.guide, self.grid_tiles)
         self.rec_sign.follow_hud(self.overlays.transport)  # 2.9.7: up with the controls
@@ -636,17 +858,22 @@ class TVWindow(QMainWindow):
         # PiP the transport keeps only its own buttons and bar, and other clicks reach the
         # small picture (OverlayHost.set_hole). The multiview's tiles are drawn under all of
         # them, and take their clicks over the transport but for its buttons and bar
-        # (GridTiles.hits); AI captions just above the tiles, under everything else (they sit
-        # above the player controls while those show, and take no click). The mixer shows over
+        # (GridTiles.hits); a song's screen above the tiles, over the black (it leaves the
+        # bottom to the player controls, and all but its own controls' clicks to the host); AI
+        # captions just above it, under everything else (they sit above the player controls
+        # while those show, and take no click), and QiTV's mark
+        # while a file opens over them (it takes no click either). The mixer shows over
         # them (it sits above the transport's controls and beside the PiP), and the Sound,
-        # Subtitles and Picture panels and the multiview's layouts over it (above their
-        # buttons). The statistics sit over the transport, under its title row (they take no
-        # click). The drawer and the guide cover them all; the OpenSubtitles search covers the
-        # player with its backdrop, under the corner player's controls, the sleep timer's last
-        # minute, Resume and the question (2.6) and the toast.
+        # Subtitles and Picture panels, the multiview's layouts and the audio dock's ⋯ menu
+        # over it (above their buttons). The statistics sit over the transport, under its title
+        # row (they take no click). The drawer and the guide cover them all; the OpenSubtitles
+        # search covers the player with its backdrop, under the corner player's controls, the
+        # sleep timer's last minute, Resume and the question (2.6) and the toast.
         for overlay in (
             self.grid_tiles,
+            self.audio_screen,
             self.captions_overlay,
+            self.opening_overlay,
             self.overlays.banner,
             self.overlays.column,
             self.overlays.transport,
@@ -659,6 +886,7 @@ class TVWindow(QMainWindow):
             self.picture_panel,
             self.quality_panel,
             self.layout_row,
+            self.more_menu,
             self.overlays.drawer,
             self.overlays.guide,
             self.overlays.next_card,
@@ -679,6 +907,11 @@ class TVWindow(QMainWindow):
         ):
             host.add_overlay(overlay)
         self.captions_overlay.follow(self.overlays.transport)
+        # A radio channel keeps live TV's controls: the screen's top bar sits below their title
+        # row while they show.
+        self.audio_screen.follow(self.overlays.transport)
+        self.audio_screen.leave_room_for(self.captions_overlay)  # Words on: title kept clear
+        self.overlays.transport.moreRequested.connect(self.more_menu.open_at)
         # After the window's surface filters: the frame takes the small surface's left button
         # before the window (its mini-player drag) and the surface (the drawer) see it.
         # Each small picture takes the shape its player's picture shows in (no bars).
@@ -783,10 +1016,29 @@ class TVWindow(QMainWindow):
         # then). It listens once the window is on screen (_start: Windows lists the window).
         self.media_keys = MediaKeys(self)
         self.media_keys.pressed.connect(self.remote_key)
+        # Plan 4: a song on the audio screen shows there with its artist, album and cover
+        # (a small file of its own, written on a thread); its tags and cover come after its
+        # state, so what the screen shows tells the panel again (once the controller is done:
+        # queued), as the cover's file does once written.
+        self.panel_cover = PanelCover(self)
+        self._panel_state = ""  # the large picture's state the panel heard last
+        self.panel_cover.written.connect(self._refresh_now_playing)
+        self.audio_screen.shownChanged.connect(
+            self._refresh_now_playing, Qt.ConnectionType.QueuedConnection
+        )
         # 2.9: AI captions (the Subtitles panel's row): a speech model in its own process
         # reads the live channel ahead of the picture; the captions show over it.
         self.captions = CaptionsController(
             self, card=self.captions_card, overlay=self.captions_overlay
+        )
+        # Words on the audio screen: its Stage shows them large (the line before, the line
+        # said, its translation), and while it does the captions over the picture give way.
+        self.captions.add_overlay(self.audio_screen)
+        self.audio_screen.stageShown.connect(lambda _shown: self.captions.words_moved())
+        # The Stage's bars, read from the song's own sound: its helper process, or the
+        # captions' film run when they read the same file (one decode).
+        self.visualizer = Visualizer(
+            self.audio_screen, lambda: self.controller.session, self.captions, parent=self
         )
         self.media_keys.raiseRequested.connect(self.come_to_front)
         self.session.stateChanged.connect(self._show_now_playing)
@@ -827,8 +1079,11 @@ class TVWindow(QMainWindow):
         self.remote.codeChanged.connect(self.pair_overlay.set_url)
         # The player controls' and the guide's ⌕: the Library's search, as Ctrl/⌘+F.
         self.overlays.transport.searchRequested.connect(self.screens.open_search)
-        # ‹ Library on the player controls: back to the Library a title came from, as Esc.
+        # ‹ Library on the player controls: back to the Library a title came from, as Esc; the
+        # audio dock's ⋯ Library and the audio screen's ‹: the Library for any song (P4-8 a).
         self.overlays.transport.libraryRequested.connect(self.screens.back_to_library)
+        self.audio_screen.backRequested.connect(self.screens.library_from_sound)
+        self.captions.changed.connect(controller.words_changed)  # the screen's Words pill
         self.overlays.transport.liveTvRequested.connect(self.screens.back_to_tv)  # 2.9.3
         self.overlays.guide.searchRequested.connect(self.screens.open_search)
         # The corner player (the Library with what plays in a corner of it): ⤢ and a click on
@@ -838,6 +1093,9 @@ class TVWindow(QMainWindow):
         # The Library (its corner player) lays the player out: a floating picture comes back.
         self.pages.modeChanged.connect(lambda *_: self.desktop_pip.dock())
         self.pages.cornerClicked.connect(self.screens.back_to_player)
+        # A song's screen stays in the corner (small): a press on it is the corner player's
+        # (dragged or clicked), as on its picture, never the song's play or pause.
+        self.audio_screen.installEventFilter(self.pages)
         self.corner_controls.backRequested.connect(self.screens.back_to_player)
         self.corner_controls.stopRequested.connect(self.screens.stop_corner)
         self.corner_controls.soundRequested.connect(self._on_corner_sound)
@@ -872,6 +1130,7 @@ class TVWindow(QMainWindow):
             self.overlays.transport,
             lambda: not self.screens.library_shown() and controller.pointer_may_hide(),
             parent=self,
+            controls_hold=self._controls_hold_pointer,
         )
         # The player controls come on a real move, not on a jittering mouse (2.8.12: it kept
         # them, and the pointer with them, up).
@@ -1209,11 +1468,15 @@ class TVWindow(QMainWindow):
         self._leave_mini()
 
     def _on_page_mode(self, mode: str) -> None:
-        """The pages moved: in the corner only its controls stay on the host, and the picture-
-        in-picture frame leaves the mouse to the corner player."""
+        """The pages moved: in the corner only its controls stay on the host (and a song's
+        screen, small: its cover and title), and the picture-in-picture frame leaves the mouse
+        to the corner player."""
         corner = mode == PageStack.CORNER
         self.pip_frame.set_interactive(not corner)
-        self.host.show_only(self.corner_controls if corner else None)
+        self.audio_screen.set_compact(corner)
+        self.host.show_only(
+            self.corner_controls if corner else None, also=(self.audio_screen,) if corner else ()
+        )
         if corner:
             self.corner_controls.set_muted(self.controller.main_muted())
             self.corner_controls.set_level(self.controller.main_level())
@@ -1222,6 +1485,18 @@ class TVWindow(QMainWindow):
             self.corner_controls.hide()
             if mode == PageStack.PLAYER and not self.pip_frame.small_rect().isEmpty():
                 self.pip_label.show()  # the corner hid it; the PiP only shows it when it opens
+            transport = self.overlays.transport
+            if mode == PageStack.PLAYER and transport.audio():
+                transport.poke()  # the song's dock, which the corner hid (it never fades)
+
+    def _controls_hold_pointer(self, at: QPoint) -> Optional[bool]:
+        """The pointer and the player controls (PointerHider): None while they fade by
+        themselves; the audio dock never does, and holds the pointer only while it rests on
+        the dock's band (in fullscreen Stage it goes after the wait elsewhere)."""
+        transport = self.overlays.transport
+        if not transport.audio():
+            return None
+        return transport.hovers_controls(QPointF(transport.mapFromGlobal(at)))
 
     def open_url(self, url: str) -> None:
         """A web page in the browser (OpenSubtitles' sign-up and API key page)."""
@@ -1282,13 +1557,38 @@ class TVWindow(QMainWindow):
             self._act(action, payload, key=key)
 
     def _show_now_playing(self, state: str) -> None:
+        """The system's media panel: what the large picture plays, in `state`; a song on the
+        audio screen with its artist, album and cover, a radio channel with its logo (as the
+        screen shows them: TVController.panel_facts)."""
         if self._closing:
             return
+        self._panel_state = state
         target = self.controller.now_playing()
+        facts = self.controller.panel_facts() if target is not None else None
         if target is None:
             self.media_keys.show(state, "", False)
-        else:
+        elif facts is None:  # a film, a channel with its picture: a video, its title alone
             self.media_keys.show(state, target.title, target.live)
+        else:  # sound: a song (tagged or not, with a cover or not), a radio channel
+            title, artist, album = facts
+            # The screen's cover as a file (and its bytes, for macOS): the last one until a
+            # new picture's is written, none for QiTV's drawn stand-in.
+            art_path, art_bytes = self.panel_cover.file_for(self.audio_screen.cover())
+            self.media_keys.show(
+                state,
+                title or target.title,
+                target.live,
+                artist=artist,
+                album=album,
+                art_path=art_path,
+                art_bytes=art_bytes,
+                music=True,
+            )
+
+    def _refresh_now_playing(self) -> None:
+        """The audio screen's song or cover changed, or the cover's file came: the panel
+        again, in the state it heard last."""
+        self._show_now_playing(self._panel_state)
 
     def remote_action(self, action: Action, payload: str = "") -> None:
         """A phone remote's button that means one action wherever the TV is (Search, Fullscreen)."""
@@ -1337,6 +1637,8 @@ class TVWindow(QMainWindow):
             if not handled and action is Action.FULLSCREEN:
                 self.toggle_fullscreen()  # F11, ⌃⌘F: the Library's other keys are its own
             return
+        if self.more_menu.handle(action):
+            return  # Esc closes the audio dock's ⋯ menu, and only it (other keys close it, on)
         if action is Action.SEARCH:
             self.screens.open_search()  # Ctrl/⌘+F: the quick search, from every screen
             return
@@ -1353,6 +1655,458 @@ class TVWindow(QMainWindow):
             self._click_on_release = True
             return
         self.controller.video_clicked()
+
+    # ---- opened files -------------------------------------------------------------------------
+
+    def open_paths(self, paths: Sequence[str], *, source: str) -> None:
+        """Files opened in QiTV, from a `source` (LAUNCH, HANDOVER, DROP, DIALOG or SHELF).
+
+        - Playlist files are read first, off the GUI thread (_on_playlists_read): one with a
+          network link becomes a provider, as a dropped one does; one of local files plays as
+          a list; an HLS one plays as one film. A media file opened with them plays instead.
+        - So is a path of no kind QiTV knows (only the disk tells a folder from a file): a
+          folder plays as a list of its own files (services.local_playlist.read_folder), from
+          the one the viewer stopped part-way into (_where_it_starts); a file QiTV won't play
+          says so, the first one named. A media file opened with them plays instead.
+        - The first media file by name plays once a thread found it there (it is checked off
+          the GUI thread); one that is gone or can't be read says so, and nothing else changes.
+          The subtitle files with it load once it opened; without one, they go to what plays.
+        - Several media files dropped together play as a list, in a folder's order, read on
+          that thread too (read_files); a launch's or a hand-over's play one, as below.
+        - The file that plays already only comes forward.
+        - A start's file within OPEN_BURST_S of the one a start chose (a multi-select, one
+          start per file) replaces it only when it sorts first by name; else it is left out.
+        - Open File plays what it picks, whatever its kind (an HLS playlist too).
+        - A Folders tile's folder, and one Add folder picks (SHELF), is read and played as a
+          dropped one; Esc (and the player's ‹ Library) then goes back to that tab, as a
+          Recordings tile's does (P4-26, P4-29).
+        - As a media file is played, QiTV's mark draws in the middle of the page until its
+          picture shows (ui/overlays/opening.py), unless a picture shows already.
+
+        A launch or a hand-over brings the window forward. The paths are passed on as given.
+        While QiTV closes nothing opens (the log names each film left out).
+
+        From the moment a file is to be looked at, nothing opens over it (the controller's
+        hold_for_file): no last channel, no drawer, no welcome card, and what waits for QiTV to
+        be idle (when_idle) waits. A file that's gone lets go, unless a file plays on, and so
+        does a start with nothing to play (main() holds for a folder, and a file QiTV won't
+        play, too: until it is read).
+        """
+        if self._closing:
+            for path in sort_paths(paths).media:
+                name = os.path.basename(path)
+                logger.info("QiTV is closing: a file it was handed isn't opened (%s)", name)
+            return
+        started = source in (LAUNCH, HANDOVER)
+        if started:
+            self.come_to_front()
+        kinds = Sorted(tuple(paths[:1]), (), ()) if source == DIALOG else sort_paths(paths)
+        if kinds.playlists or kinds.others:
+            playable = not kinds.media
+            if started and playable:
+                # A start waits for its playlist or folder (main() held it before the window
+                # showed; a hand-over may come before the start ran): nothing of it is spent
+                # until the read says what it is (_on_playlists_read). Once it ran, nothing.
+                self.controller.hold_for_read()
+            self._read_playlists(
+                [*kinds.playlists, *kinds.others],
+                playable=playable,
+                tentative=playable and not kinds.playlists,
+                library=source == SHELF,
+            )
+        subtitles = list(kinds.subtitles)
+        if not kinds.media:
+            if subtitles:
+                self.controller.drop_subtitles(subtitles)
+            if (
+                not kinds.others
+                and not self._reads_pending()
+                and self._open_due is None
+                and self._playing_file() is None
+            ):
+                # Nothing to play: a start's hold ends (one whose playlist or folder is still
+                # read, once that read is over: _on_playlists_read).
+                self.controller.hold_for_file(False)
+            return
+        path = kinds.media[0]
+        if started:
+            now, burst = self._clock(), self._burst
+            if (
+                burst is not None
+                and now - burst[0] < OPEN_BURST_S
+                and natural_key(path) >= natural_key(burst[1])
+            ):
+                logger.info("A file opened with an earlier one by name is left out")
+                return
+            self._burst = (now, path)
+        else:
+            self._burst = None  # a drop or Open File is a choice of its own
+        self._open_generation += 1
+        self._open_due = None  # a file still looked at is not played
+        if self._reads_pending():
+            self._playlist_due = None  # nor a playlist still read,
+            self._tentative.clear()  # nor a folder
+            self.controller.read_over(as_file=True)  # a start that waited for it is the film's
+        if source == DROP and len(kinds.media) > 1:
+            # Several dropped together: a list, whose order and sizes are read off the GUI
+            # thread (a songs' tags too). Held, as a playlist is, once it plays.
+            self._read_playlists([], playable=True, files=kinds.media, subtitles=subtitles)
+            return
+        if self._plays_now(path):
+            if not started:
+                self.come_to_front()
+            if subtitles:
+                self.controller.drop_subtitles(subtitles)
+            return
+        self._open_due = (self._open_generation, path, subtitles)
+        self.controller.hold_for_file(True)  # while it is looked at, it counts as playing
+        self._file_check.start(self._open_generation, path)
+
+    def _read_playlists(
+        self,
+        paths: list[str],
+        *,
+        playable: bool,
+        links: Sequence[ProviderLink] = (),
+        files: Sequence[str] = (),
+        subtitles: Sequence[str] = (),
+        tentative: bool = False,
+        library: bool = False,
+    ) -> None:
+        """Playlist files and paths of no known kind (folders, maybe) opened in QiTV (`paths`),
+        and media `files` dropped together, read on a thread (_on_playlists_read). With
+        `playable` (no media file came with them), the first that names local files or is one
+        HLS stream plays once read, unless a newer choice came meanwhile. A running QiTV holds
+        nothing while they are read: what was chosen before, a film still looked at too, is
+        left alone until one turns out to play; a start waits (hold_for_read). Provider
+        `links` dropped with them are added with their providers, in one go; the `subtitles`
+        dropped with `files` load into the entries they are for (list_entry_opens).
+
+        A `tentative` read (paths of no known kind alone) is no choice until one of them turns
+        out to play: a file QiTV won't play only says so, and leaves alone what is read before
+        it. Without `playable`, a folder's songs' tags are not read (nothing of it plays).
+        With `library` (a Folders tile's, P4-26), what plays of it goes back to the Library."""
+        self._playlist_reads += 1
+        serial = self._playlist_reads
+        if library:
+            self._shelf_reads.add(serial)
+        if tentative:
+            self._tentative.add(serial)
+        elif playable:
+            self._tentative.clear()  # a folder still read gives way to this newer choice
+            self._playlist_due = serial
+        if links:
+            self._read_links[serial] = list(links)
+        if subtitles:
+            self._read_subtitles[serial] = list(subtitles)
+        self._playlist_read.start(serial, paths, files, tags=playable)
+
+    def _reads_pending(self) -> bool:
+        """A playlist, a folder or files dropped together are still read, and may play."""
+        return self._playlist_due is not None or bool(self._tentative)
+
+    def _on_playlists_read(self, serial: int, reads: list[tuple[str, PlaylistRead]]) -> None:
+        """Playlist files and folders read (_read_playlists): each playlist with a network link
+        becomes a provider, as a dropped one does, with the links dropped beside them (adding
+        switches the list to the last), and a file QiTV won't play says so. Then, unless a
+        newer choice came:
+        - an HLS one plays as one film, as Open File plays it;
+        - one of local files plays as a list (TVController.play_list), held and drawn over as
+          a file opened in QiTV is; the entries that aren't there are counted in a toast;
+          a folder's, and several files dropped together, play from the entry the viewer
+          stopped part-way into (_where_it_starts), the whole list kept;
+        - one with none of its files there says so, and so does a folder with none of its
+          own, and one that can't be read ("Couldn't open"); nothing plays.
+        Of several, the first that plays does. A start that waited for them (hold_for_read) is
+        held as a film's by any of these; by providers alone, or a file QiTV won't play, it
+        starts as any start does (held as a film's by main() for such a file all the same).
+        A tentative read (_on_paths_read) is the choice only once it plays."""
+        if self._closing:
+            return
+        links = self._read_links.pop(serial, [])
+        library = serial in self._shelf_reads  # a Folders tile's: Esc goes back to its tab
+        self._shelf_reads.discard(serial)
+        subtitles = self._read_subtitles.pop(serial, [])
+        providers = [path for path, read in reads if read.kind == PROVIDER]
+        unplayable = [(path, read) for path, read in reads if read.kind == OTHER]
+        if unplayable:
+            self._say_unplayable(*unplayable[0])  # whatever plays, as a film's open says it
+        playable = [(path, read) for path, read in reads if read.kind in (LOCAL, HLS)]
+        failed = [(path, read) for path, read in reads if read.kind in (EMPTY, UNREADABLE)]
+        if serial in self._tentative:
+            self._tentative.discard(serial)
+            self._on_paths_read(serial, playable, failed, subtitles, library=library)
+            self._add_read_providers(providers, links)  # the links dropped with its folders
+            return
+        if self._playlist_due != serial:
+            if any(read.kind not in (PROVIDER, OTHER) for _path, read in reads):
+                logger.info("A list opened in QiTV gave way to a newer choice")
+            self._add_read_providers(providers, links)
+            return
+        self._playlist_due = None
+        as_file = bool(playable or failed)
+        if as_file or not self._tentative:
+            # The start that waited: a film's from here, or a plain start before the
+            # providers (unless a folder opened after it is still read: that one says).
+            self.controller.read_over(as_file=as_file)
+        self._add_read_providers(providers, links)
+        if not playable:
+            if failed:
+                self._say_unplayable(*failed[0])
+            self._nothing_plays()
+            return
+        self._play_read(playable, subtitles, library=library)
+
+    def _on_paths_read(
+        self,
+        serial: int,
+        playable: list[tuple[str, PlaylistRead]],
+        failed: list[tuple[str, PlaylistRead]],
+        subtitles: list[str],
+        *,
+        library: bool = False,
+    ) -> None:
+        """A tentative read (paths of no known kind alone) is back, no newer choice made since:
+        a folder of it that plays is the choice now (what is read before it gives way, a
+        folder read before it too); otherwise it says why, and leaves alone what is still
+        read."""
+        if playable:
+            self._tentative = {older for older in self._tentative if older > serial}
+            self._playlist_due = None  # a playlist read before it gives way
+            self.controller.read_over(as_file=True)  # a start that waited: the list's
+            self._play_read(playable, subtitles, library=library)
+            return
+        if failed:
+            self._say_unplayable(*failed[0])
+        if not self._reads_pending():
+            self.controller.read_over(as_file=bool(failed))
+            self._nothing_plays()
+
+    def _nothing_plays(self) -> None:
+        """What was read plays nothing: a start held for it goes on, as an open with nothing to
+        play lets go, unless a file or another read is still on its way, or a file plays."""
+        if not self._reads_pending() and self._open_due is None and self._playing_file() is None:
+            self.controller.hold_for_file(False)
+
+    def _play_read(
+        self,
+        playable: list[tuple[str, PlaylistRead]],
+        subtitles: list[str],
+        *,
+        library: bool = False,
+    ) -> None:
+        """The first read that plays (`playable`) plays: an HLS playlist as one film, a list of
+        files as a list, the `subtitles` dropped with it for the entries they are for. With
+        `library` (a Folders tile's), Esc goes back to the Library's Folders tab."""
+        if len(playable) > 1:
+            logger.info("Playlists opened together: the first plays")
+        path, read = playable[0]
+        if read.kind == HLS:
+            self.open_paths([path], source=DIALOG)  # one stream: a film, as Open File plays it
+            return
+        self._open_due = None  # a file still looked at is not played: the list came after it
+        playlist = _is_playlist(path)
+        start = None if playlist else self._where_it_starts(read)
+        first = start or 0
+        self._entry_subtitles = subtitles_for(read.entries, subtitles, first) if subtitles else {}
+        # Plan 4: a folder that plays as one goes on the Folders tab (at its front, once); a
+        # playlist's or several files' list never puts its folder there.
+        folder = _is_folder_read(path)
+        self._shelf_folder = shelf_key(path) if folder else None
+        if folder:
+            entry = os.path.basename(read.entries[first])
+            self.folder_shelf.add(path, read.name, folder_kind(read.entries), entry)
+        self._play_opened(
+            read.entries[first],
+            lambda: self.screens.play_list(
+                read.name, read.entries, read.sizes, start, from_library=library
+            ),
+        )
+        if read.missing and not playlist:
+            logger.info("Files opened together play without %d of them", read.missing)
+        elif read.missing:
+            logger.info("A playlist plays without %d of its entries", read.missing)
+            text = tr_n(
+                # i18n: a toast as a playlist plays: {n} of its files aren't there (skipped)
+                "{n} file in the playlist is missing",
+                "{n} files in the playlist are missing",
+                read.missing,
+                n=number(read.missing),
+            )
+            self.screens.notify(text, "info", ERROR_MS)
+
+    def _add_read_providers(self, files: list[str], links: list[ProviderLink]) -> None:
+        """The read's provider playlists and the links dropped with them become providers, in
+        one go, afterwards as a drop's are: after the window's start (it is posted before), as
+        adding switches the list, and a portal's form is a dialog."""
+        if files or links:
+            QTimer.singleShot(0, self, lambda: self.add_dropped_providers(files, links))
+
+    def _say_unplayable(self, path: str, read: PlaylistRead) -> None:
+        """A playlist or folder that plays nothing says why: it couldn't be read (gone,
+        refused), as a file that couldn't be opened says it, or none of its files are there
+        (none of a folder's own). A file of no kind QiTV knows says QiTV can't play it."""
+        name = _shown_name(path)
+        if read.kind == OTHER:
+            kind = os.path.splitext(name)[1] or "no extension"
+            logger.info("A file QiTV can't play was opened in it (%s)", kind)
+            # i18n: an error toast: a file opened in QiTV isn't a kind it plays ({name}: its name)
+            self.screens.notify(tr("QiTV can't play “{name}”", name=name), "error", ERROR_MS)
+        elif read.kind == UNREADABLE:
+            logger.info("A playlist or folder opened in QiTV is gone or can't be read")
+            # i18n: an error toast: a file opened in QiTV is gone or unreadable ({name}: its name)
+            self.screens.notify(tr("Couldn't open “{name}”", name=name), "error", ERROR_MS)
+        elif _is_playlist(path):
+            logger.info("None of a playlist's files are there")
+            # i18n: an error toast: a playlist opened in QiTV names no file that is there
+            text = tr("None of the files in this playlist are here")
+            self.screens.notify(text, "error", ERROR_MS)
+        else:
+            logger.info("A folder opened in QiTV has no media file of its own")
+            # i18n: an error toast: a folder opened in QiTV has no video or music ({name}: its name)
+            text = tr("No videos or music in “{name}”", name=name)
+            self.screens.notify(text, "error", ERROR_MS)
+
+    def _where_it_starts(self, read: PlaylistRead) -> Optional[int]:
+        """Where a folder's list (or several files dropped together) starts: at the first entry
+        the viewer stopped part-way into (one with a resume point: neither barely begun nor
+        seen to its end), which resumes there as any file does; else (Plan 4, Task 12) at the
+        one after the last entry seen to its end; None when there is neither (it starts as any
+        list: its first entry, or a song of its own picking when shuffled). The Folders tab's
+        "next" is this entry (local_playlist.where_it_starts, one rule)."""
+        return where_it_starts(self.watch, read.entries, read.sizes)
+
+    def list_entry_opens(self, target: Target, path: str) -> None:
+        """A list's entry at `path` opens as `target` (TVController._play_entry): the subtitle
+        files dropped for it load once it opened (subtitles_for), as a video's dropped with
+        it do; each time it opens (Play again, back to it), until another list or file plays.
+        A folder's entry is kept as its last on the Folders tab (Plan 4)."""
+        folder = os.path.dirname(path)
+        if self._shelf_folder is not None and shelf_key(folder) == self._shelf_folder:
+            self.folder_shelf.played(folder, os.path.basename(path))  # Plan 4: its last entry
+        subtitles = self._entry_subtitles.get(path)
+        if subtitles and target.local:
+            self._subtitles_due = (target, subtitles, self._clock() + OPENED_WAIT_S)
+            self._subtitles_wait.start()
+
+    def _plays_now(self, path: str) -> bool:
+        """Whether the file at `path` is what the large picture plays (opening, playing or
+        paused; one that ended or failed opens again)."""
+        target = self._playing_file()
+        if target is None:
+            return False
+        playing = QUrl(str(target.item.get("cmd") or "")).toLocalFile()
+        return bool(playing) and _same_file(playing, path)
+
+    def _playing_file(self) -> Optional[Target]:
+        """The file the large picture plays (opening, playing or paused), if it plays one."""
+        target = self.controller.now_playing()
+        local = target is not None and target.local and self.controller.playing()
+        return target if local else None
+
+    def _on_file_checked(self, generation: int, path: str, size: Optional[int]) -> None:
+        due = self._open_due
+        if self._closing or due is None or due[0] != generation:
+            return  # QiTV closes, or another file was opened since
+        self._open_due = None
+        if size is None:
+            logger.info("A file opened in QiTV is gone or can't be read")
+            name = os.path.basename(path)
+            # i18n: an error toast: a file opened in QiTV is gone or unreadable ({name}: its name)
+            self.screens.notify(tr("Couldn't open “{name}”", name=name), "error", ERROR_MS)
+            if self._playing_file() is None:  # a film that plays on keeps its hold
+                self.controller.hold_for_file(False)
+            return
+        self._entry_subtitles = {}  # a list's, for its entries: never this file's
+        self._shelf_folder = None  # nor its folder's, on the Folders tab
+        target = self._play_opened(path, lambda: self.screens.play_path(path, size))
+        if due[2] and target is not None and target.local:
+            self._subtitles_due = (target, due[2], self._clock() + OPENED_WAIT_S)
+            self._subtitles_wait.start()
+
+    def _play_opened(self, path: str, play: Callable[[], None]) -> Optional[Target]:
+        """A file opened in QiTV and found there plays (`play`: the player page's play_path, or
+        play_list with `path` its first entry): held, with QiTV's mark over it as it opens.
+        What plays then (the controller's target)."""
+        # Held again: what let go of the hold while it was looked at (a film before it that
+        # ended, the link of a channel chosen before it) leaves it this file's. A choice made
+        # after it dropped the file instead (file_gives_way).
+        self.controller.hold_for_file(True)
+        before = self.controller.now_playing()
+        # QiTV's mark draws while it opens, unless a picture shows (a film's, a channel's) or a
+        # song's screen does for the song after it (it stays; a radio channel's goes, so the
+        # mark draws): an error as it is played (opening_over) leaves it out.
+        self._opening_due = not self.controller.session.shows_picture() and not (
+            is_music(path) and self.controller.song_shown()
+        )
+        play()
+        target = self.controller.now_playing()
+        if self._opening_due and target is not None and target is not before and target.local:
+            session = self.controller.session  # the large picture's, which plays it
+            self.opening_overlay.open_for(
+                session,
+                str(target.item.get("cmd") or ""),
+                sound_only=is_music(path) or session.casting(),
+            )
+        self._opening_due = False
+        return target
+
+    def opening_over(self) -> None:
+        """What the large picture opens is no longer the file QiTV's mark draws for: it
+        failed or ended, another title was chosen, or Stop was pressed (TVController). The
+        mark opens out of the page (and one about to show for it does not)."""
+        self._opening_due = False
+        self.opening_overlay.close_opening()
+
+    def file_gives_way(self) -> None:
+        """Something other than a file was chosen for the large picture since a file was
+        opened (a channel, a provider's film, a swap, a phone's Watch or an outside player:
+        TVController): the file still being looked at (a slow share) isn't played when its
+        check is back; the later choice wins. Its hold goes with it unless a film still plays
+        (that one's hold goes once it gives way, ends or stops). A playlist or folder still
+        read plays nothing either (its links still make a provider), and a start that waited
+        for it starts."""
+        if self._reads_pending():
+            self._playlist_due = None
+            self._tentative.clear()  # nor does a folder
+            self.controller.read_over(as_file=False)
+        if self._open_due is None:
+            return
+        self._open_due = None
+        logger.info("A file opened in QiTV gave way to a newer choice before it played")
+        if self._playing_file() is None:
+            self.controller.hold_for_file(False)
+
+    def when_idle(self, callback: Callable[[], None]) -> None:
+        """`callback` now, or once the file opened in QiTV is over (it ended, was stopped,
+        failed or gave way to another title): the startup update question waits for it."""
+        self.controller.when_idle(callback)
+
+    def _load_due_subtitles(self) -> None:
+        """The subtitle files dropped with a video load once it opened, never into another
+        title; they are left after OPENED_WAIT_S, or when it fails."""
+        due, controller = self._subtitles_due, self.controller
+        if due is None or self._closing:
+            self._stop_subtitles_wait()
+            return
+        target, subtitles, until = due
+        if controller.now_playing() is not target:
+            self._stop_subtitles_wait()  # another title was chosen
+        elif controller.session.state() in _OPENED_STATES:
+            self._stop_subtitles_wait()
+            controller.drop_subtitles(subtitles)
+        elif not controller.playing() or self._clock() > until:
+            self._stop_subtitles_wait()  # it failed, or never opened
+
+    def _stop_subtitles_wait(self) -> None:
+        self._subtitles_due = None
+        self._subtitles_wait.stop()
+
+    def subtitles_due(self) -> bool:
+        """Subtitle files opened with the video playing large are still to load into it (once
+        it plays): AI captions don't come on by themselves over them (TVController)."""
+        due = self._subtitles_due
+        return due is not None and due[0] is self.controller.now_playing()
 
     # ---- dropped files -------------------------------------------------------------------------
 
@@ -1380,27 +2134,45 @@ class TVWindow(QMainWindow):
         return files, provider_drop.links(self._dropped_texts(event))
 
     def _on_drag(self, event: QDropEvent) -> None:
-        """Dragged over the window (or its overlays): taken only when it would load: subtitle
-        files for what plays, or a playlist file or a provider's link (2.2)."""
+        """Dragged over the window (or its overlays): taken only when it may load: a media
+        file, subtitle files for what plays, a playlist file or a provider's link (2.2), or a
+        file of no kind QiTV knows: a folder, maybe, which only the disk tells (Task 11; it is
+        looked at once dropped, and one that is no folder says QiTV can't play it)."""
+        paths = self._dropped_paths(event)
         files, links = self._dropped_providers(event)
-        subtitles = self.controller.accepts_subtitles(self._dropped_paths(event))
-        if not self._closing and (subtitles or files or links):
+        kinds = sort_paths(paths)  # by its name: the disk is looked at once dropped
+        subtitles = self.controller.accepts_subtitles(paths)
+        if not self._closing and (kinds.media or kinds.others or subtitles or files or links):
             event.acceptProposedAction()
         else:
             event.ignore()
 
     def _on_drop(self, event: QDropEvent) -> None:
-        """Subtitle files go to what plays; playlist files and links become providers."""
+        """A media file plays, and the subtitle files dropped with it load for it (several
+        play as a list); subtitle files alone go to what plays (open_paths). Playlist files and
+        folders are read first, as opened ones are (_read_playlists): their links make a
+        provider, local files play as a list. Provider links become providers, with the
+        playlists' when some came along (one toast, the link's shown last)."""
         if self._closing:
             event.ignore()
             return
-        subtitles = self.controller.drop_subtitles(self._dropped_paths(event))
+        kinds = sort_paths(self._dropped_paths(event))
+        subtitles = bool(kinds.subtitles) and (
+            bool(kinds.media) or self.controller.accepts_subtitles(kinds.subtitles)
+        )
+        if kinds.media or subtitles:
+            self.open_paths([*kinds.media, *kinds.subtitles], source=DROP)
         files, links = self._dropped_providers(event)
-        added = bool(files or links)
-        if added:
+        read = [*files, *kinds.others]  # the others: folders, maybe (only the disk tells)
+        if read:
+            playable = not kinds.media
+            tentative = playable and not files
+            self._read_playlists(read, playable=playable, links=links, tentative=tentative)
+        elif links:
             # After the drop: adding switches the list, and a portal's form is a dialog.
-            QTimer.singleShot(0, self, lambda: self.add_dropped_providers(files, links))
-        if subtitles or added:
+            QTimer.singleShot(0, self, lambda: self.add_dropped_providers([], links))
+        added = bool(read or links)
+        if kinds.media or subtitles or added:
             event.acceptProposedAction()
         else:
             event.ignore()
@@ -2080,6 +2852,13 @@ class TVWindow(QMainWindow):
 
     # ---- lifecycle ----------------------------------------------------------------------------
 
+    def dde_follow_registration(self, registered: bool) -> None:
+        """Settings registered QiTV for a kind of file, or stopped using it (`registered`: for
+        any kind now): on Windows, double-clicks reach this QiTV over DDE from now on, or no
+        more (services.dde_windows). Nothing elsewhere."""
+        if self.dde is not None and not self._closing:
+            self.dde.follow(registered)
+
     def come_to_front(self) -> None:
         """QiTV was started again with these settings (2.8.12, services.single_instance):
         this window shows in front instead, restored when it was minimized (fullscreen or
@@ -2339,11 +3118,19 @@ class TVWindow(QMainWindow):
 
     def _shut_down(self) -> None:
         self.epg_refresh.stop()
+        self._stop_subtitles_wait()
         self._run_steps(
+            # First: a start of QiTV during the close (QiTV closed, then the next episode
+            # double-clicked) is no longer handed to this window, which is going; it waits for
+            # the settings' lock, kept until main() lets go last, and starts with its file.
+            ("stop answering other starts", self._answer_no_starts),
+            ("take Explorer's DDE back", self._close_dde),  # Explorer starts QiTV again
             ("let the next click through", self.screens.shutdown),
             ("stop the phone remote", self.remote.shutdown),
             ("leave Now Playing", self.media_keys.stop),  # the media keys go back to others
+            ("remove the media panel's cover", self.panel_cover.close),  # its temporary file
             ("stop AI captions", self.captions.shutdown),  # its process and any download
+            ("stop the Stage's bars", self.visualizer.shutdown),  # their helper process
             ("cancel the export", self.exports.shutdown),
             ("close the Library", self.library_controller.shutdown),  # its search, its pending
             ("stop the channel list's find", self.finder.shutdown),
@@ -2359,6 +3146,14 @@ class TVWindow(QMainWindow):
             ("stop loading posters", self.posters.shutdown),
             ("save the window geometry", self._save_geometry),
         )
+
+    def _answer_no_starts(self) -> None:
+        if self.instance is not None:
+            self.instance.stop_listening()  # its lock stays held (services.single_instance)
+
+    def _close_dde(self) -> None:
+        if self.dde is not None:
+            self.dde.close()  # once: aboutToQuit and main()'s `finally` find it closed
 
     @staticmethod
     def _run_steps(*steps: tuple[str, Callable[[], None]]) -> None:

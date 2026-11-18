@@ -17,6 +17,17 @@ provider's setup failed is not waited for (that would sign it in again).
 A failure it says (a setup, the live section, a last channel's provider) is followed by
 `explain`, which asks that provider's account why (TVController._explain).
 
+A file opened in QiTV holds the flow while it is on its way or plays (`hold_for_file`, spec
+§3 of the open-videos design): nothing opens over it, neither the last channel, the drawer, the
+welcome card nor the start's own "Loading <provider>…" (the setup goes on behind it; a provider
+the viewer chooses says it loads, film or not), and what waits for QiTV to be idle
+(`when_idle`: the startup update question) runs once it is over.
+
+A start whose playlist is read first waits for it (`hold_for_read`, Ruling P4-3): the start
+itself (its setup, its hint, the welcome card, the last channel, the drawer) waits, and so
+does `when_idle`, but nothing of it is spent. A list of files then holds it as a film does
+(`hold_for_file(True)` takes the read's place); a provider's list lets it start as any start.
+
 TVController owns the links, the zapping and the player, and hands this unit callbacks.
 """
 
@@ -82,7 +93,9 @@ class ProviderFlow(QObject):
         self._autoplay_hint = autoplay_hint
         self._explain = explain
         self._await_live = False  # after providerReady: the first live section decides
-        self._loading = False  # the "Loading <provider>…" hint is up
+        self._loading = False  # a setup shows "Loading <provider>…" (_loading_text)
+        self._loading_text: Optional[str] = None  # held back while a file is held for
+        self._loading_chosen = False  # that setup is the viewer's choice: its hint never waits
         self._autotune: Optional[tuple[dict, str]] = None
         self._in_library = False  # the window shows the Library: nothing live starts
         self._live_on_ready = False  # back from the Library during a setup: tune once ready
@@ -95,6 +108,17 @@ class ProviderFlow(QObject):
         self._foreign_listening: dict[str, object] = {}
         self._foreign_timer = QTimer(self, singleShot=True, interval=FOREIGN_WAIT_MS)
         self._foreign_timer.timeout.connect(self._on_foreign_timeout)
+        self._held = False  # a file opened in QiTV is on its way or plays (hold_for_file)
+        self._file_opened = False  # one was: "start with the last channel" is spent this run
+        self._welcome_up = False  # the welcome card shows
+        self._welcome_due = False  # it was asked while held: it shows once released
+        # A provider becoming ready opens the list on an idle player: not once a file was
+        # opened, unless the viewer went back to live TV during the setup.
+        self._list_on_ready = True
+        self._idle_waits: list[Callable[[], None]] = []  # when_idle's, until released
+        self._started = False  # the start ran (start): a read no longer holds it
+        self._reading = False  # the start's playlist is read (hold_for_read)
+        self._start_due = False  # the start came while it was read: it runs once it is over
 
     def wire(self) -> None:
         catalog = self.catalog
@@ -122,18 +146,26 @@ class ProviderFlow(QObject):
     # ---- the shell's calls --------------------------------------------------------------------
 
     def start(self) -> None:
+        """The start: the selected provider's setup (or the welcome card). While the start's
+        playlist is read it waits (hold_for_read), and runs once that is over."""
+        if self._reading:
+            self._start_due = True
+            return
+        self._started = True
         if not self.catalog.provider_names():
             # ProviderManager cannot set up without providers; the setup would only fail.
             self.welcome()
             return
-        self._show_loading(self._setup_name(None))
+        self._show_loading(self._setup_name(None), chosen=False)
         self.catalog.select_provider()
 
     def select_provider(self, name: Optional[str] = None, *, force_refresh: bool = False) -> None:
+        """A setup the viewer asked for (the menu bar, Settings, a refresh, a list added): its
+        "Loading <provider>…" shows over a film too."""
         if not self.catalog.provider_names():
             self.welcome()
             return
-        self._show_loading(self._setup_name(name))
+        self._show_loading(self._setup_name(name), chosen=True)
         # Pending links are settled when the provider is ready (see _on_provider_ready).
         self.catalog.select_provider(name, force_refresh=force_refresh)
 
@@ -199,15 +231,119 @@ class ProviderFlow(QObject):
         self._foreign = None
         self._foreign_timer.stop()
         self._loading = False
+        self._welcome_due = False
+        self._idle_waits.clear()
+        self._reading = self._start_due = False
+
+    def hold_for_read(self) -> None:
+        """A start's playlist is read (main() before the window shows; the window as it reads
+        one): until read_over, or a file's hold takes its place (hold_for_file), the start
+        waits (start), and so do the welcome card and what waits for QiTV to be idle; nothing
+        of the start is spent. Once the start ran (a playlist handed to a running QiTV), it
+        holds nothing: the list holds once it plays."""
+        if not self._started:
+            self._reading = True
+
+    def reading(self) -> bool:
+        """A start's playlist is still read (hold_for_read)."""
+        return self._reading
+
+    def read_over(self) -> None:
+        """The start's playlist was read and plays nothing (a provider's list, or another
+        choice came first): the start runs as any start does, and what waited runs, unless a
+        file holds QiTV meanwhile (then once it is over)."""
+        if not self._reading:
+            return
+        self._reading = False
+        if self._closed():
+            return
+        if self._start_due:
+            self._start_due = False
+            self.start()
+        if not self._held:
+            self._released(start_hint=False)
+
+    def hold_for_file(self, on: bool) -> None:
+        """A file opened in QiTV is on its way or plays (`on`), or it is over: it ended, was
+        stopped, failed, turned out missing or gave way to another title.
+
+        While held QiTV is busy: a provider that becomes ready tunes nothing and opens no
+        drawer, and the welcome card and the start's "Loading <provider>…" wait (one already
+        up is withdrawn until then; the setup goes on, and says if it fails). A setup the
+        viewer chose says it loads all the same (select_provider, _on_provider_requested). A
+        last channel on its way, or waited for at its own provider, is dropped, and "start
+        with the last channel" is spent for this run, as the list a ready provider opens on an
+        idle player is. Released, the welcome card asked meanwhile shows and what waited
+        (when_idle) runs; nothing tunes and no drawer opens.
+
+        A start waiting for its playlist to be read (hold_for_read) is the file's from `on`:
+        the start runs now, held. Released while that playlist is still read (a subtitle
+        file's open, a file QiTV won't play), what waits goes on waiting for the read."""
+        start_hint = self._loading and not self._loading_chosen  # it waits for the file
+        if on:
+            self._held = self._file_opened = True
+            self._reading = False  # a read that held the start: the file's hold takes over
+            if self._welcome_up:
+                self._dismiss_welcome()
+                self._welcome_due = True
+            if start_hint:
+                self.overlays.toast.set_hint(None)  # the setup goes on behind the file
+            self.drop_autotune()
+            if self._start_due:
+                self._start_due = False
+                self.start()  # held: its hint and the welcome card wait for the file
+            return
+        if not self._held:
+            return
+        self._held = False
+        if self._closed() or self._reading:
+            return  # a start's playlist still read: what waits waits for it (read_over)
+        self._released(start_hint)
+
+    def _released(self, start_hint: bool) -> None:
+        """Nothing holds QiTV any more: the start's hint again while it still loads, the
+        welcome card asked meanwhile, and what waited (when_idle)."""
+        if start_hint:  # it still loads: said once what ended the hold (an error) has been
+            self.overlays.toast.set_hint(self._loading_text, cut=False)
+        due, self._welcome_due = self._welcome_due, False
+        if due and not self.catalog.provider_names():
+            self.welcome()
+        waits, self._idle_waits = self._idle_waits, []
+        for callback in waits:
+            try:
+                callback()
+            except Exception:
+                logger.exception("What waited for the film to end failed")
+
+    def when_idle(self, callback: Callable[[], None]) -> None:
+        """`callback` now, or once the file held for is over (hold_for_file), or the start's
+        playlist was read and plays nothing (read_over)."""
+        if self._held or self._reading:
+            self._idle_waits.append(callback)
+        else:
+            callback()
 
     # ---- hints --------------------------------------------------------------------------------
 
-    def welcome(self) -> None:
-        """Until a provider exists: the welcome card, whose button adds one (spec §8)."""
+    def welcome(self, *, chosen: bool = False) -> None:
+        """Until a provider exists: the welcome card, whose button adds one (spec §8).
+
+        While a file is held for (hold_for_file), or the start's playlist is read, it is only
+        noted, and shows once that is over; `chosen` (the list asked for, with no provider)
+        shows it at once."""
+        if (self._held or self._reading) and not chosen:
+            self._welcome_due = True
+            return
+        self._welcome_due = False
         self._drop_autoplay()
         self._loading = False
         self.overlays.toast.set_hint(None)
         self.overlays.welcome.show_card()
+        self._welcome_up = True
+
+    def _dismiss_welcome(self) -> None:
+        self.overlays.welcome.dismiss()
+        self._welcome_up = False
 
     def _setup_name(self, name: Optional[str]) -> str:
         """The provider a setup for `name` loads, as ProviderManager picks it (every provider
@@ -220,13 +356,19 @@ class ProviderFlow(QObject):
             return str(wanted)
         return names[0] if names else ""
 
-    def _show_loading(self, name: str) -> None:
-        """From a setup's start until the first live section or a failure."""
+    def _show_loading(self, name: str, *, chosen: bool) -> None:
+        """From a setup's start until the first live section or a failure. `chosen`: the
+        viewer asked for it, and is told it loads even over a film; the start's own waits for
+        the film (hold_for_file)."""
         self._drop_autoplay()  # a provider setup: and the hint is the setup's
-        self.overlays.welcome.dismiss()  # a provider exists now
+        self._dismiss_welcome()  # a provider exists now
+        self._welcome_due = False
         self._loading = True
+        self._loading_chosen = chosen
         # i18n: a hint while a provider's channels load; name is the provider's
-        self.overlays.toast.set_hint(tr("Loading {name}…", name=name) if name else tr("Loading…"))
+        self._loading_text = tr("Loading {name}…", name=name) if name else tr("Loading…")
+        if chosen or not self._held:  # a film opened at start shows alone: the hint waits
+            self.overlays.toast.set_hint(self._loading_text)
 
     def _end_loading(self) -> None:
         if self._loading:
@@ -252,13 +394,17 @@ class ProviderFlow(QObject):
             # waiting for this provider is tuned once its channels are listed (_try_foreign).
             return
         # Links the setup dropped are asked again by the controller, per provider.
-        self.overlays.welcome.dismiss()
+        self._dismiss_welcome()
+        self._welcome_due = False
         back_to_live, self._live_on_ready = self._live_on_ready, False
         last = self._last_channel(name)
-        idle = not self._has_media() and not self._links_busy()
-        wanted = (
-            idle and not self._in_library and (back_to_live or self.config.start_with_last_channel)
-        )
+        # A file on its way (it is looked at off the GUI thread) counts as playing, and so
+        # does a start's playlist still read (a setup chosen meanwhile tunes nothing).
+        held = self._held or self._reading
+        idle = not held and not self._has_media() and not self._links_busy()
+        on_start = self.config.start_with_last_channel and not self._file_opened
+        wanted = idle and not self._in_library and (back_to_live or on_start)
+        self._list_on_ready = back_to_live or not self._file_opened
         self._autotune = last if wanted else None
         self._foreign = None
         self._foreign_timer.stop()
@@ -269,7 +415,7 @@ class ProviderFlow(QObject):
             self.nav.focus_source(name or self.catalog.current_provider_name())
             self._autotune = None
             self._end_loading()
-            if self._foreign is None and not self._in_library:
+            if self._foreign is None and not self._in_library and self._list_on_ready:
                 self._open_drawer_if_idle()  # (the last channel of another, else the list)
             return
         self._await_live = True
@@ -409,15 +555,19 @@ class ProviderFlow(QObject):
         # The sources, on the failed one, with a row to connect again: never a black screen.
         if self._in_library:
             return  # back to live TV opens the drawer on it (resume_live)
-        if self._has_media() and not self.overlays.drawer.isVisible():
-            return  # the saved catalog still plays; the drawer offers the retry when opened
+        if (self._held or self._has_media()) and not self.overlays.drawer.isVisible():
+            # The saved catalog still plays, or a file opened in QiTV does (or is on its way):
+            # the drawer offers the retry when opened.
+            return
         self.nav.focus_source(name or self.catalog.current_provider_name())
         self.overlays.drawer.open_drawer(focus_side="left")
 
     def _on_provider_requested(self, name: str) -> None:
-        """A source chosen in the drawer started a setup (`name`: its title)."""
+        """A source chosen in the drawer started a setup (`name`: its title), or a genre its
+        find found at another provider."""
         if not self._closed():
-            self._show_loading(translate(name) if name == ALL_PROVIDERS_TITLE else name)
+            name = translate(name) if name == ALL_PROVIDERS_TITLE else name
+            self._show_loading(name, chosen=True)
 
     def _on_section_ready(self, section: str) -> None:
         if self._closed() or section != "live":
@@ -434,7 +584,8 @@ class ProviderFlow(QObject):
             return
         if self._foreign is not None:
             return  # the last channel of another provider is on its way
-        self._open_drawer_if_idle()
+        if self._list_on_ready:
+            self._open_drawer_if_idle()
 
     def _on_section_failed(self, section: str, message: str) -> None:
         if self._closed() or section != "live" or not self._await_live:
@@ -455,7 +606,7 @@ class ProviderFlow(QObject):
 
     def _open_drawer_if_idle(self) -> None:
         drawer = self.overlays.drawer
-        busy = self._has_media() or self._links_busy() or self._in_library
+        busy = self._held or self._has_media() or self._links_busy() or self._in_library
         if not busy and not drawer.isVisible():
             drawer.open_drawer()
 

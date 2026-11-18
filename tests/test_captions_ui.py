@@ -215,6 +215,7 @@ class FakeCaptions(QObject):
         self.target = ""  # 2.10: the language they are translated into ("": off)
         self.translated = []  # set_translate_to's calls
         self.translate_asks = False  # a language asks its model's download question first
+        self.offs = []  # give_way's `off`, each time
 
     def available(self):
         return self.offered
@@ -247,6 +248,12 @@ class FakeCaptions(QObject):
             self.asked = True
             return
         self.on = True
+
+    def give_way(self, *, off=False):
+        """A subtitle track, Off or a file chosen over them: off, a download too (no toggle).
+        `off`: Off chosen (kept for the next video file: CaptionsController.give_way)."""
+        self.on = self.going = False
+        self.offs.append(off)
 
     def release(self, then):
         """Settings' Delete: off, then the files (CaptionsController.release)."""
@@ -541,6 +548,9 @@ class CaptionRowsTests(PanelCase):
         self.click_row(AI_CAPTIONS)
         self.click_row(-1)  # Off too
         self.assertFalse(self.captions.on)
+        # Review M3: the panel's Off is the viewer's no, kept for the next video file; a track
+        # is a choice for this file only
+        self.assertEqual(self.captions.offs, [False, True])
 
     def test_turned_on_later_the_track_shown_goes(self):
         self.captions.asks = True
@@ -557,6 +567,7 @@ class CaptionRowsTests(PanelCase):
         path = os.path.join(ROOT, "Lighthouse.en.srt")  # the fake player takes any path
         self.assertTrue(self.controls.load_subtitle_file(path, say=False))
         self.assertFalse(self.captions.on)
+        self.assertEqual(self.captions.offs, [False])  # a file: for this one only
 
     def test_without_a_controller_nothing_changes(self):
         self.captions = None
@@ -622,6 +633,7 @@ class PhoneChoicesTests(PanelCase):
         self.assertFalse(controls.choose_subtitles(9))
         self.assertTrue(controls.choose_subtitles(-1))  # Off
         self.assertEqual(self.player.spu, -1)
+        self.assertEqual(self.captions.offs, [False, True])  # the phone's Off is kept too
 
     def test_an_open_panel_follows_the_phones_pick(self):
         self.click_button("audio")
@@ -843,7 +855,7 @@ class SpeechModelTests(unittest.TestCase):
         self.captions._here = lambda name: self.disk[name]
         self.restarts = []
         self.captions._disable = lambda: self.restarts.append("off")
-        self.captions.toggle = lambda: self.restarts.append("on")
+        self.captions._toggle = lambda: self.restarts.append("on")  # (not the viewer's toggle)
 
     def test_the_steps_name_what_automatic_takes_and_go_round(self):
         self.assertEqual(

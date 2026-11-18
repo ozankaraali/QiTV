@@ -32,8 +32,12 @@ and the `licenses/` folder are inside every packaged app.
 The apps contain the CPython 3.14.8 interpreter and standard library as `uv` installs it: the
 python-build-standalone build of release 20261009. On macOS and Linux that build links the
 libraries below into the interpreter (`libpython`); on Windows they are separate files, and the
-app contains those of the modules QiTV uses. Tcl/Tk, and on Linux Berkeley DB and the X11
-libraries, are separate modules QiTV does not use: they are not in the apps.
+app contains those of the modules QiTV uses. On Linux, Berkeley DB is a separate module QiTV does
+not use: it is not in the apps. Tcl/Tk is in the Windows and Linux apps for PyInstaller's
+start-up splash only (the Tcl and Tk libraries and a few of their scripts): its bootloader shows
+the still of QiTV's mark with them while the app unpacks. On Linux that build links the X11
+client libraries Tk draws with (libX11, libxcb and libXau) into its Tk library, so they are in
+the Linux app too. QiTV's code doesn't use tkinter, and the macOS app has no Tcl/Tk.
 
 | Component | Version | License, as its source states it | Text | Platforms |
 | --- | --- | --- | --- | --- |
@@ -52,12 +56,17 @@ libraries, are separate modules QiTV does not use: they are not in the apps.
 | ncurses | 6.5 | X11 (MIT-style) | `licenses/python/ncurses.txt` (its `COPYING`) | Linux (macOS uses the system's) |
 | libedit | 20240808-3.1 | BSD-3-Clause | `licenses/python/libedit.txt` (its `COPYING`) | Linux (macOS uses the system's) |
 | libuuid | 1.0.3 | BSD-3-Clause | `licenses/python/libuuid.txt` (its `COPYING`, and the license its `uuid.h` states) | macOS, Linux |
+| Tcl/Tk | 9.0.4 | TCL (the BSD-style terms of each one's `license.terms`) | `licenses/python/Tcl.txt` and `licenses/python/Tk.txt` (Tcl's and Tk's 9.0.4 `license.terms`) | Windows, Linux |
+| libX11 | 1.8.13 | MIT and X11 (MIT-style terms of its many authors, as its `COPYING` lists them) | `licenses/python/libX11.txt` (its `COPYING`, python-build-standalone's copy) | Linux (inside Tk) |
+| libxcb | 1.17.0 | MIT (X11 style) | `licenses/python/libxcb.txt` (its `COPYING`, python-build-standalone's copy) | Linux (inside Tk) |
+| libXau | 1.0.12 | MIT (X11 style) | `licenses/python/libXau.txt` (its `COPYING`, python-build-standalone's copy) | Linux (inside Tk) |
 
 - Source code: <https://www.python.org/downloads/source/>, and the build at
   <https://github.com/astral-sh/python-build-standalone> (release 20261009), which names each
   library's source and checksum.
-- The texts come from the installed Python where it has them (`CPython.txt`) and otherwise from
-  each project's own release of that version.
+- The texts come from the installed Python where it has them (`CPython.txt`), from
+  python-build-standalone's release for the X11 libraries (it ships each one's `COPYING`), and
+  otherwise from each project's own release of that version.
 
 ## The phone remote's page
 
@@ -186,4 +195,5 @@ and no translation of it leaves your computer.
 Chromecast, Chromecast built-in and Google Cast are trademarks of Google LLC. QiTV casts through
 VLC's own Chromecast support (see VLC above) and is not affiliated with or endorsed by Google.
 Emby is a trademark of its owner; Jellyfin is the name of the Jellyfin project; TMDB is The
-Movie Database's. Each is named only to say what QiTV works with.
+Movie Database's. Each is named only to say what QiTV works with. X Window System is a trademark
+of The Open Group (the X11 libraries above).

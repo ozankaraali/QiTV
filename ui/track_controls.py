@@ -65,6 +65,7 @@ from services import i18n
 from services.captions import mt_languages
 from services.captions.languages import own_name, qwen_name
 from services.i18n import N_, tr, translate
+from services.open_paths import SUBTITLE_EXTENSIONS
 from services.sound_sync import LIMIT_MS, STEP_MS, SoundSync, clamp
 from services.track_memory import TrackMemory, title_key
 from services.zapping import ZapContext
@@ -110,7 +111,6 @@ AI_TRANSLATE_PICK = "ai_translate_pick"  # its list's: (AI_TRANSLATE_PICK, "" or
 # language spoken; a Settings group's title
 AI_CAPTIONS_TEXT = N_("AI captions")
 LANGUAGE_TEXT = N_("Language")
-SUBTITLE_EXTENSIONS = (".srt", ".ass", ".ssa", ".vtt", ".sub")
 # i18n: the file dialog's filter; keep the part in brackets as it is
 SUBTITLE_FILTER = N_("Subtitles (*.srt *.ass *.ssa *.vtt *.sub)")
 REFRESH_MS = 500  # a panel follows what libVLC reports meanwhile (a track that came)
@@ -706,7 +706,7 @@ class TrackControls(QObject):
             return False
         self._session().set_subtitle_track(track_id)
         self._remember()
-        self._captions_off()
+        self._captions_off(off=track_id == -1)
         self._follow_player()
         return True
 
@@ -903,12 +903,15 @@ class TrackControls(QObject):
                 session.set_subtitle_track(-1)
         self._captions_on = on
 
-    def _captions_off(self) -> None:
+    def _captions_off(self, *, off: bool = False) -> None:
         """A subtitle track, Off or a file chosen: AI captions go off, a download on its way
-        too (it resumes when they are turned on again)."""
+        too (it resumes when they are turned on again), and none still to come on does (on by
+        themselves once this computer's speed is known). A track or a file gives way: what the
+        viewer asked for video files stays as it was. Off chosen (`off`) during a video file is
+        kept for the next one (CaptionsController.give_way)."""
         captions = self._captions_now()
-        if captions is not None and _chosen(captions):
-            captions.toggle()
+        if captions is not None:
+            captions.give_way(off=off)
             self._captions_on = False
 
     def _captions_changed(self) -> None:
@@ -988,7 +991,7 @@ class TrackControls(QObject):
             session.set_audio_track(int(key))
         else:
             session.set_subtitle_track(int(key))
-            self._captions_off()  # one subtitle source at a time
+            self._captions_off(off=int(key) == -1)  # one subtitle source at a time
         self._remember()
         self._open(name)
 

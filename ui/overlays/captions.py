@@ -278,6 +278,17 @@ class CaptionsOverlay(Overlay):
         self._pages_for = (key, parts)
         return list(parts)
 
+    def reach(self) -> int:
+        """How far above the player controls' top (`set_floor`) two lines of captions reach at
+        the current size, their gap above the controls included (the audio screen leaves this
+        room while Words is on). Read only: what shows doesn't change."""
+        host = self.parentWidget()
+        if host is None:
+            return 0
+        un = picture_units(host)
+        fm = QFontMetricsF(self._font_at(un, _SHRINK[0]))
+        return un.px(FLOOR_GAP_U) + round(MAX_LINES * fm.lineSpacing() + 2 * un.px(_PAD_Y_U))
+
     def _font_at(self, un: Units, scale: float) -> QFont:
         font = un.font(FONT_U * scale)  # regular, as libVLC's subtitles (no medium there)
         if CAPTION_FAMILY:

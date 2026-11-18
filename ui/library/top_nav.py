@@ -1,5 +1,6 @@
-"""The Library's top bar: the QiTV logo, Live TV / Movies / Series, the search field, the source
-pill, a refresh button (2.8: the films and series shown load again) and a fullscreen button.
+"""The Library's top bar: the QiTV logo, Live TV / Movies / Series (then Recordings, 2.9.7, and
+Folders, Plan 4, when the Library has them), the search field, the source pill, a refresh button
+(2.8: the films and series shown load again) and a fullscreen button.
 
 The search field (2.9.3, a pill before) is as wide as there is room for, up to SEARCH_MAX_U, in
 the middle of the bar: the first place to type. The bar paints its look while the Library
@@ -45,9 +46,12 @@ TAB_LABELS = {
     "series": N_("Series"),
     # i18n: the Library's tab of everything recorded, recording and scheduled (2.9.7)
     "recordings": N_("Recordings"),
+    # i18n: the Library's Folders tab, and its title: the folders the viewer opened (Plan 4)
+    "folders": N_("Folders"),
 }
-ALL_TABS = ["live", "movies", "series", "recordings"]
-DEFAULT_TABS = ["live", "movies", "series"]  # Recordings once the Library has its page
+ALL_TABS = ["live", "movies", "series", "recordings", "folders"]
+# Recordings once the Library has its page; Folders (Plan 4) while its shelf has a folder
+DEFAULT_TABS = ["live", "movies", "series"]
 MARK_U = 0.55  # 2.9.7: the Recordings tab's dot (red: something records; amber: a problem)
 PILL_H_U = 3.2
 MAX_SOURCE_U = 22.0

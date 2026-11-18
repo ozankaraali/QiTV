@@ -352,6 +352,25 @@ class TVWindowTests(WindowCase):
         saved = ConfigManager().config["window_positions"]["tv_window"]
         self.assertEqual(saved, {"x": 150, "y": 120, "width": 960, "height": 540})
 
+    def test_the_close_answers_no_other_start_from_its_first_step(self):
+        # Review M4: the close lasts seconds, and a start meanwhile (the next episode
+        # double-clicked) was handed to the window that was going. Its first step stops the
+        # instance server (its lock stays: main() lets go last) and takes Windows' DDE back.
+        window, order = self.window, []
+        window.instance = mock.Mock(spec=["stop_listening", "close"])
+        window.instance.stop_listening.side_effect = lambda: order.append("instance")
+        window.dde = mock.Mock(spec=["close", "follow"])
+        window.dde.close.side_effect = lambda: order.append("dde")
+        shutdown = window.screens.shutdown
+        with mock.patch.object(
+            window.screens, "shutdown", side_effect=lambda: (order.append("screens"), shutdown())
+        ):
+            self.close_window()
+        self.assertEqual(order[:3], ["instance", "dde", "screens"])
+        window.instance.stop_listening.assert_called_once_with()
+        window.instance.close.assert_not_called()  # the lock is main()'s to let go, last
+        window.dde.close.assert_called_once_with()
+
     def test_without_libvlc_playing_explains_why(self):
         self.open_first_channel()
         self.assertTrue(
@@ -366,9 +385,9 @@ class TVWindowTests(WindowCase):
         toast, hints = self.window.overlays.toast, []
         set_hint = toast.set_hint
 
-        def spy(text):
+        def spy(text, **how):
             hints.append(text)
-            set_hint(text)
+            set_hint(text, **how)
 
         toast.set_hint = spy
         self.show()
@@ -420,6 +439,16 @@ class TVWindowTests(WindowCase):
         self.assertLess(mixer, sound)
         self.assertLess(sound, subtitles)
         self.assertLess(subtitles, drawer)
+
+    def test_the_audio_screen_sits_over_the_tiles_under_the_captions_and_controls(self):
+        # Words show over a song's screen (Cover, Album) and the dock over all of it.
+        window, host = self.window, self.window.host
+        order = [w for w in host.children() if isinstance(w, QWidget) and w in host._overlays]
+        screen = order.index(window.audio_screen)
+        self.assertLess(order.index(window.grid_tiles), screen)
+        self.assertLess(screen, order.index(window.captions_overlay))
+        self.assertLess(screen, order.index(window.overlays.transport))
+        self.assertTrue(window.audio_screen.isHidden())  # until something plays sound only
 
     def test_the_transport_covers_the_overlay_host(self):
         self.show()
@@ -493,9 +522,14 @@ class TVWindowTests(WindowCase):
         )
         self.assertEqual(
             shortcuts(menus["File"]),
-            [("Open File…", "Ctrl+O"), ("Export", ""), ("Open Recordings Folder", "")],
+            [
+                ("Open File…", "Ctrl+O"),
+                ("Open Folder…", "Ctrl+Shift+O"),  # Plan 4: plays it, on the Folders tab
+                ("Export", ""),
+                ("Open Recordings Folder", ""),
+            ],
         )
-        export = menus["File"].actions()[1].menu()
+        export = menus["File"].actions()[2].menu()
         self.assertEqual(
             [a.text() for a in export.actions()],
             ["Cached Content…", "All Live Channels…", "Complete Series (Fetch All)…"],
@@ -540,6 +574,7 @@ class TVWindowTests(WindowCase):
             "Settings…",
             "Quit",
             "Open File…",
+            "Open Folder…",  # Plan 4
             "Live TV",
             "Movies",
             "Series",
@@ -1706,7 +1741,13 @@ class VlcWindowTests(WindowCase):
         srt = subtitle_file(self)
         self.open_first_channel()
         self.assertTrue(wait_until(self.session_on(channel_urls()[0], (PlaybackState.PLAYING,))))
-        self.assertEqual(drag_and_drop(window, [srt.with_suffix(".mkv")]), (False, False))
+        # No subtitle file: taken all the same, as it may be a folder only the disk tells (Task
+        # 11); it is none (gone), and says so. The channel plays on.
+        notes = srt.with_suffix(".txt")
+        self.assertEqual(drag_and_drop(window, [notes]), (True, True))
+        text = f"Couldn't open “{notes.name}”"
+        self.assertTrue(wait_until(lambda: (text, "error") in self.toasts), self.toasts)
+        self.assertEqual(window.session.state(), PlaybackState.PLAYING)
         self.assertEqual(drag_and_drop(window.host, [srt]), (True, True))  # over the overlays
         session = window.session
 
@@ -2463,8 +2504,14 @@ class LibraryReturnTests(WindowCase):
         self.window.overlays.transport.libraryRequested.emit()
         self.assertFalse(self.window.screens.library_shown())
         path = Path(self.config_dir) / "home video.mp4"
+        path.write_bytes(b"film")
         with mock.patch("ui.tv_pages.QFileDialog.getOpenFileName", return_value=(str(path), "")):
-            self.window.screens.open_file()  # a local file
+            self.window.screens.open_file()  # a local file, once found there (off this thread)
+
+        def opened():
+            return getattr(self.window.controller.now_playing(), "local", False)
+
+        self.assertTrue(wait_until(opened))
         self.assertTrue(self.window.controller.vod_current())
         self.assertIsNone(library_button(self.window))
 

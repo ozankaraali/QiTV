@@ -1,12 +1,15 @@
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import os
 from pathlib import Path
+import shutil
+import subprocess
 import sys
 import tempfile
 import threading
 import time
 import unittest
 from unittest import mock
+import uuid
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
@@ -30,6 +33,7 @@ from services.playback import (
 from services.vlc_profile import PlayKind
 
 FIXTURE = Path(__file__).parent / "fixtures" / "smoke.mp4"
+FFMPEG = shutil.which("ffmpeg")
 INSTANCE = create_instance(["--vout=dummy", "--aout=dummy", "--no-video-title-show", "--quiet"])
 # A stop job not joined by then is hung: the TV window gives up on a worker after as long
 # (CLOSE_THREAD_WAIT_MS). It is no speed budget. The first stops in a process can take
@@ -149,6 +153,60 @@ class PlaybackSessionTests(unittest.TestCase):
         self.assertTrue(wait_for(lambda: session.state() is PlaybackState.PLAYING))
         self.assertTrue(wait_for(shown))
         self.assertEqual(session._player.video_get_spu_delay(), -200_000)
+
+    def test_a_film_has_a_video_track_once_known(self):
+        # Never False on the way: the screen for songs follows a False (the media has no picture).
+        seen = []
+        self.assertIsNone(self.session.has_video_track())  # nothing plays
+
+        def playing_with_video():
+            seen.append(self.session.has_video_track())
+            return self.session.state() is PlaybackState.PLAYING and seen[-1] is True
+
+        self.session.stateChanged.connect(lambda _s: seen.append(self.session.has_video_track()))
+        self.session.play(FIXTURE.as_uri(), kind=PlayKind.VOD_FILE)
+        self.assertTrue(wait_for(playing_with_video))
+        self.assertNotIn(False, seen)
+        self.session.stop()
+        self.assertIsNone(self.session.has_video_track())
+
+    @unittest.skipIf(FFMPEG is None, "ffmpeg makes the song")
+    def test_a_song_has_no_video_track_and_its_tags_come_from_libvlc(self):
+        directory = tempfile.TemporaryDirectory()
+        self.addCleanup(directory.cleanup)
+        run = uuid.uuid4().hex[:6]  # libVLC caches the art by artist and album: never a stale one
+        folder = Path(directory.name)
+        cover, song = folder / ".cover.png", folder / "03 Lume Varr.mp3"
+        tone = ["-f", "lavfi", "-i", "sine=frequency=440:duration=3"]
+        make = [FFMPEG, "-y", "-f", "lavfi", "-i", "color=c=0x2A9D8F:s=32x32", "-frames:v", "1"]
+        subprocess.run([*make, str(cover)], check=True, capture_output=True)
+        tags = {
+            "title": "Lume Varr",
+            "artist": f"Kesh Dorran {run}",
+            "album": f"Thrum Days {run}",
+            "track": "3/12",
+            "disc": "1/2",
+            "date": "2019-04-01",
+        }
+        meta = [arg for key, value in tags.items() for arg in ("-metadata", f"{key}={value}")]
+        subprocess.run(
+            [FFMPEG, "-y", *tone, "-i", str(cover), "-map", "0", "-map", "1", "-c:a", "libmp3lame",
+             "-c:v", "png", "-id3v2_version", "3", *meta, str(song)],
+            check=True, capture_output=True,
+        )  # fmt: skip
+        self.session.play(song.as_uri(), kind=PlayKind.VOD_FILE, local=True)
+        self.assertTrue(wait_for(lambda: self.session.has_video_track() is False))
+        # The art reaches libVLC's cache once the file opened: it can trail the track list.
+        self.assertTrue(wait_for(lambda: self.session.tags()["art_url"].startswith("file://")))
+        found = self.session.tags()
+        self.assertEqual(
+            (found["title"], found["artist"], found["album"], found["track"], found["disc"]),
+            ("Lume Varr", tags["artist"], tags["album"], 3, 1),
+        )
+        self.assertEqual(found["year"], "2019")
+        self.assertGreater(found["duration_ms"], 2000)
+        # The embedded picture, written to libVLC's art cache once the file opened.
+        self.assertTrue(found["art_url"].startswith("file://"), found["art_url"])
 
     def test_seekable_false_when_media_is_replaced(self):
         flags = []
@@ -387,6 +445,12 @@ class _FakePlayer:
         self._call("get_state")
         return vlc.State.Opening if vlc is not None else 1
 
+    def has_vout(self):
+        # libVLC counts the input's video outputs under its lock; none here (no picture)
+        if self.joining:
+            raise AssertionError("has_vout on the GUI thread while libVLC joins the input")
+        return 0
+
     def get_time(self):
         self._call("get_time")
         return 0
@@ -588,6 +652,26 @@ class PlayerJobTests(unittest.TestCase):
         # The rate asked for meanwhile belongs to the new media: set before it plays.
         tail = self.player.calls[-3:]
         self.assertEqual(tail, [("set_media", B), ("set_rate", 1.5), ("play",)])
+
+    def tick_with_a_slot_that(self, act):
+        """A poll whose state change (Opening to Playing) reaches a slot that does `act`."""
+        self.play(A)
+        self.player.get_state = lambda: vlc.State.Playing
+        self.session.stateChanged.connect(lambda state: act() if state == "playing" else None)
+        self.session._tick()  # the fake's has_vout raises if asked while the input is joined
+        self.assertTrue(self.player.joining)  # the slot's job holds the input
+        self.assertIn("playing", self.states)
+        self.runner.finish()
+
+    def test_a_slot_that_stops_the_player_as_its_state_changes_ends_the_tick(self):
+        # Until a picture shows, each poll asks libVLC for its video output (has_vout, under
+        # the input lock). A stateChanged slot may stop the media first: its job then joins
+        # the input, and the rest of the tick must not wait on that lock.
+        self.tick_with_a_slot_that(self.session.stop)
+
+    def test_a_slot_that_opens_another_media_as_the_state_changes_ends_the_tick(self):
+        self.tick_with_a_slot_that(lambda: self.play(B))
+        self.assertEqual(self.opened(), [A, B])
 
     def test_a_burst_of_zaps_joins_once_and_opens_only_the_newest(self):
         self.play(A)
@@ -1711,6 +1795,136 @@ class PictureShapeTests(unittest.TestCase):
 
     def test_without_libvlc_nothing_has_a_shape(self):
         self.assertIsNone(NullSession().picture_ratio())
+
+
+class _SongMedia(_FakeMedia):
+    """A media whose tags libVLC read (`meta`, by python-vlc's Meta values)."""
+
+    def __init__(self, url, meta=None, duration=-1):
+        super().__init__(url)
+        self.meta, self.duration = dict(meta or {}), duration
+
+    def get_meta(self, key):
+        return self.meta.get(key.value)
+
+    def get_duration(self):
+        return self.duration
+
+    def get_mrl(self):
+        return self.url
+
+
+class _SongInstance(_FakeInstance):
+    def __init__(self, player, meta=None, duration=-1):
+        super().__init__(player)
+        self.meta, self.duration = meta, duration
+
+    def media_new(self, url):
+        return _SongMedia(url, self.meta, self.duration)
+
+
+class _SongPlayer(_ShapePlayer):
+    def has_vout(self):
+        return 0  # a song: no picture
+
+
+@unittest.skipIf(vlc is None, "python-vlc's states are needed to poll the player")
+class SongFactsTests(unittest.TestCase):
+    """What the playing media is, read from libVLC on the GUI thread: whether it has a video
+    track (None until known), and its tags."""
+
+    setUpClass = PlayerJobTests.setUpClass
+
+    def session(self, meta=None, duration=-1):
+        """A session on a player of its own, whose media have these tags."""
+        self.player = _SongPlayer()
+        self.runner = _HeldRunner(self.player)
+        instance = _SongInstance(self.player, meta, duration)
+        session = PlaybackSession(instance, runner=self.runner, poll_ms=60_000)
+        self.addCleanup(session.release)  # stops its timers; held jobs never run
+        return session
+
+    def play(self, session, url, *, playing=True):
+        session.play(url, kind=PlayKind.VOD_FILE, local=True)
+        self.player.state = vlc.State.Playing if playing else vlc.State.Opening
+        session._tick()
+
+    def test_has_video_track_none_then_known(self):
+        session = self.session()
+        with mock.patch("services.playback._track_stats", return_value={}) as stats:
+            self.assertIsNone(session.has_video_track())  # nothing plays
+            self.play(session, "file:///music/01%20Arn.mp3", playing=False)
+            stats.return_value = {"audio_codec": "mpga", "audio_rate": 44100}
+            self.assertIsNone(session.has_video_track())  # not played yet: libVLC still opens it
+            self.player.state = vlc.State.Playing
+            session._tick()
+            stats.return_value = {}
+            self.assertIsNone(session.has_video_track())  # playing, no track known yet
+            stats.return_value = {"audio_codec": "mpga", "audio_rate": 44100}
+            self.assertIs(session.has_video_track(), False)
+            # Read again each time: a radio channel's picture can come (and go) mid-stream.
+            stats.return_value = {"video_codec": "h264", "audio_codec": "mp4a"}
+            self.assertIs(session.has_video_track(), True)
+            reads = self.player.media_read
+            session.stop()  # a worker stops libVLC: the GUI thread leaves it alone meanwhile
+            self.assertIsNone(session.has_video_track())
+            self.runner.finish()
+            self.assertIsNone(session.has_video_track())  # stopped
+            self.assertEqual(self.player.media_read, reads)  # nothing read while it stopped
+
+    def test_tags_from_the_playing_media(self):
+        Meta = vlc.Meta
+        meta = {
+            Meta.Title.value: "Lume Varr",
+            Meta.Artist.value: "Kesh Dorran",
+            Meta.AlbumArtist.value: "Assorted Fen",
+            Meta.Album.value: "Thrum Days",
+            Meta.TrackNumber.value: "3/12",
+            Meta.DiscNumber.value: "1/2",
+            Meta.Date.value: "2019-04-01",
+            Meta.ArtworkURL.value: "file:///cache/art/Thrum%20Days/art.png",
+        }
+        session = self.session(meta, duration=183_500)
+        empty = session.tags()  # nothing plays: every key, empty
+        self.assertEqual(
+            set(empty),
+            {"title", "artist", "album_artist", "album", "track", "disc", "year", "duration_ms"}
+            | {"art_url", "now_playing"},
+        )
+        self.assertTrue(all(value in ("", None) for value in empty.values()), empty)
+        self.play(session, "file:///music/03%20Lume%20Varr.mp3")
+        self.assertEqual(
+            session.tags(),
+            {
+                "title": "Lume Varr",
+                "artist": "Kesh Dorran",
+                "album_artist": "Assorted Fen",
+                "album": "Thrum Days",
+                "track": 3,
+                "disc": 1,
+                "year": "2019",
+                "duration_ms": 183_500,
+                "art_url": "file:///cache/art/Thrum%20Days/art.png",
+                "now_playing": "",
+            },
+        )
+        # An untagged file: libVLC names its title after the file, which is no title.
+        untagged = self.session(
+            {Meta.Title.value: "04 Çay Bahçesi #2.mp3", Meta.TrackNumber.value: "04"}
+        )
+        self.play(untagged, "file:///music/04%20%C3%87ay%20Bah%C3%A7esi%20%232.mp3")
+        found = untagged.tags()
+        self.assertEqual((found["title"], found["track"], found["album"]), ("", 4, ""))
+        self.assertIsNone(found["duration_ms"])  # libVLC's -1: not known
+        # A radio's song as its stream names it, with libVLC's stand-in title (its address).
+        radio = self.session(
+            {Meta.Title.value: "http://radio.test/live", Meta.NowPlaying.value: "Kesh - Ober"}
+        )
+        radio.play("http://radio.test/live", kind=PlayKind.LIVE)
+        self.player.state = vlc.State.Playing
+        radio._tick()
+        found = radio.tags()
+        self.assertEqual((found["title"], found["now_playing"]), ("", "Kesh - Ober"))
 
 
 if __name__ == "__main__":

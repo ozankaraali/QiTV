@@ -12,8 +12,9 @@ import os
 import platform
 import shutil
 import sys
+import threading
 import time
-from typing import Callable, Mapping, Optional, Sequence
+from typing import Any, Callable, Mapping, Optional, Sequence
 import warnings
 
 SMOKE_FLAG = "--smoke"
@@ -25,6 +26,8 @@ APP_USER_MODEL_ID = "com.ozankaraali.qitv"
 # replacing its file (Windows keeps a running program's file locked), and how often it tries.
 REPLACE_WAIT_S = 30.0
 REPLACE_RETRY_S = 0.5
+# PyInstaller's bootloader puts its splash's port here; 0 where it shows none.
+PYI_SPLASH_IPC = "_PYI_SPLASH_IPC"
 
 
 def qt_platform_override(system: str, environ: Mapping[str, str]) -> Optional[str]:
@@ -47,6 +50,95 @@ def smoke_arguments(argv: Sequence[str], environ: Mapping[str, str]) -> Optional
     if environ.get(SMOKE_ENV) == "1" and list(argv[1:2]) == [SMOKE_FLAG]:
         return list(argv[2:])
     return None
+
+
+def wants_splash(argv: Sequence[str], environ: Mapping[str, str]) -> bool:
+    """Whether this start shows the splash (ui/splash_helper.py): not the smoke test, not a
+    Windows update's copy (`--replace`: it starts while the old QiTV quits), and not a run with
+    no screen to draw on (Qt's offscreen or minimal platform, the tests')."""
+    if smoke_arguments(argv, environ) is not None or "--replace" in argv:
+        return False
+    chosen = environ.get("QT_QPA_PLATFORM", "").split(";", 1)[0].split(":", 1)[0].strip()
+    return chosen not in ("offscreen", "minimal")
+
+
+def close_on_crash(close: Callable[[], None]) -> None:
+    """An exception nothing handles runs `close` too, once logged (sys.excepthook). That runs
+    before atexit, and before a windowed Windows build's error dialog, which PyInstaller's
+    bootloader shows with this process, and what it started, still alive, and with Python's
+    lock held: no other thread runs until the dialog is dismissed. An exception a Qt slot
+    raises reaches it too. `close` never raises from there."""
+    logged = sys.excepthook
+
+    def hook(kind: Any, error: Any, frames: Any) -> None:
+        try:
+            logged(kind, error, frames)
+        finally:
+            try:
+                close()
+            except Exception:  # the error's own report comes first; nothing hides it
+                pass
+
+    sys.excepthook = hook
+
+
+class BootloaderSplash:
+    """PyInstaller's bootloader splash: the Windows and Linux one-file apps show the build's
+    still of QiTV's mark (scripts/render_splash.py) from the double-click while they unpack,
+    before Python runs. It stays on top of every window until it is closed, so each start
+    closes it: once the splash helper's window stands over it, or at once where none will.
+    close() acts once, from any thread, and never raises.
+
+    It is there only while its port is set (none in a run from source or the macOS app, 0 in
+    a process the app spawned): pyi_splash, which warns without it, is imported only then, and
+    takes the port out of the environment as it connects. A still QiTV can't reach or close
+    may stay on top for the whole run: the log says so."""
+
+    def __init__(self, environ: Mapping[str, str] = os.environ) -> None:
+        self._lock = threading.Lock()
+        self._module: Any = None
+        if environ.get(PYI_SPLASH_IPC, "0") in ("", "0"):
+            return
+        try:
+            # By name: PyInstaller bundles the module only where an import statement names it.
+            import pyi_splash
+
+            if pyi_splash.is_alive():
+                self._module = pyi_splash
+                return
+            why = "no connection"
+        except Exception as error:  # never a reason for QiTV not to start
+            why = type(error).__name__
+        logging.getLogger("qitv").warning(
+            "PyInstaller's splash shows, but QiTV can't reach it to close it (%s).", why
+        )
+
+    @property
+    def shows(self) -> bool:
+        """Whether it shows (until close())."""
+        return self._module is not None
+
+    def close(self, why: str) -> None:
+        """It goes: `why`, for the log."""
+        with self._lock:
+            module, self._module = self._module, None
+        if module is None:
+            return
+        try:
+            module.close()
+        except Exception as error:  # never a reason for QiTV not to start
+            logging.getLogger("qitv").warning(
+                "PyInstaller's splash may not have closed (%s).", type(error).__name__
+            )
+            return
+        logging.getLogger("qitv").info("PyInstaller's splash closed: %s.", why)
+
+    def close_on_crash(self) -> None:
+        """An exception nothing handles closes it too, once logged (sys.excepthook, which also
+        runs before a windowed Windows build's error dialog, and before atexit's own close): a
+        start that fails before main()'s `finally` leaves no still on top."""
+        if self._module is not None:
+            close_on_crash(lambda: self.close("an unhandled error"))
 
 
 def replace_executable(
@@ -115,6 +207,24 @@ def handle_replace_flag(
     return old_exe_path, current_exe
 
 
+def replaced_qitv(argv: Sequence[str], not_replaced: Optional[tuple[str, str]]) -> Optional[str]:
+    """The installed QiTV a Windows update's copy wrote itself over (`--replace <path>`, and
+    the replace worked): this run is that QiTV from now on, though it runs from where it was
+    downloaded, so it registers that one (services.file_types.use_installed). None for any
+    other start (the old file kept: the copy is QiTV where it is)."""
+    if not_replaced is not None or "--replace" not in argv:
+        return None
+    index = list(argv).index("--replace")
+    return argv[index + 1] if index + 1 < len(argv) and argv[index + 1] else None
+
+
+def old_qitv_still_runs(argv: Sequence[str], not_replaced: Optional[tuple[str, str]]) -> bool:
+    """Whether this is a Windows update's copy whose old QiTV still runs: its file couldn't be
+    replaced (`handle_replace_flag` waited REPLACE_WAIT_S for it to quit). Once it was, the old
+    QiTV has quit, and this start claims its settings as any start does."""
+    return "--replace" in argv and not_replaced is not None
+
+
 def written_dirs(config_dir: str) -> list[str]:
     """Where QiTV writes files through services.atomic_write: the config (and the channel
     stores beside it), the cache (TMDB's, 2.8), the guide cache and the provider cache."""
@@ -141,22 +251,14 @@ def settings_dir() -> str:
 
 
 def main() -> int:
-    from PySide6 import QtGui
-    from PySide6.QtCore import QLocale, QLoggingCategory, QTimer, qInstallMessageHandler
-    import qdarktheme
+    # Only what the claim on the settings folder needs loads first: a second start hands over
+    # (its files too) before the UI's modules load, which takes seconds on Windows.
+    from PySide6.QtCore import QLoggingCategory
 
-    from services import i18n, log_file, private_files
-    from services.atomic_write import sweep_in_background
-    from services.config_manager import ConfigManager, get_app_version
-    from services.epg_manager import EpgManager
-    from services.gc_guard import GcGuard
-    from services.image_manager import ImageManager
-    from services.provider_manager import ProviderManager
-    from services.sleep_manager import allow_sleep, prevent_sleep
+    from services import log_file
+    from services.config_manager import get_app_version
+    from services.open_paths import holds_the_start, launch_paths, reads_the_start
     from ui.quit_reason import QiTVApplication
-    from ui.theme import focus_qss
-    from ui.tv_window import TVWindow
-    from ui.update_dialogs import check_for_updates, replace_failed
 
     # Basic logging configuration (tweak level as needed); the console's lines are masked as
     # the file's are (addresses, Xtream paths, sign-in headers, MAC addresses).
@@ -165,9 +267,20 @@ def main() -> int:
     log_file.install()
     log = logging.getLogger("qitv")
     log.info("QiTV %s starts.", get_app_version())
+    # PyInstaller's splash, up since the double-click (Windows and Linux): it stays until QiTV's
+    # own splash stands over it, and goes at once on a start that shows none (before an
+    # update's copy waits for the old QiTV to quit).
+    bootloader = BootloaderSplash()
+    bootloader.close_on_crash()
+    with_splash = wants_splash(sys.argv, os.environ)
+    if not with_splash:
+        bootloader.close("this start shows no splash")
 
     # Windows's self-update: this new version takes the old one's place, once it quit.
-    not_replaced = handle_replace_flag() if platform.system() == "Windows" else None
+    not_replaced, replaced = None, None
+    if platform.system() == "Windows":
+        not_replaced = handle_replace_flag()
+        replaced = replaced_qitv(sys.argv, not_replaced)
 
     # Suppress noisy third-party warnings
     warnings.filterwarnings("ignore", category=SyntaxWarning, module="vlc")
@@ -180,21 +293,72 @@ def main() -> int:
     # thread waiting up to 5 ms at every callback it makes: a 0.5 ms switch interval keeps
     # the window responsive while it works.
     sys.setswitchinterval(0.0005)
-    app = QiTVApplication(sys.argv)  # notes a quit request the system sends (2.8)
+    # It notes a quit request the system sends (2.8), and keeps the files QiTV is asked to
+    # open until the window takes them.
+    app = QiTVApplication(sys.argv)
+    # QiTV's mark, from now until the window opens into it, drawn by a process of its own: this
+    # thread builds the window until it shows. It shows while another QiTV is asked, too. Over
+    # the bootloader's splash, it begins on that frame, and that one goes once it shows (or
+    # it ended without showing).
+    from ui.splash_helper import Splash, when_drawn
+
+    splash = Splash(
+        on_shown=lambda: bootloader.close("the splash shows over it"),
+        on_end=lambda: bootloader.close("the splash ended"),
+    )
+    if not (with_splash and splash.start(lit=bootloader.shows)):
+        bootloader.close("no splash started")
+    # An error nothing handles ends it at once, as it is logged: until main()'s `finally`
+    # (the claim, the heavy imports, the settings and the managers come first), and before a
+    # windowed Windows build's error dialog, which would keep it looping on top.
+    close_on_crash(splash.stop)
+    if platform.system() == "Darwin":
+        # A double-click in Finder gives no argument: the file comes as an open event, sent
+        # at launch. Kept now, it is handed over (a second start) or kept for the window.
+        app.processEvents()
+    # The files this start was given (a double-click while QiTV runs hands them over).
+    paths = launch_paths(sys.argv)
     # 2.8.12: one QiTV per settings folder (a second start would record and stream twice and
     # save over the first's settings): it brings the first to the front and quits.
     from services.single_instance import claim
 
     try:
-        instance = claim(settings_dir(), replacing="--replace" in sys.argv)
+        # The open events kept so far go too; they stay kept for the window if this is first.
+        instance = claim(
+            settings_dir(),
+            replacing=old_qitv_still_runs(sys.argv, not_replaced),
+            paths=paths + app.kept_opened(),
+        )
         handed_over = instance is None
     except Exception as error:  # the check is never a reason for QiTV not to start
         log.warning("The check for another QiTV failed (%s); starting.", type(error).__name__)
         instance, handed_over = None, False
     if handed_over:
+        bootloader.close("this start handed over")
+        splash.close()
         log.info("Another QiTV runs with these settings; this start ends here.")
         log_file.close()
         return 0
+    if instance is not None:  # a start's files while the window is built are kept for it
+        instance.opened.connect(app.add_opened)
+
+    from PySide6 import QtGui
+    from PySide6.QtCore import QLocale, QTimer, qInstallMessageHandler
+    import qdarktheme
+
+    from services import file_types, i18n, private_files
+    from services.atomic_write import sweep_in_background
+    from services.config_manager import ConfigManager
+    from services.epg_manager import EpgManager
+    from services.gc_guard import GcGuard
+    from services.image_manager import ImageManager
+    from services.provider_manager import ProviderManager
+    from services.sleep_manager import allow_sleep, prevent_sleep
+    from ui.file_types_settings import refresh_at_start
+    from ui.theme import focus_qss
+    from ui.tv_window import HANDOVER, LAUNCH, TVWindow
+    from ui.update_dialogs import check_for_updates, replace_failed
+
     # Why QiTV ended, in its log: the window closed (tv_window says how), or its last one.
     app.lastWindowClosed.connect(lambda: log.info("The last window closed."))
     app.aboutToQuit.connect(lambda: log.info("QiTV quits."))
@@ -249,6 +413,10 @@ def main() -> int:
 
     if platform.system() == "Windows":
         ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID(APP_USER_MODEL_ID)
+    # An update's copy that replaced the installed QiTV registers (at start, from Settings, and
+    # in Explorer's DDE command) the installed one, never itself in Downloads; any other start
+    # registers where it runs, so a QiTV the user moved registers again where it is now.
+    file_types.use_installed(replaced)
 
     app.setWindowIcon(QtGui.QIcon(icon_path))
     # The keyboard's focus shows on buttons, check boxes, tabs and sliders too (ui/theme.py).
@@ -256,11 +424,53 @@ def main() -> int:
 
     prevent_sleep()
     control = None
+    dde = None
     try:
         window = TVWindow(app, config_manager, provider_manager, image_manager, epg_manager)
         if instance is not None:
             instance.activated.connect(window.come_to_front)
+            window.instance = instance  # it answers no start once the window's close begins
+        # This start's files, and those that came before the window (macOS's open event,
+        # another start's hand-over), taken once; from now on each plays as it comes.
+        opened = paths + app.take_opened()
+        app.filesOpened.connect(lambda files: window.open_paths(files, source=HANDOVER))
+        if holds_the_start(opened):
+            # A start with a film plays only the film: no last channel, drawer or welcome card
+            # over it, from the window's first moment (open_paths holds too, once it shows).
+            # A file QiTV won't play holds too: open_paths says so, then lets go.
+            window.controller.hold_for_file(True)
+        if reads_the_start(opened):
+            # A start with a playlist (and no film) waits until it is read: a list of files
+            # holds it as a film does, a provider's list lets it start as any start.
+            window.controller.hold_for_read()
+        # Transparent over a splash on screen: it fades in as the splash opens into it.
+        splash.before_show(window)
         window.show()
+        # PyInstaller's still, where the splash hasn't taken its place yet, stays on top until
+        # the window is on screen: never an empty screen between them.
+        when_drawn(window, lambda: bootloader.close("the window shows"))
+        # A film's start: the splash's mark glides onto the player page's, which draws on.
+        splash.open_into(window, window.opening_overlay)
+        if opened:
+            window.open_paths(opened, source=LAUNCH)
+        # A QiTV moved or renamed since it registered for videos registers again where it is
+        # now, on a thread of its own (never from source); the config is saved once it changed.
+        refresh_at_start(config_manager, window)
+        if sys.platform == "win32":
+            # Registered for videos: a double-click reaches this QiTV over DDE, with no second
+            # start (which unpacks the whole app first); Explorer is told so while it runs.
+            # The run's one server: Settings turns it on and off (dde_follow_registration).
+            try:
+                from services import dde_windows
+
+                dde = window.dde = dde_windows.serve(config_manager)
+            except Exception:  # never a reason for QiTV not to start
+                log.warning("No DDE: a double-click starts QiTV again.", exc_info=True)
+                dde = window.dde = None
+            if dde is not None:
+                dde.server.opened.connect(lambda files: window.open_paths(files, source=HANDOVER))
+                # A sign-out or shutdown ends QiTV after aboutToQuit, never reaching `finally`.
+                app.aboutToQuit.connect(dde.close)
         if not_replaced is not None:  # where the new version is, and where the old one stayed
             old_path, new_path = not_replaced
             QTimer.singleShot(0, window, lambda: replace_failed(old_path, new_path, window))
@@ -277,20 +487,30 @@ def main() -> int:
             )
             control.start()
 
-        if config_manager.check_updates:
-            check_for_updates(config_manager=config_manager)
+        if config_manager.check_updates:  # after the film a start opened, if it has one
+            # Its question too waits for a film opened while the network answers (a Finder
+            # double-click's open event comes after the window; a double-click meanwhile).
+            window.when_idle(
+                lambda: check_for_updates(config_manager=config_manager, when_idle=window.when_idle)
+            )
 
         code = app.exec()
         log.info("QiTV's event loop ended (%d).", code)
         return code
     finally:
-        if instance is not None:
-            instance.close()
+        if dde is not None:  # first: Explorer starts QiTV again (it never raises)
+            dde.close()
+        splash.close()  # one that never opened (the window didn't show)
+        bootloader.close("QiTV ends")
         if control is not None:
             control.stop()
         allow_sleep()
         if not config_manager.flush_saves():  # the window's last save among them
             log.warning("QiTV quits before config.json was written: the last change is lost.")
+        if instance is not None:
+            # Last: a start waiting for the settings' lock (one during the close) takes it
+            # only once the settings are written, the film's resume point among them.
+            instance.close()
         log_file.close()
 
 
@@ -308,6 +528,7 @@ if __name__ == "__main__":
     use_bundled_authorities()
     smoke = smoke_arguments(sys.argv, os.environ)
     if smoke is not None:
+        BootloaderSplash().close("the smoke test")  # it would stand over the app under test
         from scripts.smoke_tv import main as smoke_main
 
         sys.exit(smoke_main(smoke))

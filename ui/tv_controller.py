@@ -13,7 +13,9 @@ LiveControls' (ui/live_controls.py).
 In external-player mode a zap step launches the player only once the zapping settles.
 
 Movies and episodes play through `play_vod` (the drawer and the Library), resuming where they
-stopped; Autoplay (ui/autoplay.py) offers what follows one that ended. While a movie or an
+stopped; Autoplay (ui/autoplay.py) offers what follows one that ended. A file opened in QiTV
+whose name is an episode has its folder listed on a thread as it opens (ui/episode_listing.py):
+the same show's next episode there follows it, as a file (spec §8). While a movie or an
 episode is current, also once it ended, the zap keys stay on it: ↑/↓ and the wheel change the
 volume, and number entry, the previous channel and the guide wait for live TV.
 
@@ -48,6 +50,15 @@ A failure to open a channel or a film, or to reach a provider, is toasted at onc
 no stream (at most once a minute per provider), and a plain reason (expired, the connection
 limit, a wrong password, a refusal) replaces the toast while it still shows (`_explain`).
 
+Sound with no picture (spec §10, Plan 4) plays on the audio screen: a song at once as it plays
+(the transport as its dock), another file once its media has no video track, a live channel
+once it has played NO_PICTURE_S with none (radio: live TV's controls stay). It goes when a
+picture shows, at a new target (but a song after a song: no black between them) and at a stop.
+A song's album (its folder's same album, ui/song_jobs.py) plays on through an AudioQueue
+(ui/audio_queue.py): shuffle and repeat, the dock's and the media keys' previous and next. A
+playlist of songs (play_list) is an album named after it, in its order; a mixed one plays each
+entry on its own screen, a song's next entry after it with no card.
+
 Provider setups (the loading and welcome hints, the last channel, the drawer on an idle player)
 are ProviderFlow's (ui/provider_flow.py). Opening the window's Library (spec §5.4) keeps what
 plays going in a corner of it (`enter_library_playing`; `stop_for_library` is the corner's ×, or
@@ -59,11 +70,12 @@ runs from the Library's providerReady slot, after this controller settled the pr
 from __future__ import annotations
 
 from collections.abc import Sequence
-from dataclasses import dataclass, replace
+from dataclasses import dataclass, field, replace
 from datetime import datetime, timedelta
 from functools import partial
 import logging
 from pathlib import Path
+import random
 import time
 from typing import Any, Callable, Optional, cast
 
@@ -72,6 +84,7 @@ from PySide6.QtGui import QPixmap, QWheelEvent
 from PySide6.QtWidgets import QAbstractScrollArea
 
 from services import external_players, favorites, recording, recording_schedule
+from services.album_listing import unread_track
 from services.budgeted_stream import HeldSlot
 from services.casting import CastDevices
 from services.catalog import ALL_GROUP_ID, PROVIDER_LOADING_MESSAGE, shown_label
@@ -85,6 +98,7 @@ from services.i18n import N_, tr, translate
 from services.live import parts as live_parts
 from services.live.live_session import LiveSession
 from services.live.tuning import channel_key
+from services.local_episodes import next_in_folder, parse_episode
 from services.media_reporter import MediaReporter
 from services.navigation import (
     FAVORITES_GROUP,
@@ -95,7 +109,8 @@ from services.navigation import (
     payloads,
     recent_channel,
 )
-from services.next_episode import play_context
+from services.next_episode import LOCAL_NEXT, play_context
+from services.open_paths import PLAYLIST_EXTENSIONS, is_music, is_song, is_video
 from services.picture import SOURCE_DIRECT, ChannelPictures
 from services.provider_ids import (
     ALL_PROVIDERS,
@@ -107,14 +122,19 @@ from services.provider_ids import (
 from services.provider_types import is_media_server
 from services.redact import safe_traceback, scrub
 from services.sessions import SessionManager, Slot, records
+from services.song_facts import BRAND_COLOURS
 from services.sound_sync import SoundSync
 from services.track_memory import TrackMemory
 from services.vlc_profile import DEFAULT_USER_AGENT, classify
+from services.watch_state import local_key
 from services.zapping import ZapContext
 from ui import item_provider
+from ui.audio_queue import REPEAT_MODES, AudioQueue
 from ui.autoplay import FINISHED_TEXT, Autoplay
+from ui.captions_texts import NOT_AVAILABLE
 from ui.cast_controls import CastControls
 from ui.context_actions import ContextActions, Launcher, is_channel
+from ui.episode_listing import FolderListing
 from ui.grid_controls import LEAVE_FIRST, GridControls
 from ui.guide_controller import GuideController
 from ui.keymap import Action, as_int
@@ -138,6 +158,7 @@ from ui.player_keys import PlayerKeys
 from ui.pointer import PointerInput
 from ui.provider_flow import ProviderFlow
 from ui.quality_controls import SIZE_WHILE_RECORDING, QualityControls
+from ui.song_jobs import AlbumJob, CoverJob, cover_colours
 
 # i18n: a toast: the multiview cannot open while a picture is cast to a TV
 MULTIVIEW_WHILE_CASTING = N_("Stop casting to show the multiview")
@@ -169,6 +190,12 @@ _VOLUME_MODIFIERS = (
     Qt.KeyboardModifier.ControlModifier.value | Qt.KeyboardModifier.MetaModifier.value
 )
 _DRAWER_ROWS = 40  # rows of a mixed list whose providers load their guides
+# The audio screen (spec §10). A live stream may list its sound before its picture: a channel is
+# radio once it has played this long with no picture listed. Whether what plays has a picture is
+# looked at this often while a channel plays (it may come and go), or until a file's is known.
+NO_PICTURE_S = 2.0
+SOUND_POLL_MS = 500
+FILE_TRACKS_WAIT_S = 10.0  # a file whose tracks libVLC hasn't listed by then is left as it is
 # The controls' title over a focused tile with no channel (the feature's name).
 MULTIVIEW_TITLE = N_("Multiview")  # i18n: the player controls' title over the multiview's grid
 # The fast-zap column's titles of the pinned groups.
@@ -211,6 +238,25 @@ class Overlays:
     quality_panel: Any = None  # 2.8: the ⚙ quality menu's panel above its button
     quality_question: Any = None  # 2.8: its own QuestionCard (convert on the server?)
     captions: Any = None  # 2.9: the AI captions over the picture (a CaptionsOverlay)
+    audio_screen: Any = None  # a song's or a radio channel's screen (AudioScreen; None: none)
+    more_menu: Any = None  # the audio dock's ⋯ menu (MoreMenu)
+
+
+@dataclass
+class _LocalList:
+    """A playlist of local files that plays (TVController.play_list): its name, its files with
+    their sizes (None: unknown), and the entry that plays, as its index and its target. A list
+    of songs only (`songs`) is an album: its entries' Tracks, in its order (their files' names
+    until their tags are read), and the queue it plays through while one of them plays."""
+
+    name: str
+    entries: tuple[str, ...]
+    sizes: tuple[Optional[int], ...]
+    index: int = 0
+    target: Optional[Target] = None
+    songs: bool = False
+    tracks: list[dict] = field(default_factory=list)
+    queue: Optional[AudioQueue] = None
 
 
 class TVController(QObject):
@@ -367,7 +413,7 @@ class TVController(QObject):
             open_drawer=self._open_drawer,
             live_section_loaded=self._live_section_loaded,
             error=self._error,
-            drop_autoplay=lambda: self._autoplay.drop(),
+            drop_autoplay=self._drop_card,
             autoplay_hint=lambda: self._autoplay.hint(),
             explain=self._explain,
             parent=self,
@@ -384,21 +430,75 @@ class TVController(QObject):
         # its link comes; said then (PipControls.make_room), never if the link fails.
         self._room_for: Optional[Target] = None
         self._cid: Optional[str] = None  # resume key of the VOD being played
+        # The video file whose first "playing" AI captions heard (_video_file_playing)
+        self._video_played: Optional[Target] = None
         self._channel: Optional[dict] = None  # the channel tuned last, for INFO and the drawer
         self._digits = ""  # number entry under way
         self._state = "idle"
         self._tuning_since = 0.0  # when the banner's keep-alive started (TUNING_CAP_S)
         self._guide = GuideController(overlays.guide, parent=self)
+        # A file's next episode in its folder (spec §8): the folder is listed on a thread as
+        # the episode opens; only the newest listing, for the file that still plays, counts.
+        self._listing = FolderListing(self)
+        self._listing.listed.connect(self._on_folder_listed)
+        self._listing_generation = 0
+        self._listing_for: Optional[tuple[Target, str]] = None  # the file listed for, its path
+        # A playlist of local files (spec §11): each entry's next is the list's, never its
+        # folder's; it is followed while one of its entries is what plays.
+        self._list: Optional[_LocalList] = None
+        # The audio screen (spec §10, Plan 4): what it is for (`_sound`: a song, a file with no
+        # picture, a radio channel; the large picture's), shown or about to be, and its kind:
+        # "song" (a music file: shown at its first `playing`), "file" (another local file:
+        # shown once it plays with no video track), "radio" (a channel: once it has played
+        # NO_PICTURE_S with none). It goes when a picture shows, at a new target, at a stop.
+        self._sound: Optional[Target] = None
+        self._sound_kind = ""
+        self._sound_shown = False
+        self._sound_in_list = False  # a playlist's song: its list's next, not an album's
+        self._sound_path = ""  # its file's path, as play_file was given it
+        self._sound_played: Optional[Target] = None  # whose first `playing` the screen heard
+        self._silent_since: Optional[float] = None  # a channel with no picture listed, since
+        self._sound_since = 0.0  # when a file's tracks were first looked for
+        self._sound_clock: Callable[[], float] = time.monotonic
+        self._stage_for_words = False  # Words turned on from the screen: its Stage (no pick)
+        self._radio_texts: tuple[str, str] = ("", "")  # a radio channel's lines, as shown
+        # The song the screen shows (its title, artist and album) and for whom: the system's
+        # media panel has them while that is still what plays (panel_facts).
+        self._song_facts: Optional[tuple[Target, str, str, str]] = None
+        self._sound_poll = QTimer(self, interval=SOUND_POLL_MS)
+        self._sound_poll.timeout.connect(self._sound_watch)
+        # A song's album (its folder's same album, read on a thread: one listing for the album,
+        # its next track takes the list it has) and its cover; only the newest answer, for the
+        # song that still plays, counts (as the episode listing's).
+        self._queue: Optional[AudioQueue] = None
+        self._album_job = AlbumJob(self)
+        self._album_job.read.connect(self._on_album_read)
+        self._album_generation = 0
+        self._album_for: Optional[tuple[Target, str]] = None  # the song listed for, its path
+        # The track a song that couldn't be played skipped to (item 4): its own failure before
+        # it plays is a second in a row, and ends the album.
+        self._skipped_to: Optional[Target] = None
+        # A playlist of songs' tags, read by name on a thread of its own (an album opened
+        # meanwhile never cuts it short); only the newest list's answer counts.
+        self._list_job = AlbumJob(self)
+        self._list_job.read.connect(self._on_list_read)
+        self._list_generation = 0
+        self._shuffle_rng = random.Random()  # a shuffled list of songs' first song
+        self._cover_job = CoverJob(self)
+        self._cover_job.ready.connect(self._on_cover_ready)
+        self._cover_generation = 0
+        self._cover_for: Optional[Target] = None
         self._autoplay = Autoplay(
             catalog=catalog,
             config=config,
             card=overlays.next_card,
-            play=self.play_vod,
+            play=self._play_following,
             is_current=self._still_current,
             external_mode=lambda: self._external_launcher() is not None,
             notify=self._notify,
             set_hint=self._flow.wait_hint,
             show_transport=overlays.transport.poke,
+            declined=self._release_file_hold,
             parent=self,
         )
         self._context = ContextActions(
@@ -745,6 +845,24 @@ class TVController(QObject):
         transport.previousRequested.connect(partial(self.handle, Action.PREVIOUS))
         transport.infoRequested.connect(partial(self.handle, Action.INFO))
         transport.favoriteRequested.connect(self._favorite_playing)
+        # The audio dock's own buttons (Plan 4): the album's tracks, shuffle, repeat, the volume.
+        docked: tuple[tuple[str, Callable[..., None]], ...] = (
+            ("prevTrackRequested", self._previous_track),
+            ("nextTrackRequested", self._next_track),
+            ("shuffleRequested", self._toggle_shuffle),
+            ("repeatRequested", self._cycle_repeat),
+            ("volumeSetRequested", self._mixer.set_main_level),
+        )
+        for name, handler in docked:
+            signal = getattr(transport, name, None)
+            if signal is not None:
+                signal.connect(handler)
+        screen = self.overlays.audio_screen
+        if screen is not None:
+            screen.viewPicked.connect(self._on_view_picked)
+            screen.trackPicked.connect(self._on_track_picked)
+            screen.wordsRequested.connect(self._on_words_requested)
+            screen.upNextRequested.connect(lambda: screen.set_view("album"))  # not a pick
         self._live_controls.wire()  # its record button too (2.2)
         self._mixer.wire()
         self._tracks.wire()
@@ -781,6 +899,7 @@ class TVController(QObject):
         self._closed = True
         self._lanes.close()
         self._autoplay.close()
+        self._sound_poll.stop()
         if self._online is not None:
             self._online.shutdown()  # a sign-in ends, never holding up the quit
         self._tuning.stop()
@@ -812,6 +931,38 @@ class TVController(QObject):
 
     def select_provider(self, name: Optional[str] = None, *, force_refresh: bool = False) -> None:
         self._flow.select_provider(name, force_refresh=force_refresh)
+
+    def hold_for_file(self, on: bool) -> None:
+        """A file opened in QiTV is on its way or plays (`on`): nothing opens over it (see
+        ProviderFlow.hold_for_file), nor does the Next card's episode (it would count as a
+        choice made since: TVWindow.file_gives_way). The controller lets go when the file
+        ends (after the Next card of its folder's next episode, unless that plays), is stopped,
+        fails or gives way to another title (_before_new_target)."""
+        if on:
+            self._autoplay.drop()
+        self._flow.hold_for_file(on)
+
+    def hold_for_read(self) -> None:
+        """A start's playlist is read (Ruling P4-3): the start waits for it, without spending
+        it (ProviderFlow.hold_for_read), until read_over."""
+        self._flow.hold_for_read()
+
+    def read_over(self, *, as_file: bool) -> bool:
+        """The start's playlist was read. `as_file` (a list of files, one HLS stream, one with
+        none of its files there, one that couldn't be read): the start is held as a film's
+        (hold_for_file); else (a provider's list, a newer choice) it starts as any start. True
+        when a read held the start and it is now held as a file's; False when none did."""
+        if not self._flow.reading():
+            return False
+        if as_file:
+            self.hold_for_file(True)
+            return True
+        self._flow.read_over()
+        return False
+
+    def when_idle(self, callback: Callable[[], None]) -> None:
+        """`callback` now, or once the file held for is over."""
+        self._flow.when_idle(callback)
 
     def stop_live(self) -> None:
         """Stop what plays (window close, self-update): its slot goes back once released.
@@ -846,7 +997,8 @@ class TVController(QObject):
         target, self._resume = self._resume, None
         if not self._closed and target is not None and target is self._current:
             again = replace(target, zapped=False, retried=False, start_over=False)
-            self._request(replace(again, archive_at=None, archive_until=None))  # live
+            again = replace(again, archive_at=None, archive_until=None)  # live
+            self._request(again, chosen_now=False)  # what played: no newer choice
 
     def stop_for_library(self) -> None:
         """Stop what plays, waiting for nothing: the corner player's ×, or the Library opened
@@ -881,6 +1033,7 @@ class TVController(QObject):
     def _stop_all(self) -> None:
         """Stop what plays: no link on its way opens, the player's overlays close, a movie's
         position is saved, both pictures stop."""
+        stopped = self._current
         self._cancel_external()
         self._lanes.supersede()  # an external play waiting for its link no longer plays
         self._lanes.drop_tune()  # a link on its way never opens
@@ -905,6 +1058,11 @@ class TVController(QObject):
         self._set_recording_aside()  # 2.6: a recording records on in the background
         self._live_controls.stop_tune()
         self._current, self._cid = None, None
+        self._end_sound()  # the song's screen and its dock (dismiss() keeps the dock)
+        self._opening_over()
+        if stopped is not None and stopped.local:
+            # A file stopped (not one still looked at: it plays once found, held for).
+            self._flow.hold_for_file(False)
 
     def playing(self) -> bool:
         """Something plays, or its stream is opening; or the channel plays small while the
@@ -1001,12 +1159,108 @@ class TVController(QObject):
         since = now - min(back, reach) if reach > timedelta(0) else now
         return now, self._programmes(channel, since, limit)
 
-    def play_file(self, path: str) -> None:
+    def play_file(self, path: str, size: Optional[int] = None, *, start_over: bool = False) -> None:
         """Play a local media file (File → Open File…) as a movie: no link, no history.
 
-        It is no provider's: nothing records it, and no position is saved for it.
+        It is no provider's: nothing records it in a history. With its `size`, it goes on
+        from where it stopped (its name and size are its resume key), unless `start_over`;
+        without one, from the start and no position is kept. A song plays on its screen, its
+        album after it (Plan 4).
         """
-        self._play_local(path, Path(path).name)
+        target = self._open_file(path, size, start_over=start_over)
+        name = Path(path).name
+        if target is not None and target is self._current and is_video(path):
+            if parse_episode(name) is not None:
+                # An episode: its folder may name the next one (_on_folder_listed).
+                self._listing_generation += 1
+                self._listing_for = (target, path)
+                self._listing.start(self._listing_generation, str(Path(path).parent))
+
+    def _open_file(
+        self, path: str, size: Optional[int], *, start_over: bool = False, in_list: bool = False
+    ) -> Optional[Target]:
+        """A local file plays (play_file's, a playlist entry's: `in_list`): resumed by its name
+        and `size` (unless `start_over`); a song's key is marked as audio. Its new target (None
+        while QiTV closes)."""
+        name = Path(path).name
+        key = local_key(name, size) if size is not None else None
+        if key and is_music(path):
+            self.watch.mark_audio(key)
+        return self._play_local(path, name, resume_key=key, start_over=start_over, in_list=in_list)
+
+    def play_list(
+        self,
+        name: str,
+        entries: Sequence[str],
+        sizes: Sequence[Optional[int]] = (),
+        start: Optional[int] = None,
+    ) -> None:
+        """A playlist of local files, `name`d, plays from its first entry (spec §11), or from
+        `start` (a folder's: the entry the viewer stopped part-way into, which resumes there;
+        the list keeps the entries before it): each entry's next is the list's next entry
+        ("local_next" in its play context, with no season or number), for the transport's Next
+        and, with "Auto-play next episode" on, the Next card; no entry's folder is listed.
+        `sizes` (the router read them off the GUI thread) give each its resume key.
+
+        A list of songs only (by their extensions) is an album named after it on the audio
+        screen (Plan 4, Task 9): its entries in its order, their tags read by name on a thread
+        (those files only, never their folders), shuffle and repeat as an album's, no card
+        between two songs; shuffled with no `start`, it starts at a song of its own picking.
+        In any other list a song is a lone song on its screen, and the list's next entry plays
+        after it with no card."""
+        paths = tuple(str(entry) for entry in entries)
+        if not paths:
+            return
+        known = tuple(sizes)[: len(paths)]
+        listed = _LocalList(name, paths, known + (None,) * (len(paths) - len(known)))
+        self._list = listed
+        self._list_generation += 1  # an older list's songs, read late, reach nothing
+        self._list_job.stop()  # (they stop being read between two files)
+        first = 0 if start is None else min(max(start, 0), len(paths) - 1)
+        if self._screen() is not None and all(is_song(p) for p in paths):
+            listed.songs = True
+            listed.tracks = [unread_track(p, s) for p, s in zip(paths, listed.sizes)]
+            self._list_job.start_files(self._list_generation, list(zip(paths, listed.sizes)))
+            if start is None and self._shuffle_setting():
+                first = self._shuffle_rng.randrange(len(paths))
+        self._play_entry(first)
+
+    def _play_entry(self, index: int, *, start_over: bool = False) -> None:
+        """The list's entry at `index` plays (from its start with `start_over`: Play again),
+        its next entry as what follows it (a list of songs: its queue's next, with no card)."""
+        listed = self._list
+        if listed is None:
+            return
+        # A folder's listing still on its way (a file before the list) never reaches it.
+        self._listing_generation += 1
+        self._listing_for = None
+        path = listed.entries[index]
+        listed.index = index  # (a list of songs' queue opens on its row: _list_song_opens)
+        target = self._open_file(path, listed.sizes[index], start_over=start_over, in_list=True)
+        listed.target = target
+        opens = getattr(self.window_actions, "list_entry_opens", None)
+        if target is not None and target is self._current and callable(opens):
+            opens(target, path)  # the subtitle files dropped for this entry load once it opens
+        if target is not None and target is self._current and not listed.songs:
+            self._list_follows(listed, target)
+
+    def _list_follows(self, listed: _LocalList, target: Target) -> None:
+        """`target`, the list's entry that plays, has the list's next entry as what follows it
+        ("local_next"), for the transport's Next and the Next card; the last has none."""
+        index = listed.index
+        if index + 1 >= len(listed.entries):
+            return
+        following = listed.entries[index + 1]
+        entry = {
+            "name": Path(following).stem,
+            "season": None,
+            "number": None,
+            "local_path": following,
+            "size": listed.sizes[index + 1],
+        }
+        target.context = play_context({LOCAL_NEXT: entry})
+        self.overlays.transport.set_next_available(self._autoplay.has_next(target))
+        self._dock_follows()
 
     def play_recording(self, item: dict, start_over: bool = False) -> None:
         """A recording from the Library (2.8): its file plays as a movie from where it stopped
@@ -1028,14 +1282,20 @@ class TVController(QObject):
         resume_key: Optional[str] = None,
         start_over: bool = False,
         item: Optional[dict] = None,
-    ) -> None:
+        in_list: bool = False,
+    ) -> Optional[Target]:
         """`item`: the Library's recording (2.8), kept on what plays so that a phone can
-        take it over (play_elsewhere)."""
+        take it over (play_elsewhere); `in_list`: a playlist's entry. The file's new target
+        (None while QiTV closes). A song shows the audio dock at once (its screen as it plays);
+        anything else a film's controls until it is known to have no picture."""
         if self._closed:
-            return
+            return None
+        if not in_list:
+            self._list_job.stop()  # a list of songs given up: its songs stop being read
         self._flow.leave_library()
         url = Path(path).absolute().as_uri()
         target = Target({**(item or {}), "name": title, "cmd": url}, "movies", title, local=True)
+        self._before_new_target(target)
         self._forget_stopped()  # 2.6: a newer choice than what Stop stopped
         self.leave_multiview(keep_pip=False)  # the multiview is for live TV
         self._close_pip()  # picture in picture is for live TV
@@ -1058,7 +1318,72 @@ class TVController(QObject):
         self._tuner.open(self._guarded(target, open_file), local=True)  # no provider slot
         self.overlays.banner.dismiss()
         self.overlays.transport.set_next_available(False)
-        self.overlays.transport.show_vod(title, "")
+        if self._current is target and self._sound_opens(target, path, in_list=in_list):
+            self._show_dock(title)
+        else:
+            self.overlays.transport.show_vod(title, "")
+        return target
+
+    def _on_folder_listed(self, generation: int, listing: list) -> None:
+        """The episode's folder, listed on its thread: the same show's next episode in it
+        becomes the file's play context ("local_next"), for the Next card and the transport's
+        Next. A listing that comes after another title was chosen changes nothing."""
+        listed_for = self._listing_for
+        if self._closed or generation != self._listing_generation or listed_for is None:
+            return
+        target, path = listed_for
+        self._listing_for = None
+        if target is not self._current:
+            return
+        following = next_in_folder(path, listing)
+        if following is None:
+            return  # the last one in its folder, or the folder could not be read
+        target.context = play_context({LOCAL_NEXT: following})
+        self.overlays.transport.set_next_available(self._autoplay.has_next(target))
+        self._dock_follows()
+
+    def _dock_follows(self) -> None:
+        """What follows changed (a folder's next episode, a playlist's next entry): the audio
+        dock's ⏭ says so, while it shows."""
+        if getattr(self.overlays.transport, "audio", lambda: False)():
+            self._show_audio_state()
+
+    def _play_following(self, item: dict, kind: str, context: dict) -> None:
+        """What follows a movie or an episode (Autoplay's play): a file's next episode plays
+        as a file opened in QiTV, held as Play again holds it, its play context only what its
+        own folder's listing gives it; a playlist's next entry as the list's (_play_entry); a
+        provider's title through play_vod."""
+        path = item.get("local_path")
+        if not path:
+            self.play_vod(item, kind, context)
+            return
+        size = item.get("size")
+        self._flow.hold_for_file(True)  # nothing opens over it (the welcome card) until it ends
+        listed = self._list
+        if listed is not None and listed.target is not None and listed.target is self._current:
+            following = listed.index + 1
+            if following < len(listed.entries) and listed.entries[following] == path:
+                self._play_entry(following)
+                return
+        self.play_file(str(path), size if isinstance(size, int) else None)
+
+    def _release_file_hold(self) -> None:
+        """The Next card over a file that ended closed without playing (Esc), or gave way to
+        another choice: the hold kept for the card goes (what waited for the film, the welcome
+        card). A provider's title's card leaves alone the hold of a file still looked at."""
+        current = self._current
+        if not self._closed and current is not None and current.local:
+            self._flow.hold_for_file(False)
+
+    def _drop_card(self) -> None:
+        """A newer choice than the Next card's offer (a link asked for, the welcome card asked
+        for, a provider setup): the card closes without a reply, and a file's end that kept its
+        hold for the card lets go, after the card is gone. Autoplay.drop() alone never does:
+        a file opened, or Next, drops it just before holding again."""
+        offered = self._autoplay.offered()
+        self._autoplay.drop()
+        if offered:
+            self._release_file_hold()  # a file's end kept the hold for the card
 
     def settings_saved(self) -> None:
         """Settings were saved: a new live latency reaches the running channel at once.
@@ -1157,7 +1482,11 @@ class TVController(QObject):
             delta = 1 if action is Action.MEDIA_NEXT else -1
             if drawer.isVisible():
                 return  # the drawer is browsing; play/pause still works
-            if self._on_demand():
+            if self._album_plays() or self._keys_follow_dock():  # the dock's ⏮ ⏭ (Plan 4)
+                self._next_track() if delta > 0 else self._previous_track()
+            elif delta < 0 and self._audio_dock_shows():
+                self._previous_track()  # a lone song's ⏮, as the dock's: from its start
+            elif self._on_demand():
                 self._seek(delta * SEEK_STEP_MS)
             else:
                 self.zap.step(delta)
@@ -1294,6 +1623,11 @@ class TVController(QObject):
         if target is None or self._closed:
             return
         if target.local:
+            self._flow.hold_for_file(True)  # a film again: the welcome card goes until it ends
+            listed = self._list
+            if listed is not None and listed.target is target:
+                self._play_entry(listed.index, start_over=True)  # its list goes on after it
+                return
             self.play_file(QUrl(str(target.item.get("cmd") or "")).toLocalFile())
         elif target.live:
             key = target.group_key or ALL_GROUP_ID
@@ -1380,6 +1714,7 @@ class TVController(QObject):
             overlays.sound_panel,
             overlays.subtitle_panel,
             overlays.subtitle_search,
+            overlays.more_menu,  # the audio dock's ⋯
         )
         return not any(menu is not None and menu.isVisible() for menu in menus)
 
@@ -1502,7 +1837,8 @@ class TVController(QObject):
                 zapped=from_zap,
                 archive_at=archive[0] if archive is not None else None,
                 archive_until=archive[1] if archive is not None else None,
-            )
+            ),
+            chosen_now=True,
         )
         self._tuning_since = time.monotonic()
         self._tuning.start(TUNING_KEEP_MS)
@@ -1628,7 +1964,7 @@ class TVController(QObject):
         self._freed_for = target if kept else None
         self._room_for = target if self._pip is not None and self._pip.has_room() else None
         self._lanes.supersede()  # a newer choice than an external play waiting for its link
-        self._request(target)
+        self._request(target, chosen_now=True)
 
     def _media_menu(self, item: dict) -> Optional[dict]:
         """What the ⚙ quality menu offers for a title (the catalog's media_menu; None: none)."""
@@ -1650,7 +1986,8 @@ class TVController(QObject):
             self._media_quality.pop(provider, None)
         start = max(0, int(self.session.time_ms() or 0)) if self._has_media() else None
         self._request(
-            replace(target, quality=quality, start_ms=start, start_over=False, zapped=False)
+            replace(target, quality=quality, start_ms=start, start_over=False, zapped=False),
+            chosen_now=True,
         )
 
     # ---- AI captions on a provider's film (2.9) ----------------------------------------------
@@ -1734,7 +2071,7 @@ class TVController(QObject):
         if live is not None and live.recording():
             self._toast(SIZE_WHILE_RECORDING)
             return
-        self._request(replace(target, max_height=cap, zapped=False, retried=False))
+        self._request(replace(target, max_height=cap, zapped=False, retried=False), chosen_now=True)
         self._live_controls.choose_size(target, cap)
 
     def _title_beside_channel(self) -> bool:
@@ -1785,12 +2122,22 @@ class TVController(QObject):
                 return channel
         return kept
 
-    def _request(self, target: Target) -> None:
+    def _request(self, target: Target, *, chosen_now: bool = False) -> None:
+        """Ask for `target`'s link. `chosen_now`: the viewer chose it now (pressing a channel,
+        the guide, the quality menu); False, the default, for anything automatic (a retry,
+        an archive's end) or chosen earlier and only asked for again (queued behind another
+        link, or held by its provider's setup): a file still looked at is not dropped by it."""
+        if chosen_now and not target.local:
+            self._file_gives_way()  # a file still looked at is older than this choice
         self._forget_stopped()  # 2.6: a newer choice than what Stop stopped
         self._give_back_later = False  # the large picture has a newer choice
         self._cancel_external()
         self._flow.drop_autotune()  # a choice made before the live section loaded comes first
-        self._autoplay.drop()  # a newer choice than what the Next card offers
+        # A folder's late listing gives the file no Next now, nor once this link fails; nor a
+        # song's late album its list.
+        self._listing_generation += 1
+        self._album_generation += 1
+        self._drop_card()  # a newer choice than what the Next card offers
         self._lanes.request(target)
 
     def _follow_queue(self, settled: Target) -> bool:
@@ -1804,7 +2151,7 @@ class TVController(QObject):
             logger.debug(
                 "Dropping the link for %s: %s was chosen since", settled.title, queued.title
             )
-            self._request(queued)
+            self._request(queued, chosen_now=False)  # chosen as it was queued
         return True
 
     def _is_stay(self, target: Optional[Target]) -> bool:
@@ -1957,6 +2304,9 @@ class TVController(QObject):
             listing.playing_changed()
 
     def _deliver(self, target: Target, url: str) -> None:
+        # Its link came: it replaces what plays. It was chosen as it was asked for
+        # (_request), perhaps before a file opened since: that file isn't dropped for it.
+        self._before_new_target(target, delivered=True)
         item = target.item
         launcher = self._external_launcher()
         multiview = target.live and self.multiview_shown()
@@ -2094,6 +2444,10 @@ class TVController(QObject):
             except Exception as e:
                 # What played before was stopped to open this: nothing is current now.
                 self._current, self._cid = None, None
+                if target.local:
+                    self._flow.hold_for_file(False)  # the file could not open
+                    self._end_sound()  # a song's screen kept from the song before it
+                    self._opening_over()
                 self._log_failure(f"play {target.title}", e)
                 if not target.live:
                     self._give_small_channel_large()
@@ -2637,8 +2991,10 @@ class TVController(QObject):
         if target is None and slot.channel is not None:  # a multiview tile's: no view kept
             title = str(slot.channel.get("name") or "")
             target = Target(slot.channel, "live", title, group_key=slot.group_key or "")
+        self._before_new_target(target)
         self._current, self._cid, self._current_url = target, view.cid, view.url
         self._state = self._states.get(name, "idle")
+        self._sound_after_swap()  # a radio channel brought back: its screen as it plays
         self._tuning.stop()
         self._autoplay.drop()  # the Next card was the stand-in's
         if self._digits:
@@ -2980,6 +3336,7 @@ class TVController(QObject):
         old.channel = shown.item if shown is not None else None  # what the small one shows
         old.group_key = shown.group_key if shown is not None else None
         self._use_slot(new)
+        self._before_new_target(view.target)
         # A movie's resume key comes back with its slot: its position is saved again.
         self._current, self._cid, self._current_url = view.target, view.cid, view.url
         large_reopen, small_reopen = reopens
@@ -3000,6 +3357,7 @@ class TVController(QObject):
         channel = self._channel
         transport = self.overlays.transport
         transport.set_paused(self._state == "paused")
+        self._sound_after_swap()  # a radio channel swapped in: its screen, without a new state
         grid = self.multiview_shown()  # a tile took the focus: the grid shows it
         if channel is not None:
             self.zap.tuned(channel)
@@ -3060,12 +3418,16 @@ class TVController(QObject):
         self._live_controls.use_slot(tuner, slot.live, slot.playback)
 
     def _connect_session(self, session, connect: bool) -> None:
-        for signal, slot in (
+        pairs = [
             (session.stateChanged, self._on_state),
             (session.positionChanged, self._on_position),
             (session.errorOccurred, self._on_error),
             (session.ended, self._on_ended),
-        ):
+        ]
+        shown = getattr(session, "pictureShown", None)
+        if shown is not None:  # a picture shows: the audio screen goes
+            pairs.append((shown, self._on_picture_shown))
+        for signal, slot in pairs:
             if connect:
                 signal.connect(slot)
             else:
@@ -3128,6 +3490,68 @@ class TVController(QObject):
         tuner = slot.tuner
         assert isinstance(tuner, LiveTuner)
         return tuner
+
+    def _before_new_target(self, target: Optional[Target], *, delivered: bool = False) -> None:
+        """`target` replaces what the large picture shows (None: an outside player or a phone
+        takes it, nothing plays here). A file opened in QiTV gives way to anything but another
+        file: what waited for it (the welcome card, the update question) may come now, and
+        QiTV's mark over it goes (_opening_over). A file still being looked at gives way too,
+        to a choice made now (a swap, a bring-back, an outside player), not to a link
+        `delivered` for a choice made before it was opened.
+        AI captions that came on by themselves for a video file go off before anything else
+        opens (CaptionsController.target_changing). The audio screen and its dock go too, but
+        for a song after a song (no black page between two)."""
+        self._sound_gives_way(target)
+        if target is None or not target.local:
+            self._list_job.stop()  # a list of songs given up: its songs stop being read
+            if not delivered:
+                self._file_gives_way()
+            self._flow.hold_for_file(False)
+            self._opening_over()
+        captions = getattr(self.window_actions, "captions", None)
+        if captions is not None:
+            captions.target_changing(target is not None and target.video_file)
+
+    def _opening_over(self) -> None:
+        """A file opened in QiTV no longer opens in the large picture (it failed or ended,
+        another title replaces it, Stop): QiTV's mark over it goes (TVWindow.opening_over)."""
+        over = getattr(self.window_actions, "opening_over", None)
+        if callable(over):
+            over()
+
+    def _file_gives_way(self) -> None:
+        """Something other than a file was chosen for the large picture: a file opened before
+        it, still being looked at, isn't played once its check is back (TVWindow); the later
+        choice wins."""
+        gives_way = getattr(self.window_actions, "file_gives_way", None)
+        if callable(gives_way):
+            gives_way()
+
+    def _video_file_playing(self) -> None:
+        """The large picture's player plays: a video file's first time (not a pause's end, nor
+        a song) lets AI captions come back on for it (CaptionsController.local_video_playing)."""
+        target = self._current
+        if target is None or target is self._video_played or not target.video_file:
+            return
+        if self.session.url != target.item.get("cmd"):
+            return  # what played before it, still reported
+        self._video_played = target
+        captions = getattr(self.window_actions, "captions", None)
+        if captions is not None:
+            captions.local_video_playing()
+
+    def own_subtitles_shown(self) -> bool:
+        """The large picture shows one of its own subtitle tracks, or is about to: a subtitle
+        file chosen (libVLC lists its track a little later), or files opened with the video
+        that load once it plays (the window's)."""
+        if self._closed:
+            return False
+        if any(shown for _id, _name, shown in self._tracks.subtitle_choices()):
+            return True
+        if self.session.subtitle_file() is not None:
+            return True
+        due = getattr(self.window_actions, "subtitles_due", None)
+        return callable(due) and bool(due())
 
     def _prepare(self, session, target: Target, previous: Optional[Target]) -> None:
         """`target` is about to open in `session`, the large picture's player: its sound, its
@@ -3282,7 +3706,7 @@ class TVController(QObject):
         if self._is_stay(newest):
             self._lanes.take_queued()
         else:
-            self._request(newest)
+            self._request(newest, chosen_now=False)  # chosen before its provider was ready
 
     def _live_section_loaded(self) -> None:
         context = self.zap.context
@@ -3485,13 +3909,16 @@ class TVController(QObject):
         if state in ("paused", "playing"):
             self.overlays.transport.set_paused(state == "paused")
         if state == "playing":
+            self._skipped_to = None  # it plays: no longer a row of songs that can't
             self._live_controls.on_playing()  # direct play: a held "unavailable" shows now
             self._picture.on_playing()  # after the sleep timer: the computer stays awake again
+            self._video_file_playing()
+        self._sound_state(state)
 
     def _on_position(self, position_ms: int, length_ms: int) -> None:
         if self._closed or self._current is None or self._current.live:
             return
-        if self._cid is not None:  # a local file has no resume key
+        if self._cid is not None:  # a channel has none; a title or a local file has one
             try:
                 self.watch.update_position(self._cid, position_ms, length_ms)
             except Exception as e:
@@ -3531,11 +3958,19 @@ class TVController(QObject):
             self._explain_item(target.item, target.title)
 
     def _on_error(self, message: str) -> None:
-        if self._closed or self._tuner.running():
+        if self._closed:
+            return
+        self._opening_over()  # the error toast shows instead (even as the file is played)
+        current = self._current
+        if current is not None and current.local:
+            if self._skip_unplayable(current):
+                return  # its album's next song plays instead
+            self._flow.hold_for_file(False)  # the file failed to play
+            self._end_sound()  # a song's screen and dock (an album stops there)
+        if self._tuner.running():
             return  # LiveSession recovers pipeline errors and reports the rest (failed)
         if self._live_controls.catchup.on_error(message):
             return  # the archive's: it says so and goes live
-        current = self._current
         if current is not None and current.live:
             if self._live_controls.relink(current):
                 return  # STB play tokens expire: a fresh link first (after a wait, again)
@@ -3561,8 +3996,34 @@ class TVController(QObject):
         if self.swap():
             pip.close()  # the failed title, small now
 
+    def _skip_unplayable(self, current: Target) -> bool:
+        """A song of an album or of a list of songs (a folder's too) can't be played (gone
+        since the listing, broken): its next one plays, held, after a short toast, as a music
+        player skips it (item 4). False, and the error ends the album as before, for a second
+        in a row (the song a skip opened fails before it plays), with nothing after it, or
+        with a newer choice on its way. A video's or a mixed list's error ends its list."""
+        skipped_to, self._skipped_to = self._skipped_to, None
+        queue = self._queue
+        if current is skipped_to or queue is None or not self._album_plays():
+            return False
+        if self._lanes.busy():
+            return False  # the newer choice plays when its link comes
+        before = queue.current
+        index = queue.next(auto=False)  # (repeat one: the next song, not this one again)
+        if index is None or index == before:
+            return False
+        logger.info("A song that can't be played is skipped")
+        # i18n: an error toast: a file opened in QiTV is gone or unreadable ({name}: its name)
+        self._error(tr("Couldn't open “{name}”", name=current.title))
+        self._play_track(index, start_over=False)
+        self._skipped_to = self._current
+        return True
+
     def _on_ended(self) -> None:
-        if self._closed or self._current is None:
+        if self._closed:
+            return
+        self._opening_over()  # a file that ended before any picture
+        if self._current is None:
             return
         current = self._current
         if not current.live and self._media is not None:
@@ -3587,8 +4048,13 @@ class TVController(QObject):
             self.watch.flush()
         except Exception as e:
             self._log_failure("save the watch state", e)
+        if self._sound_goes_on(current):
+            return  # the album's next track (or this one again) plays, held: no card
         if not self._autoplay.on_ended(current):
+            if current.local:
+                self._flow.hold_for_file(False)  # the file played to its end
             self._toast(translate(FINISHED_TEXT))
+        # Else the Next card offers what follows: a file's hold waits for it (Esc lets go).
 
     def _on_next_requested(self) -> None:
         """The transport's Next: what follows the movie or episode plays at once."""
@@ -3599,6 +4065,770 @@ class TVController(QObject):
     def _still_current(self, target: Target) -> bool:
         """`target` still plays and nothing newer was chosen (autoplay may follow it)."""
         return target is self._current and not self._lanes.busy()
+
+    # ---- the audio screen (spec §10, Plan 4) --------------------------------------------------
+
+    def sound_shown(self) -> bool:
+        """The audio screen shows what plays (a song, a file with no picture, a radio channel)."""
+        return not self._closed and self._sound_shown
+
+    def song_shown(self) -> bool:
+        """The audio screen shows a song or a file with no picture (not a radio channel's): a
+        song opened now keeps it (the window draws no mark over it)."""
+        return self.sound_shown() and self._sound_kind in ("song", "file")
+
+    def panel_facts(self) -> Optional[tuple[str, str, str]]:
+        """What the system's media panel shows of the audio screen (TVWindow._show_now_playing,
+        with the screen's cover): the song's title, artist and album; a radio channel's name
+        alone (its stream's song or programme is no artist). None while the screen shows
+        nothing of what plays now (a film, a channel's picture, a song opening after another
+        song's facts): the panel has the title alone, as for a film."""
+        current = self._current
+        if not self.sound_shown() or current is None or current is not self._sound:
+            return None
+        if self._sound_kind == "radio":
+            return (current.title, "", "")
+        facts = self._song_facts
+        if self._sound_kind not in ("song", "file") or facts is None or facts[0] is not current:
+            return None
+        return facts[1:]
+
+    def _screen(self) -> Any:
+        return self.overlays.audio_screen
+
+    @staticmethod
+    def _local_path(target: Target) -> str:
+        return QUrl(str(target.item.get("cmd") or "")).toLocalFile()
+
+    def _sound_file(self, target: Target) -> str:
+        """`target`'s file, as it was opened (the album lists it so), else from its URL."""
+        if target is self._sound and self._sound_path:
+            return self._sound_path
+        return self._local_path(target)
+
+    def _is_song(self, target: Optional[Target]) -> bool:
+        return target is not None and target.local and is_music(self._local_path(target))
+
+    def _sound_opens(self, target: Target, path: str, *, in_list: bool) -> bool:
+        """A local file opens in the large picture (_play_local). A song: its dock now, its
+        screen at its first `playing` (True), its album listed on a thread; the same album's
+        song takes the list it has (one listing an album). Another file: looked at once it
+        plays (False: a film's controls meanwhile). A playlist's song (`in_list`) follows its
+        list, never its folder's album: a list of songs is its album (_list_song_opens), a
+        mixed list's song a lone song."""
+        screen = self._screen()
+        if screen is None:
+            return False
+        self._sound_poll.stop()
+        self._sound, self._sound_in_list = target, in_list
+        # Its path as given (the album's own spelling: a file URL's round trip turns Windows'
+        # backslashes into slashes, and the album's list would no longer know it).
+        self._sound_path = path
+        if not is_music(path):
+            self._sound_kind = "file"
+            return False
+        self._sound_kind = "song"
+        listed = self._list if in_list else None
+        if listed is not None and listed.songs:
+            return self._list_song_opens(screen, target, path, listed)
+        queue = self._queue
+        index = None
+        if queue is not None and not in_list and self._song_list() is None:
+            index = queue.index_of(path)  # (a song opened by hand gives a list of songs up)
+        if queue is not None and index is not None:
+            queue.pick(index)  # the same album: its list stays, on this song's row now
+            screen.set_tracks(queue.tracks, index)
+            if self._sound_shown:  # the listing's tags until the player's (as it plays)
+                self._show_song(screen, queue.track(index), path, target)
+            return True
+        self._queue = None
+        screen.set_tracks([], -1)  # another album's list goes at once
+        screen.set_view(self._opening_view())
+        if not in_list:
+            self._album_generation += 1
+            self._album_for = (target, path)
+            self._album_job.start(self._album_generation, path)
+        return True
+
+    def _list_song_opens(self, screen: Any, target: Target, path: str, listed: _LocalList) -> bool:
+        """A list of songs' entry opens (its row: `listed.index`): the list is its album (on
+        the Album view, unless a view was picked), its queue the one it plays through while
+        its songs play on; after anything else (a film, a Stop) one anew from this entry, as
+        shuffle and repeat are now, and QiTV's drawn cover until the song's own. The song: its
+        dock now, its screen at its first `playing` (_show_sound). Always True."""
+        index = listed.index
+        queue = self._queue
+        if queue is None or queue is not listed.queue:
+            queue = AudioQueue(
+                listed.tracks, index, shuffle=self._shuffle_setting(), repeat=self._repeat_setting()
+            )
+            listed.queue = self._queue = queue
+            screen.set_cover(None, BRAND_COLOURS)  # another song's cover never shows on it
+            screen.set_view(self._opening_view(listed=len(queue) >= 2))
+        else:
+            queue.pick(index)  # (its queue chose it: it is that row already)
+        screen.set_tracks(queue.tracks, index)
+        if self._sound_shown:  # the read tags until the player's (as it plays)
+            self._show_song(screen, queue.track(index), path, target)
+        return True
+
+    def _song_list(self) -> Optional[_LocalList]:
+        """The list of songs (play_list) whose queue plays, else None (an album's, or none)."""
+        listed, queue = self._list, self._queue
+        if listed is None or queue is None or queue is not listed.queue:
+            return None
+        return listed
+
+    def _single_in_list(self) -> bool:
+        """The audio screen's is an entry of a mixed playlist (a lone song, a file with no
+        picture): the list's next entry follows it, and it has no shuffle or repeat."""
+        current = self._current
+        return (
+            self._sound_in_list
+            and current is not None
+            and current is self._sound
+            and self._song_list() is None
+        )
+
+    def _show_dock(self, title: str) -> None:
+        """The transport as the audio screen's dock (its audio mode), its toggles as they are."""
+        transport = self.overlays.transport
+        show_audio = getattr(transport, "show_audio", None)
+        if show_audio is None:
+            transport.show_vod(title, "")
+            return
+        show_audio(title, "")
+        self._show_audio_state()
+
+    def _show_audio_state(self) -> None:
+        set_state = getattr(self.overlays.transport, "set_audio_state", None)
+        if set_state is None:
+            return
+        queue = self._queue
+        if queue is not None:
+            set_state(queue.shuffle, queue.repeat, len(queue) >= 2)
+        elif self._single_in_list():  # its list's order: no shuffle, no repeat of its own
+            set_state(False, "off", False, has_next=self._follows(), has_repeat=False)
+        else:  # ⏭ still acts when its folder's next episode or its playlist's entry follows
+            set_state(
+                self._shuffle_setting(),
+                self._repeat_setting(),
+                False,
+                has_next=self._follows(),
+                has_repeat=self._sound_kind == "song",  # a file with no picture: no repeat
+            )
+
+    def _follows(self) -> bool:
+        """What plays on the audio screen has a next of its own, with no album: an audio-only
+        episode's next one in its folder, a playlist's next entry (Autoplay's)."""
+        current = self._current
+        return current is not None and current is self._sound and self._autoplay.has_next(current)
+
+    def _keys_follow_dock(self) -> bool:
+        """The audio dock shows with its ⏭ lit by what follows (_follows): the media keys do
+        what its ⏮ and ⏭ do (a film still opening, its dock not up yet, seeks as a film)."""
+        return self._audio_dock_shows() and self._follows()
+
+    def _audio_dock_shows(self) -> bool:
+        """The audio dock shows for what plays (a song, a file with no picture): the media
+        keys' ⏮ is its ⏮ (item 6); ⏭ is its own only while it is lit."""
+        current = self._current
+        return (
+            bool(getattr(self.overlays.transport, "audio", lambda: False)())
+            and current is not None
+            and current is self._sound
+            and self._sound_kind in ("song", "file")
+        )
+
+    def _shuffle_setting(self) -> bool:
+        return getattr(self.config, "audio_shuffle", False) is True
+
+    def _repeat_setting(self) -> str:
+        repeat = getattr(self.config, "audio_repeat", "off")
+        return repeat if repeat in REPEAT_MODES else "off"
+
+    def _picked_view(self) -> str:
+        view = getattr(self.config, "audio_view", "") or ""
+        return view if view in ("cover", "album", "stage") else ""
+
+    def _opening_view(self, *, listed: bool = False) -> str:
+        """The view a song or a channel opens on: the one picked by hand (remembered), else
+        Stage while Words turned on from the screen stay on, else Album with an album's list,
+        else Cover. Captions on from elsewhere don't change it."""
+        picked = self._picked_view()
+        if picked:
+            return picked
+        captions = getattr(self.window_actions, "captions", None)
+        if self._stage_for_words and captions is not None and self._words_on(captions):
+            return "stage"
+        return "album" if listed else "cover"
+
+    def _sound_gives_way(self, target: Optional[Target]) -> None:
+        """`target` replaces what plays: the audio screen and its dock go, but a song after a
+        song (or after a file shown on it) keeps them, its album too while it is on it (the
+        next song's tags take the old ones' place as it plays)."""
+        if self._is_song(target) and self._sound_kind in ("song", "file"):
+            self._sound_poll.stop()
+            visualizer = self._visualizer()
+            if visualizer is not None:
+                visualizer.rest()  # (its bars rest until the next one's sound is read)
+            return
+        self._end_sound()
+
+    def _end_sound(self) -> None:
+        """The audio screen goes with its dock and its album (a stop, an error, a film or a
+        channel instead): its album's read stops, and a late album or cover reaches nothing."""
+        self._sound_poll.stop()
+        self._sound, self._sound_kind, self._sound_played = None, "", None
+        self._sound_path = ""
+        self._song_facts = None
+        self._silent_since = None
+        self._queue = None
+        self._album_generation += 1
+        self._album_job.stop()  # a slow share's listing is read no longer
+        self._album_for = None
+        self._cover_generation += 1
+        self._cover_for = None
+        self._visualize("")
+        self._hide_sound()
+        transport = self.overlays.transport
+        if getattr(transport, "audio", lambda: False)():
+            transport.end_audio()
+
+    def _visualizer(self) -> Any:
+        """The Stage's bars (ui.visualizer; None: none)."""
+        return getattr(self.window_actions, "visualizer", None)
+
+    def _visualize(self, path: str) -> None:
+        """The Stage's bars follow `path`, the local file shown on the audio screen ("": none,
+        as for a radio channel; and a local HLS playlist's stream, which a helper would open a
+        second time)."""
+        visualizer = self._visualizer()
+        if visualizer is None:
+            return
+        if Path(path).suffix.lower() in PLAYLIST_EXTENSIONS:
+            path = ""
+        visualizer.follow(path, str(self.session.url or "") if path else "")
+
+    def _hide_sound(self) -> None:
+        self._sound_shown = False
+        screen = self._screen()
+        if screen is not None and not screen.isHidden():
+            screen.hide()
+
+    def _video_track(self) -> Optional[bool]:
+        has = getattr(self.session, "has_video_track", None)
+        return has() if callable(has) else None
+
+    def _tags(self) -> dict:
+        tags = getattr(self.session, "tags", None)
+        found = tags() if callable(tags) else None
+        return found if isinstance(found, dict) else {}
+
+    def _sound_state(self, state: str) -> None:
+        """The large picture's player changed state (_on_state): a song is known at its first
+        `playing` (its tags are read then), a file once its tracks are; a channel is watched
+        for its picture while it plays (only playing time counts)."""
+        screen = self._screen()
+        if screen is None or self._closed:
+            return
+        if state not in ("opening", "buffering"):  # (between two tracks: nothing flickers)
+            screen.set_playing(state == "playing")  # ended, failed or stopped: it rests
+        target = self._current
+        if target is None:
+            return
+        if target.live:
+            self._channel_state(target, state)
+        elif state == "playing" and target is self._sound and target is not self._sound_played:
+            if self.session.url == target.item.get("cmd"):  # not what played before it
+                self._file_playing(target)
+
+    def _channel_state(self, target: Target, state: str) -> None:
+        """A live channel's state: watched for its picture while it plays (_sound_watch). Its
+        stream ended or failed: the watch stops (a reconnect's `playing` starts it again)."""
+        if state != "playing":
+            self._silent_since = None  # only playing time counts
+            if state in ("ended", "error", "idle"):
+                self._sound_poll.stop()
+            return
+        if self._sound is not target or self._sound_kind != "radio":
+            self._sound, self._sound_kind, self._sound_played = target, "radio", None
+            self._sound_in_list, self._silent_since = False, None
+        if not self._sound_poll.isActive():
+            self._sound_poll.start()
+        self._sound_watch()
+
+    def _sound_after_swap(self) -> None:
+        """Another player is large now (a swap, a bring-back): a channel already playing there
+        is watched for its picture from now, not from its next state change."""
+        if self._state == "playing":
+            self._sound_state("playing")
+
+    def _file_playing(self, target: Target) -> None:
+        """A local file's first `playing`: a song shows its screen (unless its media has a
+        picture: an .m4a's video); another file shows it once its tracks say no picture."""
+        self._sound_played = target
+        has = self._video_track()
+        if self._sound_kind == "song":
+            if has is True:
+                self._sound_is_film(target)
+            else:
+                self._show_sound(target)
+        elif self._sound_kind == "file":
+            if has is False:
+                self._show_sound(target)
+            elif has is None:  # its tracks aren't listed yet: looked at again (_sound_watch)
+                self._sound_since = self._sound_clock()
+                self._sound_poll.start()
+            else:
+                self._sound, self._sound_kind = None, ""  # a film
+
+    def _sound_watch(self) -> None:
+        """The poll (SOUND_POLL_MS): a channel playing with no picture listed for NO_PICTURE_S
+        is radio (its screen shows); a picture listed hides it at once and the watch rests
+        until the channel's next `playing` (libVLC 3's track list only grows within an open:
+        a picture that goes away stays listed); a file is shown once its tracks say no
+        picture. Not listed (None): nothing changes. What it watched gone without a new
+        target (a recording's guard, the grid): the screen goes with it."""
+        target = self._current
+        if self._closed:
+            self._sound_poll.stop()
+            return
+        if target is None or target is not self._sound:
+            self._end_sound()
+            return
+        if self._state != "playing":
+            if target.live:
+                self._silent_since = None
+            return
+        if self._sound_kind == "radio":
+            self._watch_channel(target, self._video_track())
+        elif self._sound_kind == "file" and not self._sound_shown:
+            self._watch_file(target, self._video_track())
+        else:
+            self._sound_poll.stop()
+
+    def _picture_listed(self) -> None:
+        """A live channel shows a picture (listed, or pictureShown): its screen goes, and its
+        watch rests until its next `playing` (_channel_state)."""
+        self._silent_since = None
+        self._sound_poll.stop()
+        self._sound_kind = "picture"
+        self._hide_sound()
+
+    def _watch_channel(self, target: Target, has: Optional[bool]) -> None:
+        if has is True:
+            self._picture_listed()
+        elif self.multiview_shown():
+            self._silent_since = None
+            self._hide_sound()  # the grid's tiles are the pictures
+        elif has is False:
+            now = self._sound_clock()
+            if self._silent_since is None:
+                self._silent_since = now
+            if self._sound_shown:
+                self._refresh_radio(target)  # a stream's song, as it changes
+            elif now - self._silent_since >= NO_PICTURE_S:
+                self._show_sound(target)
+
+    def _watch_file(self, target: Target, has: Optional[bool]) -> None:
+        if has is False:
+            self._sound_poll.stop()
+            self._show_sound(target)
+        elif has is True or self._sound_clock() - self._sound_since > FILE_TRACKS_WAIT_S:
+            self._sound_poll.stop()
+            if has is True:
+                self._sound, self._sound_kind = None, ""  # a film
+
+    def _show_sound(self, target: Target) -> None:
+        """The audio screen shows `target`: a song or a file with its tags (the player's, else
+        its album listing's, else its file's name) and its cover (read on a thread); a radio
+        channel with its name, its song or programme, and its logo for a cover. QiTV's mark
+        opens out over it."""
+        screen = self._screen()
+        if screen is None:
+            return
+        if self._sound_kind == "radio":
+            screen.set_tracks([], -1)
+            screen.set_view(self._opening_view())
+            self._radio_texts = ("", "")
+            self._refresh_radio(target)
+            self._radio_cover(target)
+            self._visualize("")  # no bars for a live channel
+        else:
+            path = self._sound_file(target)
+            self._visualize(path)
+            tags = self._tags()
+            queue = self._queue
+            index = queue.index_of(path) if queue is not None else None
+            listed = queue.track(index) if queue is not None and index is not None else {}
+            self._show_song(
+                screen, {**listed, **{k: v for k, v in tags.items() if v}}, path, target
+            )
+            if index is None:  # no album's cover with it: QiTV's drawn one until its own
+                screen.set_cover(None, BRAND_COLOURS)
+            if self._sound_kind == "file":
+                screen.set_tracks([], -1)
+                screen.set_view(self._opening_view())
+                self._show_dock(target.title)
+            self._cover_generation += 1
+            self._cover_for = target
+            self._cover_job.start(self._cover_generation, path, str(tags.get("art_url") or ""))
+        self.words_changed()
+        if not self._sound_shown or screen.isHidden():
+            self._sound_shown = True
+            screen.show()
+        screen.set_playing(self._state == "playing")
+        if target.local:
+            self._opening_over()  # QiTV's mark goes (a file's waited for a picture)
+
+    def _show_song(self, screen: Any, tags: dict, path: str, target: Target) -> None:
+        """`target`'s song on the screen: its title (else its file's name), artist, album and
+        year (a list of songs' song: the list's name for its album, and no year, the song's
+        album's); the system's media panel has them too (panel_facts)."""
+        title = str(tags.get("title") or "") or Path(path).stem
+        artist, album = str(tags.get("artist") or ""), str(tags.get("album") or "")
+        year = str(tags.get("year") or "")
+        listed = self._song_list()
+        if listed is not None:
+            album, year = listed.name, ""
+        self._song_facts = (target, title, artist, album)
+        screen.show_song(title, artist, album, year=year)
+
+    def _refresh_radio(self, target: Target) -> None:
+        """A radio channel's name, then the song its stream names (else the programme on)."""
+        screen = self._screen()
+        if screen is None:
+            return
+        playing = str(self._tags().get("now_playing") or "")
+        if not playing:
+            on_now = self.now_title(target.item)
+            playing = on_now[0] if on_now else ""
+        texts = (target.title, playing)
+        if texts != self._radio_texts:
+            self._radio_texts = texts
+            screen.show_song(target.title, playing, "")
+
+    def _radio_cover(self, target: Target) -> None:
+        """A radio channel's logo is its cover (none yet: QiTV's drawn one, and the logo once
+        it comes, _on_logo_ready); its colours read from a small copy, as a song's."""
+        screen = self._screen()
+        if screen is None:
+            return
+        logo = self._logo(target.item)
+        image = logo.toImage() if logo is not None and not logo.isNull() else None
+        screen.set_cover(image, cover_colours(image))
+
+    def _sound_is_film(self, target: Target) -> None:
+        """What opened as sound shows a picture after all: a film's controls, no screen (a list
+        of songs' entry: the list goes on after it as after any video, _list_follows)."""
+        self._end_sound()
+        listed = self._list
+        if listed is not None and listed.songs and listed.target is target:
+            self._list_follows(listed, target)
+        transport = self.overlays.transport
+        transport.set_next_available(self._autoplay.has_next(target))
+        transport.show_vod(target.title, target.subtitle)
+
+    def _on_picture_shown(self) -> None:
+        """The large picture's first picture of this open: the audio screen goes at once (a
+        live channel's watch rests until its next `playing`: _picture_listed)."""
+        target = self._current
+        if self._closed or target is None or target is not self._sound:
+            return
+        if target.live:
+            self._picture_listed()
+        elif self._sound_shown or getattr(self.overlays.transport, "audio", lambda: False)():
+            self._sound_is_film(target)  # the screen or the dock was up: the film's controls
+        else:  # a film whose tracks weren't listed yet: its controls stay as they are
+            self._sound_poll.stop()
+            self._sound, self._sound_kind = None, ""
+
+    def _on_album_read(self, generation: int, tracks: list, whole: bool) -> None:
+        """The song's album, listed on its thread (AlbumJob.read): its list on the screen (the
+        Album view, unless a view was picked) and the queue the song's end follows. A listing
+        that comes after another title was chosen changes nothing; one cut short (its time,
+        its cap) can't say what follows its last track: no album (review item 12)."""
+        listed_for = self._album_for
+        if self._closed or generation != self._album_generation or listed_for is None:
+            return
+        target, path = listed_for
+        self._album_for = None
+        if target is not self._current or target is not self._sound:
+            return
+        if not whole:
+            logger.info("A song's folder was read only in part: it plays as a lone song")
+            return
+        index = next((i for i, t in enumerate(tracks) if t.get("path") == path), None)
+        if index is None or len(tracks) < 2:
+            return  # a lone song: no list, nothing after it
+        self._queue = AudioQueue(
+            tracks, index, shuffle=self._shuffle_setting(), repeat=self._repeat_setting()
+        )
+        screen = self._screen()
+        if screen is not None:
+            screen.set_tracks(tracks, index)
+            screen.set_view(self._opening_view(listed=True))
+        self._show_audio_state()
+
+    def _on_list_read(self, generation: int, tracks: list, whole: bool) -> None:
+        """A list of songs' tags, read by name on its thread (AlbumJob.start_files): its rows
+        take them, in the list's order (one not read keeps its file's name, and plays all the
+        same). Only the newest list's answer counts, whatever plays now."""
+        listed = self._list
+        if self._closed or generation != self._list_generation or listed is None:
+            return
+        if not whole:
+            logger.info(
+                "A playlist's songs were read only in part (%d of %d): the rest show their names",
+                len(tracks),
+                len(listed.tracks),
+            )
+        for row, read in zip(listed.tracks, tracks):
+            if read.get("parsed") and read.get("path") == row.get("path"):
+                row.update(read)  # (its queue's row too: the same Track)
+        queue, screen = self._queue, self._screen()
+        if self._song_list() is listed and queue is not None and screen is not None:
+            screen.update_tracks(queue.tracks)  # a list scrolled by hand stays where it is
+
+    def _on_cover_ready(self, generation: int, image: Any, colours: list) -> None:
+        """The song's cover, read on its thread (CoverJob): only for the song still playing."""
+        if self._closed or generation != self._cover_generation or self._cover_for is None:
+            return
+        screen = self._screen()
+        if screen is not None and self._cover_for is self._current:
+            screen.set_cover(image, colours)
+
+    def _album_plays(self) -> bool:
+        """An album's song plays: the tracks' keys and buttons go to its queue."""
+        queue, sound = self._queue, self._sound
+        return (
+            not self._closed
+            and queue is not None
+            and len(queue) >= 2
+            and sound is not None
+            and sound is self._current
+        )
+
+    def _sound_goes_on(self, current: Target) -> bool:
+        """A song ended (_on_ended): its album's next track plays, held as a file opened in
+        QiTV, with no card (or itself again with repeat one; a lone song with repeat on); a
+        list of songs is its album. False when nothing follows (the last with repeat off says
+        "Finished"), and while a newer choice is on its way: it plays when its link comes, as
+        Autoplay never offers over one. A file with no picture has no repeat (item 5): its
+        folder's next episode follows it as a film's does."""
+        if current is not self._sound or self._sound_kind not in ("song", "file"):
+            return False
+        if self._lanes.busy():
+            return False
+        if self._single_in_list():
+            return self._entry_goes_on(current)
+        queue = self._queue
+        if queue is not None:
+            before = queue.current
+            index = queue.next(auto=True)
+            if index is None:
+                return False
+            self._play_track(index, start_over=index == before)
+            return True
+        if self._sound_shown and self._sound_kind == "song" and self._repeat_setting() != "off":
+            self._replay(current)
+            return True
+        return False
+
+    def _entry_goes_on(self, current: Target) -> bool:
+        """A mixed list's song ended: the list's next entry plays at once, held, with no card,
+        whatever "Auto-play next episode" says (as an album's next track). False after a file
+        with no picture (the list's next follows it as a video's: Task 1's card) and after the
+        last entry."""
+        listed = self._list
+        if self._sound_kind != "song" or listed is None or listed.target is not current:
+            return False
+        if listed.index + 1 >= len(listed.entries):
+            return False
+        self._flow.hold_for_file(True)
+        self._play_entry(listed.index + 1)
+        return True
+
+    def _play_track(self, index: int, *, start_over: bool) -> None:
+        """The album's track at `index` plays (play_file), held until it ends, as the next
+        file opened in QiTV is (_play_following); its list and the screen stay. A list of
+        songs' plays as the list's entry (its own size, its row: _play_entry)."""
+        queue = self._queue
+        if queue is None:
+            return
+        self._flow.hold_for_file(True)
+        if self._song_list() is not None:
+            self._play_entry(index, start_over=start_over)
+            return
+        track = queue.track(index)
+        size = track.get("size")
+        self.play_file(
+            str(track.get("path") or ""),
+            size if isinstance(size, int) else None,
+            start_over=start_over,
+        )
+
+    def _replay(self, target: Target) -> None:
+        """`target`'s file again from its start (a playlist's entry: as the list's, which goes
+        on after it; never its folder's album)."""
+        self._flow.hold_for_file(True)
+        listed = self._list
+        if listed is not None and listed.target is target:
+            self._play_entry(listed.index, start_over=True)
+            return
+        self.play_file(self._sound_file(target), start_over=True)
+
+    def _restart_sound(self, target: Target) -> None:
+        """The song from its start: a seek, or played again once it can't seek (it ended)."""
+        if self.session.is_seekable():
+            self.session.seek(0)
+            self._show_transport()
+        else:
+            self._replay(target)
+
+    def _previous_track(self) -> None:
+        """⏮ (the dock's; the media key's with an album): past 3 s into the song, the song
+        from its start; else the album's track before (the first: from its start)."""
+        target = self._current
+        if self._closed or target is None or target is not self._sound or target.live:
+            return
+        queue = self._queue
+        if not self._album_plays() or queue is None:
+            self._restart_sound(target)
+            return
+        before = queue.current
+        position = getattr(self.session, "time_ms", lambda: 0)()
+        index = queue.previous(int(position or 0))
+        if index is None or index == before:
+            self._restart_sound(target)
+        else:
+            self._play_track(index, start_over=False)
+
+    def _next_track(self) -> None:
+        """⏭ (the dock's; the media key's with an album): the album's next track (none after
+        the last with repeat off); with no album, the next episode or playlist entry, as the
+        film's Next."""
+        queue = self._queue
+        if not self._album_plays() or queue is None:
+            if queue is None and self._follows():
+                self._on_next_requested()
+            return
+        before = queue.current
+        index = queue.next(auto=False)
+        if index is not None:
+            self._play_track(index, start_over=index == before)
+
+    def _on_track_picked(self, index: int) -> None:
+        """A row of the album's list: that track plays (the one playing: from its start)."""
+        queue, target = self._queue, self._current
+        if not self._album_plays() or queue is None or target is None:
+            return
+        if not 0 <= index < len(queue):
+            return
+        if index == queue.current:
+            self._restart_sound(target)
+            return
+        queue.pick(index)
+        self._play_track(index, start_over=False)
+
+    def _remember(self, name: str, value: Any) -> None:
+        """An audio screen setting (optional config fields: older builds ignore them)."""
+        setattr(self.config, name, value)
+        try:
+            self.config.save_config()
+        except Exception as e:
+            self._log_failure(f"save {name}", e)
+
+    def _toggle_shuffle(self) -> None:
+        if self._single_in_list():
+            return  # a mixed list's entry plays in its list's order
+        queue = self._queue
+        on = queue.toggle_shuffle() if queue is not None else not self._shuffle_setting()
+        self._remember("audio_shuffle", on)
+        self._show_audio_state()
+
+    def _cycle_repeat(self) -> None:
+        if self._single_in_list() or self._sound_kind == "file":
+            return  # a mixed list's entry, a file with no picture: never itself again
+        queue = self._queue
+        if queue is not None:
+            repeat = queue.cycle_repeat()
+        else:
+            at = REPEAT_MODES.index(self._repeat_setting())
+            repeat = REPEAT_MODES[(at + 1) % len(REPEAT_MODES)]
+        self._remember("audio_repeat", repeat)
+        self._show_audio_state()
+
+    def _on_view_picked(self, view: str) -> None:
+        """A view picked on the screen's switch (it shows it already): remembered."""
+        if view in ("cover", "album", "stage"):
+            self._remember("audio_view", view)
+
+    @staticmethod
+    def _words_shown(captions: Any) -> bool:
+        """AI captions are on, downloading, or their question is asked."""
+        return any(
+            bool(getattr(captions, name, lambda: False)())
+            for name in ("enabled", "downloading", "asking")
+        )
+
+    @classmethod
+    def _words_on(cls, captions: Any) -> bool:
+        """AI captions are on, or on their way: downloading, their question asked, or waiting
+        for this computer's speed (CaptionsController.wanted)."""
+        wanted = getattr(captions, "wanted", None)
+        return bool(wanted()) if callable(wanted) else cls._words_shown(captions)
+
+    def _on_words_requested(self) -> None:
+        """The screen's Words pill: AI captions on or off, as the Subtitles panel's row turns
+        them (the subtitle track shown goes; where they can't run, it says so, as the row's
+        state does); turned on from here, the Stage shows them, unless a view was picked."""
+        captions = getattr(self.window_actions, "captions", None)
+        if self._closed or captions is None:
+            return
+        if not captions.available():  # this computer runs no speech model, or the stream
+            self._toast(translate(NOT_AVAILABLE))
+            return
+        was_on = self._words_on(captions)
+        if was_on and not self._words_shown(captions):
+            captions.toggle()  # pressed again while the speed is measured: not wanted now
+        else:
+            self._tracks.set_captions(not was_on)
+        self._stage_for_words = not was_on
+        screen = self._screen()
+        if not was_on and screen is not None and not self._picked_view():
+            screen.set_view("stage")
+        self.words_changed()
+
+    def words_changed(self) -> None:
+        """AI captions changed (CaptionsController.changed): the Words pill says so, and the
+        language they show in."""
+        screen = self._screen()
+        captions = getattr(self.window_actions, "captions", None)
+        if self._closed or screen is None or captions is None:
+            return
+        on = bool(getattr(captions, "enabled", lambda: False)())
+        screen.set_words(on, self._words_language(captions) if on else "")
+        if not self._words_on(captions):
+            self._stage_for_words = False
+
+    @staticmethod
+    def _words_language(captions: Any) -> str:
+        """The language Words show in, in its own name: what they're translated into, else the
+        one they're heard in ("" while the model detects it)."""
+        target = str(getattr(captions, "translate_to", lambda: "")() or "")
+        if target:
+            from services.captions.mt_languages import own_name
+
+            return own_name(target)
+        language = getattr(captions, "language", lambda: ("", ""))()
+        name = str(language[0] if language else "")
+        if not name or name == "auto":
+            return ""
+        from services.captions.languages import own_name as spoken_name
+
+        return spoken_name(name)
 
     # ---- subtitle files -----------------------------------------------------------------------
 
@@ -3681,6 +4911,8 @@ class TVController(QObject):
         if shown is not None and shown.live and shown.item.get("logo") == url:
             if not self.overlays.transport.badge_rect().isEmpty():
                 self.overlays.transport.set_logo(self._logo(shown.item))
+            if shown is self._sound and self._sound_shown:
+                self._radio_cover(shown)  # a radio channel's screen: its logo is its cover
         banner, channel = self.overlays.banner, self._channel
         if channel is None or channel.get("logo") != url:
             return
@@ -3689,7 +4921,7 @@ class TVController(QObject):
 
     def _open_drawer(self, from_column: bool = False) -> None:
         if not self.catalog.provider_names():
-            self._flow.welcome()
+            self._flow.welcome(chosen=True)  # asked for: over a film opened in QiTV too
             return
         # Where the big picture's channel was picked (after a swap, the new large one's); while
         # the fast-zap column is open the user is choosing in it, so the list opens at the zap's
@@ -4222,6 +5454,7 @@ class TVController(QObject):
             target.item, self._tuner.purpose, again, gives_way=True, ask_on=ask_on
         ):
             return  # 2.6: no stream is free while a recording holds one: asked
+        self._before_new_target(None)  # an outside player (a phone's too) takes it
         self._forget_stopped()
         self._cancel_external()
         self.leave_multiview(keep_pip=False)  # an external player is outside the budget

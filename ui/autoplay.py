@@ -7,7 +7,8 @@ loaded yet is requested first, with a hint; Esc ends that wait, and a failure sa
 final episode of the final season offers nothing. External players never autoplay (as in
 v1.13.8). The transport's Next plays what follows at once, without the card.
 
-Autoplay never plays anything itself: it asks the shell's `play` (TVController.play_vod).
+Autoplay never plays anything itself: it asks the shell's `play` (TVController._play_following:
+play_vod, or play_file for a file's next episode).
 """
 
 from __future__ import annotations
@@ -22,6 +23,7 @@ from services.catalog import shown_label
 from services.i18n import N_, translate
 from services.navigation import episode_key, item_key, item_title
 from services.next_episode import (
+    LOCAL_NEXT,
     NeedEpisodes,
     advanced_context,
     episode_label,
@@ -39,6 +41,11 @@ FINISHED_TEXT = N_("Finished")  # i18n: toast and picture label: the movie or ep
 NOTHING_NEXT_TEXT = N_("Nothing to play next")  # i18n: toast after Next (no next episode or movie)
 NEXT_SEASON_FAILED_TEXT = N_("Couldn't load the next season")  # i18n: error toast
 LOADING_NEXT_SEASON_TEXT = N_("Loading next season…")  # i18n: hint while a season loads
+
+
+def _is_episode(target: Target) -> bool:
+    """An episode for the setting and the card: a provider's, or a local file's next one."""
+    return target.item_type == "episode" or isinstance((target.context or {}).get(LOCAL_NEXT), dict)
 
 
 @dataclass
@@ -64,10 +71,12 @@ class Autoplay(QObject):
         notify: Callable[[str, str], None],
         set_hint: Callable[[Optional[str]], None],
         show_transport: Callable[[], None],
+        declined: Optional[Callable[[], None]] = None,
         parent: Optional[QObject] = None,
     ) -> None:
         """`play(item, kind, context)` plays; `is_current(target)`: nothing newer was chosen;
-        `notify(text, kind)` toasts; `set_hint` shows (or with None clears) a lasting hint."""
+        `notify(text, kind)` toasts; `set_hint` shows (or with None clears) a lasting hint;
+        `declined()` is called once when the card closes without playing (Esc)."""
         super().__init__(parent)
         self.catalog = catalog
         self.config = config
@@ -78,6 +87,7 @@ class Autoplay(QObject):
         self._notify = notify
         self._set_hint = set_hint
         self._show_transport = show_transport
+        self._declined = declined
         self._next: Optional[tuple[dict, str, dict]] = None  # what the card offers
         self._awaiting: Optional[_Awaiting] = None
         self._closed = False
@@ -99,7 +109,7 @@ class Autoplay(QObject):
             return False  # external players never autoplay (as in v1.13.8)
         if not self._is_current(target):
             return False  # something else was chosen and is on its way
-        episode = target.item_type == "episode"
+        episode = _is_episode(target)
         if not (self.config.auto_play_episodes if episode else self.config.auto_play_movies):
             return False
         self._advance(target, play_now=False)
@@ -114,6 +124,10 @@ class Autoplay(QObject):
 
     def card_open(self) -> bool:
         return bool(self.card.isVisible())
+
+    def offered(self) -> bool:
+        """The card offers what follows (shown, or under a host that doesn't show now)."""
+        return self._next is not None
 
     def waiting(self) -> bool:
         return self._awaiting is not None
@@ -159,7 +173,8 @@ class Autoplay(QObject):
         the wait as a failure instead of asking for it again.
         """
         context = target.context or {}
-        kind = target.item_type
+        local = isinstance(context.get(LOCAL_NEXT), dict)
+        kind = "episode" if local else target.item_type
         result = following(
             kind,
             context,
@@ -184,7 +199,9 @@ class Autoplay(QObject):
             self._notify(translate(NOTHING_NEXT_TEXT if play_now else FINISHED_TEXT), "info")
             return
         episode = kind == "episode"
-        episodes = self.catalog.episodes(context["series"], result.season) if episode else None
+        episodes = None
+        if episode and not local:
+            episodes = self.catalog.episodes(context["series"], result.season)
         offered = (result.item, kind, advanced_context(context, result, episodes))
         if play_now:
             self._play(*offered)
@@ -234,3 +251,5 @@ class Autoplay(QObject):
             return  # dropped for a newer choice (see drop)
         self._next = None
         self._show_transport()  # the final frame stays, with the transport
+        if self._declined is not None:
+            self._declined()

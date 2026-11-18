@@ -52,6 +52,12 @@ input (`_player_free`): what is asked for meanwhile is set once the next media o
 take (no bars): the stream's own is read from libVLC's track list only when asked, while a
 picture plays, at most once a second once known.
 
+What plays is told for the audio screen: `has_video_track()` (a picture at all, from libVLC's
+track list once it has played; None before) and `tags()` (its tags and art URL as libVLC read
+them, services.song_facts), both read from the playing media when asked. A file that is not
+playing is never parsed here: services.album_listing does that on a worker, with an instance
+of its own.
+
 With hardware decoding (Settings; `hardware`), each tick while a stream plays reads libVLC's
 media statistics: once its picture stood still while its sound played (`FrozenPicture`, which
 has the lab) where pictures can show (`_can_show`: on a window system, or once VLC made a video
@@ -91,6 +97,7 @@ from services import casting, picture
 from services.i18n import N_, tr, translate
 from services.jobs import JobRunner
 from services.picture_watch import Counters, FrozenPicture
+from services.song_facts import META_KEYS, song_tags, stand_in_names
 from services.sound_watch import SoundWatch
 from services.stream_address import NO_STREAM_MESSAGE, playable, shape
 from services.vlc_profile import PlayKind, media_options
@@ -151,6 +158,8 @@ _PLAYS_HERE = frozenset(
     {PlaybackState.OPENING, PlaybackState.BUFFERING, PlaybackState.PLAYING, PlaybackState.PAUSED}
 )
 _OPENED = frozenset({PlaybackState.PLAYING, PlaybackState.PAUSED})
+# A picture that showed stays up (shows_picture): playing, paused on it, or waiting for media.
+_SHOWS_PICTURE = frozenset({PlaybackState.PLAYING, PlaybackState.PAUSED, PlaybackState.BUFFERING})
 
 
 @dataclass(frozen=True)
@@ -350,6 +359,10 @@ class PlaybackSession(QObject):
     # software now (reopened, unless it is a time-shift stream; see the module docstring).
     pictureFroze = Signal()
     soundLost = Signal()  # 2.8.8: a time-shift stream's sound did not come back (cycled track)
+    # The media's picture shows: VLC's video output for it appeared (once per open; not for a
+    # song with no picture, nor while it casts). A file opened in QiTV shows QiTV's mark until
+    # then (ui/overlays/opening.py).
+    pictureShown = Signal()
 
     def __init__(
         self,
@@ -442,6 +455,8 @@ class PlaybackSession(QObject):
         # leaves it so, as this player then deinterlaces until QiTV starts again.
         self._deinterlace_method: Optional[str] = None
         self._picture_due = False  # set again once this media's video output exists
+        self._shown_due = False  # this open's picture is still to show (pictureShown)
+        self._shown = False  # it showed (shows_picture)
         self._picture_set = False  # libVLC was given a shape or deinterlacing on this player
         # On leaves a picture taller than 1080i alone (services.picture): its height is read
         # once per media, as soon as libVLC knows it.
@@ -497,6 +512,12 @@ class PlaybackSession(QObject):
 
     def state(self) -> PlaybackState:
         return self._state
+
+    def shows_picture(self) -> bool:
+        """What plays shows its picture (pictureShown came for this open): it plays, is paused
+        or buffers on it. Not while it opens, once it ended, failed or stopped, nor when it has
+        no picture (a song)."""
+        return self._shown and self._state in _SHOWS_PICTURE
 
     def time_ms(self) -> int:
         if not self._player_free():
@@ -655,6 +676,7 @@ class PlaybackSession(QObject):
         self._poll.stop()
         self._set_seekable(False)
         self._ever_played = False
+        self._shown_due = self._shown = False  # black until this open's picture shows
         self._frozen.restart()
         self._sound.restart()
         self._last_time = -1
@@ -702,6 +724,7 @@ class PlaybackSession(QObject):
         if self._subtitle_delay_ms:
             self._player.video_set_spu_delay(self._subtitle_delay_ms * 1000)
         self._height_due, self._too_tall = True, False
+        self._shown_due = True  # pictureShown once its video output appears
         if self._picture_wanted():
             self._apply_picture()  # the player's, for a new video output
             self._picture_due = True  # and again for a kept one, once it is this media's
@@ -989,6 +1012,11 @@ class PlaybackSession(QObject):
         if not self._player_free() or not self._has_input:
             return -1
         return int(self._player.video_get_spu())
+
+    def subtitle_file(self) -> Optional[str]:
+        """The subtitle file whose track is chosen (None: none), from the moment it is added:
+        libVLC lists its track a little later."""
+        return self._subtitle_on
 
     def subtitle_delay(self) -> int:
         """How many milliseconds the subtitles show after the picture (before it: negative)."""
@@ -1307,6 +1335,45 @@ class PlaybackSession(QObject):
             stats["decoding"] = "froze" if self._software else "hardware"
         return stats
 
+    def has_video_track(self) -> Optional[bool]:
+        """The media playing has a video track (True) or only sound (False: a song, a radio
+        channel); None until known (nothing plays, it has not played yet, libVLC lists no
+        track yet) and while a worker ends an input. Read from libVLC's track list each time
+        (a cheap read on the GUI thread, as `video_stats`): a channel's picture may come or go."""
+        if vlc is None or not self._player_free() or not self._has_input or not self._ever_played:
+            return None
+        media = self._player.get_media()
+        if media is None:
+            return None
+        try:
+            found = _track_stats(media)
+        finally:
+            media.release()
+        if "video_codec" in found:
+            return True
+        if "audio_codec" in found:
+            return False
+        return None
+
+    def tags(self) -> dict[str, Any]:
+        """The tags of the media playing as libVLC read them (song_facts.song_tags: every key,
+        "" or None where it says nothing; all of them so while nothing plays). A cheap read on
+        the GUI thread: a file's tags and its embedded picture's art URL (a file:// one in
+        libVLC's art cache) are there once it plays, a stream's song (`now_playing`) as it
+        changes."""
+        if vlc is None or not self._player_free() or not self._has_input:
+            return song_tags({})
+        media = self._player.get_media()
+        if media is None:
+            return song_tags({})
+        try:
+            meta = {name: media.get_meta(getattr(vlc.Meta, name)) for name in META_KEYS}
+            duration = int(media.get_duration() or 0)
+            mrl = media.get_mrl() or ""
+        finally:
+            media.release()
+        return song_tags(meta, stand_ins=stand_in_names(mrl, self._url), duration_ms=duration)
+
     def release(self) -> None:
         """Release the player; with an input still open, after a worker has stopped it.
 
@@ -1381,15 +1448,23 @@ class PlaybackSession(QObject):
                 self._playing_clock.start()
             self._ever_played = True
         self._set_state(state)
+        if not self._player_free():
+            # A slot stopped or replaced the media as its state changed: a job joins the input
+            # now, and what follows (has_vout among it) takes the input's lock.
+            return
         if state is PlaybackState.PLAYING:
             self._apply_audio()
             if self._files_due:
                 self._replay_files()
             if self._tracks_due:
                 self._choose_tracks()
-        if self._picture_due and int(self._player.has_vout() or 0) > 0:
-            self._picture_due = False
-            self._apply_picture()
+        if (self._picture_due or self._shown_due) and int(self._player.has_vout() or 0) > 0:
+            if self._picture_due:
+                self._picture_due = False
+                self._apply_picture()
+            if self._shown_due:  # only once per open (a shape set later re-arms _picture_due)
+                self._shown_due, self._shown = False, True
+                self.pictureShown.emit()
         if self._height_due and self._deinterlace_method:
             self._check_height()
         if self._spu_waiting:
@@ -1578,6 +1653,7 @@ class Session(Protocol):
     inputEnded: Any
     pictureFroze: Any
     soundLost: Any
+    pictureShown: Any
 
     @property
     def url(self) -> Optional[str]: ...
@@ -1589,6 +1665,8 @@ class Session(Protocol):
     def hardware(self) -> bool: ...
 
     def state(self) -> PlaybackState: ...
+
+    def shows_picture(self) -> bool: ...
 
     def time_ms(self) -> int: ...
 
@@ -1671,6 +1749,8 @@ class Session(Protocol):
 
     def subtitle_track(self) -> int: ...
 
+    def subtitle_file(self) -> Optional[str]: ...
+
     def subtitle_delay(self) -> int: ...
 
     def set_subtitle_delay(self, ms: int) -> None: ...
@@ -1701,6 +1781,10 @@ class Session(Protocol):
 
     def video_stats(self) -> dict[str, Any]: ...
 
+    def has_video_track(self) -> Optional[bool]: ...
+
+    def tags(self) -> dict[str, Any]: ...
+
     def release(self) -> None: ...
 
 
@@ -1715,6 +1799,7 @@ class NullSession(QObject):
     inputEnded = Signal()
     pictureFroze = Signal()
     soundLost = Signal()
+    pictureShown = Signal()
 
     @property
     def url(self) -> Optional[str]:
@@ -1730,6 +1815,9 @@ class NullSession(QObject):
 
     def state(self) -> PlaybackState:
         return PlaybackState.IDLE
+
+    def shows_picture(self) -> bool:
+        return False
 
     def time_ms(self) -> int:
         return 0
@@ -1848,6 +1936,9 @@ class NullSession(QObject):
     def subtitle_track(self) -> int:
         return -1
 
+    def subtitle_file(self) -> Optional[str]:
+        return None
+
     def subtitle_delay(self) -> int:
         return 0
 
@@ -1891,6 +1982,12 @@ class NullSession(QObject):
 
     def video_stats(self) -> dict[str, Any]:
         return {}
+
+    def has_video_track(self) -> Optional[bool]:
+        return None
+
+    def tags(self) -> dict[str, Any]:
+        return song_tags({})
 
     def release(self) -> None:
         pass

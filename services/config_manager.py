@@ -603,6 +603,27 @@ class ConfigManager:
     ai_captions_translate_to = _config_property(
         "ai_captions_translate_to", "", coerce=_one_of(("", *MT_LANGUAGES), "")
     )
+    # Optional (older builds ignore it): AI captions were turned on (true) or off during the
+    # last video file played; the next one comes on with them when nothing has to be asked,
+    # downloaded or measured first (CaptionsController.local_video_playing).
+    ai_captions_local_on = _config_property(
+        "ai_captions_local_on", False, coerce=lambda v: v is True
+    )
+    # Optional (older builds ignore them): the audio screen's view picked by hand ("": none, the
+    # song's own: Album with an album's list, else Cover), and the dock's shuffle and repeat.
+    audio_view = _config_property(
+        "audio_view", "", coerce=_one_of(("", "cover", "album", "stage"), "")
+    )
+    audio_shuffle = _config_property("audio_shuffle", False, coerce=lambda v: v is True)
+    audio_repeat = _config_property(
+        "audio_repeat", "off", coerce=_one_of(("off", "all", "one"), "off")
+    )
+    # Optional (older builds ignore it): the kinds of files QiTV registered itself for with the
+    # system, and the executable registered ({"videos": "<path>"}); services.file_types reads
+    # it and assigns a new dict (the default is shared: never changed in place).
+    file_types = _config_property(
+        "file_types", {}, coerce=lambda v: v if isinstance(v, dict) else {}
+    )
     watch_history = _config_property("watch_history", [])
     playback_positions = _config_property("playback_positions", {})
 

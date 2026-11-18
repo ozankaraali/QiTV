@@ -54,6 +54,7 @@ class OverlayHost(QWidget):
         self._hole = QRect()  # the PiP (see set_hole)
         self._cover = False  # the hole is the multiview's grid (see set_hole)
         self._only: QWidget | None = None  # see show_only
+        self._also: tuple[QWidget, ...] = ()  # the others that may show then (see show_only)
         # macOS: from a minimize until the platform reports the window restored, the window
         # counts as in the Dock here, whatever Qt's state says (see _update_visibility).
         self._in_dock = False
@@ -110,14 +111,17 @@ class OverlayHost(QWidget):
         self._update_mask()
         self._update_visibility()
 
-    def show_only(self, widget: QWidget | None) -> None:
+    def show_only(self, widget: QWidget | None, also: tuple[QWidget, ...] = ()) -> None:
         """Hide every overlay but `widget`, and keep them hidden whenever they ask to show
         (the corner player: only its controls over the small video). None: all as before.
-        What was hidden stays hidden; each overlay shows again when it is next wanted."""
+        What was hidden stays hidden; each overlay shows again when it is next wanted.
+        `also`: overlays under `widget` that stay as they are and may show meanwhile (the
+        corner player's song: its audio screen, small)."""
         self._only = widget
+        self._also = tuple(also) if widget is not None else ()
         if widget is not None:
             for overlay in self._overlays:
-                if overlay is not widget and isValid(overlay):
+                if overlay is not widget and overlay not in self._also and isValid(overlay):
                     overlay.hide()
 
     def visible_overlays(self) -> list[QWidget]:
@@ -273,7 +277,7 @@ class OverlayHost(QWidget):
         return False
 
     def _not_shown_now(self, widget: QWidget) -> bool:
-        return self._only is not None and widget is not self._only
+        return self._only is not None and widget is not self._only and widget not in self._also
 
     # Clicks that reach the host itself (on transparent parts of overlays that let them through,
     # and the Back/Forward buttons, which the overlays pass on).

@@ -245,6 +245,30 @@ def _skip_arrow(forward: bool) -> tuple[QPainterPath, QPainterPath]:
     return arc, head
 
 
+def _strokes24(*lines: tuple[tuple[float, float], ...]) -> QPainterPath:
+    """Open polylines given on a 24×24 grid (the mockup's SVG glyphs), in the unit box."""
+    path = QPainterPath()
+    for points in lines:
+        path.moveTo(points[0][0] / 24, points[0][1] / 24)
+        for x, y in points[1:]:
+            path.lineTo(x / 24, y / 24)
+    return path
+
+
+def _repeat_arrows() -> QPainterPath:
+    """The audio dock's repeat (the mockup's): two rounded arms, each with its arrowhead."""
+    path = QPainterPath(QPointF(4 / 24, 11 / 24))
+    path.lineTo(4 / 24, 9 / 24)
+    path.arcTo(QRectF(4 / 24, 7 / 24, 4 / 24, 4 / 24), 180, -90)  # its corner, r = 2
+    path.lineTo(19 / 24, 7 / 24)
+    path.moveTo(20 / 24, 13 / 24)
+    path.lineTo(20 / 24, 15 / 24)
+    path.arcTo(QRectF(16 / 24, 13 / 24, 4 / 24, 4 / 24), 0, -90)
+    path.lineTo(5 / 24, 17 / 24)
+    path.addPath(_strokes24(((16, 4), (19, 7), (16, 10)), ((8, 20), (5, 17), (8, 14))))
+    return path
+
+
 def draw_refresh(p: QPainter, rect: QRectF, color: QColor) -> None:
     """A circular arrow, drawn like painting.draw_icon's glyphs (a unit box, round caps)."""
     p.save()
@@ -582,6 +606,16 @@ def draw_icon(p: QPainter, name: str, rect: QRectF, color: QColor) -> None:
             fold.lineTo(0.78, 0.3)
             line(fold)
             fill(_poly([(0.42, 0.46), (0.62, 0.6), (0.42, 0.74)]))
+        elif name == "folder":  # Open a folder (Plan 4): a folder, its tab, and a play mark
+            body = QPainterPath(QPointF(0.1, 0.2))
+            body.lineTo(0.38, 0.2)
+            body.lineTo(0.47, 0.3)
+            body.lineTo(0.9, 0.3)
+            body.lineTo(0.9, 0.84)
+            body.lineTo(0.1, 0.84)
+            body.closeSubpath()
+            line(body)
+            fill(_poly([(0.42, 0.44), (0.62, 0.57), (0.42, 0.7)]))
         elif name in ("chevron_left", "chevron_right"):  # ‹ and ›: earlier and later
             tip, back = (0.34, 0.62) if name == "chevron_left" else (0.66, 0.38)
             chevron = QPainterPath(QPointF(back, 0.2))
@@ -616,6 +650,26 @@ def draw_icon(p: QPainter, name: str, rect: QRectF, color: QColor) -> None:
             dot = QPainterPath()
             dot.addEllipse(QRectF(0.26, 0.26, 0.48, 0.48))
             fill(dot)
+        elif name == "shuffle":  # the audio dock (the mockup's 24×24 glyph): two crossing paths
+            line(
+                _strokes24(
+                    ((3, 7), (6, 7), (17, 17), (21, 17)),
+                    ((3, 17), (6, 17), (9.5, 13.8)),
+                    ((13.5, 10.2), (17, 7), (21, 7)),
+                    ((18, 4), (21, 7), (18, 10)),
+                    ((18, 14), (21, 17), (18, 20)),
+                )
+            )
+        elif name == "repeat":  # the audio dock: the album again, round and round
+            line(_repeat_arrows())
+        elif name == "repeat_one":  # the song again: repeat's arrows round a 1
+            line(_repeat_arrows())
+            line(_strokes24(((10.8, 10.6), (12.3, 9.6), (12.3, 14.4))))
+        elif name == "more":  # ⋯: more of the controls, in a menu
+            for x in (5, 12, 19):
+                dot = QPainterPath()
+                dot.addEllipse(QPointF(x / 24, 0.5), 2 / 24, 2 / 24)
+                fill(dot)
         elif name == "check":  # ✓: the track that plays
             tick = QPainterPath(QPointF(0.2, 0.52))
             tick.lineTo(0.42, 0.74)
