@@ -604,6 +604,7 @@
     "other": "Nākamā pēc {n} s",
     "zero": "Nākamā pēc {n} s"
   },
+  "Next track": "",
   "Next: {when}": "Nākamais: {when}",
   "Nicaragua": "Nikaragva",
   "Niger": "Nigēra",
@@ -765,6 +766,7 @@
   "Previous / next channel (volume during a movie)": "Iepriekšējais / nākamais kanāls (skaļums filmas laikā)",
   "Previous Channel": "Iepriekšējais kanāls",
   "Previous channel": "Iepriekšējais kanāls",
+  "Previous track": "",
   "Programme guide": "TV programma",
   "Programme start": "Raidījuma sākums",
   "Provider verified successfully.": "Nodrošinātājs veiksmīgi pārbaudīts.",
@@ -860,6 +862,7 @@
   "Removed from Recents": "Noņemts no nesenajiem",
   "Removed from favorites": "Noņemts no izlases",
   "Repeat": "Atkārtot",
+  "Repeat one": "",
   "Repeats": "Atkārtojas",
   "Report an Issue…": "Ziņot par problēmu…",
   "Report an issue": "Ziņot par problēmu",
@@ -921,6 +924,7 @@
   "Show on TV": "Rādīt televizorā",
   "Show the Log File…": "Rādīt žurnāla failu…",
   "Show the pairing code on the TV": "Rādīt sapārošanas kodu televizorā",
+  "Shuffle": "",
   "Sierra Leone": "Sjerraleone",
   "Sign out": "Atteikties",
   "Signing in is optional: without it OpenSubtitles allows {n} download a day per connection; with your account, as many as it allows you. Sign out clears both.": {

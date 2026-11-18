@@ -592,6 +592,7 @@
   "Next in {n} s": {
     "other": "Tiếp theo sau {n} giây"
   },
+  "Next track": "",
   "Next: {when}": "Tiếp theo: {when}",
   "Nicaragua": "Nicaragua",
   "Niger": "Niger",
@@ -751,6 +752,7 @@
   "Previous / next channel (volume during a movie)": "Kênh trước / sau (âm lượng khi xem phim)",
   "Previous Channel": "Kênh trước",
   "Previous channel": "Kênh trước",
+  "Previous track": "",
   "Programme guide": "Lịch phát sóng",
   "Programme start": "Đầu chương trình",
   "Provider verified successfully.": "Đã xác minh nhà cung cấp thành công.",
@@ -844,6 +846,7 @@
   "Removed from Recents": "Đã xóa khỏi Gần đây",
   "Removed from favorites": "Đã bỏ khỏi yêu thích",
   "Repeat": "Lặp lại",
+  "Repeat one": "",
   "Repeats": "Lặp lại",
   "Report an Issue…": "Báo lỗi…",
   "Report an issue": "Báo lỗi",
@@ -905,6 +908,7 @@
   "Show on TV": "Hiện trên TV",
   "Show the Log File…": "Hiện tệp nhật ký…",
   "Show the pairing code on the TV": "Hiện mã ghép nối trên TV",
+  "Shuffle": "",
   "Sierra Leone": "Sierra Leone",
   "Sign out": "Đăng xuất",
   "Signing in is optional: without it OpenSubtitles allows {n} download a day per connection; with your account, as many as it allows you. Sign out clears both.": {

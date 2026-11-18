@@ -62,11 +62,22 @@ each runs as long as its seconds on the bar, and between two of them, where noth
 the line breaks for `GAP_PX`; a click there goes to the next part. Its times are the real
 ones: "Buffer from" the oldest part's, the bubble the moment watched, and "behind live" counts
 the time away (`behind`).
+Audio (Plan 4, `show_audio`): over the audio screen (ui/overlays/audio_screen.py) it is the
+screen's dock, as the approved mockup draws it, in the screen's unit: the scrub across the whole
+width (the time played at its left, the song's length at its right), then shuffle, the previous
+track, play (an accent circle), the next track and repeat in the middle, the volume at the
+right, and Words and "⋯" at the left. The rest of the player's controls are in the "⋯" menu
+(ui/overlays/more_menu.py): their panels open above "⋯" (`button_rect`), which is lit while one
+shows. It never fades, it is only its own band (the screen's top bar, its album rows and the
+page under it take their clicks), and it draws no title row: the screen shows the song. Without
+an album list shuffle and the next track are dim and do nothing. Any other mode ends it, and
+`end_audio` ends it and hides it.
 """
 
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 import math
+import re
 import time
 from typing import Callable, Optional
 
@@ -95,7 +106,9 @@ from PySide6.QtGui import (
     QPaintEvent,
     QPen,
     QPixmap,
+    QRadialGradient,
     QRegion,
+    QResizeEvent,
 )
 from PySide6.QtWidgets import QWidget
 
@@ -105,6 +118,7 @@ from services.live.parts import Part, from_state as parts_from_state, junctions,
 from services.live.stay_live import TARGETS, Mode, SettledLag
 from services.recording import elapsed_text
 from ui.keymap import key_hint
+from ui.overlays.audio_screen import MOCK_W, screen_units
 from ui.overlays.base import Overlay
 from ui.overlays.painting import (
     Units,
@@ -163,7 +177,20 @@ TOOLTIPS = {
     # i18n: tooltip of ⏮ on the time-shift bar: back to the start of the programme on now
     "start": N_("Programme start"),
     "fwd60": N_("Forward 60 seconds"),  # i18n: tooltip of the time-shift bar's +60 button
+    # The audio screen's dock (Plan 4).
+    # i18n: tooltip of the music player's shuffle button: the album's songs in a random order
+    "shuffle": N_("Shuffle"),
+    "repeat": N_("Repeat"),  # i18n: tooltip of the music player's repeat button
+    # i18n: tooltip of the music player's repeat button while it repeats the song playing
+    "repeat_one": N_("Repeat one"),
+    "prev_track": N_("Previous track"),  # i18n: tooltip: the album's song before (music player)
+    "next_track": N_("Next track"),  # i18n: tooltip: the album's next song (music player)
+    "more": N_("More"),  # i18n: tooltip of the music player's ⋯ button: a menu of more controls
 }
+# The controls the audio dock keeps in its "⋯" menu, in the menu's order: their panels open
+# above "⋯" (button_rect), and it is lit while one shows.
+MENU_CONTROLS = ("stop", "audio", "subtitles", "picture", "fullscreen", "mini", "library", "search")
+REPEAT_MODES = ("off", "all", "one")  # the dock's repeat: none, the album, the song playing
 # i18n: tooltip of the second channel's button, dim while the multiview's grid shows (V: key)
 PIP_IN_GRID = N_("Leave the multiview first (V)")
 # A live channel that failed to open (`show_failed`): play tries it again, nothing records.
@@ -214,6 +241,40 @@ _LABELS = ("live", "indicator", "times")  # shown, not clicked: over the PiP, cl
 # A quick second click (a double-click) repeats these steps; on any other control it counts
 # once: a toggle (★, ⛶, ▶) would undo itself, a jump (⟲, Next) go one further.
 _REPEATS = ("back10", "fwd10", "fwd60", "slower", "faster")
+# The audio dock's (Plan 4): its buttons take clicks past their icons as the icon buttons do.
+_DOCK_BUTTONS = ("shuffle", "prev_track", "next_track", "repeat", "words", "more")
+# Its sizes are the approved mockup's px at its 920 px wide page (the audio screen's unit).
+_DOCK_TOP, _DOCK_SIDE, _DOCK_BOTTOM = 14.0, 26.0, 18.0  # its padding
+_DOCK_GAP = 18.0  # between the scrub's row and the buttons'
+_DOCK_TIMES_PX = 11.5  # the times' text, in a 1.5 line
+_DOCK_SCRUB_GAP = 10.0  # between a time and the line
+_DOCK_LINE, _DOCK_KNOB, _DOCK_HALO = 4.0, 12.0, 3.0  # the line, its knob and the knob's halo
+_DOCK_SEEK_H = 14.0  # the scrub's box (a press takes as much again above and below)
+# Play's circle, and its glyph's box: the mockup's pause is 14 px tall (in its 24 px box),
+# painting's fills 0.7 of its box.
+_DOCK_PLAY, _DOCK_GLYPH = 54.0, 20.0
+_DOCK_ICON, _DOCK_DIM_ICON = 22.0, 18.0  # previous and next; shuffle and repeat
+_DOCK_CTL_GAP = 22.0  # between the middle buttons
+_DOCK_VOL_ICON, _DOCK_VOL_GAP, _DOCK_VOL_BAR = 18.0, 8.0, 90.0  # the speaker, then its level
+_DOCK_PILL_H, _DOCK_PILL_PAD, _DOCK_PILL_PX = 30.0, 12.0, 12.0  # Words (as the screen's pills)
+_DOCK_LEFT_GAP = 10.0  # between Words and ⋯
+_DOCK_SHADOW_Y, _DOCK_SHADOW_BLUR = 10.0, 30.0  # play's glow: 0 10px 30px
+_DOCK_SHADE_AT = 0.4  # the dock's shade is whole 40% down its box, as the mockup's
+_DOCK_TEXT = "#e6ebf0"  # previous and next
+_DOCK_DIM = "#8d98a4"  # shuffle and repeat while off
+_DOCK_TIMES = "#aab4be"  # the times and the speaker
+_DOCK_LEVEL = "#cfd6dd"  # the volume's level
+_DOCK_PLAY_GLYPH = "#1a0f0a"
+_DOCK_SHADE = "#080b0f"  # rgba(8,11,15,.85)
+_DOCK_SHADE_ALPHA = 0.85
+_DOCK_TRACK = "rgba(255,255,255,0.14)"
+_DOCK_GLOW_ALPHA = 0.35  # the knob's halo and play's glow, in the accent
+_DOCK_INERT_ALPHA = 0.35  # shuffle and the next track without an album list
+_PILL_FILL = "rgba(255,255,255,0.08)"  # the audio screen's pills, Words lit or not
+_PILL_TEXT = "#d9dfe5"
+_PILL_ON_FILL = "rgba(224,138,95,0.22)"
+_PILL_ON_RING = "rgba(224,138,95,0.55)"
+_PILL_ON_TEXT = "#ffd9c6"
 _ICON_BUTTONS = (  # painted as icons
     "previous",
     "guide",
@@ -410,6 +471,14 @@ class Transport(Overlay):
     qualityRequested = Signal()  # 2.8: the ⚙ quality menu
     recordRequested = Signal()  # the record button: record the channel, or stop (2.2)
     bandChanged = Signal()  # its controls changed (a mode, the bar): controls_top() moved
+    # The audio dock's (Plan 4); a film's Next stays nextRequested.
+    prevTrackRequested = Signal()  # the album's song before (or this one from its start)
+    nextTrackRequested = Signal()  # the album's next song
+    shuffleRequested = Signal()
+    repeatRequested = Signal()  # the next of off, the album, the song
+    wordsRequested = Signal()  # Words: the AI captions on or off
+    # ⋯: its menu opens from this point (the button's top-left, global coordinates).
+    moreRequested = Signal(QPoint)
 
     def __init__(
         self,
@@ -430,6 +499,11 @@ class Transport(Overlay):
         self._rec_timer.timeout.connect(self._tick_rec)
         self._live = False
         self._timeshift = False
+        self._audio = False  # the audio screen's dock (show_audio)
+        self._shuffle = False
+        self._repeat = "off"  # REPEAT_MODES
+        self._words = False  # the AI captions show: Words is lit
+        self._has_list = False  # an album list: shuffle and the next track act
         self._title = ""
         self._logo: QPixmap | None = None
         self._subtitle = ""
@@ -512,6 +586,44 @@ class Transport(Overlay):
     def failed(self) -> bool:
         """It shows a channel that failed to open (`show_failed`)."""
         return self._failed
+
+    def show_audio(self, title: str, subtitle: str) -> None:
+        """Be the audio screen's dock for a song (`title`, `subtitle`: what plays; the screen
+        shows them, the dock draws none). It stays up until another mode or end_audio()."""
+        self._set_mode(False, title, subtitle, audio=True)
+
+    def set_audio_state(self, shuffle: bool, repeat: str, words: bool, has_list: bool) -> None:
+        """The dock's toggles: shuffle on, `repeat` one of REPEAT_MODES, Words lit (the AI
+        captions show), and whether there is an album list (without one shuffle and the next
+        track are dim and do nothing)."""
+        if repeat not in REPEAT_MODES:
+            raise ValueError(f"Unknown repeat: {repeat!r}")
+        state = (bool(shuffle), repeat, bool(words), bool(has_list))
+        if state != (self._shuffle, self._repeat, self._words, self._has_list):
+            self._shuffle, self._repeat, self._words, self._has_list = state
+            self.update()
+            self._controls_changed()
+
+    def audio(self) -> bool:
+        """It is the audio screen's dock (show_audio)."""
+        return self._audio
+
+    def end_audio(self) -> None:
+        """The song's screen went (a stop, a picture showed): the dock ends and hides. The next
+        show_vod/show_live/… shows that mode's controls; poke() alone shows a film's."""
+        if not self._audio:
+            return
+        self._audio = False
+        self._sync_mask()
+        self._idle.stop()
+        self.hide()
+        self.update()
+        self._controls_changed()
+
+    def control_text(self, name: str) -> str:
+        """What a control says (its tooltip: what it does, and its key), as hovering it does;
+        the "⋯" menu names its items with it."""
+        return self._tooltip(name)
 
     def set_logo(self, logo: QPixmap | None) -> None:
         """The channel's logo arrived after the channel was shown."""
@@ -672,6 +784,10 @@ class Transport(Overlay):
             return "exit_fullscreen"
         if name == "grid" and self._grid_shown:
             return "single"  # the way back, as fullscreen's
+        if name == "repeat" and self._repeat == "one":
+            return "repeat_one"
+        if name in ("prev_track", "next_track"):
+            return name[: -len("_track")]
         return _ICONS.get(name, name)
 
     def set_library_available(self, available: bool) -> None:
@@ -763,8 +879,11 @@ class Transport(Overlay):
     def controls_top(self) -> int:
         """Where its controls start (host coordinates): the bar's time bubble, else the row.
 
-        The PiP rises above it and the mixer sits on it while the transport shows.
+        The PiP rises above it and the mixer sits on it while the transport shows. The audio
+        dock's: its band's top (the scrub's row).
         """
+        if self._audio:
+            return self.geometry().top() + self._dock_band().top()
         rects = self._layout()
         top = min(rect.top() for rect in rects.values())
         seek = rects.get("seek")
@@ -840,11 +959,16 @@ class Transport(Overlay):
             return key_hint(translate(what), key)
         if (name == "mini" and self._mini) or (name == "fullscreen" and self._fullscreen):
             return translate(TOOLTIPS[f"{name}_back"])
+        if name == "repeat" and self._repeat == "one":
+            return translate(TOOLTIPS["repeat_one"])
+        if name == "words":
+            return tr("AI captions")  # i18n: tooltip of Words (the AI captions of a song)
         text = TOOLTIPS.get(name, "")
         return translate(text) if text else ""
 
     def poke(self) -> None:
-        """Show (fade later); already shown, only restart the fade: no repaint, no mask."""
+        """Show (fade later); already shown, only restart the fade: no repaint, no mask. The
+        audio dock never fades."""
         if self.isHidden():
             self._fit()
             self.show()  # paints, and the host takes the new mask
@@ -852,13 +976,13 @@ class Transport(Overlay):
 
     def hold(self, button: str) -> None:
         """Stay up while `button`'s panel is open, the button lit (no fade); "": let go, the
-        fade starts again."""
+        fade starts again. On the audio dock a control in its "⋯" menu lights "⋯"."""
         if button != self._held:
             self._held = button
             self.update()
         if button:
             self._idle.stop()
-        elif self.isVisible():
+        elif self.isVisible() and not self._audio:
             self._idle.start()
 
     def held(self) -> str:
@@ -866,11 +990,13 @@ class Transport(Overlay):
         return self._held
 
     def _fade_later(self) -> None:
-        if not self._held:
+        if not self._held and not self._audio:
             self._idle.start()
 
     def dismiss(self) -> None:
-        if self._drag is not None:
+        """Hide (a click on the picture, a list or the Library opening); the audio dock stays:
+        it ends with end_audio() or another mode."""
+        if self._drag is not None or self._audio:
             return  # a drag in progress keeps the bar until release
         self._idle.stop()
         self.hide()
@@ -879,6 +1005,8 @@ class Transport(Overlay):
         """The idle time is up: the controls go, unless the pointer rests on them (2.8.12: they
         went from under a resting pointer, though they stay while hovered): the wait starts
         again then."""
+        if self._audio:
+            return
         if self._pointer is not None and self.hovers_controls(self._pointer):
             self._idle.start()
             return
@@ -890,6 +1018,8 @@ class Transport(Overlay):
         (the bottom one reaches 42% up the picture: a pointer left there keeps nothing up)."""
         un = ui_units(self.width())
         top = self.controls_top() - self.geometry().top()
+        if self._audio:
+            return pos.y() >= top
         title_bottom = max(
             (r.bottom() for r in self.title_rects().values()),
             default=float(un.px(5.7)),
@@ -907,6 +1037,8 @@ class Transport(Overlay):
             self._controls_changed()
 
     def texts(self) -> tuple[str, str]:
+        if self._audio:  # the dock: the time played, and the song's length (the mockup's)
+            return (fmt_duration(self._shown_ms()), fmt_duration(self._length))
         if self._timeshift:
             if not self._shows_bar():
                 return (_live_label(), self.indicator_text())
@@ -947,6 +1079,8 @@ class Transport(Overlay):
         return f"{head} ● {tail}" if head else f"● {tail}"
 
     def mask_region(self) -> QRegion:
+        if self._audio:  # the dock's band: the screen above takes its own clicks
+            return QRegion(self._dock_band()).translated(self.geometry().topLeft())
         top_h = round(self.height() * TOP_FRACTION)
         bottom_h = round(self.height() * BOTTOM_FRACTION)
         region = QRegion(QRect(0, 0, self.width(), top_h))
@@ -1116,6 +1250,20 @@ class Transport(Overlay):
             self._controls_changed()
         return False
 
+    def resizeEvent(self, event: QResizeEvent) -> None:
+        super().resizeEvent(event)
+        self._sync_mask()
+
+    def _sync_mask(self) -> None:
+        """The audio dock is its band alone (a widget mask): it covers the host over the audio
+        screen, whose controls and page take the clicks above it. Other modes have no mask."""
+        if self._audio:
+            band = QRegion(self._dock_band())
+            if self.mask() != band:
+                self.setMask(band)
+        elif not self.mask().isEmpty():
+            self.clearMask()
+
     @staticmethod
     def _chip_font(un: Units) -> QFont:
         return un.font(1.2, QFont.Weight.DemiBold)
@@ -1178,7 +1326,10 @@ class Transport(Overlay):
         language, every button of the multiview and the second channel), the icons sit closer
         before a text gives way: the multiview's chips, the Stay live indicator or the speed
         chip's − and +. A time-shifted channel spaces them for both its rows, the live edge's
-        and the bar's (2.8.12): the icons keep their places when the bar comes or goes."""
+        and the bar's (2.8.12): the icons keep their places when the bar comes or goes. The
+        audio dock lays out its own (`_dock_layout`)."""
+        if self._audio:
+            return self._dock_layout()
         rows: tuple[Optional[bool], ...] = (False, True) if self._timeshift else (None,)
         if all(self._fits(_ICON_GAP_U, True, row) for row in rows):
             return self._layout_at(_ICON_GAP_U)[0]
@@ -1330,6 +1481,86 @@ class Transport(Overlay):
             rects.update(self._speed_rects(un, speed_x, cy, min(chips, default=x)))
         return rects, crowded
 
+    # ---- the audio dock -----------------------------------------------------------------------
+
+    def _dock_unit(self) -> float:
+        """A mockup px at this size: the audio screen's (1/920 of its 16:9 page)."""
+        return screen_units(self.width(), self.height()).u * 100.0 / MOCK_W
+
+    def _dock_font(self, px: float, weight: QFont.Weight = QFont.Weight.Normal) -> QFont:
+        """A font of the mockup's `px` (never under the overlays' readable minimum)."""
+        return screen_units(self.width(), self.height()).font(px * 100.0 / MOCK_W, weight)
+
+    def _times_font_dock(self) -> QFont:
+        font = self._dock_font(_DOCK_TIMES_PX)
+        if hasattr(QFont, "Tag"):  # tabular figures, as the mockup's (Qt 6.7)
+            font.setFeature(QFont.Tag("tnum"), 1)
+        return font
+
+    def _words_label(self) -> str:
+        return tr("Words")  # i18n: the music player's button for the AI captions (lyrics)
+
+    def _dock_layout(self) -> dict[str, QRectF]:
+        """The mockup's dock from the bottom up: the buttons' row 18 px over the bottom (play's
+        circle its height), the scrub's 18 px above it, both 26 px in from the sides. The middle
+        five centred, 22 px apart; the volume at the right; Words then ⋯ at the left (with no
+        room for both beside the middle five, ⋯ alone: the screen's top bar has Words too)."""
+        w, h = float(self.width()), float(self.height())
+        k = self._dock_unit()
+        side, play = _DOCK_SIDE * k, _DOCK_PLAY * k
+        cy = h - _DOCK_BOTTOM * k - play / 2
+        fm = QFontMetricsF(self._times_font_dock())
+        # The mockup's line box at every size, so the band clears the album list's last row:
+        # in a small window the text held at the readable minimum runs past it, its digits not.
+        times_h = _DOCK_TIMES_PX * 1.5 * k
+        scrub_cy = cy - play / 2 - _DOCK_GAP * k - times_h / 2
+        rects: dict[str, QRectF] = {
+            "times": QRectF(side, scrub_cy - times_h / 2, w - 2 * side, times_h)
+        }
+        # Each time keeps the room of its widest reading, so the line holds still as they count.
+        label = max(fm.horizontalAdvance(re.sub(r"\d", "0", text)) for text in self.texts())
+        inset = side + label + _DOCK_SCRUB_GAP * k
+        seek_h = _DOCK_SEEK_H * k
+        rects["seek"] = QRectF(inset, scrub_cy - seek_h / 2, max(1.0, w - 2 * inset), seek_h)
+        middle = (
+            ("shuffle", _DOCK_DIM_ICON),
+            ("prev_track", _DOCK_ICON),
+            ("play", _DOCK_PLAY),
+            ("next_track", _DOCK_ICON),
+            ("repeat", _DOCK_DIM_ICON),
+        )
+        gap = _DOCK_CTL_GAP * k
+        x = (w - sum(size for _, size in middle) * k - gap * (len(middle) - 1)) / 2
+        for name, size in middle:
+            rects[name] = QRectF(x, cy - size * k / 2, size * k, size * k)
+            x += size * k + gap
+        volume_w = (_DOCK_VOL_ICON + _DOCK_VOL_GAP + _DOCK_VOL_BAR) * k
+        volume_h = _DOCK_VOL_ICON * k
+        rects["volume"] = QRectF(w - side - volume_w, cy - volume_h / 2, volume_w, volume_h)
+        pill = _DOCK_PILL_H * k
+        words_w = QFontMetricsF(self._dock_font(_DOCK_PILL_PX)).horizontalAdvance(
+            self._words_label()
+        )
+        words = QRectF(side, cy - pill / 2, words_w + 2 * _DOCK_PILL_PAD * k, pill)
+        more = QRectF(words.right() + _DOCK_LEFT_GAP * k, cy - pill / 2, pill, pill)
+        room = rects["shuffle"].left() - gap
+        if more.right() <= room:
+            rects["words"], rects["more"] = words, more
+        elif side + pill <= room:
+            rects["more"] = QRectF(side, cy - pill / 2, pill, pill)
+        return rects
+
+    def _dock_band(self) -> QRect:
+        """The audio dock's band (this widget's coordinates): from its scrub's row (the times,
+        or the knob's halo when taller) down. The mockup's box starts 14 px higher, over the
+        album list's last row: that part is only its shade's clear start, so it takes none of
+        the row's clicks."""
+        rects = self._dock_layout()
+        seek = rects["seek"]
+        knob = (_DOCK_KNOB / 2 + _DOCK_HALO) * self._dock_unit()
+        top = math.floor(min(rects["times"].top(), seek.center().y() - knob))
+        return QRect(0, top, self.width(), max(0, self.height() - top))
+
     def _side_chip(self, un: Units, behind: Optional[bool] = None) -> Optional[tuple[str, float]]:
         """The chip left of the right-hand buttons under the bar, and its width: Go live while
         a time-shifted channel plays behind live (`behind`: as if it did, or not), ‹ Library
@@ -1450,7 +1681,12 @@ class Transport(Overlay):
         return self._layout()["seek"]
 
     def button_rect(self, name: str) -> QRectF:
-        return self._layout()[name]
+        """A control's rect (KeyError: not shown). On the audio dock a control of its "⋯"
+        menu (MENU_CONTROLS) is "⋯"'s: its panel opens above it."""
+        rects = self._layout()
+        if self._audio and name not in rects and name in MENU_CONTROLS and "more" in rects:
+            return rects["more"]
+        return rects[name]
 
     def tick_marks(self) -> list[tuple[float, str, QRectF | None]]:
         """The bar's programme ticks: (x, shown label, label box or None when dropped)."""
@@ -1496,6 +1732,10 @@ class Transport(Overlay):
     def paintEvent(self, event: QPaintEvent) -> None:
         p = QPainter(self)
         p.setRenderHint(QPainter.Antialiasing, True)
+        if self._audio:
+            self._paint_dock(p, self._layout())
+            p.end()
+            return
         un = ui_units(self.width())
         self._paint_scrims(p)
         self._paint_title(p, un)
@@ -1563,6 +1803,113 @@ class Transport(Overlay):
             )
             x += name + gap
         draw_icon(p, "chevron_down", QRectF(x, cy - caret / 2, caret, caret), color)
+
+    def _paint_dock(self, p: QPainter, rects: dict[str, QRectF]) -> None:
+        """The audio dock, as the mockup draws it (its colours and sizes, in its px)."""
+        k = self._dock_unit()
+        band = QRectF(self._dock_band())
+        # The shade: clear at the band's top, whole where the mockup's (40% down its box).
+        box_top = rects["times"].top() - _DOCK_TOP * k
+        whole = box_top + _DOCK_SHADE_AT * (self.height() - box_top)
+        shade = QLinearGradient(0, band.top(), 0, max(band.top() + 1.0, whole))
+        shade.setColorAt(0, qcolor(_DOCK_SHADE, 0.0))
+        shade.setColorAt(1, qcolor(_DOCK_SHADE, _DOCK_SHADE_ALPHA))
+        p.save()
+        if not self._pip_rect.isEmpty():
+            p.setClipRegion(QRegion(self.rect()).subtracted(QRegion(self._pip_rect)))
+        p.fillRect(band, shade)
+        p.restore()
+        # The scrub: the time played, the line with its knob, the song's length.
+        first, second = self.texts()
+        p.setFont(self._times_font_dock())
+        p.setPen(qcolor(_DOCK_TIMES))
+        p.drawText(rects["times"], Qt.AlignVCenter | Qt.AlignLeft, first)
+        p.drawText(rects["times"], Qt.AlignVCenter | Qt.AlignRight, second)
+        seek = rects["seek"]
+        line = _DOCK_LINE * k
+        track = QRectF(seek.left(), seek.center().y() - line / 2, seek.width(), line)
+        fill_round(p, track, qcolor(_DOCK_TRACK), line / 2)
+        frac = self._shown_frac()
+        if frac > 0:
+            done = QRectF(track.left(), track.top(), track.width() * frac, line)
+            fill_round(p, done, qcolor(PALETTE.accent), line / 2)
+        knob = QPointF(track.left() + track.width() * frac, track.center().y())
+        for diameter, color in (
+            ((_DOCK_KNOB + 2 * _DOCK_HALO) * k, qcolor(PALETTE.accent, _DOCK_GLOW_ALPHA)),
+            (_DOCK_KNOB * k, qcolor("#ffffff")),
+        ):
+            disc = QRectF(knob.x() - diameter / 2, knob.y() - diameter / 2, diameter, diameter)
+            fill_round(p, disc, color, diameter / 2)
+        # The middle five.
+        for name in ("shuffle", "repeat"):
+            on = self._shuffle if name == "shuffle" else self._repeat != "off"
+            color = qcolor(PALETTE.accent) if on else qcolor(_DOCK_DIM)
+            if name == "shuffle" and not self._has_list:
+                color = qcolor(_DOCK_DIM, _DOCK_INERT_ALPHA)
+            draw_icon(p, self.icon(name), rects[name], color)
+        draw_icon(p, "prev", rects["prev_track"], qcolor(_DOCK_TEXT))
+        inert = qcolor(_DOCK_TEXT, _DOCK_INERT_ALPHA)
+        draw_icon(p, "next", rects["next_track"], qcolor(_DOCK_TEXT) if self._has_list else inert)
+        self._paint_dock_play(p, rects["play"], k)
+        # The volume: the speaker, then its level.
+        volume = rects["volume"]
+        speaker = QRectF(volume.left(), volume.top(), volume.height(), volume.height())
+        held = self._held == "volume"  # lit while the mixer shows, as the films' speaker
+        draw_icon(p, self.icon("volume"), speaker, qcolor(PALETTE.accent if held else _DOCK_TIMES))
+        level = QRectF(volume.right() - _DOCK_VOL_BAR * k, volume.center().y() - line / 2, 0, line)
+        level.setRight(volume.right())
+        fill_round(p, level, qcolor(_DOCK_TRACK), line / 2)
+        shown = 0.0 if self._muted else min(1.0, max(0.0, self._level / 100.0))
+        if shown > 0:
+            done = QRectF(level.left(), level.top(), level.width() * shown, line)
+            fill_round(p, done, qcolor(_DOCK_LEVEL), line / 2)
+        # Words and ⋯: pills as the screen's, lit as its Words is.
+        words = rects.get("words")
+        if words is not None:
+            self._paint_pill(p, words, self._words)
+            p.setFont(self._dock_font(_DOCK_PILL_PX))
+            p.setPen(qcolor(_PILL_ON_TEXT if self._words else _PILL_TEXT))
+            p.drawText(words, Qt.AlignCenter, self._words_label())
+        more = rects.get("more")
+        if more is not None:
+            lit = self._held == "more" or self._held in MENU_CONTROLS
+            self._paint_pill(p, more, lit)
+            side = _DOCK_DIM_ICON * k
+            dots = QRectF(more.center().x() - side / 2, more.center().y() - side / 2, side, side)
+            draw_icon(p, "more", dots, qcolor(PALETTE.accent) if lit else qcolor(_DOCK_TEXT))
+
+    @staticmethod
+    def _paint_pill(p: QPainter, rect: QRectF, lit: bool) -> None:
+        radius = rect.height() / 2
+        fill_round(p, rect, qcolor(_PILL_ON_FILL if lit else _PILL_FILL), radius)
+        if lit:  # the inset ring
+            p.save()
+            p.setPen(QPen(qcolor(_PILL_ON_RING), 1.0))
+            p.setBrush(Qt.NoBrush)
+            p.drawRoundedRect(rect.adjusted(0.5, 0.5, -0.5, -0.5), radius - 0.5, radius - 0.5)
+            p.restore()
+
+    def _paint_dock_play(self, p: QPainter, rect: QRectF, k: float) -> None:
+        """Play: the accent circle over its glow (0 10px 30px), the glyph dark in it."""
+        radius = rect.width() / 2
+        reach = radius + _DOCK_SHADOW_BLUR * k
+        centre = QPointF(rect.center().x(), rect.center().y() + _DOCK_SHADOW_Y * k)
+        glow = QRadialGradient(centre, reach)
+        # A disc blurred by σ = 15 px: its middle near .8 of the colour, its edge half, then out.
+        for at, strength in ((0.0, 0.8), (radius / reach, 0.5), (0.75, 0.12), (1.0, 0.0)):
+            glow.setColorAt(at, qcolor(PALETTE.accent, _DOCK_GLOW_ALPHA * strength))
+        p.save()
+        p.setPen(Qt.NoPen)
+        p.setBrush(glow)
+        p.drawEllipse(centre, reach, reach)
+        p.restore()
+        fill_round(p, rect, qcolor(PALETTE.accent), radius)
+        glyph = _DOCK_GLYPH * k
+        nudge = glyph * 0.06 if self._paused else 0.0  # ▶ looks centred a little right
+        box = QRectF(
+            rect.center().x() - glyph / 2 + nudge, rect.center().y() - glyph / 2, glyph, glyph
+        )
+        draw_icon(p, "play" if self._paused else "pause", box, qcolor(_DOCK_PLAY_GLYPH))
 
     def _paint_record(self, p: QPainter, un: Units, row: _TitleRow) -> None:
         """The record button (red; dim without time-shift; lit while it records) and the REC
@@ -1949,7 +2296,7 @@ class Transport(Overlay):
         Only the hit area grows: the icons are drawn as before."""
         hits = dict(rects)
         row = [(n, r) for n, r in rects.items() if n not in ("seek", "times")]
-        for name in _ICON_BUTTONS:
+        for name in (*_ICON_BUTTONS, *_DOCK_BUTTONS):
             rect = rects.get(name)
             if rect is None:
                 continue
@@ -2106,6 +2453,20 @@ class Transport(Overlay):
                 self.libraryRequested.emit()
             elif name == "live_tv":
                 self.liveTvRequested.emit()
+            elif name == "prev_track":
+                self.prevTrackRequested.emit()
+            elif name == "next_track":
+                if self._has_list:  # dim without an album list: nothing after this song
+                    self.nextTrackRequested.emit()
+            elif name == "shuffle":
+                if self._has_list:
+                    self.shuffleRequested.emit()
+            elif name == "repeat":
+                self.repeatRequested.emit()
+            elif name == "words":
+                self.wordsRequested.emit()
+            elif name == "more":
+                self.moreRequested.emit(self.mapToGlobal(rect.topLeft().toPoint()))
             return
 
     def _choose_speed(self, rate: float) -> None:
@@ -2123,12 +2484,18 @@ class Transport(Overlay):
         subtitle: str,
         timeshift: bool = False,
         logo: QPixmap | None = None,
+        audio: bool = False,
     ) -> None:
         if not (timeshift and self._timeshift and title == self._title):
             self._clear_timeline()
         self._failed = False
         self._live = live
         self._timeshift = timeshift
+        if audio != self._audio:
+            self._audio = audio
+            self._sync_mask()
+        if audio:
+            self._idle.stop()  # the dock never fades
         self._title = title
         self._logo = logo
         self._subtitle = subtitle

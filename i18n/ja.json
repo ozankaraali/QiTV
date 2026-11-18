@@ -592,6 +592,7 @@
   "Next in {n} s": {
     "other": "次の作品まで{n}秒"
   },
+  "Next track": "",
   "Next: {when}": "次回: {when}",
   "Nicaragua": "ニカラグア",
   "Niger": "ニジェール",
@@ -751,6 +752,7 @@
   "Previous / next channel (volume during a movie)": "前／次のチャンネル（映画中は音量）",
   "Previous Channel": "前のチャンネル",
   "Previous channel": "前のチャンネル",
+  "Previous track": "",
   "Programme guide": "番組表",
   "Programme start": "番組の最初へ",
   "Provider verified successfully.": "プロバイダーを確認しました。",
@@ -844,6 +846,7 @@
   "Removed from Recents": "最近から削除しました",
   "Removed from favorites": "お気に入りから削除しました",
   "Repeat": "繰り返し",
+  "Repeat one": "",
   "Repeats": "繰り返し",
   "Report an Issue…": "問題を報告…",
   "Report an issue": "問題を報告",
@@ -905,6 +908,7 @@
   "Show on TV": "テレビにも表示",
   "Show the Log File…": "ログファイルを表示…",
   "Show the pairing code on the TV": "ペアリングコードをテレビに表示",
+  "Shuffle": "",
   "Sierra Leone": "シエラレオネ",
   "Sign out": "サインアウト",
   "Signing in is optional: without it OpenSubtitles allows {n} download a day per connection; with your account, as many as it allows you. Sign out clears both.": {

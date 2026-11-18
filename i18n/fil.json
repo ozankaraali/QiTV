@@ -598,6 +598,7 @@
     "one": "Susunod sa {n} s",
     "other": "Susunod sa {n} s"
   },
+  "Next track": "",
   "Next: {when}": "Susunod: {when}",
   "Nicaragua": "Nicaragua",
   "Niger": "Niger",
@@ -758,6 +759,7 @@
   "Previous / next channel (volume during a movie)": "Nakaraan / susunod na channel (volume habang may pelikula)",
   "Previous Channel": "Nakaraang Channel",
   "Previous channel": "Nakaraang channel",
+  "Previous track": "",
   "Programme guide": "Gabay ng palabas",
   "Programme start": "Simula ng palabas",
   "Provider verified successfully.": "Matagumpay na na-verify ang provider.",
@@ -852,6 +854,7 @@
   "Removed from Recents": "Inalis sa Mga Kamakailan",
   "Removed from favorites": "Inalis sa mga paborito",
   "Repeat": "Ulitin",
+  "Repeat one": "",
   "Repeats": "Umuulit",
   "Report an Issue…": "Mag-ulat ng Problema…",
   "Report an issue": "Mag-ulat ng problema",
@@ -913,6 +916,7 @@
   "Show on TV": "Ipakita sa TV",
   "Show the Log File…": "Ipakita ang Log File…",
   "Show the pairing code on the TV": "Ipakita ang pairing code sa TV",
+  "Shuffle": "",
   "Sierra Leone": "Sierra Leone",
   "Sign out": "Mag-sign out",
   "Signing in is optional: without it OpenSubtitles allows {n} download a day per connection; with your account, as many as it allows you. Sign out clears both.": {

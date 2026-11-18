@@ -598,6 +598,7 @@
     "one": "Επόμενο σε {n} δευτ.",
     "other": "Επόμενο σε {n} δευτ."
   },
+  "Next track": "",
   "Next: {when}": "Επόμενη: {when}",
   "Nicaragua": "Νικαράγουα",
   "Niger": "Νίγηρας",
@@ -758,6 +759,7 @@
   "Previous / next channel (volume during a movie)": "Προηγούμενο / επόμενο κανάλι (ένταση σε ταινία)",
   "Previous Channel": "Προηγούμενο κανάλι",
   "Previous channel": "Προηγούμενο κανάλι",
+  "Previous track": "",
   "Programme guide": "Οδηγός προγράμματος",
   "Programme start": "Αρχή εκπομπής",
   "Provider verified successfully.": "Ο πάροχος επαληθεύτηκε.",
@@ -852,6 +854,7 @@
   "Removed from Recents": "Αφαιρέθηκε από τα Πρόσφατα",
   "Removed from favorites": "Αφαιρέθηκε από τα αγαπημένα",
   "Repeat": "Επανάληψη",
+  "Repeat one": "",
   "Repeats": "Επαναλαμβάνεται",
   "Report an Issue…": "Αναφορά προβλήματος…",
   "Report an issue": "Αναφορά προβλήματος",
@@ -913,6 +916,7 @@
   "Show on TV": "Εμφάνιση στην TV",
   "Show the Log File…": "Εμφάνιση αρχείου καταγραφής…",
   "Show the pairing code on the TV": "Εμφάνιση κωδικού σύζευξης στην τηλεόραση",
+  "Shuffle": "",
   "Sierra Leone": "Σιέρα Λεόνε",
   "Sign out": "Αποσύνδεση",
   "Signing in is optional: without it OpenSubtitles allows {n} download a day per connection; with your account, as many as it allows you. Sign out clears both.": {

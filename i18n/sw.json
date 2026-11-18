@@ -598,6 +598,7 @@
     "one": "Inayofuata baada ya sek {n}",
     "other": "Inayofuata baada ya sek {n}"
   },
+  "Next track": "",
   "Next: {when}": "Inayofuata: {when}",
   "Nicaragua": "Nikaragwa",
   "Niger": "Niger",
@@ -758,6 +759,7 @@
   "Previous / next channel (volume during a movie)": "Chaneli iliyotangulia / inayofuata (sauti wakati wa filamu)",
   "Previous Channel": "Chaneli iliyotangulia",
   "Previous channel": "Chaneli iliyotangulia",
+  "Previous track": "",
   "Programme guide": "Mwongozo wa vipindi",
   "Programme start": "Mwanzo wa kipindi",
   "Provider verified successfully.": "Mtoa huduma amethibitishwa.",
@@ -852,6 +854,7 @@
   "Removed from Recents": "Imeondolewa kwenye za hivi karibuni",
   "Removed from favorites": "Imeondolewa kwenye vipendwa",
   "Repeat": "Rudia",
+  "Repeat one": "",
   "Repeats": "Hujirudia",
   "Report an Issue…": "Ripoti tatizo…",
   "Report an issue": "Ripoti tatizo",
@@ -913,6 +916,7 @@
   "Show on TV": "Onyesha kwenye TV",
   "Show the Log File…": "Onyesha faili ya logi…",
   "Show the pairing code on the TV": "Onyesha msimbo wa kuoanisha kwenye TV",
+  "Shuffle": "",
   "Sierra Leone": "Siera Leoni",
   "Sign out": "Toka",
   "Signing in is optional: without it OpenSubtitles allows {n} download a day per connection; with your account, as many as it allows you. Sign out clears both.": {

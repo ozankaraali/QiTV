@@ -610,6 +610,7 @@
     "one": "Далее через {n} с",
     "other": "Далее через {n} с"
   },
+  "Next track": "",
   "Next: {when}": "Следующий: {when}",
   "Nicaragua": "Никарагуа",
   "Niger": "Нигер",
@@ -772,6 +773,7 @@
   "Previous / next channel (volume during a movie)": "Предыдущий / следующий канал (громкость во время фильма)",
   "Previous Channel": "Предыдущий канал",
   "Previous channel": "Предыдущий канал",
+  "Previous track": "",
   "Programme guide": "Телегид",
   "Programme start": "Начало передачи",
   "Provider verified successfully.": "Провайдер успешно проверен.",
@@ -868,6 +870,7 @@
   "Removed from Recents": "Убрано из «Недавних»",
   "Removed from favorites": "Убрано из избранного",
   "Repeat": "Повтор",
+  "Repeat one": "",
   "Repeats": "Повторяется",
   "Report an Issue…": "Сообщить о проблеме…",
   "Report an issue": "Сообщить о проблеме",
@@ -929,6 +932,7 @@
   "Show on TV": "Показать на телевизоре",
   "Show the Log File…": "Показать файл журнала…",
   "Show the pairing code on the TV": "Показать код сопряжения на телевизоре",
+  "Shuffle": "",
   "Sierra Leone": "Сьерра-Леоне",
   "Sign out": "Выйти",
   "Signing in is optional: without it OpenSubtitles allows {n} download a day per connection; with your account, as many as it allows you. Sign out clears both.": {

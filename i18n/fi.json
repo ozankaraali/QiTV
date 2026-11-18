@@ -598,6 +598,7 @@
     "one": "Seuraava: {n} s",
     "other": "Seuraava: {n} s"
   },
+  "Next track": "",
   "Next: {when}": "Seuraava: {when}",
   "Nicaragua": "Nicaragua",
   "Niger": "Niger",
@@ -758,6 +759,7 @@
   "Previous / next channel (volume during a movie)": "Edellinen / seuraava kanava (elokuvassa äänenvoimakkuus)",
   "Previous Channel": "Edellinen kanava",
   "Previous channel": "Edellinen kanava",
+  "Previous track": "",
   "Programme guide": "Ohjelmaopas",
   "Programme start": "Ohjelman alku",
   "Provider verified successfully.": "Palveluntarjoaja tarkistettu.",
@@ -852,6 +854,7 @@
   "Removed from Recents": "Poistettu Viimeisimmistä",
   "Removed from favorites": "Poistettu suosikeista",
   "Repeat": "Toistuvuus",
+  "Repeat one": "",
   "Repeats": "Toistuu",
   "Report an Issue…": "Ilmoita ongelmasta…",
   "Report an issue": "Ilmoita ongelmasta",
@@ -913,6 +916,7 @@
   "Show on TV": "Näytä televisiossa",
   "Show the Log File…": "Näytä lokitiedosto…",
   "Show the pairing code on the TV": "Näytä parituskoodi televisiossa",
+  "Shuffle": "",
   "Sierra Leone": "Sierra Leone",
   "Sign out": "Kirjaudu ulos",
   "Signing in is optional: without it OpenSubtitles allows {n} download a day per connection; with your account, as many as it allows you. Sign out clears both.": {

@@ -598,6 +598,7 @@
     "one": "Næste om {n} s",
     "other": "Næste om {n} s"
   },
+  "Next track": "",
   "Next: {when}": "Næste: {when}",
   "Nicaragua": "Nicaragua",
   "Niger": "Niger",
@@ -758,6 +759,7 @@
   "Previous / next channel (volume during a movie)": "Forrige / næste kanal (lydstyrke under en film)",
   "Previous Channel": "Forrige kanal",
   "Previous channel": "Forrige kanal",
+  "Previous track": "",
   "Programme guide": "Tv-guide",
   "Programme start": "Programstart",
   "Provider verified successfully.": "Udbyderen er bekræftet.",
@@ -852,6 +854,7 @@
   "Removed from Recents": "Fjernet fra Seneste",
   "Removed from favorites": "Fjernet fra favoritter",
   "Repeat": "Gentagelse",
+  "Repeat one": "",
   "Repeats": "Gentages",
   "Report an Issue…": "Rapportér et problem…",
   "Report an issue": "Rapportér et problem",
@@ -913,6 +916,7 @@
   "Show on TV": "Vis på tv",
   "Show the Log File…": "Vis logfilen…",
   "Show the pairing code on the TV": "Vis parringskoden på tv'et",
+  "Shuffle": "",
   "Sierra Leone": "Sierra Leone",
   "Sign out": "Log ud",
   "Signing in is optional: without it OpenSubtitles allows {n} download a day per connection; with your account, as many as it allows you. Sign out clears both.": {

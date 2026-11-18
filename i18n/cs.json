@@ -604,6 +604,7 @@
     "one": "Další za {n} s",
     "other": "Další za {n} s"
   },
+  "Next track": "",
   "Next: {when}": "Další: {when}",
   "Nicaragua": "Nikaragua",
   "Niger": "Niger",
@@ -765,6 +766,7 @@
   "Previous / next channel (volume during a movie)": "Předchozí / další kanál (při filmu hlasitost)",
   "Previous Channel": "Předchozí kanál",
   "Previous channel": "Předchozí kanál",
+  "Previous track": "",
   "Programme guide": "TV program",
   "Programme start": "Začátek pořadu",
   "Provider verified successfully.": "Poskytovatel byl úspěšně ověřen.",
@@ -860,6 +862,7 @@
   "Removed from Recents": "Odebráno z nedávných",
   "Removed from favorites": "Odebráno z oblíbených",
   "Repeat": "Opakování",
+  "Repeat one": "",
   "Repeats": "Opakuje se",
   "Report an Issue…": "Nahlásit problém…",
   "Report an issue": "Nahlásit problém",
@@ -921,6 +924,7 @@
   "Show on TV": "Zobrazit v TV",
   "Show the Log File…": "Zobrazit soubor protokolu…",
   "Show the pairing code on the TV": "Zobrazit párovací kód na televizi",
+  "Shuffle": "",
   "Sierra Leone": "Sierra Leone",
   "Sign out": "Odhlásit",
   "Signing in is optional: without it OpenSubtitles allows {n} download a day per connection; with your account, as many as it allows you. Sign out clears both.": {

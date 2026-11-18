@@ -592,6 +592,7 @@
   "Next in {n} s": {
     "other": "Seterusnya dalam {n} s"
   },
+  "Next track": "",
   "Next: {when}": "Seterusnya: {when}",
   "Nicaragua": "Nicaragua",
   "Niger": "Niger",
@@ -751,6 +752,7 @@
   "Previous / next channel (volume during a movie)": "Saluran sebelumnya / seterusnya (kelantangan semasa filem)",
   "Previous Channel": "Saluran Sebelumnya",
   "Previous channel": "Saluran sebelumnya",
+  "Previous track": "",
   "Programme guide": "Panduan rancangan",
   "Programme start": "Permulaan rancangan",
   "Provider verified successfully.": "Pembekal berjaya disahkan.",
@@ -844,6 +846,7 @@
   "Removed from Recents": "Dialih keluar dari Terkini",
   "Removed from favorites": "Dialih keluar dari kegemaran",
   "Repeat": "Ulang",
+  "Repeat one": "",
   "Repeats": "Berulang",
   "Report an Issue…": "Laporkan Isu…",
   "Report an issue": "Laporkan isu",
@@ -905,6 +908,7 @@
   "Show on TV": "Tunjukkan di TV",
   "Show the Log File…": "Tunjukkan Fail Log…",
   "Show the pairing code on the TV": "Tunjukkan kod pasangan pada TV",
+  "Shuffle": "",
   "Sierra Leone": "Sierra Leone",
   "Sign out": "Log keluar",
   "Signing in is optional: without it OpenSubtitles allows {n} download a day per connection; with your account, as many as it allows you. Sign out clears both.": {

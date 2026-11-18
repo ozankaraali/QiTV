@@ -592,6 +592,7 @@
   "Next in {n} s": {
     "other": "{n}초 후 다음 작품"
   },
+  "Next track": "",
   "Next: {when}": "다음: {when}",
   "Nicaragua": "니카라과",
   "Niger": "니제르",
@@ -751,6 +752,7 @@
   "Previous / next channel (volume during a movie)": "이전/다음 채널 (영화 중에는 볼륨)",
   "Previous Channel": "이전 채널",
   "Previous channel": "이전 채널",
+  "Previous track": "",
   "Programme guide": "편성표",
   "Programme start": "프로그램 처음으로",
   "Provider verified successfully.": "제공자를 확인했어요.",
@@ -844,6 +846,7 @@
   "Removed from Recents": "최근 목록에서 삭제했어요",
   "Removed from favorites": "즐겨찾기에서 삭제했어요",
   "Repeat": "반복",
+  "Repeat one": "",
   "Repeats": "반복",
   "Report an Issue…": "문제 신고…",
   "Report an issue": "문제 신고",
@@ -905,6 +908,7 @@
   "Show on TV": "TV에도 표시",
   "Show the Log File…": "로그 파일 보기…",
   "Show the pairing code on the TV": "TV에 페어링 코드 표시",
+  "Shuffle": "",
   "Sierra Leone": "시에라리온",
   "Sign out": "로그아웃",
   "Signing in is optional: without it OpenSubtitles allows {n} download a day per connection; with your account, as many as it allows you. Sign out clears both.": {

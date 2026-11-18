@@ -598,6 +598,7 @@
     "one": "اگلا {n} سیکنڈ میں",
     "other": "اگلا {n} سیکنڈ میں"
   },
+  "Next track": "",
   "Next: {when}": "اگلی: {when}",
   "Nicaragua": "نکاراگوا",
   "Niger": "نائجر",
@@ -758,6 +759,7 @@
   "Previous / next channel (volume during a movie)": "پچھلا / اگلا چینل (فلم کے دوران آواز)",
   "Previous Channel": "پچھلا چینل",
   "Previous channel": "پچھلا چینل",
+  "Previous track": "",
   "Programme guide": "پروگرام گائیڈ",
   "Programme start": "پروگرام کا آغاز",
   "Provider verified successfully.": "فراہم کنندہ کی کامیابی سے تصدیق ہو گئی۔",
@@ -852,6 +854,7 @@
   "Removed from Recents": "حالیہ سے ہٹا دیا گیا",
   "Removed from favorites": "پسندیدہ سے ہٹا دیا گیا",
   "Repeat": "دہرائیں",
+  "Repeat one": "",
   "Repeats": "دہرائی جاتی ہے",
   "Report an Issue…": "مسئلہ رپورٹ کریں…",
   "Report an issue": "مسئلہ رپورٹ کریں",
@@ -913,6 +916,7 @@
   "Show on TV": "ٹی وی پر دکھائیں",
   "Show the Log File…": "لاگ فائل دکھائیں…",
   "Show the pairing code on the TV": "جوڑنے کا کوڈ ٹی وی پر دکھائیں",
+  "Shuffle": "",
   "Sierra Leone": "سیرا لیون",
   "Sign out": "سائن آؤٹ",
   "Signing in is optional: without it OpenSubtitles allows {n} download a day per connection; with your account, as many as it allows you. Sign out clears both.": {

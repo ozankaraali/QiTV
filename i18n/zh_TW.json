@@ -592,6 +592,7 @@
   "Next in {n} s": {
     "other": "{n} 秒後播放下一部"
   },
+  "Next track": "",
   "Next: {when}": "下次：{when}",
   "Nicaragua": "尼加拉瓜",
   "Niger": "尼日",
@@ -751,6 +752,7 @@
   "Previous / next channel (volume during a movie)": "上一個 / 下一個頻道（看電影時調整音量）",
   "Previous Channel": "上一個頻道",
   "Previous channel": "上一個頻道",
+  "Previous track": "",
   "Programme guide": "節目表",
   "Programme start": "節目開頭",
   "Provider verified successfully.": "供應商驗證成功。",
@@ -844,6 +846,7 @@
   "Removed from Recents": "已從最近觀看中移除",
   "Removed from favorites": "已從我的最愛中移除",
   "Repeat": "重複",
+  "Repeat one": "",
   "Repeats": "重複",
   "Report an Issue…": "回報問題…",
   "Report an issue": "回報問題",
@@ -905,6 +908,7 @@
   "Show on TV": "在電視上顯示",
   "Show the Log File…": "顯示記錄檔…",
   "Show the pairing code on the TV": "在電視上顯示配對碼",
+  "Shuffle": "",
   "Sierra Leone": "獅子山",
   "Sign out": "登出",
   "Signing in is optional: without it OpenSubtitles allows {n} download a day per connection; with your account, as many as it allows you. Sign out clears both.": {

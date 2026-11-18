@@ -604,6 +604,7 @@
     "one": "Următorul în {n} s",
     "other": "Următorul în {n} s"
   },
+  "Next track": "",
   "Next: {when}": "Următoarea: {when}",
   "Nicaragua": "Nicaragua",
   "Niger": "Niger",
@@ -765,6 +766,7 @@
   "Previous / next channel (volume during a movie)": "Canalul anterior / următor (volum în timpul unui film)",
   "Previous Channel": "Canalul anterior",
   "Previous channel": "Canalul anterior",
+  "Previous track": "",
   "Programme guide": "Ghid de programe",
   "Programme start": "Începutul emisiunii",
   "Provider verified successfully.": "Furnizor verificat cu succes.",
@@ -860,6 +862,7 @@
   "Removed from Recents": "Eliminat din Recente",
   "Removed from favorites": "Eliminat din favorite",
   "Repeat": "Repetare",
+  "Repeat one": "",
   "Repeats": "Se repetă",
   "Report an Issue…": "Raportați o problemă…",
   "Report an issue": "Raportați o problemă",
@@ -921,6 +924,7 @@
   "Show on TV": "Afișați pe televizor",
   "Show the Log File…": "Afișați fișierul jurnal…",
   "Show the pairing code on the TV": "Afișați codul de asociere pe televizor",
+  "Shuffle": "",
   "Sierra Leone": "Sierra Leone",
   "Sign out": "Deconectați-vă",
   "Signing in is optional: without it OpenSubtitles allows {n} download a day per connection; with your account, as many as it allows you. Sign out clears both.": {

@@ -610,6 +610,7 @@
     "other": "Naslednji čez {n} s",
     "two": "Naslednji čez {n} s"
   },
+  "Next track": "",
   "Next: {when}": "Naslednje: {when}",
   "Nicaragua": "Nikaragva",
   "Niger": "Niger",
@@ -772,6 +773,7 @@
   "Previous / next channel (volume during a movie)": "Prejšnji/naslednji kanal (med filmom glasnost)",
   "Previous Channel": "Prejšnji kanal",
   "Previous channel": "Prejšnji kanal",
+  "Previous track": "",
   "Programme guide": "Spored",
   "Programme start": "Začetek oddaje",
   "Provider verified successfully.": "Ponudnik je bil uspešno preverjen.",
@@ -868,6 +870,7 @@
   "Removed from Recents": "Odstranjeno iz nedavnih",
   "Removed from favorites": "Odstranjeno iz priljubljenih",
   "Repeat": "Ponavljanje",
+  "Repeat one": "",
   "Repeats": "Ponavlja se",
   "Report an Issue…": "Prijavi težavo…",
   "Report an issue": "Prijavi težavo",
@@ -929,6 +932,7 @@
   "Show on TV": "Prikaži na TV",
   "Show the Log File…": "Pokaži dnevniško datoteko…",
   "Show the pairing code on the TV": "Prikaži kodo za seznanjanje na televizorju",
+  "Shuffle": "",
   "Sierra Leone": "Sierra Leone",
   "Sign out": "Odjava",
   "Signing in is optional: without it OpenSubtitles allows {n} download a day per connection; with your account, as many as it allows you. Sign out clears both.": {

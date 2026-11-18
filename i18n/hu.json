@@ -598,6 +598,7 @@
     "one": "Következő {n} mp múlva",
     "other": "Következő {n} mp múlva"
   },
+  "Next track": "",
   "Next: {when}": "Következő: {when}",
   "Nicaragua": "Nicaragua",
   "Niger": "Niger",
@@ -758,6 +759,7 @@
   "Previous / next channel (volume during a movie)": "Előző / következő csatorna (film közben hangerő)",
   "Previous Channel": "Előző csatorna",
   "Previous channel": "Előző csatorna",
+  "Previous track": "",
   "Programme guide": "Műsorújság",
   "Programme start": "Műsor eleje",
   "Provider verified successfully.": "A szolgáltató ellenőrzése sikerült.",
@@ -852,6 +854,7 @@
   "Removed from Recents": "Eltávolítva a Legutóbbiak közül",
   "Removed from favorites": "Eltávolítva a kedvencek közül",
   "Repeat": "Ismétlés",
+  "Repeat one": "",
   "Repeats": "Ismétlődő",
   "Report an Issue…": "Hiba bejelentése…",
   "Report an issue": "Hiba bejelentése",
@@ -913,6 +916,7 @@
   "Show on TV": "Megjelenítés a TV-n",
   "Show the Log File…": "Naplófájl megjelenítése…",
   "Show the pairing code on the TV": "Párosítókód megjelenítése a TV-n",
+  "Shuffle": "",
   "Sierra Leone": "Sierra Leone",
   "Sign out": "Kijelentkezés",
   "Signing in is optional: without it OpenSubtitles allows {n} download a day per connection; with your account, as many as it allows you. Sign out clears both.": {

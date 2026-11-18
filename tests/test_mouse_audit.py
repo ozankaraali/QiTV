@@ -31,6 +31,15 @@ Screens and their controls:
   highlighted title's strip buttons ("favorite", "play") and the A–Z "rail";
 - "series" (2.9.3): the series view's "back" (‹), its season "chips", its episode "rows" and a
   begun episode's "start_over" pill.
+
+The audio screen (a song: Plan 4) is checked on its own: AUDIO_ON_SCREEN gives, per "player"
+and "menu" row, what does the same there, on these screens, and AUDIO_EXEMPT the rows that need
+nothing there, and why:
+- "dock": the player controls in audio mode by name (the scrub is "seek");
+- "more": the dock's "⋯" menu, by item ("stop", "audio", "subtitles", "picture", "fullscreen",
+  "mini", "library", "search");
+- "audio_screen": the screen's own controls in its three views ("back", "words", "up_next",
+  "view_cover" …).
 """
 
 import os
@@ -52,9 +61,11 @@ from ui.library.poster_grid import PosterGrid
 from ui.library.series_view import SeriesView
 from ui.library.top_nav import ALL_TABS, TopNav
 from ui.overlay_host import OverlayHost
+from ui.overlays.audio_screen import VIEWS as AUDIO_VIEWS, AudioScreen
 from ui.overlays.drawer import Drawer
 from ui.overlays.guide import Guide
 from ui.overlays.mixer import Mixer, MixerRow
+from ui.overlays.more_menu import MoreMenu
 from ui.overlays.pip_label import PipLabel
 from ui.overlays.subtitle_search import LanguageRow, SubtitleSearchPage
 from ui.overlays.track_panel import PanelModel, PanelRow, PanelSync, TrackPanel
@@ -205,6 +216,59 @@ EXEMPT: dict[tuple[str, str], str] = {
     ("menu", "Ctrl+Q"): "the window's own close button (leave fullscreen with ⛶ first)",
 }
 
+# On the audio screen (a song plays: on demand, as a film), every player and menu key's action.
+# The Library rows go through it: the screen's ‹ and ⋯'s Library open it, with its tabs and ↻.
+_LIBRARY = (("audio_screen", "back"), ("more", "library"))
+AUDIO_ON_SCREEN: dict[tuple[str, str], tuple[tuple[str, str], ...]] = {
+    # On demand ↑/↓, + and − are the volume, M mutes: the speaker opens the mixer (its slider,
+    # its speaker; Tab's other row is a click on it).
+    ("player", "Up, Down"): (("dock", "volume"),),
+    ("player", "+, -"): (("dock", "volume"),),
+    ("player", "M"): (("dock", "volume"),),
+    ("player", "Tab"): (("dock", "volume"),),
+    ("player", "Left, Right"): (("dock", "seek"),),  # no ◀10 10▶: the scrub reaches any moment
+    ("player", "Space"): (("dock", "play"),),
+    ("player", "X"): (("more", "stop"),),
+    ("player", "J, K"): (("more", "audio"),),  # the Sound panel: its − and +
+    ("player", "Shift+J, Shift+K"): (("more", "subtitles"),),  # the Subtitles panel's
+    ("player", "A"): (("more", "picture"),),
+    ("player", "Shift+I"): (("more", "picture"),),  # the Picture panel's Statistics row
+    ("player", "F, F11, Ctrl+Meta+F"): (("more", "fullscreen"),),
+    ("player", "Ctrl+F"): (("more", "search"),),
+    ("player", "Alt+P"): (("more", "mini"),),
+    # Back to the Library (⋯'s Library, the screen's ‹); out of fullscreen with ⋯'s Fullscreen.
+    ("player", "Esc"): (*_LIBRARY, ("more", "fullscreen")),
+    ("menu", "Ctrl+1"): _LIBRARY,  # its Live TV tab
+    ("menu", "Ctrl+2"): _LIBRARY,  # Movies
+    ("menu", "Ctrl+3"): _LIBRARY,  # Series
+    ("menu", "Ctrl+5"): _LIBRARY,  # Recordings
+    ("menu", "Ctrl+Shift+R"): _LIBRARY,  # its ↻
+}
+
+# On demand (a song, as a film) these do nothing, or say they are live TV's (P, S, V).
+_LIVE = "live TV's (a channel's): on a song it does nothing or says so"
+AUDIO_EXEMPT: dict[tuple[str, str], str] = {
+    ("player", "0…9"): _LIVE + " (a channel number)",
+    ("player", "Backspace"): _LIVE + " (the previous channel)",
+    ("player", "L"): _LIVE + " (Go live)",
+    ("player", "R"): _LIVE + " (record the channel)",
+    ("player", "G"): _LIVE + " (the guide)",
+    # On demand I shows the player's controls: the dock always shows (the screen, the song).
+    ("player", "I"): "on a song it shows the controls, and the dock always shows",
+    ("player", "Ctrl+D"): "a favorite channel: nothing while a song plays, as on a film",
+    ("player", "P, Ctrl+P"): _LIVE + " (picture in picture with the previous channel)",
+    ("player", "S"): _LIVE + " (swaps the second channel's small picture)",
+    ("player", "V"): _LIVE + " (the multiview)",
+    ("menu", "Ctrl+4"): _LIVE + " (the multiview)",
+    # The channel list: the host's gesture opens it over a song (the mouse's Back button, as
+    # Return does); there are Open file, Settings and Refresh. The Library's Live TV has it too.
+    ("player", "Return"): "the channel list: the mouse's Back button opens it (the host's)",
+    ("menu", "Ctrl+O"): "the channel list's Open file (the mouse's Back button opens the list)",
+    ("menu", "Ctrl+,"): "the channel list's Settings (the mouse's Back button opens the list)",
+    ("menu", "Ctrl+R"): "the channel list's ↻ (the mouse's Back button opens the list)",
+    ("menu", "Ctrl+Q"): EXEMPT[("menu", "Ctrl+Q")],
+}
+
 TIMELINE = {
     "start": 0.0,
     "end": 600.0,
@@ -247,6 +311,40 @@ def _transport(host: QWidget) -> set[str]:
     t.show_vod("Film", "")
     t.update_position(0, 100_000)
     take()
+    return found
+
+
+def _audio_dock(host: QWidget) -> Transport:
+    t = Transport(host)
+    t.show_audio("Ferries at Night", "Mira Sol · Harbour Lights")
+    t.set_audio_state(False, "off", False, True)  # a song of an album
+    t.update_position(84_000, 221_000)
+    return t
+
+
+def _dock(host: QWidget) -> set[str]:
+    """The player controls in audio mode: what the dock lays out (its times only say)."""
+    t = _audio_dock(host)
+    return {n for n, r in t._layout().items() if not r.isEmpty() and n != "times"}
+
+
+def _more(host: QWidget) -> set[str]:
+    """The dock's "⋯" menu, opened from its button."""
+    t = _audio_dock(host)
+    menu = MoreMenu(t, host)
+    menu.open_at(t.mapToGlobal(t.button_rect("more").topLeft().toPoint()))
+    return {n for n, r in menu.controls().items() if not r.isEmpty()}
+
+
+def _audio_screen(host: QWidget) -> set[str]:
+    """The audio screen's own controls in each view, a song of a two-track album."""
+    screen = AudioScreen(host)
+    screen.show_song("Ferries at Night", "Mira Sol", "Harbour Lights")
+    screen.set_tracks([{"title": "Low Tide"}, {"title": "Ferries at Night"}], 1)
+    found: set[str] = set()
+    for view in AUDIO_VIEWS:
+        screen.set_view(view)
+        found.update(n for n, r in screen.controls().items() if not r.isEmpty())
     return found
 
 
@@ -508,6 +606,49 @@ class MouseOnlyAuditTests(unittest.TestCase):
         listed = {(context, keys) for context, rows in SHORTCUTS.items() for keys, _ in rows}
         self.assertEqual(set(ON_SCREEN) - listed, set())
         self.assertEqual(set(EXEMPT) - listed, set())
+
+
+class AudioScreenAuditTests(unittest.TestCase):
+    """A song's screen (Plan 4): every player and menu key's action has a control on the dock,
+    in its "⋯" menu or on the screen itself, or a reason it needs none there."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.app = QApplication.instance() or QApplication([])
+        host = _host()
+        cls.addClassCleanup(host.deleteLater)
+        cls.addClassCleanup(host.close)
+        cls.screens = {
+            "dock": _dock(_child(host)),
+            "more": _more(_child(host)),
+            "audio_screen": _audio_screen(_child(host)),
+        }
+
+    def test_every_player_action_is_reachable_on_the_audio_screen(self):
+        for context in ("player", "menu"):
+            for keys, what in SHORTCUTS[context]:
+                row = (context, keys)
+                with self.subTest(context=context, keys=keys, what=what):
+                    listed = row in AUDIO_ON_SCREEN, row in AUDIO_EXEMPT
+                    self.assertEqual(sum(listed), 1, "list it in AUDIO_ON_SCREEN or AUDIO_EXEMPT")
+                    if row in AUDIO_EXEMPT:
+                        self.assertTrue(AUDIO_EXEMPT[row])
+                        continue
+                    self.assertTrue(AUDIO_ON_SCREEN[row])
+                    for screen, control in AUDIO_ON_SCREEN[row]:
+                        self.assertIn(control, self.screens[screen], f"{screen}: {control}")
+
+    def test_the_audio_tables_name_only_player_and_menu_keys_that_are_listed(self):
+        listed = {(c, keys) for c in ("player", "menu") for keys, _ in SHORTCUTS[c]}
+        self.assertEqual(set(AUDIO_ON_SCREEN) - listed, set())
+        self.assertEqual(set(AUDIO_EXEMPT) - listed, set())
+
+    def test_the_dock_and_its_menu_show_what_they_hold(self):
+        dock = {"seek", "shuffle", "prev_track", "play", "next_track", "repeat", "volume"}
+        self.assertEqual(self.screens["dock"], dock | {"words", "more"})
+        menu = {"stop", "audio", "subtitles", "picture", "fullscreen", "mini", "library"}
+        self.assertEqual(self.screens["more"], menu | {"search"})
+        self.assertLessEqual({"back", "words", "up_next"}, self.screens["audio_screen"])
 
 
 def _child(host: QWidget) -> QWidget:

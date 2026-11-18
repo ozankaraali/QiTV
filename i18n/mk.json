@@ -598,6 +598,7 @@
     "one": "Следно за {n} с",
     "other": "Следно за {n} с"
   },
+  "Next track": "",
   "Next: {when}": "Следно: {when}",
   "Nicaragua": "Никарагва",
   "Niger": "Нигер",
@@ -758,6 +759,7 @@
   "Previous / next channel (volume during a movie)": "Претходен / следен канал (јачина на звук за време на филм)",
   "Previous Channel": "Претходен канал",
   "Previous channel": "Претходен канал",
+  "Previous track": "",
   "Programme guide": "ТВ водич",
   "Programme start": "Почеток на емисијата",
   "Provider verified successfully.": "Провајдерот е успешно проверен.",
@@ -852,6 +854,7 @@
   "Removed from Recents": "Отстрането од неодамнешни",
   "Removed from favorites": "Отстрането од омилени",
   "Repeat": "Повторување",
+  "Repeat one": "",
   "Repeats": "Се повторува",
   "Report an Issue…": "Пријави проблем…",
   "Report an issue": "Пријави проблем",
@@ -913,6 +916,7 @@
   "Show on TV": "Прикажи на ТВ",
   "Show the Log File…": "Прикажи ја датотеката со дневник…",
   "Show the pairing code on the TV": "Прикажи го кодот за спарување на ТВ",
+  "Shuffle": "",
   "Sierra Leone": "Сиера Леоне",
   "Sign out": "Одјави се",
   "Signing in is optional: without it OpenSubtitles allows {n} download a day per connection; with your account, as many as it allows you. Sign out clears both.": {

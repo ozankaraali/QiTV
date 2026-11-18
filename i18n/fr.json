@@ -598,6 +598,7 @@
     "one": "Suivant dans {n} s",
     "other": "Suivant dans {n} s"
   },
+  "Next track": "Titre suivant",
   "Next: {when}": "Prochain : {when}",
   "Nicaragua": "Nicaragua",
   "Niger": "Niger",
@@ -758,6 +759,7 @@
   "Previous / next channel (volume during a movie)": "Chaîne précédente / suivante (volume pendant un film)",
   "Previous Channel": "Chaîne précédente",
   "Previous channel": "Chaîne précédente",
+  "Previous track": "Titre précédent",
   "Programme guide": "Guide des programmes",
   "Programme start": "Début du programme",
   "Provider verified successfully.": "Fournisseur vérifié.",
@@ -852,6 +854,7 @@
   "Removed from Recents": "Retirée des récentes",
   "Removed from favorites": "Retirée des favoris",
   "Repeat": "Répéter",
+  "Repeat one": "Répéter ce titre",
   "Repeats": "Répété",
   "Report an Issue…": "Signaler un problème…",
   "Report an issue": "Signaler un problème",
@@ -913,6 +916,7 @@
   "Show on TV": "Afficher sur la télé",
   "Show the Log File…": "Afficher le fichier journal…",
   "Show the pairing code on the TV": "Afficher le code d'association sur la TV",
+  "Shuffle": "Lecture aléatoire",
   "Sierra Leone": "Sierra Leone",
   "Sign out": "Se déconnecter",
   "Signing in is optional: without it OpenSubtitles allows {n} download a day per connection; with your account, as many as it allows you. Sign out clears both.": {

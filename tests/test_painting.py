@@ -69,6 +69,10 @@ ICONS = [
     "layout_4",
     "layout_6",
     "layout_9",
+    "shuffle",  # the audio dock (Task 4)
+    "repeat",
+    "repeat_one",
+    "more",
 ]
 
 
@@ -166,6 +170,29 @@ class PaintingTest(unittest.TestCase):
                 draw_icon(p, name, QRectF(0, 0, 64, 64), QColor("#ffffff"))
                 p.end()
                 self.assertTrue(painted(image))
+
+    def test_the_audio_docks_icons_stay_in_their_box_and_repeat_one_marks_its_one(self):
+        # Drawn as the mockup's 24×24 glyphs: a 2 px stroke, round caps, inside their box.
+        def drawn(name: str) -> QImage:
+            image = QImage(96, 96, QImage.Format_ARGB32_Premultiplied)
+            image.fill(0)
+            p = QPainter(image)
+            draw_icon(p, name, QRectF(16, 16, 64, 64), QColor("#ffffff"))
+            p.end()
+            return image
+
+        for name in ("shuffle", "repeat", "repeat_one", "more"):
+            image = drawn(name)
+            ink = [(x, y) for y in range(96) for x in range(96) if image.pixelColor(x, y).alpha()]
+            xs, ys = [x for x, _ in ink], [y for _, y in ink]
+            self.assertGreaterEqual(min(xs), 16, name)
+            self.assertLessEqual(max(xs), 80, name)
+            self.assertGreaterEqual(min(ys), 16, name)
+            self.assertLessEqual(max(ys), 80, name)
+        repeat, one = drawn("repeat"), drawn("repeat_one")
+        middle = [(x, y) for y in range(40, 56) for x in range(42, 54)]
+        self.assertFalse(any(repeat.pixelColor(x, y).alpha() for x, y in middle))
+        self.assertTrue(any(one.pixelColor(x, y).alpha() for x, y in middle))
 
     def test_unknown_icon_raises(self):
         image = blank()

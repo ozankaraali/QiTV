@@ -604,6 +604,7 @@
     "other": "הבא בעוד {n} שנ׳",
     "two": "הבא בעוד {n} שנ׳"
   },
+  "Next track": "",
   "Next: {when}": "הבא: {when}",
   "Nicaragua": "ניקרגואה",
   "Niger": "ניז'ר",
@@ -765,6 +766,7 @@
   "Previous / next channel (volume during a movie)": "הערוץ הקודם / הבא (עוצמת קול בזמן סרט)",
   "Previous Channel": "הערוץ הקודם",
   "Previous channel": "הערוץ הקודם",
+  "Previous track": "",
   "Programme guide": "לוח שידורים",
   "Programme start": "תחילת התוכנית",
   "Provider verified successfully.": "הספק אומת בהצלחה.",
@@ -860,6 +862,7 @@
   "Removed from Recents": "הוסר מהאחרונים",
   "Removed from favorites": "הוסר מהמועדפים",
   "Repeat": "חזרה",
+  "Repeat one": "",
   "Repeats": "חוזרת",
   "Report an Issue…": "דיווח על בעיה…",
   "Report an issue": "דיווח על בעיה",
@@ -921,6 +924,7 @@
   "Show on TV": "הצגה בטלוויזיה",
   "Show the Log File…": "הצגת קובץ היומן…",
   "Show the pairing code on the TV": "הצגת קוד הצימוד בטלוויזיה",
+  "Shuffle": "",
   "Sierra Leone": "סיירה לאונה",
   "Sign out": "התנתקות",
   "Signing in is optional: without it OpenSubtitles allows {n} download a day per connection; with your account, as many as it allows you. Sign out clears both.": {
