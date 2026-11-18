@@ -730,7 +730,7 @@ class TitlePrefixTest(unittest.TestCase):
     def test_a_language_the_viewer_chose_stays_theirs(self) -> None:
         captions = self.controller("TR: Channel One")
         captions._config_get = lambda key, default=None: (
-            {captions._language_key(): "English"} if key == "ai_captions_picks" else default
+            {captions._pick_key(): "English"} if key == "ai_captions_picks" else default
         )
         captions._resolve_language()
         self.assertEqual(captions._language[0], "English")
@@ -811,13 +811,19 @@ class TitlePrefixTest(unittest.TestCase):
                     is_speech=lambda window: False,
                     is_voiced=lambda window: False,
                 )
-                run = object.__new__(kind)
-                with mock.patch("services.captions.decoder.AudioDecoder"):
-                    _Run.__init__(
-                        run, SimpleNamespace(send=sent.append), model, 7, "", 0.0, None, "", [0.0]
-                    )
-                self.assertIsNone(run.writer)  # no language: Qwen's pieces first
-                with mock.patch("services.captions.worker.threading.Thread"):
+                link = SimpleNamespace(send=sent.append)
+                with (
+                    mock.patch("services.captions.decoder.AudioDecoder"),
+                    mock.patch("services.captions.film.FilmReader") as reader,
+                    mock.patch("services.captions.worker.threading.Thread"),
+                ):
+                    if kind is _FilmRun:  # a file's run, as the process starts one
+                        run = _FilmRun(link, model, 7, "file:///m/Şarkı.mp3", 0.0, None, "", [0.0])
+                        run.start()
+                        reader.return_value.start.assert_called_once()
+                    else:
+                        run = _Run(link, model, 7, "", 0.0, None, "", [0.0])
+                    self.assertIsNone(run.writer)  # no language: Qwen's pieces first
                     for _ in range(3):
                         run._heard(said, 3.0)
                 self.assertEqual(run.language, TURKISH)

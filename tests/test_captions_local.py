@@ -486,16 +486,25 @@ class LocalCaptionsTests(_LocalCase):
 
 
 TIDE = "/music/Wexlo Tide/01 Tide.mp3"
-HARBOUR = "/music/Wexlo Tide/02 Harbour.flac"  # the same album (folder)
+HARBOUR = "/music/Wexlo Tide/02 Harbour.flac"  # the same folder
 QUAY = "/music/Brannow Fell/01 Quay.mp3"  # another one
+SHOW_A = "/videos/Lantern Coast/Season 1/S01E01.mkv"
+SHOW_B = "/videos/Brannow Fell/Season 1/S01E01.mkv"  # the same name, another show
+RECORDING = {
+    "id": "recording:Harbour News 2026-10-26 20.00.ts",
+    "name": "Harbour News",
+    "cmd": "file:///r/Harbour%20News%202026-10-26%2020.00.ts",
+    "path": "/r/Harbour News 2026-10-26 20.00.ts",
+    "_recording": True,
+}
 
 
 class LocalLanguageTests(_LocalCase):
     """2.11.1, the owner: Words on an English song started in Turkish, Settings' default. The
-    language a file's captions hear: the viewer's pick (a song's for its folder, its album; a
-    video file's for itself), else its audio track's, else what was heard there before (a
-    song: in its folder), else the model's own detection. Settings' default is for channels
-    and provider films only."""
+    language a file's captions hear: the viewer's pick (a song's for its folder; a video file's
+    for itself, by its path), else its audio track's, else what was heard on that file before
+    (while QiTV runs), else the model's own detection. Settings' default is for channels, their
+    recordings and providers' films. (The review's rulings I1-I3, M1, M6.)"""
 
     def setUp(self):
         super().setUp()
@@ -510,6 +519,21 @@ class LocalLanguageTests(_LocalCase):
 
     def heard(self):
         return self.captions.language()
+
+    def on(self):
+        """Words (AI captions) on for what plays, their model loaded: its run starts."""
+        self.captions.toggle()
+        self.captions._on_ready()
+
+    def run_language(self):
+        """The language the newest run was started with (its "film" message)."""
+        return [message for message in self.sent if message[0] == "film"][-1][5]
+
+    def read_again(self, path):
+        """`path` plays while captions are on: its own run starts (as the tick starts one)."""
+        self.play(path)
+        self.captions._start_run()
+        return self.run_language()
 
     def test_settings_default_is_for_channels_and_films_not_the_viewers_own_files(self):
         from ui.captions_texts import FROM_DEFAULT
@@ -527,14 +551,28 @@ class LocalLanguageTests(_LocalCase):
         self.captions._resolve_language()
         self.assertEqual(self.captions._language, ("Turkish", FROM_DEFAULT))  # a provider's film
 
+    def test_a_recording_keeps_the_channel_rule(self):
+        # Ruling I3: a recording is a channel's broadcast: Settings' default, else a guess from
+        # its channel's name, as the channel had
+        from ui.captions_texts import FROM_DEFAULT, FROM_MODEL
+
+        self.controller.play_recording(RECORDING)
+        self.session.stateChanged.emit("playing")
+        self.captions._resolve_language()
+        self.assertEqual(self.captions._language, ("Turkish", FROM_DEFAULT))
+        self.config.ai_captions_language = "auto"
+        self.controller.play_recording({**RECORDING, "name": "DE: Hafen Nachrichten"})
+        self.session.stateChanged.emit("playing")
+        self.captions._resolve_language()
+        self.assertEqual(self.captions._language, ("German", FROM_MODEL))
+        self.assertTrue(self.captions._guessed)
+
     def test_a_song_is_read_with_no_language_and_the_words_say_none_yet(self):
         from ui.tv_controller import TVController
 
         self.play(TIDE)
-        self.captions.toggle()  # Words: on for the song
-        self.captions._on_ready()  # (the model loaded)
-        [film] = [message for message in self.sent if message[0] == "film"]
-        self.assertEqual(film[5], "")  # the model hears it
+        self.on()
+        self.assertEqual(self.run_language(), "")  # the model hears it
         self.assertEqual(TVController._words_language(self.captions), "")  # "Words" alone
         changed = []
         self.captions.changed.connect(lambda: changed.append(True))
@@ -543,29 +581,52 @@ class LocalLanguageTests(_LocalCase):
         self.assertTrue(changed)  # the pill follows: "Words · English"
         self.assertEqual(TVController._words_language(self.captions), "English")
 
-    def test_what_was_heard_on_a_song_starts_its_albums_other_songs(self):
+    def test_what_was_heard_on_a_song_is_that_songs_alone(self):
+        # Ruling I1: a folder may mix languages (a compilation, Downloads): a Turkish song heard
+        # first never starts the English ones beside it in Turkish
         self.play(TIDE)
-        self.captions.toggle()
-        self.captions._on_ready()
-        self.captions._on_detected(self.captions._run, "English")
-        self.play(HARBOUR)  # the same folder
-        self.assertEqual(self.heard(), ("English", "automatic"))
-        self.play(QUAY)  # another album: heard anew
+        self.on()
+        self.captions._on_detected(self.captions._run, "Turkish")
+        self.assertEqual(self.read_again(HARBOUR), "")  # the same folder: heard anew
         self.assertEqual(self.heard(), ("auto", "automatic"))
+        self.captions._on_detected(self.captions._run, "English")
+        self.assertEqual(self.read_again(TIDE), "Turkish")  # the first song: its own, kept
+        self.assertEqual(self.heard(), ("Turkish", "automatic"))
+        self.assertEqual(self.read_again(HARBOUR), "English")
 
-    def test_a_language_picked_on_a_song_is_its_albums(self):
+    def test_auto_on_an_own_file_hears_it_again(self):
+        # Ruling I1: Auto forgets what was heard on the file, and its run reads it again with no
+        # language (a run's vote, once it agreed, stays)
+        self.play(TIDE)
+        self.on()
+        self.captions._on_detected(self.captions._run, "Turkish")
+        runs = len([message for message in self.sent if message[0] == "film"])
+        self.captions.set_language("auto")
+        self.assertEqual(self.heard(), ("auto", "automatic"))
+        films = [message for message in self.sent if message[0] == "film"]
+        self.assertEqual((len(films), films[-1][5]), (runs + 1, ""))  # read again, no language
+        self.assertEqual(self.read_again(TIDE), "")  # forgotten for its next play too
+
+    def test_a_language_picked_on_a_song_is_its_folders(self):
         self.play(TIDE)
         self.captions.set_language("English")
         self.assertEqual(self.heard(), ("English", "you chose"))
         self.play(HARBOUR)
-        self.assertEqual(self.heard(), ("English", "you chose"))  # one pick for the album
+        self.assertEqual(self.heard(), ("English", "you chose"))  # one pick for the folder
         self.play(QUAY)
         self.assertEqual(self.heard(), ("auto", "automatic"))
         self.play(HARBOUR)
-        self.captions.set_language("auto")  # Auto: the album's pick goes
+        self.captions.set_language("auto")  # Auto: the folder's pick goes
         self.play(TIDE)
         self.assertEqual(self.heard(), ("auto", "automatic"))
         self.assertEqual(self.config.ai_captions_picks, {})
+
+    def test_a_folders_pick_is_the_language_its_next_songs_run_starts_with(self):
+        self.play(TIDE)
+        self.on()
+        self.captions.set_language("English")
+        self.assertEqual(self.read_again(HARBOUR), "English")
+        self.assertEqual(self.read_again(QUAY), "")
 
     def test_a_language_picked_on_a_video_file_is_that_files(self):
         self.play(FILM)
@@ -575,30 +636,67 @@ class LocalLanguageTests(_LocalCase):
         self.play(FILM)
         self.assertEqual(self.heard(), ("German", "you chose"))
 
+    def test_two_videos_of_one_name_in_two_folders_keep_their_own_languages(self):
+        # Ruling I2: an own video is known by its path, not its bare name (S01E01.mkv)
+        self.play(SHOW_A)
+        self.captions.set_language("German")
+        self.play(SHOW_B)
+        self.assertEqual(self.heard(), ("auto", "automatic"))
+        self.on()
+        self.captions._on_detected(self.captions._run, "English")
+        self.play(SHOW_A)
+        self.assertEqual(self.heard(), ("German", "you chose"))
+        self.play(SHOW_B)
+        self.assertEqual(self.heard(), ("English", "automatic"))
+
     def test_the_audio_tracks_language_comes_before_what_was_heard(self):
         self.play(TIDE)
-        self.captions.toggle()
-        self.captions._on_ready()
+        self.on()
         self.captions._on_detected(self.captions._run, "English")
         self.captions._track_language = lambda: "Spanish"
-        self.play(HARBOUR)
+        self.play(TIDE)
         self.assertEqual(self.heard(), ("Spanish", "audio track"))
         self.captions.set_language("French")  # the viewer's pick before both
         self.assertEqual(self.heard(), ("French", "you chose"))
 
     def test_turkish_heard_on_a_song_brings_the_turkish_model_as_on_a_channel(self):
         # The same path as a channel's (_on_detected → _offer_specialist): the Turkish model,
-        # not here, is asked for once; Settings' default is no part of it.
-        self.config.ai_captions_language = "auto"
+        # not here, is asked for once. Settings' Turkish (setUp) is no part of it.
         self.missing = {"turkish"}
         self.play(TIDE)
-        self.captions.toggle()
-        self.captions._on_ready()
+        self.on()
+        self.assertEqual(self.run_language(), "")
         self.captions._on_detected(self.captions._run, "Turkish")
         self.assertEqual(self.heard(), ("Turkish", "automatic"))
         [question] = self.card.asked
         self.assertIn("Türkçe", question)
         self.assertEqual(self.captions._fetching, "turkish")
+
+    def test_a_file_that_starts_in_turkish_brings_the_turkish_model(self):
+        # Ruling M1: its audio track names Turkish: no detection, so its start asks
+        self.missing = {"turkish"}
+        self.captions._track_language = lambda: "Turkish"
+        self.play(FILM)
+        self.on()
+        self.assertEqual(self.run_language(), "Turkish")
+        [question] = self.card.asked
+        self.assertIn("Türkçe", question)
+
+    def test_a_turkish_offer_skipped_while_another_question_shows_comes_at_the_next_start(self):
+        # Ruling M1: Turkish heard while another question was up (no offer then); the next
+        # start in Turkish (what was heard on the song) asks, as a channel's next run does
+        self.missing = {"turkish"}
+        self.play(TIDE)
+        self.on()
+        self.captions._asking = True  # another question shows
+        self.captions._on_detected(self.captions._run, "Turkish")
+        self.assertEqual(self.card.asked, [])
+        self.captions._asking = False
+        self.assertEqual(self.read_again(TIDE), "Turkish")
+        [question] = self.card.asked
+        self.assertIn("Türkçe", question)
+        self.captions._start_run()  # asked once while QiTV runs
+        self.assertEqual(len(self.card.asked), 1)
 
 
 if __name__ == "__main__":
