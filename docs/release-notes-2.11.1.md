@@ -42,10 +42,11 @@ others' distributions, which may have malware.**
   for the next one. Captions that came on by themselves go off again when you go back to a
   channel or a provider's film.
 - **AI captions hear your own files' language:** the one you pick in the Subtitles panel's
-  Language row (for a video, that file's; for a song, its whole folder's, its album), else the
-  one the audio track names, else what they heard there before, else the speech model finds it
-  by itself. Turkish found so is written by QiTV's own Turkish model, as on a channel. Settings'
-  Default language is for channels and providers' films, and says so.
+  Language row (for a video, that file's; for a song, its whole folder's), else the one the
+  audio track names, else what they heard in that file before (while QiTV runs), else the
+  speech model finds it by itself; Auto in that row has them hear the file anew. Turkish is
+  written by QiTV's own Turkish model, as on a channel. Settings' Default language is for
+  channels, their recordings and providers' films.
 - **A file that's gone** says "Couldn't open …", and a file of a kind QiTV doesn't play says
   "QiTV can't play …"; what was playing goes on.
 - **Several files opened at once** from the file manager: the first by name plays. Dropped
@@ -71,7 +72,8 @@ others' distributions, which may have malware.**
 - **A folder plays in order:** drop it onto the window, or choose File → Open Folder…
   (<kbd>Ctrl/⌘+Shift+O</kbd>) or the channel list's new **Open a folder** row. A series'
   episodes go by season and episode, an album's songs by disc and track, anything else by name.
-  Only the folder's own files play, never its subfolders'.
+  Only the folder's own files play, never its subfolders', and an audio file named as a video
+  beside it (`Show S01E01.mka`, `Show S01E01.eng.ac3`) is that video's sound, not an entry.
 - **It starts where you stopped:** at the video you stopped part-way into, else after the last
   one you watched to its end. An album starts at its first song (with shuffle on, at a song of
   its own picking). The player controls' ⏭ goes to the next video, and with Auto-play next
@@ -129,7 +131,7 @@ others' distributions, which may have malware.**
   view): the line said shows large, the one before it dimmed above and, with Translate to, its
   translation under it. On Cover and Album the lines show at the bottom. They find the song's
   language by themselves ("Words · English" once they have); a language you pick in the
-  Subtitles panel is its album's. They are the AI captions themselves, so they stay on for what
+  Subtitles panel is its folder's. They are the AI captions themselves, so they stay on for what
   plays next until you turn them off. They never come on by themselves for music, and they catch
   less of a song than of speech: podcasts and talk do best.
 - **The bars move with the music itself:** QiTV reads the file's sound a little ahead and draws

@@ -647,7 +647,8 @@ class MouseOnlyAuditTests(unittest.TestCase):
         self.assertEqual(
             ON_SCREEN[("menu", "Ctrl+Shift+O")], (("folders", "add"), ("drawer", "Open a folder"))
         )
-        self.assertIn("folders", self.screens["library"])  # the top bar's tab
+        # (that the Library lists the tab with an empty shelf is the controller's: pinned by
+        # tests/test_folders_view.py's FoldersTabTests and ShelfWindowTests)
         # P4-25: and the channel list's row under Open file
         self.assertIn("Open a folder", self.screens["drawer"])
         self.assertEqual(self.screens["folders"], {"tiles", "remove", "add", "clear"})
