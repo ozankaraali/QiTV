@@ -171,6 +171,7 @@ class FolderShelfTests(ShelfFileCase):
         self.assertNotIn(far, shelf)
         self.assertNotIn(far[:1024], [entry["path"] for entry in shelf.folders()])
         stored = {"path": far, "name": "Far", "kind": VIDEOS, "opened_at": 5.0, "last_entry": ""}
+        shelf.flush()  # its queued write must land before the file is written by hand
         Path(self.path).write_text(json.dumps({"version": 1, "folders": {"k": stored}}))
         self.assertEqual(self.shelf().folders(), [])  # a cut path names another folder
 
