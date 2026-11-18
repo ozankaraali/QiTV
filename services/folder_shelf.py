@@ -40,12 +40,18 @@ MAX_ENTRIES = 30
 SERIES, ALBUM, VIDEOS = "series", "album", "videos"
 KINDS = (SERIES, ALBUM, VIDEOS)
 _VERSION = 1
-_TEXT_MAX = 1024  # a name or an entry's, kept at most this long
+_TEXT_MAX = 1024  # a name or an entry's, kept at most this long; a longer path isn't kept
 
 
 def _trimmed(path: str) -> str:
-    """`path` without the separator macOS's Finder ends a dropped folder with."""
-    return path.rstrip("/\\") or path
+    """`path` without the separator macOS's Finder ends a dropped folder with; a root keeps
+    its own ("/", and a drive's "E:\\": "E:" alone is that drive's current folder)."""
+    trimmed = path.rstrip("/\\")
+    if not trimmed:
+        return path[:1]  # the root
+    if len(trimmed) == 2 and trimmed[1] == ":" and trimmed[0].isalpha() and len(path) > 2:
+        return path[:3]  # a drive's root, with its separator
+    return trimmed
 
 
 def shelf_key(path: str) -> str:
@@ -74,9 +80,11 @@ def _entry(value: Any) -> Optional[dict[str, Any]]:
     """A stored entry as `add()` writes it; None when it is not one."""
     if not isinstance(value, dict):
         return None
-    path, name, last = _text(value.get("path")), _text(value.get("name")), value.get("last_entry")
+    path, name, last = value.get("path"), _text(value.get("name")), value.get("last_entry")
     when, kind = value.get("opened_at"), value.get("kind")
-    if not path or name is None or kind not in KINDS:
+    if not isinstance(path, str) or not path or len(path) > _TEXT_MAX:
+        return None  # (a path cut short would name another folder)
+    if name is None or kind not in KINDS:
         return None
     if not isinstance(when, (int, float)) or isinstance(when, bool):
         return None
@@ -125,10 +133,13 @@ class FolderShelf(ChannelStore):
         """The folder at `path` was opened as a folder and plays: at the front (once)."""
         if not path or kind not in KINDS:
             return
+        if len(_trimmed(path)) > _TEXT_MAX:
+            _LOG.info("A folder whose path is too long to keep is left off the shelf")
+            return  # never cut: that would name another folder
         key = shelf_key(path)
         self._entries.pop(key, None)
         self._entries[key] = {
-            "path": _trimmed(path)[:_TEXT_MAX],
+            "path": _trimmed(path),
             "name": str(name or "")[:_TEXT_MAX],
             "kind": kind,
             "opened_at": self._now(),

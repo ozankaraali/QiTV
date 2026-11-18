@@ -155,6 +155,25 @@ class FolderShelfTests(ShelfFileCase):
         self.assertEqual(calls, [1, 2, 1, 0])
         self.assertEqual(self.written(shelf)["folders"], {})
 
+    def test_a_drives_root_keeps_its_separator_and_a_too_long_path_is_left_out(self):
+        # M9: "E:" alone is that drive's current folder, not its root (a USB stick opened as
+        # a folder); "/" is the root itself. A path past what is kept is not cut: left out.
+        shelf = self.shelf()
+        for path, kept in (("E:\\", "E:\\"), ("E:/", "E:/"), ("/", "/"), ("/media/A/", "/media/A")):
+            with self.subTest(path=path):
+                shelf.add(path, "USB", VIDEOS)
+                self.assertEqual(shelf.folders()[0]["path"], kept)
+        self.assertEqual(shelf_key("E:\\"), shelf_key("E:\\\\"))
+        self.assertNotEqual(shelf_key("E:\\"), shelf_key("E:"))
+        far = "/media/" + "x" * 1100
+        with self.assertLogs("services.folder_shelf", "INFO"):
+            shelf.add(far, "Far", VIDEOS)
+        self.assertNotIn(far, shelf)
+        self.assertNotIn(far[:1024], [entry["path"] for entry in shelf.folders()])
+        stored = {"path": far, "name": "Far", "kind": VIDEOS, "opened_at": 5.0, "last_entry": ""}
+        Path(self.path).write_text(json.dumps({"version": 1, "folders": {"k": stored}}))
+        self.assertEqual(self.shelf().folders(), [])  # a cut path names another folder
+
     def test_a_folders_key_is_its_path_however_it_was_spelled(self):
         self.assertEqual(shelf_key("/media/Lantern Coast/"), shelf_key("/media/Lantern Coast"))
         self.assertEqual(shelf_key("/media/x/../Lantern Coast"), shelf_key("/media/Lantern Coast"))
