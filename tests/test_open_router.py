@@ -781,6 +781,46 @@ class RealPlayerTests(base.WindowCase):
         errors = [text for text, kind in self.toasts if kind == "error"]
         self.assertTrue(errors and gone.name in errors[-1], self.toasts)
 
+    @unittest.skipUnless(shutil.which("ffmpeg"), "ffmpeg makes the songs")
+    def test_an_album_shows_its_list_and_plays_on(self):
+        # Plan 4, Task 5, end to end: two tagged tones with their covers (the second an .m4a
+        # whose cover is an attached picture: no picture for libVLC). The first opens on the
+        # Album view once its folder is listed, ends, and the second plays with no card; after
+        # it, "Finished".
+        from tests.test_tv_controller_audio import make_song
+
+        directory = tempfile.TemporaryDirectory()
+        self.addCleanup(directory.cleanup)
+        folder = Path(directory.name)
+        # Long enough on a loaded runner (the dummy sound output plays its first ~2 s at once):
+        # the album is listed well before the first ends, the second is read while it plays.
+        first = make_song(
+            folder / "01 Arn.mp3", title="Arn", album="Thrum Days", number=1, seconds=10
+        )
+        second = make_song(
+            folder / "02 Pell.m4a", title="Pell", album="Thrum Days", number=2, seconds=8
+        )
+        make_song(folder / "Elsewhere.mp3", title="Rook", album="Brannow Fell", number=1, seconds=3)
+        window, controller = self.window, self.window.controller
+        screen, card, session = window.audio_screen, window.overlays.next_card, controller.session
+        self.show()
+        window.open_paths([str(first)], source="dialog")
+        self.assertTrue(wait_until(lambda: session.url == first.as_uri()))
+        self.assertTrue(wait_until(lambda: screen.isVisible() and screen.shown_view() == "album"))
+        names = [name for name in screen.controls() if name.startswith("track_")]
+        self.assertEqual(names, ["track_0", "track_1"])  # the album's two, not the other one
+        self.assertTrue(window.overlays.transport.audio())
+        self.assertTrue(wait_until(lambda: session.url == second.as_uri(), TO_ITS_END_MS))
+        self.assertTrue(wait_until(lambda: session.state() is PlaybackState.PLAYING))
+        self.assertIs(session.has_video_track(), False)  # its attached cover is no picture
+        self.assertTrue(screen.isVisible())
+        self.assertFalse(card.isVisible())
+        self.assertNotIn(("Finished", "info"), self.toasts)
+        finished = ("Finished", "info")
+        self.assertTrue(wait_until(lambda: finished in self.toasts, TO_ITS_END_MS), self.toasts)
+        self.assertFalse(card.isVisible())
+        self.assertEqual(session.url, second.as_uri())
+
 
 if __name__ == "__main__":
     unittest.main()

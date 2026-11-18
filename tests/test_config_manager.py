@@ -77,6 +77,39 @@ class WindowConfigMigrationTests(unittest.TestCase):
         for key, value in saved.items():
             self.assertEqual(written[key], value)
 
+    def test_the_audio_screens_view_shuffle_and_repeat_are_optional_and_kept(self):
+        # Plan 4: an older config has none of them (no view picked, shuffle off, repeat off),
+        # and saving one adds no other key (older 2.x builds read the file as it was).
+        with tempfile.TemporaryDirectory() as directory:
+            config_path = Path(directory) / "config.json"
+            config_path.write_text(json.dumps({"ai_captions_model": "small"}), encoding="utf-8")
+            with patch.object(ConfigManager, "_get_config_path", return_value=str(config_path)):
+                config = ConfigManager()
+                self.assertEqual(
+                    (config.audio_view, config.audio_shuffle, config.audio_repeat),
+                    ("", False, "off"),
+                )
+                for key, stored in (
+                    ("audio_view", "poster"),
+                    ("audio_shuffle", "yes"),
+                    ("audio_repeat", 2),
+                ):
+                    config.config[key] = stored
+                    self.assertIn(getattr(config, key), ("", False, "off"), key)
+                config.audio_view, config.audio_shuffle, config.audio_repeat = "stage", True, "one"
+                config.save_config(wait=True)
+                reloaded = ConfigManager()
+                self.assertEqual(
+                    (reloaded.audio_view, reloaded.audio_shuffle, reloaded.audio_repeat),
+                    ("stage", True, "one"),
+                )
+                written = json.loads(config_path.read_text(encoding="utf-8"))
+        self.assertEqual(
+            {k: written[k] for k in ("audio_view", "audio_shuffle", "audio_repeat")},
+            {"audio_view": "stage", "audio_shuffle": True, "audio_repeat": "one"},
+        )
+        self.assertNotIn("audio_view", ConfigManager.default_config())
+
     def test_ai_captions_for_video_files_are_off_until_turned_on_and_kept(self):
         # An older config has none: off. Only true turns it on.
         with tempfile.TemporaryDirectory() as directory:

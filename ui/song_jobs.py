@@ -75,10 +75,13 @@ class CoverJob(QObject):
 class AlbumJob(QObject):
     """The album of a song in its folder, listed on a daemon thread (album_listing.album_of):
     `listed` (the caller's generation, the album's Tracks in order, the song's own among them,
-    or [] for a lone song) comes on the GUI thread. A newer start stops an older listing
-    between two files; the older one is still answered, with what it had."""
+    or [] for a lone song) comes on the GUI thread, and `read` with it says whether the folder
+    was read whole (album_listing.read_album: a listing cut short can't say what follows its
+    last track). A newer start stops an older listing between two files; the older one is
+    still answered, with what it had (and as cut short)."""
 
     listed = Signal(int, list)
+    read = Signal(int, list, bool)  # listed's, and whether the folder was read whole
 
     def __init__(self, parent: Optional[QObject] = None) -> None:
         super().__init__(parent)
@@ -93,16 +96,17 @@ class AlbumJob(QObject):
 
     def _list(self, generation: int, path: str, newest: list[Optional[int]]) -> None:
         try:
-            album = album_listing.album_of(
+            album, whole = album_listing.read_album(
                 path,
                 budget_s=album_listing.LIST_BUDGET_S,
                 cap=album_listing.LIST_CAP,
                 stop=lambda: newest[0] != generation,
             )
-        except Exception as error:  # album_of never raises; never unanswered all the same
+        except Exception as error:  # read_album never raises; never unanswered all the same
             logger.warning("A song's album could not be listed (%s)", type(error).__name__)
-            album = []
+            album, whole = [], False
         try:
+            self.read.emit(generation, album, whole)
             self.listed.emit(generation, album)
         except RuntimeError:
             pass  # QiTV closed meanwhile

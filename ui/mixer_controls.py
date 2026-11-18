@@ -177,6 +177,15 @@ class MixerControls(QObject):
             self._toast(tr("Muted") if muted else _volume_text(self._level(MAIN_ROW)))
         self._show(MAIN_ROW)
 
+    def set_main_level(self, level: int) -> None:
+        """The audio dock's volume bar: the large picture's level (0-100), as the mixer's row
+        sets it (remembered as it is), without opening the mixer (an open one follows)."""
+        self._set_level(MAIN_ROW, max(0, min(100, int(level))))
+        if self.visible():
+            self._show(self._row)
+        else:
+            self._audio_changed()
+
     def main_muted(self) -> bool:
         """Whether the large picture is muted."""
         return self._muted(MAIN_ROW)

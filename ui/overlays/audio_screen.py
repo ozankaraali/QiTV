@@ -18,7 +18,10 @@ holds still when the system asks for less motion.
 The top bar is the screen's: back (‹), the Words pill (the AI captions; lit: "Words · <its
 language>"), "Up next · N" (Cover, with a list) and the view switch. The bottom DOCK_FRACTION is
 left for the player controls' audio dock (the transport, above this overlay); nothing of the
-screen is drawn there but its light.
+screen is drawn there but its light. A radio channel keeps live TV's controls instead: while
+they show, the top bar sits below their title row (`follow`). In the Library's corner player
+the screen is the cover and the title only (`set_compact`), and its light holds still while
+its window is covered whole.
 
 Its own controls take their clicks; every other click, double-click and wheel goes on to the
 overlay host (play/pause, fullscreen and volume stay where they are on the picture), and so do
@@ -58,6 +61,7 @@ from PySide6.QtGui import (
     QWheelEvent,
 )
 from PySide6.QtWidgets import QWidget
+from shiboken6 import isValid
 
 from services.i18n import N_, tr, tr_n, translate, upper
 from ui.opening_mark import OpeningMark
@@ -93,6 +97,9 @@ WHEEL_ROW = 40  # wheel units a row (a notch is 120: three rows)
 LOGO_RATIO = (0.87, 1.15)  # a cover's shape outside these is a logo: fitted, not cropped
 LOGO_INSET = 0.14
 LABEL_MIN_PX = 8  # the stand-in's label shows only on a cover that large
+COMPACT_COVER = (0.62, 0.6)  # the corner's cover: at most these fractions of its height, width
+# The followed transport's events that may move its top band (it shows, fades, is resized).
+_FOLLOWED = (QEvent.Type.Show, QEvent.Type.Hide, QEvent.Type.Resize, QEvent.Type.Move)
 
 # The mockup's colours (`.qa`), beside PALETTE's.
 _TOP_FILL = "rgba(255,255,255,0.08)"
@@ -366,6 +373,11 @@ class AudioScreen(Overlay):
         self._mini_timer = QTimer(self)
         self._mini_timer.setInterval(MINI_FRAME_MS)
         self._mini_timer.timeout.connect(self._mini_tick)
+        self._compact = False  # the Library's corner player: the cover and the title only
+        self._inset = 0  # the top bar's top, below live TV's title row while it shows (follow)
+        self._transport: Any = None
+        self._unexposed = False  # its window was found covered: the light waits for an Expose
+        self._exposure: Optional[QObject] = None  # the window (QWindow) whose Expose it hears
         self._watched: Optional[QWidget] = None
         self._watch(parent)
         self.hide()
@@ -417,10 +429,43 @@ class AudioScreen(Overlay):
         return self._view
 
     def shown_view(self) -> str:
-        """The view drawn: view(), but Cover for Album with no list."""
-        if self._view == "album" and not self._has_list():
+        """The view drawn: view(), but Cover for Album with no list, and in the corner."""
+        if self._compact or (self._view == "album" and not self._has_list()):
             return "cover"
         return self._view
+
+    def set_compact(self, compact: bool) -> None:
+        """The Library's corner player (True): the cover and the title only, filling the small
+        page, with no top bar and no room for the dock (the corner has its own controls)."""
+        if compact != self._compact:
+            self._compact = compact
+            self._backdrop = None
+            self._follow = True
+            self._relayout()
+            self._update_timers()
+
+    def compact(self) -> bool:
+        return self._compact
+
+    def follow(self, transport: Any) -> None:
+        """Lay the top bar out below `transport`'s top band while it shows one: live TV's title
+        row and clock, over a radio channel (Transport.top_band_bottom: 0 for a film's controls
+        and the audio dock). It follows the band (bandChanged), and the controls' showing and
+        fading."""
+        self._transport = transport
+        transport.installEventFilter(self)
+        transport.bandChanged.connect(self._follow_transport)
+        self._follow_transport()
+
+    def _follow_transport(self) -> None:
+        transport = self._transport
+        inset = 0
+        if transport is not None and not transport.isHidden():
+            inset = max(0, int(transport.top_band_bottom()) - self.geometry().top())
+        if inset != self._inset:
+            self._inset = inset
+            self._relayout()
+            self._update_timers()
 
     def set_words(self, on: bool, language: str) -> None:
         """Words (the AI captions) on or off, and the language they're shown in."""
@@ -514,8 +559,14 @@ class AudioScreen(Overlay):
         return super().event(event)
 
     def eventFilter(self, watched: QObject, event: QEvent) -> bool:
-        if watched is self._watched and event.type() == QEvent.Type.Resize:
+        kind = event.type()
+        if watched is self._watched and kind == QEvent.Type.Resize:
             self._fit()
+        elif watched is self._transport and kind in _FOLLOWED:
+            self._follow_transport()
+        elif watched is self._exposure and kind == QEvent.Type.Expose:
+            if getattr(watched, "isExposed", lambda: True)():
+                self._window_exposed()
         return False
 
     def resizeEvent(self, event: Any) -> None:
@@ -528,6 +579,9 @@ class AudioScreen(Overlay):
     def showEvent(self, event: Any) -> None:
         super().showEvent(event)
         self._fit()
+        self._watch_exposure()
+        self._unexposed = False  # shown again (a minimised window restored): it breathes
+        self._follow_transport()
         self._update_timers()
 
     def hideEvent(self, event: Any) -> None:
@@ -540,7 +594,33 @@ class AudioScreen(Overlay):
     # ---- motion -------------------------------------------------------------------------------
 
     def _moving(self) -> bool:
-        return self.isVisible() and self._playing and not OpeningMark.reduced_motion()
+        return (
+            self.isVisible()
+            and self._playing
+            and not self._unexposed
+            and not OpeningMark.reduced_motion()
+        )
+
+    def _exposed(self) -> bool:
+        """Its window shows on the screen (not fully covered: macOS says so). Hidden or
+        minimised, the screen is hidden already."""
+        handle = self.window().windowHandle()
+        return handle is None or handle.isExposed()
+
+    def _watch_exposure(self) -> None:
+        """Hear its window's Expose (the light breathes again once it is uncovered)."""
+        handle = self.window().windowHandle()
+        if handle is not None and handle is not self._exposure:
+            if self._exposure is not None and isValid(self._exposure):
+                self._exposure.removeEventFilter(self)
+            handle.installEventFilter(self)
+            self._exposure = handle
+
+    def _window_exposed(self) -> None:
+        """Its window shows again (an Expose): the light breathes on, if it plays."""
+        if self._unexposed:
+            self._unexposed = False
+            self._update_timers()
 
     def _update_timers(self) -> None:
         moving = self._moving()
@@ -561,6 +641,11 @@ class AudioScreen(Overlay):
         if OpeningMark.reduced_motion():  # known late (Linux asks on a worker): hold it still
             self._update_timers()
             self.update()
+            return
+        if not self._exposed():  # covered whole: no frames until its window shows again
+            self._unexposed = True
+            self._watch_exposure()
+            self._update_timers()
             return
         now = self._clock()
         self._glow_s += max(0.0, now - self._glow_at)
@@ -601,6 +686,9 @@ class AudioScreen(Overlay):
         m = _Mock(w, h)
         view = self.shown_view()
         lay = _Layout(view)
+        if self._compact:
+            self._lay_out_compact(lay, m, w, h)
+            return lay
         self._lay_out_top(lay, m, w)
         dock_top = h * (1 - DOCK_FRACTION)
         top_bar = lay.controls["back"].bottom()
@@ -609,11 +697,22 @@ class AudioScreen(Overlay):
         elif view == "album":
             self._lay_out_album(lay, m, w, h, top_bar, dock_top)
         else:
-            self._lay_out_stage(lay, m, w, h, dock_top)
+            self._lay_out_stage(lay, m, w, h, top_bar, dock_top)
         return lay
 
+    def _lay_out_compact(self, lay: _Layout, m: _Mock, w: int, h: int) -> None:
+        """The corner player's: the cover and the title, in the middle of the whole page."""
+        t1 = line_height(m.font(22, QFont.Weight.Bold))
+        gap = m(16)
+        side = max(m(48), min(h * COMPACT_COVER[0], w * COMPACT_COVER[1], h - t1 - gap))
+        y = max(0.0, (h - side - gap - t1) / 2)
+        lay.cover = QRectF((w - side) / 2, y, side, side)
+        text_w = w * 0.9
+        lay.title = QRectF((w - text_w) / 2, lay.cover.bottom() + gap, text_w, t1)
+
     def _lay_out_top(self, lay: _Layout, m: _Mock, w: int) -> None:
-        top, size, gap = m(14), m(30), m(10)
+        # Below live TV's title row while it shows over a radio channel (follow).
+        top, size, gap = max(m(14), float(self._inset)), m(30), m(10)
         lay.controls["back"] = QRectF(m(18), top, size, size)
         pad = m(2)
         segment = size - 2 * pad + m(4)
@@ -701,9 +800,11 @@ class AudioScreen(Overlay):
         lay.more_above = self._first > 0
         lay.more_below = self._first + shown < count
 
-    def _lay_out_stage(self, lay: _Layout, m: _Mock, w: int, h: int, dock_top: float) -> None:
+    def _lay_out_stage(
+        self, lay: _Layout, m: _Mock, w: int, h: int, top_bar: float, dock_top: float
+    ) -> None:
         side = m(84)
-        lay.cover = QRectF(m(22), m(58), side, side)
+        lay.cover = QRectF(m(22), max(m(58), top_bar + m(14)), side, side)
         t1, t2 = self._info_heights(m, 18)
         block = t1 + m(3) + t2
         x = lay.cover.right() + m(14)
@@ -1128,8 +1229,8 @@ class AudioScreen(Overlay):
             (lay.title, self._title, qcolor(PALETTE.text), font),
             (lay.subtitle, self._subtitle_text(lay.view), QColor(_SUBTITLE), m.font(13.5)),
         ):
-            if not text:
-                continue
+            if not text or rect.isEmpty():
+                continue  # (the corner player's has no artist line)
             p.setFont(f)
             p.setPen(colour)
             shown = QFontMetricsF(f).elidedText(text, Qt.TextElideMode.ElideRight, rect.width())
@@ -1362,6 +1463,8 @@ class AudioScreen(Overlay):
     # the top bar
 
     def _paint_top(self, p: QPainter, lay: _Layout, m: _Mock, dirty: QRect) -> None:
+        if "back" not in lay.controls:
+            return  # the corner player's: no top bar
         top_bar = lay.controls["back"].united(lay.switch)
         if not dirty.intersects(top_bar.adjusted(-4, -4, 4, 4).toAlignedRect()):
             return

@@ -647,7 +647,19 @@ class TVPages(QObject):
         leaves). A double-click's second click would land on the Library under the pointer
         (a click on an episode plays it): it reaches nothing.
         """
+        if self._window.controller.sound_shown():
+            self.library_from_sound()  # the audio dock's ⋯ Library: any song's (P4-8 a)
+            return
         if not self._window.closing() and self._can_return():
+            self._enter_library()
+            self._guard_second_click()
+
+    def library_from_sound(self) -> None:
+        """The audio screen's ‹ and its dock's ⋯ Library (Ruling P4-8 a): the Library, as it was
+        left, for any song or radio channel, one opened from a folder too (no Library it came
+        from: films keep `_can_return`); the sound plays on in its corner. A double-click's
+        second click reaches nothing there, as in back_to_library."""
+        if not self._window.closing() and not self.library_shown():
             self._enter_library()
             self._guard_second_click()
 

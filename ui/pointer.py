@@ -149,7 +149,8 @@ class PointerHider(QObject):
     the wait; a real move also says so (`realMoved`: the player controls come). Once `idle_ms`
     have passed without a move, and `controls` (the transport) are gone, it hides, as long as
     `may_hide()` holds (something plays and no list or menu is open) and no popup menu or
-    dialog is up. The controls hiding later (they stay while hovered) hides it then. macOS
+    dialog is up. The controls hiding later (they stay while hovered) hides it then; controls
+    that never fade (the audio dock, `controls_hold`) let it go while it rests off them. macOS
     hides it until the mouse moves, whatever view is under it (libVLC's own takes no Qt
     cursor); elsewhere `widgets` get a blank cursor.
 
@@ -179,11 +180,17 @@ class PointerHider(QObject):
         idle_ms: int = POINTER_IDLE_MS,
         parent: QObject | None = None,
         cursor_pos: Callable[[], QPoint] = QCursor.pos,
+        controls_hold: Callable[[QPoint], bool | None] | None = None,
     ) -> None:
+        """`controls_hold(pos)`, asked while the controls show (the pointer at `pos`, global):
+        None while they fade by themselves (their hiding tries again; the default); else they
+        never fade (the audio dock): True while the pointer rests on them (it stays, and tries
+        again later), False when it rests off them (it may go)."""
         super().__init__(parent)
         self._widgets: tuple[QWidget, ...] = ()
         self._watched: set[int] = set()  # the children and windows filtered (by id)
         self._controls = controls
+        self._controls_hold = controls_hold
         self._may_hide = may_hide
         self._cursor_pos = cursor_pos
         self._rest: QPoint | None = None  # where the last real move left the pointer
@@ -260,8 +267,15 @@ class PointerHider(QObject):
         return False
 
     def _try_hide(self) -> None:
-        if self._idle.isActive() or self._controls.isVisible():
-            return  # a move came since, or the controls show: their hiding tries again
+        if self._idle.isActive():
+            return  # a move came since
+        if self._controls.isVisible():
+            hold = self._controls_hold(self._cursor_pos()) if self._controls_hold else None
+            if hold is None:
+                return  # the controls show: their hiding tries again
+            if hold:
+                self._idle.start()  # it rests on controls that never fade: tries again later
+                return
         if not self._may_hide() or _popup_open():
             self._idle.start()  # a list, menu or dialog: try again once the wait is over
             return

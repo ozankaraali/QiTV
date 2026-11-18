@@ -40,6 +40,7 @@ from PySide6.QtCore import (
     QMargins,
     QObject,
     QPoint,
+    QPointF,
     QRect,
     Qt,
     QTimer,
@@ -153,6 +154,7 @@ from ui.overlays.grid_tiles import GridTiles
 from ui.overlays.guide import Guide
 from ui.overlays.layout_row import LayoutRow
 from ui.overlays.mixer import Mixer
+from ui.overlays.more_menu import MoreMenu
 from ui.overlays.next_card import NextCard
 from ui.overlays.opening import OpeningOverlay
 from ui.overlays.painting import fmt_clock
@@ -768,7 +770,11 @@ class TVWindow(QMainWindow):
             library_toast=self.library_toast,
             layout_row=self.layout_row,
             captions=self.captions_overlay,
+            audio_screen=self.audio_screen,
         )
+        # The audio dock's "⋯": the player's controls the dock has no button for (Plan 4).
+        self.more_menu = MoreMenu(self.overlays.transport, host)
+        self.overlays.more_menu = self.more_menu
         # 2.8.12: the REC sign showed through the channel list, the guide and the grid's tiles.
         self.rec_sign.cover_with(self.overlays.drawer, self.overlays.guide, self.grid_tiles)
         self.rec_sign.follow_hud(self.overlays.transport)  # 2.9.7: up with the controls
@@ -785,11 +791,11 @@ class TVWindow(QMainWindow):
         # while those show, and take no click), and QiTV's mark
         # while a file opens over them (it takes no click either). The mixer shows over
         # them (it sits above the transport's controls and beside the PiP), and the Sound,
-        # Subtitles and Picture panels and the multiview's layouts over it (above their
-        # buttons). The statistics sit over the transport, under its title row (they take no
-        # click). The drawer and the guide cover them all; the OpenSubtitles search covers the
-        # player with its backdrop, under the corner player's controls, the sleep timer's last
-        # minute, Resume and the question (2.6) and the toast.
+        # Subtitles and Picture panels, the multiview's layouts and the audio dock's ⋯ menu
+        # over it (above their buttons). The statistics sit over the transport, under its title
+        # row (they take no click). The drawer and the guide cover them all; the OpenSubtitles
+        # search covers the player with its backdrop, under the corner player's controls, the
+        # sleep timer's last minute, Resume and the question (2.6) and the toast.
         for overlay in (
             self.grid_tiles,
             self.audio_screen,
@@ -807,6 +813,7 @@ class TVWindow(QMainWindow):
             self.picture_panel,
             self.quality_panel,
             self.layout_row,
+            self.more_menu,
             self.overlays.drawer,
             self.overlays.guide,
             self.overlays.next_card,
@@ -827,6 +834,10 @@ class TVWindow(QMainWindow):
         ):
             host.add_overlay(overlay)
         self.captions_overlay.follow(self.overlays.transport)
+        # A radio channel keeps live TV's controls: the screen's top bar sits below their title
+        # row while they show.
+        self.audio_screen.follow(self.overlays.transport)
+        self.overlays.transport.moreRequested.connect(self.more_menu.open_at)
         # After the window's surface filters: the frame takes the small surface's left button
         # before the window (its mini-player drag) and the surface (the drawer) see it.
         # Each small picture takes the shape its player's picture shows in (no bars).
@@ -975,8 +986,11 @@ class TVWindow(QMainWindow):
         self.remote.codeChanged.connect(self.pair_overlay.set_url)
         # The player controls' and the guide's ⌕: the Library's search, as Ctrl/⌘+F.
         self.overlays.transport.searchRequested.connect(self.screens.open_search)
-        # ‹ Library on the player controls: back to the Library a title came from, as Esc.
+        # ‹ Library on the player controls: back to the Library a title came from, as Esc; the
+        # audio dock's ⋯ Library and the audio screen's ‹: the Library for any song (P4-8 a).
         self.overlays.transport.libraryRequested.connect(self.screens.back_to_library)
+        self.audio_screen.backRequested.connect(self.screens.library_from_sound)
+        self.captions.changed.connect(controller.words_changed)  # the screen's Words pill
         self.overlays.transport.liveTvRequested.connect(self.screens.back_to_tv)  # 2.9.3
         self.overlays.guide.searchRequested.connect(self.screens.open_search)
         # The corner player (the Library with what plays in a corner of it): ⤢ and a click on
@@ -986,6 +1000,9 @@ class TVWindow(QMainWindow):
         # The Library (its corner player) lays the player out: a floating picture comes back.
         self.pages.modeChanged.connect(lambda *_: self.desktop_pip.dock())
         self.pages.cornerClicked.connect(self.screens.back_to_player)
+        # A song's screen stays in the corner (small): a press on it is the corner player's
+        # (dragged or clicked), as on its picture, never the song's play or pause.
+        self.audio_screen.installEventFilter(self.pages)
         self.corner_controls.backRequested.connect(self.screens.back_to_player)
         self.corner_controls.stopRequested.connect(self.screens.stop_corner)
         self.corner_controls.soundRequested.connect(self._on_corner_sound)
@@ -1020,6 +1037,7 @@ class TVWindow(QMainWindow):
             self.overlays.transport,
             lambda: not self.screens.library_shown() and controller.pointer_may_hide(),
             parent=self,
+            controls_hold=self._controls_hold_pointer,
         )
         # The player controls come on a real move, not on a jittering mouse (2.8.12: it kept
         # them, and the pointer with them, up).
@@ -1357,11 +1375,15 @@ class TVWindow(QMainWindow):
         self._leave_mini()
 
     def _on_page_mode(self, mode: str) -> None:
-        """The pages moved: in the corner only its controls stay on the host, and the picture-
-        in-picture frame leaves the mouse to the corner player."""
+        """The pages moved: in the corner only its controls stay on the host (and a song's
+        screen, small: its cover and title), and the picture-in-picture frame leaves the mouse
+        to the corner player."""
         corner = mode == PageStack.CORNER
         self.pip_frame.set_interactive(not corner)
-        self.host.show_only(self.corner_controls if corner else None)
+        self.audio_screen.set_compact(corner)
+        self.host.show_only(
+            self.corner_controls if corner else None, also=(self.audio_screen,) if corner else ()
+        )
         if corner:
             self.corner_controls.set_muted(self.controller.main_muted())
             self.corner_controls.set_level(self.controller.main_level())
@@ -1370,6 +1392,18 @@ class TVWindow(QMainWindow):
             self.corner_controls.hide()
             if mode == PageStack.PLAYER and not self.pip_frame.small_rect().isEmpty():
                 self.pip_label.show()  # the corner hid it; the PiP only shows it when it opens
+            transport = self.overlays.transport
+            if mode == PageStack.PLAYER and transport.audio():
+                transport.poke()  # the song's dock, which the corner hid (it never fades)
+
+    def _controls_hold_pointer(self, at: QPoint) -> Optional[bool]:
+        """The pointer and the player controls (PointerHider): None while they fade by
+        themselves; the audio dock never does, and holds the pointer only while it rests on
+        the dock's band (in fullscreen Stage it goes after the wait elsewhere)."""
+        transport = self.overlays.transport
+        if not transport.audio():
+            return None
+        return transport.hovers_controls(QPointF(transport.mapFromGlobal(at)))
 
     def open_url(self, url: str) -> None:
         """A web page in the browser (OpenSubtitles' sign-up and API key page)."""
@@ -1485,6 +1519,8 @@ class TVWindow(QMainWindow):
             if not handled and action is Action.FULLSCREEN:
                 self.toggle_fullscreen()  # F11, ⌃⌘F: the Library's other keys are its own
             return
+        if self.more_menu.handle(action):
+            return  # Esc closes the audio dock's ⋯ menu, and only it (other keys close it, on)
         if action is Action.SEARCH:
             self.screens.open_search()  # Ctrl/⌘+F: the quick search, from every screen
             return
@@ -1718,9 +1754,12 @@ class TVWindow(QMainWindow):
         # after it dropped the file instead (file_gives_way).
         self.controller.hold_for_file(True)
         before = self.controller.now_playing()
-        # QiTV's mark draws while it opens, unless a picture shows (a film's, a channel's): an
-        # error as it is played (opening_over) leaves it out.
-        self._opening_due = not self.controller.session.shows_picture()
+        # QiTV's mark draws while it opens, unless a picture shows (a film's, a channel's) or a
+        # song's screen does for the song after it (it stays): an error as it is played
+        # (opening_over) leaves it out.
+        self._opening_due = not self.controller.session.shows_picture() and not (
+            is_music(path) and self.controller.sound_shown()
+        )
         play()
         target = self.controller.now_playing()
         if self._opening_due and target is not None and target is not before and target.local:

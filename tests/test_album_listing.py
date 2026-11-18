@@ -177,6 +177,39 @@ class AlbumListingTests(unittest.TestCase):
         self.assertIn("1500 Song.mp3", [t["name"] for t in album])
         self.assertTrue(all(t["album"] == "Wexlo Tide" for t in album))
 
+    def test_a_listing_cut_short_says_so(self):
+        # Review item 12 (Task 5): an album its time, its cap or a newer start cut short can't
+        # say what comes after its last track: `read` says whether the folder was read whole.
+        folder = _Folder(self)
+        folder.touch(*(f"{n:02d} Song.mp3" for n in range(1, 31)))
+        self._patched(lambda _i, path, _ms, *, fetch=False: _fake_tags("Wexlo Tide"))
+        playing = folder / "03 Song.mp3"
+        album, whole = album_listing.read_album(playing)
+        self.assertTrue(whole)
+        self.assertEqual(len(album), 30)
+        self.assertEqual(album_of(playing), album)  # album_of is the same album, without it
+        album, whole = album_listing.read_album(playing, cap=10)
+        self.assertFalse(whole)
+        self.assertEqual(len(album), 10)
+        album, whole = album_listing.read_album(playing, stop=lambda: True)
+        self.assertFalse(whole)
+        # From the GUI: `read` carries it beside the album; `listed` stays as it was.
+        job = AlbumJob()
+        got, listed = [], []
+
+        def heard(generation, album, whole):
+            got.append((generation, len(album), whole))
+
+        job.read.connect(heard)
+        job.listed.connect(lambda generation, album: listed.append((generation, len(album))))
+        job.start(3, playing)
+        self.assertTrue(wait_until(lambda: got and listed, 5000))
+        self.assertEqual((got, listed), ([(3, 30, True)], [(3, 30)]))
+        with mock.patch.object(album_listing, "LIST_CAP", 10):
+            job.start(4, playing)
+            self.assertTrue(wait_until(lambda: len(got) == 2, 5000))
+        self.assertEqual(got[1], (4, 10, False))
+
     def test_a_newer_start_stops_the_older_listing(self):
         folder = _Folder(self)
         folder.touch(*(f"{n:03d} Song.mp3" for n in range(1, 400)))

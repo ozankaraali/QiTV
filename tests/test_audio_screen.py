@@ -398,7 +398,69 @@ class PaintTests(ScreenCase):
         self.assertIn("4:02", painted.texts)
 
 
+class FollowAndCornerTests(ScreenCase):
+    def test_the_top_bar_steps_below_the_live_controls_while_they_show(self):
+        # Task 5, review item 9: a radio channel keeps live TV's controls, whose title row and
+        # clock sit where the top bar is: while they show, the bar sits below them.
+        from ui.overlays.transport import Transport
+
+        screen = self.make(view="cover", tracks=[], current=-1)
+        page = screen.parentWidget()
+        transport = Transport(page)
+        screen.follow(transport)
+        top = screen.controls()["back"].top()
+        transport.show_live("Night Ferry FM", "The Long Pier")
+        self.assertTrue(transport.isVisible())
+        band = transport.top_band_bottom()
+        self.assertGreater(band, top)
+        rows = [r.toAlignedRect() for r in transport.title_rects().values() if not r.isEmpty()]
+        for name, rect in screen.controls().items():
+            with self.subTest(name):
+                self.assertGreaterEqual(rect.top(), band)
+                self.assertFalse(any(rect.intersects(row) for row in rows))
+        self.assert_laid_out(screen)
+        transport.dismiss()  # they fade: the bar goes back up
+        self.assertEqual(screen.controls()["back"].top(), top)
+        transport.show_audio("Ferries at Night", "")  # a song's dock has no title row
+        self.assertEqual(transport.top_band_bottom(), 0)
+        self.assertEqual(screen.controls()["back"].top(), top)
+
+    def test_in_the_corner_it_shows_the_cover_and_the_title_only(self):
+        # Task 5, review item 10: the Library's corner player keeps the song's screen, small: its
+        # cover and title, no top bar and no room left for a dock.
+        painted = Painted(self)
+        screen = self.make((426, 240), view="album")
+        screen.set_compact(True)
+        self.assertTrue(screen.compact())
+        self.assertEqual(screen.controls(), {})
+        self.assertEqual(screen.shown_view(), "cover")
+        cover = screen.cover_rect()
+        self.assertTrue(screen.rect().contains(cover))
+        # No dock under it: the cover sits lower than over the dock's room.
+        over_the_dock = (screen.height() * (1 - DOCK_FRACTION) - cover.height()) / 2
+        self.assertGreater(cover.top(), over_the_dock)
+        screen.grab()
+        self.assertIn("Ferries at Night", painted.texts)
+        self.assertNotIn("Mira Sol · Harbour Lights", painted.texts)
+        self.assertFalse(screen.hole_claims().contains(cover.center()))
+        screen.set_compact(False)
+        self.assertEqual(screen.shown_view(), "album")
+        self.assertIn("back", screen.controls())
+
+
 class MotionTests(ScreenCase):
+    def test_the_glow_waits_while_its_window_is_not_exposed(self):
+        # Review item 11: a window shown but fully covered (macOS reports it not exposed) has
+        # no breath to show: the light's timer waits until it is exposed again.
+        screen = self.make(view="cover")
+        screen.set_playing(True)
+        self.assertTrue(screen.animating())
+        with mock.patch.object(AudioScreen, "_exposed", return_value=False):
+            screen._glow_tick()
+            self.assertFalse(screen.animating())
+        screen._window_exposed()  # the window's Expose
+        self.assertTrue(screen.animating())
+
     def test_the_glow_breathes_only_while_shown_and_playing(self):
         screen = self.make(view="cover")
         self.assertFalse(screen.animating())  # nothing plays yet

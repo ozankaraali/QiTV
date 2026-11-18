@@ -8,7 +8,8 @@ has no tag library) and, for one with an embedded picture, writes it to libVLC's
 Only the song's own folder is read (never a "Disc 2" beside it), its audio files only
 (`open_paths.is_music`), the hidden ones skipped (macOS's "._" companions). A folder of
 thousands of files, or one on a slow share, is read for LIST_BUDGET_S at most and its first
-LIST_CAP files at most, in natural order: what was read by then is the listing. A file's own
+LIST_CAP files at most, in natural order: what was read by then is the listing (`read_album`
+says whether it was cut short: such an album can't say what follows its last). A file's own
 parse gives up after PARSE_TIMEOUT_MS, or sooner when the budget runs out; a file not read is
 listed as such ("parsed": False) and matches no album. Nothing here raises.
 """
@@ -149,12 +150,24 @@ def _read(
     cap: int,
     stop: Optional[Callable[[], bool]],
 ) -> list[Track]:
+    return _read_some(files, deadline, cap, stop)[0]
+
+
+def _read_some(
+    files: Sequence[tuple[str, Optional[int]]],
+    deadline: float,
+    cap: int,
+    stop: Optional[Callable[[], bool]],
+) -> tuple[list[Track], bool]:
+    """`_read`'s Tracks, and whether every file was read: the budget, the cap or `stop` cut
+    none of them short (False without libVLC, or when reading failed)."""
     tracks: list[Track] = []
+    whole = False
     instance = None
     try:
         instance = _open_instance()
         if instance is None:
-            return []
+            return [], False
         for path, size in files[: max(0, cap)]:
             left = deadline - time.monotonic()
             if left <= 0 or (stop is not None and stop()):
@@ -167,6 +180,7 @@ def _read(
             track = song_tags({}) if tags is None else dict(tags)
             track.update(path=path, name=os.path.basename(path), size=size, parsed=tags is not None)
             tracks.append(track)
+        whole = len(tracks) == len(files)
     except Exception as error:  # never raises: what was read stays
         logger.warning("Songs could not be read (%s)", type(error).__name__)
     finally:
@@ -175,7 +189,7 @@ def _read(
                 instance.release()
             except Exception:
                 pass
-    return tracks
+    return tracks, whole
 
 
 def list_album(folder: str, *, budget_s: float = LIST_BUDGET_S, cap: int = LIST_CAP) -> list[Track]:
@@ -199,6 +213,18 @@ def album_of(
     song is read first, so it is known whatever the folder's size; then its folder's audio
     files, as `list_album` reads them (`stop` ends that between two files). Never raises;
     blocking: call on a worker."""
+    return read_album(path, budget_s=budget_s, cap=cap, stop=stop)[0]
+
+
+def read_album(
+    path: str,
+    *,
+    budget_s: float = LIST_BUDGET_S,
+    cap: int = LIST_CAP,
+    stop: Optional[Callable[[], bool]] = None,
+) -> tuple[list[Track], bool]:
+    """`album_of`'s album, and whether the folder was read whole: one cut short (the budget,
+    the cap, `stop`) can't say what comes after its last track. Never raises; blocking."""
     deadline = time.monotonic() + budget_s
     try:
         folder = os.path.dirname(path)
@@ -211,13 +237,13 @@ def album_of(
             own: Optional[int] = os.path.getsize(path)
         except OSError:
             own = None
-        tracks = _read([(path, own), *others], deadline, cap, stop)
+        tracks, whole = _read_some([(path, own), *others], deadline, cap, stop)
         if not tracks:
-            return []
-        return album_tracks(tracks[0], tracks)
+            return [], whole
+        return album_tracks(tracks[0], tracks), whole
     except Exception as error:
         logger.warning("A song's album could not be listed (%s)", type(error).__name__)
-        return []
+        return [], False
 
 
 def _is_named(path: str, folder: str, name: str) -> bool:

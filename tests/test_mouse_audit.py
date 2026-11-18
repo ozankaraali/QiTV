@@ -220,11 +220,10 @@ EXEMPT: dict[tuple[str, str], str] = {
 # On the audio screen (a song plays: on demand, as a film), every player and menu key's action.
 # The Library rows go through it: the screen's ‹ and ⋯'s Library open it, with its tabs and ↻,
 # and its Live TV, where a click opens the channel list (Open file, Settings, ↻), as the film
-# audit's chain. NOT YET WIRED for every song: Task 5 makes ‹ and ⋯'s Library open the Library
-# at its last tab for any song, a folder's included (Ruling P4-8 a), pinned by Task 5's
+# audit's chain. ‹ and ⋯'s Library open the Library as it was left for any song, a folder's
+# included (Ruling P4-8 a: TVPages.library_from_sound), pinned by
 # test_back_and_more_library_open_the_library_for_a_folder_song
-# (tests/test_tv_controller_audio.py). Until then libraryRequested returns only to titles that
-# came from the Library.
+# (tests/test_tv_controller_audio.py).
 _LIBRARY = (("audio_screen", "back"), ("more", "library"))
 AUDIO_ON_SCREEN: dict[tuple[str, str], tuple[tuple[str, str], ...]] = {
     # On demand ↑/↓, + and − are the volume: the dock's bar sets it (a slider). M mutes: the

@@ -894,6 +894,18 @@ class Transport(Overlay):
             top = min(top, seek.center().y() - un.px(2.7) - bubble)
         return self.geometry().top() + math.floor(top)
 
+    def top_band_bottom(self) -> int:
+        """Where live TV's top band ends (host coordinates): its title row (the logo, the name,
+        the star, the record button, REC) and the clock, with the gap hovers_controls() keeps
+        under them; 0 for a film's controls and the audio dock, which have no title row. The
+        audio screen lays its top bar out below it over a radio channel."""
+        if self._audio or not self._live:
+            return 0
+        un = ui_units(self.width())
+        rows = [r.bottom() for r in self.title_rects().values() if not r.isEmpty()]
+        bottom = max([*rows, self._title_row().clock_rect.bottom(), float(un.px(5.7))])
+        return self.geometry().top() + math.ceil(bottom + un.px(1.0))
+
     def _controls_changed(self) -> None:
         """The host masks the PiP anew when this shows other controls (a mode, the bar)."""
         layout = self._layout()
