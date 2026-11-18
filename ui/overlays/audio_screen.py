@@ -30,7 +30,8 @@ the mouse's moves (the controls show at a move). It never takes the focus.
 It holds no playback state of its own: the controller says what plays (show_song, set_cover,
 set_tracks, set_playing), which view shows (set_view: never a pick; a click on the switch is,
 and says so with viewPicked), the words (set_words, show_lines) and the sound's bands
-(set_levels).
+(set_levels). The AI captions feed its lines (ui.captions_controller: a place that shows
+lines); while its Stage shows (takes_words, stageShown) the captions over the picture give way.
 """
 
 from __future__ import annotations
@@ -332,11 +333,14 @@ class AudioScreen(Overlay):
     wordsRequested = Signal()  # the Words pill
     upNextRequested = Signal()  # the "Up next" pill (Cover)
     backRequested = Signal()  # ‹ (the controller takes it to the Library)
+    # Its Stage shows (True) or no longer does: the words are its own then (takes_words)
+    stageShown = Signal(bool)
 
     def __init__(
         self, parent: Optional[QWidget] = None, *, clock: Callable[[], float] = time.monotonic
     ) -> None:
         super().__init__(parent)
+        self._takes = False  # takes_words() as stageShown last said
         self.setAttribute(Qt.WidgetAttribute.WA_OpaquePaintEvent)
         self.setFocusPolicy(Qt.FocusPolicy.NoFocus)
         self.setMouseTracking(True)
@@ -424,9 +428,25 @@ class AudioScreen(Overlay):
         self._follow = True
         self._relayout()
         self._update_timers()
+        self._say_stage()
 
     def view(self) -> str:
         return self._view
+
+    def takes_words(self) -> bool:
+        """Its Stage shows (it is shown, and draws the Stage): the words are its own, and the
+        captions over its page give way (ui.captions_controller, show_lines)."""
+        return not self.isHidden() and self.shown_view() == "stage"
+
+    def setVisible(self, visible: bool) -> None:  # show()/hide() route through here
+        super().setVisible(visible)
+        self._say_stage()
+
+    def _say_stage(self) -> None:
+        takes = self.takes_words()
+        if takes != self._takes:
+            self._takes = takes
+            self.stageShown.emit(takes)
 
     def shown_view(self) -> str:
         """The view drawn: view(), but Cover for Album with no list, and in the corner."""
@@ -443,6 +463,7 @@ class AudioScreen(Overlay):
             self._follow = True
             self._relayout()
             self._update_timers()
+            self._say_stage()
 
     def compact(self) -> bool:
         return self._compact

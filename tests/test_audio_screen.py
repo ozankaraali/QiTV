@@ -398,6 +398,34 @@ class PaintTests(ScreenCase):
         self.assertIn("4:02", painted.texts)
 
 
+class WordsTests(ScreenCase):
+    def test_the_stage_says_when_it_takes_the_words(self):
+        # Plan 4: while the Stage shows, the words are its own and the captions over its page
+        # give way (CaptionsController asks takes_words(); stageShown tells it at once). Cover,
+        # Album, the corner and a hidden screen leave them to the captions.
+        screen = self.make(view="cover")
+        said: list[bool] = []
+        screen.stageShown.connect(said.append)
+        self.assertFalse(screen.takes_words())
+        screen.set_view("stage")
+        self.assertTrue(screen.takes_words())
+        screen.set_compact(True)  # the Library's corner: its cover and title
+        self.assertFalse(screen.takes_words())
+        screen.set_compact(False)
+        screen.hide()  # a film opens
+        self.assertFalse(screen.takes_words())
+        screen.show()
+        screen.set_view("album")
+        self.assertEqual(said, [True, False, True, False, True, False])
+        screen.hide()
+        screen.set_view("stage")  # hidden: nothing taken
+        self.assertEqual(said, [True, False, True, False, True, False])
+        screen.show()
+        self.assertEqual(said[-1], True)
+        screen.show_lines("", "", "")  # its words change nothing of it
+        self.assertEqual(len(said), 7)
+
+
 class FollowAndCornerTests(ScreenCase):
     def test_the_top_bar_steps_below_the_live_controls_while_they_show(self):
         # Task 5, review item 9: a radio channel keeps live TV's controls, whose title row and

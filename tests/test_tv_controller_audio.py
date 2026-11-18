@@ -850,27 +850,67 @@ class RememberedTests(AudioCase):
         self.assertFalse(captions.waits or captions.on)
         self.assertEqual(captions.toggles, 4)
 
-    def test_words_from_the_screen_open_stage_unless_a_view_was_picked(self):
+    def test_words_from_the_audio_screen_open_stage_unless_picked(self):
         tracks = self.album(2)
         self.open(Path(tracks[0]["path"]))
         self.list_album(tracks)
+        self.assertEqual(self.screen.view(), "album")
         self.screen.wordsRequested.emit()
         self.assertEqual(self.window.captions.toggles, 1)
         self.assertEqual(self.screen.view(), "stage")
         self.assertEqual(self.screen.words, (True, "Türkçe"))
+        self.assertEqual(getattr(self.config, "audio_view", ""), "")  # no pick
+        # The next album opens on the Stage while those Words stay on, its list arriving too.
+        other = Path(tempfile.mkdtemp(dir=self.folder))
+        others = [track(other, n, f"Other {n}") for n in (1, 2)]
+        self.open(Path(others[0]["path"]))
+        self.assertEqual(self.screen.view(), "stage")
+        self.list_album(others)
+        self.assertEqual(self.screen.view(), "stage")
         self.screen.wordsRequested.emit()  # off again: the view stays
         self.assertEqual(self.screen.view(), "stage")
         self.assertEqual(self.screen.words[0], False)
-        self.assertEqual(getattr(self.config, "audio_view", ""), "")
-        # Captions already on from something else: the opening view is the album's.
-        self.window.captions.on = True
-        self.open(Path(tracks[1]["path"]))
-        self.assertEqual(self.screen.view(), "stage")  # the same album: the view stays
+        self.open(Path(tracks[1]["path"]))  # off: the next album opens on its list
+        self.list_album(tracks)
+        self.assertEqual(self.screen.view(), "album")
+        # A view picked by hand: Words turned on leave it, now and for the next song.
+        self.screen.set_view("cover")
+        self.screen.viewPicked.emit("cover")
+        self.screen.wordsRequested.emit()
+        self.assertEqual((self.window.captions.toggles, self.screen.view()), (3, "cover"))
+        self.open(Path(others[1]["path"]))
+        self.list_album(others)
+        self.assertEqual(self.screen.view(), "cover")
+
+    def test_captions_already_on_keep_the_opening_view(self):
+        # AI captions on from something else (the Subtitles panel, the phone, a film before):
+        # the screen opens on its own view, and they come and go without moving it.
+        captions = self.window.captions
+        captions.on = True
+        tracks = self.album(2)
+        self.open(Path(tracks[0]["path"]))
+        self.assertEqual(self.screen.view(), "cover")
+        self.list_album(tracks)
+        self.assertEqual(self.screen.view(), "album")
+        self.assertEqual(self.screen.words, (True, "Türkçe"))
+        for _ in range(2):  # off and on again from the Subtitles panel's row
+            captions.toggle()
+            self.controller.words_changed()  # their `changed`, as the window wires it
+        self.assertEqual(self.screen.view(), "album")
         other = Path(tempfile.mkdtemp(dir=self.folder))
         others = [track(other, n, f"Other {n}") for n in (1, 2)]
         self.open(Path(others[0]["path"]))
         self.assertEqual(self.screen.view(), "cover")
         self.list_album(others)
+        self.assertEqual(self.screen.view(), "album")
+        # The pill while they're on turns them off: still no Stage, then or after.
+        self.screen.wordsRequested.emit()
+        self.assertFalse(captions.on)
+        self.assertEqual(self.screen.view(), "album")
+        captions.toggle()  # on from the panel again
+        self.controller.words_changed()
+        self.open(Path(tracks[0]["path"]))
+        self.list_album(tracks)
         self.assertEqual(self.screen.view(), "album")
 
     def test_shuffle_and_repeat_are_remembered(self):
@@ -929,6 +969,34 @@ class ScreenApiTests(unittest.TestCase):
             self.assertEqual(list(real.parameters), list(fake.parameters), name)
         for name in ("viewPicked", "trackPicked", "wordsRequested", "upNextRequested"):
             self.assertTrue(hasattr(AudioScreen, name), name)
+
+
+class WindowWordsTests(base.WindowCase):
+    """Words on the audio screen in a real window (no libVLC): the AI captions feed its Stage,
+    and the captions over the picture give way to it there."""
+
+    def test_the_stage_shows_the_words_and_the_captions_over_the_picture_give_way(self):
+        window = self.window
+        self.show()
+        screen, bottom, captions = window.audio_screen, window.captions_overlay, window.captions
+        lines = ("Kıyıda kimse kalmadı.", "Gece vapurları geçiyor.", "Night ferries pass by.")
+        screen.show_song("Ferries at Night", "Mira Sol", "Harbour Lights")
+        screen.set_view("stage")
+        screen.show()
+        captions._show(lines[2], lines)  # as a tick shows a translated line
+        self.assertEqual(screen._lines, lines)
+        self.assertTrue(bottom.isHidden())  # the Stage has them
+        screen.set_view("cover")  # given back at once
+        self.assertFalse(bottom.isHidden())
+        self.assertEqual(bottom.text(), lines[2])
+        screen.set_view("stage")
+        self.assertTrue(bottom.isHidden())
+        screen.hide()  # a film opens while it is on its Stage
+        self.assertFalse(bottom.isHidden())
+        self.assertEqual(bottom.text(), lines[2])
+        captions._show("")
+        self.assertEqual(screen._lines, ("", "", ""))
+        self.assertTrue(bottom.isHidden())
 
 
 def make_song(path: Path, *, title: str, album: str, number: int, seconds: float = 20) -> Path:

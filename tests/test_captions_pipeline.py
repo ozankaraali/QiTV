@@ -563,19 +563,59 @@ class TranslationTests(unittest.TestCase):
         said = ("AI captions: translated", "AI captions: shown as written")
         return [r.getMessage() for r in logs.records if r.getMessage().startswith(said)]
 
-    def test_a_line_in_another_language_goes_out_translated_without_its_parts(self):
+    def test_translated_line_carries_its_original(self):
+        # Plan 4 (Words on the audio screen): the translation takes the line's place, its parts
+        # stay (each said sentence's time: the Stage shows the line said part by part) and the
+        # line as heard comes after them; one of one part has none ([]: a reader of the shape
+        # before still reads it).
+        written = self.written(TWO_PARTS, 104.0, 107.9, 108.5, TWO_PARTS_VOICED)
+        self.assertEqual(len(written[5]), 2)
         run = self.a_run(self.translation("English"), "Turkish")
         with self.assertLogs("services.captions.worker", logging.DEBUG) as logs:
             run._write("qwen", "heard", TWO_PARTS, 104.0, 107.9, 108.5, TWO_PARTS_VOICED)
-            sent = self.captions(1)
+            run._write("qwen", "heard", "Üç.", 109.0, 110.0)
+            sent = self.captions(2)
         translated = "<English> " + TWO_PARTS
-        self.assertEqual(sent, [("caption", 1, 104.0, 108.5, translated)])  # no parts
-        [(text, source, target, _had)] = self.calls
-        self.assertEqual((text, source, target), (TWO_PARTS, "Turkish", "English"))
+        self.assertEqual(
+            sent,
+            [
+                ("caption", 1, 104.0, 108.5, translated, written[5], TWO_PARTS),
+                ("caption", 1, 109.0, 110.0, "<English> Üç.", [], "Üç."),
+            ],
+        )
+        self.assertEqual(
+            [call[:3] for call in self.calls],
+            [(TWO_PARTS, "Turkish", "English"), ("Üç.", "Turkish", "English")],
+        )
         self.assertEqual(self.made, [(MT_FOLDER, 2)])
         self.assertEqual(
-            self.outcomes(logs), [f"AI captions: translated {TWO_PARTS!r}: {translated!r}"]
+            self.outcomes(logs),
+            [
+                f"AI captions: translated {TWO_PARTS!r}: {translated!r}",
+                "AI captions: translated 'Üç.': '<English> Üç.'",
+            ],
         )
+
+    def test_untranslated_line_has_no_original(self):
+        # A line sent as written (translation off, the target's own language or one MiLMMT
+        # lacks, or too late for it) keeps the shape before: 5 slots, 6 with its parts; the
+        # GUI reads no original from it.
+        from services.captions.process import caption_of
+
+        lone = self.written("Bir.", 104.0, 105.0)
+        parted = self.written(TWO_PARTS, 104.0, 107.9, voiced=TWO_PARTS_VOICED)
+        self.assertEqual((len(lone), len(parted)), (5, 6))
+        translation = self.translation("English")
+        run = self.a_run(translation, "English", newest=120.0)  # the target's own
+        run._write("qwen", "heard", "Bir.", 104.0, 105.0)
+        run._write("qwen", "heard", TWO_PARTS, 104.0, 107.9, voiced=TWO_PARTS_VOICED)
+        run.language, self.viewer[0] = "Turkish", 104.2  # 0.1 s from its first word: late
+        run._write("qwen", "heard", TWO_PARTS, 104.0, 107.9, voiced=TWO_PARTS_VOICED)
+        self.assertEqual(self.captions(3), [lone, parted, parted])
+        self.assertEqual(self.calls, [])
+        # caption_of: (run, start, end, text, parts, original)
+        self.assertEqual(caption_of(lone), (1, 104.0, 105.0, "Bir.", [], ""))
+        self.assertEqual(caption_of(parted)[4:], (list(parted[5]), ""))
 
     def test_a_line_in_the_target_or_an_unknown_or_uncovered_language_goes_out_as_written(self):
         written = self.written(TWO_PARTS, 104.0, 107.9, voiced=TWO_PARTS_VOICED)
@@ -677,14 +717,18 @@ class TranslationTests(unittest.TestCase):
         new = self.a_run(translation, "Turkish", 2)  # a seek, another channel: a new run
         new._write("qwen", "heard", "Üç.", 104.0, 105.0)
         gates["Bir."].set()
-        self.assertEqual(self.captions(1), [("caption", 2, 104.0, 105.0, "<English> Üç.")])
+        self.assertEqual(
+            self.captions(1), [("caption", 2, 104.0, 105.0, "<English> Üç.", [], "Üç.")]
+        )
         new._write("qwen", "heard", "Dört.", 105.0, 106.0)  # being translated
         new._write("qwen", "heard", "Beş.", 106.0, 107.0)  # waiting
         self.until(lambda: "Dört." in began)
         translation.follow(None)  # ("stop",): captions off
         gates["Dört."].set()
         self.a_run(translation, "Turkish", 3)._write("qwen", "heard", "Altı.", 107.0, 108.0)
-        self.assertEqual(self.captions(2)[1], ("caption", 3, 107.0, 108.0, "<English> Altı."))
+        self.assertEqual(
+            self.captions(2)[1], ("caption", 3, 107.0, 108.0, "<English> Altı.", [], "Altı.")
+        )
         self.assertEqual(len(self.sent), 2)
         self.assertEqual(began, ["Bir.", "Üç.", "Dört.", "Altı."])  # "İki.", "Beş." never begun
 
@@ -708,7 +752,10 @@ class TranslationTests(unittest.TestCase):
         go.set()
         self.assertEqual(
             self.captions(2),
-            [("caption", 1, 104.0, 104.5, "<English> Bir."), self.written("İki.", 104.5, 105.0)],
+            [
+                ("caption", 1, 104.0, 104.5, "<English> Bir.", [], "Bir."),
+                self.written("İki.", 104.5, 105.0),
+            ],
         )
         self.assertEqual([call[0] for call in self.calls], ["Bir."])  # no more time spent on it
         self.assertEqual(
@@ -744,7 +791,7 @@ class TranslationTests(unittest.TestCase):
         self.assertTrue(self.until(translation._ready))
         run._write("qwen", "heard", "Beş.", 110.0, 111.0)
         sent = self.captions(4)
-        self.assertEqual(sent[3], ("caption", 1, 110.0, 111.0, "<English> Beş."))
+        self.assertEqual(sent[3], ("caption", 1, 110.0, 111.0, "<English> Beş.", [], "Beş."))
         self.assertEqual(len(sent), 4)  # the first went once: its translation never came
         said = [message for message in self.outcomes(logs) if TWO_PARTS in message]
         self.assertEqual(said, [f"AI captions: shown as written, translation off: {TWO_PARTS!r}"])
@@ -863,7 +910,9 @@ class TranslationTests(unittest.TestCase):
         go.set()
         self.assertTrue(self.until(translation._ready))
         run._write("qwen", "heard", "İki.", 105.0, 106.0)
-        self.assertEqual(self.captions(2)[1], ("caption", 1, 105.0, 106.0, "<English> İki."))
+        self.assertEqual(
+            self.captions(2)[1], ("caption", 1, 105.0, 106.0, "<English> İki.", [], "İki.")
+        )
 
     def test_the_model_is_loaded_once_and_kept_and_anew_from_another_folder(self):
         with self.assertLogs("services.captions.worker", logging.INFO) as logs:
@@ -1054,7 +1103,7 @@ class TranslationTests(unittest.TestCase):
             self.sent,
             [
                 ("ready",),
-                ("caption", 6, 104.0, 105.0, "<German> Bonsoir."),
+                ("caption", 6, 104.0, 105.0, "<German> Bonsoir.", [], "Bonsoir."),
                 ("caption", 6, 105.0, 106.0, "Merci."),  # off: straight out
             ],
         )

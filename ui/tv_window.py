@@ -947,6 +947,10 @@ class TVWindow(QMainWindow):
         self.captions = CaptionsController(
             self, card=self.captions_card, overlay=self.captions_overlay
         )
+        # Words on the audio screen: its Stage shows them large (the line before, the line
+        # said, its translation), and while it does the captions over the picture give way.
+        self.captions.add_overlay(self.audio_screen)
+        self.audio_screen.stageShown.connect(lambda _shown: self.captions.words_moved())
         self.media_keys.raiseRequested.connect(self.come_to_front)
         self.session.stateChanged.connect(self._show_now_playing)
         self.screens = TVPages(self, self)  # the Library's controller and the page moves

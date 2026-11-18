@@ -15,8 +15,10 @@ guessed, read_on),
 ("viewer", position), ("language", name), ("translate", target[, folder]) (2.10: the language
 lines are translated into, MiLMMT's name, None off; the translation model's folder when it came
 after the load; the load's "translate_to" and "translation" start them), ("stop",), ("quit",).
-From it: ("ready",), ("failed", reason), ("caption", run, start, end, text[, parts]) (parts, a
-line of more than one: [(text, start, end), ...], services.captions.parts),
+From it: ("ready",), ("failed", reason), ("caption", run, start, end, text[, parts[, original]])
+(parts, a line of more than one: [(text, start, end), ...], services.captions.parts; a
+translated line, `translated_caption`: the translation as its text, its parts as heard ([] for
+a line of one), and the line as heard, the original, last),
 ("progress", run, newest, rtf, written_to, qwen_writes), ("resync", run, newest),
 ("ended", run, reason),
 ("detected", run, language) once the pieces agree on one (none was given),
@@ -882,6 +884,15 @@ class _FilmRun(_Run):
                 return
 
 
+def translated_caption(message: tuple, text: str) -> tuple:
+    """The caption `message`, as the line was written, with `text`, its translation, as what
+    shows: its parts stay (as heard: each sentence's time; [] for a line of one, so a reader of
+    the shape before reads it as it read any line) and the line as heard comes after them (Plan
+    4: the audio screen's Stage shows both)."""
+    parts = list(message[5]) if len(message) > 5 else []
+    return message[:4] + (text, parts, message[4])
+
+
 @dataclass
 class _Line:
     """A caption line for the translator (2.10): its run, the language the run wrote it in, what
@@ -1080,7 +1091,7 @@ class _Translation:
                 text, why = None, "the target changed"
             if text is not None:
                 logger.log(LINE_LEVEL, "AI captions: translated %r: %r", line.shown, text)
-                self.link.send(line.message[:4] + (text,))  # the parts are the original's
+                self.link.send(translated_caption(line.message, text))
                 return
             if why:
                 logger.log(LINE_LEVEL, "AI captions: shown as written, %s: %r", why, line.shown)

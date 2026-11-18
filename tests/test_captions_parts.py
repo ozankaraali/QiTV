@@ -7,6 +7,7 @@ import logging
 import os
 import tempfile
 import threading
+import time
 from types import SimpleNamespace
 from typing import Any
 import unittest
@@ -158,27 +159,115 @@ class ProcessTests(unittest.TestCase):
         process._on_message(1, ("caption", 2, 11.0, 12.0, "Evet."))
         parts = [("Eve.", 10.0, 10.5), ("Evet.", 10.5, 11.0)]
         process._on_message(1, ("caption", 2, 10.0, 11.0, "Eve. Evet.", parts))
+        # translated: the original after the parts (Plan 4: the audio screen's Stage)
+        process._on_message(1, ("caption", 2, 10.0, 11.0, "Home. Yes.", parts, "Eve. Evet."))
         process._supervisor = None
         self.assertEqual(
-            heard, [(2, 11.0, 12.0, "Evet.", []), (2, 10.0, 11.0, "Eve. Evet.", parts)]
+            heard,
+            [
+                (2, 11.0, 12.0, "Evet.", [], ""),
+                (2, 10.0, 11.0, "Eve. Evet.", parts, ""),
+                (2, 10.0, 11.0, "Home. Yes.", parts, "Eve. Evet."),
+            ],
         )
+
+    def test_old_reader_ignores_the_extra_slot(self):
+        # A translated line carries its original after its parts. A reader of the shape before
+        # (2.10.1's process.py, frozen here) reads it as it read every line: its text and its
+        # parts, [] for a line of one part (never None: list(None) would raise there).
+        from services.captions.process import caption_of
+        from services.captions.worker import translated_caption
+
+        def old_reader(message):
+            parts = list(message[5]) if len(message) > 5 else []
+            return int(message[1]), float(message[2]), float(message[3]), message[4], parts
+
+        parts = [("Eve.", 10.0, 10.5), ("Evet.", 10.5, 11.0)]
+        parted = translated_caption(("caption", 2, 10.0, 11.0, "Eve. Evet.", parts), "Home. Yes.")
+        lone = translated_caption(("caption", 2, 11.0, 12.0, "Evet."), "Yes.")
+        self.assertEqual(parted, ("caption", 2, 10.0, 11.0, "Home. Yes.", parts, "Eve. Evet."))
+        self.assertEqual(lone, ("caption", 2, 11.0, 12.0, "Yes.", [], "Evet."))
+        self.assertEqual(old_reader(parted), (2, 10.0, 11.0, "Home. Yes.", parts))
+        self.assertEqual(old_reader(lone), (2, 11.0, 12.0, "Yes.", []))
+        # The reader now goes by the length: 5, 6 or 7 slots, None for no parts too.
+        self.assertEqual(
+            caption_of(("caption", 2, 11.0, 12.0, "Evet.")), (2, 11.0, 12.0, "Evet.", [], "")
+        )
+        self.assertEqual(caption_of(parted), (2, 10.0, 11.0, "Home. Yes.", parts, "Eve. Evet."))
+        self.assertEqual(
+            caption_of(("caption", 2, 11.0, 12.0, "Yes.", None, "Evet.")),
+            (2, 11.0, 12.0, "Yes.", [], "Evet."),
+        )
+
+
+class _Recorder:
+    """The captions over the picture (CaptionsOverlay's show_text and clear), each call kept;
+    `host`: the page it is on (parentWidget)."""
+
+    def __init__(self, host=None):
+        self.text = ""
+        self.calls: list[tuple] = []
+        self.host = host
+
+    def show_text(self, text):
+        self.text = text
+        self.calls.append(("show", text))
+
+    def clear(self):
+        self.text = ""
+        self.calls.append(("clear",))
+
+    def parentWidget(self):
+        return self.host
+
+
+class _Lines:
+    """The audio screen's words as the controller feeds them (AudioScreen.show_lines), each
+    change kept; `takes` its Stage showing them itself (takes_words), on the page `host`."""
+
+    def __init__(self, host=None, takes=False):
+        self.lines = ("", "", "")
+        self.calls: list[tuple] = []
+        self.host, self.takes = host, takes
+
+    def show_lines(self, previous, current, translation):
+        self.lines = (previous, current, translation)
+        self.calls.append(self.lines)
+
+    def takes_words(self):
+        return self.takes
+
+    def parentWidget(self):
+        return self.host
+
+
+# A song's lines (fictional): one as heard, then one translated with its two parts.
+SHORE = "Kıyıda kimse kalmadı."
+FERRIES = "Gece vapurları geçiyor. Işıklar yanıyor."
+FERRIES_PARTS = [("Gece vapurları geçiyor.", 12.0, 13.5), ("Işıklar yanıyor.", 13.5, 15.0)]
+FERRIES_DE = "Die Nachtfähren ziehen vorbei, die Lichter brennen."
 
 
 class ControllerTests(unittest.TestCase):
     """A long caption shows part by part, each as it is said."""
 
     def setUp(self):
+        self.captions, self.window, self.overlay = self.controller()
+        self.number = self.captions._run
+
+    def controller(self, overlay=None):
+        """A CaptionsController on, its run started, over a faked live picture and process."""
         from PySide6.QtWidgets import QApplication, QWidget
         from test_captions_pipeline import _Live, _Overlay
 
         from ui.captions_controller import CaptionsController
 
         self.app = QApplication.instance() or QApplication([])
-        self.window = QWidget()
-        self.window.live_session = _Live()
-        self.overlay = _Overlay()
-        self.captions = CaptionsController(self.window, overlay=self.overlay)
-        captions: Any = self.captions
+        window = QWidget()
+        self.addCleanup(window.deleteLater)
+        window.live_session = _Live()
+        overlay = overlay if overlay is not None else _Overlay()
+        captions: Any = CaptionsController(window, overlay=overlay)
         self.sent: list[tuple] = []
         captions._process.send = lambda *m: self.sent.append(m)
         captions._process.running = lambda: True
@@ -186,20 +275,136 @@ class ControllerTests(unittest.TestCase):
         captions._config_get = lambda name, default: self.config.get(name, default)
         captions._config_set = self.config.__setitem__
         captions._here = lambda name: True
-        self.tmp = tempfile.TemporaryDirectory()
-        self.addCleanup(self.tmp.cleanup)
-        folder = mock.patch.dict(os.environ, {"QITV_CAPTIONS_DIR": self.tmp.name})
-        folder.start()
-        self.addCleanup(folder.stop)
-        self.captions._enabled = self.captions._ready = True
-        self.captions._start_run()
-        self.number = self.captions._run
+        if not hasattr(self, "tmp"):
+            self.tmp = tempfile.TemporaryDirectory()
+            self.addCleanup(self.tmp.cleanup)
+            folder = mock.patch.dict(os.environ, {"QITV_CAPTIONS_DIR": self.tmp.name})
+            folder.start()
+            self.addCleanup(folder.stop)
+        captions._enabled = captions._ready = True
+        captions._start_run()
+        return captions, window, overlay
 
-    def at(self, position):
-        self.window.live_session.position_s = position
-        self.captions._last = None
-        self.captions._tick()
+    def at(self, position, captions=None, window=None):
+        captions, window = captions or self.captions, window or self.window
+        window.live_session.position_s = position
+        captions._last = None
+        captions._tick()
         return self.overlay.text
+
+    def test_sink_with_show_lines_gets_previous_current_translation(self):
+        # Plan 4: the audio screen's Stage shows the line before (as heard), the line said and
+        # its translation. The line said is the original, part by part as each is said (the
+        # parts' times); the translation is what the captions over the picture show.
+        pages = {FERRIES: [part[0] for part in FERRIES_PARTS]}
+        self.overlay.pages = lambda text: pages.get(text, [text])
+        sink = _Lines()
+        self.captions.add_overlay(sink)
+        self.captions._on_caption(self.number, 10.0, 11.5, SHORE)
+        self.captions._on_caption(self.number, 12.0, 15.0, FERRIES_DE, FERRIES_PARTS, FERRIES)
+        self.assertEqual(self.at(10.5), SHORE)
+        self.assertEqual(sink.lines, ("", SHORE, ""))  # no line before: nothing, no stand-in
+        self.assertEqual(self.at(12.5), FERRIES_DE)
+        self.assertEqual(sink.lines, (SHORE, "Gece vapurları geçiyor.", FERRIES_DE))
+        self.assertEqual(self.at(14.2), FERRIES_DE)
+        self.assertEqual(sink.lines, (SHORE, "Işıklar yanıyor.", FERRIES_DE))
+        self.assertEqual(len(sink.calls), 3)  # each change once
+        self.assertEqual(self.at(25.0), "")
+        self.assertEqual(sink.lines, ("", "", ""))
+        # Two translated lines joined: their originals too.
+        self.captions._on_caption(self.number, 30.0, 31.0, "Yes.", [], "Evet.")
+        self.captions._on_caption(self.number, 31.1, 32.0, "Good.", [], "İyi.")
+        self.assertEqual(self.at(30.5), "Yes. Good.")
+        self.assertEqual(sink.lines, (FERRIES, "Evet. İyi.", "Yes. Good."))
+        # A line read again over the same stretch, as heard this time: no translation left.
+        self.captions._on_caption(self.number, 30.0, 32.0, "Evet, iyi.")
+        self.assertEqual(self.at(30.6), "Evet, iyi.")
+        self.assertEqual(sink.lines, (FERRIES, "Evet, iyi.", ""))
+        # What the captions say of themselves ("Starting captions…") is the line said.
+        self.captions._starting = time.monotonic()
+        self.at(30.7)
+        self.assertEqual(sink.lines, ("", self.overlay.text, ""))
+        self.assertTrue(self.overlay.text)
+
+    def test_the_film_captions_overlay_is_unchanged_by_the_original(self):
+        # The captions over a film's picture show what they showed before the original rode
+        # along: a translated line's parts and original change none of their calls, nor does
+        # the audio screen's sink beside them (on another page: the floating picture's).
+        def pages(text):
+            if len(text) <= 40:
+                return [text]
+            return [f"{sentence}." for sentence in text.rstrip(".").split(". ")]
+
+        lines = [
+            (
+                10.0,
+                13.0,
+                "Kıyıda kimse kalmadı. Rüzgâr dindi.",
+                [("Kıyıda kimse kalmadı.", 10.0, 11.6), ("Rüzgâr dindi.", 11.6, 13.0)],
+                "",
+            ),
+            (
+                14.0,
+                18.0,
+                "Die Nachtfähren ziehen vorbei. Die Lichter brennen.",
+                [("Gece vapurları geçiyor.", 14.0, 16.0), ("Işıklar yanıyor.", 16.0, 18.0)],
+                FERRIES,
+            ),
+            (20.0, 21.0, "Yes.", [], "Evet."),
+            (21.1, 22.0, "Good.", [], "İyi."),
+        ]
+        seen = []
+        for shape in ("before", "now"):
+            recorder = _Recorder()
+            recorder.pages = pages
+            captions, window, _overlay = self.controller(recorder)
+            if shape == "now":
+                captions.add_overlay(_Lines(host=object(), takes=True))
+            for start, end, text, parts, original in lines:
+                if shape == "before":  # 2.10.1: a translated line came without its parts
+                    parts = [] if original else parts
+                    captions._on_caption(captions._run, start, end, text, parts)
+                else:
+                    captions._on_caption(captions._run, start, end, text, parts, original)
+            for tenth in range(90, 260):
+                self.at(tenth / 10, captions, window)
+            seen.append(recorder.calls)
+        before, now = seen
+        self.assertEqual(now, before)
+        self.assertIn(("show", "Die Nachtfähren ziehen vorbei."), before)
+        self.assertIn(("show", "Yes. Good."), before)
+
+    def test_the_stage_takes_the_words_from_the_captions_over_its_page(self):
+        # While the audio screen shows its Stage, the captions over its page give the words to
+        # it (cleared, and kept so while it shows them); once it gives them back, at once, they
+        # show what is said. The floating picture's (another page) shows them all along.
+        page, floating_page = object(), object()
+        bottom, floating = _Recorder(page), _Recorder(floating_page)
+        stage = _Lines(page, takes=True)
+        captions, window, _overlay = self.controller(bottom)
+        for sink in (floating, stage):
+            captions.add_overlay(sink)
+        captions._on_caption(captions._run, 10.0, 12.0, SHORE)
+        self.at(10.5, captions, window)
+        self.assertEqual(bottom.calls, [])
+        self.assertEqual(floating.calls, [("show", SHORE)])
+        self.assertEqual(stage.lines, ("", SHORE, ""))
+        stage.takes = False  # Cover or Album now, or the screen gone (a film opens)
+        captions.words_moved()
+        self.assertEqual(bottom.calls, [("show", SHORE)])
+        stage.takes = True
+        captions.words_moved()
+        self.at(10.6, captions, window)
+        self.at(25.0, captions, window)  # it ends: nothing more to clear
+        self.assertEqual(bottom.calls, [("show", SHORE), ("clear",)])
+        self.assertEqual(floating.calls, [("show", SHORE), ("clear",)])
+        self.assertEqual(stage.lines, ("", "", ""))
+        # Given back without a word from it: the next look finds it.
+        captions._on_caption(captions._run, 30.0, 32.0, SHORE)
+        self.at(30.5, captions, window)
+        stage.takes = False
+        self.at(30.6, captions, window)
+        self.assertEqual(bottom.calls[-1], ("show", SHORE))
 
     def test_a_line_s_parts_are_one_caption_timed_part_by_part(self):
         parts = [("Nereye gidiyorsun?", 10.0, 11.5), ("Eve.", 11.5, 12.5)]
