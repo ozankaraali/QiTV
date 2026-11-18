@@ -55,7 +55,7 @@ EXTRA_MUSIC_EXTENSIONS = (
 )
 _VIDEO = VIDEO_EXTENSIONS | EXTRA_VIDEO_EXTENSIONS
 _MUSIC = MUSIC_EXTENSIONS | EXTRA_MUSIC_EXTENSIONS
-_SONGS = MUSIC_EXTENSIONS | OTHER_MUSIC_EXTENSIONS
+_SONGS = MUSIC_EXTENSIONS | OTHER_MUSIC_EXTENSIONS | {"aiffc"}  # AIFF-C, as .aifc is
 SUBTITLE_EXTENSIONS = (".srt", ".ass", ".ssa", ".vtt", ".sub")
 PLAYLIST_EXTENSIONS = (".m3u", ".m3u8")
 
@@ -171,9 +171,9 @@ def is_music(path: str) -> bool:
 
 
 def is_song(path: str) -> bool:
-    """A song by its extension (MUSIC_EXTENSIONS and OTHER_MUSIC_EXTENSIONS, in any case): a
-    playlist of these only is an album (TVController.play_list). is_music also takes the kinds
-    a type QiTV registers brings (.f4a, .f4b, .mp2)."""
+    """A song by its extension (MUSIC_EXTENSIONS and OTHER_MUSIC_EXTENSIONS, and AIFF-C's
+    .aiffc, in any case): a playlist of these only is an album (TVController.play_list).
+    is_music also takes the other kinds a type QiTV registers brings (.f4a, .f4b, .mp2)."""
     return _extension(path)[1:] in _SONGS
 
 

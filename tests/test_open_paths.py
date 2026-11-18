@@ -138,8 +138,10 @@ class SortPaths(unittest.TestCase):
                 self.assertTrue(open_paths.is_music(path))
                 self.assertTrue(open_paths.is_song(path))
                 self.assertFalse(open_paths.is_video(path))
-        # Linux's AIFF-C type brings .aiffc: handed over, it plays
+        # Linux's AIFF-C type brings .aiffc: handed over, it plays, a song as AIFF-C is
+        # (ruling M3: an album holding one is still an album)
         self.assertTrue(open_paths.is_music("/x/Tide.aiffc"))
+        self.assertTrue(open_paths.is_song("/x/Tide.AIFFC"))
         self.assertNotIn("aiffc", open_paths.MUSIC_EXTENSIONS)
         kinds = open_paths.sort_paths(["/x/b.aiff", "/x/a.aif", "/x/c.aifc"])
         self.assertEqual((kinds.media, kinds.others), (("/x/a.aif", "/x/b.aiff", "/x/c.aifc"), ()))
