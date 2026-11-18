@@ -294,17 +294,21 @@ def add_file_types_row(
 
 
 def refresh_at_start(config: Any, parent: QObject, frozen: Optional[bool] = None) -> None:
-    """At start, on a thread of its own: a QiTV that was moved or renamed registers itself
-    again where it is now (`file_types.refresh`); the config is saved here once that changed
-    the record. Nothing from source, nor with nothing registered."""
+    """At start, on a thread of its own: a QiTV that was moved or renamed, or registered with
+    other file types (2.11.1), registers itself again where it is now (`file_types.refresh`);
+    the config is saved here once that changed the record. Nothing from source, nor with
+    nothing registered."""
     packaged = bool(getattr(sys, "frozen", False)) if frozen is None else frozen
     if not packaged or not config.file_types:
         return
 
     def work() -> bool:
-        before = dict(config.file_types)
+        def record() -> tuple[dict, dict]:
+            return dict(config.file_types), dict(getattr(config, "file_types_registered", {}))
+
+        before = record()
         file_types.refresh(config, frozen=packaged)
-        return bool(config.file_types != before)
+        return record() != before
 
     answer = _Answer(parent, lambda changed: _save(config) if changed else None)
     answer.run(work, REFRESH_THREAD)

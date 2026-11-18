@@ -264,6 +264,7 @@ def register(
         if result:
             record[kind] = exe
             config.file_types = record
+            _record_types(config, kind)
     return result
 
 
@@ -285,6 +286,10 @@ def unregister(kind: str, config: Any, frozen: Optional[bool] = None) -> bool:
             return False
         record.pop(kind, None)
         config.file_types = record
+        types = _registered_types(config)
+        if kind in types:
+            types.pop(kind)
+            config.file_types_registered = types
     return True
 
 
@@ -293,7 +298,11 @@ def refresh(config: Any, exe: Optional[str] = None, frozen: Optional[bool] = Non
     registered for `exe` (by default this QiTV's: `own_executable`) instead, without taking
     any default again (the user may have chosen another app since). Nothing from source or
     from a temporary place. After a Windows update that replaced the installed QiTV, that one
-    is this QiTV's executable: the copy in Downloads is never registered."""
+    is this QiTV's executable: the copy in Downloads is never registered.
+
+    2.11.1 (ruling M4): a kind registered with other types than this QiTV's (2.11.0's music had
+    no AIFF, and kept no list of them: `file_types_registered`) is registered again the same
+    way, where it is, so the system hands QiTV its new types too."""
     if not _frozen(frozen):
         return
     exe = _own_path(exe or own_executable())
@@ -304,16 +313,23 @@ def refresh(config: Any, exe: Optional[str] = None, frozen: Optional[bool] = Non
         return
     with _changes_lock:
         record = _recorded(config)
-        moved = {kind: record[kind] for kind in KINDS if record.get(kind, exe) != exe}
+        types = _registered_types(config)
+        moved = {
+            kind: record[kind]
+            for kind in KINDS
+            if kind in record and (record[kind] != exe or types.get(kind) != _type_list(kind))
+        }
         for kind, old in moved.items():
             if _attempt(
                 "refresh",
                 lambda: backend.register(kind, exe, defaults=False, previous=old),
                 kind,
             ):
-                logger.info("Registered for %s again: QiTV moved", kind)
+                why = "QiTV moved" if old != exe else "its file types changed"
+                logger.info("Registered for %s again: %s", kind, why)
                 record[kind] = exe
                 config.file_types = dict(record)
+                _record_types(config, kind)
 
 
 def open_default_apps() -> None:
@@ -432,6 +448,31 @@ def _recorded(config: Any) -> dict[str, str]:
     if not isinstance(record, dict):
         return {}
     return {k: v for k, v in record.items() if isinstance(k, str) and isinstance(v, str)}
+
+
+def _type_list(kind: str) -> list[str]:
+    """`kind`'s types (extensions) as the record keeps them: sorted."""
+    return sorted(_kind_types(kind)[0])
+
+
+def _registered_types(config: Any) -> dict[str, list[str]]:
+    """A copy of the types each kind was registered with (2.11.1, optional: older builds
+    neither write nor read it; a kind without one was registered by 2.11.0)."""
+    types = getattr(config, "file_types_registered", None)
+    if not isinstance(types, dict):
+        return {}
+    return {
+        k: [str(ext) for ext in v]
+        for k, v in types.items()
+        if isinstance(k, str) and isinstance(v, list)
+    }
+
+
+def _record_types(config: Any, kind: str) -> None:
+    """`kind` was registered with this QiTV's types: kept beside the record."""
+    types = _registered_types(config)
+    types[kind] = _type_list(kind)
+    config.file_types_registered = types
 
 
 def _attempt(action: str, call: Callable[[], object], kind: str) -> object:

@@ -1274,8 +1274,23 @@ class RecordingBackend:
 
 
 class Config:
-    def __init__(self, file_types=None):
+    """The record: each kind's executable and (ruling M4) the types it was registered with, by
+    default this version's (`registered`: as an older QiTV left it, {} for 2.11.0's none)."""
+
+    def __init__(self, file_types=None, registered=None):
         self.file_types = file_types or {}
+        if registered is None:
+            registered = {
+                kind: sorted(_kind_types(kind)[0]) for kind in self.file_types if kind in KINDS
+            }
+        self.file_types_registered = registered
+
+
+def _kind_types(kind):
+    return file_types._kind_types(kind)
+
+
+KINDS = file_types.KINDS
 
 
 class _RecordedBackend(unittest.TestCase):
@@ -1524,6 +1539,36 @@ class ServiceTests(_RecordedBackend):
         config = Config()
         self.assertFalse(file_types.register(self.KIND, config, "/tmp/x/qitv-linux", True))
         self.assertEqual(self.backend.calls, [])
+
+    def test_a_registration_keeps_the_types_it_registered(self):
+        # Ruling M4: what was registered, kept beside the record (an optional field)
+        config = Config()
+        self.assertTrue(file_types.register(self.KIND, config, "/opt/qitv/qitv-linux", True))
+        every = sorted(file_types._kind_types(self.KIND)[0])
+        self.assertEqual(config.file_types_registered, {self.KIND: every})
+        self.assertTrue(file_types.unregister(self.KIND, config, frozen=True))
+        self.assertEqual(config.file_types_registered, {})
+
+    def test_refresh_registers_again_when_the_types_changed(self):
+        # Ruling M4: 2.11.0 registered music without AIFF and kept no list of its types; at
+        # start a QiTV registered with another list registers again, never taking a default
+        exe = "/opt/qitv/qitv-linux"
+        every = sorted(file_types._kind_types(self.KIND)[0])
+        for registered in ({}, {self.KIND: ["m3u", "mp3"]}):
+            with self.subTest(registered=registered):
+                self.backend.calls.clear()
+                config = Config({self.KIND: exe}, registered=dict(registered))
+                file_types.refresh(config, exe, frozen=True)
+                again = {"defaults": False, "previous": exe}
+                self.assertEqual(self.backend.calls, [("register", self.KIND, exe, again)])
+                self.assertEqual(config.file_types, {self.KIND: exe})
+                self.assertEqual(config.file_types_registered, {self.KIND: every})
+                file_types.refresh(config, exe, frozen=True)  # once
+                self.assertEqual(len(self.backend.calls), 1)
+        self.backend.ok = False  # it failed: tried again at the next start
+        config = Config({self.KIND: exe}, registered={})
+        file_types.refresh(config, exe, frozen=True)
+        self.assertEqual(config.file_types_registered, {})
 
     def test_refresh_moves_registration(self):
         config = Config({self.KIND: "/a/qitv"})
