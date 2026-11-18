@@ -488,6 +488,26 @@ class ShelfWindowTests(ListCase):
         self.assertTrue(screens.escape_to_library())
         self.assertEqual((screens.library_shown(), library.mode), (True, "folders"))
 
+    def test_a_tiles_cover_is_read_at_the_size_the_tab_shows_it(self):
+        """M3: the tab's first open in the window takes the cover's size from the tiles as
+        they are laid out, not from a default width."""
+        self.show()
+        album = self.folder / "Brannow Fell"
+        album.mkdir()
+        for name in ("01 Tide.mp3", "02 Harbour.mp3"):
+            (album / name).write_bytes(b"song")
+        image = QImage(1600, 1200, QImage.Format.Format_RGB32)
+        image.fill(QColor("#336699"))
+        image.save(str(album / "Cover.JPG"), "JPG")
+        drop(self.window, paths=[album])
+        self.assertTrue(wait_until(lambda: self.lists()), self.calls)
+        self.window.screens.open_library("folders")
+        view = self.window.library_page.folders
+        self.assertTrue(wait_until(lambda: view.tiles() and view.tiles()[0].read))
+        cover = view.tiles()[0].cover
+        self.assertNotEqual(view.width(), folders_view.DEFAULT_WIDTH)  # (a fallback would show)
+        self.assertEqual(min(cover.width(), cover.height()), view.cover_px())
+
     def test_the_channel_lists_open_a_folder_row_asks_for_one(self):
         """P4-25: the channel list's row under Open file, as File → Open Folder…."""
         with mock.patch(
