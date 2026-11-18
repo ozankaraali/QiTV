@@ -2615,9 +2615,9 @@ class TVWindow(QMainWindow):
     # ---- lifecycle ----------------------------------------------------------------------------
 
     def dde_follow_registration(self, registered: bool) -> None:
-        """Settings registered QiTV for videos, or stopped using it: on Windows, double-clicks
-        reach this QiTV over DDE from now on, or no more (services.dde_windows). Nothing
-        elsewhere."""
+        """Settings registered QiTV for a kind of file, or stopped using it (`registered`: for
+        any kind now): on Windows, double-clicks reach this QiTV over DDE from now on, or no
+        more (services.dde_windows). Nothing elsewhere."""
         if self.dde is not None and not self._closing:
             self.dde.follow(registered)
 

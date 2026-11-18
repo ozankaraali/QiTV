@@ -1,13 +1,14 @@
-"""Windows: a double-clicked video reaches a running QiTV over DDE, with no second process (a
-second start unpacks the whole single-file app first: 6.7 s on CI before it could hand over).
+"""Windows: a double-clicked video or song reaches a running QiTV over DDE, with no second
+process (a second start unpacks the whole single-file app first: 6.7 s on CI before it could
+hand over).
 
-While a QiTV registered for videos runs, its ProgID's open verb has a `ddeexec`
-(file_types.add_ddeexec), from the start or from the moment Settings registers it, until
-Settings unregisters it or QiTV quits. Explorer then connects to the service `SERVICE` on
-`TOPIC` and executes `COMMAND` with `%1` replaced by the file. When no QiTV runs (the key goes),
-Windows starts QiTV with the file on its command line, which plays it. A crash leaves the key:
-Explorer, finding no server, starts QiTV with the file all the same and then sends `[noop]`,
-which opens nothing; that start writes the key again.
+While a QiTV registered for videos or music runs, each registered kind's ProgID has a `ddeexec`
+on its open verb (file_types.add_ddeexec), from the start or from the moment Settings registers
+it, until Settings unregisters the last kind or QiTV quits. Explorer then connects to the
+service `SERVICE` on `TOPIC` and executes `COMMAND` with `%1` replaced by the file. When no
+QiTV runs (the key goes), Windows starts QiTV with the file on its command line, which plays
+it. A crash leaves the key: Explorer, finding no server, starts QiTV with the file all the same
+and then sends `[noop]`, which opens nothing; that start writes the key again.
 
 The server uses DDEML (user32) through ctypes, with its Unicode functions. DDEML posts its
 messages to the thread that initialized it, so the server lives on the GUI thread: Qt's event
@@ -40,7 +41,6 @@ logger = logging.getLogger(__name__)
 SERVICE = "QiTV"
 TOPIC = "System"
 COMMAND = '[open("%1")]'  # Explorer puts the file's path for %1
-KIND = "videos"
 WRITER_THREAD = "qitv-dde-key"
 QUIT_LOCK_S = 2.0  # at quit, the longest wait for a file types change on its way (it takes ms)
 CLIENT_TIMEOUT_MS = 2000
@@ -301,8 +301,8 @@ class DdeServer(QObject):
 
 class Serving:
     """The run's one DDE server and the ddeexec that points Explorer at it, following the
-    registration: on while QiTV is registered for videos (from the start, or once Settings
-    registered it), off once Settings unregistered it. On the GUI thread. `exe`: the QiTV the
+    registration: on while QiTV is registered for any kind (from the start, or once Settings
+    registered one), off once Settings unregistered the last. On the GUI thread. `exe`: the QiTV the
     registration's command names, by default this one's (file_types.own_executable: after a
     Windows update, the installed QiTV the copy in Downloads wrote itself over)."""
 
@@ -317,11 +317,11 @@ class Serving:
         return self.server.running
 
     def follow(self, registered: bool) -> bool:
-        """Registered: the server starts unless it runs (never a second one), and the
-        ddeexec is written on a worker each time (written over: a registration may have come
-        meanwhile); a server that can't start takes a stale ddeexec back instead. Not
-        registered: the server stops (unregistering took the ddeexec with the ProgID). True
-        while it serves."""
+        """Registered (for any kind): the server starts unless it runs (never a second one),
+        and the ddeexec is written on a worker each time, in every registered kind's ProgID
+        (written over: a registration may have come meanwhile); a server that can't start
+        takes a stale ddeexec back instead. Not registered for any: the server stops
+        (unregistering took each ddeexec with its ProgID). True while it serves."""
         if self._closed:
             return False
         if not registered:
@@ -354,16 +354,16 @@ class Serving:
 
 
 def serve(config: Any, frozen: Optional[bool] = None) -> Optional[Serving]:
-    """On Windows, where QiTV can register for videos (file_types.status: never from source or
-    a temporary place), the run's DDE owner, serving already when QiTV is registered. None
-    elsewhere."""
+    """On Windows, where QiTV can register (file_types.status: never from source or a
+    temporary place), the run's DDE owner, serving already when QiTV is registered for any
+    kind. None elsewhere."""
     if sys.platform != "win32":
         return None
-    state = file_types.status(KIND, config, frozen)
-    if state not in (Status.REGISTERED, Status.NOT_REGISTERED):
+    states = [file_types.status(kind, config, frozen) for kind in file_types.KINDS]
+    if any(state not in (Status.REGISTERED, Status.NOT_REGISTERED) for state in states):
         return None
     serving = Serving()
-    serving.follow(state is Status.REGISTERED)
+    serving.follow(Status.REGISTERED in states)
     return serving
 
 

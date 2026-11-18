@@ -21,6 +21,8 @@ from services.dde_windows import COMMAND, SERVICE, TOPIC, DdeServer, parse_execu
 
 PROGID = f"{HKCU_CLASSES}\\QiTV.Video"
 DDEEXEC = f"{PROGID}\\shell\\open\\ddeexec"
+MUSIC_PROGID = f"{HKCU_CLASSES}\\QiTV.Audio"  # music's: a double-clicked song comes the same way
+MUSIC_DDEEXEC = f"{MUSIC_PROGID}\\shell\\open\\ddeexec"
 
 
 class ParseExecuteTests(unittest.TestCase):
@@ -68,7 +70,7 @@ class DdeExecRegistryTests(unittest.TestCase):
             p.start()
             self.addCleanup(p.stop)
 
-    def ddeexec(self):
+    def ddeexec(self, key=DDEEXEC):
         """The ddeexec key's default value and its three subkeys' (None: no such key)."""
 
         def default(path):
@@ -76,10 +78,10 @@ class DdeExecRegistryTests(unittest.TestCase):
             return None if values is None else values.get("")
 
         return {
-            "ddeexec": default(DDEEXEC),
-            "application": default(f"{DDEEXEC}\\Application"),
-            "topic": default(f"{DDEEXEC}\\Topic"),
-            "ifexec": default(f"{DDEEXEC}\\ifexec"),
+            "ddeexec": default(key),
+            "application": default(f"{key}\\Application"),
+            "topic": default(f"{key}\\Topic"),
+            "ifexec": default(f"{key}\\ifexec"),
         }
 
     def test_ddeexec_written_and_removed(self):
@@ -109,6 +111,31 @@ class DdeExecRegistryTests(unittest.TestCase):
         self.notified.clear()
         self.assertTrue(file_types.remove_ddeexec())  # twice: nothing to do, nothing told
         self.assertEqual(self.notified, [])
+
+    def test_ddeexec_for_music_too(self):
+        written = {"ddeexec": COMMAND, "application": SERVICE, "topic": TOPIC, "ifexec": "[noop]"}
+        self.assertTrue(file_types._windows.register("music", WINDOWS_EXE))
+        self.assertTrue(file_types.add_ddeexec(WINDOWS_EXE))  # music alone: its ProgID has it
+        self.assertEqual(self.ddeexec(MUSIC_DDEEXEC), written)
+        self.assertIsNone(self.reg.values(PROGID))  # never a videos' ProgID of its own
+        self.assertTrue(file_types._windows.register("videos", WINDOWS_EXE))
+        self.assertTrue(file_types.add_ddeexec(WINDOWS_EXE))
+        self.assertEqual(self.ddeexec(), written)
+        self.assertEqual(self.ddeexec(MUSIC_DDEEXEC), written)
+
+        # one kind unregistered takes its own ddeexec: the other's still reaches this QiTV
+        self.assertTrue(file_types._windows.unregister("music", WINDOWS_EXE))
+        self.assertIsNone(self.reg.values(MUSIC_PROGID))
+        self.assertEqual(self.ddeexec(), written)
+
+        self.assertTrue(file_types._windows.register("music", WINDOWS_EXE))
+        self.assertTrue(file_types.add_ddeexec(WINDOWS_EXE))
+        self.assertTrue(file_types.remove_ddeexec())  # the quit: both go, the commands stay
+        self.assertIsNone(self.reg.values(DDEEXEC))
+        self.assertIsNone(self.reg.values(MUSIC_DDEEXEC))
+        for progid in (PROGID, MUSIC_PROGID):
+            command = self.reg.values(f"{progid}\\shell\\open\\command")
+            self.assertEqual(command, {"": f'"{WINDOWS_EXE}" "%1"'})
 
     def test_ddeexec_only_where_qitv_is_registered(self):
         before = self.reg.tree()
@@ -538,6 +565,19 @@ class ServeTests(unittest.TestCase):
         self.join_writers()
         self.assertEqual(self.ddeml.calls, [])
         self.assertEqual(self.reg.tree(), before)
+
+    def test_music_alone_serves(self):
+        self.assertTrue(file_types._windows.unregister("videos", WINDOWS_EXE))
+        self.assertTrue(file_types._windows.register("music", WINDOWS_EXE))
+        serving = dde_windows.serve(Config({"music": WINDOWS_EXE}), frozen=True)
+        self.assertIsNotNone(serving)
+        self.addCleanup(serving.close)
+        self.join_writers()
+        self.assertTrue(serving.running)
+        self.assertEqual(self.reg.values(MUSIC_DDEEXEC), {"": COMMAND})
+        self.assertIsNone(self.reg.values(PROGID))
+        serving.close()
+        self.assertIsNone(self.reg.values(MUSIC_DDEEXEC))
 
     def test_unregistered_the_owner_waits_without_serving(self):
         before = self.reg.tree()

@@ -19,11 +19,13 @@ VIDEO_EXTENSIONS = frozenset(
 MUSIC_EXTENSIONS = frozenset({"mp3", "m4a", "aac", "flac", "ogg", "opus", "wav"})
 MEDIA_EXTENSIONS = VIDEO_EXTENSIONS | MUSIC_EXTENSIONS  # Open File's filter
 # The other extensions a type QiTV registers for covers (services/file_types.py registers
-# VIDEO_EXTENSIONS): on macOS 13 the QuickTime movie is .mov and .qt, MPEG-4 .mp4 and .mpg4,
-# AVI .avi and .vfw, MPEG .mpe, .m75 and .m15 too, FLV .f4v, .f4p, .f4a and .f4b too, and an
-# Ogg video may be .ogm. Linux's MIME types (shared-mime-info's globs) bring: video/mpeg .vob,
-# .mpe and .mp2 (MPEG audio layer 2: music), video/vnd.avi .avf and .divx, video/quicktime .qt,
-# .moov and .qtvr, video/mp4 .f4v and .lrv, and video/mp2t (Open With) .m2t. The system may
+# VIDEO_EXTENSIONS and MUSIC_EXTENSIONS): on macOS 13 the QuickTime movie is .mov and .qt,
+# MPEG-4 .mp4 and .mpg4, AVI .avi and .vfw, MPEG .mpe, .m75 and .m15 too, FLV .f4v, .f4p, .f4a
+# and .f4b too, and an Ogg video may be .ogm; MP3 is .mpga too, AAC .adts, a wave .wave and
+# .bwf, and Ogg audio .oga. Linux's MIME types (shared-mime-info's globs) bring: video/mpeg
+# .vob, .mpe and .mp2 (MPEG audio layer 2: music), video/vnd.avi .avf and .divx,
+# video/quicktime .qt, .moov and .qtvr, video/mp4 .f4v and .lrv, video/mp2t (Open With) .m2t,
+# audio/mpeg .mpga, audio/aac .adts, the Ogg audio types .oga and Speex's .spx. The system may
 # hand them over: they play too.
 EXTRA_VIDEO_EXTENSIONS = frozenset(
     {
@@ -31,7 +33,9 @@ EXTRA_VIDEO_EXTENSIONS = frozenset(
         "vob", "avf", "divx", "moov", "qtvr", "lrv", "m2t",
     }
 )  # fmt: skip
-EXTRA_MUSIC_EXTENSIONS = frozenset({"f4a", "f4b", "mp2"})
+EXTRA_MUSIC_EXTENSIONS = frozenset(
+    {"f4a", "f4b", "mp2", "mpga", "adts", "wave", "bwf", "oga", "spx"}
+)
 _VIDEO = VIDEO_EXTENSIONS | EXTRA_VIDEO_EXTENSIONS
 _MUSIC = MUSIC_EXTENSIONS | EXTRA_MUSIC_EXTENSIONS
 SUBTITLE_EXTENSIONS = (".srt", ".ass", ".ssa", ".vtt", ".sub")

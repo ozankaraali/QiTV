@@ -1,6 +1,8 @@
-"""QiTV registered with the system for a kind of file (videos), per user: it shows in Open With
-and can be made the default player. No admin is ever asked, and unregistering removes exactly
-what QiTV wrote.
+"""QiTV registered with the system for a kind of file (videos, music), per user: it shows in
+Open With and can be made the default player. No admin is ever asked, and unregistering removes
+exactly what QiTV wrote. Each kind registers and unregisters on its own (Settings has a row for
+each): one never changes the other's, and what both list (the playlists, Open With only) stays
+while either is registered.
 
 Everything here may touch the disk, the registry, a system framework or start a program, so it
 runs on a worker thread, except `status` and `temporary_location`, which only look at strings.
@@ -8,14 +10,16 @@ Nothing here saves the config: `register`, `unregister` and `refresh` assign
 `config.file_types` a new dict (`{kind: the executable registered}`, on macOS the `.app`), and
 the caller saves it on the GUI thread.
 
-- **Windows** (HKEY_CURRENT_USER only): the ProgID `QiTV.Video`, `OpenWithProgids` for every
-  type, the exe's `Applications` entry, and Default Programs' `Capabilities` with its
-  `RegisteredApplications` value; Windows' own Default Apps page then lets the user choose.
-  While a registered QiTV runs, the ProgID's open verb also has a `ddeexec` (`add_ddeexec`):
-  Explorer hands a double-clicked video to it over DDE (services.dde_windows), and starts
-  QiTV with the file when none runs. Unregistering takes it with the ProgID.
-- **Linux**: `$XDG_DATA_HOME/applications/qitv-open.desktop`, the icon in the user's hicolor
-  theme, and `xdg-mime default` for the default types (which writes the user's mimeapps.list).
+- **Windows** (HKEY_CURRENT_USER only): a ProgID per kind (`QiTV.Video`, `QiTV.Audio`),
+  `OpenWithProgids` for every type, the exe's `Applications` entry, and Default Programs'
+  `Capabilities` with its `RegisteredApplications` value; Windows' own Default Apps page then
+  lets the user choose. While a registered QiTV runs, each ProgID's open verb also has a
+  `ddeexec` (`add_ddeexec`): Explorer hands a double-clicked file to it over DDE
+  (services.dde_windows), and starts QiTV with the file when none runs. Unregistering takes it
+  with the ProgID.
+- **Linux**: `$XDG_DATA_HOME/applications/qitv-open.desktop` (one for every kind: its MimeType
+  holds what's registered), the icon in the user's hicolor theme, and `xdg-mime default` for
+  the default types (which writes the user's mimeapps.list).
 - **macOS**: the bundle's Info.plist declares the types (qitv-macos.spec), so Open With lists
   QiTV with nothing registered; registering makes it the default for a short list through
   Launch Services. macOS can't give a default back to the app before: unregistering forgets
@@ -49,22 +53,28 @@ from urllib.parse import quote
 
 from services.atomic_write import atomic_write
 from services.external_players import player_env
-from services.open_paths import VIDEO_EXTENSIONS
+from services.open_paths import MUSIC_EXTENSIONS, PLAYLIST_EXTENSIONS, VIDEO_EXTENSIONS
 
 logger = logging.getLogger(__name__)
 
 _installed: Optional[str] = None  # use_installed
 
-KINDS = ("videos",)  # music comes with its own row
+KINDS = ("videos", "music")  # each with its own Settings row
 DEFAULT_VIDEO = VIDEO_EXTENSIONS - {"ts"}  # .ts is Open With only: code files share it
+DEFAULT_MUSIC = MUSIC_EXTENSIONS
+# Playlists are in Open With with either kind, never made the default: a system's music or TV
+# app often holds them already.
+PLAYLISTS = frozenset(ext.lstrip(".") for ext in PLAYLIST_EXTENSIONS)
 MAC_DEFAULT_VIDEO = ("mkv", "mp4", "mov", "avi", "webm")
+MAC_DEFAULT_MUSIC = ("mp3", "m4a", "flac")
 
 APP_NAME = "QiTV"  # Default Programs' name: RegisteredApplications' value and the deep link's
-DESCRIPTION = "Plays video files, and TV channels from IPTV providers."
+DESCRIPTION = "Plays video and music files, and TV channels from IPTV providers."
 
 # Each kind's types (Open With) and the ones it offers to become the default.
 _TYPES: dict[str, tuple[frozenset[str], frozenset[str]]] = {
-    "videos": (VIDEO_EXTENSIONS, DEFAULT_VIDEO),
+    "videos": (VIDEO_EXTENSIONS | PLAYLISTS, DEFAULT_VIDEO),
+    "music": (MUSIC_EXTENSIONS | PLAYLISTS, DEFAULT_MUSIC),
 }
 
 # Each type's MIME types, from shared-mime-info: today's name first, then the one older
@@ -84,13 +94,26 @@ MIME_TYPES: dict[str, tuple[str, ...]] = {
     "flv": ("video/x-flv",),
     "wmv": ("video/x-ms-wmv",),
     "ogv": ("video/ogg",),
+    "mp3": ("audio/mpeg",),
+    "m4a": ("audio/mp4",),
+    "aac": ("audio/aac",),
+    "flac": ("audio/flac",),
+    # an Ogg file's type says what it holds (Vorbis, FLAC, Speex); Opus has its own since 1.2
+    "ogg": ("audio/ogg", "audio/x-vorbis+ogg", "audio/x-flac+ogg", "audio/x-speex+ogg"),
+    "opus": ("audio/x-opus+ogg", "audio/ogg"),
+    "wav": ("audio/vnd.wave", "audio/x-wav"),  # audio/vnd.wave since 2.3
+    # both name both extensions (an HLS playlist's is the second)
+    "m3u": ("audio/x-mpegurl", "application/vnd.apple.mpegurl"),
+    "m3u8": ("application/vnd.apple.mpegurl", "audio/x-mpegurl"),
 }
 
 # Each type's Uniform Type Identifiers on macOS (qitv-macos.spec claims them all): the one
 # Launch Services is told for a default first, then another that apps declare for it too.
-# macOS 13, the oldest QiTV runs on, declares all but mkv and ogv itself (CoreTypes, and
-# QuickTime Player for m2ts and mts). The bundle imports those two, and also the four that
-# macOS declares only as imports (webm, flv, wmv, m2ts/mts), saying what macOS says.
+# macOS 13, the oldest QiTV runs on, declares all but mkv, ogv, ogg and opus itself (CoreTypes,
+# and QuickTime Player for m2ts and mts). The bundle imports those four, with the identifiers
+# other apps use, and also the six that macOS declares only as imports (webm, flv, wmv,
+# m2ts/mts, flac and wav), saying what macOS says. An .m4a is macOS's own m4a type, which is
+# an MPEG-4 audio (whose own extensions are .mp4 and .mpg4); both playlists are one type.
 MAC_UTIS: dict[str, tuple[str, ...]] = {
     "mp4": ("public.mpeg-4",),
     "m4v": ("com.apple.m4v-video",),
@@ -106,6 +129,15 @@ MAC_UTIS: dict[str, tuple[str, ...]] = {
     "flv": ("com.adobe.flash.video",),
     "wmv": ("com.microsoft.windows-media-wmv",),
     "ogv": ("org.xiph.ogg-video", "org.xiph.ogv"),
+    "mp3": ("public.mp3",),
+    "m4a": ("com.apple.m4a-audio", "public.mpeg-4-audio"),
+    "aac": ("public.aac-audio",),
+    "flac": ("org.xiph.flac",),
+    "ogg": ("org.xiph.ogg-audio",),
+    "opus": ("org.xiph.opus",),
+    "wav": ("com.microsoft.waveform-audio",),
+    "m3u": ("public.m3u-playlist",),
+    "m3u8": ("public.m3u-playlist",),
 }
 
 SUBPROCESS_TIMEOUT_S = 10
@@ -157,6 +189,11 @@ def default_mime_types(kind: str) -> list[str]:
     every, chosen = _kind_types(kind)
     shared = set(_mimes(every - chosen))
     return [m for m in _mimes(chosen) if m not in shared]
+
+
+def any_registered(config: Any, frozen: Optional[bool] = None) -> bool:
+    """Whether QiTV is registered for any kind (Windows' DDE serves while it is)."""
+    return any(status(kind, config, frozen) is Status.REGISTERED for kind in KINDS)
 
 
 def use_installed(exe: Optional[str]) -> None:
@@ -211,14 +248,15 @@ def register(
     backend = _backend()
     if backend is None:
         return refused
-    record = _recorded(config)
-    previous = record.get(kind)
-    result = _as_result(
-        _attempt("register", lambda: backend.register(kind, exe, previous=previous), kind)
-    )
-    if result:
-        record[kind] = exe
-        config.file_types = record
+    with _changes_lock:
+        record = _recorded(config)
+        previous = record.get(kind)
+        result = _as_result(
+            _attempt("register", lambda: backend.register(kind, exe, previous=previous), kind)
+        )
+        if result:
+            record[kind] = exe
+            config.file_types = record
     return result
 
 
@@ -233,12 +271,13 @@ def unregister(kind: str, config: Any, frozen: Optional[bool] = None) -> bool:
     backend = _backend()
     if backend is None:
         return False
-    record = _recorded(config)
-    exe = record.get(kind) or _own_path(own_executable())
-    if not _attempt("unregister", lambda: backend.unregister(kind, exe), kind):
-        return False
-    record.pop(kind, None)
-    config.file_types = record
+    with _changes_lock:
+        record = _recorded(config)
+        exe = record.get(kind) or _own_path(own_executable())
+        if not _attempt("unregister", lambda: backend.unregister(kind, exe), kind):
+            return False
+        record.pop(kind, None)
+        config.file_types = record
     return True
 
 
@@ -256,17 +295,18 @@ def refresh(config: Any, exe: Optional[str] = None, frozen: Optional[bool] = Non
     backend = _backend()
     if backend is None:
         return
-    record = _recorded(config)
-    moved = {kind: old for kind, old in record.items() if kind in KINDS and old != exe}
-    for kind, old in moved.items():
-        if _attempt(
-            "refresh",
-            lambda: backend.register(kind, exe, defaults=False, previous=old),
-            kind,
-        ):
-            logger.info("Registered for %s again: QiTV moved", kind)
-            record[kind] = exe
-            config.file_types = dict(record)
+    with _changes_lock:
+        record = _recorded(config)
+        moved = {kind: record[kind] for kind in KINDS if record.get(kind, exe) != exe}
+        for kind, old in moved.items():
+            if _attempt(
+                "refresh",
+                lambda: backend.register(kind, exe, defaults=False, previous=old),
+                kind,
+            ):
+                logger.info("Registered for %s again: QiTV moved", kind)
+                record[kind] = exe
+                config.file_types = dict(record)
 
 
 def open_default_apps() -> None:
@@ -340,6 +380,11 @@ def temporary_location(exe: str) -> bool:
 
 # --- the service's own ----------------------------------------------------------------------
 
+# Settings' two rows and the start's refresh answer on workers of their own: one change at a
+# time, each reading the record (and the system) as the one before left it, so a kind changed
+# meanwhile is never lost. Taken before `_windows_lock`, never while it is held.
+_changes_lock = threading.RLock()
+
 
 def _backend() -> Optional[_Backend]:
     if sys.platform == "win32":
@@ -406,6 +451,17 @@ def _mimes(extensions: frozenset[str]) -> list[str]:
     return list(found)
 
 
+def _kinds_mimes(kinds: set[str]) -> list[str]:
+    """Every MIME type of these kinds' types, once each, in a fixed order."""
+    return _mimes(frozenset().union(*(_kind_types(kind)[0] for kind in kinds)))
+
+
+def _own_mimes(kind: str) -> set[str]:
+    """The MIME types only `kind` lists (a playlist's are every kind's: they tell none apart)."""
+    others = {m for other in KINDS if other != kind for m in mime_types(other)}
+    return set(mime_types(kind)) - others
+
+
 _WINDOWS_PATH = re.compile(r"^(?:[A-Za-z]:[\\/]|\\\\)")
 _DISK_IMAGE_APP = re.compile(r"^/Volumes/[^/]+/[^/]+\.app(?:/|$)", re.IGNORECASE)
 
@@ -448,7 +504,7 @@ _CLASSES = "Software\\Classes"
 _CAPABILITIES = f"Software\\{APP_NAME}\\Capabilities"
 _FILE_ASSOCIATIONS = f"{_CAPABILITIES}\\FileAssociations"
 _REGISTERED_APPLICATIONS = "Software\\RegisteredApplications"
-PROGIDS = {"videos": "QiTV.Video"}
+PROGIDS = {"videos": "QiTV.Video", "music": "QiTV.Audio"}
 # The open verb's DDE while QiTV runs: its default value is the command; the application,
 # topic and ifexec subkeys' default values are the service, the topic and what Explorer sends
 # to a QiTV it started itself when the conversation failed (the file is on its command line).
@@ -568,7 +624,7 @@ class _WindowsBackend:
                 except OSError as error:
                     logger.warning("A part of the DDE key stays (%s)", type(error).__name__)
         if not found:
-            logger.info("QiTV isn't registered for videos: Explorer starts it for each")
+            logger.info("QiTV isn't registered for any files: Explorer starts it for each")
             return False
         _assoc_changed()
         return ok
@@ -658,15 +714,37 @@ class _WindowsBackend:
         return ok
 
     def _remove_supported_types(self, reg: Any, kind: str, exe: str) -> None:
-        """The exe's SupportedTypes; its Applications key stays when it holds more (Windows
-        writes a command there for an Open with → Browse… of the same exe)."""
+        """`kind`'s types in the exe's SupportedTypes, but those another kind registered for an
+        exe of that name lists too (the playlists); its Applications key stays when it holds
+        more (Windows writes a command there for an Open with → Browse… of the same exe)."""
         path = f"{_CLASSES}\\Applications\\{_exe_name(exe)}\\SupportedTypes"
-        _delete_values(reg, path, [f".{ext}" for ext in _kind_types(kind)[0]])
+        types = _kind_types(kind)[0] - self._listed_by_others(reg, kind, exe)
+        _delete_values(reg, path, [f".{ext}" for ext in sorted(types)])
         _prune(reg, path, _CLASSES)
+
+    def _listed_by_others(self, reg: Any, kind: str, exe: str) -> frozenset[str]:
+        """The types of the other kinds whose ProgID's command starts an exe of `exe`'s name
+        (they share its Applications entry)."""
+        name = _exe_name(exe).lower()
+        listed: set[str] = set()
+        for other, progid in PROGIDS.items():
+            if other == kind:
+                continue
+            command = _default(reg, f"{_CLASSES}\\{progid}\\shell\\open\\command")
+            if command and _command_exe(command).lower() == name:
+                listed |= _kind_types(other)[0]
+        return frozenset(listed)
 
 
 def _exe_name(exe: str) -> str:
     return ntpath.basename(exe)
+
+
+def _command_exe(command: str) -> str:
+    """The file name of the exe a ProgID's `"<exe>" "%1"` starts."""
+    quoted = command.startswith('"')
+    path = command[1:].split('"', 1)[0] if quoted else command.split(" ", 1)[0]
+    return _exe_name(path)
 
 
 def _renamed(previous: str, exe: str) -> bool:
@@ -761,6 +839,7 @@ _windows = _WindowsBackend()
 DESKTOP_ID = "qitv-open.desktop"
 ICON_NAME = "qitv"
 _ICON_MARK = "X-QiTV-Installed-Icon=true"  # the icon is this file's: unregistering removes it
+_MIME_KEY = "MimeType="
 _MIMEAPPS_GROUPS = ("Default Applications", "Added Associations", "Removed Associations")
 _QUOTED = re.compile(r'(["`$\\])')
 
@@ -784,33 +863,63 @@ def _xdg_dir(name: str, fallback: str) -> Path:
 
 
 class _LinuxBackend:
-    """The user's own XDG folders only."""
+    """The user's own XDG folders only. Every kind shares the one desktop file: its MimeType
+    lists the types of each kind registered, which is how a kind is known to be there."""
 
     def register(
         self, kind: str, exe: str, *, defaults: bool = True, previous: Optional[str] = None
     ) -> RegisterResult:
-        """Write the desktop file (and the icon), then take the defaults. A write that fails
-        takes back only a first registration (`previous` None): one that worked stays. When
-        no default could be taken, QiTV stays in Open With (`defaults` False)."""
+        """Write the desktop file (and the icon) with this kind's types beside those of the
+        kinds it holds already, then take this kind's defaults. A write that fails takes back
+        only a first registration (`previous` None, and no other kind there): one that worked
+        stays. When no default could be taken, QiTV stays in Open With (`defaults` False)."""
         desktop = self._desktop_path()
+        others = self._kinds_written() - {kind}
         icon_ours = False
         try:
             desktop.parent.mkdir(parents=True, exist_ok=True)
             icon_ours = self._install_icon()
-            self._write_desktop(desktop, exe, mime_types(kind), icon_ours)
+            self._write_desktop(desktop, exe, _kinds_mimes({kind} | others), icon_ours)
         except OSError as e:
             logger.warning("Couldn't write QiTV's desktop file (%s)", type(e).__name__)
-            if previous is None:
+            if previous is None and not others:
                 self._remove_files(icon=icon_ours)
             return RegisterResult(False)
         self._run("update-desktop-database", str(desktop.parent))
         return RegisterResult(True, defaults and self._take_defaults(kind))
 
     def unregister(self, kind: str, exe: str) -> bool:
+        """Remove the desktop file, the icon and QiTV's lines in mimeapps.list; while another
+        kind stays registered, only this kind's own types leave the file and the lists."""
+        stays = self._kinds_written() - {kind}
+        if stays:
+            return self._unregister_beside(kind, stays)
         ok = self._remove_files()
         applications = self._desktop_path().parent
         if applications.is_dir():
             self._run("update-desktop-database", str(applications))
+        return self._drop_defaults(None) and ok
+
+    def _unregister_beside(self, kind: str, stays: set[str]) -> bool:
+        """The kinds that stay keep the desktop file as it is (its Exec and icon too), with
+        their types only; this kind's own leave mimeapps.list."""
+        desktop = self._desktop_path()
+        kept = _kinds_mimes(stays)
+        ok = True
+        try:
+            self._set_mime_types(desktop, kept)
+        except (OSError, UnicodeDecodeError) as e:
+            logger.warning("Couldn't rewrite QiTV's desktop file (%s)", type(e).__name__)
+            ok = False
+        else:
+            self._run("update-desktop-database", str(desktop.parent))
+        leaving = set(mime_types(kind)) - set(kept)
+        return self._drop_defaults(leaving) and ok
+
+    def _drop_defaults(self, mimes: Optional[set[str]]) -> bool:
+        """QiTV's desktop file out of the user's mimeapps.list, for these MIME types (None:
+        every one); False when a list couldn't be edited."""
+        ok = True
         lists = (
             _xdg_dir("XDG_CONFIG_HOME", ".config") / "mimeapps.list",
             # where xdg-utils before 1.1 wrote (deprecated, still read)
@@ -818,11 +927,33 @@ class _LinuxBackend:
         )
         for mimeapps in lists:
             try:
-                _drop_from_mimeapps(mimeapps, DESKTOP_ID)
+                _drop_from_mimeapps(mimeapps, DESKTOP_ID, mimes)
             except OSError as e:
                 logger.warning("Couldn't edit %s (%s)", mimeapps, type(e).__name__)
                 ok = False
         return ok
+
+    def _kinds_written(self) -> set[str]:
+        """The kinds QiTV's desktop file holds now, from its MimeType (a kind's own types: a
+        playlist's tell none); none without the file."""
+        try:
+            text = self._desktop_path().read_text(encoding="utf-8")
+        except OSError, UnicodeDecodeError:
+            return set()
+        for line in text.splitlines():
+            if line.startswith(_MIME_KEY):
+                written = {m for m in line[len(_MIME_KEY) :].split(";") if m}
+                return {kind for kind in KINDS if _own_mimes(kind) & written}
+        return set()
+
+    def _set_mime_types(self, path: Path, mimes: list[str]) -> None:
+        """The desktop file's MimeType replaced, every other line as it was."""
+        lines = path.read_text(encoding="utf-8").splitlines()
+        value = _MIME_KEY + "".join(f"{m};" for m in mimes)
+        lines = [value if line.startswith(_MIME_KEY) else line for line in lines]
+        with atomic_write(str(path)) as f:
+            f.write(("\n".join(lines) + "\n").encode("utf-8"))
+        os.chmod(path, 0o644)
 
     def _desktop_path(self) -> Path:
         return _xdg_dir("XDG_DATA_HOME", ".local/share") / "applications" / DESKTOP_ID
@@ -865,7 +996,7 @@ class _LinuxBackend:
             f"Icon={ICON_NAME}",
             "Terminal=false",
             "Categories=AudioVideo;Video;Player;",
-            "MimeType=" + "".join(f"{m};" for m in mimes),
+            _MIME_KEY + "".join(f"{m};" for m in mimes),
             "StartupWMClass=qitv",
         ]
         if icon_ours:
@@ -934,10 +1065,11 @@ class _LinuxBackend:
         return done.returncode
 
 
-def _drop_from_mimeapps(path: Path, desktop_id: str) -> None:
-    """Remove `desktop_id` from every list in mimeapps.list's three groups, and a key whose list
-    is then empty; every other line stays as it was, and so does the file's mode (a link to a
-    dotfiles folder stays a link: its target is written)."""
+def _drop_from_mimeapps(path: Path, desktop_id: str, mimes: Optional[set[str]] = None) -> None:
+    """Remove `desktop_id` from every list in mimeapps.list's three groups (only those of these
+    MIME types, when given), and a key whose list is then empty; every other line stays as it
+    was, and so does the file's mode (a link to a dotfiles folder stays a link: its target is
+    written)."""
     path = Path(os.path.realpath(path))
     try:
         text = path.read_text(encoding="utf-8")
@@ -955,6 +1087,9 @@ def _drop_from_mimeapps(path: Path, desktop_id: str) -> None:
             group = stripped[1:-1]
         elif group in _MIMEAPPS_GROUPS and "=" in line and not stripped.startswith("#"):
             key, _, value = line.partition("=")
+            if mimes is not None and key.strip() not in mimes:
+                kept.append(line)
+                continue
             body = value.rstrip("\r\n")
             ending = value.removeprefix(body)
             ids = [i.strip() for i in body.split(";") if i.strip()]
@@ -987,7 +1122,8 @@ LS_ROLES_ALL = 0xFFFFFFFF  # every role, as Finder's Change All: one held before
 CF_STRING_ENCODING_UTF8 = 0x08000100
 _CORE_FOUNDATION = "/System/Library/Frameworks/CoreFoundation.framework/CoreFoundation"
 _CORE_SERVICES = "/System/Library/Frameworks/CoreServices.framework/CoreServices"
-_MAC_DEFAULTS = {"videos": MAC_DEFAULT_VIDEO}  # each kind's short list (one question each)
+# each kind's short list (macOS 26.4+ asks once for each); the playlists are never one
+_MAC_DEFAULTS = {"videos": MAC_DEFAULT_VIDEO, "music": MAC_DEFAULT_MUSIC}
 
 
 def _core_services() -> Any:

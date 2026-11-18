@@ -6,11 +6,15 @@ from pathlib import Path
 import unittest
 
 from services import file_types
-from services.open_paths import VIDEO_EXTENSIONS
+from services.open_paths import MUSIC_EXTENSIONS, VIDEO_EXTENSIONS
 
 SPEC = Path(__file__).resolve().parent.parent / "qitv-macos.spec"
 EXTENSIONS = "public.filename-extension"
 MIME = "public.mime-type"
+OSTYPE = "com.apple.ostype"
+PLAYLISTS = frozenset({"m3u", "m3u8"})
+# Each document type: its name and the extensions it claims (Open With lists QiTV for them).
+DOCUMENT_TYPES = {"Video": VIDEO_EXTENSIONS, "Audio": MUSIC_EXTENSIONS, "Playlist": PLAYLISTS}
 
 # The bundle's imports: {UTI: (conforms to, tags)}.
 IMPORTS = {
@@ -35,6 +39,20 @@ IMPORTS = {
         ["public.mpeg-2-transport-stream"],
         {EXTENSIONS: ["mts", "m2ts"]},
     ),
+    # music: macOS 13 declares flac and wav only as imports itself (CoreTypes), so these copy
+    # it exactly; it declares no Ogg or Opus type, and these are the identifiers other apps
+    # import for them
+    "org.xiph.flac": (["public.audio"], {EXTENSIONS: ["flac"], MIME: ["audio/flac"]}),
+    "com.microsoft.waveform-audio": (
+        ["public.audio"],
+        {
+            OSTYPE: [".WAV", "WAVE"],
+            MIME: ["audio/vnd.wave", "audio/wav", "audio/wave", "audio/x-wav"],
+            EXTENSIONS: ["wav", "wave", "bwf"],
+        },
+    ),
+    "org.xiph.ogg-audio": (["public.audio"], {EXTENSIONS: ["ogg", "oga"], MIME: ["audio/ogg"]}),
+    "org.xiph.opus": (["public.audio"], {EXTENSIONS: ["opus"]}),
 }
 
 
@@ -67,24 +85,42 @@ class MacBundleTypesTests(unittest.TestCase):
     def setUp(self):
         self.plist = info_plist()
 
+    def document_types(self):
+        return {kind["CFBundleTypeName"]: kind for kind in self.plist["CFBundleDocumentTypes"]}
+
     def test_document_types_alternate_and_complete(self):
-        types = self.plist["CFBundleDocumentTypes"]
-        self.assertEqual(len(types), 1)
-        video = types[0]
-        self.assertEqual(video["CFBundleTypeName"], "Video")
-        self.assertEqual(video["CFBundleTypeRole"], "Viewer")
-        self.assertEqual(video["LSHandlerRank"], "Alternate")  # installing takes no default
-        claimed = video["LSItemContentTypes"]
-        self.assertEqual(len(claimed), len(set(claimed)))
-        self.assertEqual(set(file_types.MAC_UTIS), VIDEO_EXTENSIONS)
-        for ext in sorted(VIDEO_EXTENSIONS):
-            for uti in file_types.MAC_UTIS[ext]:
-                self.assertIn(uti, claimed, ext)
-        # nothing more than the video types (no public.movie: that's every movie there is)
-        self.assertEqual(set(claimed), {u for utis in file_types.MAC_UTIS.values() for u in utis})
-        self.assertIn("public.mpeg-2-transport-stream", claimed)  # .ts: Open With
-        for ext in file_types.MAC_DEFAULT_VIDEO:  # what the Settings button makes default
-            self.assertIn(file_types.MAC_UTIS[ext][0], claimed)
+        types = self.document_types()
+        self.assertEqual(types.keys(), DOCUMENT_TYPES.keys())
+        self.assertEqual(len(self.plist["CFBundleDocumentTypes"]), len(DOCUMENT_TYPES))
+        self.assertEqual(set(file_types.MAC_UTIS), VIDEO_EXTENSIONS | MUSIC_EXTENSIONS | PLAYLISTS)
+        for name, extensions in DOCUMENT_TYPES.items():
+            with self.subTest(name=name):
+                declared = types[name]
+                self.assertEqual(declared["CFBundleTypeRole"], "Viewer")
+                # installing takes no default
+                self.assertEqual(declared["LSHandlerRank"], "Alternate")
+                claimed = declared["LSItemContentTypes"]
+                self.assertEqual(len(claimed), len(set(claimed)))
+                # its types and nothing more (no public.movie or public.audio: that's every
+                # movie, or every sound, there is)
+                own = {uti for ext in extensions for uti in file_types.MAC_UTIS[ext]}
+                self.assertEqual(set(claimed), own)
+        self.assertIn("public.mpeg-2-transport-stream", types["Video"]["LSItemContentTypes"])
+        for kind, name in (("videos", "Video"), ("music", "Audio")):
+            # what each Settings button makes the default
+            for ext in file_types._MAC_DEFAULTS[kind]:
+                self.assertIn(file_types.MAC_UTIS[ext][0], types[name]["LSItemContentTypes"])
+
+    def test_playlists_are_open_with_only(self):
+        playlist = self.document_types()["Playlist"]
+        self.assertEqual(playlist["LSItemContentTypes"], ["public.m3u-playlist"])  # macOS's own
+        self.assertEqual(playlist["LSHandlerRank"], "Alternate")
+        made_default = {
+            file_types.MAC_UTIS[ext][0]
+            for short_list in file_types._MAC_DEFAULTS.values()
+            for ext in short_list
+        }
+        self.assertNotIn("public.m3u-playlist", made_default)
 
     def test_imports_every_type_macos_may_not_declare(self):
         imported = {d["UTTypeIdentifier"]: d for d in self.plist["UTImportedTypeDeclarations"]}
@@ -95,12 +131,13 @@ class MacBundleTypesTests(unittest.TestCase):
                 self.assertTrue(declared["UTTypeDescription"])
                 self.assertEqual(declared["UTTypeConformsTo"], conforms)
                 self.assertEqual(declared["UTTypeTagSpecification"], tags)
-                # a movie (a transport stream is one: UTCoreTypes.h)
-                self.assertTrue({"public.movie", "public.mpeg-2-transport-stream"} & set(conforms))
+                # a movie (a transport stream is one: UTCoreTypes.h), or a sound
+                kinds = {"public.movie", "public.mpeg-2-transport-stream", "public.audio"}
+                self.assertTrue(kinds & set(conforms))
                 extensions = tags["public.filename-extension"]
-                videos = [ext for ext in extensions if ext in VIDEO_EXTENSIONS]
-                self.assertTrue(videos)
-                for ext in videos:
+                own = [ext for ext in extensions if ext in VIDEO_EXTENSIONS | MUSIC_EXTENSIONS]
+                self.assertTrue(own)
+                for ext in own:
                     self.assertEqual(file_types.MAC_UTIS[ext][0], uti)
         self.assertNotIn("UTExportedTypeDeclarations", self.plist)  # QiTV owns no type
 
