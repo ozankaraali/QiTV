@@ -369,8 +369,8 @@ class AudioScreen(Overlay):
         self._hover: Optional[str] = None
         self._laid: Optional[_Layout] = None
         self._backdrop: Optional[QImage] = None
-        # ... scaled up to the screen (from that small one, at that size)
-        self._backdrop_scaled: Optional[tuple[QImage, tuple[int, int], QImage]] = None
+        # ... scaled up to the screen (from that small one, at that size), while kept
+        self._backdrop_scaled: Optional[tuple[Optional[QImage], tuple[int, int], QImage]] = None
         self._covers: dict[tuple, QPixmap] = {}  # the cover drawn at a size (two views' sizes)
         self._shadows: dict[tuple, QPixmap] = {}
         self._words: Optional[tuple[tuple, QPixmap, QRectF]] = None
@@ -577,6 +577,10 @@ class AudioScreen(Overlay):
             self._update_timers()
             self._update_rect(self._layout().mini)
 
+    def playing(self) -> bool:
+        """What it shows plays (set_playing): not paused, ended or stopped."""
+        return self._playing
+
     def animating(self) -> bool:
         """Its light breathes (it shows, plays, and the system allows the motion)."""
         return self._glow_timer.isActive()
@@ -660,6 +664,7 @@ class AudioScreen(Overlay):
 
     def hideEvent(self, event: Any) -> None:
         super().hideEvent(event)
+        self._backdrop_scaled = None  # (its memory back)
         self._update_timers()
         if self._hover is not None:
             self._hover = None
@@ -1012,7 +1017,12 @@ class AudioScreen(Overlay):
             p.setRenderHint(QPainter.RenderHint.Antialiasing, True)
             p.setRenderHint(QPainter.RenderHint.TextAntialiasing, True)
             p.setRenderHint(QPainter.RenderHint.SmoothPixmapTransform, True)
-            p.drawImage(0, 0, self._backdrop_full())
+            # the light, from its copy at the screen's size: a step from it to the device's
+            # pixels needs no smoothing (soft light: a 2x step is invisible), a third of its
+            # cost at DPR 2 on hel
+            p.setRenderHint(QPainter.RenderHint.SmoothPixmapTransform, False)
+            p.drawImage(QRectF(self.rect()), self._backdrop_full())
+            p.setRenderHint(QPainter.RenderHint.SmoothPixmapTransform, True)
             self._paint_cover(p, lay, m, dirty)
             self._paint_info(p, lay, m, dirty)
             if lay.view == "album":
@@ -1032,21 +1042,21 @@ class AudioScreen(Overlay):
         return self._backdrop
 
     def _backdrop_full(self) -> QImage:
-        """The backdrop at the screen's size (its device pixels), scaled up once a light frame:
-        a repaint of a part of the screen (the Stage's bars, 30 a second) copies its part."""
+        """The light at the screen's size (its own pixels, not the device's: at DPR 2 a
+        quarter of the memory, 3.7 MB at 1280x720), drawn into the same image at each light
+        frame: a repaint of a part of the screen (the Stage's bars, 30 a second) copies its
+        part. Let go while the screen is hidden."""
         small = self._backdrop_image()
-        ratio = self.devicePixelRatioF()
-        size = (max(1, math.ceil(self.width() * ratio)), max(1, math.ceil(self.height() * ratio)))
+        size = (max(1, self.width()), max(1, self.height()))
         held = self._backdrop_scaled
-        if held is None or held[0] is not small or held[1] != size:
-            full = small.scaled(
-                size[0],
-                size[1],
-                Qt.AspectRatioMode.IgnoreAspectRatio,
-                Qt.TransformationMode.SmoothTransformation,
-            )
-            full.setDevicePixelRatio(ratio)
-            held = self._backdrop_scaled = (small, size, full)
+        if held is None or held[1] != size:
+            held = (None, size, QImage(size[0], size[1], QImage.Format.Format_RGB32))
+        if held[0] is not small:
+            p = QPainter(held[2])
+            p.setRenderHint(QPainter.RenderHint.SmoothPixmapTransform, True)
+            p.drawImage(QRectF(0, 0, size[0], size[1]), small)
+            p.end()
+        self._backdrop_scaled = (small, size, held[2])
         return held[2]
 
     def _glow_colours(self) -> list[QColor]:

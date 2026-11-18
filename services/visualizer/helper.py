@@ -16,11 +16,14 @@ skipped unread (a seek far into a song waits a second or so). It reads at most A
 player, which it is told of, and then waits.
 
 To it: ("decode", from_ms, until_ms) (levels from there, to there; None: to the end; from a
-place it has passed it reads again from the start), ("viewer", ms), ("quit",). From it:
+place it has passed, and whose levels it doesn't still hold unsent, it reads again from the
+start), ("viewer", ms), ("quit",). From it:
 ("levels", start_ms, frame_ms, blob) chunks (services.levels.LevelStream), ("ended", ms, why)
-("end": the file's end; "until": until_ms), ("failed", reason), ("log", level, text). It quits
-when its pipe closes (its owner gone too). `LevelsHelper` is the owner's side: everything that
-could wait (the spawn, the pipe, the join or kill) happens on its own thread.
+("end": the file's end; "until": until_ms), ("failed", reason) (its error's name), ("log", level,
+text). It quits when its pipe closes (its owner gone too). `LevelsHelper` is the owner's side:
+everything that could wait (the spawn, the pipe, the join or kill) happens on its own thread,
+and a child that dies without a word (a crash in libVLC) is reported as ("failed", "gone").
+One libVLC instance serves the process's decodes.
 """
 
 from __future__ import annotations
@@ -83,10 +86,12 @@ class LevelsHelper:
         on_message: Callable[[tuple], None],
         *,
         detailed_log: bool = False,
+        target: Optional[Callable[..., None]] = None,
     ) -> None:
         self.location = location
         self._on_message = on_message
         self._detailed_log = detailed_log
+        self._target = target or helper_main  # (tests: a child that dies)
         self._outbox: "queue.Queue[tuple]" = queue.Queue()
         self._stopping = threading.Event()
         self._thread: Optional[threading.Thread] = None
@@ -125,7 +130,7 @@ class LevelsHelper:
         context = multiprocessing.get_context("spawn")
         conn, child = context.Pipe(duplex=True)
         process = context.Process(
-            target=helper_main,
+            target=self._target,
             args=(child, self.location, self._detailed_log),
             name="qitv-levels",
             daemon=True,
@@ -139,8 +144,9 @@ class LevelsHelper:
         finally:
             child.close()
         self.pid = process.pid
+        died = False
         try:
-            self._serve(conn, process)
+            died = self._serve(conn, process)
         finally:
             try:
                 conn.close()  # it reads EOF, and ends
@@ -151,8 +157,13 @@ class LevelsHelper:
                 process.kill()
                 process.join(1.0)
             self.exitcode = process.exitcode
+        if died:
+            logger.warning("Visualizer: its helper ended by itself (exit code %s)", self.exitcode)
+            self._hear(("failed", "gone"))
 
-    def _serve(self, conn: Connection, process: Any) -> None:
+    def _serve(self, conn: Connection, process: Any) -> bool:
+        """Its pipe, until it is stopped (False) or its child is gone (True: it died, its end
+        of the pipe closed with it)."""
         while not self._stopping.is_set():
             try:
                 while True:
@@ -160,16 +171,16 @@ class LevelsHelper:
             except queue.Empty:
                 pass
             except OSError, ValueError:
-                break
+                return True
             try:
                 if conn.poll(_POLL_S):
                     self._hear(conn.recv())
                     continue
             except EOFError, OSError:
-                break
+                return True
             if not process.is_alive():
-                self._hear(("failed", "gone"))
-                break
+                return True
+        return False
 
     def _hear(self, message: Any) -> None:
         if self._stopping.is_set() or not isinstance(message, tuple) or not message:
@@ -242,6 +253,7 @@ class FileLevels:
         self._reached = False  # until_s was reached: libVLC waits there
         self._told = False  # ... and the owner was told
         self._ended = False  # libVLC read to the file's end (the owner was told)
+        self._warned = False  # a block's trouble was said (once a decode)
         self._buffers: dict[int, Any] = {}
         self._instance: Any = None
         self._player: Any = None
@@ -255,7 +267,9 @@ class FileLevels:
         until_s = None if until_ms is None else until_ms / 1000.0
         with self._gate:
             read_to = self._rest[0] if self._rest is not None else self._at_s
-            again = self._player is None or self._ended or from_s < read_to - 0.05
+            held = self._stream.unsent_from_s()  # read, its levels not sent yet: they will be
+            behind = from_s < read_to - 0.05 and (held is None or from_s < held - 0.05)
+            again = self._player is None or self._ended or behind
             if not again:
                 self._from_s, self._until_s = from_s, until_s
                 self._reached = until_s is not None and read_to >= until_s
@@ -289,6 +303,7 @@ class FileLevels:
             self._send(("ended", round(until * 1000), "until"))
 
     def stop(self) -> None:
+        """The decode stops (libVLC's instance stays, for the next: its plugins load once)."""
         with self._gate:
             self._halted = True
             self._gate.notify_all()
@@ -296,10 +311,14 @@ class FileLevels:
         if player is not None:
             player.stop()
             player.release()
+        self._buffers.clear()
+
+    def close(self) -> None:
+        """Stopped, and libVLC let go (the helper process itself just ends)."""
+        self.stop()
         if self._instance is not None:
             self._instance.release()
             self._instance = None
-        self._buffers.clear()
 
     def _restart(self, from_s: float, until_s: Optional[float]) -> None:
         self.stop()
@@ -307,7 +326,7 @@ class FileLevels:
             self._stream.flush()
             self._from_s, self._until_s = from_s, until_s
             self._at_s, self._pts0, self._rest = 0.0, None, None
-            self._halted = self._reached = self._told = self._ended = False
+            self._halted = self._reached = self._told = self._ended = self._warned = False
         vlc = self._vlc
         if self._instance is None:
             self._instance = vlc.Instance(list(INSTANCE_ARGS))
@@ -390,6 +409,13 @@ class FileLevels:
             return True
         return at > max(self._viewer_s, self._from_s) + AHEAD_S
 
+    def _warn_once(self, text: str, *args: Any) -> None:
+        """A block's trouble, said once a decode (at 40–200x, each block's would be thousands
+        of lines a second down the pipe)."""
+        if not self._warned:
+            self._warned = True
+            logger.warning("Visualizer: " + text, *args)
+
     def _make_callbacks(self) -> tuple[Any, ...]:
         @_PRERENDER
         def prerender(data: Any, pp: Any, size: int) -> None:
@@ -413,12 +439,12 @@ class FileLevels:
             if block is None or self._halted:
                 return
             if channels != 1 or rate != RATE or bits != 16:
-                logger.warning("Visualizer: libVLC gave %d channels at %d Hz", channels, rate)
+                self._warn_once("libVLC gave %d channels at %d Hz, %d bits", channels, rate, bits)
                 return
             try:
                 self._block(int(pts), bytes(block.raw[: int(size)]))
             except Exception as error:  # never into libVLC
-                logger.warning("Visualizer: a sound block failed: %s", error)
+                self._warn_once("a sound block failed: %s", error)
 
         return None, None, prerender, postrender
 
@@ -443,23 +469,26 @@ def _exit_with_owner() -> None:
 
 
 def helper_main(conn: Connection, location: str, detailed_log: bool = False) -> None:
-    """Spawn entry point. It never returns: the process ends with `os._exit`."""
+    """Spawn entry point. It never returns: the process ends with `os._exit`; one that fails
+    says why first (its owner logs it), not the file's name."""
+    link = _Link(conn)
     try:
         with open(os.devnull, "wb") as discard:  # libVLC writes to fd 1 and 2
             os.dup2(discard.fileno(), 1)
             os.dup2(discard.fileno(), 2)
         threading.Thread(target=_exit_with_owner, name="qitv-levels-owner", daemon=True).start()
         _lower_priority()
-        from services.vlc_bundle import use_bundled_vlc
-
-        use_bundled_vlc()  # before anything imports vlc, as main.py does
-        link = _Link(conn)
         root = logging.getLogger()
         root.handlers[:] = [_LogToOwner(link)]
         root.setLevel(logging.DEBUG if detailed_log else logging.INFO)
+        from services.vlc_bundle import use_bundled_vlc
+
+        use_bundled_vlc()  # before anything imports vlc, as main.py does
         _serve(link, location)
-    except BaseException:
-        pass
+    except Exception as error:
+        name = type(error).__name__
+        link.send(("log", logging.WARNING, f"Visualizer: the helper failed: {name}: {error}"))
+        link.send(("failed", name))
     finally:
         os._exit(0)
 

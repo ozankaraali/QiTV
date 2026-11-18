@@ -22,7 +22,8 @@ not local ends it.
 
 The helper is started the first time the Stage shows for a song (a song never seen on the
 Stage costs nothing), and reads on while the song plays. Nothing here waits: the helper's
-thread starts, joins and kills its process.
+thread starts, joins and kills its process. Paused on the Stage, a seek shows its frame once
+it is read; frames more than KEEP_BEHIND_FRAMES behind the bars are let go (a long file).
 """
 
 from __future__ import annotations
@@ -45,12 +46,16 @@ FEED_MS = 33  # the bars' frames (about 30 a second)
 STEER_MS = 250  # where the sound is read is looked at this often while they move
 ASK_MS = 500  # the helper is sent elsewhere at most this often (a drag on the scrub bar)
 STILL_MS = 1000  # under reduced motion: the still shape is looked for this often
+PAUSED_MS = 250  # paused on the Stage: a seek is looked for this often (its frame shown once)
 TELL_MS = 1000  # the helper hears where the player is this often (it reads AHEAD_S past it)
 HOLD_MS = 600  # where nothing is read yet the bars hold their frame this long, then rest
 SLACK_FRAMES = round(2000 / FRAME_MS)  # the helper reads this close behind them: it gets there
 STILL_FRAMES = round(6000 / FRAME_MS)  # the still shape is the average of this much at least
 MAX_LEAD_MS = 600  # the player's time is carried on at most this far past its last reading
 BACK_MS = 1000  # a reading this much behind is a seek back (less: the clock waits for it)
+KEEP_BEHIND_FRAMES = round(5 * 60_000 / FRAME_MS)  # frames kept behind the bars (a seek back)
+TRIM_FRAMES = round(60_000 / FRAME_MS)  # ... let go of a minute at a time
+LATE_FRAMES = round(3000 / FRAME_MS)  # the captions' levels this late past their start: none come
 RESTING = [0.0] * BANDS
 
 
@@ -103,6 +108,18 @@ class FrameStore:
         merged[(first - start) * BANDS : (last - start) * BANDS] = blob
         self._starts[lo:hi] = [start]
         self._runs[lo:hi] = [merged]
+
+    def trim(self, before: int) -> None:
+        """Let go of the frames before `before` (a long file's would pile up: 7 MB an hour)."""
+        while self._starts and self._end(0) <= before:
+            del self._starts[0], self._runs[0]
+        if self._starts and self._starts[0] < before:
+            del self._runs[0][: (before - self._starts[0]) * BANDS]
+            self._starts[0] = before
+
+    def first(self) -> Optional[int]:
+        """The first frame held (None: none)."""
+        return self._starts[0] if self._starts else None
 
     def at(self, index: int) -> Optional[bytes]:
         i = bisect.bisect_right(self._starts, index) - 1
@@ -197,12 +214,15 @@ class Visualizer(QObject):
         self._frame: Optional[bytes] = None  # ... its levels
         self._missing_since: Optional[float] = None
         self._still = False  # the still shape is up (reduced motion)
+        self._paused_at: Optional[int] = None  # the player's time as it paused (a seek moves it)
         self._feed = QTimer(self)
         self._feed.setInterval(FEED_MS)
         self._feed.timeout.connect(self._tick)
+        # while the Stage shows but its bars don't move: under reduced motion, the still shape
+        # (STILL_MS); paused, a seek's frame (PAUSED_MS)
         self._slow = QTimer(self)
         self._slow.setInterval(STILL_MS)
-        self._slow.timeout.connect(self._still_tick)
+        self._slow.timeout.connect(self._slow_tick)
         self._heard.connect(self._on_heard)
         screen.stageMoving.connect(self._update)
         screen.stageShown.connect(self._update)
@@ -252,6 +272,7 @@ class Visualizer(QObject):
         self._end = self._captions_first = None
         self._shown = self._missing_since = self._frame = None
         self._still = False
+        self._paused_at = None
         self._steered_at = float("-inf")  # (a new song's first frame steers at once)
         self._play.reset()
 
@@ -273,21 +294,32 @@ class Visualizer(QObject):
             self._tick()
         elif not moving:
             self._feed.stop()  # (a pause: the bars stay at their frame)
-        still = following and not moving and bool(screen.takes_words())
-        if still and OpeningMark.reduced_motion():
-            if not self._slow.isActive():
-                self._slow.start()
-                self._still_tick()
+        shown = following and not moving and bool(screen.takes_words())
+        if shown and OpeningMark.reduced_motion():
+            self._slow_at(STILL_MS)
+        elif shown and not screen.playing():
+            if self._slow.interval() != PAUSED_MS or not self._slow.isActive():
+                self._paused_at = self._read_ms()
+            self._slow_at(PAUSED_MS)
         else:
             self._slow.stop()
 
-    def _position_ms(self) -> float:
+    def _slow_at(self, interval: int) -> None:
+        if self._slow.interval() != interval or not self._slow.isActive():
+            self._slow.start(interval)
+            self._slow_tick()
+
+    def _read_ms(self) -> Optional[int]:
+        """The player's time as libVLC says it (None: no reading)."""
         session = self._session()
         try:
             read = int(session.time_ms()) if session is not None else 0
         except Exception:
             read = 0
-        return self._play.at(read)
+        return read if read > 0 else None
+
+    def _position_ms(self) -> float:
+        return self._play.at(self._read_ms() or 0)
 
     def _tick(self) -> None:
         if not self._path:
@@ -296,12 +328,8 @@ class Visualizer(QObject):
         index = int(self._position_ms() // FRAME_MS)
         now = self._clock()
         if index != self._shown:
-            frame = self._frames.at(index)
-            if frame is not None:
-                if frame != self._frame:  # (silence: nothing to draw again)
-                    self._screen.set_levels([v / 255.0 for v in frame])
-                    self._frame = frame
-                self._shown, self._missing_since = index, None
+            if self._show(index):
+                self._missing_since = None
             elif self._missing_since is None:
                 self._missing_since = now  # held a moment: it may come at once
             elif now - self._missing_since >= HOLD_MS / 1000.0 and self._shown != -1:
@@ -310,22 +338,57 @@ class Visualizer(QObject):
         if now - self._steered_at >= STEER_MS / 1000.0:
             self._steer(index)
 
-    def _still_tick(self) -> None:
-        """Under reduced motion while the Stage shows: the song is read on, and once enough of
-        it is, its average stays up, still."""
-        if not self._path or not self._screen.takes_words() or not OpeningMark.reduced_motion():
+    def _show(self, index: int) -> bool:
+        """The bars show frame `index` (False: it isn't read yet)."""
+        frame = self._frames.at(index)
+        if frame is None:
+            return False
+        if frame != self._frame:  # (silence: nothing to draw again)
+            self._screen.set_levels([v / 255.0 for v in frame])
+            self._frame = frame
+        self._shown = index
+        return True
+
+    def _slow_tick(self) -> None:
+        if not self._path or not self._screen.takes_words():
             self._slow.stop()
+        elif OpeningMark.reduced_motion():
+            self._still_tick()
+        elif not self._screen.playing():
+            self._paused_tick()
+        else:
+            self._slow.stop()
+
+    def _still_tick(self) -> None:
+        """Under reduced motion while the Stage shows: the song is read on until enough of it
+        is, and then its average stays up, still (nothing more is read for it)."""
+        if self._still:
+            self._end_helper()
             return
         self._steer(int(self._position_ms() // FRAME_MS))
         self._show_still()
 
+    def _paused_tick(self) -> None:
+        """Paused on the Stage: the bars stay at their frame, until a seek moves the player;
+        then its frame shows, once read (one paint, no feed)."""
+        read = self._read_ms()
+        if read is None or read == self._paused_at:
+            return
+        index = read // FRAME_MS
+        if index != self._shown:
+            self._steer(index)
+            if not self._show(index):
+                return  # (looked at again: the helper reads it)
+        self._paused_at = read
+
     def _show_still(self) -> None:
-        if self._still or not self._slow.isActive():
+        if self._still or not self._slow.isActive() or not OpeningMark.reduced_motion():
             return
         count = self._frames.count()
         if count >= STILL_FRAMES or (count and self._end is not None):
             self._still = True
             self._screen.set_levels(self._frames.average())
+            self._end_helper()  # (the shape never changes: nothing more to read)
 
     # ---- where the sound is read ------------------------------------------------------------
 
@@ -350,8 +413,13 @@ class Visualizer(QObject):
     def _steer(self, index: int, *, at_once: bool = False) -> None:
         now = self._clock()
         self._steered_at = now
+        first = self._frames.first()
+        if first is not None and first < index - KEEP_BEHIND_FRAMES - TRIM_FRAMES:
+            self._frames.trim(index - KEEP_BEHIND_FRAMES)
         gap = self._frames.gap_from(index)
         until = self._captions_until()
+        if until is not None and self._captions_first is None and index >= until + LATE_FRAMES:
+            until = None  # their run sends no levels (its reader placed no sound): read on
         if until is not None and gap >= until:
             if self._captions_first is not None:
                 self._end_helper()  # one decode: what is read joins theirs, they read on
@@ -421,7 +489,7 @@ class Visualizer(QObject):
                 self._end = int(message[1]) // FRAME_MS
                 self._show_still()
         elif kind == "failed":
-            logger.info("Visualizer: the helper ended (%s): no bars for this song", message[1])
+            logger.warning("Visualizer: no more bars for this song: its helper %s", message[1])
             self._helper_failed = True
             self._end_helper()
 

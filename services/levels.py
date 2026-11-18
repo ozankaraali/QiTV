@@ -160,19 +160,22 @@ class Levels:
             self._pending.extend(v * 32768.0 for v in samples)
         self._pushed += len(samples)
         frames = []
-        while len(self._pending) >= self.size:
-            frames.append(self._frame(self._pending[: self.size]))
-            del self._pending[: self.hop]
+        pending, at = self._pending, 0
+        while len(pending) - at >= self.size:  # (an index: a whole song pushed stays linear)
+            frames.append(self._frame(pending[at : at + self.size]))
+            at += self.hop
+        del pending[:at]
         return frames
 
     def finish(self) -> list[list[float]]:
         """The frames the sound pushed still holds (one a FRAME_MS of it), padded with silence."""
         frames = []
+        pending, at = self._pending, 0
         while self._made < self._pushed // self.hop:
-            window = self._pending[: self.size]
+            window = pending[at : at + self.size]
             window = window + [0.0] * (self.size - len(window))
             frames.append(self._frame(window))
-            del self._pending[: self.hop]
+            at += self.hop
         self.drop()
         return frames
 
@@ -267,6 +270,13 @@ class LevelStream:
     def _take(self, samples: Sequence[float]) -> None:
         self._count += len(samples)
         self._add(self._levels.push(samples))
+
+    def unsent_from_s(self) -> Optional[float]:
+        """Where the sound read but not sent yet begins (its frames go with the next chunk or
+        the flush); None: nothing held."""
+        if self._origin_ms is None:
+            return None
+        return (self._origin_ms + self._first * FRAME_MS) / 1000.0
 
     def flush(self) -> None:
         """Send what is held (the sound ended, or moves elsewhere)."""

@@ -23,6 +23,7 @@ from unittest import mock
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 from PySide6.QtCore import QObject, Signal
+from PySide6.QtTest import QTest
 from PySide6.QtWidgets import QApplication, QWidget
 from motion_fixtures import pin_motion
 from test_tv_controller_audio import NO_PICTURE_S, AudioCase
@@ -34,10 +35,13 @@ from services.visualizer.helper import FileLevels, LevelsHelper
 from ui.overlays.audio_screen import AudioScreen
 from ui.visualizer import (
     ASK_MS,
+    FEED_MS,
     HOLD_MS,
+    KEEP_BEHIND_FRAMES,
     RESTING,
     STEER_MS,
     STILL_FRAMES,
+    TRIM_FRAMES,
     FrameStore,
     PlayClock,
     Visualizer,
@@ -139,9 +143,7 @@ class HelperTests(unittest.TestCase):
         self.assertTrue(all(frame == FRAME_MS for _, _, frame, _ in chunks))
         middle = read[len(read) // 2][1]
         self.assertEqual(max(range(BANDS), key=middle.__getitem__), band_of(1000.0))
-        speed = 60.0 / took
-        print(f"\n  the helper read 60 s of an mp3 in {took:.2f} s: {speed:.0f}x real time")
-        self.assertGreaterEqual(speed, 5.0)
+        self.assertGreaterEqual(60.0 / took, 5.0)  # (40x on hel)
 
     def test_the_helper_reads_from_its_start_where_the_sound_is(self):
         # :start-time lands seconds off in libVLC's stream output for these: read from the
@@ -160,7 +162,7 @@ class HelperTests(unittest.TestCase):
         # moves; to an `until`, which it says once, and no further
         sent: list = []
         levels = FileLevels(str(self.tone), sent.append)
-        self.addCleanup(levels.stop)
+        self.addCleanup(levels.close)
 
         def read_to():
             ends = [m[1] + len(m[3]) // BANDS * m[2] for m in sent if m[0] == "levels"]
@@ -204,7 +206,7 @@ class HelperTests(unittest.TestCase):
             with self.subTest(kind):
                 sent: list = []
                 levels = FileLevels(str(path), sent.append)
-                self.addCleanup(levels.stop)
+                self.addCleanup(levels.close)
 
                 def ended(count):
                     began = time.monotonic()
@@ -230,6 +232,29 @@ class HelperTests(unittest.TestCase):
                     [("ended", 6_000, "until"), ("ended", 8_220, "until")],
                 )
 
+    def test_one_libvlc_for_the_helper_and_no_restart_for_what_it_holds(self):
+        sent: list = []
+        levels = FileLevels(str(self.tone), sent.append)
+        self.addCleanup(levels.close)
+
+        def sent_to():
+            return max((m[1] for m in sent if m[0] == "levels"), default=0)
+
+        with mock.patch.object(helper_module, "AHEAD_S", 5.0):
+            levels.decode(0, None)
+            began = time.monotonic()
+            while sent_to() < 3_000 and time.monotonic() - began < 15.0:
+                time.sleep(0.05)
+            time.sleep(0.5)  # (it waits at 5 s, its last frames read but not sent)
+            instance, player = levels._instance, levels._player
+            held = levels._stream.unsent_from_s()
+            self.assertIsNotNone(held)
+            levels.decode(round(held * 1000) + FRAME_MS, None)  # what it holds covers it
+            self.assertIs(levels._player, player)  # on from there, not from the start again
+            levels.decode(1_000, None)  # behind it: from the start again, the same libVLC
+            self.assertIsNot(levels._player, player)
+            self.assertIs(levels._instance, instance)
+
     def test_the_helper_quits_when_its_pipe_closes(self):
         heard: queue.Queue = queue.Queue()
         helper = LevelsHelper(str(self.tone), heard.put)
@@ -245,6 +270,50 @@ class HelperTests(unittest.TestCase):
         self.assertNotIn(pid, [child.pid for child in multiprocessing.active_children()])
 
 
+class HelperTroubleTests(unittest.TestCase):
+    """A helper that dies or fails says so (its owner logs it), and a block's trouble is said
+    once, not for every block."""
+
+    def hear(self, target):
+        import visualizer_fixtures
+
+        heard: queue.Queue = queue.Queue()
+        helper = LevelsHelper(
+            "/music/none.mp3", heard.put, target=getattr(visualizer_fixtures, target)
+        )
+        self.addCleanup(helper.stop)
+        with self.assertLogs("services.visualizer.helper", "WARNING") as logs:
+            helper.start()
+            helper.decode(0)
+            message = heard.get(timeout=30)
+            self.assertTrue(helper.wait(5.0))
+        return message, " ".join(logs.output), helper
+
+    def test_a_helper_that_dies_says_so(self):
+        message, logged, helper = self.hear("die_at_once")
+        self.assertEqual(message, ("failed", "gone"))
+        self.assertEqual(helper.exitcode, 3)
+        self.assertIn("ended by itself (exit code 3)", logged)
+
+    def test_a_helper_that_fails_says_why(self):
+        message, logged, _ = self.hear("fail_inside")
+        self.assertEqual(message, ("failed", "RuntimeError"))
+        self.assertIn("the helper failed: RuntimeError: no libVLC here", logged)
+
+    def test_a_blocks_trouble_is_said_once(self):
+        import ctypes
+
+        levels = FileLevels("/music/none.mp3", lambda message: None, vlc_module=SimpleNamespace())
+        _, _, prerender, postrender = levels._callbacks
+        with self.assertLogs("services.visualizer.helper", "WARNING") as logs:
+            for _ in range(50):  # stereo at 44.1 kHz: not what it asked for
+                at = (ctypes.c_void_p * 1)()
+                prerender(None, at, 8)
+                postrender(None, at[0], 2, 44_100, 2, 16, 8, 0)
+        self.assertEqual(len(logs.output), 1)
+        self.assertIn("2 channels at 44100 Hz", logs.output[0])
+
+
 # ---- the visualizer (fakes) -----------------------------------------------------------------
 
 
@@ -256,7 +325,7 @@ class FakeStage(QObject):
 
     def __init__(self):
         super().__init__()
-        self.shown = self.moving = False
+        self.shown = self.moving = self.plays = False
         self.levels: list = []
 
     def takes_words(self):
@@ -265,12 +334,15 @@ class FakeStage(QObject):
     def stage_moving(self):
         return self.moving
 
+    def playing(self):
+        return self.plays
+
     def set_levels(self, bands):
         self.levels.append(None if bands is None else list(bands))
 
     def play(self, playing=True):
         """The Stage shows, playing (or paused)."""
-        self.shown, self.moving = True, playing
+        self.shown, self.moving, self.plays = True, playing, playing
         self.stageShown.emit(True)
         self.stageMoving.emit(playing)
 
@@ -432,6 +504,24 @@ class OneDecodeTests(VisualizerCase):
                 self.assertIsNotNone(until)
         self.assertLessEqual(max(until for _, until in self.helpers[0].asks), 8_220)
 
+    def test_a_captions_run_that_sends_no_levels_lets_the_helper_read_on(self):
+        self.captions.reads(LOCATION, 6.0)
+        self.vis.follow(PATH, LOCATION)
+        self.screen.play()
+        helper = self.helper()
+        helper.chunk(0, 200)
+        helper.say("ended", 6_000, "until")
+        self.play_to(8_500)
+        self.assertEqual(helper.asks, [(0, 6_000)])  # (theirs may still come)
+        self.play_to(9_500)  # 3 s past their start, none came: it reads on, as without them
+        from_ms, until = helper.asks[-1]
+        self.assertIsNone(until)
+        self.assertEqual(from_ms, 9_000 + 7 * FRAME_MS)  # (from where the bars are)
+        self.assertFalse(helper.stopped)
+        helper.chunk(from_ms // FRAME_MS, 200)
+        self.play_to(10_000)
+        self.assertEqual(self.screen.frame(), frame_at(10_000))
+
     def test_captions_turned_off_or_on_mid_song_hand_over_where_the_bars_are(self):
         self.captions.reads(LOCATION, 6.0)
         self.vis.follow(PATH, LOCATION)
@@ -474,11 +564,14 @@ class BarsTests(VisualizerCase):
         helper.chunk(0, 334)  # 0–10 s
         self.play_to(1_000)
         self.assertEqual(self.screen.frame(), frame_at(1_000))
-        # paused: the feed stops, the bars stay at their frame
+        # paused: the feed stops, the bars stay at their frame however long it stays paused
         self.screen.play(False)
         self.assertFalse(self.vis._feed.isActive())
         shown = len(self.screen.levels)
-        self.now += 5.0
+        for _ in range(5):
+            self.now += 1.0
+            self.vis._slow_tick()
+        QTest.qWait(2 * FEED_MS)
         self.assertEqual(len(self.screen.levels), shown)
         self.assertEqual(self.screen.frame(), frame_at(1_000))
         self.screen.play()
@@ -502,6 +595,42 @@ class BarsTests(VisualizerCase):
         self.assertEqual(self.screen.frame(), frame_at(5_000))
         self.assertEqual(helper.asks[-1], (334 * FRAME_MS, None))
         self.assertEqual(len(self.helpers), 1)
+
+    def test_a_seek_while_paused_shows_its_frame_once_read(self):
+        self.vis.follow(PATH, LOCATION)
+        self.screen.play()
+        helper = self.helper()
+        helper.chunk(0, 334)  # 0–10 s
+        self.play_to(2_000)
+        self.screen.play(False)
+        self.assertTrue(self.vis._slow.isActive())  # (a look a quarter second, no feed)
+        self.assertFalse(self.vis._feed.isActive())
+        self.session.ms = 7_000  # dragged on the scrub bar
+        self.vis._slow_tick()
+        self.assertEqual(self.screen.frame(), frame_at(7_000))
+        shown = len(self.screen.levels)
+        self.vis._slow_tick()
+        self.assertEqual(len(self.screen.levels), shown)  # one paint
+        self.now += ASK_MS / 1000.0
+        self.session.ms = 50_000  # past what is read: the helper is sent there
+        self.vis._slow_tick()
+        self.assertEqual(helper.asks[-1], (50_000 // FRAME_MS * FRAME_MS, None))
+        self.assertEqual(self.screen.frame(), frame_at(7_000))
+        helper.chunk(50_000 // FRAME_MS, 64)
+        self.vis._slow_tick()
+        self.assertEqual(self.screen.frame(), frame_at(50_000))
+
+    def test_frames_long_behind_the_bars_are_let_go(self):
+        self.vis.follow(PATH, LOCATION)
+        self.screen.play()
+        helper = self.helper()
+        far = KEEP_BEHIND_FRAMES + TRIM_FRAMES + 600
+        helper.chunk(0, far + 100)
+        self.seek(far * FRAME_MS)
+        self.assertEqual(self.vis._frames.first(), far - KEEP_BEHIND_FRAMES)
+        self.assertEqual(self.screen.frame(), frame_at(far * FRAME_MS))
+        self.seek((far - 600) * FRAME_MS)  # a short seek back: still held, at once
+        self.assertEqual(self.screen.frame(), frame_at((far - 600) * FRAME_MS))
 
     def test_the_helper_hears_where_the_player_is(self):
         self.vis.follow(PATH, LOCATION)
@@ -570,9 +699,14 @@ class BarsTests(VisualizerCase):
         self.assertEqual(len(still), BANDS)
         expected = ((STILL_FRAMES - 1) * 51 + 153) / STILL_FRAMES / 255
         self.assertAlmostEqual(still[0], expected, places=4)
-        helper.chunk(STILL_FRAMES, 400)  # more of it: the shape stays as it is
-        self.vis._still_tick()
+        self.assertTrue(helper.stopped)  # the shape never changes: nothing more is read
+        asks = list(helper.asks)
+        for _ in range(3):
+            self.now += 1.0
+            self.session.ms += 1_000
+            self.vis._slow_tick()
         self.assertEqual(self.screen.levels[-1], still)
+        self.assertEqual((len(self.helpers), helper.asks), (1, asks))
 
 
 class FrameStoreTests(unittest.TestCase):
@@ -590,6 +724,35 @@ class FrameStoreTests(unittest.TestCase):
         self.assertEqual(store._starts, [10])
         self.assertEqual(store.count(), 25)
         self.assertEqual(store.at(31), bytes([31] * BANDS))
+
+    def test_frames_before_the_start_are_dropped_and_the_average_is_each_bands(self):
+        store = FrameStore()
+        store.put(-3, frames(0, 5))  # (a start rounded just before 0)
+        self.assertEqual(store._starts, [0])
+        self.assertEqual(store.count(), 2)
+        self.assertEqual(store.at(0), bytes([3] * BANDS))
+        store.put(-9, frames(0, 4))  # wholly before it: nothing
+        self.assertEqual(store.count(), 2)
+        self.assertEqual(FrameStore().average(), RESTING)
+        store.clear()
+        store.put(0, bytes(range(BANDS)) + bytes(2 * b for b in range(BANDS)))
+        store.put(10, bytes([255] * BANDS))
+        average = store.average()
+        self.assertEqual(len(average), BANDS)
+        for band, value in enumerate(average):
+            self.assertAlmostEqual(value, (band + 2 * band + 255) / 3 / 255)
+
+    def test_a_trim_lets_go_of_what_is_before_it(self):
+        store = FrameStore()
+        store.put(0, frames(0, 100))
+        store.put(200, frames(200, 100))
+        store.trim(150)
+        self.assertEqual((store.first(), store.count()), (200, 100))
+        store.trim(250)
+        self.assertEqual((store.first(), store.count()), (250, 50))
+        self.assertEqual(store.at(250), bytes([250] * BANDS))
+        store.trim(1000)
+        self.assertIsNone(store.first())
 
 
 class PlayClockTests(unittest.TestCase):
@@ -644,7 +807,8 @@ class StageMovingTests(unittest.TestCase):
         pin_motion(self, reduced=True)
         screen.show()
         self.assertFalse(screen.stage_moving())
-        for name in ("stage_moving", "takes_words", "set_levels", "stageMoving", "stageShown"):
+        names = ("stage_moving", "takes_words", "playing", "set_levels", "stageMoving")
+        for name in names + ("stageShown",):
             self.assertTrue(hasattr(screen, name), name)  # (FakeStage's API)
 
 
