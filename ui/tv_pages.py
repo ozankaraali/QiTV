@@ -776,9 +776,9 @@ class TVPages(QObject):
 
     def _open_shelf_folder(self, path: str) -> None:
         """A Folders tab tile: its folder plays as a dropped folder does, from where it
-        stopped."""
+        stopped; Esc and ‹ Library then go back to the tab, as from a Recordings tile (P4-26)."""
         if not self._window.closing():
-            self._window.open_paths([path], source="drop")
+            self._window.open_paths([path], source="shelf")
 
     def play_path(self, path: str, size: Optional[int]) -> None:
         """A local file plays as a movie on the player page (Open File…, a drop, a file opened
@@ -796,14 +796,17 @@ class TVPages(QObject):
         entries: tuple[str, ...],
         sizes: tuple[Optional[int], ...],
         start: Optional[int] = None,
+        *,
+        from_library: bool = False,
     ) -> None:
         """A playlist of local files plays on the player page, as a file does (play_path), from
-        its first entry or `start` (TVController.play_list)."""
+        its first entry or `start` (TVController.play_list). `from_library`: a Folders tile's
+        folder (P4-26): Esc and ‹ Library go back to the Library, as from a Recordings tile."""
         window = self._window
         if window.closing():
             return
         self._show_page(window.player_page)
-        self._set_return_to_library(False)
+        self._set_return_to_library(from_library)
         window.controller.play_list(name, entries, sizes, start=start)
 
     def export(self, kind: ExportKind) -> None:

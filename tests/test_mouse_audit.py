@@ -173,7 +173,8 @@ ON_SCREEN: dict[tuple[str, str], tuple[tuple[str, str], ...]] = {
     ("library", "Ctrl+F"): (("library", "search"),),
     ("library", "/"): (("library", "search"),),
     ("library", "Ctrl+D"): (("library", "favorite"),),
-    ("library", "Delete"): (("library", "delete"),),  # 2.9.7: a recording's strip
+    # 2.9.7: a recording's strip; Plan 4: a Folders tile's × (off the shelf, no question)
+    ("library", "Delete"): (("library", "delete"), ("folders", "remove")),
     ("library", "F11, Ctrl+Meta+F"): (("library", "fullscreen"),),
     # Back to the grid (from a series or the search): its tab, or the series' ‹ (2.9.3); to
     # live TV: Live TV.
@@ -191,9 +192,9 @@ ON_SCREEN: dict[tuple[str, str], tuple[tuple[str, str], ...]] = {
     ("menu", "Ctrl+4"): (("transport", "grid"),),
     ("menu", "Ctrl+5"): (("library", "recordings"), ("drawer", "Recordings")),  # 2.9.7
     ("menu", "Ctrl+O"): (("drawer", "Open file"),),
-    # Plan 4: Open Folder…, the Folders tab's Add folder tile (the tab shows once a folder was
-    # opened: dropped, handed to QiTV or chosen in the File menu)
-    ("menu", "Ctrl+Shift+O"): (("folders", "add"),),
+    # Plan 4: Open Folder…, the channel list's row under Open file (an empty shelf too: the tab
+    # shows once a folder was opened) and the Folders tab's Add folder tile
+    ("menu", "Ctrl+Shift+O"): (("drawer", "Open a folder"), ("folders", "add")),
     ("menu", "Ctrl+,"): (("drawer", "settings"), ("drawer", "Settings")),
     ("menu", "Ctrl+R"): (("drawer", "refresh"),),
     ("menu", "Ctrl+Shift+R"): (("library", "refresh"),),  # 2.8: films and series
@@ -259,7 +260,8 @@ AUDIO_ON_SCREEN: dict[tuple[str, str], tuple[tuple[str, str], ...]] = {
     # The channel list (Return) and what it holds: Live TV, then a click on the picture.
     ("player", "Return"): _LIBRARY,
     ("menu", "Ctrl+O"): _LIBRARY,  # its Open file
-    ("menu", "Ctrl+Shift+O"): _LIBRARY,  # its Folders tab's Add folder
+    # its Live TV's channel list (Open a folder), and its Folders tab's Add folder
+    ("menu", "Ctrl+Shift+O"): _LIBRARY,
     ("menu", "Ctrl+,"): _LIBRARY,  # its Settings
     ("menu", "Ctrl+R"): _LIBRARY,  # its ↻
 }
@@ -625,6 +627,13 @@ class MouseOnlyAuditTests(unittest.TestCase):
                     for screen, control in ON_SCREEN[row]:
                         self.assertIn(control, self.screens[screen], f"{screen}: {control}")
 
+    def test_delete_says_it_takes_a_folder_off_folders_too(self):
+        """P4-27: Delete on a Folders tile takes it off without a question; the key's help
+        row says so beside the recording's."""
+        delete = dict(SHORTCUTS["library"])["Delete"]
+        self.assertEqual(delete, "Delete a recording (it asks first), or take a folder off Folders")
+        self.assertIn(("folders", "remove"), ON_SCREEN[("library", "Delete")])
+
     def test_the_tables_name_only_keys_that_are_listed(self):
         listed = {(context, keys) for context, rows in SHORTCUTS.items() for keys, _ in rows}
         self.assertEqual(set(ON_SCREEN) - listed, set())
@@ -634,7 +643,11 @@ class MouseOnlyAuditTests(unittest.TestCase):
         """Ctrl/⌘+Shift+O (File → Open Folder…): the Folders tab's Add folder tile asks for
         a folder as the menu does; each tile has its × and the shelf its Clear."""
         self.assertIn(("Ctrl+Shift+O", "Open a folder"), SHORTCUTS["menu"])
-        self.assertEqual(ON_SCREEN[("menu", "Ctrl+Shift+O")], (("folders", "add"),))
+        self.assertEqual(
+            ON_SCREEN[("menu", "Ctrl+Shift+O")], (("drawer", "Open a folder"), ("folders", "add"))
+        )
+        # P4-25: the channel list's row holds with an empty shelf (no Folders tab then)
+        self.assertIn("Open a folder", self.screens["drawer"])
         self.assertEqual(self.screens["folders"], {"tiles", "remove", "add", "clear"})
         view = FoldersView()
         self.addCleanup(view.deleteLater)

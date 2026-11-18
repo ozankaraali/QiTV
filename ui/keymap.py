@@ -394,7 +394,8 @@ SHORTCUTS: dict[str, list[tuple[str, str]]] = {
         ("Ctrl+F", N_("Search")),
         ("/", N_("Search, or type it in the search")),
         ("Ctrl+D", N_("Add to or remove from My list")),
-        ("Delete", N_("Delete the recording (it asks first)")),  # 2.9.7: the Recordings tab
+        # 2.9.7: a recording's strip on the Recordings tab; Plan 4: a Folders tab tile (P4-27)
+        ("Delete", N_("Delete a recording (it asks first), or take a folder off Folders")),
         ("F11, Ctrl+Meta+F", N_("Fullscreen")),
         ("Esc", N_("Back; from the genres, back to live TV")),
     ],

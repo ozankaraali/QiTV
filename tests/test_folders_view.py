@@ -25,6 +25,7 @@ from timer_fixtures import elapse, wait_until
 
 from services.folder_shelf import ALBUM, SERIES, VIDEOS, FolderShelf
 from services.local_playlist import read_folder
+from services.navigation import OPEN_FOLDER_ROW
 from services.watch_state import WatchState, local_key
 from tests.test_provider_drop import drop
 from ui.keymap import Action
@@ -402,6 +403,60 @@ class ShelfWindowTests(ListCase):
             entry.trigger()  # cancelled: nothing
         elapse(300)
         self.assertEqual(len(self.lists()), 1)
+        # P4-26: a folder chosen so plays as a dropped one: Esc doesn't bring the Library
+        self.assertFalse(self.window.screens.escape_to_library())
+
+    def test_the_channel_lists_open_a_folder_row_asks_for_one(self):
+        """P4-25: the channel list's row under Open file, as File → Open Folder…."""
+        with mock.patch(
+            "ui.tv_pages.QFileDialog.getExistingDirectory", return_value=str(self.season)
+        ) as pick:
+            self.window.overlays.drawer.actionRequested.emit(OPEN_FOLDER_ROW)
+            self.assertTrue(wait_until(lambda: self.lists()), self.calls)
+        pick.assert_called_once()
+        self.assertEqual([e["name"] for e in self.window.folder_shelf.folders()], ["Lantern Coast"])
+
+    def click_tile(self, index=0):
+        view = self.window.library_page.folders
+        self.assertTrue(wait_until(lambda: len(view.tiles()) > index and view.tiles()[index].read))
+        QTest.mouseClick(
+            view, Qt.MouseButton.LeftButton, pos=view.tile_rect(index).center().toPoint()
+        )
+
+    def test_esc_after_a_tiles_play_goes_back_to_the_folders_tab(self):
+        """P4-26: as a Recordings tile's recording goes back to Recordings; a drop doesn't."""
+        self.show()
+        drop(self.window, paths=[self.season])
+        self.assertTrue(wait_until(lambda: self.lists()), self.calls)
+        self.assertFalse(self.window.screens.escape_to_library())  # dropped: no Library
+        self.window.screens.open_library("folders")
+        self.click_tile()
+        self.assertTrue(wait_until(lambda: len(self.lists()) == 2), self.calls)
+        screens, library = self.window.screens, self.window.library_controller
+        self.assertFalse(screens.library_shown())  # it plays large
+        QTest.keyClick(self.window, Qt.Key.Key_Escape)
+        self.assertTrue(screens.library_shown())
+        self.assertEqual(
+            (library.mode, self.window.library_page.nav._active), ("folders", "folders")
+        )
+        # A song folder from a tile: back to the Folders tab too (Esc, and the screen's ‹).
+        album = self.folder / "Brannow Fell"
+        album.mkdir()
+        for name in ("01 Tide.mp3", "02 Harbour.mp3"):
+            (album / name).write_bytes(b"song")
+        drop(self.window, paths=[album])
+        self.assertTrue(wait_until(lambda: len(self.lists()) == 3), self.calls)
+        self.window.screens.open_library("folders")
+        self.click_tile(0)  # the album, opened last
+        self.assertTrue(wait_until(lambda: len(self.lists()) == 4), self.calls)
+        self.assertEqual(self.lists()[-1][0], "Brannow Fell")
+        self.assertTrue(screens.escape_to_library())
+        self.assertEqual((screens.library_shown(), library.mode), (True, "folders"))
+        drop(self.window, paths=[album])  # dropped again: Esc no longer goes back
+        self.assertTrue(wait_until(lambda: len(self.lists()) == 5), self.calls)
+        self.assertFalse(screens.escape_to_library())
+        screens.library_from_sound()  # the audio screen's ‹: the Library as it was left
+        self.assertEqual((screens.library_shown(), library.mode), (True, "folders"))
 
 
 if __name__ == "__main__":

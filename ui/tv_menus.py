@@ -38,6 +38,7 @@ from services.navigation import (
     ADD_PROVIDER_ROW,
     FREE_CHANNELS_ROW,
     OPEN_FILE_ROW,
+    OPEN_FOLDER_ROW,
     RECORDINGS_ROW,
     SETTINGS_ROW,
 )
@@ -417,8 +418,8 @@ class TVMenus(QObject):
         open_folder(str(log_file.log_dir()))
 
     def on_drawer_action(self, row: str) -> None:
-        """The drawer's Settings, Add provider, Free channels, Open file and Recordings rows,
-        and its header's Library, ⌕ and refresh buttons."""
+        """The drawer's Settings, Add provider, Free channels, Open file, Open a folder and
+        Recordings rows, and its header's Library, ⌕ and refresh buttons."""
         if row == SETTINGS_ROW:
             self._window.options_dialog()
         elif row == ADD_PROVIDER_ROW:
@@ -428,6 +429,8 @@ class TVMenus(QObject):
             self._window.show_free_channels(drawer.row_anchor(row))
         elif row == OPEN_FILE_ROW:
             self._window.screens.open_file()
+        elif row == OPEN_FOLDER_ROW:  # Plan 4: File → Open Folder… (P4-25)
+            self._window.screens.open_folder()
         elif row == RECORDINGS_ROW:  # 2.9.7
             self._window.screens.open_recordings()
         elif row == SEARCH_ACTION:

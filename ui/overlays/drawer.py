@@ -85,6 +85,7 @@ from services.navigation import (
     FREE_CHANNELS_ROW,
     LIBRARY_SECTIONS,
     OPEN_FILE_ROW,
+    OPEN_FOLDER_ROW,
     RECENT_GROUP,
     RECORDINGS_ROW,
     SETTINGS_ROW,
@@ -180,6 +181,7 @@ _ACTION_ICONS = {
     ADD_PROVIDER_ROW: "plus",
     FREE_CHANNELS_ROW: "plus",
     OPEN_FILE_ROW: "file",
+    OPEN_FOLDER_ROW: "folder",  # Plan 4
     RECORDINGS_ROW: "record",  # 2.9.7
 }
 _HEADER_TOOLTIPS = {  # the header's buttons: what they do, and their key (see _hint)

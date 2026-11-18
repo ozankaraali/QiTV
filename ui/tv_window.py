@@ -229,6 +229,7 @@ ABANDONED_EXIT_CODE = 3  # QiTV quit while background work still ran (see _exit_
 # Where open_paths' files come from: QiTV started with them, another start handed them on, a
 # drop, File → Open File….
 LAUNCH, HANDOVER, DROP, DIALOG = "launch", "handover", "drop", "dialog"
+SHELF = "shelf"  # Plan 4: a Folders tile's folder: as a drop, and Esc goes back to that tab
 # A multi-select opened from the file manager can come as one start per file, in any order
 # (Windows): a start's file this soon after the one chosen replaces it only if it sorts first.
 OPEN_BURST_S = 3.0
@@ -588,6 +589,7 @@ class TVWindow(QMainWindow):
         # until another list or file plays.
         self._read_subtitles: dict[int, list[str]] = {}
         self._entry_subtitles: dict[str, list[str]] = {}
+        self._shelf_reads: set[int] = set()  # Plan 4: the reads of a Folders tile (P4-26)
         # Plan 4: the shelf's key of the folder whose list plays (None: no folder's): its
         # entries opening are kept as its last entry (list_entry_opens).
         self._shelf_folder: Optional[str] = None
@@ -1657,7 +1659,7 @@ class TVWindow(QMainWindow):
     # ---- opened files -------------------------------------------------------------------------
 
     def open_paths(self, paths: Sequence[str], *, source: str) -> None:
-        """Files opened in QiTV, from a `source` (LAUNCH, HANDOVER, DROP or DIALOG).
+        """Files opened in QiTV, from a `source` (LAUNCH, HANDOVER, DROP, DIALOG or SHELF).
 
         - Playlist files are read first, off the GUI thread (_on_playlists_read): one with a
           network link becomes a provider, as a dropped one does; one of local files plays as
@@ -1675,6 +1677,8 @@ class TVWindow(QMainWindow):
         - A start's file within OPEN_BURST_S of the one a start chose (a multi-select, one
           start per file) replaces it only when it sorts first by name; else it is left out.
         - Open File plays what it picks, whatever its kind (an HLS playlist too).
+        - A Folders tile's folder (SHELF) is read and played as a dropped one; Esc (and the
+          player's ‹ Library) then goes back to that tab, as a Recordings tile's does (P4-26).
         - As a media file is played, QiTV's mark draws in the middle of the page until its
           picture shows (ui/overlays/opening.py), unless a picture shows already.
 
@@ -1707,6 +1711,7 @@ class TVWindow(QMainWindow):
                 [*kinds.playlists, *kinds.others],
                 playable=playable,
                 tentative=playable and not kinds.playlists,
+                library=source == SHELF,
             )
         subtitles = list(kinds.subtitles)
         if not kinds.media:
@@ -1765,6 +1770,7 @@ class TVWindow(QMainWindow):
         files: Sequence[str] = (),
         subtitles: Sequence[str] = (),
         tentative: bool = False,
+        library: bool = False,
     ) -> None:
         """Playlist files and paths of no known kind (folders, maybe) opened in QiTV (`paths`),
         and media `files` dropped together, read on a thread (_on_playlists_read). With
@@ -1777,9 +1783,12 @@ class TVWindow(QMainWindow):
 
         A `tentative` read (paths of no known kind alone) is no choice until one of them turns
         out to play: a file QiTV won't play only says so, and leaves alone what is read before
-        it. Without `playable`, a folder's songs' tags are not read (nothing of it plays)."""
+        it. Without `playable`, a folder's songs' tags are not read (nothing of it plays).
+        With `library` (a Folders tile's, P4-26), what plays of it goes back to the Library."""
         self._playlist_reads += 1
         serial = self._playlist_reads
+        if library:
+            self._shelf_reads.add(serial)
         if tentative:
             self._tentative.add(serial)
         elif playable:
@@ -1814,6 +1823,8 @@ class TVWindow(QMainWindow):
         if self._closing:
             return
         links = self._read_links.pop(serial, [])
+        library = serial in self._shelf_reads  # a Folders tile's: Esc goes back to its tab
+        self._shelf_reads.discard(serial)
         subtitles = self._read_subtitles.pop(serial, [])
         providers = [path for path, read in reads if read.kind == PROVIDER]
         unplayable = [(path, read) for path, read in reads if read.kind == OTHER]
@@ -1823,7 +1834,7 @@ class TVWindow(QMainWindow):
         failed = [(path, read) for path, read in reads if read.kind in (EMPTY, UNREADABLE)]
         if serial in self._tentative:
             self._tentative.discard(serial)
-            self._on_paths_read(serial, playable, failed, subtitles)
+            self._on_paths_read(serial, playable, failed, subtitles, library=library)
             self._add_read_providers(providers, links)  # the links dropped with its folders
             return
         if self._playlist_due != serial:
@@ -1843,7 +1854,7 @@ class TVWindow(QMainWindow):
                 self._say_unplayable(*failed[0])
             self._nothing_plays()
             return
-        self._play_read(playable, subtitles)
+        self._play_read(playable, subtitles, library=library)
 
     def _on_paths_read(
         self,
@@ -1851,6 +1862,8 @@ class TVWindow(QMainWindow):
         playable: list[tuple[str, PlaylistRead]],
         failed: list[tuple[str, PlaylistRead]],
         subtitles: list[str],
+        *,
+        library: bool = False,
     ) -> None:
         """A tentative read (paths of no known kind alone) is back, no newer choice made since:
         a folder of it that plays is the choice now (what is read before it gives way, a
@@ -1860,7 +1873,7 @@ class TVWindow(QMainWindow):
             self._tentative = {older for older in self._tentative if older > serial}
             self._playlist_due = None  # a playlist read before it gives way
             self.controller.read_over(as_file=True)  # a start that waited: the list's
-            self._play_read(playable, subtitles)
+            self._play_read(playable, subtitles, library=library)
             return
         if failed:
             self._say_unplayable(*failed[0])
@@ -1874,9 +1887,16 @@ class TVWindow(QMainWindow):
         if not self._reads_pending() and self._open_due is None and self._playing_file() is None:
             self.controller.hold_for_file(False)
 
-    def _play_read(self, playable: list[tuple[str, PlaylistRead]], subtitles: list[str]) -> None:
+    def _play_read(
+        self,
+        playable: list[tuple[str, PlaylistRead]],
+        subtitles: list[str],
+        *,
+        library: bool = False,
+    ) -> None:
         """The first read that plays (`playable`) plays: an HLS playlist as one film, a list of
-        files as a list, the `subtitles` dropped with it for the entries they are for."""
+        files as a list, the `subtitles` dropped with it for the entries they are for. With
+        `library` (a Folders tile's), Esc goes back to the Library's Folders tab."""
         if len(playable) > 1:
             logger.info("Playlists opened together: the first plays")
         path, read = playable[0]
@@ -1897,7 +1917,9 @@ class TVWindow(QMainWindow):
             self.folder_shelf.add(path, read.name, folder_kind(read.entries), entry)
         self._play_opened(
             read.entries[first],
-            lambda: self.screens.play_list(read.name, read.entries, read.sizes, start),
+            lambda: self.screens.play_list(
+                read.name, read.entries, read.sizes, start, from_library=library
+            ),
         )
         if read.missing and not playlist:
             logger.info("Files opened together play without %d of them", read.missing)

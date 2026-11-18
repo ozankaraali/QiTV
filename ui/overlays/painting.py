@@ -606,6 +606,16 @@ def draw_icon(p: QPainter, name: str, rect: QRectF, color: QColor) -> None:
             fold.lineTo(0.78, 0.3)
             line(fold)
             fill(_poly([(0.42, 0.46), (0.62, 0.6), (0.42, 0.74)]))
+        elif name == "folder":  # Open a folder (Plan 4): a folder, its tab, and a play mark
+            body = QPainterPath(QPointF(0.1, 0.2))
+            body.lineTo(0.38, 0.2)
+            body.lineTo(0.47, 0.3)
+            body.lineTo(0.9, 0.3)
+            body.lineTo(0.9, 0.84)
+            body.lineTo(0.1, 0.84)
+            body.closeSubpath()
+            line(body)
+            fill(_poly([(0.42, 0.44), (0.62, 0.57), (0.42, 0.7)]))
         elif name in ("chevron_left", "chevron_right"):  # ‹ and ›: earlier and later
             tip, back = (0.34, 0.62) if name == "chevron_left" else (0.66, 0.38)
             chevron = QPainterPath(QPointF(back, 0.2))
