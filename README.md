@@ -4,7 +4,7 @@
 
 QiTV is a free TV player for IPTV. It plays M3U playlists (lists of channel links), Xtream accounts (a server address with a username and password) and STB portals (a set-top-box portal address and a MAC address), on Windows, macOS and Linux.
 
-Version 2.0 works like a TV: the channel fills the window, ↑ and ↓ change channels, and everything else (the channel list, the guide, the player controls) slides in over the picture and gets out of the way again. You can pause and rewind live TV, watch two channels at once, and browse movies and series in a Library with posters. Since 2.1, several providers mix in one channel list, one Library and one history, and what plays keeps playing in a corner while you browse. It is written in Python with Qt and plays everything with VLC.
+Version 2.0 works like a TV: the channel fills the window, ↑ and ↓ change channels, and everything else (the channel list, the guide, the player controls) slides in over the picture and gets out of the way again. You can pause and rewind live TV, watch two channels at once, and browse movies and series in a Library with posters. Since 2.1, several providers mix in one channel list, one Library and one history, and what plays keeps playing in a corner while you browse. Since 2.11 it also plays the videos and music on your computer (see [Your own videos and music](#your-own-videos-and-music)). It is written in Python with Qt and plays everything with VLC.
 
 ![A live channel with the channel banner](docs/screenshots/01-live-banner.png)
 
@@ -49,7 +49,7 @@ This installs a desktop entry and icon so QiTV appears in your application menu.
 On a first start QiTV opens with a [publicly available playlist](https://github.com/iptv-org/iptv) of free channels from around the world, so you can try it straight away. To add your own provider:
 
 1. Press <kbd>Enter</kbd> (or click the picture) to open the channel list.
-2. Press <kbd>←</kbd> until you reach the left-most column, the list of your sources (or click your provider's name at the top of the list). With two or more providers, **All providers** is at its top. At its bottom are **⚙ Settings**, **＋ Add provider**, **＋ Free channels…** (iptv-org's free playlist again, for all countries or one country) and **Open file** (a video file on your computer, as <kbd>Ctrl/⌘+O</kbd>).
+2. Press <kbd>←</kbd> until you reach the left-most column, the list of your sources (or click your provider's name at the top of the list). With two or more providers, **All providers** is at its top. At its bottom are **⚙ Settings**, **＋ Add provider**, **＋ Free channels…** (iptv-org's free playlist again, for all countries or one country), **Open file** (a video or music file on your computer, as <kbd>Ctrl/⌘+O</kbd>) and **Open a folder** (as <kbd>Ctrl/⌘+Shift+O</kbd>; see [Your own videos and music](#your-own-videos-and-music)).
 3. Choose **＋ Add provider**. Settings opens on the Providers tab with a new provider to fill in:
    - **M3U Playlist:** the playlist's web address, or **Load File** for a playlist on your computer;
    - **M3U Stream:** the address of a single stream;
@@ -59,7 +59,7 @@ On a first start QiTV opens with a [publicly available playlist](https://github.
 
    Got a single link from your provider? Copy it and press **Paste link** beside the address (or paste it into the address): an Xtream link with your username and password in it (`get.php?username=…&password=…` or `player_api.php?…`) fills in Xtream, the server, the username and the password; a playlist address ending in .m3u or .m3u8 fills in an M3U playlist; a portal address with `/c/` or `/stalker_portal/` in it fills in STB (add the MAC address yourself).
 
-   You can also drop a playlist file (.m3u or .m3u8) or such a link onto the QiTV window: it becomes a provider and the channel list switches to it (a portal's link opens this form, for its MAC address). A subtitle file dropped at the same time still goes to what plays.
+   You can also drop a playlist file (.m3u or .m3u8) with web links in it, or such a link, onto the QiTV window: it becomes a provider and the channel list switches to it (a portal's link opens this form, for its MAC address). A subtitle file dropped at the same time still goes to what plays. A playlist of files on your computer plays instead (see [Folders and playlists](#folders-and-playlists)).
 4. Press **Verify Provider** to check the details, then **Save**. QiTV loads the channels, and the Library loads the provider's movies and series.
 
 When a channel or a film doesn't open, or a provider can't be reached, QiTV asks the provider's account why (without opening a stream, at most once a minute) and says it in plain words: the subscription has expired, all the streams the account allows are in use ("Your account allows 1 stream; one is in use"), the username or password is wrong, the server refused or blocked QiTV, or it didn't answer. When QiTV's other picture is the one using the account's only stream, it says that instead. **Verify Provider** says the same: an expired, disabled or refused account doesn't verify, and a portal whose profile shows an end date in the past verifies with a note (some portals keep old dates).
@@ -406,6 +406,75 @@ Add your Jellyfin or Emby server as a provider (see [Adding a provider](#adding-
 - **The server keeps up.** Where you stop is told to the server, so its own Continue watching and watched marks follow, and a title you started only in the server's apps starts here where you left it there.
 - **Your password isn't kept.** QiTV keeps the sign-in the server gave it when you pressed Verify Provider, and the server lists QiTV among its devices. If the server ends that sign-in, QiTV asks you to verify again.
 - The phone remote's **Watch on this phone** plays a server's titles from the server itself, at home. A server's live TV, and exporting a server to M3U, are not part of QiTV.
+
+## Your own videos and music
+
+QiTV also plays the video and music files on your computer: a series' episodes, films, albums, podcasts and audiobooks. There is no library to set up and nothing is scanned: you open a file or a folder, and it plays.
+
+- **Double-click it.** Once QiTV is your player for videos or music (see [QiTV as your video and music player](#qitv-as-your-video-and-music-player)), or when you pick QiTV in your file manager's **Open With**, the file plays in QiTV, also in the QiTV that already runs, in place of what was on: a second QiTV never starts. Double-clicking the file that plays only brings QiTV to the front.
+- **Or open it in QiTV:** **File → Open File…** (<kbd>Ctrl/⌘+O</kbd>), the channel list's **Open file** row, or drop the file onto the window.
+- **It plays alone.** A QiTV started with a file tunes no channel and opens nothing over it: the channel list doesn't open by itself, and the welcome card and the question about an update wait until the file ends or you stop it. Your providers load behind it.
+- **From where you stopped.** A video goes on where you left it ("Resumed at 41:07"), as a film from your provider does. QiTV knows the file by its name and size, so it still knows it after you move it to another folder. A song shorter than 20 minutes always starts at its beginning; anything longer, such as a podcast or an audiobook (`.m4b` too), goes on where you stopped.
+- **Nothing in the history.** Files and folders don't go into Continue, ⟲ Recent or the Library's lists. The only list of them is the [Folders tab](#the-folders-tab), of the folders you opened as folders.
+- **Subtitles.** As in VLC, a subtitle file beside the video that bears its name (`Show.S01E02.srt`, `Show.S01E02.de.srt`) loads with it. A subtitle file dropped together with the video loads for it; dropped with a folder or several videos, each goes to the video whose name it bears, else to the episode whose season and episode it names. **Load a file…** in the Subtitles panel works as for any film (see [Sound and subtitles](#sound-and-subtitles)).
+- **AI captions come back.** When AI captions were on for the last video file you watched, they come on again for the next one, in the language and with the **Translate to** you chose, but only when their speech model is already on your computer: nothing is asked for or downloaded, and they don't come on while the video shows subtitles of its own. **Off** in the Subtitles panel during a video file keeps them off for the next one. Captions that came on by themselves go off again when you go back to a channel or a provider's film.
+- **When it can't play.** A file that's gone says "Couldn't open …", and a file of a kind QiTV doesn't play says "QiTV can't play …"; what played goes on.
+- **Several files at once.** Opened together from the file manager, the first by name plays. Dropped together onto the window, they play as a list, in a folder's order (see [Folders and playlists](#folders-and-playlists)).
+
+### The next episode from the folder
+
+When a video whose name says its season and episode (`Show.S01E02.mkv`, `show s1e2.mp4`, `Show 1x02.avi`) ends, the Next card offers the same show's next episode from the same folder, with its 10-second countdown (**Settings → Auto-play next episode**); the player controls' **⏭** plays it at once, also with auto-play off. After a season's last episode comes the next season's first. The show is the same however its name is written (dots, spaces, dashes, capitals), and a file named only `S01E02.mkv` in a `Show/Season 1` folder takes its folder's name.
+
+QiTV only ever names another file when it is the next episode of the show playing: any other video ends on "Finished", with no card and no other file's name on screen. Only the video's own folder is looked at, never a "Season 2" folder beside it, and when an episode is missing (E03 isn't there, E04 is) nothing is offered rather than skipping one. Picture sizes such as `1920x1080` never count as an episode.
+
+### Folders and playlists
+
+A **folder** plays as a list: drop it onto the window, or choose **File → Open Folder…** (<kbd>Ctrl/⌘+Shift+O</kbd>) or the channel list's **Open a folder** row. Only its own files play, never its subfolders'.
+
+- **In order.** A series' episodes go by season and episode; an album's songs by disc and track, when their tags say so; anything else by name (`Episode 2` before `Episode 10`).
+- **From where you stopped.** It starts at the video you stopped part-way into (which goes on from there), else at the one after the last you watched to its end, else at the first. An album starts at its first song (with shuffle on, at a song of its own picking).
+- **On to the next.** The player controls' **⏭** plays the next video, and with **Auto-play next episode** on, the Next card offers it when one ends. Songs play on the [audio screen](#music-on-the-audio-screen) as an album named after the folder, one after another with no card; a folder of videos and songs plays each on its own screen.
+
+**Several files dropped together** play as such a list too.
+
+A **playlist** (`.m3u`, `.m3u8`) of files on your computer plays the same way, in its own order: a list of songs is an album named after the playlist (on the Album view, unless you picked another), a list of videos plays one after another (⏭ and the Next card follow it), and a mixed one plays each file on its own screen. Files the playlist names that aren't there are skipped, and QiTV says how many; with none there, it says so and plays nothing. A playlist that isn't UTF-8 (an older one, saved in its system's code page) is read in the code page under which most of its files are found, on Windows the system's own first. A playlist with a web link in it becomes a provider instead (see [Adding a provider](#adding-a-provider)), and an HLS stream's `.m3u8` plays as one stream.
+
+### The Folders tab
+
+Once you have opened a folder as a folder, the Library has a **Folders** tab after Recordings: the last 30 folders you opened that way (dropped, or with **Open Folder…**), the newest first. A single file, several files or a playlist never add their folder.
+
+- **Each tile** shows the folder's name, what it plays next or holds ("S2 · E5 next", "Album · 12 songs", "8 videos") and its picture: a `cover`, `folder` or `front` image in it, else a drawn one with its name.
+- **Click a tile** (or press <kbd>Enter</kbd>) and the folder plays from where you stopped, as above; <kbd>Esc</kbd> then comes back to the tab. **Add folder**, the last tile, picks another, as **Open Folder…** does.
+- **Its ×** (or <kbd>Delete</kbd>) takes the folder off the tab, and **Clear** takes them all off after asking: nothing is deleted from the disk. A folder that was moved or deleted, or is on an unplugged drive, says **Missing**, with **Remove**.
+- **Nothing more.** QiTV reads only these folders' own files, scans no drive and fetches nothing for them, and the list stays on your computer.
+
+### Music on the audio screen
+
+A song (or a video file with no picture) plays on the audio screen, in place of the black picture. Its three views are switched at its top right:
+
+- **Cover:** the cover large, the title, then the artist and the album; **Up next** shows the album's songs.
+- **Album:** the cover beside the album's songs, the one playing marked by small moving bars; click one to play it.
+- **Stage:** a small cover and the title at the top, the words large in the middle, and bars that move with the music below them.
+
+A song with an album opens on Album and a lone song on Cover; once you pick a view, it opens on that one. The cover's colours light the screen around it, breathing slowly (they hold still when your system asks for reduced motion). The cover is the song's own picture, else a `cover`, `folder` or `front` picture in its folder, else a drawn one with its name.
+
+- **The album plays on.** The other songs of its album in the song's own folder (the same album tag, or numbered files with no tags) follow it in disc and track order, with no card between them, and stop after the last unless repeat is on. A song with no album there plays nothing after itself. Only the song's own folder is read, never a "Disc 2" folder beside it. A song that can't be read is skipped; two in a row stop the album.
+- **The controls** at the bottom: the time bar, shuffle, **⏮** (the song from its start; pressed again quickly, the one before), play, **⏭**, repeat (the album, then the song, then off) and the volume (drag its bar; the speaker opens the mixer). **⋯** holds Stop, Sound, Subtitles, Picture (the sleep timer), Fullscreen, the mini player, the Library and Search. Shuffle and repeat are kept for next time. Every key works as on a film, and **‹** at the top left goes to the Library.
+- **Words** at the top turns on AI captions, and the screen goes to Stage (unless you picked a view): the line said shows large, the one before it dimmed above it and, with **Translate to**, its translation under it. On Cover and Album the lines show at the bottom. While they are on, it says their language ("Words · English"); the Subtitles panel (in **⋯**) sets it and Translate to. They are the AI captions themselves, so they stay on for what plays next until you turn them off, and they never come on by themselves for music. Over music they catch less than over speech: podcasts and talk do best.
+- **The bars** on Stage move with the music itself: QiTV reads the file's sound a little ahead and draws them in the cover's colours. They stand still while it's paused. Only files have them.
+- **Radio.** A live channel that sends sound and no picture plays on the audio screen too, its logo as the cover, with the song its stream names (else the programme on now). It keeps live TV's controls (record, Go live, the time-shift bar) instead of the dock; its Stage shows the words, without bars.
+- **The system's media panel** (Windows, macOS and Linux) shows the song's title, artist, album and cover, or a radio channel's name and logo, and the media keys' previous and next go through the album's songs; previous on a lone song starts it again.
+- In the Library's corner (see [Keep watching while you browse](#keep-watching-while-you-browse)), a song shows its cover and title.
+
+### QiTV as your video and music player
+
+**Settings → General** has two rows, **Open videos with QiTV** and **Open music with QiTV**, each with its own button: **Use QiTV for videos** (or music) and, once it is, **Stop using QiTV for videos**. Each kind is on its own, so QiTV can open your videos, your music or both. Playlists (`.m3u`, `.m3u8`) are in Open With with either, never made the default.
+
+- **Windows:** QiTV registers for your user only (no administrator rights needed) and appears in Open With for those files. Windows' Default Apps settings then open (on QiTV's own page on Windows 11), where you choose it: Windows lets only you set a default. **Default Apps…** beside the button opens them again. While QiTV runs, a double-click on one of those files goes straight to it.
+- **macOS:** QiTV is in Finder's **Open With** for videos, music and playlists without any setting. The button makes it the default for MKV, MP4, MOV, AVI and WebM (music: MP3, M4A and FLAC). To give a type to another app, use Finder's **Get Info → Open with → Change All**.
+- **Linux:** QiTV adds its own entry for your user, with the file types, and becomes the default video (or music) player. Where the system takes no default, QiTV is in your file manager's Open With.
+
+The video types are MP4, M4V, MKV, AVI, MOV, WebM, M2TS, MTS, MPG, MPEG, FLV, WMV and OGV, and `.ts`, which is in Open With only (program source files use the same extension); the music types are MP3, M4A, AAC, FLAC, OGG, Opus and WAV. Similar types that the system hands over play too (an audiobook's `.m4b`, for one). **Stop using…** removes exactly what QiTV wrote. A registered QiTV that you move registers itself again from its new place when it starts. A QiTV run from a temporary folder or a zip, or on a Mac from its disk image or Downloads, asks to be moved first (into Applications, on a Mac). A run from source has no such rows.
 
 ## Favorites
 
