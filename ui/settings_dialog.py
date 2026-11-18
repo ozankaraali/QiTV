@@ -920,8 +920,8 @@ class OptionsDialog(QDialog):
         # i18n: a setting: the language AI captions hear when nothing names it
         form.addRow(tr("Default language"), self.ai_captions_language_combo)
         language_note = QLabel(
-            # i18n: under AI captions' Default language (2.11.1: not for the viewer's own video
-            # and music files, whose language the speech model finds by itself)
+            # 2.11.1: not for the viewer's own video and music files (the model finds theirs)
+            # i18n: Settings → Subtitles, under AI captions' Default language
             tr(
                 "Used for channels and providers' films when the audio track names no language;"
                 " on your own files the speech model finds it. The Subtitles panel's Language"
