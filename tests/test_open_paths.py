@@ -116,6 +116,12 @@ class SortPaths(unittest.TestCase):
     def test_kinds(self):
         self.assertTrue(open_paths.is_video("/x/A.MKV"))
         self.assertTrue(open_paths.is_music("/x/b.flac"))
+        # A song (a playlist of these is an album): MUSIC_EXTENSIONS only, in any case.
+        self.assertTrue(open_paths.is_song("/x/C.FLAC"))
+        self.assertTrue(open_paths.is_song("C:\\Müzik\\d.Opus"))
+        for path in ("/x/a.f4a", "/x/b.mp2", "/x/c.mkv", "/x/mp3"):
+            with self.subTest(path=path):
+                self.assertFalse(open_paths.is_song(path))
         self.assertFalse(open_paths.is_video("/x/b.flac"))
         self.assertTrue(open_paths.is_video("/x/c.ts"))
 

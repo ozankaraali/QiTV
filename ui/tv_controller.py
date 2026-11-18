@@ -75,6 +75,7 @@ from datetime import datetime, timedelta
 from functools import partial
 import logging
 from pathlib import Path
+import random
 import time
 from typing import Any, Callable, Optional, cast
 
@@ -109,7 +110,7 @@ from services.navigation import (
     recent_channel,
 )
 from services.next_episode import LOCAL_NEXT, play_context
-from services.open_paths import MUSIC_EXTENSIONS, PLAYLIST_EXTENSIONS, is_music, is_video
+from services.open_paths import PLAYLIST_EXTENSIONS, is_music, is_song, is_video
 from services.picture import SOURCE_DIRECT, ChannelPictures
 from services.provider_ids import (
     ALL_PROVIDERS,
@@ -479,6 +480,7 @@ class TVController(QObject):
         self._list_job = AlbumJob(self)
         self._list_job.read.connect(self._on_list_read)
         self._list_generation = 0
+        self._shuffle_rng = random.Random()  # a shuffled list of songs' first song
         self._cover_job = CoverJob(self)
         self._cover_job.ready.connect(self._on_cover_ready)
         self._cover_generation = 0
@@ -1195,8 +1197,9 @@ class TVController(QObject):
         A list of songs only (by their extensions) is an album named after it on the audio
         screen (Plan 4, Task 9): its entries in its order, their tags read by name on a thread
         (those files only, never their folders), shuffle and repeat as an album's, no card
-        between two songs. In any other list a song is a lone song on its screen, and the list's
-        next entry plays after it with no card."""
+        between two songs; shuffled, it starts at a song of its own picking. In any other list
+        a song is a lone song on its screen, and the list's next entry plays after it with no
+        card."""
         paths = tuple(str(entry) for entry in entries)
         if not paths:
             return
@@ -1204,16 +1207,15 @@ class TVController(QObject):
         listed = _LocalList(name, paths, known + (None,) * (len(paths) - len(known)))
         self._list = listed
         self._list_generation += 1  # an older list's songs, read late, reach nothing
-        if self._screen() is not None and all(self._music_file(p) for p in paths):
+        self._list_job.stop()  # (they stop being read between two files)
+        first = 0
+        if self._screen() is not None and all(is_song(p) for p in paths):
             listed.songs = True
             listed.tracks = [unread_track(p, s) for p, s in zip(paths, listed.sizes)]
             self._list_job.start_files(self._list_generation, list(zip(paths, listed.sizes)))
-        self._play_entry(0)
-
-    @staticmethod
-    def _music_file(path: str) -> bool:
-        """`path` is a song by its extension (open_paths.MUSIC_EXTENSIONS, in any case)."""
-        return Path(path).suffix.lower()[1:] in MUSIC_EXTENSIONS
+            if self._shuffle_setting():
+                first = self._shuffle_rng.randrange(len(paths))
+        self._play_entry(first)
 
     def _play_entry(self, index: int, *, start_over: bool = False) -> None:
         """The list's entry at `index` plays (from its start with `start_over`: Play again),
@@ -1277,6 +1279,8 @@ class TVController(QObject):
         anything else a film's controls until it is known to have no picture."""
         if self._closed:
             return None
+        if not in_list:
+            self._list_job.stop()  # a list of songs given up: its songs stop being read
         self._flow.leave_library()
         url = Path(path).absolute().as_uri()
         target = Target({**(item or {}), "name": title, "cmd": url}, "movies", title, local=True)
@@ -3486,6 +3490,7 @@ class TVController(QObject):
         for a song after a song (no black page between two)."""
         self._sound_gives_way(target)
         if target is None or not target.local:
+            self._list_job.stop()  # a list of songs given up: its songs stop being read
             if not delivered:
                 self._file_gives_way()
             self._flow.hold_for_file(False)
@@ -4164,7 +4169,7 @@ class TVController(QObject):
         if queue is not None:
             set_state(queue.shuffle, queue.repeat, len(queue) >= 2)
         elif self._single_in_list():  # its list's order: no shuffle, no repeat of its own
-            set_state(False, "off", False, has_next=self._follows())
+            set_state(False, "off", False, has_next=self._follows(), has_repeat=False)
         else:  # ⏭ still acts when its folder's next episode or its playlist's entry follows
             set_state(
                 self._shuffle_setting(), self._repeat_setting(), False, has_next=self._follows()
@@ -4529,7 +4534,7 @@ class TVController(QObject):
                 row.update(read)  # (its queue's row too: the same Track)
         queue, screen = self._queue, self._screen()
         if self._song_list() is listed and queue is not None and screen is not None:
-            screen.set_tracks(queue.tracks, queue.current)
+            screen.update_tracks(queue.tracks)  # a list scrolled by hand stays where it is
 
     def _on_cover_ready(self, generation: int, image: Any, colours: list) -> None:
         """The song's cover, read on its thread (CoverJob): only for the song still playing."""
@@ -4553,12 +4558,13 @@ class TVController(QObject):
     def _sound_goes_on(self, current: Target) -> bool:
         """A song ended (_on_ended): its album's next track plays, held as a file opened in
         QiTV, with no card (or itself again with repeat one; a lone song with repeat on); a
-        list of songs is its album. False when nothing follows: the last with repeat off says
-        "Finished"."""
+        list of songs is its album. False when nothing follows (the last with repeat off says
+        "Finished"), and while a newer choice is on its way: it plays when its link comes, as
+        Autoplay never offers over one."""
         if current is not self._sound or self._sound_kind not in ("song", "file"):
             return False
-        if self._sound_in_list and self._lanes.busy():
-            return False  # a newer choice is on its way: a list's next never drops it
+        if self._lanes.busy():
+            return False
         if self._single_in_list():
             return self._entry_goes_on(current)
         queue = self._queue

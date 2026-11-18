@@ -213,7 +213,7 @@ _DOTTED_I_LETTERS = frozenset("ıİğĞşŞ")  # letters only Turkish and Azerba
 
 def name_upper(text: str) -> str:
     """An album's or song's name in capitals, as its own language writes them, not the app's:
-    "Harbour Lights" is HARBOUR LIGHTS in a Turkish QiTV too, and a name with a dotless ı (or
+    "Tidewick Isle" is TIDEWICK ISLE in a Turkish QiTV too, and a name with a dotless ı (or
     ğ, ş, İ) takes the dotted capital İ for its i ("Bir İz" → BİR İZ) in any language."""
     if _DOTTED_I_LETTERS.intersection(text):
         text = text.replace("i", "İ").replace("ı", "I")
@@ -433,6 +433,15 @@ class AudioScreen(Overlay):
         self._follow = True
         self._relayout()
         self._update_timers()
+
+    def update_tracks(self, tracks: Sequence[dict]) -> None:
+        """The same tracks, their tags read since (as many, in their order: a playlist's): the
+        rows say them where the list stands (one scrolled by hand stays where it was)."""
+        if len(tracks) != len(self._tracks):
+            self.set_tracks(tracks, self._current)
+            return
+        self._tracks = list(tracks)
+        self._relayout()
 
     def set_view(self, view: str) -> None:
         """Show `view` ("cover", "album" or "stage"). The controller's choice: no viewPicked.

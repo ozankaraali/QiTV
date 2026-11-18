@@ -93,10 +93,12 @@ class AlbumJob(QObject):
 
     A playlist's songs (start_files) are read the same way, by name: the files it names only,
     in its order, never their folders; `read` answers with their Tracks (the first LIST_CAP,
-    within LIST_BUDGET_S) and whether every one was read."""
+    within LIST_BUDGET_S) and whether every one was read. stop() ends what is read now
+    between two files (a playlist given up); it is answered all the same, as cut short."""
 
     listed = Signal(int, list)
-    read = Signal(int, list, bool)  # listed's, and whether the folder was read whole
+    # listed's, and whether all was read: the whole folder, or every file start_files named
+    read = Signal(int, list, bool)
 
     def __init__(self, parent: Optional[QObject] = None) -> None:
         super().__init__(parent)
@@ -125,6 +127,10 @@ class AlbumJob(QObject):
             self.listed.emit(generation, album)
         except RuntimeError:
             pass  # QiTV closed meanwhile
+
+    def stop(self) -> None:
+        """What is being read stops between two files (answered with what it had)."""
+        self._newest[0] = None
 
     def start_files(self, generation: int, files: Sequence[tuple[str, Optional[int]]]) -> None:
         """Read the songs `files` names ((path, size or None), a playlist's, in its order)."""

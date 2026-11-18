@@ -328,7 +328,7 @@ class AlbumListingTests(unittest.TestCase):
         parsed = []
         self._patched(
             lambda _i, path, _ms, *, fetch=False: parsed.append(os.path.basename(path))
-            or _fake_tags("Harbour Lights")
+            or _fake_tags("Tidewick Isle")
         )
         files = [(second / "09 Rook.mp3", 9), (first / "02 Pell.mp3", 2), (first / "01 Arn.mp3", 1)]
         job = AlbumJob()
@@ -343,10 +343,39 @@ class AlbumListingTests(unittest.TestCase):
         generation, tracks, whole = got[0]
         self.assertEqual((generation, whole), (5, True))
         self.assertEqual([(t["path"], t["size"]) for t in tracks], files)
-        self.assertTrue(all(t["parsed"] and t["album"] == "Harbour Lights" for t in tracks))
+        self.assertTrue(all(t["parsed"] and t["album"] == "Tidewick Isle" for t in tracks))
         self.assertEqual(parsed[:3], ["09 Rook.mp3", "02 Pell.mp3", "01 Arn.mp3"])
         generation, tracks, whole = got[1]
         self.assertEqual((generation, len(tracks), whole), (6, 2, False))
+
+    def test_a_playlists_read_stops_when_it_is_given_up(self):
+        # Fix round 1 (ruling P4-21): stop() ends the read between two files; it is answered
+        # all the same, with what it had, as cut short.
+        folder = _Folder(self)
+        names = [f"{n:02d} Song.mp3" for n in range(1, 21)]
+        folder.touch(*names)
+        reading, go = threading.Event(), threading.Event()
+        parsed = []
+
+        def slow(_instance, path, _timeout_ms, *, fetch=False):
+            parsed.append(os.path.basename(path))
+            if len(parsed) == 1:
+                reading.set()  # the first file is being read: the list is given up now
+                go.wait(10)
+            return _fake_tags()
+
+        self._patched(slow)
+        job = AlbumJob()
+        got = []
+        job.read.connect(lambda generation, tracks, whole: got.append((generation, tracks, whole)))
+        job.start_files(1, [(folder / name, None) for name in names])
+        self.assertTrue(reading.wait(10))
+        job.stop()
+        go.set()
+        self.assertTrue(wait_until(lambda: got, 5000))
+        generation, tracks, whole = got[0]
+        self.assertEqual((generation, [t["name"] for t in tracks], whole), (1, names[:1], False))
+        self.assertEqual(parsed, names[:1])
 
     def test_a_newer_start_stops_the_older_listing(self):
         folder = _Folder(self)

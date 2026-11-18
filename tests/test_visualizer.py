@@ -49,7 +49,7 @@ from ui.visualizer import (
 
 FFMPEG = shutil.which("ffmpeg")
 INSTANCE = create_instance(["--vout=dummy", "--aout=dummy", "--quiet"])
-PATH = "/music/Harbour Lights/01 Low Tide.mp3"
+PATH = "/music/Tidewick Isle/01 Low Tide.mp3"
 LOCATION = "file:///music/Harbour%20Lights/01%20Low%20Tide.mp3"
 OTHER = "file:///music/Harbour%20Lights/02%20Gulls.mp3"
 
@@ -666,7 +666,7 @@ class BarsTests(VisualizerCase):
         self.assertEqual(self.screen.frame(), "rest")
         first.chunk(100, 100)  # its late words reach nothing
         self.session.ms = 0
-        self.vis.follow("/music/Harbour Lights/02 Gulls.mp3", OTHER)
+        self.vis.follow("/music/Tidewick Isle/02 Gulls.mp3", OTHER)
         self.assertEqual(len(self.helpers), 2)  # (the Stage shows: read at once)
         second = self.helpers[1]
         self.assertEqual(second.asks, [(0, None)])

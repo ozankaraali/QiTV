@@ -135,6 +135,13 @@ def is_music(path: str) -> bool:
     return _extension(path)[1:] in _MUSIC
 
 
+def is_song(path: str) -> bool:
+    """A song by its extension (MUSIC_EXTENSIONS, in any case): a playlist of these only is an
+    album (TVController.play_list). is_music also takes the kinds a type QiTV registers
+    brings (.f4a, .f4b, .mp2)."""
+    return _extension(path)[1:] in MUSIC_EXTENSIONS
+
+
 def sort_paths(paths: Iterable[str]) -> Sorted:
     """Split `paths` by kind; playlists are checked first, and what is none of the kinds is
     one of the others."""

@@ -32,7 +32,7 @@ SONGS = [
     ("The Long Pier", 177_000),
     ("Gulls", 210_000),
     ("Last Boat Home", 306_000),
-    ("Harbour Lights", 260_000),
+    ("Tidewick Isle", 260_000),
 ]
 TOP_BAR = {"back", "words", "view_cover", "view_album", "view_stage"}
 GREEN = (40, 200, 120)
@@ -42,13 +42,13 @@ def track(index: int, title: str, ms: int) -> dict:
     """A Track (services.song_facts) of the fictional album."""
     name = f"{index + 1:02d} {title}.mp3"
     return {
-        "path": f"/music/Harbour Lights/{name}",
+        "path": f"/music/Tidewick Isle/{name}",
         "name": name,
         "size": 4_000_000 + index,
         "title": title,
         "artist": "Mira Sol",
         "album_artist": "",
-        "album": "Harbour Lights",
+        "album": "Tidewick Isle",
         "disc": 1,
         "track": index + 1,
         "duration_ms": ms,
@@ -110,7 +110,7 @@ class ScreenCase(unittest.TestCase):
         self.addCleanup(page.deleteLater)
         self.addCleanup(page.close)
         screen = AudioScreen(page, clock=lambda: self.now[0])
-        screen.show_song("Ferries at Night", "Mira Sol", "Harbour Lights", year="2024")
+        screen.show_song("Ferries at Night", "Mira Sol", "Tidewick Isle", year="2024")
         screen.set_cover(None, BRAND_COLOURS)
         screen.set_tracks(tracks, current)
         screen.set_view(view)
@@ -245,6 +245,24 @@ class SwitchAndRowTests(ScreenCase):
         self.click(screen, "track_0")
         self.assertEqual(picked, [0])
 
+    def test_tags_read_later_leave_a_scrolled_list_where_it_stands(self):
+        # Task 9 fix round 1: a playlist's tags come after its list shows; the rows say them,
+        # but a list scrolled by hand never snaps back to the playing row (a new list does).
+        many = [track(i, f"Song {i + 1}", 180_000) for i in range(40)]
+        screen = self.make(view="album", tracks=many, current=30)
+        row = screen.controls()["track_30"].center()
+        for _ in range(40):
+            wheel(screen, row, 120)
+        self.assertEqual(screen._layout().first, 0)
+        tagged = [dict(t, title=f"Tagged {i + 1}") for i, t in enumerate(many)]
+        screen.update_tracks(tagged)
+        self.assertEqual(screen._layout().first, 0)
+        self.assertIn("track_0", screen.controls())
+        self.assertEqual(AudioScreen._row_title(screen._tracks[0]), "Tagged 1")
+        screen.set_tracks(tagged, 30)  # a list set anew follows its playing row again
+        self.assertGreater(screen._layout().first, 0)
+        self.assertIn("track_30", screen.controls())
+
 
 def wheel(widget: QWidget, pos: QPoint, dy: int) -> bool:
     """A wheel notch over `widget` at `pos`; whether the widget took it."""
@@ -269,7 +287,7 @@ class PaintTests(ScreenCase):
         screen = self.make(view="cover")
         screen.set_cover(None, BRAND_COLOURS)
         image = screen.grab().toImage()
-        label = i18n.upper("Harbour Lights")  # the album's, as the mockup's cover label
+        label = i18n.upper("Tidewick Isle")  # the album's, as the mockup's cover label
         self.assertIn(label, painted.texts)
         cover = screen.cover_rect()
         warm = QColor(image.pixel(cover.center().x(), cover.top() + cover.height() // 5))
@@ -287,7 +305,7 @@ class PaintTests(ScreenCase):
         # The mockup's Stage cover is bare: too small for the label, at any pixel ratio.
         painted = Painted(self)
         screen = self.make(view="stage")
-        label = i18n.upper("Harbour Lights")
+        label = i18n.upper("Tidewick Isle")
         for ratio in (1.0, 2.0):
             with (
                 self.subTest(ratio=ratio),
@@ -376,8 +394,8 @@ class PaintTests(ScreenCase):
         painted = Painted(self)
         screen = self.make(view="album")
         screen.grab()
-        self.assertIn("HARBOUR LIGHTS · 8 PARÇA", painted.texts)  # never "LİGHTS"
-        self.assertIn("HARBOUR LIGHTS", painted.texts)  # the stand-in's label
+        self.assertIn("TIDEWICK ISLE · 8 PARÇA", painted.texts)  # never "TİDEWİCK İSLE"
+        self.assertIn("TIDEWICK ISLE", painted.texts)  # the stand-in's label
         self.assertEqual(name_upper("Bir İz Bıraktım"), "BİR İZ BIRAKTIM")  # in any language
         self.assertEqual(name_upper("Gece Işıkları"), "GECE IŞIKLARI")
         self.assertEqual(name_upper("Straße der Lichter"), "STRASSE DER LICHTER")
@@ -395,8 +413,8 @@ class PaintTests(ScreenCase):
         painted.texts.clear()
         screen.set_view("album")
         screen.grab()
-        self.assertIn(i18n.upper("Harbour Lights · 8 tracks"), painted.texts)
-        self.assertIn("Mira Sol · Harbour Lights · 2024", painted.texts)
+        self.assertIn(i18n.upper("Tidewick Isle · 8 tracks"), painted.texts)
+        self.assertIn("Mira Sol · Tidewick Isle · 2024", painted.texts)
         self.assertIn("4:02", painted.texts)
 
 
@@ -445,13 +463,13 @@ class CaptionsRoomTests(ScreenCase):
         screen = AudioScreen(page, clock=lambda: self.now[0])
         captions = CaptionsOverlay(page)
         transport = Transport(page)
-        screen.show_song("Ferries at Night", "Mira Sol", "Harbour Lights", year="2024")
+        screen.show_song("Ferries at Night", "Mira Sol", "Tidewick Isle", year="2024")
         screen.set_cover(None, BRAND_COLOURS)
         screen.set_tracks(tracks, 1)
         screen.set_view(view)
         page.show()
         screen.show()
-        transport.show_audio("Ferries at Night", "Mira Sol · Harbour Lights")
+        transport.show_audio("Ferries at Night", "Mira Sol · Tidewick Isle")
         transport.set_audio_state(False, "off", True)
         captions.follow(transport)
         screen.follow(transport)
@@ -559,7 +577,7 @@ class FollowAndCornerTests(ScreenCase):
         self.assertGreater(cover.top(), over_the_dock)
         screen.grab()
         self.assertIn("Ferries at Night", painted.texts)
-        self.assertNotIn("Mira Sol · Harbour Lights", painted.texts)
+        self.assertNotIn("Mira Sol · Tidewick Isle", painted.texts)
         self.assertFalse(screen.hole_claims().contains(cover.center()))
         screen.set_compact(False)
         self.assertEqual(screen.shown_view(), "album")
@@ -619,7 +637,7 @@ class HostTests(ScreenCase):
         host.resize(1280, 720)
         screen = AudioScreen(clock=lambda: self.now[0])
         host.add_overlay(screen)
-        screen.show_song("Ferries at Night", "Mira Sol", "Harbour Lights", year="2024")
+        screen.show_song("Ferries at Night", "Mira Sol", "Tidewick Isle", year="2024")
         screen.set_cover(None, BRAND_COLOURS)
         screen.set_tracks(ALBUM, 1)
         screen.set_view(view)

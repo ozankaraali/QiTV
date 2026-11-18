@@ -321,7 +321,7 @@ def _transport(host: QWidget) -> set[str]:
 
 def _audio_dock(host: QWidget) -> Transport:
     t = Transport(host)
-    t.show_audio("Ferries at Night", "Mira Sol · Harbour Lights")
+    t.show_audio("Ferries at Night", "Mira Sol · Tidewick Isle")
     t.set_audio_state(False, "off", True)  # a song of an album
     t.update_position(84_000, 221_000)
     return t
@@ -344,7 +344,7 @@ def _more(host: QWidget) -> set[str]:
 def _audio_screen(host: QWidget) -> set[str]:
     """The audio screen's own controls in each view, a song of a two-track album."""
     screen = AudioScreen(host)
-    screen.show_song("Ferries at Night", "Mira Sol", "Harbour Lights")
+    screen.show_song("Ferries at Night", "Mira Sol", "Tidewick Isle")
     screen.set_tracks([{"title": "Low Tide"}, {"title": "Ferries at Night"}], 1)
     found: set[str] = set()
     for view in AUDIO_VIEWS:

@@ -270,7 +270,7 @@ _DOCK_SHADE = "#080b0f"  # rgba(8,11,15,.85)
 _DOCK_SHADE_ALPHA = 0.85
 _DOCK_TRACK = "rgba(255,255,255,0.14)"
 _DOCK_GLOW_ALPHA = 0.35  # the knob's halo and play's glow, in the accent
-_DOCK_INERT_ALPHA = 0.35  # shuffle and the next track without an album list
+_DOCK_INERT_ALPHA = 0.35  # shuffle, the next track with no album list; a mixed list's repeat
 _PILL_FILL = "rgba(255,255,255,0.08)"  # the audio screen's pills (⋯ is one), lit or not
 _PILL_ON_FILL = "rgba(224,138,95,0.22)"
 _PILL_ON_RING = "rgba(224,138,95,0.55)"
@@ -503,6 +503,7 @@ class Transport(Overlay):
         self._repeat = "off"  # REPEAT_MODES
         self._has_list = False  # an album list: shuffle and the next track act
         self._has_next = False  # something follows: the next track acts (set_audio_state)
+        self._has_repeat = True  # repeat acts (a mixed playlist's entry: it has none)
         self._level_drag = False  # the volume's bar is being pressed or dragged
         self._title = ""
         self._logo: QPixmap | None = None
@@ -593,18 +594,27 @@ class Transport(Overlay):
         self._set_mode(False, title, subtitle, audio=True)
 
     def set_audio_state(
-        self, shuffle: bool, repeat: str, has_list: bool, has_next: Optional[bool] = None
+        self,
+        shuffle: bool,
+        repeat: str,
+        has_list: bool,
+        has_next: Optional[bool] = None,
+        *,
+        has_repeat: bool = True,
     ) -> None:
         """The dock's toggles: shuffle on, `repeat` one of REPEAT_MODES, and whether there is
         an album list (without one shuffle and the next track are dim and do nothing).
         `has_next`: whether something follows all the same (default: the list's; with no
-        list, an audio-only episode's next one in its folder, a playlist's next entry)."""
+        list, an audio-only episode's next one in its folder, a playlist's next entry).
+        `has_repeat`: whether repeat acts (False: a mixed playlist's entry, which its list's
+        next follows: dim, it does nothing)."""
         if repeat not in REPEAT_MODES:
             raise ValueError(f"Unknown repeat: {repeat!r}")
         following = bool(has_list) if has_next is None else bool(has_next)
-        state = (bool(shuffle), repeat, bool(has_list), following)
-        if state != (self._shuffle, self._repeat, self._has_list, self._has_next):
-            self._shuffle, self._repeat, self._has_list, self._has_next = state
+        state = (bool(shuffle), repeat, bool(has_list), following, bool(has_repeat))
+        now = (self._shuffle, self._repeat, self._has_list, self._has_next, self._has_repeat)
+        if state != now:
+            self._shuffle, self._repeat, self._has_list, self._has_next, self._has_repeat = state
             self.update()
             self._controls_changed()
 
@@ -1854,7 +1864,7 @@ class Transport(Overlay):
         for name in ("shuffle", "repeat"):
             on = self._shuffle if name == "shuffle" else self._repeat != "off"
             color = qcolor(PALETTE.accent) if on else qcolor(_DOCK_DIM)
-            if name == "shuffle" and not self._has_list:
+            if not (self._has_list if name == "shuffle" else self._has_repeat):
                 color = qcolor(_DOCK_DIM, _DOCK_INERT_ALPHA)
             draw_icon(p, self.icon(name), rects[name], color)
         draw_icon(p, "prev", rects["prev_track"], qcolor(_DOCK_TEXT))
@@ -2506,7 +2516,8 @@ class Transport(Overlay):
                 if self._has_list:
                     self.shuffleRequested.emit()
             elif name == "repeat":
-                self.repeatRequested.emit()
+                if self._has_repeat:  # dim on a mixed playlist's entry
+                    self.repeatRequested.emit()
             elif name == "more":
                 self.moreRequested.emit(self.mapToGlobal(rect.topLeft().toPoint()))
             return

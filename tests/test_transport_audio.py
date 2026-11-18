@@ -153,7 +153,7 @@ class AudioCase(unittest.TestCase):
 
     def dock(self, host=None, idle_ms=3000, *, has_list=True) -> Transport:
         t = Transport(host if host is not None else self.host(), idle_ms=idle_ms)
-        t.show_audio("Ferries at Night", "Mira Sol · Harbour Lights")
+        t.show_audio("Ferries at Night", "Mira Sol · Tidewick Isle")
         t.set_audio_state(False, "off", has_list)
         t.update_position(84_000, 221_000)
         return t
@@ -213,7 +213,7 @@ class DockLayoutTests(AudioCase):
                 with self.subTest(size=(width, height), view=view):
                     host = self.host(width, height)
                     screen = AudioScreen(host)
-                    screen.show_song("Ferries at Night", "Mira Sol", "Harbour Lights")
+                    screen.show_song("Ferries at Night", "Mira Sol", "Tidewick Isle")
                     screen.set_tracks(tracks, 1)
                     screen.set_view(view)
                     screen.show()
@@ -406,6 +406,42 @@ class DockLayoutTests(AudioCase):
             self.assertEqual(spy.count(), wanted, name)
 
 
+class MixedPlaylistDockTests(AudioCase):
+    def test_on_a_mixed_playlists_entry_repeat_is_dim_and_asks_nothing(self):
+        # Task 9 fix round 1 (ruling P4-20): a mixed playlist's song has no repeat of its own:
+        # drawn dim as shuffle is without a list, and a press asks nothing. Every other dock
+        # (an album, a list of songs, a lone song) keeps its repeat as before.
+        t = self.dock(has_list=False)
+        rects = t._layout()
+
+        def brightest(image, rect):
+            box = rect.toAlignedRect()
+            return max(
+                QColor(image.pixel(x, y)).lightness()
+                for y in range(box.top(), box.bottom() + 1)
+                for x in range(box.left(), box.right() + 1)
+            )
+
+        def presses():
+            QTest.qWait(QApplication.doubleClickInterval() + 20)
+            spy = QSignalSpy(t.repeatRequested)
+            self.click(t, rects["repeat"].center())
+            return spy.count()
+
+        t.set_audio_state(False, "off", False, has_next=True)
+        live = t.grab().toImage()
+        self.assertEqual(presses(), 1)
+        t.set_audio_state(False, "off", False, has_next=True, has_repeat=False)
+        dim = t.grab().toImage()
+        self.assertLess(brightest(dim, rects["repeat"]), brightest(live, rects["repeat"]) - 40)
+        self.assertLess(abs(brightest(dim, rects["repeat"]) - brightest(dim, rects["shuffle"])), 12)
+        self.assertEqual(presses(), 0)
+        self.assertEqual(t.tooltip_at(rects["repeat"].center()), "Repeat")
+        t.set_audio_state(False, "all", True)  # an album's: it acts, lit, again
+        self.assertGreater(accent_ink(t.grab().toImage(), rects["repeat"]), 90)
+        self.assertEqual(presses(), 1)
+
+
 class DockBehaviourTests(AudioCase):
     def test_audio_mode_never_fades(self):
         t = self.dock(idle_ms=60)
@@ -449,7 +485,7 @@ class DockBehaviourTests(AudioCase):
         # band only, so the screen's top bar, the album rows and the page reach their owners.
         host = self.host()
         screen = AudioScreen(host)
-        screen.show_song("Ferries at Night", "Mira Sol", "Harbour Lights")
+        screen.show_song("Ferries at Night", "Mira Sol", "Tidewick Isle")
         screen.set_tracks([{"title": "One"}, {"title": "Two"}], 0)
         screen.show()
         t = self.dock(host)

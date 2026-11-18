@@ -162,13 +162,13 @@ class MediaKeysTests(unittest.TestCase):
         # A song's artist, album and cover come after its title (its tags, its cover's file):
         # each is news to the system, as music is; the same values again are not (the cover's
         # bytes go with its file).
-        song = dict(artist="Wexlo Tide", album="Harbour Lights", art_path="/covers/cover-1.jpg")
+        song = dict(artist="Wexlo Tide", album="Tidewick Isle", art_path="/covers/cover-1.jpg")
         self.keys.show("playing", "Pell", False, music=True)  # told before it listens
         self.keys.start()
         self.keys.show("playing", "Pell", False, music=True)
         self.keys.show("playing", "Pell", False)  # (not music: news)
         self.keys.show("playing", "Pell", False, artist="Wexlo Tide", music=True)
-        self.keys.show("playing", "Pell", False, music=True, artist="W", album="Harbour Lights")
+        self.keys.show("playing", "Pell", False, music=True, artist="W", album="Tidewick Isle")
         self.keys.show("buffering", "Pell", False, music=True, art_bytes=b"one", **song)
         self.keys.show("playing", "Pell", False, music=True, art_bytes=b"one", **song)
         two = {**song, "art_path": "/covers/cover-2.jpg"}
@@ -183,7 +183,7 @@ class MediaKeysTests(unittest.TestCase):
                 ("playing", "Pell", False, "", "", "", True),  # once it listens
                 ("playing", "Pell", False, "", "", "", False),
                 ("playing", "Pell", False, "Wexlo Tide", "", "", True),
-                ("playing", "Pell", False, "W", "Harbour Lights", "", True),
+                ("playing", "Pell", False, "W", "Tidewick Isle", "", True),
                 ("playing", "Pell", False, *song.values(), True),
                 ("playing", "Pell", False, *two.values(), True),
                 ("paused", "Pell", False, *two.values(), True),
@@ -219,7 +219,7 @@ class MacNowPlayingTests(unittest.TestCase):
                 "Pell",
                 False,
                 artist="Wexlo Tide",
-                album="Harbour Lights",
+                album="Tidewick Isle",
                 art_path="/qitv-test/cover-1.png",  # (never read: its bytes are)
                 art_bytes=bytes(buffer.data().data()),
                 music=True,
@@ -353,7 +353,7 @@ class MacNowPlayingInfoTests(unittest.TestCase):
         system = fake_mac(objc)
         song = dict(
             artist="Wexlo Tide",
-            album="Harbour Lights",
+            album="Tidewick Isle",
             art_path="/covers/cover-1.jpg",
             art_bytes=b"jpeg one",
             music=True,
@@ -367,7 +367,7 @@ class MacNowPlayingInfoTests(unittest.TestCase):
                 "live": False,
                 "type": 1,  # MPNowPlayingInfoMediaTypeAudio
                 "artist": "Wexlo Tide",
-                "album": "Harbour Lights",
+                "album": "Tidewick Isle",
                 "artwork": artwork,
             },
         )
@@ -639,7 +639,7 @@ class WindowsDisplayTests(unittest.TestCase):
         runtime = FakeWindowsRuntime()
         controls = runtime.controls()
         cover = str(Path(os.sep, "covers", "cover-1.jpg").absolute())
-        song = dict(artist="Wexlo Tide", album="Harbour Lights", art_path=cover, music=True)
+        song = dict(artist="Wexlo Tide", album="Tidewick Isle", art_path=cover, music=True)
         controls.now_playing("playing", "Pell", False, **song)
         self.assertEqual(
             runtime.log,
@@ -648,7 +648,7 @@ class WindowsDisplayTests(unittest.TestCase):
                 ("get_MusicProperties",),
                 ("music put_Title", "Pell"),
                 ("put_Artist", "Wexlo Tide"),
-                ("put_AlbumTitle", "Harbour Lights"),
+                ("put_AlbumTitle", "Tidewick Isle"),
                 ("CreateUri", Path(cover).as_uri()),
                 ("CreateFromUri", "uri"),
                 ("put_Thumbnail", "reference"),
@@ -772,16 +772,16 @@ class MprisMetadataTests(unittest.TestCase):
         mpris = Mpris(connection=bus)
         cover = str(Path(os.sep, "covers", "cover 1.jpg").absolute())
         mpris.now_playing(
-            "playing", "Pell", False, artist="Wexlo Tide", album="Harbour Lights", art_path=cover
+            "playing", "Pell", False, artist="Wexlo Tide", album="Tidewick Isle", art_path=cover
         )
         metadata = mpris._all(PLAYER)["Metadata"]
         self.assertEqual(metadata["xesam:title"], "Pell")
         self.assertEqual(metadata["xesam:artist"], ["Wexlo Tide"])  # MPRIS: a list of names
-        self.assertEqual(metadata["xesam:album"], "Harbour Lights")
+        self.assertEqual(metadata["xesam:album"], "Tidewick Isle")
         self.assertEqual(metadata["mpris:artUrl"], Path(cover).as_uri())
         self.assertIn("%20", metadata["mpris:artUrl"])
         changed = bus.sent[-1].arguments()[1]  # PropertiesChanged says so too
-        self.assertEqual(changed["Metadata"]["xesam:album"], "Harbour Lights")
+        self.assertEqual(changed["Metadata"]["xesam:album"], "Tidewick Isle")
         # A film (or a song with none of them): its title alone, as before.
         mpris.now_playing("playing", "A film", False)
         self.assertEqual(set(mpris._all(PLAYER)["Metadata"]), {"mpris:trackid", "xesam:title"})
@@ -846,7 +846,7 @@ class MprisTests(unittest.TestCase):
         # as they go: ['Wexlo Tide'] for "as" ([<'Wexlo Tide'>] would be "av").
         from PySide6.QtCore import QProcess
 
-        song = dict(artist="Wexlo Tide", album="Harbour Lights", music=True)
+        song = dict(artist="Wexlo Tide", album="Tidewick Isle", music=True)
         self.keys.show("playing", "Pell", False, **song)
         service = self.keys.system.report()["service"]
         process = QProcess()
@@ -857,7 +857,7 @@ class MprisTests(unittest.TestCase):
         self.assertTrue(wait_until(lambda: process.state() == stopped, 10_000))
         answer = bytes(process.readAllStandardOutput().data()).decode()
         self.assertIn("'xesam:artist': <['Wexlo Tide']>", answer)
-        self.assertIn("'xesam:album': <'Harbour Lights'>", answer)
+        self.assertIn("'xesam:album': <'Tidewick Isle'>", answer)
 
 
 class PanelCoverTests(unittest.TestCase):
@@ -969,14 +969,14 @@ class WindowMediaKeysTests(WindowCase):
         system = FakeSystem()
         window.media_keys._system = system
         target = SimpleNamespace(title="02 Pell", live=False)
-        facts = [("Pell", "Wexlo Tide", "Harbour Lights")]
+        facts = [("Pell", "Wexlo Tide", "Tidewick Isle")]
         controller = window.controller
         with (
             mock.patch.object(controller, "now_playing", return_value=target),
             mock.patch.object(controller, "panel_facts", side_effect=lambda: facts[0]),
         ):
             window._show_now_playing("playing")
-            song = ("playing", "Pell", False, "Wexlo Tide", "Harbour Lights")
+            song = ("playing", "Pell", False, "Wexlo Tide", "Tidewick Isle")
             self.assertEqual(system.shown[-1], (*song, "", True))  # music, its cover to come
             cover = QImage(64, 64, QImage.Format.Format_RGB32)
             cover.fill(QColor("#d8653f"))
@@ -986,8 +986,8 @@ class WindowMediaKeysTests(WindowCase):
             self.assertEqual(system.shown[-1], (*song, art, True))
             with open(art, "rb") as file:
                 self.assertEqual(system.art_bytes[-1], file.read())  # macOS's picture's
-            facts[0] = ("Rook", "Wexlo Tide", "Harbour Lights")
-            screen.show_song("Rook", "Wexlo Tide", "Harbour Lights")
+            facts[0] = ("Rook", "Wexlo Tide", "Tidewick Isle")
+            screen.show_song("Rook", "Wexlo Tide", "Tidewick Isle")
             self.assertTrue(wait_until(lambda: system.shown[-1][1] == "Rook"))
             self.assertEqual(system.shown[-1][5], art)  # the same cover: the same file
             told = len(system.shown)

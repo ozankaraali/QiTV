@@ -279,7 +279,7 @@ class TurkishAudioScreenTests(AudioScreenChecks, test_audio_screen.ScreenCase):
     words_language = "Türkçe"
     expected = {
         "cover": ("Sözler · Türkçe", "Sıradaki · 7"),
-        "album": ("Sözler · Türkçe", "HARBOUR LIGHTS · 8 PARÇA"),
+        "album": ("Sözler · Türkçe", "TIDEWICK ISLE · 8 PARÇA"),
     }
 
     def setUp(self):
@@ -291,7 +291,7 @@ class FrenchAudioScreenTests(AudioScreenChecks, test_audio_screen.ScreenCase):
     words_language = "Français"
     expected = {
         "cover": ("Paroles · Français", "À suivre · 7"),
-        "album": ("Paroles · Français", "HARBOUR LIGHTS · 8 TITRES"),
+        "album": ("Paroles · Français", "TIDEWICK ISLE · 8 TITRES"),
     }
 
     def setUp(self):
