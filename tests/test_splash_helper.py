@@ -786,6 +786,60 @@ class SplashTests(unittest.TestCase):
         with self.assertNoLogs("ui.splash_helper", "WARNING"):  # QiTV's own end of it
             splash._watcher.join(KILL_WAIT_S)
 
+    def test_from_pythons_exit_on_the_watcher_tells_the_gui_thread_nothing(self):
+        # A start that handed over returns from main() as its helper ends: the watcher's
+        # "ended" was posted to the relay while PySide's own atexit deleted it on the GUI
+        # thread (SIGSEGV, 8 of 280 hand-overs). The relay shuts first (atexit runs the last
+        # registered first), and nothing reaches the GUI thread after.
+        told = []
+        shown = threading.Event()
+        with (
+            mock.patch.object(splash_helper, "run_splash", stubborn),
+            mock.patch.object(splash_helper, "atexit") as at_exit,
+        ):
+            splash = Splash(on_shown=shown.set)
+            splash._relay.heard.connect(
+                lambda message: told.append(message), Qt.ConnectionType.DirectConnection
+            )
+            self.assertTrue(splash.start(QRect(*GEOMETRY)))
+            self.addCleanup(splash._process.kill)
+            self.assertTrue(shown.wait(SPAWN_S))
+        at_exit.register.assert_called_once_with(splash._relay.shut)
+        splash._relay.shut()  # Python's exit: main() has returned
+        splash.stop()  # and the helper ends after it
+        splash._watcher.join(KILL_WAIT_S)
+        self.assertFalse(splash._watcher.is_alive())
+        pump(0.1)
+        self.assertEqual(told, [])  # never posted
+        self.assertFalse(splash._ended)
+
+    def test_the_relay_shuts_once_a_tell_under_way_has_ended(self):
+        relay = splash_helper._Relay(lambda message: None)
+        inside, release = threading.Event(), threading.Event()
+
+        def slow(message):
+            inside.set()
+            release.wait(WAIT_S)
+
+        relay.heard.connect(slow, Qt.ConnectionType.DirectConnection)
+        teller = threading.Thread(target=relay.tell, args=(("ended",),))
+        teller.start()
+        self.assertTrue(inside.wait(WAIT_S))
+        shutting = threading.Thread(target=relay.shut)
+        shutting.start()
+        shutting.join(0.2)
+        self.assertTrue(shutting.is_alive())  # it waits for the tell under way
+        release.set()
+        shutting.join(WAIT_S)
+        teller.join(WAIT_S)
+        self.assertFalse(shutting.is_alive())
+        told = []
+        relay.heard.connect(
+            lambda message: told.append(message), Qt.ConnectionType.DirectConnection
+        )
+        relay.tell(("ended",))
+        self.assertEqual(told, [])
+
     def test_stop_never_raises(self):
         Splash().stop()  # never started
         splash = Splash()

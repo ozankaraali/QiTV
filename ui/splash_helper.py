@@ -18,7 +18,9 @@ it could not leave the Dock). In QiTV, a watcher
 thread is the pipe's only user: it sends what the GUI thread queued, calls `on_shown` (on that
 thread) at "shown", passes "opening" on to the GUI thread, and joins the helper, killing it
 KILL_AFTER_S after its first command if it hasn't ended by then. The helper ends by itself once
-it finds the pipe closed (QiTV died, or ended before its window showed).
+it finds the pipe closed (QiTV died, or ended before its window showed). From Python's exit on
+(atexit), the watcher tells the GUI thread nothing more: PySide's own exit deletes the Qt objects
+Python owns, and a start that handed over returns from main() while its helper ends.
 
 Over PyInstaller's bootloader splash (the Windows and Linux one-file apps show the build's
 still while they unpack: the bare tile with the mark's outline drawn whole, unfilled,
@@ -37,6 +39,7 @@ macOS, where it takes no Dock icon or menu bar).
 
 from __future__ import annotations
 
+import atexit
 from collections.abc import Callable, Sequence
 import ctypes
 import logging
@@ -176,6 +179,9 @@ class Splash:
             return False
         self._process, self._watcher, self._place = process, watcher, QRect(rect)
         self._lit = lit
+        # atexit runs the last registered first: this before PySide's (at QtCore's import),
+        # which deletes the relay on this thread while the watcher could still post to it.
+        atexit.register(self._relay.shut)
         return True
 
     def before_show(self, window: QWidget) -> None:
@@ -489,20 +495,30 @@ class Splash:
 
 class _Relay(QObject):
     """Carries what the watcher thread hears to the GUI thread (a queued signal: the thread
-    makes no Qt object and starts no timer)."""
+    makes no Qt object and starts no timer), until shut() at Python's exit."""
 
     heard = Signal(object)
 
     def __init__(self, handler: Callable[[tuple[Any, ...]], None]) -> None:
         super().__init__()
         self._handler = handler
+        self._lock = threading.Lock()  # a tell under way, against shut()
+        self._shut = False
         self.heard.connect(self._deliver, Qt.ConnectionType.QueuedConnection)
 
     def tell(self, message: tuple[Any, ...]) -> None:
-        try:
-            self.heard.emit(message)
-        except RuntimeError:  # QiTV's end took it already
-            pass
+        with self._lock:
+            if self._shut:
+                return
+            try:
+                self.heard.emit(message)
+            except RuntimeError:  # QiTV's end took it already
+                pass
+
+    def shut(self) -> None:
+        """Nothing is told from now on; a tell under way has ended once this returns."""
+        with self._lock:
+            self._shut = True
 
     @Slot(object)
     def _deliver(self, message: tuple[Any, ...]) -> None:
