@@ -453,6 +453,9 @@ class TVController(QObject):
         self._sound_clock: Callable[[], float] = time.monotonic
         self._stage_for_words = False  # Words turned on from the screen: its Stage (no pick)
         self._radio_texts: tuple[str, str] = ("", "")  # a radio channel's lines, as shown
+        # The song the screen shows (its title, artist and album) and for whom: the system's
+        # media panel has them while that is still what plays (panel_facts).
+        self._song_facts: Optional[tuple[Target, str, str, str]] = None
         self._sound_poll = QTimer(self, interval=SOUND_POLL_MS)
         self._sound_poll.timeout.connect(self._sound_watch)
         # A song's album (its folder's same album, read on a thread: one listing for the album,
@@ -1426,7 +1429,7 @@ class TVController(QObject):
             delta = 1 if action is Action.MEDIA_NEXT else -1
             if drawer.isVisible():
                 return  # the drawer is browsing; play/pause still works
-            if self._album_plays():  # the album's tracks (Plan 4)
+            if self._album_plays() or self._keys_follow_dock():  # the dock's ⏮ ⏭ (Plan 4)
                 self._next_track() if delta > 0 else self._previous_track()
             elif self._on_demand():
                 self._seek(delta * SEEK_STEP_MS)
@@ -3992,6 +3995,22 @@ class TVController(QObject):
         song opened now keeps it (the window draws no mark over it)."""
         return self.sound_shown() and self._sound_kind in ("song", "file")
 
+    def panel_facts(self) -> Optional[tuple[str, str, str]]:
+        """What the system's media panel shows of the audio screen (TVWindow._show_now_playing,
+        with the screen's cover): the song's title, artist and album; a radio channel's name
+        alone (its stream's song or programme is no artist). None while the screen shows
+        nothing of what plays now (a film, a channel's picture, a song opening after another
+        song's facts): the panel has the title alone, as for a film."""
+        current = self._current
+        if not self.sound_shown() or current is None or current is not self._sound:
+            return None
+        if self._sound_kind == "radio":
+            return (current.title, "", "")
+        facts = self._song_facts
+        if self._sound_kind not in ("song", "file") or facts is None or facts[0] is not current:
+            return None
+        return facts[1:]
+
     def _screen(self) -> Any:
         return self.overlays.audio_screen
 
@@ -4032,7 +4051,7 @@ class TVController(QObject):
             queue.pick(index)  # the same album: its list stays, on this song's row now
             screen.set_tracks(queue.tracks, index)
             if self._sound_shown:  # the listing's tags until the player's (as it plays)
-                self._show_song(screen, queue.track(index), path)
+                self._show_song(screen, queue.track(index), path, target)
             return True
         self._queue = None
         screen.set_tracks([], -1)  # another album's list goes at once
@@ -4070,6 +4089,11 @@ class TVController(QObject):
         episode's next one in its folder, a playlist's next entry (Autoplay's)."""
         current = self._current
         return current is not None and current is self._sound and self._autoplay.has_next(current)
+
+    def _keys_follow_dock(self) -> bool:
+        """The audio dock shows with its ⏭ lit by what follows (_follows): the media keys do
+        what its ⏮ and ⏭ do (a film still opening, its dock not up yet, seeks as a film)."""
+        return bool(getattr(self.overlays.transport, "audio", lambda: False)()) and self._follows()
 
     def _shuffle_setting(self) -> bool:
         return getattr(self.config, "audio_shuffle", False) is True
@@ -4112,6 +4136,7 @@ class TVController(QObject):
         self._sound_poll.stop()
         self._sound, self._sound_kind, self._sound_played = None, "", None
         self._sound_path = ""
+        self._song_facts = None
         self._silent_since = None
         self._queue = None
         self._album_generation += 1
@@ -4291,7 +4316,9 @@ class TVController(QObject):
             queue = self._queue
             index = queue.index_of(path) if queue is not None else None
             listed = queue.track(index) if queue is not None and index is not None else {}
-            self._show_song(screen, {**listed, **{k: v for k, v in tags.items() if v}}, path)
+            self._show_song(
+                screen, {**listed, **{k: v for k, v in tags.items() if v}}, path, target
+            )
             if index is None:  # no album's cover with it: QiTV's drawn one until its own
                 screen.set_cover(None, BRAND_COLOURS)
             if self._sound_kind == "file":
@@ -4309,16 +4336,14 @@ class TVController(QObject):
         if target.local:
             self._opening_over()  # QiTV's mark goes (a file's waited for a picture)
 
-    @staticmethod
-    def _show_song(screen: Any, tags: dict, path: str) -> None:
+    def _show_song(self, screen: Any, tags: dict, path: str, target: Target) -> None:
+        """`target`'s song on the screen: its title (else its file's name), artist, album and
+        year; the system's media panel has them too (panel_facts)."""
         title = str(tags.get("title") or "") or Path(path).stem
+        artist, album = str(tags.get("artist") or ""), str(tags.get("album") or "")
         year = tags.get("year")
-        screen.show_song(
-            title,
-            str(tags.get("artist") or ""),
-            str(tags.get("album") or ""),
-            year=str(year) if year else "",
-        )
+        self._song_facts = (target, title, artist, album)
+        screen.show_song(title, artist, album, year=str(year) if year else "")
 
     def _refresh_radio(self, target: Target) -> None:
         """A radio channel's name, then the song its stream names (else the programme on)."""

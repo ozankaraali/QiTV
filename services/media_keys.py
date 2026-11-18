@@ -12,6 +12,10 @@ keyboard's key (TVWindow.remote_key).
 - Linux: MPRIS on the session bus (services.media_keys_linux), which GNOME, KDE and the other
   desktops send their media keys to.
 
+A song on the audio screen (Plan 4) shows there with its artist, its album and its cover (a
+file TVWindow writes for it, ui.song_jobs.PanelCover): with any of them it is music to the
+system, else (a film, a channel) its title alone, as before.
+
 All of it through ctypes or Qt: no native build.
 """
 
@@ -55,13 +59,28 @@ SAME_PRESS_S = 0.5
 # stream opening or waiting for data still plays; idle, ended and failed play nothing.
 _PLAYING_STATES = frozenset({"opening", "buffering", "playing"})
 
+# What the system was told: the state, title, live, artist, album and cover file.
+_Shown = tuple[str, str, bool, str, str, str]
+
 
 class System(Protocol):
     """Where the commands come from and what plays is told."""
 
     def listen(self) -> None: ...
 
-    def now_playing(self, state: str, title: str, live: bool) -> None: ...
+    def now_playing(
+        self,
+        state: str,
+        title: str,
+        live: bool,
+        *,
+        artist: str = "",
+        album: str = "",
+        art_path: str = "",
+    ) -> None:
+        """`state` "playing", "paused" or "" (nothing plays: the rest are empty). A song's
+        `artist`, `album` and `art_path` (its cover's file) make it music; none: as a film."""
+        ...
 
     def close(self) -> None: ...
 
@@ -122,7 +141,7 @@ class MediaKeys(QObject):
         super().__init__(parent)
         self._system = system
         self._state = ""  # "playing", "paused" or "" (nothing plays)
-        self._shown: Optional[tuple[str, str, bool]] = None
+        self._shown: Optional[_Shown] = None
         self._keyboard: tuple[int, float] = (0, 0.0)  # the keyboard's last media key, when
 
     @property
@@ -146,27 +165,40 @@ class MediaKeys(QObject):
         _receiver = self
         if self._shown is not None:  # what plays, told before the system listened
             shown, self._shown = self._shown, None
-            self.show(*shown)
+            state, title, live, artist, album, art_path = shown
+            self.show(state, title, live, artist=artist, album=album, art_path=art_path)
         return True
 
     def listening(self) -> bool:
         return _receiver is self and self._system is not None
 
-    def show(self, state: str, title: str, live: bool) -> None:
-        """The large picture's state (a PlaybackState value) and what it plays."""
+    def show(
+        self,
+        state: str,
+        title: str,
+        live: bool,
+        *,
+        artist: str = "",
+        album: str = "",
+        art_path: str = "",
+    ) -> None:
+        """The large picture's state (a PlaybackState value) and what it plays: a song's
+        artist, album and cover file too. Told once per change of any of them."""
         if state in _PLAYING_STATES:
             state = "playing"
         elif state != "paused":
-            state, title, live = "", "", False
+            state, title, live, artist, album, art_path = "", "", False, "", "", ""
         self._state = state
-        shown = (state, title, live)
+        shown = (state, title, live, artist, album, art_path)
         if shown == self._shown:
             return
         self._shown = shown
         if self._system is None:
             return
         try:
-            self._system.now_playing(state, title, live)
+            self._system.now_playing(
+                state, title, live, artist=artist, album=album, art_path=art_path
+            )
         except Exception as e:
             logger.warning("Couldn't tell the system what plays: %s", e)
 

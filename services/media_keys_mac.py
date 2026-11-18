@@ -1,14 +1,22 @@
 """macOS's media keys: QiTV listed as Now Playing (MediaPlayer's MPRemoteCommandCenter and
 MPNowPlayingInfoCenter, through the Objective-C runtime: no native build). See
-services.media_keys."""
+services.media_keys.
+
+A song's cover is an MPMediaItemArtwork made with initWithImage: (deprecated, but answered on
+macOS); its other initializer takes a block, which ctypes can't make. A macOS that no longer
+answers it shows the song without its cover (said once in the log).
+"""
 
 from __future__ import annotations
 
 import ctypes
 import ctypes.util
+import logging
 from typing import Any, Optional
 
 from services.media_keys import on_command
+
+logger = logging.getLogger(__name__)
 
 _MEDIA_PLAYER = "/System/Library/Frameworks/MediaPlayer.framework/MediaPlayer"
 _TARGET_CLASS = b"QiTVMediaCommandTarget"
@@ -16,7 +24,7 @@ _TARGET_CLASS = b"QiTVMediaCommandTarget"
 _SUCCESS, _NO_ITEM = 0, 110
 # MPNowPlayingPlaybackState
 _STATES = {"playing": 1, "paused": 2, "": 3}
-_MEDIA_TYPE_VIDEO = 2  # MPNowPlayingInfoMediaTypeVideo
+_MEDIA_TYPE_AUDIO, _MEDIA_TYPE_VIDEO = 1, 2  # MPNowPlayingInfoMediaType
 # MPRemoteCommandCenter's command, the target's method for it, the command's name.
 _COMMANDS = (
     (b"togglePlayPauseCommand", b"qitvToggle:", "toggle"),
@@ -71,6 +79,9 @@ class MacNowPlaying:
             player, "MPNowPlayingInfoPropertyIsLiveStream"
         ).value
         self._type_key = ctypes.c_void_p.in_dll(player, "MPNowPlayingInfoPropertyMediaType").value
+        self._artist_key = ctypes.c_void_p.in_dll(player, "MPMediaItemPropertyArtist").value
+        self._album_key = ctypes.c_void_p.in_dll(player, "MPMediaItemPropertyAlbumTitle").value
+        self._artwork_key = ctypes.c_void_p.in_dll(player, "MPMediaItemPropertyArtwork").value
         commands = self._class(b"MPRemoteCommandCenter")
         info = self._class(b"MPNowPlayingInfoCenter")
         self._center = self._send(commands, b"sharedCommandCenter")
@@ -78,6 +89,8 @@ class MacNowPlaying:
         if not self._center or not self._info:
             raise RuntimeError("no MediaPlayer command center")
         self._target: Optional[int] = None
+        self._artwork: tuple[str, Optional[int]] = ("", None)  # the cover file's, kept (+1)
+        self._artwork_answered: Optional[bool] = None  # initWithImage: is answered
 
     def _class(self, name: bytes) -> int:
         found = self._objc.objc_getClass(name)
@@ -134,41 +147,120 @@ class MacNowPlaying:
         finally:
             self._objc.objc_autoreleasePoolPop(pool)
 
-    def now_playing(self, state: str, title: str, live: bool) -> None:
+    def now_playing(
+        self,
+        state: str,
+        title: str,
+        live: bool,
+        *,
+        artist: str = "",
+        album: str = "",
+        art_path: str = "",
+    ) -> None:
         pool = self._objc.objc_autoreleasePoolPush()
         try:
             info = None
+            artwork = self._artwork_of(art_path if state else "")
             if state:
-                keys = (ctypes.c_void_p * 3)(self._title_key, self._live_key, self._type_key)
-                values = (ctypes.c_void_p * 3)(
-                    self._string(title or "QiTV"),
-                    self._send(
-                        self._class(b"NSNumber"),
-                        b"numberWithBool:",
-                        ctypes.c_void_p,
-                        (ctypes.c_bool, live),
+                music = bool(artist or album or art_path)
+                number = self._class(b"NSNumber")
+                pairs = [
+                    (self._title_key, self._string(title or "QiTV")),
+                    (
+                        self._live_key,
+                        self._send(
+                            number, b"numberWithBool:", ctypes.c_void_p, (ctypes.c_bool, live)
+                        ),
                     ),
-                    self._send(
-                        self._class(b"NSNumber"),
-                        b"numberWithUnsignedInteger:",
-                        ctypes.c_void_p,
-                        (ctypes.c_ulong, _MEDIA_TYPE_VIDEO),
+                    (
+                        self._type_key,
+                        self._send(
+                            number,
+                            b"numberWithUnsignedInteger:",
+                            ctypes.c_void_p,
+                            (ctypes.c_ulong, _MEDIA_TYPE_AUDIO if music else _MEDIA_TYPE_VIDEO),
+                        ),
                     ),
-                )
-                if not all(values):  # a nil in a dictionary is an Objective-C exception
+                ]
+                if artist:
+                    pairs.append((self._artist_key, self._string(artist)))
+                if album:
+                    pairs.append((self._album_key, self._string(album)))
+                if artwork:
+                    pairs.append((self._artwork_key, artwork))
+                if not all(value for _key, value in pairs):  # a nil: an Objective-C exception
                     raise RuntimeError("couldn't make what Now Playing shows")
+                count = len(pairs)
+                keys = (ctypes.c_void_p * count)(*(key for key, _value in pairs))
+                values = (ctypes.c_void_p * count)(*(value for _key, value in pairs))
                 info = self._send(
                     self._class(b"NSDictionary"),
                     b"dictionaryWithObjects:forKeys:count:",
                     ctypes.c_void_p,
                     (ctypes.c_void_p, ctypes.cast(values, ctypes.c_void_p)),
                     (ctypes.c_void_p, ctypes.cast(keys, ctypes.c_void_p)),
-                    (ctypes.c_ulong, 3),
+                    (ctypes.c_ulong, count),
                 )
             self._send(self._info, b"setNowPlayingInfo:", None, (ctypes.c_void_p, info))
             self._send(self._info, b"setPlaybackState:", None, (ctypes.c_ulong, _STATES[state]))
         finally:
             self._objc.objc_autoreleasePoolPop(pool)
+
+    def _artwork_of(self, path: str) -> Optional[int]:
+        """The cover at `path` as an MPMediaItemArtwork, made once per file and kept until
+        another (None: none, or none can be made; Now Playing shows the song all the same).
+        The file is TVWindow's own small one (ui.song_jobs.PanelCover)."""
+        kept_path, kept = self._artwork
+        if path == kept_path:
+            return kept
+        self._artwork = (path, None)
+        if kept:
+            self._send(kept, b"release", None)
+        if not path or not self._answers_artwork():
+            return None
+        try:
+            name = self._string(path)
+            image = (
+                self._send(
+                    self._send(self._class(b"NSImage"), b"alloc"),
+                    b"initWithContentsOfFile:",
+                    ctypes.c_void_p,
+                    (ctypes.c_void_p, name),
+                )
+                if name
+                else None
+            )
+            if not image:
+                return None
+            artwork = self._send(
+                self._send(self._class(b"MPMediaItemArtwork"), b"alloc"),
+                b"initWithImage:",
+                ctypes.c_void_p,
+                (ctypes.c_void_p, image),
+            )
+            self._send(image, b"release", None)  # the artwork keeps it
+        except Exception as e:  # never in the way of the song's title
+            logger.debug("Now Playing shows no cover: %s", e)
+            return None
+        self._artwork = (path, int(artwork) if artwork else None)
+        return self._artwork[1]
+
+    def _answers_artwork(self) -> bool:
+        if self._artwork_answered is None:
+            try:
+                self._artwork_answered = bool(
+                    self._send(
+                        self._class(b"MPMediaItemArtwork"),
+                        b"instancesRespondToSelector:",
+                        ctypes.c_bool,
+                        (ctypes.c_void_p, self._objc.sel_registerName(b"initWithImage:")),
+                    )
+                )
+            except Exception:  # no such class: an older or a stripped macOS
+                self._artwork_answered = False
+            if not self._artwork_answered:
+                logger.debug("Now Playing shows no covers: no MPMediaItemArtwork initWithImage:")
+        return self._artwork_answered
 
     def playback_state(self) -> int:
         """MPNowPlayingInfoCenter's state as set (a check's)."""
@@ -221,5 +313,6 @@ class MacNowPlaying:
                 self._target = None
             self._send(self._info, b"setNowPlayingInfo:", None, (ctypes.c_void_p, None))
             self._send(self._info, b"setPlaybackState:", None, (ctypes.c_ulong, _STATES[""]))
+            self._artwork_of("")  # the cover's artwork goes with it
         finally:
             self._objc.objc_autoreleasePoolPop(pool)

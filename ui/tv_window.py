@@ -179,6 +179,7 @@ from ui.record_timer_dialog import RecordTimerDialog, TimerChoice
 from ui.recording_scheduler import RecordingScheduler
 from ui.remote_controller import RemoteController
 from ui.settings_dialog import OptionsDialog
+from ui.song_jobs import PanelCover
 from ui.subtitle_search import OnlineSetup
 from ui.track_controls import SUBTITLE_FILTER
 from ui.tv_controller import ERROR_MS, INFO_MS, Overlays, TVController
@@ -944,6 +945,16 @@ class TVWindow(QMainWindow):
         # then). It listens once the window is on screen (_start: Windows lists the window).
         self.media_keys = MediaKeys(self)
         self.media_keys.pressed.connect(self.remote_key)
+        # Plan 4: a song on the audio screen shows there with its artist, album and cover
+        # (a small file of its own, written on a thread); its tags and cover come after its
+        # state, so what the screen shows tells the panel again (once the controller is done:
+        # queued), as the cover's file does once written.
+        self.panel_cover = PanelCover(self)
+        self._panel_state = ""  # the large picture's state the panel heard last
+        self.panel_cover.written.connect(self._refresh_now_playing)
+        self.audio_screen.shownChanged.connect(
+            self._refresh_now_playing, Qt.ConnectionType.QueuedConnection
+        )
         # 2.9: AI captions (the Subtitles panel's row): a speech model in its own process
         # reads the live channel ahead of the picture; the captions show over it.
         self.captions = CaptionsController(
@@ -1475,13 +1486,29 @@ class TVWindow(QMainWindow):
             self._act(action, payload, key=key)
 
     def _show_now_playing(self, state: str) -> None:
+        """The system's media panel: what the large picture plays, in `state`; a song on the
+        audio screen with its artist, album and cover, a radio channel with its logo (as the
+        screen shows them: TVController.panel_facts)."""
         if self._closing:
             return
+        self._panel_state = state
         target = self.controller.now_playing()
+        facts = self.controller.panel_facts() if target is not None else None
         if target is None:
             self.media_keys.show(state, "", False)
-        else:
+        elif facts is None:  # a film, a channel: its title alone
             self.media_keys.show(state, target.title, target.live)
+        else:
+            title, artist, album = facts
+            art = self.panel_cover.path_for(self.audio_screen.cover())  # "" until written
+            self.media_keys.show(
+                state, title or target.title, target.live, artist=artist, album=album, art_path=art
+            )
+
+    def _refresh_now_playing(self) -> None:
+        """The audio screen's song or cover changed, or the cover's file came: the panel
+        again, in the state it heard last."""
+        self._show_now_playing(self._panel_state)
 
     def remote_action(self, action: Action, payload: str = "") -> None:
         """A phone remote's button that means one action wherever the TV is (Search, Fullscreen)."""
@@ -2854,6 +2881,7 @@ class TVWindow(QMainWindow):
             ("let the next click through", self.screens.shutdown),
             ("stop the phone remote", self.remote.shutdown),
             ("leave Now Playing", self.media_keys.stop),  # the media keys go back to others
+            ("remove the media panel's cover", self.panel_cover.close),  # its temporary file
             ("stop AI captions", self.captions.shutdown),  # its process and any download
             ("stop the Stage's bars", self.visualizer.shutdown),  # their helper process
             ("cancel the export", self.exports.shutdown),

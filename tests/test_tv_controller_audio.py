@@ -408,6 +408,33 @@ class ScreenFollowsTheMediaTests(AudioCase):
         self.controller._on_cover_ready(generation, image, [(1, 2, 3)])
         self.assertIsNone(self.screen.cover[0])
 
+    def test_the_media_panel_has_a_songs_facts_while_its_screen_shows_them(self):
+        # Task 8: the system's media panel has what the screen shows of the song playing now;
+        # a song still opening after another's, or a film, has its title alone.
+        self.session.meta = {"title": "Pell", "artist": "Wexlo Tide", "album": "Harbour Lights"}
+        self.open(self.folder / "02 Pell.mp3", playing=False)
+        self.assertIsNone(self.controller.panel_facts())  # its screen shows at its `playing`
+        self.session.stateChanged.emit("playing")
+        self.assertEqual(self.controller.panel_facts(), ("Pell", "Wexlo Tide", "Harbour Lights"))
+        self.session.meta = {"title": "Rook", "artist": "Kel Arno", "album": "Far Shore"}
+        self.open(self.folder / "03 Rook.mp3", playing=False)
+        self.assertTrue(self.screen.visible)  # Pell's facts still show on it
+        self.assertIsNone(self.controller.panel_facts())
+        self.session.stateChanged.emit("playing")
+        self.assertEqual(self.controller.panel_facts(), ("Rook", "Kel Arno", "Far Shore"))
+        # An album's next track: its listing's facts as it opens.
+        self.session.meta = {}
+        tracks = self.album(3)
+        self.open(Path(tracks[0]["path"]))
+        self.list_album(tracks)
+        self.assertEqual(self.controller.panel_facts(), ("01 Song 1", "", ""))  # as it shows
+        self.controller.handle(Action.MEDIA_NEXT)
+        self.assertEqual(self.controller.panel_facts(), ("Song 2", "Wexlo Tide", "Harbour Lights"))
+        self.open(self.folder / "film.mkv", video=True)
+        self.assertIsNone(self.controller.panel_facts())
+        self.controller.stop()
+        self.assertIsNone(self.controller.panel_facts())
+
     def test_a_stop_or_a_channel_ends_the_screen_and_the_dock(self):
         self.open(self.folder / "01 Arn.mp3")
         self.assertTrue(self.screen.visible)
@@ -544,6 +571,18 @@ class RadioTests(AudioCase):
         self.assertEqual(self.screen.cover, (None, self.screen.cover[1]))  # no logo: drawn
         self.controller.handle(Action.MEDIA_NEXT)  # live TV's: the next channel
         self.assertEqual(self.requested()[-1], "Two")
+
+    def test_the_media_panel_has_a_radio_channels_name_alone(self):
+        # Ruling 2 (Task 8): its stream's song or programme is no artist for the panel.
+        self.session.meta = {"now_playing": "Wexlo Tide - Pell"}
+        self.tune_radio()
+        self.assertIsNone(self.controller.panel_facts())  # no screen yet: as a channel
+        self.clock.now += NO_PICTURE_S + 0.1
+        self.controller._sound_watch()
+        self.assertEqual(self.screen.song[1], "Wexlo Tide - Pell")  # the screen shows it
+        self.assertEqual(self.controller.panel_facts(), ("One", "", ""))
+        self.session.pictureShown.emit()  # a picture: a channel again
+        self.assertIsNone(self.controller.panel_facts())
 
 
 class SwapTests(test_tv_pip.PipCase):
@@ -760,6 +799,25 @@ class AlbumTests(AudioCase):
         self.assertTrue(self.transport.next_on)
         self.transport.nextTrackRequested.emit()
         self.assertEqual(self.played()[-1], second)
+
+    def test_the_media_keys_next_plays_an_audio_only_episodes_next_one(self):
+        # Task 5's deferred minor (Task 8, ruling 5): the media keys do what the dock's ⏭ and
+        # ⏮ do on the audio screen: the next episode; the episode from its start.
+        listings = mock.patch.object(self.controller._listing, "start").start()
+        first, second = self.folder / "Show.S01E01.mkv", self.folder / "Show.S01E02.mkv"
+        first.write_bytes(b"one")
+        second.write_bytes(b"two!")
+        self.session.seekable = True
+        self.open(first, size=3, video=False)
+        generation, folder = listings.call_args.args
+        self.controller._on_folder_listed(generation, list_folder(folder))
+        self.assertTrue(self.transport.next_on)
+        self.session.now_ms = 40_000
+        self.controller.handle(Action.MEDIA_PREV)  # the dock's ⏮: from its start
+        self.assertEqual(self.session.seeks, [0])
+        self.controller.handle(Action.MEDIA_NEXT)
+        self.assertEqual(self.played()[-1], second)
+        self.assertEqual(self.session.relative, [])  # no seek by 10 s
 
     def test_the_docks_previous_restarts_a_lone_song(self):
         self.session.seekable = True
@@ -1035,6 +1093,25 @@ def make_song(path: Path, *, title: str, album: str, number: int, seconds: float
     return path
 
 
+class MediaPanel:
+    """The system's media panel (services.media_keys.System) as it hears what plays."""
+
+    def __init__(self):
+        self.shown: list[tuple] = []
+
+    def listen(self):
+        pass
+
+    def now_playing(self, state, title, live, *, artist="", album="", art_path=""):
+        self.shown.append((state, title, live, artist, album, art_path))
+
+    def last(self):
+        return self.shown[-1] if self.shown else ("", "", False, "", "", "")
+
+    def close(self):
+        pass
+
+
 @unittest.skipUnless(FFMPEG, "ffmpeg makes the songs")
 class WindowSongTests(base.WindowCase):
     """A folder's song in a real window (libVLC with no picture or sound)."""
@@ -1055,6 +1132,28 @@ class WindowSongTests(base.WindowCase):
         screen = window.audio_screen
         self.assertTrue(wait_until(lambda: screen.isVisible()), "the audio screen")
         return screen
+
+    def test_the_systems_media_panel_hears_the_songs_artist_album_and_cover(self):
+        # Task 8: a song's tags come at its first `playing` and its cover from a thread after
+        # it: the system's media panel hears each as it comes, the cover as a small file of its
+        # own, which goes when QiTV closes.
+        window = self.window
+        panel = MediaPanel()
+        window.media_keys._system = panel  # as on macOS
+        self.play_song()
+        self.assertTrue(wait_until(lambda: bool(panel.last()[5])), panel.shown)  # the cover
+        state, title, live, artist, album, art = panel.last()
+        self.assertEqual(
+            (state, title, live, artist, album),
+            ("playing", "Pell", False, "Wexlo Tide", f"Kesh {RUN}"),
+        )
+        self.assertTrue(os.path.isfile(art))
+        self.assertEqual(QImage(art).size().width(), 64)  # the song's own (never made larger)
+        folder = os.path.dirname(art)
+        window.controller.stop()
+        self.assertTrue(wait_until(lambda: panel.last() == ("", "", False, "", "", "")))
+        self.close_window()
+        self.assertFalse(os.path.exists(folder))
 
     def click(self, widget, rect):
         QTest.mouseClick(widget, Qt.MouseButton.LeftButton, pos=rect.center())

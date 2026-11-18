@@ -339,6 +339,9 @@ class AudioScreen(Overlay):
     # Its Stage shows and moves (it plays, its window shows, the system allows the motion), or
     # no longer does: the bars are fed only then (stage_moving; ui.visualizer)
     stageMoving = Signal(bool)
+    # Its song, its cover or its showing changed (a song's tags and cover come after its
+    # state): the system's media panel hears them (TVWindow._show_now_playing)
+    shownChanged = Signal()
 
     def __init__(
         self, parent: Optional[QWidget] = None, *, clock: Callable[[], float] = time.monotonic
@@ -404,6 +407,7 @@ class AudioScreen(Overlay):
         self.setAccessibleDescription(" · ".join(t for t in (title, artist, album) if t))
         self._covers.clear()  # the stand-in's label
         self._relayout()
+        self.shownChanged.emit()
 
     def set_cover(self, image: Optional[QImage], colours: Sequence[Colour]) -> None:
         """Its cover (None: the drawn stand-in) and the colours its light takes (1 to 3,
@@ -415,6 +419,11 @@ class AudioScreen(Overlay):
         self._covers.clear()
         self._backdrop = None
         self.update()
+        self.shownChanged.emit()
+
+    def cover(self) -> Optional[QImage]:
+        """The cover it shows (None: its drawn stand-in)."""
+        return self._image
 
     def set_tracks(self, tracks: Sequence[dict], current: int) -> None:
         """The album's tracks (services.song_facts' Track, in their order) and the one playing
@@ -451,6 +460,7 @@ class AudioScreen(Overlay):
     def setVisible(self, visible: bool) -> None:  # show()/hide() route through here
         super().setVisible(visible)
         self._say_stage()
+        self.shownChanged.emit()
 
     def _say_stage(self) -> None:
         takes = self.takes_words()

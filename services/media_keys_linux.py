@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import logging
 import os
+from pathlib import Path
 from typing import Any, Optional
 
 from PySide6.QtDBus import (
@@ -143,6 +144,7 @@ class Mpris:
         self._player = _Player(self)
         self._service = ""
         self._state, self._title, self._live = "", "", False
+        self._artist = self._album = self._art_path = ""
         self._asked: Any = None
 
     # ---- the system's side -------------------------------------------------------------
@@ -158,8 +160,18 @@ class Mpris:
         self._bus.unregisterObject(PATH)
         raise RuntimeError(f"couldn't take {SERVICE}: {self._bus.lastError().message()}")
 
-    def now_playing(self, state: str, title: str, live: bool) -> None:
+    def now_playing(
+        self,
+        state: str,
+        title: str,
+        live: bool,
+        *,
+        artist: str = "",
+        album: str = "",
+        art_path: str = "",
+    ) -> None:
         self._state, self._title, self._live = state, title, live
+        self._artist, self._album, self._art_path = artist, album, art_path
         changed = {
             "PlaybackStatus": _STATUS[state],
             "Metadata": self._metadata(),
@@ -271,4 +283,16 @@ class Mpris:
     def _metadata(self) -> dict[str, Any]:
         if not self._state:
             return {"mpris:trackid": QDBusObjectPath("/org/mpris/MediaPlayer2/TrackList/NoTrack")}
-        return {"mpris:trackid": QDBusObjectPath(_TRACK), "xesam:title": self._title or "QiTV"}
+        metadata: dict[str, Any] = {
+            "mpris:trackid": QDBusObjectPath(_TRACK),
+            "xesam:title": self._title or "QiTV",
+        }
+        # A song's: only those it has (an empty list would go as variants, "av": see above).
+        if self._artist:
+            metadata["xesam:artist"] = [self._artist]  # MPRIS's artists: a string array
+        if self._album:
+            metadata["xesam:album"] = self._album
+        art = Path(self._art_path) if self._art_path else None
+        if art is not None and art.is_absolute():  # (no file is read here: the desktop does)
+            metadata["mpris:artUrl"] = art.as_uri()
+        return metadata
