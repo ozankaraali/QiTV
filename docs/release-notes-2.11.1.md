@@ -73,7 +73,7 @@ others' distributions, which may have malware.**
   (<kbd>Ctrl/⌘+Shift+O</kbd>) or the channel list's new **Open a folder** row. A series'
   episodes go by season and episode, an album's songs by disc and track, anything else by name.
   Only the folder's own files play, never its subfolders', and an audio file named as a video
-  beside it (`Show S01E01.mka`, `Show S01E01.eng.ac3`) is that video's sound, not an entry.
+  beside it (`Show S01E01.mka`, `Show S01E01.eng.ac3`) is left out of the list.
 - **It starts where you stopped:** at the video you stopped part-way into, else after the last
   one you watched to its end. An album starts at its first song (with shuffle on, at a song of
   its own picking). The player controls' ⏭ goes to the next video, and with Auto-play next

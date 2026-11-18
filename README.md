@@ -430,7 +430,7 @@ QiTV only ever names another file when it is the next episode of the show playin
 
 ### Folders and playlists
 
-A **folder** plays as a list: drop it onto the window, or choose **File → Open Folder…** (<kbd>Ctrl/⌘+Shift+O</kbd>) or the channel list's **Open a folder** row. Only its own files play, never its subfolders', and an audio file named as a video beside it (`Show S01E01.mka`, `Show S01E01.eng.ac3`: a dub or a surround track) is that video's sound, not an entry of its own.
+A **folder** plays as a list: drop it onto the window, or choose **File → Open Folder…** (<kbd>Ctrl/⌘+Shift+O</kbd>) or the channel list's **Open a folder** row. Only its own files play, never its subfolders', and an audio file named as a video beside it (`Show S01E01.mka`, `Show S01E01.eng.ac3`: a dub or a surround track) is left out of the list, as that video's side track.
 
 - **In order.** A series' episodes go by season and episode; an album's songs by disc and track, when their tags say so; anything else by name (`Episode 2` before `Episode 10`).
 - **From where you stopped.** It starts at the video you stopped part-way into (which goes on from there), else at the one after the last you watched to its end, else at the first. An album starts at its first song (with shuffle on, at a song of its own picking).
