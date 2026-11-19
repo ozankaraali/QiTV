@@ -1235,6 +1235,93 @@ class TranslationTests(unittest.TestCase):
         self.assertEqual(self.config["ai_captions_translations"], {"Turkish": ""})
         self.assertTrue(self.captions.enabled())  # the captions go on, as written
 
+    def test_not_now_after_a_zap_is_the_asked_languages_no(self):
+        # 2.11.2: asked for German's rule, answered once a Turkish channel plays: German is
+        # remembered untranslated, and Turkish keeps having no rule
+        self.config["ai_captions_translations"] = {"German": "English"}
+        self.disk["translation"] = False
+        with mock.patch("services.captions.models.download_size", return_value=726_000_000):
+            self.captions.set_language("German")
+            self.assertTrue(self.captions.asking())
+            self.captions.set_language("Turkish")  # the language heard changes meanwhile
+            self.captions.answer(False)
+        self.assertEqual(self.config["ai_captions_translations"], {"German": ""})
+
+    def test_a_download_that_failed_after_a_zap_is_the_asked_languages_no(self):
+        self.config["ai_captions_translations"] = {"German": "English", "French": "Turkish"}
+        self.disk["translation"] = False
+        self.captions._begin_download = lambda: setattr(self.captions, "_download", object())
+        with mock.patch("services.captions.models.download_size", return_value=726_000_000):
+            self.captions.set_language("German")
+            self.captions.answer(True)
+            self.captions.set_language("French")  # another rule, the same model on its way
+            self.captions._on_download_failed(self.captions._download, "Download failed: 404")
+        self.assertEqual(
+            self.config["ai_captions_translations"], {"German": "", "French": "Turkish"}
+        )
+
+    def test_off_for_one_language_keeps_the_model_another_rule_still_needs(self):
+        # 2.11.2: the translation model is one for every language: Off for Turkish takes its
+        # question away only once no rule names a language to translate into
+        self.config["ai_captions_translations"] = {"German": "English"}
+        self.captions.set_language("Turkish")
+        self.disk["translation"] = False
+        with mock.patch("services.captions.models.download_size", return_value=726_000_000):
+            self.captions.set_translate_to("English")
+            self.captions.set_translate_to("")  # German still needs the model
+            self.assertEqual((self.card.withdrawn, self.captions.asking()), (0, True))
+            self.captions.set_language("German")
+            self.captions.set_translate_to("")  # none left: the question goes
+        self.assertEqual((self.card.withdrawn, self.captions.asking()), (1, False))
+        self.assertEqual(self.config["ai_captions_translations"], {"German": "", "Turkish": ""})
+
+    def test_a_late_detection_from_the_channel_before_a_zap_changes_nothing_here(self):
+        # 2.11.2: the run of the channel left detects German after the zap: kept for that
+        # channel, while the one playing stays as it is (its language, its translation)
+        from test_captions_pipeline import _Target
+
+        self.config["ai_captions_translations"] = {"German": "English"}
+        first = self.window.controller.target
+        other = _Target(live=True)
+        other.title = "Another channel"
+        self.window.controller.target = other  # tuned; its run not started yet
+        self.captions._on_detected(self.captions._run, "German")
+        self.assertEqual(self.captions._detected, {"films|A film": "German"})
+        self.assertEqual(self.captions.language()[0], "auto")
+        self.assertEqual(self.captions.translate_to(), "")
+        self.assertNotIn("translate", [message[0] for message in self.sent])
+        self.assertEqual(self.window.live_session.floor, 8.0)
+        self.window.controller.target = first  # back on it: what was heard there
+        self.captions._resolve_language()
+        self.assertEqual(self.captions.translate_to(), "English")
+
+    def test_an_audio_track_whose_language_has_a_rule_is_translated_as_its_run_starts(self):
+        # 2.11.2: the film's other track names German (a rule): the run read again for it
+        # finds the language itself, and is read again from further ahead, translated
+        from test_captions_pipeline import _Controller, _Session, _Target
+
+        from ui.captions_controller import FILM_AHEAD_S
+
+        self.window.controller = _Controller(_Target(live=False, local=True))
+        self.window.session = _Session("file:///films/a.mkv", 120_000)
+        self.config["ai_captions_translations"] = {"German": "English"}
+        track = {"language": "Turkish"}
+        self.captions._track_language = lambda: track["language"]
+
+        def starts():
+            return [message[3] for message in self.sent if message[0] == "film"]
+
+        self.captions._start_run()
+        self.assertEqual(starts(), [120.0 + FILM_AHEAD_S])
+        self.assertNotIn("translate", [message[0] for message in self.sent])
+        self.window.session.audio_track = lambda: 3  # the viewer's other track
+        track["language"] = "German"
+        self.captions._tick()
+        self.assertIn(("translate", "English", self.folder()), self.sent)
+        ahead = 120.0 + FILM_AHEAD_S
+        self.assertEqual(starts(), [ahead, ahead, ahead + TRANSLATE_LEAD_S])
+        self.assertEqual(self.captions.translate_to(), "English")
+
     def test_off_while_its_model_downloads_calls_the_download_off(self):
         cancelled = []
 
@@ -1298,16 +1385,23 @@ class TranslationTests(unittest.TestCase):
         self.captions.set_language("Turkish")
         self.config["ai_captions_translations"] = {"Turkish": "English", "German": "English"}
         self.disk["translation"] = False
-        changed = []
-        self.captions.changed.connect(lambda: changed.append(True))
         with (
             mock.patch.object(models, "download_size", side_effect=models.Unsupported("x")),
-            self.assertLogs("ui.captions_controller", "WARNING"),
+            self.assertLogs("ui.captions_controller", "WARNING") as said,
         ):
             self.captions._start_run()
-        self.assertEqual(self.captions.translate_to(), "")
+        self.assertIn("no translation model suits this computer", said.output[0])
+        # no rule left, for any language: the row and the phones say Off, nothing is asked
         self.assertEqual(self.config["ai_captions_translations"], {})
-        self.assertTrue(changed)  # the row and the phones say Off
+        self.assertEqual(self.captions.translate_to(), "")
+        self.assertEqual((self.card.asked, self.captions.asking()), ([], False))
+        self.assertIsNone(self.captions._download)
+        self.assertNotEqual(self.captions._fetching, models.TRANSLATION_KEY)
+        with (
+            mock.patch.object(models, "download_size", side_effect=AssertionError("asked")),
+            self.assertNoLogs("ui.captions_controller", "WARNING"),
+        ):
+            self.captions._start_run()  # the next run: nothing looked at again
 
     def test_the_load_and_the_command_name_one_folder(self):
         from ui.captions_controller import CaptionsController

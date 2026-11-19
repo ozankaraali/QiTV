@@ -254,6 +254,7 @@ class CaptionsController(QObject):
         self._step_tried = False  # Automatic stepped down, or asked to, while QiTV runs
         self._stepped_down = False  # Automatic takes the 0.6B while QiTV runs
         self._fetching = ""  # the tier downloaded
+        self._translation_for = ""  # 2.11.2: the language heard when the translation model came
         self._warming = False  # the speed benchmark started (once)
         self._unmeasured = False  # it failed: Automatic doesn't wait for it
         self._toggle_waits = False  # turned on before the speed was known: on once it is
@@ -659,7 +660,7 @@ class CaptionsController(QObject):
         none, remembered as such), kept as Settings keep theirs; nothing while that language
         isn't known yet (`translation_waits`). A language whose model isn't here asks its
         download's question first, while they are on (else as they start; not now: none); ""
-        takes back that question, or calls off that download."""
+        takes back that question, or calls off that download, once no rule needs the model."""
         from services.captions.models import TRANSLATION_KEY
         from services.captions.mt_languages import MT_LANGUAGES
 
@@ -668,22 +669,24 @@ class CaptionsController(QObject):
         if self.translation_waits():
             return
         before = self._translation()
-        if not name and self._fetching == TRANSLATION_KEY:
+        self._set_rule(name)
+        if not name and self._fetching == TRANSLATION_KEY and not any(self._rules().values()):
             if self._download is not None:
                 self._cancel_download()
             elif self._asking:
                 self._asking = self._asking_step = False
                 if self._card is not None:
                     self._card.withdraw()
-        self._set_rule(name)
         logger.info("AI captions: %s translated into %s", self._language[0], name or "nothing")
         self._retranslate(before)
 
-    def _set_rule(self, target: str) -> None:
-        """The language heard is translated into `target` from now on ("": none, remembered)."""
+    def _set_rule(self, target: str, heard: Optional[str] = None) -> None:
+        """The language heard (or `heard`) is translated into `target` from now on ("": none,
+        remembered)."""
         from services.captions.translation_rules import with_rule
 
-        self._config_set(_TRANSLATIONS, with_rule(self._rules(), self._language[0], target))
+        heard = self._language[0] if heard is None else heard
+        self._config_set(_TRANSLATIONS, with_rule(self._rules(), heard, target))
 
     def _retranslate(self, before: str) -> None:
         """What they are translated into may have changed from `before` (the language heard, or
@@ -765,6 +768,7 @@ class CaptionsController(QObject):
             self.changed.emit()  # the row (and the phones) say Off
             return
         self._fetching = models.TRANSLATION_KEY
+        self._translation_for = self._language[0]  # (a zap may come before the answer)
         if missing == 0:  # here already, only to be checked
             self._start_download()
             return
@@ -930,7 +934,8 @@ class CaptionsController(QObject):
             from services.captions.models import TRANSLATION_KEY
 
             if self._fetching == TRANSLATION_KEY:
-                self._set_rule("")  # 2.10: not now: not translated (2.11.2: the language heard)
+                # 2.10: not now: not translated (2.11.2: the language it was asked for)
+                self._set_rule("", self._translation_for)
             self.changed.emit()  # the question is gone (a phone's closes too)
             self._offer_translation()  # 2.10: one picked while this one was up
             return
@@ -1030,8 +1035,8 @@ class CaptionsController(QObject):
         if reason != CANCELLED:
             self._toast(reason, "error")  # already the whole sentence ("Download failed: …")
             if self._fetching == TRANSLATION_KEY:
-                # 2.10: not translated (a pick asks again); 2.11.2: the language heard's rule
-                self._set_rule("")
+                # 2.10: not translated (a pick asks again); 2.11.2: the language it was for
+                self._set_rule("", self._translation_for)
             self._offer_faster()
         self.changed.emit()
 
@@ -1469,13 +1474,14 @@ class CaptionsController(QObject):
         """No language was given and the pieces agreed on one: kept for the channel (the file:
         `_heard_key`) while QiTV runs (the next run there starts with it), and the panel says
         it. 2.11.2: translated as the viewer's rule for it says (a programme's language
-        changing: the new one's)."""
+        changing: the new one's). One that comes after a zap is kept for its channel only: the
+        language heard now, and its translation, are the new channel's."""
         if run != self._run:
             return
         key = self._run_channel  # the run's channel, not the one a zap just tuned
         if key:
             self._detected[key] = language
-        if self._language[1] == FROM_MODEL:
+        if self._language[1] == FROM_MODEL and key == self._heard_key():
             before = self._translation()
             self._language = (language, FROM_MODEL)
             self._retranslate(before)  # (the panel says it)
