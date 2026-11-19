@@ -5,12 +5,14 @@ keyPressEvent handles those keys through ui.keymap. Modifier combinations are ap
 shortcuts, which the keymap leaves to the menus (a test checks that no screen claims them).
 The player's keys are disabled while the Library shows. The Providers menu is an exclusive
 group of the configured providers, rebuilt when a provider becomes ready or fails and after
-Settings closes, then Add provider and the free-channels menu (the welcome card that offers
-both shows only without providers, and the last one stays). The drawer's Settings and Add
-provider rows open the same dialogs, its Free channels row the free-channels menu, its Open
-file row the same file dialog, and its header's ⌕ the same search. File → Open Recordings
-Folder opens where recordings go (2.2), as Settings' Open folder does; View → Recordings
-(2.9.7) the Library's Recordings page, as the drawer's Recordings row.
+the Settings window closes, then Add provider and the free-channels menu (the welcome card
+that offers both shows only without providers, and the last one stays). Settings… opens
+Settings in the drawer, as the drawer's Settings row and ⚙ do (backing out of it from there
+gives the drawer back). The drawer's Add provider row opens the same Settings window as Add
+provider, its Free channels row the free-channels menu, its Open file row the same file
+dialog, and its header's ⌕ the same search. File → Open Recordings Folder opens where
+recordings go (2.2), as Settings' Open folder does; View → Recordings (2.9.7) the Library's
+Recordings page, as the drawer's Recordings row.
 """
 
 from __future__ import annotations
@@ -203,8 +205,8 @@ class TVMenus(QObject):
             self.check_updates,
             role.ApplicationSpecificRole,
         )
-        # i18n: a menu entry (opens the Settings window)
-        add(app_menu, tr("Settings…"), "Ctrl+,", window.options_dialog, role.PreferencesRole)
+        # i18n: a menu entry (opens Settings)
+        add(app_menu, tr("Settings…"), "Ctrl+,", window.open_settings, role.PreferencesRole)
         # i18n: a menu entry: the phone remote's pairing code (turning the remote on if it's off)
         add(
             app_menu,
@@ -419,9 +421,10 @@ class TVMenus(QObject):
 
     def on_drawer_action(self, row: str) -> None:
         """The drawer's Settings, Add provider, Free channels, Open file, Open a folder and
-        Recordings rows, and its header's Library, ⌕ and refresh buttons."""
+        Recordings rows, and its header's ⚙ (as its Settings row), Library, ⌕ and refresh
+        buttons."""
         if row == SETTINGS_ROW:
-            self._window.options_dialog()
+            self._window.open_settings(from_drawer=True)
         elif row == ADD_PROVIDER_ROW:
             self._window.add_provider()
         elif row == FREE_CHANNELS_ROW:

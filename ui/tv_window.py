@@ -135,6 +135,7 @@ from services.recordings_index import FILE_NAME as RECORDINGS_INDEX_FILE, Record
 from services.recordings_list import timer_text
 from services.redact import safe_message, safe_traceback
 from services.sessions import SessionManager, Slot
+from services.settings_values import SettingsValues
 from services.sound_sync import FILE_NAME as SOUND_SYNC_FILE, SoundSync
 from services.subtitle_picks import FILE_NAME as SUBTITLE_PICKS_FILE, SubtitlePicks
 from services.thread_cleanup import has_pending_threads
@@ -177,6 +178,7 @@ from ui.overlays.question_card import QuestionCard
 from ui.overlays.rec_sign import RecSign
 from ui.overlays.remote_pair import PairOverlay
 from ui.overlays.retry_notice import RetryNotice
+from ui.overlays.settings_drawer import SettingsDrawer
 from ui.overlays.sleep_notice import SleepNotice
 from ui.overlays.stats import StatsOverlay
 from ui.overlays.stopped_notice import StoppedNotice
@@ -192,6 +194,7 @@ from ui.pointer import PointerHider
 from ui.record_timer_dialog import RecordTimerDialog, TimerChoice
 from ui.recording_scheduler import RecordingScheduler
 from ui.remote_controller import RemoteController
+from ui.settings_controller import SettingsController
 from ui.settings_dialog import OptionsDialog
 from ui.song_jobs import PanelCover
 from ui.subtitle_search import OnlineSetup
@@ -791,6 +794,13 @@ class TVWindow(QMainWindow):
         self.audio_screen = AudioScreen(host)
         self.captions_overlay = CaptionsOverlay(host)  # 2.9: AI captions over the picture
         self.opening_overlay = OpeningOverlay(host)  # QiTV's mark while a file opens
+        # Settings in the drawer, a layer over the channel list: its rows' values are asked of
+        # its controller (self.settings, built once the TV controller is).
+        self.settings_drawer = SettingsDrawer(
+            lambda row: self.settings.value_text(row),
+            lambda row: self.settings.lit(row),
+            parent=host,
+        )
         # 2.8: the recordings scheduled from the guide (a small file beside the config).
         self.recording_schedule = Schedule(
             os.path.join(config_manager.get_config_dir(), SCHEDULE_FILE)
@@ -849,7 +859,9 @@ class TVWindow(QMainWindow):
         self.more_menu = MoreMenu(self.overlays.transport, host)
         self.overlays.more_menu = self.more_menu
         # 2.8.12: the REC sign showed through the channel list, the guide and the grid's tiles.
-        self.rec_sign.cover_with(self.overlays.drawer, self.overlays.guide, self.grid_tiles)
+        self.rec_sign.cover_with(
+            self.overlays.drawer, self.settings_drawer, self.overlays.guide, self.grid_tiles
+        )
         self.rec_sign.follow_hud(self.overlays.transport)  # 2.9.7: up with the controls
         for listing in (self.overlays.column, self.overlays.drawer, self.overlays.guide):
             listing.set_playing(playing)
@@ -866,9 +878,10 @@ class TVWindow(QMainWindow):
         # them (it sits above the transport's controls and beside the PiP), and the Sound,
         # Subtitles and Picture panels, the multiview's layouts and the audio dock's ⋯ menu
         # over it (above their buttons). The statistics sit over the transport, under its title
-        # row (they take no click). The drawer and the guide cover them all; the OpenSubtitles
-        # search covers the player with its backdrop, under the corner player's controls, the
-        # sleep timer's last minute, Resume and the question (2.6) and the toast.
+        # row (they take no click). The drawer, Settings over it, and the guide cover them all;
+        # the OpenSubtitles search covers the player with its backdrop, under the corner
+        # player's controls, the sleep timer's last minute, Resume and the question (2.6) and
+        # the toast.
         for overlay in (
             self.grid_tiles,
             self.audio_screen,
@@ -888,6 +901,7 @@ class TVWindow(QMainWindow):
             self.layout_row,
             self.more_menu,
             self.overlays.drawer,
+            self.settings_drawer,
             self.overlays.guide,
             self.overlays.next_card,
             self.overlays.welcome,
@@ -1105,6 +1119,26 @@ class TVWindow(QMainWindow):
         self.overlays.welcome.addRequested.connect(self.add_provider)
         self.overlays.welcome.freeRequested.connect(self.show_free_channels)
         self.overlays.drawer.actionRequested.connect(self.menus.on_drawer_action)
+        # Settings in the drawer (its Settings row and ⚙, Settings…): a step applies at once
+        # (what takes effect beyond the config, through its hook); a section still kept in the
+        # Settings window opens it on its tab; backing out of it from the drawer gives the
+        # drawer back on its Settings row.
+        values = SettingsValues(
+            config_manager,
+            hooks={
+                "live_latency": controller.settings_saved,
+                "desktop_pip": self._arm_desktop_pip,
+                "covered_pip": self._arm_desktop_pip,
+            },
+        )
+        self.settings = SettingsController(
+            self.settings_drawer,
+            values,
+            platform.system(),
+            self.options_dialog,
+            controller.reopen_drawer_on_settings,
+        )
+        controller.set_settings(self.settings)
         # The channel list's find: genres and channels at every provider, found in a worker;
         # its last row looks for films and series in the Library's search.
         self.finder = FindSession(
@@ -2623,12 +2657,28 @@ class TVWindow(QMainWindow):
 
     # ---- OptionsDialog host -------------------------------------------------------------------
 
+    def open_settings(self, from_drawer: bool = False) -> None:
+        """Settings in the drawer (the drawer's Settings row and ⚙, Settings…, Ctrl/⌘+,), over
+        live TV: from the Library it goes back to the TV first, and the mini player becomes the
+        window again; the channel list gives way to it. `from_drawer`: backing out of it gives
+        the list back. Asked again while it shows, it stays as it is (where it came from too)."""
+        if self._closing or self.settings.visible():
+            return
+        if self.screens.library_shown():
+            self.screens.back_to_tv()
+        self.leave_mini_player()
+        drawer = self.overlays.drawer
+        if drawer.isVisible():
+            drawer.close_drawer()
+        self.settings.open(from_drawer=from_drawer)
+
     def options_dialog(self, tab: str = "") -> None:
-        """Settings; `tab` "remote" opens it on Phone remote."""
+        """The Settings window, on the tab `tab` names ("general", "timeshift", "subtitles",
+        "remote", "parental", "providers", "epg"; "": the first)."""
         if not self._closing:
             dialog = OptionsDialog(self)
-            if tab == "remote":
-                dialog.options_tab.setCurrentWidget(dialog.remote_tab)
+            if tab:
+                dialog.show_tab(tab)
             dialog.exec()
             self.menus.rebuild_providers()
             self.screens.tmdb.settings_changed()  # 2.8: TMDB turned off or on

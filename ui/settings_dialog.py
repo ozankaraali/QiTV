@@ -541,7 +541,7 @@ class OptionsDialog(QDialog):
         self.create_timeshift_ui()
         self.create_subtitles_ui()
         build_remote_tab(self)
-        build_parental_tab(self)  # 2.8
+        self.parental_tab = build_parental_tab(self)  # 2.8 (None without the window's guard)
 
         # Add tab with providers
         self.create_providers_ui()
@@ -834,6 +834,7 @@ class OptionsDialog(QDialog):
         tab.setObjectName("subtitlesSettings")
         scroll.setWidget(tab)
         self.options_tab.addTab(scroll, tr("Subtitles"))  # i18n: a tab of the Settings window
+        self.subtitles_tab = scroll
         layout = QFormLayout(tab)
         intro = QLabel(opensubtitles_hint(), tab)
         intro.setWordWrap(True)
@@ -988,6 +989,7 @@ class OptionsDialog(QDialog):
         tab.setObjectName("timeshiftSettings")
         scroll.setWidget(tab)
         self.options_tab.addTab(scroll, tr("Time-shift"))  # i18n: a tab of the Settings window
+        self.timeshift_tab = scroll
         layout = QVBoxLayout(tab)
         consent = tr(
             "Use disk for a longer time-shift buffer.\n"
@@ -1663,6 +1665,25 @@ class OptionsDialog(QDialog):
         self.selected_provider_index = index
         self.edited_provider = None
         self.load_providers()
+
+    def show_tab(self, key: str) -> None:
+        """The tab named by `key` in front: "general", "timeshift", "subtitles", "remote",
+        "parental", "providers" or "epg" (the drawer's sections still kept here, and Phone
+        Remote…). "", or a tab this window lacks, leaves it on General."""
+        pages = {
+            "general": self.settings_tab,
+            "timeshift": self.timeshift_tab,
+            "subtitles": self.subtitles_tab,
+            "remote": self.remote_tab,
+            "parental": self.parental_tab,
+            "providers": self.providers_tab,
+            "epg": self.epg_tab,
+        }
+        page = pages.get(key)
+        if page is not None:
+            self.options_tab.setCurrentWidget(page)
+        elif key and key not in pages:
+            logging.getLogger(__name__).warning("No Settings tab %r", key)
 
     def start_new_provider(self):
         """Open on the Providers tab with a new, empty provider to fill in (TV: Add provider)."""

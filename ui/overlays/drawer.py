@@ -705,6 +705,8 @@ class Drawer(Overlay):
         self._own: tuple[tuple, frozenset[tuple[str, str]]] = ((), frozenset())
         self._restore: _Place | None = None  # where the right column goes back to (_refresh)
         self._pending_key: str | tuple[str, str] | None = None
+        # open_drawer's focus key for the left column (focus_side "left"): its first fill.
+        self._pending_left: str | tuple[str, str] | None = None
         self._left_choice: NavNode | None = None  # the left highlight, which may lead the path
         self._preview_node: NavNode | None = None
         self._preview_timer = QTimer(self)
@@ -730,11 +732,14 @@ class Drawer(Overlay):
     def open_drawer(
         self, focus_key: str | tuple[str, str] | None = None, focus_side: str = "right"
     ) -> None:
-        """Open on the NavModel's path, focusing the right column (or the left one)."""
+        """Open on the NavModel's path, focusing the right column (or the left one). The
+        focused column's highlight goes to `focus_key`'s row when it lists it (on the left: the
+        list back from Settings, on its Settings row)."""
         self.focus_side = focus_side
         self._drop_find()
         self._left_choice = None  # the left highlight starts at the end of the path
         self._pending_key = focus_key
+        self._pending_left = focus_key if focus_side == "left" else None
         self._cancel_preview()
         self._second_click.disarm()  # open again: the next click is on the list
         self._columns["right"].parent = None  # force the highlight to be re-chosen
@@ -781,7 +786,7 @@ class Drawer(Overlay):
         col = self._columns[self.focus_side]
         if not col.nodes:
             return
-        self._pending_key = None
+        self._pending_key = self._pending_left = None
         self._find_moved = self.finding()
         row = col.rows.get(col.current, -1 if delta > 0 else len(col.nodes))
         target = self._selectable_row(col, min(len(col.nodes) - 1, max(0, row + delta)), delta)
@@ -1267,6 +1272,12 @@ class Drawer(Overlay):
     def _choose_left(self, col: _Column, nodes: Sequence[NavNode]) -> None:
         path = self._nav.path
         end = path[-1] if path else None
+        if self._pending_left is not None and nodes:
+            wanted, self._pending_left = self._pending_left, None
+            # As if ↑/↓ had put the highlight there: Enter chooses it (the path stays).
+            match = next((n for n in nodes if _is_focus_key(n, wanted)), None)
+            if match is not None:
+                self._left_choice = match
         if self._left_choice is not None and self._left_choice not in col.rows:
             # Gone from the list: Enter must choose what is highlighted now, not that row.
             self._left_choice = None

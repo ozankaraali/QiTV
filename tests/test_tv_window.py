@@ -2652,15 +2652,18 @@ class DrawerSettingsTests(WindowCase):
             for key in (Qt.Key.Key_Left, Qt.Key.Key_Left, Qt.Key.Key_Down):
                 QTest.keyClick(self.window, key)  # the sources column, then ⚙ Settings
             self.assertEqual(drawer.highlighted().title, "Settings")
-            QTest.keyClick(self.window, Qt.Key.Key_Return)
-            dialog.assert_called_once_with(self.window)
-            dialog.return_value.exec.assert_called_once_with()
-            dialog.return_value.start_new_provider.assert_not_called()
+            QTest.keyClick(self.window, Qt.Key.Key_Return)  # Settings in the drawer
+            self.assertTrue(self.window.settings.visible())
+            dialog.assert_not_called()
+            QTest.keyClick(self.window, Qt.Key.Key_Escape)  # out of it: the list, on its row
+            self.assertTrue(drawer.isVisible())
+            self.assertEqual(drawer.highlighted().title, "Settings")
             QTest.keyClick(self.window, Qt.Key.Key_Down)
             self.assertEqual(drawer.highlighted().title, "Add provider")
-            QTest.keyClick(self.window, Qt.Key.Key_Return)
+            QTest.keyClick(self.window, Qt.Key.Key_Return)  # the Settings window, still
+            dialog.assert_called_once_with(self.window)
             dialog.return_value.start_new_provider.assert_called_once_with()
-        self.assertEqual(dialog.call_count, 2)
+            dialog.return_value.exec.assert_called_once_with()
         self.assertTrue(drawer.isVisible())
 
     def test_the_drawers_search_button_opens_the_search(self):

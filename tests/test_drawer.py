@@ -724,6 +724,23 @@ class DrawerTests(unittest.TestCase):
         self.assertEqual(self.drawer.highlighted().key, ADD_PROVIDER_ROW)
         self.assertEqual((self.nav.path, self.catalog.selected, self.library), (path, [], []))
 
+    def test_a_focus_key_on_the_left_column_highlights_that_row(self):
+        # Back from Settings opened on its row: the sources, ⚙ Settings highlighted, and
+        # Enter chooses it again.
+        self.nav.focus_source("Home")
+        self.drawer.open_drawer(focus_key=SETTINGS_ROW, focus_side="left")
+        self.record_hand_offs()
+        path = self.nav.path
+        self.assertEqual(self.drawer.focus_side, "left")
+        self.assertEqual(self.drawer.highlighted().key, SETTINGS_ROW)
+        elapse(PREVIEW_WAIT_MS)  # highlighting an action row starts nothing
+        self.assertEqual((self.actions, self.nav.path), ([], path))
+        self.drawer.activate()
+        self.assertEqual(self.actions, [SETTINGS_ROW])
+        self.drawer.close_drawer()
+        self.drawer.open_drawer(focus_side="left")  # without one: on the path's end again
+        self.assertEqual(self.drawer.highlighted(), path[-1])
+
     def test_free_channels_sits_under_add_provider_and_asks_with_a_row_anchor(self):
         column = self.open_on_the_sources()
         self.assertEqual(

@@ -103,6 +103,7 @@ from services.media_reporter import MediaReporter
 from services.navigation import (
     FAVORITES_GROUP,
     RECENT_GROUP,
+    SETTINGS_ROW,
     NavNode,
     item_key,
     item_title,
@@ -163,6 +164,7 @@ from ui.song_jobs import AlbumJob, CoverJob, cover_colours
 # i18n: a toast: the multiview cannot open while a picture is cast to a TV
 MULTIVIEW_WHILE_CASTING = N_("Stop casting to show the multiview")
 from ui.record_guard import RecordGuard
+from ui.settings_controller import SettingsController
 from ui.stream_question import ScheduledRecording, StreamQuestion, quit_text
 from ui.subtitle_search import OnlineSetup, OnlineSubtitles
 from ui.track_controls import TrackControls
@@ -190,6 +192,29 @@ _VOLUME_MODIFIERS = (
     Qt.KeyboardModifier.ControlModifier.value | Qt.KeyboardModifier.MetaModifier.value
 )
 _DRAWER_ROWS = 40  # rows of a mixed list whose providers load their guides
+# The channel list's own keys (the drawer's context): while Settings shows, those it does not
+# use reach nothing, never the list under it (its find, Delete's Remove from Recents).
+_LIST_KEYS = frozenset(
+    {
+        Action.NAV_UP,
+        Action.NAV_DOWN,
+        Action.NAV_PAGE_UP,
+        Action.NAV_PAGE_DOWN,
+        Action.NAV_LEFT,
+        Action.NAV_RIGHT,
+        Action.NAV_ACTIVATE,
+        Action.NAV_TEXT,
+        Action.NAV_BACKSPACE,
+        Action.NAV_HOME,
+        Action.NAV_END,
+        Action.NAV_DELETE,
+        Action.FORGET,
+        Action.SELECT_ALL,
+        Action.COPY,
+        Action.CUT,
+        Action.PASTE,
+    }
+)
 # The audio screen (spec §10). A live stream may list its sound before its picture: a channel is
 # radio once it has played this long with no picture listed. Whether what plays has a picture is
 # looked at this often while a channel plays (it may come and go), or until a file's is known.
@@ -530,6 +555,8 @@ class TVController(QObject):
             tiles=self._mixer_tiles,
             parent=self,
         )
+        # Settings in the drawer (the window's, set_settings): None until it is wired.
+        self._settings: Optional[SettingsController] = None
         # Subtitles from OpenSubtitles for a film or an episode (the Subtitles panel's search).
         self._online: Optional[OnlineSubtitles] = None
         if online_subtitles is not None and overlays.subtitle_search is not None:
@@ -1045,6 +1072,7 @@ class TVController(QObject):
         overlays = self.overlays
         overlays.column.close()
         overlays.drawer.close_drawer()
+        self._close_settings()
         overlays.banner.dismiss()
         overlays.transport.dismiss()
         self._tracks.close()
@@ -1081,10 +1109,10 @@ class TVController(QObject):
         """The window opens the Library with the player in a corner (2.1): what plays keeps
         playing and nothing stops.
 
-        The drawer, the zap column and banner, the controls, the mixer, the guide, a number being
-        typed and the Next card close (the overlays are gone from the corner player). Until
-        leave_library_playing(), a provider change neither tunes the last channel nor opens
-        the drawer, as in the Library.
+        The drawer, Settings, the zap column and banner, the controls, the mixer, the guide, a
+        number being typed and the Next card close (the overlays are gone from the corner
+        player). Until leave_library_playing(), a provider change neither tunes the last
+        channel nor opens the drawer, as in the Library.
         """
         if self._closed:
             return
@@ -1101,6 +1129,7 @@ class TVController(QObject):
         overlays = self.overlays
         overlays.column.close()
         overlays.drawer.close_drawer()
+        self._close_settings()
         overlays.banner.dismiss()
         overlays.transport.dismiss()
         self._mixer.hide()
@@ -1401,21 +1430,47 @@ class TVController(QObject):
     # ---- input --------------------------------------------------------------------------------
 
     def key_context(self) -> str:
-        """The keymap context for the next key: the OpenSubtitles search, the open guide or
-        the drawer takes the keys."""
+        """The keymap context for the next key: the OpenSubtitles search, the open guide,
+        Settings (the drawer's keys) or the drawer takes the keys."""
         if self._online is not None and self._online.visible():
             return "subtitles"
         if self._guide.is_open():
             return "guide"
+        if self._settings_shown():
+            return "drawer"
         return "drawer" if self.overlays.drawer.isVisible() else "player"
 
+    # ---- Settings in the drawer ---------------------------------------------------------------
+
+    def set_settings(self, settings: SettingsController) -> None:
+        """Settings in the drawer: while it shows it takes the drawer's keys, the mouse's Back
+        and Forward, and a click on the picture closes it."""
+        self._settings = settings
+
+    def _settings_shown(self) -> bool:
+        return self._settings is not None and self._settings.visible()
+
+    def _close_settings(self) -> None:
+        if self._settings is not None and self._settings.visible():
+            self._settings.close()
+
+    def reopen_drawer_on_settings(self) -> None:
+        """Backed out of Settings opened from the drawer (its Settings row or ⚙): the list
+        again, on the sources with Settings highlighted (Enter opens it again)."""
+        if self._closed:
+            return
+        self.nav.focus_source(self.catalog.current_provider_name())
+        self.overlays.drawer.open_drawer(focus_key=SETTINGS_ROW, focus_side="left")
+
     def overlay_open(self) -> bool:
-        """Whether Esc would close something first: the drawer, the guide, the Next card (or the
-        wait for the next season), a number being typed, the zap column or the banner."""
+        """Whether Esc would close something first: Settings, the drawer, the guide, the Next
+        card (or the wait for the next season), a number being typed, the zap column or the
+        banner."""
         overlays = self.overlays
         return bool(
             (self._online is not None and self._online.visible())
             or self._guide.is_open()
+            or self._settings_shown()
             or self._mixer.visible()
             or self._tracks.visible()
             or self._picture.visible()
@@ -1462,7 +1517,11 @@ class TVController(QObject):
         if self._guide.is_open() and self._guide.handle(action, payload):
             return
         drawer = self.overlays.drawer
-        if drawer.isVisible() and drawer.field_key(action, payload):
+        settings = self._settings
+        if settings is not None and settings.visible():
+            if settings.handle(action, payload) or action in _LIST_KEYS:
+                return  # Settings' keys; the others of the list's, never the list under it
+        elif drawer.isVisible() and drawer.field_key(action, payload):
             return  # 2.9.3: the Find box's caret, selection and clipboard
         if not drawer.isVisible() and self._tracks.handle(action, key):
             return  # a Sound or Subtitles panel shows: the arrows, Enter and Esc are its own
@@ -1644,10 +1703,13 @@ class TVController(QObject):
             notice.hide()
 
     def video_clicked(self) -> None:
-        """A click on the picture: the channel list closes; else on live TV it opens, and
-        during a movie or an episode (2.9.3: the list came up over a film; the owner: never
-        the channel list there) the film pauses or plays on, its controls showing."""
-        if self.overlays.drawer.isVisible():
+        """A click on the picture: Settings or the channel list closes; else on live TV the
+        list opens, and during a movie or an episode (2.9.3: the list came up over a film; the
+        owner: never the channel list there) the film pauses or plays on, its controls
+        showing."""
+        if self._settings_shown():
+            self._close_settings()  # as the list: it does not come back
+        elif self.overlays.drawer.isVisible():
             self.overlays.drawer.close_drawer()
         elif self._on_demand():
             self._play_pause()
@@ -1672,17 +1734,20 @@ class TVController(QObject):
             self.window_actions.toggle_fullscreen()
 
     def mouse_back(self) -> None:
-        """The mouse's Back button: a drawer layer up (spec §5.3); closed, it opens."""
-        self._mouse_layer(Action.NAV_LEFT)
+        """The mouse's Back button: a drawer layer up (spec §5.3), Settings' as Esc; closed,
+        the drawer opens."""
+        self._mouse_layer(Action.NAV_LEFT, Action.ESCAPE)
 
     def mouse_forward(self) -> None:
-        """The mouse's Forward button: a drawer layer down; closed, it opens."""
-        self._mouse_layer(Action.NAV_RIGHT)
+        """The mouse's Forward button: a drawer layer down (Settings' too); closed, it opens."""
+        self._mouse_layer(Action.NAV_RIGHT, Action.NAV_RIGHT)
 
-    def _mouse_layer(self, action: Action) -> None:
+    def _mouse_layer(self, action: Action, in_settings: Action) -> None:
         if self._closed:
             return
-        if self.overlays.drawer.isVisible():
+        if self._settings is not None and self._settings.visible():
+            self._settings.handle(in_settings)
+        elif self.overlays.drawer.isVisible():
             self.handle(action)
         else:
             self.handle(Action.OPEN_DRAWER)
@@ -1701,7 +1766,7 @@ class TVController(QObject):
         no list, guide, mixer or card that the pointer clicks is open."""
         if self._closed or self._current is None or not self._has_media():
             return False
-        if self._flow.in_library():
+        if self._flow.in_library() or self._settings_shown():
             return False
         overlays = self.overlays
         menus = (
@@ -5074,7 +5139,7 @@ class TVController(QObject):
 
     def _show_transport(self) -> None:
         target = self._current
-        if self.overlays.drawer.isVisible():
+        if self.overlays.drawer.isVisible() or self._settings_shown():
             return
         if (target is None or not self._has_media()) and self.multiview_shown():
             self._show_grid_transport()  # the grid's button and layout chip stay in reach
