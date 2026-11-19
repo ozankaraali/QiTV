@@ -504,6 +504,30 @@ class CaptionRowsTests(PanelCase):
         self.assertEqual(self.subtitle_panel.model().title, "Subtitles")  # nothing opened
         self.assertEqual(self.captions.translated, [])
 
+    def test_an_open_translate_list_goes_back_once_the_language_is_unknown(self):
+        # 2.11.2: a zap while the list is open (the new channel's language not heard yet): the
+        # Subtitles list again, as when they go off, its row waiting for the language
+        self.captions.on = True
+        self.click_button("subtitles")
+        self.click_row(AI_TRANSLATE)
+        self.assertEqual(self.subtitle_panel.model().title, "Translate to")
+        self.captions.waits = True
+        self.captions.changed.emit()
+        self.assertEqual(self.subtitle_panel.model().title, "Subtitles")
+        self.assertEqual(self.row(AI_TRANSLATE).note, "Once the language is heard")
+        self.captions.waits = False  # heard: the row opens the list again
+        self.captions.changed.emit()
+        self.click_row(AI_TRANSLATE)
+        self.assertEqual(self.subtitle_panel.model().title, "Translate to")
+
+    def test_the_translate_rows_widest_value_counts_the_one_shown(self):
+        # 2.11.2: the row's width holds the language shown, used before or not
+        self.captions.on, self.captions.recent = True, ["English"]
+        self.captions.target = "Indonesian"
+        self.click_button("subtitles")
+        row = self.row(AI_TRANSLATE)
+        self.assertEqual((row.value, row.widest), ("Bahasa Indonesia", "Bahasa Indonesia"))
+
     def test_the_translate_row_steps_through_off_and_the_used_languages(self):
         self.captions.on, self.captions.recent = True, ["English", "Turkish"]
         self.click_button("subtitles")
@@ -1095,20 +1119,45 @@ class TranslationTests(unittest.TestCase):
         }
         self.captions.set_language("German")
         self.assertEqual(self.captions.recent_translations(), ["English", "Turkish"])
-        with mock.patch("services.i18n.language", return_value="de"):
+        with mock.patch("services.i18n.language", return_value="fr"):
             listed = self.captions.translate_languages()
         self.assertEqual(
-            listed[:3], [("English", "English"), ("Turkish", "Türkçe"), ("German", "Deutsch")]
+            listed[:3], [("English", "English"), ("Turkish", "Türkçe"), ("French", "Français")]
         )
-        self.assertEqual(sorted(name for name, _own in listed), sorted(MT_LANGUAGES))  # once each
+        # never the language heard (2.11.2), the rest once each
+        others = sorted(name for name in MT_LANGUAGES if name != "German")
+        self.assertEqual(sorted(name for name, _own in listed), others)
         rest = [own for _name, own in listed[3:]]
         self.assertEqual(rest, sorted(rest, key=str.casefold))
+        with mock.patch("services.i18n.language", return_value="de"):
+            listed = self.captions.translate_languages()  # the app's is the one heard: not it
+        self.assertEqual(listed[:2], [("English", "English"), ("Turkish", "Türkçe")])
+        self.assertEqual(sorted(name for name, _own in listed), others)
         self.captions.set_language("English")  # heard: not offered as its own translation
         self.assertEqual(self.captions.recent_translations(), ["Turkish"])
         with mock.patch("services.i18n.language", return_value="tr"):
             listed = self.captions.translate_languages()
         self.assertEqual(listed[0], ("Turkish", "Türkçe"))  # used, and the app's: once
-        self.assertEqual(len(listed), 46)
+        self.assertNotIn("English", [name for name, _own in listed])
+        self.assertEqual(len(listed), 45)
+        self.captions.set_language("Chinese")  # as MiLMMT names it: its Simplified only
+        names = [name for name, _own in self.captions.translate_languages()]
+        self.assertNotIn("Chinese (Simplified)", names)
+        self.assertIn("Chinese (Traditional)", names)
+
+    def test_a_rule_into_the_language_heard_is_no_translation(self):
+        # 2.11.2: "German → German" (set before the list left it out, or by hand): nothing is
+        # translated, so no 5 s hold and no translator for the process
+        self.config["ai_captions_translations"] = {"German": "German"}
+        self.captions.set_language("German")
+        self.assertEqual(self.captions.translate_to(), "")
+        self.assertEqual(self.window.live_session.floor, 8.0)
+        self.assertNotIn(("translate", "German", self.folder()), self.sent)
+        self.config["ai_captions_translations"]["Chinese"] = "Chinese (Simplified)"
+        self.captions.set_language("Chinese")
+        self.assertEqual(self.captions.translate_to(), "")
+        self.config["ai_captions_translations"]["Chinese"] = "Chinese (Traditional)"
+        self.assertEqual(self.captions.translate_to(), "Chinese (Traditional)")
 
     def test_translation_is_remembered_per_spoken_language(self):
         self.captions.set_language("German")

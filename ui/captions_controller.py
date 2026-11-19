@@ -618,12 +618,14 @@ class CaptionsController(QObject):
     def translate_to(self) -> str:
         """The language AI captions are translated into: the viewer's rule for the language they
         hear (MiLMMT's name; "": none, no rule, or that language not known yet). Its model may
-        not be here yet (asked for, or on its way)."""
-        from services.captions.mt_languages import MT_LANGUAGES
+        not be here yet (asked for, or on its way). 2.11.2: a rule into the language heard
+        itself is none (its lines stay as they are: no hold, no step to the 0.6B for them)."""
+        from services.captions.mt_languages import MT_LANGUAGES, source_for
         from services.captions.translation_rules import target_for
 
-        name = target_for(self._rules(), self._language[0])
-        return name if name in MT_LANGUAGES else ""
+        heard = self._language[0]
+        name = target_for(self._rules(), heard)
+        return name if name in MT_LANGUAGES and name != source_for(heard) else ""
 
     def translation_waits(self) -> bool:
         """No language is known yet (Auto, not heard yet): nothing is translated, and no rule
@@ -641,16 +643,18 @@ class CaptionsController(QObject):
         """The Translate to list's languages, Off aside, as (MiLMMT's name, its own name): the
         ones the viewer's rules use first (`recent_translations`), then the app language's when
         MiLMMT has it (a shortcut only: it chooses nothing), then the rest by their own names
-        (as Settings sorts the captions' languages)."""
+        (as Settings sorts the captions' languages). 2.11.2: never the language heard (nothing
+        is translated into the language it is in)."""
         from services import i18n
-        from services.captions.mt_languages import MT_LANGUAGES, app_default, own_name
+        from services.captions.mt_languages import MT_LANGUAGES, app_default, own_name, source_for
 
-        first = self.recent_translations()
+        heard = source_for(self._language[0])  # None while not known (or MiLMMT lacks it)
+        first = self.recent_translations()  # (never the one heard)
         app = app_default(i18n.language())
-        if app and app not in first:
+        if app and app != heard and app not in first:
             first.append(app)
         rest = sorted(
-            (name for name in MT_LANGUAGES if name not in first),
+            (name for name in MT_LANGUAGES if name not in first and name != heard),
             key=lambda name: own_name(name).casefold(),
         )
         return [(name, own_name(name)) for name in first + rest]

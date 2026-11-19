@@ -621,7 +621,9 @@ class TrackControls(QObject):
         if self._level == AI_LANGUAGE and captions is not None and captions.enabled():
             return self._language_model(captions)
         if self._level == AI_TRANSLATE and captions is not None and captions.enabled():
-            return self._translate_model(captions)
+            # 2.11.2: the language no longer known (a zap meanwhile): back, as when they go off
+            if not captions.translation_waits():
+                return self._translate_model(captions)
         self._level = ""
         session = self._session()
         shown = session.subtitle_track()
@@ -837,7 +839,8 @@ class TrackControls(QObject):
         used = captions.recent_translations()
         if not used:
             return PanelRow(AI_TRANSLATE, label, note=shown, opens=True)
-        widest = max([translate_off_text(), *(mt_languages.own_name(n) for n in used)], key=len)
+        own_names = (mt_languages.own_name(n) for n in used)
+        widest = max([translate_off_text(), *own_names, shown], key=len)  # 2.11.2: shown too
         return PanelRow(
             AI_TRANSLATE,
             label,
