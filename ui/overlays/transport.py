@@ -226,7 +226,7 @@ KEY_HINTS = {
     "audio": (N_("Sound: track and sync"), "J, K"),  # i18n: tooltip of the sound button
     # i18n: tooltip of the subtitles button
     "subtitles": (N_("Subtitles: track, file and sync"), "Shift+J, Shift+K"),
-    # i18n: tooltip of the Picture button (its panel: aspect ratio, deinterlacing, sleep timer
+    # i18n: tooltip of the Picture button (its panel: aspect ratio, sleep timer
     # and statistics)
     "picture": (N_("Picture, sleep timer and statistics"), "A"),
 }
@@ -451,7 +451,7 @@ class Transport(Overlay):
     fullscreenRequested = Signal()
     audioRequested = Signal()
     subtitleRequested = Signal()
-    pictureRequested = Signal()  # the Picture panel: aspect, deinterlacing, sleep timer, stats
+    pictureRequested = Signal()  # the Picture panel: aspect, sleep timer, stats
     nextRequested = Signal()
     goLiveRequested = Signal()
     programmeStartRequested = Signal()

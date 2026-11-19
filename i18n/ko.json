@@ -83,6 +83,7 @@
   "Auto (best)": "자동 (최고)",
   "Auto (recommended)": "자동 (권장)",
   "Auto adjusts each channel: it starts at Normal and plays further behind on channels that run dry, coming back over time.\nLow starts live channels sooner; Stable buffers more for unreliable streams.": "자동은 채널마다 조정해요. 보통으로 시작해 끊기는 채널은 더 늦게 재생하고, 시간이 지나면 되돌려요.\n저지연은 라이브를 더 빨리 시작하고, 안정은 불안정한 스트림을 위해 더 많이 버퍼링해요.",
+  "Auto deinterlaces only the pictures marked interlaced and costs nothing on channels that are not. Off never deinterlaces; back to Auto takes effect when QiTV starts again.": "",
   "Auto-Play Settings": "자동 재생 설정",
   "Auto-play next episode (10s countdown)": "다음 에피소드 자동 재생 (10초 카운트다운)",
   "Automatic": "자동",
@@ -736,7 +737,7 @@
   "Picture-in-picture is for live TV": "PIP는 라이브 TV 전용이에요",
   "Picture-in-picture is off while channels play in an external player": "외부 플레이어에서 재생 중에는 PIP를 쓸 수 없어요",
   "Picture-in-picture with the previous channel, or close it": "이전 채널을 PIP로 보기, 또는 닫기",
-  "Picture: aspect ratio, deinterlacing, sleep timer; pressed again, the next ratio": "화면: 화면 비율, 디인터레이싱, 취침 예약; 다시 누르면 다음 비율",
+  "Picture: aspect ratio, sleep timer; pressed again, the next ratio": "",
   "Pictures": "프레임",
   "Pinned": "고정됨",
   "Play": "재생",
@@ -1267,7 +1268,6 @@
   "catching up {rate}×": "따라잡는 중 {rate}×",
   "deinterlacing|Auto": "자동",
   "deinterlacing|Off": "끔",
-  "deinterlacing|On": "켬",
   "in {h} h {mm}": "{h}시간 {mm}분 후",
   "in {n} min": {
     "other": "{n}분 후"

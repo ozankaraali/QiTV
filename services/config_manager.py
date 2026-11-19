@@ -159,6 +159,7 @@ class ConfigManager:
     DEFAULT_OPTION_HARDWARE_DECODING = True
     # Bumped by each one-time change of the decoding default (`update_patcher`).
     DECODING_DEFAULTS_VERSION = 1
+    DEINTERLACE_DEFAULTS_VERSION = 1
     DEFAULT_OPTION_TIMESHIFT_MAX_MIB = 2048
     DEFAULT_OPTION_TIMESHIFT_RAM_MIB = 256  # memory per stream not on the disk ring
     TIMESHIFT_RAM_CHOICES = (128, 256, 512)
@@ -168,8 +169,9 @@ class ConfigManager:
     CORNER_PLAYER_CORNER_CHOICES = ("top-left", "top-right", "bottom-left", "bottom-right")
     DEFAULT_OPTION_PIP_VOLUME = 30  # the small picture's own level once it is made audible
     DEFAULT_OPTION_VOLUME = 100  # the large picture's level: libVLC's default
-    DEFAULT_OPTION_DEINTERLACE = "auto"  # 2.3: libVLC's own; "on" or "off" (the Picture panel)
-    DEINTERLACE_CHOICES = ("auto", "on", "off")
+    DEFAULT_OPTION_DEINTERLACE = "auto"  # 2.3: libVLC's own, or "off" (the Picture panel)
+    # 2.11.2 and older also stored "on" (every picture deinterlaced): it reads as "auto" now.
+    DEINTERLACE_CHOICES = ("auto", "off")
     AI_CAPTIONS_MODELS = ("auto", "small", "large")  # 2.9: AI captions' speech model tier
     # 2.2, the multiview: a tile's time-shift buffer while it has no focus (an optional key,
     # never written by default). 48 MiB holds one keyframe interval of a 4K channel.
@@ -345,6 +347,17 @@ class ConfigManager:
             self.config["live_latency"] = "auto"
         if latency_defaults < ConfigManager.LATENCY_DEFAULTS_VERSION:
             self.config["latency_defaults_version"] = ConfigManager.LATENCY_DEFAULTS_VERSION
+            need_update = True
+
+        # 2.11.3: deinterlacing is Auto or Off (On is gone: it deinterlaced progressive pictures
+        # too, for three times the CPU). Everyone is moved to Auto once, whatever was saved, and
+        # an Off chosen afterwards stays. Older 2.x builds ignore the key and read "deinterlace"
+        # as one of their choices.
+        deinterlace_defaults = self._defaults_version("deinterlace_defaults_version")
+        if deinterlace_defaults < 1 and "deinterlace" in self.config:
+            self.config["deinterlace"] = "auto"
+        if deinterlace_defaults < ConfigManager.DEINTERLACE_DEFAULTS_VERSION:
+            self.config["deinterlace_defaults_version"] = ConfigManager.DEINTERLACE_DEFAULTS_VERSION
             need_update = True
 
         # 2.9.7: the wheel over the picture changes the volume. Every config saved "channel"

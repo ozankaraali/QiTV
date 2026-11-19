@@ -83,6 +83,7 @@
   "Auto (best)": "自動（最佳）",
   "Auto (recommended)": "自動（建議）",
   "Auto adjusts each channel: it starts at Normal and plays further behind on channels that run dry, coming back over time.\nLow starts live channels sooner; Stable buffers more for unreliable streams.": "「自動」會逐一調整頻道：從「標準」開始，緩衝耗盡的頻道會延後播放，之後逐漸恢復。\n「低」讓直播頻道更快開始；「穩定」為不穩定的串流多做緩衝。",
+  "Auto deinterlaces only the pictures marked interlaced and costs nothing on channels that are not. Off never deinterlaces; back to Auto takes effect when QiTV starts again.": "",
   "Auto-Play Settings": "自動播放設定",
   "Auto-play next episode (10s countdown)": "自動播放下一集（10 秒倒數）",
   "Automatic": "自動",
@@ -736,7 +737,7 @@
   "Picture-in-picture is for live TV": "子母畫面僅適用於直播電視",
   "Picture-in-picture is off while channels play in an external player": "頻道在外部播放器中播放時，無法使用子母畫面",
   "Picture-in-picture with the previous channel, or close it": "以子母畫面顯示上一個頻道，或將其關閉",
-  "Picture: aspect ratio, deinterlacing, sleep timer; pressed again, the next ratio": "畫面：畫面比例、去交錯、睡眠計時器；再按一次切換到下一個比例",
+  "Picture: aspect ratio, sleep timer; pressed again, the next ratio": "",
   "Pictures": "影格",
   "Pinned": "已釘選",
   "Play": "播放",
@@ -1267,7 +1268,6 @@
   "catching up {rate}×": "正在追趕 {rate}×",
   "deinterlacing|Auto": "自動",
   "deinterlacing|Off": "關閉",
-  "deinterlacing|On": "開啟",
   "in {h} h {mm}": "{h} 小時 {mm} 分後",
   "in {n} min": {
     "other": "{n} 分鐘後"

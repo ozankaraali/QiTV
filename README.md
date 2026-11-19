@@ -119,7 +119,7 @@ These are also in the app under Help → Keyboard Shortcuts. <kbd>Ctrl/⌘</kbd>
 | <kbd>Tab</kbd> | The mixer's other row (while it shows) |
 | <kbd>J</kbd> / <kbd>K</kbd> | Sound 50 ms earlier / later (sync with the picture) |
 | <kbd>Shift+J</kbd> / <kbd>Shift+K</kbd> | Subtitles 50 ms earlier / later |
-| <kbd>A</kbd> | Picture: aspect ratio, deinterlacing, sleep timer; pressed again, the next ratio |
+| <kbd>A</kbd> | Picture: aspect ratio, sleep timer; pressed again, the next ratio |
 | <kbd>Shift+I</kbd> | Statistics over the picture: show or hide |
 | <kbd>F</kbd> / <kbd>F11</kbd> / <kbd>⌃⌘F (Mac)</kbd> | Fullscreen |
 | <kbd>Ctrl/⌘+F</kbd> | Search |

@@ -1596,13 +1596,20 @@ class DefaultArgsTests(unittest.TestCase):
         with mock.patch.dict(os.environ, {VLC_LOG_ENV: ""}), _on("Darwin"):
             self.assertEqual(
                 default_args(hardware_decoding=True),  # decoding: tests/test_video_decoding.py
-                ["--no-video-title-show", "--no-volume-save", *subtitle_args(), "--quiet"],
+                [
+                    "--no-video-title-show",
+                    "--no-volume-save",
+                    "--deinterlace-mode=yadif",
+                    *subtitle_args(),
+                    "--quiet",
+                ],
             )
 
     def test_subtitles_are_drawn_as_the_ai_captions_are(self):
         # 2.9: the owner's: VLC's subtitles (a stream's, a file's) in the captions' look.
         from ui.theme import PALETTE
 
+        self.assertIn("--deinterlace-mode=yadif", default_args())  # Auto's method (2.11.3)
         args = default_args(subtitle_font="Segoe UI")
         self.assertIn("--freetype-font=Segoe UI", args)
         self.assertIn("--freetype-outline-thickness=0", args)
@@ -1624,6 +1631,7 @@ class DefaultArgsTests(unittest.TestCase):
             [
                 "--no-video-title-show",
                 "--no-volume-save",
+                "--deinterlace-mode=yadif",
                 *subtitle_args(),
                 "--aout=directsound",
                 "--quiet",

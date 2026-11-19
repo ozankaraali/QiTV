@@ -285,6 +285,8 @@ def default_args(hardware_decoding: bool = False, subtitle_font: str = "") -> li
     args = [
         "--no-video-title-show",
         "--no-volume-save",
+        # Auto's deinterlacing (services.picture): yadif, on the pictures marked interlaced.
+        "--deinterlace-mode=yadif",
         *decoder_args(hardware_decoding),
         *subtitle_args(subtitle_font),
     ]
@@ -450,18 +452,11 @@ class PlaybackSession(QObject):
         self._aspect = picture.AUTO
         self._video_size = (0, 0)
         self._deinterlace = picture.AUTO
-        self._deinterlace_set = False  # libVLC was given on or off: Auto cannot come back
-        # What libVLC was given last: the method (on) or None (off); Auto chosen after either
-        # leaves it so, as this player then deinterlaces until QiTV starts again.
-        self._deinterlace_method: Optional[str] = None
+        self._deinterlace_set = False  # libVLC was given off: Auto cannot come back
         self._picture_due = False  # set again once this media's video output exists
         self._shown_due = False  # this open's picture is still to show (pictureShown)
         self._shown = False  # it showed (shows_picture)
         self._picture_set = False  # libVLC was given a shape or deinterlacing on this player
-        # On leaves a picture taller than 1080i alone (services.picture): its height is read
-        # once per media, as soon as libVLC knows it.
-        self._height_due = False
-        self._too_tall = False  # this media's picture is never interlaced
         self._shape_timer = QTimer(self, singleShot=True, interval=_SHAPE_SETTLE_MS)
         self._shape_timer.timeout.connect(self._apply_shape)
         # The stream's own shape (`picture_ratio`): the last one read, kept through the next
@@ -723,7 +718,6 @@ class PlaybackSession(QObject):
             self._player.audio_set_delay(self._audio_delay_ms * 1000)
         if self._subtitle_delay_ms:
             self._player.video_set_spu_delay(self._subtitle_delay_ms * 1000)
-        self._height_due, self._too_tall = True, False
         self._shown_due = True  # pictureShown once its video output appears
         if self._picture_wanted():
             self._apply_picture()  # the player's, for a new video output
@@ -1241,8 +1235,8 @@ class PlaybackSession(QObject):
         return self._deinterlace
 
     def set_deinterlace(self, choice: str) -> bool:
-        """Deinterlace this media and every one after it: services.picture's AUTO, ON or OFF.
-        False when Auto cannot come back to this player (libVLC was given on or off: it stays
+        """Deinterlace this media and every one after it: services.picture's AUTO or OFF.
+        False when Auto cannot come back to this player (libVLC was given off: it stays
         until QiTV starts again)."""
         if self._released or choice not in picture.DEINTERLACING:
             return False
@@ -1250,7 +1244,6 @@ class PlaybackSession(QObject):
         if choice == picture.AUTO:
             return not self._deinterlace_set  # libVLC keeps what it was given last
         self._deinterlace_set = True
-        self._deinterlace_method = picture.deinterlace_method(choice)
         self._set_picture()
         return True
 
@@ -1283,26 +1276,7 @@ class PlaybackSession(QObject):
         self._player.video_set_aspect_ratio(aspect)
         self._player.video_set_crop_geometry(crop)
         if self._deinterlace_set:
-            method = None if self._too_tall else self._deinterlace_method
-            self._player.video_set_deinterlace(method)
-
-    def _check_height(self) -> None:
-        """On, once libVLC knows this media's picture height: a picture taller than 1080i is
-        left alone (services.picture.never_interlaced)."""
-        media = self._player.get_media()
-        if media is None:
-            return
-        try:
-            height = int(_track_stats(media).get("height") or 0)
-        finally:
-            media.release()
-        if height <= 0:
-            return  # not known yet
-        self._height_due = False
-        if picture.never_interlaced(height):
-            logger.info("The picture is %d lines tall: not deinterlaced (never interlaced)", height)
-            self._too_tall = True
-            self._apply_picture()
+            self._player.video_set_deinterlace(None)
 
     def video_stats(self) -> dict[str, Any]:
         """What the statistics overlay shows of the media playing ({} when none): its video and
@@ -1465,8 +1439,6 @@ class PlaybackSession(QObject):
             if self._shown_due:  # only once per open (a shape set later re-arms _picture_due)
                 self._shown_due, self._shown = False, True
                 self.pictureShown.emit()
-        if self._height_due and self._deinterlace_method:
-            self._check_height()
         if self._spu_waiting:
             self.subtitle_tracks()  # names the files' tracks once they show
         if state in (PlaybackState.OPENING, PlaybackState.BUFFERING) and not self._ever_played:

@@ -2632,6 +2632,7 @@ class TVWindow(QMainWindow):
             dialog.exec()
             self.menus.rebuild_providers()
             self.screens.tmdb.settings_changed()  # 2.8: TMDB turned off or on
+            self.controller.apply_deinterlacing()  # 2.11.3: its Settings choice
             self._arm_desktop_pip()  # the covered window's setting turned on or off
 
     def open_phone_remote(self) -> None:
