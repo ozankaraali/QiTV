@@ -2541,6 +2541,21 @@ class LibraryButtonTests(WindowCase):  # 2.8: the Library in one click from the 
         self.assertTrue(screens.library_shown())
         self.assertEqual(screens.library_controller.section, "series")
 
+    def test_the_player_bars_library_button_opens_it_at_the_section_used_last(self):  # 2.11.2
+        self.show()
+        self.wait_for_drawer()
+        screens = self.window.screens
+        bar = self.window.overlays.transport
+        bar.openLibraryRequested.emit()
+        self.assertTrue(screens.library_shown())
+        self.assertEqual(screens.library_controller.section, "movies")
+        screens.open_library("series")
+        screens.back_to_tv()
+        self.assertFalse(screens.library_shown())
+        bar.openLibraryRequested.emit()
+        self.assertTrue(screens.library_shown())
+        self.assertEqual(screens.library_controller.section, "series")
+
     def test_the_channel_lists_movies_row_opens_the_library_on_its_provider(self):
         self.show()
         drawer = self.wait_for_drawer()

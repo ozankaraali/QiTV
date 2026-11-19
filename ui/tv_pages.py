@@ -498,6 +498,11 @@ class TVPages(QObject):
         self._show_page(window.library_page)
         self._guard_second_click()
 
+    def open_last_library(self) -> None:
+        """The Library at the section used last, Movies the first time (the channel bar's
+        Library button and the player bar's, 2.11.2)."""
+        self.open_library(self.library_controller.section or "movies")
+
     def open_library(self, section: str) -> None:
         """Movies or Series: what plays goes on in a corner of the Library (nothing playing: the
         Library has the whole window).

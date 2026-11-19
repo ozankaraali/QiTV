@@ -29,13 +29,14 @@ above it and the subtitles button the Subtitles panel (ui/track_controls.py), an
 button beside them the Picture panel (ui/picture_controls.py): the controls stay up while one
 shows (`hold`).
 Without a keyboard every key of the player has a control here too: left of the speaker sit
-Search, and on live TV the guide and the previous channel; a time-shifted channel at its live
-edge has ◀10 beside play; on live TV the channel's name (and logo) shows its info, and a star
-after the name adds or removes it from the favorites. Each names its key when hovered. A movie
-or an episode played from the Library has "‹ Library" at the left of the right-hand buttons:
-back to where it came from, as Esc. 2.9.3: a movie or an episode has a TV button too, where live
-TV has the guide's: live TV again (the channel that was on before), as Ctrl/⌘+1; the phone
-remote's TV button does the same.
+Search, and on live TV the Library, the guide and the previous channel; a time-shifted channel
+at its live edge has ◀10 beside play; on live TV the channel's name (and logo) shows its info,
+and a star after the name adds or removes it from the favorites. Each names its key when
+hovered. A movie or an episode played from the Library has "‹ Library" at the left of the
+right-hand buttons: back to where it came from, as Esc. 2.9.3: a movie or an episode has a
+TV button too: live TV again (the channel that was on before), as Ctrl/⌘+1; the phone
+remote's TV button does the same. 2.11.2: live TV has a Library button (the clapper, as the
+channel bar's) in that very place: the Library at the section used last, as Ctrl/⌘+2.
 The buttons keep their places (2.8.12), so a second click on the same spot does the same thing:
 play comes first in every mode, and what the time-shift bar adds comes after the live edge's
 buttons (▶ ■ ◀10 at the live edge; ▶ ⏮ ◀10 ▶10 +60 ■ behind it: ◀10 stays put, and the
@@ -217,6 +218,8 @@ KEY_HINTS = {
     "title": (N_("Channel info"), "I"),  # i18n: tooltip of the channel's name and logo
     "library": (N_("Back to the Library"), "Esc"),
     "live_tv": (N_("Live TV"), "Ctrl+1"),  # 2.9.3: a movie's way back to live TV
+    # 2.11.2: live TV's way to the Library, in the channel bar's own words and key
+    "open_library": (N_("Movies and series"), "Ctrl+2"),
     # 2.2: each opens a panel whose − and + are these keys.
     "audio": (N_("Sound: track and sync"), "J, K"),  # i18n: tooltip of the sound button
     # i18n: tooltip of the subtitles button
@@ -237,6 +240,7 @@ _ICONS = {
     "previous": "recent",
     "quality": "gear",
     "live_tv": "tv",
+    "open_library": "clapper",
 }
 _LABELS = ("live", "indicator", "times")  # shown, not clicked: over the PiP, clicks go on
 # A quick second click (a double-click) repeats these steps; on any other control it counts
@@ -278,6 +282,7 @@ _ICON_BUTTONS = (  # painted as icons
     "previous",
     "guide",
     "live_tv",
+    "open_library",
     "search",
     "quality",
     "subtitles",
@@ -467,6 +472,7 @@ class Transport(Overlay):
     favoriteRequested = Signal()  # the star after the name: add or remove the channel
     libraryRequested = Signal()  # ‹ Library: back to the Library the title came from (Esc)
     liveTvRequested = Signal()  # 2.9.3: a movie's TV button: live TV again (Ctrl/⌘+1)
+    openLibraryRequested = Signal()  # 2.11.2: live TV's Library button (Ctrl/⌘+2)
     qualityRequested = Signal()  # 2.8: the ⚙ quality menu
     recordRequested = Signal()  # the record button: record the channel, or stop (2.2)
     bandChanged = Signal()  # its controls changed (a mode, the bar): controls_top() moved
@@ -1686,12 +1692,16 @@ class Transport(Overlay):
         """The icon buttons from the right edge inwards: the window's and the picture's, the
         Picture panel's, the subtitles', the sound's (♫ and the speaker: one order in every
         mode, 2.8.12), the ⚙ quality menu (2.8, with `extras`), then Search and, on live TV,
-        the guide and the previous channel; during a movie or an episode the way back to live
-        TV (2.9.3) where the guide is. The second channel's stays (dim) while the grid shows:
-        the multiview's own keeps its place."""
+        the Library (2.11.2), the guide and the previous channel; during a movie or an episode
+        the way back to live TV (2.9.3) where the Library is. The second channel's stays (dim)
+        while the grid shows: the multiview's own keeps its place."""
         grid = ("grid",) if self._grid_available and self._live else ()
         pip = ("pip",) if self._pip_available and self._live else ()
-        tv = ("search", "guide", "previous") if self._live else ("search", "live_tv")
+        tv = (
+            ("search", "open_library", "guide", "previous")
+            if self._live
+            else ("search", "live_tv")
+        )
         cast = ("cast",) if self._cast_available else ()
         quality = ("quality",) if self._quality and extras else ()
         sound = ("picture", "subtitles", "audio", "volume")
@@ -2507,6 +2517,8 @@ class Transport(Overlay):
                 self.libraryRequested.emit()
             elif name == "live_tv":
                 self.liveTvRequested.emit()
+            elif name == "open_library":
+                self.openLibraryRequested.emit()
             elif name == "prev_track":
                 self.prevTrackRequested.emit()
             elif name == "next_track":

@@ -693,6 +693,7 @@ class OnScreenKeysTests(unittest.TestCase):
         signals = {
             "previous": (t.previousRequested, key_hint("Previous channel", "Backspace")),
             "guide": (t.guideRequested, key_hint("Guide", "G")),
+            "open_library": (t.openLibraryRequested, key_hint("Movies and series", "Ctrl+2")),
             "search": (t.searchRequested, key_hint("Search", "Ctrl+F")),
         }
         for name, (signal, tooltip) in signals.items():
@@ -703,9 +704,22 @@ class OnScreenKeysTests(unittest.TestCase):
                 spy = QSignalSpy(signal)
                 self.click(t, rect.center())
                 self.assertEqual(spy.count(), 1)
-        # Left to right: ⟲ ▦ ⌕, then the speaker (the channel's, then the sound's buttons).
-        lefts = [t.button_rect(n).left() for n in ("previous", "guide", "search", "volume")]
+        # Left to right: ⟲ ▦ the Library ⌕, then the speaker (the channel's, then the sound's
+        # buttons).
+        names = ("previous", "guide", "open_library", "search", "volume")
+        lefts = [t.button_rect(n).left() for n in names]
         self.assertEqual(lefts, sorted(lefts))
+
+    def test_the_library_sits_on_live_tv_where_a_movie_has_its_tv_button(self):  # 2.11.2
+        t = self.make()
+        t.show_vod("Film", "")
+        t.update_position(0, 100_000)
+        tv = t.button_rect("live_tv")
+        t.show_live("One", "")
+        self.assertEqual(t.button_rect("open_library"), tv)
+        self.assertLess(t.button_rect("guide").right(), t.button_rect("open_library").left())
+        t.show_vod("Film", "")
+        self.assertNotIn("open_library", t._layout())
 
     def test_a_title_with_choices_has_the_quality_button(self):  # 2.8: the ⚙ menu
         t = self.make()
