@@ -1372,9 +1372,9 @@ class Transport(Overlay):
         if all(self._fits(_ICON_GAP_U, True, row) for row in rows):
             return self._layout_at(_ICON_GAP_U)[0]
         # 2.11.2: live TV's Library button gives way first (the channel bar's reaches the
-        # Library): where the chips would still run into the buttons with the icons closest, the
-        # row lays out again without it, before the ⚙ or any text gives way.
-        library = not any(self._layout_at(_TIGHT_GAP_U, True, row)[1] for row in rows)
+        # Library): where the row still has no room for its chips and texts with the icons
+        # closest (`_fits`), it lays out again without it, before the ⚙ or any text gives way.
+        library = all(self._fits(_TIGHT_GAP_U, True, row) for row in rows)
         rects = self._layout_at(_TIGHT_GAP_U, library=library)[0]
         if "quality" in rects and not all(
             self._fits(_TIGHT_GAP_U, True, row, library) for row in rows
@@ -1710,9 +1710,10 @@ class Transport(Overlay):
         mode, 2.8.12), the ⚙ quality menu (2.8, with `extras`), then Search and, on live TV,
         the Library (2.11.2), the guide and the previous channel; during a movie or an episode
         the way back to live TV (2.9.3) where the Library is. The second channel's stays (dim)
-        while the grid shows: the multiview's own keeps its place. 2.11.2: a row too crowded
-        for the Library button, even with the icons closest, lays out again without it (`library`
-        False), before the ⚙ or any text gives way; the channel bar's still reaches the Library."""
+        while the grid shows: the multiview's own keeps its place. 2.11.2: a row with no room
+        for its chips and texts, even with the icons closest, lays out again without the Library
+        (`library` False), before the ⚙ or any text gives way; the channel bar's still reaches
+        the Library."""
         grid = ("grid",) if self._grid_available and self._live else ()
         pip = ("pip",) if self._pip_available and self._live else ()
         if self._live:

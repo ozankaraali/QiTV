@@ -1384,6 +1384,28 @@ class LiveLibraryButtonTests(unittest.TestCase):  # 2.11.2
                     for b in names[i + 1 :]:
                         self.assertFalse(rects[a].intersects(rects[b]), f"{a} overlaps {b}")
 
+    def test_a_row_short_of_room_for_a_text_leaves_out_the_library_before_the_gear(self):
+        # 2.11.2: not only chips that run into the buttons: a row whose texts are squeezed
+        # (the Stay live indicator, the speed chip's − and +) or whose multiview chips fall
+        # short lets the Library button go before the ⚙, the only way to the quality menu.
+        # Which widths do that depends on the fonts: here the row has room only without it.
+        for check in ("_squeezed", "_grid_chips_short"):
+            t = Transport(idle_ms=3000)
+            self.addCleanup(t.close)
+            t.setGeometry(0, 0, 1280, 720)
+            t.set_pip_state(True, False)
+            t.set_quality_available(True)
+            t.show_live("One", "")
+            with self.subTest(check=check):
+                self.assertIn("open_library", t._layout())  # room for every button
+                self.assertIn("quality", t._layout())
+                setattr(t, check, lambda rects, row=None: "open_library" in rects)
+                rects = t._layout()
+                self.assertNotIn("open_library", rects)
+                self.assertIn("quality", rects)
+                for name in ("guide", "previous", "search", "volume"):
+                    self.assertIn(name, rects)
+
 
 class GridChipTests(TransportCase):
     """The multiview's controls: the way back to one picture, and the layout chip beside it,
