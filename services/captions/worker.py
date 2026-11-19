@@ -15,7 +15,8 @@ guessed, read_on),
 ("viewer", position), ("language", name), ("translate", target[, folder]) (2.10: the language
 lines are translated into, MiLMMT's name, None off; the translation model's folder when it came
 after the load; the load's "translate_to" and "translation" start them), ("levels", on) (Plan 4:
-a film's run sends its sound's band levels too, for the audio screen's Stage), ("stop",),
+a film's run sends its sound's band levels too, for the audio screen's Stage), ("reading", name)
+(dev build: how our Turkish Moonshine reads, services.captions.moon_reading), ("stop",),
 ("quit",).
 From it: ("ready",), ("failed", reason), ("caption", run, start, end, text[, parts[, original]])
 (parts, a line of more than one: [(text, start, end), ...], services.captions.parts; a
@@ -194,8 +195,17 @@ class _Model:
             self.names[_TURKISH_ROLE] = _folder_name(folder)
             try:
                 from services.captions.moon_beam import BeamReader
+                from services.captions.moon_reading import TurkishReader
 
-                self.beam = self.turkish = BeamReader(folder, None, threads=min(2, threads))
+                self.beam = BeamReader(folder, None, threads=min(2, threads))
+                # dev build (2026-11-19): read greedy, by the beam, or with the LSTM LM (and
+                # ILME), as the Subtitles panel's Turkish reading row says
+                lm = spec.get("turkish_lm")
+                self.turkish = TurkishReader(
+                    self.beam,
+                    Path(lm) if lm else None,
+                    str(spec.get("turkish_reading") or "beam"),
+                )
                 self.moonshine = True
             except Exception as error:
                 self.drop_turkish("did not load", error)
@@ -229,11 +239,17 @@ class _Model:
             # Warm up: the first decode is slow (graph optimisation), not the viewer's first.
             if self.recognizer is not None:
                 self.decode(array("f", bytes(16000 * 4)), "")
-            if self.beam is not None:
+            if self.turkish is not None:
                 try:
-                    self.beam.warm()  # (silence is skipped: a quiet tone)
+                    self.turkish.warm()  # (silence is skipped: a quiet tone; the LM loaded)
                 except Exception as error:
                     self.drop_turkish("did not load", error)
+
+    def set_reading(self, name: str) -> None:
+        """Dev build: how our Turkish Moonshine reads from the next piece on (moon_reading)."""
+        turkish = self.turkish
+        if turkish is not None:
+            turkish.set_reading(name)
 
     def drop_turkish(self, what: str, error: BaseException) -> None:
         """Our Turkish Moonshine writes no more, for the process's life: Qwen writes Turkish."""
@@ -355,11 +371,22 @@ class _Model:
     def decode(self, samples: array, language: str, fast: bool = False) -> str:
         """`samples` read by the model that writes `language` (`wrote` names it after); `fast`
         (the picture plays faster than FAST_RATE): our beam narrowed to its best path alone."""
-        beam = self.beam  # (once: a failure on the stream's thread lets it go, `drop_turkish`)
-        if language == TURKISH and beam is not None:
-            self._wrote.name = self.name(_TURKISH_ROLE)
-            width = 1 if fast else None
-            return str(beam.transcribe(samples, width=width)).strip()  # as sherpa-onnx's
+        turkish = self.turkish  # (once: a failure on the stream's thread lets it go)
+        if language == TURKISH and turkish is not None:
+            started = time.perf_counter()
+            text, reading = turkish.transcribe(samples, fast=fast)
+            took = time.perf_counter() - started
+            # dev build: the reading named beside the model, and its time for every piece
+            self._wrote.name = f"{self.name(_TURKISH_ROLE)} · {reading}"
+            seconds = len(samples) / 16000
+            logger.info(
+                "AI captions: Turkish %s: %.1f s of sound in %.2f s (RTF %.2f)",
+                reading,
+                seconds,
+                took,
+                took / max(seconds, 0.01),
+            )
+            return str(text).strip()  # as sherpa-onnx's
         specialist = self._specialist(language) if language else None
         if specialist is None and language and language not in QWEN_LANGUAGES:
             return ""  # 2.9.6: only its own model writes it, and that isn't here (not now)
@@ -1307,6 +1334,9 @@ def _serve(link: _Link) -> None:
                 run._maybe_stream()
         elif kind == "translate":
             translation.set(message[1], message[2] if len(message) > 2 else None)
+        elif kind == "reading":  # dev build: the Turkish reading, from the next piece
+            if model is not None:
+                model.set_reading(str(message[1]))
         elif kind == "stop":
             if run is not None:
                 run.stop()

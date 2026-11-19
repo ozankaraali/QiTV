@@ -530,7 +530,7 @@ class ModelLoadTest(unittest.TestCase):
     """The captions process loads Qwen at once and, with its files given, our Turkish Moonshine
     read with our beam (2.10); the log names the model each language is written by."""
 
-    def load(self, beam: Any, loaded: list) -> Any:
+    def load(self, beam: Any, loaded: list, **extra: Any) -> Any:
         """worker._Model with a fake sherpa-onnx (Qwen says "Good evening.") and `beam` for
         moon_beam.BeamReader; the Turkish model's folder is named as its own."""
         import shutil
@@ -569,7 +569,7 @@ class ModelLoadTest(unittest.TestCase):
         folder = tempfile.mkdtemp()
         self.addCleanup(shutil.rmtree, folder, True)
         spec = {"model": dict.fromkeys(("conv_frontend", "encoder", "decoder", "tokenizer"), "x")}
-        spec.update(vad="vad.onnx", turkish=folder)
+        spec.update(vad="vad.onnx", turkish=folder, **extra)
         with (
             mock.patch.dict(sys.modules, {"sherpa_onnx": fake}),
             mock.patch("services.captions.moon_beam.BeamReader", beam),
@@ -602,6 +602,91 @@ class ModelLoadTest(unittest.TestCase):
                 turkish = model.decode(array("f", bytes(4 * 1600)), worker.TURKISH)
                 self.assertEqual(turkish, "Good evening.")  # Qwen's
                 self.assertEqual(model.writes(worker.TURKISH), "Qwen3-ASR")
+
+    class _Beam:
+        """moon_beam.BeamReader: 2.10's beam, its widths recorded."""
+
+        def __init__(self, folder, lm, threads=2):
+            self.widths: list = []
+            from types import SimpleNamespace
+
+            self.model = SimpleNamespace(_api=None)  # (its onnxruntime: the LMs' sessions')
+
+        def warm(self):
+            pass
+
+        def transcribe(self, samples, width=None):
+            self.widths.append(width)
+            return " iyi akşamlar "
+
+    def test_turkish_decode_names_its_reading_in_the_writer(self) -> None:
+        # dev build (2026-11-19): the log says how each Turkish line was read
+        import os
+
+        from services.captions import worker
+
+        model = self.load(self._Beam, [])
+        name = os.path.basename(str(model.names[worker._TURKISH_ROLE]))
+        self.assertEqual(model.decode(array("f", bytes(4 * 1600)), worker.TURKISH), "iyi akşamlar")
+        self.assertEqual(model.wrote(), f"{name} · beam")
+        model.decode(array("f", bytes(4 * 1600)), worker.TURKISH, fast=True)
+        self.assertEqual(model.wrote(), f"{name} · beam (fast)")
+        self.assertEqual(model.beam.widths, [None, 1])
+
+    def test_the_spec_names_the_turkish_reading_and_its_lm_folder(self) -> None:
+        import tempfile
+        from pathlib import Path
+
+        from types import SimpleNamespace
+        from unittest import mock
+
+        folder = tempfile.mkdtemp()
+        (Path(folder) / "lm.int8.onnx").write_bytes(b"x")
+        lm = SimpleNamespace(close=lambda: None)  # (warm() loads the chosen reading's LM)
+        with mock.patch("services.captions.moon_reading._lstm", lambda path, api: lm):
+            model = self.load(self._Beam, [], turkish_reading="lm_int8", turkish_lm=folder)
+        self.assertEqual(model.turkish.reading, "lm_int8")
+        self.assertEqual(model.turkish.folder, Path(folder))
+        model = self.load(self._Beam, [], turkish_reading="ilme", turkish_lm=folder)
+        self.assertEqual(model.turkish.reading, "beam")  # its file isn't there
+        model = self.load(self._Beam, [], turkish_reading="greedy")
+        self.assertEqual(model.turkish.reading, "greedy")
+        model = self.load(self._Beam, [])
+        self.assertEqual(model.turkish.reading, "beam")
+
+    def test_each_turkish_reading_is_logged_with_its_time(self) -> None:
+        from services.captions import worker
+
+        model = self.load(self._Beam, [])
+        with self.assertLogs("services.captions.worker", "INFO") as logs:
+            model.decode(array("f", bytes(4 * 16000)), worker.TURKISH)
+        said = [r.getMessage() for r in logs.records if "of sound in" in r.getMessage()]
+        self.assertEqual(len(said), 1)
+        self.assertIn("Turkish beam: 1.0 s of sound in", said[0])
+        self.assertIn("RTF", said[0])
+
+    def test_a_reading_message_reaches_the_model(self) -> None:
+        from types import SimpleNamespace
+        from unittest import mock
+
+        from services.captions import worker
+
+        readings: list = []
+
+        class Model:
+            def __init__(self, spec):
+                pass
+
+            def set_reading(self, name):
+                readings.append(name)
+
+        messages = [("reading", "lm"), ("load", {}), ("reading", "lm_int8"), ("quit",)]
+        sent: list = []
+        link = SimpleNamespace(conn=SimpleNamespace(recv=lambda: messages.pop(0)), send=sent.append)
+        with mock.patch.object(worker, "_Model", Model):
+            worker._serve(link)
+        self.assertEqual(readings, ["lm_int8"])  # before the model loaded: nothing to tell
+        self.assertIn(("ready",), sent)
 
     def test_qwen_and_the_turkish_moonshine_load_at_once(self) -> None:
         import os
@@ -663,7 +748,7 @@ class ModelLoadTest(unittest.TestCase):
         self.assertEqual(loaded, ["qwen", ("beam", name, None)])  # the beam alone, no n-gram
         self.assertIsNotNone(model.recognizer)
         self.assertEqual(model.decode(array("f", bytes(4 * 1600)), worker.TURKISH), "iyi akşamlar")
-        self.assertEqual(model.wrote(), name)
+        self.assertEqual(model.wrote(), f"{name} · beam")  # dev build: its reading too
         self.assertEqual(model.decode(array("f", bytes(4 * 1600)), "English"), "Good evening.")
         self.assertEqual(model.writes(worker.TURKISH), name)
         self.assertEqual(model.writes("English"), "Qwen3-ASR")

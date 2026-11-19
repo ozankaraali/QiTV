@@ -19,6 +19,7 @@ import unittest.mock
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 from services.captions import guards, text_language
+from services.captions.moon_reading import TurkishReader
 from services.captions.pieces import RATE, WINDOW, Cutter
 from services.captions.stream_clock import StreamClock, TsTimes, pts_seconds
 
@@ -241,7 +242,8 @@ class TurkishModelTests(unittest.TestCase):
 
         model = object.__new__(_Model)
         model.recognizer = Recognizer("qwen", "Good evening.")
-        model.beam = model.turkish = Beam()
+        model.beam = Beam()
+        model.turkish = TurkishReader(model.beam, None)  # dev build: the reading round the beam
         model.european = model.cohere = None
         model._folders, model._loading = {}, {}
         return model, heard
@@ -1284,6 +1286,7 @@ class StreamClockTests(unittest.TestCase):
             return ""
 
         model.beam = SimpleNamespace(transcribe=transcribe)
+        model.turkish = TurkishReader(model.beam, None)
         model._wrote, model.names = threading.local(), {}
         model.name = lambda role: "beam"
         model.decode(array("f"), worker.TURKISH, fast=True)
@@ -1320,6 +1323,7 @@ class StreamClockTests(unittest.TestCase):
         model.beam = SimpleNamespace(
             transcribe=lambda samples, width=None: widths.append(width) or ""
         )
+        model.turkish = TurkishReader(model.beam, None)
         model._wrote, model.names = threading.local(), {}
         model.name = lambda role: "beam"
         model.decode(array("f"), worker.TURKISH, fast=slow.fast())
