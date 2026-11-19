@@ -11,6 +11,7 @@ import tomllib
 import orjson as json
 
 from services.atomic_write import atomic_write, set_aside
+from services.captions import translation_rules
 from services.captions.languages import CAPTION_LANGUAGES
 from services.captions.mt_languages import MT_LANGUAGES
 from services.config_writer import ConfigWriter
@@ -599,9 +600,15 @@ class ConfigManager:
         "ai_captions_language_models", False, coerce=lambda value: value is True
     )
     # 2.10, optional (older builds ignore it): the language AI captions are translated into
-    # ("": off; else one of services.captions.mt_languages.MT_LANGUAGES, MiLMMT's names)
+    # ("": off; else one of services.captions.mt_languages.MT_LANGUAGES, MiLMMT's names).
+    # 2.11.2: no longer read (nor carried over); kept so older builds read what they wrote.
     ai_captions_translate_to = _config_property(
         "ai_captions_translate_to", "", coerce=_one_of(("", *MT_LANGUAGES), "")
+    )
+    # 2.11.2, optional (older builds ignore it): the translation per spoken language
+    # ({Qwen's name: MiLMMT's name, or "" for none}; services.captions.translation_rules)
+    ai_captions_translations = _config_property(
+        "ai_captions_translations", {}, coerce=translation_rules.clean
     )
     # Optional (older builds ignore it): AI captions were turned on (true) or off during the
     # last video file played; the next one comes on with them when nothing has to be asked,

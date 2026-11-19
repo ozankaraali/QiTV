@@ -143,10 +143,17 @@ class LocalCaptionsTests(_LocalCase):
 
     def translated_with_the_speed_unknown(self):
         """Translated, Automatic goes by this computer's speed first (_speed_unknown); QiTV
-        has just started: not measured yet. Its models are here."""
+        has just started: not measured yet. Its models are here. 2.11.2: the series' sound
+        track names Turkish, and Turkish is translated into German (the viewer's rule)."""
         self.config.ai_captions_local_on = True
-        self.config.ai_captions_translate_to = "German"
+        self.turkish_into_german()
         self.score = None
+
+    def turkish_into_german(self):
+        """2.11.2: the files' audio track names Turkish; the viewer's rule for Turkish is
+        German."""
+        self.config.ai_captions_translations = {"Turkish": "German"}
+        self.captions._track_language = lambda: "Turkish"
 
     def test_translated_they_come_on_once_the_speed_is_measured(self):
         # Ruling 13, the friend's setup: a Turkish series translated into German, double-clicked
@@ -165,6 +172,17 @@ class LocalCaptionsTests(_LocalCase):
         self.controller.tune_live(CHANNELS[0], group_key="10", channels=list(CHANNELS))
         self.ready()
         self.assertFalse(self.captions.enabled())  # on by themselves: off for live TV
+
+    def test_a_file_whose_language_isnt_known_comes_back_untranslated_at_once(self):
+        # 2.11.2: a rule for Turkish, but this file's language isn't known yet: nothing is
+        # translated, so Automatic takes the model here with no wait for the speed
+        self.config.ai_captions_local_on = True
+        self.config.ai_captions_translations = {"Turkish": "German"}
+        self.score = None
+        self.film()
+        self.assertTrue(self.captions.enabled())
+        self.assertEqual((self.loads, self.warmed, self.card.asked), (["large"], [], []))
+        self.assertEqual(self.captions.translate_to(), "")
 
     def test_translated_a_title_changed_before_the_speed_is_known_brings_nothing_on(self):
         self.translated_with_the_speed_unknown()
@@ -218,7 +236,7 @@ class LocalCaptionsTests(_LocalCase):
         # this computer's speed: the channel tuned meanwhile ends the wait.
         self.config.ai_captions_local_on = True
         self.config.ai_captions_model = "small"
-        self.config.ai_captions_translate_to = "German"
+        self.turkish_into_german()
         self.score = None
         self.film()
         self.assertTrue(self.captions.enabled())

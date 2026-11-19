@@ -33,6 +33,8 @@ where it is (TVController.relay_film); turning them off keeps it until the title
 2.10: the captions show translated into the language the viewer picks from the "Translate to"
 list (`set_translate_to`; MiLMMT-46 1B in the captions process, services.captions.translate). Its
 model is downloaded once its question is answered (asked while they are on; not now: none).
+2.11.2: the language they are translated into is remembered per spoken language
+(services.captions.translation_rules); none is translated before its language is known.
 While they are translated the picture is held TRANSLATE_LEAD_S further back (a film's sound read
 that much further ahead), on every channel. On a computer too slow for the 1.7B and the
 translator both, Automatic takes the 0.6B (services.captions.tier.TRANSLATE_SMALL_BELOW) and
@@ -126,7 +128,8 @@ _SLOW_RTF = 0.9  # the model takes this long per second of speech: it can't keep
 _LANGUAGE_MODELS_OK = "ai_captions_language_models"
 _BACKLOG_S = 2.0  # ... or this much sound read waits for it (2.9.1)
 _SLOW_FOR_S = 30.0
-_TRANSLATE_TO = "ai_captions_translate_to"  # 2.10: the language they are translated into
+# 2.11.2: the language they are translated into, per spoken language (translation_rules)
+_TRANSLATIONS = "ai_captions_translations"
 _LOCAL_ON = "ai_captions_local_on"  # turned on (or off) during the last video file
 
 from ui.captions_texts import (  # noqa: E402  (the texts, with their translations)
@@ -445,6 +448,9 @@ class CaptionsController(QObject):
             return
         from services.captions import models
 
+        # 2.11.2: what plays decides whether they are translated (the rule for its language),
+        # and with it Automatic's model and its wait for the speed
+        self._resolve_language()
         if self._speed_unknown():
             self._toggle_waits = True  # Automatic picks once the benchmark is done
             self._warm_tier()
@@ -493,6 +499,7 @@ class CaptionsController(QObject):
             return
         if self._own_subtitles_shown():
             return
+        self._resolve_language()  # 2.11.2: translated (the rule for its language), or not
         if self._speed_unknown():  # (before the tier: Automatic's would start the benchmark)
             if self._here("large") or self._here("small"):  # what it takes once known is here
                 self._auto_pending = self._target()
@@ -579,7 +586,9 @@ class CaptionsController(QObject):
         """The viewer's pick for this channel, film or video file, and for a song's folder
         (`_pick_key`; "auto": the model's own detection). 2.11.1 (ruling I1): Auto on the
         viewer's own file also forgets what was heard on it, and its run reads it again with
-        no language (a run's vote, once it agreed, stays): Auto hears it anew."""
+        no language (a run's vote, once it agreed, stays): Auto hears it anew. 2.11.2: they are
+        translated as the viewer's rule for that language says (`_retranslate`)."""
+        before = self._translation()
         key = self._pick_key()
         picks = dict(self._config_get("ai_captions_picks", {}) or {})
         if name == "auto":
@@ -595,41 +604,68 @@ class CaptionsController(QObject):
             self._read_again()
         else:
             self._process.send("language", self._language[0])
-        self.changed.emit()
+        self._retranslate(before)  # (the panel says it)
         self._offer_specialist()
 
-    # ---- 2.10: translated into the language the viewer picks ------------------------------
-    def translate_to(self) -> str:
-        """The language AI captions are translated into, as the viewer chose it (MiLMMT's
-        name; "": none). Its model may not be here yet (asked for, or on its way)."""
-        from services.captions.mt_languages import MT_LANGUAGES
+    # ---- 2.10: translated into the language the viewer picks; 2.11.2: per spoken language ----
+    def _rules(self) -> dict[str, str]:
+        """The viewer's translation per spoken language (services.captions.translation_rules)."""
+        from services.captions.translation_rules import clean
 
-        name = str(self._config_get(_TRANSLATE_TO, "") or "")
+        return clean(self._config_get(_TRANSLATIONS, {}))
+
+    def translate_to(self) -> str:
+        """The language AI captions are translated into: the viewer's rule for the language they
+        hear (MiLMMT's name; "": none, no rule, or that language not known yet). Its model may
+        not be here yet (asked for, or on its way)."""
+        from services.captions.mt_languages import MT_LANGUAGES
+        from services.captions.translation_rules import target_for
+
+        name = target_for(self._rules(), self._language[0])
         return name if name in MT_LANGUAGES else ""
+
+    def translation_waits(self) -> bool:
+        """No language is known yet (Auto, not heard yet): nothing is translated, and no rule
+        can be set until it is (the Translate to row waits for it)."""
+        return self._language[0] == ""
+
+    def recent_translations(self) -> list[str]:
+        """The languages the viewer's rules translate into, once each, by their own names; not
+        the one heard (MiLMMT's names)."""
+        from services.captions.translation_rules import used_targets
+
+        return used_targets(self._rules(), self._language[0])
 
     def translate_languages(self) -> list[tuple[str, str]]:
         """The Translate to list's languages, Off aside, as (MiLMMT's name, its own name): the
-        app language's first when MiLMMT has it, then the rest by their own names (as Settings
-        sorts the captions' languages)."""
+        ones the viewer's rules use first (`recent_translations`), then the app language's when
+        MiLMMT has it (a shortcut only: it chooses nothing), then the rest by their own names
+        (as Settings sorts the captions' languages)."""
         from services import i18n
         from services.captions.mt_languages import MT_LANGUAGES, app_default, own_name
 
-        first = app_default(i18n.language())
+        first = self.recent_translations()
+        app = app_default(i18n.language())
+        if app and app not in first:
+            first.append(app)
         rest = sorted(
-            (name for name in MT_LANGUAGES if name != first),
+            (name for name in MT_LANGUAGES if name not in first),
             key=lambda name: own_name(name).casefold(),
         )
-        return [(name, own_name(name)) for name in ([first] if first else []) + rest]
+        return [(name, own_name(name)) for name in first + rest]
 
     def set_translate_to(self, name: str) -> None:
-        """The language AI captions are translated into ("": none), kept as Settings keep
-        theirs. A language whose model isn't here asks its download's question first, while
-        they are on (else as they start; not now: none); "" takes back that question, or calls
-        off that download."""
+        """The viewer's rule for the language AI captions hear: translated into `name` ("":
+        none, remembered as such), kept as Settings keep theirs; nothing while that language
+        isn't known yet (`translation_waits`). A language whose model isn't here asks its
+        download's question first, while they are on (else as they start; not now: none); ""
+        takes back that question, or calls off that download."""
         from services.captions.models import TRANSLATION_KEY
         from services.captions.mt_languages import MT_LANGUAGES
 
         if name and name not in MT_LANGUAGES:
+            return
+        if self.translation_waits():
             return
         before = self._translation()
         if not name and self._fetching == TRANSLATION_KEY:
@@ -639,9 +675,22 @@ class CaptionsController(QObject):
                 self._asking = self._asking_step = False
                 if self._card is not None:
                     self._card.withdraw()
-        self._config_set(_TRANSLATE_TO, name)
-        logger.info("AI captions: translated into %s", name or "nothing")
-        self._follow_translation(before)
+        self._set_rule(name)
+        logger.info("AI captions: %s translated into %s", self._language[0], name or "nothing")
+        self._retranslate(before)
+
+    def _set_rule(self, target: str) -> None:
+        """The language heard is translated into `target` from now on ("": none, remembered)."""
+        from services.captions.translation_rules import with_rule
+
+        self._config_set(_TRANSLATIONS, with_rule(self._rules(), self._language[0], target))
+
+    def _retranslate(self, before: str) -> None:
+        """What they are translated into may have changed from `before` (the language heard, or
+        its rule): followed (`_follow_translation`), its model's question when it isn't here,
+        and the panel says it. Never from `_resolve_language`: a restart resolves again."""
+        if self._translation() != before:
+            self._follow_translation(before)
         self._offer_translation()
         self.changed.emit()
 
@@ -712,7 +761,7 @@ class CaptionsController(QObject):
             missing = models.download_size(models.TRANSLATION_KEY)
         except models.Unsupported:
             logger.warning("AI captions: no translation model suits this computer")
-            self._config_set(_TRANSLATE_TO, "")
+            self._config_set(_TRANSLATIONS, {})  # 2.11.2: none, for any language
             self.changed.emit()  # the row (and the phones) say Off
             return
         self._fetching = models.TRANSLATION_KEY
@@ -881,7 +930,7 @@ class CaptionsController(QObject):
             from services.captions.models import TRANSLATION_KEY
 
             if self._fetching == TRANSLATION_KEY:
-                self._config_set(_TRANSLATE_TO, "")  # 2.10: not now: not translated
+                self._set_rule("")  # 2.10: not now: not translated (2.11.2: the language heard)
             self.changed.emit()  # the question is gone (a phone's closes too)
             self._offer_translation()  # 2.10: one picked while this one was up
             return
@@ -981,7 +1030,8 @@ class CaptionsController(QObject):
         if reason != CANCELLED:
             self._toast(reason, "error")  # already the whole sentence ("Download failed: …")
             if self._fetching == TRANSLATION_KEY:
-                self._config_set(_TRANSLATE_TO, "")  # 2.10: not translated (a pick asks again)
+                # 2.10: not translated (a pick asks again); 2.11.2: the language heard's rule
+                self._set_rule("")
             self._offer_faster()
         self.changed.emit()
 
@@ -1241,7 +1291,6 @@ class CaptionsController(QObject):
         self._restart.stop()  # this is the start a pending restart was for
         if not self._enabled or not self._ready:
             return
-        self._offer_translation()  # 2.10: a language chosen whose model isn't here (any more)
         if not self._is_live():
             self._start_film()
             return
@@ -1270,6 +1319,7 @@ class CaptionsController(QObject):
         self._run_channel = self._heard_key()
         self._run_start = start
         self._run_track = self._audio_track()
+        before = self._translation()
         self._resolve_language()  # the language of the track it reads, as it begins
         self._session_key = url.rsplit("/side/", 1)[0]
         self._newest = self._written = None
@@ -1284,6 +1334,9 @@ class CaptionsController(QObject):
             read_on,
         )
         self._process.send("viewer", self._position())
+        # 2.11.2: that language's translation; 2.10: its model's question when it isn't here
+        # (any more), before a language's own speech model's
+        self._retranslate(before)
         self._offer_specialist()
 
     def _start_film(self) -> None:
@@ -1298,6 +1351,7 @@ class CaptionsController(QObject):
         self._run_channel = self._heard_key()
         self._run_start = start
         self._run_track = self._audio_track()
+        before = self._translation()
         self._resolve_language()  # the language of the track it reads, as it begins
         self._session_key = location
         self._newest = self._written = None
@@ -1308,6 +1362,8 @@ class CaptionsController(QObject):
         )
         self._process.send("viewer", self._position())
         self.soundRead.emit()  # the visualizer reads no further than where this run reads from
+        # 2.11.2: that language's translation (turned on: read again from further ahead)
+        self._retranslate(before)
         if self._language[0] == "Turkish" and self._own_file(self._target()) is not None:
             # 2.11.1 (ruling M1): a file of the viewer's that starts in Turkish (its track's,
             # or heard on it before) asks for our Turkish model as a channel's run does; one
@@ -1412,15 +1468,17 @@ class CaptionsController(QObject):
     def _on_detected(self, run: int, language: str) -> None:
         """No language was given and the pieces agreed on one: kept for the channel (the file:
         `_heard_key`) while QiTV runs (the next run there starts with it), and the panel says
-        it."""
+        it. 2.11.2: translated as the viewer's rule for it says (a programme's language
+        changing: the new one's)."""
         if run != self._run:
             return
         key = self._run_channel  # the run's channel, not the one a zap just tuned
         if key:
             self._detected[key] = language
         if self._language[1] == FROM_MODEL:
+            before = self._translation()
             self._language = (language, FROM_MODEL)
-            self.changed.emit()
+            self._retranslate(before)  # (the panel says it)
         self._offer_specialist()
 
     def _on_resync(self, run: int, newest: float) -> None:
@@ -1472,9 +1530,10 @@ class CaptionsController(QObject):
             self._forget_run()  # ... read from its own picture, its speed judged anew
             self._deaf_runs = 0
             self._last = None
+            before = self._translation()
             self._resolve_language()  # its own language too
             self._start_run()
-            self.changed.emit()
+            self._retranslate(before)  # 2.11.2: its language's translation (the panel says it)
             return
         if self._ready and self._track_changed():
             self._hear_track()

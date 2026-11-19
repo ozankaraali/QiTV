@@ -55,7 +55,7 @@ class WindowConfigMigrationTests(unittest.TestCase):
 
     def test_the_language_captions_are_translated_into_is_off_or_one_of_the_models(self):
         # 2.10: an older config has none (Off) and keeps what it has; anything but one of
-        # MiLMMT's names reads as Off
+        # MiLMMT's names reads as Off (2.11.2: no longer read, kept for older builds)
         saved = {"ai_captions_model": "small", "ai_captions_language": "Turkish"}
         with tempfile.TemporaryDirectory() as directory:
             config_path = Path(directory) / "config.json"
@@ -73,6 +73,32 @@ class WindowConfigMigrationTests(unittest.TestCase):
                 config.save_config(wait=True)
                 reloaded = ConfigManager()
                 self.assertEqual(reloaded.ai_captions_translate_to, "Chinese (Simplified)")
+                written = json.loads(config_path.read_text(encoding="utf-8"))
+        for key, value in saved.items():
+            self.assertEqual(written[key], value)
+
+    def test_translations_are_kept_per_spoken_language_and_a_2_11_1_config_has_none(self):
+        # 2.11.2, the owner: translation starts Off for every language; the old single target
+        # is not carried over, and both old keys stay as they were (older builds read them)
+        saved = {"ai_captions_translate_to": "English", "ai_captions_language": "Turkish"}
+        with tempfile.TemporaryDirectory() as directory:
+            config_path = Path(directory) / "config.json"
+            config_path.write_text(json.dumps(saved), encoding="utf-8")
+            with patch.object(ConfigManager, "_get_config_path", return_value=str(config_path)):
+                config = ConfigManager()
+                self.assertEqual(config.ai_captions_translations, {})
+                for stored in ("English", ["German"], {"Klingon": "English"}, None, 5):
+                    config.config["ai_captions_translations"] = stored
+                    self.assertEqual(config.ai_captions_translations, {}, stored)
+                config.ai_captions_translations = {"German": "English", "English": "", "x": "y"}
+                self.assertEqual(
+                    config.config["ai_captions_translations"], {"German": "English", "English": ""}
+                )
+                config.save_config(wait=True)
+                reloaded = ConfigManager()
+                self.assertEqual(
+                    reloaded.ai_captions_translations, {"German": "English", "English": ""}
+                )
                 written = json.loads(config_path.read_text(encoding="utf-8"))
         for key, value in saved.items():
             self.assertEqual(written[key], value)
