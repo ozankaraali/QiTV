@@ -1448,6 +1448,9 @@ class TVController(QObject):
         and Forward, and a click on the picture closes it."""
         self._settings = settings
         settings.hidden.connect(self._on_settings_hidden)
+        # The channel list opened while it shows (a menu, a provider ready) raises itself over
+        # it and takes the keys: Settings goes (eventFilter).
+        self.overlays.drawer.installEventFilter(self)
 
     def make_way_for_settings(self) -> None:
         """Settings is opening over the player: what would keep the keys hidden under it
@@ -1825,6 +1828,10 @@ class TVController(QObject):
             self._zap_steps(steps)
 
     def eventFilter(self, watched: QObject, event: QEvent) -> bool:
+        if watched is self.overlays.drawer:
+            if event.type() == QEvent.Type.Show and self._settings_shown():
+                self._close_settings()
+            return False
         if isinstance(event, QWheelEvent) and self.overlays.column.isVisible():
             self._column_wheel.wheel_event(event)
             event.accept()

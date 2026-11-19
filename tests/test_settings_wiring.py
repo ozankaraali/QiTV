@@ -16,6 +16,7 @@ from timer_fixtures import wait_until
 from services.navigation import SETTINGS_ROW
 from services.settings_model import GENERAL
 from tests import test_tv_window as base
+from ui.keymap import Action
 from ui.settings_dialog import OptionsDialog
 
 
@@ -151,6 +152,19 @@ class SettingsWiringTests(base.WindowCase):
         self.assertTrue(card.isVisible())
         stacked = [w for w in self.window.host.children() if w is card or w is settings]
         self.assertEqual(stacked, [settings, card])  # the card above
+
+    def test_the_channel_list_opened_over_settings_closes_it(self):
+        # The list opened while Settings shows (a menu, a provider ready) shows on top and
+        # takes the keys: Settings goes.
+        self.show()
+        drawer = self.wait_for_drawer()
+        self.menu_actions()["Settings…"].trigger()
+        self.assertFalse(drawer.isVisible())
+        self.window.controller.handle(Action.OPEN_DRAWER)
+        self.assertTrue(drawer.isVisible())
+        self.assertFalse(self.window.settings.visible())
+        QTest.keyClick(self.window, Qt.Key.Key_Escape)  # the list's own Esc
+        self.assertFalse(drawer.isVisible())
 
     def test_the_search_from_settings_leaves_it_for_the_library(self):
         self.show()
