@@ -17,7 +17,6 @@ reading or warm()."""
 
 from __future__ import annotations
 
-from dataclasses import replace
 import logging
 from pathlib import Path
 import threading
@@ -86,7 +85,6 @@ class TurkishReader:
         lm_factory: Optional[Callable[[Path, Any], Any]] = None,
     ) -> None:
         self.beam = beam
-        self.model = beam.model
         self.folder = folder
         self._factory = lm_factory or _lstm
         self._lock = threading.Lock()  # the LMs' loading
@@ -98,6 +96,10 @@ class TurkishReader:
     @property
     def reading(self) -> str:
         return self._reading
+
+    @property
+    def model(self) -> Any:
+        return self.beam.model
 
     def choices(self) -> list[str]:
         """The readings offered here: their file is there and didn't fail to load."""
@@ -131,36 +133,46 @@ class TurkishReader:
 
     def transcribe(self, samples: Any, fast: bool = False) -> tuple[str, str]:
         """A piece's text (16 kHz mono floats) and the reading that wrote it ("lm (fast)": the
-        best path alone)."""
+        best path alone). Beam, and any fast reading, are BeamReader.transcribe as 2.10 reads."""
         reading = self._reading  # once: a switch meanwhile is the next reading's
+        if reading == "greedy":
+            return self._greedy(samples), reading
+        lm = None
+        if not fast and reading in LM_FILES:
+            lm = self._lm(LM_FILES[reading])
+            if lm is None:
+                reading = DEFAULT
+        if lm is None:
+            label = f"{reading} (fast)" if fast else reading
+            return str(self.beam.transcribe(samples, width=1 if fast else None)), label
         model = self.model
         encoded = model.encode(samples)
         try:
-            if reading == "greedy":
-                return model.text(model.decode(encoded).tokens), reading
-            lm = None
-            if not fast and reading in LM_FILES:
-                lm = self._lm(LM_FILES[reading])
-                if lm is None:
-                    reading = DEFAULT
-            label = f"{reading} (fast)" if fast else reading
             if encoded.silent:
-                return "", label
+                return "", reading
             cap = token_cap(encoded.frames)
             if cap <= 0:
-                return "", label
-            settings = replace(SETTINGS[DEFAULT], width=1) if fast else SETTINGS[reading]
+                return "", reading
+            settings = SETTINGS[reading]
             with model.steps(encoded) as steps:
-                if lm is not None and reading == "ilme":
+                if reading == "ilme":
                     assert encoded.value is not None  # (not silent)
                     shape = encoded.value.shape
                     ilm = DecoderIlm(model, shape[1], shape[2])
                     try:
                         fused: Any = Fused(lm, ilm, ILME_MU / settings.lm_weight)
-                        return model.text(search(steps, cap, settings, fused).tokens), label
+                        return model.text(search(steps, cap, settings, fused).tokens), reading
                     finally:
                         ilm.close()
-                return model.text(search(steps, cap, settings, lm).tokens), label
+                return model.text(search(steps, cap, settings, lm).tokens), reading
+        finally:
+            encoded.release()
+
+    def _greedy(self, samples: Any) -> str:
+        model = self.model
+        encoded = model.encode(samples)
+        try:
+            return str(model.text(model.decode(encoded).tokens))
         finally:
             encoded.release()
 

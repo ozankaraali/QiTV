@@ -51,10 +51,17 @@ class FakeModel:
 
 
 class FakeBeam:
+    """moon_beam.BeamReader: its model, and its own reading (2.10's beam) recorded."""
+
     def __init__(self):
         self.model = FakeModel()
         self.warmed = 0
         self.closed = False
+        self.widths = []
+
+    def transcribe(self, samples, width=None):
+        self.widths.append(width)
+        return "b"
 
     def warm(self):
         self.warmed += 1
@@ -133,10 +140,11 @@ class ReadingTests(unittest.TestCase):
         self.assertEqual(self.searched, [])
         self.assertTrue(reader.model.encoded[0].released)
 
-    def test_beam_searches_with_2_10_settings_and_no_lm(self):
+    def test_beam_reads_exactly_as_2_10_did(self):
         reader = self.reader("beam")
-        self.assertEqual(reader.transcribe([0.0] * 16000), ("9", "beam"))
-        self.assertEqual(self.searched, [(Settings(), None)])
+        self.assertEqual(reader.transcribe([0.0] * 16000), ("b", "beam"))
+        self.assertEqual(reader.beam.widths, [None])  # BeamReader.transcribe, its own settings
+        self.assertEqual(self.searched, [])
         self.assertEqual(self.loaded, [])
 
     def test_lm_searches_with_the_u8mm_lm_at_its_tuned_weights(self):
@@ -171,8 +179,10 @@ class ReadingTests(unittest.TestCase):
 
     def test_fast_reads_the_best_path_alone_without_lm(self):
         reader = self.reader("lm")
-        self.assertEqual(reader.transcribe([0.0] * 16000, fast=True), ("9", "lm (fast)"))
-        self.assertEqual(self.searched, [(Settings(width=1), None)])
+        self.assertEqual(reader.transcribe([0.0] * 16000, fast=True), ("b", "lm (fast)"))
+        self.assertEqual(reader.beam.widths, [1])  # 2.10's fast reading: its best path alone
+        self.assertEqual(self.searched, [])
+        self.assertEqual(self.loaded, [])
 
     def test_an_lm_that_fails_to_load_falls_back_to_beam_once(self):
         calls = []
@@ -183,12 +193,12 @@ class ReadingTests(unittest.TestCase):
 
         reader = self.reader("lm", factory=broken)
         with self.assertLogs("services.captions.moon_reading", "WARNING") as logs:
-            self.assertEqual(reader.transcribe([0.0] * 16000), ("9", "beam"))
-            self.assertEqual(reader.transcribe([0.0] * 16000), ("9", "beam"))
+            self.assertEqual(reader.transcribe([0.0] * 16000), ("b", "beam"))
+            self.assertEqual(reader.transcribe([0.0] * 16000), ("b", "beam"))
         self.assertEqual(len(calls), 1)
         self.assertEqual(len(logs.records), 1)
         self.assertEqual(reader.reading, "beam")
-        self.assertEqual(self.searched[0], (Settings(), None))
+        self.assertEqual(reader.beam.widths, [None, None])
         reader.set_reading("lm")
         self.assertEqual(reader.reading, "beam")  # its file failed: not offered again
 
