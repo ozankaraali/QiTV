@@ -40,6 +40,9 @@ TRANSLATE_QUESTION = N_(
 # captions can be translated into; the list's title too.
 # i18n: a row opening a list of languages; the captions show translated into the one chosen
 TRANSLATE_ROW = N_("Translate to")
+# 2.11.2: the translation is remembered per spoken language, so none is set before it is known.
+# i18n: the Translate to row's note while AI captions haven't found the language yet
+TRANSLATE_WAITS = N_("Once the language is heard")
 # AI captions fell behind with the larger speech model (Automatic) and the faster isn't here.
 # i18n: the question when AI captions fall behind with the larger speech model; size: "880 MB"
 STEP_DOWN_QUESTION = N_(

@@ -215,6 +215,8 @@ class FakeCaptions(QObject):
         self.target = ""  # 2.10: the language they are translated into ("": off)
         self.translated = []  # set_translate_to's calls
         self.translate_asks = False  # a language asks its model's download question first
+        self.waits = False  # 2.11.2: the spoken language isn't known yet
+        self.recent = []  # 2.11.2: the languages used before (MiLMMT's names), in order
         self.offs = []  # give_way's `off`, each time
 
     def available(self):
@@ -297,8 +299,16 @@ class FakeCaptions(QObject):
     def translate_to(self):
         return self.target
 
+    def translation_waits(self):
+        return self.waits
+
+    def recent_translations(self):
+        return list(self.recent)
+
     def translate_languages(self):
-        return [("Turkish", "Türkçe"), ("English", "English"), ("German", "Deutsch")]
+        everyone = [("Turkish", "Türkçe"), ("English", "English"), ("German", "Deutsch")]
+        used = [pair for name in self.recent for pair in everyone if pair[0] == name]
+        return used + [pair for pair in everyone if pair not in used]
 
     def set_translate_to(self, name):
         self.translated.append(name)
@@ -341,9 +351,18 @@ class CaptionRowsTests(PanelCase):
             for r in self.rows()
         ]
 
+    def row(self, key):
+        return self.rows()[[r.key for r in self.rows()].index(key)]
+
     def click_row(self, key):
         index = [r.key for r in self.rows()].index(key)
         self.click(self.subtitle_panel, self.subtitle_panel.row_rect(index).center().toPoint())
+
+    def step_row(self, key, delta):
+        index = [r.key for r in self.rows()].index(key)
+        self.click(
+            self.subtitle_panel, self.subtitle_panel.step_rect(index, delta).center().toPoint()
+        )
 
     def test_the_row_shows_while_ai_captions_can_be_offered(self):
         self.captions.offered = False
@@ -473,6 +492,38 @@ class CaptionRowsTests(PanelCase):
         self.captions.changed.emit()
         self.assertEqual(self.subtitle_panel.model().title, "Subtitles")
         self.assertNotIn(AI_TRANSLATE, [r.key for r in self.rows()])
+
+    def test_the_translate_row_waits_for_the_language(self):
+        self.captions.on, self.captions.waits = True, True
+        self.click_button("subtitles")
+        row = self.row(AI_TRANSLATE)
+        self.assertEqual(
+            (row.note, row.opens, row.value), ("Once the language is heard", False, "")
+        )
+        self.click_row(AI_TRANSLATE)
+        self.assertEqual(self.subtitle_panel.model().title, "Subtitles")  # nothing opened
+        self.assertEqual(self.captions.translated, [])
+
+    def test_the_translate_row_steps_through_off_and_the_used_languages(self):
+        self.captions.on, self.captions.recent = True, ["English", "Turkish"]
+        self.click_button("subtitles")
+        row = self.row(AI_TRANSLATE)
+        self.assertEqual(
+            (row.value, row.choosable, row.lit, row.widest), ("Off", True, False, "English")
+        )
+        self.step_row(AI_TRANSLATE, +1)
+        self.assertEqual(self.captions.translated, ["English"])
+        self.assertEqual(
+            (self.row(AI_TRANSLATE).value, self.row(AI_TRANSLATE).lit), ("English", True)
+        )
+        self.step_row(AI_TRANSLATE, +1)
+        self.step_row(AI_TRANSLATE, +1)  # round to Off
+        self.assertEqual(self.captions.translated, ["English", "Turkish", ""])
+        self.step_row(AI_TRANSLATE, -1)  # and back round the other way
+        self.assertEqual(self.captions.translated[-1], "Turkish")
+        self.click_row(AI_TRANSLATE)  # a click opens the full list
+        self.assertEqual(self.subtitle_panel.model().title, "Translate to")
+        self.assertEqual(self.texts()[1:4], ["Off", "English", "*Türkçe"])  # used first
 
     def test_a_language_whose_model_must_download_puts_its_question_in_front(self):
         self.captions.on, self.captions.translate_asks = True, True
@@ -692,7 +743,14 @@ class PhoneChoicesTests(PanelCase):
         self.assertEqual((off.translate_text, off.translations), ("", ()))
         self.assertFalse(controls.choose_caption_translation("Turkish"))  # off: no row
         self.assertEqual(self.captions.translated, [])
-        self.captions.on = True
+        self.captions.on, self.captions.waits = True, True
+        waiting = controls.captions_choice()  # 2.11.2: no list until the language is known
+        self.assertEqual(
+            (waiting.translate_text, waiting.translations), ("Once the language is heard", None)
+        )
+        self.assertFalse(controls.choose_caption_translation("Turkish"))
+        self.assertEqual(self.captions.translated, [])
+        self.captions.waits = False
         choice = controls.captions_choice()
         self.assertEqual((choice.translate, choice.translate_text), ("", "Off"))
         self.assertEqual(
