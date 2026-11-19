@@ -14,7 +14,7 @@ from unittest import mock
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 from PySide6.QtCore import QObject, Qt, Signal
-from PySide6.QtWidgets import QApplication, QMessageBox, QWidget
+from PySide6.QtWidgets import QApplication, QComboBox, QMessageBox, QWidget
 from test_track_panel import CHANNEL, FILM, FakePlayer, PanelCase
 from timer_fixtures import wait_until
 
@@ -1563,31 +1563,24 @@ class CaptionsSettingsTests(base.WindowCase):
         self.addCleanup(patch.stop)
         return models
 
-    def test_the_model_and_the_language_are_kept_at_save(self):
+    def test_the_model_is_kept_at_save_and_a_stored_language_is_left_alone(self):
         self.models(0)
+        self.window.config_manager.ai_captions_language = "Turkish"  # a 2.11.1 config: not read
         dialog = self.dialog()
         self.assertEqual(dialog.ai_captions_model_combo.currentData(), "auto")
-        self.assertEqual(dialog.ai_captions_language_combo.currentData(), "auto")
-        # Auto, Qwen's 30 and the 9 only Parakeet writes (2.9.3)
-        self.assertEqual(dialog.ai_captions_language_combo.count(), 40)
+        self.assertIsNone(dialog.findChild(QComboBox, "aiCaptionsLanguage"))
         group = dialog.ai_captions_model_combo.parentWidget()
         self.assertEqual(group.objectName(), "aiCaptionsSettings")
         dialog.ai_captions_model_combo.setCurrentIndex(
             dialog.ai_captions_model_combo.findData("large")
         )
-        dialog.ai_captions_language_combo.setCurrentIndex(
-            dialog.ai_captions_language_combo.findData("Turkish")
-        )
-        self.assertEqual(dialog.ai_captions_language_combo.currentText(), "Türkçe")
         self.assertTrue(dialog.has_unsaved_changes())
         dialog.save_settings()
         saved = ConfigManager()
-        self.assertEqual(
-            (saved.ai_captions_model, saved.ai_captions_language), ("large", "Turkish")
-        )
+        self.assertEqual(saved.ai_captions_model, "large")
+        self.assertEqual(saved.config["ai_captions_language"], "Turkish")
         dialog = self.dialog()
         self.assertEqual(dialog.ai_captions_model_combo.currentData(), "large")
-        self.assertEqual(dialog.ai_captions_language_combo.currentData(), "Turkish")
 
     def test_older_settings_read_as_automatic_and_unknown_values_too(self):
         config = ConfigManager()

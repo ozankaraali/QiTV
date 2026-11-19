@@ -138,7 +138,6 @@ from ui.captions_texts import (  # noqa: E402  (the texts, with their translatio
     DOWNLOADING,
     FALLBACK_QUESTION,
     FROM_AUDIO_TRACK,
-    FROM_DEFAULT,
     FROM_MODEL,
     FROM_VIEWER,
     NOT_AVAILABLE,
@@ -1998,17 +1997,17 @@ class CaptionsController(QObject):
         return track if track >= 0 else None
 
     def _resolve_language(self) -> None:
-        """The viewer's pick for the channel, else the audio track's, else Settings', else
-        the model's own detection: what it detected on the channel before, else a guess from a
-        prefix on the channel's title or group ("TR: …", 2026-11-07), which the captions
-        process may still correct (`_guessed`).
+        """The viewer's pick for the channel, else the audio track's, else the model's own
+        detection: what it detected on the channel before, else a guess from a prefix on the
+        channel's title or group ("TR: …", 2026-11-07), which the captions process may still
+        correct (`_guessed`).
 
-        2.11.1 (the owner: Words on an English song started in Settings' Turkish): Settings'
-        default is for channels, their recordings and provider films (a media server's too).
-        The viewer's own file, a song or a video file, has the viewer's pick (a song's: its
-        folder's), else its audio track's, else what was heard on that file before (while QiTV
-        runs), else the model's own detection, with no guess from its name."""
-        from services.captions.languages import language_from_title, qwen_name
+        2.11.2, the owner: what captions hear comes from the content only. There is no Settings
+        default (a 2.11.1 config's `ai_captions_language` is not read). The viewer's own file,
+        a song or a video file, has the viewer's pick (a song's: its folder's), else its audio
+        track's, else what was heard on that file before (while QiTV runs), else the model's
+        own detection, with no guess from its name."""
+        from services.captions.languages import language_from_title
 
         self._guessed = False
         pick = (self._config_get("ai_captions_picks", {}) or {}).get(self._pick_key())
@@ -2021,10 +2020,6 @@ class CaptionsController(QObject):
             return
         target = self._target()
         own_file = self._own_file(target) is not None
-        default = self._config_get("ai_captions_language", "auto")
-        if default and default != "auto" and not own_file:
-            self._language = (str(qwen_name(default) or default), FROM_DEFAULT)
-            return
         detected = self._detected.get(self._heard_key(), "")
         if not detected and not own_file:
             item = getattr(target, "item", None)

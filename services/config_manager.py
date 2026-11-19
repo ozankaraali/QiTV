@@ -571,13 +571,13 @@ class ConfigManager:
     tmdb_details = _config_property("tmdb_details", True, coerce=lambda value: value is not False)
     tmdb_token = _config_property("tmdb_token", "", coerce=str)
     # 2.9, optional (older builds ignore them): AI captions. The speech model's tier ("auto":
-    # chosen by the computer's speed; "small": faster, 0.6B; "large": more accurate, 1.7B), and
-    # the language they hear when nothing names it ("auto": the speech model's own guess, else
-    # one of services.captions.languages.CAPTION_LANGUAGES: Qwen's English names, and 2.9.3's
-    # European ones only Parakeet writes; an older build reads those as "auto").
+    # chosen by the computer's speed; "small": faster, 0.6B; "large": more accurate, 1.7B).
     ai_captions_model = _config_property(
         "ai_captions_model", "auto", coerce=_one_of(AI_CAPTIONS_MODELS, "auto")
     )
+    # 2.11.2: no longer read; kept so older builds read what they wrote (the language captions
+    # heard when nothing named it: "auto", else one of services.captions.languages.
+    # CAPTION_LANGUAGES). What captions hear now comes from the content only.
     ai_captions_language = _config_property(
         "ai_captions_language", "auto", coerce=_one_of(("auto", *CAPTION_LANGUAGES), "auto")
     )

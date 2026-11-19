@@ -16,6 +16,7 @@ from PySide6.QtWidgets import QWidget
 import test_tv_controller as tv
 from test_tv_controller import CHANNELS, ControllerTestCase, play_context
 
+from ui.captions_texts import FROM_MODEL
 from ui.track_controls import SUBTITLES
 
 FILM = "/videos/Dizi Bölüm 1.mkv"
@@ -500,15 +501,15 @@ RECORDING = {
 
 
 class LocalLanguageTests(_LocalCase):
-    """2.11.1, the owner: Words on an English song started in Turkish, Settings' default. The
-    language a file's captions hear: the viewer's pick (a song's for its folder; a video file's
-    for itself, by its path), else its audio track's, else what was heard on that file before
-    (while QiTV runs), else the model's own detection. Settings' default is for channels, their
-    recordings and providers' films. (The review's rulings I1-I3, M1, M6.)"""
+    """2.11.1, the owner: Words on an English song started in Turkish. The language a file's
+    captions hear: the viewer's pick (a song's for its folder; a video file's for itself, by its
+    path), else its audio track's, else what was heard on that file before (while QiTV runs),
+    else the model's own detection. (The review's rulings I1-I3, M1, M6.) 2.11.2, the owner: no
+    Settings default: what captions hear comes from the content only."""
 
     def setUp(self):
         super().setUp()
-        self.config.ai_captions_language = "Turkish"  # the owner's Settings
+        self.config.ai_captions_language = "Turkish"  # a 2.11.1 config: no longer read
         self.sent = []
         self.captions._process.send = lambda *message: self.sent.append(message)
 
@@ -535,9 +536,8 @@ class LocalLanguageTests(_LocalCase):
         self.captions._start_run()
         return self.run_language()
 
-    def test_settings_default_is_for_channels_and_films_not_the_viewers_own_files(self):
-        from ui.captions_texts import FROM_DEFAULT
-
+    def test_a_channel_or_film_with_no_name_is_detected_by_the_model(self):
+        # 2.11.2, the owner: what captions hear comes from the content only
         for path in (TIDE, FILM):
             with self.subTest(path=path):
                 self.play(path)
@@ -545,22 +545,27 @@ class LocalLanguageTests(_LocalCase):
         self.controller.tune_live(CHANNELS[0], group_key="10", channels=list(CHANNELS))
         self.ready()
         self.captions._resolve_language()
-        self.assertEqual(self.captions._language, ("Turkish", FROM_DEFAULT))  # as before
+        self.assertEqual(self.captions._language, ("", FROM_MODEL))  # the model detects it
         self.controller.play_vod(tv.VodTests.MOVIE, "movie", play_context())
         self.catalog.linkReady.emit(self.catalog.links[-1][0], "http://vod/heat.mkv")
         self.captions._resolve_language()
-        self.assertEqual(self.captions._language, ("Turkish", FROM_DEFAULT))  # a provider's film
+        self.assertEqual(self.captions._language, ("", FROM_MODEL))  # a provider's film: the same
+        titled = {**CHANNELS[0], "name": "TR| News"}
+        self.controller.tune_live(titled, group_key="10", channels=[titled])
+        self.ready()
+        self.captions._resolve_language()
+        # the title's guess, which the model's detection may correct
+        self.assertEqual(
+            (self.captions._language, self.captions._guessed), (("Turkish", FROM_MODEL), True)
+        )
 
     def test_a_recording_keeps_the_channel_rule(self):
-        # Ruling I3: a recording is a channel's broadcast: Settings' default, else a guess from
-        # its channel's name, as the channel had
-        from ui.captions_texts import FROM_DEFAULT, FROM_MODEL
-
+        # Ruling I3: a recording is a channel's broadcast: no name, the model detects it; a
+        # prefix on its channel's name gives a guess, as the channel had
         self.controller.play_recording(RECORDING)
         self.session.stateChanged.emit("playing")
         self.captions._resolve_language()
-        self.assertEqual(self.captions._language, ("Turkish", FROM_DEFAULT))
-        self.config.ai_captions_language = "auto"
+        self.assertEqual(self.captions._language, ("", FROM_MODEL))
         self.controller.play_recording({**RECORDING, "name": "DE: Hafen Nachrichten"})
         self.session.stateChanged.emit("playing")
         self.captions._resolve_language()

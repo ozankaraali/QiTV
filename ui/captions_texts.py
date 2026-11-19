@@ -62,8 +62,6 @@ DOWNLOAD_FAILED = N_("The AI captions download failed: {reason}")
 # i18n: the AI captions language came from the audio track (lowercase, after the language)
 FROM_AUDIO_TRACK = N_("audio track")
 FROM_VIEWER = N_("you chose")  # i18n: the AI captions language: the viewer picked it (lowercase)
-# i18n: the AI captions language is Settings' default language (lowercase, after the language)
-FROM_DEFAULT = N_("default")
 # i18n: the AI captions language: the speech model finds it by itself (lowercase)
 FROM_MODEL = N_("automatic")
 
