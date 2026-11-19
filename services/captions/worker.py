@@ -805,6 +805,9 @@ class _Run:
             if seconds:
                 took = time.perf_counter() - started
                 self.rtf = 0.95 * self.rtf + 0.05 * (took / max(0.01, seconds))
+            # dev build: the model with the reading this thread's last decode used
+            wrote = getattr(getattr(self, "model", None), "wrote", None)
+            by = (str(wrote()) if callable(wrote) else "") or name
             for text, start, end in lines:
                 text = guards.clean(text)
                 if text and text_language.written_in(text, TURKISH):
@@ -812,7 +815,7 @@ class _Run:
                     # after a pause in lower case at times)
                     shown = numbers_tr.written(self.sentence_case(text, start, end))
                     # (the owner's field tests compare what it heard with what shows)
-                    self._write(name, text, shown, start, end, until=start + 0.5)
+                    self._write(by, text, shown, start, end, until=start + 0.5)
             if None in batch:
                 return
 

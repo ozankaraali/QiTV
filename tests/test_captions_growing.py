@@ -449,6 +449,27 @@ class WorkerTest(unittest.TestCase):
         self.assertEqual([m[4] for m in captions], ["Tam 28 yıllık bir mücadele."])
         self.assertEqual(captions[0][1:3], (7, run.writer._last[0]))
 
+    def test_a_streamed_turkish_line_is_logged_with_its_reading(self) -> None:
+        # dev build (2026-11-19), the final review: channels and films read Turkish through the
+        # growing writer; its lines name the reading the decode on this thread used
+        from types import SimpleNamespace
+
+        script = Script(sentence("tam yirmi sekiz yıllık bir mücadele", 1.0))
+        run, _sent = self.run_of(script)
+        run.model = SimpleNamespace(
+            writes=lambda language: "tr-moon", wrote=lambda: "tr-moon · lm_int8"
+        )
+        t = 0.0
+        while t < 6.0:
+            run.blocks.put((t, array("f", (t + i / RATE for i in range(1600)))))
+            t += STEP
+        run.blocks.put(None)
+        with self.assertLogs("services.captions.worker", "DEBUG") as logs:
+            run._stream()
+        heard = [r.getMessage() for r in logs.records if " heard " in r.getMessage()]
+        self.assertEqual(len(heard), 1)
+        self.assertIn("[tr-moon · lm_int8] heard", heard[0])
+
     def test_a_failing_turkish_model_hands_turkish_to_qwen(self) -> None:
         # the final review: the stream's thread ended, the writer stayed, and every block piled
         # up where nothing read it (no captions, "Can't keep up", no "ended")
