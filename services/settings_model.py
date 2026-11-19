@@ -37,6 +37,19 @@ LEGACY_TABS: dict[str, str] = {
     ADVANCED: "general",
 }
 
+# Section key -> its icon, a drawing of ui/overlays/painting.py's draw_icon. A section with no
+# fitting drawing yet (Phone remote, Parental controls) has none.
+ICONS: dict[str, str] = {
+    PROVIDERS: "tv",
+    GENERAL: "gear",
+    PLAYBACK: "play",
+    SUBTITLES: "subtitles",
+    TIMESHIFT: "record",
+    GUIDE: "guide",
+    FILES: "folder",
+    ADVANCED: "more",
+}
+
 
 @dataclass(frozen=True)
 class Choice:
@@ -234,7 +247,7 @@ def _playback(system: str) -> Section:
             ),
         ),
     )
-    return Section(PLAYBACK, N_("Playback"), rows=rows)
+    return Section(PLAYBACK, N_("Playback"), ICONS[PLAYBACK], rows=rows)
 
 
 def sections(system: str) -> tuple[Section, ...]:
@@ -253,6 +266,10 @@ def sections(system: str) -> tuple[Section, ...]:
         (ADVANCED, N_("Advanced")),
     )
     return tuple(
-        _playback(system) if key == PLAYBACK else Section(key, text, legacy_tab=LEGACY_TABS[key])
+        (
+            _playback(system)
+            if key == PLAYBACK
+            else Section(key, text, ICONS.get(key, ""), legacy_tab=LEGACY_TABS[key])
+        )
         for key, text in titles
     )

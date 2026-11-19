@@ -29,7 +29,7 @@ Back and Forward buttons go on to the shell, as over the drawer.
 from __future__ import annotations
 
 from collections.abc import Callable, Sequence
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 import logging
 import math
 from typing import Optional
@@ -90,6 +90,7 @@ VALUE_FONT_U = 1.2  # a stepper's value (its title is TITLE_FONT_U)
 HELP_FONT_U = 1.05
 HELP_LINES = 2
 HELP_PAD_U = 0.8  # under the help
+TITLE_LINES = 2  # a long title wraps, its line growing; beyond this it elides (small windows)
 STEP_U = 1.8  # a stepper's ‹ and › (the panels')
 STEP_GAP_U = 0.6
 TITLE_GAP_U = 0.8  # between a row's title and its ‹ value › or ›
@@ -116,14 +117,20 @@ class _Box:
     """Where a line is drawn (widget coordinates)."""
 
     rect: QRectF  # all of it, with its help when that shows
-    line: QRectF  # its title's line (the highlight)
-    title: QRectF  # the room its title is elided into
+    line: QRectF  # its title's lines (the highlight)
+    title: QRectF  # the room its title wraps in
+    titles: list[str] = field(default_factory=list)  # the title as shown, a line each
     icon: QRectF = field(default_factory=QRectF)
     less: QRectF = field(default_factory=QRectF)  # a stepper's ‹, value and ›
     value: QRectF = field(default_factory=QRectF)
     more: QRectF = field(default_factory=QRectF)
     chevron: QRectF = field(default_factory=QRectF)  # a row that opens a layer: ›
     help: list[str] = field(default_factory=list)
+
+    def moved(self, dy: float) -> _Box:
+        """The same line, `dy` lower."""
+        names = ("rect", "line", "title", "icon", "less", "value", "more", "chevron")
+        return replace(self, **{name: getattr(self, name).translated(0, dy) for name in names})
 
 
 @dataclass
@@ -142,8 +149,23 @@ def _kind(row: Row) -> str:
     return "open" if row.section is not None else "act"
 
 
-def _cut(font: QFont, text: str, width: float) -> str:
-    return QFontMetricsF(font).elidedText(text, Qt.TextElideMode.ElideRight, max(0.0, width))
+def _wrap(text: str, font: QFont, width: float, most: int) -> list[str]:
+    """`text` word-wrapped into `most` lines at most, the last elided; a word wider than the
+    line elides too, so that no line runs past `width`."""
+    text = " ".join(text.split())
+    fm = QFontMetricsF(font)
+    if fm.horizontalAdvance(text) <= width:
+        return [text]  # (most texts: no layout of lines needed)
+    return [
+        fm.elidedText(line, Qt.TextElideMode.ElideRight, max(0.0, width))
+        for line in wrap_lines(text, font, width, most)
+    ]
+
+
+def _whole(lines: list[str], text: str) -> bool:
+    """Whether `lines` show all of `text` (a line may break where there is no space: after a
+    hyphen, or in Chinese)."""
+    return "".join("".join(lines).split()) == "".join(text.split())
 
 
 class SettingsDrawer(Overlay):
@@ -172,7 +194,9 @@ class SettingsDrawer(Overlay):
         self._first = {LEFT: 0, RIGHT: 0}  # each column's first row in sight
         self._hover: Optional[tuple[str, int]] = None  # (column or _BACK, line)
         self._wheel = 0  # a wheel's turn not yet a whole row
-        self._press_path: tuple[str, ...] = ()  # where a click started (see the double-click)
+        # The last press: (column, row key, part), or (_BACK or _FADE, "", ""): a double-click's
+        # second press repeats it (_click_again).
+        self._pressed: Optional[tuple[str, str, str]] = None
         self._second_click = SecondClickGuard(self)
         parent.installEventFilter(self)
         self.hide()
@@ -190,6 +214,7 @@ class SettingsDrawer(Overlay):
         self._first = {LEFT: 0, RIGHT: 0}
         self._hover = None
         self._wheel = 0
+        self._pressed = None
         self._second_click.disarm()
         self._relayout()
         self._reveal(LEFT)
@@ -433,11 +458,9 @@ class SettingsDrawer(Overlay):
         help_text = translate(row.help) if row.help else ""
         note = translate(RESTART_NOTE) if row.restart else ""
         text = " ".join(part for part in (help_text, note) if part)
-        lines = wrap_lines(text, font, width, HELP_LINES)
-        # (cut short: a line may break where there is no space, after a hyphen or in Chinese)
-        if help_text and note and "".join("".join(lines).split()) != "".join(text.split()):
-            lines = wrap_lines(help_text, font, width, HELP_LINES - 1)
-            lines += wrap_lines(note, font, width, 1)
+        lines = _wrap(text, font, width, HELP_LINES)
+        if help_text and note and not _whole(lines, text):
+            lines = _wrap(help_text, font, width, HELP_LINES - 1) + _wrap(note, font, width, 1)
         return lines
 
     def _help_height(self, lines: list[str], un: Units) -> float:
@@ -446,16 +469,18 @@ class SettingsDrawer(Overlay):
         spacing = QFontMetricsF(un.font(HELP_FONT_U)).lineSpacing()
         return float(math.ceil(len(lines) * spacing + HELP_PAD_U * un.u))
 
-    def _heights(self, side: str, un: Units, area: QRectF) -> list[float]:
-        row_h = float(un.px(ROW_H_U))
+    def _boxes(self, side: str, un: Units, area: QRectF) -> list[_Box]:
+        """Each line of a column, as tall as its title's lines and its help, at y 0."""
         items = self._items(side)
-        heights = [row_h] * len(items)
-        if side == RIGHT and self._side == RIGHT and 0 <= self._right < len(items):
-            row = items[self._right].row
-            if row is not None:
-                width = area.width() - 2 * INSET_U * un.u
-                heights[self._right] += self._help_height(self._help_lines(row, un, width), un)
-        return heights
+        icons = side == LEFT and any(item.icon for item in items)
+        focus = self._right if side == RIGHT and self._side == RIGHT else -1
+        return [
+            self._place(side, un, area, item, icons, index == focus)
+            for index, item in enumerate(items)
+        ]
+
+    def _heights(self, side: str, un: Units, area: QRectF) -> list[float]:
+        return [box.rect.height() for box in self._boxes(side, un, area)]
 
     @staticmethod
     def _last_first(heights: list[float], room: float) -> int:
@@ -495,78 +520,94 @@ class SettingsDrawer(Overlay):
         un = self._units()
         columns, areas = self._columns(un)
         back, crumbs = self._header(un, columns)
-        boxes: dict[str, list[Optional[_Box]]] = {}
+        shown: dict[str, list[Optional[_Box]]] = {}
         for side in (LEFT, RIGHT):
             area = areas[side]
-            items = self._items(side)
-            heights = self._heights(side, un, area)
-            out: list[Optional[_Box]] = [None] * len(items)
-            icons = side == LEFT and any(item.icon for item in items)
+            boxes = self._boxes(side, un, area)
+            heights = [box.rect.height() for box in boxes]
+            out: list[Optional[_Box]] = [None] * len(boxes)
             first = min(self._first[side], self._last_first(heights, area.height()))
             y = area.top()
-            for index in range(first, len(items)):
+            for index in range(first, len(boxes)):
                 if index > first and y + heights[index] > area.bottom() + 0.5:
                     break
-                out[index] = self._place(side, un, area, y, heights[index], items[index], icons)
+                out[index] = boxes[index].moved(y)
                 y += heights[index]
-            boxes[side] = out
-        return _Layout(un, columns, back, crumbs, boxes)
+            shown[side] = out
+        return _Layout(un, columns, back, crumbs, shown)
 
     def _place(
-        self, side: str, un: Units, area: QRectF, y: float, height: float, item: _Item, icons: bool
+        self, side: str, un: Units, area: QRectF, item: _Item, icons: bool, focused: bool
     ) -> _Box:
-        """Line `item` of a column at `y`, `height` tall (with its help); `icons`: the
-        column keeps room for the sections' icons."""
-        row_h = float(un.px(ROW_H_U))
-        line = QRectF(area.x(), y, area.width(), row_h)
+        """Line `item` of a column at y 0: its title wraps onto a second line when it does not
+        fit on one (the line grows), and a focused right-column row has its help under it.
+        `icons`: the column keeps room for the sections' icons."""
         inset = INSET_U * un.u
-        x, right = line.x() + inset, line.right() - inset
-        box = _Box(QRectF(area.x(), y, area.width(), height), line, QRectF())
-        row = item.row
+        x, right = area.x() + inset, area.right() - inset
+        icon_size = ICON_U * un.u
+        icon_x = x
         if icons:
-            size = ICON_U * un.u
-            box.icon = QRectF(x, line.center().y() - size / 2, size, size)
-            x += size + ICON_GAP_U * un.u
+            x += icon_size + ICON_GAP_U * un.u
+        row = item.row
         kind = _kind(row) if side == RIGHT and row is not None else ""
+        title_gap = TITLE_GAP_U * un.u
+        end, step, gap = 0.0, 0.0, 0.0
+        chevron = float(un.px(STEP_ICON_U))
         if row is not None and kind == "step":
-            right = self._place_steps(box, row, un, x, right)
+            end, step, gap = self._steps_width(row, un, right - x)
+            title_right = right - end - title_gap
         elif kind == "open":
-            size = float(un.px(STEP_ICON_U))
-            box.chevron = QRectF(right - size, line.center().y() - size / 2, size, size)
-            right = box.chevron.left() - TITLE_GAP_U * un.u
-        box.title = QRectF(x, line.y(), max(0.0, right - x), row_h)
-        if side == RIGHT and row is not None and height > row_h:
-            box.help = self._help_lines(row, un, line.right() - inset - line.x() - inset)
+            title_right = right - chevron - title_gap
+        else:
+            title_right = right
+        title_font = un.font(TITLE_FONT_U)
+        title_w = max(0.0, title_right - x)
+        titles = _wrap(translate(item.text), title_font, title_w, TITLE_LINES)
+        spacing = QFontMetricsF(title_font).lineSpacing()
+        line_h = float(un.px(ROW_H_U)) + max(0, len(titles) - 1) * spacing
+        middle = line_h / 2
+        box = _Box(QRectF(), QRectF(area.x(), 0, area.width(), line_h), QRectF(), titles)
+        box.title = QRectF(x, 0, title_w, line_h)
+        if icons:
+            box.icon = QRectF(icon_x, middle - icon_size / 2, icon_size, icon_size)
+        if kind == "step":
+            box.more = QRectF(right - step, 0, step, line_h)
+            box.less = QRectF(right - end, 0, step, line_h)
+            value_w = max(0.0, box.more.left() - gap - box.less.right() - gap)
+            box.value = QRectF(box.less.right() + gap, 0, value_w, line_h)
+        elif kind == "open":
+            box.chevron = QRectF(right - chevron, middle - chevron / 2, chevron, chevron)
+        height = line_h
+        if focused and row is not None:
+            box.help = self._help_lines(row, un, area.width() - 2 * inset)
+            height += self._help_height(box.help, un)
+        box.rect = QRectF(area.x(), 0, area.width(), height)
         return box
 
-    def _place_steps(self, box: _Box, row: Row, un: Units, x: float, right: float) -> float:
-        """A stepper's ‹ value › at the row's right; where its title must end. The value is
-        as wide as its widest choice, so that it keeps its place while stepping, when that fits
-        beside the whole title; else as wide as the value shown. When even that does not fit,
-        the value keeps what the whole title leaves, but at least VALUE_SHARE of the row, and
-        both elide."""
-        line = box.line
+    def _steps_width(self, row: Row, un: Units, room: float) -> tuple[float, float, float]:
+        """A stepper's ‹ value › at the end of `room`: (its width, ‹'s and ›'s, the gaps).
+        The value is as wide as its widest choice, so that it keeps its place while stepping,
+        when that fits beside the title on one line; else as wide as the value shown, when
+        that does. Else the title wraps and the value keeps its widest width within
+        VALUE_SHARE of the row, or what the title leaves (at least that share), eliding."""
         fm = QFontMetricsF(un.font(VALUE_FONT_U))
         step = max(float(un.px(STEP_U)), fm.height())  # the font stops at a floor, u does not
         gap = float(un.px(STEP_GAP_U))
         value = fm.horizontalAdvance(self._value_text(row))
         widest = max([value] + [fm.horizontalAdvance(translate(c.text)) for c in row.choices])
-        room = right - x
-        title_gap = TITLE_GAP_U * un.u
         title_w = math.ceil(
             QFontMetricsF(un.font(TITLE_FONT_U)).horizontalAdvance(translate(row.text))
         )
         least = 2 * step + 2 * gap
-        left_over = room - title_gap - title_w
+        left_over = room - TITLE_GAP_U * un.u - title_w
+        share = room * VALUE_SHARE
         if least + widest <= left_over:
-            end = least + widest
-        else:
-            end = min(least + value, max(least, left_over, room * VALUE_SHARE))
-        box.more = QRectF(right - step, line.y(), step, line.height())
-        box.less = QRectF(right - end, line.y(), step, line.height())
-        value_w = max(0.0, box.more.left() - gap - box.less.right() - gap)
-        box.value = QRectF(box.less.right() + gap, line.y(), value_w, line.height())
-        return box.less.left() - title_gap
+            return least + widest, step, gap
+        if least + value <= left_over:
+            return least + value, step, gap
+        if least + widest <= share:
+            return least + widest, step, gap
+        return min(least + value, max(least, left_over, share)), step, gap
 
     def _header(
         self, un: Units, columns: dict[str, QRectF]
@@ -661,7 +702,11 @@ class SettingsDrawer(Overlay):
                 self._paint_icon(p, item.icon, box.icon)
             p.setFont(title_font)
             p.setPen(text if item.selectable else muted)
-            p.drawText(box.title, align, _cut(title_font, translate(item.text), box.title.width()))
+            spacing = QFontMetricsF(title_font).lineSpacing()
+            y = box.line.center().y() - spacing * len(box.titles) / 2
+            for line in box.titles:  # a long title on two lines, centred as one is
+                p.drawText(QRectF(box.title.x(), y, box.title.width(), spacing), align, line)
+                y += spacing
             row = item.row
             if side == LEFT or row is None:
                 continue
@@ -715,26 +760,22 @@ class SettingsDrawer(Overlay):
             return (_FADE, 0, "")
         return None
 
-    def _click(self, pos: QPointF, again: bool = False) -> None:
-        """A click at `pos`; `again`: the second of a double-click, which only steps again,
-        goes up again, or picks the same line again (a layer it opened is left alone)."""
+    def _click(self, pos: QPointF) -> None:
+        """A click at `pos`; what it did is kept for a double-click's second press."""
         hit = self._hit(pos)
+        self._pressed = None
         if hit is None:
             return
         target, index, part = hit
         if target in (_BACK, _FADE):
-            self.back()
-            if not self.isVisible():
-                self._second_click.arm()  # its second click reaches nothing behind
+            self._pressed = (target, "", "")
+            self._back_by_mouse()
             return
-        if again and self.path() != self._press_path:
-            return  # the first click opened or left a layer: this line is another one
         if target == LEFT:
             self._click_left(index)
             return
         row = self._right_rows()[index]
-        if again and _kind(row) != "step":
-            return  # never a second action, nor a layer opened twice
+        self._pressed = (RIGHT, row.key, part)
         self._side = RIGHT
         self._right = index
         self._reveal(RIGHT)
@@ -743,6 +784,33 @@ class SettingsDrawer(Overlay):
         elif part != "help":
             self._act(row)
         self.update()
+
+    def _click_again(self) -> None:
+        """A double-click's second press: ‹ or the fade go up again, and a stepper the first
+        press stepped steps the same way again. Its row is found by its key, not under the
+        pointer: the first press moved the help to it, so the rows below it (and, in a small
+        window, its ‹ beside a value of another width) moved. Anything else is left alone: a
+        layer the first press opened, an action, a section."""
+        pressed, self._pressed = self._pressed, None
+        if pressed is None:
+            return
+        target, key, part = pressed
+        if target in (_BACK, _FADE):
+            self._back_by_mouse()
+            return
+        rows = self._right_rows()
+        index = next((i for i, row in enumerate(rows) if row.key == key), None)
+        if index is None or _kind(rows[index]) != "step" or part == "help":
+            return
+        self._side = RIGHT
+        self._right = index
+        self.stepped.emit(key, -1 if part == "less" else 1)
+        self.update()
+
+    def _back_by_mouse(self) -> None:
+        self.back()
+        if not self.isVisible():
+            self._second_click.arm()  # a double-click's second press reaches nothing behind
 
     def _click_left(self, index: int) -> None:
         item = self._items(LEFT)[index]
@@ -765,7 +833,6 @@ class SettingsDrawer(Overlay):
             return
         event.accept()
         if event.button() == Qt.MouseButton.LeftButton:
-            self._press_path = self.path()
             self._click(event.position())
             self._hover_at(event.position())
 
@@ -775,7 +842,7 @@ class SettingsDrawer(Overlay):
             return
         event.accept()  # never the video's fullscreen toggle
         if event.button() == Qt.MouseButton.LeftButton:
-            self._click(event.position(), again=True)
+            self._click_again()
             self._hover_at(event.position())
 
     def mouseReleaseEvent(self, event: QMouseEvent) -> None:
@@ -830,9 +897,9 @@ class SettingsDrawer(Overlay):
         un = self._units()
         whole = []
         title = translate(item.text)
-        if _cut(un.font(TITLE_FONT_U), title, box.title.width()) != title:
+        if not _whole(box.titles, title):
             whole.append(title)
-        if item.row is not None and _kind(item.row) == "step":
+        if side == RIGHT and item.row is not None and _kind(item.row) == "step":
             value = self._value_text(item.row)
             fm = QFontMetricsF(un.font(VALUE_FONT_U))
             if fm.horizontalAdvance(value) > box.value.width():

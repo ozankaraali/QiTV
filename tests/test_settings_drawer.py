@@ -6,10 +6,11 @@ import unittest
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
-from PySide6.QtCore import QPoint, QPointF, Qt
-from PySide6.QtGui import QWheelEvent
+from PySide6.QtCore import QEvent, QPoint, QPointF, Qt
+from PySide6.QtGui import QMouseEvent, QWheelEvent
 from PySide6.QtTest import QTest
 from PySide6.QtWidgets import QApplication, QWidget
+from timer_fixtures import elapse
 
 from services.i18n import translate
 from services.settings_model import (
@@ -74,6 +75,24 @@ class SettingsDrawerTests(unittest.TestCase):
 
     def click(self, point: QPointF):
         QTest.mouseClick(self.drawer, Qt.MouseButton.LeftButton, pos=point.toPoint())
+
+    def wait_out_the_second_click(self):
+        """A click that closed Settings swallows the next press for a double-click's time (an
+        app-wide filter): let it pass, so that no later test loses its click."""
+        elapse(QApplication.doubleClickInterval() + 80)
+
+    def double_click(self, point: QPointF):
+        """A double-click's second press, as Qt reports it."""
+        where = QPointF(point.toPoint())
+        event = QMouseEvent(
+            QEvent.Type.MouseButtonDblClick,
+            where,
+            QPointF(self.drawer.mapToGlobal(where)),
+            Qt.MouseButton.LeftButton,
+            Qt.MouseButton.LeftButton,
+            Qt.KeyboardModifier.NoModifier,
+        )
+        QApplication.sendEvent(self.drawer, event)
 
     def test_opens_on_the_section_asked(self):
         self.drawer.open_at(sections("Darwin"), PLAYBACK)
@@ -199,19 +218,110 @@ class SettingsDrawerTests(unittest.TestCase):
         self.assertEqual(self.drawer.focus_side(), "left")
         self.click(self.drawer.back_rect().center())
         self.assertEqual(self.closed, [True])
+        self.wait_out_the_second_click()
 
     def test_the_help_shows_under_the_focused_row_only(self):
         self.focus_on("hardware_decoding")
         self.drawer.grab()
         focused = self.drawer.row_rect("right", 1)
-        other = self.drawer.row_rect("right", 2)
+        other = self.drawer.row_rect("right", 3)  # (both titles on one line)
         self.assertGreater(focused.height(), other.height())
-        self.assertLessEqual(focused.bottom(), other.top())
+        self.assertLessEqual(focused.bottom(), self.drawer.row_rect("right", 2).top())
         self.drawer.back()  # the sections: no help on the right
         self.drawer.grab()
         self.assertEqual(
-            self.drawer.row_rect("right", 1).height(), self.drawer.row_rect("right", 2).height()
+            self.drawer.row_rect("right", 1).height(), self.drawer.row_rect("right", 3).height()
         )
+
+    def test_every_title_shows_whole_at_the_default_size(self):
+        # Keys and the phone's remote cannot hover: a long title wraps onto a second line.
+        def check(where, count):
+            self.drawer.right()
+            self.drawer.grab()
+            for side, lines in (("left", len(self.drawer._items("left"))), ("right", count)):
+                for i in range(lines):
+                    rect = self.drawer.row_rect(side, i)
+                    self.assertFalse(rect.isEmpty(), (where, side, i))
+                    point = self.drawer.title_rect(i).center() if side == "right" else rect.center()
+                    self.assertEqual(self.drawer.tooltip_at(point), "", (where, side, i))
+
+        everything = sections("Darwin")
+        for section in everything:
+            self.drawer.open_at(everything, section.key)
+            check(section.key, len(section.rows) or 1)
+            for i, row in enumerate(section.rows):
+                if row.section is None:
+                    continue
+                self.drawer.open_at(everything, section.key)
+                self.drawer.right()
+                self.drawer.move_by(i)
+                self.drawer.activate()
+                self.assertEqual(self.drawer.path(), (section.key, row.key))
+                check(row.key, len(row.section.rows))
+
+    def test_a_long_title_takes_a_second_line_and_its_row_grows(self):
+        long = Row(
+            "long", "Float the picture when you leave a fullscreen desktop", "", ON_OFF, True
+        )
+        short = Row("short", "Short", "", ON_OFF, True)
+        self.drawer.open_at((Section("s", "S", rows=(long, short)),))
+        self.drawer.grab()
+        self.assertEqual(len(self.drawer._box("right", 0).titles), 2)
+        self.assertGreater(
+            self.drawer.row_rect("right", 0).height(), self.drawer.row_rect("right", 1).height()
+        )
+        self.assertLessEqual(self.drawer.title_rect(0).right(), self.drawer.step_rect(0, -1).left())
+
+    def test_a_double_click_steps_the_row_it_was_on_twice(self):
+        # The first press moves the help from Hardware video decoding to the row clicked, so
+        # the rows under it move: the second press is that row's, not the one now under it.
+        self.focus_on("hardware_decoding")
+        self.drawer.grab()
+        rect = self.drawer.row_rect("right", 3)  # Start with the last channel
+        point = QPointF(self.drawer.title_rect(3).center().x(), rect.bottom() - 3)
+        self.click(point)
+        self.double_click(point)
+        self.assertEqual(self.steps, [("start_with_last_channel", 1)] * 2)
+
+    def test_a_double_click_on_the_back_step_steps_back_twice(self):
+        self.use(*make(640, 360))
+        self.drawer.open_at(sections("Darwin"), PLAYBACK)
+        self.drawer.grab()
+        point = self.drawer.step_rect(0, -1).center()
+        self.click(point)
+        self.double_click(point)
+        self.assertEqual(self.steps, [("live_latency", -1)] * 2)
+
+    def test_a_double_click_opens_a_layer_once(self):
+        self.drawer.open_at(sections("Darwin"), PLAYBACK)
+        index = [r.key for r in playback_rows()].index("autoplay")
+        point = self.drawer.row_rect("right", index).center()
+        self.click(point)
+        self.double_click(point)
+        self.assertEqual(self.drawer.path(), ("playback", "autoplay"))
+        self.assertEqual(self.steps, [])
+
+    def test_the_sections_show_their_icons(self):
+        self.drawer.open_at(sections("Darwin"), PLAYBACK)
+        self.drawer.right()  # the left column's highlight dims: an icon stands out on it
+        image = self.drawer.grab().toImage()
+        ratio = image.devicePixelRatio()
+        keys = [s.key for s in sections("Darwin")]
+
+        def accent_pixels(index):
+            box = self.drawer._box("left", index)
+            self.assertLessEqual(box.icon.right(), box.title.left())
+            r = box.icon
+            return sum(
+                1
+                for y in range(int(r.top() * ratio), int(r.bottom() * ratio))
+                for x in range(int(r.left() * ratio), int(r.right() * ratio))
+                if (c := image.pixelColor(x, y)).red() > 170 and c.blue() < 140
+            )
+
+        for key in ("general", "playback", "guide", "advanced"):
+            self.assertGreater(accent_pixels(keys.index(key)), 0, key)
+        self.assertEqual(accent_pixels(keys.index("remote")), 0)  # none fits yet: room kept
 
     def test_a_small_window_elides_without_overlap(self):
         self.use(*make(640, 360))
@@ -259,6 +369,7 @@ class SettingsDrawerTests(unittest.TestCase):
         self.click(point)
         self.assertEqual(self.closed, [True])
         self.assertFalse(self.drawer.isVisible())
+        self.wait_out_the_second_click()
 
     def test_mouse_back_and_forward_reach_the_shell(self):
         self.drawer.open_at(sections("Darwin"), PLAYBACK)
