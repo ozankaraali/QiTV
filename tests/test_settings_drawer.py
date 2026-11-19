@@ -1,0 +1,290 @@
+"""The Settings layer of the drawer (Settings in the drawer, plan 1): sections on the left,
+the chosen section's rows on the right, its keys, its clicks and its fit in a small window."""
+
+import os
+import unittest
+
+os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+
+from PySide6.QtCore import QPoint, QPointF, Qt
+from PySide6.QtGui import QWheelEvent
+from PySide6.QtTest import QTest
+from PySide6.QtWidgets import QApplication, QWidget
+
+from services.i18n import translate
+from services.settings_model import (
+    GUIDE,
+    ON_OFF,
+    PLAYBACK,
+    Row,
+    Section,
+    choice_of,
+    is_lit,
+    sections,
+)
+from ui.overlays.settings_drawer import SettingsDrawer
+
+
+def make(width=1280, height=720, values=None):
+    host = QWidget()
+    host.resize(width, height)
+    host.show()
+    values = dict(values or {})
+    drawer = SettingsDrawer(
+        lambda row: translate(choice_of(row, values.get(row.key, row.default)).text),
+        lambda row: is_lit(row, values.get(row.key, row.default)),
+        host,
+    )
+    return host, drawer, values
+
+
+def playback_rows():
+    return next(s for s in sections("Darwin") if s.key == PLAYBACK).rows
+
+
+class SettingsDrawerTests(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        cls.app = QApplication.instance() or QApplication([])
+
+    def setUp(self):
+        self.use(*make())
+
+    def use(self, host, drawer, values):
+        self.host, self.drawer, self.values = host, drawer, values
+        self.addCleanup(host.deleteLater)
+        self.addCleanup(host.close)
+        self.steps, self.chosen, self.closed = [], [], []
+        drawer.stepped.connect(lambda key, delta: self.steps.append((key, delta)))
+        drawer.chosen.connect(self.chosen.append)
+        drawer.closed.connect(lambda: self.closed.append(True))
+
+    def focus_on(self, key):
+        """Playback open, the keys on its row `key` in the right column."""
+        self.drawer.open_at(sections("Darwin"), PLAYBACK)
+        self.drawer.right()
+        for _ in range(20):
+            row = self.drawer.focused_row()
+            if row is not None and row.key == key:
+                return
+            self.drawer.move_by(1)
+        self.fail(f"no row {key}")
+
+    def click(self, point: QPointF):
+        QTest.mouseClick(self.drawer, Qt.MouseButton.LeftButton, pos=point.toPoint())
+
+    def test_opens_on_the_section_asked(self):
+        self.drawer.open_at(sections("Darwin"), PLAYBACK)
+        self.assertTrue(self.drawer.isVisible())
+        self.assertEqual(self.drawer.path(), ("playback",))
+        self.assertEqual(self.drawer.focus_side(), "left")
+
+    def test_opens_on_the_first_section_without_one(self):
+        self.drawer.open_at(sections("Darwin"))
+        self.assertEqual(self.drawer.path(), ("providers",))
+
+    def test_right_steps_a_stepper_and_left_steps_back(self):
+        self.focus_on("live_latency")
+        self.drawer.right()
+        self.assertEqual(self.steps, [("live_latency", 1)])
+        self.drawer.left()
+        self.assertEqual(self.steps, [("live_latency", 1), ("live_latency", -1)])
+        self.assertEqual(self.drawer.focus_side(), "right")
+        self.drawer.activate()  # Enter steps on
+        self.assertEqual(self.steps[-1], ("live_latency", 1))
+
+    def test_left_on_a_plain_row_goes_to_the_sections(self):
+        self.focus_on("autoplay")
+        self.drawer.left()
+        self.assertEqual(self.drawer.focus_side(), "left")
+        self.assertEqual(self.steps, [])
+        self.assertEqual(self.drawer.path(), ("playback",))
+
+    def test_enter_opens_a_layer_and_back_climbs(self):
+        self.focus_on("autoplay")
+        self.drawer.activate()
+        self.assertEqual(self.drawer.path(), ("playback", "autoplay"))
+        self.assertEqual(self.drawer.focused_row().key, "auto_play_episodes")
+        self.drawer.back()
+        self.assertEqual(self.drawer.path(), ("playback",))
+        self.assertEqual(self.drawer.focus_side(), "right")
+        self.assertEqual(self.drawer.focused_row().key, "autoplay")
+        self.drawer.back()
+        self.assertEqual(self.drawer.focus_side(), "left")
+        self.assertEqual(self.closed, [])
+        self.drawer.back()
+        self.assertEqual(self.closed, [True])
+        self.assertFalse(self.drawer.isVisible())
+
+    def test_a_legacy_section_offers_the_old_window(self):
+        self.drawer.open_at(sections("Darwin"))
+        while self.drawer.path() != (GUIDE,):
+            self.drawer.move_by(1)
+        self.drawer.right()
+        self.assertEqual(self.drawer.focused_row().key, "legacy:guide")
+        self.drawer.activate()
+        self.assertEqual(self.chosen, ["legacy:guide"])
+
+    def test_highlighting_a_section_shows_its_rows_at_once(self):
+        self.drawer.open_at(sections("Darwin"), GUIDE)
+        self.drawer.move_by(-3)  # Guide → Playback
+        self.assertEqual(self.drawer.path(), ("playback",))
+        self.drawer.right()
+        self.assertEqual(self.drawer.focused_row().key, "live_latency")
+
+    def test_clicks_on_the_steps(self):
+        self.drawer.open_at(sections("Darwin"), PLAYBACK)
+        self.drawer.grab()
+        self.click(self.drawer.step_rect(0, 1).center())
+        self.assertEqual(self.steps, [("live_latency", 1)])
+        self.click(self.drawer.step_rect(0, -1).center())
+        self.assertEqual(self.steps, [("live_latency", 1), ("live_latency", -1)])
+        self.assertEqual(self.drawer.focus_side(), "right")
+
+    def test_a_click_on_a_stepper_steps_on(self):
+        self.drawer.open_at(sections("Darwin"), PLAYBACK)
+        self.drawer.grab()
+        self.click(self.drawer.title_rect(1).center())
+        self.assertEqual(self.steps, [("hardware_decoding", 1)])
+        self.assertEqual(self.drawer.focused_row().key, "hardware_decoding")
+
+    def test_clicks_open_a_layer_and_choose_an_action(self):
+        self.drawer.open_at(sections("Darwin"), PLAYBACK)
+        index = [r.key for r in playback_rows()].index("autoplay")
+        self.click(self.drawer.row_rect("right", index).center())
+        self.assertEqual(self.drawer.path(), ("playback", "autoplay"))
+        self.drawer.open_at(sections("Darwin"), GUIDE)
+        self.click(self.drawer.row_rect("right", 0).center())
+        self.assertEqual(self.chosen, ["legacy:guide"])
+
+    def test_a_click_on_a_section_shows_its_rows(self):
+        self.drawer.open_at(sections("Darwin"), PLAYBACK)
+        self.drawer.right()
+        self.click(self.drawer.row_rect("left", 5).center())  # Guide
+        self.assertEqual(self.drawer.path(), ("guide",))
+        self.assertEqual(self.drawer.focus_side(), "left")
+
+    def test_the_back_chevron_is_back(self):
+        self.focus_on("live_latency")
+        self.drawer.grab()
+        self.click(self.drawer.back_rect().center())
+        self.assertEqual(self.drawer.focus_side(), "left")
+        self.click(self.drawer.back_rect().center())
+        self.assertEqual(self.closed, [True])
+
+    def test_the_help_shows_under_the_focused_row_only(self):
+        self.focus_on("hardware_decoding")
+        self.drawer.grab()
+        focused = self.drawer.row_rect("right", 1)
+        other = self.drawer.row_rect("right", 2)
+        self.assertGreater(focused.height(), other.height())
+        self.assertLessEqual(focused.bottom(), other.top())
+        self.drawer.back()  # the sections: no help on the right
+        self.drawer.grab()
+        self.assertEqual(
+            self.drawer.row_rect("right", 1).height(), self.drawer.row_rect("right", 2).height()
+        )
+
+    def test_a_small_window_elides_without_overlap(self):
+        self.use(*make(640, 360))
+        self.drawer.open_at(sections("Darwin"), PLAYBACK)
+        self.drawer.right()
+        rows = playback_rows()
+        column = self.drawer.column_rect("right")
+        for focus in range(len(rows)):
+            self.drawer.grab()
+            last_bottom = None
+            for i, row in enumerate(rows):
+                rect = self.drawer.row_rect("right", i)
+                if rect.isEmpty():
+                    continue  # scrolled out of sight
+                self.assertTrue(column.contains(rect), (focus, row.key, rect, column))
+                if last_bottom is not None:
+                    self.assertLessEqual(last_bottom, rect.top() + 0.01, row.key)
+                last_bottom = rect.bottom()
+                if row.choices:
+                    less = self.drawer.step_rect(i, -1)
+                    self.assertLessEqual(self.drawer.title_rect(i).right(), less.left(), row.key)
+                    self.assertTrue(rect.contains(self.drawer.step_rect(i, 1)), row.key)
+            self.assertFalse(self.drawer.row_rect("right", focus).isEmpty())
+            self.drawer.move_by(1)
+
+    def test_the_restart_note_keeps_its_line_in_a_small_window(self):
+        self.use(*make(640, 360))
+        self.focus_on("hardware_decoding")
+        self.drawer.grab()
+        lines = self.drawer._box("right", 1).help
+        self.assertEqual(len(lines), 2)
+        self.assertTrue(lines[-1].startswith("Applies"), lines)
+
+    def test_a_value_gives_way_to_its_title_in_a_small_window(self):
+        # "Mouse wheel  ‹ Volume ›": the column sized for "Change channel" would cut the title.
+        self.use(*make(640, 360))
+        self.focus_on("mouse_wheel_action")
+        self.drawer.grab()
+        index = [r.key for r in playback_rows()].index("mouse_wheel_action")
+        self.assertEqual(self.drawer.tooltip_at(self.drawer.title_rect(index).center()), "")
+
+    def test_a_click_over_the_picture_backs_out(self):
+        self.drawer.open_at(sections("Darwin"), PLAYBACK)
+        point = QPointF(self.drawer.width() * 0.95, self.drawer.height() * 0.5)
+        self.click(point)
+        self.assertEqual(self.closed, [True])
+        self.assertFalse(self.drawer.isVisible())
+
+    def test_mouse_back_and_forward_reach_the_shell(self):
+        self.drawer.open_at(sections("Darwin"), PLAYBACK)
+        center = self.drawer.row_rect("left", 2).center().toPoint()
+        for button in (Qt.MouseButton.BackButton, Qt.MouseButton.ForwardButton):
+            QTest.mouseClick(self.drawer, button, pos=center)
+        self.assertEqual(self.closed, [])
+        self.assertEqual(self.drawer.focus_side(), "left")
+
+    def test_a_long_section_scrolls_to_keep_the_focus_in_sight(self):
+        self.use(*make(640, 360))
+        rows = tuple(Row(f"row{i}", f"Row {i}", "Its help.", ON_OFF, True) for i in range(40))
+        self.drawer.open_at((Section("long", "Long", rows=rows),))
+        self.drawer.right()
+        self.drawer.move_by(39)
+        self.drawer.grab()
+        self.assertTrue(self.drawer.row_rect("right", 0).isEmpty())
+        last = self.drawer.row_rect("right", 39)
+        self.assertFalse(last.isEmpty())
+        self.assertTrue(self.drawer.column_rect("right").contains(last))
+        over = self.drawer.row_rect("right", 39).center()
+        wheel = QWheelEvent(
+            over,
+            self.drawer.mapToGlobal(over),
+            QPoint(),
+            QPoint(0, 120 * 50),  # up, to the top
+            Qt.MouseButton.NoButton,
+            Qt.KeyboardModifier.NoModifier,
+            Qt.ScrollPhase.NoScrollPhase,
+            False,
+        )
+        QApplication.sendEvent(self.drawer, wheel)
+        self.assertFalse(self.drawer.row_rect("right", 0).isEmpty())
+        self.assertEqual(self.drawer.focused_row().key, "row39")  # the wheel only scrolls
+
+    def test_a_parent_row_on_the_left_opens_its_own_layer(self):
+        # Deeper, the left column lists the parent's rows: only those that open a layer take
+        # its highlight, and that layer's rows show on the right at once.
+        self.focus_on("autoplay")
+        self.drawer.activate()
+        keys = [r.key for r in playback_rows()]
+        self.click(self.drawer.row_rect("left", keys.index("pip")).center())
+        self.assertEqual(self.drawer.path(), ("playback", "pip"))
+        self.assertEqual(self.drawer.focus_side(), "left")
+        self.drawer.move_by(-1)  # the rows above only step: the highlight stays
+        self.assertEqual(self.drawer.path(), ("playback", "pip"))
+        self.drawer.move_by(1)
+        self.assertEqual(self.drawer.path(), ("playback", "autoplay"))
+        self.drawer.left()  # a layer up, the focus staying left: on the sections
+        self.assertEqual(self.drawer.path(), ("playback",))
+        self.assertEqual(self.drawer.focus_side(), "left")
+        self.drawer.right()
+        self.assertEqual(self.drawer.focused_row().key, "autoplay")
+
+
+if __name__ == "__main__":
+    unittest.main()

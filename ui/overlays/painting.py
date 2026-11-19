@@ -694,11 +694,13 @@ def paint_value_steps(
     more: QRectF,
     value: str,
     lit: bool,
+    lit_color: QColor | None = None,
 ) -> None:
     """A setting's ‹ value ›: the chevrons in `less` and `more`, the value between them in
-    `text`, lit (full text colour) while it is not the default and muted otherwise. Draws with
-    the painter's font."""
-    lit_color = qcolor(PALETTE.text)
+    `text`, lit while it is not the default and muted otherwise. Lit is the full text colour
+    (the panels), or `lit_color` (Settings lights it in the accent). Draws with the painter's
+    font."""
+    lit_color = qcolor(PALETTE.text) if lit_color is None else lit_color
     muted = qcolor(PALETTE.text, PALETTE.text_muted_alpha)
     icon = min(less.width(), max(float(units.px(STEP_ICON_U)), less.width() * 0.6))
     for rect, glyph in ((less, "chevron_left"), (more, "chevron_right")):
