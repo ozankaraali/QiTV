@@ -61,7 +61,14 @@ from PySide6.QtWidgets import QApplication, QWidget
 
 from services.i18n import N_, translate
 from ui.overlays.base import Overlay
-from ui.overlays.painting import Units, draw_icon, fill_round, ui_units
+from ui.overlays.painting import (
+    STEP_ICON_U,
+    Units,
+    draw_icon,
+    fill_round,
+    paint_value_steps,
+    ui_units,
+)
 from ui.pointer import NAV_BUTTONS
 from ui.theme import FOCUS_FILL_ALPHA, PALETTE, qcolor
 
@@ -77,7 +84,7 @@ _MIN_WIDTH_U = 24.0
 _TEXT_MAX_U = 28.0  # a longer track name is elided
 _ROW_U = 2.8
 _TICK_U = 2.4  # the tick's column
-_ICON_U = 1.5
+_ICON_U = STEP_ICON_U
 _CHIP_U = 2.6  # − and +
 _GAP_U = 0.6
 _SECTION_U = 1.0  # between the rows and the Sync row
@@ -564,7 +571,8 @@ class TrackPanel(Overlay):
             label = row_fm.elidedText(row.text, Qt.TextElideMode.ElideRight, max(0.0, room))
             p.drawText(QRectF(x + tick_w, rect.top(), room, rect.height()), left, label)
             if steps is not None:
-                self._paint_steps(p, un, row, steps, text, muted)
+                less, value, more = steps
+                paint_value_steps(p, un, less, value, more, row.value, row.lit)
         if scrolls:
             self._paint_arrows(p, un, rects, shown, muted)
         sync = model.sync
@@ -621,21 +629,6 @@ class TrackPanel(Overlay):
             p.restore()
             end -= width + 2 * gap
         return end
-
-    @staticmethod
-    def _paint_steps(p: QPainter, un: Units, row: PanelRow, steps, text, muted) -> None:
-        """A setting's ‹ value ›: the value lit while it is not the default."""
-        less, value, more = steps
-        icon = min(less.width(), max(float(un.px(_ICON_U)), less.width() * 0.6))
-        for rect, glyph in ((less, "chevron_left"), (more, "chevron_right")):
-            box = QRectF(0, 0, icon, icon)
-            box.moveCenter(rect.center())
-            draw_icon(p, glyph, box, muted)
-        p.setPen(text if row.lit else muted)
-        shown = QFontMetricsF(p.font()).elidedText(
-            row.value, Qt.TextElideMode.ElideRight, value.width()
-        )
-        p.drawText(value, Qt.AlignmentFlag.AlignCenter, shown)
 
     @staticmethod
     def _paint_focus(p: QPainter, un: Units, rect: QRectF, *, outline: bool) -> None:

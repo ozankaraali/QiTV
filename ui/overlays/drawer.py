@@ -55,15 +55,11 @@ from PySide6.QtCore import (
     Signal,
 )
 from PySide6.QtGui import (
-    QColor,
     QFont,
     QFontMetrics,
     QFontMetricsF,
-    QLinearGradient,
     QMouseEvent,
     QPainter,
-    QPainterPath,
-    QPen,
     QWheelEvent,
 )
 from PySide6.QtWidgets import (
@@ -109,10 +105,25 @@ from ui.overlays.channel_rows import (
     column_focused,
     paint_hover,
 )
+from ui.overlays.drawer_look import (
+    COUNT_FONT_U,
+    CRUMB_FONT_U,
+    CRUMB_H_U,
+    FADE_U,
+    LEFT_U,
+    PAD_SIDE_U,
+    PAD_TOP_U,
+    RIGHT_U,
+    ROW_H_U,
+    TITLE_FONT_U,
+    draw_back,
+    paint_backdrop,
+    paint_highlight,
+)
 from ui.overlays.painting import Units, draw_icon, draw_refresh, elided, fill_round, ui_units
 from ui.pointer import NAV_BUTTONS, SecondClickGuard
 from ui.text_edit import SELECTION_ALPHA, Dragging, TextEdit, edit_key, paint_edit
-from ui.theme import FOCUS_FILL_ALPHA, PALETTE, qcolor
+from ui.theme import PALETTE, qcolor
 
 logger = logging.getLogger(__name__)
 
@@ -120,12 +131,6 @@ _CONTEXT_LAYERS = ("item", "episode")  # rows with a context menu (channels are 
 _CONTEXT_GROUPS = (RECENT_GROUP,)  # and these groups' rows ("Clear Recents")
 _RIGHT_PRESSES = (QEvent.Type.MouseButtonPress, QEvent.Type.MouseButtonDblClick)
 DRAG_OPACITY = 0.25  # the list while a channel is dragged out of it onto the grid
-LEFT_U = 25.0  # the left column (2.9.3: in u; a quarter of the width up to UNIT_CAP_PX)
-RIGHT_U = 58.0  # the right column's right edge
-FADE_U = 7.0
-PAD_TOP_U = 2.4
-PAD_SIDE_U = 1.6
-CRUMB_H_U = 2.2
 FOUND_GENRE_H_U = 5.0  # a genre the find found: its name, then its provider and count
 FOUND_CHANNEL_SCALE = 0.7  # its channels: a long name (and a 5-digit number) fits whole
 FILTER_H_U = 3.4  # the ⌕ Find box above the right column (the left column's: its buttons)
@@ -145,7 +150,6 @@ SEPARATOR = " › "
 PROVIDER_TOOLTIP = N_("Choose another provider")  # i18n: tooltip of the provider's name
 # i18n: the channel list's title over its providers (the top layer, Settings and Add under them)
 PROVIDERS_TITLE = N_("Providers")
-CRUMB_FONT_U = 1.15
 PREVIEW_DEBOUNCE_MS = 200
 OWN_AT_ONCE = 20_000  # an open group this long or shorter is scoped here, at once (~20 ms)
 LOADING_TEXT = N_("Loading…")
@@ -197,24 +201,6 @@ _HEADER_TOOLTIPS = {  # the header's buttons: what they do, and their key (see _
 def _hint(what: str, keys: str) -> str:
     """A tooltip naming its key; `what` (English, marked N_) in the active language."""
     return key_hint(translate(what), keys)
-
-
-def _draw_back(p: QPainter, rect: QRectF, color: QColor) -> None:
-    """‹: a chevron, drawn like the refresh arrow (a unit box, round caps)."""
-    p.save()
-    p.setRenderHint(QPainter.Antialiasing, True)
-    p.translate(rect.x(), rect.y())
-    p.scale(rect.width(), rect.height())
-    pen = QPen(color, 0.12)
-    pen.setCapStyle(Qt.RoundCap)
-    pen.setJoinStyle(Qt.RoundJoin)
-    p.setPen(pen)
-    p.setBrush(Qt.NoBrush)
-    chevron = QPainterPath(QPointF(0.62, 0.2))
-    chevron.lineTo(0.34, 0.5)
-    chevron.lineTo(0.62, 0.8)
-    p.drawPath(chevron)
-    p.restore()
 
 
 @dataclass(frozen=True)
@@ -462,22 +448,12 @@ class _FoundRowDelegate(QStyledItemDelegate):
         return delegate.cut_text(index) if isinstance(delegate, CutTexts) else ""
 
 
-def _paint_highlight(p: QPainter, rect: QRectF, u: float, focused: bool) -> None:
-    """A row's highlight: the accent, stronger in the focused column."""
-    box = rect.adjusted(0.3 * u, 0.2 * u, -0.3 * u, -0.2 * u)
-    fill_round(p, box, qcolor(PALETTE.accent, FOCUS_FILL_ALPHA if focused else 0.1), 1.0 * u)
-    p.setRenderHint(QPainter.Antialiasing, True)
-    p.setPen(qcolor(PALETTE.accent, 0.7 if focused else 0.35))
-    p.setBrush(Qt.NoBrush)
-    p.drawRoundedRect(box.adjusted(0.5, 0.5, -0.5, -0.5), 1.0 * u, 1.0 * u)
-
-
 class _SimpleRowDelegate(CutTexts, QStyledItemDelegate):
     def _units(self, widget) -> Units:
         return ui_units(getattr(widget, "units_width", 100) or 100)
 
     def sizeHint(self, option, index) -> QSize:
-        return QSize(0, self._units(option.widget).px(3.6))
+        return QSize(0, self._units(option.widget).px(ROW_H_U))
 
     def paint(self, p: QPainter, option, index) -> None:
         units = self._units(option.widget)
@@ -521,7 +497,7 @@ class _SimpleRowDelegate(CutTexts, QStyledItemDelegate):
             )
         paint_hover(p, option, index, u)
         if selected:
-            _paint_highlight(p, rect, u, focused)
+            paint_highlight(p, rect, units, focused)
         x = rect.x() + 0.9 * u + 0.3 * u
         right = rect.right() - 0.9 * u - 0.3 * u
         title = str(index.data(Qt.DisplayRole) or "")
@@ -538,7 +514,7 @@ class _SimpleRowDelegate(CutTexts, QStyledItemDelegate):
             title = title.lstrip("★⟲ ")
         count = index.data(CountRole)
         if count is not None:
-            p.setFont(units.font(1.1))
+            p.setFont(units.font(COUNT_FONT_U))
             p.setPen(qcolor(PALETTE.text, PALETTE.text_muted_alpha))
             text = str(count)
             width = p.fontMetrics().horizontalAdvance(text)
@@ -548,7 +524,7 @@ class _SimpleRowDelegate(CutTexts, QStyledItemDelegate):
                 text,
             )
             right -= width + 0.8 * u
-        p.setFont(units.font(1.35))
+        p.setFont(units.font(TITLE_FONT_U))
         p.setPen(qcolor(PALETTE.text))
         shown = elided(p, title, right - x)
         self.note_cut(index, [(title, shown)])
@@ -575,9 +551,9 @@ class _FoundGenreDelegate(_SimpleRowDelegate):
         p.save()
         paint_hover(p, option, index, u)
         if option.state & QStyle.State_Selected:
-            _paint_highlight(p, rect, u, column_focused(option.widget))
+            paint_highlight(p, rect, units, column_focused(option.widget))
         left, width = rect.x() + 1.2 * u, max(0.0, rect.width() - 2.4 * u)
-        title_font, label_font = units.font(1.35), units.font(1.1)
+        title_font, label_font = units.font(TITLE_FONT_U), units.font(COUNT_FONT_U)
         title_h = QFontMetricsF(title_font).height()
         label_h = QFontMetricsF(label_font).height()
         label = str(index.data(CountRole) or "")
@@ -1655,15 +1631,7 @@ class Drawer(Overlay):
         p = QPainter(self)
         units = self._units
         left, right = self._columns["left"], self._columns["right"]
-        p.fillRect(left.rect, qcolor(PALETTE.panel_raised, 0.95))
-        p.fillRect(right.rect, qcolor(PALETTE.panel))
-        fade = QRect(
-            right.rect.right() + 1, 0, self.width() - right.rect.right() - 1, self.height()
-        )
-        grad = QLinearGradient(fade.left(), 0, fade.right(), 0)
-        grad.setColorAt(0.0, qcolor(PALETTE.panel))
-        grad.setColorAt(1.0, qcolor(PALETTE.panel, 0.0))
-        p.fillRect(fade, grad)
+        paint_backdrop(p, self.rect(), units)
         self._paint_breadcrumb(p, left)
         self._paint_find(p, units)
         for col in (left, right):
@@ -1806,7 +1774,7 @@ class Drawer(Overlay):
             elif key == LIBRARY_ACTION:
                 draw_icon(p, "clapper", rect, tone)
             elif key == BACK_BUTTON:
-                _draw_back(p, rect, tone)
+                draw_back(p, rect, tone)
             else:
                 draw_refresh(p, rect, tone)
 
@@ -1838,7 +1806,7 @@ class Drawer(Overlay):
         right = (clear.left() if not clear.isEmpty() else box.right()) - 0.6 * u
         inner = QRectF(box.x() + 1.0 * u + size + 0.7 * u, box.y(), 0, box.height())
         inner.setRight(max(inner.left(), right))
-        p.setFont(units.font(1.35))
+        p.setFont(units.font(TITLE_FONT_U))
         if active:
             paint_edit(
                 p,
@@ -1868,7 +1836,7 @@ class Drawer(Overlay):
         u = units.u
         if col.message:
             error = col.message in _RETRY_TEXTS
-            p.setFont(units.font(1.35))
+            p.setFont(units.font(TITLE_FONT_U))
             p.setPen(qcolor(PALETTE.text, 0.75 if error else PALETTE.text_muted_alpha))
             view = col.view.geometry()
             p.drawText(

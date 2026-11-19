@@ -681,3 +681,30 @@ def draw_icon(p: QPainter, name: str, rect: QRectF, color: QColor) -> None:
             raise KeyError(f"Unknown icon: {name!r}")
     finally:
         p.restore()
+
+
+STEP_ICON_U = 1.5  # a ‹ or › chevron, this tall (at least 60% of its box)
+
+
+def paint_value_steps(
+    p: QPainter,
+    units: Units,
+    less: QRectF,
+    text: QRectF,
+    more: QRectF,
+    value: str,
+    lit: bool,
+) -> None:
+    """A setting's ‹ value ›: the chevrons in `less` and `more`, the value between them in
+    `text`, lit (full text colour) while it is not the default and muted otherwise. Draws with
+    the painter's font."""
+    lit_color = qcolor(PALETTE.text)
+    muted = qcolor(PALETTE.text, PALETTE.text_muted_alpha)
+    icon = min(less.width(), max(float(units.px(STEP_ICON_U)), less.width() * 0.6))
+    for rect, glyph in ((less, "chevron_left"), (more, "chevron_right")):
+        box = QRectF(0, 0, icon, icon)
+        box.moveCenter(rect.center())
+        draw_icon(p, glyph, box, muted)
+    p.setPen(lit_color if lit else muted)
+    shown = QFontMetricsF(p.font()).elidedText(value, Qt.TextElideMode.ElideRight, text.width())
+    p.drawText(text, Qt.AlignmentFlag.AlignCenter, shown)
