@@ -1097,6 +1097,49 @@ class TranslationTests(unittest.TestCase):
         self.assertEqual(self.sent[-1], ("translate", None))
         self.assertEqual(self.window.live_session.floor, 8.0)
 
+    def test_a_language_detected_mid_run_moves_automatics_model_with_its_rule(self):
+        # on a slower computer: German detected (translated) takes the 0.6B here, and the
+        # 1.7B comes back once the programme turns English (no rule); what was heard survives
+        # the reload, and they stay on
+        self.config["ai_captions_model"] = "auto"
+        self.captions._tier = "large"
+        self.machine(1.2)
+        installed = mock.patch("services.captions.models.installed", return_value=True)
+        installed.start()
+        self.addCleanup(installed.stop)
+        self.config["ai_captions_translations"] = {"German": "English"}
+        self.captions._on_detected(self.captions._run, "German")
+        self.assertEqual(self.stopped, [True])
+        [load] = self.loaded
+        self.assertIn("qwen3-asr-0.6b", load["model"]["encoder"])
+        self.assertEqual((load["translate_to"], load["translation"]), ("English", self.folder()))
+        self.assertEqual(self.window.live_session.floor, 8.0 + TRANSLATE_LEAD_S)
+        self.captions._on_ready()  # the 0.6B loaded: its run starts in what was heard
+        self.assertEqual([m for m in self.sent if m[0] == "start"][-1][5], "German")
+        self.captions._on_detected(self.captions._run, "English")  # the programme changed
+        self.assertEqual(len(self.loaded), 2)
+        self.assertIn("qwen3-asr-1.7b", self.loaded[-1]["model"]["encoder"])
+        self.assertEqual(self.loaded[-1]["translate_to"], None)
+        self.assertEqual(self.window.live_session.floor, 10.0)
+        self.assertTrue(self.captions.enabled())
+
+    def test_turned_on_by_hand_automatic_goes_by_the_rule_for_what_plays(self):
+        # the language a channel watched before spoke (translated) is not this one's: nothing
+        # known here, so Automatic takes the model here with no wait for the speed
+        self.config["ai_captions_translations"] = {"German": "English"}
+        self.config["ai_captions_model"] = "auto"
+        self.machine(None)
+        self.captions._warm_tier = lambda: None  # never a benchmark here
+        self.captions._language = ("German", "")
+        self.captions._disable()
+        with mock.patch("services.captions.models.installed", return_value=True):
+            self.captions.toggle()
+        self.assertTrue(self.captions.enabled())
+        self.assertFalse(self.captions._toggle_waits)
+        load = self.loaded[-1]
+        self.assertIn("qwen3-asr-1.7b", load["model"]["encoder"])
+        self.assertEqual((load["translate_to"], load["translation"]), (None, None))
+
     def test_a_zap_to_a_language_without_a_rule_stops_translating(self):
         from test_captions_pipeline import _Target
 
