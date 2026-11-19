@@ -436,8 +436,7 @@ class TVMenus(QObject):
         elif row == SEARCH_ACTION:
             self._window.screens.open_search()
         elif row == LIBRARY_ACTION:  # 2.8: the section opened last, Movies the first time
-            screens = self._window.screens
-            screens.open_library(screens.library_controller.section or "movies")
+            self._window.screens.open_last_library()
         elif row == REFRESH_ACTION:
             self.refresh_content()
 

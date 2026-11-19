@@ -11,6 +11,7 @@ import tomllib
 import orjson as json
 
 from services.atomic_write import atomic_write, set_aside
+from services.captions import translation_rules
 from services.captions.languages import CAPTION_LANGUAGES
 from services.captions.mt_languages import MT_LANGUAGES
 from services.config_writer import ConfigWriter
@@ -571,13 +572,13 @@ class ConfigManager:
     tmdb_details = _config_property("tmdb_details", True, coerce=lambda value: value is not False)
     tmdb_token = _config_property("tmdb_token", "", coerce=str)
     # 2.9, optional (older builds ignore them): AI captions. The speech model's tier ("auto":
-    # chosen by the computer's speed; "small": faster, 0.6B; "large": more accurate, 1.7B), and
-    # the language they hear when nothing names it ("auto": the speech model's own guess, else
-    # one of services.captions.languages.CAPTION_LANGUAGES: Qwen's English names, and 2.9.3's
-    # European ones only Parakeet writes; an older build reads those as "auto").
+    # chosen by the computer's speed; "small": faster, 0.6B; "large": more accurate, 1.7B).
     ai_captions_model = _config_property(
         "ai_captions_model", "auto", coerce=_one_of(AI_CAPTIONS_MODELS, "auto")
     )
+    # 2.11.2: no longer read; kept so older builds read what they wrote (the language captions
+    # heard when nothing named it: "auto", else one of services.captions.languages.
+    # CAPTION_LANGUAGES). What captions hear now comes from the content only.
     ai_captions_language = _config_property(
         "ai_captions_language", "auto", coerce=_one_of(("auto", *CAPTION_LANGUAGES), "auto")
     )
@@ -599,9 +600,15 @@ class ConfigManager:
         "ai_captions_language_models", False, coerce=lambda value: value is True
     )
     # 2.10, optional (older builds ignore it): the language AI captions are translated into
-    # ("": off; else one of services.captions.mt_languages.MT_LANGUAGES, MiLMMT's names)
+    # ("": off; else one of services.captions.mt_languages.MT_LANGUAGES, MiLMMT's names).
+    # 2.11.2: no longer read (nor carried over); kept so older builds read what they wrote.
     ai_captions_translate_to = _config_property(
         "ai_captions_translate_to", "", coerce=_one_of(("", *MT_LANGUAGES), "")
+    )
+    # 2.11.2, optional (older builds ignore it): the translation per spoken language
+    # ({Qwen's name: MiLMMT's name, or "" for none}; services.captions.translation_rules)
+    ai_captions_translations = _config_property(
+        "ai_captions_translations", {}, coerce=translation_rules.clean
     )
     # Optional (older builds ignore it): AI captions were turned on (true) or off during the
     # last video file played; the next one comes on with them when nothing has to be asked,

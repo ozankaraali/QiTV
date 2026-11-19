@@ -14,7 +14,7 @@ from unittest import mock
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 from PySide6.QtCore import QObject, Qt, Signal
-from PySide6.QtWidgets import QApplication, QMessageBox, QWidget
+from PySide6.QtWidgets import QApplication, QComboBox, QMessageBox, QWidget
 from test_track_panel import CHANNEL, FILM, FakePlayer, PanelCase
 from timer_fixtures import wait_until
 
@@ -215,6 +215,8 @@ class FakeCaptions(QObject):
         self.target = ""  # 2.10: the language they are translated into ("": off)
         self.translated = []  # set_translate_to's calls
         self.translate_asks = False  # a language asks its model's download question first
+        self.waits = False  # 2.11.2: the spoken language isn't known yet
+        self.recent = []  # 2.11.2: the languages used before (MiLMMT's names), in order
         self.offs = []  # give_way's `off`, each time
 
     def available(self):
@@ -297,8 +299,16 @@ class FakeCaptions(QObject):
     def translate_to(self):
         return self.target
 
+    def translation_waits(self):
+        return self.waits
+
+    def recent_translations(self):
+        return list(self.recent)
+
     def translate_languages(self):
-        return [("Turkish", "Türkçe"), ("English", "English"), ("German", "Deutsch")]
+        everyone = [("Turkish", "Türkçe"), ("English", "English"), ("German", "Deutsch")]
+        used = [pair for name in self.recent for pair in everyone if pair[0] == name]
+        return used + [pair for pair in everyone if pair not in used]
 
     def set_translate_to(self, name):
         self.translated.append(name)
@@ -341,9 +351,18 @@ class CaptionRowsTests(PanelCase):
             for r in self.rows()
         ]
 
+    def row(self, key):
+        return self.rows()[[r.key for r in self.rows()].index(key)]
+
     def click_row(self, key):
         index = [r.key for r in self.rows()].index(key)
         self.click(self.subtitle_panel, self.subtitle_panel.row_rect(index).center().toPoint())
+
+    def step_row(self, key, delta):
+        index = [r.key for r in self.rows()].index(key)
+        self.click(
+            self.subtitle_panel, self.subtitle_panel.step_rect(index, delta).center().toPoint()
+        )
 
     def test_the_row_shows_while_ai_captions_can_be_offered(self):
         self.captions.offered = False
@@ -473,6 +492,62 @@ class CaptionRowsTests(PanelCase):
         self.captions.changed.emit()
         self.assertEqual(self.subtitle_panel.model().title, "Subtitles")
         self.assertNotIn(AI_TRANSLATE, [r.key for r in self.rows()])
+
+    def test_the_translate_row_waits_for_the_language(self):
+        self.captions.on, self.captions.waits = True, True
+        self.click_button("subtitles")
+        row = self.row(AI_TRANSLATE)
+        self.assertEqual(
+            (row.note, row.opens, row.value), ("Once the language is heard", False, "")
+        )
+        self.click_row(AI_TRANSLATE)
+        self.assertEqual(self.subtitle_panel.model().title, "Subtitles")  # nothing opened
+        self.assertEqual(self.captions.translated, [])
+
+    def test_an_open_translate_list_goes_back_once_the_language_is_unknown(self):
+        # 2.11.2: a zap while the list is open (the new channel's language not heard yet): the
+        # Subtitles list again, as when they go off, its row waiting for the language
+        self.captions.on = True
+        self.click_button("subtitles")
+        self.click_row(AI_TRANSLATE)
+        self.assertEqual(self.subtitle_panel.model().title, "Translate to")
+        self.captions.waits = True
+        self.captions.changed.emit()
+        self.assertEqual(self.subtitle_panel.model().title, "Subtitles")
+        self.assertEqual(self.row(AI_TRANSLATE).note, "Once the language is heard")
+        self.captions.waits = False  # heard: the row opens the list again
+        self.captions.changed.emit()
+        self.click_row(AI_TRANSLATE)
+        self.assertEqual(self.subtitle_panel.model().title, "Translate to")
+
+    def test_the_translate_rows_widest_value_counts_the_one_shown(self):
+        # 2.11.2: the row's width holds the language shown, used before or not
+        self.captions.on, self.captions.recent = True, ["English"]
+        self.captions.target = "Indonesian"
+        self.click_button("subtitles")
+        row = self.row(AI_TRANSLATE)
+        self.assertEqual((row.value, row.widest), ("Bahasa Indonesia", "Bahasa Indonesia"))
+
+    def test_the_translate_row_steps_through_off_and_the_used_languages(self):
+        self.captions.on, self.captions.recent = True, ["English", "Turkish"]
+        self.click_button("subtitles")
+        row = self.row(AI_TRANSLATE)
+        self.assertEqual(
+            (row.value, row.choosable, row.lit, row.widest), ("Off", True, False, "English")
+        )
+        self.step_row(AI_TRANSLATE, +1)
+        self.assertEqual(self.captions.translated, ["English"])
+        self.assertEqual(
+            (self.row(AI_TRANSLATE).value, self.row(AI_TRANSLATE).lit), ("English", True)
+        )
+        self.step_row(AI_TRANSLATE, +1)
+        self.step_row(AI_TRANSLATE, +1)  # round to Off
+        self.assertEqual(self.captions.translated, ["English", "Turkish", ""])
+        self.step_row(AI_TRANSLATE, -1)  # and back round the other way
+        self.assertEqual(self.captions.translated[-1], "Turkish")
+        self.click_row(AI_TRANSLATE)  # a click opens the full list
+        self.assertEqual(self.subtitle_panel.model().title, "Translate to")
+        self.assertEqual(self.texts()[1:4], ["Off", "English", "*Türkçe"])  # used first
 
     def test_a_language_whose_model_must_download_puts_its_question_in_front(self):
         self.captions.on, self.captions.translate_asks = True, True
@@ -692,7 +767,14 @@ class PhoneChoicesTests(PanelCase):
         self.assertEqual((off.translate_text, off.translations), ("", ()))
         self.assertFalse(controls.choose_caption_translation("Turkish"))  # off: no row
         self.assertEqual(self.captions.translated, [])
-        self.captions.on = True
+        self.captions.on, self.captions.waits = True, True
+        waiting = controls.captions_choice()  # 2.11.2: no list until the language is known
+        self.assertEqual(
+            (waiting.translate_text, waiting.translations), ("Once the language is heard", None)
+        )
+        self.assertFalse(controls.choose_caption_translation("Turkish"))
+        self.assertEqual(self.captions.translated, [])
+        self.captions.waits = False
         choice = controls.captions_choice()
         self.assertEqual((choice.translate, choice.translate_text), ("", "Off"))
         self.assertEqual(
@@ -939,19 +1021,22 @@ class SpeechModelTests(unittest.TestCase):
 class TranslationTests(unittest.TestCase):
     """2.10: AI captions translated into the language the viewer picks: the list, its model's
     question, the picture held the translator's time further back (a film's sound read further
-    ahead), and Automatic's speech model while translating."""
+    ahead), and Automatic's speech model while translating. 2.11.2, the owner: the language is
+    remembered per spoken language, and nothing is translated before that language is known
+    (a channel plays whose language isn't known yet: the tests pick or detect one)."""
 
     @classmethod
     def setUpClass(cls):
         cls.app = QApplication.instance() or QApplication([])
 
     def setUp(self):
-        from test_captions_pipeline import _Card, _Live, _Overlay
+        from test_captions_pipeline import _Card, _Controller, _Live, _Overlay, _Target
 
         from ui.captions_controller import CaptionsController
 
         self.window = QWidget()
         self.addCleanup(self.window.deleteLater)
+        self.window.controller = _Controller(_Target(live=True))  # a channel ("films|A film")
         self.window.live_session = _Live()
         self.window.live_session.position_s = 100.0
         self.card = _Card()
@@ -1021,10 +1106,185 @@ class TranslationTests(unittest.TestCase):
         self.assertEqual(owns, sorted(owns, key=str.casefold))
         self.assertIn(("Russian", "Русский"), listed)
 
+    def test_the_list_has_the_languages_used_first_then_the_app_language(self):
+        # 2.11.2: the languages any rule translates into (but the one heard), by their own
+        # names; then the app language's (a shortcut only: it chooses nothing); then the rest
+        from services.captions.mt_languages import MT_LANGUAGES
+
+        self.config["ai_captions_translations"] = {
+            "German": "Turkish",
+            "French": "English",
+            "Arabic": "",
+            "Spanish": "Turkish",
+        }
+        self.captions.set_language("German")
+        self.assertEqual(self.captions.recent_translations(), ["English", "Turkish"])
+        with mock.patch("services.i18n.language", return_value="fr"):
+            listed = self.captions.translate_languages()
+        self.assertEqual(
+            listed[:3], [("English", "English"), ("Turkish", "Türkçe"), ("French", "Français")]
+        )
+        # never the language heard (2.11.2), the rest once each
+        others = sorted(name for name in MT_LANGUAGES if name != "German")
+        self.assertEqual(sorted(name for name, _own in listed), others)
+        rest = [own for _name, own in listed[3:]]
+        self.assertEqual(rest, sorted(rest, key=str.casefold))
+        with mock.patch("services.i18n.language", return_value="de"):
+            listed = self.captions.translate_languages()  # the app's is the one heard: not it
+        self.assertEqual(listed[:2], [("English", "English"), ("Turkish", "Türkçe")])
+        self.assertEqual(sorted(name for name, _own in listed), others)
+        self.captions.set_language("English")  # heard: not offered as its own translation
+        self.assertEqual(self.captions.recent_translations(), ["Turkish"])
+        with mock.patch("services.i18n.language", return_value="tr"):
+            listed = self.captions.translate_languages()
+        self.assertEqual(listed[0], ("Turkish", "Türkçe"))  # used, and the app's: once
+        self.assertNotIn("English", [name for name, _own in listed])
+        self.assertEqual(len(listed), 45)
+        self.captions.set_language("Chinese")  # as MiLMMT names it: its Simplified only
+        names = [name for name, _own in self.captions.translate_languages()]
+        self.assertNotIn("Chinese (Simplified)", names)
+        self.assertIn("Chinese (Traditional)", names)
+
+    def test_a_rule_into_the_language_heard_is_no_translation(self):
+        # 2.11.2: "German → German" (set before the list left it out, or by hand): nothing is
+        # translated, so no 5 s hold and no translator for the process
+        self.config["ai_captions_translations"] = {"German": "German"}
+        self.captions.set_language("German")
+        self.assertEqual(self.captions.translate_to(), "")
+        self.assertEqual(self.window.live_session.floor, 8.0)
+        self.assertNotIn(("translate", "German", self.folder()), self.sent)
+        self.config["ai_captions_translations"]["Chinese"] = "Chinese (Simplified)"
+        self.captions.set_language("Chinese")
+        self.assertEqual(self.captions.translate_to(), "")
+        self.config["ai_captions_translations"]["Chinese"] = "Chinese (Traditional)"
+        self.assertEqual(self.captions.translate_to(), "Chinese (Traditional)")
+
+    def test_translation_is_remembered_per_spoken_language(self):
+        self.captions.set_language("German")
+        self.captions.set_translate_to("English")
+        self.assertEqual(self.sent[-1], ("translate", "English", self.folder()))
+        self.captions.set_language("English")
+        self.assertEqual(self.captions.translate_to(), "")  # never chosen: off
+        self.assertEqual(self.sent[-1], ("translate", None))
+        self.assertEqual(self.window.live_session.floor, 8.0)
+        self.captions.set_translate_to("Turkish")
+        self.captions.set_language("German")
+        self.assertEqual(self.captions.translate_to(), "English")
+        self.assertEqual(
+            self.config["ai_captions_translations"], {"German": "English", "English": "Turkish"}
+        )
+        self.captions.set_translate_to("")  # no translation, remembered as such
+        self.assertEqual(
+            self.config["ai_captions_translations"], {"German": "", "English": "Turkish"}
+        )
+        self.assertEqual(self.captions.translate_to(), "")
+
+    def test_nothing_is_translated_or_set_while_the_language_is_unknown(self):
+        self.config["ai_captions_translations"] = {"German": "English"}
+        self.assertTrue(self.captions.translation_waits())
+        changed = []
+        self.captions.changed.connect(lambda: changed.append(True))
+        with self.assertNoLogs("ui.captions_controller", "INFO"):
+            self.captions.set_translate_to("Turkish")
+        self.assertEqual(self.config["ai_captions_translations"], {"German": "English"})
+        self.assertEqual(self.captions.translate_to(), "")
+        self.assertEqual(self.captions.recent_translations(), ["English"])
+        self.assertEqual((changed, self.card.asked), ([], []))
+        self.assertNotIn("translate", [message[0] for message in self.sent])
+        self.captions.set_language("German")
+        self.assertFalse(self.captions.translation_waits())
+
+    def test_a_language_detected_mid_run_applies_its_rule(self):
+        # on, ready, a live run going, the language unknown (setUp)
+        self.config["ai_captions_translations"] = {"German": "English"}
+        self.captions._on_detected(self.captions._run, "German")
+        self.assertEqual(self.sent[-1], ("translate", "English", self.folder()))
+        self.assertEqual(self.window.live_session.floor, 8.0 + TRANSLATE_LEAD_S)
+        self.captions._on_detected(self.captions._run, "English")  # the programme changed
+        self.assertEqual(self.sent[-1], ("translate", None))
+        self.assertEqual(self.window.live_session.floor, 8.0)
+
+    def test_a_language_detected_mid_run_moves_automatics_model_with_its_rule(self):
+        # on a slower computer: German detected (translated) takes the 0.6B here, and the
+        # 1.7B comes back once the programme turns English (no rule); what was heard survives
+        # the reload, and they stay on
+        self.config["ai_captions_model"] = "auto"
+        self.captions._tier = "large"
+        self.machine(1.2)
+        installed = mock.patch("services.captions.models.installed", return_value=True)
+        installed.start()
+        self.addCleanup(installed.stop)
+        self.config["ai_captions_translations"] = {"German": "English"}
+        self.captions._on_detected(self.captions._run, "German")
+        self.assertEqual(self.stopped, [True])
+        [load] = self.loaded
+        self.assertIn("qwen3-asr-0.6b", load["model"]["encoder"])
+        self.assertEqual((load["translate_to"], load["translation"]), ("English", self.folder()))
+        self.assertEqual(self.window.live_session.floor, 8.0 + TRANSLATE_LEAD_S)
+        self.captions._on_ready()  # the 0.6B loaded: its run starts in what was heard
+        self.assertEqual([m for m in self.sent if m[0] == "start"][-1][5], "German")
+        self.captions._on_detected(self.captions._run, "English")  # the programme changed
+        self.assertEqual(len(self.loaded), 2)
+        self.assertIn("qwen3-asr-1.7b", self.loaded[-1]["model"]["encoder"])
+        self.assertEqual(self.loaded[-1]["translate_to"], None)
+        self.assertEqual(self.window.live_session.floor, 10.0)
+        self.assertTrue(self.captions.enabled())
+
+    def test_turned_on_by_hand_automatic_goes_by_the_rule_for_what_plays(self):
+        # the language a channel watched before spoke (translated) is not this one's: nothing
+        # known here, so Automatic takes the model here with no wait for the speed
+        self.config["ai_captions_translations"] = {"German": "English"}
+        self.config["ai_captions_model"] = "auto"
+        self.machine(None)
+        self.captions._warm_tier = lambda: None  # never a benchmark here
+        self.captions._language = ("German", "")
+        self.captions._disable()
+        with mock.patch("services.captions.models.installed", return_value=True):
+            self.captions.toggle()
+        self.assertTrue(self.captions.enabled())
+        self.assertFalse(self.captions._toggle_waits)
+        load = self.loaded[-1]
+        self.assertIn("qwen3-asr-1.7b", load["model"]["encoder"])
+        self.assertEqual((load["translate_to"], load["translation"]), (None, None))
+
+    def test_a_zap_to_a_language_without_a_rule_stops_translating(self):
+        from test_captions_pipeline import _Target
+
+        from ui.captions_texts import FROM_VIEWER
+
+        self.config["ai_captions_translations"] = {"German": "English"}
+        self.captions.set_language("German")
+        self.assertEqual(self.sent[-1], ("translate", "English", self.folder()))
+        self.assertEqual(self.window.live_session.floor, 8.0 + TRANSLATE_LEAD_S)
+        other = _Target(live=True)
+        other.title = "Another channel"
+        picks = self.config["ai_captions_picks"]
+        self.config["ai_captions_picks"] = {**picks, "films|Another channel": "Turkish"}
+        self.window.controller.target = other  # the next channel: its own session
+        self.window.live_session.source = ("http://127.0.0.1:1/t/s2/side/3.ts", 3, 0.0)
+        runs = self.captions._run
+        self.captions._tick()
+        self.assertEqual(self.captions._run, runs + 1)  # its run started
+        self.assertEqual(self.captions._language, ("Turkish", FROM_VIEWER))
+        self.assertEqual(self.sent[-1], ("translate", None))
+        self.assertEqual(self.window.live_session.floor, 8.0)
+
+    def test_captions_turned_on_where_the_language_is_unknown_load_untranslated(self):
+        self.config["ai_captions_translations"] = {"German": "English"}
+        self.captions._language = ("German", "")  # what a channel watched before spoke
+        self.captions._disable()
+        with mock.patch("services.captions.models.installed", return_value=True):
+            self.captions.toggle()
+        self.assertTrue(self.captions.enabled())
+        load = self.loaded[-1]
+        self.assertEqual((load["translate_to"], load["translation"]), (None, None))
+        self.assertEqual((self.card.asked, self.window.live_session.floor), ([], 8.0))
+
     def test_a_language_without_its_model_asks_once_then_it_downloads_and_translates(self):
         from services.captions import models
         from ui.captions_texts import TRANSLATE_QUESTION
 
+        self.captions.set_language("Turkish")
         self.disk["translation"] = False
         sizes = {models.TRANSLATION_KEY: 726_000_000}
         with mock.patch.object(models, "download_size", side_effect=lambda key: sizes[key]):
@@ -1050,16 +1310,18 @@ class TranslationTests(unittest.TestCase):
         self.assertTrue(self.captions.enabled())
 
     def test_not_now_leaves_translation_off(self):
+        self.captions.set_language("Turkish")
         self.disk["translation"] = False
         with mock.patch("services.captions.models.download_size", return_value=726_000_000):
             self.captions.set_translate_to("English")
         self.captions.answer(False)
         self.assertEqual(self.captions.translate_to(), "")
-        self.assertEqual(self.config["ai_captions_translate_to"], "")
+        self.assertEqual(self.config["ai_captions_translations"], {"Turkish": ""})
         self.assertIsNone(self.captions._download)
         self.assertEqual(self.window.live_session.floor, 8.0)
 
     def test_off_while_its_question_is_up_takes_the_question_away(self):
+        self.captions.set_language("Turkish")
         self.disk["translation"] = False
         with mock.patch("services.captions.models.download_size", return_value=726_000_000):
             self.captions.set_translate_to("English")
@@ -1068,6 +1330,7 @@ class TranslationTests(unittest.TestCase):
         self.assertEqual(self.captions.translate_to(), "")
 
     def test_a_download_that_failed_says_why_and_leaves_translation_off(self):
+        self.captions.set_language("Turkish")
         self.disk["translation"] = False
         self.captions._begin_download = lambda: setattr(self.captions, "_download", object())
         with mock.patch("services.captions.models.download_size", return_value=726_000_000):
@@ -1076,7 +1339,95 @@ class TranslationTests(unittest.TestCase):
         self.captions._on_download_failed(self.captions._download, "Download failed: 404")
         self.assertEqual(self.toasts, ["Download failed: 404"])
         self.assertEqual(self.captions.translate_to(), "")
+        self.assertEqual(self.config["ai_captions_translations"], {"Turkish": ""})
         self.assertTrue(self.captions.enabled())  # the captions go on, as written
+
+    def test_not_now_after_a_zap_is_the_asked_languages_no(self):
+        # 2.11.2: asked for German's rule, answered once a Turkish channel plays: German is
+        # remembered untranslated, and Turkish keeps having no rule
+        self.config["ai_captions_translations"] = {"German": "English"}
+        self.disk["translation"] = False
+        with mock.patch("services.captions.models.download_size", return_value=726_000_000):
+            self.captions.set_language("German")
+            self.assertTrue(self.captions.asking())
+            self.captions.set_language("Turkish")  # the language heard changes meanwhile
+            self.captions.answer(False)
+        self.assertEqual(self.config["ai_captions_translations"], {"German": ""})
+
+    def test_a_download_that_failed_after_a_zap_is_the_asked_languages_no(self):
+        self.config["ai_captions_translations"] = {"German": "English", "French": "Turkish"}
+        self.disk["translation"] = False
+        self.captions._begin_download = lambda: setattr(self.captions, "_download", object())
+        with mock.patch("services.captions.models.download_size", return_value=726_000_000):
+            self.captions.set_language("German")
+            self.captions.answer(True)
+            self.captions.set_language("French")  # another rule, the same model on its way
+            self.captions._on_download_failed(self.captions._download, "Download failed: 404")
+        self.assertEqual(
+            self.config["ai_captions_translations"], {"German": "", "French": "Turkish"}
+        )
+
+    def test_off_for_one_language_keeps_the_model_another_rule_still_needs(self):
+        # 2.11.2: the translation model is one for every language: Off for Turkish takes its
+        # question away only once no rule names a language to translate into
+        self.config["ai_captions_translations"] = {"German": "English"}
+        self.captions.set_language("Turkish")
+        self.disk["translation"] = False
+        with mock.patch("services.captions.models.download_size", return_value=726_000_000):
+            self.captions.set_translate_to("English")
+            self.captions.set_translate_to("")  # German still needs the model
+            self.assertEqual((self.card.withdrawn, self.captions.asking()), (0, True))
+            self.captions.set_language("German")
+            self.captions.set_translate_to("")  # none left: the question goes
+        self.assertEqual((self.card.withdrawn, self.captions.asking()), (1, False))
+        self.assertEqual(self.config["ai_captions_translations"], {"German": "", "Turkish": ""})
+
+    def test_a_late_detection_from_the_channel_before_a_zap_changes_nothing_here(self):
+        # 2.11.2: the run of the channel left detects German after the zap: kept for that
+        # channel, while the one playing stays as it is (its language, its translation)
+        from test_captions_pipeline import _Target
+
+        self.config["ai_captions_translations"] = {"German": "English"}
+        first = self.window.controller.target
+        other = _Target(live=True)
+        other.title = "Another channel"
+        self.window.controller.target = other  # tuned; its run not started yet
+        self.captions._on_detected(self.captions._run, "German")
+        self.assertEqual(self.captions._detected, {"films|A film": "German"})
+        self.assertEqual(self.captions.language()[0], "auto")
+        self.assertEqual(self.captions.translate_to(), "")
+        self.assertNotIn("translate", [message[0] for message in self.sent])
+        self.assertEqual(self.window.live_session.floor, 8.0)
+        self.window.controller.target = first  # back on it: what was heard there
+        self.captions._resolve_language()
+        self.assertEqual(self.captions.translate_to(), "English")
+
+    def test_an_audio_track_whose_language_has_a_rule_is_translated_as_its_run_starts(self):
+        # 2.11.2: the film's other track names German (a rule): the run read again for it
+        # finds the language itself, and is read again from further ahead, translated
+        from test_captions_pipeline import _Controller, _Session, _Target
+
+        from ui.captions_controller import FILM_AHEAD_S
+
+        self.window.controller = _Controller(_Target(live=False, local=True))
+        self.window.session = _Session("file:///films/a.mkv", 120_000)
+        self.config["ai_captions_translations"] = {"German": "English"}
+        track = {"language": "Turkish"}
+        self.captions._track_language = lambda: track["language"]
+
+        def starts():
+            return [message[3] for message in self.sent if message[0] == "film"]
+
+        self.captions._start_run()
+        self.assertEqual(starts(), [120.0 + FILM_AHEAD_S])
+        self.assertNotIn("translate", [message[0] for message in self.sent])
+        self.window.session.audio_track = lambda: 3  # the viewer's other track
+        track["language"] = "German"
+        self.captions._tick()
+        self.assertIn(("translate", "English", self.folder()), self.sent)
+        ahead = 120.0 + FILM_AHEAD_S
+        self.assertEqual(starts(), [ahead, ahead, ahead + TRANSLATE_LEAD_S])
+        self.assertEqual(self.captions.translate_to(), "English")
 
     def test_off_while_its_model_downloads_calls_the_download_off(self):
         cancelled = []
@@ -1088,6 +1439,7 @@ class TranslationTests(unittest.TestCase):
             def cancel(self):
                 cancelled.append(True)
 
+        self.captions.set_language("Turkish")
         self.disk["translation"] = False
         self.captions._begin_download = lambda: setattr(self.captions, "_download", Download())
         with mock.patch("services.captions.models.download_size", return_value=726_000_000):
@@ -1119,6 +1471,7 @@ class TranslationTests(unittest.TestCase):
         from services.captions import models
 
         sizes = {"turkish": 278_000_000, models.TRANSLATION_KEY: 726_000_000}
+        self.captions.set_language("Turkish")
         self.disk["translation"] = False
         self.captions._begin_download = lambda: setattr(self.captions, "_download", object())
         with mock.patch.object(models, "download_size", side_effect=lambda key: sizes[key]):
@@ -1136,21 +1489,31 @@ class TranslationTests(unittest.TestCase):
     def test_a_computer_no_translation_model_suits_says_off_at_once(self):
         from services.captions import models
 
-        self.config["ai_captions_translate_to"] = "English"
+        self.captions.set_language("Turkish")
+        self.config["ai_captions_translations"] = {"Turkish": "English", "German": "English"}
         self.disk["translation"] = False
-        changed = []
-        self.captions.changed.connect(lambda: changed.append(True))
         with (
             mock.patch.object(models, "download_size", side_effect=models.Unsupported("x")),
-            self.assertLogs("ui.captions_controller", "WARNING"),
+            self.assertLogs("ui.captions_controller", "WARNING") as said,
         ):
             self.captions._start_run()
+        self.assertIn("no translation model suits this computer", said.output[0])
+        # no rule left, for any language: the row and the phones say Off, nothing is asked
+        self.assertEqual(self.config["ai_captions_translations"], {})
         self.assertEqual(self.captions.translate_to(), "")
-        self.assertTrue(changed)  # the row and the phones say Off
+        self.assertEqual((self.card.asked, self.captions.asking()), ([], False))
+        self.assertIsNone(self.captions._download)
+        self.assertNotEqual(self.captions._fetching, models.TRANSLATION_KEY)
+        with (
+            mock.patch.object(models, "download_size", side_effect=AssertionError("asked")),
+            self.assertNoLogs("ui.captions_controller", "WARNING"),
+        ):
+            self.captions._start_run()  # the next run: nothing looked at again
 
     def test_the_load_and_the_command_name_one_folder(self):
         from ui.captions_controller import CaptionsController
 
+        self.captions.set_language("Turkish")
         with mock.patch.object(
             CaptionsController, "_translation_folder", return_value="/elsewhere/mt"
         ):
@@ -1170,6 +1533,7 @@ class TranslationTests(unittest.TestCase):
             looked.append(name)
             return self.disk[name]  # (none for the translation model: a look would raise)
 
+        self.captions.set_language("Turkish")
         del self.disk["translation"]
         self.captions._here = here
         self.config["ai_captions_model"] = "auto"
@@ -1196,7 +1560,8 @@ class TranslationTests(unittest.TestCase):
     def test_a_language_whose_model_went_is_asked_for_again_as_the_next_run_starts(self):
         # Settings' Delete took the model the language chosen needs: no hold, no translation,
         # and its question when captions read again (a pick asks again too)
-        self.config["ai_captions_translate_to"] = "English"
+        self.captions.set_language("Turkish")
+        self.config["ai_captions_translations"] = {"Turkish": "English"}
         self.disk["translation"] = False
         self.assertEqual(self.captions._picture_lead(), 8.0)
         with mock.patch("services.captions.models.download_size", return_value=726_000_000):
@@ -1209,6 +1574,7 @@ class TranslationTests(unittest.TestCase):
         from ui.captions_controller import LEAD_S
 
         live = self.window.live_session
+        self.captions.set_language("Turkish")
         self.assertEqual((self.captions._picture_lead(), live.floor), (LEAD_S["small"], 8.0))
         self.captions.set_translate_to("English")
         self.assertEqual(self.captions._picture_lead(), LEAD_S["small"] + TRANSLATE_LEAD_S)
@@ -1226,7 +1592,7 @@ class TranslationTests(unittest.TestCase):
         self.assertEqual(self.sent[-1], ("translate", None))
         self.captions._tier = "large"
         self.assertEqual(self.captions._picture_lead(), LEAD_S["large"])
-        self.config["ai_captions_translate_to"] = "English"
+        self.config["ai_captions_translations"] = {"Turkish": "English"}
         self.assertEqual(self.captions._picture_lead(), LEAD_S["large"] + TRANSLATE_LEAD_S)
         self.assertEqual((self.loaded, self.stopped), ([], []))  # the viewer's own speech model
 
@@ -1235,8 +1601,9 @@ class TranslationTests(unittest.TestCase):
             self.captions._load_model()
             return self.loaded[-1]["translate_to"], self.loaded[-1]["translation"]
 
+        self.captions.set_language("Turkish")
         self.assertEqual(loaded(), (None, None))
-        self.config["ai_captions_translate_to"] = "English"
+        self.config["ai_captions_translations"] = {"Turkish": "English"}
         self.disk["translation"] = False
         self.assertEqual(loaded(), (None, None))
         self.disk["translation"] = True
@@ -1245,7 +1612,8 @@ class TranslationTests(unittest.TestCase):
     def test_the_hold_is_the_tier_s_lead_and_five_seconds_while_translating(self):
         from ui.captions_controller import LEAD_S
 
-        self.config["ai_captions_translate_to"] = "English"
+        self.captions.set_language("Turkish")
+        self.config["ai_captions_translations"] = {"Turkish": "English"}
         self.assertEqual(self.captions._picture_lead(), LEAD_S["small"] + 5.0)
 
     def test_the_load_says_whether_this_computer_is_slow_to_translate(self):
@@ -1270,6 +1638,7 @@ class TranslationTests(unittest.TestCase):
 
         self.window.controller = _Controller(_Target(live=False, local=True))
         self.window.session = _Session("file:///films/a.mkv", 120_000)
+        self.captions.set_language("Turkish")  # the film's
 
         def starts():
             return [message[3] for message in self.sent if message[0] == "film"]
@@ -1284,6 +1653,7 @@ class TranslationTests(unittest.TestCase):
         self.assertEqual(starts()[-1], 120.0 + FILM_AHEAD_S)
 
     def test_automatic_takes_the_0_6b_while_translating_on_a_slower_computer(self):
+        self.captions.set_language("Turkish")
         self.config["ai_captions_model"] = "auto"
         for score, plain, translating in (
             (1.2, "large", "small"),
@@ -1292,9 +1662,9 @@ class TranslationTests(unittest.TestCase):
         ):
             with self.subTest(score=score):
                 self.machine(score)
-                self.config["ai_captions_translate_to"] = ""
+                self.config["ai_captions_translations"] = {}
                 self.assertEqual(self.captions._auto_tier(), plain)  # the one here
-                self.config["ai_captions_translate_to"] = "English"
+                self.config["ai_captions_translations"] = {"Turkish": "English"}
                 self.assertEqual(self.captions._auto_tier(), translating)
         self.disk["translation"] = False  # its model not here: not translated
         self.assertEqual(self.captions._auto_tier(), "large")
@@ -1309,6 +1679,7 @@ class TranslationTests(unittest.TestCase):
         self.assertEqual(self.captions._choose_tier(), "large")
 
     def test_automatic_s_model_follows_translation_turned_on_and_off_while_they_are_on(self):
+        self.captions.set_language("Turkish")
         self.config["ai_captions_model"] = "auto"
         self.captions._tier = "large"
         self.machine(1.2)
@@ -1331,6 +1702,7 @@ class TranslationTests(unittest.TestCase):
     def test_on_a_slower_computer_translation_moves_to_the_0_6b_with_captions_going_on(self):
         # R25: picked while the 1.7B wrote, with the 0.6B here: the 0.6B reads on from the
         # picture, and the captions stay on (before: off and on again)
+        self.captions.set_language("Turkish")
         self.config["ai_captions_model"] = "auto"
         self.captions._tier = "large"
         self.machine(1.2)
@@ -1358,6 +1730,7 @@ class TranslationTests(unittest.TestCase):
         # down asks for the 0.6B if it can't keep up
         from ui.captions_texts import STEP_DOWN_QUESTION
 
+        self.captions.set_language("Turkish")
         self.config["ai_captions_model"] = "auto"
         self.captions._tier = "large"
         self.disk["small"] = False
@@ -1563,31 +1936,24 @@ class CaptionsSettingsTests(base.WindowCase):
         self.addCleanup(patch.stop)
         return models
 
-    def test_the_model_and_the_language_are_kept_at_save(self):
+    def test_the_model_is_kept_at_save_and_a_stored_language_is_left_alone(self):
         self.models(0)
+        self.window.config_manager.ai_captions_language = "Turkish"  # a 2.11.1 config: not read
         dialog = self.dialog()
         self.assertEqual(dialog.ai_captions_model_combo.currentData(), "auto")
-        self.assertEqual(dialog.ai_captions_language_combo.currentData(), "auto")
-        # Auto, Qwen's 30 and the 9 only Parakeet writes (2.9.3)
-        self.assertEqual(dialog.ai_captions_language_combo.count(), 40)
+        self.assertIsNone(dialog.findChild(QComboBox, "aiCaptionsLanguage"))
         group = dialog.ai_captions_model_combo.parentWidget()
         self.assertEqual(group.objectName(), "aiCaptionsSettings")
         dialog.ai_captions_model_combo.setCurrentIndex(
             dialog.ai_captions_model_combo.findData("large")
         )
-        dialog.ai_captions_language_combo.setCurrentIndex(
-            dialog.ai_captions_language_combo.findData("Turkish")
-        )
-        self.assertEqual(dialog.ai_captions_language_combo.currentText(), "Türkçe")
         self.assertTrue(dialog.has_unsaved_changes())
         dialog.save_settings()
         saved = ConfigManager()
-        self.assertEqual(
-            (saved.ai_captions_model, saved.ai_captions_language), ("large", "Turkish")
-        )
+        self.assertEqual(saved.ai_captions_model, "large")
+        self.assertEqual(saved.config["ai_captions_language"], "Turkish")
         dialog = self.dialog()
         self.assertEqual(dialog.ai_captions_model_combo.currentData(), "large")
-        self.assertEqual(dialog.ai_captions_language_combo.currentData(), "Turkish")
 
     def test_older_settings_read_as_automatic_and_unknown_values_too(self):
         config = ConfigManager()

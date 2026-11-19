@@ -372,6 +372,15 @@ class TracksTests(PanelCase):
         self.assertEqual((ai["translate"], ai["translate_note"]), ("Turkish", "Türkçe"))
         self.assertEqual(ai["translate_langs"], TRANSLATE_LANGS)
 
+    def test_ai_captions_offer_no_translation_list_until_the_language_is_known(self):
+        self.captions.on, self.captions.waits = True, True
+        ai = tracks(self.window, 1)["ai"]
+        self.assertNotIn("translate_langs", ai)
+        self.assertEqual(ai["translate_note"], "Once the language is heard")
+        self.captions.waits = False
+        ai = tracks(self.window, 1)["ai"]
+        self.assertEqual(ai["translate_langs"], TRANSLATE_LANGS)
+
     def test_nothing_playing_lists_nothing(self):
         self.playing = False
         empty = {"t": "tracks", "of": 2, "playing": False, "sound": [], "subs": []}

@@ -47,7 +47,6 @@ from services import (
     system_open,
 )
 from services.account_check import check_account
-from services.captions.languages import CAPTION_LANGUAGES, own_name
 from services.config_manager import ConfigManager
 from services.epg_view import (
     GUIDE_OFFSET_KEY,
@@ -80,7 +79,7 @@ from ui.parental_settings import build_parental_tab, pin_allows
 from ui.provider_drop import unique_name
 from ui.remote_settings import build_remote_tab, save_remote_settings
 from ui.theme import PALETTE, accent_button_style
-from ui.track_controls import AI_CAPTIONS_TEXT, auto_language_text
+from ui.track_controls import AI_CAPTIONS_TEXT
 from ui.update_dialogs import check_for_updates
 
 
@@ -906,31 +905,6 @@ class OptionsDialog(QDialog):
         model_note = QLabel(tr("Automatic takes the more accurate one on a fast computer."), group)
         model_note.setWordWrap(True)
         form.addRow(model_note)
-        self.ai_captions_language_combo = QComboBox(group)
-        self.ai_captions_language_combo.setObjectName("aiCaptionsLanguage")
-        self.ai_captions_language_combo.addItem(auto_language_text(), "auto")
-        for name in sorted(CAPTION_LANGUAGES, key=lambda name: own_name(name).casefold()):
-            self.ai_captions_language_combo.addItem(own_name(name), name)
-        self.ai_captions_language_combo.setCurrentIndex(
-            max(
-                0,
-                self.ai_captions_language_combo.findData(self.config_manager.ai_captions_language),
-            )
-        )
-        # i18n: a setting: the language AI captions hear when nothing names it
-        form.addRow(tr("Default language"), self.ai_captions_language_combo)
-        language_note = QLabel(
-            # 2.11.1: not for the viewer's own video and music files (the model finds theirs)
-            # i18n: Settings → Subtitles, under AI captions' Default language
-            tr(
-                "Used for channels and providers' films when the audio track names no language;"
-                " on your own files the speech model finds it. The Subtitles panel's Language"
-                " row picks one for a single channel."
-            ),
-            group,
-        )
-        language_note.setWordWrap(True)
-        form.addRow(language_note)
         files = QHBoxLayout()
         self.ai_captions_space = QLabel("", group)
         self.ai_captions_space.setObjectName("aiCaptionsSpace")
@@ -1910,7 +1884,6 @@ class OptionsDialog(QDialog):
         )
         self.config_manager.opensubtitles_password = self.opensubtitles_password_input.text()
         self.config_manager.ai_captions_model = self.ai_captions_model_combo.currentData()
-        self.config_manager.ai_captions_language = self.ai_captions_language_combo.currentData()
 
         # The combos' data: the values as the config has always had them ("STB", "Hours").
         epg_source = self.epg_source_combo.currentData()

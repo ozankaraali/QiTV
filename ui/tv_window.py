@@ -1085,6 +1085,7 @@ class TVWindow(QMainWindow):
         self.audio_screen.backRequested.connect(self.screens.library_from_sound)
         self.captions.changed.connect(controller.words_changed)  # the screen's Words pill
         self.overlays.transport.liveTvRequested.connect(self.screens.back_to_tv)  # 2.9.3
+        self.overlays.transport.openLibraryRequested.connect(self.screens.open_last_library)
         self.overlays.guide.searchRequested.connect(self.screens.open_search)
         # The corner player (the Library with what plays in a corner of it): ⤢ and a click on
         # it bring the player back, × stops it, the speaker mutes.

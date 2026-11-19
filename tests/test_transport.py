@@ -693,6 +693,7 @@ class OnScreenKeysTests(unittest.TestCase):
         signals = {
             "previous": (t.previousRequested, key_hint("Previous channel", "Backspace")),
             "guide": (t.guideRequested, key_hint("Guide", "G")),
+            "open_library": (t.openLibraryRequested, key_hint("Movies and series", "Ctrl+2")),
             "search": (t.searchRequested, key_hint("Search", "Ctrl+F")),
         }
         for name, (signal, tooltip) in signals.items():
@@ -703,9 +704,22 @@ class OnScreenKeysTests(unittest.TestCase):
                 spy = QSignalSpy(signal)
                 self.click(t, rect.center())
                 self.assertEqual(spy.count(), 1)
-        # Left to right: ⟲ ▦ ⌕, then the speaker (the channel's, then the sound's buttons).
-        lefts = [t.button_rect(n).left() for n in ("previous", "guide", "search", "volume")]
+        # Left to right: ⟲ ▦ the Library ⌕, then the speaker (the channel's, then the sound's
+        # buttons).
+        names = ("previous", "guide", "open_library", "search", "volume")
+        lefts = [t.button_rect(n).left() for n in names]
         self.assertEqual(lefts, sorted(lefts))
+
+    def test_the_library_sits_on_live_tv_where_a_movie_has_its_tv_button(self):  # 2.11.2
+        t = self.make()
+        t.show_vod("Film", "")
+        t.update_position(0, 100_000)
+        tv = t.button_rect("live_tv")
+        t.show_live("One", "")
+        self.assertEqual(t.button_rect("open_library"), tv)
+        self.assertLess(t.button_rect("guide").right(), t.button_rect("open_library").left())
+        t.show_vod("Film", "")
+        self.assertNotIn("open_library", t._layout())
 
     def test_a_title_with_choices_has_the_quality_button(self):  # 2.8: the ⚙ menu
         t = self.make()
@@ -1195,6 +1209,11 @@ class SmallWidthLayoutTests(unittest.TestCase):
                     if not movie:
                         self.assertIn("guide", rects)
                         self.assertIn("previous", rects)
+                    # 2.11.2: a film has the TV button, live TV the Library button (where
+                    # the row has room for it: it gives way first).
+                    self.assertEqual("live_tv" in rects, movie)
+                    if movie:
+                        self.assertNotIn("open_library", rects)
                     # ‹ Library: only for a title from the Library (live TV ignores it).
                     library = mode == "movie from the Library, with Next"
                     self.assertEqual("library" in rects, library)
@@ -1333,6 +1352,59 @@ class SmallWidthLayoutTests(unittest.TestCase):
         fm = QFontMetricsF(t._indicator_font(Units(1280)))
         box = t._layout()["indicator"]
         self.assertGreater(box.width(), fm.horizontalAdvance(head) + fm.horizontalAdvance(tail))
+
+
+class LiveLibraryButtonTests(unittest.TestCase):  # 2.11.2
+    """Live TV's Library button gives way first where the row is crowded."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.app = QApplication.instance() or QApplication([])
+
+    def test_a_crowded_live_row_leaves_out_the_library_button_first(self):  # 2.11.2
+        for width, crowded in ((300, True), (1280, False)):
+            t = Transport(idle_ms=3000)
+            self.addCleanup(t.close)
+            t.setGeometry(0, 0, width, round(width * 9 / 16))
+            t.set_pip_state(True, False)
+            t.show_live("One", "")
+            if crowded:  # every button of the multiview, Go live and a cast target, at 300 px
+                t.set_cast_state(True, False)
+                t.set_quality_available(True)
+                t.set_grid_state(True, True, "3×3", True, cells=9)
+                t.show_timeshift("One", "")
+                t.update_timeline(SmallWidthLayoutTests.state("shifted", 300.0, 1.0), [])
+            with self.subTest(width=width):
+                rects = t._layout()
+                self.assertEqual("open_library" in rects, not crowded)
+                for name in ("guide", "previous", "search", "volume"):
+                    self.assertIn(name, rects)  # the others keep their places
+                names = [n for n in rects if n not in ("seek", "times")]
+                for i, a in enumerate(names):
+                    for b in names[i + 1 :]:
+                        self.assertFalse(rects[a].intersects(rects[b]), f"{a} overlaps {b}")
+
+    def test_a_row_short_of_room_for_a_text_leaves_out_the_library_before_the_gear(self):
+        # 2.11.2: not only chips that run into the buttons: a row whose texts are squeezed
+        # (the Stay live indicator, the speed chip's − and +) or whose multiview chips fall
+        # short lets the Library button go before the ⚙, the only way to the quality menu.
+        # Which widths do that depends on the fonts: here the row has room only without it.
+        for check in ("_squeezed", "_grid_chips_short"):
+            t = Transport(idle_ms=3000)
+            self.addCleanup(t.close)
+            t.setGeometry(0, 0, 1280, 720)
+            t.set_pip_state(True, False)
+            t.set_quality_available(True)
+            t.show_live("One", "")
+            with self.subTest(check=check):
+                self.assertIn("open_library", t._layout())  # room for every button
+                self.assertIn("quality", t._layout())
+                setattr(t, check, lambda rects, row=None: "open_library" in rects)
+                rects = t._layout()
+                self.assertNotIn("open_library", rects)
+                self.assertIn("quality", rects)
+                for name in ("guide", "previous", "search", "volume"):
+                    self.assertIn(name, rects)
 
 
 class GridChipTests(TransportCase):

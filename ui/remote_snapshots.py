@@ -166,9 +166,10 @@ def tracks(window: Any, of: int) -> dict:
             ai["langs"] = [{"id": name, "name": own} for name, own in captions.languages]
             ai["translate"] = captions.translate
             ai["translate_note"] = captions.translate_text[:TITLE_CHARS]  # "Türkçe", "Off"
-            ai["translate_langs"] = [
-                {"id": name, "name": own[:TITLE_CHARS]} for name, own in captions.translations
-            ]
+            if captions.translations is not None:  # 2.11.2: none until the language is known
+                ai["translate_langs"] = [
+                    {"id": name, "name": own[:TITLE_CHARS]} for name, own in captions.translations
+                ]
         if captions.models:  # their row's ‹ speech model ›, and its steps in order
             ai["model"] = captions.model
             ai["models"] = [
