@@ -610,6 +610,13 @@ class ConfigManager:
     ai_captions_translations = _config_property(
         "ai_captions_translations", {}, coerce=translation_rules.clean
     )
+    # Dev build (2026-11-19), optional (older builds ignore it): how our Turkish Moonshine reads
+    # (services.captions.moon_reading.READINGS; the Subtitles panel's Turkish reading row)
+    dev_turkish_reading = _config_property(
+        "dev_turkish_reading",
+        "beam",
+        coerce=_one_of(("greedy", "beam", "lm", "lm_int8", "ilme"), "beam"),
+    )
     # Optional (older builds ignore it): AI captions were turned on (true) or off during the
     # last video file played; the next one comes on with them when nothing has to be asked,
     # downloaded or measured first (CaptionsController.local_video_playing).

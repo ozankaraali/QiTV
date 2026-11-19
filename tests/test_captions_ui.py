@@ -317,6 +317,29 @@ class FakeCaptions(QObject):
         self.changed.emit()
 
 
+class ReadingCaptions(FakeCaptions):
+    """Dev build (2026-11-19): with the Turkish reading row's three methods."""
+
+    def __init__(self):
+        super().__init__()
+        self.reading = "beam"
+        self.here = [("greedy", "Greedy"), ("beam", "Beam"), ("lm", "Beam + LM")]
+        self.steps = []
+
+    def turkish_reading(self):
+        return self.reading if self.reading in dict(self.here) else "beam"
+
+    def turkish_readings(self):
+        return list(self.here)
+
+    def step_turkish_reading(self, delta):
+        self.steps.append(delta)
+        names = [name for name, _text in self.here]
+        at = names.index(self.turkish_reading())
+        self.reading = names[(at + (1 if delta > 0 else -1)) % len(names)]
+        self.changed.emit()
+
+
 class CaptionRowsTests(PanelCase):
     def setUp(self):
         self.captions = FakeCaptions()
@@ -548,6 +571,55 @@ class CaptionRowsTests(PanelCase):
         self.click_row(AI_TRANSLATE)  # a click opens the full list
         self.assertEqual(self.subtitle_panel.model().title, "Translate to")
         self.assertEqual(self.texts()[1:4], ["Off", "English", "*Türkçe"])  # used first
+
+    def reading_panel(self):
+        from ui.track_controls import AI_READING
+
+        self.captions = ReadingCaptions()  # (the controls ask for it each time)
+        return AI_READING
+
+    def test_reading_row_steps_and_sends_while_on(self):
+        key = self.reading_panel()
+        self.captions.on = True
+        self.click_button("subtitles")
+        keys = [r.key for r in self.rows()]
+        self.assertEqual(keys.index(key), keys.index(AI_TRANSLATE) + 1)  # under Translate to
+        row = self.row(key)
+        self.assertEqual(row.text, "Turkish reading")
+        self.assertEqual((row.value, row.lit, row.choosable), ("Beam", False, True))
+        self.assertEqual(row.widest, "Beam + LM")
+        self.step_row(key, +1)
+        self.assertEqual(self.captions.steps, [1])
+        self.assertEqual((self.row(key).value, self.row(key).lit), ("Beam + LM", True))
+        self.step_row(key, -1)
+        self.step_row(key, -1)
+        self.assertEqual(self.row(key).value, "Greedy")
+        self.assertTrue(self.subtitle_panel.isVisible())  # the panel stays
+
+    def test_reading_row_absent_while_captions_off(self):
+        key = self.reading_panel()
+        self.click_button("subtitles")
+        self.assertNotIn(key, [r.key for r in self.rows()])
+
+    def test_reading_row_absent_for_a_controller_without_it(self):
+        from ui.track_controls import AI_READING
+
+        self.captions.on = True  # the base fake: no turkish_readings
+        self.click_button("subtitles")
+        self.assertNotIn(AI_READING, [r.key for r in self.rows()])
+
+    def test_reading_row_shows_beam_when_config_names_a_missing_lm(self):
+        key = self.reading_panel()
+        self.captions.on, self.captions.reading = True, "ilme"  # its file isn't here
+        self.click_button("subtitles")
+        self.assertEqual(self.row(key).value, "Beam")
+
+    def test_reading_row_steps_without_a_turkish_language_too(self):
+        key = self.reading_panel()
+        self.captions.on, self.captions.lang = True, ("German", "you chose")
+        self.click_button("subtitles")
+        self.step_row(key, +1)
+        self.assertEqual(self.captions.steps, [1])
 
     def test_a_language_whose_model_must_download_puts_its_question_in_front(self):
         self.captions.on, self.captions.translate_asks = True, True
@@ -1087,6 +1159,54 @@ class TranslationTests(unittest.TestCase):
             patch = mock.patch.object(tier, name, return_value=value)
             patch.start()
             self.addCleanup(patch.stop)
+
+    def lm_folder(self, *names):
+        from pathlib import Path
+
+        folder = Path(tempfile.mkdtemp())
+        self.addCleanup(shutil.rmtree, folder, True)
+        for name in names:
+            (folder / name).write_bytes(b"x")
+        patch = mock.patch("ui.captions_controller.reading_folder", return_value=folder)
+        patch.start()
+        self.addCleanup(patch.stop)
+        return folder
+
+    def test_spec_carries_the_reading_and_the_lm_folder(self):
+        # dev build (2026-11-19): the process starts in the chosen Turkish reading
+        folder = self.lm_folder("lm.u8mm.onnx")
+        self.config["dev_turkish_reading"] = "lm"
+        self.captions._load_model()
+        load = self.loaded[-1]
+        self.assertEqual((load["turkish_reading"], load["turkish_lm"]), ("lm", str(folder)))
+        self.config["dev_turkish_reading"] = "lm_int8"  # its file isn't here: the beam
+        self.captions._load_model()
+        self.assertEqual(self.loaded[-1]["turkish_reading"], "beam")
+
+    def test_the_turkish_readings_are_those_whose_file_is_here(self):
+        self.lm_folder("lm.int8.onnx")
+        self.assertEqual(
+            self.captions.turkish_readings(),
+            [("greedy", "Greedy"), ("beam", "Beam"), ("lm_int8", "Beam + LM (int8)")],
+        )
+        self.assertEqual(self.captions.turkish_reading(), "beam")
+
+    def test_a_reading_stepped_is_kept_and_sent_to_the_process(self):
+        self.lm_folder("lm.u8mm.onnx", "lm.int8.onnx")
+        changed = []
+        self.captions.changed.connect(lambda: changed.append(True))
+        self.captions.step_turkish_reading(+1)
+        self.assertEqual(self.config["dev_turkish_reading"], "lm")
+        self.assertEqual(self.sent[-1], ("reading", "lm"))
+        self.assertTrue(changed)
+        self.captions.step_turkish_reading(-1)
+        self.captions.step_turkish_reading(-1)
+        self.assertEqual(self.sent[-1], ("reading", "greedy"))
+        self.alive = False  # no process: kept, nothing sent
+        sent = len(self.sent)
+        self.captions.step_turkish_reading(-1)
+        self.assertEqual(self.config["dev_turkish_reading"], "ilme")
+        self.assertEqual(len(self.sent), sent)
 
     def test_the_list_has_the_app_language_first_then_the_rest_by_their_own_names(self):
         from services.captions.mt_languages import MT_LANGUAGES

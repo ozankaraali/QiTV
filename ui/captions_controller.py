@@ -59,6 +59,7 @@ from typing import Any, Optional
 
 from PySide6.QtCore import QObject, QTimer, Signal
 
+from services.captions import moon_reading
 from services.captions.streaming import TRANSLATE_LEAD_S
 from services.i18n import tr, translate
 
@@ -189,6 +190,13 @@ def _page_of(sink: Any) -> Any:
     """The page (overlay host) a place the captions show is on; None when it says none."""
     parent = getattr(sink, "parentWidget", None)
     return parent() if callable(parent) else None
+
+
+def reading_folder() -> Any:
+    """Dev build (2026-11-19): the Turkish LM files' folder, beside the other caption models."""
+    from services.captions import models
+
+    return models.captions_root() / moon_reading.LM_FOLDER
 
 
 def model_texts() -> dict[str, str]:
@@ -785,6 +793,31 @@ class CaptionsController(QObject):
         self._card.ask(*self._question)
         self.changed.emit()  # the phones ask too (asked_unprompted)
 
+    # ---- dev build (2026-11-19): how our Turkish Moonshine reads (services.captions.moon_reading)
+    def turkish_readings(self) -> list[tuple[str, str]]:
+        """The readings whose LM file is here, as (name, text), in their order; looked for once,
+        then again at each start of the captions process."""
+        here: Optional[list[str]] = getattr(self, "_readings_here", None)
+        if here is None:
+            here = moon_reading.available(reading_folder())
+            self._readings_here: Optional[list[str]] = here
+        return [(name, moon_reading.TEXTS[name]) for name in here]
+
+    def turkish_reading(self) -> str:
+        """The reading chosen, or Beam when its file isn't here."""
+        name = str(self._config_get("dev_turkish_reading", moon_reading.DEFAULT) or "")
+        return name if name in dict(self.turkish_readings()) else moon_reading.DEFAULT
+
+    def step_turkish_reading(self, delta: int) -> None:
+        """The row's ‹ or ›: the reading before or after, round those here; kept, and told to the
+        captions process at once (from its next piece on)."""
+        names = [name for name, _text in self.turkish_readings()]
+        name = moon_reading.stepped(self.turkish_reading(), delta, names)
+        self._config_set("dev_turkish_reading", name)
+        if self._process.running():
+            self._process.send("reading", name)
+        self.changed.emit()
+
     # ---- the speech model (2.9: on the AI captions row, a game's ‹ quality ›; Settings' too) --
     def model(self) -> str:
         """The viewer's speech model: "auto" (by this computer's speed), "small" or "large"."""
@@ -1100,6 +1133,7 @@ class CaptionsController(QObject):
         paths = models.model_paths(self._tier)
         runtime = models.runtime_dir()
         translation = self._translation()
+        self._readings_here = None  # dev build: the LM files looked for again
         self._loading, self._ready = True, False
         self._process.start(
             {
@@ -1119,6 +1153,9 @@ class CaptionsController(QObject):
                 "translate_to": translation or None,
                 "translation": self._translation_folder() if translation else None,
                 "slow_to_translate": self._slow_to_translate(),  # 2.10 (an older child ignores it)
+                # dev build: how our Turkish Moonshine reads, and where its LM files are
+                "turkish_reading": self.turkish_reading(),
+                "turkish_lm": str(reading_folder()),
                 "threads": model_threads(),
             },
             detailed_log=bool(self._config_get("detailed_log", False)),

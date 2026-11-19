@@ -110,6 +110,7 @@ AI_BACK = "ai_back"  # the list's way back to the Subtitles panel
 AI_PICK = "ai_pick"  # a language of the list: (AI_PICK, "auto" or Qwen's name)
 AI_TRANSLATE = "ai_translate"  # 2.10: the language they are translated into: opens its list
 AI_TRANSLATE_PICK = "ai_translate_pick"  # its list's: (AI_TRANSLATE_PICK, "" or MiLMMT's name)
+AI_READING = "ai_reading"  # dev build (2026-11-19): how our Turkish Moonshine reads
 # i18n: the Subtitles panel's row: captions written on this computer by a speech model, in the
 # language spoken; a Settings group's title
 AI_CAPTIONS_TEXT = N_("AI captions")
@@ -827,7 +828,25 @@ class TrackControls(QObject):
             note = self._language_text(captions)
             rows.append(PanelRow(AI_LANGUAGE, translate(LANGUAGE_TEXT), note=note, opens=True))
             rows.append(self._translate_row(captions))  # 2.10: under it, while on as it is
+            readings = getattr(captions, "turkish_readings", None)
+            if callable(readings):  # dev build: under it, "Turkish reading  ‹ Beam ›"
+                rows.append(self._reading_row(captions, readings()))
         return rows
+
+    @staticmethod
+    def _reading_row(captions, readings: list[tuple[str, str]]) -> PanelRow:
+        """Dev build (2026-11-19): how our Turkish Moonshine reads, stepped round the readings
+        whose files are here (plain English: never in a release)."""
+        texts = dict(readings)
+        now = captions.turkish_reading()
+        return PanelRow(
+            AI_READING,
+            "Turkish reading",
+            value=texts.get(now, now),
+            widest=max(texts.values(), key=len, default=""),
+            lit=now != "beam",
+            choosable=True,
+        )
 
     def _translate_row(self, captions) -> PanelRow:
         """The Translate to row (2.11.2): waiting for the language; or its own name or Off as a
@@ -908,6 +927,10 @@ class TrackControls(QObject):
         captions = self._offered()
         if name != SUBTITLES or captions is None or not self._playing():
             return
+        if key == AI_READING:  # dev build: round the Turkish readings, the panel stays
+            if captions.enabled():
+                captions.step_turkish_reading(delta)
+            return
         if key == AI_TRANSLATE:  # 2.11.2: round Off and the languages used, the panel stays
             if captions.enabled() and not captions.translation_waits():
                 steps = ["", *captions.recent_translations()]
@@ -987,6 +1010,10 @@ class TrackControls(QObject):
             if captions is not None and not captions.translation_waits():
                 self._level = AI_TRANSLATE
                 self._open(SUBTITLES)
+        elif key == AI_READING:  # dev build: a click steps on, as ›
+            captions = self._offered()
+            if captions is not None and captions.enabled():
+                captions.step_turkish_reading(1)
         elif key == AI_BACK:
             self._back_to_subtitles()
         elif isinstance(key, tuple) and len(key) == 2 and key[0] == AI_PICK:

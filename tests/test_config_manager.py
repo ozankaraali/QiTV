@@ -77,6 +77,21 @@ class WindowConfigMigrationTests(unittest.TestCase):
         for key, value in saved.items():
             self.assertEqual(written[key], value)
 
+    def test_dev_turkish_reading_defaults_to_beam_and_rejects_unknown(self):
+        # dev build (2026-11-19): optional; an older build ignores it
+        with tempfile.TemporaryDirectory() as directory:
+            config_path = Path(directory) / "config.json"
+            config_path.write_text(json.dumps({}), encoding="utf-8")
+            with patch.object(ConfigManager, "_get_config_path", return_value=str(config_path)):
+                config = ConfigManager()
+                self.assertEqual(config.dev_turkish_reading, "beam")
+                for stored in ("fast", 5, None, ["lm"]):
+                    config.config["dev_turkish_reading"] = stored
+                    self.assertEqual(config.dev_turkish_reading, "beam", stored)
+                config.dev_turkish_reading = "ilme"
+                config.save_config(wait=True)
+                self.assertEqual(ConfigManager().dev_turkish_reading, "ilme")
+
     def test_translations_are_kept_per_spoken_language_and_a_2_11_1_config_has_none(self):
         # 2.11.2, the owner: translation starts Off for every language; the old single target
         # is not carried over, and both old keys stay as they were (older builds read them)
