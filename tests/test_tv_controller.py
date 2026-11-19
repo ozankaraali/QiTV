@@ -42,7 +42,7 @@ from services.vlc_profile import DEFAULT_USER_AGENT, STB_USER_AGENT, PlayKind
 from services.watch_state import WatchState
 from services.zapping import ZapController
 from tests.test_navigation import FakeCatalog as NavCatalog
-from ui.keymap import Action
+from ui.keymap import Action, resolve
 from ui.link_lanes import Target
 from ui.overlays.channel_column import ChannelColumn
 from ui.overlays.channel_rows import ChannelRowsModel
@@ -5850,8 +5850,6 @@ class SettingsLayerTests(ControllerTestCase):
         ):
             self.controller.handle(action, payload)
         self.assertEqual(self.settings_drawer.path(), (GENERAL,))  # its next section
-        self.controller.handle(Action.VOL_UP)  # the player's keys still reach the player
-        self.assertEqual(self.session.level, 55)
         self.assertEqual(self.drawer.named("move_by"), [])
         self.assertEqual(self.drawer.named("field_key"), [])
         self.assertEqual(self.drawer.named("type_text"), [])
@@ -5859,6 +5857,69 @@ class SettingsLayerTests(ControllerTestCase):
         self.assertEqual(self.controller.key_context(), "drawer")  # the list closed under it
         self.settings.close()
         self.assertEqual(self.controller.key_context(), "player")
+
+    def test_the_media_keys_and_f11_reach_the_player_under_settings(self):
+        # In the drawer's context the letters type (+ − M F reach nothing, as in the list);
+        # the keyboard's volume key and F11 resolve to the player's actions there too.
+        self.play(0)
+        self.settings.open()
+        for key in (Qt.Key.Key_VolumeUp, Qt.Key.Key_F11):
+            action, payload = resolve(key, NO_MODS, "", context=self.controller.key_context())
+            self.controller.handle(action, payload)
+        self.assertEqual(self.session.level, 55)
+        self.assertEqual(self.window.calls, ["toggle_fullscreen"])
+        self.assertTrue(self.settings.visible())
+
+    def open_settings(self):
+        """As the window opens it (TVWindow.open_settings)."""
+        self.controller.make_way_for_settings()
+        self.settings.open()
+
+    def test_a_provider_ready_while_settings_shows_keeps_it(self):
+        # Ctrl/⌘+, while a provider loads: the idle player's list waits for Settings to go.
+        self.controller.start()
+        self.open_settings()
+        self.catalog.hub_ready("Home")
+        self.catalog.sectionReady.emit("live")
+        self.assertTrue(self.settings.visible())
+        self.assertEqual(self.drawer.named("open_drawer"), [])
+        self.controller.handle(Action.ESCAPE)  # the sections: closed (not from the list)
+        self.assertFalse(self.settings.visible())
+        self.assertEqual(self.drawer.named("open_drawer"), [(None,)])  # the list due, now
+
+    def test_a_provider_failing_while_settings_shows_keeps_it(self):
+        self.controller.start()
+        self.open_settings()
+        self.catalog.hub_failed("Home", "Handshake failed")
+        self.assertTrue(self.settings.visible())
+        self.assertEqual(self.drawer.named("open_drawer"), [])
+        self.controller.handle(Action.ESCAPE)
+        self.assertEqual(self.drawer.named("open_drawer"), [(None, "left")])  # its retry row
+        self.assertEqual([(n.layer, n.key) for n in self.nav.path], [("source", "Home")])
+
+    def test_the_welcome_card_waits_for_a_file_opened_while_settings_shows(self):
+        self.catalog.names = []
+        self.controller.start()
+        self.assertTrue(self.welcome.visible)
+        self.open_settings()
+        self.assertFalse(self.welcome.visible)  # under Settings
+        self.controller.hold_for_file(True)  # a file opened meanwhile (⌘O, a drop)
+        self.controller.play_file("/videos/Film.mkv", size=1234)
+        self.session.stateChanged.emit("playing")
+        self.controller.handle(Action.ESCAPE)  # Settings closes over the playing file
+        self.assertFalse(self.settings.visible())
+        self.assertFalse(self.welcome.visible)  # not over the film
+        self.session.stateChanged.emit("ended")
+        self.session.ended.emit()
+        self.assertTrue(self.welcome.visible)  # the film is over: the card again
+
+    def test_the_welcome_card_comes_back_after_settings(self):
+        self.catalog.names = []
+        self.controller.start()
+        self.open_settings()
+        self.assertFalse(self.welcome.visible)
+        self.controller.handle(Action.ESCAPE)
+        self.assertTrue(self.welcome.visible)
 
     def test_the_mouse_buttons_go_a_layer_down_and_up_in_settings(self):
         self.settings.open()

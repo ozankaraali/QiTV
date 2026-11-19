@@ -422,6 +422,8 @@ class TVController(QObject):
             retry_notice=lambda: self.overlays.retry_notice,
             parent=self,
         )
+        # Settings in the drawer (the window's, set_settings): None until it is wired.
+        self._settings: Optional[SettingsController] = None
         # Provider setups: the loading and welcome hints, the last channel, the Library's
         # hold on live TV.
         self._flow = ProviderFlow(
@@ -441,6 +443,7 @@ class TVController(QObject):
             drop_autoplay=self._drop_card,
             autoplay_hint=lambda: self._autoplay.hint(),
             explain=self._explain,
+            settings_shown=self._settings_shown,
             parent=self,
         )
         self._current: Optional[Target] = None  # handed to the player
@@ -555,9 +558,6 @@ class TVController(QObject):
             tiles=self._mixer_tiles,
             parent=self,
         )
-        # Settings in the drawer (the window's, set_settings): None until it is wired.
-        self._settings: Optional[SettingsController] = None
-        self._welcome_under_settings = False  # the welcome card gave way to Settings
         # Subtitles from OpenSubtitles for a film or an episode (the Subtitles panel's search).
         self._online: Optional[OnlineSubtitles] = None
         if online_subtitles is not None and overlays.subtitle_search is not None:
@@ -1448,16 +1448,19 @@ class TVController(QObject):
         and Forward, and a click on the picture closes it."""
         self._settings = settings
         settings.hidden.connect(self._on_settings_hidden)
-        # The channel list opened while it shows (a menu, a provider ready) raises itself over
-        # it and takes the keys: Settings goes (eventFilter).
+        # The channel list or the welcome card opened while it shows (asked for: a menu, a
+        # click; what opens them by itself waits, ProviderFlow) raises itself over it and
+        # takes the keys: Settings goes (eventFilter).
         self.overlays.drawer.installEventFilter(self)
+        self.overlays.welcome.installEventFilter(self)
 
     def make_way_for_settings(self) -> None:
         """Settings is opening over the player: what would keep the keys hidden under it
         closes, each as it closes by itself (the channel list, the guide, the OpenSubtitles
         search, the ⚙ quality menu, the phone remote's pairing screen), so the keys always go
-        to what shows. The welcome card gives way until Settings goes. A question (stop a
-        recording? convert? download?) keeps the keys, and stays above Settings."""
+        to what shows. The welcome card gives way until Settings goes (ProviderFlow, its
+        owner). A question (stop a recording? convert? download?) keeps the keys, and stays
+        above Settings."""
         if self._closed:
             return
         overlays = self.overlays
@@ -1471,15 +1474,12 @@ class TVController(QObject):
         pairing = overlays.pairing
         if pairing is not None and pairing.isVisible():
             pairing.dismiss()
-        if overlays.welcome.isVisible():
-            self._welcome_under_settings = True
-            overlays.welcome.dismiss()
+        self._flow.welcome_give_way()
 
     def _on_settings_hidden(self) -> None:
-        """Settings went: the welcome card it covered comes back while there is no provider."""
-        under, self._welcome_under_settings = self._welcome_under_settings, False
-        if under and not self._closed and not self.catalog.provider_names():
-            self.overlays.welcome.show_card()
+        """Settings went: what waited for it (the welcome card, a list due) as it is now."""
+        if not self._closed:
+            self._flow.settings_closed()
 
     def _settings_shown(self) -> bool:
         return self._settings is not None and self._settings.visible()
@@ -1779,8 +1779,8 @@ class TVController(QObject):
     def _mouse_layer(self, action: Action, in_settings: Action) -> None:
         if self._closed:
             return
-        if self._settings is not None and self._settings.visible():
-            self._settings.handle(in_settings)
+        if self._settings_shown():
+            self.handle(in_settings)  # through what shows over it first (a question)
         elif self.overlays.drawer.isVisible():
             self.handle(action)
         else:
@@ -1828,7 +1828,7 @@ class TVController(QObject):
             self._zap_steps(steps)
 
     def eventFilter(self, watched: QObject, event: QEvent) -> bool:
-        if watched is self.overlays.drawer:
+        if watched is self.overlays.drawer or watched is self.overlays.welcome:
             if event.type() == QEvent.Type.Show and self._settings_shown():
                 self._close_settings()
             return False

@@ -153,6 +153,23 @@ class SettingsWiringTests(base.WindowCase):
         stacked = [w for w in self.window.host.children() if w is card or w is settings]
         self.assertEqual(stacked, [settings, card])  # the card above
 
+    def test_the_mouse_buttons_reach_a_question_over_settings_first(self):
+        # A question shown over Settings (from the phone, say) keeps the keys: the mouse's
+        # Back and Forward too.
+        self.show()
+        self.wait_for_drawer()
+        self.menu_actions()["Settings…"].trigger()
+        card = self.window.quality_card
+        card.ask("Convert it on the server?", "Convert", "Not now")
+        self.addCleanup(card.withdraw)
+        self.window.controller.mouse_forward()  # the card's →
+        self.assertEqual(self.window.settings_drawer.focus_side(), "left")
+        self.window.controller.mouse_back()  # the card's Esc: Not now
+        self.assertTrue(card.isHidden())
+        self.assertTrue(self.window.settings.visible())  # Settings stays where it was
+        self.window.controller.mouse_back()  # now Settings': the sections close
+        self.assertFalse(self.window.settings.visible())
+
     def test_the_channel_list_opened_over_settings_closes_it(self):
         # The list opened while Settings shows (a menu, a provider ready) shows on top and
         # takes the keys: Settings goes.
