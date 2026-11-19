@@ -434,7 +434,8 @@ class SettingsDrawer(Overlay):
         note = translate(RESTART_NOTE) if row.restart else ""
         text = " ".join(part for part in (help_text, note) if part)
         lines = wrap_lines(text, font, width, HELP_LINES)
-        if help_text and note and " ".join(lines) != " ".join(text.split()):
+        # (cut short: a line may break where there is no space, after a hyphen or in Chinese)
+        if help_text and note and "".join("".join(lines).split()) != "".join(text.split()):
             lines = wrap_lines(help_text, font, width, HELP_LINES - 1)
             lines += wrap_lines(note, font, width, 1)
         return lines

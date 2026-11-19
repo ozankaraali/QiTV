@@ -22,7 +22,9 @@ from services.settings_model import (
     is_lit,
     sections,
 )
-from ui.overlays.settings_drawer import SettingsDrawer
+from ui.overlays.guide import wrap_lines
+from ui.overlays.painting import ui_units
+from ui.overlays.settings_drawer import HELP_FONT_U, INSET_U, SettingsDrawer
 
 
 def make(width=1280, height=720, values=None):
@@ -99,6 +101,32 @@ class SettingsDrawerTests(unittest.TestCase):
         self.assertEqual(self.drawer.focus_side(), "left")
         self.assertEqual(self.steps, [])
         self.assertEqual(self.drawer.path(), ("playback",))
+        self.drawer.left()  # on the sections: a layer up, out of Settings
+        self.assertEqual(self.closed, [True])
+        self.assertFalse(self.drawer.isVisible())
+
+    def test_a_help_broken_after_a_hyphen_keeps_both_its_lines(self):
+        # A line may break where there is no space (after a hyphen, in Chinese): the help and
+        # the restart note that fit in two lines together are not cut short.
+        note = translate("Applies when QiTV starts again.")
+        units = ui_units(self.host.width())
+        font = units.font(HELP_FONT_U)
+        for words in range(2, 30):  # a help that breaks after a hyphen, both fitting in two lines
+            help_text = "-".join(["abcdefghij"] * words)
+            row = Row("hyphens", "Hyphens", help_text, ON_OFF, True, restart=True)
+            self.drawer.open_at((Section("s", "S", rows=(row,)),))
+            self.drawer.right()
+            width = self.drawer.row_rect("right", 0).width() - 2 * INSET_U * units.u
+            whole = wrap_lines(f"{help_text} {note}", font, width, 3)
+            if len(whole) == 2 and whole[0].endswith("-"):
+                break
+        else:
+            self.fail("no help breaking after a hyphen")
+        self.drawer.grab()
+        lines = self.drawer._box("right", 0).help
+        self.assertEqual(len(lines), 2)
+        self.assertFalse(any("…" in line for line in lines), lines)
+        self.assertTrue(lines[-1].endswith(note), lines)
 
     def test_enter_opens_a_layer_and_back_climbs(self):
         self.focus_on("autoplay")
