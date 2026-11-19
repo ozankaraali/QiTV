@@ -17,7 +17,7 @@ others' distributions, which may have malware.**
 
 - **AI captions hear the language the content speaks:** the one you pick in the Subtitles
   panel's Language row (for a title, that title's; for a song, its folder's), else the one the
-  audio track names, else what they heard on that track while QiTV runs, else, on channels and
+  audio track names, else what they heard on that title while QiTV runs, else, on channels and
   providers' films, a clear language prefix in the title such as "TR| …" (detection still
   corrects it), else the speech model finds it by itself. **Settings → Subtitles → Default
   language is gone;** older builds still read what it stored.
@@ -56,11 +56,11 @@ others' distributions, which may have malware.**
 - **Nothing goes into your history.** Files don't appear in Continue, Recent or the Library. Only
   the folders you open as folders are kept, on the Folders tab (below).
 - **AI captions come back on for a video file** when they were on for the last one, with the
-  translation remembered for the language they hear. They come on only when their speech model is already on your
-  computer: nothing is asked for or downloaded, and they never come on while the video shows
-  subtitles of its own. Choosing Off in the Subtitles panel during a video file keeps them off
-  for the next one. Captions that came on by themselves go off again when you go back to a
-  channel or a provider's film.
+  translation remembered for the language they hear. They come on only when their speech model
+  is already on your computer: nothing is asked for or downloaded, and they never come on while
+  the video shows subtitles of its own. Choosing Off in the Subtitles panel during a video file
+  keeps them off for the next one. Captions that came on by themselves go off again when you go
+  back to a channel or a provider's film.
 - **AI captions hear your own files' language** as above (a video's pick is that file's, a
   song's its whole folder's); **Auto** in the Language row has them hear the file anew. Turkish
   is written by QiTV's own Turkish model, as on a channel.
