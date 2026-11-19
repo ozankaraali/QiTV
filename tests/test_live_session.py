@@ -2570,6 +2570,73 @@ class StayLiveTests(LiveSessionCase):
         self.assertEqual([r for r in self.playback.rates if r < 1.0], [])
         self.assertEqual(len(self.playback.plays), 1)
 
+    def test_ai_captions_zap_from_a_translated_channel_waits_for_the_lower_floor(self):
+        # 2.11.2: a zap from a channel translated (13 s) to one with no rule: the tune aims at
+        # 13 s and lands short, then the captions' tick lowers the floor to 8 s before VLC
+        # plays. The new channel's wait is kept, for the 8 s.
+        self.live.set_caption_floor(13.0)
+        sid = self.start()
+        feed = Feed(self, sid, burst=0.0, edge=2.5, open_s=0.5).ready()
+        for _ in range(100):
+            if self.playback.plays:
+                break
+            feed.run(0.05)
+        self.assertEqual(len(self.playback.plays), 1)  # the tune opened, short of 13 s
+        self.assertIsNot(self.playback.current, PlaybackState.PLAYING)  # VLC not playing yet
+        self.live.set_caption_floor(8.0, shift=False)
+        feed.run(20.0)
+        self.assertFalse(self.live.caption_waiting())
+        self.assertEqual(self.playback.holds, [True, False])
+        self.assertAlmostEqual(self.timelines[-1]["lag"], 8.0, delta=0.5)
+        feed.run(120.0)
+        self.assertEqual(self.playback.holds, [True, False])  # once
+        self.assertAlmostEqual(self.timelines[-1]["lag"], 8.0, delta=0.5)
+        self.assertEqual([r for r in self.playback.rates if r < 1.0], [])
+        self.assertEqual(self.timelines[-1]["mode"], "live")
+
+    def test_ai_captions_wait_going_on_waits_for_a_lower_floor(self):
+        # 2.11.2: lowered while the picture waits (the translation's 5 s no longer needed), the
+        # wait goes on and ends at the lower floor, not at once short of it
+        self.live.set_caption_floor(13.0)
+        sid = self.start()
+        feed = Feed(self, sid, burst=0.0, edge=2.5).ready()
+        feed.run(1.0)
+        self.assertTrue(self.live.caption_waiting())
+        self.live.set_caption_floor(8.0, shift=False)
+        self.assertTrue(self.live.caption_waiting())
+        self.assertTrue(self.playback.held)
+        feed.run(10.0)
+        self.assertFalse(self.live.caption_waiting())
+        self.assertEqual(self.playback.holds, [True, False])
+        self.assertAlmostEqual(self.timelines[-1]["lag"], 8.0, delta=0.5)
+        feed.run(120.0)
+        self.assertEqual(self.playback.holds, [True, False])
+        self.assertAlmostEqual(self.timelines[-1]["lag"], 8.0, delta=0.5)
+        self.assertEqual([r for r in self.playback.rates if r < 1.0], [])
+
+    def test_ai_captions_off_before_a_tunes_wait_waits_for_nothing(self):
+        # off (0) still ends a wait to come at once, as one going on (below)
+        self.live.set_caption_floor(13.0)
+        sid = self.start()
+        feed = Feed(self, sid, burst=0.0, edge=2.5, open_s=0.5).ready()
+        for _ in range(100):
+            if self.playback.plays:
+                break
+            feed.run(0.05)
+        self.assertEqual(len(self.playback.plays), 1)  # the tune opened, short of 13 s
+        self.assertIsNot(self.playback.current, PlaybackState.PLAYING)
+        self.live.set_caption_floor(0.0)
+        feed.run(20.0)
+        self.assertFalse(self.live.caption_waiting())
+        self.assertEqual(self.playback.holds, [])
+        feed.run(2.0)
+        self.live.set_caption_floor(13.0)
+        feed.run(1.0)
+        self.assertTrue(self.live.caption_waiting())
+        self.live.set_caption_floor(0.0)
+        self.assertFalse(self.live.caption_waiting())
+        self.assertFalse(self.playback.held)
+
     def test_ai_captions_go_live_lands_at_their_floor_when_the_buffer_holds_it(self):
         self.live.set_caption_floor(8.0)
         sid = self.start()

@@ -1398,7 +1398,10 @@ class LiveSession(QObject):
         stay-live steers to it from there; time-shifted about there already (captions turned
         off and on again), it is live again there. Dropped, it stays where it is, time-shifted
         as after a pause, the bar and Go live showing: nothing catches up by itself; without
-        `shift` (a picture no longer large) stay-live steers it back."""
+        `shift` (a picture no longer large) stay-live steers it back. 2.11.2: lowered but still
+        on (a zap from a translated channel to one without: its tune aimed at the higher floor
+        and landed short), a wait still to come or going on is kept and ends at the lower one;
+        only off (0) ends it at once."""
         seconds = max(0.0, float(seconds))
         if abs(seconds - self._caption_floor) < 1e-6:
             return
@@ -1413,6 +1416,8 @@ class LiveSession(QObject):
                     self._stay.user_go_live(keep_landing=True)  # live again, where it is
                     self._emit_timeline()
             return
+        if seconds > 0 and (self._caption_armed or self._caption_held is not None):
+            return  # 2.11.2: short of the floor: `_caption_wait` waits for the lower one
         self._caption_armed = False
         self._release_caption_wait()
         if not shift or not playing or self._stay.mode is not Mode.LIVE:
