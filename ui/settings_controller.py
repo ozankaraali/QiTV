@@ -12,7 +12,7 @@ from collections.abc import Callable, Iterator
 import logging
 from typing import Optional
 
-from PySide6.QtCore import QObject
+from PySide6.QtCore import QEvent, QObject, Signal
 
 from services.i18n import translate
 from services.settings_model import LEGACY_TABS, Row, Section, choice_of, is_lit, sections, step
@@ -32,6 +32,8 @@ def _walk(rows: tuple[Row, ...]) -> Iterator[Row]:
 
 
 class SettingsController(QObject):
+    hidden = Signal()  # Settings went: backed out of, closed, or its section's window opened
+
     def __init__(
         self,
         drawer: SettingsDrawer,
@@ -51,6 +53,7 @@ class SettingsController(QObject):
         drawer.stepped.connect(self._on_stepped)
         drawer.chosen.connect(self._on_chosen)
         drawer.closed.connect(self._on_closed)
+        drawer.installEventFilter(self)  # its own hide, however it came (`hidden`)
 
     # ---- what the overlay shows -------------------------------------------------------------
 
@@ -132,6 +135,13 @@ class SettingsController(QObject):
             return
         self.close()
         self._open_legacy(tab)
+
+    def eventFilter(self, watched: QObject, event: QEvent) -> bool:
+        # Hidden itself, not only with the page or window it is on.
+        if watched is self._drawer and event.type() == QEvent.Type.Hide:
+            if self._drawer.isHidden():
+                self.hidden.emit()
+        return False
 
     def _on_closed(self) -> None:
         from_drawer, self._from_drawer = self._from_drawer, False

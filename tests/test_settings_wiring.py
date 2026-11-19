@@ -11,8 +11,10 @@ os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 from PySide6.QtCore import Qt
 from PySide6.QtGui import QKeySequence
 from PySide6.QtTest import QTest
+from timer_fixtures import wait_until
 
 from services.navigation import SETTINGS_ROW
+from services.settings_model import GENERAL
 from tests import test_tv_window as base
 from ui.settings_dialog import OptionsDialog
 
@@ -90,6 +92,7 @@ class SettingsWiringTests(base.WindowCase):
         QTest.keyClick(self.window, Qt.Key.Key_Escape)  # the sections: closed
         self.assertFalse(self.window.settings.visible())
         self.assertFalse(drawer.isVisible())
+        self.assertTrue(self.window.overlays.welcome.isHidden())  # a provider: no card
         self.dialog.assert_not_called()
 
     def test_settings_asked_again_while_it_shows_stays_as_it_is(self):
@@ -104,6 +107,51 @@ class SettingsWiringTests(base.WindowCase):
         self.assertTrue(drawer.isVisible())  # still from the drawer: it comes back
         self.assertEqual(drawer.highlighted().key, SETTINGS_ROW)
 
+    def test_opening_settings_closes_the_guide(self):
+        self.open_first_channel()
+        guide, zap = self.window.overlays.guide, self.window.zap
+        self.assertTrue(wait_until(lambda: zap.context.current() is not None))  # tuned
+        QTest.keyClick(self.window, Qt.Key.Key_G)
+        self.assertTrue(guide.isVisible())
+        self.menu_actions()["Settings…"].trigger()
+        self.assertTrue(guide.isHidden())  # it kept the keys, hidden under Settings
+        self.assertEqual(self.window._key_context(), "drawer")
+        QTest.keyClick(self.window, Qt.Key.Key_Down)
+        self.assertEqual(self.window.settings_drawer.path(), (GENERAL,))
+
+    def test_opening_settings_closes_the_subtitle_search(self):
+        self.show()
+        self.wait_for_drawer()
+        search = self.window.subtitle_search
+        search.show_key_page()  # the OpenSubtitles search's key page
+        self.assertEqual(self.window._key_context(), "subtitles")
+        self.menu_actions()["Settings…"].trigger()
+        self.assertTrue(search.isHidden())
+        self.assertEqual(self.window._key_context(), "drawer")
+        QTest.keyClick(self.window, Qt.Key.Key_Down)
+        self.assertEqual(self.window.settings_drawer.path(), (GENERAL,))
+
+    def test_opening_settings_closes_the_pairing_screen(self):
+        self.show()
+        self.wait_for_drawer()
+        pairing = self.window.pair_overlay
+        pairing.open()
+        self.menu_actions()["Settings…"].trigger()
+        self.assertTrue(pairing.isHidden())  # any key would have closed it, unseen
+        self.assertTrue(self.window.settings.visible())
+
+    def test_a_question_keeps_its_place_above_settings(self):
+        # It keeps the keys (it answers itself after a while), so it stays in sight too.
+        self.show()
+        self.wait_for_drawer()
+        card, settings = self.window.question_card, self.window.settings_drawer
+        card.ask("Stop the recording?", "Stop", "Keep")
+        self.addCleanup(card.withdraw)
+        self.menu_actions()["Settings…"].trigger()
+        self.assertTrue(card.isVisible())
+        stacked = [w for w in self.window.host.children() if w is card or w is settings]
+        self.assertEqual(stacked, [settings, card])  # the card above
+
     def test_the_search_from_settings_leaves_it_for_the_library(self):
         self.show()
         self.wait_for_drawer()
@@ -111,6 +159,23 @@ class SettingsWiringTests(base.WindowCase):
         QTest.keyClick(self.window, Qt.Key.Key_F, Qt.KeyboardModifier.ControlModifier)
         self.assertTrue(self.window.screens.library_shown())
         self.assertTrue(self.window.settings_drawer.isHidden())  # not only behind the page
+
+
+class NoProviderSettingsTests(base.WindowCase):
+    def provider_list(self):
+        return []
+
+    def test_the_welcome_card_hides_under_settings_and_comes_back(self):
+        self.show()
+        card = self.window.overlays.welcome
+        self.assertTrue(wait_until(card.isVisible))
+        with mock.patch("ui.tv_window.OptionsDialog"):
+            self.menu_actions()["Settings…"].trigger()
+            self.assertTrue(self.window.settings.visible())
+            self.assertTrue(card.isHidden())
+            QTest.keyClick(self.window, Qt.Key.Key_Escape)  # the sections: closed
+        self.assertFalse(self.window.settings.visible())
+        self.assertTrue(card.isVisible())  # still no provider: the card again
 
 
 class SettingsWindowTabTests(base.WindowCase):

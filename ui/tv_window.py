@@ -2660,17 +2660,21 @@ class TVWindow(QMainWindow):
     def open_settings(self, from_drawer: bool = False) -> None:
         """Settings in the drawer (the drawer's Settings row and ⚙, Settings…, Ctrl/⌘+,), over
         live TV: from the Library it goes back to the TV first, and the mini player becomes the
-        window again; the channel list gives way to it. `from_drawer`: backing out of it gives
-        the list back. Asked again while it shows, it stays as it is (where it came from too)."""
+        window again; the channel list, and whatever else would keep the keys under it, gives
+        way to it (TVController.make_way_for_settings; the audio dock's ⋯ menu too). A question
+        keeps the keys, so it stays above Settings. `from_drawer`: backing out of it gives the
+        list back. Asked again while it shows, it stays as it is (where it came from too)."""
         if self._closing or self.settings.visible():
             return
         if self.screens.library_shown():
             self.screens.back_to_tv()
         self.leave_mini_player()
-        drawer = self.overlays.drawer
-        if drawer.isVisible():
-            drawer.close_drawer()
+        self.more_menu.dismiss()
+        self.controller.make_way_for_settings()
         self.settings.open(from_drawer=from_drawer)
+        for card in (self.question_card, self.quality_card, self.captions_card):
+            if card.isVisible():
+                card.raise_()  # Settings raised itself over it
 
     def options_dialog(self, tab: str = "") -> None:
         """The Settings window, on the tab `tab` names ("general", "timeshift", "subtitles",
