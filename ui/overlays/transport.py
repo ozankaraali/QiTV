@@ -1698,9 +1698,7 @@ class Transport(Overlay):
         grid = ("grid",) if self._grid_available and self._live else ()
         pip = ("pip",) if self._pip_available and self._live else ()
         tv = (
-            ("search", "open_library", "guide", "previous")
-            if self._live
-            else ("search", "live_tv")
+            ("search", "open_library", "guide", "previous") if self._live else ("search", "live_tv")
         )
         cast = ("cast",) if self._cast_available else ()
         quality = ("quality",) if self._quality and extras else ()

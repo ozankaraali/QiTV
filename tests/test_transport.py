@@ -1209,6 +1209,10 @@ class SmallWidthLayoutTests(unittest.TestCase):
                     if not movie:
                         self.assertIn("guide", rects)
                         self.assertIn("previous", rects)
+                    # 2.11.2: the Library button keeps live TV's row down to a mini player's
+                    # width as the guide does; no two controls (nor the chips) overlap below.
+                    self.assertEqual("open_library" in rects, not movie)
+                    self.assertEqual("live_tv" in rects, movie)
                     # ‹ Library: only for a title from the Library (live TV ignores it).
                     library = mode == "movie from the Library, with Next"
                     self.assertEqual("library" in rects, library)
