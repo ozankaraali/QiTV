@@ -46,7 +46,9 @@ again, with no LIVE badge, and the record button says nothing plays.
 At a small width (or in a longer language) the Stay live indicator first leaves out "adjusted",
 then its name (the LIVE badge beside it says live), then its text is cut short, or the
 indicator left out, so it never runs under the play button. A row whose LIVE, Go live or
-‹ Library chip would still run into the buttons at its left sets its icons closer together.
+‹ Library chip would still run into the buttons at its left sets its icons closer together;
+2.11.2: where they still would, live TV's Library button gives way first (the channel bar's
+reaches the Library).
 Catch-up (2.2): on a channel whose provider keeps an archive the time-shift bar reaches
 further back than the buffer (`buffer_start` in the state: where the buffer starts); that
 part of the line is dashed. While the archive plays (`archive` in the state) the whole line
@@ -1369,15 +1371,23 @@ class Transport(Overlay):
         rows: tuple[Optional[bool], ...] = (False, True) if self._timeshift else (None,)
         if all(self._fits(_ICON_GAP_U, True, row) for row in rows):
             return self._layout_at(_ICON_GAP_U)[0]
-        rects = self._layout_at(_TIGHT_GAP_U)[0]
-        if "quality" in rects and not all(self._fits(_TIGHT_GAP_U, True, row) for row in rows):
+        # 2.11.2: live TV's Library button gives way first (the channel bar's reaches the
+        # Library): where the chips would still run into the buttons with the icons closest, the
+        # row lays out again without it, before the ⚙ or any text gives way.
+        library = not any(self._layout_at(_TIGHT_GAP_U, True, row)[1] for row in rows)
+        rects = self._layout_at(_TIGHT_GAP_U, library=library)[0]
+        if "quality" in rects and not all(
+            self._fits(_TIGHT_GAP_U, True, row, library) for row in rows
+        ):
             # 2.8: the ⚙ gives way first (the speed and the other buttons keep their room).
-            return self._layout_at(_TIGHT_GAP_U, extras=False)[0]
+            return self._layout_at(_TIGHT_GAP_U, extras=False, library=library)[0]
         return rects
 
-    def _fits(self, icon_gap: float, extras: bool, row: Optional[bool]) -> bool:
+    def _fits(
+        self, icon_gap: float, extras: bool, row: Optional[bool], library: bool = True
+    ) -> bool:
         """The row (`_layout_at`'s) has room for its chips and texts with `icon_gap`."""
-        rects, crowded = self._layout_at(icon_gap, extras, row)
+        rects, crowded = self._layout_at(icon_gap, extras, row, library)
         return not (crowded or self._grid_chips_short(rects) or self._squeezed(rects, row))
 
     def _squeezed(self, rects: dict[str, QRectF], row: Optional[bool] = None) -> bool:
@@ -1433,12 +1443,17 @@ class Transport(Overlay):
         return self._grid_restorable and "restore" not in rects
 
     def _layout_at(
-        self, icon_gap: float, extras: bool = True, row: Optional[bool] = None
+        self,
+        icon_gap: float,
+        extras: bool = True,
+        row: Optional[bool] = None,
+        library: bool = True,
     ) -> tuple[dict[str, QRectF], bool]:
         """The rects with `icon_gap` (u) between the icons (without the ⚙ unless `extras`), and
         whether the chips at their left (LIVE, Go live, ‹ Library) run into the buttons at the
         row's left. `row`: the bar's row (True, with Go live on a time-shifted channel) or the
-        live edge's (False) whichever shows now; None: the one that shows."""
+        live edge's (False) whichever shows now; None: the one that shows. `library`: live TV's
+        Library button (2.11.2) is laid out."""
         un = ui_units(self.width())
         left, right = un.px(3), self.width() - un.px(3)
         bottom = self.height() - un.px(3)
@@ -1472,7 +1487,7 @@ class Transport(Overlay):
             else:
                 put("stop", skip, un.px(1.5))
             left_end = x  # the left buttons and their gap
-            buttons = self._right_buttons(extras=extras)
+            buttons = self._right_buttons(extras=extras, library=library)
             if self._failed:  # nothing plays: no LIVE badge (2.8.12)
                 x = self._put_right(rects, un, buttons, cy, left_end, icon_gap)
                 return rects, x < left_end
@@ -1508,7 +1523,8 @@ class Transport(Overlay):
             speed_x = x  # the chip goes in once the right side has taken its room
             side = self._side_chip(un, None if row is None else shifted)
             room = speed_x + (side[1] if side is not None else 0.0) + un.px(0.8)
-            x = self._put_right(rects, un, self._right_buttons(extras=extras), cy, room, icon_gap)
+            buttons = self._right_buttons(extras=extras, library=library)
+            x = self._put_right(rects, un, buttons, cy, room, icon_gap)
             if side is not None:
                 h = self._chip_h(un)
                 rects[side[0]] = QRectF(x - side[1], cy - h / 2, side[1], h)
@@ -1688,18 +1704,21 @@ class Transport(Overlay):
             return False
         return chip.width() >= self._layout_chip_width(ui_units(self.width()), True) - 0.5
 
-    def _right_buttons(self, extras: bool = True) -> tuple[str, ...]:
+    def _right_buttons(self, extras: bool = True, library: bool = True) -> tuple[str, ...]:
         """The icon buttons from the right edge inwards: the window's and the picture's, the
         Picture panel's, the subtitles', the sound's (♫ and the speaker: one order in every
         mode, 2.8.12), the ⚙ quality menu (2.8, with `extras`), then Search and, on live TV,
         the Library (2.11.2), the guide and the previous channel; during a movie or an episode
         the way back to live TV (2.9.3) where the Library is. The second channel's stays (dim)
-        while the grid shows: the multiview's own keeps its place."""
+        while the grid shows: the multiview's own keeps its place. 2.11.2: a row too crowded
+        for the Library button, even with the icons closest, lays out again without it (`library`
+        False), before the ⚙ or any text gives way; the channel bar's still reaches the Library."""
         grid = ("grid",) if self._grid_available and self._live else ()
         pip = ("pip",) if self._pip_available and self._live else ()
-        tv = (
-            ("search", "open_library", "guide", "previous") if self._live else ("search", "live_tv")
-        )
+        if self._live:
+            tv = ("search", *(("open_library",) if library else ()), "guide", "previous")
+        else:
+            tv = ("search", "live_tv")
         cast = ("cast",) if self._cast_available else ()
         quality = ("quality",) if self._quality and extras else ()
         sound = ("picture", "subtitles", "audio", "volume")

@@ -1209,10 +1209,11 @@ class SmallWidthLayoutTests(unittest.TestCase):
                     if not movie:
                         self.assertIn("guide", rects)
                         self.assertIn("previous", rects)
-                    # 2.11.2: the Library button keeps live TV's row down to a mini player's
-                    # width as the guide does; no two controls (nor the chips) overlap below.
-                    self.assertEqual("open_library" in rects, not movie)
+                    # 2.11.2: a film has the TV button, live TV the Library button (where
+                    # the row has room for it: it gives way first).
                     self.assertEqual("live_tv" in rects, movie)
+                    if movie:
+                        self.assertNotIn("open_library", rects)
                     # ‹ Library: only for a title from the Library (live TV ignores it).
                     library = mode == "movie from the Library, with Next"
                     self.assertEqual("library" in rects, library)
@@ -1351,6 +1352,37 @@ class SmallWidthLayoutTests(unittest.TestCase):
         fm = QFontMetricsF(t._indicator_font(Units(1280)))
         box = t._layout()["indicator"]
         self.assertGreater(box.width(), fm.horizontalAdvance(head) + fm.horizontalAdvance(tail))
+
+
+class LiveLibraryButtonTests(unittest.TestCase):  # 2.11.2
+    """Live TV's Library button gives way first where the row is crowded."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.app = QApplication.instance() or QApplication([])
+
+    def test_a_crowded_live_row_leaves_out_the_library_button_first(self):  # 2.11.2
+        for width, crowded in ((300, True), (1280, False)):
+            t = Transport(idle_ms=3000)
+            self.addCleanup(t.close)
+            t.setGeometry(0, 0, width, round(width * 9 / 16))
+            t.set_pip_state(True, False)
+            t.show_live("One", "")
+            if crowded:  # every button of the multiview, Go live and a cast target, at 300 px
+                t.set_cast_state(True, False)
+                t.set_quality_available(True)
+                t.set_grid_state(True, True, "3×3", True, cells=9)
+                t.show_timeshift("One", "")
+                t.update_timeline(SmallWidthLayoutTests.state("shifted", 300.0, 1.0), [])
+            with self.subTest(width=width):
+                rects = t._layout()
+                self.assertEqual("open_library" in rects, not crowded)
+                for name in ("guide", "previous", "search", "volume"):
+                    self.assertIn(name, rects)  # the others keep their places
+                names = [n for n in rects if n not in ("seek", "times")]
+                for i, a in enumerate(names):
+                    for b in names[i + 1 :]:
+                        self.assertFalse(rects[a].intersects(rects[b]), f"{a} overlaps {b}")
 
 
 class GridChipTests(TransportCase):
