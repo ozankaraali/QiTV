@@ -861,7 +861,8 @@ class SettingsDrawer(Overlay):
             tone = text if item.selectable else muted
             if side == RIGHT and row is not None and row.kind == DANGER:
                 tone = qcolor(PALETTE.live)
-            self._paint_title(p, un, box, tone, muted)
+            warned = row is not None and row.warn  # its sub line says why it failed
+            self._paint_title(p, un, box, tone, qcolor(PALETTE.warn) if warned else muted)
             if side == LEFT or row is None:
                 continue
             if row.kind == STEP:
@@ -1026,6 +1027,9 @@ class SettingsDrawer(Overlay):
         self._right = index
         self._reveal(RIGHT)
         self._pressed = (RIGHT, row.key, part, self._press(row, part, focused))
+        if not self.isVisible():  # it closed Settings (a link's Play): the picture is under it
+            self._second_click.arm()  # a double-click's second press reaches nothing behind
+            return
         self.update()
         self._say()
 

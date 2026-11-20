@@ -1,7 +1,8 @@
 """Settings › Providers in the drawer (2.12): the providers, and each one's own rows.
 
 Providers lists each provider by its name (as the viewer gave it: never translated), its kind
-under it ("Xtream · in use" for the one the TV shows), then ＋ Add provider and Free channels
+under it ("Xtream · in use" for the one the TV shows), then Network streams while a link is
+kept (ui.settings_links: never a provider), then ＋ Add provider and Free channels
 (services.settings_model). A provider opens a layer of its own:
 
 - Name, edited in place: Enter or a click elsewhere renames it, never a keystroke; another
@@ -118,6 +119,13 @@ SAVE_FAILED_TEXT = N_("Couldn't save the providers; nothing was changed")
 REMOVE_TEXT = N_("Remove")  # i18n: a button of "Remove the provider …?" (verb); its key: REMOVE
 
 
+class LinkSource(Protocol):
+    """Network streams in Settings (ui.settings_links): its row among Providers' rows, after
+    the providers; None while no link is kept."""
+
+    def row(self) -> Optional[Row]: ...
+
+
 class ProviderCards(Protocol):
     """The cards over the picture that add a provider (filled from `link` when one came) and
     change one's address and login (ui.provider_cards)."""
@@ -213,7 +221,9 @@ class ProviderRows(QObject):
     """Settings' Providers rows (`rows`, for the sections) and the handler of their keys
     (`provider/…`, registered with `settings`). `window` is the TV window; `drawer` the
     Settings layer the rows show in; `cards` the Add and the address cards (the window gives
-    them once both are built: ui.provider_cards; none, those rows do nothing)."""
+    them once both are built: ui.provider_cards; none, those rows do nothing); `links` Network
+    streams' row, after the providers' (the window gives it once its network player is built:
+    ui.settings_links; none, there is no such row)."""
 
     def __init__(
         self,
@@ -227,6 +237,7 @@ class ProviderRows(QObject):
         self._settings = settings
         self._drawer = drawer
         self.cards: Optional[ProviderCards] = cards
+        self.links: Optional[LinkSource] = None
         self._actions = ProviderActions(window)
         self._changing = False  # a change of ours runs: the rows are built once it is done
         self._pin_granted = False  # this visit of Settings
@@ -245,7 +256,8 @@ class ProviderRows(QObject):
     # ---- the rows ---------------------------------------------------------------------------
 
     def rows(self) -> tuple[Row, ...]:
-        """A row per provider, in the list's order, each opening its own layer."""
+        """A row per provider, in the list's order, each opening its own layer; then Network
+        streams' while a link is kept (never a provider: nothing here counts it)."""
         selected = str(self._window.config_manager.selected_provider_name or "")
         offsets = _offsets()
         groups: dict[str, list[dict]] = {}
@@ -266,6 +278,9 @@ class ProviderRows(QObject):
             )
             sub = translate(IN_USE_TEXT, kind=kind) if name == selected else kind
             rows.append(Row(layer_key(name), name, section=layer, sub=sub, literal=True))
+        links = self.links.row() if self.links is not None else None
+        if links is not None:
+            rows.append(links)
         return tuple(rows)
 
     def _layer(

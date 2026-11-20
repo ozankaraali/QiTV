@@ -19,7 +19,11 @@ kept. `rows()` are those links as the list's rows (a film's with where it stoppe
 A link that showed its first picture is kept (`keep`, `opened`); one that did not play, or
 went for good, is kept with why (`failed`, in plain words). Its kind changes only as this
 player handed it over: a kept film played another way (as a channel of ⟲ Recent or a tile)
-stays a film. The store's file is read once on
+stays a film. Settings › Providers › Network streams changes them too (ui.settings_links):
+`rename`, `set_url` (a fresh token, or another stream that replaces the link's: its id stays,
+so its name, resume point and ⟲ Recent's row follow, and Open Link of that address finds it),
+`keep_new` and `remove`. A link removed is not kept again by what plays it next in this run
+(the stream still playing, ⟲ Recent), only by Open Link. The store's file is read once on
 a worker (`start`), and each change is written on a worker, one write at a time with the
 newest state; nothing is written before the file was read (what played meanwhile is merged
 over it), and a file that could not be read is set aside before the first write. The links
@@ -40,6 +44,7 @@ from services import network_streams
 from services.navigation import LinkRow
 from services.network_streams import (
     FILM,
+    LIVE,
     Entry,
     NetworkStreams,
     default_name,
@@ -120,6 +125,7 @@ class NetworkPlayer(QObject):
         self._dirty = False  # changed since the last write began
         self._set_aside = False  # the file could not be read: moved aside before the write
         self._handed: dict[str, str] = {}  # each link's kind as this player last played it
+        self._removed: set[str] = set()  # links removed: not kept again but by Open Link
         controller.set_links(self.url_of)
         controller.set_link_player(self.play_kept)
         controller.linkPlayed.connect(self._on_played)
@@ -199,14 +205,22 @@ class NetworkPlayer(QObject):
         url = url.strip()
         if not url:
             return
-        key = stream_id(url)
-        entry = self.store.get(key)
+        entry = self._of_stream(stream_id(url))
+        key = entry.id if entry is not None else stream_id(url)
+        self._removed.discard(key)  # opened again: kept again once it plays
         if entry is not None and entry.url != url:
             self.store.set_url(key, url)  # the newest address handed over is the one it plays
-            self.changed.emit()
-            self._save()
+            self._changed()
         name = entry.name if entry is not None else default_name(url)
         self._hand_over(key, name, url, kind)
+
+    def _of_stream(self, key: str) -> Optional[Entry]:
+        """The link whose stream `key` names (a stream_id): kept under it, else one whose
+        address was replaced with that stream's in Settings (kept under its own id)."""
+        entry = self.store.get(key)
+        if entry is not None:
+            return entry
+        return next((e for e in self.store.entries() if stream_id(e.url) == key), None)
 
     def play_kept(self, key: str) -> bool:
         """The link kept under `key` plays (its row in the channel list, or the find's), its
@@ -271,19 +285,69 @@ class NetworkPlayer(QObject):
             kind = kept.kind  # played another way (⟲ Recent, a tile): what it was kept as
         return self.store.keep(url, str(item.get("name") or ""), kind)
 
+    def _dropped(self, item: dict, url: str) -> bool:
+        """Whether `item` is a link removed in Settings (still playing, or played again from
+        ⟲ Recent): it is not kept again; only Open Link keeps it again."""
+        key = item.get("id")
+        if isinstance(key, str) and self.store.get(key) is not None:
+            return False
+        return (isinstance(key, str) and key in self._removed) or stream_id(url) in self._removed
+
     def _on_played(self, item: object, kind: str, url: str) -> None:
-        if not isValid(self) or not isinstance(item, dict):
+        if not isValid(self) or not isinstance(item, dict) or self._dropped(item, url):
             return
         entry = self._kept(item, kind, url)
         self.store.opened(entry.id, self._now())
-        self.changed.emit()
-        self._save()
+        self._changed()
 
     def _on_failed(self, item: object, kind: str, url: str, why: str) -> None:
-        if not isValid(self) or not isinstance(item, dict):
+        if not isValid(self) or not isinstance(item, dict) or self._dropped(item, url):
             return
         entry = self._kept(item, kind, url)
         self.store.failed(entry.id, why)
         logger.info("A link of Network streams did not play: %s", why)
+        self._changed()
+
+    # ---- Settings' changes (ui.settings_links) ------------------------------------------------
+
+    def rename(self, key: str, name: str) -> None:
+        """The link kept under `key` is listed as `name` from now on."""
+        if self.store.get(key) is not None:
+            self.store.rename(key, name)
+            self._changed()
+
+    def set_url(self, key: str, url: str, kind: str = "") -> None:
+        """The link kept under `key` plays `url` from now on: its stream's fresh token, or
+        another stream that replaces its own, of `kind` (LIVE or FILM: as that address says;
+        "" keeps the link's). Its id stays, with its name and resume point, and why it failed
+        last time goes: that was the old address's."""
+        entry = self.store.get(key)
+        if entry is None:
+            return
+        self.store.set_url(key, url)
+        if kind in (LIVE, FILM):
+            entry.kind = kind
+        self.store.failed(key, "")
+        self._changed()
+
+    def keep_new(self, url: str, kind: str) -> Entry:
+        """`url` kept as a link of its own (Settings' Keep as a new link), named after its
+        address, not played yet; the same stream's kept link takes the address instead."""
+        entry = self.store.keep(url, "", kind)
+        self._removed.discard(entry.id)
+        self._changed()
+        return entry
+
+    def remove(self, key: str) -> None:
+        """The link kept under `key` goes (its resume point stays with the watch state)."""
+        if self.store.get(key) is None:
+            return
+        self.store.remove(key)
+        self._handed.pop(key, None)
+        self._removed.add(key)
+        self._changed()
+
+    def _changed(self) -> None:
+        """The links changed: the lists follow, and the store is written on a worker."""
         self.changed.emit()
         self._save()

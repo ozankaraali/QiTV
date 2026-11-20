@@ -204,6 +204,7 @@ from ui.recording_scheduler import RecordingScheduler
 from ui.remote_controller import RemoteController
 from ui.settings_controller import SettingsController
 from ui.settings_dialog import OptionsDialog
+from ui.settings_links import LinkRows
 from ui.settings_providers import ProviderRows
 from ui.song_jobs import PanelCover
 from ui.subtitle_search import OnlineSetup
@@ -1199,8 +1200,12 @@ class TVWindow(QMainWindow):
             owner=lambda url: self._link_owner(url),
             parent=self,
         )
-        # The channel list lists them after the providers (never one of them).
+        # The channel list lists them after the providers (never one of them), and so does
+        # Settings › Providers, where each plays, is renamed, has its address replaced or is
+        # removed (written on a worker; its rows follow every change of the links).
         self.nav.set_links(self.network_player.rows)
+        self.link_rows = LinkRows(self, self.settings, self.settings_drawer, self.network_player)
+        self.provider_rows.links = self.link_rows
         # The channel list's find: genres and channels at every provider, found in a worker,
         # and Network streams' links by their names; its last row looks for films and series
         # in the Library's search.

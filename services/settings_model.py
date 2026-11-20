@@ -97,7 +97,8 @@ class Row:
     value of its own: "answered 2 min ago") and `sub` (a second, muted line under the title:
     "Xtream · in use") are shown as they are given, in the active language already. A
     `literal` row's `text` is too: a name the viewer gave (a provider's, a group's), never
-    translated, even when it is also one of QiTV's texts ("General")."""
+    translated, even when it is also one of QiTV's texts ("General"). A `warn` row's sub line
+    is in the warning colour (why a link of Network streams failed last time)."""
 
     key: str
     text: str
@@ -111,6 +112,7 @@ class Row:
     note: str = ""
     sub: str = ""
     literal: bool = False
+    warn: bool = False
 
     def __post_init__(self) -> None:
         if not self.kind:
