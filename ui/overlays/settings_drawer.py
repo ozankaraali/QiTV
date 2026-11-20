@@ -20,13 +20,15 @@ Enter steps on; on another right-column row ← goes to the left column, and →
 layer or acts. On the left column → or Enter goes right, and ← is `back()`. `back()` goes one
 layer up: a layer, the rows it is one of, the sections, closed.
 
-The mouse: a click on a row focuses it, so that its help shows before anything changes; a
-click on the right column's focused row does what Enter does, and ‹ or › step their row at
-once, focused or not. A double-click's second press is a click on the row the first one
-focused (an action is taken once). Hovering a row shows its help, the restart note too, as
-its tooltip. The wheel scrolls the column under the pointer. ‹ in the header and a click on
-the fade over the picture are `back()`. The mouse's Back and Forward buttons go on to the
-shell, as over the drawer.
+The mouse: a click on a row focuses it. On the right column a row whose click changes it in
+place (a stepper's value) only takes the focus while it has not got it, so that its help
+shows before anything changes; a click on it focused steps it on. A row that opens a layer or
+acts does so on the first click, as the drawer's rows do. ‹ or › step their row at once,
+focused or not. A double-click's second press is a click on the row the first one was on (an
+action is taken once). Hovering a row shows its help, the restart note too, as its tooltip.
+The wheel scrolls the column under the pointer. ‹ in the header and a click on the fade over
+the picture are `back()`. The mouse's Back and Forward buttons go on to the shell, as over the
+drawer.
 """
 
 from __future__ import annotations
@@ -800,12 +802,13 @@ class SettingsDrawer(Overlay):
 
     def _press(self, row: Row, part: str, focused: bool) -> bool:
         """A click on the right column's `row`, the focused row now: ‹ or › step it, and its
-        line does what Enter does if it was `focused` before; else the click only focused it,
-        so that its help shows before anything changes (a click on the help does nothing).
-        True when it stepped, opened or acted."""
+        line does what Enter does: at once for a row that opens a layer or acts, and for a
+        stepper only if it was `focused` before (its value changes in place: the first click
+        only focuses it, so that its help shows first). A click on the help does nothing. True
+        when it stepped, opened or acted."""
         if part in ("less", "more"):
             self.stepped.emit(row.key, -1 if part == "less" else 1)
-        elif part == "line" and focused:
+        elif part == "line" and (focused or _kind(row) != "step"):
             self._act(row)
         else:
             return False
@@ -813,12 +816,11 @@ class SettingsDrawer(Overlay):
 
     def _click_again(self) -> None:
         """A double-click's second press: ‹ or the fade go up again, else a click on the row
-        the first press was on, focused now: a row that only took the focus steps on, opens
-        or acts; a stepper the first press stepped steps the same way again. Its row is found
-        by its key, not under the pointer: the first press moved the help to it, so the rows
-        below it (and, in a small window, its ‹ beside a value of another width) moved. An
-        action is not taken twice, and a layer the first press opened or a section is left
-        alone."""
+        the first press was on, focused now: a stepper that only took the focus steps on, and
+        one the first press stepped steps the same way again. Its row is found by its key, not
+        under the pointer: the first press moved the help to it, so the rows below it (and, in
+        a small window, its ‹ beside a value of another width) moved. An action is not taken
+        twice, and a layer the first press opened or a section is left alone."""
         pressed, self._pressed = self._pressed, None
         if pressed is None:
             return

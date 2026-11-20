@@ -240,21 +240,16 @@ class SettingsDrawerTests(unittest.TestCase):
         self.assertIn(translate(RESTART_NOTE), tip(rows[playback_index("hardware_decoding")]))
         self.assertEqual(self.steps, [])
 
-    def test_clicks_open_a_layer_and_choose_an_action(self):
-        # As a stepper: the first click focuses the row, the next one opens or acts.
+    def test_one_click_opens_a_layer_or_acts(self):
+        # Nothing changes in place: a row that opens a layer or acts does so on the first
+        # click, focused or not, as the drawer's rows do.
         self.drawer.open_at(sections("Darwin"), PLAYBACK)
         self.drawer.grab()
-        index = playback_index("autoplay")
-        self.click(self.drawer.title_rect(index).center())
-        self.assertEqual(self.drawer.path(), ("playback",))
-        self.assertEqual(self.drawer.focused_row().key, "autoplay")
-        self.drawer.grab()
-        self.click(self.drawer.title_rect(index).center())
+        self.click(self.drawer.title_rect(playback_index("autoplay")).center())
         self.assertEqual(self.drawer.path(), ("playback", "autoplay"))
-        self.drawer.open_at(sections("Darwin"), GUIDE)
-        self.drawer.grab()
-        self.click(self.drawer.title_rect(0).center())
-        self.assertEqual(self.chosen, [])
+        self.assertEqual(self.drawer.focus_side(), "right")
+        self.assertEqual(self.steps, [])
+        self.drawer.open_at(sections("Darwin"), GUIDE)  # the keys on the sections
         self.drawer.grab()
         self.click(self.drawer.title_rect(0).center())
         self.assertEqual(self.chosen, ["legacy:guide"])
