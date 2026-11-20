@@ -2,9 +2,9 @@
 
 Nothing ships with QiTV: the first time AI captions are turned on, the viewer downloads a
 speech model tier, the Silero VAD, the Turkish model (2.10: QiTV's own Turkish Moonshine medium,
-278 MB, read with our beam search; 2.9.2 to 2.9.10 used ufakzeka-kulak) and (unless this Python
-already has it) the sherpa-onnx runtime, all pinned below by size and sha256. They live in
-`captions_root()`:
+278 MB, read with our beam search; 2.12.1: with its language model, 39 MB more; 2.9.2 to 2.9.10
+used ufakzeka-kulak) and (unless this Python already has it) the sherpa-onnx runtime, all pinned
+below by size and sha256. They live in `captions_root()`:
 
     ai-captions/
         runtime-2.0.1-cp314/   the sherpa-onnx and sherpa-onnx-core wheels, as pip lays them
@@ -13,6 +13,7 @@ already has it) the sherpa-onnx runtime, all pinned below by size and sha256. Th
         qwen3-asr-1.7b/        tokenizer/ (both tiers alike)
         qitv-asr-tr-moonshine-mid/  encoder_model_quantized.onnx,
                                decoder_model_merged_quantized.onnx, tokens.txt (Moonshine v2 files)
+            lm/lm.int8.onnx    (2.12.1) its LSTM language model (TURKISH_LM)
         qitv-mt-milmmt-46-1b/  model.onnx, model.onnx.data, tokenizer.json, config.json
                                (2.10: translation)
             site/              the tokenizers wheel, unpacked (put on sys.path by the translator)
@@ -117,6 +118,7 @@ class ModelPaths:
     european: Path  # 2.9.3: Parakeet TDT 0.6B v3's folder (EUROPEAN_FILES)
     cohere: Path  # 2.9.3: Cohere Transcribe's folder (COHERE_FILE, unpacked)
     translation: Path  # 2.10: the translator's folder (TRANSLATION_FILES, and site/)
+    turkish_lm: Path  # 2.12.1: the Turkish Moonshine's language model (TURKISH_LM), in its folder
 
 
 # ---- what is downloaded -------------------------------------------------------------------
@@ -260,6 +262,19 @@ TURKISH_FILES = (
         1856,
         "0a8950a8ea8b41c43413921beff70f8d9655278fa9ad2cb07dc5609e138c604c",
     ),
+)
+# 2.12.1: its language model, an LSTM over the model's pieces with 8-bit weights, trained on
+# Turkish text and then TV transcripts; our beam reads Turkish with it (services.captions.
+# moon_reading). It is in the same repository (lm/), added after revision d81f33cb, so it comes
+# from the main branch, pinned by its size and sha256 as every file here is. It downloads with the
+# model (last, and counted in what the question says), but the model runs without it: installed()
+# doesn't wait for it, and an install from before it gets it alone (TURKISH_LM_KEY).
+_TURKISH_RESOLVE = "https://huggingface.co/ozankaraali/qitv-asr-tr-moonshine-mid/resolve/"
+TURKISH_LM = RemoteFile(
+    _TURKISH_RESOLVE + "main/lm/lm.int8.onnx",
+    "lm/lm.int8.onnx",
+    38648607,
+    "440f7dba99f592de1b1ce7d47e28bd5d68652ae606cc70fd94c7c5bddb13bbd4",
 )
 
 
@@ -556,6 +571,7 @@ def model_paths(tier: str, root: Optional[Path] = None) -> ModelPaths:
         european=base / EUROPEAN_FOLDER,
         cohere=base / COHERE_FOLDER,
         translation=base / TRANSLATION_FOLDER,
+        turkish_lm=base / TURKISH_FOLDER / TURKISH_LM.path,
     )
 
 
@@ -610,17 +626,26 @@ SPECIALISTS = (TURKISH_KEY, EUROPEAN_KEY, COHERE_KEY)
 # 2.10: caption translation, downloaded once translating is wanted (not a speech specialist:
 # `full_size` leaves it out)
 TRANSLATION_KEY = "translation"
+# 2.12.1: the Turkish model's language model alone (TURKISH_LM: an install from before it)
+TURKISH_LM_KEY = "turkish_lm"
+# 2.12.1: what a specialist's download brings beside its model, which the model runs without:
+# `needed` lists it after the model's files, `installed` doesn't wait for it
+EXTRAS = {TURKISH_KEY: TURKISH_LM_KEY}
 
 
 def needed(key: str, root: Optional[Path] = None) -> list[Download]:
     """What `key` needs to run, in download order. A tier ("small", "large"): the runtime
     (unless this Python has one), the VAD and Qwen's files, what captions need to start. A
-    specialist (`SPECIALISTS`): its own files. Unsupported without a runtime for this computer."""
+    specialist (`SPECIALISTS`): its own files, then its `EXTRAS`'. Unsupported without a runtime
+    for this computer."""
     base = _root(root)
     if key == TRANSLATION_KEY:
         return _translation(base)
+    if key == TURKISH_LM_KEY:
+        return [Download(base / TURKISH_FOLDER, TURKISH_LM, ((TURKISH_LM.path, TURKISH_LM.size),))]
     if key in SPECIALISTS:
-        return _specialist(key, base)
+        extra = EXTRAS.get(key)
+        return _specialist(key, base) + (needed(extra, base) if extra else [])
     downloads: list[Download] = []
     runtime = runtime_dir(base)
     if runtime is not None:
@@ -680,9 +705,15 @@ def missing(tier: str, root: Optional[Path] = None) -> list[Download]:
 
 def installed(tier: str, root: Optional[Path] = None) -> bool:
     """The tier, the VAD and the runtime are in place: each downloaded whole, checked, and
-    each file present at its size. False where no runtime suits this computer."""
+    each file present at its size. False where no runtime suits this computer. A specialist
+    is in place without its `EXTRAS` (2.12.1: the Turkish model without its LM)."""
     try:
-        return not missing(tier, root)
+        left = missing(tier, root)
+        extra = EXTRAS.get(tier)
+        if left and extra is not None:
+            beside = needed(extra, root)
+            left = [download for download in left if download not in beside]
+        return not left
     except Unsupported:
         return False
 

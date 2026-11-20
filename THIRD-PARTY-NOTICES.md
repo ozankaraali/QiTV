@@ -148,8 +148,9 @@ publishers' own servers, and checks against pinned SHA-256 sums:
   export on ModelScope (`zengshuishui/Qwen3-ASR-onnx`), under the same license.
 - **qitv-asr-tr-moonshine-mid** (QiTV ASR Turkish, Ozan Karaali), the Turkish speech model:
   Creative Commons Attribution 4.0 (<https://huggingface.co/ozankaraali/qitv-asr-tr-moonshine-mid>),
-  its 8-bit sherpa-onnx files. It is Moonshine Streaming Medium (Moonshine AI, MIT License)
-  trained further on Turkish speech; its model card lists the training data and their licences.
+  its 8-bit sherpa-onnx files and, from the same repository, its 8-bit LSTM language model
+  (`lm/`). It is Moonshine Streaming Medium (Moonshine AI, MIT License) trained further on
+  Turkish speech; its model card lists the training data and their licences.
 - **Parakeet TDT 0.6B v3** (NVIDIA), the speech model for 25 European languages: Creative
   Commons Attribution 4.0 (CC-BY-4.0) (<https://huggingface.co/nvidia/parakeet-tdt-0.6b-v3>),
   as converted to int8 ONNX by the sherpa-onnx project

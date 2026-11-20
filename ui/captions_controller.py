@@ -1003,12 +1003,15 @@ class CaptionsController(QObject):
         self._disk.clear()
         self._unpacking = False
         self._download = None
-        from services.captions.models import SPECIALISTS, TRANSLATION_KEY
+        from services.captions.models import EXTRAS, SPECIALISTS, TRANSLATION_KEY
 
         if self._fetching == TRANSLATION_KEY:  # 2.10: translated from now on
             self._follow_translation("")
             self._offer_specialist()  # one wanted while this one downloaded (every phone hears)
             self.changed.emit()
+            return
+        if self._fetching in EXTRAS.values():  # 2.12.1: the Turkish model's LM is here
+            self._extra_arrived()
             return
         if self._fetching in SPECIALISTS:  # 2.9.6: a language's own model is here
             if self._enabled:
@@ -1036,6 +1039,8 @@ class CaptionsController(QObject):
         from services.captions.download import CANCELLED
         from services.captions.models import TRANSLATION_KEY
 
+        if self._extra_failed(reason):  # 2.12.1: only the Turkish model's LM didn't come
+            return
         if reason != CANCELLED:
             self._toast(reason, "error")  # already the whole sentence ("Download failed: …")
             if self._fetching == TRANSLATION_KEY:
@@ -1043,6 +1048,59 @@ class CaptionsController(QObject):
                 self._set_rule("", self._translation_for)
             self._offer_faster()
         self.changed.emit()
+
+    # ---- 2.12.1: what a language's model brings beside it (the Turkish model's LM) ----------
+    def _fetch_extra(self, key: str) -> None:
+        """The model of `key` is here; what came with its download since (models.EXTRAS: the
+        Turkish LM, for an install from before it) comes unasked, once while QiTV runs, when
+        nothing else asks or downloads (else at the next start). The model writes meanwhile."""
+        from services.captions import models
+
+        extra = models.EXTRAS.get(key)
+        if extra is None or extra in self._offered or self._here(extra):
+            return
+        if self._asking or self._download is not None:
+            return
+        self._offered.add(extra)
+        self._fetching = extra
+        self._start_download()
+
+    def _extra_arrived(self) -> None:
+        """The Turkish LM came: the captions process reads Turkish with it from the next piece,
+        without starting again; a translation wanted meanwhile is asked for now."""
+        from services.captions import models
+
+        if self._enabled and self._process.running():
+            self._process.send("turkish_lm", str(models.model_paths(self._tier).turkish_lm))
+        self._offer_translation()
+        self.changed.emit()
+
+    def _extra_failed(self, reason: str) -> bool:
+        """The Turkish LM didn't come, alone or after the model's own files: only the log says
+        so, it isn't fetched again while QiTV runs, and the model reads Turkish without it (from
+        now on, when its own files came). False when more than the LM failed."""
+        from services.captions import models
+        from services.captions.download import CANCELLED
+
+        fetching = self._fetching
+        if fetching in models.EXTRAS.values():
+            extra = fetching
+        elif fetching in models.EXTRAS and self._here(fetching):
+            extra = models.EXTRAS[fetching]
+        else:
+            return False
+        if reason != CANCELLED:
+            logger.warning(
+                "AI captions: the Turkish language model did not download (%s); Turkish is read "
+                "without it",
+                reason,
+            )
+            self._offered.add(extra)
+            if extra != fetching and self._enabled:
+                self._reload()  # the model's own files came: it writes Turkish now
+                return True
+        self.changed.emit()
+        return True
 
     def _offer_faster(self) -> None:
         """Automatic's 1.7B didn't download (2.9.1: it comes from a community export, which can
@@ -1113,6 +1171,12 @@ class CaptionsController(QObject):
                 "vad": str(paths.vad),
                 # the specialists that are here (2.9.6: each comes once its language is wanted)
                 "turkish": self._folder("turkish", paths.turkish),  # 2.10: our Turkish Moonshine
+                # 2.12.1: its language model, once here beside it (an older child ignores it)
+                "turkish_lm": (
+                    self._folder(models.TURKISH_LM_KEY, paths.turkish_lm)
+                    if self._here(models.TURKISH_KEY)
+                    else None
+                ),
                 "european": self._folder("european", paths.european),  # 2.9.3: Parakeet
                 "cohere": self._folder("cohere", paths.cohere),  # 2.9.3: Cohere Transcribe
                 # 2.10: the language they are translated into, and its model once it is here
@@ -1185,12 +1249,15 @@ class CaptionsController(QObject):
     def _offer_specialist(self) -> None:
         """2.9.6: the run's language is written best by a model that isn't here: asked for
         once while QiTV runs, on the TV and every phone (Qwen writes the language meanwhile,
-        where it knows it)."""
+        where it knows it). 2.12.1: one that is here gets what came with it since, unasked."""
         from services.captions import models
         from services.captions.languages import own_name, specialist_for
 
         key = specialist_for(self._language[0])
-        if key is None or key in self._offered or not self._enabled or self._here(key):
+        if key is None or key in self._offered or not self._enabled:
+            return
+        if self._here(key):
+            self._fetch_extra(key)
             return
         if self._asking or self._download is not None or self._card is None:
             return

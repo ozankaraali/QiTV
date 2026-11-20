@@ -530,9 +530,11 @@ class ModelLoadTest(unittest.TestCase):
     """The captions process loads Qwen at once and, with its files given, our Turkish Moonshine
     read with our beam (2.10); the log names the model each language is written by."""
 
-    def load(self, beam: Any, loaded: list) -> Any:
+    def load(self, beam: Any, loaded: list, factory: Any = None, **extra: Any) -> Any:
         """worker._Model with a fake sherpa-onnx (Qwen says "Good evening.") and `beam` for
-        moon_beam.BeamReader; the Turkish model's folder is named as its own."""
+        moon_beam.BeamReader; the Turkish model's folder is named as its own. `factory`: the
+        Turkish LM's loader (moon_reading's), `extra`: more of the load's spec."""
+        from contextlib import nullcontext
         import shutil
         import sys
         import tempfile
@@ -569,12 +571,121 @@ class ModelLoadTest(unittest.TestCase):
         folder = tempfile.mkdtemp()
         self.addCleanup(shutil.rmtree, folder, True)
         spec = {"model": dict.fromkeys(("conv_frontend", "encoder", "decoder", "tokenizer"), "x")}
-        spec.update(vad="vad.onnx", turkish=folder)
+        spec.update(vad="vad.onnx", turkish=folder, **extra)
         with (
             mock.patch.dict(sys.modules, {"sherpa_onnx": fake}),
             mock.patch("services.captions.moon_beam.BeamReader", beam),
+            (
+                mock.patch("services.captions.moon_reading._lstm", factory)
+                if factory
+                else nullcontext()
+            ),
         ):
             return worker._Model(spec)
+
+    class _Beam:
+        """moon_beam.BeamReader: the beam alone writes "iyi akşamlar"; its model is
+        test_captions_reading's, where the beam with an LM that prefers it writes "11"."""
+
+        def __init__(self, folder, lm, threads=2):
+            from test_captions_reading import FakeModel
+
+            self.model = FakeModel()
+            self.widths: list = []
+
+        def warm(self):
+            pass
+
+        def transcribe(self, samples, width=None):
+            self.widths.append(width)
+            return " iyi akşamlar "
+
+    def test_turkish_is_read_with_the_lm_the_load_names(self) -> None:
+        # 2.12.1: the GUI names the Turkish model's LM once it is here beside the model
+        from pathlib import Path
+
+        from test_captions_reading import PrefersEleven, lm_file
+
+        from services.captions import worker
+
+        path, made = lm_file(), []
+
+        def factory(where, api):
+            made.append(Path(where))
+            return PrefersEleven()
+
+        model = self.load(self._Beam, [], factory, turkish_lm=str(path))
+        self.assertEqual(made, [path])  # loaded with the model (its warm-up)
+        sound = array("f", bytes(4 * 1600))
+        self.assertEqual(model.decode(sound, worker.TURKISH), "11")
+        self.assertEqual(model.wrote(), model.name(worker._TURKISH_ROLE))  # named as before
+        self.assertEqual(model.decode(sound, worker.TURKISH, fast=True), "iyi akşamlar")
+        self.assertEqual(model.beam.beam.widths, [1])  # at 2x its best path alone, no LM
+        self.assertEqual(made, [path])
+
+    def test_without_the_lm_turkish_is_read_as_in_2_12_0(self) -> None:
+        from services.captions import worker
+
+        made: list = []
+        model = self.load(self._Beam, [], lambda where, api: made.append(where))
+        sound = array("f", bytes(4 * 1600))
+        self.assertEqual(model.decode(sound, worker.TURKISH), "iyi akşamlar")
+        self.assertEqual(model.beam.beam.widths, [None])  # the beam's own reading
+        self.assertEqual(made, [])
+
+    def test_an_lm_that_does_not_load_never_hands_turkish_to_qwen(self) -> None:
+        from test_captions_reading import lm_file
+
+        from services.captions import worker
+
+        def broken(where, api):
+            raise OSError("lm.int8.onnx is damaged")
+
+        with self.assertLogs("services.captions.moon_reading", "WARNING") as logs:
+            model = self.load(self._Beam, [], broken, turkish_lm=str(lm_file()))
+        self.assertEqual(len(logs.records), 1)
+        self.assertTrue(model.moonshine)
+        self.assertEqual(model.decode(array("f", bytes(4 * 1600)), worker.TURKISH), "iyi akşamlar")
+        self.assertNotEqual(model.writes(worker.TURKISH), "Qwen3-ASR")
+
+    def test_an_lm_downloaded_since_the_load_is_read_with_from_the_next_piece(self) -> None:
+        from test_captions_reading import PrefersEleven, lm_file
+
+        from services.captions import worker
+
+        model = self.load(self._Beam, [], lambda where, api: PrefersEleven())
+        sound = array("f", bytes(4 * 1600))
+        self.assertEqual(model.decode(sound, worker.TURKISH), "iyi akşamlar")
+        model.use_turkish_lm(str(lm_file()))
+        self.assertEqual(model.decode(sound, worker.TURKISH), "11")
+
+    def test_a_turkish_lm_message_reaches_the_model(self) -> None:
+        from types import SimpleNamespace
+        from unittest import mock
+
+        from services.captions import worker
+
+        used: list = []
+
+        class Model:
+            def __init__(self, spec):
+                pass
+
+            def use_turkish_lm(self, path):
+                used.append(path)
+
+        messages: list = [
+            ("turkish_lm", "/early/lm.int8.onnx"),
+            ("load", {}),
+            ("turkish_lm", "/ai-captions/lm/lm.int8.onnx"),
+            ("quit",),
+        ]
+        sent: list = []
+        link = SimpleNamespace(conn=SimpleNamespace(recv=lambda: messages.pop(0)), send=sent.append)
+        with mock.patch.object(worker, "_Model", Model):
+            worker._serve(link)
+        self.assertEqual(used, ["/ai-captions/lm/lm.int8.onnx"])  # before the load: no model
+        self.assertIn(("ready",), sent)
 
     def test_a_turkish_model_that_does_not_load_leaves_turkish_to_qwen(self) -> None:
         # the final review: it made the whole process fail ("Couldn't start AI captions"), in
