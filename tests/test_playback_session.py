@@ -1756,8 +1756,11 @@ class PictureShapeTests(unittest.TestCase):
             _FakeInstance(self.player), runner=self.runner, poll_ms=60_000
         )
         self.addCleanup(self.session.release)
-        patcher = mock.patch("services.playback._stream_ratio", return_value=4 / 3)
-        self.stream_ratio = patcher.start()
+        self.stream_ratio = mock.Mock(return_value=4 / 3)
+        patcher = mock.patch(
+            "services.playback._stream_shape", side_effect=lambda m: (self.stream_ratio(m), False)
+        )
+        patcher.start()
         self.addCleanup(patcher.stop)
 
     def play(self, url, *, playing=True):
@@ -1812,6 +1815,121 @@ class PictureShapeTests(unittest.TestCase):
 
     def test_without_libvlc_nothing_has_a_shape(self):
         self.assertIsNone(NullSession().picture_ratio())
+
+
+class BoxFillTests(unittest.TestCase):
+    """2.13.1: a picture shown small (the picture in picture, in the window or floating) fills
+    its box: while the box has the picture's shape, libVLC is given the box's own (its size in
+    device pixels), so the box's last pixel or two are a stretch too small to see, not a bar."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.app = QApplication.instance() or QApplication([])
+
+    def setUp(self):
+        self.player = _ShapePlayer()
+        self.runner = _HeldRunner(self.player)
+        self.session = PlaybackSession(
+            _FakeInstance(self.player), runner=self.runner, poll_ms=60_000
+        )
+        self.addCleanup(self.session.release)
+        self.shape = (16 / 9, False)  # the stream's (shape, turned) in libVLC's track list
+        patcher = mock.patch("services.playback._stream_shape", side_effect=lambda m: self.shape)
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
+    def play(self, url):
+        self.session.play(url, kind=PlayKind.LIVE)
+        if self.runner.jobs:
+            self.runner.finish()
+        self.player.state = vlc.State.Playing
+        self.session._tick()
+
+    def aspects(self):
+        return [c[1] for c in self.player.calls if c[0] == "video_set_aspect_ratio"]
+
+    def crops(self):
+        return [c[1] for c in self.player.calls if c[0] == "video_set_crop_geometry"]
+
+    def boxed(self, size):
+        self.session.set_box_size(size)
+        elapse(400)  # once the resize stops
+
+    def test_a_boxed_picture_fills_its_box_in_the_boxes_own_shape(self):
+        self.boxed(None)  # never in a box: nothing reaches libVLC
+        self.play(A)
+        self.assertEqual(self.aspects(), [])
+        self.session.picture_ratio()  # the box asks its shape: 16:9
+        self.boxed((1000, 568))  # the owner's floating window, 500×284 on a Retina screen
+        self.assertEqual(self.aspects(), ["125:71"])
+        self.assertEqual(self.crops(), [None])
+
+    def test_back_in_the_large_view_the_viewers_own_choice_returns(self):
+        self.play(A)
+        self.session.picture_ratio()
+        self.boxed((1000, 568))
+        self.boxed(None)
+        self.assertEqual(self.aspects(), ["125:71", None])  # Auto: the stream's own
+        self.session.set_aspect("16:9")
+        self.boxed((1000, 568))
+        self.assertEqual(self.aspects()[-1], "125:71")
+        self.boxed(None)
+        self.assertEqual(self.aspects()[-1], "16:9")
+
+    def test_a_resizing_box_is_filled_once_it_stops(self):
+        self.play(A)
+        self.session.picture_ratio()
+        for width in (960, 980, 1000):
+            self.session.set_box_size((width, round(width * 9 / 16)))
+        self.assertEqual(self.aspects(), [])
+        elapse(400)
+        self.assertEqual(self.aspects(), ["500:281"])  # once, the last size's
+
+    def test_a_picture_not_known_yet_is_never_stretched_to_the_last_ones_box(self):
+        self.play(A)
+        self.boxed((1000, 562))
+        self.assertEqual(self.aspects(), [])  # its shape not read yet
+        self.session.picture_ratio()  # read: it fills the box at once
+        self.assertEqual(self.aspects(), ["500:281"])
+        self.shape = (4 / 3, False)
+        self.play(B)  # a zap to a 4:3 channel, the box still 16:9
+        self.assertEqual(self.aspects()[-1], None)  # its own shape (not stretched to 16:9)
+        self.session.picture_ratio()
+        self.assertEqual(self.aspects()[-1], None)  # 4:3: the box is another shape still
+        self.boxed((740, 555))  # the box takes the 4:3 shape
+        self.assertEqual(self.aspects()[-1], "4:3")
+
+    def test_nothing_reaches_libvlc_while_a_worker_ends_an_input(self):
+        self.play(A)
+        self.session.picture_ratio()
+        self.session.play(B, kind=PlayKind.LIVE)  # the old input is being joined
+        self.player.calls.clear()
+        self.boxed((1000, 562))
+        self.assertEqual(self.aspects(), [])
+        self.runner.finish()
+        self.player.state = vlc.State.Playing
+        self.session._tick()
+        self.session.picture_ratio()
+        self.assertEqual(self.aspects()[-1], "500:281")
+
+    def test_fill_crops_to_its_box_and_a_turned_picture_is_left_alone(self):
+        self.play(A)
+        self.session.picture_ratio()
+        self.session.set_video_size(500, 281)
+        self.session.set_aspect("fill")
+        self.boxed((1000, 562))
+        self.assertEqual((self.aspects()[-1], self.crops()[-1]), (None, "500:281"))
+        self.session.set_aspect("auto")
+        self.player.calls.clear()
+        self.shape = (9 / 16, True)  # a phone's upright video, turned by libVLC
+        self.play(B)
+        self.session.picture_ratio()
+        self.boxed((360, 640))
+        self.assertNotIn("9:16", self.aspects())
+        self.assertEqual(set(self.aspects()), {None})
+
+    def test_without_libvlc_a_box_is_nothing(self):
+        NullSession().set_box_size((1000, 562))
 
 
 class _SongMedia(_FakeMedia):

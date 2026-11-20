@@ -50,7 +50,13 @@ reads what the statistics overlay shows. None of them reaches libVLC while a wor
 input (`_player_free`): what is asked for meanwhile is set once the next media opens.
 `picture_ratio()` tells the shape the picture shows in, which the picture in picture's boxes
 take (no bars): the stream's own is read from libVLC's track list only when asked, while a
-picture plays, at most once a second once known.
+picture plays, at most once a second once known. While the picture shows in such a box (the
+shell reports its size in device pixels, `set_box_size`; None back in the large view) and the
+box has its shape (`services.picture.box_aspect`), libVLC's aspect ratio is the box's own, so
+the picture fills it to the last pixel; the viewer's own choice applies again once it is out
+(or the box has another shape). Set a moment after a resize stops, as Fill's crop; never on a
+picture whose shape is not read from this media yet (a zap's is not stretched to the last
+one's box), nor on a turned one (how libVLC turns a forced shape is not known).
 
 What plays is told for the audio screen: `has_video_track()` (a picture at all, from libVLC's
 track list once it has played; None before) and `tags()` (its tags and art URL as libVLC read
@@ -470,8 +476,13 @@ class PlaybackSession(QObject):
         # The stream's own shape (`picture_ratio`): the last one read, kept through the next
         # media's open until its picture is known; read again once _RATIO_READ_MS have passed.
         self._stream_ratio: Optional[float] = None
+        self._stream_turned = False  # libVLC turns it upright (a phone's video)
         self._ratio_known = False  # read from this media
         self._ratio_read = QElapsedTimer()
+        # The picture in picture's box it shows in (device pixels; None: the large view), and
+        # the aspect ratio libVLC was given last to fill it (None: the viewer's own).
+        self._box_size: Optional[tuple[int, int]] = None
+        self._box_fit: Optional[str] = None
         # Casting (2.8): a libVLC renderer (a Chromecast) given before each play while casting;
         # libVLC takes it only before a play, so a change applies at the next open (`reopen`).
         self._renderer: Any = None
@@ -727,10 +738,10 @@ class PlaybackSession(QObject):
         if self._subtitle_delay_ms:
             self._player.video_set_spu_delay(self._subtitle_delay_ms * 1000)
         self._shown_due = True  # pictureShown once its video output appears
+        self._ratio_known = False  # (the last media's shape stays until this one's is read)
         if self._picture_wanted():
             self._apply_picture()  # the player's, for a new video output
             self._picture_due = True  # and again for a kept one, once it is this media's
-        self._ratio_known = False  # (the last media's shape stays until this one's is read)
         self._ratio_read.invalidate()  # read as soon as its picture plays
         self._spu_files, self._spu_known, self._spu_waiting = {}, set(), []
         self._media_files = set()
@@ -1225,11 +1236,14 @@ class PlaybackSession(QObject):
         if media is None:
             return
         try:
-            ratio = _stream_ratio(media)
+            ratio, turned = _stream_shape(media)
         finally:
             media.release()
         if ratio is not None:
             self._stream_ratio, self._ratio_known = ratio, True
+            self._stream_turned = turned
+            if self._box_aspect() != self._box_fit:
+                self._set_picture()  # its box is filled now (or no more: another shape)
 
     def set_video_size(self, width: int, height: int) -> None:
         """The surface this player draws into is `width` × `height`: Fill's crop follows it."""
@@ -1238,6 +1252,15 @@ class PlaybackSession(QObject):
         self._video_size = (int(width), int(height))
         if self._aspect == picture.FILL:
             self._shape_timer.start()  # once the resize stops
+
+    def set_box_size(self, size: Optional[tuple[int, int]]) -> None:
+        """The picture shows in a picture in picture's box `size` (width, height in device
+        pixels; None: in none, the large view): while the box has the picture's shape, libVLC
+        is given the box's own, a moment after a resize stops (the module docstring)."""
+        if self._released or size == self._box_size:
+            return
+        self._box_size = None if size is None else (int(size[0]), int(size[1]))
+        self._shape_timer.start()
 
     def deinterlace(self) -> str:
         return self._deinterlace
@@ -1269,18 +1292,31 @@ class PlaybackSession(QObject):
         return self._picture_set or self._aspect != picture.AUTO or self._deinterlace_set
 
     def _apply_shape(self) -> None:
-        if self._aspect != picture.FILL:
-            return
+        if self._aspect != picture.FILL and self._box_aspect() == self._box_fit:
+            return  # (nothing for libVLC: no crop follows the surface, its box is as it was)
         if self._player_free():
             self._apply_picture()
         else:
             self._shape_timer.start()  # a worker ends an input: once it has let go
+
+    def _box_aspect(self) -> Optional[str]:
+        """libVLC's aspect ratio that has the picture fill its box (None: the viewer's own): in
+        a box shaped for it, its shape read from this media (with Auto), not turned."""
+        if self._box_size is None or self._stream_turned:
+            return None
+        if self._aspect == picture.AUTO and not self._ratio_known:
+            return None
+        shown = picture.shown_ratio(self._aspect, self._stream_ratio)
+        return picture.box_aspect(shown, *self._box_size)
 
     def _apply_picture(self) -> None:
         """libVLC's aspect ratio, crop and deinterlacing, as asked for (only while no worker
         holds the player's input: libVLC takes its input lock to reach the video outputs)."""
         self._picture_set = True
         aspect, crop = picture.shape_args(self._aspect, *self._video_size)
+        self._box_fit = self._box_aspect()
+        if self._box_fit is not None:
+            aspect, crop = self._box_fit, None  # its box's own shape: filled to the last pixel
         self._player.video_set_aspect_ratio(aspect)
         self._player.video_set_crop_geometry(crop)
         if self._deinterlace_set:
@@ -1753,6 +1789,8 @@ class Session(Protocol):
 
     def set_video_size(self, width: int, height: int) -> None: ...
 
+    def set_box_size(self, size: Optional[tuple[int, int]]) -> None: ...
+
     def picture_ratio(self) -> Optional[float]: ...
 
     def deinterlace(self) -> str: ...
@@ -1951,6 +1989,9 @@ class NullSession(QObject):
     def set_video_size(self, width: int, height: int) -> None:
         pass
 
+    def set_box_size(self, size: Optional[tuple[int, int]]) -> None:
+        pass
+
     def picture_ratio(self) -> Optional[float]:
         return None
 
@@ -2010,15 +2051,18 @@ def _track_stats(media: Any) -> dict[str, Any]:
     return found
 
 
-def _stream_ratio(media: Any) -> Optional[float]:
-    """The shape the media's first video track shows in (None: its size is not known yet)."""
+def _stream_shape(media: Any) -> tuple[Optional[float], bool]:
+    """The shape the media's first video track shows in (None: its size is not known yet), and
+    whether libVLC turns it upright."""
     found = _track_stats(media)
-    return picture.display_ratio(
+    rotated = bool(found.get("rotated"))
+    ratio = picture.display_ratio(
         int(found.get("width") or 0),
         int(found.get("height") or 0),
         found.get("sar", (1, 1)),
-        bool(found.get("rotated")),
+        rotated,
     )
+    return ratio, rotated
 
 
 class _Track(ctypes.Structure):

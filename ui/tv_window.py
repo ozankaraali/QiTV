@@ -986,6 +986,10 @@ class TVWindow(QMainWindow):
         self.floating_note.hide()
         self._floating_captions: Optional[OverlayHost] = None  # AI captions over it (2.9)
         self.desktop_pip.floatingChanged.connect(self._on_picture_floating)
+        # A picture shown small fills its box: told as it shows, hides, floats or comes back
+        # (and as its surface resizes, `_report_video_size`).
+        self.desktop_pip.floatingChanged.connect(self._fit_small_pictures)
+        self.pip_frame.smallRectChanged.connect(self._fit_small_pictures)
         self.pip_frame.suspending.connect(self.desktop_pip.dock)  # the multiview lays them out
         # The host covers the page exactly: page coordinates are the host's.
         self.pip_frame.smallRectChanged.connect(self.pip_label.follow)
@@ -1572,10 +1576,26 @@ class TVWindow(QMainWindow):
 
     def _report_video_size(self, surface: QObject) -> None:
         """A player's surface changed size: a picture filling the window follows its shape
-        (the Picture panel's Fill, 2.3)."""
+        (the Picture panel's Fill, 2.3), and one shown small its box."""
         for name, player in self._players():
             if self.surfaces.get(name) is surface:
                 player.set_video_size(surface.width(), surface.height())
+        self._fit_small_pictures()
+
+    def _fit_small_pictures(self, *_args: object) -> None:
+        """Each player is told the box its picture shows small in, in device pixels (the
+        picture in picture's, in the window or floating), which it fills to the last pixel
+        while the box has its shape; None in the large view (the viewer's own aspect ratio)."""
+        frame = getattr(self, "pip_frame", None)
+        if frame is None:
+            return  # (a surface laid out before the frame is made)
+        for name, player in self._players():
+            surface = self.surfaces.get(name)
+            box = None
+            if surface is not None and frame.shows_small(name):
+                pixels = surface.size() * surface.devicePixelRatioF()
+                box = (pixels.width(), pixels.height())
+            player.set_box_size(box)
 
     def _picture_shape(self, name: str) -> Optional[float]:
         """The shape (width / height) slot `name`'s picture shows in (None: not known yet, or

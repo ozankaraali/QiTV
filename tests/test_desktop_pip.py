@@ -12,6 +12,7 @@ from PySide6.QtGui import QMouseEvent  # noqa: E402
 from PySide6.QtWidgets import QApplication, QWidget  # noqa: E402
 
 from services import picture  # noqa: E402
+from services.playback import NullSession  # noqa: E402
 from tests.test_tv_window import WindowCase  # noqa: E402
 from ui import desktop_pip  # noqa: E402
 from ui.desktop_pip import DesktopPip, FloatingPlayer, corner_rect  # noqa: E402
@@ -20,6 +21,20 @@ from ui.pip import PipFrame  # noqa: E402
 
 class Config:
     pip_corner = "bottom-right"
+
+
+class _BoxedPlayer(NullSession):
+    """A player that keeps what the window tells it of the box it shows in."""
+
+    def __init__(self):
+        super().__init__()
+        self.boxes: list = []
+
+    def set_box_size(self, size):
+        self.boxes.append(size)
+
+    def box(self):
+        return self.boxes[-1] if self.boxes else None
 
 
 def mouse(widget, kind, at, buttons=Qt.MouseButton.LeftButton):
@@ -464,6 +479,47 @@ class DesktopPipWindowTests(WindowCase):
             self.assertEqual(overlay.text(), "")
             window.showNormal()
             self.app.processEvents()
+
+    def test_a_picture_shown_small_is_told_its_box_in_device_pixels(self):
+        # 2.13.1: the floating window and the window's own picture in picture are filled by
+        # their picture (no bar); back in the large view the viewer's choice returns.
+        shown = {"value": True}
+        main, small = _BoxedPlayer(), _BoxedPlayer()
+        players = [("main", main), ("pip", small)]
+        with (
+            mock.patch("ui.tv_window._macos_desktops", return_value=True),
+            mock.patch.object(self.window, "_players", return_value=players),
+        ):
+            window = self.window
+            pip = window.desktop_pip
+            pip._on_active_space = lambda _w: shown["value"]
+            pip._may_float = lambda: True
+            pip._place = lambda: QRect(100, 100, 500, 284)  # the owner's floating window
+            window.surface.devicePixelRatioF = lambda: 2.0  # a Retina screen
+            window.show()
+            window.showFullScreen()
+            self.app.processEvents()
+            self.assertIsNone(main.box())
+            shown["value"] = False
+            pip.check()
+            pip.check()
+            self.assertEqual(window.surface.size(), QSize(500, 284))
+            self.assertEqual(main.box(), (1000, 568))
+            self.assertIsNone(small.box())
+            shown["value"] = True
+            pip.check()  # back in the fullscreen window
+            self.app.processEvents()
+            self.assertIsNone(main.box())
+            window.showNormal()
+            self.app.processEvents()
+            window.pip_frame.show_pip()  # the small picture in the window
+            self.app.processEvents()
+            rect = window.pip_frame.small_rect()
+            self.assertEqual(small.box(), (rect.width(), rect.height()))
+            self.assertIsNone(main.box())
+            window.pip_frame.hide_pip()
+            self.app.processEvents()
+            self.assertIsNone(small.box())
 
     def test_without_a_playing_picture_or_with_the_setting_off_nothing_floats(self):
         window = self.window
