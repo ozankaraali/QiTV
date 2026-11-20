@@ -185,6 +185,42 @@ class ProviderChangesTests(unittest.TestCase):
         self.assertEqual(before["url"], PANEL["url"])
         self.assertEqual(listed[1]["url"], "http://panel.test:9090")
 
+    def test_a_list_that_cannot_be_saved_is_left_as_the_disk_holds_it(self):
+        # Every change, its write refused: the list in memory is what the disk holds (the
+        # shared list object too), and the error goes on to the caller.
+        listed = self.manager.providers
+        on_disk = [dict(p) for p in self.saved()]
+        changes = (
+            ("add", ({"type": "M3UPLAYLIST", "name": "New", "url": "http://n.test/"},)),
+            ("update", ("Panel", {"url": "http://panel.test:9090", "max_streams": 2})),
+            ("rename", ("Panel", "Films")),
+            ("remove", ("Lists",)),
+        )
+        for name, args in changes:
+            with self.subTest(name):
+                with mock.patch.object(
+                    self.manager, "save_providers", side_effect=PermissionError("index.json")
+                ):
+                    with self.assertRaises(PermissionError):
+                        getattr(self.changes, name)(*args)
+                self.assertIs(self.manager.providers, listed)
+                self.assertEqual(listed, on_disk)
+                self.assertEqual(self.saved(), on_disk)
+
+    def test_a_stale_cache_that_cannot_go_does_not_fail_the_save(self):
+        # The list is written first; a cache file left of a name no longer listed that cannot
+        # be removed is only logged (the save stands, memory and disk agree).
+        cache = self.manager._provider_cache_name("Panel")
+        with open(cache, "w", encoding="utf-8") as f:
+            f.write("{}")
+        with (
+            mock.patch("services.provider_manager.os.remove", side_effect=PermissionError()),
+            self.assertLogs("services.provider_manager", "WARNING"),
+        ):
+            self.changes.rename("Panel", "Films")
+        self.assertEqual([p["name"] for p in self.saved()], ["Lists", "Films"])
+        self.assertEqual(self.changes.names(), ["Lists", "Films"])
+
 
 if __name__ == "__main__":
     unittest.main()

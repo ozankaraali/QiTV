@@ -19,7 +19,7 @@ Settings. Each change runs the TV window's follow-ups (ui.provider_actions), and
 built again once it is done; a rename keeps the viewer in the renamed provider's layer. A change
 made elsewhere (a drop, Free channels, the old window, the TV moving to another provider) builds
 them again at once (`providers_changed`), the place kept by key. A list that cannot be saved is
-said, and the change holds until QiTV closes.
+said, and nothing changes (services.provider_changes puts it back as the disk holds it).
 
 Keys: `provider/<name>` for a provider's layer and `provider/<name>/<field>` for its rows, the
 name with "%", "/" and a leading "@" escaped (an unnamed provider is named after its address;
@@ -30,7 +30,7 @@ from __future__ import annotations
 
 import logging
 import os
-from typing import Any, Callable, Optional, Protocol, TypeVar
+from typing import Any, Callable, Optional, Protocol
 from urllib.parse import quote, unquote, urlsplit
 
 from PySide6.QtCore import QObject
@@ -77,8 +77,6 @@ from ui.tv_controller import ERROR_MS
 
 logger = logging.getLogger(__name__)
 
-_T = TypeVar("_T")
-
 # A provider's rows, by the last part of their keys.
 NAME, KIND, LOGIN, SSL, STREAMS, OFFSET, HIDDEN, CHECK, REMOVE = (
     "name",
@@ -113,6 +111,9 @@ _STREAM_CHOICES = (Choice(0, AUTOMATIC_TEXT),) + tuple(
     Choice(n, str(n), literal=True) for n in range(1, STREAMS_MOST + 1)
 )
 SHOW_AGAIN_TEXT = N_("Show again")  # i18n: Settings → Providers → Hidden groups: a group's action
+# i18n: a toast: the provider list could not be written (a full disk, a read-only folder), so the
+# change made in Settings → Providers did not happen
+SAVE_FAILED_TEXT = N_("Couldn't save the providers; nothing was changed")
 REMOVE_TEXT = N_("Remove")  # i18n: a button of "Remove the provider …?" (verb); its key: REMOVE
 
 
@@ -434,20 +435,19 @@ class ProviderRows(QObject):
         if not self._changing:
             self._settings.refresh_sections()
 
-    def _apply(self, change: Callable[[], _T]) -> Optional[_T]:
-        """Run one change of ours (ProviderActions'). The window's news of it, which comes
-        inside it (the catalogs' providersChanged), waits for the caller's one build of the
-        rows. A provider list that cannot be saved is said (None): the change holds in memory,
-        and the window's follow-ups after the save did not run."""
+    def _apply(self, change: Callable[[], object]) -> bool:
+        """Run one change of ours (ProviderActions'); whether it was made. The window's news of
+        it, which comes inside it (the catalogs' providersChanged), waits for the caller's one
+        build of the rows. A provider list that cannot be saved is said (False): nothing was
+        changed (the list is as the disk holds it, and no follow-up ran)."""
         self._changing = True
         try:
-            return change()
+            change()
+            return True
         except OSError as e:
             logger.warning("Couldn't save the provider list: %s", type(e).__name__)
-            from ui.tv_window import SAVE_FAILED_TEXT  # (the window imports this module)
-
             self._notify(translate(SAVE_FAILED_TEXT))
-            return None
+            return False
         finally:
             self._changing = False
 
@@ -464,7 +464,7 @@ class ProviderRows(QObject):
             self._notify(translate(NAME_TAKEN_TEXT, name=taken.name))
             return
         names = self._actions.changes.names()
-        new = names[index] if index < len(names) else name  # (its save may have failed)
+        new = names[index] if index < len(names) else name  # (blank: after its address)
         if new == name:
             self._settings.refresh_sections()
             return
@@ -526,9 +526,9 @@ class ProviderRows(QObject):
         name, self._removing = self._removing, ""
         if key != REMOVE or not name or self._find(name) is None:
             return
-        self._notes.pop(name, None)
-        self._checks = {check: n for check, n in self._checks.items() if n != name}
-        self._apply(lambda: self._actions.remove(name))
+        if self._apply(lambda: self._actions.remove(name)):
+            self._notes.pop(name, None)
+            self._checks = {check: n for check, n in self._checks.items() if n != name}
         self._settings.refresh_sections()
 
     # ---- what they need ---------------------------------------------------------------------

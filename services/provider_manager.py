@@ -346,7 +346,14 @@ class ProviderManager(QObject):
             f.write(serialized)
         if self._keep_unlisted_caches:
             return
+        try:
+            self._prune_unlisted_caches()
+        except OSError as e:
+            # The list is written: a raise now would say it was not (Settings puts back a
+            # change whose write failed). A stale cache only takes room until the next save.
+            logger.warning("Couldn't remove a stale provider cache: %s", type(e).__name__)
 
+    def _prune_unlisted_caches(self) -> None:
         # Delete stale cache files not matching any known provider name hash
         # (malformed provider entries without a string name are ignored).
         expected_files = {

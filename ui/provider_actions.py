@@ -17,8 +17,9 @@ Settings window's Save ran for it, in its order:
   the catalogs reload; the TV's gives way to the provider after it in the list (the one before
   it when it was the last; none when it was the only one: the welcome card).
 
-Each ends with the menu bar's provider list rebuilt. Asking first (a removal, the parental
-PIN for a rename) is the caller's. The TV's provider is the one Settings selects
+Each ends with the menu bar's provider list rebuilt. A change whose write the disk refuses
+raises its OSError before any follow-up: nothing was changed (ProviderChanges puts the list
+back). Asking first (a removal, the parental PIN for a rename) is the caller's. The TV's provider is the one Settings selects
 (`selected_provider_name`), as the old Save had it.
 """
 

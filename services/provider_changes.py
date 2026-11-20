@@ -11,7 +11,9 @@ the same rules, so the list stays as older 2.x builds read it:
 - a media server's password never (it signs in once; its token is kept instead).
 
 Each write saves the list (`ProviderManager.save_providers`, which also lets go of the cache
-of a name no longer listed). What the TV window does after one is `ui.provider_actions`'.
+of a name no longer listed). A write the disk refuses (OSError) changes nothing: the list goes
+back to what it was, as the disk still holds it, and the error is the caller's to say. What the
+TV window does after one is `ui.provider_actions`'.
 
 The list object stays the one the providers' own managers share; a changed provider is listed
 as a new entry, so whoever holds the one before keeps it as it was (as the old Save's copy).
@@ -84,8 +86,9 @@ class ProviderChanges:
         if not name:
             raise ValueError("A provider needs a name or an address")
         name = provider["name"] = unique_name(name, self.names())
+        listed = list(self._providers)
         self._providers.append(provider)
-        self._manager.save_providers()
+        self._save(listed)
         return name
 
     def update(self, name: str, changes: dict) -> Change:
@@ -107,8 +110,9 @@ class ProviderChanges:
         verify = self._global_ssl_verify()
         identity = self._manager.provider_cache_identity
         changed = identity(before, ssl_verify=verify) != identity(after, ssl_verify=verify)
+        listed = list(self._providers)
         self._providers[index] = after
-        self._manager.save_providers()
+        self._save(listed)
         return Change(identity_changed=changed, fields=fields)
 
     def rename(self, old: str, new: str) -> str:
@@ -124,14 +128,27 @@ class ProviderChanges:
         folded = new.casefold()
         if any(other.casefold() == folded for other in others):
             raise NameTaken(new)
+        listed = list(self._providers)
         self._providers[index] = {**deepcopy(entry), "name": new}
-        self._manager.save_providers()
+        self._save(listed)
         return new
 
     def remove(self, name: str) -> None:
         """Take provider `name` off the list (KeyError when none has the name)."""
-        del self._providers[self._index(name)]
-        self._manager.save_providers()
+        index = self._index(name)
+        listed = list(self._providers)
+        del self._providers[index]
+        self._save(listed)
+
+    def _save(self, listed: list) -> None:
+        """Write the list; one the disk refuses (OSError) is put back as `listed`, the list as
+        it was before the change (the same list object, which the providers' own managers
+        share): memory stays what the disk holds, and the error goes on to the caller."""
+        try:
+            self._manager.save_providers()
+        except OSError:
+            self._providers[:] = listed
+            raise
 
     # ---- the writing rules ----------------------------------------------------------------------
 

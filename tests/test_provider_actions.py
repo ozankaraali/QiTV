@@ -149,6 +149,27 @@ class ProviderActionsTests(unittest.TestCase):
         )
         self.assertEqual(self.actions.changes.names(), ["News", "Extra"])
 
+    def test_a_change_that_cannot_be_saved_has_no_follow_ups(self):
+        # The list is as the disk holds it again: nothing to carry over, reload or hand over.
+        extra = {"type": "M3UPLAYLIST", "name": "Extra", "url": "http://extra.test/tv.m3u"}
+        cases = (
+            ("add", (extra,)),
+            ("update", ("Lists", {"url": "http://lists.test/b.m3u"})),
+            ("rename", ("Lists", "News")),
+            ("remove", ("Lists",)),
+        )
+        for action, args in cases:
+            with self.subTest(action):
+                self.window.events.clear()
+                with mock.patch.object(
+                    self.manager, "save_providers", side_effect=PermissionError()
+                ):
+                    with self.assertRaises(PermissionError):
+                        getattr(self.actions, action)(*args)
+                self.assertEqual(self.window.events, [])
+                self.assertEqual(self.actions.changes.names(), ["Lists", "Panel"])
+                self.assertEqual(self.config.selected_provider_name, "Lists")
+
     def test_removing_the_provider_shown_shows_the_next_or_none(self):
         self.manager.providers.append(
             {"type": "M3UPLAYLIST", "name": "Extra", "url": "http://extra.test/tv.m3u"}

@@ -48,8 +48,14 @@ from ui.settings_dialog import (
     REMOVE_QUESTION,
     REMOVE_RECORDINGS_NOTE,
 )
-from ui.settings_providers import REMOVE as REMOVE_KEY, ProviderRows, kind_text, layer_key, row_key
-from ui.tv_window import SAVE_FAILED_TEXT
+from ui.settings_providers import (
+    REMOVE as REMOVE_KEY,
+    SAVE_FAILED_TEXT,
+    ProviderRows,
+    kind_text,
+    layer_key,
+    row_key,
+)
 
 PIN = "2468"
 
@@ -374,16 +380,40 @@ class ProvidersTests(unittest.TestCase):
         self.manager.providers[1] = {**self.manager.providers[1], GUIDE_OFFSET_KEY: 45}
         self.assertEqual(self.value("Panel", "offset"), "No offset")
 
+    def failing_save(self):
+        """The provider list's writes refused (a full disk, a read-only folder)."""
+        return mock.patch.object(self.manager, "save_providers", side_effect=PermissionError())
+
     def test_a_failed_save_says_so_and_does_not_crash(self):
+        # Nothing was changed: the list stays what the disk holds, and the toast says so.
         self.on("Panel", "streams")
-        with (
-            mock.patch.object(self.manager, "save_providers", side_effect=PermissionError()),
-            self.assertLogs("ui.settings_providers", "WARNING"),
-        ):
+        with self.failing_save(), self.assertLogs("ui.settings_providers", "WARNING"):
             self.key(Action.NAV_RIGHT)
         self.assertEqual(self.window.toasts, [(translate(SAVE_FAILED_TEXT), "error")])
-        self.assertEqual(self.value("Panel", "streams"), "1")  # kept while QiTV runs
+        self.assertEqual(self.value("Panel", "streams"), "Automatic")
+        self.assertEqual(self.manager.providers, [PLAYLIST, PANEL])
+        self.assertEqual(self.window.events, [])  # no follow-ups
         self.assertTrue(self.settings.visible())
+
+    def test_a_rename_or_removal_that_cannot_be_saved_changes_nothing(self):
+        self.on("Panel", "name")
+        with self.failing_save(), self.assertLogs("ui.settings_providers", "WARNING"):
+            self.type_name("Films", replace=True)
+        self.assertEqual(self.rows._actions.changes.names(), ["Lists", "Panel"])
+        self.assertEqual(self.drawer.path(), (PROVIDERS, layer_key("Panel")))  # its old name
+        self.assertEqual(self.drawer.focused_row().key, row_key("Panel", "name"))
+        self.assertEqual(self.value("Panel", "name"), "Panel")
+        self.on("Lists", "remove")
+        self.key(Action.NAV_ACTIVATE)
+        self.key(Action.NAV_RIGHT)
+        with self.failing_save(), self.assertLogs("ui.settings_providers", "WARNING"):
+            self.key(Action.NAV_ACTIVATE)
+        self.assertEqual(self.rows._actions.changes.names(), ["Lists", "Panel"])
+        self.assertEqual(self.config.selected_provider_name, "Lists")  # never handed over
+        self.assertEqual(self.drawer.path(), (PROVIDERS, layer_key("Lists")))
+        self.assertEqual(self.window.events, [])  # no follow-ups: nothing carried, reloaded
+        self.assertEqual(self.window.toasts, [(translate(SAVE_FAILED_TEXT), "error")] * 2)
+        self.assertEqual(self.saved(), ["Lists", "Panel"])
 
     # ---- the name ----------------------------------------------------------------------------
 
