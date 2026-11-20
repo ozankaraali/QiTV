@@ -712,8 +712,8 @@ class PinnedFilesTests(unittest.TestCase):
         self.assertEqual(models.runtime_folder_name("cp314"), "runtime-2.0.1-cp314")
 
     def test_the_turkish_lm_is_pinned_in_the_model_s_repository(self):
-        # 2.12.1: lm/lm.int8.onnx of the Turkish model's own repository, by its size and sha256;
-        # the model's files stay at their revision
+        # 2.12.1: lm/lm.int8.onnx of the Turkish model's own repository at the revision that
+        # added it, by its size and sha256; the model's files stay at their revision
         lm = models.TURKISH_LM
         self.assertEqual(
             (lm.path, lm.size, lm.sha256, lm.extract),
@@ -725,7 +725,9 @@ class PinnedFilesTests(unittest.TestCase):
             ),
         )
         repository = "https://huggingface.co/ozankaraali/qitv-asr-tr-moonshine-mid/resolve/"
-        self.assertEqual(lm.url, repository + "main/lm/lm.int8.onnx")
+        self.assertEqual(
+            lm.url, repository + "ed8d50119886bd96f0437d49b84b58551ddb886d/lm/lm.int8.onnx"
+        )
         for file in models.TURKISH_FILES:
             self.assertTrue(
                 file.url.startswith(repository + "d81f33cbdc992b78b7dd9e4a949f2862bd47f62c/")

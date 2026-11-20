@@ -265,13 +265,16 @@ TURKISH_FILES = (
 )
 # 2.12.1: its language model, an LSTM over the model's pieces with 8-bit weights, trained on
 # Turkish text and then TV transcripts; our beam reads Turkish with it (services.captions.
-# moon_reading). It is in the same repository (lm/), added after revision d81f33cb, so it comes
-# from the main branch, pinned by its size and sha256 as every file here is. It downloads with the
-# model (last, and counted in what the question says), but the model runs without it: installed()
-# doesn't wait for it, and an install from before it gets it alone (TURKISH_LM_KEY).
-_TURKISH_RESOLVE = "https://huggingface.co/ozankaraali/qitv-asr-tr-moonshine-mid/resolve/"
+# moon_reading). It is in the same repository (lm/), added in revision ed8d5011 (the model's
+# files, pinned at d81f33cb above, are the same there). It downloads with the model (last, and
+# counted in what the question says), but the model runs without it: installed() doesn't wait for
+# it, and an install from before it gets it alone (TURKISH_LM_KEY).
+_TURKISH_LM_REVISION = (
+    "https://huggingface.co/ozankaraali/qitv-asr-tr-moonshine-mid/resolve/"
+    "ed8d50119886bd96f0437d49b84b58551ddb886d/"
+)
 TURKISH_LM = RemoteFile(
-    _TURKISH_RESOLVE + "main/lm/lm.int8.onnx",
+    _TURKISH_LM_REVISION + "lm/lm.int8.onnx",
     "lm/lm.int8.onnx",
     38648607,
     "440f7dba99f592de1b1ce7d47e28bd5d68652ae606cc70fd94c7c5bddb13bbd4",
