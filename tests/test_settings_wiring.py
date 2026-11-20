@@ -10,7 +10,7 @@ from unittest import mock
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
-from PySide6.QtCore import Qt
+from PySide6.QtCore import QPoint, Qt
 from PySide6.QtGui import QGuiApplication, QKeySequence
 from PySide6.QtTest import QTest
 from PySide6.QtWidgets import QApplication
@@ -470,6 +470,25 @@ class AddProviderTests(base.WindowCase):
                     drawer.close_drawer()
         self.assertEqual(self.provider_manager.providers[0]["name"], base.PROVIDER_NAME)
         self.assertEqual(len(self.provider_manager.providers), 1)  # nothing added
+
+    def test_a_double_clicks_second_click_on_the_librarys_add_provider_reaches_nothing(self):
+        # Its button acts on the release and the Library goes: the second press of a
+        # double-click would land on the card's dimmed picture, and cancel it.
+        self.show()
+        self.wait_for_drawer()
+        window = self.window
+        window.screens.open_library("movies")
+        elapse(QApplication.doubleClickInterval() + 80)  # the Library's own guard gone
+        window.library_controller.addProviderRequested.emit()  # its button, clicked
+        form = window.provider_cards.form
+        self.assertTrue(form.isVisible())
+        host = form.window()
+        dimmed = QPoint(20, host.height() - 20)  # the picture beside the card
+        QTest.mouseClick(host.windowHandle(), Qt.MouseButton.LeftButton, pos=dimmed)
+        self.assertTrue(form.isVisible())  # it reached nothing
+        elapse(QApplication.doubleClickInterval() + 80)
+        QTest.mouseClick(host.windowHandle(), Qt.MouseButton.LeftButton, pos=dimmed)
+        self.assertFalse(form.isVisible())  # a click of its own: the dimmed picture cancels
 
     def test_add_provider_while_settings_shows_moves_to_providers(self):
         self.show()

@@ -122,7 +122,7 @@ class TVPages(QObject):
             parent=self,
         )
         self.library_controller.notice.connect(self.notify)
-        self.library_controller.addProviderRequested.connect(lambda: window.add_provider())
+        self.library_controller.addProviderRequested.connect(self._add_provider)
         # 2.8: a Library genre's right-click hides it, as the TV list's groups.
         self.library_controller.set_hiding(
             lambda *args: window.controller.hide_group(*args),
@@ -621,6 +621,17 @@ class TVPages(QObject):
         self._show_page(window.player_page)
         self._set_return_to_library(False)
         window.controller.resume_live()
+
+    def _add_provider(self) -> None:
+        """The Library's Add provider (under "… has no movies"): Settings at Providers over the
+        TV, with the Add card (TVWindow.add_provider). Its button acts on the release, so a
+        double-click's second click would land on the card's dimmed picture and cancel it: it
+        reaches nothing (_guard_second_click)."""
+        window = self._window
+        if window.closing():
+            return
+        window.add_provider()
+        self._guard_second_click()
 
     def toggle_multiview(self) -> None:
         """View → Multiview: the grid over live TV (from the Library, live TV first: what
