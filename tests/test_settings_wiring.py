@@ -15,7 +15,7 @@ from PySide6.QtTest import QTest
 from timer_fixtures import wait_until
 
 from services.navigation import SETTINGS_ROW
-from services.settings_model import GENERAL
+from services.settings_model import GENERAL, TEXT, Row, Section
 from tests import test_tv_window as base
 from ui.keymap import Action
 from ui.settings_dialog import OptionsDialog
@@ -268,6 +268,28 @@ class SettingsWiringTests(base.WindowCase):
         self.window.controller.mouse_forward()
         self.assertEqual(self.config.live_latency, "auto")
         self.assertTrue(self.window.settings.visible())
+
+    def test_a_click_on_the_picture_keeps_a_text_being_edited(self):
+        # A click elsewhere keeps the text, as Enter does: the picture beyond the fade too,
+        # though that click closes Settings.
+        self.show()
+        self.wait_for_drawer()
+        only = (Section("s", "S", rows=(Row("probe", "Name", kind=TEXT),)),)
+        settings = self.window.settings
+        with mock.patch("ui.settings_controller.sections", return_value=only):
+            self.menu_actions()["Settings…"].trigger()
+        values = settings._values
+        with (
+            mock.patch.object(values, "get", return_value="old"),
+            mock.patch.object(values, "set") as written,
+        ):
+            self.window.controller.handle(Action.NAV_RIGHT)
+            self.window.controller.handle(Action.NAV_ACTIVATE)
+            self.assertTrue(self.window.settings_drawer.editing())
+            self.window.controller.handle(Action.NAV_TEXT, "x")
+            self.window.controller.video_clicked()
+        written.assert_called_once_with("probe", "oldx")
+        self.assertFalse(settings.visible())
 
     def test_the_channel_list_opened_over_settings_closes_it(self):
         # The list opened while Settings shows (a menu, a provider ready) shows on top and

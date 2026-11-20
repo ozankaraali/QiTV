@@ -104,6 +104,12 @@ class SettingsController(QObject):
     def visible(self) -> bool:
         return self._drawer.isVisible()
 
+    def keep_edit(self) -> None:
+        """A text being edited is kept, as Enter keeps it (a click on the picture closes
+        Settings: it is a click elsewhere). Any other hide puts the text back."""
+        if self._drawer.editing():
+            self._drawer.edit_key(Action.NAV_ACTIVATE)
+
     def close(self) -> None:
         """Hide Settings; the TV drawer is not reopened."""
         self._from_drawer = False
@@ -162,7 +168,11 @@ class SettingsController(QObject):
         if row is None or row.kind != TEXT:
             logger.warning("An edit for %r, which is no text row", key)
             return
-        self._values.set(key, text)
+        try:
+            self._values.set(key, text)
+        except KeyError:
+            logger.warning("An edit for %r, which the config has no setting for", key)
+            return
         self._drawer.refresh()
 
     def _on_chosen(self, key: str) -> None:

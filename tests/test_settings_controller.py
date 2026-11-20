@@ -188,6 +188,27 @@ class SettingsControllerTests(unittest.TestCase):
         self.assertEqual(self.values.sets, [("name", "Demo TV!")])
         self.assertEqual(self.controller.value_text(self.drawer.focused_row()), "Demo TV!")
 
+    def test_an_edit_of_a_key_the_values_refuse_is_logged(self):
+        self.open_text_row("Demo TV")
+        self.controller.handle(Action.NAV_ACTIVATE)
+        self.controller.handle(Action.NAV_TEXT, "!")
+        with (
+            mock.patch.object(self.values, "set", side_effect=KeyError("name")),
+            self.assertLogs("ui.settings_controller", "WARNING"),
+        ):
+            self.controller.handle(Action.NAV_ACTIVATE)  # no exception out of the slot
+        self.assertFalse(self.drawer.editing())
+
+    def test_keep_edit_keeps_the_text_being_edited(self):
+        self.open_text_row("ab")
+        self.controller.keep_edit()  # nothing edited: nothing
+        self.assertEqual(self.values.sets, [])
+        self.controller.handle(Action.NAV_ACTIVATE)
+        self.controller.handle(Action.NAV_TEXT, "c")
+        self.controller.keep_edit()
+        self.assertEqual(self.values.sets, [("name", "abc")])
+        self.assertFalse(self.drawer.editing())
+
     def test_the_keys_reach_the_field_while_editing(self):
         self.open_text_row("ab")
         self.controller.handle(Action.OK)  # Enter, as the phone's OK

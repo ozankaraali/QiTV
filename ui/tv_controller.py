@@ -1764,6 +1764,8 @@ class TVController(QObject):
         owner: never the channel list there) the film pauses or plays on, its controls
         showing."""
         if self._settings_shown():
+            if self._settings is not None:
+                self._settings.keep_edit()  # a click elsewhere keeps a text being edited
             self.close_settings()  # as the list: it does not come back
         elif self.overlays.drawer.isVisible():
             self.overlays.drawer.close_drawer()
