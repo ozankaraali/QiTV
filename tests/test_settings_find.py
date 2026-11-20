@@ -466,7 +466,7 @@ class SettingsFindTests(FindCase):
         # by a find typed inside it, and first there: a country typed in Free radio is never
         # Free channels' first. A find typed in any layer lists that layer's rows first.
         def countries(key, text):
-            names = (("de", "Germany"), ("ge", "Georgia"), ("dz", "Algeria"))
+            names = (("dz", "Algeria"), ("de", "Germany"), ("ge", "Georgia"))
             rows = tuple(Row(f"{key}/{c}", n, kind=m.ACTION, literal=True) for c, n in names)
             return Row(key, text, section=Section(key, text, rows=rows, found_inside=True))
 
@@ -495,13 +495,15 @@ class SettingsFindTests(FindCase):
         self.key(Action.NAV_ACTIVATE)
         self.assertEqual(self.drawer.path(), (PROVIDERS, "provider/@radio"))
         self.assertEqual(self.drawer.focused_row().key, "provider/@radio/de")
-        self.type("ge")  # its own rows first, then the rest of Settings
+        self.type("ge")  # its own rows first, those a word starts first, then the rest
         self.assertEqual(
             self.found_keys()[:3],
             ["provider/@radio/de", "provider/@radio/ge", "provider/@radio/dz"],
         )
         self.assertNotIn("provider/@free/de", self.found_keys())
         self.assertGreater(len(self.found_keys()), 3)  # General, its section: after them
+        self.type("r")  # "ger": Germany, then Algeria
+        self.assertEqual(self.found_keys()[:2], ["provider/@radio/de", "provider/@radio/dz"])
         self.key(Action.ESCAPE)
         self.assertTrue(self.controller.show_row("provider/Harbour/name"))
         self.type("check the conn")

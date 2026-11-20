@@ -394,6 +394,35 @@ class DrawerRowTests(LayerCase):
         self.assertFalse(self.window.settings.visible())
         self.assertTrue(wait_until(drawer.isVisible))  # as backing out of it gives it back
 
+    def test_a_double_click_adds_once_and_its_second_press_reaches_nothing(self):
+        # Its first press closes Settings and the list comes back under the pointer: the
+        # second press lands on nothing there (Settings' guard), and the list stays where it
+        # was.
+        drawer = self.to_row()
+        self.assert_layer()
+        self.sd.grab()
+        point = QPointF(self.sd.title_rect(0).center().toPoint())  # All countries
+        where = self.sd.mapToGlobal(point.toPoint())
+        count = len(self.provider_manager.providers)
+        QTest.mouseClick(self.sd, Qt.MouseButton.LeftButton, pos=point.toPoint())
+        self.assertFalse(self.window.settings.visible())
+        self.assertTrue(wait_until(drawer.isVisible))
+        under = QApplication.widgetAt(where) or drawer
+        event = QMouseEvent(
+            QEvent.Type.MouseButtonDblClick,
+            QPointF(under.mapFromGlobal(where)),
+            QPointF(where),
+            Qt.MouseButton.LeftButton,
+            Qt.MouseButton.LeftButton,
+            Qt.KeyboardModifier.NoModifier,
+        )
+        QApplication.sendEvent(under, event)
+        self.assertEqual(len(self.provider_manager.providers), count + 1)
+        self.assertTrue(drawer.isVisible())
+        self.assertEqual(drawer.highlighted().key, FREE_CHANNELS_ROW)
+        self.assertFalse(self.window.settings.visible())
+        elapse(QApplication.doubleClickInterval() + 80)
+
     def test_backing_out_gives_the_list_back_where_it_was(self):
         drawer = self.to_row()
         self.assert_layer()

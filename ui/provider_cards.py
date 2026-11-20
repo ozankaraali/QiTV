@@ -253,8 +253,8 @@ def _accounts(old: dict, new: dict) -> tuple[str, str]:
 class ProviderCards(QObject):
     """Settings › Providers' Add card and each provider's Address-and-login card, over the
     picture under Settings (`drawer`'s parent). `window` is the TV window (its check runner,
-    its toasts, its Free channels menu); `settings` shows the cards and gives them the keys;
-    `rows` the Providers rows, whose changes these are too (`ProviderRows.apply`)."""
+    its toasts, its Free channels and Free radio); `settings` shows the cards and gives them
+    the keys; `rows` the Providers rows, whose changes these are too (`ProviderRows.apply`)."""
 
     # What a card holds (`_reset`).
     _original: dict

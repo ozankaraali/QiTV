@@ -13,7 +13,8 @@ a section, when every word is in its title. Those with every word in the title c
 those the help matched; each in Settings' order (a section before its rows). A find typed inside
 a layer lists that layer's rows first (2.13.1), and a long list of names (a `found_inside`
 layer: Free channels' countries) is looked through only by a find typed inside it: a country
-typed in Free radio is Free radio's, and never floods a find typed elsewhere.
+typed in Free radio is Free radio's, and never floods a find typed elsewhere. There the names
+a typed word starts come first ("ger": Germany before Algeria).
 """
 
 from __future__ import annotations
@@ -109,4 +110,6 @@ def find(
     if here is None:
         return found
     ours = [target for target in found if (target.section, target.opened) == here]
+    if ours and ours[0].inside:  # names: those a typed word starts first ("ger": Germany)
+        ours.sort(key=lambda target: not all(f" {word}" in target.title_words for word in typed))
     return ours + [target for target in found if (target.section, target.opened) != here]

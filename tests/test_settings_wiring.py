@@ -96,7 +96,7 @@ class SettingsWiringTests(base.WindowCase):
             [
                 mock.call.back_to_tv(),
                 mock.call.leave_mini_player(),
-                mock.call.open("", from_drawer=True),
+                mock.call.open("", from_drawer=True, row=""),
             ],
         )
 

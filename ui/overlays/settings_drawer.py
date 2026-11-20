@@ -858,8 +858,8 @@ class SettingsDrawer(Overlay):
         return QRectF(self._layout().back)
 
     def row_anchor(self, key: str) -> QPoint:
-        """The global point under the right column's row `key`, at its left (where a menu it
-        opens pops up: Free channels); the overlay's corner while it is out of sight."""
+        """The global point under the right column's row `key`, at its left (where something
+        it opens would pop up); the overlay's corner while it is out of sight."""
         keys = [row.key for row in self._right_rows()]
         box = self._box(RIGHT, keys.index(key)) if key in keys else None
         if box is None:
