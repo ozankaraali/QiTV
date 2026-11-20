@@ -5821,7 +5821,6 @@ class SettingsLayerTests(ControllerTestCase):
         self.host.show()
         self.addCleanup(self.host.deleteLater)
         self.addCleanup(self.host.close)
-        self.legacy = []
         self.settings_drawer = SettingsDrawer(
             lambda row: self.settings.value_text(row),
             lambda row: self.settings.lit(row),
@@ -5831,7 +5830,6 @@ class SettingsLayerTests(ControllerTestCase):
             self.settings_drawer,
             FakeValues(),
             lambda: sections("Darwin"),
-            self.legacy.append,
             self.controller.reopen_drawer_on_settings,
         )
         self.controller.set_settings(self.settings)
@@ -5854,6 +5852,11 @@ class SettingsLayerTests(ControllerTestCase):
         self.controller.handle(Action.ESCAPE)  # the find ends; Settings stays
         self.assertFalse(self.settings_drawer.finding())
         self.assertTrue(self.settings.visible())
+        QGuiApplication.clipboard().setText("latency")
+        self.controller.handle(Action.PASTE)  # Settings' find too, never the list's Find box
+        self.assertEqual(self.settings_drawer.find_text(), "latency")
+        self.controller.handle(Action.ESCAPE)
+        QGuiApplication.clipboard().setText("")  # nothing to paste: it reaches nothing
         for action, payload in (
             (Action.PASTE, ""),
             (Action.FORGET, ""),

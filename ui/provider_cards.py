@@ -72,7 +72,6 @@ from ui.overlays.settings_card import (
 )
 from ui.provider_check import ProviderCheck
 from ui.settings_controller import SettingsController
-from ui.settings_dialog import NO_LINK_TEXT
 from ui.settings_providers import (
     SAVE_FAILED_TEXT,
     ProviderRows,
@@ -81,6 +80,8 @@ from ui.settings_providers import (
     where,
 )
 
+# i18n: said in the Add card: what was pasted into its address is no provider link
+NO_LINK_TEXT = N_("The clipboard holds no provider link.")
 # The fields, by the provider keys they fill.
 URL, USERNAME, PASSWORD, MAC, SERIAL, DEVICE, NAME = (
     "url",

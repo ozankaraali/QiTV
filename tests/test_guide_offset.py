@@ -3,7 +3,6 @@ grid, now/next, the banner, the time-shift bar's ticks), and Settings keeps it a
 per-provider key that older builds ignore."""
 
 from datetime import datetime, timedelta, timezone
-import json
 import os
 import tempfile
 from types import SimpleNamespace
@@ -23,9 +22,9 @@ from services.epg_view import (
     programmes_for_channel,
 )
 from services.multikeydict import MultiKeyDict
-from tests import test_tv_controller as tv, test_tv_window as base
+from tests import test_tv_controller as tv
 from ui.overlays.guide import Guide
-from ui.settings_dialog import OptionsDialog, offset_text
+from ui.settings_providers import offset_text
 
 HOUR = timedelta(hours=1)
 NOW = tv.NOW  # the controller tests' clock
@@ -247,52 +246,13 @@ class EverywhereTests(tv.PipelineCase):
         self.assertEqual(title, "Film")  # 20:00-22:00 as listed
 
 
-class SettingsTests(base.WindowCase):
-    def dialog(self):
-        dialog = OptionsDialog(self.window)
-        self.addCleanup(dialog.deleteLater)
-        return dialog
-
-    def test_the_setting_lists_minus_to_plus_twelve_hours_in_half_hours(self):
-        combo = self.dialog().guide_offset_combo
-        values = [combo.itemData(i) for i in range(combo.count())]
-        self.assertEqual(values, list(range(-720, 721, 30)))
-        self.assertEqual(combo.currentText(), "No offset")
+class OffsetTextTests(unittest.TestCase):
+    def test_an_offset_is_said_in_hours_and_minutes(self):
+        # Settings › Providers › Guide time offset's values (−12 h … +12 h by half hours).
+        self.assertEqual(offset_text(0), "No offset")
         self.assertEqual(offset_text(90), "+1 h 30 min")
         self.assertEqual(offset_text(-30), "−30 min")
         self.assertEqual(offset_text(-720), "−12 h")
-
-    def test_it_round_trips_and_no_offset_writes_no_key(self):
-        dialog = self.dialog()
-        combo = dialog.guide_offset_combo
-        combo.setCurrentIndex(combo.findData(-90))
-        dialog.save_settings()
-        saved = self.saved_providers()
-        self.assertEqual(saved[0][GUIDE_OFFSET_KEY], -90)
-        dialog = self.dialog()
-        self.assertEqual(dialog.guide_offset_combo.currentData(), -90)
-        dialog.guide_offset_combo.setCurrentIndex(dialog.guide_offset_combo.findData(0))
-        dialog.save_settings()
-        self.assertNotIn(GUIDE_OFFSET_KEY, self.saved_providers()[0])
-
-    def test_an_offset_alone_keeps_the_provider_loaded(self):
-        # The guide moves; nothing signs in again (the connection is the same).
-        dialog = self.dialog()
-        dialog.guide_offset_combo.setCurrentIndex(dialog.guide_offset_combo.findData(60))
-        calls = []
-        self.window.set_provider = lambda force_update=False: calls.append(force_update)
-        dialog.save_settings()
-        self.assertEqual(calls, [])
-        manager = self.window.provider_manager
-        self.assertEqual(
-            manager.provider_cache_identity(manager.providers[0]),
-            manager.provider_cache_identity({**manager.providers[0], GUIDE_OFFSET_KEY: 0}),
-        )
-
-    def saved_providers(self):
-        index = os.path.join(self.config_dir, "cache", "provider", "index.json")
-        with open(index, encoding="utf-8") as f:
-            return json.load(f)
 
 
 if __name__ == "__main__":

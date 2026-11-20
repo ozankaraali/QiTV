@@ -150,7 +150,6 @@ class LinksTests(unittest.TestCase):
             self.drawer,
             FakeValues(),
             lambda: sections("Darwin", self.rows.rows()),
-            lambda tab: None,
             lambda: None,
         )
         self.rows = ProviderRows(self.window, self.settings, self.drawer, cards=mock.Mock())
@@ -516,12 +515,6 @@ class LinksTests(unittest.TestCase):
 class PlayRowTests(WindowCase):
     """The real window: a kept link's Play plays it through the network player, as the
     channel list's row does, and Settings closes."""
-
-    def setUp(self):
-        super().setUp()
-        patch = mock.patch("ui.tv_window.OptionsDialog")  # never the Settings window's form
-        patch.start()
-        self.addCleanup(patch.stop)
 
     def tearDown(self):
         elapse(QApplication.doubleClickInterval() + 80)  # no second-click guard left armed

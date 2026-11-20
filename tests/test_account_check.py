@@ -17,17 +17,13 @@ from urllib.parse import parse_qs, urlsplit
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
-from PySide6.QtWidgets import QCheckBox
 import requests
 
 from services import failure_reasons as reasons, provider_api, provider_check, workers
 from services.account_check import AccountChecks, check_account, check_stb, check_xtream
 from services.failure_reasons import Reason
 from services.live.refusals import STREAM_LIMIT
-from services.provider_check import Outcome
-from tests import test_tv_controller as tv, test_tv_window as tv_window
-from tests.timer_fixtures import wait_until
-from ui.settings_dialog import HTTP_ONLY_NOTE, WARNING_COLOR, OptionsDialog
+from tests import test_tv_controller as tv
 from ui.tv_controller import ERROR_MS
 
 NOW = datetime(2026, 10, 19, 20, 0, tzinfo=timezone.utc)
@@ -601,47 +597,6 @@ class VerifyReasonTests(ServerCase):
         self.assertEqual(note, "The portal says your subscription ended on 3 Oct 2026")
         self.reply = (200, {"js": {"token": "T", "id": 7, "name": "F", "blocked": "1"}}, 0.0)
         self.assertEqual(self.verify(**portal), (False, reasons.DISABLED_MESSAGE))
-
-
-class SettingsNoteTests(tv_window.WindowCase):
-    def answer(self, dialog, outcome):
-        """Verify Provider, answered with `outcome` (on the check's own thread)."""
-        with patch.object(provider_check, "check", return_value=outcome):
-            dialog.verify_provider()
-            self.assertTrue(wait_until(dialog.verify_button.isEnabled))
-
-    def test_the_note_shows_in_the_settings(self):
-        dialog = OptionsDialog(self.window)
-        self.addCleanup(dialog.deleteLater)
-        self.answer(dialog, Outcome(True, "The portal says your subscription ended on 3 Oct 2026"))
-        self.assertEqual(
-            dialog.verify_result.text(),
-            "Provider verified successfully. "
-            "Note: The portal says your subscription ended on 3 Oct 2026.",
-        )
-        self.assertIn(WARNING_COLOR, dialog.verify_result.styleSheet())
-        self.answer(dialog, Outcome(False, "Your subscription has expired"))
-        self.assertEqual(
-            dialog.verify_result.text(), "Failed to verify provider: Your subscription has expired."
-        )
-
-    def test_a_provider_without_https_is_noted_where_it_is_saved(self):
-        # 2.7.1: the only place QiTV says a provider has no HTTPS
-        dialog = OptionsDialog(self.window)
-        self.addCleanup(dialog.deleteLater)
-        self.answer(dialog, Outcome(True, "", True))
-        self.assertEqual(
-            dialog.verify_result.text(), f"Provider verified successfully.\n{HTTP_ONLY_NOTE}"
-        )
-        self.assertIn(WARNING_COLOR, dialog.verify_result.styleSheet())
-        self.answer(dialog, Outcome(True))
-        self.assertEqual(dialog.verify_result.text(), "Provider verified successfully.")
-
-    def test_the_settings_have_no_https_switch(self):
-        dialog = OptionsDialog(self.window)
-        self.addCleanup(dialog.deleteLater)
-        texts = [box.text() for box in dialog.findChildren(QCheckBox)]
-        self.assertFalse([text for text in texts if "HTTPS" in text], texts)
 
 
 if __name__ == "__main__":

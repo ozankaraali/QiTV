@@ -1,12 +1,15 @@
 """Settings in the drawer, wired into the TV window (plan 1): the drawer's Settings row and ⚙
 and the menu's Settings… (Ctrl/⌘+,) open it over live TV, backing out of it gives the drawer
 back (on its Settings row from there, where it was from ⚙), a step reaches what it changes,
-and the Settings window opens on a tab. Every Add provider opens it at Providers with the Add
-card (plan 2), and a provider added there is selected and said; so does File → Open Link…'s
-Add as a provider… (plan 4), and whichever card shows on top has the keys."""
+and no section opens the old Settings window, which is gone. Every Add provider opens it at
+Providers with the Add card (plan 2), and a provider added there is selected and said; so
+does File → Open Link…'s Add as a provider… (plan 4), and whichever card shows on top has the
+keys."""
 
+import ast
 from itertools import combinations
 import os
+from pathlib import Path
 import threading
 import unittest
 from unittest import mock
@@ -26,7 +29,6 @@ from services.settings_model import GENERAL, PROVIDERS, TEXT, Row, Section
 from tests import test_tv_window as base
 from ui import settings_layer
 from ui.keymap import Action, resolve
-from ui.settings_dialog import OptionsDialog
 from ui.settings_layer import SettingsLayer
 from ui.tv_window import SAVE_FAILED_TEXT
 
@@ -79,14 +81,6 @@ def drawer_actions() -> dict:
 
 
 class SettingsWiringTests(base.WindowCase):
-    def setUp(self):
-        super().setUp()
-        # Never a modal window here: a stray key on a section still in the Settings window
-        # would wait for an answer.
-        patch = mock.patch("ui.tv_window.OptionsDialog")
-        self.dialog = patch.start()
-        self.addCleanup(patch.stop)
-
     def test_opening_from_the_library_goes_back_to_the_tv(self):
         window = self.window
         order = mock.Mock()
@@ -138,7 +132,6 @@ class SettingsWiringTests(base.WindowCase):
         QTest.keyClick(self.window, Qt.Key.Key_Return)  # Enter chooses it again
         self.assertTrue(settings.visible())
         self.assertFalse(drawer.isVisible())
-        self.dialog.assert_not_called()
 
     def test_the_gear_in_a_group_backs_out_to_where_the_list_was(self):
         # ⚙ in a group, mid-find: backing out of Settings gives the list back in that group, on
@@ -170,7 +163,6 @@ class SettingsWiringTests(base.WindowCase):
         self.assertEqual(drawer.focus_side, "right")
         self.assertTrue(wait_until(lambda: on("Channel 2")))
         self.assertEqual(drawer.find_text, "")
-        self.dialog.assert_not_called()
 
     def test_a_live_latency_step_reaches_the_running_channel(self):
         # The window's hooks are keyed by the rows' keys: a step on Live latency is applied to
@@ -236,7 +228,6 @@ class SettingsWiringTests(base.WindowCase):
         self.assertFalse(self.window.settings.visible())
         self.assertFalse(drawer.isVisible())
         self.assertTrue(self.window.overlays.welcome.isHidden())  # a provider: no card
-        self.dialog.assert_not_called()
 
     def test_settings_asked_again_while_it_shows_stays_as_it_is(self):
         self.show()
@@ -532,12 +523,6 @@ class AddProviderTests(base.WindowCase):
     # A playlist on a closed port of the loopback: the new provider's setup is never real.
     LINK = "http://127.0.0.1:9/list.m3u"
 
-    def setUp(self):
-        super().setUp()
-        patch = mock.patch("ui.tv_window.OptionsDialog")  # never the Settings window's form
-        self.dialog = patch.start()
-        self.addCleanup(patch.stop)
-
     def tearDown(self):
         elapse(QApplication.doubleClickInterval() + 80)  # no second-click guard left armed
         super().tearDown()
@@ -554,7 +539,6 @@ class AddProviderTests(base.WindowCase):
         self.assertEqual(form.title(), "Add a provider")
         self.assertTrue(window.settings.card_shown())  # it has the keys
         self.assertEqual(form.focus(), ("field", "url"))
-        self.dialog.assert_not_called()
 
     def test_every_add_provider_opens_the_card(self):
         self.show()
@@ -717,7 +701,6 @@ class AddProviderTests(base.WindowCase):
             (values["url"], values["username"], values["password"]),
             ("http://panel.example", "demo", "secret"),
         )
-        self.dialog.assert_not_called()
         focus = form.focus()
         QTest.keyClick(window, Qt.Key.Key_Down)  # the Add card's keys
         self.assertNotEqual(form.focus(), focus)
@@ -822,44 +805,58 @@ class NoProviderSettingsTests(base.WindowCase):
         self.show()
         card = self.window.overlays.welcome
         self.assertTrue(wait_until(card.isVisible))
-        with mock.patch("ui.tv_window.OptionsDialog"):
-            self.menu_actions()["Settings…"].trigger()
-            self.assertTrue(self.window.settings.visible())
-            self.assertTrue(card.isHidden())
-            QTest.keyClick(self.window, Qt.Key.Key_Escape)  # the sections: closed
+        self.menu_actions()["Settings…"].trigger()
+        self.assertTrue(self.window.settings.visible())
+        self.assertTrue(card.isHidden())
+        QTest.keyClick(self.window, Qt.Key.Key_Escape)  # the sections: closed
         self.assertFalse(self.window.settings.visible())
         self.assertTrue(card.isVisible())  # still no provider: the card again
 
 
-class SettingsWindowTabTests(base.WindowCase):
-    TABS = {
-        "": "General",
-        "general": "General",
-        "timeshift": "Time-shift",
-        "subtitles": "Subtitles",
-        "remote": "Phone remote",
-        "parental": "Parental controls",
-        "providers": "Providers",
-        "epg": "EPG",
-    }
+class NoOldWindowTests(base.WindowCase):
+    # The old Settings window and the tab modules only it used.
+    OLD = (
+        "ui.settings_dialog",
+        "ui.remote_settings",
+        "ui.parental_settings",
+        "ui.file_types_settings",
+        "ui.hidden_groups_settings",
+    )
 
-    def test_options_dialog_selects_a_tab_by_key(self):
-        shown = []
-
-        def exec_at_once(dialog):
-            tabs = dialog.options_tab
-            shown.append(tabs.tabText(tabs.currentIndex()))
-            epg.append(tabs.currentWidget() is dialog.epg_tab)
-            dialog.deleteLater()
-            return 0
-
-        epg: list[bool] = []
-        with mock.patch.object(OptionsDialog, "exec", exec_at_once):
-            self.window.options_dialog(tab="epg")
-            self.assertEqual(epg, [True])  # the EPG tab is the current one
-            for key in self.TABS:
-                self.window.options_dialog(tab=key)
-        self.assertEqual(shown[1:], list(self.TABS.values()))
+    def test_no_section_opens_the_old_window(self):
+        # Every section has its rows in the drawer: none opens the old Settings window, which
+        # is gone with its tabs, and nothing in QiTV imports them.
+        root = Path(__file__).resolve().parents[1]
+        for name in self.OLD:
+            self.assertFalse((root / (name.replace(".", "/") + ".py")).exists(), name)
+        sources = [root / "main.py", *sorted((root / "ui").rglob("*.py"))]
+        sources += sorted((root / "services").rglob("*.py"))
+        for path in sources:
+            for node in ast.walk(ast.parse(path.read_text(encoding="utf-8"))):
+                if isinstance(node, ast.ImportFrom):
+                    module = node.module or ""
+                    names = [module] + [f"{module}.{alias.name}" for alias in node.names]
+                elif isinstance(node, ast.Import):
+                    names = [alias.name for alias in node.names]
+                else:
+                    continue
+                for name in names:
+                    self.assertNotIn(name, self.OLD, f"{path.relative_to(root)} imports it")
+        self.assertFalse(hasattr(self.window, "options_dialog"))
+        self.show()
+        self.wait_for_drawer()
+        settings, drawer = self.window.settings, self.window.settings_drawer
+        self.menu_actions()["Settings…"].trigger()
+        self.assertTrue(settings.visible())
+        for key in [section.key for section in settings._sections]:
+            with self.subTest(section=key):
+                settings.show_section(key)
+                self.assertEqual(drawer.path(), (key,))
+                section = next(s for s in settings._sections if s.key == key)
+                rows = drawer._right_rows()
+                self.assertEqual(rows, section.rows)  # its own, none standing in for a window
+                self.assertTrue(rows or section.empty_text)  # (Files from source says why)
+                self.assertFalse([row.key for row in rows if row.key.startswith("legacy:")])
 
 
 if __name__ == "__main__":

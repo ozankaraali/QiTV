@@ -115,8 +115,6 @@ class SubtitlesTests(SubtitlesCase):
     def test_speech_model_steps(self):
         context = m.Context(captions_space="Downloaded: 880 MB", captions_downloaded=True)
         section = {s.key: s for s in m.sections("Linux", (), context)}[m.SUBTITLES]
-        self.assertEqual(section.legacy_tab, "")
-        self.assertNotIn(m.SUBTITLES, m.LEGACY_TABS)
         self.assertEqual(
             [row.key for row in section.rows],
             [

@@ -31,7 +31,6 @@ from services.i18n import N_, number, translate
 from services.remote.protocol import RELAY_URL, STORE_VERSION
 from services.settings_model import ACTION, INFO, ON_OFF, OPENS, STEP, Row, Section, step as stepped
 from ui.overlays.settings_card import CANCEL, CANCEL_TEXT, Button, ChoiceCard
-from ui.remote_settings import NEWER_SETTINGS, RELAY_STATES
 from ui.settings_controller import SettingsController
 
 logger = logging.getLogger(__name__)
@@ -65,6 +64,22 @@ REMOVE_QUESTION = N_("Remove the phone “{name}”?")
 # i18n: under "Remove the phone …?": what it takes to use that phone again
 REMOVE_BODY = N_("It can be paired again with the code on the TV.")
 REMOVE_TEXT = N_("Remove")  # i18n: a button: unpairs the phone (verb)
+# i18n: Settings → Phone remote: the settings were written by a newer QiTV
+NEWER_SETTINGS = N_("These phone remote settings come from a newer QiTV; it keeps them.")
+# The relay's state, as Settings → Phone remote says it.
+RELAY_STATES = {
+    "off": N_("Off"),  # i18n: the relay's state in Settings → Phone remote
+    "connecting": N_("Connecting…"),  # i18n: the relay's state in Settings → Phone remote
+    "online": N_("Connected"),  # i18n: the relay's state in Settings → Phone remote
+    # i18n: the relay's state in Settings → Phone remote: it couldn't be reached, QiTV retries
+    "away": N_("Can't connect; trying again"),
+    # i18n: the relay's state in Settings → Phone remote
+    "resting": N_("Resting until 00:00 UTC (its daily limit)"),
+    # i18n: the relay's state: a copy of this QiTV's settings runs elsewhere
+    "replaced": N_("Another QiTV is using this relay room"),
+    # i18n: the phone remote's state: it couldn't start
+    "error": N_("The phone remote couldn't start"),
+}
 
 
 def _known(data: dict) -> bool:

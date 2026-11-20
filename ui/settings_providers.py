@@ -18,8 +18,8 @@ kept (ui.settings_links: never a provider), then ＋ Add provider and Free chann
 Renaming and removing ask the parental PIN while parental controls are locked, once per visit of
 Settings. Each change runs the TV window's follow-ups (ui.provider_actions), and the rows are
 built again once it is done; a rename keeps the viewer in the renamed provider's layer. A change
-made elsewhere (a drop, Free channels, the old window, the TV moving to another provider) builds
-them again at once (`providers_changed`), the place kept by key. A list that cannot be saved is
+made elsewhere (a drop, Free channels, the TV moving to another provider) builds them again
+at once (`providers_changed`), the place kept by key. A list that cannot be saved is
 said, and nothing changes (services.provider_changes puts it back as the disk holds it).
 
 Keys: `provider/<name>` for a provider's layer and `provider/<name>/<field>` for its rows, the
@@ -62,19 +62,11 @@ from services.settings_model import (
     Section,
     step as next_choice,
 )
-from ui.hidden_groups_settings import INTRO as HIDDEN_INTRO, SECTIONS as GROUP_KINDS
 from ui.overlays.settings_card import BUSY_TEXT, CANCEL, CANCEL_TEXT, Button, ChoiceCard
-from ui.parental_settings import pin_allows
 from ui.provider_actions import ProviderActions
 from ui.provider_check import ProviderCheck
 from ui.settings_controller import SettingsController
-from ui.settings_dialog import (
-    HTTP_ONLY_NOTE,
-    NAME_TAKEN_TEXT,
-    REMOVE_QUESTION,
-    REMOVE_RECORDINGS_NOTE,
-    offset_text,
-)
+from ui.settings_parental import pin_allows
 from ui.tv_controller import ERROR_MS
 
 logger = logging.getLogger(__name__)
@@ -117,6 +109,38 @@ SHOW_AGAIN_TEXT = N_("Show again")  # i18n: Settings → Providers → Hidden gr
 # change made in Settings → Providers did not happen
 SAVE_FAILED_TEXT = N_("Couldn't save the providers; nothing was changed")
 REMOVE_TEXT = N_("Remove")  # i18n: a button of "Remove the provider …?" (verb); its key: REMOVE
+# i18n: Verify Provider's note under "Provider verified successfully."
+HTTP_ONLY_NOTE = N_("This provider does not answer over HTTPS, so QiTV connects to it over HTTP.")
+# i18n: Settings → Providers: the name typed is another provider's (QiTV finds providers by name)
+NAME_TAKEN_TEXT = N_("Another provider is named “{name}” already. Choose another name.")
+# i18n: Settings → Providers → Remove Provider asks first ({name}: the provider)
+REMOVE_QUESTION = N_("Remove the provider “{name}”?")
+# i18n: added to "Remove the provider …?" when it has scheduled recordings
+REMOVE_RECORDINGS_NOTE = N_("Its scheduled recordings will be cancelled.")
+# i18n: Settings → Providers → Hidden groups: what the list is, and how a group got there
+HIDDEN_INTRO = N_("Groups and genres hidden with “Hide group” in a list's menu. Nothing is locked.")
+# A hidden group's kind, by the list it is hidden from.
+GROUP_KINDS = {
+    "live": N_("Live TV"),  # i18n: Settings → Providers → Hidden groups: a group's kind
+    "movies": N_("Movies"),  # i18n: Settings → Providers → Hidden groups: a group's kind
+    "series": N_("Series"),  # i18n: Settings → Providers → Hidden groups: a group's kind
+}
+
+
+def offset_text(minutes: int) -> str:
+    """A guide time offset as the setting lists it: "No offset", "+1 h 30 min", "−30 min"."""
+    if not minutes:
+        return tr("No offset")  # i18n: the guide time offset setting's choice of none
+    hours, rest = divmod(abs(minutes), 60)
+    sign = "+" if minutes > 0 else "−"
+    if hours and rest:
+        # i18n: a guide time offset: sign is + or −, h hours and m minutes (abbreviated)
+        return tr("{sign}{h} h {m} min", sign=sign, h=hours, m=rest)
+    if hours:
+        # i18n: a guide time offset: sign is + or −, h hours (abbreviated)
+        return tr("{sign}{h} h", sign=sign, h=hours)
+    # i18n: a guide time offset: sign is + or −, m minutes (abbreviated)
+    return tr("{sign}{m} min", sign=sign, m=rest)
 
 
 class LinkSource(Protocol):

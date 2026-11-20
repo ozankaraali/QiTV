@@ -23,8 +23,8 @@ from services.provider_manager import ProviderManager
 from services.settings_texts import CLEAR_CACHE_QUESTION
 from tests import test_tv_window as base
 from tests.fixtures.local_provider import PROVIDER_NAME
-from ui import file_types_settings as row_module
-from ui.file_types_settings import FAILED_HINT, MAC_HINT, MUSIC_LABEL, VIDEOS_LABEL
+from ui import file_types_switch as row_module
+from ui.file_types_switch import FAILED_HINT, MAC_HINT, MUSIC_LABEL, VIDEOS_LABEL
 from ui.keymap import Action
 from ui.overlays.settings_card import CANCEL
 from ui.overlays.settings_drawer import RESTART_NOTE
@@ -57,9 +57,6 @@ def recorded(unavailable=()):
 class GeneralCase(base.WindowCase):
     def setUp(self):
         super().setUp()
-        patch = mock.patch("ui.tv_window.OptionsDialog")  # never a modal window here
-        patch.start()
-        self.addCleanup(patch.stop)
         self.show()
         self.wait_for_drawer()
 
@@ -117,9 +114,6 @@ class GeneralTests(GeneralCase):
         self.assertEqual(token.placeholder, "Built in; or paste your own")
         source = {s.key: s for s in m.sections("Linux", (), m.Context(tmdb_built_in=False))}
         self.assertEqual(source[m.GENERAL].rows[-1].placeholder, "Your TMDB Read Access Token")
-        for key in (m.GENERAL, m.FILES, m.ADVANCED):  # no longer the Settings window's
-            self.assertEqual(by_key[key].legacy_tab, "", key)
-            self.assertNotIn(key, m.LEGACY_TABS)
         self.assertEqual(
             [row.key for row in by_key[m.ADVANCED].rows],
             [
@@ -152,6 +146,35 @@ class GeneralTests(GeneralCase):
         self.assertEqual(self.config.language, available[0][0])
         self.config.save_config(wait=True)
         self.assertEqual(ConfigManager().language, available[0][0])
+
+    def test_the_languages_are_the_systems_english_and_each_catalogs(self):
+        # The system's first, then English, then each catalog by its own name (2.8.12).
+        with mock.patch.object(i18n, "_system_preferences", return_value=["tr"]):
+            self.window.general_rows._languages = None  # (read once a run: read anew here)
+            row = self.open_at(m.GENERAL, "language")
+        choices = [(choice.value, choice.shown()) for choice in row.choices]
+        self.assertEqual(choices[0], (None, "System default (Türkçe)"))
+        self.assertEqual(choices[1:], [tuple(pair) for pair in i18n.available_languages()])
+        self.assertEqual(choices[1], ("en", "English"))
+        for shown in (("de", "Deutsch"), ("es", "Español"), ("fr", "Français"), ("tr", "Türkçe")):
+            self.assertIn(shown, choices)
+        self.assertEqual(self.window.settings.value_text(row), "System default (Türkçe)")
+        # A choice is kept; the system's default keeps no key.
+        values = self.window.settings._values
+        values.set("language", "tr")
+        self.config.save_config(wait=True)
+        self.assertEqual(ConfigManager().config["language"], "tr")
+        values.set("language", None)
+        self.config.save_config(wait=True)
+        self.assertNotIn("language", ConfigManager().config)
+        self.assertIsNone(ConfigManager().language)
+
+    def test_older_settings_without_the_language_follow_the_system(self):
+        config = ConfigManager()
+        config.config.pop("language", None)
+        self.assertIsNone(config.language)
+        config.config["language"] = 5  # not a code: the system's
+        self.assertIsNone(config.language)
 
     def test_turning_update_checks_on_starts_a_check_off_the_gui_thread(self):
         self.assertFalse(self.config.check_updates)  # the fixture's config: off

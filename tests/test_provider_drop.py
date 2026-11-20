@@ -157,24 +157,22 @@ class WindowDropTests(base.WindowCase):
         self.show()
         window = self.window
         link = f"{PANEL}/player_api.php?username=ann&password=pw1"
-        with mock.patch("ui.tv_window.OptionsDialog") as dialog:
-            self.assertEqual(drop(window, urls=[link], text=link), (True, True))
-            self.assertTrue(wait_until(lambda: "127.0.0.1" in self.names()))
-            added = window.provider_manager.providers[-1]
-            self.assertEqual(
-                {k: added[k] for k in ("type", "url", "username", "password")},
-                {"type": "XTREAM", "url": PANEL, "username": "ann", "password": "pw1"},
-            )
-            self.assertIn(("Added 127.0.0.1 to your providers", "info"), self.toasts)
-            self.assertEqual(self.config.selected_provider_name, "127.0.0.1")
-            playlist = f"{PANEL}/lists/all.m3u"
-            self.assertEqual(drop(window, text=playlist), (True, True))
-            self.assertTrue(wait_until(lambda: "127.0.0.1 (2)" in self.names()))
-            self.assertEqual(window.provider_manager.providers[-1]["url"], playlist)
-            elapse(20)
+        self.assertEqual(drop(window, urls=[link], text=link), (True, True))
+        self.assertTrue(wait_until(lambda: "127.0.0.1" in self.names()))
+        added = window.provider_manager.providers[-1]
+        self.assertEqual(
+            {k: added[k] for k in ("type", "url", "username", "password")},
+            {"type": "XTREAM", "url": PANEL, "username": "ann", "password": "pw1"},
+        )
+        self.assertIn(("Added 127.0.0.1 to your providers", "info"), self.toasts)
+        self.assertEqual(self.config.selected_provider_name, "127.0.0.1")
+        playlist = f"{PANEL}/lists/all.m3u"
+        self.assertEqual(drop(window, text=playlist), (True, True))
+        self.assertTrue(wait_until(lambda: "127.0.0.1 (2)" in self.names()))
+        self.assertEqual(window.provider_manager.providers[-1]["url"], playlist)
+        elapse(20)
         self.assertFalse(window.settings.visible())
         self.assertFalse(window.provider_cards.form.isVisible())
-        dialog.assert_not_called()
 
     def test_a_dropped_portal_link_without_mac_opens_the_card_filled(self):
         self.show()
@@ -182,9 +180,8 @@ class WindowDropTests(base.WindowCase):
         before = self.names()
         portal = "http://portal.example.test/stalker_portal/c/"
         form = window.provider_cards.form
-        with mock.patch("ui.tv_window.OptionsDialog") as dialog:
-            self.assertEqual(drop(window, text=portal), (True, True))
-            self.assertTrue(wait_until(form.isVisible))
+        self.assertEqual(drop(window, text=portal), (True, True))
+        self.assertTrue(wait_until(form.isVisible))
         self.assertTrue(window.settings.visible())
         self.assertEqual(window.settings_drawer.path(), (PROVIDERS,))
         self.assertEqual(form.title(), "Add a provider")
@@ -194,7 +191,6 @@ class WindowDropTests(base.WindowCase):
         self.assertEqual(form.found(), ("✓ STB portal at portal.example.test", True))
         self.assertEqual(form.focus(), ("field", "mac"))  # the keys on what it lacks
         self.assertEqual(self.names(), before)  # nothing kept before its check
-        dialog.assert_not_called()
         elapse(QApplication.doubleClickInterval() + 80)  # no second-click guard left armed
 
     def test_dropping_a_stream_link_opens_the_card(self):
@@ -233,22 +229,20 @@ class WindowDropTests(base.WindowCase):
         # and the card opens for the stream.
         self.show()
         window, card = self.window, self.window.open_link_card
-        with mock.patch("ui.tv_window.OptionsDialog") as dialog:
-            for text, name in (
-                ("127.0.0.1:9/player_api.php?username=bob&password=pw2", "127.0.0.1"),
-                (f"{PANEL}/lists/all.m3u", "127.0.0.1 (2)"),
-            ):
-                self.assertEqual(drop(window, text=text), (True, True))
-                self.assertTrue(wait_until(lambda: name in self.names()))
-            elapse(20)
-            self.assertTrue(card.isHidden())
-            account = f"{PANEL}/get.php?username=ann&password=pw1"
-            stream = "http://cdn.example.test/live/harbour.ts"
-            self.assertEqual(drop(window, text=f"{account}\n{stream}"), (True, True))
-            self.assertTrue(wait_until(lambda: "127.0.0.1 (3)" in self.names()))
-            self.assertTrue(wait_until(lambda: not card.isHidden()))
-            self.assertEqual(card.values(), {"link": stream})
-        dialog.assert_not_called()
+        for text, name in (
+            ("127.0.0.1:9/player_api.php?username=bob&password=pw2", "127.0.0.1"),
+            (f"{PANEL}/lists/all.m3u", "127.0.0.1 (2)"),
+        ):
+            self.assertEqual(drop(window, text=text), (True, True))
+            self.assertTrue(wait_until(lambda: name in self.names()))
+        elapse(20)
+        self.assertTrue(card.isHidden())
+        account = f"{PANEL}/get.php?username=ann&password=pw1"
+        stream = "http://cdn.example.test/live/harbour.ts"
+        self.assertEqual(drop(window, text=f"{account}\n{stream}"), (True, True))
+        self.assertTrue(wait_until(lambda: "127.0.0.1 (3)" in self.names()))
+        self.assertTrue(wait_until(lambda: not card.isHidden()))
+        self.assertEqual(card.values(), {"link": stream})
         added = window.provider_manager.providers[-1]
         self.assertEqual((added["username"], added["password"]), ("ann", "pw1"))
 

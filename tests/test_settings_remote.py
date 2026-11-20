@@ -20,7 +20,7 @@ from tests.test_settings_guide import GuideCase
 from ui import settings_remote as remote_rows
 from ui.keymap import Action
 from ui.overlays.settings_card import CANCEL
-from ui.remote_settings import NEWER_SETTINGS
+from ui.settings_remote import NEWER_SETTINGS
 
 USED = 1_700_000_000.0
 PHONE_A = {"id": "d1", "name": "Phone A", "paired_at": 1.0, "last_used": USED, "keys": []}
@@ -153,6 +153,19 @@ class RemoteTests(RemoteCase):
         self.hub.return_value.set_pairing.assert_called_with(True)
 
 
+class RelayAddressTests(RemoteCase):
+    stored = {"version": 1, "enabled": False, "relay_url": "https://relay.example"}
+
+    def test_a_relay_address_set_in_the_config_stays(self):
+        # It is set in config.json only (to test a relay): no row has it, and a step keeps it.
+        self.open_at(m.REMOTE, remote_rows.ENABLED)
+        self.assertFalse([row for row in self.drawer._right_rows() if "relay.example" in row.note])
+        self.key(Action.NAV_RIGHT)
+        self.assertEqual(self.config.remote["relay_url"], "https://relay.example")
+        self.config.save_config(wait=True)
+        self.assertEqual(ConfigManager().remote["relay_url"], "https://relay.example")
+
+
 class PhonesTests(RemoteCase):
     stored = {"version": 1, "devices": [PHONE_A, PHONE_B]}
 
@@ -202,7 +215,7 @@ class PhonesTests(RemoteCase):
 class NewerTests(RemoteCase):
     stored = {"version": 2, "enabled": True, "future": "kept"}
 
-    def test_newer_remote_settings_are_left_alone(self):
+    def test_a_newer_qitvs_phone_remote_is_left_alone(self):
         self.window.open_settings(section_key=m.REMOTE)
         rows = self.drawer._right_rows()
         self.assertEqual(rows[0].text, NEWER_SETTINGS)  # the old tab's note, first
@@ -223,15 +236,12 @@ class NewerTests(RemoteCase):
 
     def test_phone_remote_menu_opens_this_section(self):
         # The menu's Phone Remote… when the remote can't start: Settings at Phone remote, which
-        # says why (no longer the Settings window's tab).
-        with mock.patch.object(self.window, "options_dialog") as old_window:
-            self.window.open_phone_remote()
-        old_window.assert_not_called()
+        # says why.
+        self.window.open_phone_remote()
         self.assertTrue(self.window.settings.visible())
         self.assertEqual(self.drawer.path(), (m.REMOTE,))
         self.assertEqual(self.drawer._right_rows()[0].text, NEWER_SETTINGS)
         self.assertFalse(self.window.pair_overlay.isVisible())
-        self.assertNotIn(m.REMOTE, m.LEGACY_TABS)
 
 
 if __name__ == "__main__":

@@ -44,10 +44,6 @@ TEXT = "text"  # a value edited in place: Enter or a click on it focused starts 
 INFO = "info"  # a muted line with its value: never focused, the keys go past it
 KINDS = (STEP, OPENS, ACTION, DANGER, TEXT, INFO)
 
-# Section key -> the key of the old Settings window's tab that still holds its settings (none
-# now: every section has its rows in the drawer).
-LEGACY_TABS: dict[str, str] = {}
-
 # Section key -> its icon, a drawing of ui/overlays/painting.py's draw_icon. A section with no
 # fitting drawing yet (Phone remote, Parental controls) has none.
 ICONS: dict[str, str] = {
@@ -158,16 +154,14 @@ class Row:
 
 @dataclass(frozen=True)
 class Section:
-    """A group of rows. `legacy_tab` names the old Settings tab that still holds the
-    section's settings until its rows move here. `empty_text` (an English text marked with
-    N_) shows in place of its rows while it has none. A `literal` one's `text` is shown as it
-    is given (a provider's layer: its name, in the breadcrumb)."""
+    """A group of rows. `empty_text` (an English text marked with N_) shows in place of its
+    rows while it has none. A `literal` one's `text` is shown as it is given (a provider's
+    layer: its name, in the breadcrumb)."""
 
     key: str
     text: str
     icon: str = ""
     rows: tuple[Row, ...] = ()
-    legacy_tab: str = ""
     empty_text: str = ""
     literal: bool = False
 
@@ -763,6 +757,4 @@ def sections(
             built.append(_remote(text, tuple(context.remote)))
         elif key == PARENTAL:
             built.append(_parental(text, tuple(context.parental)))
-        else:
-            built.append(Section(key, text, ICONS.get(key, ""), legacy_tab=LEGACY_TABS[key]))
     return tuple(built)

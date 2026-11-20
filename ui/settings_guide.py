@@ -23,7 +23,6 @@ applied at once.
 
 Keys: the config's for its settings (epg_source, epg_url, epg_list_window_hours,
 epg_stb_period_hours: through the values, with `hooks`); `guide/…` for the rest (GuideRows').
-This module is light on purpose: the Settings window imports its texts.
 """
 
 from __future__ import annotations
@@ -49,6 +48,7 @@ from ui.overlays.settings_card import (
     pick_file,
 )
 from ui.settings_controller import SettingsController, Settled
+from ui.tv_controller import ERROR_MS
 
 logger = logging.getLogger(__name__)
 
@@ -705,8 +705,6 @@ class GuideRows(QObject):
 
     def _notify(self, text: str, kind: str = "info") -> None:
         if kind == "error":
-            from ui.tv_controller import ERROR_MS  # (not at import: the Settings window's)
-
             self._window.screens.notify(text, kind, ERROR_MS)
         else:
             self._window.screens.notify(text, kind)

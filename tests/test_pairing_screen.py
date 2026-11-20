@@ -1,4 +1,6 @@
-"""Settings → Phone remote, the pairing screen over the TV and the menu's Phone Remote… entry."""
+"""The phone remote's pairing screen over the TV, the menu's Phone Remote… entry, and a phone
+removed while the remote is off (Settings › Phone remote itself: tests/test_settings_remote.py).
+"""
 
 import os
 import unittest
@@ -12,57 +14,12 @@ from PySide6.QtTest import QTest
 from services.config_manager import ConfigManager
 from services.remote.protocol import Paired
 from tests import test_tv_window as base
-from ui.settings_dialog import OptionsDialog
 
 DEVICE = {"id": "d1", "name": "Phone A", "paired_at": 1.0, "last_used": 2.0, "keys": []}
 URL = "http://192.168.1.20:5384/#1.-.AAAA.BBBB"
 
 
-class RemoteSettingsTests(base.WindowCase):
-    def dialog(self):
-        dialog = OptionsDialog(self.window)
-        self.addCleanup(dialog.deleteLater)
-        return dialog
-
-    def test_tab_reflects_and_saves(self):
-        dialog = self.dialog()
-        titles = [dialog.options_tab.tabText(i) for i in range(dialog.options_tab.count())]
-        self.assertIn("Phone remote", titles)
-        self.assertEqual(dialog.remote_tab.objectName(), "remoteSettings")
-        self.assertFalse(dialog.remote_enabled_checkbox.isChecked())
-        self.assertTrue(dialog.remote_relay_checkbox.isChecked())
-        dialog.remote_enabled_checkbox.setChecked(True)
-        with mock.patch("services.remote.hub.RemoteHub") as hub:
-            dialog.save_settings()
-        saved = ConfigManager().remote
-        self.assertEqual((saved["version"], saved["enabled"], saved["relay"]), (1, True, True))
-        hub.return_value.start.assert_called_once()
-        self.window.remote.hub = None  # the stub isn't a real thread to stop
-
-    def test_saving_keeps_paired_phones(self):
-        self.config.remote = {"version": 1, "enabled": False, "devices": [DEVICE], "room": "r"}
-        dialog = self.dialog()
-        dialog.remote_relay_checkbox.setChecked(False)
-        dialog.save_settings()
-        saved = ConfigManager().remote
-        self.assertEqual(saved["devices"], [DEVICE])
-        self.assertEqual(saved["room"], "r")
-        self.assertFalse(saved["relay"])
-
-    def test_tab_lists_phones_and_remove_calls_remote(self):
-        self.config.remote = {"version": 1, "devices": [DEVICE]}
-        dialog = self.dialog()
-        phones = dialog.remote_phones_list
-        self.assertEqual(phones.count(), 1)
-        self.assertIn("Phone A", phones.item(0).text())
-        self.assertFalse(dialog.remote_remove_button.isEnabled())
-        phones.setCurrentRow(0)
-        self.assertTrue(dialog.remote_remove_button.isEnabled())
-        with mock.patch.object(self.window.remote, "remove_device") as remove:
-            dialog.remote_remove_button.click()
-        remove.assert_called_once_with("d1")
-        self.assertEqual(phones.count(), 0)
-
+class RemoveDeviceTests(base.WindowCase):
     def test_remove_without_the_remote_running_edits_the_config(self):
         self.config.remote = {"version": 1, "devices": [DEVICE]}
         self.window.remote.remove_device("d1")
@@ -137,50 +94,7 @@ class PairingScreenTests(base.WindowCase):
         self.window.remote.hub.set_pairing.assert_called_with(True)
 
 
-class ReviewFixSettingsTests(base.WindowCase):
-    def dialog(self):
-        dialog = OptionsDialog(self.window)
-        self.addCleanup(dialog.deleteLater)
-        return dialog
-
-    def test_relay_status_follows(self):
-        dialog = self.dialog()
-        remote = self.window.remote
-        remote.statusChanged.emit({"home_url": "http://192.168.1.20:5384/", "relay": "resting"})
-        self.assertIn("daily limit", dialog.remote_relay_label.text())
-        remote.statusChanged.emit({"home_url": "http://192.168.1.20:5384/", "relay": "online"})
-        self.assertEqual(dialog.remote_relay_label.text(), "Connected")
-        remote.statusChanged.emit({"home_url": "", "relay": "replaced"})
-        self.assertIn("Another QiTV", dialog.remote_relay_label.text())
-        remote.statusChanged.emit({"home_url": "", "relay": "away"})
-        self.assertEqual(dialog.remote_relay_label.text(), "Can't connect; trying again")
-
-    def test_phone_list_follows_pairings_while_open(self):
-        dialog = self.dialog()
-        self.window.remote.devicesChanged.emit([{"id": "d9", "name": "Phone B", "last_used": 1.0}])
-        self.assertIn("Phone B", dialog.remote_phones_list.item(0).text())
-
-    def test_a_closed_dialog_leaves_no_listeners(self):
-        from PySide6.QtCore import QCoreApplication, QEvent
-
-        dialog = OptionsDialog(self.window)
-        dialog.deleteLater()
-        QCoreApplication.sendPostedEvents(None, QEvent.Type.DeferredDelete.value)
-        with mock.patch("sys.excepthook") as hook:  # PySide reports a slot's error there
-            self.window.remote.statusChanged.emit({"home_url": "", "relay": "off"})
-            self.window.remote.devicesChanged.emit([])
-        hook.assert_not_called()
-
-    def test_a_newer_builds_settings_are_left_alone(self):
-        newer = {"version": 2, "enabled": True, "future": "kept"}
-        self.config.remote = dict(newer)
-        dialog = self.dialog()
-        self.assertFalse(dialog.remote_enabled_checkbox.isEnabled())
-        dialog.save_settings()
-        self.assertEqual(ConfigManager().remote, newer)
-        self.window.remote.apply_config()
-        self.assertIsNone(self.window.remote.hub)
-
+class PairingNoticeTests(base.WindowCase):
     def test_overlay_says_when_the_remote_could_not_start(self):
         from services.remote.protocol import Status
 
@@ -214,26 +128,7 @@ class ReviewFixSettingsTests(base.WindowCase):
         self.assertEqual(overlay.note_text(), "")
 
 
-class OwnerCheckSettingsTests(base.WindowCase):
-    def dialog(self):
-        dialog = OptionsDialog(self.window)
-        self.addCleanup(dialog.deleteLater)
-        return dialog
-
-    def test_relay_box_follows_the_remote_box(self):
-        dialog = self.dialog()
-        self.assertFalse(dialog.remote_enabled_checkbox.isChecked())
-        self.assertFalse(dialog.remote_relay_checkbox.isEnabled())
-        dialog.remote_enabled_checkbox.setChecked(True)
-        self.assertTrue(dialog.remote_relay_checkbox.isEnabled())
-
-    def test_no_relay_address_field_and_the_saved_one_stays(self):
-        self.config.remote = {"version": 1, "relay_url": "https://relay.example"}
-        dialog = self.dialog()
-        self.assertFalse(hasattr(dialog, "remote_relay_url_input"))
-        dialog.save_settings()
-        self.assertEqual(ConfigManager().remote["relay_url"], "https://relay.example")
-
+class QrTests(base.WindowCase):
     def test_qr_has_room_for_the_logo(self):
         self.show()
         overlay = self.window.pair_overlay

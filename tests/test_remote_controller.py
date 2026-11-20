@@ -168,19 +168,18 @@ class RemoteDispatchTests(WindowCase):
         self.show()
         drawer = self.wait_for_drawer()
         controller = self.window.controller
-        with mock.patch("ui.tv_window.OptionsDialog"):  # never a modal window here
-            self.window.menus.on_drawer_action(SETTINGS_ROW)
-            settings = self.window.settings_drawer
-            for key in (Qt.Key.Key_Down, Qt.Key.Key_Down, Qt.Key.Key_Right):  # Playback's rows
-                QTest.keyClick(self.window, key)
-            for _ in range(len(settings._right_rows())):
-                if settings.focused_row().key == "autoplay":
-                    break
-                QTest.keyClick(self.window, Qt.Key.Key_Down)
-            QTest.keyClick(self.window, Qt.Key.Key_Return)  # its layer
-            self.assertEqual(settings.path(), ("playback", "autoplay"))
-            self.assertEqual(settings.focus_side(), "right")
-            self.remote().fire("tv")
+        self.window.menus.on_drawer_action(SETTINGS_ROW)
+        settings = self.window.settings_drawer
+        for key in (Qt.Key.Key_Down, Qt.Key.Key_Down, Qt.Key.Key_Right):  # Playback's rows
+            QTest.keyClick(self.window, key)
+        for _ in range(len(settings._right_rows())):
+            if settings.focused_row().key == "autoplay":
+                break
+            QTest.keyClick(self.window, Qt.Key.Key_Down)
+        QTest.keyClick(self.window, Qt.Key.Key_Return)  # its layer
+        self.assertEqual(settings.path(), ("playback", "autoplay"))
+        self.assertEqual(settings.focus_side(), "right")
+        self.remote().fire("tv")
         self.assertFalse(self.window.settings.visible())
         self.assertFalse(drawer.isVisible())
         self.assertEqual(controller.key_context(), "player")

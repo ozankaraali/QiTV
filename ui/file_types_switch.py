@@ -1,9 +1,9 @@
-"""Settings → General → Open videos with QiTV, and Open music with QiTV: each row's button
-registers QiTV with the system for its kind of file, or takes it back (services.file_types),
-on a thread of its own; the hint under it says what the system does then. The rows are
-independent: each follows its own kind's status. At start, a QiTV that was moved registers
-itself again where it is now (`refresh_at_start`). A kind's press and its answer are a
-`FileTypesSwitch`'s, which the drawer's Settings → Files rows use too (ui.settings_general).
+"""Settings › Files › Open videos with QiTV, and Open music with QiTV (the drawer's rows,
+ui.settings_general): a kind's press registers QiTV with the system for its kind of file, or
+takes it back (services.file_types), on a thread of its own; the row's help says what the
+system does then. Each kind follows its own status. A kind's press and its answer are a
+`FileTypesSwitch`'s. At start, a QiTV that was moved registers itself again where it is now
+(`refresh_at_start`).
 
 The service only records what it did in the config; it is saved here, on the GUI thread."""
 
@@ -16,19 +16,11 @@ import threading
 from typing import Any, Callable, Optional
 
 from PySide6.QtCore import QObject, Qt, Signal, Slot
-from PySide6.QtWidgets import (
-    QFormLayout,
-    QHBoxLayout,
-    QLabel,
-    QPushButton,
-    QVBoxLayout,
-    QWidget,
-)
 from shiboken6 import isValid
 
 from services import file_types
 from services.file_types import Status
-from services.i18n import N_, translate
+from services.i18n import N_
 from services.redact import safe_message
 
 logger = logging.getLogger(__name__)
@@ -36,22 +28,13 @@ logger = logging.getLogger(__name__)
 PRESS_THREAD = "qitv-file-types"
 REFRESH_THREAD = "qitv-file-types-refresh"
 DEFAULT_APPS_THREAD = "qitv-default-apps"
-ERROR_STYLE = "color: red;"  # as Settings' other failures (Verify Provider, Paste link)
 
-# Each row's label, its button (Settings → General → Open videos with QiTV) and the hints
-# under it; the music row's say "music" where the videos' say "videos".
+# Each row's title (Settings → Files → Open videos with QiTV) and the hints that are its help;
+# the music row's say "music" where the videos' say "videos".
 # i18n: a setting (General): QiTV opens video files, as with a double-click on one
 VIDEOS_LABEL = N_("Open videos with QiTV")
-# i18n: a button (Settings → General): video files open in QiTV, as with a double-click
-USE_TEXT = N_("Use QiTV for videos")
-# i18n: a button (Settings → General): video files no longer open in QiTV
-STOP_TEXT = N_("Stop using QiTV for videos")
 # i18n: a setting (General): QiTV opens music files (songs), as with a double-click on one
 MUSIC_LABEL = N_("Open music with QiTV")
-# i18n: a button (Settings → General): music files (songs) open in QiTV, as with a double-click
-MUSIC_USE_TEXT = N_("Use QiTV for music")
-# i18n: a button (Settings → General): music files (songs) no longer open in QiTV
-MUSIC_STOP_TEXT = N_("Stop using QiTV for music")
 # Windows, once registered: back to the page where Windows asks (closed unconfirmed, or later).
 # i18n: a button on Windows: opens Windows' Default Apps settings on QiTV's page (its own name)
 DEFAULT_APPS_TEXT = N_("Default Apps…")
@@ -85,21 +68,14 @@ class RowTexts:
     """A row's own texts (untranslated: each is translated where it shows)."""
 
     label: str
-    use: str
-    stop: str
     mac_hint: str
     linux_hint: str
 
 
 TEXTS = {
-    "videos": RowTexts(VIDEOS_LABEL, USE_TEXT, STOP_TEXT, MAC_HINT, LINUX_HINT),
-    "music": RowTexts(
-        MUSIC_LABEL, MUSIC_USE_TEXT, MUSIC_STOP_TEXT, MUSIC_MAC_HINT, MUSIC_LINUX_HINT
-    ),
+    "videos": RowTexts(VIDEOS_LABEL, MAC_HINT, LINUX_HINT),
+    "music": RowTexts(MUSIC_LABEL, MUSIC_MAC_HINT, MUSIC_LINUX_HINT),
 }
-# The dialog's attributes for each row (`<prefix>_button`, `<prefix>_hint`, ...) and its
-# widgets' object names (`<name>Button`, ...).
-_PREFIXES = {"videos": ("file_types", "fileTypes"), "music": ("music_file_types", "musicTypes")}
 
 
 def _system() -> str:
@@ -107,19 +83,13 @@ def _system() -> str:
     return "linux" if sys.platform.startswith("linux") else sys.platform
 
 
-def hint_text(
-    state: Status, system: str, open_with_only: bool = False, kind: str = "videos"
-) -> str:
-    """The hint under `kind`'s button ("": none). `open_with_only`: this window registered
-    QiTV on Linux without making it the default (no xdg-mime)."""
-    hint = hint_source(state, system, open_with_only, kind)
-    return translate(hint) if hint else ""
-
-
 def hint_source(
     state: Status, system: str, open_with_only: bool = False, kind: str = "videos"
 ) -> str:
-    """`hint_text` in English, as marked (N_): a row's help, translated where it shows."""
+    """The help of `kind`'s row for `state` on `system`, in English as marked (N_; "": none),
+    translated where it shows: what the system does on a press, or what must be done first.
+    `open_with_only`: this QiTV registered itself on Linux without being made the default (no
+    xdg-mime)."""
     if state is Status.REGISTERED and system == "linux" and open_with_only:
         return LINUX_OPEN_WITH_HINT
     texts = TEXTS[kind]
@@ -179,7 +149,7 @@ class _Answer(QObject):
         def body() -> None:
             try:
                 answer = work()
-            except Exception:  # never unanswered: the button would stay disabled
+            except Exception:  # never unanswered: the switch would stay busy
                 logger.warning("Telling the system which files QiTV opens failed", exc_info=True)
                 answer = None
             try:
@@ -226,8 +196,8 @@ class FileTypesSwitch:
         return file_types.status(self.kind, self._config)
 
     def hint(self, state: Status) -> str:
-        """The old window's hint under the button for `state`, in English as marked (N_; "":
-        none): what the system does on a press, or what must be done first."""
+        """The row's help for `state`, in English as marked (N_; "": none): what the system
+        does on a press, or what must be done first."""
         return hint_source(state, _system(), self.open_with_only, self.kind)
 
     def press(self) -> bool:
@@ -262,93 +232,6 @@ class FileTypesSwitch:
         if result and registering:
             self.open_with_only = not getattr(result, "defaults", True)
         self._then()
-
-
-class FileTypesRow:
-    """A kind's row: its button and hint (`button`, `hint`), with Windows' Default Apps beside
-    the button once QiTV is registered there (`default_apps_button`); hidden where QiTV can't
-    register (a run from source)."""
-
-    def __init__(
-        self, dialog: Any, layout: QFormLayout, parent: QWidget, kind: str = "videos"
-    ) -> None:
-        self.kind = kind
-        self._texts = TEXTS[kind]
-        name = _PREFIXES[kind][1]
-        self._config = dialog.config_manager
-        self._layout = layout
-        self.box = QWidget(parent)
-        column = QVBoxLayout(self.box)
-        column.setContentsMargins(0, 0, 0, 0)
-        self.button = QPushButton(self.box)
-        self.button.setObjectName(f"{name}Button")
-        self.button.setAutoDefault(False)  # Enter in a field still saves
-        self.button.clicked.connect(self.press)
-        self.default_apps_button = QPushButton(translate(DEFAULT_APPS_TEXT), self.box)
-        self.default_apps_button.setObjectName(f"{name}DefaultApps")
-        self.default_apps_button.setAutoDefault(False)
-        self.default_apps_button.setFlat(True)  # the row's second action, quieter
-        self.default_apps_button.clicked.connect(lambda: open_default_apps())
-        buttons = QHBoxLayout()
-        buttons.addWidget(self.button)
-        buttons.addWidget(self.default_apps_button)
-        buttons.addStretch(1)
-        column.addLayout(buttons)
-        self.hint = QLabel(self.box)
-        self.hint.setObjectName(f"{name}Hint")
-        self.hint.setWordWrap(True)
-        column.addWidget(self.hint)
-        layout.addRow(translate(self._texts.label), self.box)
-        # Settings' own: an answer that comes after it closed still saves the config.
-        self._switch = FileTypesSwitch(
-            self._config, dialog.parent(), kind, dialog, answered=self._answered
-        )
-        self.show()
-
-    def show(self) -> None:
-        """The button and hint as the record says now (for this row's kind only)."""
-        switch = self._switch
-        state = switch.status()
-        self._layout.setRowVisible(self.box, state is not Status.UNAVAILABLE)
-        registered = state is Status.REGISTERED
-        if not registered:
-            switch.open_with_only = False
-        self.button.setText(translate(self._texts.stop if registered else self._texts.use))
-        can_press = state in (Status.REGISTERED, Status.NOT_REGISTERED)
-        self.button.setEnabled(can_press and not switch.busy)
-        self.default_apps_button.setVisible(registered and _system() == "win32")
-        if switch.failed:
-            text = translate(FAILED_HINT)
-        else:
-            text = hint_text(state, _system(), switch.open_with_only, self.kind)
-        self.hint.setText(text)
-        self.hint.setStyleSheet(ERROR_STYLE if switch.failed else "")
-        self.hint.setVisible(bool(text))  # (an empty line's height until it says something)
-
-    def press(self) -> None:
-        """Use QiTV for this row's kind, or Stop using it: the system is told on a worker."""
-        if self._switch.press():
-            self.button.setEnabled(False)
-
-    def _answered(self) -> None:
-        """On the GUI thread, once the switch heard the system's answer (and saved it): the row
-        follows while Settings is still there."""
-        if isValid(self.button) and isValid(self.hint):
-            self.show()
-
-
-def add_file_types_row(
-    dialog: Any, layout: QFormLayout, parent: QWidget, kind: str = "videos"
-) -> FileTypesRow:
-    """`kind`'s row, at the end of `layout`: `dialog.file_types_button`, `file_types_hint`
-    and so on for videos, `dialog.music_file_types_button` ... for music."""
-    row = FileTypesRow(dialog, layout, parent, kind)
-    prefix = _PREFIXES[kind][0]
-    setattr(dialog, f"{prefix}_row", row)
-    setattr(dialog, f"{prefix}_button", row.button)
-    setattr(dialog, f"{prefix}_hint", row.hint)
-    setattr(dialog, f"{prefix}_default_apps_button", row.default_apps_button)
-    return row
 
 
 def refresh_at_start(config: Any, parent: QObject, frozen: Optional[bool] = None) -> None:

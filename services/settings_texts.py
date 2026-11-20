@@ -1,7 +1,6 @@
-"""Texts Settings shows in the drawer and in the old Settings window alike (no Qt), kept here
-rather than in ui/settings_dialog.py, which goes once no section is left in that window: the
-questions it asks before what can't be taken back, what it says of OpenSubtitles' key, and
-the time-shift buffer's sizes and how far back they reach (the example streams' bitrates)."""
+"""Texts Settings shows from more than one place (no Qt): the question it asks before the
+image cache is cleared, what it says of OpenSubtitles' key, and the time-shift buffer's sizes
+and how far back they reach (the example streams' bitrates)."""
 
 from __future__ import annotations
 

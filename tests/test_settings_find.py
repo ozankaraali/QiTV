@@ -60,7 +60,7 @@ class FindCase(unittest.TestCase):
         )
         self.shown = with_providers("Demo TV", "Harbour")
         self.controller = SettingsController(
-            self.drawer, self.values, lambda: self.shown, lambda tab: None, lambda: None
+            self.drawer, self.values, lambda: self.shown, lambda: None
         )
 
     def tearDown(self):

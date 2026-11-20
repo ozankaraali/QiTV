@@ -5,10 +5,10 @@ General tab, its rows where the spec puts them, each applied at once.
   as at a start, on the update checker's own thread), Enable Channel Logos, Film and series
   details from TMDB, and the TMDB token (a secret, kept without spaces);
 - Files: Open videos with QiTV and Open music with QiTV, what opens such files now at their
-  end; a press tells the system on a worker (ui.file_types_settings' FileTypesSwitch, as the
-  old window's button), its help the old window's hint, and a press that fails is said. A kind
-  QiTV can't be registered for (a run from source) has no row. On Windows, Default Apps… once
-  QiTV opens a kind there;
+  end; a press tells the system on a worker (ui.file_types_switch's FileTypesSwitch), its help
+  says what the system does then, and a press that fails is said. A kind QiTV can't be
+  registered for (a run from source) has no row. On Windows, Default Apps… once QiTV opens a
+  kind there;
 - Advanced: Verify SSL certificates (the providers that follow it connect anew, as the old
   Save had them: ProviderActions.global_ssl_changed, once its steps stop), Secure DNS, the
   detailed log, the image cache's largest size (from the next start), and Clear Image Cache…,
@@ -42,7 +42,7 @@ from services.settings_model import (
     Row,
 )
 from services.settings_texts import CLEAR_CACHE_QUESTION
-from ui.file_types_settings import (
+from ui.file_types_switch import (
     DEFAULT_APPS_TEXT,
     FAILED_HINT,
     TEXTS,

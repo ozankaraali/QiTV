@@ -7,16 +7,14 @@ import shutil
 import subprocess
 import sys
 import tempfile
-from types import SimpleNamespace
 import unittest
 from unittest import mock
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 from PySide6.QtCore import QObject, Qt, Signal
-from PySide6.QtWidgets import QApplication, QComboBox, QMessageBox, QWidget
+from PySide6.QtWidgets import QApplication, QWidget
 from test_track_panel import CHANNEL, FILM, FakePlayer, PanelCase
-from timer_fixtures import wait_until
 
 from services.captions.languages import QWEN_LANGUAGES, iso_code, own_name, qwen_name
 from services.captions.streaming import TRANSLATE_LEAD_S
@@ -25,6 +23,7 @@ from services.i18n import translate
 from services.playback import AudioTrackInfo, NullSession
 from services.sound_sync import SoundSync
 from tests import test_tv_window as base
+from ui.captions_files import captions_space_text
 from ui.captions_texts import size_text
 from ui.keymap import Action
 from ui.overlays.captions import MAX_LINES, CaptionsOverlay
@@ -32,7 +31,6 @@ from ui.overlays.painting import MIN_FONT_PX
 from ui.overlays.track_panel import PanelModel, PanelRow
 from ui.overlays.transport import Transport
 from ui.player_keys import PlayerKeys
-from ui.settings_dialog import OptionsDialog, captions_space_text
 from ui.track_controls import (
     AI_BACK,
     AI_CAPTIONS,
@@ -1912,49 +1910,7 @@ class SizeTextTests(unittest.TestCase):
         self.assertEqual(captions_space_text(880_000_000), "Downloaded: 880 MB")
 
 
-class FakeModels(SimpleNamespace):
-    """services.captions.models' space_used and delete_all, over a number."""
-
-    def space_used(self):
-        return self.size
-
-    def delete_all(self):
-        self.deleted += 1
-        self.size = 0
-
-
-class CaptionsSettingsTests(base.WindowCase):
-    def dialog(self):
-        dialog = OptionsDialog(self.window)
-        self.addCleanup(dialog.deleteLater)
-        return dialog
-
-    def models(self, size):
-        models = FakeModels(size=size, deleted=0)
-        patch = mock.patch.dict(sys.modules, {"services.captions.models": models})
-        patch.start()
-        self.addCleanup(patch.stop)
-        return models
-
-    def test_the_model_is_kept_at_save_and_a_stored_language_is_left_alone(self):
-        self.models(0)
-        self.window.config_manager.ai_captions_language = "Turkish"  # a 2.11.1 config: not read
-        dialog = self.dialog()
-        self.assertEqual(dialog.ai_captions_model_combo.currentData(), "auto")
-        self.assertIsNone(dialog.findChild(QComboBox, "aiCaptionsLanguage"))
-        group = dialog.ai_captions_model_combo.parentWidget()
-        self.assertEqual(group.objectName(), "aiCaptionsSettings")
-        dialog.ai_captions_model_combo.setCurrentIndex(
-            dialog.ai_captions_model_combo.findData("large")
-        )
-        self.assertTrue(dialog.has_unsaved_changes())
-        dialog.save_settings()
-        saved = ConfigManager()
-        self.assertEqual(saved.ai_captions_model, "large")
-        self.assertEqual(saved.config["ai_captions_language"], "Turkish")
-        dialog = self.dialog()
-        self.assertEqual(dialog.ai_captions_model_combo.currentData(), "large")
-
+class CaptionsConfigTests(base.WindowCase):
     def test_older_settings_read_as_automatic_and_unknown_values_too(self):
         config = ConfigManager()
         for key in ("ai_captions_model", "ai_captions_language"):
@@ -1962,29 +1918,6 @@ class CaptionsSettingsTests(base.WindowCase):
         self.assertEqual((config.ai_captions_model, config.ai_captions_language), ("auto", "auto"))
         config.config.update(ai_captions_model="huge", ai_captions_language="tr")
         self.assertEqual((config.ai_captions_model, config.ai_captions_language), ("auto", "auto"))
-
-    def test_the_space_used_shows_and_delete_asks_first(self):
-        models = self.models(880_000_000)
-        dialog = self.dialog()
-        self.assertTrue(wait_until(lambda: dialog.ai_captions_delete_button.isEnabled()))
-        self.assertEqual(dialog.ai_captions_space.text(), "Downloaded: 880 MB")
-        captions = FakeCaptions()
-        captions.on = True
-        playing = mock.patch.object(self.window, "captions", captions, create=True)
-        playing.start()
-        self.addCleanup(playing.stop)
-        no = QMessageBox.StandardButton.No
-        with mock.patch.object(QMessageBox, "question", return_value=no) as asked:
-            dialog.ai_captions_delete_button.click()
-        self.assertEqual(asked.call_count, 1)
-        self.assertEqual(models.deleted, 0)
-        yes = QMessageBox.StandardButton.Yes
-        with mock.patch.object(QMessageBox, "question", return_value=yes):
-            dialog.ai_captions_delete_button.click()
-        self.assertTrue(wait_until(lambda: models.deleted == 1))
-        self.assertTrue(wait_until(lambda: dialog.ai_captions_space.text() == "Nothing downloaded"))
-        self.assertFalse(dialog.ai_captions_delete_button.isEnabled())
-        self.assertFalse(captions.on)  # they stopped first
 
 
 class CaptionsWindowTests(base.WindowCase):

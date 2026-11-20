@@ -68,33 +68,17 @@ class SettingsModelTests(unittest.TestCase):
         self.assertNotIn("pip", keys("Linux"))
         self.assertNotIn("pip", keys("Windows"))
 
-    def test_unmoved_sections_open_the_old_tab(self):
+    def test_files_without_rows_says_why(self):
         by_key = {s.key: s for s in m.sections("Linux")}
-        for key, tab in m.LEGACY_TABS.items():  # (the sections not moved yet)
-            self.assertEqual(by_key[key].legacy_tab, tab, key)
-        self.assertEqual(by_key[m.PLAYBACK].legacy_tab, "")
-        for key in (
-            m.GENERAL,
-            m.SUBTITLES,
-            m.TIMESHIFT,
-            m.FILES,
-            m.ADVANCED,
-            m.GUIDE,
-            m.REMOTE,
-            m.PARENTAL,
-        ):  # plan 3's
-            self.assertEqual(by_key[key].legacy_tab, "", key)
-            self.assertNotIn(key, m.LEGACY_TABS)
+        self.assertEqual(by_key[m.FILES].rows, ())
         self.assertTrue(by_key[m.FILES].empty_text)  # none of its rows can be (from source)
 
     def test_providers_list_its_rows_then_add_and_free(self):
-        # Providers is no longer the Settings window's tab: the providers' rows, as its caller
-        # builds them, then ＋ Add provider and Free channels.
+        # The providers' rows, as its caller builds them, then ＋ Add provider and Free
+        # channels.
         given = (m.Row("provider/A", "A", literal=True),)
         providers = m.sections("Linux", given)[0]
         self.assertEqual(providers.key, m.PROVIDERS)
-        self.assertEqual(providers.legacy_tab, "")
-        self.assertNotIn(m.PROVIDERS, m.LEGACY_TABS)
         self.assertEqual(
             [row.key for row in providers.rows], ["provider/A", m.ADD_PROVIDER, m.FREE_CHANNELS]
         )

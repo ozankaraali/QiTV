@@ -91,10 +91,10 @@ def playback_index(key):
     return [r.key for r in playback_rows()].index(key)
 
 
-def with_old():
-    """The sections, and one whose settings are still in the Settings window (made up: the
-    sections move into the drawer one by one)."""
-    return sections("Darwin") + (Section("old", "Old", legacy_tab="old"),)
+def subtitles_index(key):
+    """Where the row `key` is in Subtitles & AI captions (its Sign out acts at once)."""
+    rows = next(s for s in sections("Darwin") if s.key == m.SUBTITLES).rows
+    return [r.key for r in rows].index(key)
 
 
 def tip(row):
@@ -227,14 +227,6 @@ class SettingsDrawerTests(unittest.TestCase):
         self.assertEqual(self.closed, [True])
         self.assertFalse(self.drawer.isVisible())
 
-    def test_a_legacy_section_offers_the_old_window(self):
-        self.drawer.open_at(with_old(), "old")
-        self.assertEqual(self.drawer.path(), ("old",))
-        self.drawer.right()
-        self.assertEqual(self.drawer.focused_row().key, "legacy:old")
-        self.drawer.activate()
-        self.assertEqual(self.chosen, ["legacy:old"])
-
     def test_highlighting_a_section_shows_its_rows_at_once(self):
         self.drawer.open_at(sections("Darwin"), GUIDE)
         self.drawer.move_by(-3)  # Guide → Playback
@@ -296,15 +288,15 @@ class SettingsDrawerTests(unittest.TestCase):
         self.assertEqual(self.drawer.path(), ("playback", "autoplay"))
         self.assertEqual(self.drawer.focus_side(), "right")
         self.assertEqual(self.steps, [])
-        self.drawer.open_at(with_old(), "old")  # the keys on the sections
+        self.drawer.open_at(sections("Darwin"), m.SUBTITLES)  # the keys on the sections
         self.drawer.grab()
-        self.click(self.drawer.title_rect(0).center())
-        self.assertEqual(self.chosen, ["legacy:old"])
+        self.click(self.drawer.title_rect(subtitles_index(m.SIGN_OUT)).center())
+        self.assertEqual(self.chosen, [m.SIGN_OUT])
 
     def test_a_row_that_closes_settings_guards_its_second_press_only_meanwhile(self):
         # A link's Play closes Settings on the press, and a double-click's second press would
-        # land on the picture under it. The old window's section opens a modal window as it
-        # closes Settings: the guard is armed as Settings hides, spent while that window shows,
+        # land on the picture under it. What the press does next may wait in a modal window as
+        # Settings closes: the guard is armed as Settings hides, spent while that window shows,
         # and never swallows the click after it.
         armed = []
 
@@ -314,10 +306,10 @@ class SettingsDrawerTests(unittest.TestCase):
             elapse(QApplication.doubleClickInterval() + 80)  # the modal window, a while
 
         self.drawer.chosen.connect(close_and_wait)
-        self.drawer.open_at(with_old(), "old")
+        self.drawer.open_at(sections("Darwin"), m.SUBTITLES)
         self.drawer.grab()
-        self.click(self.drawer.title_rect(0).center())
-        self.assertEqual(self.chosen, ["legacy:old"])
+        self.click(self.drawer.title_rect(subtitles_index(m.SIGN_OUT)).center())
+        self.assertEqual(self.chosen, [m.SIGN_OUT])
         self.assertEqual(armed, [True])
         self.assertFalse(self.drawer._second_click._open.isActive())  # the next click counts
 
@@ -369,8 +361,7 @@ class SettingsDrawerTests(unittest.TestCase):
         everything = sections("Darwin")
         for section in everything:
             self.drawer.open_at(everything, section.key)
-            # (A section still in the Settings window has its one row; Files may have none.)
-            check(section.key, len(section.rows) or (1 if section.legacy_tab else 0))
+            check(section.key, len(section.rows))  # (Files may have none)
             for i, row in enumerate(section.rows):
                 if row.section is None:
                     continue
@@ -420,14 +411,16 @@ class SettingsDrawerTests(unittest.TestCase):
         for focused in (False, True):
             with self.subTest(focused=focused):
                 self.chosen.clear()
-                self.drawer.open_at(with_old(), "old")
+                self.drawer.open_at(sections("Darwin"), m.SUBTITLES)
                 if focused:
                     self.drawer.right()
+                    while self.drawer.focused_row().key != m.SIGN_OUT:
+                        self.drawer.move_by(1)
                 self.drawer.grab()
-                point = self.drawer.title_rect(0).center()
+                point = self.drawer.title_rect(subtitles_index(m.SIGN_OUT)).center()
                 self.click(point)
                 self.double_click(point)
-                self.assertEqual(self.chosen, ["legacy:old"])
+                self.assertEqual(self.chosen, [m.SIGN_OUT])
 
     def test_a_double_click_on_the_back_step_steps_back_twice(self):
         self.use(*make(640, 360))

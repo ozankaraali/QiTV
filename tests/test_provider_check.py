@@ -21,9 +21,7 @@ from services import failure_reasons as reasons, media_workers, provider_api, pr
 from services.failure_reasons import Reason
 from services.jobs import JobRunner
 from services.provider_check import Outcome, check, check_kept
-from tests import test_tv_window as base
 from ui.provider_check import ProviderCheck
-from ui.settings_dialog import OptionsDialog
 
 PANEL = {
     "type": "XTREAM",
@@ -314,56 +312,6 @@ class ProviderCheckTests(unittest.TestCase):
         self.assertEqual(errors, [])
         self.assertEqual([outcome.ok for outcome in outcomes], [False, False, False, True, False])
         self.assertEqual(made, [])
-
-
-class SettingsVerifyTests(base.WindowCase):
-    """The old Settings window's Verify asks through the shared check, as before (its texts:
-    test_account_check's SettingsNoteTests)."""
-
-    def dialog(self):
-        dialog = OptionsDialog(self.window)
-        self.addCleanup(dialog.deleteLater)
-        return dialog
-
-    def verify(self, dialog, outcome):
-        with mock.patch.object(provider_check, "check", return_value=outcome) as asked:
-            dialog.verify_provider()
-            self.assertEqual(dialog.verify_result.text(), "Verifying...")
-            self.assertFalse(dialog.verify_button.isEnabled())
-            self.assertTrue(wait_until(dialog.verify_button.isEnabled))
-        return asked
-
-    def test_a_media_servers_access_is_kept_and_its_password_never(self):
-        dialog = self.dialog()
-        dialog.start_new_provider()
-        dialog.type_JELLYFIN.setChecked(True)
-        dialog.url_input.setText("http://media.example.test")
-        dialog.username_input.setText("ann")
-        dialog.password_input.setText("pw")
-        asked = self.verify(dialog, Outcome(True, "", False, ACCESS))
-        provider, ssl_verify = asked.call_args.args[:2]
-        self.assertEqual((provider["type"], provider["password"]), ("JELLYFIN", "pw"))
-        self.assertIs(ssl_verify, dialog.ssl_verify_checkbox.isChecked())
-        self.assertEqual(dialog.verify_result.text(), "Provider verified successfully.")
-        edited = dialog.edited_provider
-        self.assertEqual({key: edited[key] for key in ACCESS}, ACCESS)
-        self.assertNotIn("password", edited)
-        self.assertEqual(dialog.password_input.text(), "")
-        self.assertIn(id(edited), dialog._refresh_provider_ids)
-
-    def test_an_answer_for_a_form_since_changed_or_left_is_dropped(self):
-        dialog = self.dialog()
-        with mock.patch.object(provider_check, "check", return_value=Outcome(False, "Gone")):
-            dialog.verify_provider()
-            dialog.url_input.setText(dialog.url_input.text() + "/other")
-            self.assertTrue(wait_until(dialog.verify_button.isEnabled))
-        self.assertEqual(dialog.verify_result.text(), "")  # it answered for another address
-        with mock.patch.object(provider_check, "check", return_value=Outcome(False, "Gone")):
-            dialog.verify_provider()
-            dialog.load_provider_settings(dialog.provider_combo.currentIndex())
-            self.assertTrue(dialog.verify_button.isEnabled())
-            self.assertTrue(wait_until(lambda: not self.window.jobs.pending()))
-        self.assertEqual(dialog.verify_result.text(), "")  # another provider shows: dropped
 
 
 if __name__ == "__main__":

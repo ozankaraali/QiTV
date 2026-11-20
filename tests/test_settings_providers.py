@@ -16,7 +16,7 @@ from PySide6.QtWidgets import QApplication, QWidget
 from timer_fixtures import elapse, wait_until
 
 from services import i18n, provider_check
-from services.epg_view import GUIDE_OFFSET_KEY
+from services.epg_view import GUIDE_OFFSET_KEY, Programme
 from services.failure_reasons import SIGN_IN_AGAIN_MESSAGE
 from services.hidden_groups import HiddenGroups
 from services.i18n import translate
@@ -36,21 +36,20 @@ from services.settings_model import (
 )
 from tests.fixtures.local_provider import PROVIDER_NAME
 from tests.test_provider_changes import PANEL, PLAYLIST, manager_of, temp_manager
+from tests.test_provider_rename import _at, channel
 from tests.test_tv_window import WindowCase
-from ui import parental_settings
+from ui import settings_parental
 from ui.keymap import Action
 from ui.overlays.settings_card import BUSY_TEXT, CANCEL
 from ui.overlays.settings_drawer import SettingsDrawer
 from ui.overlays.settings_layout import Item, title_of, whole
 from ui.settings_controller import SettingsController
-from ui.settings_dialog import (
+from ui.settings_providers import (
     HTTP_ONLY_NOTE,
     NAME_TAKEN_TEXT,
+    REMOVE as REMOVE_KEY,
     REMOVE_QUESTION,
     REMOVE_RECORDINGS_NOTE,
-)
-from ui.settings_providers import (
-    REMOVE as REMOVE_KEY,
     SAVE_FAILED_TEXT,
     ProviderRows,
     answer_text,
@@ -175,7 +174,6 @@ class ProvidersTests(unittest.TestCase):
             self.drawer,
             FakeValues(),
             lambda: sections("Darwin", self.rows.rows()),
-            lambda tab: None,
             lambda: None,
         )
         self.rows = ProviderRows(self.window, self.settings, self.drawer, cards=self.cards)
@@ -382,6 +380,23 @@ class ProvidersTests(unittest.TestCase):
         self.manager.providers[1] = {**self.manager.providers[1], GUIDE_OFFSET_KEY: 45}
         self.assertEqual(self.value("Panel", "offset"), "No offset")
 
+    def test_a_hand_edited_stream_limit_reads_as_automatic(self):
+        # As the old window's spin box read it: Automatic, or its most (10) for a larger one.
+        self.on("Panel", "streams")
+        for bad, shown in (
+            ("many", "Automatic"),
+            ([], "Automatic"),
+            ({}, "Automatic"),
+            (float("inf"), "Automatic"),
+            (float("nan"), "Automatic"),
+            (None, "Automatic"),
+            (-3, "Automatic"),
+            (99, "10"),
+        ):
+            with self.subTest(bad=bad):
+                self.manager.providers[1] = {**self.manager.providers[1], "max_streams": bad}
+                self.assertEqual(self.value("Panel", "streams"), shown)
+
     def failing_save(self):
         """The provider list's writes refused (a full disk, a read-only folder)."""
         return mock.patch.object(self.manager, "save_providers", side_effect=PermissionError())
@@ -466,21 +481,21 @@ class ProvidersTests(unittest.TestCase):
         self.window.parental.is_locked = True
         self.on("Panel", "name")
         with (
-            mock.patch.object(parental_settings, "_ask_pin", return_value="1111") as asked,
-            mock.patch.object(parental_settings.QMessageBox, "warning") as wrong,
+            mock.patch.object(settings_parental, "_ask_pin", return_value="1111") as asked,
+            mock.patch.object(settings_parental.QMessageBox, "warning") as wrong,
         ):
             self.type_name("Renamed", replace=True)
         asked.assert_called_once()
         wrong.assert_called_once()
         self.assertEqual(self.saved(), ["Lists", "Panel"])
         self.assertEqual(self.value("Panel", "name"), "Panel")
-        with mock.patch.object(parental_settings, "_ask_pin", return_value=PIN) as asked:
+        with mock.patch.object(settings_parental, "_ask_pin", return_value=PIN) as asked:
             self.type_name("Renamed", replace=True)
             self.type_name(" again")  # once per visit
         asked.assert_called_once()
         self.assertEqual(self.saved(), ["Lists", "Renamed again"])
         self.settings.close()  # the visit is over: asked again
-        with mock.patch.object(parental_settings, "_ask_pin", return_value=None) as asked:
+        with mock.patch.object(settings_parental, "_ask_pin", return_value=None) as asked:
             self.on("Renamed again", "name")
             self.type_name("Third", replace=True)
         asked.assert_called_once()
@@ -635,11 +650,11 @@ class ProvidersTests(unittest.TestCase):
         self.window.parental.is_locked = True
         self.key(Action.NAV_ACTIVATE)
         self.move_to(row_key("Panel", "remove"))
-        with mock.patch.object(parental_settings, "_ask_pin", return_value=None) as asked:
+        with mock.patch.object(settings_parental, "_ask_pin", return_value=None) as asked:
             self.key(Action.NAV_ACTIVATE)
         asked.assert_called_once()
         self.assertFalse(self.settings.card_shown())  # refused: never asked
-        with mock.patch.object(parental_settings, "_ask_pin", return_value=PIN):
+        with mock.patch.object(settings_parental, "_ask_pin", return_value=PIN):
             self.key(Action.NAV_ACTIVATE)
         self.assertEqual(question.body(), "")
         self.key(Action.ESCAPE)
@@ -667,12 +682,6 @@ class ProvidersTests(unittest.TestCase):
 class ProvidersWindowTests(WindowCase):
     """Settings › Providers in the TV window: the catalogs' signal and the welcome card."""
 
-    def setUp(self):
-        super().setUp()
-        patch = mock.patch("ui.tv_window.OptionsDialog")  # never a modal window here
-        patch.start()
-        self.addCleanup(patch.stop)
-
     def tearDown(self):
         elapse(QApplication.doubleClickInterval() + 80)
         super().tearDown()
@@ -698,6 +707,9 @@ class ProvidersWindowTests(WindowCase):
         self.fail(f"no row {key}")
 
     def test_removing_the_last_provider_leaves_the_welcome_card(self):
+        # Its scheduled recordings are said before, and go with it (they could never record).
+        start = Programme("Quiz", _at(4_000_000_000), _at(4_000_003_600), "", None)
+        self.window.recording_schedule.add_once(channel("One", PROVIDER_NAME), start)
         self.open_providers()
         controller = self.window.controller
         controller.handle(Action.NAV_RIGHT)
@@ -706,9 +718,13 @@ class ProvidersWindowTests(WindowCase):
         self.down_to(row_key(PROVIDER_NAME, "remove"))
         controller.handle(Action.NAV_ACTIVATE)
         self.assertTrue(self.window.settings.card_shown())
+        question = self.window.provider_rows.question
+        self.assertEqual(question.body(), translate(REMOVE_RECORDINGS_NOTE))
         controller.handle(Action.NAV_RIGHT)
         controller.handle(Action.NAV_ACTIVATE)
         self.assertEqual(self.provider_manager.providers, [])
+        self.assertEqual(self.window.recording_schedule.items(), [])
+        self.assertTrue(any("removed provider" in text for text, _kind in self.toasts))
         drawer = self.window.settings_drawer
         self.assertEqual(drawer.path(), (PROVIDERS,))
         self.assertEqual(drawer.focused_row().key, ADD_PROVIDER)  # nothing points at it
@@ -718,6 +734,26 @@ class ProvidersWindowTests(WindowCase):
         controller.handle(Action.ESCAPE)
         self.assertFalse(self.window.settings.visible())
         self.assertTrue(wait_until(welcome.isVisible))
+
+    def test_a_stream_limit_step_keeps_the_connection_and_its_lists(self):
+        # Only the stream limit changed: nothing signs in again, the provider's cached lists
+        # stay, and the stream budget reads the new limit.
+        self.open_providers()
+        catalog = self.tv_catalog()
+        cache = catalog.provider_manager._provider_cache_name(PROVIDER_NAME)
+        self.assertTrue(wait_until(lambda: os.path.exists(cache)))  # its lists, kept on disk
+        controller = self.window.controller
+        controller.handle(Action.NAV_RIGHT)
+        self.down_to(layer_key(PROVIDER_NAME))
+        controller.handle(Action.NAV_ACTIVATE)
+        self.down_to(row_key(PROVIDER_NAME, "streams"))
+        with mock.patch.object(catalog, "select_provider", wraps=catalog.select_provider) as setup:
+            controller.handle(Action.NAV_RIGHT)  # Automatic → 1
+            elapse(200)  # a setup would have begun by now
+        setup.assert_not_called()
+        self.assertTrue(os.path.exists(cache))
+        self.assertEqual(self.provider_manager.providers[0]["max_streams"], 1)
+        self.assertEqual(catalog.current_provider()["max_streams"], 1)  # the budget reads it
 
     def test_a_rename_in_the_window_stays_in_its_layer(self):
         self.open_providers()

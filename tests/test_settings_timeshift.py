@@ -146,12 +146,10 @@ class DiskOnTests(TimeshiftCase):
 
 class DiskOffTests(TimeshiftCase):
     def test_section_rows_and_texts(self):
-        self.assertNotIn(m.TIMESHIFT, m.LEGACY_TABS)
         context = m.Context(
             timeshift_disk=True, recordings_folder="/media/QiTV", recordings_own=True
         )
         section = {s.key: s for s in m.sections("Linux", (), context)}[m.TIMESHIFT]
-        self.assertEqual(section.legacy_tab, "")
         self.assertEqual(
             [row.key for row in section.rows],
             [

@@ -15,11 +15,9 @@ placeholder, muted. A row may have a muted sub line under its title, and a note 
 end. In a layer the left column lists the rows the layer is one of, the opened one marked as
 the drawer marks its path; there only the rows that open a layer take the highlight, and a
 click on another goes back up to it. A layer (or a section) without rows says its
-`empty_text` and the keys stay on the left. A section whose settings are still in the
-Settings window has one row that opens it there (`legacy:<section key>`). Only the right
-column's focused row shows its help under it, two
-lines at most; a note cut short at its row's end shows there whole instead (a check's
-answer). Where everything goes is ui/overlays/settings_layout.py's.
+`empty_text` and the keys stay on the left. Only the right column's focused row shows its
+help under it, two lines at most; a note cut short at its row's end shows there whole instead
+(a check's answer). Where everything goes is ui/overlays/settings_layout.py's.
 
 It changes nothing itself: a step is `stepped(key, ±1)`, an action (a card's row too)
 `chosen(key)`, a text kept `edited(key, text)`, and backing out of the sections `closed`; the
@@ -142,9 +140,6 @@ SETTINGS_TITLE = N_("Settings")
 RESTART_NOTE = N_("Applies when QiTV starts again.")
 # i18n: in Settings' right column while what was typed finds no setting; {typed} is what was typed
 NO_SETTING_FOUND = N_("No setting has “{typed}”")
-# i18n: the one row of a Settings section whose settings are still in the Settings window
-LEGACY_TEXT = N_("Open in the Settings window")
-LEGACY_PREFIX = "legacy:"  # the legacy row's key: LEGACY_PREFIX + the section's key
 MASK = "•"  # a secret text's every character, as a FormCard's secret field shows it
 SECRET_DOTS = 8  # the dots before a secret's end that shows (Row.secret_tail), whatever its length
 
@@ -208,8 +203,7 @@ class SettingsDrawer(Overlay):
     accessible_name = SETTINGS_TITLE
     # A stepper's key, and -1 (‹, ←) or +1 (›, →, Enter, a click on it focused).
     stepped = Signal(str, int)
-    # An action row's key (the legacy rows': "legacy:<section key>"), a destructive row's, or
-    # that of a row that opens a card.
+    # An action row's key, a destructive row's, or that of a row that opens a card.
     chosen = Signal(str)
     # A text row's key and its text, kept (Enter, a click elsewhere, ↑/↓) when it changed.
     edited = Signal(str, str)
@@ -865,10 +859,7 @@ class SettingsDrawer(Overlay):
         chain = self._chain()
         if not chain:
             return ()
-        section = chain[-1]
-        if section.rows or not section.legacy_tab:
-            return section.rows
-        return (Row(LEGACY_PREFIX + section.key, LEGACY_TEXT, action=True),)
+        return chain[-1].rows
 
     def _items(self, side: str) -> list[Item]:
         if side == RIGHT:
@@ -1491,7 +1482,7 @@ class SettingsDrawer(Overlay):
             self._clicking = False
         self._pressed = (RIGHT, row.key, part, done)
         if not self.isVisible():
-            return  # it closed Settings (a link's Play, the old window's section)
+            return  # it closed Settings (a link's Play)
         self.update()
         self._say()
 
@@ -1732,8 +1723,8 @@ class SettingsDrawer(Overlay):
         if self._clicking and self.isHidden():
             # A click on a row closed Settings (a link's Play): a double-click's second press
             # would land on what is under it, the picture. Armed now, not once the click is
-            # over: the old window's section opens a modal window as Settings closes, and the
-            # guard is spent while it shows, never swallowing the click after it.
+            # over: what the click does next may wait in a modal window, and the guard is
+            # spent while it shows, never swallowing the click after it.
             self._second_click.arm()
         self._hover = None
         self._paste_hovered = False

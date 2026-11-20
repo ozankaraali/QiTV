@@ -25,8 +25,9 @@ from typing import Any, Optional
 from urllib.parse import quote, unquote
 
 from PySide6.QtCore import QObject
+from PySide6.QtWidgets import QInputDialog, QLineEdit, QMessageBox, QWidget
 
-from services.i18n import N_, number, translate
+from services.i18n import N_, number, tr, translate
 from services.parental import Parental
 from services.settings_model import (
     ACTION,
@@ -39,11 +40,11 @@ from services.settings_model import (
     step as stepped,
 )
 from ui.overlays.settings_card import CANCEL, CANCEL_TEXT, OK, OK_TEXT, Button, Field, FormCard
-from ui.parental_settings import MIN_DIGITS
 from ui.settings_controller import SettingsController
 
 logger = logging.getLogger(__name__)
 
+MIN_DIGITS = 4  # a PIN's
 PARENTAL_PREFIX = "parental/"
 STATE = PARENTAL_PREFIX + "state"
 PIN = PARENTAL_PREFIX + "pin"  # Set PIN… / Change PIN…
@@ -102,6 +103,27 @@ def _digits(text: str) -> str:
 
 def _on_off(on: bool) -> str:
     return next(choice for choice in ON_OFF if choice.value is on).shown()
+
+
+def _ask_pin(parent: QWidget, label: str) -> Optional[str]:
+    # i18n: the title of the window that asks for the parental controls' PIN
+    text, ok = QInputDialog.getText(parent, tr("Parental controls"), label, QLineEdit.Password)
+    return text if ok else None
+
+
+def pin_allows(parent: QWidget, guard: Optional[Parental]) -> bool:
+    """Whether a change parental controls guard may go ahead (Settings › Providers: a provider
+    renamed or removed, 2.8.12): no PIN set, unlocked, or the PIN typed now (asked in the
+    system's window, without unlocking; a wrong one is said)."""
+    if guard is None or not guard.locked():
+        return True
+    pin = _ask_pin(parent, translate(YOUR_PIN_TEXT))
+    if pin is None:
+        return False
+    if not guard.check(pin):
+        QMessageBox.warning(parent, tr("Parental controls"), translate(WRONG_TEXT))
+        return False
+    return True
 
 
 class ParentalRows(QObject):

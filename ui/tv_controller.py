@@ -3707,8 +3707,7 @@ class TVController(QObject):
                 signal.disconnect(slot)
 
     def apply_deinterlacing(self) -> None:
-        """The players have the deinterlacing Settings saved (a step in the drawer, or the
-        Settings window closed)."""
+        """The players have the deinterlacing Settings saved (a step in the drawer)."""
         self._picture.apply_deinterlacing()
 
     def _players(self) -> list[tuple[str, Any]]:

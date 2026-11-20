@@ -19,6 +19,7 @@ from PySide6.QtWidgets import QApplication
 
 from services import provider_api
 from services.catalog import WorkerFactory
+from services.epg_view import GUIDE_OFFSET_KEY
 from services.export import save_stb_content
 from services.exporter import ExportKind, ExportWorker
 from services.provider_api import remember_http_only, stb_portal_base
@@ -156,6 +157,13 @@ class ProviderCacheIdentityTests(unittest.TestCase):
         manager = ProviderManager.__new__(ProviderManager)
         manager.config_manager = SimpleNamespace(ssl_verify=True)
         return manager.provider_cache_identity(provider)
+
+    def test_the_guide_offset_and_the_stream_limit_keep_the_identity(self):
+        # Changed in Settings › Providers, they are no new connection: the lists stay.
+        base = {"type": "XTREAM", "url": "http://p.test", "username": "u", "password": "p"}
+        for extra in ({GUIDE_OFFSET_KEY: 60}, {"max_streams": 2}):
+            with self.subTest(extra=extra):
+                self.assertEqual(self._identity({**base, **extra}), self._identity(base))
 
     def test_an_older_saved_https_preference_does_not_change_the_identity(self):
         base = {"type": "STB", "url": "http://p.test"}

@@ -123,7 +123,7 @@ class SettingsControllerTests(unittest.TestCase):
         self.addCleanup(self.host.deleteLater)
         self.addCleanup(self.host.close)
         self.values = FakeValues(live_latency="auto")
-        self.legacy, self.reopened = [], []
+        self.reopened = []
         self.drawer = SettingsDrawer(
             lambda row: self.controller.value_text(row),
             lambda row: self.controller.lit(row),
@@ -134,7 +134,6 @@ class SettingsControllerTests(unittest.TestCase):
             self.drawer,
             self.values,
             lambda: self.shown,
-            self.legacy.append,
             lambda: self.reopened.append(True),
         )
 
@@ -192,17 +191,6 @@ class SettingsControllerTests(unittest.TestCase):
                 self.values.values["hardware_decoding"] = False
                 self.assertEqual(self.controller.value_text(row), off)
                 self.assertEqual(translate("Off"), plain)
-
-    def test_legacy_closes_then_opens_the_old_tab(self):
-        # A section whose settings are still in the Settings window (made up here: the
-        # sections move into the drawer one by one).
-        self.shown = sections("Darwin") + (Section("old", "Old", legacy_tab="old_tab"),)
-        with mock.patch.dict(settings_model.LEGACY_TABS, {"old": "old_tab"}):
-            self.controller.open("old")
-            self.controller.handle(Action.NAV_RIGHT)
-            self.controller.handle(Action.NAV_ACTIVATE)
-        self.assertEqual(self.legacy, ["old_tab"])
-        self.assertFalse(self.controller.visible())
 
     def test_back_from_the_sections_reopens_the_drawer_only_when_opened_from_it(self):
         self.controller.open(from_drawer=True)

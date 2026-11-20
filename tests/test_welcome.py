@@ -158,12 +158,6 @@ class WelcomeAddTests(WindowCase):
     def provider_list(self):
         return []
 
-    def setUp(self):
-        super().setUp()
-        patch = mock.patch("ui.tv_window.OptionsDialog")  # never the Settings window's form
-        self.dialog = patch.start()
-        self.addCleanup(patch.stop)
-
     def tearDown(self):
         elapse(QApplication.doubleClickInterval() + 80)  # no second-click guard left armed
         super().tearDown()
@@ -185,7 +179,6 @@ class WelcomeAddTests(WindowCase):
         self.assertEqual(form.title(), "Add a provider")
         self.assertTrue(card.isHidden())  # over the empty canvas, the welcome card under it
         self.assertFalse(window.overlays.drawer.isVisible())
-        self.dialog.assert_not_called()
 
     def test_cancel_with_no_provider_goes_back_to_the_welcome_card(self):
         card = self.start()

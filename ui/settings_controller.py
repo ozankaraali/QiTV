@@ -1,10 +1,9 @@
 """Binds the Settings layer of the drawer to the config and to the key actions.
 
 A step is applied at once (no Save): the row's next choice is written through the values and
-the overlay paints again; so is a text row's text once it is kept. A section whose settings
-still live in the Settings window opens that window on its tab. The controller keeps the key
-actions it uses and hands every other one back, so volume, mute and fullscreen still reach the
-player. While a text is edited the field has the keys first (typing, Backspace, the caret,
+the overlay paints again; so is a text row's text once it is kept. The controller keeps the
+key actions it uses and hands every other one back, so volume, mute and fullscreen still reach
+the player. While a text is edited the field has the keys first (typing, Backspace, the caret,
 the clipboard; Enter and Esc); else typing and Paste find a setting, and while a find shows
 Backspace edits its text (Esc, ← or Enter on a match end it: SettingsDrawer's find).
 
@@ -26,19 +25,10 @@ from typing import Any, Optional, Protocol
 
 from PySide6.QtCore import QEvent, QObject, QTimer, Signal
 
-from services.settings_model import (
-    INFO,
-    LEGACY_TABS,
-    TEXT,
-    Row,
-    Section,
-    choice_of,
-    is_lit,
-    step,
-)
+from services.settings_model import INFO, TEXT, Row, Section, choice_of, is_lit, step
 from services.settings_values import SettingsValues
 from ui.keymap import Action
-from ui.overlays.settings_drawer import LEGACY_PREFIX, SettingsDrawer
+from ui.overlays.settings_drawer import SettingsDrawer
 
 logger = logging.getLogger(__name__)
 
@@ -114,21 +104,19 @@ def _walk(rows: tuple[Row, ...]) -> Iterator[Row]:
 
 
 class SettingsController(QObject):
-    hidden = Signal()  # Settings went: backed out of, closed, or its section's window opened
+    hidden = Signal()  # Settings went: backed out of, or closed
 
     def __init__(
         self,
         drawer: SettingsDrawer,
         values: SettingsValues,
         sections: Callable[[], tuple[Section, ...]],
-        open_legacy: Callable[[str], None],
         reopen_drawer: Callable[[], None],
     ) -> None:
         super().__init__(drawer)
         self._drawer = drawer
         self._values = values
         self._make_sections = sections  # the sections as they are now
-        self._open_legacy = open_legacy
         self._reopen_drawer = reopen_drawer
         self._from_drawer = False
         self._sections: tuple[Section, ...] = ()
@@ -340,12 +328,6 @@ class SettingsController(QObject):
         self._drawer.refresh()
 
     def _on_chosen(self, key: str) -> None:
-        if key.startswith(LEGACY_PREFIX):
-            tab = LEGACY_TABS.get(key[len(LEGACY_PREFIX) :])
-            if tab is not None:
-                self.close()
-                self._open_legacy(tab)
-            return
         handler = self._handler(key)
         if handler is None:
             return

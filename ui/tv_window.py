@@ -204,7 +204,6 @@ from ui.record_timer_dialog import RecordTimerDialog, TimerChoice
 from ui.recording_scheduler import RecordingScheduler
 from ui.remote_controller import RemoteController
 from ui.settings_controller import SettingsController
-from ui.settings_dialog import OptionsDialog
 from ui.settings_general import GeneralRows, hooks as general_hooks
 from ui.settings_guide import GuideRows, hooks as guide_hooks
 from ui.settings_links import LinkRows
@@ -535,7 +534,6 @@ class TVWindow(QMainWindow):
     ):
         super().__init__()
         self.app = app
-        # OptionsDialog reads these from its parent.
         self.config_manager = config_manager
         # 2.9.1: before the first provider request and the time-shift helper's start.
         secure_dns.enable(getattr(config_manager, "secure_dns", False) is True)
@@ -1142,9 +1140,9 @@ class TVWindow(QMainWindow):
         self.overlays.welcome.freeRequested.connect(self.show_free_channels)
         self.overlays.drawer.actionRequested.connect(self.menus.on_drawer_action)
         # Settings in the drawer (its Settings row and ⚙, Settings…): a step applies at once
-        # (what takes effect beyond the config, through its hook); a section still kept in the
-        # Settings window opens it on its tab; backing out of it from the drawer gives the
-        # drawer back on its Settings row. A save that failed meanwhile is said as it goes.
+        # (what takes effect beyond the config, through its hook); backing out of it from the
+        # drawer gives the drawer back on its Settings row. A save that failed meanwhile is said
+        # as it goes.
         system = platform.system()
         values = SettingsValues(
             config_manager,
@@ -1162,14 +1160,13 @@ class TVWindow(QMainWindow):
             self.settings_drawer,
             values,
             lambda: sections(system, self.provider_rows.rows(), self._settings_context()),
-            self.options_dialog,
             controller.reopen_drawer_on_settings,
         )
         controller.set_settings(self.settings)
         self.settings.hidden.connect(self._settings_went)
         # Settings › Providers: each provider's rows (`provider/…`), built from the list as it
-        # is now; again whenever it changes, here or elsewhere (a drop, Free channels, the
-        # Settings window), and when the TV moves to another provider (its "in use").
+        # is now; again whenever it changes, here or elsewhere (a drop, Free channels), and
+        # when the TV moves to another provider (its "in use").
         self.provider_rows = ProviderRows(self, self.settings, self.settings_drawer)
         # Its ＋ Add provider and each provider's Address and login: cards over the picture,
         # a check before anything is kept.
@@ -2847,7 +2844,7 @@ class TVWindow(QMainWindow):
         if fitted != geometry:
             self.setGeometry(fitted)
 
-    # ---- OptionsDialog host -------------------------------------------------------------------
+    # ---- Settings ---------------------------------------------------------------------------
 
     def open_settings(
         self, from_drawer: bool = False, keep_place: bool = False, section_key: str = ""
@@ -2894,16 +2891,6 @@ class TVWindow(QMainWindow):
             parental=self.parental_rows.rows(),
         )
 
-    def options_dialog(self, tab: str = "") -> None:
-        """The Settings window, on the tab `tab` names ("general", "timeshift", "subtitles",
-        "remote", "parental", "providers", "epg"; "": the first)."""
-        if not self._closing:
-            dialog = OptionsDialog(self)
-            if tab:
-                dialog.show_tab(tab)
-            dialog.exec()
-            self._settings_closed()
-
     def _settings_went(self) -> None:
         """Settings in the drawer went: a step's save that failed (written in the background,
         where its failure is only logged) is said, once, until a save works again."""
@@ -2913,13 +2900,6 @@ class TVWindow(QMainWindow):
         if failed and not self._save_failure_said:
             self.screens.notify(translate(SAVE_FAILED_TEXT), "error", ERROR_MS)
         self._save_failure_said = failed
-
-    def _settings_closed(self) -> None:
-        """What Settings' saved choices change in the window, whichever way it was opened."""
-        self.menus.rebuild_providers()
-        self.screens.tmdb.settings_changed()  # 2.8: TMDB turned off or on
-        self.controller.apply_deinterlacing()  # 2.12: its Settings choice, for every player
-        self._arm_desktop_pip()  # the covered window's setting turned on or off
 
     def open_phone_remote(self) -> None:
         """The menu's Phone Remote…: turns the remote on if it is off, then the pairing QR."""
@@ -3109,7 +3089,8 @@ class TVWindow(QMainWindow):
             self.kept.rekey(keys)
 
     def save_config(self) -> None:
-        """Settings → Save: the new settings apply even when config.json cannot be written."""
+        """The config saved after a change to the providers (ui.provider_actions, Free
+        channels): what it changes applies even when config.json cannot be written."""
         try:
             self.config_manager.save_config(wait=True)  # its failure is said
         except Exception as e:

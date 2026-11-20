@@ -26,7 +26,6 @@ from services.config_manager import ConfigManager
 from services.picture_watch import Counters, FrozenPicture
 from services.vlc_profile import PlayKind
 from tests import test_config_tv, test_playback_session as sessions, test_tv_window as base
-from ui.settings_dialog import OptionsDialog
 
 HARDWARE_FLAGS = ("--avcodec-hw", "--no-videotoolbox")
 SOFTWARE = [":avcodec-hw=none", ":no-videotoolbox"]  # on the Mac
@@ -671,70 +670,6 @@ class DecodingConfigTests(unittest.TestCase):
 
 
 class DecodingWindowTests(base.WindowCase):
-    def test_settings_offers_hardware_decoding_with_its_fallback(self):
-        self.config.hardware_decoding = True
-        dialog = OptionsDialog(self.window)
-        self.addCleanup(dialog.deleteLater)
-        box = dialog.hardware_decoding_checkbox
-        self.assertTrue(box.isChecked())
-        self.assertNotIn("experimental", box.text().lower())
-        tip = box.toolTip().lower()
-        self.assertIn("freezes while its sound plays", tip)
-        self.assertIn("switches to software decoding by itself, for a day", tip)
-        self.assertIn("restart", tip)
-        box.setChecked(False)  # Settings turns it off ...
-        dialog.save_settings()
-        self.assertFalse(ConfigManager().hardware_decoding)
-        box.setChecked(True)  # ... and on again
-        dialog.save_settings()
-        self.assertTrue(ConfigManager().hardware_decoding)
-
-    def test_settings_offers_deinterlacing_after_hardware_decoding(self):
-        dialog = OptionsDialog(self.window)
-        self.addCleanup(dialog.deleteLater)
-        combo = dialog.deinterlace_combo
-        self.assertEqual([combo.itemText(i) for i in range(combo.count())], ["Auto", "Off"])
-        self.assertEqual(combo.currentData(), "auto")
-        self.assertIn("marked interlaced", combo.toolTip())
-        self.assertIn("starts again", combo.toolTip())
-        layout = dialog.settings_layout
-        rows = [layout.itemAt(i).widget() for i in range(layout.count())]
-        self.assertEqual(
-            rows[rows.index(dialog.hardware_decoding_checkbox) + 2], combo
-        )  # the label, then the combo
-        combo.setCurrentIndex(combo.findData("off"))
-        dialog.save_settings()
-        self.assertEqual(ConfigManager().deinterlace, "off")
-        self.assertEqual(self.window.config_manager.deinterlace, "off")
-
-    def test_the_players_get_the_saved_deinterlacing_once_the_settings_window_closes(self):
-        # 2.12: the Settings window's choice (Add provider opens the drawer's card instead).
-        players = [player for _name, player in self.window._players()]
-        for player in players:
-            player.set_deinterlace = mock.Mock(return_value=True)
-        self.config.deinterlace = "off"  # what Settings saved
-        with mock.patch.object(OptionsDialog, "exec", return_value=0):
-            self.window.options_dialog()
-        for player in players:
-            player.set_deinterlace.assert_called_once_with("off")
-            del player.set_deinterlace
-
-    def test_settings_offers_secure_dns_off_and_it_applies_at_once(self):
-        # 2.9.1: the providers' names over HTTPS (services.secure_dns), off by default.
-        from services import secure_dns
-
-        self.addCleanup(secure_dns.enable, False)
-        dialog = OptionsDialog(self.window)
-        self.addCleanup(dialog.deleteLater)
-        box = dialog.secure_dns_checkbox
-        self.assertFalse(box.isChecked())
-        self.assertIn("Cloudflare", box.toolTip())
-        box.setChecked(True)
-        dialog.save_settings()
-        self.assertTrue(ConfigManager().secure_dns)
-        self.window.save_config()  # what Save does after the dialog wrote the config
-        self.assertTrue(secure_dns.enabled())
-
     def test_the_window_creates_libvlc_with_the_setting(self):
         self.config.hardware_decoding = True
         with mock.patch("ui.tv_window.create_instance", return_value=None) as create:

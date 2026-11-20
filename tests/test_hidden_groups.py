@@ -51,38 +51,3 @@ class HiddenGroupsTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
-
-
-class SettingsBoxTests(unittest.TestCase):
-    """Settings → Providers → Hidden groups lists them and shows one again, no PIN."""
-
-    @classmethod
-    def setUpClass(cls):
-        import os
-
-        os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
-        from PySide6.QtWidgets import QApplication
-
-        cls.app = QApplication.instance() or QApplication([])
-
-    def test_a_group_is_listed_and_shown_again(self):
-        from PySide6.QtWidgets import QDialog, QFormLayout, QWidget
-
-        from ui.hidden_groups_settings import add_hidden_groups_box
-
-        window = QWidget()
-        self.addCleanup(window.deleteLater)
-        window.hidden_groups = HiddenGroups(kept())
-        window.hidden_groups.hide("live", "P", "12", "Foreign news")
-        changed = []
-        window.controller = SimpleNamespace(lists_changed=lambda: changed.append(True))
-        dialog = QDialog(window)
-        tab = QWidget(dialog)
-        layout = QFormLayout(tab)
-        box = add_hidden_groups_box(dialog, layout, tab)
-        widgets = dialog.hidden_groups_widgets
-        self.assertEqual(widgets["list"].item(0).text(), "Foreign news (Live TV, P)")
-        widgets["show_again"].click()
-        self.assertEqual(changed, [True])
-        self.assertEqual(widgets["list"].count(), 0)
-        self.assertTrue(box.isHidden())  # nothing hidden: no box

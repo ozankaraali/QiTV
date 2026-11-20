@@ -28,10 +28,15 @@ from ui.keymap import Action
 from ui.overlays.question_card import QuestionCard
 from ui.overlays.settings_card import CANCEL
 from ui.overlays.settings_drawer import SettingsDrawer
-from ui.provider_cards import ProviderCards
+from ui.provider_cards import NO_LINK_TEXT, ProviderCards
 from ui.settings_controller import SettingsController
-from ui.settings_dialog import HTTP_ONLY_NOTE, NO_LINK_TEXT
-from ui.settings_providers import SAVE_FAILED_TEXT, ProviderRows, layer_key, row_key
+from ui.settings_providers import (
+    HTTP_ONLY_NOTE,
+    SAVE_FAILED_TEXT,
+    ProviderRows,
+    layer_key,
+    row_key,
+)
 
 XTREAM_LINK = "http://other.test:8080/get.php?username=other&password=s3cret&type=m3u_plus"
 PORTAL_LINK = "http://portal.test/stalker_portal/c/index.html?mac=00:1a:79:00:00:01"
@@ -63,7 +68,6 @@ class CardsTests(unittest.TestCase):
             self.drawer,
             FakeValues(),
             lambda: sections("Darwin", self.rows.rows()),
-            lambda tab: None,
             lambda: None,
         )
         self.rows = ProviderRows(self.window, self.settings, self.drawer)
@@ -244,6 +248,14 @@ class CardsTests(unittest.TestCase):
         self.assertEqual(self.form.found(), (translate(pc.FILL_IN_TEXT, field="Password"), False))
         self.assertEqual(self.form.focus(), ("field", pc.PASSWORD))
         self.assertEqual(self.window.jobs.jobs, [])
+
+    def test_a_pasted_link_logs_nothing_of_it(self):
+        # Its login is filled in from it, and nothing of it reaches the log (2.7.1).
+        self.cards.add()
+        with self.assertNoLogs(level="DEBUG"):
+            self.paste(XTREAM_LINK)
+            self.type_text(pc.URL, PORTAL_LINK)
+        self.assertEqual(self.form.values()[pc.MAC], "00:1A:79:00:00:01")
 
     def test_check_and_add_adds_selects_and_toasts(self):
         self.cards.add()
@@ -785,12 +797,6 @@ class CardsTests(unittest.TestCase):
 class CardsWindowTests(WindowCase):
     """The cards in the TV window: Settings › Providers' rows open them."""
 
-    def setUp(self):
-        super().setUp()
-        patch = mock.patch("ui.tv_window.OptionsDialog")  # never a modal window here
-        self.dialog = patch.start()
-        self.addCleanup(patch.stop)
-
     def tearDown(self):
         elapse(QApplication.doubleClickInterval() + 80)
         super().tearDown()
@@ -818,7 +824,6 @@ class CardsWindowTests(WindowCase):
         form = self.window.provider_cards.form
         self.assertTrue(wait_until(form.isVisible))
         self.assertEqual(form.title(), "Add a provider")
-        self.dialog.assert_not_called()  # never the Settings window's form
         controller.handle(Action.ESCAPE)
         self.assertFalse(form.isVisible())
         self.assertTrue(self.window.settings.visible())
@@ -828,7 +833,6 @@ class CardsWindowTests(WindowCase):
         controller.handle(Action.NAV_ACTIVATE)
         self.assertTrue(form.isVisible())
         self.assertEqual(form.title(), f"{PROVIDER_NAME}: address and login")
-        self.dialog.assert_not_called()
 
 
 if __name__ == "__main__":

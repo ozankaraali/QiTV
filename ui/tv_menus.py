@@ -5,11 +5,11 @@ keyPressEvent handles those keys through ui.keymap. Modifier combinations are ap
 shortcuts, which the keymap leaves to the menus (a test checks that no screen claims them).
 The player's keys are disabled while the Library shows. The Providers menu is an exclusive
 group of the configured providers, rebuilt when a provider becomes ready or fails and after
-the Settings window closes, then Add provider and the free-channels menu (the welcome card
+a provider changes in Settings, then Add provider and the free-channels menu (the welcome card
 that offers both shows only without providers, and the last one stays). Settings… opens
 Settings in the drawer, as the drawer's Settings row and ⚙ do (backing out of it from there
-gives the drawer back). The drawer's Add provider row opens the same Settings window as Add
-provider, its Free channels row the free-channels menu, its Open file row the same file
+gives the drawer back). The drawer's Add provider row opens the same Add card in Settings as
+Add provider, its Free channels row the free-channels menu, its Open file row the same file
 dialog, and its header's ⌕ the same search. File → Open Recordings Folder opens where
 recordings go (2.2), as Settings' Open folder does; View → Recordings (2.9.7) the Library's
 Recordings page, as the drawer's Recordings row.
