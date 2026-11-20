@@ -1070,6 +1070,7 @@ class TVController(QObject):
         self._tracks.close()
         self._picture.close()
         self._close_online()
+        self._cancel_cards()  # Open Link…'s
         try:
             self.watch.flush()  # a movie's last position
         except Exception as e:
@@ -1128,6 +1129,7 @@ class TVController(QObject):
         self._tracks.close()
         self._picture.close()
         self._close_online()
+        self._cancel_cards()  # Open Link…'s
         self._autoplay.drop()  # the Next card, and a wait for the next season
 
     def leave_library_playing(self) -> None:
@@ -1444,7 +1446,8 @@ class TVController(QObject):
 
     def make_way_for_settings(self, keep_place: bool = False) -> None:
         """Settings is opening over the player: what would keep the keys hidden under it
-        closes (SettingsLayer.make_way_for_settings)."""
+        closes (SettingsLayer.make_way_for_settings), a card over the TV cancels."""
+        self._cancel_cards()
         self.settings_layer.make_way_for_settings(keep_place=keep_place)
 
     def _settings_shown(self) -> bool:
@@ -1472,6 +1475,16 @@ class TVController(QObject):
 
     def _shown_card(self) -> Optional[Any]:
         return next((card for card in reversed(self._cards) if not card.isHidden()), None)
+
+    def _cancel_cards(self) -> None:
+        """Something else takes the screen (Settings, the Library, everything stopping): each
+        card over the TV still showing cancels, as its Esc does (a read on its way is
+        dropped)."""
+        for card in reversed(self._cards):
+            if not card.isHidden():
+                card.handle(Action.ESCAPE)
+            if not card.isHidden():
+                card.hide()
 
     def overlay_open(self) -> bool:
         """Whether Esc would close something first: a card over the TV (Open Link…'s),

@@ -409,6 +409,29 @@ class EntryPointTests(WindowCase):
         play.assert_called_once_with("http://cdn.example/live/channel.ts", LIVE)
         add.assert_called_once_with(ProviderLink(XTREAM, "http://panel.example", "demo", "secret"))
 
+    def test_settings_or_the_library_over_the_card_cancel_it(self):
+        """What takes the screen over the card (Settings by Ctrl/⌘+, or the app menu, the
+        Library by Ctrl/⌘+2) cancels it, as its Esc would: the keys go to what shows."""
+        self.show()
+        self.wait_for_drawer()
+        window, card = self.window, self.window.open_link_card
+        window.open_link()
+        QTest.keyClick(window, Qt.Key.Key_A)
+        self.assertEqual(card.values(), {"link": "a"})
+        window.open_settings()
+        self.assertTrue(card.isHidden())
+        self.assertTrue(window.settings.visible())
+        row = window.settings_drawer.focused_row()
+        QTest.keyClick(window, Qt.Key.Key_Down)  # Settings' own: its next row
+        self.assertNotEqual(window.settings_drawer.focused_row(), row)
+        window.settings.close()
+        window.open_link()
+        self.assertFalse(card.isHidden())
+        window.screens.open_library("movies")
+        self.assertTrue(card.isHidden())
+        window.screens.back_to_tv()
+        self.assertTrue(card.isHidden())  # not back by itself
+
 
 if __name__ == "__main__":
     unittest.main()
