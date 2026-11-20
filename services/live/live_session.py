@@ -1953,8 +1953,11 @@ class LiveSession(QObject):
         sid, self._sid = self._sid, None
         self._phase = _Phase.FALLING_BACK
         self._fallback_notice = message
-        # A buffer that was open may still count with the provider a while (one stream).
-        self._direct_retries = len(self._direct_waits) if sid is not None else 0
+        # A buffer that was open may still count with the provider a while (one stream); a
+        # link its server refused (plan 4: `once`) is tried directly once, now or later (its
+        # buffer played on what it had first).
+        retried = sid is not None and not self._link_refused()
+        self._direct_retries = len(self._direct_waits) if retried else 0
         self._paused = self._source_lost = False
         self._deferred = None
         self._after_update = self._retry = self._failing_since = None
@@ -2132,6 +2135,10 @@ class LiveSession(QObject):
             self._kept_fallback(late=True, why=self._unready_reason())
         else:
             _LOG.info("Playing the channel directly: %s.", self._unready_reason())
+            snapshot = self._snapshot()
+            silent = not _number(snapshot.get("received")) and snapshot.get("answered") is not True
+            if not self._ready_seen and silent and not self._failure[0]:
+                self._failure = ("timeout", None)  # nothing answered in time (plan 4's words)
             self._fall_back(UNAVAILABLE)
 
     def _receiving(self) -> bool:
@@ -2411,10 +2418,9 @@ class LiveSession(QObject):
             self._emit_timeline()
         else:  # at the live edge, or recovering: nothing buffered is worth keeping
             self._fall_back(LOST)
-        if status in _GONE_STATUS or (self._once and status is not None and 400 <= status < 500):
+        if status in _GONE_STATUS:
             # 2.8.12: the address is not there: its direct play is tried once, not again and
-            # again after "Reconnecting…" (a closed connection still counted is no 404); nor
-            # is a link's that its server refused (plan 4: one try again at most).
+            # again after "Reconnecting…" (a closed connection still counted is no 404).
             self._direct_retries = 0
 
     def _on_ended(self, sid: str) -> None:
@@ -2530,6 +2536,11 @@ class LiveSession(QObject):
             if self._reviving:
                 self._set_retry(0.0)  # a try opens now
             self._play_provider()
+
+    def _link_refused(self) -> bool:
+        """This tune is a link's (`once`) and its server refused its buffer (an HTTP 4xx)."""
+        status = self._failure[1]
+        return self._once and status is not None and 400 <= status < 500
 
     def failure(self) -> tuple[str, Optional[int]]:
         """How this tune's buffer input last failed for good: the helper's kind ("http",

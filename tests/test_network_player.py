@@ -12,7 +12,6 @@ import os
 from pathlib import Path
 import tempfile
 import threading
-import time
 import unittest
 from unittest import mock
 
@@ -221,7 +220,7 @@ class KeptTests(PlayerCase):
 
     def test_saves_follow_one_another_with_the_newest_state(self):
         self.loaded()
-        real, lock = ns.save, threading.Lock()
+        real, lock, disk = ns.save, threading.Lock(), threading.Event()
         writes, running, most = [], [0], [0]
 
         def slow(*args, **kwargs):  # a slow disk: the changes meanwhile wait their turn
@@ -229,7 +228,7 @@ class KeptTests(PlayerCase):
                 running[0] += 1
                 most[0] = max(most[0], running[0])
             try:
-                time.sleep(0.4)
+                disk.wait(5.0)  # held until every link played
                 writes.append(json.loads(args[1])["entries"])
                 return real(*args, **kwargs)
             finally:
@@ -240,10 +239,10 @@ class KeptTests(PlayerCase):
             for url in (URL, "http://h.example/b.ts", "http://h.example/c.ts"):
                 self.link(url)
                 self.plays_now()
-            self.assertTrue(wait_until(lambda: len(writes) >= 2 and self.jobs.pending() == 0))
+            disk.set()
+            self.assertTrue(wait_until(lambda: len(writes) == 2 and self.jobs.pending() == 0))
         self.assertEqual(most[0], 1)  # never two writes at once
-        self.assertEqual(len(writes[-1]), 3)  # the last one written holds every link
-        self.assertLess(len(writes), 3)  # the changes during a write go in the next, together
+        self.assertEqual([len(rows) for rows in writes], [1, 3])  # the rest in one, the newest
         self.assertEqual(len(json.loads(self.path.read_text())["entries"]), 3)
 
     def test_an_unreadable_file_is_set_aside_before_it_is_written(self):
@@ -268,6 +267,11 @@ class FailureTests(PlayerCase):
 
     def errors(self):
         return [text for text, kind in self.toast.messages() if kind == "error"]
+
+    def fails(self, message):
+        """VLC's failure, as PlaybackSession reports it: its state, then why."""
+        self.session.stateChanged.emit("error")
+        self.session.errorOccurred.emit(message)
 
     def test_a_refused_link_is_marked_and_not_retried_forever(self):
         # Refused by its buffer (a plain 403): kept, marked, said plainly, not asked again.
@@ -311,19 +315,46 @@ class FailureTests(PlayerCase):
         self.link(rtmp)  # no pipeline: VLC plays it directly
         self.assertEqual(self.session.plays[-1][0], rtmp)
         self.plays_now()
-        self.session.errorOccurred.emit("The stream could not be played")
+        self.fails("The stream could not be played")
         self.assertTrue(wait_until(lambda: len(self.session.plays) == 2))  # its one try again
-        self.session.errorOccurred.emit("The stream could not be played")
+        self.fails("The stream could not be played")
         pause(200)
         self.assertEqual(len(self.session.plays), 2)
         self.assertEqual(self.entry(rtmp).failed, "The link could not be opened")
+        self.link(rtmp)  # chosen again, it opens anew
+        self.assertEqual(len(self.session.plays), 3)
         # A film that does not open is kept, marked; nothing tries it again.
         self.link(FILM_URL, FILM)
-        self.session.errorOccurred.emit("The stream could not be opened")
+        self.fails("The stream could not be opened")
         pause(100)
         self.assertEqual(self.session.plays[-1][0], FILM_URL)
         self.assertEqual(self.entry(FILM_URL).failed, "The link could not be opened")
         self.assertEqual(self.entry(FILM_URL).kind, FILM)
+
+    def test_the_same_link_opens_again_after_each_failure(self):
+        # Chosen again (Open Link, ⟲ Recent), a link that failed opens anew, however it went.
+        self.link(URL)  # refused: its stream stopped
+        self.live.failure = lambda: ("http", 403)
+        self.live.failed.emit(STREAM_REFUSED)
+        self.live.released.emit()
+        self.link(URL)
+        self.assertEqual(len(self.starts()), 2)
+        self.live.play_direct()  # its direct try failed: nothing stopped it
+        self.live.failure = lambda: ("http", 401)
+        self.session.stateChanged.emit("error")
+        self.live.failed.emit("The stream could not be opened")
+        self.link(URL)
+        self.assertEqual(len(self.starts()), 3)
+        self.live.failure = lambda: ("", None)  # it played, and went down after its try
+        self.live.play_pipeline()
+        self.plays_now()
+        self.live.retrying.emit(5.0)
+        self.live.retrying.emit(30.0)
+        self.assertEqual(self.live.calls[-1], ("stop",))
+        self.live.released.emit()
+        self.link(URL)
+        self.assertEqual(len(self.starts()), 4)
+        self.assertEqual(self.starts()[-1][0], URL)
 
     def test_a_link_that_plays_again_forgets_why_it_failed(self):
         self.link(URL)
@@ -383,13 +414,13 @@ class WindowTests(WindowCase):
         # Without libVLC nothing opens: that is QiTV's, not the link's, so it is not marked.
         self.assertTrue(wait_until(lambda: window.jobs.pending() == 0))
         self.assertIsNone(window.network_streams.get(stream_id(URL)))
-        # The account's own short link is the account's stream.
+        # The account's own short link is the account's stream (handed over, not played: it
+        # would sign the account in for its guide).
         short = "http://panel.example:8080/demo/secret/12"
-        window.play_network_link(short, LIVE)
-        self.assertTrue(
-            wait_until(lambda: window.controller.now_playing().item.get("cmd") == short)
-        )
-        self.assertEqual(window.controller.now_playing().item["_provider"], "Panel")
+        with mock.patch.object(window.controller, "play_link") as play:
+            window.play_network_link(short, LIVE)
+        item, section = play.call_args.args
+        self.assertEqual((item["cmd"], item["_provider"], section), (short, "Panel", "live"))
         store_path = Path(self.config_dir) / ns.FILE_NAME
         self.assertEqual(window.network_streams.path, store_path)
 

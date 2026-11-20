@@ -7756,6 +7756,48 @@ class NightAuditSessionTests(LiveSessionCase):
         self.assertEqual(len(self.failures), 1)
         self.assertIn(RECONNECTING, self.notices)
 
+    def test_a_link_whose_buffer_ran_out_after_a_refusal_is_tried_directly_once(self):
+        # Plan 4: a link refused mid-play (its token ran out) plays on what its buffer held;
+        # once that runs out, its direct play is tried once, not three times more.
+        self.live = self.make(retry_ms=(20, 30, 40))
+        self.live.start(
+            URL,
+            headers={"User-Agent": "QiTV-Test"},
+            verify_ssl=True,
+            latency="normal",
+            user_agent="QiTV-Test",
+            disk=False,
+            max_bytes=128 * MiB,
+            revive=False,
+            once=True,
+        )
+        sid = self.engine.last_sid
+        self.engine.failure_status = lambda failed: 401 if failed == sid else None
+        self.live._failure = ("http", 401)  # as its failure left it, the buffer playing on
+        self.live._fall_back(UNAVAILABLE)  # what it held ran out
+        self.engine.answer()
+        self.assertEqual(self.playback.plays[-1], DIRECT)
+        self.playback.set_state(PlaybackState.ERROR)
+        self.playback.errorOccurred.emit("The stream could not be opened")
+        self.assertEqual(self.failures, ["The stream could not be opened"])
+        self.assertNotIn(RECONNECTING, self.notices)
+
+    def test_a_link_that_never_answers_is_said_to_have_timed_out(self):
+        self.live = self.make(ready_timeout_ms=30, ready_max_ms=60)
+        self.live.start(
+            URL,
+            headers={"User-Agent": "QiTV-Test"},
+            verify_ssl=True,
+            latency="normal",
+            user_agent="QiTV-Test",
+            disk=False,
+            max_bytes=128 * MiB,
+            revive=False,
+            once=True,
+        )
+        self.wait_until(lambda: self.live.failure() != ("", None))
+        self.assertEqual(self.live.failure(), ("timeout", None))
+
     def test_back_before_the_buffer_while_leaving_a_part_waits_for_its_close(self):
         # Review: one stream; leaving a part makes the live resume wait for its close; going
         # back before the buffer meanwhile opened the new part at once (two connections), and
