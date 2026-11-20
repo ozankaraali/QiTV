@@ -29,6 +29,7 @@ from PySide6.QtWidgets import QInputDialog, QLineEdit, QMessageBox, QWidget
 
 from services.i18n import N_, number, tr, translate
 from services.parental import Parental
+from services.provider_ids import provider_title
 from services.settings_model import (
     ACTION,
     DANGER,
@@ -267,7 +268,7 @@ class ParentalRows(QObject):
             N_("Shows it in the lists again, at once."),
             kind=ACTION,
             note=translate(SHOW_AGAIN_TEXT),
-            sub=str(entry.get("provider") or ""),
+            sub=provider_title(str(entry.get("provider") or "")),  # a link's: Network streams
             literal=True,
         )
 

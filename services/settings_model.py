@@ -382,7 +382,7 @@ def _subtitles(title: str, context: Context) -> Section:
             SIGN_OUT,
             N_("Sign out"),  # i18n: forget the OpenSubtitles username and password (it asks)
             # i18n: help under Settings → Subtitles → Sign out (it asks first)
-            N_("Clears the username and the password. Asked first."),
+            N_("Clears the username and the password."),
             kind=DANGER,
         ),
     )

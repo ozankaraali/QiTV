@@ -323,9 +323,7 @@ class SubtitlesTests(SubtitlesCase):
         self.config.opensubtitles_password = PASSWORD
         row = self.open_at(m.SUBTITLES, m.SIGN_OUT)
         self.assertEqual(row.kind, m.DANGER)
-        self.assertEqual(
-            self.drawer._help_text(row), "Clears the username and the password. Asked first."
-        )
+        self.assertEqual(self.drawer._help_text(row), "Clears the username and the password.")
         self.key(Action.NAV_ACTIVATE)
         question = self.window.subtitle_rows.question
         self.assertTrue(self.window.settings.card_shown())

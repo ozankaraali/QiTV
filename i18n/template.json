@@ -152,8 +152,7 @@
     "Clear the find": "the find box's ✕ (tooltip)",
     "Clear the image cache? Posters and logos download again as they show.": "asked by Settings' Clear Image Cache before it clears it (2.9.3)",
     "Clear {n} channel": "the one entry under \"Clear Recents\": it empties the list; {n} is how many go",
-    "Clears the username and the password.": "under \"Sign out of …?\"",
-    "Clears the username and the password. Asked first.": "help under Settings → Subtitles → Sign out (it asks first)",
+    "Clears the username and the password.": "under \"Sign out of …?\"; help under Settings → Subtitles → Sign out (it asks first)",
     "Click a programme in the guide below, or record a channel by the clock.": "the Recordings home: how to add a recording",
     "Click to try again": "on a multiview tile's card (no stream, or it failed)",
     "Close": "what a key does (verb); the pairing screen's close hint (Esc, or a click); a tooltip (verb)",
@@ -1337,7 +1336,6 @@
     "other": ""
   },
   "Clears the username and the password.": "",
-  "Clears the username and the password. Asked first.": "",
   "Click a programme in the guide below, or record a channel by the clock.": "",
   "Click to try again": "",
   "Close": "",

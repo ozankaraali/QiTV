@@ -16,6 +16,7 @@ from timer_fixtures import wait_until
 from services import settings_model as m
 from services.config_manager import ConfigManager
 from services.i18n import translate
+from services.provider_ids import NETWORK_PROVIDER
 from tests.fixtures.local_provider import PROVIDER_NAME
 from tests.test_settings_guide import GuideCase
 from ui import settings_parental as parental
@@ -277,6 +278,19 @@ class RulesTests(ParentalCase):
         self.assertTrue(self.guard.locked())
         self.assertEqual(self.drawer.path(), (m.PARENTAL,))
         self.assertEqual([h["title"] for h in self.guard.hidden()], ["News"])
+
+    def test_a_hidden_link_names_network_streams_under_it(self):
+        # A link is hidden as Network streams' (TVController._guard_view): its row names the
+        # list as the TV's drawer does, never the stamp.
+        self.with_a_pin()
+        link = {"_provider": NETWORK_PROVIDER, "id": "6ca35429d7503b1b", "name": "Harbour cam"}
+        self.guard.unlock(PIN)
+        self.guard.hide_item("live", link)
+        self.window.parental_changed()
+        self.open(parental.HIDDEN)
+        self.key(Action.NAV_ACTIVATE)
+        rows = self.drawer._right_rows()
+        self.assertEqual([(r.text, r.sub) for r in rows], [("Harbour cam", "Network streams")])
 
     def test_every_change_tells_the_window(self):
         with mock.patch.object(
