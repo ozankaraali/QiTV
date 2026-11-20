@@ -182,7 +182,7 @@ class PastWindowTests(unittest.TestCase):
 class UnreadableTimeTests(unittest.TestCase):
     """2.12: a programme whose time can't be read is left out of its channel's guide; before,
     one such entry emptied the whole guide (now and next, the banner, catch-up, and the
-    airings a series recording is due by)."""
+    airings a series recording is due by). And one written to the minute reads as written."""
 
     def manager(self, source, kind, guide):
         directory = tempfile.TemporaryDirectory()
@@ -239,6 +239,23 @@ class UnreadableTimeTests(unittest.TestCase):
         manager = self.manager("STB", "STB", guide)
         found = programmes_for_channel(manager, {"id": "7"}, now)
         self.assertEqual([p.title for p in found], ["S0", "S1", "S2"])
+
+    def test_a_guide_written_to_the_minute_shows_its_minutes(self):  # 2.12
+        # "…2030 +0000" (the XMLTV DTD allows it) showed as 20:03: 27 minutes early.
+        now = datetime.now(timezone.utc)
+        start = (now - timedelta(hours=1)).replace(minute=30, second=0, microsecond=0)
+        written = "%Y%m%d%H%M +0000"
+        guide = MultiKeyDict()
+        guide[("ch1",)] = [
+            {
+                "@start": start.strftime(written),
+                "@stop": (start + timedelta(hours=2)).strftime(written),
+                "title": "On now",
+            }
+        ]
+        manager = self.manager("URL", "M3UPLAYLIST", guide)
+        [shown] = programmes_for_channel(manager, CHANNEL, now)
+        self.assertEqual((shown.start, shown.stop), (start, start + timedelta(hours=2)))
 
 
 if __name__ == "__main__":
