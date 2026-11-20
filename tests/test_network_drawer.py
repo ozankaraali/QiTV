@@ -12,10 +12,10 @@ from unittest import mock
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
-from PySide6.QtCore import QEvent, QPoint, QPointF, Qt
-from PySide6.QtGui import QMouseEvent
+from PySide6.QtCore import QEvent, QPoint, QPointF, QRect, Qt
+from PySide6.QtGui import QColor, QImage, QMouseEvent, QPainter
 from PySide6.QtTest import QTest
-from PySide6.QtWidgets import QApplication, QWidget
+from PySide6.QtWidgets import QApplication, QStyleOptionViewItem, QWidget
 from job_fixtures import ImmediateRunner
 from mixed_fixtures import live_content
 from timer_fixtures import elapse, wait_until
@@ -41,6 +41,7 @@ from ui.find_session import DEBOUNCE_MS, FindSession
 from ui.overlays import drawer as drawer_module
 from ui.overlays.channel_rows import ChannelRowsModel
 from ui.overlays.drawer import CountRole, Drawer, SubRole
+from ui.overlays.painting import ui_units
 
 LIVE_URL = "https://cdn.example/live/harbour/index.m3u8?token=aaa"
 FILM_URL = "https://vod.example/films/lecture.mkv?token=aaa"
@@ -176,9 +177,9 @@ class RowTests(unittest.TestCase):
             drawn.append(text)
             return elided(p, text, width)
 
-        def wrapped(text, font, width):
+        def wrapped(text, font, width, *most):
             drawn.append(text)
-            return failed_lines(text, font, width)
+            return failed_lines(text, font, width, *most)
 
         with (
             mock.patch.object(drawer_module, "elided", spy),
@@ -218,6 +219,36 @@ class RowTests(unittest.TestCase):
                 self.assertEqual(view.itemDelegate().cut_text(index), "", sub)
                 self.assertGreater(view.sizeHintForRow(2), view.sizeHintForRow(0))
                 self.assertEqual(view.visualRect(index).height(), view.sizeHintForRow(2))
+
+    def test_a_failed_link_keeps_to_a_row_given_one_height(self):
+        # A list that gives every row one height (a find's cached size, a list of uniform
+        # rows): why it failed keeps to the lines its row has room for, the last elided,
+        # never painted over the row under it.
+        self.addCleanup(i18n.set_language, "en")
+        self.assertEqual(i18n.set_language("tr"), "tr")
+        self.host.resize(640, 360)
+        source = next(n for n in self.nav.children(None) if n.layer == LINKS_LAYER)
+        self.nav.open(source)
+        self.drawer.open_drawer()
+        right = self.drawer._columns["right"]
+        view, index = right.view, right.model.index(2)
+        self.assertTrue(index.data(SubRole)[1])
+        units = ui_units(view.units_width)
+        option = QStyleOptionViewItem()
+        option.rect = QRect(0, 0, 160, units.px(drawer_module.LINK_ROW_H_U))  # one line's room
+        option.widget = view
+        image = QImage(160, option.rect.height() + 60, QImage.Format.Format_ARGB32)
+        image.fill(QColor(0, 0, 0))
+        painter = QPainter(image)
+        view.itemDelegate().paint(painter, option, index)
+        painter.end()
+        below = [
+            image.pixelColor(x, y)
+            for y in range(option.rect.bottom() + 1, image.height())
+            for x in range(image.width())
+        ]
+        self.assertTrue(all(color == QColor(0, 0, 0) for color in below))
+        self.assertNotEqual(view.itemDelegate().cut_text(index), "")  # (the tooltip says it)
 
 
 class FoundLinkTests(unittest.TestCase):

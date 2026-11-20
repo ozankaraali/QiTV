@@ -244,10 +244,10 @@ def link_sub(row: LinkRow) -> tuple[str, bool]:
     return translate(LINK_STOPPED_TEXT, time=fmt_duration(row.stopped_ms)), False
 
 
-def _failed_lines(text: str, font: QFont, width: float) -> list[str]:
-    """Why a link failed last time as its row shows it: wrapped onto LINK_SUB_LINES lines at
-    most, whole but in a window too small for them."""
-    return wrap_lines(text, font, width, LINK_SUB_LINES) or ([text] if text else [])
+def _failed_lines(text: str, font: QFont, width: float, most: int = LINK_SUB_LINES) -> list[str]:
+    """Why a link failed last time as its row shows it: wrapped onto `most` lines at most
+    (LINK_SUB_LINES), whole but in a window too small for them."""
+    return wrap_lines(text, font, width, most) or ([text] if text else [])
 
 
 def _hint(what: str, keys: str) -> str:
@@ -627,8 +627,9 @@ class _SimpleRowDelegate(CutTexts, QStyledItemDelegate):
         sub_h = QFontMetricsF(sub_font).height()
         sub, warn = index.data(SubRole) or ("", False)
         p.setFont(sub_font)
-        if warn:
-            subs = _failed_lines(sub, sub_font, width)
+        if warn:  # as many lines as its row was given room for (a list of one row height)
+            room = max(1, int((rect.height() - title_h) // sub_h))
+            subs = _failed_lines(sub, sub_font, width, min(LINK_SUB_LINES, room))
         else:
             subs = [elided(p, sub, width)] if sub else []
         y = rect.y() + (rect.height() - title_h - sub_h * len(subs)) / 2
