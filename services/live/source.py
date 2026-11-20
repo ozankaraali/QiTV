@@ -775,9 +775,12 @@ class TsSource:
     endless backoff: a live channel comes back once its stream does). A provider archive's
     (2.7, `archive`) never reconnects: a new request would play its address from the start
     again, so any end ends the input; and it reads no further while `hold` says so (its pacing).
+    A link of no provider's (plan 4, `once`) has no connection counted anywhere to wait out: a
+    refused reconnect, or one answered with a recording, ends the input at once.
     """
 
     hls = False
+    _once = False  # plan 4: a link of no provider's (`open_source(once=True)`)
 
     def __init__(
         self,
@@ -789,8 +792,10 @@ class TsSource:
         capture: _Capture | None = None,
         archive: bool = False,
         hold: Callable[[], bool] | None = None,
+        once: bool = False,
     ) -> None:
         self.user_agent = http.user_agent
+        self._once = once
         http.stall_after(_TS_STALL_TIMEOUT)
         self._http = http
         self._url = url
@@ -895,6 +900,8 @@ class TsSource:
             finally:
                 http.release(response)
             yield Reconnecting()  # before the backoff: the helper says so at once
+            if self._not_live and self._once:
+                raise SourceError("http", STREAM_LIMIT)  # plan 4: a link is not asked again
             if self._not_live:
                 self._not_live = False
                 finite = False  # a recording answered: its declared length was never the channel's
@@ -914,7 +921,10 @@ class TsSource:
                 # 2.8.12: the provider answered: the reconnect schedule is for connections
                 # that fail (six recordings used it up, and the source gave up in 2 minutes).
                 backoff.reset()
-            response = http.retry(lambda: http.get(self._url), backoff, patient=True)
+            # A provider may still count the connection that broke: asked again patiently; a
+            # link of no provider's is not (plan 4: its refusal is final).
+            patient = not self._once
+            response = http.retry(lambda: http.get(self._url), backoff, patient=patient)
             if capture is not None:
                 capture.mark("reconnect")
             connected, received, reconnected = time.monotonic(), 0, True
@@ -2319,6 +2329,7 @@ def _open_http(
     hold: Callable[[], bool] | None = None,
     max_height: int = 0,
     after_seq: int | None = None,
+    once: bool = False,
 ) -> Source:
     response, prefix, content = _first_answer(http, url, on_answer)
     if content is None:
@@ -2327,7 +2338,9 @@ def _open_http(
             http.release(response)
             raise SourceError("unsupported")
         # It now owns the response.
-        return TsSource(http, url, response, prefix, capture=capture, archive=archive, hold=hold)
+        return TsSource(
+            http, url, response, prefix, capture=capture, archive=archive, hold=hold, once=once
+        )
     try:
         final = str(response.url)
     finally:
@@ -2369,6 +2382,7 @@ def open_source(
     https_first: bool = False,
     max_height: int = 0,
     after_seq: int | None = None,
+    once: bool = False,
 ) -> Source:
     """Open ``url``, sniff it, and return a TS or HLS source (``window``: a server part of
     the HLS playlist, 2.7, `HlsSource`; raw TS then is unsupported, but for a provider
@@ -2413,7 +2427,9 @@ def open_source(
     ``max_height`` (2.8, the live ⚙): an HLS master plays its best variant of at most that
     many lines (`_within`); 0 its best. The source's ``heights`` are the master's sizes.
     ``after_seq`` (2.8): a live HLS playlist's run starts after that media sequence, the last
-    of the run it joins, when it lists what follows (`HlsSource._start`).
+    of the run it joins, when it lists what follows (`HlsSource._start`). ``once`` (plan 4): a
+    link of Network streams no provider owns: its raw-TS reconnect, refused or answered with a
+    recording, is never asked again (`TsSource`).
     """
     try:
         scheme = _scheme(url)
@@ -2437,6 +2453,7 @@ def open_source(
         hold=hold,
         max_height=max_height,
         after_seq=after_seq,
+        once=once,
     )
     host = _host_key(url)
     if https_first and scheme == "http" and host not in _HTTPS_FAILED:
@@ -2505,6 +2522,7 @@ def _open_url(
     max_height: int = 0,
     after_seq: int | None = None,
     connect_timeout: float = _TIMEOUT,
+    once: bool = False,
 ) -> Source:
     """`open_source`'s open of one address (its connect timeout `connect_timeout`)."""
     http = _Http(headers, verify_ssl, stop)
@@ -2523,6 +2541,7 @@ def _open_url(
             hold,
             max_height,
             after_seq,
+            once,
         )
     except Exception as error:
         failure = SourceError("network", _STOPPED) if http.closed else _translate(error)

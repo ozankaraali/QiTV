@@ -133,9 +133,14 @@ class NetworkPlayer(QObject):
     def _on_read(self, _context: object, data: object) -> None:
         if not isValid(self):
             return
-        if isinstance(data, bytes) and not self.store.merge(data):
-            self._set_aside = True  # what the file held is kept beside it
-        self._read_done()
+        try:
+            if isinstance(data, bytes) and not self.store.merge(data):
+                self._set_aside = True  # what the file held is kept beside it
+        except Exception as e:
+            logger.warning("The kept network streams could not be read (%s)", type(e).__name__)
+            self._set_aside = True  # kept beside the new one, never written over
+        finally:
+            self._read_done()  # read or not, what plays from now on is kept
 
     def _on_read_failed(self, _context: object, _message: str) -> None:
         if isValid(self):
@@ -158,12 +163,23 @@ class NetworkPlayer(QObject):
         self._writing = True
         aside, self._set_aside = self._set_aside, False
         job = _WriteJob(self.store.path, self.store.save_bytes(), aside)
-        self._jobs.run_worker(job, self._on_written, self._on_written)
+        self._jobs.run_worker(job, self._on_written, self._on_write_failed, context=aside)
 
     def _on_written(self, _context: object, _payload: object) -> None:
         if not isValid(self):
             return
         self._writing = False
+        if self._dirty:
+            self._save()
+
+    def _on_write_failed(self, aside: object, _message: str) -> None:
+        """The write failed (logged): an unreadable file it was to set aside still is, and the
+        next change writes everything (never at once again: a disk that fails stays quiet)."""
+        if not isValid(self):
+            return
+        self._writing = False
+        if aside:
+            self._set_aside = True
         if self._dirty:
             self._save()
 

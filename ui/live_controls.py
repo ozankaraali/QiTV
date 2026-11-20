@@ -69,6 +69,7 @@ from services.live.tuning import channel_key
 from services.network_streams import DOWN, failure_reason
 from services.playback import PlaybackState
 from services.provider_api import known_http_only, portal_http_only
+from services.provider_ids import NETWORK_PROVIDER
 from services.revive import revive_wait
 from services.vlc_profile import PlayKind
 from ui import item_provider
@@ -614,9 +615,12 @@ class LiveControls(QObject):
         plain = kind == "XTREAM" or portal_http_only(provider)  # its sign-in found no HTTPS
         https = not known_http_only(url) and not (plain and url.startswith("http://"))
         # An STB portal's channel that fails gets a fresh link (`relink`), never the old again;
-        # a link of Network streams is tried again once (`once`), by the player's own retry.
+        # a link of Network streams is tried again once, by the player's own retry. One no
+        # configured provider owns (`once`) has nothing counted anywhere to wait out; one of
+        # an account keeps that provider's patience with a refusal.
         link = self._link(target.item)
         revive = kind != "STB" and not link
+        once = link and item_provider.provider_name(self.catalog, target.item) == NETWORK_PROVIDER
         return LiveStart(
             url,
             user_agent,
@@ -626,7 +630,7 @@ class LiveControls(QObject):
             https,
             target.max_height,
             revive,
-            once=link,
+            once=once,
         )
 
     def pipeline_live(self) -> bool:

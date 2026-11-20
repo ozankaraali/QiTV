@@ -462,6 +462,16 @@ class ParkResumeTests(unittest.TestCase):
         engine.open_session(URL_FOR_RING, headers={}, verify_ssl=True, disk=False, max_bytes=MIB)
         self.assertEqual(len(commands.get_nowait()), 7)  # without it, as before
 
+    def test_a_links_once_reaches_the_helper_on_an_open_and_a_resume(self):
+        # Plan 4: a link no provider owns: its source asks a refused reconnect no more.
+        engine, commands = self.engine()
+        sid = engine.open_session(
+            URL_FOR_RING, headers={}, verify_ssl=True, disk=False, max_bytes=MIB, once=True
+        )
+        self.assertEqual(commands.get_nowait()[7], {"once": True})
+        engine.resume_session(sid, URL_FOR_RING, headers={}, verify_ssl=True, once=True)
+        self.assertEqual(commands.get_nowait()[5:], (6.0, {"once": True}))
+
     def test_a_size_cap_reaches_the_helper_on_an_open_and_a_resume(self):
         # 2.8, the live ⚙: the user's cap for an HLS master's variants.
         engine, commands = self.engine()

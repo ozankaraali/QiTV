@@ -161,9 +161,9 @@ def read_bytes(path: Path) -> Optional[bytes]:
 def save(path: Path, data: bytes, *, set_aside: bool = False) -> None:
     """Write the store's `data` to `path` (blocking: a worker's). `set_aside`: the file there
     could not be read; it is moved beside it first ("<name>.broken-<time>"), so nothing in it
-    is lost."""
-    if set_aside and os.path.exists(path):
-        set_file_aside(str(path))
+    is lost. One that cannot be moved is never written over: OSError."""
+    if set_aside and os.path.exists(path) and set_file_aside(str(path)) is None:
+        raise OSError("the unreadable network streams file could not be set aside")
     write(path, data)
 
 
@@ -178,7 +178,7 @@ def _entry(row: Any) -> Optional[Entry]:
         return None
     try:
         opened = float(row.get("opened") or 0.0)
-    except TypeError, ValueError:
+    except TypeError, ValueError, OverflowError:  # (an integer too large for a time)
         opened = 0.0
     name, failed = row.get("name"), row.get("failed")
     return Entry(
@@ -221,7 +221,7 @@ class NetworkStreams:
         try:
             doc = json.loads(data)
             rows = doc["entries"]
-        except ValueError, TypeError, KeyError:
+        except ValueError, TypeError, KeyError, RecursionError:
             rows = None
         if not isinstance(rows, list):
             logger.warning("Network streams file unreadable: starting empty")
@@ -229,7 +229,11 @@ class NetworkStreams:
             return False
         self.broken = False
         for row in rows:
-            entry = _entry(row)
+            try:
+                entry = _entry(row)
+            except Exception as e:  # a row of another kind: left out, the others read
+                logger.info("A network stream row could not be read (%s)", type(e).__name__)
+                entry = None
             if entry is not None:
                 self._entries[entry.id] = entry
         if len(self._entries) < len(rows):
@@ -240,12 +244,15 @@ class NetworkStreams:
         """`load` the file's `data`, read after links played: what was kept meanwhile stays
         (its address, kind and times), under the name the file gave it."""
         since = self._entries
-        loaded = self.load(data)
-        for key, entry in since.items():
-            stored = self._entries.get(key)
-            if stored is not None:
-                entry.name = stored.name or entry.name
-            self._entries[key] = entry
+        loaded = False
+        try:
+            loaded = self.load(data)
+        finally:  # what played meanwhile is never lost, whatever the file held
+            for key, entry in since.items():
+                stored = self._entries.get(key)
+                if stored is not None:
+                    entry.name = stored.name or entry.name
+                self._entries[key] = entry
         return loaded
 
     def save_bytes(self) -> bytes:

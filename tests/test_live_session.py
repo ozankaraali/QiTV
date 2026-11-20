@@ -7735,6 +7735,7 @@ class NightAuditSessionTests(LiveSessionCase):
             once=True,
         )
         sid = self.engine.last_sid
+        self.assertTrue(self.engine.opened[-1][2]["once"])  # its source asks no more either
         self.assertEqual(self.live.failure(), ("", None))
         self.engine.failure_status = lambda failed: 401 if failed == sid else None
         self.engine.sessionFailed.emit(sid, "http", "The channel could not be reached over HTTP.")
@@ -7755,6 +7756,30 @@ class NightAuditSessionTests(LiveSessionCase):
         self.playback.errorOccurred.emit("The stream could not be opened")
         self.assertEqual(len(self.failures), 1)
         self.assertIn(RECONNECTING, self.notices)
+
+    def test_a_link_whose_buffer_failed_otherwise_is_tried_directly_once_too(self):
+        # Nothing counts a link no provider owns: no failure of its buffer earns the quick
+        # tries a provider's closed connection is waited out with.
+        self.live = self.make(retry_ms=(20, 30, 40))
+        self.live.start(
+            URL,
+            headers={"User-Agent": "QiTV-Test"},
+            verify_ssl=True,
+            latency="normal",
+            user_agent="QiTV-Test",
+            disk=False,
+            max_bytes=128 * MiB,
+            revive=False,
+            once=True,
+        )
+        sid = self.engine.last_sid
+        self.engine.sessionFailed.emit(sid, "network", "The channel could not be reached.")
+        self.engine.answer()
+        self.assertEqual(self.playback.plays[-1], DIRECT)
+        self.playback.set_state(PlaybackState.ERROR)
+        self.playback.errorOccurred.emit("The stream could not be opened")
+        self.assertEqual(self.failures, ["The stream could not be opened"])
+        self.assertNotIn(RECONNECTING, self.notices)
 
     def test_a_link_whose_buffer_ran_out_after_a_refusal_is_tried_directly_once(self):
         # Plan 4: a link refused mid-play (its token ran out) plays on what its buffer held;

@@ -936,6 +936,7 @@ class _Session:
                 hold=self._hold if isinstance(window, dict) and "ahead_s" in window else None,
                 https_first=self._start.get("https") is True,
                 max_height=_lines(self._start.get("max_height")),
+                once=self._start.get("once") is True,  # plan 4: a link of no provider's
                 after_seq=self._join_after,
             )
         except SourceError as error:

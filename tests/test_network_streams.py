@@ -5,6 +5,7 @@ import os
 from pathlib import Path
 import tempfile
 import unittest
+from unittest import mock
 
 from services import network_streams as ns
 from services.network_streams import NetworkStreams, stream_id
@@ -103,6 +104,23 @@ class StoreTests(unittest.TestCase):
         self.assertEqual(store.get("b").opened, 0.0)  # never a time that is no number
         self.assertEqual(store.get("c").opened, 0.0)
         self.assertFalse(store.broken)
+
+    def test_a_time_too_large_for_a_number_reads_as_never(self):
+        rows = [
+            {"id": "a", "url": "http://h.example/a.ts", "opened": 10**400},
+            {"id": "b", "url": "http://h.example/b.ts", "opened": 5.0},
+        ]
+        store = NetworkStreams(self.path)
+        self.assertTrue(store.load(json.dumps({"v": 1, "entries": rows}).encode()))
+        self.assertEqual([(e.id, e.opened) for e in store.entries()], [("b", 5.0), ("a", 0.0)])
+        self.assertTrue(store.merge(b'{"v": 1, "entries": [[[[[]]]]]}'))  # never raises
+
+    def test_a_file_that_cannot_be_set_aside_is_never_written_over(self):
+        self.path.write_text("{not json", encoding="utf-8")
+        with mock.patch.object(ns, "set_file_aside", return_value=None):
+            with self.assertRaises(OSError):
+                ns.save(self.path, b'{"v": 1, "entries": []}', set_aside=True)
+        self.assertEqual(self.path.read_text(), "{not json")
 
     def test_an_odd_kind_or_time_is_kept_plainly(self):
         store = NetworkStreams(self.path)

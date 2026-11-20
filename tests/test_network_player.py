@@ -143,6 +143,9 @@ class LivePlayTests(PlayerCase):
             with self.subTest(url):
                 self.link(url)
                 self.assertEqual(self.controller.now_playing().item["_provider"], owner)
+                # Only a link no provider owns refuses patience (an account's keeps it).
+                once = self.starts()[-1][1].get("once", False)
+                self.assertEqual(once, owner == NETWORK_PROVIDER)
                 self.assertTrue(wait_until(lambda: self.budget.holders(owner) == ["main"]))
                 others = {"Harbor IPTV", NETWORK_PROVIDER} - {owner}
                 self.assertEqual([self.budget.holders(o) for o in others], [[]])
@@ -244,6 +247,48 @@ class KeptTests(PlayerCase):
         self.assertEqual(most[0], 1)  # never two writes at once
         self.assertEqual([len(rows) for rows in writes], [1, 3])  # the rest in one, the newest
         self.assertEqual(len(json.loads(self.path.read_text())["entries"]), 3)
+
+    def test_a_file_with_a_time_too_large_is_still_read_and_saved(self):
+        # Review: a huge number in `opened` raised out of the read: nothing was saved all run.
+        row = '{"id": "x", "name": "X", "url": "http://h.example/x.ts", "opened": %s}' % ("9" * 400)
+        self.path.write_text('{"v": 1, "entries": [%s]}' % row, encoding="utf-8")
+        self.loaded()
+        self.link(URL)
+        self.plays_now()
+        self.assertTrue(wait_until(lambda: len(self.rows()) == 2 and self.jobs.pending() == 0))
+        self.assertEqual(self.store.get("x").opened, 0.0)
+
+    def test_a_read_that_fails_keeps_what_plays_beside_the_file(self):
+        self.path.write_text('{"v": 1, "entries": []}', encoding="utf-8")
+        with mock.patch.object(self.store, "merge", side_effect=RuntimeError):
+            self.loaded()  # read or not, the store is ready
+        self.link(URL)
+        self.plays_now()
+        self.assertTrue(wait_until(lambda: len(self.rows()) == 1 and self.jobs.pending() == 0))
+        self.assertEqual([p.read_text() for p in self.aside()], ['{"v": 1, "entries": []}'])
+
+    def test_a_file_that_cannot_be_set_aside_is_never_written_over(self):
+        self.path.write_text("{not json", encoding="utf-8")
+        self.loaded()
+        with mock.patch.object(ns, "set_file_aside", return_value=None) as aside:
+            self.link(URL)
+            self.plays_now()
+            self.assertTrue(wait_until(lambda: aside.called and self.jobs.pending() == 0))
+        self.assertEqual(self.path.read_text(), "{not json")  # left as it was
+        self.link("http://h.example/b.ts")  # the next change: set aside now, then written
+        self.plays_now()
+        self.assertTrue(wait_until(lambda: self.aside() and self.jobs.pending() == 0))
+        self.assertEqual([p.read_text() for p in self.aside()], ["{not json"])
+        self.assertEqual(len(self.rows()), 2)
+
+    def rows(self):
+        try:
+            return json.loads(self.path.read_text())["entries"]
+        except ValueError, KeyError:
+            return []
+
+    def aside(self):
+        return [p for p in self.path.parent.iterdir() if ".broken-" in p.name]
 
     def test_an_unreadable_file_is_set_aside_before_it_is_written(self):
         self.path.write_text("{not json", encoding="utf-8")

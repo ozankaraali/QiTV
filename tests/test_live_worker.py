@@ -1800,6 +1800,27 @@ class HttpsFirstTests(unittest.TestCase):
         self.assertEqual(upstream.connections, 2)  # the HTTPS attempt, then HTTP
 
 
+class LinkOnceTests(unittest.TestCase):
+    def test_a_links_start_reaches_its_source(self):
+        # Plan 4: the start's "once" reaches open_source (a refused reconnect is final).
+        seen = []
+        real = source_module.open_source
+
+        def opened(url, **kwargs):
+            seen.append(kwargs.get("once"))
+            return real(url, **kwargs)
+
+        body = make_stream(4)
+        upstream = LocalSource({SECRET_PATH: (200, {"Content-Length": str(len(body))}, body)})
+        self.addCleanup(upstream.close)
+        with patch.object(source_module, "open_source", opened):
+            helper = InProcessHelper(self)
+            url = upstream.url + SECRET_PATH
+            helper.parent.send(("open", "p", url, {}, True, RAM, 6.0, {"once": True}))
+            helper.wait_for(lambda m: m == ("ready", "p"))
+        self.assertEqual(seen, [True])
+
+
 class ArchivePartTests(unittest.TestCase):
     def test_an_archive_part_ends_at_the_buffers_time_of_day(self):
         # 2.7: a provider archive (raw TS: no media sequence to share) ends its input once
