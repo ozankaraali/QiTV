@@ -863,10 +863,17 @@ class CatalogService(QObject):
         return self._usable(content) and not self.provider_manager.is_content_stale(ct)
 
     def at_hand(self, section: str) -> bool:
-        """Whether the list of `section` shows at once (2.13.1): the provider is set up (no
-        setup runs or waits) and asking for it loads nothing, as request_section answers from
-        the saved list; a provider without the section has none to load."""
-        if self._closed or self._setup_active() or self._ready_provider is None:
+        """Whether the list of `section` shows at once (2.13.1): the provider is set up (its
+        setup's worker done, though its result may still wait for the event loop; none waits
+        behind it) and asking for it loads nothing, as request_section answers from the saved
+        list; a provider without the section has none to load."""
+        if self._closed or self._pending_setup is not None:
+            return False
+        if self._state_job == "provider":
+            end = self.setup_end()
+            if end is None or end[0] != "ready":
+                return False  # still setting up, or it failed
+        elif self._ready_provider is None:
             return False
         if section not in self.sections():
             return True

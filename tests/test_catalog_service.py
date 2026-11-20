@@ -727,6 +727,29 @@ class AtHandTests(unittest.TestCase):
         runner.complete(0)
         self.assertTrue(service.at_hand("live"))
 
+    def test_a_setup_done_whose_result_waits_for_the_event_loop_is_at_hand(self):
+        # main() builds the window with no event loop: the worker is done, its result queued.
+        runner = ManualRunner()
+        service, providers = self.ready_service(runner=runner)
+        providers.current_provider_content["itv"] = XTREAM_PAYLOAD
+        service.select_provider()
+        runner.jobs[0][0].run()  # the worker ends; the catalog has not heard it yet
+        self.assertTrue(service.is_loading())
+        self.assertTrue(service.at_hand("live"))
+        service.select_provider()  # another setup waits behind it: nothing is at hand
+        self.assertFalse(service.at_hand("live"))
+
+    def test_a_setup_that_failed_has_nothing_at_hand(self):
+        runner = ManualRunner()
+        service, providers = self.ready_service(runner=runner)
+        service.factory.results["provider_setup"] = {"fail": "Timed out"}
+        providers.current_provider_content["itv"] = XTREAM_PAYLOAD
+        service.select_provider()
+        runner.jobs[0][0].run()
+        self.assertFalse(service.at_hand("live"))
+        runner.complete(0)
+        self.assertFalse(service.at_hand("live"))
+
     def test_a_server_without_channels_has_none_to_load(self):
         service, _ = self.ready_service(ptype="JELLYFIN")
         service.select_provider()

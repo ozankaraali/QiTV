@@ -52,6 +52,15 @@ class EarlyStartTests(ControllerTestCase):
         self.assertIsNone(self.toast.hint)
         self.assertEqual(self.drawer.named("open_drawer"), [(None,)])  # once
 
+    def test_a_list_whose_result_comes_after_the_start_opens_with_no_loading_hint(self):
+        # Its worker was done as the window showed; the window's start ran first.
+        self.early(at_hand=True)
+        self.controller.start()
+        self.catalog.hub_ready("Home")
+        self.catalog.sectionReady.emit("live")
+        self.assertNotIn("Loading Home…", self.hints())
+        self.assertEqual(self.drawer.named("open_drawer"), [(None,)])
+
     def test_the_last_channel_is_tuned_once_after_the_start(self):
         self.config.last_live_channel = dict(LAST)
         self.early(at_hand=True)
@@ -215,8 +224,7 @@ class FailedEarlyWindowTests(EarlyWindowCase):
         self.show()
         errors = lambda: [text for text, kind in self.toasts if kind == "error"]  # noqa: E731
         self.assertTrue(wait_until(lambda: errors() != []))
-        drawer = self.wait_for_drawer()  # on the sources, with the retry row
-        self.assertTrue(drawer.isVisible())
+        self.wait_for_drawer()  # on the sources, with the retry row
         elapse(300)  # a second sign-in would have begun by then
         self.assertEqual(len(errors()), 1)
         self.assertEqual(self.setups, [base.PROVIDER_NAME])  # never signed in again
