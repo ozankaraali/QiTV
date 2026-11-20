@@ -1256,12 +1256,18 @@ _UNSAFE = re.compile(r'[<>:"/\\|?*\x00-\x1f]')
 _RESERVED = frozenset(
     ["CON", "PRN", "AUX", "NUL"] + [f"{name}{n}" for name in ("COM", "LPT") for n in range(1, 10)]
 )
+# A name's UTF-8 bytes at most (2.12; 120 characters were up to 360): with ".srt" and
+# atomic_write's temporary name (".<stem>-xxxxxxxx.tmp", 14 bytes more) it stays under the
+# 255 bytes file systems allow.
+_NAME_BYTES = 200
 
 
 def safe_file_name(name: str, fallback: str) -> str:
-    """A file name safe on every system, with a subtitle extension (.srt unless it has one)."""
+    """A file name safe on every system, with a subtitle extension (.srt unless it has one):
+    at most 120 characters and _NAME_BYTES bytes of UTF-8 (cut between characters)."""
     clean = _UNSAFE.sub(" ", os.path.basename(str(name or "").replace("\\", "/")))
-    clean = " ".join(clean.split()).strip(" .")[:120].strip(" .")
+    clean = " ".join(clean.split()).strip(" .")[:120]
+    clean = clean.encode("utf-8")[:_NAME_BYTES].decode("utf-8", "ignore").strip(" .")
     if not clean:
         clean = fallback
     if clean.split(".")[0].strip().upper() in _RESERVED:  # Windows' device names

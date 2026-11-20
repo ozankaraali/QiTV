@@ -476,6 +476,19 @@ class FoundTests(unittest.TestCase):
         self.assertEqual(safe_file_name("COM1.en.srt", "1.srt"), "_COM1.en.srt")
         self.assertEqual(safe_file_name("Console.srt", "1.srt"), "Console.srt")
 
+    def test_a_long_name_in_any_script_can_be_saved(self):  # 2.12
+        # The cut was 120 characters: 90 CJK ones (270 bytes) made the file, or its temporary
+        # one, longer than the 255 bytes file systems allow, after the download was counted.
+        self.assertEqual(safe_file_name("a" * 150 + ".srt", "1.srt"), "a" * 120 + ".srt")
+        with tempfile.TemporaryDirectory() as folder:
+            for name in ("字" * 90 + ".srt", "Ж" * 119 + ".srt", "字" * 300, "a" * 300):
+                with self.subTest(name=name[:3]):
+                    path = opensubtitles.subtitle_path(folder, 7, name)
+                    opensubtitles.save_subtitle(path, b"1\n00:00:01,000 --> 00:00:02,000\nHi\n")
+                    self.assertTrue(os.path.isfile(path))
+                    self.assertLessEqual(len(os.path.basename(path).encode("utf-8")), 204)
+                    self.assertTrue(path.endswith(".srt"))
+
 
 class KeyTests(unittest.TestCase):
     def test_the_users_key_else_the_builds(self):
