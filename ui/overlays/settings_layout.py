@@ -3,10 +3,10 @@ two columns and the areas their lines scroll in, the breadcrumb, and each line's
 
 A line has its title, wrapped onto a second line when it does not fit on one, and under it a
 row's muted sub line ("Xtream · in use"); at its right end, by the row's kind, a stepper's
-‹ value ›, a text row's value (the field it is edited in, while it is, with its Paste at the
-field's end), an info row's value or a row's note ("answered 2 min ago"), and the › of a row
-that opens; under a focused row, its help. Geometry only: the overlay keeps the state and
-paints.
+‹ value › (a value too wide for its room wraps onto a second line too), a text row's value
+(the field it is edited in, while it is, with its Paste at the field's end), an info row's
+value or a row's note ("answered 2 min ago"), and the › of a row that opens; under a focused
+row, its help. Geometry only: the overlay keeps the state and paints.
 """
 
 from __future__ import annotations
@@ -50,6 +50,7 @@ HELP_FONT_U = 1.05
 HELP_LINES = 2
 HELP_PAD_U = 0.8  # under the help
 TITLE_LINES = 2  # a long title wraps, its line growing; beyond this it elides (small windows)
+VALUE_LINES = 2  # so does a stepper's value too wide for its room
 STEP_U = 1.8  # a stepper's ‹ and › (the panels')
 STEP_GAP_U = 0.6
 TITLE_GAP_U = 0.8  # between a row's title and what is at its right end
@@ -92,6 +93,7 @@ class Box:
     less: QRectF = field(default_factory=QRectF)  # a stepper's ‹, value and ›
     value: QRectF = field(default_factory=QRectF)
     more: QRectF = field(default_factory=QRectF)
+    values: list[str] = field(default_factory=list)  # a stepper's value as shown, a line each
     end: QRectF = field(default_factory=QRectF)  # a text or info row's value, a note, a field
     chevron: QRectF = field(default_factory=QRectF)  # a row that opens: ›
     # While its text is edited: its field (in `end`), and the field's Paste at the end of `end`.
@@ -206,13 +208,16 @@ def help_height(lines: list[str], un: Units) -> float:
 
 def steps_width(
     un: Units, room: float, title: str, value: str, choices: Sequence[str]
-) -> tuple[float, float, float]:
-    """A stepper's ‹ value › at the end of `room`: (its width, ‹'s and ›'s, the gaps).
-    The value is as wide as its widest choice, so that it keeps its place while stepping,
-    when that fits beside the title on one line; else as wide as the value shown, when
-    that does. Else the title wraps and the value keeps its widest width within
-    VALUE_SHARE of the row, or what the title leaves (at least that share), eliding."""
-    fm = QFontMetricsF(un.font(VALUE_FONT_U))
+) -> tuple[float, float, float, list[str]]:
+    """A stepper's ‹ value › at the end of `room`: (its width, ‹'s and ›'s, the gaps, the
+    value's lines). The value is as wide as its widest choice, so that it keeps its place
+    while stepping, when that fits beside the title on one line; else as wide as the value
+    shown, when that does. Else the title wraps and the value keeps its widest width within
+    VALUE_SHARE of the row, or what the title leaves (at least that share); a value wider
+    than that wraps there, as a title does ("Auf einem / 4K-Bildschirm"), onto VALUE_LINES
+    lines at most, the last elided, and is as wide as its widest line."""
+    font = un.font(VALUE_FONT_U)
+    fm = QFontMetricsF(font)
     step = max(float(un.px(STEP_U)), fm.height())  # the font stops at a floor, u does not
     gap = float(un.px(STEP_GAP_U))
     shown = fm.horizontalAdvance(value)
@@ -222,12 +227,16 @@ def steps_width(
     left_over = room - TITLE_GAP_U * un.u - title_w
     share = room * VALUE_SHARE
     if least + widest <= left_over:
-        return least + widest, step, gap
+        return least + widest, step, gap, [value]
     if least + shown <= left_over:
-        return least + shown, step, gap
+        return least + shown, step, gap, [value]
     if least + widest <= share:
-        return least + widest, step, gap
-    return min(least + shown, max(least, left_over, share)), step, gap
+        return least + widest, step, gap, [value]
+    most = max(least, left_over, share) - least  # the value's room
+    lines = wrap(value, font, most, VALUE_LINES) if shown > most else []
+    if not lines:  # it fits (or there is no room at all: it elides)
+        return least + min(shown, most), step, gap, [value]
+    return least + max(fm.horizontalAdvance(line) for line in lines), step, gap, lines
 
 
 def tail_width(un: Units, room: float, title: str, text: str, editing: bool) -> float:
@@ -275,9 +284,10 @@ def place(
     chevron = float(un.px(STEP_ICON_U))
     end = right  # where the title's room ends
     steps_w, step, gap = 0.0, 0.0, 0.0
+    values: list[str] = []  # a stepper's value, a line each
     tail_right, tail_w = right, 0.0  # a value or a note: its right edge, its width
     if row is not None and kind == STEP:
-        steps_w, step, gap = steps_width(un, right - x, title, value, choices)
+        steps_w, step, gap, values = steps_width(un, right - x, title, value, choices)
         end = right - steps_w - title_gap
     elif row is not None and kind:
         if kind == OPENS:
@@ -297,9 +307,15 @@ def place(
             " ".join(row.sub.split()), Qt.TextElideMode.ElideRight, title_w
         )
         sub_h = QFontMetricsF(sub_font).lineSpacing()
-    line_h = float(un.px(ROW_H_U)) + max(0, len(titles) - 1) * spacing + sub_h
+    # The line grows with the taller of its title (and sub line) and its value's lines.
+    grown = max(0, len(titles) - 1) * spacing + sub_h
+    if len(values) > 1:
+        value_spacing = QFontMetricsF(un.font(VALUE_FONT_U)).lineSpacing()
+        grown = max(grown, (len(values) - 1) * value_spacing)
+    line_h = float(un.px(ROW_H_U)) + grown
     middle = line_h / 2
     box = Box(QRectF(), QRectF(area.x(), 0, area.width(), line_h), QRectF(), titles, sub)
+    box.values = values
     box.title = QRectF(x, 0, title_w, line_h)
     if icons:
         box.icon = QRectF(icon_x, middle - icon_size / 2, icon_size, icon_size)
