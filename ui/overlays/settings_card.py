@@ -19,9 +19,10 @@ before its rows), and every key is the card's while it shows, but the sound's an
 (at the text's end, → goes on to its Paste), or go between the buttons; typing, Backspace,
 Delete, Home/End and Ctrl/⌘ + A, C, X and V work in the focused field (ui/text_edit.py);
 Enter presses the focused button, or the accent one from a field; Esc cancels. A click focuses
-or presses, and a click on the dimmed picture (or the mouse's Back) cancels. Off a field,
-Backspace is a ChoiceCard's Cancel and does nothing on a FormCard, so that a stray key never
-throws away what was typed.
+or presses, and a click on the dimmed picture (or the mouse's Back) cancels. On a button or an
+alternate, Backspace (the phone's "previous" too) is Back, which in a card is Cancel; in a
+field it deletes and never cancels. A mouse press that hides the card swallows a
+double-click's second press, which would land on what is behind it (ui.pointer).
 
 The button keyed CANCEL ("cancel") is the card's Cancel and is never disabled: on a FormCard
 it does what Esc does (`cancelled`, never `pressed("cancel")`); a ChoiceCard answers "cancel"
@@ -60,6 +61,7 @@ from services.i18n import N_, translate
 from ui.keymap import Action, key_hint
 from ui.overlays.base import Overlay, announce
 from ui.overlays.painting import Units, fill_round, ui_units
+from ui.pointer import SecondClickGuard
 from ui.text_edit import (
     CARET_W,
     SELECTION_ALPHA,
@@ -115,6 +117,8 @@ FOUND, BUSY, RULE, LEAD = ("found", ""), ("busy", ""), ("rule", ""), ("lead", ""
 _FOOTER = frozenset({"button", "busy", "rule", "lead", "alt"})  # stays in a small window
 _MIDDLE = frozenset({"body", "label", "field", "paste", "found"})  # cut in a small window
 _HITS = ("paste", "field", "label", "button", "alt")
+# Words that wrap (the question's, the found line's), from the top left.
+_WRAP = int(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignTop | Qt.TextFlag.TextWordWrap)
 
 # Keys that never wait for the card: the sound and the window (as the question card's).
 _THROUGH = frozenset(
@@ -207,6 +211,7 @@ class _Card(Overlay):
         self._last_alt = ""
         self._hover: Optional[tuple[str, str]] = None
         self._drag = Dragging()
+        self._second_click = SecondClickGuard(self)
         if parent is not None:
             parent.installEventFilter(self)
         self.hide()
@@ -220,7 +225,7 @@ class _Card(Overlay):
         raise NotImplementedError
 
     def _back(self) -> None:
-        """Backspace off a field (and the player's Back)."""
+        """Backspace off a field, or the player's Back (PREVIOUS, in a field too)."""
 
     # ---- what it holds (the caller, tests) --------------------------------------------------
 
@@ -553,11 +558,9 @@ class _Card(Overlay):
         if self._body or self._fields or self._found:
             y += gap(_TITLE_GAP_U)
         if self._body:
-            flags = int(Qt.AlignmentFlag.AlignLeft | Qt.TextFlag.TextWordWrap)
-            bound = QFontMetricsF(fonts["body"]).boundingRect(
-                QRectF(0, 0, inner, 100_000), flags, self._body
+            rects[BODY] = QRectF(
+                left, y, inner, self._wrapped_height(fonts["body"], self._body, inner)
             )
-            rects[BODY] = QRectF(left, y, inner, math.ceil(bound.height()))
             y += rects[BODY].height()
         label_w = self._label_width(un, fonts, inner)
         field_h = max(float(un.px(_FIELD_H_U)), _line_h(fonts["field"]) + 2 * un.px(_TEXT_PAD_U))
@@ -579,15 +582,16 @@ class _Card(Overlay):
             y += field_h
             if index == 0 and self._found:  # what the first field (the link) was found to be
                 y += gap(_FOUND_GAP_U)
-                rects[FOUND] = QRectF(
-                    left + label_w, y, max(0.0, inner - label_w), _line_h(fonts["found"])
-                )
-                y += rects[FOUND].height()
+                found_w = max(1.0, inner - label_w)
+                found_h = self._wrapped_height(fonts["found"], self._found, found_w)
+                rects[FOUND] = QRectF(left + label_w, y, found_w, found_h)
+                y += found_h
         if self._found and not self._fields:
             if self._body:
                 y += gap(_ROW_GAP_U)
-            rects[FOUND] = QRectF(left, y, inner, _line_h(fonts["found"]))
-            y += rects[FOUND].height()
+            found_h = self._wrapped_height(fonts["found"], self._found, inner)
+            rects[FOUND] = QRectF(left, y, inner, found_h)
+            y += found_h
         y += gap(_FOOT_GAP_U)
         footer = y
         rects[MIDDLE] = QRectF(0, middle_top, width, footer - middle_top)
@@ -596,6 +600,12 @@ class _Card(Overlay):
         y += gap(_PAD_Y_U)
         rects[PANEL] = QRectF(0, 0, width, y)
         return rects, footer
+
+    @staticmethod
+    def _wrapped_height(font: QFont, text: str, width: float) -> float:
+        """How tall `text` is wrapped to `width` (its own line breaks kept), one line at least."""
+        bound = QFontMetricsF(font).boundingRect(QRectF(0, 0, width, 100_000), _WRAP, text)
+        return max(_line_h(font), float(math.ceil(bound.height())))
 
     def _label_width(self, un: Units, fonts: dict[str, QFont], inner: float) -> float:
         """The labels' column: the widest label's, at least 9 u, at most 40% of the card."""
@@ -717,10 +727,7 @@ class _Card(Overlay):
         if BODY in rects:
             p.setFont(fonts["body"])
             p.setPen(qcolor(PALETTE.text, 0.8))
-            flags = int(
-                Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignTop | Qt.TextFlag.TextWordWrap
-            )
-            p.drawText(rects[BODY], flags, self._body)
+            p.drawText(rects[BODY], _WRAP, self._body)
         for f in self._fields:
             label = rects[("label", f.key)]
             p.setFont(fonts["label"])
@@ -738,11 +745,10 @@ class _Card(Overlay):
                     hovered=self._hover == ("paste", f.key),
                     enabled=not self._busy,
                 )
-        if FOUND in rects and self._found:
-            found = rects[FOUND]
+        if FOUND in rects and self._found:  # wrapped: a check's reason can be long
             p.setFont(fonts["found"])
             p.setPen(qcolor(PALETTE.ok if self._found_ok else PALETTE.warn))
-            p.drawText(found, left, _elided(fonts["found"], self._found, found.width()))
+            p.drawText(rects[FOUND], _WRAP, self._found)
 
     def _paint_field(
         self, p: QPainter, un: Units, fonts: dict[str, QFont], box: QRectF, f: Field
@@ -897,6 +903,11 @@ class _Card(Overlay):
 
     def mousePressEvent(self, event: QMouseEvent) -> None:
         event.accept()  # never the picture's under it
+        self._mouse_press(event)
+        if self.isHidden():  # cancelled, answered or closed by its caller: a double-click's
+            self._second_click.arm()  # second press reaches nothing behind the card
+
+    def _mouse_press(self, event: QMouseEvent) -> None:
         if event.button() == Qt.MouseButton.BackButton:
             self._cancel()
             return
@@ -1075,6 +1086,12 @@ class FormCard(_Card):
 
     def _pressed(self, key: str) -> None:
         self.pressed.emit(key)
+
+    def _back(self) -> None:
+        """Back on a button or an alternate is Cancel; the player's Back (PREVIOUS) in a field
+        is nothing (Backspace there deletes)."""
+        if self._focus[0] in ("button", "alt"):
+            self._cancel()
 
     def _cancel(self) -> None:
         if self.isHidden():

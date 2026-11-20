@@ -7,18 +7,23 @@ import unittest
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
-from PySide6.QtCore import QPointF, QRectF, Qt
-from PySide6.QtGui import QColor, QGuiApplication
+from PySide6.QtCore import QObject, QPointF, QRectF, Qt
+from PySide6.QtGui import QColor, QFontMetricsF, QGuiApplication
 from PySide6.QtTest import QSignalSpy, QTest
 from PySide6.QtWidgets import QApplication, QWidget
 
 from ui.keymap import Action, key_hint
 from ui.overlays.painting import ui_units
 from ui.overlays.settings_card import CANCEL, Button, ChoiceCard, Field, FormCard
+from ui.pointer import SecondClickGuard
 from ui.theme import PALETTE, qcolor
 
 LINK = "http://tv.example/get.php?username=demo&password=secret"
 FOUND = "✓ Xtream at tv.example, with its login"
+REASON = (
+    "Failed to verify provider: The username or password is wrong. Note: The portal says "
+    "your subscription ended on 3 Oct 2026."
+)
 BUTTONS = [Button(CANCEL, "Cancel"), Button("add", "Check and add", accent=True)]
 ALTERNATES = [Button("file", "M3U file…"), Button("stb", "STB portal")]
 
@@ -49,6 +54,23 @@ def painted(image, rect: QRectF) -> int:
     return count
 
 
+class Behind(QWidget):
+    """What is under a card (the Settings drawer, say): the mouse it is given."""
+
+    def __init__(self, parent):
+        super().__init__(parent)
+        self.events = []
+
+    def mousePressEvent(self, event):
+        self.events.append("press")
+
+    def mouseDoubleClickEvent(self, event):
+        self.events.append("double")
+
+    def mouseReleaseEvent(self, event):
+        self.events.append("release")
+
+
 class Case(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
@@ -60,6 +82,14 @@ class Case(unittest.TestCase):
         self.host.show()
         self.addCleanup(self.host.deleteLater)
         self.addCleanup(self.host.close)
+        self.addCleanup(self.disarm)
+
+    def disarm(self):
+        # A card a click hid swallows the next press for a moment (a double-click's second),
+        # in any window: never the next test's first.
+        for guard in self.host.findChildren(QObject):
+            if isinstance(guard, SecondClickGuard):
+                guard.disarm()
 
     def form(self, **kwargs) -> FormCard:
         return add_form(FormCard(self.host), **kwargs)
@@ -142,10 +172,10 @@ class FormCardTests(Case):
         for _ in range(4):
             self.assertTrue(card.handle(Action.NAV_UP))
         self.assertEqual(card.focus(), ("field", "url"))
+        self.assertTrue(card.handle(Action.PREVIOUS))  # the player's Back, in a field: nothing
         for _ in range(3):
             card.handle(Action.NAV_DOWN)
         self.assertTrue(card.handle(Action.NAV_TEXT, "x"))
-        self.assertTrue(card.handle(Action.NAV_BACKSPACE))  # never a stray Cancel of a form
         self.assertFalse(card.handle(Action.VOL_UP))
         self.assertEqual(card.values(), {"url": "t-v", "username": "", "password": ""})
         self.assertEqual((pressed.count(), cancelled.count()), (1, 0))
@@ -153,6 +183,19 @@ class FormCardTests(Case):
         card.handle(Action.NAV_ACTIVATE)  # Cancel is the card's Esc, not a press
         self.assertEqual((pressed.count(), cancelled.count()), (1, 1))
         self.assertFalse(card.isVisible())
+        # Off the fields, Backspace (the phone's "previous" too) is Back: in a card, Cancel.
+        add_form(card)
+        for _ in range(3):
+            card.handle(Action.NAV_DOWN)
+        self.assertEqual(card.focus(), ("button", "add"))
+        self.assertTrue(card.handle(Action.NAV_BACKSPACE))
+        self.assertEqual((cancelled.count(), card.isVisible()), (2, False))
+        add_form(card)
+        for _ in range(4):
+            card.handle(Action.NAV_DOWN)
+        self.assertEqual(card.focus(), ("alt", "file"))
+        card.handle(Action.PREVIOUS)
+        self.assertEqual((pressed.count(), cancelled.count()), (1, 3))
 
     def test_clicks_focus_put_the_caret_paste_and_press(self):
         card = self.form(url="http://old.example")
@@ -263,6 +306,33 @@ class FormCardTests(Case):
         self.click(card, card.control_rect("button", CANCEL).center())
         self.assertEqual((cancelled.count(), pressed.count()), (4, 0))
 
+    def test_a_double_click_that_hides_a_card_never_reaches_what_is_behind(self):
+        # Over the Settings drawer, the second press would back out a layer or step again.
+        behind = Behind(self.host)
+        behind.setGeometry(self.host.rect())
+        behind.show()
+        form, choice = self.form(), ChoiceCard(self.host)
+        window = self.host.windowHandle()
+
+        def double_click(point):
+            for _ in range(2):
+                QTest.mouseClick(window, Qt.MouseButton.LeftButton, pos=point.toPoint())
+
+        double_click(form.control_rect("button", CANCEL).center())
+        self.assertFalse(form.isVisible())
+        add_form(form)
+        double_click(QPointF(5, 5))  # the dimmed picture
+        self.assertFalse(form.isVisible())
+        remove = [Button("remove", "Remove", danger=True), Button(CANCEL, "Cancel")]
+        answered = QSignalSpy(choice.answered)
+        choice.ask("Remove Demo TV?", "", remove, CANCEL)
+        double_click(choice.control_rect("button", "remove").center())
+        self.assertEqual((answered.count(), answered.at(0)), (1, ["remove"]))
+        self.assertNotIn("press", behind.events)
+        self.assertNotIn("double", behind.events)
+        QTest.mouseClick(window, Qt.MouseButton.LeftButton, pos=QPointF(5, 5).toPoint())
+        self.assertTrue({"press", "double"} & set(behind.events))  # only that one click
+
     def test_secret_fields_paint_dots(self):
         card = FormCard(self.host)
         fields = [
@@ -321,6 +391,10 @@ class FormCardTests(Case):
     def test_a_small_window_keeps_the_card_inside(self):
         card = self.form(found=FOUND)
         self.assertAlmostEqual(card.card_rect().width(), ui_units(1280).px(48), delta=1)
+        # A check's reason is long, and may have a second line: it wraps, never spills.
+        card.set_found(REASON + "\nIt answers over HTTP only.", False)
+        line = QFontMetricsF(ui_units(1280).font(1.1)).height()
+        self.assertGreaterEqual(card.control_rect("found").height(), 3 * line - 1)
         self.assertEqual(
             card.card_rect().center().toPoint(), QRectF(card.rect()).center().toPoint()
         )
@@ -337,6 +411,11 @@ class FormCardTests(Case):
                     rect = card.control_rect(zone, key)
                     self.assertFalse(rect.isEmpty(), (zone, key))
                     self.assertTrue(panel.contains(rect), (zone, key))
+                found, user = card.control_rect("found"), card.control_rect("field", "username")
+                if not found.isEmpty():
+                    self.assertGreaterEqual(found.top(), card.control_rect("field", "url").bottom())
+                    if not user.isEmpty():
+                        self.assertLessEqual(found.bottom(), user.top())
                 if width == 2560:  # the unit stops growing: no bigger than at 1600
                     self.assertAlmostEqual(panel.width(), ui_units(2560).px(48), delta=1)
                     self.assertAlmostEqual(panel.width(), ui_units(1600).px(48), delta=1)
