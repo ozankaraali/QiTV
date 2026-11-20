@@ -21,12 +21,12 @@ from PySide6.QtGui import QFont, QFontMetricsF
 
 from services.i18n import N_, translate
 from services.settings_model import DANGER, INFO, OPENS, STEP, TEXT, Row
-from ui.overlays.drawer import FIND_X_U
 from ui.overlays.drawer_look import (
     COUNT_FONT_U,
     CRUMB_FONT_U,
     CRUMB_H_U,
     FILTER_H_U,
+    FIND_X_U,
     GEAR_GAP_U,
     GEAR_U,
     MIN_HIT_PX,

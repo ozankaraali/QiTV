@@ -1,16 +1,16 @@
 """Typing finds a setting (Settings in the drawer, plan 3): what the find looks through and what
 it finds (pure: no widgets).
 
-It looks through every row of every section and of each layer a row opens, however deep, by
-the row's title and its help as they show (translated; a provider's name as given), folded as
-the channel list's find folds them (services.find.words: case and accents aside, "ı" as "i",
-"ş" as "s"). Never by what a row holds: a text row's text, a secret, a stepper's value, its
-note or its sub line are not looked at. A row that opens a card has no rows to look through
-(its card is made when it opens); a section still in the Settings window has none either.
+It looks through every section by its title, and every row of every section and of each
+layer a row opens, however deep, by the row's title and its help as they show (translated; a
+provider's name as given), folded as the channel list's find folds them (services.find.words:
+case and accents aside, "ı" as "i", "ş" as "s"). Never by what a row holds: a text row's text,
+a secret, a stepper's value, its note or its sub line are not looked at. A row that opens a
+card has no rows to look through (its card is made when it opens).
 
-A row matches when every word typed is in its title or its help, whole or as a part of a word.
-Those with every word in the title come first, then those the help matched; each in Settings'
-order.
+A row matches when every word typed is in its title or its help, whole or as a part of a word;
+a section, when every word is in its title. Those with every word in the title come first, then
+those the help matched; each in Settings' order (a section before its rows).
 """
 
 from __future__ import annotations
@@ -20,17 +20,21 @@ from dataclasses import dataclass
 
 from services.find import words
 from services.i18n import translate
-from services.settings_model import Row, Section
+from services.settings_model import OPENS, Row, Section
 from ui.overlays.drawer_look import SEPARATOR
 from ui.overlays.settings_layout import Item, title_of
+
+# A section the find found: its row's key is this, then the section's key (never a row's key).
+SECTION_FOUND = "section:"
 
 
 @dataclass(frozen=True)
 class Target:
     """A row the find can go to: its section (an index of the sections), the rows opened as
     layers on the way to it (an index each, from the section's rows) and its index among its
-    layer's rows; its title as shown and where it is ("Providers › Demo TV"); and the folded
-    words of its title and its help, a space around each ("  live latency  ")."""
+    layer's rows (-1: the section itself, `row` standing for it); its title as shown and where
+    it is ("Providers › Demo TV"; "" for a section); and the folded words of its title and its
+    help, a space around each ("  live latency  ")."""
 
     section: int
     opened: tuple[int, ...]
@@ -62,11 +66,14 @@ def _targets(at: int, opened: tuple[int, ...], rows: Sequence[Row], where: str) 
 
 
 def find_index(sections: Sequence[Section]) -> list[Target]:
-    """Every row the find looks through, in Settings' order: each section's rows, a row that
-    opens a layer followed by the layer's."""
+    """Every section and row the find looks through, in Settings' order: each section, then its
+    rows, a row that opens a layer followed by the layer's."""
     found: list[Target] = []
     for at, section in enumerate(sections):
-        found.extend(_targets(at, (), section.rows, _shown_name(section)))
+        name = _shown_name(section)
+        itself = Row(SECTION_FOUND + section.key, name, kind=OPENS, literal=True)
+        found.append(Target(at, (), -1, itself, name, "", _spaced(name), _spaced("")))
+        found.extend(_targets(at, (), section.rows, name))
     return found
 
 

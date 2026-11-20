@@ -41,13 +41,14 @@ Assistive technology hears the focused line and its value as they change (`annou
 "Settings" first as it opens, and a layer's empty line as it is entered. Hidden, it is named
 "Settings" again.
 
-Typing finds a setting (`find_type`; a text being edited takes the typing instead): the find's
-line shows over the right column, as the channel list's Find box, with the text and a ✕ (the
-breadcrumb keeps to the left column meanwhile), and the right column lists the rows of every
-section and layer whose title or help has the words (ui/overlays/settings_find.py), each with
-where it is as its sub line ("Providers › Demo TV"); the keys are on the first. ↑/↓ move among
-them; Enter, → (the mouse's Forward too) or a click on one opens its section or layer with
-that row focused (an info line: the row after it); Backspace edits the text (`find_backspace`),
+Typing finds a setting (`find_type`, and Paste: `find_paste`; a text being edited takes them
+instead): the find's line shows over the right column, as the channel list's Find box, with the
+text and a ✕ (the breadcrumb keeps to the left column meanwhile), and the right column lists
+the sections whose title has the words and the rows of every section and layer whose title or
+help has them (ui/overlays/settings_find.py), each row with where it is as its sub line
+("Providers › Demo TV"); the keys are on the first. ↑/↓ move among them; Enter, → (the mouse's
+Forward too) or a click on one opens its section or layer with that row focused (an info line:
+the row after it; a section: its first row); Backspace edits the text (`find_backspace`),
 its last letter going ends the find; Esc, ←, ✕, ‹, the fade (`back()`) and a click on the left
 column end it (`end_find`), the right column back as it was. New sections while it shows: the
 find stays, over them.
@@ -90,7 +91,6 @@ from ui import text_edit
 from ui.keymap import Action, key_hint
 from ui.overlays.base import Overlay, announce
 from ui.overlays.channel_rows import HOVER_ALPHA
-from ui.overlays.drawer import find_clear_tooltip
 from ui.overlays.drawer_look import (
     CRUMB_FONT_U,
     FADE_U,
@@ -98,6 +98,7 @@ from ui.overlays.drawer_look import (
     TITLE_FONT_U,
     column_widths,
     draw_back,
+    find_clear_tooltip,
     paint_backdrop,
     paint_highlight,
 )
@@ -700,8 +701,9 @@ class SettingsDrawer(Overlay):
 
     def _go_to_found(self, index: int) -> None:
         """Enter, → or a click on the find's row `index`: its section or layer opens, that row
-        focused (an info line: the nearest row after it, else before it), and the find ends;
-        Esc then goes up from there."""
+        focused (an info line: the nearest row after it, else before it; a section found by
+        its title: its first row, else the section on the left), and the find ends; Esc then
+        goes up from there."""
         if not 0 <= index < len(self._found):
             return
         target = self._found[index]
@@ -709,7 +711,7 @@ class SettingsDrawer(Overlay):
         self._pressed = None  # a double-click's second press does not step what it reached
         self._section = target.section
         self._opened = list(target.opened)
-        self._right = target.index
+        self._right = max(target.index, 0)  # a section found: its first row
         self._first = {LEFT: 0, RIGHT: 0}
         if not self._focus_rows():
             self._side = LEFT
@@ -719,9 +721,30 @@ class SettingsDrawer(Overlay):
         self.update()
         self._say()
 
+    def find_paste(self) -> None:
+        """Paste (Ctrl/⌘+V) while no text is edited: the clipboard's first line into the find,
+        as the channel list's find takes it (a find started by it)."""
+        line = text_edit.clipboard_line()
+        if line:
+            self.find_type(line)
+
     def _find_notice(self) -> str:
-        """What the right column says while the find finds nothing."""
+        """What the right column says while the find finds nothing (said whole)."""
         return translate(NO_SETTING_FOUND, typed=" ".join(self.find_text().split()))
+
+    def _shown_notice(self, un: Units, width: float) -> str:
+        """The notice as the column paints it, on one line of `width` where it can be: what
+        was typed elided ("…") so that the notice is never cut; whole when it fits."""
+        typed = " ".join(self.find_text().split())
+        whole = translate(NO_SETTING_FOUND, typed=typed)
+        fm = QFontMetricsF(un.font(TITLE_FONT_U))
+        if fm.horizontalAdvance(whole) <= width:
+            return whole
+        room = width - fm.horizontalAdvance(translate(NO_SETTING_FOUND, typed=""))
+        room = max(room, fm.horizontalAdvance("…"))  # (a notice longer than its line wraps)
+        return translate(
+            NO_SETTING_FOUND, typed=fm.elidedText(typed, Qt.TextElideMode.ElideRight, room)
+        )
 
     # ---- what assistive technology hears ----------------------------------------------------
 
@@ -1370,20 +1393,21 @@ class SettingsDrawer(Overlay):
         """A layer without rows (or a find that found none): its line, muted and centred at
         the column's top (as the drawer's column says it has nothing)."""
         chain = self._chain()
+        area = lay.areas[RIGHT]
         if self._find is not None:
-            text = self._find_notice()
+            text = self._shown_notice(lay.units, area.width())
         else:
             text = translate(chain[-1].empty_text) if chain and chain[-1].empty_text else ""
         if not text:
             return
-        area = lay.areas[RIGHT]
-        p.setFont(lay.units.font(TITLE_FONT_U))
+        font = lay.units.font(TITLE_FONT_U)
+        flags = Qt.AlignmentFlag.AlignCenter | Qt.TextFlag.TextWordWrap
+        # As tall as its lines need (a long translation wraps), never cut at its box's foot.
+        needed = QFontMetricsF(font).boundingRect(QRectF(0, 0, area.width(), 1e6), int(flags), text)
+        height = max(EMPTY_H_U * lay.units.u, needed.height())
+        p.setFont(font)
         p.setPen(qcolor(PALETTE.text, PALETTE.text_muted_alpha))
-        p.drawText(
-            QRectF(area.x(), area.y(), area.width(), EMPTY_H_U * lay.units.u),
-            Qt.AlignmentFlag.AlignCenter | Qt.TextFlag.TextWordWrap,
-            text,
-        )
+        p.drawText(QRectF(area.x(), area.y(), area.width(), height), flags, text)
 
     @staticmethod
     def _paint_icon(p: QPainter, name: str, rect: QRectF) -> None:

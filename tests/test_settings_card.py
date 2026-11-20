@@ -355,6 +355,33 @@ class FormCardTests(Case):
         QTest.mouseClick(window, Qt.MouseButton.LeftButton, pos=QPointF(5, 5).toPoint())
         self.assertTrue({"press", "double"} & set(behind.events))  # only that one click
 
+    def test_a_card_a_press_showed_keeps_no_guard_once_a_key_takes_it_away(self):
+        # Shown by a press (a row's ›), the card swallows a double-click's second press; gone
+        # by a key before that came (Esc), it swallows nothing more: not a click on what is
+        # behind, nor one on another window.
+        behind = Behind(self.host)
+        behind.setGeometry(self.host.rect())
+        behind.show()
+        window = self.host.windowHandle()
+        corner = QPointF(5, 5).toPoint()
+        for card in (self.form(), ChoiceCard(self.host)):
+            with self.subTest(card=type(card).__name__):
+                card.hide()
+                QTest.mousePress(window, Qt.MouseButton.LeftButton, pos=corner)
+                if isinstance(card, FormCard):
+                    add_form(card)
+                else:
+                    card.ask("Turn it off?", "", [Button(CANCEL, "Cancel")], CANCEL)
+                QTest.mouseRelease(window, Qt.MouseButton.LeftButton, pos=corner)
+                self.assertTrue(card.isVisible())
+                self.assertTrue(card._second_click._open.isActive())  # a second press: none
+                card.handle(Action.ESCAPE)
+                self.assertTrue(card.isHidden())
+                self.assertFalse(card._second_click._open.isActive())
+                behind.events.clear()
+                QTest.mouseClick(window, Qt.MouseButton.LeftButton, pos=corner)
+                self.assertTrue({"press", "double"} & set(behind.events))
+
     def test_secret_fields_paint_dots(self):
         card = FormCard(self.host)
         fields = [

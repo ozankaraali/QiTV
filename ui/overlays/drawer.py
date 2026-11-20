@@ -121,6 +121,7 @@ from ui.overlays.drawer_look import (  # the header's metrics are offered from h
     CRUMB_H_U,
     FADE_U,
     FILTER_H_U,
+    FIND_X_U,
     GEAR_GAP_U,
     GEAR_U,
     LEFT_U,
@@ -133,6 +134,7 @@ from ui.overlays.drawer_look import (  # the header's metrics are offered from h
     TITLE_FONT_U,
     column_widths,
     draw_back,
+    find_clear_tooltip,
     paint_backdrop,
     paint_highlight,
 )
@@ -158,7 +160,6 @@ DRAG_OPACITY = 0.25  # the list while a channel is dragged out of it onto the gr
 FOUND_GENRE_H_U = 5.0  # a genre the find found: its name, then its provider and count
 LINK_ROW_H_U = FOUND_GENRE_H_U  # a link of Network streams: its name, then what it is
 FOUND_CHANNEL_SCALE = 0.7  # its channels: a long name (and a 5-digit number) fits whole
-FIND_X_U = 2.2  # its ✕, this wide at its right end
 ICONS_TOP_U = 0.6  # 2.9.3: the buttons' row, this far under the Find box's bottom
 REFRESH_ACTION = "refresh"  # the header's refresh button: the provider's channels and guide
 SEARCH_ACTION = "search"  # the header's ⌕: the Library's search
@@ -182,10 +183,6 @@ PROVIDER_ERROR_TEXT = N_("Couldn't connect — click or press Enter to retry")
 _RETRY_TEXTS = (ERROR_TEXT, PROVIDER_ERROR_TEXT)  # a click on the list, or Enter, retries
 FIND_ACTION = "find"  # the ⌕ Find box above the right column
 FIND_CLEAR = "find_clear"  # its ✕
-
-
-def find_clear_tooltip() -> str:
-    return key_hint(tr("Clear the find"), "Esc")  # i18n: the find box's ✕ (tooltip)
 
 
 FIND_PLACEHOLDER = N_("Find a genre or channel")  # i18n: the empty find box's prompt

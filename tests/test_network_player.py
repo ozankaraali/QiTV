@@ -12,6 +12,7 @@ import os
 from pathlib import Path
 import tempfile
 import threading
+import time
 import unittest
 from unittest import mock
 
@@ -326,6 +327,7 @@ class KeptTests(PlayerCase):
         self.assertEqual(self.store.get("x").opened, 0.0)
 
     def test_a_read_that_fails_keeps_what_plays_beside_the_file(self):
+        self.enterContext(self.slow_writes())  # the file is away a moment meanwhile
         self.path.write_text('{"v": 1, "entries": []}', encoding="utf-8")
         with mock.patch.object(self.store, "merge", side_effect=RuntimeError):
             self.loaded()  # read or not, the store is ready
@@ -335,6 +337,7 @@ class KeptTests(PlayerCase):
         self.assertEqual([p.read_text() for p in self.aside()], ['{"v": 1, "entries": []}'])
 
     def test_a_file_that_cannot_be_set_aside_is_never_written_over(self):
+        self.enterContext(self.slow_writes())  # the file is away a moment meanwhile
         self.path.write_text("{not json", encoding="utf-8")
         self.loaded()
         with mock.patch.object(ns, "set_file_aside", return_value=None) as aside:
@@ -349,20 +352,41 @@ class KeptTests(PlayerCase):
         self.assertEqual(len(self.rows()), 2)
 
     def rows(self):
+        """The file's links as it is now ([] while it is away: set aside, the new one not
+        written yet)."""
         try:
-            return json.loads(self.path.read_text())["entries"]
-        except ValueError, KeyError:
+            return json.loads(self.text())["entries"]
+        except ValueError, KeyError, TypeError:
             return []
+
+    def text(self):
+        """The file's text, None while it is away (moved aside, the new one not written)."""
+        try:
+            return self.path.read_text()
+        except FileNotFoundError:
+            return None
 
     def aside(self):
         return [p for p in self.path.parent.iterdir() if ".broken-" in p.name]
 
+    def slow_writes(self):
+        """Each write a moment late, as on a slow disk: a file set aside is away meanwhile (it
+        is moved aside, then the new one written)."""
+        real = ns.write
+
+        def slow(path, data):
+            time.sleep(0.15)
+            real(path, data)
+
+        return mock.patch.object(ns, "write", slow)
+
     def test_an_unreadable_file_is_set_aside_before_it_is_written(self):
+        self.enterContext(self.slow_writes())  # the file is away a moment meanwhile
         self.path.write_text("{not json", encoding="utf-8")
         self.loaded()
         self.link(URL)
         self.plays_now()
-        self.assertTrue(wait_until(lambda: self.path.read_text() != "{not json"))
+        self.assertTrue(wait_until(lambda: self.text() not in (None, "{not json")))
         self.assertTrue(wait_until(lambda: self.jobs.pending() == 0))
         aside = [p for p in self.path.parent.iterdir() if ".broken-" in p.name]
         self.assertEqual([p.read_text() for p in aside], ["{not json"])

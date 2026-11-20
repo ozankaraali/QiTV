@@ -52,8 +52,8 @@ from ui.overlays.drawer import (
     CountRole,
     Drawer,
     IconRole,
-    find_clear_tooltip,
 )
+from ui.overlays.drawer_look import find_clear_tooltip
 
 PREVIEW_WAIT_MS = PREVIEW_DEBOUNCE_MS + 120
 _OFFSCREEN_NOISE = (

@@ -5,8 +5,8 @@ the overlay paints again; so is a text row's text once it is kept. A section who
 still live in the Settings window opens that window on its tab. The controller keeps the key
 actions it uses and hands every other one back, so volume, mute and fullscreen still reach the
 player. While a text is edited the field has the keys first (typing, Backspace, the caret,
-the clipboard; Enter and Esc); else typing finds a setting, and while a find shows Backspace
-edits its text (Esc, ← or Enter on a match end it: SettingsDrawer's find).
+the clipboard; Enter and Esc); else typing and Paste find a setting, and while a find shows
+Backspace edits its text (Esc, ← or Enter on a match end it: SettingsDrawer's find).
 
 The sections are built by the caller's function, again whenever what they show changed
 (`refresh_sections`: a provider added, removed or renamed, here or elsewhere), and the drawer
@@ -24,7 +24,7 @@ from collections.abc import Callable, Iterator, Mapping
 import logging
 from typing import Any, Optional, Protocol
 
-from PySide6.QtCore import QEvent, QObject, Signal
+from PySide6.QtCore import QEvent, QObject, QTimer, Signal
 
 from services.settings_model import (
     INFO,
@@ -44,6 +44,30 @@ logger = logging.getLogger(__name__)
 
 # NAV_RIGHT's payload from the mouse's Forward button: a layer down only, never a step.
 MOUSE_FORWARD = "mouse forward"
+# A stepper whose change loads something again (the guide's source, Verify SSL) waits this long
+# after its last step: passing through its values loads once, for the one the steps stop on.
+STEPS_SETTLE_MS = 600
+
+
+class Settled(QObject):
+    """`act()` once the steps stop: each `start()` waits STEPS_SETTLE_MS again. Never while
+    `closing()` holds (the window closes). Made on the GUI thread; `act` runs there."""
+
+    def __init__(self, act: Callable[[], None], closing: Callable[[], bool], parent: QObject):
+        super().__init__(parent)
+        self._act = act
+        self._closing = closing
+        self._timer = QTimer(self)
+        self._timer.setSingleShot(True)
+        self._timer.setInterval(STEPS_SETTLE_MS)
+        self._timer.timeout.connect(self._settled)
+
+    def start(self) -> None:
+        self._timer.start()
+
+    def _settled(self) -> None:
+        if not self._closing():
+            self._act()
 
 
 class RowHandler(Protocol):
@@ -237,9 +261,9 @@ class SettingsController(QObject):
         """Do a key action on the overlay; False for one it does not use. A card shown over it
         takes every key first (False for the ones it gives back: the sound's, the window's),
         and the rows hear none. While a text is edited its field takes its keys first (Esc
-        there puts the text back, Backspace deletes); else typing finds a setting, Backspace
-        editing the find's text while it shows. NAV_RIGHT with MOUSE_FORWARD is the mouse's
-        Forward: a layer down only (none over a card)."""
+        there puts the text back, Backspace deletes); else typing and Paste find a setting,
+        Backspace editing the find's text while it shows. NAV_RIGHT with MOUSE_FORWARD is the
+        mouse's Forward: a layer down only (none over a card)."""
         card = self._card()
         if card is not None:
             if action is Action.NAV_RIGHT and payload == MOUSE_FORWARD:
@@ -254,6 +278,8 @@ class SettingsController(QObject):
             return True
         if action is Action.NAV_TEXT:
             drawer.find_type(text)  # (a space alone starts no find: it reaches nothing)
+        elif action is Action.PASTE:
+            drawer.find_paste()  # as into the channel list's find
         elif action is Action.NAV_BACKSPACE and drawer.finding():
             drawer.find_backspace()
         elif action is Action.NAV_UP:

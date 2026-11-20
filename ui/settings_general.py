@@ -10,9 +10,9 @@ General tab, its rows where the spec puts them, each applied at once.
   QiTV can't be registered for (a run from source) has no row. On Windows, Default Apps… once
   QiTV opens a kind there;
 - Advanced: Verify SSL certificates (the providers that follow it connect anew, as the old
-  Save had them: ProviderActions.global_ssl_changed), Secure DNS, the detailed log, the image
-  cache's largest size (from the next start), and Clear Image Cache…, asked first in a card,
-  cleared on a worker, then said.
+  Save had them: ProviderActions.global_ssl_changed, once its steps stop), Secure DNS, the
+  detailed log, the image cache's largest size (from the next start), and Clear Image Cache…,
+  asked first in a card, cleared on a worker, then said.
 
 The config's rows are written through the values (services.settings_values), each followed by
 its hook (`hooks`, which the TV window gives them). What only the running QiTV knows (its
@@ -51,7 +51,7 @@ from ui.file_types_settings import (
     open_default_apps,
 )
 from ui.overlays.settings_card import CANCEL, CANCEL_TEXT, Button, ChoiceCard
-from ui.settings_controller import SettingsController
+from ui.settings_controller import SettingsController, Settled
 from ui.tv_controller import ERROR_MS
 from ui.update_dialogs import check_for_updates
 
@@ -86,8 +86,14 @@ def hooks(window: Any) -> dict[str, Callable[[], None]]:
     def details() -> None:  # TMDB turned off or on, or a token of one's own given or taken
         window.screens.tmdb.settings_changed()
 
+    # The providers that follow Verify SSL connect anew once its steps stop (Settled: on, off
+    # and on again connects once).
+    reconnect = Settled(
+        lambda: window.provider_rows.actions.global_ssl_changed(), lambda: window.closing(), window
+    )
+
     def ssl() -> None:
-        window.provider_rows.actions.global_ssl_changed()
+        reconnect.start()
         window.settings.refresh_sections()  # a provider's own check shows its new default
 
     def dns() -> None:

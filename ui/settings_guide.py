@@ -2,8 +2,9 @@
 applied at once.
 
 - Guide source steps through no guide, the provider's own, a local file and a web address (the
-  config's "No Source", "STB", "Local File" and "URL"). A step loads the guide again in the
-  background (TVWindow.reload_epg) and the rows follow it, as the old tab's did: the address for
+  config's "No Source", "STB", "Local File" and "URL"). The rows follow a step at once, as the
+  old tab's did, and the guide loads again in the background (TVWindow.reload_epg) once the
+  steps stop (passing through the sources loads it once): the address for
   a web address (an edit loads it again), the file for a local file (the system's picker, then a
   load), how often it is checked for a web address and the provider's guide, the channel
   matching for the XMLTV guides (a file, a web address), and the portal's fetch period for the
@@ -47,7 +48,7 @@ from ui.overlays.settings_card import (
     FormCard,
     pick_file,
 )
-from ui.settings_controller import SettingsController
+from ui.settings_controller import SettingsController, Settled
 
 logger = logging.getLogger(__name__)
 
@@ -274,12 +275,15 @@ class ExportMapping(QObject):
 
 
 def hooks(window: Any) -> dict[str, Callable[[], None]]:
-    """The hooks of the Guide's config rows (SettingsValues'): a new source loads the guide
-    again in the background and the rows follow it; a new address loads it again. `window` is
-    the TV window, read as a hook runs."""
+    """The hooks of the Guide's config rows (SettingsValues'): a new source's rows follow it at
+    once, and the guide loads again in the background once the steps stop (Settled: passing
+    through the sources loads once); a new address loads it again. `window` is the TV window,
+    read as a hook runs."""
+    # In the background; the guide repaints when ready.
+    reload = Settled(lambda: window.reload_epg(), lambda: window.closing(), window)
 
     def source() -> None:
-        window.reload_epg()  # in the background; the guide repaints when ready
+        reload.start()
         window.settings.refresh_sections()  # its address, file and matching rows follow
 
     def address() -> None:
@@ -487,7 +491,7 @@ class GuideRows(QObject):
         """Guide file: the system's picker (as the old window's Browse), then the guide loads
         again."""
         path = pick_file(self._drawer.window(), translate(FILE_TEXT), "")
-        if not path:
+        if not path or self._window.closing():  # (the window may close while it asks)
             return
         self._window.config_manager.epg_file = path
         self._save()
@@ -626,6 +630,8 @@ class GuideRows(QObject):
                 if self._editing is not None and keys == self._editing and not placed:
                     changed[ids] = {**value, "name": name, "icon": icon}  # in its place
                     placed = True
+                elif self._editing is not None and keys == ids:
+                    continue  # the entry that had these IDs gives way to the edit
                 else:
                     changed[keys] = value
             if not placed:
@@ -650,7 +656,7 @@ class GuideRows(QObject):
         if self._importing:
             return
         path = pick_file(self._drawer.window(), translate(IMPORT_TEXT).rstrip("… ."), "")
-        if not path:
+        if not path or self._window.closing():
             return
         self._importing = True
         self._window.jobs.run_worker(ImportMapping(path), self._imported, self._import_failed)
@@ -671,7 +677,7 @@ class GuideRows(QObject):
         if self._exporting:
             return
         path = pick_save_file(self._drawer.window(), translate(EXPORT_TEXT).rstrip("… ."), "")
-        if not path:
+        if not path or self._window.closing():
             return
         if not path.endswith(".json"):
             path += ".json"

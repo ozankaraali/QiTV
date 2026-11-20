@@ -11,19 +11,21 @@ from unittest import mock
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 from PySide6.QtCore import QEvent, QPointF, Qt
-from PySide6.QtGui import QMouseEvent
+from PySide6.QtGui import QFontMetricsF, QGuiApplication, QMouseEvent
 from PySide6.QtTest import QTest
 from PySide6.QtWidgets import QApplication, QWidget
-from timer_fixtures import elapse
+from timer_fixtures import elapse, wait_until
 
 from services import settings_model as m
+from services.network_streams import LIVE, stream_id
 from services.settings_model import PLAYBACK, PROVIDERS, TIMESHIFT, Row, Section, sections
 from tests import test_tv_window as base
 from tests.test_settings_controller import FakeValues, providers_section
 from ui.keymap import Action
-from ui.overlays.drawer import find_clear_tooltip
+from ui.overlays.drawer_look import TITLE_FONT_U, find_clear_tooltip
 from ui.overlays.settings_drawer import SettingsDrawer
 from ui.settings_controller import MOUSE_FORWARD, SettingsController
+from ui.settings_links import LINKS, link_key
 
 KEY = "fictional0zebrafish0key0WXYZ"
 
@@ -358,6 +360,79 @@ class SettingsFindTests(FindCase):
         self.assertEqual(self.found_keys()[0], m.SIGN_OUT)
         self.assertFalse(self.drawer.editing())
 
+    def test_a_section_is_found_by_its_title(self):
+        # Before its rows, in Settings' order; Enter opens it, the keys on its first row (on
+        # the section when it has none to take them).
+        self.controller.open(PLAYBACK)
+        self.type("parental")
+        self.assertEqual(self.found()[0], ("section:parental", "Parental controls", ""))
+        self.assertEqual(self.drawer._spoken(), "Parental controls")
+        self.key(Action.NAV_ACTIVATE)
+        self.assertFalse(self.drawer.finding())
+        self.assertEqual(self.drawer.path(), (m.PARENTAL,))
+        self.assertEqual(self.drawer.focus_side(), "left")  # (no rows here)
+        self.type("subtitles")
+        self.assertEqual(self.found()[0], ("section:subtitles", "Subtitles & AI captions", ""))
+        self.assertIn("opensubtitles_api_key", self.found_keys())  # its rows after it
+        self.key(Action.NAV_ACTIVATE)
+        self.assertEqual(self.drawer.path(), (m.SUBTITLES,))
+        self.assertEqual(self.drawer.focus_side(), "right")
+        self.assertEqual(self.drawer.focused_row().key, "ai_captions_model")
+        self.key(Action.ESCAPE)
+        self.assertEqual(self.drawer.focus_side(), "left")
+        self.assertEqual(self.drawer.path(), (m.SUBTITLES,))
+        # A click on it, as on a row.
+        self.type("time-shift")
+        self.drawer.grab()
+        self.click(self.drawer.title_rect(0).center())
+        self.assertEqual(self.drawer.path(), (TIMESHIFT,))
+        self.assertEqual(self.drawer.focused_row().key, "timeshift_enabled")
+
+    def test_the_notice_shows_what_was_typed_elided_never_cut(self):
+        for width, height in ((640, 360), (1280, 720), (1920, 1080)):
+            for typed in ("qqq", "q" * 150, "qx " * 50):
+                with self.subTest(size=(width, height), typed=typed[:6]):
+                    self.host.resize(width, height)
+                    self.controller.open(PLAYBACK)
+                    self.type(typed)
+                    self.assertEqual(self.found(), [])
+                    said = f"No setting has “{' '.join(typed.split())}”"
+                    self.assertEqual(self.drawer._spoken(), said)  # said whole
+                    lay = self.drawer._layout()
+                    area = lay.areas["right"]
+                    shown = self.drawer._shown_notice(lay.units, area.width())
+                    fm = QFontMetricsF(lay.units.font(TITLE_FONT_U))
+                    self.assertLessEqual(fm.horizontalAdvance(shown), area.width())  # one line
+                    if typed == "qqq":
+                        self.assertEqual(shown, said)
+                    else:
+                        self.assertTrue(shown.startswith("No setting has “q"), shown)
+                        self.assertTrue(shown.endswith("…”"), shown)
+                    self.drawer.grab()
+                    self.controller.close()
+
+    def test_paste_feeds_the_find(self):
+        # Ctrl/⌘+V, as in the channel list's find: the clipboard's first line, into the find
+        # (one started by it); while a text is edited, into the text.
+        QGuiApplication.clipboard().setText("\nlatency\nsecond line")
+        self.controller.open(PROVIDERS)
+        self.key(Action.PASTE)
+        self.assertEqual(self.drawer.find_text(), "latency")
+        self.assertEqual(self.found_keys()[0], "live_latency")
+        self.key(Action.PASTE)  # into the find's text
+        self.assertEqual(self.drawer.find_text(), "latencylatency")
+        self.key(Action.ESCAPE)
+        QGuiApplication.clipboard().setText("  ")  # nothing to paste: no find
+        self.key(Action.PASTE)
+        self.assertFalse(self.drawer.finding())
+        QGuiApplication.clipboard().setText("latency")
+        self.controller.open(m.SUBTITLES)
+        self.to_row("opensubtitles_username")
+        self.key(Action.NAV_ACTIVATE)
+        self.key(Action.PASTE)
+        self.assertFalse(self.drawer.finding())
+        self.assertEqual(self.drawer._edit.text, "kumquat_viewerlatency")
+
     def test_turkish_letters_fold(self):
         rows = (
             Row("folder", "Kayıt klasörü", "Kayıtların gittiği yer"),
@@ -383,6 +458,37 @@ class SettingsFindTests(FindCase):
                 self.type(typed)
                 self.assertEqual(self.found_keys(), keys)
                 self.controller.close()
+
+
+class EverySectionFindTests(base.WindowCase):
+    def test_the_find_reaches_the_rows_this_qitv_builds(self):
+        # The Guide's, the phone remote's, parental controls' and Network streams' rows are
+        # built by the window (they follow what it has): the find looks through them too.
+        self.show()
+        self.wait_for_drawer()
+        player = self.window.network_player
+        player.start()
+        self.assertTrue(wait_until(player.loaded))
+        url = "https://cdn.example/live/harbour/index.m3u8?token=aaa"
+        player.keep_new(url, LIVE)
+        player.rename(stream_id(url), "Harbour News")
+        self.assertTrue(wait_until(lambda: self.window.jobs.pending() == 0))
+        settings, drawer = self.window.settings, self.window.settings_drawer
+        self.menu_actions()["Settings…"].trigger()
+        self.assertTrue(settings.visible())
+        for typed, key in (
+            ("guide source", "epg_source"),
+            ("pairing code", "remote/pair"),
+            ("set pin", "parental/pin"),
+            ("harbour news", link_key(stream_id(url))),
+            ("network streams", LINKS),
+        ):
+            with self.subTest(typed=typed):
+                for char in typed:
+                    self.assertTrue(settings.handle(Action.NAV_TEXT, char))
+                self.assertIn(key, [row.key for row in drawer._right_rows()])
+                settings.handle(Action.ESCAPE)
+                self.assertFalse(drawer.finding())
 
 
 class PhoneFindTests(base.WindowCase):

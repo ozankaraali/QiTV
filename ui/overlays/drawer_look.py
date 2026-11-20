@@ -1,10 +1,13 @@
 """The drawer's look, shared: its column metrics and widths, its header's metrics, the two
-columns' backdrop with the fade at the right edge, a row's highlight and the ‹ back chevron.
-The Settings overlay takes the same look from here, so the two read as one."""
+columns' backdrop with the fade at the right edge, a row's highlight, the ‹ back chevron and
+the find box's ✕ (its width and tooltip). The Settings overlay takes the same look from here,
+so the two read as one."""
 
 from PySide6.QtCore import QPointF, QRect, QRectF, Qt
 from PySide6.QtGui import QColor, QLinearGradient, QPainter, QPainterPath, QPen
 
+from services.i18n import tr
+from ui.keymap import key_hint
 from ui.overlays.painting import Units, fill_round
 from ui.theme import FOCUS_FILL_ALPHA, PALETTE, qcolor
 
@@ -23,6 +26,11 @@ GEAR_U = 1.9  # the header's buttons (Library, Search, refresh, Settings), this 
 GEAR_GAP_U = 0.7
 MIN_HIT_PX = 28  # the header's buttons take clicks over this square at least
 SEPARATOR = " › "  # between the names of a breadcrumb
+FIND_X_U = 2.2  # the find box's ✕, this wide at its right end (the channel list's, Settings')
+
+
+def find_clear_tooltip() -> str:
+    return key_hint(tr("Clear the find"), "Esc")  # i18n: the find box's ✕ (tooltip)
 
 
 def column_widths(units: Units) -> tuple[int, int]:

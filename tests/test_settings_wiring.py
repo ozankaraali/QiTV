@@ -455,11 +455,11 @@ class SettingsWiringTests(base.WindowCase):
             Action.NAV_BACKSPACE,
             Action.ESCAPE,
         }
-        # Typing is Settings' own: it finds a setting (a space alone starts none, and reaches
-        # nothing); while a find shows, Backspace edits its text and the moves go among what
-        # it found.
-        self.assertEqual(own["rows"], moves | {Action.NAV_TEXT})
-        self.assertEqual(own["finding"], moves | {Action.NAV_TEXT})
+        # Typing and Paste are Settings' own: they find a setting (a space alone starts none,
+        # and reaches nothing); while a find shows, Backspace edits its text and the moves go
+        # among what it found.
+        self.assertEqual(own["rows"], moves | {Action.NAV_TEXT, Action.PASTE})
+        self.assertEqual(own["finding"], moves | {Action.NAV_TEXT, Action.PASTE})
         # Each of the list's keys that Settings does not use is a key of the field being
         # edited: while one is, Settings uses every action the keys give but PASSED_ON.
         self.assertEqual(swallowed["editing"], set())

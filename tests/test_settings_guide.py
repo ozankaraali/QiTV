@@ -14,7 +14,7 @@ os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 from PySide6.QtCore import QPointF
 import orjson
-from timer_fixtures import wait_until
+from timer_fixtures import elapse, wait_until
 
 from services import settings_model as m
 from services.config_manager import ConfigManager
@@ -27,6 +27,7 @@ from ui import settings_guide as guide
 from ui.keymap import Action
 from ui.overlays import settings_layout
 from ui.overlays.settings_card import CANCEL
+from ui.settings_controller import STEPS_SETTLE_MS
 
 PORTAL = {
     "type": "STB",
@@ -118,21 +119,40 @@ class SourceTests(GuideCase):
             self.assertFalse(self.window.settings.lit(row))  # the config's default
             self.key(Action.NAV_RIGHT)
             self.assertEqual(self.config.epg_source, "Local File")
-            refresh.assert_called_once_with(force=True)  # its worker loads it
             self.key(Action.NAV_RIGHT)
             self.assertEqual(self.config.epg_source, "URL")
             self.key(Action.NAV_LEFT)
             self.key(Action.NAV_LEFT)
             self.key(Action.NAV_LEFT)
             self.assertEqual(self.config.epg_source, "No Source")
-            self.assertEqual(refresh.call_count, 5)
             self.assertEqual(self.drawer.focused_row().key, "epg_source")  # the place kept
+            elapse(STEPS_SETTLE_MS + 80)  # once the steps stop: loaded again, once
+            refresh.assert_called_once_with(force=True)  # its worker loads it
+            self.key(Action.NAV_RIGHT)
+            elapse(STEPS_SETTLE_MS + 80)
+            self.assertEqual(refresh.call_count, 2)
         self.config.save_config(wait=True)
-        self.assertEqual(ConfigManager().epg_source, "No Source")
-        self.assertNotIn("epg", m.LEGACY_TABS.values())  # no longer the Settings window's
-        self.assertEqual(
-            next(s for s in self.window.settings._sections if s.key == m.GUIDE).legacy_tab, ""
-        )
+        self.assertEqual(ConfigManager().epg_source, "STB")
+
+    def test_passing_through_sources_loads_the_guide_once_they_stop(self):
+        # Each step's rows follow at once (its address, its file); the guide loads again only
+        # once the steps stop, for the source they stopped on. Never while the window closes.
+        with mock.patch.object(self.window.catalog, "refresh_epg") as refresh:
+            self.open_at(m.GUIDE, "epg_source")
+            self.key(Action.NAV_RIGHT)
+            self.assertIn(guide.FILE, self.keys())
+            self.key(Action.NAV_RIGHT)
+            self.assertIn("epg_url", self.keys())
+            elapse(STEPS_SETTLE_MS - 200)
+            self.key(Action.NAV_RIGHT)  # a step within the wait: it waits again
+            elapse(STEPS_SETTLE_MS - 200)
+            refresh.assert_not_called()
+            elapse(280)
+            refresh.assert_called_once_with(force=True)
+            self.key(Action.NAV_RIGHT)
+            with mock.patch.object(self.window, "closing", return_value=True):
+                elapse(STEPS_SETTLE_MS + 80)
+            refresh.assert_called_once_with(force=True)
 
     def test_url_and_file_rows_follow_the_source(self):
         with (
@@ -145,6 +165,7 @@ class SourceTests(GuideCase):
             self.assertEqual(self.note(guide.EVERY), "2 hours")
             self.fit()
             self.key(Action.NAV_RIGHT)  # a local file: no update period; its channel matching
+            elapse(STEPS_SETTLE_MS + 80)  # (loaded again once the steps stop)
             self.assertEqual(
                 self.keys(),
                 ["epg_source", guide.FILE, "epg_list_window_hours", guide.MATCHING],
@@ -164,6 +185,7 @@ class SourceTests(GuideCase):
             self.assertEqual(refresh.call_count, 2)
             self.key(Action.NAV_UP)
             self.key(Action.NAV_RIGHT)  # a web address: edited in place, and loaded again
+            elapse(STEPS_SETTLE_MS + 80)
             self.assertEqual(
                 self.keys(),
                 [
@@ -432,6 +454,83 @@ class MatchingTests(MatchingCase):
             self.key(Action.NAV_ACTIVATE)
             self.assertEqual(self.stored(), [("News One", ["news1.example"])])
             reindex.assert_not_called()
+
+
+class SameIdsTests(MatchingCase):
+    channel_map = mapping(("First", ["first.example"]), ("Second", ["second.example"]))
+
+    def give_ids(self, index, ids):
+        """Entry `index`'s card: `ids` in place of its IDs, saved."""
+        self.go_to(guide.MAP_PREFIX + str(index))
+        self.key(Action.NAV_ACTIVATE)
+        card = self.window.guide_rows.mapping_card
+        self.assertEqual(card.focus(), ("field", guide.NAME))
+        self.key(Action.NAV_DOWN)
+        self.key(Action.NAV_DOWN)
+        self.assertEqual(card.focus(), ("field", guide.IDS))
+        self.key(Action.SELECT_ALL)
+        self.key(Action.NAV_TEXT, ids)
+        self.key(Action.NAV_ACTIVATE)  # Save
+        self.assertFalse(self.window.settings.card_shown())
+
+    def test_an_edit_given_another_entrys_ids_keeps_the_edit(self):
+        # The entry that had those IDs gives way to the edit, whichever comes first in the
+        # list: never its old value written over the edit.
+        for index, ids, kept in (
+            (0, "second.example", [("First", ["second.example"])]),
+            (1, "first.example", [("Second", ["first.example"])]),
+        ):
+            with self.subTest(index=index):
+                self.config.xmltv_channel_map = MultiKeyDict.deserialize(
+                    self.channel_map.serialize()
+                )
+                with mock.patch.object(EpgManager, "reindex_programs", autospec=True):
+                    if self.window.settings.visible():
+                        self.window.settings.close()
+                    self.open_layer()
+                    self.give_ids(index, ids)
+                self.assertEqual(self.stored(), kept)
+                self.assertEqual(self.config.xmltv_channel_map.get(ids)["name"], kept[0][0])
+
+
+def files(worker):
+    """The channel matching's file jobs given to the (mocked) worker runner, by their kind."""
+    kinds = (guide.ImportMapping, guide.ExportMapping)
+    return [type(c.args[0]) for c in worker.call_args_list if isinstance(c.args[0], kinds)]
+
+
+class PickerClosingTests(MatchingCase):
+    source = "Local File"
+
+    def test_nothing_picked_as_the_window_closes_is_used(self):
+        # The system's pickers wait for their answer, and the window may close meanwhile: a
+        # guide file is then not kept nor loaded, nor a file read or written.
+        before = self.config.epg_file
+        target = Path(self.config_dir) / "out.json"
+        with (
+            mock.patch.object(self.window.catalog, "refresh_epg") as refresh,
+            mock.patch.object(guide, "pick_file", return_value="/srv/guides/guide.xml") as pick,
+            mock.patch.object(guide, "pick_save_file", return_value=str(target)) as save,
+            mock.patch.object(self.window.jobs, "run_worker") as worker,
+        ):
+            self.open_at(m.GUIDE, guide.FILE)
+            with mock.patch.object(self.window, "closing", return_value=True):
+                self.key(Action.NAV_ACTIVATE)
+            pick.assert_called_once()
+            self.assertEqual(self.config.epg_file, before)
+            refresh.assert_not_called()
+            self.go_to(guide.MATCHING)
+            self.key(Action.NAV_ACTIVATE)
+            for key in (guide.IMPORT, guide.EXPORT):
+                self.go_to(key)
+                with mock.patch.object(self.window, "closing", return_value=True):
+                    self.key(Action.NAV_ACTIVATE)
+            self.assertEqual(pick.call_count, 2)
+            save.assert_called_once()
+            self.assertEqual(files(worker), [])
+            # Not closing: each goes on as ever.
+            self.key(Action.NAV_ACTIVATE)  # Export…
+            self.assertEqual(files(worker), [guide.ExportMapping])
 
 
 class FilesTests(MatchingCase):

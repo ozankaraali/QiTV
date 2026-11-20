@@ -13,7 +13,7 @@ from unittest import mock
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 import requests
-from timer_fixtures import wait_until
+from timer_fixtures import elapse, wait_until
 
 from services import file_types, i18n, settings_model as m, update_checker
 from services.config_manager import ConfigManager
@@ -28,6 +28,7 @@ from ui.file_types_settings import FAILED_HINT, MAC_HINT, MUSIC_LABEL, VIDEOS_LA
 from ui.keymap import Action
 from ui.overlays.settings_card import CANCEL
 from ui.overlays.settings_drawer import RESTART_NOTE
+from ui.settings_controller import STEPS_SETTLE_MS
 from ui.settings_general import (
     CLEAR,
     CLEARED_TEXT,
@@ -325,6 +326,7 @@ class SslTests(GeneralCase):
             self.open_at(m.ADVANCED, "ssl_verify")
             self.key(Action.NAV_RIGHT)
             self.assertFalse(self.config.ssl_verify)
+            elapse(STEPS_SETTLE_MS + 80)  # (once the steps stop)
             # Only the providers that follow the global check connect anew: the others' lists
             # go, the one in use is set up again with it.
             self.assertEqual(invalidated, ["Inherits"])
@@ -336,8 +338,27 @@ class SslTests(GeneralCase):
             fixture["ssl_verify"] = True
             self.key(Action.NAV_RIGHT)
             self.assertTrue(self.config.ssl_verify)
+            elapse(STEPS_SETTLE_MS + 80)
             self.assertEqual(invalidated, ["Inherits", "Inherits"])
             set_provider.assert_called_once_with(force_update=True)
+
+    def test_stepping_verify_ssl_connects_anew_once_the_steps_stop(self):
+        # On and off and on again, quickly: the providers that follow it connect anew once,
+        # for where the steps stopped; never while the window closes.
+        actions = self.window.provider_rows.actions
+        with mock.patch.object(actions, "global_ssl_changed") as changed:
+            self.open_at(m.ADVANCED, "ssl_verify")
+            for _ in range(3):
+                self.key(Action.NAV_RIGHT)
+                elapse(STEPS_SETTLE_MS - 200)
+            changed.assert_not_called()
+            self.assertFalse(self.config.ssl_verify)  # each step written at once
+            elapse(280)
+            changed.assert_called_once_with()
+            self.key(Action.NAV_RIGHT)
+            with mock.patch.object(self.window, "closing", return_value=True):
+                elapse(STEPS_SETTLE_MS + 80)
+            changed.assert_called_once_with()
 
 
 class AdvancedTests(GeneralCase):

@@ -54,6 +54,7 @@ from PySide6.QtCore import QEvent, QObject, QPointF, QRectF, Qt, Signal
 from PySide6.QtGui import (
     QFont,
     QFontMetricsF,
+    QHideEvent,
     QMouseEvent,
     QPainter,
     QPaintEvent,
@@ -927,6 +928,14 @@ class _Card(Overlay):
             # press would land on the card (Qt makes it a press on another widget), on the
             # dimmed picture, and cancel it. It reaches nothing.
             self._second_click.arm()
+
+    def hideEvent(self, event: QHideEvent) -> None:
+        if self.isHidden():
+            # Gone by a key or its caller before a double-click's second press came: the guard
+            # a press that showed it armed goes with it, so no later press is swallowed, in
+            # any window. A press that hides it arms the guard again (mousePressEvent).
+            self._second_click.disarm()
+        super().hideEvent(event)
 
     def mousePressEvent(self, event: QMouseEvent) -> None:
         event.accept()  # never the picture's under it
