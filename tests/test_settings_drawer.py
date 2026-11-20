@@ -537,6 +537,17 @@ class SettingsDrawerTests(unittest.TestCase):
         self.assertTrue(whole(box.help, help_text), box.help)
         for line in box.help:
             self.assertLessEqual(fm.horizontalAdvance(line), room + 0.5, box.help)
+        # Turkish ＋ Add provider: its help, in that narrower room, takes the small window's
+        # fourth line, whole.
+        self.addCleanup(i18n.set_language, "en")
+        self.assertEqual(i18n.set_language("tr"), "tr")
+        add = next(s for s in sections("Darwin") if s.key == m.PROVIDERS).rows[0]
+        self.assertEqual(add.key, m.ADD_PROVIDER)
+        self.drawer.open_at(sections("Darwin"), m.PROVIDERS)
+        self.drawer.right()
+        self.drawer.grab()
+        lines = self.drawer._box("right", 0).help
+        self.assertTrue(whole(lines, translate(add.help)), lines)
 
     def test_a_small_window_elides_without_overlap(self):
         self.use(*make(640, 360))
@@ -621,7 +632,7 @@ class SettingsDrawerTests(unittest.TestCase):
         self.assertTrue(" ".join(lines).endswith(translate(RESTART_NOTE)), lines)
 
     def test_the_restart_note_keeps_its_line_in_a_small_window(self):
-        # A help too long to share its three lines (a small window's) with the note: the note
+        # A help too long to share its four lines (a small window's) with the note: the note
         # keeps the last one, whole.
         self.use(*make(640, 360))
         help_text = (
@@ -633,20 +644,21 @@ class SettingsDrawerTests(unittest.TestCase):
         self.drawer.right()
         self.drawer.grab()
         lines = self.drawer._box("right", 0).help
-        self.assertEqual(len(lines), 3)
-        self.assertTrue(lines[1].endswith("…"), lines)
+        self.assertEqual(len(lines), 4)
+        self.assertTrue(lines[2].endswith("…"), lines)
         self.assertEqual(lines[-1], translate(RESTART_NOTE))
 
     def test_a_small_window_gives_a_help_a_title_and_a_value_a_line_more(self):
         # At 640×360 the columns shrink with the window but the fonts stop at their floor:
-        # a help (its restart note too) takes its third line, a title and a stepper's value
-        # take a third line before they elide, and a value's long word widens its room, the
-        # title wrapping instead. A window wide enough for every font keeps two lines for
-        # titles and values (1280, 1600).
+        # a help (its restart note too) takes a fourth line, a title and a stepper's value a
+        # third, before they elide, and a value's long word widens its room, the title
+        # wrapping instead. A window wide enough for every font keeps three lines for a help
+        # and two for titles and values (1280, 1600).
         self.assertEqual(settings_layout.HELP_LINES, 3)
         for width in (1280, 1600):
             un = ui_units(width)
             for font_u, most in (
+                (HELP_FONT_U, settings_layout.HELP_LINES),
                 (TITLE_FONT_U, settings_layout.TITLE_LINES),
                 (VALUE_FONT_U, settings_layout.VALUE_LINES),
             ):

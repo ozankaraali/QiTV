@@ -9,9 +9,9 @@ time reads whole); at its right end, by the row's kind, a stepper's
 value or a row's note ("answered 2 min ago"), and the › of a row that opens; under a focused
 row, its help, on three lines at most (a wider system font, macOS's, must not cut a help made to
 fit two). In a small window (640×360) the columns go on shrinking with the window while the
-fonts stop at their floor (MIN_FONT_PX): a title and a stepper's value then take a line more
-each before they elide, and a value's word never elides while the title can wrap to give it
-room. Geometry only: the overlay keeps the state and paints.
+fonts stop at their floor (MIN_FONT_PX): a title, a stepper's value and a help then take a
+line more each before they elide, and a value's word never elides while the title can wrap
+to give it room. Geometry only: the overlay keeps the state and paints.
 """
 
 from __future__ import annotations
@@ -207,14 +207,14 @@ def most_lines(un: Units, font_u: float, most: int) -> int:
 
 def help_lines(help_text: str, note: str, un: Units, width: float) -> list[str]:
     """The help under a focused row, HELP_LINES at most (at any size: a help written for two
-    lines may need a third in a wider font, or in a small window), the last elided, its
-    restart `note` after it; when both do not fit, the note keeps the last lines it needs to
-    itself (all but the first), the help the lines before it."""
+    lines may need a third in a wider font), a line more in a small window (most_lines), the
+    last elided, its restart `note` after it; when both do not fit, the note keeps the last
+    lines it needs to itself (all but the first), the help the lines before it."""
     font = un.font(HELP_FONT_U)
     text = " ".join(part for part in (help_text, note) if part)
     if not text:
         return []  # a row without help keeps its height when focused
-    most = HELP_LINES
+    most = most_lines(un, HELP_FONT_U, HELP_LINES)
     lines = wrap(text, font, width, most)
     if help_text and note and not whole(lines, text):
         notes = wrap(note, font, width, most - 1)

@@ -18,7 +18,7 @@ column lists the rows the layer is one of, the opened one marked as the drawer m
 there only the rows that open a layer take the highlight, and a
 click on another goes back up to it. A layer (or a section) without rows says its
 `empty_text` and the keys stay on the left. Only the right column's focused row shows its
-help under it, three lines at most (written for two); a note cut short at its row's end
+help under it, three lines at most (four in a small window); a note cut short at its row's end
 shows there whole instead (a check's answer). Where everything goes is
 ui/overlays/settings_layout.py's.
 
