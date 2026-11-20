@@ -246,7 +246,11 @@ class SettingsControllerTests(unittest.TestCase):
     def test_a_text_row_shows_its_value_and_keeps_an_edit(self):
         self.open_text_row("Demo TV")
         self.assertEqual(self.controller.value_text(self.drawer.focused_row()), "Demo TV")
-        self.assertFalse(self.controller.handle(Action.NAV_TEXT, "x"))  # not editing: nothing
+        self.assertTrue(self.controller.handle(Action.NAV_TEXT, "x"))  # not editing: a find
+        self.assertTrue(self.drawer.finding())
+        self.assertTrue(self.controller.handle(Action.ESCAPE))  # ended: on the row again
+        self.assertFalse(self.drawer.finding())
+        self.assertEqual(self.controller.value_text(self.drawer.focused_row()), "Demo TV")
         self.assertTrue(self.controller.handle(Action.NAV_ACTIVATE))
         self.assertTrue(self.drawer.editing())
         self.assertTrue(self.controller.handle(Action.NAV_TEXT, "!"))
