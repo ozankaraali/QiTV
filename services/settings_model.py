@@ -41,7 +41,6 @@ KINDS = (STEP, OPENS, ACTION, DANGER, TEXT, INFO)
 LEGACY_TABS: dict[str, str] = {
     SUBTITLES: "subtitles",
     TIMESHIFT: "timeshift",
-    PARENTAL: "parental",
 }
 
 # Section key -> its icon, a drawing of ui/overlays/painting.py's draw_icon. A section with no
@@ -193,8 +192,9 @@ class Context:
     cache's largest size as set (MB: one the old window took that is none of the steps shows
     as its own); and Files' rows, as their status is now (none when QiTV cannot be the app
     files open with: a run from source). The Guide's rows, built for its source as it is now
-    (ui.settings_guide), and the phone remote's for its settings and its state
-    (ui.settings_remote)."""
+    (ui.settings_guide), the phone remote's for its settings and its state
+    (ui.settings_remote), and parental controls' for the PIN and the lock now
+    (ui.settings_parental)."""
 
     languages: tuple[tuple[str, str], ...] = ((SOURCE_LANGUAGE, SOURCE_NAME),)
     system_language: str = SOURCE_NAME
@@ -203,6 +203,7 @@ class Context:
     files: tuple[Row, ...] = ()
     guide: tuple[Row, ...] = ()
     remote: tuple[Row, ...] = ()
+    parental: tuple[Row, ...] = ()
 
 
 def _general(title: str, context: Context) -> Section:
@@ -338,6 +339,11 @@ def _guide(title: str, rows: tuple[Row, ...]) -> Section:
 def _remote(title: str, rows: tuple[Row, ...]) -> Section:
     """Phone remote: its rows as ui.settings_remote builds them (they follow the remote)."""
     return Section(REMOTE, title, ICONS.get(REMOTE, ""), rows=rows)
+
+
+def _parental(title: str, rows: tuple[Row, ...]) -> Section:
+    """Parental controls: its rows as ui.settings_parental builds them (they follow the lock)."""
+    return Section(PARENTAL, title, ICONS.get(PARENTAL, ""), rows=rows)
 
 
 def _playback(system: str) -> Section:
@@ -517,7 +523,7 @@ def sections(
     """The sections in the drawer's order; `system` is platform.system(), `providers` the
     rows of the providers, listed first in Providers, `context` what only the running QiTV
     knows (by default: English only, no TMDB token built in, the image cache's default size
-    and no Files, Guide or Phone remote rows)."""
+    and no Files, Guide, Phone remote or Parental controls rows)."""
     context = context if context is not None else Context()
     titles = (
         (PROVIDERS, N_("Providers")),  # i18n: a settings section's title
@@ -547,6 +553,8 @@ def sections(
             built.append(_guide(text, tuple(context.guide)))
         elif key == REMOTE:
             built.append(_remote(text, tuple(context.remote)))
+        elif key == PARENTAL:
+            built.append(_parental(text, tuple(context.parental)))
         else:
             built.append(Section(key, text, ICONS.get(key, ""), legacy_tab=LEGACY_TABS[key]))
     return tuple(built)

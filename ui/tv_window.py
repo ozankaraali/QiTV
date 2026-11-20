@@ -206,6 +206,7 @@ from ui.settings_controller import SettingsController
 from ui.settings_dialog import OptionsDialog
 from ui.settings_general import GeneralRows, hooks as general_hooks
 from ui.settings_guide import GuideRows, hooks as guide_hooks
+from ui.settings_parental import ParentalRows
 from ui.settings_providers import ProviderRows
 from ui.settings_remote import RemoteRows
 from ui.song_jobs import PanelCover
@@ -1181,6 +1182,9 @@ class TVWindow(QMainWindow):
         # Settings › Phone remote: its switches start or stop the remote at once, its state as
         # the remote tells it, each paired phone removed once asked.
         self.remote_rows = RemoteRows(self, self.settings, self.settings_drawer)
+        # Settings › Parental controls: the PIN in a card, locked and unlocked, what is hidden
+        # only while unlocked; each change through parental_changed.
+        self.parental_rows = ParentalRows(self, self.settings, self.settings_drawer)
         self.catalogs.providersChanged.connect(self.provider_rows.providers_changed)
         self.catalog.providerReady.connect(self.provider_rows.providers_changed)
         # File → Open Link… and the channel list's Open a link (plan 4): while its card shows it
@@ -1448,6 +1452,8 @@ class TVWindow(QMainWindow):
             self._relock.stop()
         # 2.9.7: the Recordings tab hides a hidden channel's recordings while locked
         self.screens.library_controller.recordings_changed()
+        if self.settings.visible():  # Settings' Parental controls follow (the hour run out too)
+            self.settings.refresh_sections()
 
     def note_recording(self, path: str, channel: dict, title: str, start: float) -> None:
         """2.9.7: a recording started with R: what its file holds, in the recordings index."""
@@ -2837,12 +2843,13 @@ class TVWindow(QMainWindow):
 
     def _settings_context(self) -> Context:
         """What Settings' sections show that only this QiTV knows: General's, Files' and
-        Advanced's (ui.settings_general), and the Guide's and the phone remote's rows as they
-        are now."""
+        Advanced's (ui.settings_general), and the Guide's, the phone remote's and parental
+        controls' rows as they are now."""
         return dataclasses.replace(
             self.general_rows.context(),
             guide=self.guide_rows.rows(),
             remote=self.remote_rows.rows(),
+            parental=self.parental_rows.rows(),
         )
 
     def options_dialog(self, tab: str = "") -> None:
