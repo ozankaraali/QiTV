@@ -208,6 +208,29 @@ class FilmTests(PlayerCase):
         url, options = self.session.plays[-1]
         self.assertEqual((url, options["start_ms"]), (other, None))  # from its beginning
 
+    def test_going_back_to_a_links_first_film_forgets_the_film_between(self):
+        # Review M1: "the same stream" is the one the link plays now, never its id's first.
+        self.loaded()
+        self.link(FILM_URL, FILM)
+        self.plays_now()
+        key = stream_id(FILM_URL)
+        cid = f"{NETWORK_PROVIDER}:movie:{key}"
+        other = "https://vod.example/films/concert.mp4"
+        self.player.set_url(key, other, FILM)  # Replace: another film
+        self.opens(lambda: self.player.play_kept(key))
+        self.plays_now()
+        self.watch.resume[cid] = 300_000  # where that film stopped, under the link's id
+        self.player.set_url(key, FILM_FRESH, FILM)  # Settings: back to its first film
+        item = {"id": key, "cmd": FILM_FRESH, "_provider": NETWORK_PROVIDER}
+        self.assertIsNone(self.controller.stopped_at(item))
+        # Open Link of the first film's address, after another Replace: the same.
+        self.player.set_url(key, other, FILM)
+        self.watch.resume[cid] = 300_000
+        self.opens(lambda: self.player.play(FILM_URL, FILM))
+        url, options = self.session.plays[-1]
+        self.assertEqual((url, options["start_ms"]), (FILM_URL, None))
+        self.assertEqual(self.store.get(key).url, FILM_URL)
+
 
 class KeptTests(PlayerCase):
     def test_a_kept_film_played_as_a_channel_elsewhere_stays_a_film(self):
@@ -506,6 +529,35 @@ class NoProviderHoldTests(PlayerCase):
         self.session.ended.emit()
         self.assertEqual(self.runs, [True])
         self.assertTrue(self.welcome.visible)
+
+    def test_a_link_that_never_comes_lets_go(self):
+        # Review M2: held at play_link, before anything is current; its delivery raised.
+        failing = mock.patch.object(
+            self.controller, "_deliver", side_effect=RuntimeError("no player")
+        )
+        with failing, self.assertLogs("ui.tv_controller", "WARNING"):
+            self.player.play(URL, LIVE)
+            self.waits()
+            self.assertTrue(wait_until(lambda: self.runs == [True]))
+        self.assertTrue(self.welcome.visible)
+        self.assertFalse(self.controller._link_hold)
+
+    def test_the_first_provider_added_after_a_link_still_opens_its_list(self):
+        # Review M4: a link spends nothing of the start, as a file does.
+        self.link(URL)
+        self.controller.stop()
+        self.catalog.names = ["Home"]
+        self.catalog.hub_ready("Home")
+        self.catalog.sectionReady.emit("live")
+        self.assertEqual(self.drawer.named("open_drawer"), [(None,)])
+
+    def test_once_a_provider_exists_the_next_link_lets_the_hold_go(self):
+        self.link(URL)
+        self.waits()
+        self.catalog.names = ["Home"]  # added while the link plays
+        self.link("https://cdn.example/live/coast/index.m3u8")
+        self.assertEqual(self.runs, [True])
+        self.assertFalse(self.controller._link_hold)
 
     def test_with_a_provider_a_link_holds_nothing(self):
         self.catalog.names = ["Home"]

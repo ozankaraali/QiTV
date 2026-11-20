@@ -279,8 +279,8 @@ class LinkRows(QObject):
         if kind not in (LIVE, FILM, PROBE):
             self._notify(translate(NOT_A_LINK_TEXT))
             return
-        if stream_id(url) in (entry.id, stream_id(entry.url)):
-            self._player.set_url(entry.id, url)  # its stream, with a fresh token
+        if stream_id(url) == stream_id(entry.url):
+            self._player.set_url(entry.id, url)  # the stream it plays now, a fresh token
             return
         told = str(kind) if kind in (LIVE, FILM) else ""  # a PROBE keeps the link's kind
         self._asked = (ADDRESS, entry.id, url, told)

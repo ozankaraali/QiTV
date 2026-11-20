@@ -163,7 +163,8 @@ class RowTests(unittest.TestCase):
             [
                 ("Live", False),
                 ("Film · stopped at 41:12", False),
-                ("401: the link's access ran out", True),  # in the warning colour
+                # in the warning colour, as in Settings
+                ("Didn't open last time (401: the link's access ran out)", True),
                 ("Film", False),  # a film never stopped: from its start
             ],
         )
@@ -175,7 +176,8 @@ class RowTests(unittest.TestCase):
 
         with mock.patch.object(drawer_module, "elided", spy):
             drawer.grab()  # two lines a row: its name, then what it is
-        for text in ("Harbour News", "Live", "Film · stopped at 41:12", ACCESS_ENDED):
+        failed = "Didn't open last time (401: the link's access ran out)"
+        for text in ("Harbour News", "Live", "Film · stopped at 41:12", failed):
             self.assertIn(text, drawn)
         view = right.view
         self.assertGreater(view.sizeHintForRow(0), left.view.sizeHintForRow(0))

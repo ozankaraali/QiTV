@@ -208,6 +208,9 @@ LINK_LIVE_TEXT = N_("Live")
 LINK_FILM_TEXT = N_("Film")  # i18n: under a link's name in Network streams: it is a film
 # i18n: under a link's name in Network streams: a film, and where it stopped ({time}: 41:12)
 LINK_STOPPED_TEXT = N_("Film · stopped at {time}")
+# i18n: under a link's name in Network streams, in the warning colour: it did not play last
+# time, and why ({reason}: "401: the link's access ran out")
+LINK_FAILED_TEXT = N_("Didn't open last time ({reason})")
 _PINNED_ICONS = {FAVORITES_GROUP: "star", RECENT_GROUP: "recent"}
 _ACTION_ICONS = {
     SETTINGS_ROW: "gear",
@@ -228,11 +231,11 @@ _HEADER_TOOLTIPS = {  # the header's buttons: what they do, and their key (see _
 
 
 def link_sub(row: LinkRow) -> tuple[str, bool]:
-    """What a link's row says under its name, and whether in the warning colour: why it did
-    not play last time, else "Live", or a film's "Film · stopped at 41:12" ("Film" from its
-    start)."""
+    """What a link's row says under its name (the channel list's and Settings'), and whether
+    in the warning colour: that it did not play last time and why, else "Live", or a film's
+    "Film · stopped at 41:12" ("Film" from its start)."""
     if row.failed:
-        return translate(row.failed), True
+        return translate(LINK_FAILED_TEXT, reason=translate(row.failed)), True
     if row.kind != FILM:
         return translate(LINK_LIVE_TEXT), False
     if row.stopped_ms is None:

@@ -210,8 +210,7 @@ class NetworkPlayer(QObject):
         key = entry.id if entry is not None else stream_id(url)
         self._removed.discard(key)  # opened again: kept again once it plays
         if entry is not None and entry.url != url:
-            self.store.set_url(key, url)  # the newest address handed over is the one it plays
-            self._changed()
+            self.set_url(key, url)  # the newest address handed over is the one it plays
         name = entry.name if entry is not None else default_name(url)
         self._hand_over(key, name, url, kind)
 
@@ -321,12 +320,13 @@ class NetworkPlayer(QObject):
         """The link kept under `key` plays `url` from now on: its stream's fresh token, or
         another stream that replaces its own, of `kind` (LIVE or FILM: as that address says;
         "" keeps the link's). Its id stays, with its name and ⟲ Recent's row, and why it
-        failed last time goes: that was the old address's. Its resume point stays for its own
-        stream only: another stream's film starts from its beginning."""
+        failed last time goes: that was the old address's. Its resume point stays for the
+        stream it plays now only: another stream's film (its first one again, after a
+        Replace) starts from its beginning."""
         entry = self.store.get(key)
         if entry is None:
             return
-        another = stream_id(url) not in (key, stream_id(entry.url))
+        another = stream_id(url) != stream_id(entry.url)  # (its first stream again too)
         self.store.set_url(key, url)
         if kind in (LIVE, FILM):
             entry.kind = kind

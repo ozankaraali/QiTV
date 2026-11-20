@@ -983,9 +983,13 @@ class TVController(QObject):
         ProviderFlow.hold_for_file), nor does the Next card's episode (it would count as a
         choice made since: TVWindow.file_gives_way). The controller lets go when the file
         ends (after the Next card of its folder's next episode, unless that plays), is stopped,
-        fails or gives way to another title (_before_new_target)."""
+        fails or gives way to another title (_before_new_target). While a link held for plays
+        (_hold_for_link), a file's release from outside (a subtitle dropped, a file that
+        turned out gone or gave way) keeps the hold: the link's own end lets go."""
         if on:
             self._autoplay.drop()
+        elif self._link_hold:
+            return
         self._flow.hold_for_file(on)
 
     def hold_for_read(self) -> None:
@@ -1240,10 +1244,13 @@ class TVController(QObject):
     def _hold_for_link(self) -> None:
         """A link is about to play while no provider is configured: nothing opens over it (the
         welcome card waits), as over a file opened in QiTV (hold_for_file), until it stops,
-        ends, fails or another title that is no link replaces it. With a provider configured
-        a link plays as a channel or a film does: nothing is held."""
+        ends, fails or another title that is no link replaces it (or a link, once a provider
+        exists). It spends nothing: the first provider added later still opens its list when
+        ready. With a provider configured a link plays as a channel or a film does: nothing is
+        held."""
         if not self.catalog.provider_names():
-            self.hold_for_file(True)
+            self._autoplay.drop()
+            self._flow.hold_for_file(True, spends_start=False)
             self._link_hold = True
 
     def _link_holds(self, target: Optional[Target]) -> bool:
@@ -1261,6 +1268,12 @@ class TVController(QObject):
         if self._link_hold:
             self._link_hold = False
             self._flow.hold_for_file(False)
+
+    def _let_go_unless_a_link_plays(self) -> None:
+        """A link chosen while held never came (its open raised, an outside player refused
+        it, the multiview had no room): the hold goes, unless a link it holds for plays on."""
+        if not self._link_holds(self._current):
+            self._let_go_of_link()
 
     def _resume_owner(self, item: dict, provider_name: str) -> str:
         """Whose resume points `item`'s are: a link's are Network streams' (its id stays
@@ -2047,6 +2060,7 @@ class TVController(QObject):
             self._lanes.drop_tune()
             self._live_controls.new_target()
             self._current, self._cid = None, None
+            self._let_go_unless_a_link_plays()  # a link chosen held never comes
             self.zap.tuned(channel)
             return
         title = str(channel.get("name") or "")
@@ -2410,6 +2424,7 @@ class TVController(QObject):
         except Exception as e:
             self._current = previous  # whatever was playing before is still the current one
             self._log_failure(f"play {target.title}", e)
+            self._let_go_unless_a_link_plays()  # a link chosen held never came
             self._restore_channel()
             self._error(self._named(target.title, str(e)))
 
@@ -2430,6 +2445,7 @@ class TVController(QObject):
             return  # the failed target was superseded: no error for it
         self._forget_room(target)
         self._give_large_back(target)
+        self._let_go_unless_a_link_plays()  # a link chosen held never came
         self._restore_channel()
         self._error(self._named(target.title, message))
         self._explain_item(target.item, target.title)
@@ -2722,6 +2738,7 @@ class TVController(QObject):
             self._media.playing(url)  # 2.8: its server hears it start; the phone says where
         if not ok:
             self._phone_slot.give_back()
+            self._let_go_unless_a_link_plays()  # a link chosen held never came
             first, _, rest = (message or "").strip().partition("\n")
             if rest.strip():
                 logger.info("External player: %s", scrub(rest))
@@ -3749,7 +3766,9 @@ class TVController(QObject):
             self._list_job.stop()  # a list of songs given up: its songs stop being read
             if not delivered:
                 self._file_gives_way()
-            if not self._link_holds(target):
+            # A link after the held link keeps its hold; once a provider exists it plays as a
+            # channel does, and the hold goes.
+            if not self._link_holds(target) or self.catalog.provider_names():
                 self._link_hold = False
                 self._flow.hold_for_file(False)
             self._opening_over()

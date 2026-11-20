@@ -73,6 +73,7 @@ from ui.settings_links import (
     row_key,
 )
 from ui.settings_providers import ProviderRows, layer_key
+from ui.tv_window import DROP
 
 LIVE_URL = "https://cdn.example/live/harbour/index.m3u8?token=aaa"
 FRESH = "https://cdn.example/live/harbour/index.m3u8?token=bbb"
@@ -282,7 +283,8 @@ class LinksTests(unittest.TestCase):
         live_sub = link_sub(LinkRow(LIVE_ID, "Harbour News", LIVE))
         film_sub = link_sub(LinkRow(FILM_ID, "Lecture recording", FILM, failed=ACCESS_ENDED))
         self.assertEqual([(row.sub, row.warn) for row in rows[:2]], [live_sub, film_sub])
-        self.assertEqual(film_sub, (translate(ACCESS_ENDED), True))
+        failed = "Didn't open last time (401: the link's access ran out)"  # (the mockup's)
+        self.assertEqual(film_sub, (failed, True))
         self.assertTrue(rows[2].help)
         # A film that played says where it stopped, as the channel list does.
         self.controller.stops[FILM_ID] = 2_472_000
@@ -438,6 +440,15 @@ class LinksTests(unittest.TestCase):
         self.assertIsNone(self.player.rows()[0].stopped_ms)
         listed = {row.key: row for row in self.links.row().section.rows}  # Network streams
         self.assertEqual(listed[link_key(FILM_ID)].sub, "Film")  # its row says so too
+        # Back to its first film: another stream than the one it plays now, asked again, and
+        # where the film between stopped is forgotten too (review M1).
+        self.controller.stops[FILM_ID] = 900_000
+        self.type_text(FILM_URL)
+        self.assertTrue(self.links.question.isVisible())
+        self.key(Action.NAV_LEFT)
+        self.key(Action.NAV_ACTIVATE)  # Replace
+        self.assertEqual(self.controller.forgotten, [FILM_ID, FILM_ID])
+        self.assertEqual(self.store.get(FILM_ID).url, FILM_URL)
 
     def test_remove_asks_and_saves_off_the_gui_thread(self):
         self.seed(
@@ -643,6 +654,34 @@ class NoProviderPlayRowTests(PlayRowTests):
         self.assertEqual(runs, [])
         window.controller.stop()
         self.assertTrue(wait_until(welcome.isVisible))  # stopped: as after a file
+        self.assertEqual(runs, [True])
+
+    def test_a_subtitle_or_a_gone_file_dropped_meanwhile_keeps_the_card_away(self):
+        # Review I1: the window lets a file's hold go when no file plays; the link held for
+        # plays on, and keeps it until it stops.
+        self.start()
+        self.plays_quietly()
+        window, welcome = self.window, self.window.overlays.welcome
+        self.to_play()
+        self.press(Qt.Key.Key_Return)  # Play
+        self.assertTrue(wait_until(lambda: window.controller.now_playing() is not None))
+        runs = []
+        window.when_idle(lambda: runs.append(True))
+        folder = Path(self.config_dir)
+        subtitles = folder / "harbour.srt"
+        subtitles.write_text("1\n00:00:01,000 --> 00:00:02,000\nHello\n", encoding="utf-8")
+        window.open_paths([str(subtitles)], source=DROP)  # subtitles alone: for what plays
+        elapse(300)
+        self.assertFalse(welcome.isVisible())
+        self.assertEqual(runs, [])
+        window.open_paths([str(folder / "gone.mkv")], source=DROP)  # a film no longer there
+        self.assertTrue(wait_until(lambda: any("gone.mkv" in text for text, _ in self.toasts)))
+        elapse(300)
+        self.assertFalse(welcome.isVisible())
+        self.assertEqual(runs, [])
+        self.assertEqual(window.controller.now_playing().item["id"], LIVE_ID)  # it plays on
+        window.controller.stop()
+        self.assertTrue(wait_until(welcome.isVisible))
         self.assertEqual(runs, [True])
 
     def test_the_open_link_cards_play_holds_the_welcome_card_off_too(self):

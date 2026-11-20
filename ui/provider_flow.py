@@ -272,9 +272,11 @@ class ProviderFlow(QObject):
         if not self._held:
             self._released(start_hint=False)
 
-    def hold_for_file(self, on: bool) -> None:
+    def hold_for_file(self, on: bool, *, spends_start: bool = True) -> None:
         """A file opened in QiTV is on its way or plays (`on`), or it is over: it ended, was
-        stopped, failed, turned out missing or gave way to another title.
+        stopped, failed, turned out missing or gave way to another title. A link of Network
+        streams played with no provider configured holds as a file does, but spends nothing
+        (`spends_start` False): the first provider added later still opens its list when ready.
 
         While held QiTV is busy: a provider that becomes ready tunes nothing and opens no
         drawer, and the welcome card and the start's "Loading <provider>…" wait (one already
@@ -290,7 +292,9 @@ class ProviderFlow(QObject):
         file's open, a file QiTV won't play), what waits goes on waiting for the read."""
         start_hint = self._loading and not self._loading_chosen  # it waits for the file
         if on:
-            self._held = self._file_opened = True
+            self._held = True
+            if spends_start:
+                self._file_opened = True
             self._reading = False  # a read that held the start: the file's hold takes over
             if self._welcome_up:
                 self._dismiss_welcome()
