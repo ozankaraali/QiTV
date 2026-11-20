@@ -22,13 +22,13 @@ import time
 from typing import Any, Callable, Iterator, Optional
 
 from PySide6.QtCore import QObject, QPoint, QThread
-from PySide6.QtWidgets import QFileDialog, QMenu, QMessageBox, QWidget
+from PySide6.QtWidgets import QFileDialog, QMenu, QWidget
 
 from services import parental, recording_desk as desk, recordings_library as rl, system_open
 from services.catalog import ALL_GROUP_ID
 from services.exporter import ExportKind
 from services.failure_reasons import shown_message
-from services.i18n import tr, translate
+from services.i18n import N_, tr, translate
 from services.library import LibraryModel
 from services.navigation import FAVORITES_GROUP, RECENT_GROUP
 from services.open_paths import MEDIA_EXTENSIONS
@@ -42,6 +42,7 @@ from ui.library.folders_view import FoldersDesk
 from ui.library_controller import LibraryController
 from ui.overlays.question_card import QuestionCard
 from ui.overlays.rec_sign import MANAGE_TEXT
+from ui.overlays.settings_card import CANCEL, CANCEL_TEXT, Button
 from ui.page_stack import PageStack
 from ui.pointer import SecondClickGuard
 from ui.recordings_desk import RecordingsDesk
@@ -50,6 +51,8 @@ from ui.tv_controller import ERROR_MS, INFO_MS, scrub
 
 logger = logging.getLogger(__name__)
 
+DELETE = "delete"  # a recording's deletion question's answer (2.13.1: a card)
+DELETE_TEXT = N_("Delete")
 # File → Open File…'s files (the dialog's filter, after its name).
 MEDIA_PATTERNS = " ".join(f"*.{ext}" for ext in (*sorted(MEDIA_EXTENSIONS), "m3u8"))
 
@@ -751,19 +754,28 @@ class TVPages(QObject):
         system_open.open_folder(os.path.dirname(path))
 
     def delete_recording(self, item: dict) -> None:
-        """A recording's file deleted, asked first (its right-click's, the Recordings page's)."""
+        """A recording's file deleted, asked first (its right-click's, the Recordings page's):
+        2.13.1, QiTV's own card over the page that shows (the Library's), Cancel first, Delete
+        in red; the answer through a callback."""
         window = self._window
-        name = os.path.basename(str(item.get("path") or ""))
-        answer = QMessageBox.question(
-            window,
+        path = str(item.get("path") or "")
+        name = os.path.basename(path)
+
+        def answered(key: str) -> None:
+            if key == DELETE and not window.closing():
+                self.recordings.delete(path)
+
+        window.window_cards.ask(
             tr("Delete Recording"),  # i18n: the title of the question before a recording goes
             # i18n: the question before deleting a recording's file ({name}: the file's name)
             tr("Delete “{name}”? Its file is removed from the disk.", name=name),
-            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
-            QMessageBox.StandardButton.No,
+            [
+                Button(CANCEL, translate(CANCEL_TEXT)),
+                Button(DELETE, translate(DELETE_TEXT), danger=True),
+            ],
+            CANCEL,
+            answered,
         )
-        if answer == QMessageBox.StandardButton.Yes and not window.closing():
-            self.recordings.delete(str(item.get("path") or ""))
 
     def open_file(self) -> None:
         """File → Open File…: a local media file plays as a movie, once it is found there
