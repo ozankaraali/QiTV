@@ -18,7 +18,8 @@ from unittest import mock
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
-from PySide6.QtCore import Qt
+from PySide6.QtCore import QPoint, QPointF, Qt
+from PySide6.QtGui import QWheelEvent
 from PySide6.QtWidgets import QWidget
 from timer_fixtures import elapse, pause, wait_until
 
@@ -1101,6 +1102,25 @@ class CardOverTheTvTests(PlayerCase):
         self.card.handle(Action.ESCAPE)
         self.assertTrue(wait_until(lambda: self.welcome.visible))
 
+    def test_the_wheel_over_the_card_is_the_cards(self):
+        # The controller watches the card for its hiding only: a wheel over it never zaps,
+        # even with the channel column open under it.
+        self.opener.open()
+        self.column.visible = True
+        wheel = QWheelEvent(
+            QPointF(20, 20),
+            QPointF(20, 20),
+            QPoint(0, 0),
+            QPoint(0, -120),
+            Qt.MouseButton.NoButton,
+            Qt.KeyboardModifier.NoModifier,
+            Qt.ScrollPhase.NoScrollPhase,
+            False,
+        )
+        with mock.patch.object(self.controller._column_wheel, "wheel_event") as zapped:
+            self.assertFalse(self.controller.eventFilter(self.card, wheel))
+        zapped.assert_not_called()
+
     def test_a_link_played_from_the_card_holds_before_the_welcome_card_could_come(self):
         self.catalog.names = []
         self.controller.start()
@@ -1173,6 +1193,12 @@ class WindowTests(WindowCase):
             window.play_network_link(short, LIVE)
         item, section = play.call_args.args
         self.assertEqual((item["cmd"], item["_provider"], section), (short, "Panel", "live"))
+        # Kept as no provider's (played before the account was added), ⟲ Recent lists it as
+        # the account's: the window's own owner (final review C1).
+        kept = {**item, "_provider": NETWORK_PROVIDER}
+        window.config_manager.watch_history = [tvc.watched(NETWORK_PROVIDER, kept)]
+        recent = window.nav.children(NavNode("group", RECENT_GROUP, "Recent"))
+        self.assertEqual([node.payload["_provider"] for node in recent], ["Panel"])
         store_path = Path(self.config_dir) / ns.FILE_NAME
         self.assertEqual(window.network_streams.path, store_path)
 

@@ -2054,13 +2054,15 @@ class TVController(QObject):
             self._zap_steps(steps)
 
     def eventFilter(self, watched: QObject, event: QEvent) -> bool:
+        if any(watched is card for card in self._cards):  # a card over the TV: its own events
+            if event.type() == QEvent.Type.Hide:
+                # After what hid it (Play hands its link over right after: it holds first).
+                QTimer.singleShot(0, self, self._card_went)
+            return False
         if isinstance(event, QWheelEvent) and self.overlays.column.isVisible():
             self._column_wheel.wheel_event(event)
             event.accept()
             return True
-        if event.type() == QEvent.Type.Hide and any(watched is card for card in self._cards):
-            # After what hid it (Play hands its link over right after: it holds first).
-            QTimer.singleShot(0, self, self._card_went)
         return False
 
     def _on_column_wheel(self, steps: int, modifiers) -> None:
