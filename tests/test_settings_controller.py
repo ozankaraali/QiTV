@@ -433,6 +433,25 @@ class SettingsControllerTests(unittest.TestCase):
         self.controller.handle(Action.ESCAPE)  # now the rows': a layer up
         self.assertEqual(self.drawer.focus_side(), "left")
 
+    def test_only_a_card_in_sight_takes_the_keys(self):
+        # A card whose page is out of sight (it is not hidden itself) has no keys: they reach
+        # what shows, and the card has them again once it shows.
+        self.controller.open(PLAYBACK)
+        page = QWidget(self.host)
+        page.hide()
+        card = FakeCard(page)
+        self.controller.show_card(card)
+        self.assertFalse(card.isHidden())
+        self.assertFalse(card.isVisible())
+        self.assertFalse(self.controller.card_shown())
+        self.controller.handle(Action.NAV_RIGHT)
+        self.assertEqual(card.keys, [])
+        self.assertEqual(self.drawer.focus_side(), "right")  # the rows had it
+        page.show()
+        self.assertTrue(self.controller.card_shown())
+        self.controller.handle(Action.NAV_DOWN)
+        self.assertEqual(card.keys, [Action.NAV_DOWN])
+
     def test_a_card_over_a_card_and_settings_going_cancels_them(self):
         self.controller.open(PLAYBACK)
         form, question = FakeCard(self.host), FakeCard(self.host)

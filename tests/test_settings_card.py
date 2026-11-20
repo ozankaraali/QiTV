@@ -134,6 +134,19 @@ class FormCardTests(Case):
         card.handle(Action.PASTE)
         self.assertEqual(card.values()["password"], "pw")
 
+    def test_focus_field_gives_a_field_the_keys(self):
+        # Its caller moves the keys to the field it asks for (the first one empty, say).
+        card = self.form()
+        for _ in range(3):
+            card.handle(Action.NAV_DOWN)
+        self.assertEqual(card.focus(), ("button", "add"))
+        card.focus_field("username")
+        self.assertEqual(card.focus(), ("field", "username"))
+        card.handle(Action.NAV_TEXT, "demo")
+        self.assertEqual(card.values()["username"], "demo")
+        card.focus_field("nothing")  # no such field: the keys stay
+        self.assertEqual(card.focus(), ("field", "username"))
+
     def test_enter_in_a_field_presses_the_accent_button(self):
         card = self.form()
         pressed = QSignalSpy(card.pressed)

@@ -71,6 +71,8 @@ class Card(Protocol):
 
     def isHidden(self) -> bool: ...
 
+    def isVisible(self) -> bool: ...
+
     def show(self) -> None: ...
 
     def hide(self) -> None: ...
@@ -191,9 +193,11 @@ class SettingsController(QObject):
         return self._card() is not None
 
     def _card(self) -> Optional[Card]:
-        """The card on top, of those still showing (a card hides itself when it is done)."""
+        """The card on top, of those in sight (a card hides itself when it is done). One whose
+        page is out of sight, not hidden itself, has no keys until it shows again."""
         self._cards = [card for card in self._cards if not card.isHidden()]
-        return self._cards[-1] if self._cards else None
+        shown = [card for card in self._cards if card.isVisible()]
+        return shown[-1] if shown else None
 
     def _cancel_cards(self) -> None:
         """Settings went: each card still showing cancels, as its Esc cancels it."""

@@ -149,6 +149,24 @@ class ProviderActionsTests(unittest.TestCase):
         )
         self.assertEqual(self.actions.changes.names(), ["News", "Extra"])
 
+    def test_a_new_sign_in_brings_the_lists_again(self):
+        # A media server signed in again keeps its address, user and device: the connection's
+        # identity is the same, yet its lists were fetched with the token it replaces.
+        home = {"type": "JELLYFIN", "name": "Home", "url": "http://media.test:8096"}
+        self.actions.changes.add({**home, "username": "me", "token": "t1", "device_id": "d1"})
+        self.assertEqual(
+            self.run_action("update", "Home", {"token": "t2"}, True),
+            [("invalidate", "list", "Home"), SAVED, REBUILT],
+        )
+        self.assertFalse(self.result.identity_changed)
+        self.config.selected_provider_name = "Home"
+        self.assertEqual(
+            self.run_action("update", "Home", {"token": "t3"}, True),
+            [SAVED, ("set_provider", True), REBUILT],
+        )
+        self.assertEqual(self.run_action("update", "Home", {"token": "t3"}, True), [])  # the same
+        self.assertEqual(self.run_action("update", "Home", {"token": "t4"}), [SAVED, REBUILT])
+
     def test_a_change_that_cannot_be_saved_has_no_follow_ups(self):
         # The list is as the disk holds it again: nothing to carry over, reload or hand over.
         extra = {"type": "M3UPLAYLIST", "name": "Extra", "url": "http://extra.test/tv.m3u"}

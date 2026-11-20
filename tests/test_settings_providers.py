@@ -17,6 +17,7 @@ from timer_fixtures import elapse, wait_until
 
 from services import i18n, provider_check
 from services.epg_view import GUIDE_OFFSET_KEY
+from services.failure_reasons import SIGN_IN_AGAIN_MESSAGE
 from services.hidden_groups import HiddenGroups
 from services.i18n import translate
 from services.provider_check import Outcome
@@ -52,6 +53,7 @@ from ui.settings_providers import (
     REMOVE as REMOVE_KEY,
     SAVE_FAILED_TEXT,
     ProviderRows,
+    answer_text,
     kind_text,
     layer_key,
     row_key,
@@ -576,6 +578,28 @@ class ProvidersTests(unittest.TestCase):
         self.assertNotIn("Lists", self.rows._notes)
         self.into("Films")
         self.assertEqual(self.row("Films", "check").note, "Provider verified successfully.")
+
+    def test_an_answer_says_its_reason_with_one_full_stop(self):
+        # A media server's reasons end in a full stop of their own; a portal's warning may too.
+        reason = "The user name or the password is not right."
+        self.assertEqual(
+            answer_text(Outcome(False, reason)), f"Failed to verify provider: {reason}"
+        )
+        self.assertEqual(
+            answer_text(Outcome(False, "Couldn't reach the provider")),
+            "Failed to verify provider: Couldn't reach the provider.",
+        )
+        self.assertEqual(
+            answer_text(Outcome(True, "Dated.")), "Provider verified successfully. Note: Dated."
+        )
+        # A server that asks for a sign-in again points to where it is signed in now.
+        self.assertEqual(
+            translate(SIGN_IN_AGAIN_MESSAGE),
+            "The server asks to sign in again: Settings → Providers → this server → Address and"
+            " login.",
+        )
+        said = answer_text(Outcome(False, translate(SIGN_IN_AGAIN_MESSAGE)))
+        self.assertEqual(said, f"Failed to verify provider: {translate(SIGN_IN_AGAIN_MESSAGE)}")
 
     # ---- removing ----------------------------------------------------------------------------
 

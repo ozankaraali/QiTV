@@ -1088,6 +1088,12 @@ class FormCard(_Card):
         """Each field's text, by its key."""
         return {f.key: self._edits[f.key].text for f in self._fields}
 
+    def focus_field(self, key: str) -> None:
+        """The keys on the field `key` (the one its caller asks to fill in next); a key of no
+        field leaves them where they are."""
+        if key in self._edits:
+            self._set_focus(("field", key))
+
     def set_found(self, text: str, ok: bool) -> None:
         """What the link was found to be ("✓ Xtream at …"), or what went wrong (not `ok`)."""
         self._found, self._found_ok = text, ok

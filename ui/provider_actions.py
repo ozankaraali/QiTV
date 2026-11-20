@@ -6,9 +6,10 @@ Settings window's Save ran for it, in its order:
 
 - added: the catalogs reload (`providers_saved`), then the list shows the new provider
   (`_show_provider`, as for a dropped link's);
-- a new connection (the address, the login, the SSL check): a provider other than the TV's
-  loses its cached lists before the catalogs reload (one set up again at once then keeps what
-  its new sign-in brings); the TV's is set up again with it once they reloaded;
+- a new connection (the address, the login, the SSL check, a media server's new sign-in): a
+  provider other than the TV's loses its cached lists before the catalogs reload (one set up
+  again at once then keeps what its new sign-in brings); the TV's is set up again with it once
+  they reloaded;
 - the same connection (the stream limit, the guide's offset): the catalogs reload only;
 - renamed: what is kept under its old name moves (`providers_renamed`), its lists under that
   name go (a write its catalog queued too), the catalogs reload, and the TV's is set up again
@@ -19,8 +20,8 @@ Settings window's Save ran for it, in its order:
 
 Each ends with the menu bar's provider list rebuilt. A change whose write the disk refuses
 raises its OSError before any follow-up: nothing was changed (ProviderChanges puts the list
-back). Asking first (a removal, the parental PIN for a rename) is the caller's. The TV's provider is the one Settings selects
-(`selected_provider_name`), as the old Save had it.
+back). Asking first (a removal, the parental PIN for a rename) is the caller's. The TV's
+provider is the one Settings selects (`selected_provider_name`), as the old Save had it.
 """
 
 from __future__ import annotations
@@ -47,16 +48,20 @@ class ProviderActions:
         self._done()
         return name
 
-    def update(self, name: str, changes: dict) -> Change:
-        """Change provider `name`'s fields by `changes` (ProviderChanges.update)."""
+    def update(self, name: str, changes: dict, refresh: bool = False) -> Change:
+        """Change provider `name`'s fields by `changes` (ProviderChanges.update). `refresh`:
+        its lists come again as for a new connection, though its identity is the same (a media
+        server signed in again: its new token, which the identity leaves out, as the old
+        window's verified providers)."""
         change = self.changes.update(name, changes)
         if not change.fields:
             return change
         selected = self._selected(name)
-        if change.identity_changed and not selected:
+        anew = change.identity_changed or refresh
+        if anew and not selected:
             self._manager_of(name).invalidate_provider_cache(name)
         self._window.providers_saved()
-        if change.identity_changed and selected:
+        if anew and selected:
             self._window.set_provider(force_update=True)
         self._done()
         return change

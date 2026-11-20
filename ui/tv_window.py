@@ -192,6 +192,7 @@ from ui.overlays.zap_banner import ZapBanner
 from ui.page_stack import PageStack
 from ui.pip import PipFrame
 from ui.pointer import PointerHider
+from ui.provider_cards import ProviderCards
 from ui.record_timer_dialog import RecordTimerDialog, TimerChoice
 from ui.recording_scheduler import RecordingScheduler
 from ui.remote_controller import RemoteController
@@ -1150,6 +1151,12 @@ class TVWindow(QMainWindow):
         # is now; again whenever it changes, here or elsewhere (a drop, Free channels, the
         # Settings window), and when the TV moves to another provider (its "in use").
         self.provider_rows = ProviderRows(self, self.settings, self.settings_drawer)
+        # Its ＋ Add provider and each provider's Address and login: cards over the picture,
+        # a check before anything is kept.
+        self.provider_cards = ProviderCards(
+            self, self.settings, self.settings_drawer, self.provider_rows
+        )
+        self.provider_rows.cards = self.provider_cards
         self.catalogs.providersChanged.connect(self.provider_rows.providers_changed)
         self.catalog.providerReady.connect(self.provider_rows.providers_changed)
         # The channel list's find: genres and channels at every provider, found in a worker;

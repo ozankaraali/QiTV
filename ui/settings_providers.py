@@ -7,7 +7,7 @@ under it ("Xtream · in use" for the one the TV shows), then ＋ Add provider an
 - Name, edited in place: Enter or a click elsewhere renames it, never a keystroke; another
   provider's name, in any case, is refused and said, and the name stays;
 - Kind, only shown: another kind is another provider;
-- Address and login ›, the card that changes them after a check (`ProviderCards.edit`);
+- Address and login ›, the card that changes them after a check (ui.provider_cards);
 - Verify certificates, Streams at once and Guide time offset, each step written at once by the
   old Save's rules (services.provider_changes);
 - Hidden groups ›, this provider's groups hidden to tidy the lists, each shown again at once;
@@ -44,6 +44,7 @@ from services.epg_view import (
 from services.i18n import N_, tr, translate
 from services.provider_changes import NameTaken
 from services.provider_check import Outcome
+from services.provider_link import ProviderLink
 from services.provider_types import EMBY, JELLYFIN
 from services.settings_model import (
     ACTION,
@@ -118,26 +119,12 @@ REMOVE_TEXT = N_("Remove")  # i18n: a button of "Remove the provider …?" (verb
 
 
 class ProviderCards(Protocol):
-    """The cards over the picture that add a provider and change one's address and login
-    (plan 2, Task 8)."""
+    """The cards over the picture that add a provider (filled from `link` when one came) and
+    change one's address and login (ui.provider_cards)."""
 
-    def add(self) -> None: ...
+    def add(self, link: Optional[ProviderLink] = None) -> None: ...
 
     def edit(self, name: str) -> None: ...
-
-
-class WindowCards:
-    """Until the drawer's own cards (plan 2, Tasks 8 and 9): ＋ Add provider and Address and
-    login open the Settings window's provider form, as Add provider does today."""
-
-    def __init__(self, window: Any) -> None:
-        self._window = window
-
-    def add(self) -> None:
-        self._window.add_provider()
-
-    def edit(self, name: str) -> None:
-        self._window.options_dialog("providers")
 
 
 def _escaped(name: str) -> str:
@@ -173,8 +160,9 @@ def kind_text(kind: Any) -> str:
 
 
 def answer_text(outcome: Outcome) -> str:
-    """A check's answer as the old window's Verify Provider said it."""
-    why = outcome.why
+    """A check's answer as the old window's Verify Provider said it (a reason that ends in a
+    full stop of its own, as a media server's, keeps only that one)."""
+    why = outcome.why[:-1] if outcome.why.endswith(".") else outcome.why
     if outcome.ok:
         if why:
             # i18n: why is a warning, as "The portal says your subscription ended on 3 Oct 2026"
@@ -190,7 +178,7 @@ def answer_text(outcome: Outcome) -> str:
     return tr("Failed to verify provider.")
 
 
-def _where(provider: dict) -> str:
+def where(provider: dict) -> str:
     """Where a provider is, without its login: a web address's host (and port), a playlist
     file's name."""
     url = str(provider.get("url") or "").strip()
@@ -224,8 +212,8 @@ def _offsets() -> tuple[Choice, ...]:
 class ProviderRows(QObject):
     """Settings' Providers rows (`rows`, for the sections) and the handler of their keys
     (`provider/…`, registered with `settings`). `window` is the TV window; `drawer` the
-    Settings layer the rows show in; `cards` the Add and the address cards (the Settings
-    window's form until plan 2's cards: WindowCards)."""
+    Settings layer the rows show in; `cards` the Add and the address cards (the window gives
+    them once both are built: ui.provider_cards; none, those rows do nothing)."""
 
     def __init__(
         self,
@@ -238,7 +226,7 @@ class ProviderRows(QObject):
         self._window = window
         self._settings = settings
         self._drawer = drawer
-        self.cards: ProviderCards = cards if cards is not None else WindowCards(window)
+        self.cards: Optional[ProviderCards] = cards
         self._actions = ProviderActions(window)
         self._changing = False  # a change of ours runs: the rows are built once it is done
         self._pin_granted = False  # this visit of Settings
@@ -305,7 +293,7 @@ class ProviderRows(QObject):
                 # i18n: help under a provider's Address and login in Settings
                 N_("Changed in a card, and checked before anything is kept."),
                 kind=OPENS,
-                note=_where(provider),
+                note=where(provider),
             ),
             Row(
                 row_key(name, SSL),
@@ -398,7 +386,7 @@ class ProviderRows(QObject):
             return
         name, field, _rest = parsed
         value = next_choice(row, self.value(row), delta)
-        self._apply(lambda: self._actions.update(name, {_STORED[field]: value}))
+        self.apply(lambda: self._actions.update(name, {_STORED[field]: value}))
         self._settings.refresh_sections()
 
     def edited(self, row: Row, text: str) -> None:
@@ -408,7 +396,8 @@ class ProviderRows(QObject):
 
     def chosen(self, row: Row) -> None:
         if row.key == ADD_PROVIDER:
-            self.cards.add()
+            if self.cards is not None:
+                self.cards.add()
             return
         if row.key == FREE_CHANNELS:  # the window's menu, under the row
             self._window.show_free_channels(self._drawer.row_anchor(row.key))
@@ -418,7 +407,8 @@ class ProviderRows(QObject):
             return
         name, field, rest = parsed
         if field == LOGIN:
-            self.cards.edit(name)
+            if self.cards is not None:
+                self.cards.edit(name)
         elif field == CHECK:
             self._check(name)
         elif field == REMOVE:
@@ -435,11 +425,16 @@ class ProviderRows(QObject):
         if not self._changing:
             self._settings.refresh_sections()
 
-    def _apply(self, change: Callable[[], object]) -> bool:
-        """Run one change of ours (ProviderActions'); whether it was made. The window's news of
-        it, which comes inside it (the catalogs' providersChanged), waits for the caller's one
-        build of the rows. A provider list that cannot be saved is said (False): nothing was
-        changed (the list is as the disk holds it, and no follow-up ran)."""
+    @property
+    def actions(self) -> ProviderActions:
+        """The provider changes, each followed up in the window (the cards' too)."""
+        return self._actions
+
+    def apply(self, change: Callable[[], object]) -> bool:
+        """Run one change of ours (ProviderActions', the cards' too); whether it was made. The
+        window's news of it, which comes inside it (the catalogs' providersChanged), waits for
+        the caller's one build of the rows. A provider list that cannot be saved is said
+        (False): nothing was changed (the list is as the disk holds it, and no follow-up ran)."""
         self._changing = True
         try:
             change()
@@ -459,7 +454,7 @@ class ProviderRows(QObject):
             return
         index = self._actions.changes.names().index(name)
         try:
-            self._apply(lambda: self._actions.rename(name, text))
+            self.apply(lambda: self._actions.rename(name, text))
         except NameTaken as taken:
             self._notify(translate(NAME_TAKEN_TEXT, name=taken.name))
             return
@@ -472,6 +467,11 @@ class ProviderRows(QObject):
             self._notes[new] = self._notes.pop(name)
         self._checks = {check: new if n == name else n for check, n in self._checks.items()}
         self._settings.refresh_sections(renamed={layer_key(name): layer_key(new)})
+
+    def checked(self, name: str, outcome: Outcome) -> None:
+        """Provider `name` was checked elsewhere (a card, before it was kept): its answer is
+        its Check the connection's note (the caller builds the rows again)."""
+        self._notes[name] = answer_text(outcome)
 
     def _show_again(self, group: str) -> None:
         """A hidden group back in the lists, at once (as the old box's Show again)."""
@@ -498,7 +498,7 @@ class ProviderRows(QObject):
             return  # its provider went meanwhile
         self._notes[name] = answer_text(outcome)
         if outcome.access:  # a sign-in's (a media server's): kept in place of a password
-            self._apply(lambda: self._actions.update(name, dict(outcome.access)))
+            self.apply(lambda: self._actions.update(name, dict(outcome.access)))
         self._settings.refresh_sections()
 
     def _ask_remove(self, name: str) -> None:
@@ -526,7 +526,7 @@ class ProviderRows(QObject):
         name, self._removing = self._removing, ""
         if key != REMOVE or not name or self._find(name) is None:
             return
-        if self._apply(lambda: self._actions.remove(name)):
+        if self.apply(lambda: self._actions.remove(name)):
             self._notes.pop(name, None)
             self._checks = {check: n for check, n in self._checks.items() if n != name}
         self._settings.refresh_sections()
