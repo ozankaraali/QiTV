@@ -293,6 +293,26 @@ class SettingsDrawerTests(unittest.TestCase):
         self.click(self.drawer.title_rect(0).center())
         self.assertEqual(self.chosen, ["legacy:guide"])
 
+    def test_a_row_that_closes_settings_guards_its_second_press_only_meanwhile(self):
+        # A link's Play closes Settings on the press, and a double-click's second press would
+        # land on the picture under it. The old window's section opens a modal window as it
+        # closes Settings: the guard is armed as Settings hides, spent while that window shows,
+        # and never swallows the click after it.
+        armed = []
+
+        def close_and_wait(_key):
+            self.drawer.hide()
+            armed.append(self.drawer._second_click._open.isActive())
+            elapse(QApplication.doubleClickInterval() + 80)  # the modal window, a while
+
+        self.drawer.chosen.connect(close_and_wait)
+        self.drawer.open_at(sections("Darwin"), GUIDE)
+        self.drawer.grab()
+        self.click(self.drawer.title_rect(0).center())
+        self.assertEqual(self.chosen, ["legacy:guide"])
+        self.assertEqual(armed, [True])
+        self.assertFalse(self.drawer._second_click._open.isActive())  # the next click counts
+
     def test_a_click_on_a_section_shows_its_rows(self):
         self.drawer.open_at(sections("Darwin"), PLAYBACK)
         self.drawer.right()

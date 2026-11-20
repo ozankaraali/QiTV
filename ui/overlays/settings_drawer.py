@@ -195,6 +195,7 @@ class SettingsDrawer(Overlay):
         # (_click_again).
         self._pressed: Optional[tuple[str, str, str, bool]] = None
         self._second_click = SecondClickGuard(self)
+        self._clicking = False  # a click on a row acts now (a hide meanwhile arms the guard)
         # The text being edited: its field (None while none is), its row's key, and the text
         # it started from (kept unchanged, nothing is said).
         self._edit: Optional[TextEdit] = None
@@ -1026,10 +1027,14 @@ class SettingsDrawer(Overlay):
         self._side = RIGHT
         self._right = index
         self._reveal(RIGHT)
-        self._pressed = (RIGHT, row.key, part, self._press(row, part, focused))
-        if not self.isVisible():  # it closed Settings (a link's Play): the picture is under it
-            self._second_click.arm()  # a double-click's second press reaches nothing behind
-            return
+        self._clicking = True  # a row that closes Settings arms the guard as it hides
+        try:
+            done = self._press(row, part, focused)
+        finally:
+            self._clicking = False
+        self._pressed = (RIGHT, row.key, part, done)
+        if not self.isVisible():
+            return  # it closed Settings (a link's Play, the old window's section)
         self.update()
         self._say()
 
@@ -1256,6 +1261,12 @@ class SettingsDrawer(Overlay):
         return "\n".join(whole_texts)
 
     def hideEvent(self, event) -> None:
+        if self._clicking and self.isHidden():
+            # A click on a row closed Settings (a link's Play): a double-click's second press
+            # would land on what is under it, the picture. Armed now, not once the click is
+            # over: the old window's section opens a modal window as Settings closes, and the
+            # guard is spent while it shows, never swallowing the click after it.
+            self._second_click.arm()
         self._hover = None
         self._paste_hovered = False
         self._edit = None  # hidden while editing: the text is put back
