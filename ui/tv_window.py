@@ -1270,7 +1270,11 @@ class TVWindow(QMainWindow):
         self.pointer = PointerHider(
             sources,
             self.overlays.transport,
-            lambda: not self.screens.library_shown() and controller.pointer_may_hide(),
+            lambda: (
+                not self.screens.library_shown()
+                and not self.popup_menu.shown()  # 2.13.1: the pointer is the menu's
+                and controller.pointer_may_hide()
+            ),
             parent=self,
             controls_hold=self._controls_hold_pointer,
         )

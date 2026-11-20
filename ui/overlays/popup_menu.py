@@ -221,6 +221,7 @@ class PopupMenu(Overlay):
         self._filtering = False
         self._wheel = 0
         self._defer: Optional[tuple[PopupMenu, Callable[[], bool]]] = None
+        self._page_size = QSize()  # its page's, as it was laid out against
         if parent is not None:
             parent.installEventFilter(self)  # its page's size or hiding closes it
         self.hide()
@@ -266,9 +267,10 @@ class PopupMenu(Overlay):
             return self
         self._levels = [level]
         self._first(level)
-        self._opener = opener
-        if opener is not None:
-            opener.installEventFilter(self)
+        self._page_size = parent.size()
+        self._opener = opener if opener is not parent else None  # (its page: filtered always)
+        if self._opener is not None:
+            self._opener.installEventFilter(self)
         self._pressed, self._wheel = None, 0
         self._shown.start()
         self.show()
@@ -735,7 +737,9 @@ class PopupMenu(Overlay):
             self._choose(*hit)
 
     def mouseMoveEvent(self, event: QMouseEvent) -> None:
-        event.accept()
+        """The entry under the pointer is highlighted; the move goes on to its page (the
+        pointer stays shown while it moves: ui.pointer)."""
+        event.ignore()
         hit = self._hit(event.position())
         if hit is None or hit[1] < 0:
             return
@@ -792,8 +796,13 @@ class PopupMenu(Overlay):
         if not self._levels:
             return False
         kind = event.type()
-        if obj is self.parentWidget() and kind in (QEvent.Type.Resize, QEvent.Type.Hide):
-            self.close_menu()  # its page changed size or went: it opens again where asked
+        parent = self.parentWidget()
+        if obj is parent and kind == QEvent.Type.Hide:
+            self.close_menu()  # its page went
+        elif obj is parent and kind == QEvent.Type.Resize and parent.size() != self._page_size:
+            # Its page changed size: asked again, it opens where it is. (A hidden page's resize
+            # comes as the page shows: the size the menu was laid out against keeps it.)
+            self.close_menu()
         elif obj is self._opener and kind == QEvent.Type.Hide:
             self.close_menu()  # the list that opened it went
         elif kind in _PRESSES and isinstance(event, QMouseEvent) and self._outside(obj):

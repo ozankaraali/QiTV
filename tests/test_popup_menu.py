@@ -32,10 +32,15 @@ class _Host(QWidget):
 
     def __init__(self) -> None:
         super().__init__()
+        self.setMouseTracking(True)
         self.presses: list[QPoint] = []
+        self.moves: list[QPoint] = []
 
     def mousePressEvent(self, event: QMouseEvent) -> None:
         self.presses.append(event.position().toPoint())
+
+    def mouseMoveEvent(self, event: QMouseEvent) -> None:
+        self.moves.append(event.position().toPoint())
 
 
 class PopupCase(unittest.TestCase):
@@ -497,6 +502,38 @@ class LifecycleTests(PopupCase):
         QApplication.processEvents()
         self.assertFalse(overlay.isVisible())  # it stays closed
         self.assertEqual(self.done, ["closed", "closed"])
+
+    def test_a_page_resized_while_hidden_keeps_the_menu_it_shows_for(self):
+        # The player's overlay host is hidden while nothing shows on it: a right-click on the
+        # picture shows it, and its resize, waiting while it was hidden, comes then.
+        host = _Host()
+        self.addCleanup(host.deleteLater)
+        self.addCleanup(host.close)
+        host.resize(1280, 720)
+        overlay = self.overlay(host)
+        overlay.open(self.channel_menu(), at=host.mapToGlobal(QPoint(100, 80)))
+        host.show()
+        QApplication.processEvents()
+        self.assertTrue(overlay.shown())
+        self.assertEqual(self.done, [])
+
+    def test_the_pages_own_watch_outlives_a_menu_it_opened(self):
+        host = self.host()
+        overlay = self.overlay(host)
+        overlay.open(self.channel_menu(), at=host.mapToGlobal(QPoint(50, 50)), opener=host)
+        overlay.close_menu()  # opened by its page itself (the Library's genres, its pill)
+        self.open_at(overlay, self.channel_menu())
+        host.resize(1000, 600)
+        QApplication.processEvents()
+        self.assertFalse(overlay.shown())  # the page's resize still closes it
+
+    def test_a_move_over_it_goes_on_to_its_page(self):
+        host = self.host()
+        overlay = self.open_at(self.overlay(host), self.channel_menu())
+        mpv = overlay.entry_rect(overlay_entry(overlay, "Play in MPV")).center()
+        self.send(overlay, QEvent.Type.MouseMove, mpv)
+        self.assertEqual(self.current(overlay), "Play in MPV")
+        self.assertIn(mpv, host.moves)  # the pointer stays up while it moves (ui.pointer)
 
     def test_it_closes_when_the_list_that_opened_it_hides(self):
         host = self.host()

@@ -256,7 +256,11 @@ class TVWindowTests(WindowCase):
         node = drawer.highlighted()
         menu = self.window.popup_menu
         self.assertIn(menu, self.window.host.findChildren(type(menu)))  # on the player's host
-        drawer.contextRequested.emit(node, drawer.mapToGlobal(QPoint(200, 150)))
+        controller = self.window.controller
+        with mock.patch.object(controller, "pointer_may_hide", return_value=True):
+            self.assertTrue(self.window.pointer._may_hide())
+            drawer.contextRequested.emit(node, drawer.mapToGlobal(QPoint(200, 150)))
+            self.assertFalse(self.window.pointer._may_hide())  # the pointer is the menu's
         self.assertTrue(menu.isVisible())
         self.assertEqual(menu.menu().texts()[0], "Add to favorites")
         QTest.keyClick(self.window, Qt.Key.Key_Down)  # the menu's, not the channel list's
