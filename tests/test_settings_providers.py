@@ -248,9 +248,10 @@ class ProvidersTests(unittest.TestCase):
         )
         self.assertEqual(
             [title_of(Item(row.key, row.text, row=row)) for row in rows],
-            ["Lists", "Panel", "＋ Add provider", "Free channels"],
+            ["Lists", "Panel", "Add provider", "Free channels…"],
         )
-        self.assertEqual([row.kind for row in rows], [OPENS, OPENS, ACTION, OPENS])
+        self.assertEqual([row.kind for row in rows], [OPENS, OPENS, ACTION, ACTION])
+        self.assertEqual([row.icon for row in rows], ["", "", "plus", "plus"])
         self.assertEqual([row.sub for row in rows[:2]], ["M3U playlist · in use", "Xtream"])
         self.assertEqual(
             [kind_text(kind) for kind in ("STB", "JELLYFIN", "EMBY", "M3USTREAM", "ODD")],

@@ -11,8 +11,9 @@ place ("Name  Demo TV"), or only says something (muted, and the focus goes past 
 else its note). A secret text (a token) shows dots in its place, in its field too, and is never
 said, given as a tooltip or copied out; one that shows its end (an API key's last four) shows
 it after a fixed row of dots, so that its length doesn't show. An empty text shows its
-placeholder, muted. A row may have a muted sub line under its title, and a note at its right
-end. In a layer the left column lists the rows the layer is one of, the opened one marked as
+placeholder, muted. A row may have an icon of its own before its title, in the accent (＋ Add
+provider's, as the channel list's action rows; the first after rows without one has a gap
+above it), a muted sub line under its title, and a note at its right end. In a layer the left column lists the rows the layer is one of, the opened one marked as
 the drawer marks its path; there only the rows that open a layer take the highlight, and a
 click on another goes back up to it. A layer (or a section) without rows says its
 `empty_text` and the keys stay on the left. Only the right column's focused row shows its
@@ -865,14 +866,15 @@ class SettingsDrawer(Overlay):
     def _items(self, side: str) -> list[Item]:
         if side == RIGHT:
             return [
-                Item(row.key, row.text, row=row, selectable=row.kind != INFO)
+                Item(row.key, row.text, row.icon, row=row, selectable=row.kind != INFO)
                 for row in self._right_rows()
             ]
         chain = self._chain()
         if len(chain) < 2:
             return [Item(s.key, s.text, s.icon, literal=s.literal) for s in self._sections]
         return [
-            Item(row.key, row.text, row=row, selectable=_opens_layer(row)) for row in chain[-2].rows
+            Item(row.key, row.text, row.icon, row=row, selectable=_opens_layer(row))
+            for row in chain[-2].rows
         ]
 
     def _left_index(self) -> int:
@@ -980,7 +982,8 @@ class SettingsDrawer(Overlay):
         """Each line of a column, as tall as its title's lines, its sub line and its help, at
         y 0: laid out once for what it shows (`_placed`)."""
         items = self._items(side)
-        icons = side == LEFT and any(item.icon for item in items)
+        # The sections keep their icons' room; a row's own icon (＋, ▶) is its line's alone.
+        icons = side == LEFT and len(self._chain()) < 2 and any(item.icon for item in items)
         focus = self._right if side == RIGHT and self._side == RIGHT else -1
         editing = self._editing_index() if side == RIGHT else -1
         fonts = un.font(TITLE_FONT_U).key()  # the family and the size the lines are set in
@@ -995,9 +998,11 @@ class SettingsDrawer(Overlay):
             elif row is not None and row.kind in (TEXT, INFO):
                 value = self._tail_text(row)
             focused = row is not None and index == focus
+            # The first row with an icon of its own after rows without one: a gap above it.
+            apart = not icons and index > 0 and bool(item.icon) and not items[index - 1].icon
             key = self._placed_key(
                 side, item, un, area, icons, value, choices, focused, index == editing, fonts
-            )
+            ) + (apart,)
             box = self._placed.get(key)
             if box is None:
                 help = self._focused_help(un, area, item) if focused else []
@@ -1011,6 +1016,7 @@ class SettingsDrawer(Overlay):
                     choices=choices,
                     help=help,
                     editing=index == editing,
+                    apart=apart,
                 )
                 self._placed[key] = box
             boxes.append(box)
@@ -1039,6 +1045,7 @@ class SettingsDrawer(Overlay):
         return (
             side,
             title_of(item),
+            item.icon,
             kind,
             sub,
             warn,

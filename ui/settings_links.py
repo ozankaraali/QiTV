@@ -74,7 +74,7 @@ KEEP_NEW, REPLACE = "new", "replace"  # the address question's answers (and CANC
 
 # i18n: help under Settings → Providers → Network streams (the links opened with Open a link)
 LINKS_HELP = N_("The links that played from Open a link, kept apart from the providers.")
-# i18n: a row of Settings → Providers → Network streams, after "＋ ": File → Open Link…'s card
+# i18n: a row of Settings → Providers → Network streams, after a ＋: File → Open Link…'s card
 OPEN_LINK_TEXT = N_("Open a link…")
 NEVER_CTX = "last opened"
 # i18n: a link's Last opened in Settings → Providers → Network streams: it never played
@@ -171,11 +171,11 @@ class LinkRows(QObject):
     def _open_row() -> Row:
         return Row(
             OPEN_LINK,
-            "＋ " + translate(OPEN_LINK_TEXT),
+            OPEN_LINK_TEXT,
             # i18n: help under Settings → Providers → Network streams → Open a link
             N_("Plays one stream's link; once it plays, it's kept here."),
             kind=ACTION,
-            literal=True,
+            icon="plus",
         )
 
     @staticmethod
@@ -193,6 +193,7 @@ class LinkRows(QObject):
                 # i18n: help under a link's Play in Settings → Network streams
                 N_("Plays it now, and Settings closes."),
                 kind=ACTION,
+                icon="play",  # its main action: ▶, in the accent
             ),
             Row(
                 row_key(key, NAME),

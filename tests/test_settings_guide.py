@@ -361,7 +361,8 @@ class MatchingTests(MatchingCase):
         with mock.patch.object(EpgManager, "reindex_programs", autospec=True) as reindex:
             self.open_layer()
             self.assertEqual(self.keys(), [guide.ADD, guide.IMPORT, guide.EXPORT])
-            self.assertEqual(self.shown()[guide.ADD].text, "＋ Add")
+            add = self.shown()[guide.ADD]
+            self.assertEqual((add.text, add.icon), ("Add", "plus"))  # its ＋ painted (2.12)
             self.fit()
             self.go_to(guide.ADD)
             self.key(Action.NAV_ACTIVATE)

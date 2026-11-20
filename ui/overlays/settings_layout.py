@@ -47,8 +47,9 @@ from ui.overlays.painting import MIN_FONT_PX, STEP_ICON_U, Units
 LEFT, RIGHT = "left", "right"
 HEAD_TOP_U = 1.0  # the lists start this far under the header row (the drawer's right column)
 INSET_U = 1.2  # a row's text from its sides (the drawer's rows)
-ICON_U = 1.8  # a section's icon
+ICON_U = 1.8  # a section's icon, and a row's own (＋ Add provider's, Play's: the drawer's)
 ICON_GAP_U = 0.7
+GROUP_GAP_U = 1.0  # above the first row with an icon after rows without one (the mockup's)
 VALUE_FONT_U = 1.2  # a row's value or note (its title is TITLE_FONT_U)
 SUB_FONT_U = COUNT_FONT_U  # a row's sub line, as the drawer's two-line rows have theirs
 HELP_FONT_U = 1.05
@@ -294,16 +295,19 @@ def place(
     choices: Sequence[str] = (),
     help: Sequence[str] = (),
     editing: bool = False,
+    apart: bool = False,
 ) -> Box:
     """Line `item` of a column at y 0. `ends`: its row's right end shows (the right column;
-    the left lists titles only); `icons`: the column keeps room for the sections' icons.
-    `value`: what a stepper, a text or an info row shows (`choices`: a stepper's, shown);
-    `help`: the lines under a focused row; `editing`: its text is edited, in a field."""
+    the left lists titles only); `icons`: the column keeps room for the sections' icons, else
+    a line with an icon of its own (＋, ▶) has it before its title. `value`: what a stepper, a
+    text or an info row shows (`choices`: a stepper's, shown); `help`: the lines under a
+    focused row; `editing`: its text is edited, in a field; `apart`: GROUP_GAP_U above it (the
+    first ＋ after the providers)."""
     inset = INSET_U * un.u
     x, right = area.x() + inset, area.right() - inset
     icon_size = ICON_U * un.u
     icon_x = x
-    if icons:
+    if icons or item.icon:
         x += icon_size + ICON_GAP_U * un.u
     row = item.row
     kind = row.kind if ends and row is not None else ""
@@ -343,7 +347,7 @@ def place(
     box = Box(QRectF(), QRectF(area.x(), 0, area.width(), line_h), QRectF(), titles, subs)
     box.values = values
     box.title = QRectF(x, 0, title_w, line_h)
-    if icons:
+    if icons or item.icon:
         box.icon = QRectF(icon_x, middle - icon_size / 2, icon_size, icon_size)
     if kind == STEP:
         box.more = QRectF(right - step, 0, step, line_h)
@@ -358,6 +362,10 @@ def place(
             box.entry, box.paste = field_and_paste(un, box.end)
     box.rect = QRectF(area.x(), 0, area.width(), line_h + help_height(list(help), un))
     box.help = list(help)
+    if apart:  # the line and all of it lower, the gap above it in its place
+        top = float(un.px(GROUP_GAP_U))
+        box = box.moved(top)
+        box.rect = QRectF(area.x(), 0, area.width(), box.rect.height() + top)
     return box
 
 

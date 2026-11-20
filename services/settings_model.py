@@ -64,7 +64,7 @@ ICONS: dict[str, str] = {
 PROVIDER_PREFIX = "provider/"
 ADD_PROVIDER = PROVIDER_PREFIX + "@add"
 FREE_CHANNELS = PROVIDER_PREFIX + "@free"
-# i18n: a row of Settings → Providers, after "＋ ": adds a provider
+# i18n: a row of Settings → Providers, after a ＋ (an icon): adds a provider
 ADD_PROVIDER_TEXT = N_("Add provider")
 
 # Files' rows are `files/…` and Advanced's Clear Image Cache `advanced/…` (ui.settings_general's):
@@ -145,6 +145,7 @@ class Row:
     secret: bool = False  # a text row's text shows as dots, and is never said or copied
     placeholder: str = ""  # an English text (N_) an empty text row shows, muted
     secret_tail: int = 0  # a secret's last characters shown after its dots
+    icon: str = ""  # a drawing (painting.draw_icon) before its title, in the accent: ＋, ▶
 
     def __post_init__(self) -> None:
         if not self.kind:
@@ -713,21 +714,23 @@ def _playback(system: str) -> Section:
 
 def _providers(title: str, rows: tuple[Row, ...]) -> Section:
     """Providers: the providers' rows as given (ui.settings_providers builds them), then ＋ Add
-    provider and Free channels."""
+    provider and ＋ Free channels…, as the channel list names them (its ＋ painted)."""
     add = Row(
         ADD_PROVIDER,
-        "＋ " + translate(ADD_PROVIDER_TEXT),
+        ADD_PROVIDER_TEXT,
         # i18n: help under Settings → Providers → Add provider
         N_("A provider from its link: Xtream, an M3U playlist, a portal, Jellyfin or Emby."),
         kind=ACTION,
-        literal=True,
+        icon="plus",
     )
     free = Row(
         FREE_CHANNELS,
-        N_("Free channels"),  # i18n: a row of Settings → Providers; opens iptv-org's menu
+        # i18n: a row of Settings → Providers, after a ＋ (an icon); opens iptv-org's menu
+        N_("Free channels…"),
         # i18n: help under Settings → Providers → Free channels (iptv-org is a project's name)
         N_("iptv-org's free channels: every country's, or one country's."),
-        kind=OPENS,
+        kind=ACTION,
+        icon="plus",
     )
     return Section(PROVIDERS, title, ICONS[PROVIDERS], rows=rows + (add, free))
 

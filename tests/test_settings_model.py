@@ -83,8 +83,9 @@ class SettingsModelTests(unittest.TestCase):
             [row.key for row in providers.rows], ["provider/A", m.ADD_PROVIDER, m.FREE_CHANNELS]
         )
         add, free = providers.rows[1:]
-        self.assertEqual((add.text, add.kind, add.literal), ("＋ Add provider", m.ACTION, True))
-        self.assertEqual((free.text, free.kind), ("Free channels", m.OPENS))
+        # As the channel list names them, each with its ＋ painted in the accent (2.12).
+        self.assertEqual((add.text, add.kind, add.icon), ("Add provider", m.ACTION, "plus"))
+        self.assertEqual((free.text, free.kind, free.icon), ("Free channels…", m.ACTION, "plus"))
         for row in (add, free):
             self.assertTrue(row.help, row.key)
             self.assertLessEqual(len(row.help), 90, row.key)

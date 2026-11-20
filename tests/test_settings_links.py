@@ -283,7 +283,7 @@ class LinksTests(unittest.TestCase):
             [(row.key, row.kind) for row in rows],
             [(link_key(LIVE_ID), OPENS), (link_key(FILM_ID), OPENS), (OPEN_LINK, ACTION)],
         )
-        self.assertEqual(self.titles(), ["Harbour News", "Lecture recording", "＋ Open a link…"])
+        self.assertEqual(self.titles(), ["Harbour News", "Lecture recording", "Open a link…"])
         self.assertTrue(all(row.literal for row in rows[:2]))  # names as given
         live_sub = link_sub(LinkRow(LIVE_ID, "Harbour News", LIVE))
         film_sub = link_sub(LinkRow(FILM_ID, "Lecture recording", FILM, failed=ACCESS_ENDED))

@@ -40,7 +40,7 @@ from ui.overlays.settings_drawer import (
     SettingsDrawer,
 )
 from ui.overlays.settings_layout import whole
-from ui.theme import PALETTE
+from ui.theme import PALETTE, qcolor
 
 
 def make(width=1280, height=720, values=None):
@@ -460,6 +460,47 @@ class SettingsDrawerTests(unittest.TestCase):
 
         for key in keys:  # every section has one (2.12: the phone remote's and the lock too)
             self.assertGreater(accent_pixels(keys.index(key)), 0, key)
+
+    def test_a_row_with_an_icon_paints_it_in_the_accent_after_a_gap(self):
+        # ＋ Add provider and ＋ Free channels…, as the channel list's action rows: the ＋ in
+        # the accent before the title, the first of them a gap below the providers; a row
+        # without one keeps its title at the row's start (no room kept for an icon).
+        layer = Section("demo", "Demo TV", rows=(m.Row("x", "X"),))
+        self.drawer.open_at(
+            (
+                Section(
+                    "p",
+                    "Providers",
+                    rows=(
+                        m.Row("demo", "Demo TV", section=layer, sub="Xtream · in use"),
+                        m.Row("add", "Add provider", kind=m.ACTION, icon="plus"),
+                        m.Row("free", "Free channels…", kind=m.ACTION, icon="plus"),
+                    ),
+                ),
+            )
+        )
+        image = self.drawer.grab().toImage()
+        plain, add, free = (self.drawer._box("right", index) for index in range(3))
+        self.assertTrue(plain.icon.isEmpty())
+        self.assertLessEqual(add.icon.right(), add.title.left())
+        self.assertGreater(add.title.left(), plain.title.left())
+        self.assertEqual(add.title.left(), free.title.left())
+        self.assertGreater(add.line.top(), add.rect.top())  # the gap, above the first only
+        self.assertEqual(free.line.top(), free.rect.top())
+        self.assertLessEqual(plain.rect.bottom(), add.rect.top() + 0.01)
+        icon = add.icon.toAlignedRect()
+        accent = qcolor(PALETTE.accent)
+        painted = [
+            image.pixelColor(x, y)
+            for y in range(icon.top(), icon.bottom())
+            for x in range(icon.left(), icon.right())
+        ]
+        self.assertTrue(any(near(color, accent) for color in painted))
+        # A click in the gap reaches no row; one on the row acts.
+        self.click(QPointF(add.line.center().x(), (add.rect.top() + add.line.top()) / 2))
+        self.assertEqual(self.chosen, [])
+        self.click(add.line.center())
+        self.assertEqual(self.chosen, ["add"])
 
     def test_a_small_window_elides_without_overlap(self):
         self.use(*make(640, 360))
