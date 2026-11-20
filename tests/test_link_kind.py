@@ -33,7 +33,6 @@ class ClassifyTests(unittest.TestCase):
         ):
             self.assertEqual(classify(url), FILM, url)
         for url in (
-            "http://cdn.example/a/b.ts",
             "http://panel.example:8080/live/user/pass/1.ts",
             "http://panel.example:8080/live/user/pass/1",
             "http://panel.example:8080/live/user/pass/1.m3u8",
@@ -43,14 +42,23 @@ class ClassifyTests(unittest.TestCase):
         ):
             self.assertEqual(classify(url), LIVE, url)
 
-    def test_every_media_file_type_qitv_opens_is_a_film_but_ts(self):
-        # Final review I2: a song or a podcast (.mp3, .flac, .mpg…) played as a live channel,
-        # and replayed from its start for ever. A .ts stays live.
+    def test_every_media_file_type_qitv_opens_is_a_film_or_asks_its_first_bytes(self):
+        # Final review I2: a song or a podcast (.flac, .mpg…) played as a live channel, and
+        # replayed from its start for ever. Audio that may be internet radio and the
+        # containers live channels come in (.mp3 .aac .ogg .opus .m4a .flac .wav, .flv .ts)
+        # are what their answer says (probe_text: a size is a file); any other is a film.
+        ambiguous = {"mp3", "aac", "ogg", "opus", "m4a", "flac", "wav", "flv", "ts"}
         kinds = MEDIA_EXTENSIONS | EXTRA_VIDEO_EXTENSIONS | EXTRA_MUSIC_EXTENSIONS
+        self.assertLessEqual(ambiguous, kinds)
         for ext in sorted(kinds):
             with self.subTest(ext):
                 url = f"https://cdn.example/media/Episode.{ext.upper()}?token=1"
-                self.assertEqual(classify(url), LIVE if ext == "ts" else FILM)
+                self.assertEqual(classify(url), PROBE if ext in ambiguous else FILM)
+        for ext in ("mp4", "mkv", "avi", "mov", "wmv", "mpg", "mpeg", "webm", "m4v"):
+            with self.subTest(ext):  # video files: films by their address
+                self.assertEqual(classify(f"http://cdn.example/a/b.{ext}"), FILM)
+        # An Xtream live path stays live by its address, whatever its extension.
+        self.assertEqual(classify("http://panel.example/live/u/p/1.ts"), LIVE)
 
     def test_accounts_and_playlists_are_providers(self):
         got = classify("http://panel.example:8080/get.php?username=u&password=p&type=m3u_plus")
@@ -114,6 +122,7 @@ class ProbeTests(unittest.TestCase):
             ("#EXTM3U\n#EXTINF:-1,A\na.ts\n", "", 40, LIVE),
             (live, "application/vnd.apple.mpegurl", 300, LIVE),  # its tags decide
             (live + "#EXT-X-ENDLIST\n", "audio/mpegurl", None, FILM),
+            ("\ufffd\ufffd", "video/x-flv", None, LIVE),  # a live .flv: no size
         )
         for text, content_type, length, kind in cases:
             with self.subTest(content_type=content_type, length=length, text=text[:12]):

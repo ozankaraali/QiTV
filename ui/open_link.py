@@ -11,15 +11,16 @@ says what it is (services.link_kind.classify):
 - a whole provider (an account's playlist or API link, a playlist's address, a portal): the
   line names its kind and host (never its login), the note says it is no one stream, and
   "Add as a provider…" hands it to Add provider, filled in, `add_provider(link)`;
-- a link only its first bytes tell (an .m3u8, any other web address): no line yet; Play reads
-  them first, at most 64 KB, on a worker (QiTV's user agent, the TLS check of the provider the
-  link's host is, else Settings'). A list of channels turns the card into the provider offer;
-  anything else plays with the kind they and the answer's headers say (an answer with a size
-  is a file that ends: a film or a song, link_kind.probe_text), and so does a link that
-  refused them or never answered (as LIVE: VLC tries it, and the player says why it failed). A link at a provider
-  that allows only so many streams is never read (the read would be one stream more than it
-  allows, and a closed one may stay counted there for minutes): it plays as LIVE at once
-  (`may_probe`).
+- a link only its first bytes tell (an .m3u8; a song or a .ts, which may be a file or a
+  stream that never ends; any other web address): no line yet; Play reads them first, at most
+  64 KB, on a worker (QiTV's user agent, the TLS check of the provider the link's host is, else
+  Settings'). A list of channels turns the card into the provider offer; anything else plays
+  with the kind they and the answer's headers say (an answer with a size is a file that ends:
+  a film or a song; internet radio and a live channel never end: link_kind.probe_text), and
+  so does a link that refused them or never answered (as LIVE: VLC tries it, and the player
+  says why it failed). A link at a provider that allows only so many streams is never read
+  (the read would be one stream more than it allows, and a closed one may stay counted there
+  for minutes): it plays as LIVE at once (`may_probe`), a song or a .ts there too.
 
 While the bytes are read the card says "Checking…" and only Cancel works. Each read has its
 request id and only the latest one answers: a cancelled card, or one opened again, drops a
@@ -116,8 +117,8 @@ def provider_found(link: ProviderLink) -> str:
 
 class LinkStart(NamedTuple):
     """What a link answered (plain data, from the worker): its first bytes as text, its
-    Content-Type ("" for none) and its Content-Length (None: not given, as a stream that never
-    ends answers)."""
+    Content-Type ("" for none) and its size (Content-Length, or a 206's whole size; None: not
+    given, as a stream that never ends answers, and an internet radio station's always)."""
 
     text: str
     content_type: str = ""
@@ -131,6 +132,19 @@ def _length(value: object) -> Optional[int]:
     except ValueError:
         return None
     return length if length >= 0 else None
+
+
+def _size(status: int, headers: Any) -> Optional[int]:
+    """The size an answer states: a 206's whole size (Content-Range "bytes 0-9/1234"), else
+    its Content-Length; None for none, and for an internet radio station (its icy-* or
+    Shoutcast headers: it never ends, whatever it says)."""
+    if any(str(name).lower().startswith(("icy-", "ice-")) for name in headers):
+        return None
+    if status == 206:
+        whole = _length(str(headers.get("Content-Range") or "").rpartition("/")[2])
+        if whole:
+            return whole
+    return _length(headers.get("Content-Length"))
 
 
 def read_start(url: str, verify_ssl: bool, stop: Optional[threading.Event] = None) -> LinkStart:
@@ -156,7 +170,7 @@ def read_start(url: str, verify_ssl: bool, stop: Optional[threading.Event] = Non
         response.raise_for_status()
         headers = response.headers
         content_type = str(headers.get("Content-Type") or "")
-        length = _length(headers.get("Content-Length"))
+        length = _size(response.status_code, headers)
         body = bytearray()
         for chunk in response.iter_content(_CHUNK):
             body += chunk

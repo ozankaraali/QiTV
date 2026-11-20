@@ -1,11 +1,12 @@
 """What a link is, from its address or its first bytes (no Qt, no network).
 
 File > Open Link takes any link a person pastes. Most say what they are by their address: a
-film or a song (any file type QiTV opens from the disk, services.open_paths: it ends, so it
-seeks and resumes), a live `.ts`, an account's playlist or API link, a portal. A `.m3u8` (or
-any other address over http) may be one stream or a list of channels, so `classify` answers
-PROBE and the caller fetches the first 64 KB for `probe_text`, with what the answer's headers
-say of it.
+film (a video file type QiTV opens from the disk, services.open_paths: it ends, so it seeks
+and resumes), an Xtream live path, an account's playlist or API link, a portal. A `.m3u8` (or
+any other address over http) may be one stream or a list of channels, and a song (.mp3,
+.aac…) or a `.ts` or `.flv` may be a file or a stream that never ends (internet radio, a
+live channel), so `classify` answers PROBE and the caller fetches the first 64 KB for
+`probe_text`, with what the answer's headers say of it (a size: a file that ends).
 
 A kind is FILM, LIVE, PROBE, NONE (not a link QiTV opens), or a `Provider` holding what
 `parse_provider_link` read, for the "Add provider" offer. An Xtream stream path
@@ -35,12 +36,17 @@ from services.provider_link import (
 )
 
 FILM, LIVE, PROBE, NONE = "FILM", "LIVE", "PROBE", "NONE"
-# Every video and music file type QiTV opens from the disk is a file that ends (final review
-# I2: a song played as a live channel replayed from its start for ever); a .ts is live.
+# The audio internet radio is sent in, and the containers live channels come in: a file or a
+# stream that never ends, as its answer says (final review I2, the coordinator's ruling).
+_EITHER_EXTENSIONS = tuple(
+    f".{ext}" for ext in ("mp3", "aac", "ogg", "opus", "m4a", "flac", "wav", "flv", "ts")
+)
+# Every other video and music file type QiTV opens from the disk is a file that ends (final
+# review I2: a song played as a live channel replayed from its start for ever).
 _FILM_EXTENSIONS = tuple(
     f".{ext}"
     for ext in sorted(MEDIA_EXTENSIONS | EXTRA_VIDEO_EXTENSIONS | EXTRA_MUSIC_EXTENSIONS)
-    if ext != "ts"
+    if f".{ext}" not in _EITHER_EXTENSIONS
 )
 _LIVE_SCHEMES = ("rtmp", "rtmps", "rtsp", "udp", "rtp")
 PROBE_BYTES = 64 * 1024  # what a caller reads of a PROBE link for probe_text, at most
@@ -123,12 +129,10 @@ def classify(url: str) -> Kind:
     if stream is not None:
         return stream[0]
     path = parts.path.lower()
-    if path.endswith(".m3u8"):
+    if path.endswith((".m3u8",) + _EITHER_EXTENSIONS):
         return PROBE
     if path.endswith(_FILM_EXTENSIONS):
         return FILM
-    if path.endswith(".ts"):
-        return LIVE
     link = parse_provider_link(parts.geturl())
     if link is not None:
         return Provider(link)
