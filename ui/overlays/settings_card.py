@@ -29,13 +29,13 @@ for it, for Esc and for the dimmed picture. Either card hides itself when cancel
 answered; a FormCard stays up after `pressed`, and its caller hides it when it is done.
 
 Paste (the button, or Ctrl/⌘+V off the field) puts the clipboard's first line in the field in
-place of its text, or at the caret once one was put in the text (a click, an arrow); Ctrl/⌘+V
-in the field types it at the caret. While a FormCard is busy (`set_busy`: a check is on its
-way) it says "Checking…" beside its buttons, which wait, and its fields keep the text being
-checked; Cancel still works. A secret field's text is never shown, copied, announced, given
-as a tooltip or put in a repr. 1 u = 1% of the overlay host's width (ui_units); in a window
-too small for the card, its gaps shrink, then the middle is cut so that the title and the
-buttons stay.
+place of its text (a link in place of the old one), or in place of the part selected in it;
+Ctrl/⌘+V in the field types it at the caret, as any text field does. While a FormCard is busy
+(`set_busy`: a check is on its way) it says "Checking…" beside its buttons, which wait, and
+its fields keep the text being checked; Cancel still works. A secret field's text is never
+shown, copied, announced, given as a tooltip or put in a repr. 1 u = 1% of the overlay host's
+width (ui_units); in a window too small for the card, its gaps shrink, then the middle is cut
+so that the title and the buttons stay.
 """
 
 from __future__ import annotations
@@ -439,8 +439,9 @@ class _Card(Overlay):
         return self._fields[0].key if self._fields else ""
 
     def _paste_into(self, key: str) -> None:
-        """Paste: the clipboard's first line in place of the field's text, or at its caret
-        once one was put in the text; the keys go on in the field."""
+        """Paste: the clipboard's first line in place of the field's text, or of the part
+        selected in it (a click in the field never splices a link into the old one); the keys
+        go on in the field."""
         edit = self._edits.get(key)
         if edit is None or self._busy:
             return
@@ -450,7 +451,7 @@ class _Card(Overlay):
         if not line:
             return
         before = edit.text
-        if edit.placed:
+        if edit.has_selection():
             edit.insert(line)
         else:
             edit.set_text(line)
@@ -979,8 +980,10 @@ class FormCard(_Card):
     ) -> None:
         """Show the form (texts in the app's language; `found` good). Set again while it shows
         (a field appears, a button changes), the focus and each remaining field's caret stay
-        where they were, and a field's text is the one given; nothing is `changed`. Shown
-        afresh, its first field has the keys and nothing waits."""
+        where they were, a field's text is the one given (pass `values()` back for the fields
+        the user may have changed), and the same `found` keeps its colour (a failure stays
+        one); nothing is `changed`. Shown afresh, its first field has the keys and nothing
+        waits."""
         fresh = self.isHidden()
         old = {} if fresh else self._edits
         self._title, self._body = title, ""
@@ -996,7 +999,9 @@ class FormCard(_Card):
         self._edits = edits
         if self._drag.active is not None and self._drag.active not in edits.values():
             self._drag.release()
-        self._found, self._found_ok = found, True
+        if fresh or found != self._found:
+            self._found_ok = True
+        self._found = found
         self._buttons, self._alternates = list(buttons), list(alternates)
         self._hover = None
         if fresh:

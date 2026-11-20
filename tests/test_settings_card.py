@@ -169,9 +169,20 @@ class FormCardTests(Case):
         card.grab()  # where the text is drawn, for the clicks in it
         field = card.control_rect("field", "url")
         self.click(card, QPointF(field.left() + 2, field.center().y()))  # the caret at 0
-        QGuiApplication.clipboard().setText("x")
+        QGuiApplication.clipboard().setText("new.example")
         self.click(card, card.control_rect("paste", "url").center())
-        self.assertEqual(card.values()["url"], "xtv.example")  # once put, Paste goes there
+        self.assertEqual(card.values()["url"], "new.example")  # a click never splices a link
+        card.handle(Action.NAV_HOME)
+        card.handle(Action.NAV_RIGHT, "select")
+        card.handle(Action.NAV_RIGHT, "select")
+        card.handle(Action.NAV_RIGHT, "select")
+        QGuiApplication.clipboard().setText("old")
+        self.click(card, card.control_rect("paste", "url").center())
+        self.assertEqual(card.values()["url"], "old.example")  # in place of the selection
+        QGuiApplication.clipboard().setText("www.")
+        card.handle(Action.NAV_HOME)
+        card.handle(Action.PASTE)  # Ctrl/⌘+V in the field: at the caret
+        self.assertEqual(card.values()["url"], "www.old.example")
         self.click(card, card.control_rect("field", "password").center())
         self.assertEqual(card.focus(), ("field", "password"))
         self.click(card, card.control_rect("button", "add").center())
@@ -203,6 +214,12 @@ class FormCardTests(Case):
         self.assertEqual(
             card.values(), {"url": "tv.example/get.php?", "username": "demo", "password": "pw"}
         )
+        self.assertEqual(card.found(), (FOUND, True))
+        card.set_found("The server refused the login.", False)
+        fields = [Field("url", "Link or address", card.values()["url"], paste=True)]
+        card.set_form("Add a provider", fields, "The server refused the login.", BUTTONS, [])
+        self.assertEqual(card.found(), ("The server refused the login.", False))  # still red
+        card.set_form("Add a provider", fields, FOUND, BUTTONS, [])
         self.assertEqual(card.found(), (FOUND, True))
         card.handle(Action.NAV_LEFT)
         card.handle(Action.NAV_TEXT, "x")  # the caret stayed where it was
