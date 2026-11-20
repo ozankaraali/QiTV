@@ -8,6 +8,7 @@ from typing import Any, Callable, Dict, List, NamedTuple, Optional, Tuple
 
 from PySide6.QtCore import QObject, Qt, Signal
 
+from services import free_radio
 from services.body_limits import LIST_MAX, TooLarge, capped
 from services.catchup import (
     Answer,
@@ -29,7 +30,7 @@ from services.failure_reasons import (
 )
 from services.i18n import N_
 from services.lazy_import import lazy_module
-from services.m3u import decode_playlist, parse_m3u
+from services.m3u import decode_playlist, parse_m3u, parse_stations, stations_in
 from services.provider_api import (
     CLIENT_HEADERS,
     https_fallback_candidates,
@@ -139,20 +140,34 @@ class M3ULoaderWorker(QObject):
                     text = file.read(LIST_MAX + 1)  # characters: at least as many bytes
                     if len(text) > LIST_MAX:
                         raise TooLarge(LIST_MAX)
-                    self.finished.emit(parse_m3u(text, categorize=True))
+                    stations = stations_in(text)  # a file of the radio directory's stations
+                    if stations is not None:
+                        self.finished.emit(parse_stations(stations))
+                    else:
+                        self.finished.emit(parse_m3u(text, categorize=True))
                 return
             last_exc: Optional[Exception] = None
+            # Free radio (2.13): the directory hears QiTV's own name; its station JSON (known by
+            # its content, from anywhere) is the list.
+            directory = free_radio.is_directory_url(self.url)
             for u in https_fallback_candidates(self.url, self.prefer_https):
                 try:
                     response = requests.get(  # read up to LIST_MAX: TooLarge past it
                         u,
                         timeout=10,
-                        headers=CLIENT_HEADERS,
+                        headers=free_radio.headers_for(u),
                         verify=self.verify_ssl,
                         hooks=capped(LIST_MAX),
                     )
                     response.raise_for_status()
                     text = decode_playlist(response)
+                    stations = stations_in(text, directory=directory)
+                    if stations == []:  # the directory found none: kept as an empty answer is
+                        last_exc = _NotAPlaylist()
+                        continue
+                    if stations is not None:
+                        self.finished.emit(parse_stations(stations))  # (read mended)
+                        return
                     playlist = parse_m3u(text, categorize=True)
                     if not_a_playlist(text, playlist):
                         last_exc = _NotAPlaylist()

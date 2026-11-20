@@ -27,6 +27,7 @@ from ui.overlays.welcome import (
     BODY_TEXT,
     BODY_U,
     BUTTON_TEXT,
+    PAD_U,
     TITLE_TEXT,
     TITLE_U,
     WIDTH_U,
@@ -48,6 +49,12 @@ class WelcomeCardTests(unittest.TestCase):
         self.added = []
         self.card.addRequested.connect(lambda: self.added.append(True))
 
+    def spec_width(self, host_width):
+        """44 units, or wider for its row of buttons (2.13: three) and the card's padding."""
+        units = Units(host_width)
+        row = self.card.radio_button_rect().right() - self.card.button_rect().left()
+        return max(units.px(WIDTH_U), round(row) + 2 * units.px(PAD_U))
+
     def test_the_spec_texts_and_sizes(self):
         self.assertEqual(TITLE_TEXT, "Welcome to QiTV")
         self.assertEqual(
@@ -65,7 +72,8 @@ class WelcomeCardTests(unittest.TestCase):
         self.card.show_card()
         self.assertTrue(self.card.isVisible())
         geometry = self.card.geometry()
-        self.assertEqual(geometry.width(), Units(1280).px(WIDTH_U))
+        self.assertEqual(geometry.width(), self.spec_width(1280))
+        self.assertGreaterEqual(geometry.width(), Units(1280).px(WIDTH_U))
         self.assertAlmostEqual(geometry.center().x(), 640, delta=1)
         self.assertAlmostEqual(geometry.center().y(), 360, delta=1)
         self.assertEqual(self.card.mask_region().boundingRect(), geometry)
@@ -99,7 +107,7 @@ class WelcomeCardTests(unittest.TestCase):
         self.card.show_card()
         self.host.resize(800, 600)
         pause(10)
-        self.assertEqual(self.card.width(), Units(800).px(WIDTH_U))
+        self.assertEqual(self.card.width(), self.spec_width(800))
         self.assertAlmostEqual(self.card.geometry().center().x(), 400, delta=1)
 
     def test_the_button_asks_to_add_a_provider(self):
@@ -119,8 +127,8 @@ class WelcomeCardTests(unittest.TestCase):
         self.assertEqual((first.top(), first.height()), (free.top(), free.height()))
         self.assertGreaterEqual(free.height(), 28)
         self.assertTrue(QRectF(self.card.rect()).contains(free))
-        pair_centre = (first.left() + free.right()) / 2
-        self.assertAlmostEqual(pair_centre, self.card.width() / 2, delta=1)
+        row_centre = (first.left() + self.card.radio_button_rect().right()) / 2
+        self.assertAlmostEqual(row_centre, self.card.width() / 2, delta=1)
         asked = []
         self.card.freeRequested.connect(asked.append)
         QTest.mouseClick(self.card, Qt.MouseButton.LeftButton, pos=free.center().toPoint())
@@ -128,14 +136,33 @@ class WelcomeCardTests(unittest.TestCase):
         below = self.card.mapToGlobal(free.bottomLeft().toPoint())
         self.assertEqual(asked, [below])
 
-    def test_both_buttons_fit_the_card_at_small_widths(self):
+    def test_the_free_radio_button_sits_last_and_asks_with_a_position(self):
+        self.card.show_card()
+        free, radio = self.card.free_button_rect(), self.card.radio_button_rect()
+        self.assertLess(free.right(), radio.left())
+        self.assertEqual((free.top(), free.height()), (radio.top(), radio.height()))
+        self.assertTrue(QRectF(self.card.rect()).contains(radio))
+        asked, free_asked = [], []
+        self.card.radioRequested.connect(asked.append)
+        self.card.freeRequested.connect(free_asked.append)
+        QTest.mouseClick(self.card, Qt.MouseButton.LeftButton, pos=radio.center().toPoint())
+        self.assertEqual((self.added, free_asked), ([], []))
+        self.assertEqual(asked, [self.card.mapToGlobal(radio.bottomLeft().toPoint())])
+
+    def test_the_buttons_fit_the_card_at_small_widths(self):
         self.host.resize(320, 240)
         self.card.show_card()
         card = QRectF(self.card.rect())
-        self.assertTrue(card.contains(self.card.button_rect()))
-        self.assertTrue(card.contains(self.card.free_button_rect()))
+        buttons = [
+            self.card.button_rect(),
+            self.card.free_button_rect(),
+            self.card.radio_button_rect(),
+        ]
+        for button in buttons:
+            self.assertTrue(card.contains(button))
         self.assertGreaterEqual(self.card.button_rect().height(), 28)
-        self.assertFalse(self.card.button_rect().intersects(self.card.free_button_rect()))
+        self.assertFalse(buttons[0].intersects(buttons[1]))
+        self.assertFalse(buttons[1].intersects(buttons[2]))
 
     def test_enter_activates_the_button_only_while_shown(self):
         self.assertFalse(self.card.activate())

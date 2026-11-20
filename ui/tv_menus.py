@@ -5,14 +5,14 @@ keyPressEvent handles those keys through ui.keymap. Modifier combinations are ap
 shortcuts, which the keymap leaves to the menus (a test checks that no screen claims them).
 The player's keys are disabled while the Library shows. The Providers menu is an exclusive
 group of the configured providers, rebuilt when a provider becomes ready or fails and after
-a provider changes in Settings, then Add provider and the free-channels menu (the welcome card
-that offers both shows only without providers, and the last one stays). Settings… opens
-Settings in the drawer, as the drawer's Settings row and ⚙ do (backing out of it from there
-gives the drawer back). The drawer's Add provider row opens the same Add card in Settings as
-Add provider, its Free channels row the free-channels menu, its Open file row the same file
-dialog, and its header's ⌕ the same search. File → Open Recordings Folder opens where
-recordings go (2.2), as Settings' Open folder does; View → Recordings (2.9.7) the Library's
-Recordings page, as the drawer's Recordings row.
+a provider changes in Settings, then Add provider and the free-channels and free-radio (2.13)
+menus (the welcome card that offers them shows only without providers, and the last one
+stays). Settings… opens Settings in the drawer, as the drawer's Settings row and ⚙ do (backing
+out of it from there gives the drawer back). The drawer's Add provider row opens the same Add
+card in Settings as Add provider, its Free channels and Free radio rows their menus, its Open
+file row the same file dialog, and its header's ⌕ the same search. File → Open Recordings
+Folder opens where recordings go (2.2), as Settings' Open folder does; View → Recordings (2.9.7)
+the Library's Recordings page, as the drawer's Recordings row.
 """
 
 from __future__ import annotations
@@ -39,6 +39,7 @@ from services.i18n import N_, tr, translate
 from services.navigation import (
     ADD_PROVIDER_ROW,
     FREE_CHANNELS_ROW,
+    FREE_RADIO_ROW,
     OPEN_FILE_ROW,
     OPEN_FOLDER_ROW,
     OPEN_LINK_ROW,
@@ -49,7 +50,9 @@ from services.provider_ids import ALL_PROVIDERS, ALL_PROVIDERS_TITLE
 from ui.brand import logo_pixmap, scaled_asset
 from ui.free_channels_menu import (
     PICKER_TITLE as FREE_CHANNELS_TITLE,
+    RADIO_TITLE as FREE_RADIO_TITLE,
     build_menu as build_free_channels_menu,
+    build_radio_menu as build_free_radio_menu,
 )
 from ui.keymap import Action
 from ui.overlays.drawer import LIBRARY_ACTION, REFRESH_ACTION, SEARCH_ACTION, SETTINGS_BUTTON
@@ -186,6 +189,7 @@ class TVMenus(QObject):
         self._player_actions: list[QAction] = []  # entries of the player's keys
         self._provider_group: Optional[QActionGroup] = None
         self._free_menu: Optional[QMenu] = None  # the Providers menu's Free channels
+        self._radio_menu: Optional[QMenu] = None  # and its Free radio (2.13)
         self.providers_menu: QMenu
         self.keep_on_top: QAction  # View → Keep on Top, checkable (2.8.5)
         # A mouse button was let go on an open menu: the entry it triggers now was clicked
@@ -356,7 +360,7 @@ class TVMenus(QObject):
     def rebuild_providers(self) -> None:
         """One checkable entry per provider, after "All providers" when there are two or more
         (as in the channel list's sources), the source the TV page browses checked; then Add
-        provider and Free channels."""
+        provider, Free channels and Free radio."""
         menu = self.providers_menu
         menu.clear()
         catalog = self._window.catalog
@@ -383,7 +387,7 @@ class TVMenus(QObject):
         self._add_entries(menu)
 
     def _add_entries(self, menu: QMenu) -> None:
-        """Add provider and the free-channels menu, under the providers."""
+        """Add provider and the free-channels and free-radio menus, under the providers."""
         window = self._window
         menu.addSeparator()
         add = menu.addAction(translate(ADD_PROVIDER_TEXT))
@@ -395,6 +399,13 @@ class TVMenus(QObject):
         )
         free.setTitle(translate(FREE_CHANNELS_TITLE))
         menu.addMenu(free)
+        if self._radio_menu is not None:
+            self._radio_menu.deleteLater()
+        radio = self._radio_menu = build_free_radio_menu(
+            menu, lambda code: window.add_free_radio(code), styled=False
+        )
+        radio.setTitle(translate(FREE_RADIO_TITLE))
+        menu.addMenu(radio)
 
     def _choose_provider(self, source: str) -> None:
         """The exclusive group moved the check; providerReady rebuilds the menu (never here:
@@ -427,10 +438,10 @@ class TVMenus(QObject):
         open_folder(str(log_file.log_dir()))
 
     def on_drawer_action(self, row: str) -> None:
-        """The drawer's Settings, Add provider, Free channels, Open file, Open a link, Open a
-        folder and Recordings rows, and its header's ⚙, Library, ⌕ and refresh buttons. Backed
-        out of, Settings gives the list back: on its Settings row from there, where it was
-        from ⚙ and from Add provider (Settings at Providers, its Add card over it)."""
+        """The drawer's Settings, Add provider, Free channels, Free radio, Open file, Open a link,
+        Open a folder and Recordings rows, and its header's ⚙, Library, ⌕ and refresh buttons.
+        Backed out of, Settings gives the list back: on its Settings row from there, where it
+        was from ⚙ and from Add provider (Settings at Providers, its Add card over it)."""
         if row == SETTINGS_ROW:
             self._window.open_settings(from_drawer=True)
         elif row == SETTINGS_BUTTON:
@@ -440,6 +451,9 @@ class TVMenus(QObject):
         elif row == FREE_CHANNELS_ROW:
             drawer = self._window.overlays.drawer
             self._window.show_free_channels(drawer.row_anchor(row))
+        elif row == FREE_RADIO_ROW:  # 2.13
+            drawer = self._window.overlays.drawer
+            self._window.show_free_radio(drawer.row_anchor(row))
         elif row == OPEN_FILE_ROW:
             self._window.screens.open_file()
         elif row == OPEN_LINK_ROW:  # plan 4: File → Open Link…

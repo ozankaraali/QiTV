@@ -189,6 +189,12 @@ and no translation of it leaves your computer.
   to its API (<https://api.themoviedb.org/3>) with an API Read Access Token; no TMDB code is
   part of QiTV, and About shows TMDB's logo (`assets/tmdb.png`, TMDB's own). QiTV uses TMDB
   and the TMDB APIs but is not endorsed, certified, or otherwise approved by TMDB.
+- **radio-browser.info** (<https://www.radio-browser.info>), a free directory of internet radio
+  stations run by its community, gives Free radio its lists (2.13). QiTV reads the stations'
+  data (name, stream address, logo address, country and tags) at run time from its public API
+  (<https://all.api.radio-browser.info>), naming itself as QiTV; no station list is part of
+  QiTV, no "click" is reported and nothing of the user's is sent. The stations are the
+  directory's entries, under its own terms, and their streams and logos come from each station.
 - **Jellyfin** (<https://jellyfin.org>) is free software (GPL-2.0). QiTV talks to your own
   Jellyfin server over its HTTP API; no Jellyfin code or logo is part of QiTV. QiTV is not
   affiliated with or endorsed by the Jellyfin project; "Jellyfin" is that project's name.

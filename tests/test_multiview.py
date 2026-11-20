@@ -26,6 +26,7 @@ from PySide6.QtTest import QTest
 from PySide6.QtWidgets import QApplication, QWidget
 from timer_fixtures import elapse, pause, wait_until
 
+from services import free_radio
 from services.connection_budget import ConnectionBudget
 from services.live.refusals import STREAM_LIMIT
 from services.navigation import NavNode, item_key
@@ -1009,6 +1010,18 @@ class MultiviewTests(MultiviewCase):
         self.assertEqual(self.grid.state("t2"), FAILED)
         self.assertEqual(t2.playback.stops, 1)
         self.assertEqual(self.budget.holders("Home"), ["main"])
+
+    def test_a_radio_station_in_the_focused_tile_plays_directly(self):
+        # Free radio (2.13): no time-shift session for a station, in a tile too.
+        self.start_large(0)
+        self.v()
+        self.grid_frame.tileClicked.emit("t2")
+        station = {**CHANNELS[2], free_radio.STATION_KEY: True}
+        self.controller.tune(station, group_key="10", channels=[station])
+        self.ready("http://radio.test/live.aac")
+        t2 = self.sessions.slot("t2")
+        self.assertEqual(t2.playback.plays[-1][0], "http://radio.test/live.aac")
+        self.assertEqual(t2.live.calls, [])
 
     def test_the_focused_tiles_buffer_is_the_full_one_and_the_others_small(self):
         # A tile out of focus keeps 64 MiB; the focus grows it to the memory per

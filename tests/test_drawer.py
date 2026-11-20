@@ -19,6 +19,7 @@ from services.navigation import (
     ADD_PROVIDER_ROW,
     FAVORITES_GROUP,
     FREE_CHANNELS_ROW,
+    FREE_RADIO_ROW,
     OPEN_FILE_ROW,
     OPEN_FOLDER_ROW,
     OPEN_LINK_ROW,
@@ -690,6 +691,7 @@ class DrawerTests(unittest.TestCase):
                 ("Settings", "gear"),
                 ("Add provider", "plus"),
                 ("Free channels…", "plus"),
+                ("Free radio…", "plus"),  # 2.13
                 ("Open file", "file"),  # Ctrl/⌘+O without the menu bar (2.0.1)
                 ("Open a link", "link"),  # plan 4: File → Open Link… (2.12: its icon)
                 ("Open a folder", "folder"),  # Plan 4: Ctrl/⌘+Shift+O, an empty shelf too
@@ -701,13 +703,13 @@ class DrawerTests(unittest.TestCase):
     def test_a_click_on_open_file_asks_for_it(self):
         column = self.open_on_the_sources()
         path = self.nav.path
-        self.drawer._on_row_clicked("left", 6)
+        self.drawer._on_row_clicked("left", 7)  # under Free channels… and Free radio…
         self.assertEqual(self.actions, [OPEN_FILE_ROW])
         self.assertEqual(column.current.key, OPEN_FILE_ROW)
         self.assertEqual((self.nav.path, self.catalog.selected, self.library), (path, [], []))
-        self.drawer._on_row_clicked("left", 7)  # plan 4: Open a link, right under it
+        self.drawer._on_row_clicked("left", 8)  # plan 4: Open a link, right under it
         self.assertEqual(self.actions, [OPEN_FILE_ROW, OPEN_LINK_ROW])
-        self.drawer._on_row_clicked("left", 8)  # Plan 4: Open a folder, under that
+        self.drawer._on_row_clicked("left", 9)  # Plan 4: Open a folder, under that
         self.assertEqual(self.actions, [OPEN_FILE_ROW, OPEN_LINK_ROW, OPEN_FOLDER_ROW])
         self.assertEqual((self.nav.path, self.catalog.selected, self.library), (path, [], []))
 
@@ -773,6 +775,7 @@ class DrawerTests(unittest.TestCase):
                 SETTINGS_ROW,
                 ADD_PROVIDER_ROW,
                 FREE_CHANNELS_ROW,
+                FREE_RADIO_ROW,
                 OPEN_FILE_ROW,
                 OPEN_LINK_ROW,
                 OPEN_FOLDER_ROW,

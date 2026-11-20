@@ -18,7 +18,7 @@ from test_browsed_catalog import FakeEpg, ScriptedFactory
 from test_settings_controller import FakeValues
 from timer_fixtures import elapse, pause, wait_until
 
-from services import media_server as ms, provider_api
+from services import free_radio, media_server as ms, provider_api
 from services.browsed_catalog import BrowsedCatalog
 from services.catalog import PROVIDER_LOADING_MESSAGE, UNREACHABLE_MESSAGE
 from services.catalogs import Catalogs
@@ -3603,6 +3603,24 @@ class PipelineTuneTests(PipelineCase):
         self.assertEqual(len(self.starts()), 1)
         self.assertEqual(self.budget.holders("Home"), ["main"])  # the direct play's own
 
+    def test_a_radio_station_plays_directly_from_the_start(self):
+        # Free radio (2.13): a radio list's station never opens a time-shift session (no
+        # second connection, nothing to say); it books its one stream as a direct play does.
+        self.catalog.ptype = "M3UPLAYLIST"
+        station = {**CHANNELS[1], free_radio.STATION_KEY: True}
+        self.controller.tune(station, group_key="10", channels=[station])
+        self.ready("http://radio.test/live.mp3")
+        self.assertEqual(self.session.plays[-1][0], "http://radio.test/live.mp3")
+        self.assertEqual(self.live.calls, [])  # no time-shift session at all
+        self.assertEqual(self.toast.messages(), [])
+        self.assertEqual(self.budget.holders("Home"), ["main"])
+        # A TV channel of the same playlist still goes through the time-shift buffer.
+        self.tune(0)
+        self.ready("http://stream/1")
+        self.assertTrue(wait_until(lambda: len(self.starts()) == 1))
+        self.assertEqual(self.starts()[0][0], "http://stream/1")
+        self.assertEqual(self.budget.holders("Home"), ["main"])
+
     def test_a_channel_from_another_provider_holds_that_providers_slot(self):
         self.controller.tune(HARBOR_ONE, group_key="10", channels=[HARBOR_ONE])
         self.ready("http://stream/1")
@@ -4885,6 +4903,16 @@ class ContextMenuTests(ControllerTestCase):
         self.assertIn("Record at a time…", self.texts(menu))
         self.choose(menu, "Record at a time…")
         self.assertEqual(asked, ["One"])
+
+    def test_a_radio_station_is_never_recorded_at_a_time(self):  # 2.13
+        # It plays directly: the helper a scheduled recording opens can't read it.
+        self.controller.record_at = lambda channel: None  # QiTV can record at a time
+        node = self.channels[0]
+        station = {**node.payload, free_radio.STATION_KEY: True}
+        texts = self.texts(self.menu_for(NavNode(node.layer, node.key, node.title, station)))
+        self.assertNotIn("Record at a time…", texts)
+        self.assertEqual(texts[0], "Add to favorites")
+        self.assertIn("Record at a time…", self.texts(self.menu_for(node)))  # a channel: as ever
 
     def guarded(self):
         from services.parental import Parental

@@ -7,7 +7,7 @@ own or a card (OPENS), acts (ACTION), acts on something that cannot be undone an
 value a row key means, and how a step or an edit is applied, is for the callers; this module
 only says what exists and how stepping moves. Providers lists the providers' rows its caller
 builds (ui.settings_providers: a name is shown as given, never translated), then ＋ Add
-provider and Free channels.
+provider, Free channels and Free radio.
 """
 
 from __future__ import annotations
@@ -15,6 +15,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any, Optional
 
+from services import free_radio
 from services.config_manager import ConfigManager
 from services.i18n import N_, SOURCE_LANGUAGE, SOURCE_NAME, number, translate
 from services.settings_texts import (
@@ -64,6 +65,7 @@ ICONS: dict[str, str] = {
 PROVIDER_PREFIX = "provider/"
 ADD_PROVIDER = PROVIDER_PREFIX + "@add"
 FREE_CHANNELS = PROVIDER_PREFIX + "@free"
+FREE_RADIO = PROVIDER_PREFIX + "@radio"  # 2.13
 # i18n: a row of Settings → Providers, after a ＋ (an icon): adds a provider
 ADD_PROVIDER_TEXT = N_("Add provider")
 
@@ -728,7 +730,8 @@ def _playback(system: str) -> Section:
 
 def _providers(title: str, rows: tuple[Row, ...]) -> Section:
     """Providers: the providers' rows as given (ui.settings_providers builds them), then ＋ Add
-    provider and ＋ Free channels…, as the channel list names them (its ＋ painted)."""
+    provider, ＋ Free channels… and ＋ Free radio…, as the channel list names them (its ＋
+    painted)."""
     add = Row(
         ADD_PROVIDER,
         ADD_PROVIDER_TEXT,
@@ -746,7 +749,15 @@ def _providers(title: str, rows: tuple[Row, ...]) -> Section:
         kind=ACTION,
         icon="plus",
     )
-    return Section(PROVIDERS, title, ICONS[PROVIDERS], rows=rows + (add, free))
+    radio = Row(
+        FREE_RADIO,
+        # i18n: a row of Settings → Providers, after a ＋ (an icon), 2.13; opens a menu
+        N_("Free radio…"),
+        free_radio.HELP_TEXT,
+        kind=ACTION,
+        icon="plus",
+    )
+    return Section(PROVIDERS, title, ICONS[PROVIDERS], rows=rows + (add, free, radio))
 
 
 def sections(

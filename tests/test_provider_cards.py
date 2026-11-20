@@ -181,7 +181,7 @@ class CardsTests(unittest.TestCase):
         self.assertEqual(self.form.found(), ("", True))
         self.assertEqual(
             [b.key for b in self.form._alternates],
-            [pc.FILE, "STB", "JELLYFIN", "EMBY", pc.FREE],
+            [pc.FILE, "STB", "JELLYFIN", "EMBY", pc.FREE, pc.RADIO],
         )
         # An Xtream link: its login goes to its own fields, out of the link's (not secret).
         self.paste(XTREAM_LINK)
@@ -791,6 +791,17 @@ class CardsTests(unittest.TestCase):
         self.assertEqual(self.window.free, [where])
         self.cards.add()
         self.assertEqual(self.form.values(), {pc.URL: "", pc.NAME: ""})
+
+    def test_free_radio_closes_the_card_and_opens_its_menu(self):
+        self.cards.add()
+        free = self.form.control_rect("alt", pc.FREE)
+        radio = self.form.control_rect("alt", pc.RADIO)
+        # After Free channels…: beside it, or on the next line.
+        self.assertGreater((radio.top(), radio.left()), (free.top(), free.left()))
+        where = self.form.mapToGlobal(radio.bottomLeft().toPoint())
+        self.press(pc.RADIO, zone="alt")
+        self.assertFalse(self.form.isVisible())
+        self.assertEqual((self.window.free, self.window.radio), ([], [where]))
 
     def test_the_cards_stay_under_a_question_of_the_window(self):
         # A question keeps the keys above Settings (stop a recording?): a card shown or

@@ -12,6 +12,7 @@ from services.navigation import (
     ADD_PROVIDER_ROW,
     FAVORITES_GROUP,
     FREE_CHANNELS_ROW,
+    FREE_RADIO_ROW,
     OPEN_FILE_ROW,
     OPEN_FOLDER_ROW,
     OPEN_LINK_ROW,
@@ -158,6 +159,7 @@ class NavModelTests(unittest.TestCase):
                 ("action", SETTINGS_ROW, "Settings"),  # icons are painted, not glyphs
                 ("action", ADD_PROVIDER_ROW, "Add provider"),
                 ("action", FREE_CHANNELS_ROW, "Free channels…"),
+                ("action", FREE_RADIO_ROW, "Free radio…"),  # 2.13: radio-browser.info's
                 ("action", OPEN_FILE_ROW, "Open file"),
                 ("action", OPEN_LINK_ROW, "Open a link"),  # plan 4: File → Open Link…
                 ("action", OPEN_FOLDER_ROW, "Open a folder"),  # Plan 4: File → Open Folder…

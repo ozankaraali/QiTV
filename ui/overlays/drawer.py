@@ -85,6 +85,7 @@ from services.navigation import (
     ADD_PROVIDER_ROW,
     FAVORITES_GROUP,
     FREE_CHANNELS_ROW,
+    FREE_RADIO_ROW,
     LIBRARY_SECTIONS,
     LINK_LAYER,
     LINKS_LAYER,
@@ -216,6 +217,7 @@ _ACTION_ICONS = {
     SETTINGS_ROW: "gear",
     ADD_PROVIDER_ROW: "plus",
     FREE_CHANNELS_ROW: "plus",
+    FREE_RADIO_ROW: "plus",  # 2.13
     OPEN_FILE_ROW: "file",
     OPEN_LINK_ROW: "link",  # 2.12
     OPEN_FOLDER_ROW: "folder",  # Plan 4

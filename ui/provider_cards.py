@@ -19,7 +19,8 @@ land in the address). The name is optional: the host, made unique, as its placeh
 playlist's HEAD or its file, a media server's sign-in). Only one that answered is added,
 selected and said ("Added … to your providers"). A failure says why and offers "Add anyway",
 but for Jellyfin and Emby (only their sign-in's token is kept, never the password) and for a
-playlist file QiTV can't find. "Free channels…" gives way to the window's menu.
+playlist file QiTV can't find. "Free channels…" and "Free radio…" give way to the window's
+menus.
 
 The Address-and-login card ("<name>: address and login") is the same card, filled in from the
 provider, with "Check and save". Its link is never read as one until it changes: an older
@@ -54,7 +55,7 @@ import os
 from typing import Any, Optional
 from urllib.parse import parse_qsl, urlsplit
 
-from PySide6.QtCore import QObject
+from PySide6.QtCore import QObject, QPoint
 from PySide6.QtWidgets import QWidget
 
 from services.i18n import N_, translate
@@ -102,7 +103,8 @@ URL, USERNAME, PASSWORD, MAC, SERIAL, DEVICE, NAME = (
     "name",
 )
 CHECK, ANYWAY = "check", "anyway"  # the buttons (and CANCEL)
-FILE, FREE = "file", "free"  # the other ways; a kind's is its type (STB, JELLYFIN, EMBY)
+# The other ways; a kind's is its type (STB, JELLYFIN, EMBY).
+FILE, FREE, RADIO = "file", "free", "radio"
 KINDS = (STB, JELLYFIN, EMBY)
 ADD_NEW, REPLACE = "new", "replace"  # the guard's answers (and CANCEL)
 _ADD, _UPDATE = "add", "update"  # what an answered check is for
@@ -124,6 +126,7 @@ CHECK_SAVE_TEXT = N_("Check and save")  # i18n: a button: ask the provider first
 ADD_ANYWAY_TEXT = N_("Add anyway")
 M3U_FILE_TEXT = N_("M3U file…")  # i18n: the Add provider card's other way: a playlist file
 FREE_TEXT = N_("Free channels…")
+RADIO_TEXT = N_("Free radio…")  # i18n: the Add provider card's last other way (2.13); a menu
 # Under a provider's link: what QiTV found it to be.
 # i18n: under a provider's link: what it is ({kind}: "M3U playlist", "STB portal"…; {host})
 FOUND_TEXT = N_("✓ {kind} at {host}")
@@ -543,7 +546,8 @@ class ProviderCards(QObject):
         if self._editing:
             return [file] if self._stored_kind() in _PLAYLISTS else []
         kinds = [Button(kind, kind_text(kind)) for kind in KINDS]
-        return [file, *kinds, Button(FREE, translate(FREE_TEXT))]
+        free = [Button(FREE, translate(FREE_TEXT)), Button(RADIO, translate(RADIO_TEXT))]
+        return [file, *kinds, *free]
 
     def _focus_first_empty(self) -> None:
         """The keys on the first field the card still needs (the optional ones not)."""
@@ -594,6 +598,8 @@ class ProviderCards(QObject):
             self._pick_file()
         elif key == FREE:
             self._free_channels()
+        elif key == RADIO:
+            self._free_radio()
         elif key in KINDS:
             self._chosen = "" if self._chosen == key else key
             self._line, self._failed = None, False
@@ -611,10 +617,18 @@ class ProviderCards(QObject):
 
     def _free_channels(self) -> None:
         """Free channels…: the card gives way to the window's menu, where it was."""
-        rect = self.form.control_rect("alt", FREE)
+        self._window.show_free_channels(self._give_way(FREE))
+
+    def _free_radio(self) -> None:
+        """Free radio… (2.13): likewise, its menu."""
+        self._window.show_free_radio(self._give_way(RADIO))
+
+    def _give_way(self, key: str) -> QPoint:
+        """The card closes: the global point under its alternate `key`, for a menu."""
+        rect = self.form.control_rect("alt", key)
         at = self.form.mapToGlobal(rect.bottomLeft().toPoint())
         self._close()
-        self._window.show_free_channels(at)
+        return at
 
     # ---- checking, then keeping -------------------------------------------------------------
 

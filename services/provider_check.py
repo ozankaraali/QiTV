@@ -1,11 +1,12 @@
 """Whether a provider answers, as Settings checks it before keeping it (blocking).
 
 An STB portal or an Xtream panel is asked as the account check asks it (services.account_check:
-no stream is opened); a playlist must answer a HEAD, or be a file on this computer; a Jellyfin
-or Emby server is signed in to. Each is asked over HTTPS first, and one that answered only over
-HTTP says so (2.7.1). A media server's sign-in hands back its access (a token, the user's id and
-the device's id) to keep in place of the password, which is used here only; `check_kept` asks
-one already added (its token kept, no password) with its token instead.
+no stream is opened); a playlist must answer a HEAD (Free radio's directory a GET), or be a file
+on this computer; a Jellyfin or Emby server is signed in to. Each is asked over HTTPS first, and
+one that answered only over HTTP says so (2.7.1). A media server's sign-in hands back its access
+(a token, the user's id and the device's id) to keep in place of the password, which is used
+here only; `check_kept` asks one already added (its token kept, no password) with its token
+instead.
 
 `check` runs on a worker thread (ui.provider_check runs it for Settings) and answers an
 `Outcome`, plain data. Nothing here logs a URL or a credential: the failure's type and host.
@@ -18,7 +19,7 @@ import logging
 import os
 from typing import Any
 
-from services import failure_reasons as reasons
+from services import failure_reasons as reasons, free_radio
 from services.account_check import check_account
 from services.lazy_import import lazy_module
 from services.provider_api import (
@@ -137,6 +138,8 @@ def verify_url(url: str, *, verify_ssl: bool = True) -> bool:
     only over HTTP is remembered so, `known_http_only`), or is a file on this computer."""
     if not url.startswith(("http://", "https://")):
         return os.path.isfile(url)
+    if free_radio.is_directory_url(url):
+        return _directory_answers(url, verify_ssl)
     try:
         for candidate in https_fallback_candidates(url, True):
             try:
@@ -153,3 +156,19 @@ def verify_url(url: str, *, verify_ssl: bool = True) -> bool:
     except Exception as e:
         logger.warning("Error verifying URL: %s", safe_exc(e))
         return False
+
+
+def _directory_answers(url: str, verify_ssl: bool) -> bool:
+    """Whether the radio directory (Free radio, 2.13) answers for its list at `url`: it finds
+    nothing at a HEAD, so a GET, closed once its status came (none of the list is read)."""
+    try:
+        response = requests.get(
+            url, timeout=5, headers=free_radio.headers_for(url), verify=verify_ssl, stream=True
+        )
+    except requests.RequestException as e:
+        logger.warning("Error verifying URL: %s", safe_exc(e))
+        return False
+    try:
+        return bool(response.status_code == 200)
+    finally:
+        response.close()
