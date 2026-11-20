@@ -572,7 +572,7 @@ class SettingsDrawerTests(unittest.TestCase):
             self.assertEqual(i18n.set_language(language), language)
             if language != "en":
                 self.assertNotEqual(translate(row.help), row.help, language)
-            for size in ((1280, 720), (960, 540)):
+            for size in ((1600, 900), (1280, 720), (960, 540)):
                 with self.subTest(language=language, size=size):
                     self.use(*make(*size))
                     self.focus_on("deinterlace")
@@ -580,6 +580,29 @@ class SettingsDrawerTests(unittest.TestCase):
                     lines = self.drawer._box("right", index).help
                     self.assertFalse(any("…" in line for line in lines), lines)
                     self.assertEqual(" ".join(lines).split(), translate(row.help).split())
+                    # macOS's fonts are wider than this test machine's (they cut de, es and
+                    # fr at two lines): written to fit two lines in a font 10% wider too.
+                    units = ui_units(size[0])
+                    width = self.drawer.row_rect("right", index).width() - 2 * INSET_U * units.u
+                    font = units.font(HELP_FONT_U)
+                    wider = wrap_lines(translate(row.help), font, width / 1.1, 3)
+                    self.assertLessEqual(len(wider), 2, wider)
+
+    def test_a_help_takes_a_third_line_at_any_size(self):
+        # A help written for two lines may need a third in a wider font (macOS's): at
+        # 1280×720 too it shows whole on three, the restart note last.
+        help_text = (
+            "Lets the graphics chip decode the video, so that the processor does less and the"
+            " fans stay quiet."
+        )
+        row = Row("long", "Long", help_text, ON_OFF, True, restart=True)
+        self.drawer.open_at((Section("s", "S", rows=(row,)),))
+        self.drawer.right()
+        self.drawer.grab()
+        lines = self.drawer._box("right", 0).help
+        self.assertEqual(len(lines), 3, lines)
+        self.assertTrue(whole(lines, tip(row)), lines)
+        self.assertTrue(" ".join(lines).endswith(translate(RESTART_NOTE)), lines)
 
     def test_the_restart_note_keeps_its_line_in_a_small_window(self):
         # A help too long to share its three lines (a small window's) with the note: the note
@@ -600,13 +623,14 @@ class SettingsDrawerTests(unittest.TestCase):
 
     def test_a_small_window_gives_a_help_a_title_and_a_value_a_line_more(self):
         # At 640×360 the columns shrink with the window but the fonts stop at their floor:
-        # a help (its restart note too), a title and a stepper's value take a third line
-        # before they elide, and a value's long word widens its room, the title wrapping
-        # instead. A window wide enough for every font keeps two lines (1280, 1600).
+        # a help (its restart note too) takes its third line, a title and a stepper's value
+        # take a third line before they elide, and a value's long word widens its room, the
+        # title wrapping instead. A window wide enough for every font keeps two lines for
+        # titles and values (1280, 1600).
+        self.assertEqual(settings_layout.HELP_LINES, 3)
         for width in (1280, 1600):
             un = ui_units(width)
             for font_u, most in (
-                (HELP_FONT_U, settings_layout.HELP_LINES),
                 (TITLE_FONT_U, settings_layout.TITLE_LINES),
                 (VALUE_FONT_U, settings_layout.VALUE_LINES),
             ):

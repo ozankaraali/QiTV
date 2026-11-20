@@ -13,11 +13,12 @@ said, given as a tooltip or copied out; one that shows its end (an API key's las
 it after a fixed row of dots, so that its length doesn't show. An empty text shows its
 placeholder, muted. A row may have an icon of its own before its title, in the accent (＋ Add
 provider's, as the channel list's action rows; the first after rows without one has a gap
-above it), a muted sub line under its title, and a note at its right end. In a layer the left column lists the rows the layer is one of, the opened one marked as
-the drawer marks its path; there only the rows that open a layer take the highlight, and a
+above it), a muted sub line under its title, and a note at its right end. In a layer the left
+column lists the rows the layer is one of, the opened one marked as the drawer marks its path;
+there only the rows that open a layer take the highlight, and a
 click on another goes back up to it. A layer (or a section) without rows says its
 `empty_text` and the keys stay on the left. Only the right column's focused row shows its
-help under it, two lines at most (three in a small window); a note cut short at its row's end
+help under it, three lines at most (written for two); a note cut short at its row's end
 shows there whole instead (a check's answer). Where everything goes is
 ui/overlays/settings_layout.py's.
 

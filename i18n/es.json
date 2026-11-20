@@ -96,7 +96,7 @@
   "Austria": "Austria",
   "Auto (best)": "Automático (la mejor)",
   "Auto (recommended)": "Automática (recomendada)",
-  "Auto deinterlaces only interlaced pictures. Back to Auto applies when QiTV starts again.": "Automático solo actúa en imágenes entrelazadas. Volver a Automático se aplica al reiniciar QiTV.",
+  "Auto deinterlaces only interlaced pictures. Back to Auto applies when QiTV starts again.": "Automático: solo imágenes entrelazadas. Volver a él requiere reiniciar QiTV.",
   "Auto-play next episode (10s countdown)": "Reproducir el siguiente episodio (cuenta atrás de 10 s)",
   "Automatic": "Automático",
   "Automatic takes the more accurate one on a fast computer.": "Automático elige el más preciso en un ordenador rápido.",
