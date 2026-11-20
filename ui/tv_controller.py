@@ -1240,15 +1240,19 @@ class TVController(QObject):
                 self._cid = None
             self.watch.forget_position(key)
 
-    def play_link(self, item: dict, section: str) -> None:
+    def play_link(self, item: dict, section: str, zapped: bool = False) -> None:
         """A link of Network streams plays (the network player hands it over): `section`
         "live" as a channel (in ⟲ Recent's group, where it lands), else as a film, where it
         stopped. Its address is known: the link lanes answer it, no provider is asked. With no
-        provider configured it is held as a file opened in QiTV is (_hold_for_link)."""
+        provider configured it is held as a file opened in QiTV is (_hold_for_link).
+        `zapped`: channel up/down stepped to it over the picture, a zap step as a channel's
+        (an outside player opens only once the steps settle)."""
         if self._closed:
             return
         self._hold_for_link()
-        if section == "live":
+        if section == "live" and zapped:
+            self._tune(item, RECENT_GROUP, [item], from_zap=True)
+        elif section == "live":
             self.tune_live(item, RECENT_GROUP, [item])
         else:
             self.play_vod(item, "movie", play_context())

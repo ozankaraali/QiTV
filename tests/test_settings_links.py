@@ -115,7 +115,7 @@ class FakeController(QObject):
     def set_link_stepper(self, step):
         self.step = step
 
-    def play_link(self, item, section):
+    def play_link(self, item, section, zapped=False):
         self.played.append((dict(item), section))
 
     def stopped_at(self, item):

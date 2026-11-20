@@ -19,7 +19,7 @@ from unittest import mock
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 from PySide6.QtCore import Qt
-from timer_fixtures import pause, wait_until
+from timer_fixtures import elapse, pause, wait_until
 
 from services import network_streams as ns
 from services.jobs import JobRunner
@@ -437,7 +437,8 @@ class LinkStepTests(PlayerCase):
         self.assertEqual(self.playing(), stream_id(URL))
         with mock.patch.object(self.player, "play_kept", wraps=self.player.play_kept) as kept:
             self.step(Action.CH_NEXT)
-            kept.assert_called_once_with(stream_id(self.OTHER))  # the network player plays it
+            # The network player plays it, as a zap step (an outside player waits for the rest).
+            kept.assert_called_once_with(stream_id(self.OTHER), zapped=True)
             self.assertEqual(self.playing(), stream_id(self.OTHER))
             self.assertEqual(self.starts()[-1][0], self.OTHER)
             self.step(Action.CH_NEXT)  # past the last: the first again
@@ -527,6 +528,33 @@ class LinkStepTests(PlayerCase):
             )
             self.assertEqual(self.starts()[-1][0], "http://stream/2")  # the group's next
         kept.assert_not_called()
+
+
+class ExternalLinkStepTests(PlayerCase):
+    """In VLC or MPV: a pick of a kept link launches the player at once; channel up/down
+    through the kept links launches only the link the steps settle on, as channels do."""
+
+    def setUp(self):
+        super().setUp()
+        patcher = mock.patch("ui.tv_controller.EXTERNAL_SETTLE_MS", 60)
+        patcher.start()
+        self.addCleanup(patcher.stop)
+        self.config.play_in_vlc = True
+        self.loaded()
+
+    def test_link_steps_launch_only_the_link_the_steps_settle_on(self):
+        third = LinkStepTests.THIRD
+        other = LinkStepTests.OTHER
+        for url in (third, other, URL):
+            self.player.keep_new(url, LIVE)  # Network streams: URL, other, third
+        self.player.play_kept(stream_id(URL))  # a pick launches at once
+        self.assertTrue(wait_until(lambda: self.external.calls == [("vlc", URL)]))
+        self.controller.handle(Action.CH_NEXT)  # other
+        self.controller.handle(Action.CH_NEXT)  # third, before other settled
+        pause(20)
+        self.assertEqual(self.external.calls, [("vlc", URL)])  # nothing yet
+        elapse(120)
+        self.assertEqual(self.external.calls, [("vlc", URL), ("vlc", third)])
 
 
 class FailureTests(PlayerCase):

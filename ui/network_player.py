@@ -229,13 +229,15 @@ class NetworkPlayer(QObject):
             return entry
         return next((e for e in self.store.entries() if stream_id(e.url) == key), None)
 
-    def play_kept(self, key: str) -> bool:
+    def play_kept(self, key: str, zapped: bool = False) -> bool:
         """The link kept under `key` plays (its row in the channel list, or the find's), its
-        address and kind as kept; False when none is kept under it."""
+        address and kind as kept; False when none is kept under it. `zapped`: a channel
+        up/down's step to it (`step`), as a zap's (an outside player waits for the steps to
+        settle)."""
         entry = self.store.get(key)
         if entry is None:
             return False
-        self._hand_over(entry.id, entry.name, entry.url, entry.kind)
+        self._hand_over(entry.id, entry.name, entry.url, entry.kind, zapped)
         return True
 
     def step(self, item: dict, delta: int) -> bool:
@@ -254,18 +256,19 @@ class NetworkPlayer(QObject):
         if len(self._steps) > 1:
             at = self._steps.index(key)
             self._stepped = self._steps[(at + (1 if delta > 0 else -1)) % len(self._steps)]
-            self.play_kept(self._stepped)
+            self.play_kept(self._stepped, zapped=True)
         return True
 
-    def _hand_over(self, key: str, name: str, url: str, kind: str) -> None:
+    def _hand_over(self, key: str, name: str, url: str, kind: str, zapped: bool = False) -> None:
         """The controller plays the link `url` as `key`'s: as a channel or a film, the stream
-        of the account whose host and user name it has (else Network streams')."""
+        of the account whose host and user name it has (else Network streams'); `zapped`, as
+        a zap step's."""
         owner = self._owner(url) or NETWORK_PROVIDER
         item = {"id": key, "name": name, "cmd": url, "_provider": owner}
         self._handed[key] = kind
         whose = "its account's" if owner != NETWORK_PROVIDER else "no provider's"
         logger.info("Open Link: a %s link plays (%s stream)", kind.lower(), whose)
-        self._controller.play_link(item, "movies" if kind == FILM else "live")
+        self._controller.play_link(item, "movies" if kind == FILM else "live", zapped=zapped)
 
     def rows(self) -> list[LinkRow]:
         """The kept links as the channel list's rows, newest opened first: a film's with
