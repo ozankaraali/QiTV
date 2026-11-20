@@ -99,8 +99,18 @@ class WatchState:
         return cid
 
     def record_play(
-        self, provider_name: str, item: dict, *, item_type: str, link: str, group_id=None
+        self,
+        provider_name: str,
+        item: dict,
+        *,
+        item_type: str,
+        link: str,
+        group_id=None,
+        last_channel: bool = True,
     ) -> None:
+        """`item` played: into the history, and a channel becomes the one Start with the last
+        channel tunes, unless `last_channel` is False (a link of Network streams: the
+        provider's channel watched before stays)."""
         self.config.add_to_watch_history(
             item,
             item_type,
@@ -115,7 +125,7 @@ class WatchState:
             "timestamp": time.strftime("%Y-%m-%dT%H:%M:%S"),
             "provider_name": provider_name,
         }
-        if item_type == "channel":
+        if item_type == "channel" and last_channel:
             self.config.last_live_channel = {
                 "provider_name": provider_name,
                 "group_id": "" if group_id is None else str(group_id),

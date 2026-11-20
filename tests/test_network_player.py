@@ -254,6 +254,22 @@ class OwnerAfreshTests(PlayerCase):
         self.assertEqual([e["provider_name"] for e in self.config.watch_history], ["Home"])
 
 
+class LastChannelTests(PlayerCase):
+    def test_a_link_never_becomes_the_last_channel(self):
+        # Final review M2: Start with the last channel would play nothing at the next start
+        # (and a link's token may have run out by then): the provider's channel stays.
+        self.loaded()
+        self.opens(lambda: self.play(1))
+        last = self.watch.last_channel
+        self.assertEqual((last[0], last[1]["id"]), ("Home", 2))
+        for url in (URL, "http://harbor.example:8080/live/demo/secret/7.ts"):  # an account's
+            with self.subTest(url):
+                self.link(url)
+                self.plays_now()
+                self.assertEqual(self.watch.plays[-1][1]["cmd"], url)  # in the history
+                self.assertEqual(self.watch.last_channel, last)
+
+
 class FilmTests(PlayerCase):
     def test_a_film_resumes_after_a_fresh_token(self):
         self.loaded()

@@ -554,6 +554,7 @@ class TVController(QObject):
             may_hide=lambda: self.parental is not None and self.parental.has_pin(),
             tidy=self._tidy_from_menu,  # 2.9.1: out of the lists, no PIN
             record_at=lambda: self.record_at,
+            link=lambda item: self._network_url(item) is not None,
             parent=self,
         )
         # The volume keys, mute and the wheel, on the mixer (one row per picture).
@@ -2883,6 +2884,9 @@ class TVController(QObject):
                 item_type=target.item_type,
                 link=url,
                 group_id=target.group_key if target.live else None,
+                # A link is never the channel QiTV starts on (its token may be gone by then):
+                # the provider's channel watched before it stays (final review M2).
+                last_channel=self._network_url(target.item) is None,
             )
         except Exception as e:
             self._log_failure(f"record {target.title} in the watch history", e)
