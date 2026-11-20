@@ -319,7 +319,9 @@ class ProviderManager(QObject):
 
     def _invalidate_cache_path(self, cache_path) -> None:
         """Supersede queued writes for this cache file, then delete it (its pages, and an older
-        build's file too)."""
+        build's file too). Each is tried: one the system refuses (Windows: a search reading it)
+        leaves the others gone, and its error is raised after them."""
+        refused = None
         with self._cache_lock:
             self._cache_generations[cache_path] = self._cache_generations.get(cache_path, 0) + 1
             self._pending_cache_snapshots.pop(cache_path, None)
@@ -332,12 +334,19 @@ class ProviderManager(QObject):
                     os.remove(path)
                 except FileNotFoundError:
                     pass
+                except OSError as e:
+                    refused = refused or e
+        if refused is not None:
+            raise refused
 
     def invalidate_provider_cache(self, provider_name) -> None:
-        """Invalidate queued writes as well as the on-disk cache for this name."""
-        self._invalidate_cache_path(self._provider_cache_name(provider_name))
-        if self.current_provider.get("name") == provider_name:
-            self.current_provider_content = {}
+        """Invalidate queued writes as well as the on-disk cache for this name (its lists in
+        memory go even when a file is refused)."""
+        try:
+            self._invalidate_cache_path(self._provider_cache_name(provider_name))
+        finally:
+            if self.current_provider.get("name") == provider_name:
+                self.current_provider_content = {}
 
     def clear_current_provider_cache(self):
         self.invalidate_provider_cache(self.current_provider["name"])

@@ -176,6 +176,22 @@ class ProviderChangesTests(unittest.TestCase):
         self.changes.remove("Lists")
         self.assertEqual(self.saved(), [])
 
+    def test_a_rename_or_a_removal_drops_each_file_of_the_cache(self):
+        # 2.12: the lists in pieces, the pages opened beside them, and an older build's file.
+        def written(name):
+            lists = self.manager._provider_cache_name(name)
+            pages, legacy = self.manager._pages_name(lists), self.manager._legacy_cache_name(lists)
+            for path in (lists, pages, legacy):
+                with open(path, "w", encoding="utf-8") as f:
+                    f.write("{}")
+            return [lists, pages, legacy]
+
+        renamed, removed = written("Panel"), written("Lists")
+        self.changes.rename("Panel", "Films")
+        self.changes.remove("Lists")
+        for path in renamed + removed:
+            self.assertFalse(os.path.exists(path), os.path.basename(path))
+
     def test_a_change_keeps_the_shared_list_and_lists_a_new_entry(self):
         listed = self.manager.providers
         before = listed[1]

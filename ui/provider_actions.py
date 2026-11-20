@@ -23,16 +23,21 @@ Settings window's Save ran for it, in its order:
 
 Each ends with the menu bar's provider list rebuilt. A change whose write the disk refuses
 raises its OSError before any follow-up: nothing was changed (ProviderChanges puts the list
-back). Asking first (a removal, the parental PIN for a rename) is the caller's. The TV's
-provider is the one Settings selects (`selected_provider_name`), as the old Save had it.
+back). Cached lists the system refuses to remove once the list is written (2.12: three files a
+provider's) are only logged: the change and its follow-ups stand. Asking first (a removal, the
+parental PIN for a rename) is the caller's. The TV's provider is the one Settings selects
+(`selected_provider_name`), as the old Save had it.
 """
 
 from __future__ import annotations
 
+import logging
 from typing import Any
 
 from services.provider_changes import Change, ProviderChanges
 from services.provider_rename import Renames
+
+logger = logging.getLogger(__name__)
 
 
 class ProviderActions:
@@ -62,7 +67,7 @@ class ProviderActions:
         selected = self._selected(name)
         anew = change.identity_changed or refresh
         if anew and not selected:
-            self._manager_of(name).invalidate_provider_cache(name)
+            self._drop_lists(name)
         self._window.providers_saved()
         if anew and selected:
             self._window.set_provider(force_update=True)
@@ -77,7 +82,7 @@ class ProviderActions:
         if name == old:
             return name
         self._window.providers_renamed(Renames({old: name}, before), [])
-        self._manager_of(old).invalidate_provider_cache(old)  # a write queued under the old name
+        self._drop_lists(old)  # a write queued under the old name too
         self._window.providers_saved()
         if selected:
             self._window.set_provider(force_update=True)
@@ -90,7 +95,7 @@ class ProviderActions:
         selected = self._selected(name)
         self.changes.remove(name)
         self._window.providers_renamed(Renames({}), [name])
-        self._manager_of(name).invalidate_provider_cache(name)  # a write queued for it, too
+        self._drop_lists(name)  # a write queued for it, too
         self._window.providers_saved()
         if selected:
             left = self.changes.names()
@@ -111,7 +116,7 @@ class ProviderActions:
         ]
         for name in following:
             if not self._selected(name):
-                self._manager_of(name).invalidate_provider_cache(name)
+                self._drop_lists(name)
         if any(self._selected(name) for name in following):
             self._window.set_provider(force_update=True)
 
@@ -125,6 +130,16 @@ class ProviderActions:
         if name in catalogs.created():
             return catalogs.catalog(name).provider_manager
         return self._window.provider_manager
+
+    def _drop_lists(self, name: str) -> None:
+        """Provider `name`'s cached lists go, through its own catalog's manager when it has one.
+        The list is written by then: a file the system refuses (Windows: a search reading it) is
+        logged, not raised as an unsaved change (a name no longer listed has it pruned at the
+        next save; lists of another connection are never loaded)."""
+        try:
+            self._manager_of(name).invalidate_provider_cache(name)
+        except OSError as e:
+            logger.warning("Couldn't remove a provider's cached lists: %s", type(e).__name__)
 
     def _done(self) -> None:
         self._window.menus.rebuild_providers()

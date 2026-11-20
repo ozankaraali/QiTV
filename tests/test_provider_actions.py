@@ -11,7 +11,7 @@ os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 from services.epg_view import GUIDE_OFFSET_KEY
 from services.provider_changes import NameTaken
-from tests.test_provider_changes import PANEL, PLAYLIST, temp_manager
+from tests.test_provider_changes import PANEL, PLAYLIST, manager_of, temp_manager
 from ui.provider_actions import ProviderActions
 
 REBUILT = ("menus.rebuild_providers",)
@@ -229,6 +229,84 @@ class ProviderActionsTests(unittest.TestCase):
             ],
         )
         self.assertEqual(self.config.selected_provider_name, "")
+
+
+class CacheFileTests(unittest.TestCase):
+    """2.12: a provider's cache is three files (its lists in pieces, the pages opened beside
+    them, an older build's single file): what a change lets go of, on disk."""
+
+    def setUp(self):
+        self.config, self.manager = temp_manager(self, [PLAYLIST, PANEL])
+        self.config.ssl_verify = True
+        self.config.selected_provider_name = "Lists"
+        self.window = FakeWindow(self.config, self.manager)
+        self.actions = ProviderActions(self.window)
+
+    def cache_files(self, name):
+        """Provider `name`'s cache files, each written (what they hold is never read here)."""
+        lists = self.manager._provider_cache_name(name)
+        files = [lists, self.manager._pages_name(lists), self.manager._legacy_cache_name(lists)]
+        for path in files:
+            with open(path, "w", encoding="utf-8") as f:
+                f.write("{}")
+        return files
+
+    def assert_gone(self, files):
+        for path in files:
+            self.assertFalse(os.path.exists(path), os.path.basename(path))
+
+    def test_each_change_that_lets_go_of_the_lists_drops_every_file(self):
+        own = manager_of(self, self.config)  # Panel's catalog's own (its queued writes)
+        own.current_provider = own.providers[1]
+        own.current_provider_content = {"vod": {"categories": []}}
+        self.window.created["Panel"] = SimpleNamespace(provider_manager=own)
+        files = self.cache_files("Panel")
+        self.actions.update("Panel", {"url": "http://panel.test:9090"})  # a new connection
+        self.assert_gone(files)
+        self.assertEqual(own.current_provider_content, {})
+        files = self.cache_files("Panel")
+        self.config.ssl_verify = False  # Panel follows Verify SSL (Lists is the TV's)
+        self.actions.global_ssl_changed()
+        self.assert_gone(files)
+        files = self.cache_files("Panel")
+        self.actions.rename("Panel", "Films")
+        self.assert_gone(files)
+        files = self.cache_files("Films")
+        self.actions.remove("Films")
+        self.assert_gone(files)
+
+    def test_a_file_the_system_refuses_is_logged_and_the_change_stands(self):
+        # Windows refuses to remove a file being read (a search reading the lists): the list
+        # is written by then, so the change is not said to have failed, its follow-ups run and
+        # the other files go.
+        for action, args, follow_ups in (
+            ("update", ("Panel", {"url": "http://panel.test:9090"}), [SAVED, REBUILT]),
+            ("rename", ("Panel", "Films"), [SAVED, REBUILT]),
+        ):
+            with self.subTest(action):
+                files = self.cache_files("Panel")
+                remove = os.remove
+
+                def refusing(path, refused=files[0]):
+                    if path == refused:
+                        raise PermissionError(path)
+                    remove(path)
+
+                self.window.events.clear()
+                with (
+                    mock.patch("services.provider_manager.os.remove", refusing),
+                    self.assertLogs(level="WARNING") as logs,  # (a rename's prune says it too)
+                ):
+                    getattr(self.actions, action)(*args)
+                self.assertIn("ui.provider_actions", {record.name for record in logs.records})
+                events = [e for e in self.window.events if e[0] != "providers_renamed"]
+                self.assertEqual(events, follow_ups)
+                self.assertTrue(os.path.exists(files[0]))  # refused
+                self.assertFalse(os.path.exists(files[1]))
+                self.assertFalse(os.path.exists(files[2]))
+                os.remove(files[0])
+        self.assertEqual(self.actions.changes.names(), ["Lists", "Films"])
+        self.assertEqual(self.actions.changes.get("Films")["url"], "http://panel.test:9090")
 
 
 if __name__ == "__main__":

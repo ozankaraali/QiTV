@@ -392,6 +392,30 @@ class ManagerTests(ManagerCase):
         for path in (cache, pages, legacy):
             self.assertFalse(os.path.exists(path), path)
 
+    def test_a_refused_file_leaves_the_others_gone_and_is_raised(self):
+        # Windows refuses to remove a file being read: the pages and an older build's file go
+        # all the same, so do the lists in memory, and the refusal is raised after them.
+        self.manager.current_provider_content = {"series": {"seasons": {"42": [{"id": "1"}]}}}
+        self.manager.save_provider()
+        self.written(self.manager)
+        cache = self.manager._provider_cache_name("Fixture")
+        pages = self.manager._pages_name(cache)
+        legacy = self.legacy("Fixture", {"vod": {}})
+        remove = os.remove
+
+        def refusing(path):
+            if path == cache:
+                raise PermissionError(path)
+            remove(path)
+
+        with mock.patch("services.provider_manager.os.remove", refusing):
+            with self.assertRaises(PermissionError):
+                self.manager.invalidate_provider_cache("Fixture")
+        self.assertTrue(os.path.exists(cache))
+        self.assertFalse(os.path.exists(pages))
+        self.assertFalse(os.path.exists(legacy))
+        self.assertEqual(self.manager.current_provider_content, {})
+
 
 class PagesTests(ManagerCase):
     """2.12: a series, a season or a portal's group opened writes its pages beside the lists,
