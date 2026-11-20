@@ -631,6 +631,30 @@ class ProvidersTests(unittest.TestCase):
         self.pin_card()  # never granted by the cancelled card
         self.key(Action.ESCAPE)
 
+    def test_back_in_the_pin_card_deletes_a_digit_then_cancels(self):
+        # 2.13.1: Back (Backspace, the phone's) deletes a digit while there is one; on the
+        # empty field it cancels the card (the phone may have only Back). Esc cancels at once.
+        self.window.parental.is_locked = True
+        self.on("Panel", "name")
+        self.type_name("Renamed", replace=True)
+        card = self.pin_card()
+        self.key(Action.NAV_TEXT, "246")
+        self.key(Action.NAV_BACKSPACE)
+        self.assertEqual(card.values(), {settings_parental.YOURS: "24"})
+        self.key(Action.PREVIOUS)  # the player's Back: a digit too
+        self.assertEqual(card.values(), {settings_parental.YOURS: "2"})
+        self.key(Action.NAV_BACKSPACE)
+        self.assertTrue(card.isVisible())  # emptied, still asked
+        self.key(Action.NAV_BACKSPACE)  # on the empty field: cancelled
+        self.assertTrue(card.isHidden())
+        self.assertFalse(self.settings.card_shown())
+        self.assertEqual(self.saved(), ["Lists", "Panel"])
+        self.type_name("Renamed", replace=True)
+        self.key(Action.NAV_TEXT, "24")
+        self.key(Action.ESCAPE)  # at once, digits or not
+        self.assertTrue(card.isHidden())
+        self.assertEqual(self.saved(), ["Lists", "Panel"])
+
     # ---- hidden groups -----------------------------------------------------------------------
 
     def test_hidden_groups_layer_and_show_again(self):

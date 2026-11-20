@@ -7,7 +7,9 @@ action at once, through the window's services.parental guard as the old tab used
   then the new one twice. Remove PIN… asks the current one; Unlock for an hour…, only while
   locked, asks it too; Lock now, only while unlocked, ends the hour. The old rules and
   messages: a PIN is 4 digits or more, typed the same twice, and a wrong one is refused (said in
-  the card, which stays for another try). The fields are secret and take digits only;
+  the card, which stays for another try). The fields are secret and take digits only; Back
+  (Backspace, the player's Back) deletes a digit, and on an empty field cancels the card (the
+  phone may have only Back), Esc at once (2.13.1);
 - Hide groups whose names look adult is a switch only with a PIN, and while locked with it on
   it only says so (turning it off needs the PIN: unlocked);
 - Hidden while locked › lists what is hidden, each shown again at once with a press; while
@@ -41,6 +43,7 @@ from services.settings_model import (
     Section,
     step as stepped,
 )
+from ui.keymap import Action
 from ui.overlays.settings_card import CANCEL, CANCEL_TEXT, OK, OK_TEXT, Button, Field, FormCard
 from ui.settings_controller import SettingsController
 
@@ -107,6 +110,23 @@ def _digits(text: str) -> str:
 
 def _on_off(on: bool) -> str:
     return next(choice for choice in ON_OFF if choice.value is on).shown()
+
+
+_BACK = (Action.NAV_BACKSPACE, Action.PREVIOUS)  # Back in the PIN's card
+
+
+class _PinCard(FormCard):
+    """The PIN's card: Back (Backspace, the player's Back) deletes a digit while the field has
+    one, and on an empty field cancels the card; Esc cancels at once (FormCard's)."""
+
+    def handle(self, action: Action, payload: object = "") -> bool:
+        zone, key = self.focus()
+        if not self.isHidden() and zone == "field" and action in _BACK:
+            if not self.values().get(key):
+                self._cancel()
+                return True
+            action = Action.NAV_BACKSPACE  # the player's Back too: a digit
+        return super().handle(action, payload)
 
 
 def ask_pin(window: Any, guard: Optional[Parental], then: Callable[[bool], None]) -> None:
@@ -321,7 +341,7 @@ class ParentalRows(QObject):
     def _ask(self, purpose: str, title: str) -> None:
         """The card for `purpose`, its fields empty, the keys on the first; `title` the row's."""
         if self._card is None:
-            self._card = FormCard(self._drawer.parentWidget())
+            self._card = _PinCard(self._drawer.parentWidget())
             self._card.pressed.connect(self._on_pressed)
             self._card.changed.connect(self._on_changed)
             self._card.cancelled.connect(self._forget)
