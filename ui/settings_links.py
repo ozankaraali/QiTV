@@ -17,7 +17,8 @@ Link…'s card over Settings. A link opens a layer of its own:
   Replace (this link plays it from now on, its id, name, place and ⟲ Recent's row kept; where
   a film stopped is forgotten: it was another film). What is no one stream's link (a whole
   provider's, or none) is said, and nothing changes;
-- Kind and Last opened, only shown;
+- Kind and Last opened, only shown, and why it did not play last time while it says so: a
+  line of its own, whole, in the warning colour (the keys and the phone have no tooltip);
 - Remove…, asked first in a card.
 
 Every change is the network player's (ui.network_player): written on a worker, one write at a
@@ -68,11 +69,12 @@ LINKS = PROVIDER_PREFIX + "@links"  # Network streams' row in Providers, and its
 OPEN_LINK = LINKS + "/@open"  # ＋ Open a link…
 # A link's rows, by the last part of their keys.
 PLAY, NAME, ADDRESS, KIND, OPENED, REMOVE = "play", "name", "address", "kind", "opened", "remove"
+FAILED = "failed"  # why it did not play last time (an info line, while it says so)
 KEEP_NEW, REPLACE = "new", "replace"  # the address question's answers (and CANCEL)
 
 # i18n: help under Settings → Providers → Network streams (the links opened with Open a link)
 LINKS_HELP = N_("The links that played from Open a link, kept apart from the providers.")
-# i18n: a row of Settings → Providers → Network streams, after "＋ ": File → Open Link…'s card
+# i18n: a row of Settings → Providers → Network streams, after a ＋: File → Open Link…'s card
 OPEN_LINK_TEXT = N_("Open a link…")
 NEVER_CTX = "last opened"
 # i18n: a link's Last opened in Settings → Providers → Network streams: it never played
@@ -162,22 +164,28 @@ class LinkRows(QObject):
         name = link.name or (default_name(entry.url) if entry is not None else link.id)
         sub, warn = link_sub(link)
         key = link_key(link.id)
-        layer = Section(key, name, rows=self._layer(link.id), literal=True)
+        layer = Section(key, name, rows=self._layer(link.id, sub if warn else ""), literal=True)
         return Row(key, name, section=layer, sub=sub, warn=warn, literal=True)
 
     @staticmethod
     def _open_row() -> Row:
         return Row(
             OPEN_LINK,
-            "＋ " + translate(OPEN_LINK_TEXT),
+            OPEN_LINK_TEXT,
             # i18n: help under Settings → Providers → Network streams → Open a link
             N_("Plays one stream's link; once it plays, it's kept here."),
             kind=ACTION,
-            literal=True,
+            icon="plus",
         )
 
     @staticmethod
-    def _layer(key: str) -> tuple[Row, ...]:
+    def _layer(key: str, failed: str = "") -> tuple[Row, ...]:
+        """A link's rows; `failed`: why it did not play last time (as its row says it), an
+        info line of its own, whole, in the warning colour (the keys and the phone have no
+        tooltip to read a cut one in)."""
+        why: tuple[Row, ...] = ()
+        if failed:
+            why = (Row(row_key(key, FAILED), failed, kind=INFO, literal=True, warn=True),)
         return (
             Row(
                 row_key(key, PLAY),
@@ -185,6 +193,7 @@ class LinkRows(QObject):
                 # i18n: help under a link's Play in Settings → Network streams
                 N_("Plays it now, and Settings closes."),
                 kind=ACTION,
+                icon="play",  # its main action: ▶, in the accent
             ),
             Row(
                 row_key(key, NAME),
@@ -203,6 +212,7 @@ class LinkRows(QObject):
             Row(row_key(key, KIND), N_("Kind"), kind=INFO),  # i18n: a link's kind (Live, Film)
             # i18n: when a link in Settings → Network streams last played
             Row(row_key(key, OPENED), N_("Last opened"), kind=INFO),
+            *why,
             Row(
                 row_key(key, REMOVE),
                 REMOVE_TEXT,

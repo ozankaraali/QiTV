@@ -606,6 +606,24 @@ def draw_icon(p: QPainter, name: str, rect: QRectF, color: QColor) -> None:
             fold.lineTo(0.78, 0.3)
             line(fold)
             fill(_poly([(0.42, 0.46), (0.62, 0.6), (0.42, 0.74)]))
+        elif name == "phone":  # the phone remote (2.12): a phone, the bar at its foot
+            line(_rrect(0.28, 0.08, 0.44, 0.84, 0.1))
+            fill(_rrect(0.41, 0.75, 0.18, 0.06, 0.03))
+        elif name == "lock":  # parental controls (2.12): a padlock, its keyhole
+            shackle = QPainterPath(QPointF(0.32, 0.46))
+            shackle.lineTo(0.32, 0.33)
+            shackle.arcTo(QRectF(0.32, 0.15, 0.36, 0.36), 180, -180)
+            shackle.lineTo(0.68, 0.46)
+            line(shackle)
+            keyhole = QPainterPath()
+            keyhole.addEllipse(QPointF(0.5, 0.64), 0.07, 0.07)
+            fill(_rrect(0.2, 0.44, 0.6, 0.46, 0.08).subtracted(keyhole))
+        elif name == "link":  # Open a link (2.12): two chain links, rising to the right
+            spin = QTransform().translate(0.5, 0.5).rotate(-45).translate(-0.5, -0.5)
+            for left in (0.09, 0.43):
+                ring = QPainterPath()
+                ring.addRoundedRect(QRectF(left, 0.39, 0.48, 0.22), 0.11, 0.11)
+                line(spin.map(ring))
         elif name == "folder":  # Open a folder (Plan 4): a folder, its tab, and a play mark
             body = QPainterPath(QPointF(0.1, 0.2))
             body.lineTo(0.38, 0.2)

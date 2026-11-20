@@ -21,7 +21,7 @@ from PySide6.QtTest import QTest
 from PySide6.QtWidgets import QApplication, QWidget
 from timer_fixtures import elapse, wait_until
 
-from services import network_streams as ns
+from services import i18n, network_streams as ns
 from services.i18n import translate
 from services.jobs import JobRunner
 from services.navigation import LinkRow
@@ -47,6 +47,7 @@ from services.settings_model import (
     sections,
 )
 from tests.test_provider_changes import PANEL, PLAYLIST, temp_manager
+from tests.test_settings_drawer import near
 from tests.test_settings_providers import FakeValues, FakeWindow
 from tests.test_tv_window import WindowCase
 from ui.keymap import Action
@@ -55,10 +56,11 @@ from ui.open_link import NOT_A_LINK_TEXT, WHOLE_TEXT
 from ui.overlays.drawer import link_sub
 from ui.overlays.settings_card import CANCEL
 from ui.overlays.settings_drawer import SettingsDrawer
-from ui.overlays.settings_layout import Item, title_of
+from ui.overlays.settings_layout import Item, title_of, whole
 from ui.settings_controller import SettingsController
 from ui.settings_links import (
     ADDRESS,
+    FAILED,
     KEEP_NEW,
     KIND,
     LINKS,
@@ -73,6 +75,7 @@ from ui.settings_links import (
     row_key,
 )
 from ui.settings_providers import ProviderRows, layer_key
+from ui.theme import PALETTE, qcolor
 from ui.tv_window import DROP
 
 LIVE_URL = "https://cdn.example/live/harbour/index.m3u8?token=aaa"
@@ -286,7 +289,7 @@ class LinksTests(unittest.TestCase):
             [(row.key, row.kind) for row in rows],
             [(link_key(LIVE_ID), OPENS), (link_key(FILM_ID), OPENS), (OPEN_LINK, ACTION)],
         )
-        self.assertEqual(self.titles(), ["Harbour News", "Lecture recording", "＋ Open a link…"])
+        self.assertEqual(self.titles(), ["Harbour News", "Lecture recording", "Open a link…"])
         self.assertTrue(all(row.literal for row in rows[:2]))  # names as given
         live_sub = link_sub(LinkRow(LIVE_ID, "Harbour News", LIVE))
         film_sub = link_sub(LinkRow(FILM_ID, "Lecture recording", FILM, failed=ACCESS_ENDED))
@@ -305,6 +308,41 @@ class LinksTests(unittest.TestCase):
         self.window.open_link.assert_called_once_with()
         self.assertTrue(self.settings.visible())
 
+    def test_why_a_link_failed_reads_whole_by_the_keys_in_a_small_window(self):
+        # The keys and the phone have no tooltip: at 640×360, in Turkish, why a link failed
+        # last time reads whole under its name in the list (its row grows) and in its own
+        # rows, a line of its own in the warning colour.
+        self.addCleanup(i18n.set_language, "en")
+        self.assertEqual(i18n.set_language("tr"), "tr")
+        self.host.resize(640, 360)
+        self.seed((LIVE_URL, "Harbour News", LIVE, NOW, ACCESS_ENDED))
+        failed, warn = link_sub(LinkRow(LIVE_ID, "Harbour News", LIVE, failed=ACCESS_ENDED))
+        self.assertTrue(warn)
+        self.into_links()
+        row = self.move_to(link_key(LIVE_ID))
+        self.drawer.grab()
+        box = self.drawer._box("right", [r.key for r in self.shown()].index(row.key))
+        self.assertEqual(row.sub, failed)
+        self.assertGreater(len(box.subs), 1, box.subs)  # wrapped,
+        self.assertTrue(whole(box.subs, failed), box.subs)  # not cut
+        self.key(Action.NAV_ACTIVATE)  # its own rows
+        rows = self.shown()
+        index = [r.key for r in rows].index(row_key(LIVE_ID, FAILED))
+        why = rows[index]
+        self.assertEqual((why.kind, why.warn, why.text), (INFO, True, failed))
+        image = self.drawer.grab().toImage()
+        box = self.drawer._box("right", index)
+        self.assertIsNotNone(box)  # in sight
+        self.assertTrue(whole(box.titles, failed), box.titles)
+        warn_color = qcolor(PALETTE.warn)
+        line = box.line.toAlignedRect()
+        painted = [
+            image.pixelColor(x, y)
+            for y in range(line.top(), line.bottom())
+            for x in range(line.left(), line.right())
+        ]
+        self.assertTrue(any(near(color, warn_color) for color in painted))  # the warning colour
+
     # ---- a link's own rows --------------------------------------------------------------------
 
     def test_rename_and_replace_address_keep_the_id(self):
@@ -318,6 +356,7 @@ class LinksTests(unittest.TestCase):
                 (row_key(LIVE_ID, ADDRESS), TEXT),
                 (row_key(LIVE_ID, KIND), INFO),
                 (row_key(LIVE_ID, OPENED), INFO),
+                (row_key(LIVE_ID, FAILED), INFO),  # why it did not play last time
                 (row_key(LIVE_ID, REMOVE), DANGER),
             ],
         )

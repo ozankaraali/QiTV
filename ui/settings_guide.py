@@ -111,7 +111,7 @@ CHANNEL_IDS_TEXT = N_("Channel IDs")
 IDS_PLACEHOLDER = N_("Separated by commas")
 # i18n: said in a channel's card (Channel matching) when its name or its IDs are missing
 REQUIRED_TEXT = N_("Channel Name and Channel IDs are required.")
-ADD_TEXT = N_("Add")  # i18n: a row of Settings → Guide → Channel matching, after "＋ " (verb)
+ADD_TEXT = N_("Add")  # i18n: a row of Settings → Guide → Channel matching, after a ＋ (verb)
 # i18n: rows of Settings → Guide → Channel matching: a JSON file read in, or written (verbs)
 IMPORT_TEXT = N_("Import…")
 EXPORT_TEXT = N_("Export…")  # i18n: a row of Settings → Guide → Channel matching (verb)
@@ -372,7 +372,7 @@ class GuideRows(QObject):
                     EVERY_TEXT,
                     # i18n: help under Settings → Guide → Check for updates every
                     N_("How long QiTV keeps the guide before it loads it again."),
-                    kind=ACTION,
+                    kind=OPENS,  # its card: ›, as every row that opens one
                     note=every_text(
                         _count(config.epg_expiration_value), config.epg_expiration_unit
                     ),
@@ -426,11 +426,11 @@ class GuideRows(QObject):
         rows += [
             Row(
                 ADD,
-                "＋ " + translate(ADD_TEXT),
+                ADD_TEXT,
                 # i18n: help under Settings → Guide → Channel matching → Add
                 N_("Matches a channel to the guide's IDs for it."),
                 kind=ACTION,
-                literal=True,
+                icon="plus",
             ),
             Row(
                 IMPORT,

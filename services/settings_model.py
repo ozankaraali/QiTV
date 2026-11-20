@@ -44,8 +44,7 @@ TEXT = "text"  # a value edited in place: Enter or a click on it focused starts 
 INFO = "info"  # a muted line with its value: never focused, the keys go past it
 KINDS = (STEP, OPENS, ACTION, DANGER, TEXT, INFO)
 
-# Section key -> its icon, a drawing of ui/overlays/painting.py's draw_icon. A section with no
-# fitting drawing yet (Phone remote, Parental controls) has none.
+# Section key -> its icon, a drawing of ui/overlays/painting.py's draw_icon.
 ICONS: dict[str, str] = {
     PROVIDERS: "tv",
     GENERAL: "gear",
@@ -53,6 +52,8 @@ ICONS: dict[str, str] = {
     SUBTITLES: "subtitles",
     TIMESHIFT: "record",
     GUIDE: "guide",
+    REMOTE: "phone",
+    PARENTAL: "lock",
     FILES: "folder",
     ADVANCED: "more",
 }
@@ -63,7 +64,7 @@ ICONS: dict[str, str] = {
 PROVIDER_PREFIX = "provider/"
 ADD_PROVIDER = PROVIDER_PREFIX + "@add"
 FREE_CHANNELS = PROVIDER_PREFIX + "@free"
-# i18n: a row of Settings → Providers, after "＋ ": adds a provider
+# i18n: a row of Settings → Providers, after a ＋ (an icon): adds a provider
 ADD_PROVIDER_TEXT = N_("Add provider")
 
 # Files' rows are `files/…` and Advanced's Clear Image Cache `advanced/…` (ui.settings_general's):
@@ -122,7 +123,8 @@ class Row:
     "Xtream · in use") are shown as they are given, in the active language already. A
     `literal` row's `text` is too: a name the viewer gave (a provider's, a group's), never
     translated, even when it is also one of QiTV's texts ("General"). A `warn` row's sub line
-    is in the warning colour (why a link of Network streams failed last time). A `secret` text
+    is in the warning colour (why a link of Network streams failed last time), else an info
+    line's title. A `secret` text
     row (a token) shows dots in its text's place, and its last `secret_tail` characters after
     them when it has that many to show (an API key's last four, as the page that gave it shows
     them); an empty one shows its `placeholder`."""
@@ -139,10 +141,11 @@ class Row:
     note: str = ""
     sub: str = ""
     literal: bool = False
-    warn: bool = False  # its sub line in the warning colour
+    warn: bool = False  # its sub line (an info line without one: its title) in the warning colour
     secret: bool = False  # a text row's text shows as dots, and is never said or copied
     placeholder: str = ""  # an English text (N_) an empty text row shows, muted
     secret_tail: int = 0  # a secret's last characters shown after its dots
+    icon: str = ""  # a drawing (painting.draw_icon) before its title, in the accent: ＋, ▶
 
     def __post_init__(self) -> None:
         if not self.kind:
@@ -215,12 +218,12 @@ class Context:
     as its own) and what it takes now (Clear Image Cache's note, in the active language: ""
     until ui.settings_general has measured it); Files' rows, as their status is now (none when
     QiTV cannot be the app files open with: a run from source); whether its build carries an
-    OpenSubtitles key; and what AI captions' downloaded files take (ui.settings_subtitles
-    measures it): the line that says it, in the active language ("" while it is measured;
-    None: this build has no such files to tell of, and no row says it), and whether there is
-    any to delete; the time-shift settings
-    as they are now (whether the disk buffer is on, the memory per stream and the disk cache,
-    in MiB) and the Recordings folder (where recordings go, and whether it is one of the
+    OpenSubtitles key, and whether a username is kept for it (Sign out shows only then); and
+    what AI captions' downloaded files take (ui.settings_subtitles measures it): the line that
+    says it, in the active language ("" while it is measured; None: this build has no such
+    files to tell of, and no row says it), and whether there is any to delete; the time-shift
+    settings as they are now (whether the disk buffer is on, the memory per stream and the disk
+    cache, in MiB) and the Recordings folder (where recordings go, and whether it is one of the
     viewer's own rather than the default). The Guide's rows, built for its source as it is now
     (ui.settings_guide), the phone remote's for its settings and its state
     (ui.settings_remote), and parental controls' for the PIN and the lock now
@@ -233,6 +236,7 @@ class Context:
     image_cache_used: str = ""
     files: tuple[Row, ...] = ()
     opensubtitles_built_in: bool = False
+    opensubtitles_signed_in: bool = False
     captions_space: Optional[str] = None
     captions_downloaded: bool = False
     timeshift_disk: bool = ConfigManager.DEFAULT_OPTION_TIMESHIFT_ENABLED
@@ -337,6 +341,11 @@ def _subtitles(title: str, context: Context) -> Section:
         # i18n: help under Settings → Subtitles → OpenSubtitles API key in a build without one
         key_help = N_("Create one on the API consumers page of your free OpenSubtitles account.")
         key_placeholder = N_("Paste your API key")  # i18n: the API key field's placeholder
+    signed_in = context.opensubtitles_signed_in
+    # Signing in is optional: the empty fields say so (the password's only while no username
+    # is kept: then it is wanted). Sign out only while there is a sign-in to forget.
+    # i18n: what Settings → Subtitles' empty Username (and Password) fields show, muted
+    optional = N_("Optional")
     rows = (
         Row(
             "ai_captions_model",
@@ -369,6 +378,7 @@ def _subtitles(title: str, context: Context) -> Section:
             # i18n: help under Settings → Subtitles → Username (OpenSubtitles' sign-in)
             N_("Optional: signed in, OpenSubtitles allows you more downloads a day."),
             kind=TEXT,
+            placeholder=optional,
         ),
         Row(
             "opensubtitles_password",
@@ -377,6 +387,7 @@ def _subtitles(title: str, context: Context) -> Section:
             N_("The password of your OpenSubtitles account, to sign in with."),
             kind=TEXT,
             secret=True,
+            placeholder="" if signed_in else optional,
         ),
         Row(
             SIGN_OUT,
@@ -386,6 +397,8 @@ def _subtitles(title: str, context: Context) -> Section:
             kind=DANGER,
         ),
     )
+    if not signed_in:
+        rows = tuple(row for row in rows if row.key != SIGN_OUT)
     return Section(SUBTITLES, title, ICONS[SUBTITLES], rows=rows)
 
 
@@ -436,7 +449,7 @@ def _timeshift(title: str, context: Context) -> Section:
             DISK_CACHE,
             DISK_CACHE_TEXT,
             cache_help,
-            kind=ACTION if context.timeshift_disk else INFO,
+            kind=OPENS if context.timeshift_disk else INFO,  # its card: ›
             note=cache_size_text(context.timeshift_max_mib),
         ),
         Row(
@@ -545,12 +558,12 @@ def _guide(title: str, rows: tuple[Row, ...]) -> Section:
 
 def _remote(title: str, rows: tuple[Row, ...]) -> Section:
     """Phone remote: its rows as ui.settings_remote builds them (they follow the remote)."""
-    return Section(REMOTE, title, ICONS.get(REMOTE, ""), rows=rows)
+    return Section(REMOTE, title, ICONS[REMOTE], rows=rows)
 
 
 def _parental(title: str, rows: tuple[Row, ...]) -> Section:
     """Parental controls: its rows as ui.settings_parental builds them (they follow the lock)."""
-    return Section(PARENTAL, title, ICONS.get(PARENTAL, ""), rows=rows)
+    return Section(PARENTAL, title, ICONS[PARENTAL], rows=rows)
 
 
 def _playback(system: str) -> Section:
@@ -715,21 +728,23 @@ def _playback(system: str) -> Section:
 
 def _providers(title: str, rows: tuple[Row, ...]) -> Section:
     """Providers: the providers' rows as given (ui.settings_providers builds them), then ＋ Add
-    provider and Free channels."""
+    provider and ＋ Free channels…, as the channel list names them (its ＋ painted)."""
     add = Row(
         ADD_PROVIDER,
-        "＋ " + translate(ADD_PROVIDER_TEXT),
+        ADD_PROVIDER_TEXT,
         # i18n: help under Settings → Providers → Add provider
         N_("A provider from its link: Xtream, an M3U playlist, a portal, Jellyfin or Emby."),
         kind=ACTION,
-        literal=True,
+        icon="plus",
     )
     free = Row(
         FREE_CHANNELS,
-        N_("Free channels"),  # i18n: a row of Settings → Providers; opens iptv-org's menu
+        # i18n: a row of Settings → Providers, after a ＋ (an icon); opens iptv-org's menu
+        N_("Free channels…"),
         # i18n: help under Settings → Providers → Free channels (iptv-org is a project's name)
         N_("iptv-org's free channels: every country's, or one country's."),
-        kind=OPENS,
+        kind=ACTION,
+        icon="plus",
     )
     return Section(PROVIDERS, title, ICONS[PROVIDERS], rows=rows + (add, free))
 

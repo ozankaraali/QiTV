@@ -56,7 +56,7 @@ class DiskOnTests(TimeshiftCase):
         row = self.open_at(m.TIMESHIFT, "timeshift_enabled")
         self.assertEqual((row.kind, row.default), (m.STEP, False))
         self.assertEqual(self.window.settings.value_text(row), "On")
-        self.assertEqual(self.shown()[m.DISK_CACHE].kind, m.ACTION)
+        self.assertEqual(self.shown()[m.DISK_CACHE].kind, m.OPENS)  # its card: ›
         # Every way to step it asks first, Cancel where the keys start; Cancel and Esc keep it.
         for action in (Action.NAV_RIGHT, Action.NAV_LEFT, Action.NAV_ACTIVATE, Action.NAV_RIGHT):
             self.key(action)
@@ -101,7 +101,7 @@ class DiskOnTests(TimeshiftCase):
 
     def test_disk_cache_card_sets_the_amount_at_once(self):
         row = self.open_at(m.TIMESHIFT, m.DISK_CACHE)
-        self.assertEqual((row.kind, row.note), (m.ACTION, "2 GiB"))
+        self.assertEqual((row.kind, row.note), (m.OPENS, "2 GiB"))  # its card: ›
         self.assertIn("at once", self.drawer._help_text(row))
         self.key(Action.NAV_ACTIVATE)
         card = self.rows.range_card
@@ -176,7 +176,7 @@ class DiskOffTests(TimeshiftCase):
         )
         self.assertEqual(
             [row.kind for row in section.rows],
-            [m.STEP, m.STEP, m.ACTION, m.INFO, m.ACTION, m.ACTION, m.ACTION],
+            [m.STEP, m.STEP, m.OPENS, m.INFO, m.ACTION, m.ACTION, m.ACTION],
         )
         for row in section.rows:
             self.assertTrue(row.help, row.key)
@@ -203,7 +203,7 @@ class DiskOffTests(TimeshiftCase):
         self.kept.set_disk.assert_called_once_with(True)
         self.engine.drop_kept.assert_not_called()
         self.assertTrue(start_kwargs(start, self.config)["disk"])  # the next tune's
-        self.assertEqual(self.shown()[m.DISK_CACHE].kind, m.ACTION)  # its size can change now
+        self.assertEqual(self.shown()[m.DISK_CACHE].kind, m.OPENS)  # its size can change now
         self.assertEqual(self.drawer.focused_row().key, "timeshift_enabled")
         self.config.save_config(wait=True)
         self.assertTrue(ConfigManager().timeshift_enabled)

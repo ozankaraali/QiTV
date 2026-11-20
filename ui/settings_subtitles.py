@@ -76,6 +76,8 @@ class SubtitlesRows(QObject):
         self._deleting = False
         settings.register(SUBTITLES_PREFIX, self)
         drawer.installEventFilter(self)  # Settings opening: the size measured anew
+        # Sign out shows while a username is kept: the rows again as it is typed or cleared.
+        values.add_hook("opensubtitles_username", settings.refresh_sections)
 
     @property
     def question(self) -> Optional[ChoiceCard]:
@@ -94,6 +96,7 @@ class SubtitlesRows(QObject):
         return replace(
             base,
             opensubtitles_built_in=bool(built_in_key()),
+            opensubtitles_signed_in=bool(self._values.get("opensubtitles_username")),
             captions_space=space,
             captions_downloaded=self._measured and bool(self._size) and not self._deleting,
         )

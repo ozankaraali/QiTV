@@ -2,11 +2,16 @@
 two columns and the areas their lines scroll in, the breadcrumb, and each line's parts.
 
 A line has its title, wrapped onto a second line when it does not fit on one, and under it a
-row's muted sub line ("Xtream · in use"); at its right end, by the row's kind, a stepper's
+row's muted sub line ("Xtream · in use"; a long one wraps too, so that why a link failed last
+time reads whole); at its right end, by the row's kind, a stepper's
 ‹ value › (a value too wide for its room wraps onto a second line too), a text row's value
 (the field it is edited in, while it is, with its Paste at the field's end), an info row's
 value or a row's note ("answered 2 min ago"), and the › of a row that opens; under a focused
-row, its help. Geometry only: the overlay keeps the state and paints.
+row, its help, on three lines at most (a wider system font, macOS's, must not cut a help made to
+fit two). In a small window (640×360) the columns go on shrinking with the window while the
+fonts stop at their floor (MIN_FONT_PX): a title, a stepper's value and a help then take a
+line more each before they elide, and a value's word never elides while the title can wrap
+to give it room. Geometry only: the overlay keeps the state and paints.
 """
 
 from __future__ import annotations
@@ -38,20 +43,22 @@ from ui.overlays.drawer_look import (
     column_widths,
 )
 from ui.overlays.guide import wrap_lines
-from ui.overlays.painting import STEP_ICON_U, Units
+from ui.overlays.painting import MIN_FONT_PX, STEP_ICON_U, Units
 
 LEFT, RIGHT = "left", "right"
 HEAD_TOP_U = 1.0  # the lists start this far under the header row (the drawer's right column)
 INSET_U = 1.2  # a row's text from its sides (the drawer's rows)
-ICON_U = 1.8  # a section's icon
+ICON_U = 1.8  # a section's icon, and a row's own (＋ Add provider's, Play's: the drawer's)
 ICON_GAP_U = 0.7
+GROUP_GAP_U = 1.0  # above the first row with an icon after rows without one (the mockup's)
 VALUE_FONT_U = 1.2  # a row's value or note (its title is TITLE_FONT_U)
 SUB_FONT_U = COUNT_FONT_U  # a row's sub line, as the drawer's two-line rows have theirs
 HELP_FONT_U = 1.05
-HELP_LINES = 2
+HELP_LINES = 3  # a help and its restart note: two lines as written, a third when it needs one
 HELP_PAD_U = 0.8  # under the help
 TITLE_LINES = 2  # a long title wraps, its line growing; beyond this it elides (small windows)
 VALUE_LINES = 2  # so does a stepper's value too wide for its room
+SUB_LINES = 3  # and a sub line (why a link failed last time: read whole, never cut)
 STEP_U = 1.8  # a stepper's ‹ and › (the panels')
 STEP_GAP_U = 0.6
 TITLE_GAP_U = 0.8  # between a row's title and what is at its right end
@@ -89,7 +96,7 @@ class Box:
     line: QRectF  # its title's lines and its sub line (the highlight)
     title: QRectF  # the room its title wraps in
     titles: list[str] = field(default_factory=list)  # the title as shown, a line each
-    sub: str = ""  # the sub line as shown
+    subs: list[str] = field(default_factory=list)  # the sub line as shown, a line each
     icon: QRectF = field(default_factory=QRectF)
     less: QRectF = field(default_factory=QRectF)  # a stepper's ‹, value and ›
     value: QRectF = field(default_factory=QRectF)
@@ -190,16 +197,28 @@ def last_first(heights: list[float], room: float) -> int:
     return min(first, max(0, len(heights) - 1))
 
 
+def most_lines(un: Units, font_u: float, most: int) -> int:
+    """How many lines a text set `font_u` tall may take: `most`, and one more while that font
+    is held at its floor (MIN_FONT_PX) in a small window, where the columns keep shrinking
+    with the window: the text is wider for its room there than the layout is made for. A
+    window wide enough for every font (1280, 1600) is laid out as before."""
+    return most + 1 if un.px(font_u) < MIN_FONT_PX else most
+
+
 def help_lines(help_text: str, note: str, un: Units, width: float) -> list[str]:
-    """The help under a focused row, two lines at most (the last elided), its restart `note`
-    after it; when both do not fit, the note keeps the last line to itself."""
+    """The help under a focused row, HELP_LINES at most (at any size: a help written for two
+    lines may need a third in a wider font), a line more in a small window (most_lines), the
+    last elided, its restart `note` after it; when both do not fit, the note keeps the last
+    lines it needs to itself (all but the first), the help the lines before it."""
     font = un.font(HELP_FONT_U)
     text = " ".join(part for part in (help_text, note) if part)
     if not text:
         return []  # a row without help keeps its height when focused
-    lines = wrap(text, font, width, HELP_LINES)
+    most = most_lines(un, HELP_FONT_U, HELP_LINES)
+    lines = wrap(text, font, width, most)
     if help_text and note and not whole(lines, text):
-        lines = wrap(help_text, font, width, HELP_LINES - 1) + wrap(note, font, width, 1)
+        notes = wrap(note, font, width, most - 1)
+        lines = wrap(help_text, font, width, most - len(notes)) + notes
     return lines
 
 
@@ -219,14 +238,17 @@ def steps_width(
     shown, when that does. Else the title wraps and the value keeps its widest width within
     VALUE_SHARE of the row, or what the title leaves (at least that share); a value wider
     than that wraps there, as a title does ("Auf einem / 4K-Bildschirm"), onto VALUE_LINES
-    lines at most, the last elided, and is as wide as its widest line."""
+    lines at most (a line more in a small window: most_lines), the last elided, and is as wide
+    as its widest line. A word of the value wider than that room ("Sağlayıcının" at 640)
+    widens it, the title wrapping on what is left, as narrow as its own widest word."""
     font = un.font(VALUE_FONT_U)
     fm = QFontMetricsF(font)
     step = max(float(un.px(STEP_U)), fm.height())  # the font stops at a floor, u does not
     gap = float(un.px(STEP_GAP_U))
     shown = fm.horizontalAdvance(value)
     widest = max([shown] + [fm.horizontalAdvance(choice) for choice in choices])
-    title_w = math.ceil(QFontMetricsF(un.font(TITLE_FONT_U)).horizontalAdvance(title))
+    title_fm = QFontMetricsF(un.font(TITLE_FONT_U))
+    title_w = math.ceil(title_fm.horizontalAdvance(title))
     least = 2 * step + 2 * gap
     left_over = room - TITLE_GAP_U * un.u - title_w
     share = room * VALUE_SHARE
@@ -237,7 +259,12 @@ def steps_width(
     if least + widest <= share:
         return least + widest, step, gap, [value]
     most = max(least, left_over, share) - least  # the value's room
-    lines = wrap(value, font, most, VALUE_LINES) if shown > most else []
+    word = max((fm.horizontalAdvance(part) for part in value.split()), default=0.0)
+    if word > most:  # the title wraps instead of the word eliding
+        title_word = max((title_fm.horizontalAdvance(part) for part in title.split()), default=0.0)
+        most = max(most, min(word, room - TITLE_GAP_U * un.u - math.ceil(title_word) - least))
+    count = most_lines(un, VALUE_FONT_U, VALUE_LINES)
+    lines = wrap(value, font, most, count) if shown > most else []
     if not lines:  # it fits (or there is no room at all: it elides)
         return least + min(shown, most), step, gap, [value]
     return least + max(fm.horizontalAdvance(line) for line in lines), step, gap, lines
@@ -270,16 +297,19 @@ def place(
     choices: Sequence[str] = (),
     help: Sequence[str] = (),
     editing: bool = False,
+    apart: bool = False,
 ) -> Box:
     """Line `item` of a column at y 0. `ends`: its row's right end shows (the right column;
-    the left lists titles only); `icons`: the column keeps room for the sections' icons.
-    `value`: what a stepper, a text or an info row shows (`choices`: a stepper's, shown);
-    `help`: the lines under a focused row; `editing`: its text is edited, in a field."""
+    the left lists titles only); `icons`: the column keeps room for the sections' icons, else
+    a line with an icon of its own (＋, ▶) has it before its title. `value`: what a stepper, a
+    text or an info row shows (`choices`: a stepper's, shown); `help`: the lines under a
+    focused row; `editing`: its text is edited, in a field; `apart`: GROUP_GAP_U above it (the
+    first ＋ after the providers)."""
     inset = INSET_U * un.u
     x, right = area.x() + inset, area.right() - inset
     icon_size = ICON_U * un.u
     icon_x = x
-    if icons:
+    if icons or item.icon:
         x += icon_size + ICON_GAP_U * un.u
     row = item.row
     kind = row.kind if ends and row is not None else ""
@@ -301,16 +331,14 @@ def place(
         end = tail_right - tail_w - title_gap if tail_w else tail_right
     title_font = un.font(TITLE_FONT_U)
     title_w = max(0.0, end - x)
-    titles = wrap(title, title_font, title_w, TITLE_LINES)
+    titles = wrap(title, title_font, title_w, most_lines(un, TITLE_FONT_U, TITLE_LINES))
     spacing = QFontMetricsF(title_font).lineSpacing()
-    sub = ""
+    subs: list[str] = []
     sub_h = 0.0
     if row is not None and row.sub:
         sub_font = un.font(SUB_FONT_U)
-        sub = QFontMetricsF(sub_font).elidedText(
-            " ".join(row.sub.split()), Qt.TextElideMode.ElideRight, title_w
-        )
-        sub_h = QFontMetricsF(sub_font).lineSpacing()
+        subs = wrap(row.sub, sub_font, title_w, most_lines(un, SUB_FONT_U, SUB_LINES))
+        sub_h = QFontMetricsF(sub_font).lineSpacing() * len(subs)
     # The line grows with the taller of its title (and sub line) and its value's lines.
     grown = max(0, len(titles) - 1) * spacing + sub_h
     if len(values) > 1:
@@ -318,10 +346,10 @@ def place(
         grown = max(grown, (len(values) - 1) * value_spacing)
     line_h = float(un.px(ROW_H_U)) + grown
     middle = line_h / 2
-    box = Box(QRectF(), QRectF(area.x(), 0, area.width(), line_h), QRectF(), titles, sub)
+    box = Box(QRectF(), QRectF(area.x(), 0, area.width(), line_h), QRectF(), titles, subs)
     box.values = values
     box.title = QRectF(x, 0, title_w, line_h)
-    if icons:
+    if icons or item.icon:
         box.icon = QRectF(icon_x, middle - icon_size / 2, icon_size, icon_size)
     if kind == STEP:
         box.more = QRectF(right - step, 0, step, line_h)
@@ -336,6 +364,10 @@ def place(
             box.entry, box.paste = field_and_paste(un, box.end)
     box.rect = QRectF(area.x(), 0, area.width(), line_h + help_height(list(help), un))
     box.help = list(help)
+    if apart:  # the line and all of it lower, the gap above it in its place
+        top = float(un.px(GROUP_GAP_U))
+        box = box.moved(top)
+        box.rect = QRectF(area.x(), 0, area.width(), box.rect.height() + top)
     return box
 
 

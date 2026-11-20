@@ -40,7 +40,7 @@ from ui.overlays.settings_drawer import (
     SettingsDrawer,
 )
 from ui.overlays.settings_layout import whole
-from ui.theme import PALETTE
+from ui.theme import PALETTE, qcolor
 
 
 def make(width=1280, height=720, values=None):
@@ -71,6 +71,21 @@ def near(color: QColor, target: QColor, slack: int = 24) -> bool:
     return all(abs(a - b) <= slack for a, b in zip(ours, theirs))
 
 
+def contrast(one: QColor, other: QColor) -> float:
+    """The WCAG contrast ratio of two opaque colours."""
+
+    def luminance(color: QColor) -> float:
+        def linear(c: int) -> float:
+            s = c / 255
+            return s / 12.92 if s <= 0.04045 else ((s + 0.055) / 1.055) ** 2.4
+
+        r, g, b = (linear(c) for c in color.getRgb()[:3])
+        return 0.2126 * r + 0.7152 * g + 0.0722 * b
+
+    high, low = sorted((luminance(one), luminance(other)), reverse=True)
+    return (high + 0.05) / (low + 0.05)
+
+
 def inked(image: QImage, rect: QRectF) -> list[float]:
     """The x of each pixel in `rect` (every other one) unlike the rect's bottom-right corner."""
     ratio = image.devicePixelRatio()
@@ -91,9 +106,14 @@ def playback_index(key):
     return [r.key for r in playback_rows()].index(key)
 
 
+def signed_in():
+    """The sections with someone signed in to OpenSubtitles: Subtitles has its Sign out."""
+    return sections("Darwin", context=m.Context(opensubtitles_signed_in=True))
+
+
 def subtitles_index(key):
     """Where the row `key` is in Subtitles & AI captions (its Sign out acts at once)."""
-    rows = next(s for s in sections("Darwin") if s.key == m.SUBTITLES).rows
+    rows = next(s for s in signed_in() if s.key == m.SUBTITLES).rows
     return [r.key for r in rows].index(key)
 
 
@@ -288,7 +308,7 @@ class SettingsDrawerTests(unittest.TestCase):
         self.assertEqual(self.drawer.path(), ("playback", "autoplay"))
         self.assertEqual(self.drawer.focus_side(), "right")
         self.assertEqual(self.steps, [])
-        self.drawer.open_at(sections("Darwin"), m.SUBTITLES)  # the keys on the sections
+        self.drawer.open_at(signed_in(), m.SUBTITLES)  # the keys on the sections
         self.drawer.grab()
         self.click(self.drawer.title_rect(subtitles_index(m.SIGN_OUT)).center())
         self.assertEqual(self.chosen, [m.SIGN_OUT])
@@ -306,7 +326,7 @@ class SettingsDrawerTests(unittest.TestCase):
             elapse(QApplication.doubleClickInterval() + 80)  # the modal window, a while
 
         self.drawer.chosen.connect(close_and_wait)
-        self.drawer.open_at(sections("Darwin"), m.SUBTITLES)
+        self.drawer.open_at(signed_in(), m.SUBTITLES)
         self.drawer.grab()
         self.click(self.drawer.title_rect(subtitles_index(m.SIGN_OUT)).center())
         self.assertEqual(self.chosen, [m.SIGN_OUT])
@@ -411,7 +431,7 @@ class SettingsDrawerTests(unittest.TestCase):
         for focused in (False, True):
             with self.subTest(focused=focused):
                 self.chosen.clear()
-                self.drawer.open_at(sections("Darwin"), m.SUBTITLES)
+                self.drawer.open_at(signed_in(), m.SUBTITLES)
                 if focused:
                     self.drawer.right()
                     while self.drawer.focused_row().key != m.SIGN_OUT:
@@ -458,9 +478,65 @@ class SettingsDrawerTests(unittest.TestCase):
                 if (c := image.pixelColor(x, y)).red() > 170 and c.blue() < 140
             )
 
-        for key in ("general", "playback", "guide", "advanced"):
+        for key in keys:  # every section has one (2.12: the phone remote's and the lock too)
             self.assertGreater(accent_pixels(keys.index(key)), 0, key)
-        self.assertEqual(accent_pixels(keys.index("remote")), 0)  # none fits yet: room kept
+
+    def test_a_row_with_an_icon_paints_it_in_the_accent_after_a_gap(self):
+        # ＋ Add provider and ＋ Free channels…, as the channel list's action rows: the ＋ in
+        # the accent before the title, the first of them a gap below the providers; a row
+        # without one keeps its title at the row's start (no room kept for an icon).
+        layer = Section("demo", "Demo TV", rows=(m.Row("x", "X"),))
+        self.drawer.open_at(
+            (
+                Section(
+                    "p",
+                    "Providers",
+                    rows=(
+                        m.Row("demo", "Demo TV", section=layer, sub="Xtream · in use"),
+                        m.Row("add", "Add provider", kind=m.ACTION, icon="plus"),
+                        m.Row("free", "Free channels…", kind=m.ACTION, icon="plus"),
+                    ),
+                ),
+            )
+        )
+        image = self.drawer.grab().toImage()
+        plain, add, free = (self.drawer._box("right", index) for index in range(3))
+        self.assertTrue(plain.icon.isEmpty())
+        self.assertLessEqual(add.icon.right(), add.title.left())
+        self.assertGreater(add.title.left(), plain.title.left())
+        self.assertEqual(add.title.left(), free.title.left())
+        self.assertGreater(add.line.top(), add.rect.top())  # the gap, above the first only
+        self.assertEqual(free.line.top(), free.rect.top())
+        self.assertLessEqual(plain.rect.bottom(), add.rect.top() + 0.01)
+        icon = add.icon.toAlignedRect()
+        accent = qcolor(PALETTE.accent)
+        painted = [
+            image.pixelColor(x, y)
+            for y in range(icon.top(), icon.bottom())
+            for x in range(icon.left(), icon.right())
+        ]
+        self.assertTrue(any(near(color, accent) for color in painted))
+        # A click in the gap reaches no row; one on the row acts.
+        self.click(QPointF(add.line.center().x(), (add.rect.top() + add.line.top()) / 2))
+        self.assertEqual(self.chosen, [])
+        self.click(add.line.center())
+        self.assertEqual(self.chosen, ["add"])
+
+    def test_the_help_of_a_row_with_an_icon_fits_under_its_title(self):
+        # A link's Play (▶) at 640×360: its help starts under its title, past the icon, and
+        # is wrapped for that room (it ran past the column's end: "Settings close").
+        self.use(*make(640, 360))
+        help_text = "Plays it now, and Settings closes."
+        play = m.Row("play", "Play", help_text, kind=m.ACTION, icon="play")
+        self.open_rows(play, m.Row("name", "Name", kind=m.TEXT))
+        self.drawer.grab()
+        box = self.drawer._box("right", 0)
+        un = ui_units(640)
+        room = box.line.right() - INSET_U * un.u - box.title.x()  # where _paint_help draws it
+        fm = QFontMetricsF(un.font(HELP_FONT_U))
+        self.assertTrue(whole(box.help, help_text), box.help)
+        for line in box.help:
+            self.assertLessEqual(fm.horizontalAdvance(line), room + 0.5, box.help)
 
     def test_a_small_window_elides_without_overlap(self):
         self.use(*make(640, 360))
@@ -512,7 +588,7 @@ class SettingsDrawerTests(unittest.TestCase):
             self.assertEqual(i18n.set_language(language), language)
             if language != "en":
                 self.assertNotEqual(translate(row.help), row.help, language)
-            for size in ((1280, 720), (960, 540)):
+            for size in ((1600, 900), (1280, 720), (960, 540)):
                 with self.subTest(language=language, size=size):
                     self.use(*make(*size))
                     self.focus_on("deinterlace")
@@ -520,19 +596,106 @@ class SettingsDrawerTests(unittest.TestCase):
                     lines = self.drawer._box("right", index).help
                     self.assertFalse(any("…" in line for line in lines), lines)
                     self.assertEqual(" ".join(lines).split(), translate(row.help).split())
+                    # macOS's fonts are wider than hel's (they cut de, es and fr at two
+                    # lines): the translations are written to fit two lines in a font 10%
+                    # wider too. (English is the source, as it is: on a wider font it shows
+                    # whole on the third line, as checked above; nor is it measured wider
+                    # on a machine whose own font is the wider one already.)
+                    if language == "en":
+                        continue
+                    units = ui_units(size[0])
+                    width = self.drawer.row_rect("right", index).width() - 2 * INSET_U * units.u
+                    font = units.font(HELP_FONT_U)
+                    wider = wrap_lines(translate(row.help), font, width / 1.1, 3)
+                    self.assertLessEqual(len(wider), 2, wider)
 
-    def test_the_restart_note_keeps_its_line_in_a_small_window(self):
-        # A help too long to share two lines with the note: the note keeps the last one.
-        self.use(*make(640, 360))
-        help_text = "Lets the graphics chip decode the video, so that the processor does less."
+    def test_a_help_takes_a_third_line_at_any_size(self):
+        # A help written for two lines may need a third in a wider font (macOS's): at
+        # 1280×720 too it shows whole on three, the restart note last.
+        help_text = (
+            "Lets the graphics chip decode the video, so that the processor does less and the"
+            " fans stay quiet."
+        )
         row = Row("long", "Long", help_text, ON_OFF, True, restart=True)
         self.drawer.open_at((Section("s", "S", rows=(row,)),))
         self.drawer.right()
         self.drawer.grab()
         lines = self.drawer._box("right", 0).help
-        self.assertEqual(len(lines), 2)
-        self.assertTrue(lines[0].endswith("…"), lines)
-        self.assertTrue(lines[-1].startswith("Applies"), lines)
+        self.assertEqual(len(lines), 3, lines)
+        self.assertTrue(whole(lines, tip(row)), lines)
+        self.assertTrue(" ".join(lines).endswith(translate(RESTART_NOTE)), lines)
+
+    def test_the_restart_note_keeps_its_line_in_a_small_window(self):
+        # A help too long to share its four lines (a small window's) with the note: the note
+        # keeps the last one, whole.
+        self.use(*make(640, 360))
+        help_text = (
+            "Lets the graphics chip decode the video, so that the processor does less and the"
+            " fans of a small computer stay quiet while a film or a channel plays."
+        )
+        row = Row("long", "Long", help_text, ON_OFF, True, restart=True)
+        self.drawer.open_at((Section("s", "S", rows=(row,)),))
+        self.drawer.right()
+        self.drawer.grab()
+        lines = self.drawer._box("right", 0).help
+        self.assertEqual(len(lines), 4)
+        # (a wider font, macOS's, may give the note two lines: it keeps them, at the end)
+        self.assertTrue(" ".join(lines).endswith(translate(RESTART_NOTE)), lines)
+        self.assertTrue(any(line.endswith("…") for line in lines), lines)
+
+    def test_a_small_window_gives_a_help_a_title_and_a_value_a_line_more(self):
+        # At 640×360 the columns shrink with the window but the fonts stop at their floor:
+        # a help (its restart note too) takes a fourth line, a title and a stepper's value a
+        # third, before they elide, and a value's long word widens its room, the title
+        # wrapping instead. A window wide enough for every font keeps three lines for a help
+        # and two for titles and values (1280, 1600).
+        self.assertEqual(settings_layout.HELP_LINES, 3)
+        for width in (1280, 1600):
+            un = ui_units(width)
+            for font_u, most in (
+                (HELP_FONT_U, settings_layout.HELP_LINES),
+                (TITLE_FONT_U, settings_layout.TITLE_LINES),
+                (VALUE_FONT_U, settings_layout.VALUE_LINES),
+            ):
+                self.assertEqual(settings_layout.most_lines(un, font_u, most), most, width)
+        self.addCleanup(i18n.set_language, "en")
+        self.assertEqual(i18n.set_language("tr"), "tr")
+        self.use(*make(640, 360))
+        self.drawer.open_at(sections("Darwin"), m.GENERAL)
+        self.drawer.right()  # Language: "QiTV'nin menülerinin ve metinlerinin dili." + restart
+        self.drawer.grab()
+        lines = self.drawer._box("right", 0).help
+        self.assertGreater(len(lines), 2, lines)  # more than the two it had: whole
+        language = next(s for s in sections("Darwin") if s.key == m.GENERAL).rows[0]
+        self.assertEqual(" ".join(lines).split(), tip(language).split())  # whole
+        advanced = next(s for s in sections("Darwin") if s.key == m.ADVANCED)
+        self.drawer.open_at(sections("Darwin"), m.ADVANCED)
+        self.drawer.grab()
+        index = [r.key for r in advanced.rows].index("detailed_log")
+        title = translate(advanced.rows[index].text)  # "Ayrıntılı günlük (sorun gidermek için)"
+        titles = self.drawer._box("right", index).titles
+        self.assertEqual(len(titles), 3, titles)
+        self.assertTrue(whole(titles, title), titles)
+        source = Row(
+            "source",
+            "Rehber kaynağı",
+            "",
+            (m.Choice("stb", "Sağlayıcının kendi rehberi", literal=True),),
+            "stb",
+            literal=True,
+        )
+        self.drawer.open_at((Section("s", "S", rows=(source,)),))
+        self.drawer.grab()
+        box = self.drawer._box("right", 0)
+        self.assertTrue(whole(box.values, "Sağlayıcının kendi rehberi"), box.values)
+        value_fm = QFontMetricsF(ui_units(640).font(VALUE_FONT_U))
+        title_fm = QFontMetricsF(ui_units(640).font(TITLE_FONT_U))
+        for line in box.values:
+            self.assertLessEqual(value_fm.horizontalAdvance(line), box.value.width() + 0.5)
+        self.assertTrue(whole(box.titles, "Rehber kaynağı"), box.titles)
+        for line in box.titles:
+            self.assertLessEqual(title_fm.horizontalAdvance(line), box.title.width() + 0.5)
+        self.assertLessEqual(box.title.right(), box.less.left() + 0.5)
 
     def test_a_value_gives_way_to_its_title_in_a_small_window(self):
         # "Mouse wheel  ‹ Volume ›": the column sized for "Change channel" would cut the title.
@@ -737,20 +900,23 @@ class SettingsDrawerTests(unittest.TestCase):
                     self.assertTrue(inked(image, part), (part, box.values))
                 point = box.value.center()
                 self.assertEqual(self.drawer.tooltip_at(point), tip(playback_rows()[index]))
-        # Past two lines, it elides (a small window).
+        # Past its lines, it elides (a small window: three).
         i18n.set_language("en")
         self.use(*make(640, 360))
-        text = "A value of many words that cannot fit in two short lines at all"
+        text = (
+            "A value of many words that cannot fit in three short lines at all, not even in a"
+            " window much larger than this one"
+        )
         long = Row("long", "Long", "", (m.Choice("a", text),), "a")
         self.drawer.open_at((Section("s", "S", rows=(long,)),))
         self.drawer.grab()
         box = self.drawer._box("right", 0)
-        self.assertEqual(len(box.values), 2, box.values)
+        self.assertEqual(len(box.values), 3, box.values)
         self.assertTrue(box.values[-1].endswith("…"), box.values)
         small = QFontMetricsF(ui_units(640).font(VALUE_FONT_U))
         for line in box.values:
             self.assertLessEqual(small.horizontalAdvance(line), box.value.width() + 0.5)
-        self.assertLessEqual(2 * small.lineSpacing(), box.line.height())
+        self.assertLessEqual(3 * small.lineSpacing(), box.line.height())
         self.assertIn(text, self.drawer.tooltip_at(box.value.center()))
 
     def test_a_parent_row_on_the_left_opens_its_own_layer(self):
@@ -836,8 +1002,8 @@ class SettingsDrawerTests(unittest.TestCase):
         image = self.drawer.grab().toImage()
         self.assertEqual(self.drawer._box("right", 1).titles, ["Remove provider…"])
         self.assertEqual(self.drawer._box("right", 2).titles, ["Remove provider…"])  # one "…"
-        live, accent = QColor(PALETTE.live), QColor(PALETTE.accent)
-        self.assertFalse(near(live, accent))  # the test tells them apart
+        red, accent = QColor(PALETTE.danger_text), QColor(PALETTE.accent)
+        self.assertFalse(near(red, accent))  # the test tells them apart
         ratio = image.devicePixelRatio()
 
         def reds(index):
@@ -846,11 +1012,18 @@ class SettingsDrawerTests(unittest.TestCase):
                 1
                 for y in range(int(r.top() * ratio), int(r.bottom() * ratio))
                 for x in range(int(r.left() * ratio), int(r.right() * ratio))
-                if near(image.pixelColor(x, y), live)
+                if near(image.pixelColor(x, y), red)
             )
 
         self.assertGreater(reds(1), 20)
         self.assertEqual(reds(0), 0)
+        # Readable over the brightest picture: the right column's panel over white (2.12: the
+        # live red there was 3.1:1), at the 4.5:1 normal-size text needs.
+        panel = qcolor(PALETTE.panel)
+        alpha = panel.alphaF()
+        under = QColor(*(round(c * alpha + 255 * (1 - alpha)) for c in panel.getRgb()[:3]))
+        self.assertGreaterEqual(contrast(red, under), 4.5)
+        self.assertLess(contrast(QColor(PALETTE.live), under), 4.5)  # (why it is not the live red)
 
     def test_a_danger_row_acts_on_the_first_click(self):
         self.open_rows(m.Row("plain", "Plain"), m.Row("remove", "Remove provider…", kind=m.DANGER))
@@ -907,11 +1080,11 @@ class SettingsDrawerTests(unittest.TestCase):
         )
         self.drawer.grab()
         two, one = self.drawer._box("right", 0), self.drawer._box("right", 1)
-        self.assertEqual(two.sub, "Xtream · in use")
+        self.assertEqual(two.subs, ["Xtream · in use"])
         self.assertGreater(two.line.height(), one.line.height())
         self.drawer.activate()  # a layer down: the left column lists them, with the sub
         self.drawer.grab()
-        self.assertEqual(self.drawer._box("left", 0).sub, "Xtream · in use")
+        self.assertEqual(self.drawer._box("left", 0).subs, ["Xtream · in use"])
 
     def test_a_row_without_help_keeps_its_height_when_focused(self):
         self.open_rows(m.Row("a", "Check the connection"), m.Row("b", "Check again"))
@@ -1456,11 +1629,11 @@ class SettingsDrawerTests(unittest.TestCase):
                     fonts["title"].horizontalAdvance(line), box.title.width() + 0.5, where
                 )
             spacing = fonts["title"].lineSpacing()
-            sub_h = fonts["sub"].lineSpacing() if box.sub else 0.0
+            sub_h = fonts["sub"].lineSpacing() * len(box.subs)
             self.assertLessEqual(spacing * len(box.titles) + sub_h, box.line.height() + 0.5, where)
-            if box.sub:
+            for line in box.subs:  # each sub line fits its room
                 self.assertLessEqual(
-                    fonts["sub"].horizontalAdvance(box.sub), box.title.width() + 0.5, where
+                    fonts["sub"].horizontalAdvance(line), box.title.width() + 0.5, where
                 )
             for part in (box.end, box.chevron, self.drawer.paste_rect(index)):
                 if part.isEmpty():

@@ -12,14 +12,15 @@ from unittest import mock
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
-from PySide6.QtCore import QEvent, QPoint, QPointF, Qt
-from PySide6.QtGui import QMouseEvent
+from PySide6.QtCore import QEvent, QPoint, QPointF, QRect, Qt
+from PySide6.QtGui import QColor, QImage, QMouseEvent, QPainter
 from PySide6.QtTest import QTest
-from PySide6.QtWidgets import QApplication, QWidget
+from PySide6.QtWidgets import QApplication, QStyleOptionViewItem, QWidget
 from job_fixtures import ImmediateRunner
 from mixed_fixtures import live_content
 from timer_fixtures import elapse, wait_until
 
+from services import i18n
 from services.find import build_find_index, find_channels
 from services.navigation import (
     LINK_LAYER,
@@ -40,6 +41,7 @@ from ui.find_session import DEBOUNCE_MS, FindSession
 from ui.overlays import drawer as drawer_module
 from ui.overlays.channel_rows import ChannelRowsModel
 from ui.overlays.drawer import CountRole, Drawer, SubRole
+from ui.overlays.painting import ui_units
 
 LIVE_URL = "https://cdn.example/live/harbour/index.m3u8?token=aaa"
 FILM_URL = "https://vod.example/films/lecture.mkv?token=aaa"
@@ -169,24 +171,84 @@ class RowTests(unittest.TestCase):
             ],
         )
         drawn, elided = [], drawer_module.elided
+        failed_lines = drawer_module._failed_lines
 
         def spy(p, text, width):
             drawn.append(text)
             return elided(p, text, width)
 
-        with mock.patch.object(drawer_module, "elided", spy):
+        def wrapped(text, font, width, *most):
+            drawn.append(text)
+            return failed_lines(text, font, width, *most)
+
+        with (
+            mock.patch.object(drawer_module, "elided", spy),
+            mock.patch.object(drawer_module, "_failed_lines", wrapped),
+        ):
             drawer.grab()  # two lines a row: its name, then what it is
         failed = "Didn't open last time (401: the link's access ran out)"
         for text in ("Harbour News", "Live", "Film · stopped at 41:12", failed):
             self.assertIn(text, drawn)
         view = right.view
         self.assertGreater(view.sizeHintForRow(0), left.view.sizeHintForRow(0))
+        delegate = view.itemDelegate()
+        self.assertEqual(delegate.cut_text(right.model.index(2)), "")  # why: whole
         # Enter on a link asks for it to play, as a channel's row does.
         self.assertEqual(drawer.highlighted().key, "a1")
         drawer.move_by(1)
         drawer.activate()
         node, _siblings, parent = self.played[-1]
         self.assertEqual((node.layer, node.key, parent), (LINK_LAYER, "b2", source))
+
+    def test_why_a_link_failed_wraps_whole_in_any_window(self):
+        # The keys and the phone have no tooltip: why a link failed last time takes the lines
+        # it needs (its row grows), never cut: in Turkish at 640×360 and 1280×720 too.
+        self.addCleanup(i18n.set_language, "en")
+        source = next(n for n in self.nav.children(None) if n.layer == LINKS_LAYER)
+        self.nav.open(source)
+        for language, size in (("tr", (640, 360)), ("tr", (1280, 720)), ("en", (1600, 900))):
+            with self.subTest(language=language, size=size):
+                self.assertEqual(i18n.set_language(language), language)
+                self.host.resize(*size)
+                self.drawer.open_drawer()
+                right = self.drawer._columns["right"]
+                self.drawer.grab()
+                view, index = right.view, right.model.index(2)
+                sub, warn = index.data(SubRole)
+                self.assertTrue(warn)
+                self.assertEqual(view.itemDelegate().cut_text(index), "", sub)
+                self.assertGreater(view.sizeHintForRow(2), view.sizeHintForRow(0))
+                self.assertEqual(view.visualRect(index).height(), view.sizeHintForRow(2))
+
+    def test_a_failed_link_keeps_to_a_row_given_one_height(self):
+        # A list that gives every row one height (a find's cached size, a list of uniform
+        # rows): why it failed keeps to the lines its row has room for, the last elided,
+        # never painted over the row under it.
+        self.addCleanup(i18n.set_language, "en")
+        self.assertEqual(i18n.set_language("tr"), "tr")
+        self.host.resize(640, 360)
+        source = next(n for n in self.nav.children(None) if n.layer == LINKS_LAYER)
+        self.nav.open(source)
+        self.drawer.open_drawer()
+        right = self.drawer._columns["right"]
+        view, index = right.view, right.model.index(2)
+        self.assertTrue(index.data(SubRole)[1])
+        units = ui_units(view.units_width)
+        option = QStyleOptionViewItem()
+        option.rect = QRect(0, 0, 160, units.px(drawer_module.LINK_ROW_H_U))  # one line's room
+        option.widget = view
+        image = QImage(160, option.rect.height() + 60, QImage.Format.Format_ARGB32)
+        image.fill(QColor(0, 0, 0))
+        painter = QPainter(image)
+        view.itemDelegate().paint(painter, option, index)
+        painter.end()
+        below = [
+            image.pixelColor(x, y)
+            for y in range(option.rect.bottom() + 1, image.height())
+            for x in range(image.width())
+        ]
+        self.assertTrue(all(color == QColor(0, 0, 0) for color in below))
+        self.assertNotEqual(view.itemDelegate().cut_text(index), "")  # (the tooltip says it)
 
 
 class FoundLinkTests(unittest.TestCase):
