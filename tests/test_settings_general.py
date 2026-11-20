@@ -383,6 +383,26 @@ class SslTests(GeneralCase):
                 elapse(STEPS_SETTLE_MS + 80)
             changed.assert_called_once_with()
 
+    def test_verify_ssl_stepped_back_to_where_it_was_connects_nothing(self):
+        # ← meant as "back" turns it off, → puts it back: the steps stop where they began, so
+        # no provider connects anew. Off, then on only after the steps stopped: each stop
+        # changed it.
+        actions = self.window.provider_rows.actions
+        with mock.patch.object(actions, "global_ssl_changed") as changed:
+            self.open_at(m.ADVANCED, "ssl_verify")
+            self.key(Action.NAV_LEFT)
+            self.assertFalse(self.config.ssl_verify)
+            self.key(Action.NAV_RIGHT)
+            self.assertTrue(self.config.ssl_verify)
+            elapse(STEPS_SETTLE_MS + 80)
+            changed.assert_not_called()
+            self.key(Action.NAV_LEFT)
+            elapse(STEPS_SETTLE_MS + 80)
+            self.assertEqual(changed.call_count, 1)
+            self.key(Action.NAV_RIGHT)
+            elapse(STEPS_SETTLE_MS + 80)
+            self.assertEqual(changed.call_count, 2)
+
 
 class AdvancedTests(GeneralCase):
     def test_secure_dns_and_detailed_log_hooks(self):
@@ -431,6 +451,38 @@ class AdvancedTests(GeneralCase):
         self.assertEqual(len(cleared), 1)
         self.assertIsNot(cleared[0], threading.main_thread())
         self.assertEqual(self.drawer.path(), (m.ADVANCED,))
+
+    def test_clear_image_cache_says_what_the_cache_takes(self):
+        # As the old window's "actual size": measured on a worker each time Settings opens,
+        # Clear Image Cache's note; once cleared, what is left.
+        manager = self.window.image_manager
+        size, asked = [12_400_000], []
+
+        def measured():
+            asked.append(threading.current_thread())
+            return size[0]
+
+        def note():
+            return self.shown()[m.CLEAR_IMAGE_CACHE].note
+
+        with (
+            mock.patch.object(manager, "cache_size", side_effect=measured),
+            mock.patch.object(manager, "clear_cache", side_effect=lambda: size.__setitem__(0, 0)),
+        ):
+            self.open_at(m.ADVANCED, m.CLEAR_IMAGE_CACHE)
+            self.assertTrue(wait_until(lambda: note() == "12 MB"), note())
+            self.assertTrue(asked)
+            self.assertNotIn(threading.main_thread(), asked)
+            self.key(Action.NAV_ACTIVATE)
+            self.key(Action.NAV_RIGHT)
+            self.key(Action.NAV_ACTIVATE)  # Clear
+            self.assertTrue(wait_until(lambda: note() == "0 MB"), note())
+            self.assertIn((translate(CLEARED_TEXT), "info"), self.toasts)
+            self.assertEqual(self.drawer.focused_row().key, m.CLEAR_IMAGE_CACHE)
+            size[0] = 2_300_000_000
+            self.window.settings.close()
+            self.open_at(m.ADVANCED, m.CLEAR_IMAGE_CACHE)  # opened again: measured anew
+            self.assertTrue(wait_until(lambda: note() == "2.3 GB"), note())
 
     def test_image_cache_size_round_trips(self):
         row = self.open_at(m.ADVANCED, "max_cache_image_size")

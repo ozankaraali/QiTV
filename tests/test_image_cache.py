@@ -33,6 +33,9 @@ class ImageCacheTests(unittest.TestCase):
         self._store(manager, b"a" * 100, True)
         self._store(manager, b"b" * 200, False)
         self.assertEqual(manager.current_cache_size, 300)
+        self.assertEqual(manager.cache_size(), 300)  # (Settings' note, read on a worker)
+        manager.clear_cache()
+        self.assertEqual(manager.cache_size(), 0)
 
     def test_touching_an_existing_image_does_not_double_count(self):
         manager = ImageManager(self.config, max_cache_size=10_000)

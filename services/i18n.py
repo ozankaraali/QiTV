@@ -11,8 +11,8 @@ Every text QiTV shows is written in English in the code and looked up in a catal
 A missing or empty translation shows the English text. Texts are looked up when they are
 shown: the language is chosen once, while QiTV starts (main.set_language), before any window
 exists, and a text kept at module level is only marked (`N_`, with its `ctx` when it has one)
-and translated where it is used (`translate`, given the same `ctx`). scripts/i18n_extract.py collects every marked text into i18n/template.json,
-the starting point of a new language.
+and translated where it is used (`translate`, given the same `ctx`). scripts/i18n_extract.py
+collects every marked text into i18n/template.json, the starting point of a new language.
 
 A plural entry holds one form per CLDR category the language uses ("one", "few", "many",
 "other"); Turkish writes one form after a number, so its entries hold "other" alone.

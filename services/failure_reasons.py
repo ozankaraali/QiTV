@@ -65,7 +65,7 @@ OK = "ok"
 UNEXPECTED = "unexpected"
 EXPIRED = "expired"
 # A portal's profile dated in the past while the portal still answers: such dates go stale on
-# some portals, so it is said as the portal's word (and Verify Provider only warns of it).
+# some portals, so it is said as the portal's word (and Check the connection only warns of it).
 DATED = "dated"
 LIMIT = "limit"
 WRONG_LOGIN = "wrong_login"
@@ -98,7 +98,7 @@ _BLOCKED_MESSAGE = re.compile(
 @dataclass(frozen=True)
 class Reason:
     kind: str
-    text: str  # in the active language: what Verify Provider and the toasts show
+    text: str  # in the active language: what Check the connection and the toasts show
     # A LIMIT's numbers, as the account reported them (the GUI compares them with QiTV's own
     # streams at that provider, `own_streams_text`).
     limit: Optional[int] = field(default=None, compare=False)

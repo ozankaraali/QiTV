@@ -40,23 +40,48 @@ STEPS_SETTLE_MS = 600
 
 
 class Settled(QObject):
-    """`act()` once the steps stop: each `start()` waits STEPS_SETTLE_MS again. Never while
-    `closing()` holds (the window closes). Made on the GUI thread; `act` runs there."""
+    """`act()` once the steps stop, if they changed what `value()` gives: each `start()` waits
+    STEPS_SETTLE_MS again, and then `act` runs only when the value differs from `before`, what
+    it was before the first of these steps (steps that end where they began, as ← meant as
+    "back" then →, do nothing). `before` is the value as the Settled is made, then as each stop
+    of the steps leaves it: only the steps it hears change the value. Never while `closing()`
+    holds (the window closes). Made on the GUI thread; `act` runs there."""
 
-    def __init__(self, act: Callable[[], None], closing: Callable[[], bool], parent: QObject):
+    def __init__(
+        self,
+        act: Callable[[], None],
+        closing: Callable[[], bool],
+        parent: QObject,
+        value: Callable[[], Any],
+    ):
         super().__init__(parent)
         self._act = act
         self._closing = closing
+        self._value = value
+        self._before = value()
         self._timer = QTimer(self)
         self._timer.setSingleShot(True)
         self._timer.setInterval(STEPS_SETTLE_MS)
         self._timer.timeout.connect(self._settled)
 
+    @property
+    def before(self) -> Any:
+        """The value before the steps (as the last stop of them left it)."""
+        return self._before
+
+    def waiting(self) -> bool:
+        """Whether steps are on their way: their stop is yet to come."""
+        return self._timer.isActive()
+
     def start(self) -> None:
         self._timer.start()
 
     def _settled(self) -> None:
-        if not self._closing():
+        if self._closing():
+            return
+        now = self._value()
+        if now != self._before:
+            self._before = now
             self._act()
 
 

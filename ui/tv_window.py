@@ -241,7 +241,7 @@ FORWARD_WAIT_MS = 1000  # the longest wait for QiTV to come forward before a rem
 FORWARD_POLL_MS = 50
 # config.json could not be written (locked by antivirus, read-only, a full disk).
 SAVE_FAILED_TEXT = N_("Couldn't save the settings; changes will be lost when QiTV closes")
-# i18n: a toast after Settings → Save: the scheduled recordings of a provider removed there were
+# i18n: a toast after a provider is removed in Settings: its scheduled recordings were
 # cancelled ({titles}: their programmes, comma-separated)
 DROPPED_RECORDINGS_TEXT = N_("Recordings of a removed provider were cancelled: {titles}")
 ABANDONED_EXIT_CODE = 3  # QiTV quit while background work still ran (see _exit_now)
@@ -2989,8 +2989,8 @@ class TVWindow(QMainWindow):
             show_free_channels_menu(self, global_pos, self.add_free_channels)
 
     def add_free_channels(self, code: Optional[str]) -> None:
-        """Add iptv-org's list (all countries, or `code`'s) and load it, as Settings → Save does
-        for a new selected provider; a provider with that URL is only switched to."""
+        """Add iptv-org's list (all countries, or `code`'s), select it and load it, as a provider
+        added in Settings is; a provider with that URL is only switched to."""
         if self._closing:
             return
         entry = free_channels.provider_entry(code)

@@ -10,9 +10,12 @@ General tab, its rows where the spec puts them, each applied at once.
   registered for (a run from source) has no row. On Windows, Default Apps… once QiTV opens a
   kind there;
 - Advanced: Verify SSL certificates (the providers that follow it connect anew, as the old
-  Save had them: ProviderActions.global_ssl_changed, once its steps stop), Secure DNS, the
+  Save had them: ProviderActions.global_ssl_changed, once its steps stop, and only when they
+  changed it), Secure DNS, the
   detailed log, the image cache's largest size (from the next start), and Clear Image Cache…,
-  asked first in a card, cleared on a worker, then said.
+  asked first in a card, cleared on a worker, then said; its note says what the cache takes,
+  measured on a worker each time Settings opens and once it is cleared (as the old window's
+  "actual size").
 
 The config's rows are written through the values (services.settings_values), each followed by
 its hook (`hooks`, which the TV window gives them). What only the running QiTV knows (its
@@ -28,11 +31,11 @@ from functools import partial
 import logging
 from typing import Any, Callable, Optional
 
-from PySide6.QtCore import QObject, Signal
+from PySide6.QtCore import QEvent, QObject, Signal
 
 from services import i18n, log_file, secure_dns, tmdb
 from services.file_types import Status
-from services.i18n import N_, translate
+from services.i18n import N_, number, tr, translate
 from services.settings_model import (
     ACTION,
     ADVANCED_PREFIX,
@@ -42,6 +45,7 @@ from services.settings_model import (
     Row,
 )
 from services.settings_texts import CLEAR_CACHE_QUESTION
+from ui.captions_texts import size_text
 from ui.file_types_switch import (
     DEFAULT_APPS_TEXT,
     FAILED_HINT,
@@ -87,9 +91,12 @@ def hooks(window: Any) -> dict[str, Callable[[], None]]:
         window.screens.tmdb.settings_changed()
 
     # The providers that follow Verify SSL connect anew once its steps stop (Settled: on, off
-    # and on again connects once).
+    # and on again connects once), and only when they changed it (off and on: none).
     reconnect = Settled(
-        lambda: window.provider_rows.actions.global_ssl_changed(), lambda: window.closing(), window
+        lambda: window.provider_rows.actions.global_ssl_changed(),
+        lambda: window.closing(),
+        window,
+        value=lambda: bool(config.ssl_verify),
     )
 
     def ssl() -> None:
@@ -118,19 +125,31 @@ def hooks(window: Any) -> dict[str, Callable[[], None]]:
     }
 
 
-class ClearImageCache(QObject):
-    """Clear Image Cache's work, run on a JobRunner thread (the image cache locks its index)."""
+class ImageCacheJob(QObject):
+    """The image cache's size in bytes, after clearing it with `clear` (Clear Image Cache's
+    work), run on a JobRunner thread: the image cache locks its index, which its loaders'
+    threads hold while they change it."""
 
     finished = Signal(object)
     error = Signal(str)
 
-    def __init__(self, images: Any) -> None:
+    def __init__(self, images: Any, clear: bool = False) -> None:
         super().__init__()
         self._images = images
+        self._clear = clear
 
     def run(self) -> None:
-        self._images.clear_cache()
-        self.finished.emit(None)
+        if self._clear:
+            self._images.clear_cache()
+        self.finished.emit(int(self._images.cache_size()))
+
+
+def image_cache_text(size: int) -> str:
+    """What the image cache takes, as Clear Image Cache's note says it: "12 MB", "2.3 GB",
+    "0 MB" when it is empty."""
+    if size <= 0:
+        return tr("{size} MB", size=number(0))  # i18n: a size in megabytes, as "12"
+    return size_text(size)
 
 
 class GeneralRows(QObject):
@@ -153,8 +172,11 @@ class GeneralRows(QObject):
         }
         self._question: Optional[ChoiceCard] = None
         self._clearing = False
+        self._image_bytes: Optional[int] = None  # the image cache's size (None: not measured)
+        self._image_job = 0  # the last measure (or clear) asked: only its answer shows
         settings.register(FILES_PREFIX, self)
         settings.register(ADVANCED_PREFIX, self)
+        drawer.installEventFilter(self)  # Settings opening: the image cache measured anew
 
     @property
     def question(self) -> Optional[ChoiceCard]:
@@ -175,8 +197,47 @@ class GeneralRows(QObject):
             system_language=system,
             tmdb_built_in=bool(tmdb.built_in_token()),
             image_cache_mb=self._window.config_manager.max_cache_image_size,
+            image_cache_used=(
+                image_cache_text(self._image_bytes) if self._image_bytes is not None else ""
+            ),
             files=self._file_rows(),
         )
+
+    # ---- the image cache's size -------------------------------------------------------------
+
+    def eventFilter(self, watched: QObject, event: QEvent) -> bool:
+        if watched is self._drawer and event.type() == QEvent.Type.Show:
+            if not self._drawer.isHidden() and not self._clearing:
+                self._image_cache_job(clear=False)  # (a clear on its way answers with it)
+        return False
+
+    def _image_cache_job(self, clear: bool) -> None:
+        """The image cache measured (cleared first with `clear`) on a worker; only the answer
+        of the last one asked shows (a clear asked after a measure answers last)."""
+        self._image_job += 1
+        self._window.jobs.run_worker(
+            ImageCacheJob(self._window.image_manager, clear),
+            self._image_measured,
+            self._image_failed,
+            context=(self._image_job, clear),
+        )
+
+    def _image_measured(self, context: tuple[int, bool], size: object) -> None:
+        job, cleared = context
+        if cleared:
+            self._clearing = False
+            self._notify(translate(CLEARED_TEXT))
+        if job == self._image_job and isinstance(size, int):
+            self._image_bytes = size
+            self._settings.refresh_sections()  # the note says it
+
+    def _image_failed(self, context: tuple[int, bool], message: str) -> None:
+        _job, cleared = context
+        if cleared:
+            self._clearing = False
+            self._notify(translate(message), "error", ERROR_MS)
+        else:
+            logger.warning("The image cache's size: %s", message)
 
     def _file_rows(self) -> tuple[Row, ...]:
         """A row per kind QiTV can open (none from source), what opens it now at its end; then
@@ -250,16 +311,7 @@ class GeneralRows(QObject):
         if key != CLEAR or self._clearing:
             return
         self._clearing = True
-        job = ClearImageCache(self._window.image_manager)
-        self._window.jobs.run_worker(job, self._cleared, self._clear_failed)
-
-    def _cleared(self, _context: object, _payload: object) -> None:
-        self._clearing = False
-        self._notify(translate(CLEARED_TEXT))
-
-    def _clear_failed(self, _context: object, message: str) -> None:
-        self._clearing = False
-        self._notify(translate(message), "error", ERROR_MS)
+        self._image_cache_job(clear=True)  # then said, and what is left its note
 
     def _notify(self, text: str, kind: str = "info", ms: Optional[int] = None) -> None:
         if ms is None:

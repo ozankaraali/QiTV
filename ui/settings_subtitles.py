@@ -8,8 +8,9 @@ tab, each row applied at once.
   holds them, and the space measured again;
 - OpenSubtitles: the API key (a secret that shows only its last four characters, kept without
   spaces), the username (kept without the spaces at its ends) and the password (a secret), all
-  config rows edited in place; Sign out clears the username and the password, and saves. The
-  next search signs in anew (ui.subtitle_search replaces a client whose sign-in changed).
+  config rows edited in place; Sign out…, asked first in a card (the phone can't type the
+  password back), clears the username and the password, and saves. The next search signs in
+  anew (ui.subtitle_search replaces a client whose sign-in changed).
 
 What only the running QiTV knows (whether its build carries an OpenSubtitles key, what the
 files take) is the sections' Context (`context`). Keys: the config's for its settings;
@@ -43,6 +44,11 @@ logger = logging.getLogger(__name__)
 
 DELETE = "delete"  # the key of the delete question's Delete
 DELETE_TEXT = N_("Delete")  # i18n: a button: deletes AI captions' speech models (verb)
+SIGN_OUT_KEY = "sign_out"  # the key of the sign-out question's Sign out
+# i18n: asked before Settings → Subtitles → Sign out… clears the OpenSubtitles sign-in
+SIGN_OUT_QUESTION = N_("Sign out of OpenSubtitles?")
+SIGN_OUT_BODY = N_("Clears the username and the password.")  # i18n: under "Sign out of …?"
+SIGN_OUT_TEXT = N_("Sign out")  # i18n: a button: forgets the OpenSubtitles sign-in (verb)
 
 
 class SubtitlesRows(QObject):
@@ -73,7 +79,8 @@ class SubtitlesRows(QObject):
 
     @property
     def question(self) -> Optional[ChoiceCard]:
-        """The card that asks before the files are deleted (None until it first asked)."""
+        """The card that asks before the files are deleted or the sign-in is cleared (None
+        until it first asked)."""
         return self._question
 
     # ---- what the section shows -------------------------------------------------------------
@@ -145,9 +152,41 @@ class SubtitlesRows(QObject):
         if row.key == DELETE_CAPTIONS:
             self._ask_delete()
         elif row.key == SIGN_OUT:
+            self._ask_sign_out()
+
+    # ---- the questions ----------------------------------------------------------------------
+
+    def _card(self) -> ChoiceCard:
+        """The one card both questions are asked in (each answer has its own key)."""
+        if self._question is None:
+            self._question = ChoiceCard(self._drawer.parentWidget())
+            self._question.answered.connect(self._on_answered)
+        return self._question
+
+    def _on_answered(self, key: str) -> None:
+        if key == DELETE:
+            self._on_delete_answered()
+        elif key == SIGN_OUT_KEY:
             # The sign-in goes; the next search's client has none (the old one signs out).
             self._values.set("opensubtitles_username", "")
             self._values.set("opensubtitles_password", "")
+            self._settings.refresh_sections()
+
+    # ---- signing out ------------------------------------------------------------------------
+
+    def _ask_sign_out(self) -> None:
+        """Sign out…: asked first, Cancel the answer the keys start on."""
+        card = self._card()
+        card.ask(
+            translate(SIGN_OUT_QUESTION),
+            translate(SIGN_OUT_BODY),
+            [
+                Button(CANCEL, translate(CANCEL_TEXT)),
+                Button(SIGN_OUT_KEY, translate(SIGN_OUT_TEXT), danger=True),
+            ],
+            CANCEL,
+        )
+        self._settings.show_card(card)
 
     # ---- deleting ---------------------------------------------------------------------------
 
@@ -156,10 +195,8 @@ class SubtitlesRows(QObject):
         size = self._size
         if not size or self._deleting:
             return
-        if self._question is None:
-            self._question = ChoiceCard(self._drawer.parentWidget())
-            self._question.answered.connect(self._on_delete_answered)
-        self._question.ask(
+        card = self._card()
+        card.ask(
             translate(DELETE_QUESTION, size=size_text(size)),
             "",
             [
@@ -168,10 +205,10 @@ class SubtitlesRows(QObject):
             ],
             CANCEL,
         )
-        self._settings.show_card(self._question)
+        self._settings.show_card(card)
 
-    def _on_delete_answered(self, key: str) -> None:
-        if key != DELETE or self._deleting:
+    def _on_delete_answered(self) -> None:
+        if self._deleting:
             return
         self._deleting = True
         self._settings.refresh_sections()  # Delete goes at once: it is on its way

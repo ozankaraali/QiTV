@@ -8,7 +8,9 @@ found to be shows under it (services.provider_link), and only the fields its kin
 - a portal's: its address, the MAC its link names, a serial and a device ID;
 - a playlist's: a web address, or a file on this computer ("M3U file…" picks one);
 - an address that is no link: an Xtream server once a login is typed, a playlist without one,
-  or the kind picked below it (STB portal, Jellyfin, Emby; picked again, the guess again).
+  or the kind picked below it (STB portal, Jellyfin, Emby; picked again, the guess again). An
+  Xtream server keeps no file's path from it (the same host's film or page pasted in: only
+  its server, or its panel's path, is kept; services.provider_link.xtream_address).
 
 A link pasted, or sent in one go (as the phone sends a word), gives its login to the fields at
 once; one typed a character at a time keeps it until the check (the rest of a password would
@@ -59,7 +61,14 @@ from services.i18n import N_, translate
 from services.provider_changes import unique_name
 from services.provider_check import Outcome
 from services.provider_guard import OTHER_HOST, OTHER_KIND, SAME, judge
-from services.provider_link import M3U, STB, XTREAM, ProviderLink, parse_provider_link
+from services.provider_link import (
+    M3U,
+    STB,
+    XTREAM,
+    ProviderLink,
+    parse_provider_link,
+    xtream_address,
+)
 from services.provider_types import EMBY, JELLYFIN, is_media_server
 from ui.overlays.settings_card import (
     CANCEL,
@@ -397,7 +406,8 @@ class ProviderCards(QObject):
 
     def _address(self, kind: str) -> str:
         """The address the provider keeps: a link's own (a server's without its login), a
-        file's path, else the address as typed (a web one with its scheme)."""
+        file's path, else the address as typed (a web one with its scheme; an Xtream one
+        without a file's path at its end: services.provider_link.xtream_address)."""
         text = self._text(URL)
         link = self._link
         if _is_path(text):
@@ -405,8 +415,8 @@ class ProviderCards(QObject):
         if link is not None and (link.type == kind or (link.type == M3U and kind in _PLAYLISTS)):
             return link.url
         if text and "://" not in text:
-            return f"http://{text}"
-        return text
+            text = f"http://{text}"
+        return xtream_address(text) if kind == XTREAM else text
 
     def _login(self, kind: str) -> dict[str, str]:
         """What the kind signs in with, as the old window kept it (a media server's password

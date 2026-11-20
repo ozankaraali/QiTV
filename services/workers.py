@@ -261,8 +261,8 @@ class _XtreamAccount(NamedTuple):
 
 def xtream_answers_https(base_url: str, username: str, password: str, verify_ssl: bool) -> bool:
     """Whether the Xtream panel at `base_url` gives its lists and streams over HTTPS: its
-    address is HTTPS, or the panel answers its sign-in over HTTPS (Settings' Verify Provider
-    says when it does not, 2.7.1). Blocking: run it on a worker."""
+    address is HTTPS, or the panel answers its sign-in over HTTPS (Settings' Check the
+    connection says when it does not, 2.7.1). Blocking: run it on a worker."""
     account = _XtreamAccount(base_url, username, password, verify_ssl)
     with requests.Session() as session:
         session.headers.update(CLIENT_HEADERS)

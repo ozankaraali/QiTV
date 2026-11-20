@@ -154,6 +154,23 @@ class SourceTests(GuideCase):
                 elapse(STEPS_SETTLE_MS + 80)
             refresh.assert_called_once_with(force=True)
 
+    def test_sources_stepped_back_to_where_they_began_load_nothing(self):
+        # ← meant as "back", then →; or round every source to the first: the steps stop on
+        # the source they began on, so the guide is not loaded again (its rows follow back).
+        with mock.patch.object(self.window.catalog, "refresh_epg") as refresh:
+            self.open_at(m.GUIDE, "epg_source")
+            self.key(Action.NAV_LEFT)
+            self.assertEqual(self.config.epg_source, "No Source")
+            self.key(Action.NAV_RIGHT)
+            elapse(STEPS_SETTLE_MS + 80)
+            refresh.assert_not_called()
+            for _ in range(4):
+                self.key(Action.NAV_RIGHT)
+            self.assertEqual(self.config.epg_source, "STB")
+            elapse(STEPS_SETTLE_MS + 80)
+            refresh.assert_not_called()
+            self.assertEqual(self.keys(), ["epg_source", guide.EVERY, "epg_list_window_hours"])
+
     def test_url_and_file_rows_follow_the_source(self):
         with (
             mock.patch.object(self.window.catalog, "refresh_epg") as refresh,

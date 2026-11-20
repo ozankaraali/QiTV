@@ -10,7 +10,10 @@ kept (ui.settings_links: never a provider), then ＋ Add provider and Free chann
 - Kind, only shown: another kind is another provider;
 - Address and login ›, the card that changes them after a check (ui.provider_cards);
 - Verify certificates, Streams at once and Guide time offset, each step written at once by the
-  old Save's rules (services.provider_changes);
+  old Save's rules (services.provider_changes); Verify certificates' rules compare with the
+  provider as it was before its first step in this visit of Settings (steps back to where they
+  began leave it as it was), and its new connection waits for the steps to stop (none when
+  they came back to where they began);
 - Hidden groups ›, this provider's groups hidden to tidy the lists, each shown again at once;
 - Check the connection, its last answer at its end (a check on a worker: ui.provider_check);
 - Remove provider…, asked first in a card, its scheduled recordings said.
@@ -29,6 +32,8 @@ the list's own rows are `provider/@add` and `provider/@free`).
 
 from __future__ import annotations
 
+from copy import deepcopy
+from functools import partial
 import logging
 import os
 from typing import Any, Callable, Optional, Protocol
@@ -42,7 +47,7 @@ from services.epg_view import (
     GUIDE_OFFSET_STEP,
     guide_offset_minutes,
 )
-from services.i18n import N_, tr, translate
+from services.i18n import N_, number, tr, translate
 from services.provider_changes import NameTaken
 from services.provider_check import Outcome
 from services.provider_link import ProviderLink
@@ -65,7 +70,7 @@ from services.settings_model import (
 from ui.overlays.settings_card import BUSY_TEXT, CANCEL, CANCEL_TEXT, Button, ChoiceCard
 from ui.provider_actions import ProviderActions
 from ui.provider_check import ProviderCheck
-from ui.settings_controller import SettingsController
+from ui.settings_controller import SettingsController, Settled
 from ui.settings_parental import pin_allows
 from ui.tv_controller import ERROR_MS
 
@@ -109,7 +114,7 @@ SHOW_AGAIN_TEXT = N_("Show again")  # i18n: Settings → Providers → Hidden gr
 # i18n: a toast: the provider list could not be written, so the change in Settings didn't happen
 SAVE_FAILED_TEXT = N_("Couldn't save the providers; nothing was changed")
 REMOVE_TEXT = N_("Remove")  # i18n: a button of "Remove the provider …?" (verb); its key: REMOVE
-# i18n: Verify Provider's note under "Provider verified successfully."
+# i18n: Check the connection's note, after "Provider verified successfully."
 HTTP_ONLY_NOTE = N_("This provider does not answer over HTTPS, so QiTV connects to it over HTTP.")
 # i18n: Settings → Providers: the name typed is another provider's (QiTV finds providers by name)
 NAME_TAKEN_TEXT = N_("Another provider is named “{name}” already. Choose another name.")
@@ -271,6 +276,10 @@ class ProviderRows(QObject):
         self._checks: dict[ProviderCheck, str] = {}  # a check on its way -> its provider
         self._question: Optional[ChoiceCard] = None
         self._removing = ""  # the provider the question asks about
+        # Verify certificates: each provider as it was before its first step this visit (the
+        # writing rules' "before"), and its steps on their way (their follow-ups once they stop).
+        self._ssl_since: dict[str, dict] = {}
+        self._ssl_runs: dict[str, Settled] = {}
         settings.register(PROVIDER_PREFIX, self)
         settings.hidden.connect(self._on_settings_hidden)
 
@@ -368,7 +377,7 @@ class ProviderRows(QObject):
                 hidden.text,
                 HIDDEN_INTRO,
                 section=hidden,
-                note=str(len(groups)) if groups else "",
+                note=number(len(groups)) if groups else "",
             ),
             Row(
                 row_key(name, CHECK),
@@ -428,7 +437,38 @@ class ProviderRows(QObject):
             return
         name, field, _rest = parsed
         value = next_choice(row, self.value(row), delta)
-        self.apply(lambda: self._actions.update(name, {_STORED[field]: value}))
+        if field == SSL:
+            self._step_ssl(name, bool(value))
+        else:
+            self.apply(lambda: self._actions.update(name, {_STORED[field]: value}))
+        self._settings.refresh_sections()
+
+    def _step_ssl(self, name: str, verify: bool) -> None:
+        """Verify certificates: each step written at once, by the rules against the provider
+        as it was before its first step in this visit of Settings (as the old Save compared
+        with the window as it opened: back where it began, a provider that followed the global
+        setting follows it again); its new connection (its lists dropped, or the TV's set up
+        again) once the steps stop, and only when they changed it."""
+        since = self._ssl_since.get(name)
+        if since is None:
+            since = self._ssl_since[name] = self._actions.changes.get(name)
+        run = self._ssl_runs.get(name)
+        if run is None or not run.waiting():
+            if run is not None:
+                run.deleteLater()
+            before = self._actions.changes.get(name)  # what this run's stop compares with
+            run = Settled(
+                partial(self._ssl_settled, name, before),
+                lambda: bool(self._window.closing()),
+                self,
+                value=partial(self._entry, name),
+            )
+            self._ssl_runs[name] = run
+        if self.apply(lambda: self._actions.write(name, {"ssl_verify": verify}, since)):
+            run.start()
+
+    def _ssl_settled(self, name: str, before: dict) -> None:
+        self.apply(lambda: self._actions.follow_up(name, before))
         self._settings.refresh_sections()
 
     def edited(self, row: Row, text: str) -> None:
@@ -507,6 +547,8 @@ class ProviderRows(QObject):
             return
         if name in self._notes:
             self._notes[new] = self._notes.pop(name)
+        if name in self._ssl_since:  # (steps under its new name compare with it as it was)
+            self._ssl_since[new] = {**self._ssl_since.pop(name), "name": new}
         self._checks = {check: new if n == name else n for check, n in self._checks.items()}
         self._settings.refresh_sections(renamed={layer_key(name): layer_key(new)})
 
@@ -586,6 +628,7 @@ class ProviderRows(QObject):
 
     def _on_settings_hidden(self) -> None:
         self._pin_granted = False
+        self._ssl_since.clear()  # the next visit compares with the providers as they are then
 
     def _notify(self, text: str) -> None:
         self._window.screens.notify(text, "error", ERROR_MS)
@@ -599,3 +642,8 @@ class ProviderRows(QObject):
     def _find(self, name: str) -> Optional[dict]:
         """Provider `name`'s entry as listed (read only); None when none has the name."""
         return next((p for p in self._providers() if p.get("name") == name), None)
+
+    def _entry(self, name: str) -> Optional[dict]:
+        """A copy of provider `name`'s entry; None when none has the name."""
+        found = self._find(name)
+        return deepcopy(found) if found is not None else None

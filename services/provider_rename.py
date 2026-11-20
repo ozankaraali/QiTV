@@ -1,9 +1,10 @@
 """A provider renamed in Settings keeps what QiTV stored under its name (2.8.12).
 
-QiTV keeps much under a provider's name, never under anything else: Settings → Save calls
-`carry_over()` once the provider list with the new names is saved, and every store's own hook
-moves its entries to the new name, each in the format it always had (older builds read them
-as before). One save may rename several providers at once, a swap among them (`Renames`).
+QiTV keeps much under a provider's name, never under anything else: a rename in Settings
+(ui.provider_actions, through the TV window) calls `carry_over()` once the provider list with
+the new name is saved, and every store's own hook moves its entries to the new name, each in
+the format it always had (older builds read them as before). One call may rename several
+providers at once, a swap among them (`Renames`).
 
 Kept by name, in config.json: the selected provider, the Library's (`library_provider_name`,
 `library_mix`), the stars (`services.favorites`), the history, the resume points, the last film

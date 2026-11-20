@@ -31,17 +31,20 @@ and the `licenses/` folder are inside every packaged app.
 
 ## Python runtime
 
-The apps contain the CPython 3.14.8 interpreter and standard library as `uv` installs it: the
-python-build-standalone build of release 20261009. On macOS and Linux that build links the
-libraries below into the interpreter (`libpython`); on Windows they are separate files, and the
-app contains those of the modules QiTV uses. On Linux, Berkeley DB is a separate module QiTV does
+The apps contain the CPython 3.14 interpreter and standard library as `uv` installs it in the
+release job: the CPython 3.14 release it resolves then, in python-build-standalone's build of
+it. The versions in the table below are those of the build these notices were last checked
+against, CPython 3.14.8 in python-build-standalone release 20261009; an app built from a later
+build carries the versions that build has. On macOS and Linux the build links the libraries
+below into the interpreter (`libpython`); on Windows they are separate files, and the app
+contains those of the modules QiTV uses. On Linux, Berkeley DB is a separate module QiTV does
 not use: it is not in the apps. Tcl/Tk is in the Windows and Linux apps for PyInstaller's
 start-up splash only (the Tcl and Tk libraries and a few of their scripts): its bootloader shows
 the still of QiTV's mark with them while the app unpacks. On Linux that build links the X11
 client libraries Tk draws with (libX11, libxcb and libXau) into its Tk library, so they are in
 the Linux app too. QiTV's code doesn't use tkinter, and the macOS app has no Tcl/Tk.
 
-| Component | Version | License, as its source states it | Text | Platforms |
+| Component | Version, as last checked | License, as its source states it | Text | Platforms |
 | --- | --- | --- | --- | --- |
 | CPython | 3.14.8 | Python Software Foundation License Version 2 (PSF-2.0); its LICENSE also carries the older BeOpen, CNRI and CWI terms | `licenses/python/CPython.txt` (the installed Python's `lib/python3.14/LICENSE.txt`) | all |
 | Software CPython incorporates (HACL\*, mimalloc and others) | 3.14.8 | each as listed | `licenses/python/CPython-incorporated-software.rst` (CPython 3.14.8's `Doc/license.rst`) | all |
@@ -64,8 +67,8 @@ the Linux app too. QiTV's code doesn't use tkinter, and the macOS app has no Tcl
 | libXau | 1.0.12 | MIT (X11 style) | `licenses/python/libXau.txt` (its `COPYING`, python-build-standalone's copy) | Linux (inside Tk) |
 
 - Source code: <https://www.python.org/downloads/source/>, and the build at
-  <https://github.com/astral-sh/python-build-standalone> (release 20261009), which names each
-  library's source and checksum.
+  <https://github.com/astral-sh/python-build-standalone>, whose release the app was built with
+  (20261009 when these notices were last checked) names each library's source and checksum.
 - The texts come from the installed Python where it has them (`CPython.txt`), from
   python-build-standalone's release for the X11 libraries (it ships each one's `COPYING`), and
   otherwise from each project's own release of that version.

@@ -11,6 +11,9 @@ Settings window's Save ran for it, in its order:
   again at once then keeps what its new sign-in brings); the TV's is set up again with it once
   they reloaded;
 - the same connection (the stream limit, the guide's offset): the catalogs reload only;
+- a run of steps on one row (Verify certificates: `write` each, `follow_up` once they stop):
+  each step written at once, the follow-ups above once, for what the run changed; none when it
+  came back to where it began;
 - renamed: what is kept under its old name moves (`providers_renamed`), its lists under that
   name go (a write its catalog queued too), the catalogs reload, and the TV's is set up again
   under its new name;
@@ -64,15 +67,38 @@ class ProviderActions:
         change = self.changes.update(name, changes)
         if not change.fields and not refresh:
             return change
+        self._follow(name, change.identity_changed or refresh)
+        return change
+
+    def write(self, name: str, changes: dict, since: dict) -> Change:
+        """One step of a run on provider `name`'s rows, written at once with no follow-up yet
+        (`follow_up` runs them once the steps stop): its fields by `changes`, by the rules
+        against `since`, the provider as it was before the steps began (ProviderChanges.update:
+        steps back to where they began write it as it was)."""
+        return self.changes.update(name, changes, since=since)
+
+    def follow_up(self, name: str, before: dict) -> None:
+        """The steps on provider `name`'s rows stopped (`write`): what `update` follows a change
+        with, once, for what differs from `before`, the provider before them. Nothing when they
+        came back to it, or when the provider went meanwhile (renamed or removed: those follow
+        themselves up)."""
+        try:
+            change = self.changes.since(name, before)
+        except KeyError:
+            return
+        if change.fields:
+            self._follow(name, change.identity_changed)
+
+    def _follow(self, name: str, anew: bool) -> None:
+        """A change of provider `name`, written: its lists come again on a new connection
+        (`anew`), then the catalogs reload."""
         selected = self._selected(name)
-        anew = change.identity_changed or refresh
         if anew and not selected:
             self._drop_lists(name)
         self._window.providers_saved()
         if anew and selected:
             self._window.set_provider(force_update=True)
         self._done()
-        return change
 
     def rename(self, old: str, new: str) -> str:
         """Rename provider `old` (ProviderChanges.rename: NameTaken); its name now."""

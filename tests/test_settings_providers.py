@@ -43,7 +43,7 @@ from ui.keymap import Action
 from ui.overlays.settings_card import BUSY_TEXT, CANCEL
 from ui.overlays.settings_drawer import SettingsDrawer
 from ui.overlays.settings_layout import Item, title_of, whole
-from ui.settings_controller import SettingsController
+from ui.settings_controller import STEPS_SETTLE_MS, SettingsController
 from ui.settings_providers import (
     HTTP_ONLY_NOTE,
     NAME_TAKEN_TEXT,
@@ -127,6 +127,9 @@ class FakeWindow:
 
     def notify(self, text, kind="info", ms=0, **_button):
         self.toasts.append((text, kind))
+
+    def closing(self):
+        return False
 
     def show_free_channels(self, global_pos):
         self.free.append(global_pos)
@@ -357,12 +360,92 @@ class ProvidersTests(unittest.TestCase):
         self.key(Action.NAV_RIGHT)
         self.assertEqual(self.saved("Panel"), {**PANEL, "ssl_verify": False})
         self.assertEqual(self.value("Panel", "ssl"), "Off")
-        self.key(Action.NAV_RIGHT)
-        self.assertEqual(self.saved("Panel"), {**PANEL, "ssl_verify": True})  # it was there
+        self.key(Action.NAV_RIGHT)  # back: it follows the global setting again (no key)
+        self.assertEqual(self.saved("Panel"), PANEL)
         self.config.ssl_verify = False  # the global setting off: the default follows it
         self.rows.providers_changed()
         self.assertIs(self.row("Panel", "ssl").default, False)
         self.assertEqual(self.saved("Lists"), PLAYLIST)
+
+    def test_verify_certificates_connects_anew_once_the_steps_stop(self):
+        # Each step is written at once; a new connection (the lists dropped) only once the
+        # steps stop, and only when they changed it: back where it began, nothing at all.
+        with mock.patch.object(self.manager, "invalidate_provider_cache") as dropped:
+            self.on("Panel", "ssl")
+            self.key(Action.NAV_LEFT)  # (← meant as "back")
+            self.key(Action.NAV_RIGHT)
+            elapse(STEPS_SETTLE_MS + 80)
+            self.assertEqual(self.saved("Panel"), PANEL)
+            dropped.assert_not_called()
+            self.assertEqual(self.window.events, [])
+            for _ in range(3):
+                self.key(Action.NAV_RIGHT)
+                elapse(STEPS_SETTLE_MS - 200)
+            self.assertEqual(self.saved("Panel"), {**PANEL, "ssl_verify": False})
+            dropped.assert_not_called()
+            self.assertEqual(self.window.events, [])
+            elapse(280)
+            dropped.assert_called_once_with("Panel")
+            self.assertEqual(self.window.events, ["providers_saved"])
+            # On again after the steps stopped, in this visit of Settings: it connects anew,
+            # and follows the global setting again, as before its first step.
+            self.key(Action.NAV_RIGHT)
+            elapse(STEPS_SETTLE_MS + 80)
+            self.assertEqual(self.saved("Panel"), PANEL)
+            self.assertEqual(dropped.call_count, 2)
+            self.assertEqual(self.window.events, ["providers_saved"] * 2)
+            # The TV's provider is set up again once, its lists kept for it; never while the
+            # window closes.
+            self.window.events.clear()
+            self.on("Lists", "ssl")
+            for _ in range(3):
+                self.key(Action.NAV_RIGHT)
+            elapse(STEPS_SETTLE_MS + 80)
+            self.assertEqual(self.window.events, ["providers_saved", ("set_provider", True)])
+            self.assertEqual(dropped.call_count, 2)
+            self.key(Action.NAV_RIGHT)
+            with mock.patch.object(self.window, "closing", return_value=True):
+                elapse(STEPS_SETTLE_MS + 80)
+            self.assertEqual(len(self.window.events), 2)
+            self.assertEqual(self.saved("Lists"), PLAYLIST)  # (written at once all the same)
+
+    def test_verify_certificates_of_its_own_stays_its_own(self):
+        # A provider with a check of its own keeps it through a round trip, as it was.
+        self.manager.providers[1] = {**PANEL, "ssl_verify": True}
+        self.on("Panel", "ssl")
+        self.key(Action.NAV_RIGHT)
+        self.assertIs(self.saved("Panel")["ssl_verify"], False)
+        self.key(Action.NAV_RIGHT)
+        self.assertEqual(self.saved("Panel"), {**PANEL, "ssl_verify": True})
+        elapse(STEPS_SETTLE_MS + 80)
+        self.assertEqual(self.window.events, [])
+
+    def test_a_verify_certificates_step_outlives_a_rename_and_settings(self):
+        # Renamed before the steps stop: the step stays written, and only the rename's own
+        # follow-ups run. Back on under its new name: it follows the global setting again, as
+        # before the first step. Settings gone before the steps stop: it still connects anew
+        # once they do.
+        with mock.patch.object(self.manager, "invalidate_provider_cache") as dropped:
+            self.on("Panel", "ssl")
+            self.key(Action.NAV_RIGHT)
+            self.key(Action.NAV_UP)
+            self.key(Action.NAV_UP)
+            self.assertEqual(self.drawer.focused_row().key, row_key("Panel", "name"))
+            self.type_name("Panel TV", replace=True)
+            events, drops = list(self.window.events), dropped.call_count
+            elapse(STEPS_SETTLE_MS + 80)
+            self.assertEqual(
+                self.saved("Panel TV"), {**PANEL, "name": "Panel TV", "ssl_verify": False}
+            )
+            self.assertEqual((self.window.events, dropped.call_count), (events, drops))
+            self.move_to(row_key("Panel TV", "ssl"))
+            self.key(Action.NAV_RIGHT)
+            self.assertEqual(self.saved("Panel TV"), {**PANEL, "name": "Panel TV"})
+            self.settings.close()
+            elapse(STEPS_SETTLE_MS + 80)
+            dropped.assert_called_with("Panel TV")
+            self.assertEqual(dropped.call_count, drops + 1)
+            self.assertEqual(self.window.events, events + ["providers_saved"])
 
     def test_offset_steps_and_zero_pops_the_key(self):
         row = self.on("Panel", "offset")
@@ -527,6 +610,15 @@ class ProvidersTests(unittest.TestCase):
         self.assertEqual(self.shown(), ())
         self.assertEqual(self.drawer.focus_side(), "left")  # nothing left to focus
         self.assertEqual(self.drawer._chain()[-1].empty_text, "No hidden groups")
+
+    def test_the_hidden_groups_count_is_the_languages_number(self):
+        # As every other count in Settings: in the language's own digits.
+        self.window.hidden_groups.hide("live", "Panel", "10", "Foreign news")
+        self.window.hidden_groups.hide("movies", "Panel", "20", "Drama")
+        self.assertEqual(i18n.set_language("ar"), "ar")
+        self.addCleanup(i18n.set_language, "en")
+        self.assertNotEqual(i18n.number(2), "2")  # (its digits are other than English's)
+        self.assertEqual(self.on("Panel", "hidden").note, i18n.number(2))
 
     def test_no_hidden_groups_says_so(self):
         hidden = self.on("Lists", "hidden")

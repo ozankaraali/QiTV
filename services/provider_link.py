@@ -11,6 +11,9 @@ Providers hand out a single link more often than the form's fields:
 
 Values are percent-decoded only (a "+" in a password stays one).
 
+An Xtream address that is no link (`xtream_address`) keeps its server and the path a panel is
+served under, never a file's path (the same host's film or page pasted into it).
+
 The text may come from the clipboard or a drop: it is never logged, and a `ProviderLink`'s
 repr hides the password.
 """
@@ -29,6 +32,8 @@ _STREAM_ID = re.compile(r"^\d+(?:\.\w+)?$")  # a stream's last part: 123, 123.ts
 _PLAYLIST_SUFFIXES = (".m3u", ".m3u8")
 _MAC = re.compile(r"^[0-9A-Fa-f]{2}(?::[0-9A-Fa-f]{2}){5}$")
 _SCHEMES = ("http", "https")
+# A path's last part that names a file (film.mp4, index.html), not a folder (v1.2).
+_FILE_NAME = re.compile(r"\.[A-Za-z][A-Za-z0-9]{0,4}$")
 
 
 @dataclass(frozen=True)
@@ -122,6 +127,29 @@ def parse_provider_link(text: str) -> Optional[ProviderLink]:
         mac = query.get("mac", "")
         return ProviderLink(STB, f"{server}{portal}", mac=mac.upper() if _MAC.match(mac) else "")
     return None
+
+
+def xtream_address(address: str) -> str:
+    """An Xtream provider's address from a web address typed or pasted that is no link: as it
+    is, but a path that ends in a file. A panel's API file there goes, with its query
+    (…/xc/player_api.php: the panel is under /xc); any other file's path is no panel's, so only
+    the server stays (…/media/film.mp4: its panel answers at the server's root)."""
+    try:
+        parts = urlsplit(address)
+    except ValueError:
+        return address
+    if parts.scheme.lower() not in _SCHEMES or not parts.netloc:
+        return address
+    segments = [s for s in parts.path.split("/") if s]
+    last = segments[-1] if segments else ""
+    if last.lower() in _XTREAM_FILES:
+        segments.pop()
+    elif _FILE_NAME.search(last):
+        segments = []
+    else:
+        return address
+    server = f"{parts.scheme}://{parts.netloc}"
+    return f"{server}/{'/'.join(segments)}" if segments else server
 
 
 def _portal(path: str) -> Optional[str]:
