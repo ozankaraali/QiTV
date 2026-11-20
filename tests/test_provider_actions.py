@@ -108,17 +108,25 @@ class ProviderActionsTests(unittest.TestCase):
         )
         self.assertEqual(self.run_action("update", "Panel", {GUIDE_OFFSET_KEY: 60}), [])
         # A rename: what is kept under the old name moves, before the catalogs reload ...
+        # (its lists under the old name go, through its catalog's manager when it has one).
         names = ["Extra", "Lists", "Panel"]
         self.assertEqual(
             self.run_action("rename", "Panel", "Films"),
-            [("providers_renamed", {"Panel": "Films"}, names, []), SAVED, REBUILT],
+            [
+                ("providers_renamed", {"Panel": "Films"}, names, []),
+                ("invalidate", "list", "Panel"),
+                SAVED,
+                REBUILT,
+            ],
         )
         self.assertEqual(self.result, "Films")
         # ... and the one shown is set up again under its new name.
+        self.window.catalog_for("Lists")
         self.assertEqual(
             self.run_action("rename", "Lists", "News"),
             [
                 ("providers_renamed", {"Lists": "News"}, ["Extra", "Films", "Lists"], []),
+                ("invalidate", "own", "Lists"),
                 SAVED,
                 ("set_provider", True),
                 REBUILT,
@@ -129,10 +137,15 @@ class ProviderActionsTests(unittest.TestCase):
             self.run_action("rename", "Films", "news")
         self.assertEqual(self.window.events, [])
         self.assertEqual(self.run_action("rename", "Films", "Films"), [])  # nothing to follow
-        # Removed (not the one shown): its recordings go, then the catalogs reload.
+        # Removed (not the one shown): its recordings and its lists go, then the catalogs reload.
         self.assertEqual(
             self.run_action("remove", "Films"),
-            [("providers_renamed", {}, [], ["Films"]), SAVED, REBUILT],
+            [
+                ("providers_renamed", {}, [], ["Films"]),
+                ("invalidate", "list", "Films"),
+                SAVED,
+                REBUILT,
+            ],
         )
         self.assertEqual(self.actions.changes.names(), ["News", "Extra"])
 
@@ -141,7 +154,8 @@ class ProviderActionsTests(unittest.TestCase):
             {"type": "M3UPLAYLIST", "name": "Extra", "url": "http://extra.test/tv.m3u"}
         )
         self.manager.save_providers()
-        removed = [("providers_renamed", {}, [], ["Lists"]), SAVED]
+        self.window.catalog_for("Lists")
+        removed = [("providers_renamed", {}, [], ["Lists"]), ("invalidate", "own", "Lists"), SAVED]
         self.assertEqual(
             self.run_action("remove", "Lists"),
             [*removed, ("save_config", "Panel"), ("set_provider", False), REBUILT],
@@ -156,6 +170,7 @@ class ProviderActionsTests(unittest.TestCase):
             self.run_action("remove", "Panel"),  # none left: the TV shows its welcome card
             [
                 ("providers_renamed", {}, [], ["Panel"]),
+                ("invalidate", "list", "Panel"),
                 SAVED,
                 ("save_config", ""),
                 ("set_provider", False),

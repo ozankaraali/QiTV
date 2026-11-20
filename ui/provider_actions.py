@@ -10,11 +10,12 @@ Settings window's Save ran for it, in its order:
   loses its cached lists before the catalogs reload (one set up again at once then keeps what
   its new sign-in brings); the TV's is set up again with it once they reloaded;
 - the same connection (the stream limit, the guide's offset): the catalogs reload only;
-- renamed: what is kept under its old name moves (`providers_renamed`), the catalogs reload,
-  and the TV's is set up again under its new name;
-- removed: its scheduled recordings go (`providers_renamed`), the catalogs reload; the TV's
-  gives way to the provider after it in the list (the one before it when it was the last; none
-  when it was the only one: the welcome card).
+- renamed: what is kept under its old name moves (`providers_renamed`), its lists under that
+  name go (a write its catalog queued too), the catalogs reload, and the TV's is set up again
+  under its new name;
+- removed: its scheduled recordings go (`providers_renamed`), so do its lists (as a rename's),
+  the catalogs reload; the TV's gives way to the provider after it in the list (the one before
+  it when it was the last; none when it was the only one: the welcome card).
 
 Each ends with the menu bar's provider list rebuilt. Asking first (a removal, the parental
 PIN for a rename) is the caller's. The TV's provider is the one Settings selects
@@ -67,6 +68,7 @@ class ProviderActions:
         if name == old:
             return name
         self._window.providers_renamed(Renames({old: name}, before), [])
+        self._manager_of(old).invalidate_provider_cache(old)  # a write queued under the old name
         self._window.providers_saved()
         if selected:
             self._window.set_provider(force_update=True)
@@ -79,6 +81,7 @@ class ProviderActions:
         selected = self._selected(name)
         self.changes.remove(name)
         self._window.providers_renamed(Renames({}), [name])
+        self._manager_of(name).invalidate_provider_cache(name)  # a write queued for it, too
         self._window.providers_saved()
         if selected:
             left = self.changes.names()
