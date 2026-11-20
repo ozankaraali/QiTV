@@ -11,7 +11,7 @@ from unittest import mock
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
-from ui.settings_dialog import ProviderVerificationWorker
+from services.provider_check import check
 
 
 class _Server(BaseHTTPRequestHandler):
@@ -54,13 +54,8 @@ class VerifyMediaServerTests(unittest.TestCase):
             "username": "me",
             "password": password,
         }
-        worker = ProviderVerificationWorker(1, provider, True)
-        got = {"access": None, "why": "", "verified": None}
-        worker.signed_in.connect(lambda _rid, access: got.update(access=access))
-        worker.reason.connect(lambda _rid, why: got.update(why=why))
-        worker.result.connect(lambda _rid, _provider, ok: got.update(verified=ok))
-        worker.run()
-        return got
+        outcome = check(provider, True)
+        return {"access": outcome.access, "why": outcome.why, "verified": outcome.ok}
 
     def test_a_sign_in_hands_back_the_servers_access(self):
         got = self.verify("pw")
@@ -81,7 +76,7 @@ class VerifyMediaServerTests(unittest.TestCase):
     def test_a_wrong_password_says_so(self):
         got = self.verify("nope")
         self.assertFalse(got["verified"])
-        self.assertIsNone(got["access"])
+        self.assertEqual(got["access"], {})
         self.assertEqual(got["why"], "The user name or the password is not right.")
 
 

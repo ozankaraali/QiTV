@@ -19,8 +19,8 @@ os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 from services import provider_api
 from services.epg_manager import EpgManager, _xtream_cache_key
 from services.provider_api import CLIENT_HEADERS
+from services.provider_check import check
 from services.workers import M3ULoaderWorker, XtreamLoaderWorker, XtreamSeriesInfoWorker
-from ui.settings_dialog import ProviderVerificationWorker
 
 XMLTV = (
     b'<?xml version="1.0"?><tv><channel id="one"><display-name>One</display-name></channel>'
@@ -116,11 +116,7 @@ class BlockedLibraryAgentTests(unittest.TestCase):
         return results[0]
 
     def _verify(self, **provider):
-        verified = []
-        worker = ProviderVerificationWorker(1, provider, True)
-        worker.result.connect(lambda _id, _provider, ok: verified.append(ok))
-        worker.run()
-        return verified[0]
+        return check(provider, True).ok
 
     def test_xtream_catalog_loads(self):
         catalog = self._run(XtreamLoaderWorker(self.base, "user", "password", "itv"))
