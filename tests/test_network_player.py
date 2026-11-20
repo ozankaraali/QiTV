@@ -19,6 +19,7 @@ from unittest import mock
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 from PySide6.QtCore import Qt
+from PySide6.QtWidgets import QWidget
 from timer_fixtures import elapse, pause, wait_until
 
 from services import network_streams as ns, parental
@@ -34,6 +35,7 @@ from tests.test_tv_window import WindowCase
 from ui import live_controls
 from ui.keymap import Action
 from ui.network_player import NetworkPlayer
+from ui.open_link import LinkCard, OpenLink
 
 URL = "https://cdn.example/live/harbour/index.m3u8?token=aaa"
 FRESH = "https://cdn.example/live/harbour/index.m3u8?token=bbb"
@@ -883,6 +885,25 @@ class FailureTests(PlayerCase):
         self.assertEqual(len(self.starts()), 4)
         self.assertEqual(self.starts()[-1][0], URL)
 
+    def test_a_direct_link_that_ends_for_good_keeps_why(self):
+        # Final review M5: it only said "The stream ended", and Network streams kept no
+        # reason for it (the pipeline's give-up keeps one).
+        self.enterContext(mock.patch.object(live_controls, "RECONNECT_MS", (10, 20)))
+        rtmp = "rtmp://media.example/live/harbour"
+        self.link(rtmp)  # no pipeline: VLC plays it directly
+        self.plays_now()
+        self.session.stateChanged.emit("ended")
+        self.session.ended.emit()
+        self.assertTrue(wait_until(lambda: len(self.session.plays) == 2))  # its one try again
+        self.plays_now()
+        self.session.stateChanged.emit("ended")
+        self.session.ended.emit()  # ended again: nothing more is tried
+        self.assertEqual(self.entry(rtmp).failed, "The link stopped answering")
+        self.assertIn("The link stopped answering", self.errors()[-1])
+        self.assertNotIn(("The stream ended", "info"), self.toast.messages())
+        pause(100)
+        self.assertEqual(len(self.session.plays), 2)
+
     def test_a_link_that_plays_again_forgets_why_it_failed(self):
         self.link(URL)
         self.live.failure = lambda: ("http", 403)
@@ -1015,11 +1036,88 @@ class NoProviderHoldTests(PlayerCase):
         self.assertIn(("MPV is not installed", "error"), self.toast.messages())
         self.assert_the_film_holds_on()
 
+    def test_a_link_an_outside_player_took_lets_go(self):
+        # Final review M4: Settings' Play in VLC took the link, and QiTV stayed black with no
+        # welcome card (and the update question waiting) for good.
+        self.config.play_in_vlc = True
+        self.player.play(URL, LIVE)
+        self.waits()
+        self.assertTrue(wait_until(lambda: self.external.calls == [("vlc", URL)]))
+        self.assertTrue(wait_until(lambda: self.runs == [True]))
+        self.assertTrue(self.welcome.visible)
+        self.assertFalse(self.controller._link_hold)
+
     def test_with_a_provider_a_link_holds_nothing(self):
         self.catalog.names = ["Home"]
         self.link(URL)
         self.waits()
         self.assertEqual(self.runs, [True])  # at once, as with a channel
+
+
+class CardOverTheTvTests(PlayerCase):
+    """Final review M1: while File → Open Link…'s card shows (it has the keys), neither the
+    list nor the welcome card opens over it by itself: they wait until it goes, cancelled
+    or after its Play (the link held first)."""
+
+    def setUp(self):
+        super().setUp()
+        self.host = QWidget()
+        self.host.resize(1280, 720)
+        self.host.show()
+        self.addCleanup(self.host.deleteLater)
+        self.addCleanup(self.host.close)
+        self.card = LinkCard(self.host)
+        self.opener = OpenLink(
+            self.card,
+            self.jobs,
+            play=self.player.play,
+            add_provider=lambda link: None,
+            verify_ssl=lambda url: True,
+            may_probe=lambda url: False,  # never read: no network in tests
+            parent=self.host,
+        )
+        self.controller.add_card(self.card)
+        self.loaded()
+
+    def test_the_list_due_meanwhile_opens_once_the_card_is_cancelled(self):
+        self.opener.open()
+        self.catalog.hub_ready("Home")  # the provider still loading at start comes
+        self.catalog.sectionReady.emit("live")
+        self.assertEqual(self.drawer.named("open_drawer"), [])  # not over the card
+        self.card.handle(Action.ESCAPE)
+        self.assertTrue(self.card.isHidden())
+        self.assertTrue(wait_until(lambda: self.drawer.named("open_drawer") == [(None,)]))
+
+    def test_without_a_provider_the_welcome_card_waits_for_the_card(self):
+        self.catalog.names = []
+        self.controller.start()
+        self.link(URL)  # held: the welcome card waits for it
+        self.assertFalse(self.welcome.visible)
+        self.opener.open()  # a fresh link is pasted as the one playing runs out
+        self.live.failure = lambda: ("http", 401)
+        self.live.failed.emit(STREAM_REFUSED)
+        pause(20)
+        self.assertFalse(self.welcome.visible)  # not over the card, which has the keys
+        self.card.handle(Action.ESCAPE)
+        self.assertTrue(wait_until(lambda: self.welcome.visible))
+
+    def test_a_link_played_from_the_card_holds_before_the_welcome_card_could_come(self):
+        self.catalog.names = []
+        self.controller.start()
+        self.link(URL)
+        self.opener.open()
+        self.live.failure = lambda: ("http", 401)
+        self.live.failed.emit(STREAM_REFUSED)
+        self.live.released.emit()
+        fresh = "https://cdn.example/live/coast/index.m3u8"
+        self.card.handle(Action.NAV_TEXT, fresh)
+        opened = len(self.starts())
+        self.card.handle(Action.NAV_ACTIVATE)  # Play: classified live by its address
+        self.assertTrue(self.card.isHidden())
+        self.assertTrue(wait_until(lambda: len(self.starts()) > opened))
+        pause(20)
+        self.assertFalse(self.welcome.visible)  # the fresh link holds it
+        self.assertTrue(self.controller._link_hold)
 
 
 class WindowTests(WindowCase):

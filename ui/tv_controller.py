@@ -112,7 +112,7 @@ from services.navigation import (
     payloads,
     recent_channel,
 )
-from services.network_streams import FILM, LIVE, failure_reason, is_link
+from services.network_streams import DOWN, FILM, LIVE, failure_reason, is_link
 from services.next_episode import LOCAL_NEXT, play_context
 from services.open_paths import PLAYLIST_EXTENSIONS, is_music, is_song, is_video
 from services.picture import SOURCE_DIRECT, ChannelPictures
@@ -434,8 +434,11 @@ class TVController(QObject):
             link_failed=self._on_link_failed,
             parent=self,
         )
+        # Cards over the TV of their own (File → Open Link…'s, plan 4; add_card).
+        self._cards: list[Any] = []
         # Provider setups: the loading and welcome hints, the last channel, the Library's
-        # hold on live TV.
+        # hold on live TV. What opens by itself (the list, the welcome card) waits while
+        # Settings or a card over the TV shows: either has the keys (final review M1).
         self._flow = ProviderFlow(
             catalog=catalog,
             nav=nav,
@@ -453,7 +456,7 @@ class TVController(QObject):
             drop_autoplay=self._drop_card,
             autoplay_hint=lambda: self._autoplay.hint(),
             explain=self._explain,
-            settings_shown=self._settings_shown,
+            settings_shown=lambda: self._settings_shown() or self._shown_card() is not None,
             parent=self,
         )
         self._current: Optional[Target] = None  # handed to the player
@@ -658,8 +661,6 @@ class TVController(QObject):
             update_guides=lambda: self._update_guides(),
             parent=self,
         )
-        # Cards over the TV of their own (File → Open Link…'s, plan 4; add_card).
-        self._cards: list[Any] = []
         # 2.6: before a recording is stopped for a stream, the question.
         # 2.8: a Jellyfin or Emby server hears where its title plays (None: none told).
         self._media = media_reporter
@@ -1681,8 +1682,18 @@ class TVController(QObject):
         ui/overlays/settings_card.py): while it shows it has every key but QiTV's questions'
         (it hands back the sound's and the window's), before the OpenSubtitles search, the
         guide, Settings and the channel list, so none reaches what is under it; the keys type
-        into it (the drawer's context), and Esc is its own."""
+        into it (the drawer's context), and Esc is its own. Nothing opens over it by itself:
+        once it goes, what waited for it comes (`_card_went`)."""
         self._cards.append(card)
+        card.installEventFilter(self)  # its hiding (`eventFilter`)
+
+    def _card_went(self) -> None:
+        """A card over the TV went (cancelled, or once it handed its link over: the link holds
+        first): what waited for it (the welcome card, the list due meanwhile) comes now, as
+        after Settings, unless Settings or another card still covers the TV."""
+        if self._closed or self._settings_shown() or self._shown_card() is not None:
+            return
+        self._flow.settings_closed()
 
     def _shown_card(self) -> Optional[Any]:
         return next((card for card in reversed(self._cards) if not card.isHidden()), None)
@@ -2041,6 +2052,9 @@ class TVController(QObject):
             self._column_wheel.wheel_event(event)
             event.accept()
             return True
+        if event.type() == QEvent.Type.Hide and any(watched is card for card in self._cards):
+            # After what hid it (Play hands its link over right after: it holds first).
+            QTimer.singleShot(0, self, self._card_went)
         return False
 
     def _on_column_wheel(self, steps: int, modifiers) -> None:
@@ -2846,6 +2860,13 @@ class TVController(QObject):
         self.handedOn.emit()  # the phones that watched before let go
         self._current, self._cid = target, None
         self._delivered(target, url)
+        if self._link_holds(target):
+            # An outside player took the link: nothing plays in QiTV, so nothing holds the
+            # welcome card back (final review M4); a file's hold under it stays the file's.
+            if self._file_under_link:
+                self._link_hold = self._file_under_link = False
+            else:
+                self._let_go_of_link()
 
     def phone_stopped(self) -> None:
         """2.8.12: the phone that watched left for good (`RemoteController`): the stream it
@@ -4418,10 +4439,14 @@ class TVController(QObject):
                 return  # LiveSession opens its direct play again itself, in the same slot
             if self._live_controls.reconnect(current):
                 return  # the same stream opens again, in the same slot (the pill says when)
+            if self._network_url(current.item) is not None:
+                # A link ended for good: said, and kept with why (final review M5); a held
+                # one lets go (_on_link_failed).
+                self._fail_focused_tile(ended=True)
+                self._on_link_failed(current, DOWN)
+                return
             self._toast(tr("The stream ended"))  # i18n: a toast
             self._fail_focused_tile(ended=True)
-            if self._link_holds(current):
-                self._let_go_of_link()  # a link's stream ended for good
             return
         try:
             self.watch.flush()
