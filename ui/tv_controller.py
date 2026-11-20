@@ -112,7 +112,7 @@ from services.navigation import (
     payloads,
     recent_channel,
 )
-from services.network_streams import FILM, LIVE, failure_reason, is_link
+from services.network_streams import DOWN, FILM, LIVE, failure_reason, is_link
 from services.next_episode import LOCAL_NEXT, play_context
 from services.open_paths import PLAYLIST_EXTENSIONS, is_music, is_song, is_video
 from services.picture import SOURCE_DIRECT, ChannelPictures
@@ -385,6 +385,8 @@ class TVController(QObject):
         # item its provider makes the link of), and the link whose first picture was heard.
         self._links: Callable[[dict], Optional[str]] = _own_link
         self._link_heard: Optional[Target] = None
+        # Whose stream a link is now (`set_link_owner`; None: no link), asked as it plays.
+        self._whose: Callable[[dict], Optional[str]] = lambda item: None
         # Its link kept under an id plays, by the network player (`set_link_player`).
         self._play_kept: Callable[[str], bool] = lambda key: False
         # Channel up/down while a kept link plays: its neighbour there (`set_link_stepper`).
@@ -432,8 +434,11 @@ class TVController(QObject):
             link_failed=self._on_link_failed,
             parent=self,
         )
+        # Cards over the TV of their own (File → Open Link…'s, plan 4; add_card).
+        self._cards: list[Any] = []
         # Provider setups: the loading and welcome hints, the last channel, the Library's
-        # hold on live TV.
+        # hold on live TV. What opens by itself (the list, the welcome card) waits while
+        # Settings or a card over the TV shows: either has the keys (final review M1).
         self._flow = ProviderFlow(
             catalog=catalog,
             nav=nav,
@@ -451,7 +456,7 @@ class TVController(QObject):
             drop_autoplay=self._drop_card,
             autoplay_hint=lambda: self._autoplay.hint(),
             explain=self._explain,
-            settings_shown=self._settings_shown,
+            settings_shown=lambda: self._settings_shown() or self._shown_card() is not None,
             parent=self,
         )
         self._current: Optional[Target] = None  # handed to the player
@@ -552,6 +557,7 @@ class TVController(QObject):
             may_hide=lambda: self.parental is not None and self.parental.has_pin(),
             tidy=self._tidy_from_menu,  # 2.9.1: out of the lists, no PIN
             record_at=lambda: self.record_at,
+            link=lambda item: self._network_url(item) is not None,
             parent=self,
         )
         # The volume keys, mute and the wheel, on the mixer (one row per picture).
@@ -655,8 +661,6 @@ class TVController(QObject):
             update_guides=lambda: self._update_guides(),
             parent=self,
         )
-        # Cards over the TV of their own (File → Open Link…'s, plan 4; add_card).
-        self._cards: list[Any] = []
         # 2.6: before a recording is stopped for a stream, the question.
         # 2.8: a Jellyfin or Emby server hears where its title plays (None: none told).
         self._media = media_reporter
@@ -750,6 +754,7 @@ class TVController(QObject):
                 explain=self._explain_item,
                 needs_stream=self._ask_for_stream,
                 borrow=lambda item, provider, purpose: self.lend_scheduled(item, provider, purpose),
+                owned=self._owned,
                 parent=self,
             )
             self._pip.changed.connect(self._mixer.refresh)
@@ -1212,6 +1217,30 @@ class TVController(QObject):
         Without it a link plays its own address."""
         self._links = resolve
 
+    def set_link_owner(self, whose: Callable[[dict], Optional[str]]) -> None:
+        """`whose(item)`: whose stream the link `item` is now (the network player's: the
+        account its address names, else Network streams'; None for an item that is no link).
+        Every way a link plays books it so, and ⟲ Recent lists it so, never as it was kept."""
+        self._whose = whose
+        set_owner = getattr(self.nav, "set_link_owner", None)
+        if set_owner is not None:
+            set_owner(whose)
+
+    def _owned(self, item: dict) -> dict:
+        """`item` stamped with whose stream it is now, when it is a link (final review C1: a
+        link kept before its account was configured books under that account); any other
+        item as it is."""
+        owner = self._whose(item) if isinstance(item, dict) else None
+        if owner is None or provider_of(item) == owner:
+            return item
+        return with_provider(item, owner)
+
+    def _owned_target(self, target: Target) -> Target:
+        """`target`, its link stamped with whose stream it is now; itself for anything else
+        (what plays now stays what plays now)."""
+        owned = target.item if target.local else self._owned(target.item)
+        return target if owned is target.item else replace(target, item=owned)
+
     def set_link_player(self, play: Callable[[str], bool]) -> None:
         """`play(id)`: the link of Network streams kept under `id` plays (the network
         player's: it knows its kind and whose stream it is); False when none is kept so."""
@@ -1246,9 +1275,10 @@ class TVController(QObject):
         stopped. Its address is known: the link lanes answer it, no provider is asked. With no
         provider configured it is held as a file opened in QiTV is (_hold_for_link).
         `zapped`: channel up/down stepped to it over the picture, a zap step as a channel's
-        (an outside player opens only once the steps settle)."""
-        if self._closed:
-            return
+        (an outside player opens only once the steps settle). A link parental controls hide
+        plays nowhere while locked, as a hidden channel (its list leaves it out)."""
+        if self._closed or self.hides_link(item):
+            return  # (before the hold: nothing would replace it)
         self._hold_for_link()
         if section == "live" and zapped:
             self._tune(item, RECENT_GROUP, [item], from_zap=True)
@@ -1259,6 +1289,27 @@ class TVController(QObject):
 
     def _network_url(self, item: dict) -> Optional[str]:
         return self._links(item) or None
+
+    def _guard_view(self, section: str, item: dict) -> tuple[str, dict]:
+        """`item` of `section` as parental controls know it: a link as one live link of
+        Network streams by its id, whoever's stream it is now (an account added after it was
+        hidden) and a film too; anything else as it is."""
+        if self._network_url(item) is not None:
+            return "live", with_provider(item, NETWORK_PROVIDER)
+        return section, item
+
+    def hides_link(self, item: dict) -> bool:
+        """Whether parental controls hide the link `item` now (locked): it is not listed,
+        never plays, and channel up/down steps past it. False for an item that is no link."""
+        guard = self.parental
+        if guard is None or self._network_url(item) is None:
+            return False
+        return bool(guard.hides_item(*self._guard_view("live", item)))
+
+    def _protects_play(self, guard: Any, target: Target) -> bool:
+        """`guard.protects_play` for what `target` plays, a link as `_guard_view` says."""
+        section, item = self._guard_view(target.section, target.item)
+        return bool(guard.protects_play(section, item, target.context))
 
     def _hold_for_link(self) -> None:
         """A link is about to play while no provider is configured: nothing opens over it (the
@@ -1637,8 +1688,18 @@ class TVController(QObject):
         ui/overlays/settings_card.py): while it shows it has every key but QiTV's questions'
         (it hands back the sound's and the window's), before the OpenSubtitles search, the
         guide, Settings and the channel list, so none reaches what is under it; the keys type
-        into it (the drawer's context), and Esc is its own."""
+        into it (the drawer's context), and Esc is its own. Nothing opens over it by itself:
+        once it goes, what waited for it comes (`_card_went`)."""
         self._cards.append(card)
+        card.installEventFilter(self)  # its hiding (`eventFilter`)
+
+    def _card_went(self) -> None:
+        """A card over the TV went (cancelled, or once it handed its link over: the link holds
+        first): what waited for it (the welcome card, the list due meanwhile) comes now, as
+        after Settings, unless Settings or another card still covers the TV."""
+        if self._closed or self._settings_shown() or self._shown_card() is not None:
+            return
+        self._flow.settings_closed()
 
     def _shown_card(self) -> Optional[Any]:
         return next((card for card in reversed(self._cards) if not card.isHidden()), None)
@@ -1993,6 +2054,11 @@ class TVController(QObject):
             self._zap_steps(steps)
 
     def eventFilter(self, watched: QObject, event: QEvent) -> bool:
+        if any(watched is card for card in self._cards):  # a card over the TV: its own events
+            if event.type() == QEvent.Type.Hide:
+                # After what hid it (Play hands its link over right after: it holds first).
+                QTimer.singleShot(0, self, self._card_went)
+            return False
         if isinstance(event, QWheelEvent) and self.overlays.column.isVisible():
             self._column_wheel.wheel_event(event)
             event.accept()
@@ -2045,6 +2111,11 @@ class TVController(QObject):
         the guide's past programme) instead of live."""
         if self._closed:
             return
+        channel = self._owned(channel)  # a link: whose stream it is now
+        if self.hides_link(channel):
+            return  # parental controls hide it while locked (a link held from before)
+        if group_key == RECENT_GROUP:  # (where links are listed: a few rows)
+            channels = [self._owned(c) for c in channels]
         self._cancel_external()  # a newer choice: the settling external launch is dropped
         self._lanes.supersede()  # and an external play still waiting for its link
         context = self.zap.context
@@ -2225,6 +2296,9 @@ class TVController(QObject):
         """
         if self._closed:
             return
+        item = self._owned(item)  # a film link: whose stream it is now
+        if self.hides_link(item):
+            return  # parental controls hide it while locked
         if from_library is None:
             from_library = self._flow.in_library()
 
@@ -2794,6 +2868,13 @@ class TVController(QObject):
         self.handedOn.emit()  # the phones that watched before let go
         self._current, self._cid = target, None
         self._delivered(target, url)
+        if self._link_holds(target):
+            # An outside player took the link: nothing plays in QiTV, so nothing holds the
+            # welcome card back (final review M4); a file's hold under it stays the file's.
+            if self._file_under_link:
+                self._link_hold = self._file_under_link = False
+            else:
+                self._let_go_of_link()
 
     def phone_stopped(self) -> None:
         """2.8.12: the phone that watched left for good (`RemoteController`): the stream it
@@ -2823,7 +2904,7 @@ class TVController(QObject):
 
     def _record_watched(self, target: Target, url: str) -> None:
         guard = self.parental
-        if guard is not None and guard.protects_play(target.section, target.item, target.context):
+        if guard is not None and self._protects_play(guard, target):
             return  # 2.8: what parental controls hide never enters the history (nor Recent)
         try:
             self.watch.record_play(
@@ -2832,6 +2913,9 @@ class TVController(QObject):
                 item_type=target.item_type,
                 link=url,
                 group_id=target.group_key if target.live else None,
+                # A link is never the channel QiTV starts on (its token may be gone by then):
+                # the provider's channel watched before it stays (final review M2).
+                last_channel=self._network_url(target.item) is None,
             )
         except Exception as e:
             self._log_failure(f"record {target.title} in the watch history", e)
@@ -3407,6 +3491,7 @@ class TVController(QObject):
         grid, sessions = self._grid, self.sessions
         if grid is None or sessions is None or self._closed or not grid.shown():
             return
+        channel = self._owned(channel)  # a link: whose stream it is now
         if self._hidden_now(channel):
             return  # 2.12: hidden, and locked: no tile plays it
         if name not in grid.names():
@@ -4362,10 +4447,14 @@ class TVController(QObject):
                 return  # LiveSession opens its direct play again itself, in the same slot
             if self._live_controls.reconnect(current):
                 return  # the same stream opens again, in the same slot (the pill says when)
+            if self._network_url(current.item) is not None:
+                # A link ended for good: said, and kept with why (final review M5); a held
+                # one lets go (_on_link_failed).
+                self._fail_focused_tile(ended=True)
+                self._on_link_failed(current, DOWN)
+                return
             self._toast(tr("The stream ended"))  # i18n: a toast
             self._fail_focused_tile(ended=True)
-            if self._link_holds(current):
-                self._let_go_of_link()  # a link's stream ended for good
             return
         try:
             self.watch.flush()
@@ -5553,6 +5642,9 @@ class TVController(QObject):
             if guard.active():
                 self._lock_out(guard)
             self._forget_protected_tiles(guard)  # after it: a grid it left was saved
+        links_changed = getattr(self.nav, "links_changed", None)
+        if links_changed is not None:
+            links_changed()  # Network streams leaves out a hidden link (emptied: it goes)
         self._repaint()
         self._guide.invalidate()
 
@@ -5566,9 +5658,8 @@ class TVController(QObject):
             if not isinstance(item, dict):
                 return False
             section = sections.get(str(entry.get("item_type") or ""), "live")
-            return bool(
-                guard.protects(section, with_provider(item, str(entry.get("provider_name") or "")))
-            )
+            stamped = with_provider(item, str(entry.get("provider_name") or ""))
+            return bool(guard.protects(*self._guard_view(section, stamped)))
 
         forget = getattr(self.watch, "forget", None)
         if forget is not None and forget(protected):
@@ -5590,19 +5681,19 @@ class TVController(QObject):
         picture closes, a multiview tile closes)."""
         context = self.zap.context
         channels = guard.visible("live", context.channels)
+        if context.group_key == RECENT_GROUP:  # ⟲ Recent's links (a few rows), as known
+            channels = [channel for channel in channels if not self.hides_link(channel)]
         fallback = guard.visible("live", context.fallback)
         if len(channels) != len(context.channels) or len(fallback) != len(context.fallback):
             self.zap.set_context(
                 ZapContext(context.group_key, channels, fallback=fallback, source=context.source)
             )
         small = self._beside_target()
-        if small is not None and guard.protects_play(small.section, small.item, small.context):
+        if small is not None and self._protects_play(guard, small):
             self._close_pip()
         self._close_hidden_tiles()
         current = self._current or self._lanes.pending()
-        if current is not None and guard.protects_play(
-            current.section, current.item, current.context
-        ):
+        if current is not None and self._protects_play(guard, current):
             self.stop()
 
     def _hidden_now(self, channel: dict) -> bool:
@@ -5612,7 +5703,7 @@ class TVController(QObject):
         if guard is None:
             return False
         provider = item_provider.provider_name(self.catalog, channel)
-        return bool(guard.hides_item("live", with_provider(channel, provider)))
+        return bool(guard.hides_item(*self._guard_view("live", with_provider(channel, provider))))
 
     def _close_hidden_tiles(self) -> None:
         """Locked (2.12): a multiview tile whose channel is hidden closes, as its ✕ does: one
@@ -5643,7 +5734,7 @@ class TVController(QObject):
             if not isinstance(item, dict):
                 return False
             provider = str(record.get("provider_name") or "")
-            return bool(guard.protects("live", with_provider(item, provider)))
+            return bool(guard.protects(*self._guard_view("live", with_provider(item, provider))))
 
         if not any(protected(record) for record in tiles):
             return
@@ -5667,7 +5758,7 @@ class TVController(QObject):
             provider = name or self.catalog.current_provider_name()
             self.hide_group(section, provider, own or node.key, node.title)
             return
-        if guard.hide_item(section, node.payload):
+        if guard.hide_item(*self._guard_view(section, node.payload)):  # a link: by its id
             self._toast(translate(HIDDEN_TEXT))
             self.parental_changed()  # out of the history; locked, it stops if it plays
 
@@ -5704,11 +5795,31 @@ class TVController(QObject):
             self.parental_changed()  # out of the history; locked, it stops if it plays
 
     def _forget_recent(self, item: dict) -> None:
-        """The channel leaves ⟲ Recent: its plays leave the watch history (saved with it)."""
+        """The channel leaves ⟲ Recent: its plays leave the watch history (saved with it). A
+        link's go whoever's stream they were kept as (⟲ Recent lists it once, as whose it is
+        now)."""
         wanted = (provider_of(item), item_key(item))
-        if self.watch.forget(lambda entry: recent_channel(entry) == wanted):
+        if self._network_url(item) is None:
+            matches = lambda entry: recent_channel(entry) == wanted  # noqa: E731
+        else:
+            matches = self._same_link(item)
+        if self.watch.forget(matches):
             self._recents_changed()
             self._toast(tr("Removed from Recents"))  # i18n: a toast (see "Remove from Recents")
+
+    def _same_link(self, item: dict) -> Callable[[dict], bool]:
+        """Whether a watch-history entry is a play of the link `item`, under any stamp."""
+        key = item_key(item)
+
+        def matches(entry: dict) -> bool:
+            channel = recent_channel(entry)
+            if channel is None or channel[1] != key:
+                return False
+            played = entry.get("item_data")
+            stamped = with_provider(played if isinstance(played, dict) else {}, channel[0])
+            return self._network_url(stamped) is not None
+
+        return matches
 
     def _clear_recents(self) -> None:
         """Clear Recents: every channel leaves ⟲ Recent (films and episodes stay in the
@@ -5790,6 +5901,7 @@ class TVController(QObject):
         target = target or self._current
         if self._closed or target is None:
             return False
+        target = self._owned_target(target)  # a link: whose stream it is now
         chosen = target
         if target.local:
             path = str(target.item.get("path") or "")
@@ -5822,6 +5934,7 @@ class TVController(QObject):
         `phone`: a phone's Watch (its stream is counted: `_launch`)."""
         if self._closed:
             return
+        target = self._owned_target(target)  # a link: whose stream it is now
 
         def again() -> None:
             self._play_external(target, url, launcher, ask_on=ask_on, phone=phone)

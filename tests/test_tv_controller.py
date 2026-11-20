@@ -36,7 +36,7 @@ from services.navigation import (
     item_key,
 )
 from services.playback import PlaybackState
-from services.provider_ids import ALL_PROVIDERS, mixed_group_id, provider_of
+from services.provider_ids import ALL_PROVIDERS, NETWORK_PROVIDER, mixed_group_id, provider_of
 from services.settings_model import GENERAL, PROVIDERS, sections
 from services.vlc_profile import DEFAULT_USER_AGENT, STB_USER_AGENT, PlayKind
 from services.watch_state import WatchState
@@ -950,6 +950,7 @@ class FakeWindow:
 class FakeWatch:
     def __init__(self):
         self.plays, self.positions = [], []
+        self.last_channel = None
         self.flushes = 0
         self.resume = {}
 
@@ -966,8 +967,12 @@ class FakeWatch:
     def resume_from(self, cid, item):
         return self.resume.get(cid) or ms.server_resume(item)
 
-    def record_play(self, provider_name, item, *, item_type, link, group_id=None):
+    def record_play(
+        self, provider_name, item, *, item_type, link, group_id=None, last_channel=True
+    ):
         self.plays.append((provider_name, item, item_type, link, group_id))
+        if item_type == "channel" and last_channel:
+            self.last_channel = (provider_name, item)  # Start with the last channel's
 
     def update_position(self, cid, position_ms, duration_ms):
         self.positions.append((cid, position_ms, duration_ms))
@@ -5199,6 +5204,38 @@ class RecentsTests(ControllerTestCase):
         self.drawer.highlight, self.drawer.visible = self.rows[0], False  # the list is closed
         self.controller.handle(Action.FORGET)
         self.assertEqual(self.config.watch_history, history)
+
+
+class RecentLinkMenuTests(ControllerTestCase):
+    """Final review M3: a link's row of ⟲ Recent offers only what works for a link: no
+    favorites (★ lists a provider's channels only) and no Record at a time… (a scheduled
+    recording asks a provider for the link)."""
+
+    menu_for = ContextMenuTests.menu_for
+    texts = staticmethod(ContextMenuTests.texts)
+
+    def test_a_links_row_leaves_out_favorites_and_record_at_a_time(self):
+        url = "https://cdn.example/live/harbour/index.m3u8"
+        link = {"id": "6ca35429d7503b1b", "name": "Harbour", "cmd": url}
+        link["_provider"] = NETWORK_PROVIDER
+        self.config.watch_history = [watched(NETWORK_PROVIDER, link), watched("Home", CHANNELS[1])]
+        self.controller.record_at = lambda channel: None  # QiTV can record at a time
+        self.controller.start()
+        self.nav.reset_to("live", RECENT_GROUP)
+        rows = self.nav.children(self.nav.path[-1])
+        self.assertEqual([n.title for n in rows], ["Harbour", "Two"])
+        self.assertEqual(
+            self.texts(self.menu_for(rows[0])),
+            [
+                "Remove from Recents",
+                "Clear Recents",
+                "Play in VLC",
+                "Play in MPV",
+                "Copy stream link",
+            ],
+        )
+        texts = self.texts(self.menu_for(rows[1]))  # a provider's channel: as ever
+        self.assertEqual(texts[:2], ["Add to favorites", "Record at a time…"])
 
 
 class ExternalButtonTests(ControllerTestCase):

@@ -3,7 +3,9 @@ manager's tiles, and the shell's grid over fake players (test_tv_pip's PipCase: 
 manager and budget), then once in the window with libVLC's dummy outputs."""
 
 import os
+from pathlib import Path
 import sys
+import tempfile
 import unittest
 from unittest import mock
 
@@ -27,7 +29,7 @@ from timer_fixtures import elapse, pause, wait_until
 from services.connection_budget import ConnectionBudget
 from services.live.refusals import STREAM_LIMIT
 from services.navigation import NavNode, item_key
-from services.network_streams import stream_id
+from services.network_streams import NetworkStreams, stream_id
 from services.parental import Parental
 from services.provider_ids import NETWORK_PROVIDER, with_provider
 from services.sessions import SessionManager, Slot
@@ -40,6 +42,7 @@ from ui.grid_frame import GridFrame, grid_rects
 from ui.keymap import Action
 from ui.live_tuner import LiveTuner, one_disk_ring, wait_for_each_other
 from ui.mixer_controls import FOLLOW_ACTION, FOLLOWS_TEXT, MIXED_TEXT
+from ui.network_player import NetworkPlayer
 from ui.overlays.grid_tiles import (
     DENIED,
     EMPTY,
@@ -1565,6 +1568,33 @@ class ParentalGridTests(MultiviewCase):
         self.controller.parental_changed()  # the lock-out again (an unlocked hour ran out)
         self.assertTrue(slot.live.running)
         self.assertNotEqual(self.grid.state("t3"), EMPTY)
+
+
+class LinkOwnerGridTests(MultiviewCase):
+    """Final review C1: a link kept as Network streams' before its account was configured
+    opens in a tile under that account (its limit), whatever it was kept with."""
+
+    URL = "http://harbor.example:8080/live/demo/secret/7.ts"
+
+    def setUp(self):
+        super().setUp()
+        self.catalog.current_provider = lambda: {"name": "Home", "type": "STB", "max_streams": 4}
+        folder = tempfile.TemporaryDirectory()
+        self.addCleanup(folder.cleanup)
+        store = NetworkStreams(Path(folder.name) / "network_streams.json")
+        owner = lambda url: "Harbor IPTV" if "harbor.example" in url else ""  # noqa: E731
+        self.player = NetworkPlayer(store, mock.Mock(), self.controller, owner=owner)
+
+    def test_a_link_kept_as_no_providers_plays_in_a_tile_as_its_accounts(self):
+        self.start_large(0)
+        self.v()
+        kept = {"id": stream_id(self.URL), "name": "Seven", "cmd": self.URL}
+        kept["_provider"] = NETWORK_PROVIDER  # as ⟲ Recent kept it, before the account
+        self.controller.play_in_tile("t3", kept)
+        slot = self.sessions.slot("t3")
+        self.assertTrue(wait_until(lambda: slot.live.running and slot.live.url == self.URL))
+        self.assertEqual(self.budget.holders("Harbor IPTV"), ["t3"])
+        self.assertEqual(self.budget.holders(NETWORK_PROVIDER), [])
 
 
 class DrawerDragTests(unittest.TestCase):

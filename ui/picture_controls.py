@@ -21,10 +21,10 @@ under the channel's key as the channel opened in that player (ui/player_keys.py,
 the sound's sync: the channel list may browse another provider by the time A is pressed). A
 film's stays with its player while it plays; the next title starts on Auto. Fill crops to the
 shape of the player's own surface, which the window reports to the player. Deinterlacing is not
-here: it is a setting (Settings, General), one for every player, kept in the config
-(`deinterlace`, optional: older builds ignore it); `apply_deinterlacing` gives it to the players
-once Settings saved it. libVLC 3 cannot give a player Auto back once it was set to Off, which a
-toast says (QiTV's next start does).
+here: it is a setting (Settings, Playback, after Hardware video decoding), one for every
+player, kept in the config (`deinterlace`, optional: older builds ignore it);
+`apply_deinterlacing` gives it to the players once Settings saved it. libVLC 3 cannot give a
+player Auto back once it was set to Off, which a toast says (QiTV's next start does).
 
 The sleep timer (`services.sleep_timer`) is never kept across a restart. While it runs, its row
 shows the time left; "End of the programme" is offered while the guide knows when the programme

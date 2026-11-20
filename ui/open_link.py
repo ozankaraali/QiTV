@@ -11,14 +11,16 @@ says what it is (services.link_kind.classify):
 - a whole provider (an account's playlist or API link, a playlist's address, a portal): the
   line names its kind and host (never its login), the note says it is no one stream, and
   "Add as a provider…" hands it to Add provider, filled in, `add_provider(link)`;
-- a link only its first bytes tell (an .m3u8, any other web address): no line yet; Play reads
-  them first, at most 64 KB, on a worker (QiTV's user agent, the TLS check of the provider the
-  link's host is, else Settings'). A list of channels turns the card into the provider offer;
-  anything else plays with the kind they say, and so does a link that refused them or never
-  answered (as LIVE: VLC tries it, and the player says why it failed). A link at a provider
-  that allows only so many streams is never read (the read would be one stream more than it
-  allows, and a closed one may stay counted there for minutes): it plays as LIVE at once
-  (`may_probe`).
+- a link only its first bytes tell (an .m3u8; a song or a .ts, which may be a file or a
+  stream that never ends; any other web address): no line yet; Play reads them first, at most
+  64 KB, on a worker (QiTV's user agent, the TLS check of the provider the link's host is, else
+  Settings'). A list of channels turns the card into the provider offer; anything else plays
+  with the kind they and the answer's headers say (an answer with a size is a file that ends:
+  a film or a song; internet radio and a live channel never end: link_kind.probe_text), and
+  so does a link that refused them or never answered (as LIVE: VLC tries it, and the player
+  says why it failed). A link at a provider that allows only so many streams is never read
+  (the read would be one stream more than it allows, and a closed one may stay counted there
+  for minutes): it plays as LIVE at once (`may_probe`), a song or a .ts there too.
 
 While the bytes are read the card says "Checking…" and only Cancel works. Each read has its
 request id and only the latest one answers: a cancelled card, or one opened again, drops a
@@ -31,7 +33,7 @@ from __future__ import annotations
 import logging
 import threading
 import time
-from typing import Any, Callable, Optional
+from typing import Any, Callable, NamedTuple, Optional
 
 from PySide6.QtCore import QObject, QRectF, Qt, Signal
 from PySide6.QtGui import QFont, QPainter
@@ -113,13 +115,46 @@ def provider_found(link: ProviderLink) -> str:
     return translate(_PROVIDER_FOUND.get(link.type, M3U_FOUND), host=link.name)
 
 
-def read_start(url: str, verify_ssl: bool, stop: Optional[threading.Event] = None) -> str:
-    """The first PROBE_BYTES of what `url` answers, as text (blocking: run it on a worker),
-    asked with QiTV's user agent and `verify_ssl` (the TLS check). Only that much is read,
-    however long the answer (a live stream never ends), and the connection is closed after
-    it. Between chunks the read ends early with what came so far: past the deadline, once the
-    window asks its jobs to stop, or once `stop` is set (the card dropped the read). An HTTP
-    error raises (requests.HTTPError), as a connection that fails does."""
+class LinkStart(NamedTuple):
+    """What a link answered (plain data, from the worker): its first bytes as text, its
+    Content-Type ("" for none) and its size (Content-Length, or a 206's whole size; None: not
+    given, as a stream that never ends answers, and an internet radio station's always)."""
+
+    text: str
+    content_type: str = ""
+    length: Optional[int] = None
+
+
+def _length(value: object) -> Optional[int]:
+    """A Content-Length header's size; None when there is none (or it is no size)."""
+    try:
+        length = int(str(value).strip())
+    except ValueError:
+        return None
+    return length if length >= 0 else None
+
+
+def _size(status: int, headers: Any) -> Optional[int]:
+    """The size an answer states: a 206's whole size (Content-Range "bytes 0-9/1234"), else
+    its Content-Length; None for none, and for an internet radio station (its icy-* or
+    Shoutcast headers: it never ends, whatever it says)."""
+    if any(str(name).lower().startswith(("icy-", "ice-")) for name in headers):
+        return None
+    if status == 206:
+        whole = _length(str(headers.get("Content-Range") or "").rpartition("/")[2])
+        if whole:
+            return whole
+    return _length(headers.get("Content-Length"))
+
+
+def read_start(url: str, verify_ssl: bool, stop: Optional[threading.Event] = None) -> LinkStart:
+    """The first PROBE_BYTES of what `url` answers, as text, with its Content-Type and
+    Content-Length (blocking: run it on a worker), asked with QiTV's user agent and
+    `verify_ssl` (the TLS check). Only that much is read, however long the answer (a live
+    stream never ends), and the connection is closed after it. Between chunks the read ends
+    early with what came so far: past the deadline, once the window asks its jobs to stop, or
+    once `stop` is set (the card dropped the read). An HTTP error raises
+    (requests.HTTPError), as a connection that fails does."""
     deadline = time.monotonic() + _PROBE_DEADLINE_S
 
     def ended() -> bool:
@@ -127,12 +162,15 @@ def read_start(url: str, verify_ssl: bool, stop: Optional[threading.Event] = Non
         return stopped or cancel_requested() or time.monotonic() > deadline
 
     if ended():
-        return ""  # dropped before it began: nothing is asked
+        return LinkStart("")  # dropped before it began: nothing is asked
     response = requests.get(
         url, headers=CLIENT_HEADERS, timeout=_PROBE_TIMEOUT, verify=verify_ssl, stream=True
     )
     try:
         response.raise_for_status()
+        headers = response.headers
+        content_type = str(headers.get("Content-Type") or "")
+        length = _size(response.status_code, headers)
         body = bytearray()
         for chunk in response.iter_content(_CHUNK):
             body += chunk
@@ -140,11 +178,12 @@ def read_start(url: str, verify_ssl: bool, stop: Optional[threading.Event] = Non
                 break
     finally:
         response.close()
-    return bytes(body[:PROBE_BYTES]).decode("utf-8", errors="replace")
+    text = bytes(body[:PROBE_BYTES]).decode("utf-8", errors="replace")
+    return LinkStart(text, content_type, length)
 
 
 class LinkProbeJob(QObject):
-    """One link's first bytes, read on the runner's thread: their text, plain data. `stop`,
+    """One link's first bytes, read on the runner's thread: a LinkStart, plain data. `stop`,
     set from the GUI thread, ends the read at its next chunk."""
 
     finished = Signal(object)
@@ -365,13 +404,14 @@ class OpenLink(QObject):
             and not self.card.isHidden()
         )
 
-    def _on_read(self, context: tuple[int, str], text: object) -> None:
+    def _on_read(self, context: tuple[int, str], start: object) -> None:
         request, url = context
         if not self._answers(request):
             return  # cancelled, or the card opened again since
         self._waiting, self._stop = None, None
         self.card.set_busy(False)
-        kind = probe_text(str(text), url)
+        answer = start if isinstance(start, LinkStart) else LinkStart(str(start or ""))
+        kind = probe_text(answer.text, url, answer.content_type, answer.length)
         if not isinstance(kind, Provider):
             self._start(url, str(kind))
             return

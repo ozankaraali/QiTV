@@ -335,6 +335,8 @@ class NavModel(QObject):
         self._pending_group: Optional[tuple[str, str]] = None
         self._revealed: Optional[dict] = None  # the row the list opened on (see reveal)
         self._links: Callable[[], Sequence[LinkRow]] = lambda: ()  # Network streams' (set_links)
+        # Whose stream a link of ⟲ Recent is now (set_link_owner; None: no link).
+        self._link_owner: Callable[[dict], Optional[str]] = lambda item: None
         # children() results, keyed by parent and stamped with what they depend on.
         self._memo: OrderedDict[tuple, tuple[tuple, Any, int]] = OrderedDict()  # deps, list, token
         self._events = 0  # bumped by every catalog event handled here, and by retry()
@@ -363,6 +365,13 @@ class NavModel(QObject):
         """`rows()`: Network streams' links as their rows, newest opened first (asked each
         time the list is made: there are few)."""
         self._links = rows
+
+    def set_link_owner(self, whose: Callable[[dict], Optional[str]]) -> None:
+        """`whose(item)`: whose stream the link `item` is now (the configured account its
+        address names, else Network streams'; None for an item that is no link). ⟲ Recent
+        lists each link once, stamped so, whatever it was kept under."""
+        self._link_owner = whose
+        self._memo.pop(("@recent",), None)
 
     def links_changed(self) -> None:
         """Network streams' links changed (read, kept, renamed, failed): the list follows.
@@ -777,7 +786,12 @@ class NavModel(QObject):
 
         guard = parental.installed()
         state = guard.state_version() if guard is not None else 0
-        deps = (self._history_fingerprint(), tuple(self.catalog.provider_names()), state)
+        deps = (
+            self._history_fingerprint(),
+            tuple(self.catalog.provider_names()),
+            state,
+            self._data_version(),  # a provider's streams' hosts known: a link's owner may change
+        )
         return cast(list[dict], self._cached(("@recent",), deps, self._compute_recent))
 
     def _compute_favorites(self) -> list[dict]:
@@ -788,21 +802,32 @@ class NavModel(QObject):
 
     def _compute_recent(self) -> list[dict]:
         # What was watched at any provider in the list, newest first (a removed provider's
-        # entries can no longer play), and the live links of Network streams (plan 4).
+        # entries can no longer play), and the live links of Network streams (plan 4): each
+        # once by its id, stamped with whose stream it is now (final review C1), listed
+        # whoever it was kept under.
         from services import parental
 
         guard = parental.installed()
         known = {*self.catalog.provider_names(), NETWORK_PROVIDER}
-        seen, result = set(), []
+        seen: set[tuple] = set()
+        result: list[dict] = []
         for entry in self.config.watch_history or []:
             key = recent_channel(entry)
-            if key is None or key[0] not in known:
+            if key is None:
                 continue
             provider, item = key[0], entry.get("item_data") or {}
-            if guard is not None and guard.hides_item("live", with_provider(item, provider)):
+            owner = self._link_owner(with_provider(item, provider))
+            once: tuple = key
+            hidden_as = provider
+            if owner is not None:
+                provider, once = owner, (None, key[1])  # a link: one row, whoever's it was
+                hidden_as = NETWORK_PROVIDER  # and hidden as Network streams', by its id
+            elif provider not in known:
+                continue
+            if guard is not None and guard.hides_item("live", with_provider(item, hidden_as)):
                 continue  # 2.8: hidden by parental controls while locked
-            if key not in seen:
-                seen.add(key)
+            if once not in seen:
+                seen.add(once)
                 # Stamped also with one provider (an entry older than 2.1 has no stamp): the
                 # drawer finds the channel that plays by its provider and id.
                 result.append(with_provider(item, provider))

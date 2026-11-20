@@ -1,9 +1,12 @@
 """What a link is, from its address or its first bytes (no Qt, no network).
 
 File > Open Link takes any link a person pastes. Most say what they are by their address: a
-film file, a live `.ts`, an account's playlist or API link, a portal. A `.m3u8` (or any other
-address over http) may be one stream or a list of channels, so `classify` answers PROBE and
-the caller fetches the first 64 KB for `probe_text`.
+film (a video file type QiTV opens from the disk, services.open_paths: it ends, so it seeks
+and resumes), an Xtream live path, an account's playlist or API link, a portal. A `.m3u8` (or
+any other address over http) may be one stream or a list of channels, and a song (.mp3,
+.aac…) or a `.ts` or `.flv` may be a file or a stream that never ends (internet radio, a
+live channel), so `classify` answers PROBE and the caller fetches the first 64 KB for
+`probe_text`, with what the answer's headers say of it (a size: a file that ends).
 
 A kind is FILM, LIVE, PROBE, NONE (not a link QiTV opens), or a `Provider` holding what
 `parse_provider_link` read, for the "Add provider" offer. An Xtream stream path
@@ -17,6 +20,11 @@ from dataclasses import dataclass
 from typing import Iterable, Optional, Union
 from urllib.parse import unquote, urlsplit
 
+from services.open_paths import (
+    EXTRA_MUSIC_EXTENSIONS,
+    EXTRA_VIDEO_EXTENSIONS,
+    MEDIA_EXTENSIONS,
+)
 from services.provider_link import (
     _STREAM_ID,
     M3U,
@@ -28,9 +36,21 @@ from services.provider_link import (
 )
 
 FILM, LIVE, PROBE, NONE = "FILM", "LIVE", "PROBE", "NONE"
-_FILM_EXTENSIONS = (".mp4", ".mkv", ".avi", ".webm", ".mov", ".m4v")
+# The audio internet radio is sent in, and the containers live channels come in: a file or a
+# stream that never ends, as its answer says (final review I2, the coordinator's ruling).
+_EITHER_EXTENSIONS = tuple(
+    f".{ext}" for ext in ("mp3", "aac", "ogg", "opus", "m4a", "flac", "wav", "flv", "ts")
+)
+# Every other video and music file type QiTV opens from the disk is a file that ends (final
+# review I2: a song played as a live channel replayed from its start for ever).
+_FILM_EXTENSIONS = tuple(
+    f".{ext}"
+    for ext in sorted(MEDIA_EXTENSIONS | EXTRA_VIDEO_EXTENSIONS | EXTRA_MUSIC_EXTENSIONS)
+    if f".{ext}" not in _EITHER_EXTENSIONS
+)
 _LIVE_SCHEMES = ("rtmp", "rtmps", "rtsp", "udp", "rtp")
 PROBE_BYTES = 64 * 1024  # what a caller reads of a PROBE link for probe_text, at most
+_WEB_PORTS = {"http": "80", "https": "443"}  # each scheme's own port: the host without it
 
 
 @dataclass(frozen=True)
@@ -50,17 +70,24 @@ def address(text: str) -> str:
 
 
 def host_of(url: object) -> str:
-    """A web address's host and port, as a link's is compared with a provider's: lower case,
-    without a login ("panel.example:8080"; "" for none). One typed without its scheme
-    ("panel.example:8080/get.php") is read as http."""
+    """A web address's host and port, as a link's is compared with a provider's (and as a
+    provider's stream hosts are kept, services.catalog): case-folded, without a login and
+    without its scheme's own port, as `stream_id` reads it ("panel.example:8080"; "" for
+    none). `panel.example:80` over http is `panel.example`, as is `panel.example:443` over
+    https, and an address at a host over http is at that host over https too. One typed
+    without its scheme ("panel.example:8080/get.php") is read as http."""
     text = address(str(url or ""))
     if text and "://" not in text:
         text = f"http://{text}"
     try:
-        netloc = urlsplit(text).netloc
+        parts = urlsplit(text)
     except ValueError:
         return ""
-    return netloc.rpartition("@")[2].lower()
+    host = parts.netloc.rpartition("@")[2].casefold()
+    name, colon, port = host.rpartition(":")
+    if colon and port == _WEB_PORTS.get(parts.scheme.lower()):
+        return name  # its scheme's own port, written out ("[::1]:80" is "[::1]")
+    return host
 
 
 def _split(text: str):
@@ -102,12 +129,10 @@ def classify(url: str) -> Kind:
     if stream is not None:
         return stream[0]
     path = parts.path.lower()
-    if path.endswith(".m3u8"):
+    if path.endswith((".m3u8",) + _EITHER_EXTENSIONS):
         return PROBE
     if path.endswith(_FILM_EXTENSIONS):
         return FILM
-    if path.endswith(".ts"):
-        return LIVE
     link = parse_provider_link(parts.geturl())
     if link is not None:
         return Provider(link)
@@ -123,13 +148,18 @@ def xtream_account(url: str) -> Optional[ProviderLink]:
     return stream[1] if stream is not None else None
 
 
-def probe_text(text: str, url: str = "") -> Kind:
-    """What a fetched playlist is, from its first 64 KB: FILM when it has an end (a finished
+def probe_text(
+    text: str, url: str = "", content_type: str = "", length: Optional[int] = None
+) -> Kind:
+    """What a fetched link is, from its first 64 KB and its answer's `content_type` and
+    `length` (its Content-Length; None: not given): FILM when it has an end (a finished
     playlist), LIVE for any other HLS playlist (a master too), a Provider (an M3U playlist at
-    `url`) for a list of channels with their own http(s) links and no HLS tags. Anything
-    else is LIVE: VLC decides, and so is a list read without its address (no provider to
-    offer)."""
-    lines = [line.strip() for line in text[:PROBE_BYTES].lstrip("﻿").splitlines()]
+    `url`) for a list of channels with their own http(s) links and no HLS tags. Any other
+    answer with a size is a file that ends, a FILM (a song or a film whose address has no
+    extension), unless it is text or a playlist. Anything else is LIVE (a stream that never
+    ends: internet radio, a live channel): VLC decides, and so is a list read without its
+    address (no provider to offer)."""
+    lines = [line.strip() for line in text[:PROBE_BYTES].lstrip("\ufeff").splitlines()]
     if any(line.startswith("#EXT-X-") for line in lines):
         vod = any(
             line.startswith("#EXT-X-ENDLIST") or line.upper() == "#EXT-X-PLAYLIST-TYPE:VOD"
@@ -144,7 +174,17 @@ def probe_text(text: str, url: str = "") -> Kind:
                 if nxt.lower().startswith(("http://", "https://")):
                     return Provider(ProviderLink(M3U, url)) if url.strip() else LIVE
                 break
-    return LIVE
+    playlist = any(line.startswith(("#EXTM3U", "#EXTINF")) for line in lines)
+    return FILM if not playlist and _ends(content_type, length) else LIVE
+
+
+def _ends(content_type: str, length: Optional[int]) -> bool:
+    """Whether an answer is a file that ends: its size is given (a stream that never ends has
+    none), and it is neither text (a page saying why) nor a playlist."""
+    if length is None or length <= 0:
+        return False
+    kind = content_type.partition(";")[0].strip().lower()
+    return not (kind.startswith("text/") or "mpegurl" in kind)
 
 
 def _login_user(url: str) -> Optional[str]:

@@ -12,7 +12,6 @@ import itertools
 import logging
 import re
 from typing import Any, Callable, Iterator, Optional, cast
-from urllib.parse import urlsplit
 
 from PySide6.QtCore import QObject, QTimer, Signal
 
@@ -37,6 +36,7 @@ from services.failure_reasons import (  # noqa: F401 (the catalog's messages, as
 )
 from services.i18n import N_, tr, translate
 from services.jobs import FAILED_MESSAGE, NO_RESULT_MESSAGE, JobRunner
+from services.link_kind import host_of
 from services.provider_api import (
     stb_api_base,
     stb_endpoint,
@@ -132,15 +132,10 @@ _UNREACHABLE = re.compile(
 
 
 def _host(url: Any) -> str:
-    """A web address's host and port, lower case ("" for none); one typed without its scheme
+    """A web address's host and port as a link's is compared with it (link_kind.host_of:
+    without its scheme's own port; "" for none); one typed without its scheme
     ("panel.example:8080") is read as http."""
-    text = str(url or "").strip()
-    if text and "://" not in text:
-        text = f"http://{text}"
-    try:
-        return urlsplit(text).netloc.lower()
-    except ValueError:
-        return ""
+    return host_of(url)
 
 
 def friendly_error(message: object) -> str:

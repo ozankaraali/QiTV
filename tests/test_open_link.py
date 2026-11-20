@@ -122,7 +122,6 @@ class CardTests(CardCase):
     def test_found_line_per_kind(self):
         play, add = ["Cancel", "Play"], ["Cancel", "Add as a provider…"]
         cases = [
-            ("http://cdn.example/live/channel.ts", "✓ A live stream", KEPT, play, []),
             ("https://cdn.example/films/Harbour.mkv", "✓ A film", KEPT, play, []),
             ("rtsp://cam.example/stream", "✓ A live stream", KEPT, play, []),
             # An Xtream stream link is one stream, with the whole account as the other way.
@@ -134,9 +133,12 @@ class CardTests(CardCase):
                 play,
                 ["Add the whole account (panel.example)"],
             ),
-            # Only its first bytes tell: no line until Play reads them.
+            # Only its first bytes tell: no line until Play reads them (a song or a .ts may be
+            # a file or a stream that never ends: final review I2).
             ("https://cdn.example/live/index.m3u8?token=abc", "", KEPT, play, []),
             ("https://cdn.example/watch?v=7", "", KEPT, play, []),
+            ("http://cdn.example/live/channel.ts", "", KEPT, play, []),
+            ("https://cdn.example/radio/coast.mp3", "", KEPT, play, []),
             # A whole provider: what it is, at its host only (never the login).
             (PLAYLIST, "✓ Xtream at panel.example, with its login", WHOLE, add, []),
             ("http://lists.example/tv.m3u", "✓ M3U playlist at lists.example", WHOLE, add, []),
@@ -154,7 +156,7 @@ class CardTests(CardCase):
                 self.assertTrue(self.card.found()[1])  # green: nothing went wrong
                 self.assertEqual(self.card.title(), "Open a link")
         # The note sits under the found line, the buttons under the note.
-        self.typed("http://cdn.example/live/channel.ts")
+        self.typed("https://cdn.example/films/Harbour.mkv")
         found, note = self.card.control_rect("found"), self.card.control_rect("note")
         play_button = self.card.control_rect("button", "play")
         self.assertFalse(note.isEmpty())
@@ -171,7 +173,7 @@ class CardTests(CardCase):
 
     def test_play_hands_the_stream_over_with_its_kind(self):
         streams = (
-            ("http://cdn.example/live/channel.ts", LIVE),
+            ("http://limited.example/live/channel.ts", LIVE),  # never read there: live
             ("https://cdn.example/films/Harbour.mkv", FILM),
             (ACCOUNT, LIVE),
             ("'http://cdn.example/films/Coast.mp4'", FILM),  # quoted as copied: the link only
@@ -292,6 +294,15 @@ class ProbeTests(CardCase):
                 "/live/index.m3u8": (200, {}, leaf("a.ts", "b.ts", ended=False)),
                 "/vod/index.m3u8": (200, {}, leaf("a.ts", "b.ts")),
                 "/gone.m3u8": (403, {}, b"Forbidden"),
+                "/podcast": (200, {"Content-Type": "audio/mpeg"}, b"ID3\x04" + b"\x00" * 4096),
+                "/radio": (200, {"Content-Type": "audio/mpeg"}, self.endless),
+                "/song.mp3": (200, {"Content-Type": "audio/mpeg"}, b"ID3\x04" + b"\x00" * 4096),
+                "/part.mp3": (206, {"Content-Range": "bytes 0-4099/9000000"}, b"\x00" * 4100),
+                # A radio station names itself (icy-*): it never ends, whatever it says.
+                "/coast.mp3": (200, {"icy-name": "Coast FM", "icy-br": "128"}, b"\x00" * 4096),
+                "/onair.aac": (200, {"Content-Type": "audio/aac"}, self.endless),
+                "/channel.ts": (200, {"Content-Type": "video/mp2t"}, self.endless),
+                "/recorded.ts": (200, {"Content-Type": "video/mp2t"}, b"G" * 4096),
                 "/big": (200, {}, b"#EXTM3U\n" + b"x" * (1024 * 1024)),
                 "/slow": (200, {}, self.trickle),
             }
@@ -316,6 +327,18 @@ class ProbeTests(CardCase):
             handler.wfile.write(b"x" * 1024)
             handler.wfile.flush()
             time.sleep(0.25)
+
+    def endless(self, handler):
+        """Internet radio: sound that never ends (no size), until the read lets go."""
+        for _ in range(200):
+            if self.source.stop.is_set():
+                return
+            try:
+                handler.wfile.write(b"\xff\xfb" + b"\x00" * 4094)
+                handler.wfile.flush()
+            except OSError:
+                return
+            time.sleep(0.01)
 
     def play(self, path):
         url = self.source.url + path
@@ -355,7 +378,19 @@ class ProbeTests(CardCase):
         self.assertEqual(len(self.source.requests), 1)  # its answer was kept: no second read
 
     def test_a_stream_plays_with_the_kind_its_first_bytes_say(self):
-        cases = (("/live/index.m3u8", LIVE), ("/vod/index.m3u8", FILM), ("/gone.m3u8", LIVE))
+        cases = (
+            ("/live/index.m3u8", LIVE),
+            ("/vod/index.m3u8", FILM),
+            ("/gone.m3u8", LIVE),
+            ("/podcast", FILM),  # final review I2: a sized answer is a file that ends
+            ("/radio", LIVE),  # its sound never ends
+            ("/song.mp3", FILM),  # a song: its size is given
+            ("/part.mp3", FILM),  # a part of it, with its whole size
+            ("/coast.mp3", LIVE),  # a station: icy headers
+            ("/onair.aac", LIVE),  # no size: it streams
+            ("/channel.ts", LIVE),
+            ("/recorded.ts", FILM),
+        )
         for path, kind in cases:  # a refusal plays as live: VLC (and the player) say why
             with self.subTest(path):
                 self.played.clear()
@@ -367,7 +402,7 @@ class ProbeTests(CardCase):
 
     def test_at_most_64_kb_are_read_with_the_tls_setting(self):
         with mock.patch("requests.get", wraps=open_link.requests.get) as get:
-            text = open_link.read_start(self.source.url + "/big", False)  # a 1 MB answer
+            text = open_link.read_start(self.source.url + "/big", False).text  # a 1 MB answer
         self.assertTrue(text.startswith("#EXTM3U\n"))
         self.assertEqual(len(text.encode()), PROBE_BYTES)
         self.assertIs(get.call_args.kwargs["verify"], False)
@@ -442,12 +477,12 @@ class EntryPointTests(WindowCase):
             mock.patch.object(window, "play_network_link") as play,
             mock.patch.object(window, "add_provider") as add,
         ):
-            for text in ("http://cdn.example/live/channel.ts", PLAYLIST):
+            for text in ("rtsp://cam.example/harbour", PLAYLIST):  # live by its address
                 self.menu_actions()["Open Link…"].trigger()
                 QTest.keyClicks(window, text)
                 QTest.keyClick(window, Qt.Key.Key_Return)
                 self.assertTrue(card.isHidden())
-        play.assert_called_once_with("http://cdn.example/live/channel.ts", LIVE)
+        play.assert_called_once_with("rtsp://cam.example/harbour", LIVE)
         link = ProviderLink(XTREAM, "http://panel.example", "demo", "secret")
         add.assert_called_once_with(link, from_drawer=False)  # over the player, not the list
 
@@ -517,6 +552,9 @@ class ProviderHostTests(WindowCase):
             "http://portal.example/play/live.php?stream=5",  # an STB portal: one stream
             "http://panel.example:8080/demo/secret/12",  # Xtream's short live form, its max
             "http://lists.example:8000/stream/7",  # a playlist with max_streams
+            "http://PORTAL.example:80/play/live.php?stream=6",  # its host, http's port written
+            "http://panel.example:8080/demo/secret/12.ts",  # the account's .ts: live, unread
+            "http://panel.example:8080/radio/coast.mp3",  # a song there: as it was, live
         )
         read = mock.patch.object(open_link, "read_start", return_value=CHANNELS)
         play = mock.patch.object(window, "play_network_link")

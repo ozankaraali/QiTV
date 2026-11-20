@@ -9,9 +9,9 @@ from __future__ import annotations
 
 from datetime import tzinfo
 from typing import Optional, cast
-from urllib.parse import urlsplit
 
 from services import vlc_profile
+from services.link_kind import host_of
 from services.navigation import FAVORITES_GROUP, RECENT_GROUP
 from services.provider_ids import ALL_PROVIDERS, provider_of
 
@@ -87,10 +87,7 @@ def xtream_zone_at(catalog, url: str) -> Optional[tzinfo]:
     """The time zone of a signed-in provider whose streams are on `url`'s server (an M3U
     playlist's xc channel's), when one knows it."""
     find = getattr(catalog, "xtream_zone_at", None)
-    try:
-        host = urlsplit(str(url or "")).netloc.lower()
-    except ValueError:
-        return None
+    host = host_of(url)  # as the catalogs keep their stream hosts
     return find(host) if find is not None and host else None
 
 

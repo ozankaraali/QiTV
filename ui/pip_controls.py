@@ -147,6 +147,7 @@ class PipControls(QObject):
         explain: Callable[[dict, str], None] = lambda item, title: None,
         needs_stream: Callable[[dict, str, Callable[[], None]], bool] = lambda *_: False,
         borrow: Callable[[dict, str, str], Any] = lambda item, provider, purpose: None,
+        owned: Callable[[dict], dict] = lambda item: item,
         parent: Optional[QObject] = None,
     ) -> None:
         """`frame` is the PipFrame and `label` the PipLabel (None in tests without them).
@@ -160,6 +161,7 @@ class PipControls(QObject):
         `sound(player, channel)` gives a channel opening small its sound sync (2.2).
         `needs_stream(channel, purpose, then)` asks before a recording is stopped for the
         stream a channel opening over `purpose`'s needs (2.6): True, asked (`then` follows).
+        `owned(channel)` is a link stamped with whose stream it is now (the controller's).
         """
         super().__init__(parent)
         self.sessions = sessions
@@ -186,6 +188,7 @@ class PipControls(QObject):
         self._explain = explain  # why a failure happened, at the item's provider
         self._needs_stream = needs_stream
         self._borrow = borrow  # 2.9.7: a scheduled recording's session, to watch small
+        self._owned = owned
         self._views: dict[str, SlotView] = {}
         self._wanted: Optional[tuple[Target, ZapContext]] = None  # its link is on its way
         self._link: Optional[Target] = None  # the one link request in flight
@@ -393,6 +396,7 @@ class PipControls(QObject):
         """Open `channel` small, or show it in the small picture instead of what it shows."""
         if self._closed():
             return
+        channel = self._owned(channel)  # a link: whose stream it is now (its limit)
         if self._refused():
             return
         if ZapContext.same(channel, self._large_channel()):

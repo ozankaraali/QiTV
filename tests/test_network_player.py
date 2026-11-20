@@ -18,21 +18,25 @@ from unittest import mock
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
-from PySide6.QtCore import Qt
+from PySide6.QtCore import QPoint, QPointF, Qt
+from PySide6.QtGui import QWheelEvent
+from PySide6.QtWidgets import QWidget
 from timer_fixtures import elapse, pause, wait_until
 
-from services import network_streams as ns
+from services import network_streams as ns, parental
 from services.jobs import JobRunner
 from services.link_kind import FILM, LIVE, host_of, owner_of
 from services.live.refusals import STREAM_REFUSED
-from services.navigation import RECENT_GROUP, NavNode
+from services.navigation import LINKS_LAYER, RECENT_GROUP, NavNode
 from services.network_streams import NetworkStreams, stream_id
+from services.parental import Parental
 from services.provider_ids import NETWORK_PROVIDER
 from tests import test_tv_controller as tvc
 from tests.test_tv_window import WindowCase
 from ui import live_controls
 from ui.keymap import Action
 from ui.network_player import NetworkPlayer
+from ui.open_link import LinkCard, OpenLink
 
 URL = "https://cdn.example/live/harbour/index.m3u8?token=aaa"
 FRESH = "https://cdn.example/live/harbour/index.m3u8?token=bbb"
@@ -160,6 +164,113 @@ class LivePlayTests(PlayerCase):
         self.session.positionChanged.emit(90_000, 6_000_000)
         cid = self.watch.positions[-1][0]
         self.assertEqual(cid, f"{NETWORK_PROVIDER}:movie:{stream_id(film)}")
+
+
+class OwnerAfreshTests(PlayerCase):
+    """Final review C1: an account's link played before that account was configured is kept
+    as Network streams' (no limit). Once the account is added it books under the account on
+    every path, with the account's patience: whose stream a link is is asked each time it
+    plays, never read from the stamp it was kept with. ⟲ Recent lists it once, under whose
+    stream it is now."""
+
+    ACCOUNT = "http://harbor.example:8080/live/demo/secret/7.ts"
+    ACCOUNT_FILM = "http://harbor.example:8080/movie/demo/secret/55.mkv"
+
+    def setUp(self):
+        super().setUp()
+        self.harbor = self.catalog.specs.pop("Harbor IPTV")  # not configured yet
+        self.loaded()
+
+    def kept_before(self, url, kind=LIVE):
+        """`url` played before its account was added (its item as it was kept), then the
+        account added, and a channel of the browsed provider played meanwhile."""
+        self.link(url, kind)
+        self.plays_now()
+        provider, item, *_ = self.watch.plays[-1]
+        self.assertEqual((provider, item["_provider"]), (NETWORK_PROVIDER, NETWORK_PROVIDER))
+        self.catalog.specs["Harbor IPTV"] = self.harbor
+        self.catalog.names.append("Harbor IPTV")
+        self.opens(lambda: self.play(1))
+        self.assertEqual(self.budget.holders(NETWORK_PROVIDER), [])
+        return item
+
+    def recent(self):
+        return self.nav.children(NavNode("group", RECENT_GROUP, "Recent"))
+
+    def test_a_link_kept_as_no_providers_plays_as_its_accounts(self):
+        item = self.kept_before(self.ACCOUNT)
+        self.config.watch_history = [tvc.watched(NETWORK_PROVIDER, item)]
+        self.assertEqual([r.payload["_provider"] for r in self.recent()], ["Harbor IPTV"])
+        # Played as it was kept (a zap context, Play again, a drag made before): the same.
+        self.opens(lambda: self.controller.tune(item, group_key=RECENT_GROUP, channels=[item]))
+        self.assertEqual(self.controller.now_playing().item["_provider"], "Harbor IPTV")
+        self.assertTrue(wait_until(lambda: self.budget.holders("Harbor IPTV") == ["main"]))
+        self.assertEqual(self.budget.holders(NETWORK_PROVIDER), [])
+        self.assertFalse(self.starts()[-1][1].get("once", False))  # the account's patience
+        self.assertEqual(self.watch.plays[-1][0], "Harbor IPTV")
+
+    def test_a_film_kept_as_no_providers_plays_as_its_accounts(self):
+        item = self.kept_before(self.ACCOUNT_FILM, FILM)
+        self.opens(lambda: self.controller.play_vod(item, "movie", tvc.play_context()))
+        self.assertEqual(self.session.plays[-1][0], self.ACCOUNT_FILM)
+        self.assertEqual(self.budget.holders("Harbor IPTV"), ["main"])
+        self.assertEqual(self.budget.holders(NETWORK_PROVIDER), [])
+
+    def test_the_phones_watch_counts_it_as_its_accounts(self):
+        item = self.kept_before(self.ACCOUNT)
+        launched = []
+        target = tvc.Target(item, "live", "Seven", group_key=RECENT_GROUP)
+        stops = len(self.live.named("stop"))
+        self.assertTrue(
+            self.controller.play_elsewhere(
+                lambda t, url: launched.append(url) or (True, ""), target
+            )
+        )
+        self.assertTrue(wait_until(lambda: len(self.live.named("stop")) > stops))
+        self.live.released.emit()  # QiTV's own stream let go first
+        self.assertTrue(wait_until(lambda: launched == [self.ACCOUNT]))
+        self.assertEqual(self.budget.holders("Harbor IPTV"), ["main"])  # the phone's
+        self.assertEqual(self.budget.holders(NETWORK_PROVIDER), [])
+
+    def test_recent_lists_a_link_once_and_takes_it_out_whole(self):
+        item = self.kept_before(self.ACCOUNT)
+        owned = {**item, "_provider": "Harbor IPTV"}
+        self.config.watch_history = [
+            tvc.watched("Harbor IPTV", owned),
+            tvc.watched(NETWORK_PROVIDER, item),
+            tvc.watched("Home", tvc.CHANNELS[1]),
+        ]
+        rows = self.recent()
+        self.assertEqual(
+            [(r.payload["_provider"], r.payload["id"]) for r in rows],
+            [("Harbor IPTV", item["id"]), ("Home", tvc.CHANNELS[1]["id"])],
+        )
+        # Its account removed, it is still listed: a link plays without it, as no provider's.
+        self.catalog.names.remove("Harbor IPTV")
+        del self.catalog.specs["Harbor IPTV"]
+        rows = self.recent()
+        self.assertEqual(rows[0].payload["_provider"], NETWORK_PROVIDER)
+        self.assertEqual(len(rows), 2)
+        # Remove from Recents takes it out whatever it was kept under.
+        self.controller.watch = tvc.WatchState(self.config)
+        self.controller._forget_recent(rows[0].payload)
+        self.assertEqual([e["provider_name"] for e in self.config.watch_history], ["Home"])
+
+
+class LastChannelTests(PlayerCase):
+    def test_a_link_never_becomes_the_last_channel(self):
+        # Final review M2: Start with the last channel would play nothing at the next start
+        # (and a link's token may have run out by then): the provider's channel stays.
+        self.loaded()
+        self.opens(lambda: self.play(1))
+        last = self.watch.last_channel
+        self.assertEqual((last[0], last[1]["id"]), ("Home", 2))
+        for url in (URL, "http://harbor.example:8080/live/demo/secret/7.ts"):  # an account's
+            with self.subTest(url):
+                self.link(url)
+                self.plays_now()
+                self.assertEqual(self.watch.plays[-1][1]["cmd"], url)  # in the history
+                self.assertEqual(self.watch.last_channel, last)
 
 
 class FilmTests(PlayerCase):
@@ -530,6 +641,125 @@ class LinkStepTests(PlayerCase):
         kept.assert_not_called()
 
 
+class _Kept:
+    """Where parental controls keep their rules (the config's `parental`)."""
+
+    parental = None
+
+    def save_config(self):
+        pass
+
+
+class HiddenLinkTests(PlayerCase):
+    """Final review (maintenance) I1: a link hidden with "Hide (parental controls)" is hidden
+    as a hidden channel is while locked. Network streams doesn't list it, nothing plays it
+    (its row, the find, Open Link of its address), channel up/down steps past it, and one
+    playing at the lock stops. That holds whoever's stream it is: an account added after it
+    was hidden too, and a kept film as well."""
+
+    OTHER = LinkStepTests.OTHER
+    ACCOUNT = "http://harbor.example:8080/live/demo/secret/7.ts"
+
+    def setUp(self):
+        super().setUp()
+        ticks = iter(range(1, 10_000))
+        self.player._now = lambda: NOW + next(ticks)  # each link opened after the one before
+        self.harbor = self.catalog.specs.pop("Harbor IPTV")  # not configured yet
+        self.nav.set_links(self.player.rows)  # as the window lists them
+        self.loaded()
+        self.guard = Parental(_Kept())
+        self.guard.set_pin("1234")
+        self.assertTrue(self.guard.unlock("1234"))
+        self.controller.parental = self.guard
+        parental.install(self.guard)  # as the window installs it, for the lists
+        self.addCleanup(parental.install, None)
+
+    def keep(self, *urls, kind=LIVE):
+        for url in urls:
+            self.link(url, kind)
+            self.plays_now()
+
+    def hide(self, url):
+        """`url`'s ⟲ Recent row hidden with its menu's Hide (unlocked), as Network streams'
+        link (its account not configured yet)."""
+        item = {"id": stream_id(url), "name": "Hidden", "cmd": url, "_provider": NETWORK_PROVIDER}
+        self.config.watch_history = [tvc.watched(NETWORK_PROVIDER, item)]
+        rows = self.nav.children(NavNode("group", RECENT_GROUP, "Recent"))
+        self.controller._hide_from_menu(next(n for n in rows if n.payload["id"] == item["id"]))
+        self.assertEqual(len(self.guard.hidden()), 1)
+        return item
+
+    def add_account_and_lock(self):
+        self.catalog.specs["Harbor IPTV"] = self.harbor
+        self.catalog.names.append("Harbor IPTV")
+        self.guard.lock()
+        self.controller.parental_changed()  # as the window tells it
+
+    def nothing_opens(self, action):
+        opened = len(self.starts()), len(self.session.plays)
+        action()
+        pause(50)
+        self.assertEqual((len(self.starts()), len(self.session.plays)), opened)
+
+    def listed(self):
+        layer = NavNode(LINKS_LAYER, NETWORK_PROVIDER, "Network streams", NETWORK_PROVIDER)
+        return [node.key for node in self.nav.children(layer)]
+
+    def test_a_hidden_link_is_not_listed_played_or_stepped_onto_while_locked(self):
+        self.keep(self.ACCOUNT, self.OTHER, URL)  # Network streams: URL, OTHER, ACCOUNT
+        hidden = self.hide(self.ACCOUNT)
+        self.add_account_and_lock()  # it is the account's stream now
+        self.assertEqual(self.listed(), [stream_id(URL), stream_id(self.OTHER)])
+        self.assertEqual([row.id for row in self.player.rows()], self.listed())
+        source = next(n for n in self.nav.children(None) if n.layer == LINKS_LAYER)
+        self.assertEqual(source.count, 2)  # Network streams' count among the sources
+        # Played again as the account's (⟲ Recent kept it so), it is still not listed there.
+        owned = {**hidden, "_provider": "Harbor IPTV"}
+        self.config.watch_history = [tvc.watched("Harbor IPTV", owned)]
+        recent = self.nav.children(NavNode("group", RECENT_GROUP, "Recent"))
+        self.assertEqual(recent, [])
+        self.assertTrue(self.controller._hidden_now(owned))  # no tile plays it
+        # Its row, the find and Open Link of its address play nothing.
+        self.nothing_opens(lambda: self.player.play_kept(hidden["id"]))
+        self.nothing_opens(lambda: self.player.play(self.ACCOUNT, LIVE))
+        self.nothing_opens(
+            lambda: self.controller.tune(owned, group_key=RECENT_GROUP, channels=[owned])
+        )
+        # Channel up/down steps past it, round.
+        self.assertEqual(self.controller.now_playing().item["id"], stream_id(URL))
+        played = []
+        for action in (Action.CH_NEXT, Action.CH_NEXT, Action.CH_PREV):
+            self.opens(lambda: self.controller.handle(action))
+            self.plays_now()
+            played.append(self.controller.now_playing().item["id"])
+        self.assertEqual(played, [stream_id(self.OTHER), stream_id(URL), stream_id(self.OTHER)])
+        self.assertEqual(self.budget.holders("Harbor IPTV"), [])
+
+    def test_a_hidden_link_that_plays_stops_at_the_lock_and_never_enters_the_history(self):
+        self.keep(self.OTHER, self.ACCOUNT)
+        self.hide(self.ACCOUNT)
+        self.catalog.specs["Harbor IPTV"] = self.harbor
+        self.catalog.names.append("Harbor IPTV")
+        plays = len(self.watch.plays)
+        self.opens(lambda: self.player.play(self.ACCOUNT, LIVE))  # unlocked: it plays
+        self.assertEqual(self.controller.now_playing().item["_provider"], "Harbor IPTV")
+        self.assertEqual(len(self.watch.plays), plays)  # hidden: kept out of the history
+        self.guard.lock()
+        self.controller.parental_changed()
+        self.assertEqual(self.live.calls[-1], ("stop",))
+        self.assertIsNone(self.controller.now_playing())
+
+    def test_a_hidden_film_link_is_not_listed_or_played_while_locked(self):
+        self.keep(FILM_URL, kind=FILM)
+        self.keep(URL)
+        film = self.hide(FILM_URL)  # its row of ⟲ Recent (played there as a channel once)
+        self.guard.lock()
+        self.controller.parental_changed()
+        self.assertEqual(self.listed(), [stream_id(URL)])
+        self.nothing_opens(lambda: self.player.play_kept(film["id"]))
+        self.nothing_opens(lambda: self.player.play(FILM_URL, FILM))
+
+
 class ExternalLinkStepTests(PlayerCase):
     """In VLC or MPV: a pick of a kept link launches the player at once; channel up/down
     through the kept links launches only the link the steps settle on, as channels do."""
@@ -655,6 +885,25 @@ class FailureTests(PlayerCase):
         self.link(URL)
         self.assertEqual(len(self.starts()), 4)
         self.assertEqual(self.starts()[-1][0], URL)
+
+    def test_a_direct_link_that_ends_for_good_keeps_why(self):
+        # Final review M5: it only said "The stream ended", and Network streams kept no
+        # reason for it (the pipeline's give-up keeps one).
+        self.enterContext(mock.patch.object(live_controls, "RECONNECT_MS", (10, 20)))
+        rtmp = "rtmp://media.example/live/harbour"
+        self.link(rtmp)  # no pipeline: VLC plays it directly
+        self.plays_now()
+        self.session.stateChanged.emit("ended")
+        self.session.ended.emit()
+        self.assertTrue(wait_until(lambda: len(self.session.plays) == 2))  # its one try again
+        self.plays_now()
+        self.session.stateChanged.emit("ended")
+        self.session.ended.emit()  # ended again: nothing more is tried
+        self.assertEqual(self.entry(rtmp).failed, "The link stopped answering")
+        self.assertIn("The link stopped answering", self.errors()[-1])
+        self.assertNotIn(("The stream ended", "info"), self.toast.messages())
+        pause(100)
+        self.assertEqual(len(self.session.plays), 2)
 
     def test_a_link_that_plays_again_forgets_why_it_failed(self):
         self.link(URL)
@@ -788,11 +1037,107 @@ class NoProviderHoldTests(PlayerCase):
         self.assertIn(("MPV is not installed", "error"), self.toast.messages())
         self.assert_the_film_holds_on()
 
+    def test_a_link_an_outside_player_took_lets_go(self):
+        # Final review M4: Settings' Play in VLC took the link, and QiTV stayed black with no
+        # welcome card (and the update question waiting) for good.
+        self.config.play_in_vlc = True
+        self.player.play(URL, LIVE)
+        self.waits()
+        self.assertTrue(wait_until(lambda: self.external.calls == [("vlc", URL)]))
+        self.assertTrue(wait_until(lambda: self.runs == [True]))
+        self.assertTrue(self.welcome.visible)
+        self.assertFalse(self.controller._link_hold)
+
     def test_with_a_provider_a_link_holds_nothing(self):
         self.catalog.names = ["Home"]
         self.link(URL)
         self.waits()
         self.assertEqual(self.runs, [True])  # at once, as with a channel
+
+
+class CardOverTheTvTests(PlayerCase):
+    """Final review M1: while File → Open Link…'s card shows (it has the keys), neither the
+    list nor the welcome card opens over it by itself: they wait until it goes, cancelled
+    or after its Play (the link held first)."""
+
+    def setUp(self):
+        super().setUp()
+        self.host = QWidget()
+        self.host.resize(1280, 720)
+        self.host.show()
+        self.addCleanup(self.host.deleteLater)
+        self.addCleanup(self.host.close)
+        self.card = LinkCard(self.host)
+        self.opener = OpenLink(
+            self.card,
+            self.jobs,
+            play=self.player.play,
+            add_provider=lambda link: None,
+            verify_ssl=lambda url: True,
+            may_probe=lambda url: False,  # never read: no network in tests
+            parent=self.host,
+        )
+        self.controller.add_card(self.card)
+        self.loaded()
+
+    def test_the_list_due_meanwhile_opens_once_the_card_is_cancelled(self):
+        self.opener.open()
+        self.catalog.hub_ready("Home")  # the provider still loading at start comes
+        self.catalog.sectionReady.emit("live")
+        self.assertEqual(self.drawer.named("open_drawer"), [])  # not over the card
+        self.card.handle(Action.ESCAPE)
+        self.assertTrue(self.card.isHidden())
+        self.assertTrue(wait_until(lambda: self.drawer.named("open_drawer") == [(None,)]))
+
+    def test_without_a_provider_the_welcome_card_waits_for_the_card(self):
+        self.catalog.names = []
+        self.controller.start()
+        self.link(URL)  # held: the welcome card waits for it
+        self.assertFalse(self.welcome.visible)
+        self.opener.open()  # a fresh link is pasted as the one playing runs out
+        self.live.failure = lambda: ("http", 401)
+        self.live.failed.emit(STREAM_REFUSED)
+        pause(20)
+        self.assertFalse(self.welcome.visible)  # not over the card, which has the keys
+        self.card.handle(Action.ESCAPE)
+        self.assertTrue(wait_until(lambda: self.welcome.visible))
+
+    def test_the_wheel_over_the_card_is_the_cards(self):
+        # The controller watches the card for its hiding only: a wheel over it never zaps,
+        # even with the channel column open under it.
+        self.opener.open()
+        self.column.visible = True
+        wheel = QWheelEvent(
+            QPointF(20, 20),
+            QPointF(20, 20),
+            QPoint(0, 0),
+            QPoint(0, -120),
+            Qt.MouseButton.NoButton,
+            Qt.KeyboardModifier.NoModifier,
+            Qt.ScrollPhase.NoScrollPhase,
+            False,
+        )
+        with mock.patch.object(self.controller._column_wheel, "wheel_event") as zapped:
+            self.assertFalse(self.controller.eventFilter(self.card, wheel))
+        zapped.assert_not_called()
+
+    def test_a_link_played_from_the_card_holds_before_the_welcome_card_could_come(self):
+        self.catalog.names = []
+        self.controller.start()
+        self.link(URL)
+        self.opener.open()
+        self.live.failure = lambda: ("http", 401)
+        self.live.failed.emit(STREAM_REFUSED)
+        self.live.released.emit()
+        fresh = "https://cdn.example/live/coast/index.m3u8"
+        self.card.handle(Action.NAV_TEXT, fresh)
+        opened = len(self.starts())
+        self.card.handle(Action.NAV_ACTIVATE)  # Play: classified live by its address
+        self.assertTrue(self.card.isHidden())
+        self.assertTrue(wait_until(lambda: len(self.starts()) > opened))
+        pause(20)
+        self.assertFalse(self.welcome.visible)  # the fresh link holds it
+        self.assertTrue(self.controller._link_hold)
 
 
 class WindowTests(WindowCase):
@@ -848,6 +1193,12 @@ class WindowTests(WindowCase):
             window.play_network_link(short, LIVE)
         item, section = play.call_args.args
         self.assertEqual((item["cmd"], item["_provider"], section), (short, "Panel", "live"))
+        # Kept as no provider's (played before the account was added), ⟲ Recent lists it as
+        # the account's: the window's own owner (final review C1).
+        kept = {**item, "_provider": NETWORK_PROVIDER}
+        window.config_manager.watch_history = [tvc.watched(NETWORK_PROVIDER, kept)]
+        recent = window.nav.children(NavNode("group", RECENT_GROUP, "Recent"))
+        self.assertEqual([node.payload["_provider"] for node in recent], ["Panel"])
         store_path = Path(self.config_dir) / ns.FILE_NAME
         self.assertEqual(window.network_streams.path, store_path)
 
