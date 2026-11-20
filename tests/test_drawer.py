@@ -1063,11 +1063,15 @@ class HostedDrawerInputTests(unittest.TestCase):
         self.assertEqual(self.events, [])
         self.assertTrue(self.drawer.isVisible())
 
-    def test_a_right_click_on_a_group_asks_for_nothing(self):
+    def test_a_right_click_on_a_group_asks_for_its_menu(self):
+        # 2.13.1: a group's menu (Hide group, 2.9.1; Hide with a PIN, 2.8) was never asked for;
+        # the menu says what a group has (nothing for All or ★ Favorites).
         requests = []
         self.drawer.contextRequested.connect(lambda node, pos: requests.append(node))
-        self.right_click(self.drawer._columns["left"].view, 0)
-        self.assertEqual(requests, [])
+        left = self.drawer._columns["left"]
+        self.right_click(left.view, 0)
+        self.assertEqual(requests, [left.nodes[0]])
+        self.assertEqual(requests[0].layer, "group")
         self.assertEqual(self.events, [])
 
     def test_a_right_click_on_recent_asks_for_its_menu(self):

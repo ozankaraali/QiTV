@@ -156,8 +156,10 @@ from ui.theme import PALETTE, qcolor
 
 logger = logging.getLogger(__name__)
 
-_CONTEXT_LAYERS = ("item", "episode")  # rows with a context menu (channels are items)
-_CONTEXT_GROUPS = (RECENT_GROUP,)  # and these groups' rows ("Clear Recents")
+# Rows with a context menu: channels (items), episodes, and groups (⟲ Recent's Clear Recents;
+# 2.13.1: a provider's group's Hide group, which 2.8 and 2.9.1 offered and no right-click asked
+# for; the menu has nothing for All or ★ Favorites).
+_CONTEXT_LAYERS = ("item", "episode", "group")
 _RIGHT_PRESSES = (QEvent.Type.MouseButtonPress, QEvent.Type.MouseButtonDblClick)
 DRAG_OPACITY = 0.25  # the list while a channel is dragged out of it onto the grid
 FOUND_GENRE_H_U = 5.0  # a genre the find found: its name, then its provider and count
@@ -309,7 +311,7 @@ def _is_focus_key(node: NavNode, wanted: "str | tuple[str, str]") -> bool:
 
 def _has_context(node: NavNode) -> bool:
     """Whether a right-click on the row asks for a context menu."""
-    return node.layer in _CONTEXT_LAYERS or (node.layer == "group" and node.key in _CONTEXT_GROUPS)
+    return node.layer in _CONTEXT_LAYERS
 
 
 def _found_link(node: NavNode) -> bool:
