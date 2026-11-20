@@ -71,6 +71,21 @@ def near(color: QColor, target: QColor, slack: int = 24) -> bool:
     return all(abs(a - b) <= slack for a, b in zip(ours, theirs))
 
 
+def contrast(one: QColor, other: QColor) -> float:
+    """The WCAG contrast ratio of two opaque colours."""
+
+    def luminance(color: QColor) -> float:
+        def linear(c: int) -> float:
+            s = c / 255
+            return s / 12.92 if s <= 0.04045 else ((s + 0.055) / 1.055) ** 2.4
+
+        r, g, b = (linear(c) for c in color.getRgb()[:3])
+        return 0.2126 * r + 0.7152 * g + 0.0722 * b
+
+    high, low = sorted((luminance(one), luminance(other)), reverse=True)
+    return (high + 0.05) / (low + 0.05)
+
+
 def inked(image: QImage, rect: QRectF) -> list[float]:
     """The x of each pixel in `rect` (every other one) unlike the rect's bottom-right corner."""
     ratio = image.devicePixelRatio()
@@ -940,8 +955,8 @@ class SettingsDrawerTests(unittest.TestCase):
         image = self.drawer.grab().toImage()
         self.assertEqual(self.drawer._box("right", 1).titles, ["Remove provider…"])
         self.assertEqual(self.drawer._box("right", 2).titles, ["Remove provider…"])  # one "…"
-        live, accent = QColor(PALETTE.live), QColor(PALETTE.accent)
-        self.assertFalse(near(live, accent))  # the test tells them apart
+        red, accent = QColor(PALETTE.danger_text), QColor(PALETTE.accent)
+        self.assertFalse(near(red, accent))  # the test tells them apart
         ratio = image.devicePixelRatio()
 
         def reds(index):
@@ -950,11 +965,18 @@ class SettingsDrawerTests(unittest.TestCase):
                 1
                 for y in range(int(r.top() * ratio), int(r.bottom() * ratio))
                 for x in range(int(r.left() * ratio), int(r.right() * ratio))
-                if near(image.pixelColor(x, y), live)
+                if near(image.pixelColor(x, y), red)
             )
 
         self.assertGreater(reds(1), 20)
         self.assertEqual(reds(0), 0)
+        # Readable over the brightest picture: the right column's panel over white (2.12: the
+        # live red there was 3.1:1), at the 4.5:1 normal-size text needs.
+        panel = qcolor(PALETTE.panel)
+        alpha = panel.alphaF()
+        under = QColor(*(round(c * alpha + 255 * (1 - alpha)) for c in panel.getRgb()[:3]))
+        self.assertGreaterEqual(contrast(red, under), 4.5)
+        self.assertLess(contrast(QColor(PALETTE.live), under), 4.5)  # (why it is not the live red)
 
     def test_a_danger_row_acts_on_the_first_click(self):
         self.open_rows(m.Row("plain", "Plain"), m.Row("remove", "Remove provider…", kind=m.DANGER))

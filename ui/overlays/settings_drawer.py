@@ -1276,7 +1276,7 @@ class SettingsDrawer(Overlay):
             row = item.row
             tone = text if item.selectable else muted
             if side == RIGHT and row is not None and row.kind == DANGER:
-                tone = qcolor(PALETTE.live)
+                tone = qcolor(PALETTE.danger_text)  # (readable over a bright picture)
             elif row is not None and row.warn and not row.sub:
                 tone = qcolor(PALETTE.warn)  # an info line that says why something failed
             warned = row is not None and row.warn  # its sub line says why it failed

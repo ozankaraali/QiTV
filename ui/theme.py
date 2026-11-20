@@ -19,6 +19,9 @@ class Palette:
     accent: str = "#e08a5f"
     brand: str = "#C96B43"
     live: str = "#d6453a"
+    # A destructive row's text ("Remove…"): the live red lightened so that it reads at 4.5:1 on
+    # the drawer's panel over the brightest picture (#d6453a there: 3.1:1).
+    danger_text: str = "#ff5f57"
     ok: str = "#5fbf7a"
     warn: str = "#e0b24a"
 

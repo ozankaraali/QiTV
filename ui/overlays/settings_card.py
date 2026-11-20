@@ -887,7 +887,7 @@ class _Card(Overlay):
                 p.drawRoundedRect(rect.adjusted(0.5, 0.5, -0.5, -0.5), radius, radius)
             elif self._hover == ("alt", button.key):
                 fill_round(p, rect, qcolor(PALETTE.text, 0.1), radius)
-            p.setPen(qcolor(PALETTE.live if button.danger else PALETTE.text))
+            p.setPen(qcolor(PALETTE.danger_text if button.danger else PALETTE.text))
             p.drawText(
                 rect,
                 Qt.AlignmentFlag.AlignCenter,
@@ -926,7 +926,7 @@ class _Card(Overlay):
             p.setPen(QPen(edge, 1.0))
             p.setBrush(Qt.BrushStyle.NoBrush)
             p.drawRoundedRect(rect.adjusted(0.5, 0.5, -0.5, -0.5), radius, radius)
-            tone = qcolor(PALETTE.live if button.danger else PALETTE.text)
+            tone = qcolor(PALETTE.danger_text if button.danger else PALETTE.text)
         if focused:
             p.setPen(QPen(qcolor(PALETTE.text), 2.0))
             p.setBrush(Qt.BrushStyle.NoBrush)
