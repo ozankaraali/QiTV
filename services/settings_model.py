@@ -213,11 +213,12 @@ class Context:
     name of the one the system's choice gives; whether its build carries a TMDB token; the image
     cache's largest size as set (MB: one the old window took that is none of the steps shows
     as its own) and what it takes now (Clear Image Cache's note, in the active language: ""
-    until ui.settings_general has measured it); Files' rows, as their status is now (none when QiTV cannot be the app files
-    open with: a run from source); whether its build carries an OpenSubtitles key; and what AI
-    captions' downloaded files take (ui.settings_subtitles measures it): the line that says it,
-    in the active language ("" while it is measured; None: this build has no such files to
-    tell of, and no row says it), and whether there is any to delete; the time-shift settings
+    until ui.settings_general has measured it); Files' rows, as their status is now (none when
+    QiTV cannot be the app files open with: a run from source); whether its build carries an
+    OpenSubtitles key; and what AI captions' downloaded files take (ui.settings_subtitles
+    measures it): the line that says it, in the active language ("" while it is measured;
+    None: this build has no such files to tell of, and no row says it), and whether there is
+    any to delete; the time-shift settings
     as they are now (whether the disk buffer is on, the memory per stream and the disk cache,
     in MiB) and the Recordings folder (where recordings go, and whether it is one of the
     viewer's own rather than the default). The Guide's rows, built for its source as it is now
