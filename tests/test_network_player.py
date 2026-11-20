@@ -559,6 +559,47 @@ class NoProviderHoldTests(PlayerCase):
         self.assertEqual(self.runs, [True])
         self.assertFalse(self.controller._link_hold)
 
+    def film(self):
+        """A file opened in QiTV plays (TVWindow.open_paths holds for it first)."""
+        self.controller.hold_for_file(True)
+        self.controller.play_file("/videos/Harbour Night.mkv", size=1234)
+        self.session.stateChanged.emit("playing")
+        self.assertFalse(self.welcome.visible)
+
+    def assert_the_film_holds_on(self):
+        """The film plays on with its own hold; stopped, the welcome card and the waits come."""
+        self.assertFalse(self.welcome.visible)
+        self.assertEqual(self.runs, [])
+        self.assertTrue(self.controller.now_playing().local)
+        self.assertTrue(self.controller._flow.held())
+        self.assertFalse(self.controller._link_hold)
+        self.controller.stop()
+        self.assertTrue(self.welcome.visible)
+        self.assertEqual(self.runs, [True])
+
+    def test_a_link_that_never_comes_over_a_film_leaves_the_films_hold(self):
+        # Review R1: its delivery raised while a file plays.
+        self.film()
+        self.waits()
+        failing = mock.patch.object(
+            self.controller, "_deliver", side_effect=RuntimeError("no player")
+        )
+        with failing, self.assertLogs("ui.tv_controller", "WARNING"):
+            self.player.play(URL, LIVE)
+            self.assertTrue(wait_until(lambda: not self.controller._link_hold))
+        self.assert_the_film_holds_on()
+
+    def test_an_outside_player_failing_a_link_over_a_film_leaves_the_films_hold(self):
+        self.film()
+        self.waits()
+        self.config.play_in_mpv = True
+        self.external.result = (False, "MPV is not installed")
+        self.player.play(URL, LIVE)
+        self.assertTrue(wait_until(lambda: self.external.calls == [("mpv", URL)]))
+        self.assertTrue(wait_until(lambda: not self.controller._link_hold))
+        self.assertIn(("MPV is not installed", "error"), self.toast.messages())
+        self.assert_the_film_holds_on()
+
     def test_with_a_provider_a_link_holds_nothing(self):
         self.catalog.names = ["Home"]
         self.link(URL)

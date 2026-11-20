@@ -257,6 +257,10 @@ class ProviderFlow(QObject):
         """A start's playlist is still read (hold_for_read)."""
         return self._reading
 
+    def held(self) -> bool:
+        """A file opened in QiTV (or a link played with no provider) holds QiTV now."""
+        return self._held
+
     def read_over(self) -> None:
         """The start's playlist was read and plays nothing (a provider's list, or another
         choice came first): the start runs as any start does, and what waited runs, unless a

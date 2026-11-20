@@ -386,8 +386,10 @@ class TVController(QObject):
         # Its link kept under an id plays, by the network player (`set_link_player`).
         self._play_kept: Callable[[str], bool] = lambda key: False
         # A link plays while no provider is configured: held as a file opened in QiTV is (the
-        # welcome card waits) until it stops, ends or fails (_hold_for_link).
+        # welcome card waits) until it stops, ends or fails (_hold_for_link); and whether a
+        # file's hold (one playing, or looked at) is under it, the file's to end.
         self._link_hold = False
+        self._file_under_link = False
         self._lanes = LinkLanes(catalog, self)
         self._lanes.known = self._network_url  # no provider is asked for a link's address
         # The live channel's time-shift side: pipeline tunes, its controls and reports.
@@ -988,7 +990,9 @@ class TVController(QObject):
         turned out gone or gave way) keeps the hold: the link's own end lets go."""
         if on:
             self._autoplay.drop()
+            self._file_under_link = self._link_hold  # a file's hold beside the link's
         elif self._link_hold:
+            self._file_under_link = False  # what held is the link's alone from now on
             return
         self._flow.hold_for_file(on)
 
@@ -1250,6 +1254,8 @@ class TVController(QObject):
         held."""
         if not self.catalog.provider_names():
             self._autoplay.drop()
+            if not self._link_hold:  # a file playing or looked at holds already: its hold
+                self._file_under_link = self._flow.held()
             self._flow.hold_for_file(True, spends_start=False)
             self._link_hold = True
 
@@ -1266,14 +1272,21 @@ class TVController(QObject):
         """The link held for stopped, ended or failed: what waited for it (the welcome card,
         the update question) may come now, as after a file."""
         if self._link_hold:
-            self._link_hold = False
+            self._link_hold = self._file_under_link = False
             self._flow.hold_for_file(False)
 
     def _let_go_unless_a_link_plays(self) -> None:
         """A link chosen while held never came (its open raised, an outside player refused
-        it, the multiview had no room): the hold goes, unless a link it holds for plays on."""
-        if not self._link_holds(self._current):
-            self._let_go_of_link()
+        it, the multiview had no room): the hold goes, unless a link it holds for plays on, or
+        a file's hold is under it (a file plays on, or is looked at): that one stays the
+        file's, and goes as a file's does."""
+        current = self._current
+        if self._link_holds(current):
+            return
+        if self._file_under_link or (current is not None and current.local):
+            self._link_hold = self._file_under_link = False
+            return
+        self._let_go_of_link()
 
     def _resume_owner(self, item: dict, provider_name: str) -> str:
         """Whose resume points `item`'s are: a link's are Network streams' (its id stays
@@ -3766,14 +3779,16 @@ class TVController(QObject):
             self._list_job.stop()  # a list of songs given up: its songs stop being read
             if not delivered:
                 self._file_gives_way()
-            # A link after the held link keeps its hold; once a provider exists it plays as a
-            # channel does, and the hold goes.
+            # A link after the held link keeps its hold (the file it replaces gave way: the hold
+            # is the link's alone); once a provider exists it plays as a channel does, and the
+            # hold goes.
             if not self._link_holds(target) or self.catalog.provider_names():
                 self._link_hold = False
                 self._flow.hold_for_file(False)
+            self._file_under_link = False
             self._opening_over()
         else:
-            self._link_hold = False  # a file holds from now on, by a file's rules
+            self._link_hold = self._file_under_link = False  # a file's rules from now on
         captions = getattr(self.window_actions, "captions", None)
         if captions is not None:
             captions.target_changing(target is not None and target.video_file)
