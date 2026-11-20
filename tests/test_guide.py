@@ -5,7 +5,6 @@ from pathlib import Path
 import subprocess
 import sys
 import unittest
-from unittest import mock
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
@@ -17,7 +16,7 @@ from shiboken6 import isValid
 from timer_fixtures import elapse
 
 from services.epg_view import Programme
-from ui.keymap import key_hint
+from ui.keymap import Action, key_hint
 from ui.overlay_host import OverlayHost
 from ui.overlays.guide import (
     CHANNEL_U,
@@ -32,6 +31,7 @@ from ui.overlays.guide import (
     slot_start,
     wrap_lines,
 )
+from ui.overlays.popup_menu import popup_for
 from ui.video_surface import VideoSurface
 
 NOW = datetime(2026, 10, 15, 19, 42, tzinfo=timezone.utc)
@@ -614,11 +614,18 @@ class GuideHeaderTests(unittest.TestCase):
         self.guide._go_to(tomorrow)
         self.assertEqual(self.guide.window_start(), tomorrow)
         self.assertEqual(self.guide.day_choices()[0][1], start)  # today: now
-        shown = []
-        with mock.patch("ui.overlays.guide.QMenu.popup", lambda menu, pos: shown.append(menu)):
-            self.click("day")
-        self.assertEqual([a.text() for a in shown[0].actions()], ["Today", "Tomorrow"])
-        self.assertEqual([a.isChecked() for a in shown[0].actions()], [False, True])
+        self.click("day")
+        shown = popup_for(self.guide)  # 2.13.1: the painted menu, on the guide's page
+        menu = shown.menu()
+        self.assertEqual(menu.texts(), ["Today", "Tomorrow"])
+        self.assertEqual([entry.checked for entry in menu.entries], [False, True])
+        day = self.guide.header_buttons()["day"]
+        self.assertGreaterEqual(shown.panel().top(), day.bottom())  # under its button
+        self.assertAlmostEqual(shown.panel().left(), day.left(), delta=1)
+        shown.handle(Action.NAV_HOME)
+        shown.handle(Action.NAV_ACTIVATE)  # the keys reach it: Today
+        self.assertFalse(shown.shown())
+        self.assertEqual(self.guide.window_start(), start)
 
     def test_a_window_wider_than_the_cap_shows_more_time_not_wider_boxes(self):  # 2.9.3
         self.host.resize(1280, 720)

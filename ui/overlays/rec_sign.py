@@ -19,11 +19,12 @@ a recording begins or ends; the Library's, in its corner, stays while recordings
 
 from __future__ import annotations
 
+from functools import partial
 import math
 import time
 from typing import Callable, Optional
 
-from PySide6.QtCore import QEvent, QObject, QPoint, QRectF, Qt, QTimer, Signal
+from PySide6.QtCore import QEvent, QObject, QPoint, QRect, QRectF, Qt, QTimer, Signal
 from PySide6.QtGui import (
     QEnterEvent,
     QFont,
@@ -32,14 +33,15 @@ from PySide6.QtGui import (
     QPainter,
     QPaintEvent,
 )
-from PySide6.QtWidgets import QMenu, QWidget
+from PySide6.QtWidgets import QWidget
 
 from services.i18n import N_, tr_n, translate
 from services.recording import clock_text
-from ui.context_actions import menu_style
+from ui.overlays import popup_menu
 from ui.overlays.base import Overlay
 from ui.overlays.painting import Units, elided, fill_round, ui_units
 from ui.overlays.pip_label import REC
+from ui.overlays.popup_menu import ABOVE, BELOW, Menu
 from ui.stream_question import STOP_RECORDING
 from ui.theme import PALETTE, qcolor
 
@@ -153,31 +155,27 @@ class RecSign(Overlay):
         """What it says, its dot aside: "REC News 01:23", or "REC 2 channels"."""
         return " ".join(self._parts())
 
-    def menu(self) -> QMenu:
+    def menu(self) -> Menu:
         """Its menu, for the recordings it shows (a pair of choices each)."""
-        menu = QMenu(self)
-        menu.setStyleSheet(menu_style())
+        menu = Menu()
         for index, (name, channel, _since) in enumerate(self._recordings):
             if index:
-                menu.addSeparator()
-            back = menu.addAction(translate(GO_BACK, channel=channel))
-            back.triggered.connect(lambda _checked=False, n=name: self.goBack.emit(n))
-            stop = menu.addAction(translate(STOP_RECORDING))
-            stop.triggered.connect(lambda _checked=False, n=name: self.stop.emit(n))
+                menu.add_separator()
+            menu.add(translate(GO_BACK, channel=channel), partial(self.goBack.emit, name))
+            menu.add(translate(STOP_RECORDING), partial(self.stop.emit, name))
         if self._recordings:
-            menu.addSeparator()
-        manage = menu.addAction(translate(MANAGE_TEXT))
-        manage.triggered.connect(lambda _checked=False: self.manageRequested.emit())
+            menu.add_separator()
+        menu.add(translate(MANAGE_TEXT), lambda: self.manageRequested.emit())
         return menu
 
     def open_menu(self) -> None:
+        """Its menu, painted on its page: under it on the player, above it in the Library's
+        corner. It stays shown while its menu does."""
         menu = self.menu()
-        menu.aboutToHide.connect(menu.deleteLater)
         self._menu_open = True
-        menu.aboutToHide.connect(self._menu_closed)
-        below = QPoint(0, self.height() + 4)
-        above = QPoint(0, -menu.sizeHint().height() - 4)
-        menu.popup(self.mapToGlobal(above if self._bottom else below))
+        menu.on_close(self._menu_closed)
+        sign = QRect(self.mapToGlobal(QPoint(0, 0)), self.size())
+        popup_menu.popup(menu, self, beside=sign, side=ABOVE if self._bottom else BELOW)
 
     def _menu_closed(self) -> None:
         self._menu_open = False

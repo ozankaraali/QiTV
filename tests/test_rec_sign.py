@@ -11,7 +11,9 @@ from PySide6.QtWidgets import QApplication, QWidget
 from timer_fixtures import pause
 
 from tests.timer_fixtures import wait_until
+from ui.keymap import Action
 from ui.overlays.painting import Units
+from ui.overlays.popup_menu import popup_for
 from ui.overlays.rec_sign import RecSign
 
 
@@ -52,9 +54,8 @@ class RecSignTests(unittest.TestCase):
     def test_its_menu_goes_back_or_stops(self):
         self.sign.set_recordings([("main", "One", 100.0), ("b1", "Two", 120.0)])
         menu = self.sign.menu()
-        texts = [a.text() for a in menu.actions() if not a.isSeparator()]
         self.assertEqual(
-            texts,
+            menu.texts(),
             [
                 "Go back to One",
                 "Stop recording",
@@ -63,10 +64,28 @@ class RecSignTests(unittest.TestCase):
                 "Manage Recordings…",  # 2.9.7: the Library's Recordings page
             ],
         )
-        actions = [a for a in menu.actions() if not a.isSeparator()]
-        actions[0].trigger()
-        actions[3].trigger()
+        entries = [e for e in menu.entries if not e.separator]
+        entries[0].trigger()
+        entries[3].trigger()
         self.assertEqual((self.back, self.stopped), (["main"], ["b1"]))
+
+    def test_its_menu_opens_under_it_on_the_player_and_above_it_in_the_library(self):
+        self.host.show()
+        library = RecSign(self.host, clock=lambda: self.now[0], bottom=True)
+        library.goBack.connect(self.back.append)
+        for sign in (self.sign, library):
+            sign.set_recordings([("main", "One", 100.0)])
+            sign.open_menu()
+            shown = popup_for(sign)  # 2.13.1: painted, on its page
+            self.assertTrue(shown.shown())
+            self.assertTrue(sign.isVisible())  # it stays while its menu shows
+            if sign is library:
+                self.assertLessEqual(shown.panel().bottom(), sign.geometry().top())
+            else:
+                self.assertGreaterEqual(shown.panel().top(), sign.geometry().bottom())
+            shown.handle(Action.NAV_ACTIVATE)  # the keys reach it: Go back to One
+            self.assertFalse(shown.shown())
+        self.assertEqual(self.back, ["main", "main"])
 
     def test_on_the_player_it_sits_under_the_clock_clear_of_the_channel_name(self):
         # 2.8.12: at the top left it covered the controls' logo and channel name.
@@ -160,9 +179,9 @@ class RecSignHudTests(unittest.TestCase):  # 2.9.7: on the player, it comes and 
 
     def test_its_menu_ends_with_the_recordings_page(self):
         self.sign.set_recordings([])
-        actions = [a for a in self.sign.menu().actions() if not a.isSeparator()]
-        self.assertEqual([a.text() for a in actions], ["Manage Recordings…"])
-        actions[0].trigger()
+        menu = self.sign.menu()
+        self.assertEqual(menu.texts(), ["Manage Recordings…"])
+        menu.entry("Manage Recordings…").trigger()
         self.assertEqual(self.managed, [True])
 
 

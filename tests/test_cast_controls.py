@@ -7,12 +7,14 @@ from unittest import mock
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
+from PySide6.QtCore import QPoint
 from PySide6.QtWidgets import QApplication
 
 from services.casting import CastDevices
 from services.playback import PlaybackSession
 from services.vlc_profile import PlayKind
 from ui.cast_controls import CastControls
+from ui.overlays.popup_menu import ABOVE
 
 app = QApplication.instance() or QApplication([])
 
@@ -103,6 +105,31 @@ class CastControlsTests(unittest.TestCase):
         for name in names:
             self.discovery.found(name, "chromecast", f"handle:{name}")
         app.processEvents()
+
+    def shown_menu(self):
+        """The cast button's menu as it opens (painted: 2.13.1), and where."""
+        with mock.patch("ui.overlays.popup_menu.popup") as popup:
+            self.controls.show_menu(QPoint(300, 600))
+        return popup.call_args.args[0], popup.call_args.kwargs
+
+    def test_its_painted_menu_ticks_the_device_and_ends_with_stop_casting(self):  # 2.13.1
+        menu, where = self.shown_menu()
+        self.assertEqual(menu.texts(), ["Looking for devices…"])
+        self.assertFalse(menu.entries[0].enabled)  # a note: the keys and the pointer pass it
+        self.assertEqual(where["beside"].topLeft(), QPoint(300, 600))
+        self.assertEqual((where["side"], where["follow"]), (ABOVE, False))  # above the bar
+        self.found("Living Room TV")
+        menu, _where = self.shown_menu()
+        self.assertEqual([(e.text, e.checked) for e in menu.entries], [("Living Room TV", False)])
+        menu.entry("Living Room TV").trigger()
+        self.assertEqual(self.controls.device(), "Living Room TV")
+        menu, _where = self.shown_menu()
+        self.assertEqual(
+            [(e.text, e.checked) for e in menu.entries],
+            [("Living Room TV", True), ("Stop casting", None)],
+        )
+        menu.entry("Stop casting").trigger()
+        self.assertIsNone(self.controls.device())
 
     def test_the_menu_looks_for_devices_until_one_is_found(self):
         self.assertEqual(self.controls.menu_entries(), [("Looking for devices…", None, False)])

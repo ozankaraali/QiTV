@@ -21,16 +21,18 @@ without picture-in-picture of itself; a film's or an episode's players and link)
 - "Copy stream link": the link goes to the clipboard.
 Links are asked for on LinkLanes' side lane (one at a time, beside the tune's); a newer
 choice supersedes an external play still waiting for its link, never a copy.
+2.13.1: the menus are painted (ui/overlays/popup_menu.py), on the page that asks: built here as
+plain data (`menu`, `channel_menu`), each entry's callback runs once the menu closed.
 """
 
 from __future__ import annotations
 
+from functools import partial
 import logging
 from typing import Callable, Optional
 
-from PySide6.QtCore import QObject, QPoint
+from PySide6.QtCore import QObject, QPoint, QRect, QSize
 from PySide6.QtGui import QGuiApplication
-from PySide6.QtWidgets import QMenu, QWidget
 
 from services import external_players, favorites, free_radio, i18n
 from services.i18n import N_, tr, tr_n, translate
@@ -43,6 +45,8 @@ from services.navigation import (
     item_title,
 )
 from ui.link_lanes import LinkLanes, Target
+from ui.overlays import popup_menu
+from ui.overlays.popup_menu import ABOVE, Menu, Where
 from ui.theme import FOCUS_FILL_ALPHA, PALETTE, qcolor
 
 logger = logging.getLogger(__name__)
@@ -90,7 +94,8 @@ def _css(value: str, alpha: Optional[float] = None) -> str:
 
 
 def menu_style() -> str:
-    """The menu in the shell's colours, with the shared focus style."""
+    """A QMenu in the shell's colours, with the shared focus style (Free channels' own menu,
+    ui/free_channels_menu.py; QiTV's other menus are painted: ui/overlays/popup_menu.py)."""
     line = _css(PALETTE.text, 0.12)
     return (
         f"QMenu {{ background: {_css(PALETTE.panel_raised)}; color: {_css(PALETTE.text)};"
@@ -148,91 +153,79 @@ class ContextActions(QObject):
         self._play_external = play_external
         self._notify = notify
 
-    def show(self, node: NavNode, global_pos: QPoint, parent: Optional[QObject] = None) -> None:
-        """Pop `node`'s menu up at `global_pos`; it is built now and deleted once closed."""
-        menu = self.menu(node, parent if isinstance(parent, QWidget) else None)
+    def show(self, node: NavNode, global_pos: Where, parent: Optional[QObject] = None) -> None:
+        """Show `node`'s menu at `global_pos` (a right-click's point, or the row the menu key
+        was pressed on: beside it), on `parent`'s page (the drawer's); it closes when the
+        drawer does."""
+        menu = self.menu(node)
         if menu is not None:
-            menu.aboutToHide.connect(menu.deleteLater)
-            menu.popup(global_pos)
+            popup_menu.popup(menu, parent, at=global_pos)
 
     def show_players(
         self, target: Target, anchor: QPoint, parent: Optional[QObject] = None
     ) -> None:
         """The two players for `target` (what plays now), opening upwards from `anchor`: the
-        player controls' button top-left, in global coordinates."""
-        menu = QMenu(parent if isinstance(parent, QWidget) else None)
-        menu.setStyleSheet(menu_style())
+        player controls' button top-left, in global coordinates. It stays while the controls
+        fade."""
+        menu = Menu()
         self._add_players(menu, target)
-        menu.aboutToHide.connect(menu.deleteLater)
-        menu.popup(QPoint(anchor.x(), anchor.y() - menu.sizeHint().height()))
+        beside = QRect(anchor, QSize(1, 1))
+        popup_menu.popup(menu, parent, beside=beside, side=ABOVE, follow=False)
 
     def show_target(
-        self, target: Target, global_pos: QPoint, parent: Optional[QObject] = None
+        self, target: Target, global_pos: Where, parent: Optional[QObject] = None
     ) -> None:
         """A Library title's or episode's menu: the players and its link (no favorites)."""
-        menu = QMenu(parent if isinstance(parent, QWidget) else None)
-        menu.setStyleSheet(menu_style())
+        menu = Menu()
         self._add_link_actions(menu, target)
-        menu.aboutToHide.connect(menu.deleteLater)
-        menu.popup(global_pos)
+        popup_menu.popup(menu, parent, at=global_pos)
 
     def show_channel(
         self,
         item: dict,
-        global_pos: QPoint,
+        global_pos: Where,
         parent: Optional[QObject] = None,
         *,
         group_key: str = "",
     ) -> None:
         """2.9.3: a live channel's menu where the channel list is not (the guide's rows): its
         row's entries, whatever the channel list shows now."""
-        menu = self.channel_menu(item, parent if isinstance(parent, QWidget) else None, group_key)
-        menu.aboutToHide.connect(menu.deleteLater)
-        menu.popup(global_pos)
+        popup_menu.popup(self.channel_menu(item, group_key), parent, at=global_pos)
 
     def show_playing(
         self, target: Target, global_pos: QPoint, parent: Optional[QObject] = None
     ) -> None:
         """2.9.3: a right-click on the picture: the menu of what plays. A live channel's as
         its row's (no picture-in-picture of the channel itself), a film's or an episode's the
-        players and its link, a file's the players."""
-        widget = parent if isinstance(parent, QWidget) else None
+        players and its link, a file's the players. It stays while the controls fade."""
         if target.live and not target.local:
-            menu = self.channel_menu(target.item, widget, target.group_key, playing=target)
+            menu = self.channel_menu(target.item, target.group_key, playing=target)
         else:
-            menu = QMenu(widget)
-            menu.setStyleSheet(menu_style())
+            menu = Menu()
             if target.local:
                 self._add_players(menu, target)
             else:
                 self._add_link_actions(menu, target)
-        menu.aboutToHide.connect(menu.deleteLater)
-        menu.popup(global_pos)
+        popup_menu.popup(menu, parent, at=global_pos, follow=False)
 
     def channel_menu(
-        self,
-        item: dict,
-        parent: Optional[QWidget] = None,
-        group_key: str = "",
-        *,
-        playing: Optional[Target] = None,
-    ) -> QMenu:
+        self, item: dict, group_key: str = "", *, playing: Optional[Target] = None
+    ) -> Menu:
         """A live channel's menu wherever it is listed (2.9.3): favorites, picture-in-picture
         (not for `playing`: the channel playing itself), Record at a time…, Hide, then the
         players and its link (`playing`'s own, else the channel's live one)."""
         node = NavNode("item", item_key(item), item_title(item), item)
-        menu = QMenu(parent)
-        menu.setStyleSheet(menu_style())
+        menu = Menu()
         self._add_channel_actions(menu, node, pip=playing is None, recent=False)
-        menu.addSeparator()
+        menu.add_separator()
         target = playing or Target(item, "live", node.title, group_key=group_key)
         self._add_link_actions(menu, target)
         return menu
 
-    def menu(self, node: NavNode, parent: Optional[QWidget] = None) -> Optional[QMenu]:
+    def menu(self, node: NavNode) -> Optional[Menu]:
         """`node`'s menu; None when it has nothing to offer (a series)."""
         if node.layer == "group" and node.key == RECENT_GROUP:
-            return self._recents_menu(parent)
+            return self._recents_menu()
         hide = self._hide if self._may_hide() else None
         tidy = self._tidy
         if (
@@ -241,29 +234,27 @@ class ContextActions(QObject):
             and node.key != FAVORITES_GROUP
             and _a_providers_group(node)
         ):
-            menu = QMenu(parent)  # a group's menu: hidden from the lists (2.9.1), parental (2.8)
-            menu.setStyleSheet(menu_style())
+            menu = Menu()  # a group's menu: hidden from the lists (2.9.1), parental (2.8)
             if tidy is not None:
-                menu.addAction(translate(TIDY_TEXT)).triggered.connect(lambda _=False: tidy(node))
+                menu.add(translate(TIDY_TEXT), lambda: tidy(node))
             if hide is not None:
-                menu.addAction(translate(HIDE_TEXT)).triggered.connect(lambda _=False: hide(node))
+                menu.add(translate(HIDE_TEXT), lambda: hide(node))
             return menu
         channel = is_channel(self.nav, node)
         playable = isinstance(node.payload, dict) and self.nav.is_playable(node)
         if not channel and not playable:
             return None
-        menu = QMenu(parent)
-        menu.setStyleSheet(menu_style())
+        menu = Menu()
         if channel:
             self._add_channel_actions(menu, node)
         if playable:
             if channel:
-                menu.addSeparator()
+                menu.add_separator()
             self._add_link_actions(menu, self._target(node))
         return menu
 
     def _add_channel_actions(
-        self, menu: QMenu, node: NavNode, *, pip: bool = True, recent: bool = True
+        self, menu: Menu, node: NavNode, *, pip: bool = True, recent: bool = True
     ) -> None:
         """A channel's own entries: favorites, picture-in-picture (with `pip`), Record at a
         time…, Remove from Recents (with `recent`, on a row of ⟲ Recent) and Hide. A link
@@ -275,50 +266,42 @@ class ContextActions(QObject):
         if not link:
             kept = favorites.is_favorite(self.config, item)
             text = tr("Remove from favorites") if kept else tr("Add to favorites")
-            menu.addAction(text).triggered.connect(lambda _=False: self._toggle_favorite(item))
+            menu.add(text, lambda: self._toggle_favorite(item))
         open_pip = self._open_pip if pip else None
         if open_pip is not None:
-            menu.addAction(translate(OPEN_PIP_TEXT)).triggered.connect(
-                lambda _=False: open_pip(node)
-            )
+            menu.add(translate(OPEN_PIP_TEXT), lambda: open_pip(node))
         recordable = not link and not free_radio.is_station(item)
         record_at = self._record_at() if self._record_at is not None and recordable else None
         if record_at is not None:
-            menu.addAction(translate(RECORD_AT_TEXT)).triggered.connect(
-                lambda _=False: record_at(item)
-            )
+            menu.add(translate(RECORD_AT_TEXT), lambda: record_at(item))
         forget = self._forget_recent
         if recent and forget is not None and self.nav.is_recent_row(node):
-            menu.addSeparator()
-            menu.addAction(translate(REMOVE_RECENT_TEXT)).triggered.connect(
-                lambda _=False: forget(item)
-            )
+            menu.add_separator()
+            menu.add(translate(REMOVE_RECENT_TEXT), lambda: forget(item))
             self._add_clear_recents(menu)
         hide = self._hide if self._may_hide() else None
         if hide is not None:
-            menu.addAction(translate(HIDE_TEXT)).triggered.connect(lambda _=False: hide(node))
+            menu.add(translate(HIDE_TEXT), lambda: hide(node))
 
-    def _recents_menu(self, parent: Optional[QWidget]) -> Optional[QMenu]:
+    def _recents_menu(self) -> Optional[Menu]:
         """A right-click on the ⟲ Recent row: "Clear Recents ›"."""
         if self._clear_recents is None or not self.nav.recent_count():
             return None
-        menu = QMenu(parent)
-        menu.setStyleSheet(menu_style())
+        menu = Menu()
         self._add_clear_recents(menu)
         return menu
 
-    def _add_clear_recents(self, menu: QMenu) -> None:
+    def _add_clear_recents(self, menu: Menu) -> None:
         """The "Clear Recents ›" submenu: its one entry, naming how many channels go, clears
         the list (a second, deliberate choice: never a dialog over the TV)."""
         clear = self._clear_recents
         if clear is None:
             return
-        sub = menu.addMenu(translate(CLEAR_RECENTS_TEXT))
-        sub.setStyleSheet(menu_style())
+        sub = menu.add_menu(translate(CLEAR_RECENTS_TEXT))
         count = self.nav.recent_count()
         # i18n: the one entry under "Clear Recents": it empties the list; {n} is how many go
         text = tr_n("Clear {n} channel", "Clear all {n} channels", count, n=i18n.number(count))
-        sub.addAction(text).triggered.connect(lambda _=False: clear())
+        sub.add(text, clear)
 
     def _target(self, node: NavNode) -> Target:
         """What the row plays: its section and group as the drawer shows them now."""
@@ -326,19 +309,18 @@ class ContextActions(QObject):
         section = self.nav.section_of(node) or "live"
         return Target(node.payload, section, node.title, group_key=group)
 
-    def _add_link_actions(self, menu: QMenu, target: Target) -> None:
+    def _add_link_actions(self, menu: Menu, target: Target) -> None:
         """The players, then "Copy stream link"."""
         self._add_players(menu, target)
-        menu.addSeparator()
-        menu.addAction(tr("Copy stream link")).triggered.connect(  # i18n: a menu entry
-            lambda _=False: self.lanes.request_side(target, self._copy_link, play=False)
+        menu.add_separator()
+        menu.add(
+            tr("Copy stream link"),  # i18n: a menu entry
+            lambda: self.lanes.request_side(target, self._copy_link, play=False),
         )
 
-    def _add_players(self, menu: QMenu, target: Target) -> None:
+    def _add_players(self, menu: Menu, target: Target) -> None:
         for text, player in PLAYERS:
-            menu.addAction(translate(text)).triggered.connect(
-                lambda _=False, name=player: self._external_play(target, name)
-            )
+            menu.add(translate(text), partial(self._external_play, target, player))
 
     def _external_play(self, target: Target, player: str) -> None:
         if player == "vlc":
