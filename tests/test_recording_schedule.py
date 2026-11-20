@@ -5,6 +5,7 @@ import json
 from pathlib import Path
 import shutil
 import tempfile
+import threading
 import time
 import unittest
 from unittest import mock
@@ -204,6 +205,48 @@ class ScheduleTests(unittest.TestCase):
                 schedule.add_once(CHANNEL, programme(f"Show {minutes}", 60 * minutes))
             rs.flush_writes(5)
         self.assertEqual(written[-1], 5)
+
+    def test_a_save_as_the_writer_ends_is_still_written(self):  # 2.12
+        # The writer found nothing left, let the lock go, and only then said it had ended: a
+        # save in that moment saw it still running, started none, and was never written (a
+        # timer, a cancel or an outcome lost when QiTV quit next).
+        rs.flush_writes(5)
+        path = str(self.folder / "moment.json")
+        state = {"wrote": False, "done": False}
+        landed = threading.Event()
+        write_now = rs.write_now
+
+        def wrote(target, data):
+            write_now(target, data)
+            state["wrote"] = True
+
+        class Moment(threading.Condition):
+            """A save lands just after the writer let the lock go with nothing left."""
+
+            def __exit__(self, *exc):
+                result = super().__exit__(*exc)
+                if (
+                    threading.current_thread().name == "schedule-save"
+                    and state["wrote"]
+                    and not state["done"]
+                    and not rs._pending
+                ):
+                    state["done"] = True
+                    save = threading.Thread(
+                        target=rs.write_later, args=(path, {"items": ["SECOND"]})
+                    )
+                    save.start()
+                    save.join()
+                    landed.set()
+                return result
+
+        self.addCleanup(rs._pending.clear)
+        with mock.patch.object(rs, "write_now", wrote), mock.patch.object(rs, "_writing", Moment()):
+            rs.write_later(path, {"items": ["FIRST"]})
+            self.assertTrue(landed.wait(5))
+            rs.flush_writes(5)
+        self.assertEqual(json.loads(Path(path).read_text(encoding="utf-8")), {"items": ["SECOND"]})
+        self.assertEqual(rs._pending, {})
 
     def test_a_programme_that_ended_is_not_scheduled(self):  # 2.8 review M7
         ended = programme("Old News", -60)  # an hour before T0, half an hour long

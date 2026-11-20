@@ -732,15 +732,32 @@ print(json.dumps({
 }))
 """
 
+# The day menu on a Tuesday at 12:10, two days after the clocks changed (in spring on Sunday
+# 29 March 2026, 02:00 to 03:00; in autumn on Sunday 25 October 2026, 03:00 back to 02:00),
+# the window at 20:00 and an archive four days back.
+_DAY_MENU_SCRIPT = """
+import json
+from datetime import datetime, timedelta
+from types import SimpleNamespace
+from ui.overlays.guide import Guide
+now = datetime(2026, {month}, {day}, 12, 10).astimezone()
+guide = SimpleNamespace(
+    _now=lambda: now,
+    _back=timedelta(days=4),
+    _window_start=datetime(2026, {month}, {day}, 20, 0).astimezone(),
+)
+print(json.dumps([s.astimezone().strftime("%a %H:%M %z") for _, s in Guide.day_choices(guide)]))
+"""
+
 
 @unittest.skipIf(sys.platform == "win32", "POSIX TZ strings")
 class LocalTimeTests(unittest.TestCase):
     """Slots, times and day labels follow the local zone, not UTC (run in a child process)."""
 
-    def run_in_zone(self, tz):
+    def run_in_zone(self, tz, script=_LOCAL_TIME_SCRIPT):
         env = dict(os.environ, TZ=tz, QT_QPA_PLATFORM="offscreen")
         done = subprocess.run(
-            [sys.executable, "-c", _LOCAL_TIME_SCRIPT],
+            [sys.executable, "-c", script],
             cwd=Path(__file__).resolve().parents[1],
             env=env,
             capture_output=True,
@@ -770,6 +787,33 @@ class LocalTimeTests(unittest.TestCase):
                 "span": "11:30 – 12:30",
                 "days": ["Today", "Today", "Tomorrow", "Tomorrow"],
             },
+        )
+
+    def test_a_day_across_a_clock_change_keeps_the_windows_time_of_day(self):  # 2.12
+        # The window's 20:00 kept its offset on the days before the change: in autumn
+        # (+0100 carried back to +0200 days) 21:00, in spring (+0200 to +0100 days) 19:00.
+        zone = "CET-1CEST,M3.5.0,M10.5.0/3"
+        self.assertEqual(
+            self.run_in_zone(zone, _DAY_MENU_SCRIPT.format(month=10, day=27)),
+            [
+                "Fri 20:00 +0200",
+                "Sat 20:00 +0200",
+                "Sun 20:00 +0100",
+                "Mon 20:00 +0100",
+                "Tue 12:00 +0100",  # today: now
+                "Wed 12:00 +0100",  # tomorrow: as far as the guide reaches
+            ],
+        )
+        self.assertEqual(
+            self.run_in_zone(zone, _DAY_MENU_SCRIPT.format(month=3, day=31)),
+            [
+                "Fri 20:00 +0100",
+                "Sat 20:00 +0100",
+                "Sun 20:00 +0200",
+                "Mon 20:00 +0200",
+                "Tue 12:00 +0200",
+                "Wed 12:00 +0200",
+            ],
         )
 
 

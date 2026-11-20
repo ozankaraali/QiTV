@@ -1,4 +1,5 @@
 from functools import cmp_to_key
+import logging
 import re
 import sys
 from typing import Any, Dict, List, Optional
@@ -6,6 +7,8 @@ from urllib.parse import unquote, urlparse, urlsplit
 
 from services.catchup import SOURCE_KEY, TYPE_KEY, m3u_archive_fields, playlist_fields
 from services.i18n import N_
+
+logger = logging.getLogger(__name__)
 
 _ATTRIBUTE = re.compile(r'([A-Za-z][\w-]*)="([^"]*)"')
 # The attributes catch-up reads (services.catchup.m3u_archive_fields); the #EXTM3U line's set
@@ -95,6 +98,7 @@ def parse_m3u(data: str, categorize: bool = False):
     expecting = ""
     id_counter = 0
     defaults: Dict[str, str] = {}  # the #EXTM3U line's catch-up attributes
+    unreadable = 0  # links urlparse refuses
 
     for line in lines:
         if line.startswith("#EXTM3U"):
@@ -149,7 +153,11 @@ def parse_m3u(data: str, categorize: bool = False):
             # Any scheme VLC opens (udp://, rtsp://…): the player sends what the time-shift
             # pipeline cannot read (http(s) only) to VLC directly. Round-trip through
             # urlparse: it drops stray tabs and other control whitespace.
-            link = urlparse(line.strip()).geturl()
+            try:
+                link = urlparse(line.strip()).geturl()
+            except ValueError:  # 2.12: an unbalanced bracket in its host failed the whole list
+                unreadable += 1  # left out (a channel's next link, a backup, plays instead)
+                continue
             if expecting == "link":
                 item["cmd"] = link
                 items.append(item)
@@ -168,6 +176,9 @@ def parse_m3u(data: str, categorize: bool = False):
                 }
                 items.append(item)
             # else another link for the channel just read (a backup): its first one plays
+
+    if unreadable:  # never the links themselves: they may hold an account
+        logger.warning("%d links of the playlist can't be read: they were left out", unreadable)
 
     # Return flat list if not categorizing
     if not categorize:

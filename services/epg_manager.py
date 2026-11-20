@@ -95,6 +95,23 @@ def _as_written(moment: datetime, text: str) -> str:
     return moment.astimezone(parse_xmltv(text.strip()).tzinfo).strftime(_XMLTV_FORMATS[0])
 
 
+def _local_or_none(text: str) -> Optional[datetime]:
+    """parse_xmltv_local, or None for a time it can't read."""
+    try:
+        return parse_xmltv_local(text)
+    except ValueError:
+        return None
+
+
+def _stb_start(program: Any) -> datetime:
+    """A portal programme's start, to sort by: one without a time it can read goes last
+    (epg_view.parse_programme leaves it out; before 2.12 it emptied the channel's guide)."""
+    try:
+        return parse_stb(program["time"])
+    except KeyError, TypeError, ValueError:
+        return datetime.max
+
+
 def _stop_not_before(start: str, stop: str) -> bool:
     """True when the text alone shows `stop` is not before `start`: both begin with 14 ASCII
     digits ("YYYYmmddHHMMSS"), end the same (" +HHMM", or nothing), and stop's digits are not
@@ -966,20 +983,25 @@ class EpgManager:
         provider_type = self.provider_manager.current_provider.get("type", "").upper()
         if self.config_manager.epg_source == "STB" and provider_type == "STB":
             programs = epg.get(channel_data.get("id", ""), [])
-            return sorted(programs, key=lambda program: parse_stb(program["time"]))
+            return sorted(programs, key=_stb_start)
         # Xtream, Local File and URL guides are XMLTV.
         entries = self._xmltv_entries(epg, channel_data)
         if not entries:
             return []
         # The timezone of the programmes, by the first and the last (a time without an offset
-        # is local wall-clock time, as the guide shows it: epg_view.parse_programme).
+        # is local wall-clock time, as the guide shows it: epg_view.parse_programme). When
+        # either can't be read, each entry is compared at its own; one it can't read is left
+        # out (2.12: one such entry emptied the channel's guide).
         first, last = entries[0]["@start"], entries[-1]["@start"]
         if offset_less(first) and self._offset_less_noted != self._epg_source:
             self._offset_less_noted = self._epg_source
             logger.info("The guide's times carry no UTC offset: they are read as local time")
+        first_at, last_at = _local_or_none(first), _local_or_none(last)
         need_check_tz = (
-            offset_less(first) != offset_less(last)
-            or parse_xmltv_local(first).tzinfo != parse_xmltv_local(last).tzinfo
+            first_at is None
+            or last_at is None
+            or offset_less(first) != offset_less(last)
+            or first_at.tzinfo != last_at.tzinfo
         )
         window_hours = self.config_manager.epg_list_window_hours
         if window_hours <= 0:
@@ -994,15 +1016,18 @@ class EpgManager:
             zone = start_time.tzinfo
             asked = since.astimezone(zone) if zone else since.astimezone().replace(tzinfo=None)
             start_time = min(start_time, asked - self.guide_offset())
-        start_time_str = _as_written(start_time, first)
+        start_time_str = "" if need_check_tz else _as_written(start_time, first)
         programs = []
         for entry in entries:
-            if need_check_tz:
-                start_time_str = _as_written(start_time, entry["@start"])
-            if entry["@start"] >= start_time_str or entry["@stop"] > start_time_str:
-                entry_start = parse_xmltv_local(entry["@start"])
-                if entry_start < end_time.astimezone(entry_start.tzinfo):  # naive: local
-                    programs.append(entry)
+            try:
+                if need_check_tz:
+                    start_time_str = _as_written(start_time, entry["@start"])
+                if entry["@start"] >= start_time_str or entry["@stop"] > start_time_str:
+                    entry_start = parse_xmltv_local(entry["@start"])
+                    if entry_start < end_time.astimezone(entry_start.tzinfo):  # naive: local
+                        programs.append(entry)
+            except ValueError:  # a time it can't read: that programme is left out
+                continue
         programs.sort(key=lambda program: program["@start"])
         return programs
 

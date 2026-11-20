@@ -1,7 +1,8 @@
 # QiTV — notes for coding agents
 
-A PySide6 IPTV player on libVLC (VLC 3.0.20 ships inside the app). What each release changed is in
-`docs/release-notes-*.md`; the history is in `git log`.
+A PySide6 IPTV player on libVLC (VideoLAN's VLC 3.0 ships inside the app on macOS and Windows, the
+distribution's on Linux). What each release changed is in `docs/release-notes-*.md`; the history
+is in `git log`.
 
 ## Commands
 - Run: `uv run python main.py`
