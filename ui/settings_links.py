@@ -14,8 +14,9 @@ Link…'s card over Settings. A link opens a layer of its own:
 - Address, edited in place and shown as kept. Its stream with a fresh token is kept at once,
   under the same id (its name, resume point and ⟲ Recent's row follow); another stream is
   asked first, in a card: Keep as a new link (the default: this one stays as it was), or
-  Replace (this link plays it from now on, its id, name and place kept). What is no one
-  stream's link (a whole provider's, or none) is said, and nothing changes;
+  Replace (this link plays it from now on, its id, name, place and ⟲ Recent's row kept; where
+  a film stopped is forgotten: it was another film). What is no one stream's link (a whole
+  provider's, or none) is said, and nothing changes;
 - Kind and Last opened, only shown;
 - Remove…, asked first in a card.
 

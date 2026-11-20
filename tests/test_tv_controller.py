@@ -960,6 +960,9 @@ class FakeWatch:
     def resume_position(self, cid):
         return self.resume.get(cid)
 
+    def forget_position(self, cid):
+        return self.resume.pop(cid, None) is not None
+
     def resume_from(self, cid, item):
         return self.resume.get(cid) or ms.server_resume(item)
 

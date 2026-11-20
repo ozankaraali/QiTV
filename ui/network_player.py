@@ -21,7 +21,8 @@ went for good, is kept with why (`failed`, in plain words). Its kind changes onl
 player handed it over: a kept film played another way (as a channel of ⟲ Recent or a tile)
 stays a film. Settings › Providers › Network streams changes them too (ui.settings_links):
 `rename`, `set_url` (a fresh token, or another stream that replaces the link's: its id stays,
-so its name, resume point and ⟲ Recent's row follow, and Open Link of that address finds it),
+so its name and ⟲ Recent's row follow, and Open Link of that address finds it; its resume
+point stays for a fresh token only, through the controller's `forget_stopped`),
 `keep_new` and `remove`. A link removed is not kept again by what plays it next in this run
 (the stream still playing, ⟲ Recent), only by Open Link. The store's file is read once on
 a worker (`start`), and each change is written on a worker, one write at a time with the
@@ -319,15 +320,19 @@ class NetworkPlayer(QObject):
     def set_url(self, key: str, url: str, kind: str = "") -> None:
         """The link kept under `key` plays `url` from now on: its stream's fresh token, or
         another stream that replaces its own, of `kind` (LIVE or FILM: as that address says;
-        "" keeps the link's). Its id stays, with its name and resume point, and why it failed
-        last time goes: that was the old address's."""
+        "" keeps the link's). Its id stays, with its name and ⟲ Recent's row, and why it
+        failed last time goes: that was the old address's. Its resume point stays for its own
+        stream only: another stream's film starts from its beginning."""
         entry = self.store.get(key)
         if entry is None:
             return
+        another = stream_id(url) not in (key, stream_id(entry.url))
         self.store.set_url(key, url)
         if kind in (LIVE, FILM):
             entry.kind = kind
         self.store.failed(key, "")
+        if another:
+            self._controller.forget_stopped({"id": key, "cmd": url, "_provider": NETWORK_PROVIDER})
         self._changed()
 
     def keep_new(self, url: str, kind: str) -> Entry:

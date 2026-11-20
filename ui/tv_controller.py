@@ -385,6 +385,9 @@ class TVController(QObject):
         self._link_heard: Optional[Target] = None
         # Its link kept under an id plays, by the network player (`set_link_player`).
         self._play_kept: Callable[[str], bool] = lambda key: False
+        # A link plays while no provider is configured: held as a file opened in QiTV is (the
+        # welcome card waits) until it stops, ends or fails (_hold_for_link).
+        self._link_hold = False
         self._lanes = LinkLanes(catalog, self)
         self._lanes.known = self._network_url  # no provider is asked for a link's address
         # The live channel's time-shift side: pipeline tunes, its controls and reports.
@@ -1108,6 +1111,7 @@ class TVController(QObject):
         if stopped is not None and stopped.local:
             # A file stopped (not one still looked at: it plays once found, held for).
             self._flow.hold_for_file(False)
+        self._let_go_of_link()  # a link playing or on its way: nothing of it opens now
 
     def playing(self) -> bool:
         """Something plays, or its stream is opening; or the channel plays small while the
@@ -1207,12 +1211,24 @@ class TVController(QObject):
         key = self.resume_key(self.title_target(item, "movie"))
         return self.watch.resume_position(key) if key else None
 
+    def forget_stopped(self, item: dict) -> None:
+        """The film `item` (a link of Network streams whose address now names another
+        stream) plays from its start next time: where the old one stopped is forgotten, and
+        the old one, if it plays now, keeps no point under it any more."""
+        key = self.resume_key(self.title_target(item, "movie"))
+        if key:
+            if self._cid == key:
+                self._cid = None
+            self.watch.forget_position(key)
+
     def play_link(self, item: dict, section: str) -> None:
         """A link of Network streams plays (the network player hands it over): `section`
         "live" as a channel (in ⟲ Recent's group, where it lands), else as a film, where it
-        stopped. Its address is known: the link lanes answer it, no provider is asked."""
+        stopped. Its address is known: the link lanes answer it, no provider is asked. With no
+        provider configured it is held as a file opened in QiTV is (_hold_for_link)."""
         if self._closed:
             return
+        self._hold_for_link()
         if section == "live":
             self.tune_live(item, RECENT_GROUP, [item])
         else:
@@ -1220,6 +1236,31 @@ class TVController(QObject):
 
     def _network_url(self, item: dict) -> Optional[str]:
         return self._links(item) or None
+
+    def _hold_for_link(self) -> None:
+        """A link is about to play while no provider is configured: nothing opens over it (the
+        welcome card waits), as over a file opened in QiTV (hold_for_file), until it stops,
+        ends, fails or another title that is no link replaces it. With a provider configured
+        a link plays as a channel or a film does: nothing is held."""
+        if not self.catalog.provider_names():
+            self.hold_for_file(True)
+            self._link_hold = True
+
+    def _link_holds(self, target: Optional[Target]) -> bool:
+        """Whether `target` is a link the hold for links is for (any link, while it holds)."""
+        return (
+            self._link_hold
+            and target is not None
+            and not target.local
+            and self._network_url(target.item) is not None
+        )
+
+    def _let_go_of_link(self) -> None:
+        """The link held for stopped, ended or failed: what waited for it (the welcome card,
+        the update question) may come now, as after a file."""
+        if self._link_hold:
+            self._link_hold = False
+            self._flow.hold_for_file(False)
 
     def _resume_owner(self, item: dict, provider_name: str) -> str:
         """Whose resume points `item`'s are: a link's are Network streams' (its id stays
@@ -1245,6 +1286,9 @@ class TVController(QObject):
             return
         self._error(self._named(target.title, translate(why)))
         self.linkFailed.emit(target.item, LIVE if target.live else FILM, url, why)
+        if self._current is None or target is self._current:
+            if self._link_holds(target):
+                self._let_go_of_link()  # it failed for good: as a file that failed
 
     def watch_from_start(
         self, channel: dict, programme: Programme, group_key: str, channels: list
@@ -1798,7 +1842,10 @@ class TVController(QObject):
                 self._play_entry(listed.index, start_over=True)  # its list goes on after it
                 return
             self.play_file(QUrl(str(target.item.get("cmd") or "")).toLocalFile())
-        elif target.live:
+            return
+        if self._network_url(target.item) is not None:
+            self._hold_for_link()  # a link again: held as its first play was, without a provider
+        if target.live:
             key = target.group_key or ALL_GROUP_ID
             channels = list(self.catalog.items("live", key) or []) or self._all_live()
             self.tune(target.item, group_key=key, channels=channels)
@@ -2636,6 +2683,8 @@ class TVController(QObject):
                     self._flow.hold_for_file(False)  # the file could not open
                     self._end_sound()  # a song's screen kept from the song before it
                     self._opening_over()
+                elif self._link_holds(target):
+                    self._let_go_of_link()  # the link could not open
                 self._log_failure(f"play {target.title}", e)
                 if not target.live:
                     self._give_small_channel_large()
@@ -3690,7 +3739,8 @@ class TVController(QObject):
         file: what waited for it (the welcome card, the update question) may come now, and
         QiTV's mark over it goes (_opening_over). A file still being looked at gives way too,
         to a choice made now (a swap, a bring-back, an outside player), not to a link
-        `delivered` for a choice made before it was opened.
+        `delivered` for a choice made before it was opened. A link played with no provider
+        holds on as a file would (_hold_for_link): what waits, waits until it is over.
         AI captions that came on by themselves for a video file go off before anything else
         opens (CaptionsController.target_changing). The audio screen and its dock go too, but
         for a song after a song (no black page between two)."""
@@ -3699,8 +3749,12 @@ class TVController(QObject):
             self._list_job.stop()  # a list of songs given up: its songs stop being read
             if not delivered:
                 self._file_gives_way()
-            self._flow.hold_for_file(False)
+            if not self._link_holds(target):
+                self._link_hold = False
+                self._flow.hold_for_file(False)
             self._opening_over()
+        else:
+            self._link_hold = False  # a file holds from now on, by a file's rules
         captions = getattr(self.window_actions, "captions", None)
         if captions is not None:
             captions.target_changing(target is not None and target.video_file)
@@ -4180,6 +4234,8 @@ class TVController(QObject):
             self._explain_item(current.item, title)
             if current.live:
                 self._fail_focused_tile()
+            if self._link_holds(current):
+                self._let_go_of_link()  # it failed to play: as a file that failed
 
     def _give_small_channel_large(self) -> None:
         """The movie or the episode playing large failed: a channel shown small beside it
@@ -4239,6 +4295,8 @@ class TVController(QObject):
                 return  # the same stream opens again, in the same slot (the pill says when)
             self._toast(tr("The stream ended"))  # i18n: a toast
             self._fail_focused_tile(ended=True)
+            if self._link_holds(current):
+                self._let_go_of_link()  # a link's stream ended for good
             return
         try:
             self.watch.flush()
@@ -4249,6 +4307,8 @@ class TVController(QObject):
         if not self._autoplay.on_ended(current):
             if current.local:
                 self._flow.hold_for_file(False)  # the file played to its end
+            elif self._link_holds(current):
+                self._let_go_of_link()  # a link's film played to its end
             self._toast(translate(FINISHED_TEXT))
         # Else the Next card offers what follows: a file's hold waits for it (Esc lets go).
 

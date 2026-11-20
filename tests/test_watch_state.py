@@ -92,6 +92,17 @@ class WatchStateTests(unittest.TestCase):
     def test_resume_unknown_is_none(self):
         self.assertIsNone(self.ws.resume_position("nope"))
 
+    def test_a_forgotten_position_starts_from_the_beginning_and_is_saved(self):
+        # A link of Network streams whose address now names another film (plan 4).
+        self.cfg.save_playback_position("c", 50000, 100000)
+        self.cfg.save_playback_position("d", 60000, 100000)
+        saves = self.cfg.saves
+        self.assertTrue(self.ws.forget_position("c"))
+        self.assertIsNone(self.ws.resume_position("c"))
+        self.assertEqual(self.ws.resume_position("d"), 60000)  # another title's stays
+        self.assertGreater(self.cfg.saves, saves)
+        self.assertFalse(self.ws.forget_position("c"))  # none kept any more
+
     def test_a_title_qitv_saw_finished_starts_over_whatever_its_server_said(self):
         # 2.8: the Library's list still carries the server's point from before QiTV played on
         # to the end; the server forgets it once told, the list only at its next refresh.

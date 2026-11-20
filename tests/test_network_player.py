@@ -182,6 +182,32 @@ class FilmTests(PlayerCase):
         self.assertEqual(self.store.entries()[0].url, FILM_FRESH)
         self.assertEqual(self.store.entries()[0].kind, FILM)
 
+    def test_another_film_in_a_links_place_starts_from_its_beginning(self):
+        # Settings' Replace: the link keeps its id (its name, ⟲ Recent's row), but where the
+        # old film stopped is forgotten; its own film with a fresh token keeps it.
+        self.loaded()
+        self.link(FILM_URL, FILM)
+        self.plays_now()
+        key = stream_id(FILM_URL)
+        self.watch.resume[f"{NETWORK_PROVIDER}:movie:{key}"] = 125_000
+        item = {"id": key, "cmd": FILM_URL, "_provider": NETWORK_PROVIDER}
+        self.assertEqual(self.controller.stopped_at(item), 125_000)
+        self.player.set_url(key, FILM_FRESH)
+        self.assertEqual(self.controller.stopped_at(item), 125_000)
+        cid = f"{NETWORK_PROVIDER}:movie:{key}"
+        self.session.positionChanged.emit(130_000, 6_000_000)  # its own film, playing on
+        self.assertEqual(self.watch.positions[-1], (cid, 130_000, 6_000_000))
+        other = "https://vod.example/films/concert.mp4"
+        self.player.set_url(key, other, FILM)
+        self.assertIsNone(self.controller.stopped_at(item))
+        recorded = len(self.watch.positions)
+        self.session.positionChanged.emit(140_000, 6_000_000)  # the old film, still playing
+        self.assertEqual(len(self.watch.positions), recorded)  # keeps no point under the link
+        self.assertEqual((self.store.get(key).id, self.store.get(key).url), (key, other))
+        self.opens(lambda: self.player.play_kept(key))
+        url, options = self.session.plays[-1]
+        self.assertEqual((url, options["start_ms"]), (other, None))  # from its beginning
+
 
 class KeptTests(PlayerCase):
     def test_a_kept_film_played_as_a_channel_elsewhere_stays_a_film(self):
@@ -429,6 +455,63 @@ class FailureTests(PlayerCase):
         self.plays_now()
         self.assertEqual(self.entry(URL).failed, "")
         self.assertEqual(self.entry(URL).opened, NOW)
+
+
+class NoProviderHoldTests(PlayerCase):
+    """With no provider configured a link holds the TV as a file opened in QiTV does: the
+    welcome card, and what waits for QiTV to be idle, wait until it stops, ends or fails.
+    With a provider nothing is held for it."""
+
+    def setUp(self):
+        super().setUp()
+        self.loaded()
+        self.catalog.names = []
+        self.controller.start()
+        self.assertTrue(self.welcome.visible)
+        self.runs = []
+
+    def waits(self):
+        self.controller.when_idle(lambda: self.runs.append(True))
+
+    def test_a_live_link_holds_until_it_stops(self):
+        self.link(URL)
+        self.assertFalse(self.welcome.visible)
+        self.waits()
+        self.plays_now()
+        self.assertEqual(self.runs, [])
+        coast = "https://cdn.example/live/coast/index.m3u8"
+        self.link(coast)  # a link after a link: still held
+        self.assertFalse(self.welcome.visible)
+        self.assertEqual(self.runs, [])
+        self.controller.stop()
+        self.assertTrue(self.welcome.visible)
+        self.assertEqual(self.runs, [True])
+
+    def test_a_link_that_fails_for_good_lets_go(self):
+        self.link(URL)
+        self.waits()
+        self.live.failure = lambda: ("http", 403)
+        self.live.failed.emit(STREAM_REFUSED)
+        self.assertEqual(self.store.get(stream_id(URL)).failed, "403: the link was refused")
+        self.assertEqual(self.runs, [True])
+        self.assertTrue(self.welcome.visible)
+
+    def test_a_film_link_holds_until_it_ends(self):
+        self.link(FILM_URL, FILM)
+        self.assertFalse(self.welcome.visible)
+        self.waits()
+        self.plays_now()
+        self.assertEqual(self.runs, [])
+        self.session.stateChanged.emit("ended")
+        self.session.ended.emit()
+        self.assertEqual(self.runs, [True])
+        self.assertTrue(self.welcome.visible)
+
+    def test_with_a_provider_a_link_holds_nothing(self):
+        self.catalog.names = ["Home"]
+        self.link(URL)
+        self.waits()
+        self.assertEqual(self.runs, [True])  # at once, as with a channel
 
 
 class WindowTests(WindowCase):

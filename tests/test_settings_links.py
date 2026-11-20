@@ -79,7 +79,9 @@ FRESH = "https://cdn.example/live/harbour/index.m3u8?token=bbb"
 OTHER = "https://cdn2.example/live/harbour/index.m3u8?token=ccc"
 OTHER_FRESH = "https://cdn2.example/live/harbour/index.m3u8?token=ddd"
 FILM_URL = "https://vod.example/films/lecture.mkv?token=aaa"
+FILM_FRESH = "https://vod.example/films/lecture.mkv?token=bbb"
 NEW_FILM = "https://vod.example/films/concert.mp4"
+RTMP = "rtmp://media.example/live/harbour"  # a live link by its address: nothing is read
 ACCOUNT = "http://panel.example:8080/get.php?username=demo&password=secret&type=m3u_plus"
 NOW = 1_800_000_000.0
 LIVE_ID, FILM_ID = stream_id(LIVE_URL), stream_id(FILM_URL)
@@ -101,6 +103,7 @@ class FakeController(QObject):
         super().__init__()
         self.played = []
         self.stops = {}
+        self.forgotten = []  # the links whose resume point was forgotten
 
     def set_links(self, resolve):
         self.resolve = resolve
@@ -113,6 +116,10 @@ class FakeController(QObject):
 
     def stopped_at(self, item):
         return self.stops.get(item.get("id"))
+
+    def forget_stopped(self, item):
+        self.forgotten.append(item.get("id"))
+        self.stops.pop(item.get("id"), None)
 
 
 class LinksTests(unittest.TestCase):
@@ -410,6 +417,28 @@ class LinksTests(unittest.TestCase):
             self.assertEqual(self.store.get(LIVE_ID).url, OTHER)
             self.assertEqual(len(self.store.entries()), 2)
 
+    def test_replace_forgets_where_a_film_stopped_and_a_fresh_token_keeps_it(self):
+        self.seed((FILM_URL, "Lecture recording", FILM, NOW, ""))
+        self.controller.stops[FILM_ID] = 2_472_000
+        self.into(FILM_ID)
+        self.move_to(row_key(FILM_ID, ADDRESS))
+        # Its own film with a fresh token: where it stopped stays.
+        self.type_text(FILM_FRESH)
+        self.assertFalse(self.settings.card_shown())
+        self.assertEqual(self.controller.forgotten, [])
+        self.assertEqual(self.player.rows()[0].stopped_ms, 2_472_000)
+        # Another film in its place (Replace): the same link, from that film's beginning.
+        self.type_text(NEW_FILM)
+        self.key(Action.NAV_LEFT)
+        self.assertEqual(self.links.question.focus(), ("button", REPLACE))
+        self.key(Action.NAV_ACTIVATE)
+        self.assertEqual(self.controller.forgotten, [FILM_ID])
+        entry = self.store.get(FILM_ID)
+        self.assertEqual((entry.url, entry.name), (NEW_FILM, "Lecture recording"))
+        self.assertIsNone(self.player.rows()[0].stopped_ms)
+        listed = {row.key: row for row in self.links.row().section.rows}  # Network streams
+        self.assertEqual(listed[link_key(FILM_ID)].sub, "Film")  # its row says so too
+
     def test_remove_asks_and_saves_off_the_gui_thread(self):
         self.seed(
             (LIVE_URL, "Harbour News", LIVE, NOW, ""),
@@ -570,10 +599,26 @@ class PlayRowTests(WindowCase):
         self.assertFalse(window.isFullScreen())
         self.assertFalse(window.settings.visible())  # nothing opened it again
 
+    def plays_quietly(self):
+        """Without libVLC every open fails at once: here each opens and plays on."""
+        self.window.session.play = lambda url, **kwargs: None
+
+    def test_what_waits_for_the_tv_while_a_link_plays(self):
+        # With a provider a link plays as a channel does: nothing is held for it.
+        self.start()
+        self.plays_quietly()
+        self.to_play()
+        self.press(Qt.Key.Key_Return)
+        self.assertTrue(wait_until(lambda: self.window.controller.now_playing() is not None))
+        runs = []
+        self.window.when_idle(lambda: runs.append(True))
+        self.assertEqual(runs, [True])  # at once
+
 
 class NoProviderPlayRowTests(PlayRowTests):
     """With no provider the channel list never opens (the welcome card shows): Settings is
-    where the kept links play from."""
+    where the kept links play from, and a link that plays holds the welcome card off as a
+    file opened in QiTV does, until it stops."""
 
     def provider_list(self):
         return []
@@ -582,6 +627,43 @@ class NoProviderPlayRowTests(PlayRowTests):
         self.show()
         self.assertTrue(wait_until(self.window.overlays.welcome.isVisible))
         self.keep_a_link()
+
+    def test_what_waits_for_the_tv_while_a_link_plays(self):
+        self.start()
+        self.plays_quietly()
+        window, welcome = self.window, self.window.overlays.welcome
+        self.to_play()
+        self.press(Qt.Key.Key_Return)  # Play
+        self.assertFalse(window.settings.visible())
+        self.assertTrue(wait_until(lambda: window.controller.now_playing() is not None))
+        runs = []
+        window.when_idle(lambda: runs.append(True))  # (the startup update question)
+        elapse(300)
+        self.assertFalse(welcome.isVisible())  # not over the link
+        self.assertEqual(runs, [])
+        window.controller.stop()
+        self.assertTrue(wait_until(welcome.isVisible))  # stopped: as after a file
+        self.assertEqual(runs, [True])
+
+    def test_the_open_link_cards_play_holds_the_welcome_card_off_too(self):
+        self.start()
+        self.plays_quietly()
+        window, welcome = self.window, self.window.overlays.welcome
+        window.open_link(RTMP)
+        self.assertTrue(window.open_link_card.isVisible())
+        QTest.keyClick(window, Qt.Key.Key_Return)  # Play
+        self.assertTrue(window.open_link_card.isHidden())
+        self.assertTrue(wait_until(lambda: window.controller.now_playing() is not None))
+        self.assertEqual(window.controller.now_playing().item["cmd"], RTMP)
+        elapse(300)
+        self.assertFalse(welcome.isVisible())
+        window.controller.stop()
+        self.assertTrue(wait_until(welcome.isVisible))
+        # Played again from the Stop's pill: held again, as its first play was.
+        window.controller.play_again()
+        self.assertTrue(wait_until(lambda: window.controller.now_playing() is not None))
+        elapse(300)
+        self.assertFalse(welcome.isVisible())
 
 
 if __name__ == "__main__":
