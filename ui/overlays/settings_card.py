@@ -245,6 +245,10 @@ class _Card(Overlay):
     def title(self) -> str:
         return self._title
 
+    def body(self) -> str:
+        """A ChoiceCard's words under its title ("" for none)."""
+        return self._body
+
     def focus(self) -> tuple[str, str]:
         """("field" | "paste" | "button" | "alt", its key): what the keys are on."""
         return self._focus

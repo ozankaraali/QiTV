@@ -194,6 +194,25 @@ class CheckTests(unittest.TestCase):
             self.assertEqual(calls[-1][1:], ("EMBY", "ann", "pw", False, "D"))
             self.assertEqual(check(SERVER, True, password="nope"), Outcome(False, WRONG))
 
+    def test_a_media_server_already_added_is_asked_with_its_kept_sign_in(self):
+        # No password is kept (only the sign-in's token): Settings' Check the connection asks
+        # the server with the token, never a sign-in with an empty password.
+        kept = {**SERVER, **ACCESS}
+        with (
+            mock.patch.object(media_workers, "sign_in", side_effect=AssertionError),
+            mock.patch.object(media_workers, "check_access", return_value=(True, "")) as asked,
+        ):
+            self.assertEqual(check(kept, True), Outcome(True))
+            asked.assert_called_once_with(kept, True)
+        with mock.patch.object(media_workers, "check_access", return_value=(False, "Again")):
+            self.assertEqual(check({**kept, "ssl_verify": False}, True), Outcome(False, "Again"))
+        # A password given (the address card) signs in with it, as before.
+        with (
+            mock.patch.object(media_workers, "check_access", side_effect=AssertionError),
+            mock.patch.object(media_workers, "sign_in", return_value=(True, ACCESS)),
+        ):
+            self.assertEqual(check(kept, True, password="pw"), Outcome(True, "", False, ACCESS))
+
 
 class ProviderCheckTests(unittest.TestCase):
     @classmethod

@@ -291,6 +291,25 @@ class MediaSignInWorker(QObject):
             self.error.emit(str(value))
 
 
+def check_access(
+    provider: dict, verify: bool, client: Optional[Callable] = None
+) -> tuple[bool, str]:
+    """Whether a server answers its kept sign-in (Settings' Check the connection: its token,
+    never a password, which is not kept), on the calling thread: (True, "") or (False, why).
+    `client` makes its client (provider, verify), client_for by default."""
+    server = (client or client_for)(provider, verify)
+    try:
+        server.libraries()
+        return True, ""
+    except ms.SignInNeeded:
+        return False, translate(ms.SIGN_IN_AGAIN)
+    except Exception as e:
+        logger.info("A media server's kept sign-in was not answered: %s", _logged(e))
+        return False, _failure(e)
+    finally:
+        server.close()
+
+
 def sign_in(
     url: str,
     kind: str,

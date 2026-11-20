@@ -1072,6 +1072,69 @@ class SettingsDrawerTests(unittest.TestCase):
         self.drawer.edited.disconnect()
         self.assertEqual(self.drawer.path(), ("providers", "provider/A"))
 
+    def test_new_sections_follow_a_rename(self):
+        # A rename changes every key of the provider's (provider/<name>/…): told so, the
+        # viewer stays in its layer, on the row they were on, the keys on their side.
+        self.drawer.open_at(self.providers("A", "B"))
+        self.focus("provider/B")
+        self.drawer.activate()
+        self.drawer.move_by(1)  # its Check row
+        renamed = {"provider/B": "provider/Bee"}
+        self.drawer.set_sections(self.providers("A", "Bee"), renamed=renamed)
+        self.assertEqual(self.drawer.path(), ("providers", "provider/Bee"))
+        self.assertEqual(self.drawer.focused_row().key, "provider/Bee/check")
+        self.assertEqual(self.drawer.focus_side(), "right")
+        # Only a whole key or a key under it: "provider/Be" is no part of "provider/Bee".
+        renamed = {"provider/Be": "provider/Q"}
+        self.drawer.set_sections(self.providers("A", "Bee", "Q"), renamed=renamed)
+        self.assertEqual(self.drawer.path(), ("providers", "provider/Bee"))
+        self.assertEqual(self.drawer.focused_row().key, "provider/Bee/check")
+        # The keys on the left column of the layer: the renamed provider stays the one open.
+        self.drawer.left()
+        renamed = {"provider/Bee": "provider/Cee"}
+        self.drawer.set_sections(self.providers("A", "Cee", "Q"), renamed=renamed)
+        self.assertEqual(self.drawer.path(), ("providers", "provider/Cee"))
+        self.assertEqual(self.drawer.focus_side(), "left")
+        # Without the hint, the renamed layer is one that went (plan 2, Task 2).
+        self.drawer.set_sections(self.providers("A", "Dee", "Q"))
+        self.assertEqual(self.drawer.path(), ("providers",))
+
+    def test_back_after_a_rename_goes_up_once(self):
+        # ‹ or the fade pressed while the name is edited: the edit is kept first. A rename
+        # that rebuilt the rows drops the press (it was aimed at the layer as it was), so the
+        # viewer is never taken a layer further than they saw; a name kept as it was lets
+        # the press go up, once.
+        def back():
+            return self.drawer.back_rect().center()
+
+        def fade():
+            return QPointF(self.drawer.column_rect("right").right() + 20, 300)
+
+        for where in (back, fade):
+            for renamed in (True, False):
+                with self.subTest(where=where.__name__, renamed=renamed):
+                    self.drawer.open_at(self.providers("A", "B"))
+                    self.focus("provider/B")
+                    self.drawer.activate()
+                    self.values["provider/B/name"] = "B"
+                    self.drawer.activate()  # Name, edited
+                    self.drawer.type_text("x")
+
+                    def rename(*_args, renamed=renamed):
+                        if renamed:
+                            self.drawer.set_sections(
+                                self.providers("A", "Bx"), renamed={"provider/B": "provider/Bx"}
+                            )
+
+                    self.drawer.edited.connect(rename)
+                    self.drawer.grab()
+                    self.press(where())
+                    self.drawer.edited.disconnect(rename)
+                    self.assertFalse(self.drawer.editing())
+                    self.assertTrue(self.drawer.isVisible())
+                    expected = ("providers", "provider/Bx") if renamed else ("providers",)
+                    self.assertEqual(self.drawer.path(), expected)
+
     def test_the_paste_control_pastes_into_the_field(self):
         # A mouse cannot press Ctrl/⌘+V: the field has its Paste.
         edits = self.edits()

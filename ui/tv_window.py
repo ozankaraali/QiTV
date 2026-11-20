@@ -197,6 +197,7 @@ from ui.recording_scheduler import RecordingScheduler
 from ui.remote_controller import RemoteController
 from ui.settings_controller import SettingsController
 from ui.settings_dialog import OptionsDialog
+from ui.settings_providers import ProviderRows
 from ui.song_jobs import PanelCover
 from ui.subtitle_search import OnlineSetup
 from ui.track_controls import SUBTITLE_FILTER
@@ -1139,12 +1140,18 @@ class TVWindow(QMainWindow):
         self.settings = SettingsController(
             self.settings_drawer,
             values,
-            lambda: sections(system),
+            lambda: sections(system, self.provider_rows.rows()),
             self.options_dialog,
             controller.reopen_drawer_on_settings,
         )
         controller.set_settings(self.settings)
         self.settings.hidden.connect(self._settings_went)
+        # Settings › Providers: each provider's rows (`provider/…`), built from the list as it
+        # is now; again whenever it changes, here or elsewhere (a drop, Free channels, the
+        # Settings window), and when the TV moves to another provider (its "in use").
+        self.provider_rows = ProviderRows(self, self.settings, self.settings_drawer)
+        self.catalogs.providersChanged.connect(self.provider_rows.providers_changed)
+        self.catalog.providerReady.connect(self.provider_rows.providers_changed)
         # The channel list's find: genres and channels at every provider, found in a worker;
         # its last row looks for films and series in the Library's search.
         self.finder = FindSession(

@@ -21,7 +21,9 @@ It changes nothing itself: a step is `stepped(key, ±1)`, an action (a card's ro
 caller applies them and calls `refresh()`. The value a row shows and whether it is lit are
 asked of the caller at each paint (`value_text`, `lit`). The sections may change while they
 show (a provider added or removed, here or elsewhere: `set_sections`): the place is kept by
-key, and a line that went gives its place to its neighbour.
+key, and a line that went gives its place to its neighbour; a renamed one's new keys are told
+(`renamed`), so the place follows it. A row's title is translated, unless it is a name the
+viewer gave (`literal`: a provider's, shown as given, its layer's breadcrumb too).
 
 The keys (the shell hands them over): ↑/↓ move. On a stepper of the right column ←/→ step and
 Enter steps on; on another right-column row ← goes to the left column, and → or Enter opens its
@@ -42,20 +44,20 @@ takes no click. ‹ or › step their row at once, focused or not. While a text 
 click in its field puts the caret (a drag selects, a double-click takes a word), its Paste at
 the field's end puts the clipboard's first line in (a mouse cannot press Ctrl/⌘+V; the phone
 types its own text in), and a click elsewhere keeps the text, then does what it does, unless
-keeping it changed the rows under it (a rename). A double-click's second press is a click on
-the row the first one was on (an action is taken once). Hovering a row shows its help, the
-restart note too, as its tooltip. The wheel scrolls the column under the pointer. ‹ in the
-header and a click on the fade over the picture are `back()`. The mouse's Back and Forward
-buttons go on to the shell, as over the drawer.
+keeping it changed the rows under it or the layer (a rename: ‹ and the fade too). A
+double-click's second press is a click on the row the first one was on (an action is taken
+once). Hovering a row shows its help, the restart note too, as its tooltip. The wheel scrolls
+the column under the pointer. ‹ in the header and a click on the fade over the picture are
+`back()`. The mouse's Back and Forward buttons go on to the shell, as over the drawer.
 """
 
 from __future__ import annotations
 
-from collections.abc import Callable, Sequence
+from collections.abc import Callable, Mapping, Sequence
 import logging
 from typing import Optional
 
-from PySide6.QtCore import QEvent, QObject, QPointF, QRect, QRectF, Qt, Signal
+from PySide6.QtCore import QEvent, QObject, QPoint, QPointF, QRect, QRectF, Qt, Signal
 from PySide6.QtGui import QColor, QFontMetricsF, QMouseEvent, QPainter, QWheelEvent
 from PySide6.QtWidgets import QWidget
 
@@ -146,6 +148,16 @@ def _opens_layer(row: Row) -> bool:
     return row.kind == OPENS and row.section is not None
 
 
+def _rekeyed(key: str, renamed: Mapping[str, str]) -> str:
+    """`key` under its new name: a key `renamed` names, or a key under one (after a "/"),
+    takes the new one in its place ("provider/A/name" → "provider/B/name"); "provider/A" is
+    no part of "provider/AB"."""
+    for old, new in renamed.items():
+        if key == old or key.startswith(old + "/"):
+            return new + key[len(old) :]
+    return key
+
+
 class SettingsDrawer(Overlay):
     accessible_name = SETTINGS_TITLE
     # A stepper's key, and -1 (‹, ←) or +1 (›, →, Enter, a click on it focused).
@@ -217,7 +229,9 @@ class SettingsDrawer(Overlay):
         self.raise_()
         self._say(opening=True)
 
-    def set_sections(self, sections: Sequence[Section]) -> None:
+    def set_sections(
+        self, sections: Sequence[Section], renamed: Optional[Mapping[str, str]] = None
+    ) -> None:
         """The sections as they are now, while they show (a provider added or removed, here or
         elsewhere): the place stays, by key. A section, layer or row that is still there keeps
         its place (its line may have moved); one that went gives it to its neighbour, the line
@@ -225,12 +239,21 @@ class SettingsDrawer(Overlay):
         closes, the keys going onto the rows it was one of, on its neighbour (never into the
         layer that took its place: that is another provider). A text being edited stays while
         its row does, else it is put back. A line is known by its key alone: one whose key
-        changed (a provider renamed, `provider/<name>/…`) went, and another came."""
+        changed went, and another came, unless `renamed` says it is the same one under a new
+        key (old key → new: a provider renamed, `provider/<name>` and every key under it), so
+        that the viewer stays where they were in it."""
         old_section = self._sections[self._section].key if self._sections else ""
         old_path = self.path()[1:]
         old_opened = list(self._opened)
         rows = self._right_rows()
         old_focus = rows[self._right].key if 0 <= self._right < len(rows) else ""
+        if renamed:
+            old_path = tuple(_rekeyed(key, renamed) for key in old_path)
+            old_focus = _rekeyed(old_focus, renamed)
+            self._edit_row = _rekeyed(self._edit_row, renamed)
+            if self._pressed is not None:
+                target, key, part, did = self._pressed
+                self._pressed = (target, _rekeyed(key, renamed), part, did)
         self._sections = tuple(sections)
         self._hover = None
         keys = [section.key for section in self._sections]
@@ -540,6 +563,15 @@ class SettingsDrawer(Overlay):
         """‹ at the start of the breadcrumb."""
         return QRectF(self._layout().back)
 
+    def row_anchor(self, key: str) -> QPoint:
+        """The global point under the right column's row `key`, at its left (where a menu it
+        opens pops up: Free channels); the overlay's corner while it is out of sight."""
+        keys = [row.key for row in self._right_rows()]
+        box = self._box(RIGHT, keys.index(key)) if key in keys else None
+        if box is None:
+            return self.mapToGlobal(QPoint(0, 0))
+        return self.mapToGlobal(box.line.bottomLeft().toPoint())
+
     # ---- state ------------------------------------------------------------------------------
 
     def _chain(self) -> list[Section]:
@@ -571,7 +603,7 @@ class SettingsDrawer(Overlay):
             ]
         chain = self._chain()
         if len(chain) < 2:
-            return [Item(s.key, s.text, s.icon) for s in self._sections]
+            return [Item(s.key, s.text, s.icon, literal=s.literal) for s in self._sections]
         return [
             Item(row.key, row.text, row=row, selectable=_opens_layer(row)) for row in chain[-2].rows
         ]
@@ -736,7 +768,8 @@ class SettingsDrawer(Overlay):
     def _layout(self) -> Layout:
         un = self._units()
         cols, areas = columns(un, float(self.height()))
-        names = [translate(SETTINGS_TITLE)] + [translate(s.text) for s in self._chain()]
+        names = [translate(SETTINGS_TITLE)]
+        names += [s.text if s.literal else translate(s.text) for s in self._chain()]
         back, crumbs = header(un, cols, names)
         shown: dict[str, list[Optional[Box]]] = {}
         for side in (LEFT, RIGHT):
@@ -1099,11 +1132,14 @@ class SettingsDrawer(Overlay):
         if event.button() == Qt.MouseButton.LeftButton:
             pos = event.position()
             hit = self._hit(pos)
-            line = self._line_at(hit)
+            line, path = self._line_at(hit), self.path()
             shift = bool(event.modifiers() & Qt.KeyboardModifier.ShiftModifier)
             if not self._press_while_editing(pos, hit, shift, double=False):
-                if self._line_at(hit) != line:
-                    hit = None  # keeping the text changed the rows under it (a rename)
+                if self._line_at(hit) != line or self.path() != path:
+                    # Keeping the text changed the rows under it, or the layer (a rename):
+                    # the press was aimed at what went, ‹ and the fade too (never a layer
+                    # further up than the one seen).
+                    hit = None
                 self._click(hit)
             self._hover_at(pos)
 

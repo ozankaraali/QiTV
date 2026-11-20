@@ -11,13 +11,15 @@ The sections are built by the caller's function, again whenever what they show c
 (`refresh_sections`: a provider added, removed or renamed, here or elsewhere), and the drawer
 keeps its place in them by key. A row whose key starts with a registered prefix is that
 handler's (`register`: Providers' rows are `provider/<name>/<field>`), its value, steps,
-edits and actions; every other key is a config setting, through the values. A card over the
-picture (`show_card`: a form, a question) has every key before the rows while it shows.
+edits and actions (the rows paint again after each; a row's own data, its note or sub line,
+changes only when the handler builds the sections again); every other key is a config setting,
+through the values. A card over the picture (`show_card`: a form, a question) has every key
+before the rows while it shows.
 """
 
 from __future__ import annotations
 
-from collections.abc import Callable, Iterator
+from collections.abc import Callable, Iterator, Mapping
 import logging
 from typing import Any, Optional, Protocol
 
@@ -159,13 +161,14 @@ class SettingsController(QObject):
         self._sections = self._make_sections()
         self._drawer.open_at(self._sections, section_key)
 
-    def refresh_sections(self) -> None:
+    def refresh_sections(self, renamed: Optional[Mapping[str, str]] = None) -> None:
         """The sections built again: what they show changed (a provider added, removed or
         renamed, here or elsewhere). While they show, the drawer keeps its place in them by
-        key (SettingsDrawer.set_sections)."""
+        key (SettingsDrawer.set_sections); `renamed` (old key → new) says which keys are the
+        same lines under a new name, so that a provider renamed here keeps the viewer in it."""
         self._sections = self._make_sections()
         if self._drawer.isVisible():
-            self._drawer.set_sections(self._sections)
+            self._drawer.set_sections(self._sections, renamed=renamed)
 
     def visible(self) -> bool:
         return self._drawer.isVisible()
@@ -302,6 +305,9 @@ class SettingsController(QObject):
             logger.warning("A choice of %r, which is no row", key)
             return
         handler.chosen(row)
+        # A value it changed shows and is said (what it changed in the rows' own data, a note,
+        # it shows by building the sections again).
+        self._drawer.refresh()
 
     def eventFilter(self, watched: QObject, event: QEvent) -> bool:
         # Hidden itself, not only with the page or window it is on.

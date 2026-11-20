@@ -73,6 +73,29 @@ class SettingsModelTests(unittest.TestCase):
         self.assertEqual(by_key[m.GUIDE].legacy_tab, "epg")
         self.assertEqual(by_key[m.PLAYBACK].legacy_tab, "")
 
+    def test_providers_list_its_rows_then_add_and_free(self):
+        # Providers is no longer the Settings window's tab: the providers' rows, as its caller
+        # builds them, then ＋ Add provider and Free channels.
+        given = (m.Row("provider/A", "A", literal=True),)
+        providers = m.sections("Linux", given)[0]
+        self.assertEqual(providers.key, m.PROVIDERS)
+        self.assertEqual(providers.legacy_tab, "")
+        self.assertNotIn(m.PROVIDERS, m.LEGACY_TABS)
+        self.assertEqual(
+            [row.key for row in providers.rows], ["provider/A", m.ADD_PROVIDER, m.FREE_CHANNELS]
+        )
+        add, free = providers.rows[1:]
+        self.assertEqual((add.text, add.kind, add.literal), ("＋ Add provider", m.ACTION, True))
+        self.assertEqual((free.text, free.kind), ("Free channels", m.OPENS))
+        for row in (add, free):
+            self.assertTrue(row.help, row.key)
+            self.assertLessEqual(len(row.help), 90, row.key)
+        self.assertEqual(
+            [row.key for row in m.sections("Linux")[0].rows], [m.ADD_PROVIDER, m.FREE_CHANNELS]
+        )
+        # A literal choice is shown as it is given (a number, a text in the language already).
+        self.assertEqual(m.Choice(3, "3", literal=True).shown(), "3")
+
     def test_every_help_fits_one_line(self):
         for row in _all_rows():
             self.assertTrue(row.help, row.key)

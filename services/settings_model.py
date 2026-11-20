@@ -5,7 +5,9 @@ right. A row is of a kind: it steps through its choices (STEP), opens a layer of
 own or a card (OPENS), acts (ACTION), acts on something that cannot be undone and asks first
 (DANGER), holds a text edited in place (TEXT), or only says something (INFO). Which config
 value a row key means, and how a step or an edit is applied, is for the callers; this module
-only says what exists and how stepping moves.
+only says what exists and how stepping moves. Providers lists the providers' rows its caller
+builds (ui.settings_providers: a name is shown as given, never translated), then ＋ Add
+provider and Free channels.
 """
 
 from __future__ import annotations
@@ -37,7 +39,6 @@ KINDS = (STEP, OPENS, ACTION, DANGER, TEXT, INFO)
 
 # Section key -> the key of the old Settings window's tab that still holds its settings.
 LEGACY_TABS: dict[str, str] = {
-    PROVIDERS: "providers",
     GENERAL: "general",
     SUBTITLES: "subtitles",
     TIMESHIFT: "timeshift",
@@ -62,19 +63,30 @@ ICONS: dict[str, str] = {
 }
 
 
+# Providers' rows (plan 2): `provider/<name>…` are ui.settings_providers', which lists the
+# providers before these two.
+PROVIDER_PREFIX = "provider/"
+ADD_PROVIDER = PROVIDER_PREFIX + "@add"
+FREE_CHANNELS = PROVIDER_PREFIX + "@free"
+# i18n: a row of Settings → Providers, after "＋ ": adds a provider
+ADD_PROVIDER_TEXT = N_("Add provider")
+
+
 @dataclass(frozen=True)
 class Choice:
     """One value a stepping row can take, and the English text that names it; `ctx`, the
     catalogs' context it is marked with (N_(text, ctx=...)), when that English names another
-    thing elsewhere."""
+    thing elsewhere. A `literal` one's text is shown as it is given (a number, or a text
+    already in the active language: a guide offset's "+1 h")."""
 
     value: Any
     text: str
     ctx: Optional[str] = None
+    literal: bool = False
 
     def shown(self) -> str:
         """Its text in the active language."""
-        return translate(self.text, ctx=self.ctx)
+        return self.text if self.literal else translate(self.text, ctx=self.ctx)
 
 
 @dataclass(frozen=True)
@@ -83,7 +95,9 @@ class Row:
     `kind` says otherwise (KINDS; "" derives it so). `text` and `help` are English texts
     marked with N_, shown translated; `note` (muted at the right end of a row that has no
     value of its own: "answered 2 min ago") and `sub` (a second, muted line under the title:
-    "Xtream · in use") are shown as they are given, in the active language already."""
+    "Xtream · in use") are shown as they are given, in the active language already. A
+    `literal` row's `text` is too: a name the viewer gave (a provider's, a group's), never
+    translated, even when it is also one of QiTV's texts ("General")."""
 
     key: str
     text: str
@@ -96,6 +110,7 @@ class Row:
     kind: str = ""
     note: str = ""
     sub: str = ""
+    literal: bool = False
 
     def __post_init__(self) -> None:
         if not self.kind:
@@ -109,7 +124,8 @@ class Row:
 class Section:
     """A group of rows. `legacy_tab` names the old Settings tab that still holds the
     section's settings until its rows move here. `empty_text` (an English text marked with
-    N_) shows in place of its rows while it has none."""
+    N_) shows in place of its rows while it has none. A `literal` one's `text` is shown as it
+    is given (a provider's layer: its name, in the breadcrumb)."""
 
     key: str
     text: str
@@ -117,6 +133,7 @@ class Section:
     rows: tuple[Row, ...] = ()
     legacy_tab: str = ""
     empty_text: str = ""
+    literal: bool = False
 
 
 # A setting's On and Off have their own catalog entries: the plain "Off" also names the
@@ -309,8 +326,30 @@ def _playback(system: str) -> Section:
     return Section(PLAYBACK, N_("Playback"), ICONS[PLAYBACK], rows=rows)
 
 
-def sections(system: str) -> tuple[Section, ...]:
-    """The sections in the drawer's order; `system` is platform.system()."""
+def _providers(title: str, rows: tuple[Row, ...]) -> Section:
+    """Providers: the providers' rows as given (ui.settings_providers builds them), then ＋ Add
+    provider and Free channels."""
+    add = Row(
+        ADD_PROVIDER,
+        "＋ " + translate(ADD_PROVIDER_TEXT),
+        # i18n: help under Settings → Providers → Add provider
+        N_("A provider from its link: Xtream, an M3U playlist, a portal, Jellyfin or Emby."),
+        kind=ACTION,
+        literal=True,
+    )
+    free = Row(
+        FREE_CHANNELS,
+        N_("Free channels"),  # i18n: a row of Settings → Providers; opens iptv-org's menu
+        # i18n: help under Settings → Providers → Free channels (iptv-org is a project's name)
+        N_("iptv-org's free channels: every country's, or one country's."),
+        kind=OPENS,
+    )
+    return Section(PROVIDERS, title, ICONS[PROVIDERS], rows=rows + (add, free))
+
+
+def sections(system: str, providers: tuple[Row, ...] = ()) -> tuple[Section, ...]:
+    """The sections in the drawer's order; `system` is platform.system(), `providers` the
+    rows of the providers, listed first in Providers."""
     titles = (
         (PROVIDERS, N_("Providers")),  # i18n: a settings section's title
         (GENERAL, N_("General")),  # i18n: a settings section's title
@@ -323,11 +362,12 @@ def sections(system: str) -> tuple[Section, ...]:
         (FILES, N_("Files")),  # i18n: a settings section's title
         (ADVANCED, N_("Advanced")),  # i18n: a settings section's title
     )
-    return tuple(
-        (
-            _playback(system)
-            if key == PLAYBACK
-            else Section(key, text, ICONS.get(key, ""), legacy_tab=LEGACY_TABS[key])
-        )
-        for key, text in titles
-    )
+    built: list[Section] = []
+    for key, text in titles:
+        if key == PROVIDERS:
+            built.append(_providers(text, tuple(providers)))
+        elif key == PLAYBACK:
+            built.append(_playback(system))
+        else:
+            built.append(Section(key, text, ICONS.get(key, ""), legacy_tab=LEGACY_TABS[key]))
+    return tuple(built)

@@ -390,6 +390,23 @@ class SettingsControllerTests(unittest.TestCase):
         self.assertEqual(self.values.sets, [("live_latency", "low")])
         self.assertEqual(len(handler.calls), 5)
 
+    def test_a_choice_paints_again_and_a_rename_is_passed_on(self):
+        # A handler's action may change what its rows show: they paint again (and say it).
+        # A rename's new keys reach the drawer with the hint that keeps the viewer in place.
+        self.shown = (providers_section("A"),)
+        handler = FakeHandler()
+        self.controller.register("provider/", handler)
+        self.controller.open()
+        self.focus_row("provider/@add")
+        with mock.patch.object(self.drawer, "refresh") as painted:
+            self.controller.handle(Action.NAV_ACTIVATE)
+        self.assertEqual(handler.calls, [("chosen", "provider/@add")])
+        painted.assert_called_once_with()
+        self.shown = (providers_section("B"),)
+        with mock.patch.object(self.drawer, "set_sections") as given:
+            self.controller.refresh_sections(renamed={"provider/A": "provider/B"})
+        given.assert_called_once_with(self.shown, renamed={"provider/A": "provider/B"})
+
     def test_a_card_takes_the_keys_first_and_esc_cancels_it(self):
         self.controller.open(PLAYBACK)
         self.controller.handle(Action.NAV_RIGHT)

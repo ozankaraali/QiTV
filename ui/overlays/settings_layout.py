@@ -69,13 +69,14 @@ PASTE_TEXT = N_("Paste")  # i18n: a button and its tooltip (verb)
 class Item:
     """A line of a column: a section, or a row (`row`). Only a selectable one takes the
     highlight (on the right, a row that is no info line; in a layer, the left column's rows
-    that open a layer)."""
+    that open a layer). A `literal` one (or one of a literal row) shows its text as given."""
 
     key: str
     text: str
     icon: str = ""
     row: Optional[Row] = None
     selectable: bool = True
+    literal: bool = False
 
 
 @dataclass
@@ -146,10 +147,12 @@ def whole(lines: list[str], text: str) -> bool:
 
 
 def title_of(item: Item) -> str:
-    """A line's title as shown: translated, and a destructive row's ends in "…" (it asks
-    before it acts), whether or not its text (or a translation) has one."""
-    title = translate(item.text)
+    """A line's title as shown: translated (a literal one as given: a provider's name), and a
+    destructive row's ends in "…" (it asks before it acts), whether or not its text (or a
+    translation) has one."""
     row = item.row
+    literal = item.literal or (row is not None and row.literal)
+    title = item.text if literal else translate(item.text)
     if row is not None and row.kind == DANGER and not title.rstrip().endswith((ELLIPSIS, "...")):
         title = title.rstrip() + ELLIPSIS
     return title
