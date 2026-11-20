@@ -1235,6 +1235,12 @@ class TVController(QObject):
             return item
         return with_provider(item, owner)
 
+    def _owned_target(self, target: Target) -> Target:
+        """`target`, its link stamped with whose stream it is now; itself for anything else
+        (what plays now stays what plays now)."""
+        owned = target.item if target.local else self._owned(target.item)
+        return target if owned is target.item else replace(target, item=owned)
+
     def set_link_player(self, play: Callable[[str], bool]) -> None:
         """`play(id)`: the link of Network streams kept under `id` plays (the network
         player's: it knows its kind and whose stream it is); False when none is kept so."""
@@ -5893,8 +5899,7 @@ class TVController(QObject):
         target = target or self._current
         if self._closed or target is None:
             return False
-        if not target.local:
-            target = replace(target, item=self._owned(target.item))  # a link: whose it is now
+        target = self._owned_target(target)  # a link: whose stream it is now
         chosen = target
         if target.local:
             path = str(target.item.get("path") or "")
@@ -5927,8 +5932,7 @@ class TVController(QObject):
         `phone`: a phone's Watch (its stream is counted: `_launch`)."""
         if self._closed:
             return
-        if not target.local:
-            target = replace(target, item=self._owned(target.item))  # a link: whose it is now
+        target = self._owned_target(target)  # a link: whose stream it is now
 
         def again() -> None:
             self._play_external(target, url, launcher, ask_on=ask_on, phone=phone)
