@@ -134,7 +134,7 @@ On a Mac in fullscreen, switching to another desktop or app floats the picture i
 
 ### Keys
 
-These are also in the app under Help → Keyboard Shortcuts. <kbd>Ctrl/⌘</kbd> means Ctrl on Windows and Linux and ⌘ (Command) on a Mac.
+These are also in the app under Settings › Keys (Help → Keyboard Shortcuts opens it). <kbd>Ctrl/⌘</kbd> means Ctrl on Windows and Linux and ⌘ (Command) on a Mac.
 
 <!-- keys:start -->
 **Watching TV**
