@@ -50,11 +50,11 @@ class ProviderActions:
 
     def update(self, name: str, changes: dict, refresh: bool = False) -> Change:
         """Change provider `name`'s fields by `changes` (ProviderChanges.update). `refresh`:
-        its lists come again as for a new connection, though its identity is the same (a media
-        server signed in again: its new token, which the identity leaves out, as the old
-        window's verified providers)."""
+        its lists come again as for a new connection, though its identity is the same and even
+        when nothing changed (a media server signed in again: its token, which the identity
+        leaves out, may come back the same; the old window refreshed every provider verified)."""
         change = self.changes.update(name, changes)
-        if not change.fields:
+        if not change.fields and not refresh:
             return change
         selected = self._selected(name)
         anew = change.identity_changed or refresh

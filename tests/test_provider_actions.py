@@ -164,7 +164,19 @@ class ProviderActionsTests(unittest.TestCase):
             self.run_action("update", "Home", {"token": "t3"}, True),
             [SAVED, ("set_provider", True), REBUILT],
         )
-        self.assertEqual(self.run_action("update", "Home", {"token": "t3"}, True), [])  # the same
+        # Signed in again with the same token: its lists come again all the same (the old
+        # window refreshed every provider verified), though nothing is written.
+        self.assertEqual(
+            self.run_action("update", "Home", {"token": "t3"}, True),
+            [SAVED, ("set_provider", True), REBUILT],
+        )
+        self.assertEqual(self.actions.changes.get("Home")["token"], "t3")
+        self.config.selected_provider_name = "Lists"
+        self.assertEqual(
+            self.run_action("update", "Home", {"token": "t3"}, True),
+            [("invalidate", "list", "Home"), SAVED, REBUILT],
+        )
+        self.assertEqual(self.run_action("update", "Home", {"token": "t3"}), [])  # no sign-in
         self.assertEqual(self.run_action("update", "Home", {"token": "t4"}), [SAVED, REBUILT])
 
     def test_a_change_that_cannot_be_saved_has_no_follow_ups(self):

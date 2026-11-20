@@ -541,6 +541,14 @@ class CardsTests(unittest.TestCase):
         self.assertEqual(self.saved("Panel")["url"], "http://moved.test:8080")
         self.assertFalse(self.has(self.form, pc.ANYWAY))
 
+    def test_a_port_fixed_saves_without_asking(self):
+        self.cards.edit("Panel")
+        self.type_text(pc.URL, "http://panel.test:8081", at_once=True)
+        self.press(pc.CHECK)
+        self.assertFalse(self.question.isVisible())  # the same server and account
+        self.run_check(Outcome(True))
+        self.assertEqual(self.saved("Panel"), {**PANEL, "url": "http://panel.test:8081"})
+
     def test_a_new_password_saves_without_asking(self):
         self.cards.edit("Panel")
         self.type_text(pc.PASSWORD, "newpass")
@@ -592,7 +600,12 @@ class CardsTests(unittest.TestCase):
         self.paste("http://s.test/other.m3u8")
         self.assertEqual(self.form.found(), ("✓ M3U Stream at s.test", True))
         self.press(pc.CHECK)
-        self.assertEqual(self.question.title(), "This is another server")  # its whole address
+        # Its whole address is what a playlist is, but it is no other server: said so.
+        self.assertEqual(self.question.title(), "This is another address")
+        self.assertEqual(
+            self.question.body(), translate(pc.SAME_HOST_BODY, name="Stream", host="s.test")
+        )
+        self.assertNotIn("other.m3u8", self.question.body())  # never a path
         self.answer(pc.REPLACE)
         self.run_check(Outcome(True))
         self.assertEqual(self.saved("Stream"), {**stream, "url": "http://s.test/other.m3u8"})
@@ -608,8 +621,42 @@ class CardsTests(unittest.TestCase):
             self.key(Action.NAV_TEXT, character)
         self.assertEqual(self.form.found(), ("✓ M3U playlist at p.test", True))
         self.press(pc.CHECK)
-        self.assertEqual(self.question.title(), "This is another server")
+        self.assertEqual(self.question.title(), "This is another address")
+        body = translate(pc.SAME_HOST_BODY, name="Panel list", host="p.test")
+        self.assertEqual(self.question.body(), body)  # never its query: the login is in it
         self.assertTrue(self.has(self.question, pc.REPLACE))
+        self.answer(CANCEL)
+        self.key(Action.ESCAPE)
+        # Playlist files: another one of the same name, or of another name.
+        folder = self.config.get_config_dir()
+        files = {
+            "type": "M3UPLAYLIST",
+            "name": "Files",
+            "url": os.path.join(folder, "a", "tv.m3u"),
+        }
+        self.rows.actions.changes.add(dict(files))
+        for path, expected in (
+            (
+                os.path.join(folder, "b", "tv.m3u"),
+                translate(pc.SAME_FILE_BODY, name="Files", file="tv.m3u"),
+            ),
+            (
+                os.path.join(folder, "a", "news.m3u"),
+                translate(pc.FILE_BODY, name="Files", old_where="tv.m3u", where="news.m3u"),
+            ),
+            (
+                "http://cdn.test/tv.m3u",
+                translate(pc.FILE_BODY, name="Files", old_where="tv.m3u", where="cdn.test"),
+            ),
+        ):
+            self.cards.edit("Files")
+            self.type_text(pc.URL, path, at_once=True)
+            self.press(pc.CHECK)
+            self.assertEqual(self.question.title(), "This is another address", path)
+            self.assertEqual(self.question.body(), expected)
+            self.assertNotIn(folder, self.question.body())
+            self.answer(CANCEL)
+            self.key(Action.ESCAPE)
 
     def test_a_late_check_answer_after_cancel_is_dropped(self):
         self.cards.add()

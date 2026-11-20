@@ -7,6 +7,8 @@ the pure decision; the question itself is the UI's.
 
 from __future__ import annotations
 
+from urllib.parse import urlsplit
+
 from services.provider_changes import normal_address
 
 SAME = "SAME"
@@ -22,12 +24,14 @@ def _kind(provider: dict) -> str:
 
 
 def _host(provider: dict) -> str:
-    """The server as compared: a playlist's whole normal address, otherwise its host (and
-    non-default port) without the path."""
-    address = normal_address(str(provider.get("url") or ""))
+    """The server as compared: a playlist's whole normal address (a file's path, a web one
+    without its scheme and default port), otherwise its host alone: a port fixed on the same
+    server is the same provider (spec §4)."""
+    url = str(provider.get("url") or "").strip()
+    address = normal_address(url)
     if _kind(provider) in _PLAYLISTS or not address.startswith("//"):
         return address
-    return address[2:].split("/", 1)[0].split("?", 1)[0]
+    return urlsplit(url).hostname or ""  # in lower case
 
 
 def _text(provider: dict, key: str) -> str:
@@ -36,9 +40,9 @@ def _text(provider: dict, key: str) -> str:
 
 def judge(old: dict, new: dict) -> str:
     """How `new` relates to `old`: SAME, OTHER_KIND (another type), OTHER_HOST (another
-    server) or OTHER_ACCOUNT (the same server with another user name, or a portal with
-    another MAC). A password, a name or a
-    path after the host never decides."""
+    server; for a playlist, another address) or OTHER_ACCOUNT (the same server with another
+    user name, or a portal with another MAC). A password, a name, a port or a path after the
+    host never decides but for a playlist."""
     if _kind(old) != _kind(new):
         return OTHER_KIND
     if _host(old) != _host(new):

@@ -25,10 +25,13 @@ QiTV's "M3U Stream", or a playlist from a panel's get.php, stays the kind it is.
 (services.provider_guard) compares the provider with what it would become before anything is
 asked:
 
-- the same server and account (a new password): checked, then saved, with no question;
+- the same server and account (a new password, a port fixed): checked, then saved, with no
+  question;
 - another kind: "This is another provider", with only "Add as new" (and Cancel);
 - another server, or another account (a user name, a portal's MAC): "Add as new" first, or
-  "Replace <name>'s address" / "Replace <name>'s login", checked, then saved.
+  "Replace <name>'s address" / "Replace <name>'s login", checked, then saved. A playlist is
+  its whole address: another one on the same server, or another file, is "another address",
+  said by its server's or its file's name (never a path or a query, which may hold a login).
 
 "Add as new" turns the card into the Add card and adds the provider as new: the one edited
 stays as it was. A check that fails saves nothing here: nothing about who a provider is
@@ -136,6 +139,23 @@ ANOTHER_HOST_BODY = N_(
     "{name} is at {old_host}, and this one at {host}. Add it as a new provider, or replace"
     " {name}'s address?"
 )
+# i18n: asked when a playlist's new address is another on the same server, or another file
+ANOTHER_ADDRESS_TITLE = N_("This is another address")
+SAME_HOST_BODY = N_(
+    # i18n: {name} is the playlist edited; {host} the server both addresses are on
+    "{name} and this one are both on {host}, at different addresses. Add it as a new"
+    " provider, or replace {name}'s address?"
+)
+SAME_FILE_BODY = N_(
+    # i18n: {name} is the playlist edited; {file} the name both playlist files have
+    "{name} and this one are both files named {file}, in different folders. Add it as a new"
+    " provider, or replace {name}'s address?"
+)
+FILE_BODY = N_(
+    # i18n: {name} is the playlist edited; {old_where} and {where}: a file's name or a server
+    "{name} plays from {old_where}, and this one from {where}. Add it as a new provider, or"
+    " replace {name}'s address?"
+)
 # i18n: asked when a provider's new login is another account on the same server
 ANOTHER_ACCOUNT_TITLE = N_("This is another account")
 ANOTHER_ACCOUNT_BODY = N_(
@@ -199,6 +219,11 @@ def _reads_as_playlist(text: str) -> bool:
         return True
     kind = next((value for key, value in parse_qsl(parts.query) if key.lower() == "type"), "")
     return path.rsplit("/", 1)[-1] == "get.php" and "m3u" in kind.lower()
+
+
+def _web(provider: dict) -> bool:
+    """Whether a provider's address is a web one (not a file's)."""
+    return "://" in str(provider.get(URL) or "")
 
 
 def _accounts(old: dict, new: dict) -> tuple[str, str]:
@@ -598,8 +623,7 @@ class ProviderCards(QObject):
             )
             buttons = [cancel, add_new]
         elif verdict == OTHER_HOST:
-            title = translate(ANOTHER_HOST_TITLE)
-            body = translate(ANOTHER_HOST_BODY, name=name, old_host=old_host, host=host)
+            title, body = self._other_address(name, new)
             replace = Button(REPLACE, translate(REPLACE_ADDRESS_TEXT, name=name))
             buttons = [cancel, replace, add_new]
         else:
@@ -613,6 +637,23 @@ class ProviderCards(QObject):
         self.question.ask(title, body, buttons, ADD_NEW)
         self._settings.show_card(self.question)
         self._raise_questions()
+
+    def _other_address(self, name: str, new: dict) -> tuple[str, str]:
+        """The question's words for another address: another server, or (a playlist is its
+        whole address) another one on the same server, another file. Only servers' and files'
+        names are said, never a path or a query (an address may hold its login)."""
+        old_host, host = where(self._original), where(new)
+        files = [not _web(provider) for provider in (self._original, new)]
+        if all(files) and old_host == host:
+            body = translate(SAME_FILE_BODY, name=name, file=host)
+        elif any(files):
+            body = translate(FILE_BODY, name=name, old_where=old_host, where=host)
+        elif old_host == host:
+            body = translate(SAME_HOST_BODY, name=name, host=host)
+        else:
+            body = translate(ANOTHER_HOST_BODY, name=name, old_host=old_host, host=host)
+            return translate(ANOTHER_HOST_TITLE), body
+        return translate(ANOTHER_ADDRESS_TITLE), body
 
     def _on_guard(self, key: str) -> None:
         new, self._pending = self._pending, {}

@@ -44,6 +44,19 @@ class ProviderGuardTests(unittest.TestCase):
         )
         self.assertEqual(judge(PANEL, {**PANEL, "url": "http://panel.test:8080/player_api"}), SAME)
 
+    def test_a_port_fixed_is_the_same_provider(self):
+        # The same server and account with its port fixed (spec §4): no question. A playlist
+        # is its whole address, its port included.
+        self.assertEqual(judge(PANEL, {**PANEL, "url": "http://panel.test:8081"}), SAME)
+        self.assertEqual(judge(PANEL, {**PANEL, "url": "https://panel.test"}), SAME)
+        self.assertEqual(judge(PORTAL, {**PORTAL, "url": "http://portal.test:8088/c"}), SAME)
+        ipv6 = {**PANEL, "url": "http://[::1]:8080"}
+        self.assertEqual(judge(ipv6, {**ipv6, "url": "http://[::1]:9090"}), SAME)
+        self.assertEqual(judge(ipv6, {**ipv6, "url": "http://[::2]:8080"}), OTHER_HOST)
+        lists = {"type": "M3UPLAYLIST", "url": "http://lists.test:8000/a.m3u"}
+        self.assertEqual(judge(lists, {**lists, "url": "http://lists.test:9000/a.m3u"}), OTHER_HOST)
+        self.assertEqual(judge(lists, {**lists, "url": "https://lists.test:8000/a.m3u"}), SAME)
+
     def test_another_mac_on_the_same_portal_is_another_account(self):
         self.assertEqual(judge(PORTAL, {**PORTAL, "mac": "00:1A:79:00:00:02"}), OTHER_ACCOUNT)
         self.assertEqual(judge(PORTAL, {**PORTAL, "mac": "00:1a:79:00:00:01"}), SAME)
