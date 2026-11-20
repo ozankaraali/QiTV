@@ -10,11 +10,11 @@ from PySide6.QtTest import QSignalSpy
 from PySide6.QtWidgets import QApplication
 from job_fixtures import ImmediateRunner
 from mixed_fixtures import DEMO, HARBOR, live_content, mixed_config, shut_hub
-import orjson
 from test_catalog_service import FakeWorker
 from test_catalogs import RecordingFactory
 from timer_fixtures import pause
 
+from services import provider_cache
 from services.browsed_catalog import BrowsedCatalog
 from services.catalog import ALL_GROUP_ID
 from services.catalogs import Catalogs
@@ -137,8 +137,7 @@ class BrowsedCatalogTests(unittest.TestCase):
                 "refreshed_at": {"itv": time.time()},
             },
         }
-        with open(self.registry._provider_cache_name(name), "wb") as f:
-            f.write(orjson.dumps(cache))
+        provider_cache.write_cache(self.registry._provider_cache_name(name), cache)
         self.catalogs.select(name)
 
     def library_view(self):

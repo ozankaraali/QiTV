@@ -13,7 +13,7 @@ from PySide6.QtCore import QObject, Signal
 import orjson as json
 import tzlocal
 
-from services import free_channels
+from services import free_channels, provider_cache
 from services.atomic_write import atomic_write, set_aside
 from services.catchup import mark_stb_archives
 from services.lazy_import import lazy_module
@@ -35,6 +35,14 @@ requests = lazy_module("requests")
 HANDSHAKE_UNREACHABLE = "unreachable"  # DNS, connection, timeout or a server error
 HANDSHAKE_REJECTED = "rejected"  # an explicit refusal (401/403, blocked) or no token
 HANDSHAKE_UNEXPECTED = "unexpected"  # any other answer: a wrong path, not JSON
+# 2.12: a provider's cache is "<hash>.v2.jsonl", in pieces (services.provider_cache). Before,
+# "<hash>.json", one document: read once when there is no new file, removed by the first save
+# (older builds then find no cache and load the lists again).
+CACHE_SUFFIX = ".v2.jsonl"
+LEGACY_CACHE_SUFFIX = ".json"
+# One cache file is read or written at a time, whichever provider's: four read at once left the
+# GUI thread a fifth of the interpreter (its work took 4.7 times as long), one at a time half.
+_CACHE_FILE_TURN = threading.Lock()
 _PREHASH = "2614ddf9829ba9d284f389d88e8c669d81f6a5c2"
 # When attempts (portal paths, HTTPS then HTTP) fail differently, the stronger reason wins.
 _HANDSHAKE_FAILURE_RANK = {HANDSHAKE_UNREACHABLE: 0, HANDSHAKE_UNEXPECTED: 1, HANDSHAKE_REJECTED: 2}
@@ -108,7 +116,12 @@ class ProviderManager(QObject):
 
     def _provider_cache_name(self, provider_name):
         hashed_name = hashlib.sha256(provider_name.encode("utf-8")).hexdigest()
-        return os.path.join(self.provider_dir, f"{hashed_name}.json")
+        return os.path.join(self.provider_dir, f"{hashed_name}{CACHE_SUFFIX}")
+
+    @staticmethod
+    def _legacy_cache_name(cache_path):
+        """The older builds' file for the cache at `cache_path` (one JSON document)."""
+        return cache_path[: -len(CACHE_SUFFIX)] + LEGACY_CACHE_SUFFIX
 
     def _current_provider_cache_name(self):
         return self._provider_cache_name(self.current_provider["name"])
@@ -132,12 +145,10 @@ class ProviderManager(QObject):
         with self._cache_lock:
             pending = self._pending_cache_snapshots.get(cache_path)
             cache = self._snapshot_cache(pending[1]) if pending is not None else None
+            generation = self._cache_generations.get(cache_path, 0)
+        legacy = False
         if cache is None:
-            try:
-                with open(cache_path, "rb") as f:
-                    cache = json.loads(f.read())
-            except OSError, json.JSONDecodeError:
-                return {}
+            cache, legacy = self._read_cache_file(cache_path)
         if not isinstance(cache, dict):
             return {}
         metadata = cache.get("_cache")
@@ -156,8 +167,43 @@ class ProviderManager(QObject):
             # Cached before STB catch-up: the channels the portal marks archived get their
             # archive keys now, from the cache.
             mark_stb_archives(live.get("contents"))
+        if legacy and provider.get("name") == self.current_provider.get("name"):
+            self._rewrite_legacy_cache(cache_path, generation, cache)  # (the content it saves)
         # Raw legacy payloads are readable, but have no trusted freshness timestamp.
         return cache
+
+    def _read_cache_file(self, cache_path):
+        """(The cache saved at `cache_path`, whether it is an older build's): {} when it cannot
+        be read; without the file, the older builds' single document."""
+        with _CACHE_FILE_TURN:
+            try:
+                return provider_cache.read_cache(cache_path), False
+            except FileNotFoundError:
+                pass
+            except OSError, ValueError:
+                return {}, False
+            try:
+                with open(self._legacy_cache_name(cache_path), "rb") as f:
+                    return json.loads(f.read()), True
+            except OSError, json.JSONDecodeError:
+                return {}, False
+
+    def _rewrite_legacy_cache(self, cache_path, generation, cache):
+        """An older build's cache, just read, is written as the new file (and goes): it is
+        read in one call once. Not when a save or a removal came meanwhile (`generation`)."""
+        snapshot = self._snapshot_cache(cache)
+        with self._cache_lock:
+            if self._cache_generations.get(cache_path, 0) != generation:
+                return
+            generation += 1
+            self._cache_generations[cache_path] = generation
+            self._pending_cache_snapshots[cache_path] = (generation, snapshot)
+        try:
+            self._cache_writer.submit(self._write_provider_cache, cache_path, generation, snapshot)
+        except RuntimeError:  # the writer has stopped (its provider went): left to the next start
+            with self._cache_lock:
+                if self._pending_cache_snapshots.get(cache_path, (0,))[0] == generation:
+                    del self._pending_cache_snapshots[cache_path]
 
     def is_content_stale(self, content_type) -> bool:
         if content_type not in self.current_provider_content:
@@ -246,14 +292,15 @@ class ProviderManager(QObject):
         return [free_channels.provider_entry(None)]
 
     def _invalidate_cache_path(self, cache_path) -> None:
-        """Supersede queued writes for this cache file, then delete it."""
+        """Supersede queued writes for this cache file, then delete it (an older build's too)."""
         with self._cache_lock:
             self._cache_generations[cache_path] = self._cache_generations.get(cache_path, 0) + 1
             self._pending_cache_snapshots.pop(cache_path, None)
-            try:
-                os.remove(cache_path)
-            except FileNotFoundError:
-                pass
+            for path in (cache_path, self._legacy_cache_name(cache_path)):
+                try:
+                    os.remove(path)
+                except FileNotFoundError:
+                    pass
 
     def invalidate_provider_cache(self, provider_name) -> None:
         """Invalidate queued writes as well as the on-disk cache for this name."""
@@ -357,12 +404,17 @@ class ProviderManager(QObject):
 
         with self._cache_lock:
             queued_files = {os.path.basename(path) for path in self._cache_generations}
+        caches = set()
         for entry in set(os.listdir(self.provider_dir)) | queued_files:
-            # Only consider json cache files for pruning
-            if entry == "index.json" or not entry.endswith(".json"):
+            # Only a cache's files are considered for pruning (an older build's "<hash>.json" too)
+            if entry == "index.json":
                 continue
-            if entry not in expected_files:
-                self._invalidate_cache_path(os.path.join(self.provider_dir, entry))
+            for suffix in (CACHE_SUFFIX, LEGACY_CACHE_SUFFIX):
+                if entry.endswith(suffix):
+                    caches.add(entry[: -len(suffix)] + CACHE_SUFFIX)
+                    break
+        for cache in sorted(caches - expected_files):
+            self._invalidate_cache_path(os.path.join(self.provider_dir, cache))
 
     @staticmethod
     def _snapshot_cache(value):
@@ -391,9 +443,14 @@ class ProviderManager(QObject):
             with self._cache_lock:
                 if self._cache_generations.get(cache_path, 0) != generation:
                     return
-            serialized = json.dumps(snapshot)
-            with atomic_write(cache_path, replace_if_newest) as f:
-                f.write(serialized)
+            # In pieces: one orjson call held the GIL (the GUI thread) for the whole cache.
+            with _CACHE_FILE_TURN:
+                provider_cache.write_cache(cache_path, snapshot, replace_if_newest)
+            if os.path.exists(cache_path):  # the older builds' file is read no more
+                try:
+                    os.remove(self._legacy_cache_name(cache_path))
+                except FileNotFoundError:
+                    pass
         except OSError, TypeError:
             logger.exception("Failed to save provider cache")
         finally:

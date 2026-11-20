@@ -98,8 +98,7 @@ def _grouped(rng: random.Random, count: int, groups: int, kind: str) -> dict:
 
 def build_fixture(out: Path, providers: int, channels: int, films: int) -> None:
     """Write `out/config`: providers and fresh caches (what mixed_config does, at scale)."""
-    import orjson
-
+    from services import provider_cache
     from services.config_manager import ConfigManager
     from services.provider_manager import ProviderManager
 
@@ -147,8 +146,7 @@ def build_fixture(out: Path, providers: int, channels: int, films: int) -> None:
             "identity": manager.provider_cache_identity(provider),
             "refreshed_at": {key: time.time() for key in content},
         }
-        with open(manager._provider_cache_name(provider["name"]), "wb") as f:
-            f.write(orjson.dumps(cache))
+        provider_cache.write_cache(manager._provider_cache_name(provider["name"]), cache)
         logger.info("%s: %d live channels", provider["name"], len(content["itv"]["contents"]))
     config.save_config()
 
