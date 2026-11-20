@@ -195,6 +195,19 @@ class ZoneTests(unittest.TestCase):
         self.assertEqual(xtream_zone_fields(None), {})
         self.assertEqual(xtream_zone_fields({"time_now": "garbage", "timestamp_now": "1"}), {})
 
+    def test_a_panel_clock_it_cant_read_gives_no_offset_not_a_failed_load(self):  # 2.12
+        # Milliseconds, "nan" or a stamp out of range raised while the loader's result was
+        # built: the provider's Live TV, Movies and Series all failed to load.
+        milliseconds = str(int(WINTER.timestamp()) * 1000)
+        for stamp in (milliseconds, "nan", "inf", "-inf", "1e300", "-1e300"):
+            with self.subTest(stamp=stamp):
+                info = {
+                    "timezone": "Europe/Berlin",
+                    "time_now": "2026-01-20 15:05:30",
+                    "timestamp_now": stamp,
+                }
+                self.assertEqual(xtream_zone_fields(info), {"timezone": "Europe/Berlin"})
+
     def test_a_known_name_wins_then_the_offset_then_utc(self):
         berlin = provider_zone("Europe/Berlin", 0)
         self.assertEqual(WINTER.astimezone(berlin).utcoffset(), timedelta(hours=1))

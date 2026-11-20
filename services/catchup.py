@@ -304,9 +304,10 @@ def _offset_minutes(time_now: Any, timestamp_now: Any) -> Optional[int]:
     try:
         local = datetime.strptime(str(time_now).strip(), "%Y-%m-%d %H:%M:%S")
         stamp = float(str(timestamp_now).strip())
-    except TypeError, ValueError:
+        # 2.12: in milliseconds, "nan" or out of range, it failed the whole provider's load
+        utc = datetime.fromtimestamp(stamp, timezone.utc).replace(tzinfo=None)
+    except TypeError, ValueError, OverflowError, OSError:
         return None
-    utc = datetime.fromtimestamp(stamp, timezone.utc).replace(tzinfo=None)
     minutes = (local - utc).total_seconds() / 60.0
     if not math.isfinite(minutes) or abs(minutes) > 15 * 60:
         return None
