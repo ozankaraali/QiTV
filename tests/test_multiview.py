@@ -1405,6 +1405,8 @@ class ParentalGridTests(MultiviewCase):
         self.assertTrue(self.grid.shown())
         self.assertIs(self.sessions.large(), self.main_slot)
         self.assertTrue(self.main_slot.live.running)  # One plays on
+        t2.live.released.emit()  # its upstream closed: its stream goes back
+        self.assertEqual(sorted(self.budget.holders("Home")), ["main"])
 
     def test_a_hidden_channels_link_on_its_way_to_a_tile_never_opens(self):
         self.start_large(0)
@@ -1429,8 +1431,66 @@ class ParentalGridTests(MultiviewCase):
         self.assertFalse(self.grid.shown())  # left as Stop leaves it, nothing asked
         self.assertIn(t2, self.sessions.background())
         self.assertTrue(t2.live.recording())
+        self.assertIn("t2", self.budget.holders("Home"))  # its recording keeps its stream
         self.assertIs(self.sessions.large(), self.main_slot)
         self.assertTrue(self.main_slot.live.running)
+
+    def test_a_focused_tile_waiting_for_its_provider_at_the_lock_never_plays_it(self):
+        # Restored while unlocked; the lock came back while its provider was still loading.
+        self.guard.hide_item("live", HARBOR_NINE)
+        self.assertTrue(self.guard.unlock("1234"))
+        self.config.multiview = {
+            "version": 1,
+            "cells": 4,
+            "focus": 2,
+            "tiles": [
+                {"provider_name": "Home", "group_id": "10", "item": CHANNELS[0]},
+                None,
+                {"provider_name": "Harbor IPTV", "group_id": "", "item": HARBOR_NINE},
+                None,
+            ],
+        }
+        self.start_large(0)
+        self.v()
+        self.transport.restoreRequested.emit()
+        self.assertEqual(self.sessions.large().name, "t2")
+        self.assertEqual(self.grid.label("t2"), ("Nine", CONNECTING))
+        self.guard.lock()
+        self.controller.parental_changed()
+        self.assertEqual(self.grid.state("t2"), EMPTY)
+        links = len(self.catalog.links)
+        self.catalog.catalogs.ready.add("Harbor IPTV")
+        self.catalog.hub_ready("Harbor IPTV")
+        self.assertEqual(len(self.catalog.links), links)  # its link never asked for
+        self.assertEqual(self.grid.state("t2"), EMPTY)
+
+    def test_a_focused_card_at_the_lock_neither_shows_nor_plays_it(self):
+        self.assertTrue(self.guard.unlock("1234"))
+        self.guard.hide_item("live", HOME_THREE)  # watched unlocked
+        self.start_large(0)
+        self.v()
+        self.pick_in("t2", HOME_THREE, "http://stream/3")  # focused now
+        self.controller._fail_focused_tile()  # its card: "Three", a click tries again
+        self.assertEqual(self.grid.state("t2"), FAILED)
+        self.guard.lock()
+        self.controller.parental_changed()
+        self.assertEqual(self.grid.state("t2"), EMPTY)
+        self.assertNotEqual(self.grid.label("t2")[0], "Three")
+        links = len(self.catalog.links)
+        self.grid.retry("t2")  # the card's click
+        self.controller._retry_tile(HOME_THREE)
+        self.assertEqual(len(self.catalog.links), links)
+
+    def test_no_tile_opens_a_hidden_channel_while_locked(self):
+        self.guard.hide_item("live", HOME_THREE)
+        self.start_large(0)
+        self.v()
+        links = len(self.catalog.links)
+        self.controller.play_in_tile("t3", HOME_THREE)  # a drop, a reopen, a restore
+        self.controller.play_in_tile("main", HOME_THREE)  # the focused tile: a tune
+        self.controller._retry_tile(HOME_THREE)  # a card's click
+        self.assertEqual(len(self.catalog.links), links)
+        self.assertEqual(self.grid.state("t3"), EMPTY)
 
     def test_a_hidden_channel_with_the_focus_stops_and_stays_out_of_the_last_grid(self):
         self.start_large(0)

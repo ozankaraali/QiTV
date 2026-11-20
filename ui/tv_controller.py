@@ -3086,6 +3086,8 @@ class TVController(QObject):
 
     def _retry_tile(self, channel: dict) -> None:
         """A click on a tile's card: its channel again, in the zap group when it is there."""
+        if self._hidden_now(channel):
+            return  # 2.12: hidden, and locked
         context = self.zap.context
         if context.index_of(channel) >= 0:
             self.tune(channel, group_key=context.group_key, channels=context.channels)
@@ -3108,6 +3110,8 @@ class TVController(QObject):
         grid, sessions = self._grid, self.sessions
         if grid is None or sessions is None or self._closed or not grid.shown():
             return
+        if self._hidden_now(channel):
+            return  # 2.12: hidden, and locked: no tile plays it
         if name not in grid.names():
             return
         listed = channels if channels is not None else self._all_live()
@@ -3204,8 +3208,7 @@ class TVController(QObject):
     def _restore_tile(self, name: str, channel: dict, provider: str, group: str) -> None:
         """A restored grid's tile: its channel opens once its provider is ready (as the last
         channel at start), saying "Connecting…" meanwhile."""
-        guard = self.parental
-        if guard is not None and guard.hides_item("live", with_provider(channel, provider)):
+        if self._hidden_now(channel):
             return  # 2.12: hidden since, and locked: its tile stays "+"
         hub = getattr(self.catalog, "catalogs", None)
         if hub is not None and not hub.is_ready(provider):
@@ -5276,21 +5279,32 @@ class TVController(QObject):
         small = self._beside_target()
         if small is not None and guard.protects_play(small.section, small.item, small.context):
             self._close_pip()
-        self._close_hidden_tiles(guard)
+        self._close_hidden_tiles()
         current = self._current or self._lanes.pending()
         if current is not None and guard.protects_play(
             current.section, current.item, current.context
         ):
             self.stop()
 
-    def _close_hidden_tiles(self, guard: Any) -> None:
-        """Locked (2.12): a multiview tile beside the focus whose channel is hidden closes, as
-        its ✕ does; while one of them records, the grid is left as Stop leaves it instead
-        (that recording goes on in the background, the other tiles beside the focus stop)."""
+    def _hidden_now(self, channel: dict) -> bool:
+        """2.12: parental controls hide the live `channel` now (locked), stamped with its
+        provider as the lists stamp it."""
+        guard = self.parental
+        if guard is None:
+            return False
+        provider = item_provider.provider_name(self.catalog, channel)
+        return bool(guard.hides_item("live", with_provider(channel, provider)))
+
+    def _close_hidden_tiles(self) -> None:
+        """Locked (2.12): a multiview tile whose channel is hidden closes, as its ✕ does: one
+        beside the focus, and the focused one by its card or what it waits for (what it plays
+        is the lock-out's own target); while one of them records, the grid is left as Stop
+        leaves it instead (that recording goes on in the background, the other tiles beside
+        the focus stop)."""
         grid, sessions = self._grid, self.sessions
         if grid is None or sessions is None or not grid.shown():
             return
-        names = grid.tiles_with(lambda channel: guard.protects_play("live", channel, None))
+        names = grid.tiles_with(self._hidden_now)
         if any(slot.name in names and records(slot) for slot in sessions.slots()):
             self.leave_multiview(keep_pip=False)
             return
