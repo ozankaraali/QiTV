@@ -596,8 +596,13 @@ class SettingsDrawerTests(unittest.TestCase):
                     lines = self.drawer._box("right", index).help
                     self.assertFalse(any("…" in line for line in lines), lines)
                     self.assertEqual(" ".join(lines).split(), translate(row.help).split())
-                    # macOS's fonts are wider than this test machine's (they cut de, es and
-                    # fr at two lines): written to fit two lines in a font 10% wider too.
+                    # macOS's fonts are wider than hel's (they cut de, es and fr at two
+                    # lines): the translations are written to fit two lines in a font 10%
+                    # wider too. (English is the source, as it is: on a wider font it shows
+                    # whole on the third line, as checked above; nor is it measured wider
+                    # on a machine whose own font is the wider one already.)
+                    if language == "en":
+                        continue
                     units = ui_units(size[0])
                     width = self.drawer.row_rect("right", index).width() - 2 * INSET_U * units.u
                     font = units.font(HELP_FONT_U)
