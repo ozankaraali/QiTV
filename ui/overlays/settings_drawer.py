@@ -1270,6 +1270,8 @@ class SettingsDrawer(Overlay):
             tone = text if item.selectable else muted
             if side == RIGHT and row is not None and row.kind == DANGER:
                 tone = qcolor(PALETTE.live)
+            elif row is not None and row.warn and not row.sub:
+                tone = qcolor(PALETTE.warn)  # an info line that says why something failed
             warned = row is not None and row.warn  # its sub line says why it failed
             self._paint_title(p, un, box, tone, qcolor(PALETTE.warn) if warned else muted)
             if side == LEFT or row is None:
@@ -1301,21 +1303,23 @@ class SettingsDrawer(Overlay):
 
     @staticmethod
     def _paint_title(p: QPainter, un: Units, box: Box, tone: QColor, muted: QColor) -> None:
-        """A line's title (a long one on two lines) and its sub line, centred as one."""
+        """A line's title (a long one on two lines) and its sub line (on its lines), centred
+        as one."""
         align = Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter
         title_font, sub_font = un.font(TITLE_FONT_U), un.font(SUB_FONT_U)
         spacing = QFontMetricsF(title_font).lineSpacing()
-        sub_h = QFontMetricsF(sub_font).lineSpacing() if box.sub else 0.0
-        y = box.line.center().y() - (spacing * len(box.titles) + sub_h) / 2
+        sub_spacing = QFontMetricsF(sub_font).lineSpacing()
+        y = box.line.center().y() - (spacing * len(box.titles) + sub_spacing * len(box.subs)) / 2
         p.setFont(title_font)
         p.setPen(tone)
         for line in box.titles:
             p.drawText(QRectF(box.title.x(), y, box.title.width(), spacing), align, line)
             y += spacing
-        if box.sub:
-            p.setFont(sub_font)
-            p.setPen(muted)
-            p.drawText(QRectF(box.title.x(), y, box.title.width(), sub_h), align, box.sub)
+        p.setFont(sub_font)
+        p.setPen(muted)
+        for line in box.subs:
+            p.drawText(QRectF(box.title.x(), y, box.title.width(), sub_spacing), align, line)
+            y += sub_spacing
 
     @staticmethod
     def _paint_value_lines(p: QPainter, rect: QRectF, lines: list[str], color: QColor) -> None:
@@ -1700,7 +1704,7 @@ class SettingsDrawer(Overlay):
         row = item.row
         if not whole(box.titles, title):
             whole_texts.append(title)
-        if row is not None and row.sub and box.sub != " ".join(row.sub.split()):
+        if row is not None and row.sub and not whole(box.subs, row.sub):
             whole_texts.append(row.sub)
         if side == RIGHT and row is not None and index != self._editing_index():
             tail, cut = "", False

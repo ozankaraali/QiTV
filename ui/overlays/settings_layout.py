@@ -2,7 +2,8 @@
 two columns and the areas their lines scroll in, the breadcrumb, and each line's parts.
 
 A line has its title, wrapped onto a second line when it does not fit on one, and under it a
-row's muted sub line ("Xtream · in use"); at its right end, by the row's kind, a stepper's
+row's muted sub line ("Xtream · in use"; a long one wraps too, so that why a link failed last
+time reads whole); at its right end, by the row's kind, a stepper's
 ‹ value › (a value too wide for its room wraps onto a second line too), a text row's value
 (the field it is edited in, while it is, with its Paste at the field's end), an info row's
 value or a row's note ("answered 2 min ago"), and the › of a row that opens; under a focused
@@ -55,6 +56,7 @@ HELP_LINES = 2
 HELP_PAD_U = 0.8  # under the help
 TITLE_LINES = 2  # a long title wraps, its line growing; beyond this it elides (small windows)
 VALUE_LINES = 2  # so does a stepper's value too wide for its room
+SUB_LINES = 3  # and a sub line (why a link failed last time: read whole, never cut)
 STEP_U = 1.8  # a stepper's ‹ and › (the panels')
 STEP_GAP_U = 0.6
 TITLE_GAP_U = 0.8  # between a row's title and what is at its right end
@@ -92,7 +94,7 @@ class Box:
     line: QRectF  # its title's lines and its sub line (the highlight)
     title: QRectF  # the room its title wraps in
     titles: list[str] = field(default_factory=list)  # the title as shown, a line each
-    sub: str = ""  # the sub line as shown
+    subs: list[str] = field(default_factory=list)  # the sub line as shown, a line each
     icon: QRectF = field(default_factory=QRectF)
     less: QRectF = field(default_factory=QRectF)  # a stepper's ‹, value and ›
     value: QRectF = field(default_factory=QRectF)
@@ -325,14 +327,12 @@ def place(
     title_w = max(0.0, end - x)
     titles = wrap(title, title_font, title_w, most_lines(un, TITLE_FONT_U, TITLE_LINES))
     spacing = QFontMetricsF(title_font).lineSpacing()
-    sub = ""
+    subs: list[str] = []
     sub_h = 0.0
     if row is not None and row.sub:
         sub_font = un.font(SUB_FONT_U)
-        sub = QFontMetricsF(sub_font).elidedText(
-            " ".join(row.sub.split()), Qt.TextElideMode.ElideRight, title_w
-        )
-        sub_h = QFontMetricsF(sub_font).lineSpacing()
+        subs = wrap(row.sub, sub_font, title_w, most_lines(un, SUB_FONT_U, SUB_LINES))
+        sub_h = QFontMetricsF(sub_font).lineSpacing() * len(subs)
     # The line grows with the taller of its title (and sub line) and its value's lines.
     grown = max(0, len(titles) - 1) * spacing + sub_h
     if len(values) > 1:
@@ -340,7 +340,7 @@ def place(
         grown = max(grown, (len(values) - 1) * value_spacing)
     line_h = float(un.px(ROW_H_U)) + grown
     middle = line_h / 2
-    box = Box(QRectF(), QRectF(area.x(), 0, area.width(), line_h), QRectF(), titles, sub)
+    box = Box(QRectF(), QRectF(area.x(), 0, area.width(), line_h), QRectF(), titles, subs)
     box.values = values
     box.title = QRectF(x, 0, title_w, line_h)
     if icons:

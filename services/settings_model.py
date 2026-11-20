@@ -122,7 +122,8 @@ class Row:
     "Xtream · in use") are shown as they are given, in the active language already. A
     `literal` row's `text` is too: a name the viewer gave (a provider's, a group's), never
     translated, even when it is also one of QiTV's texts ("General"). A `warn` row's sub line
-    is in the warning colour (why a link of Network streams failed last time). A `secret` text
+    is in the warning colour (why a link of Network streams failed last time), else an info
+    line's title. A `secret` text
     row (a token) shows dots in its text's place, and its last `secret_tail` characters after
     them when it has that many to show (an API key's last four, as the page that gave it shows
     them); an empty one shows its `placeholder`."""
@@ -139,7 +140,7 @@ class Row:
     note: str = ""
     sub: str = ""
     literal: bool = False
-    warn: bool = False  # its sub line in the warning colour
+    warn: bool = False  # its sub line (an info line without one: its title) in the warning colour
     secret: bool = False  # a text row's text shows as dots, and is never said or copied
     placeholder: str = ""  # an English text (N_) an empty text row shows, muted
     secret_tail: int = 0  # a secret's last characters shown after its dots

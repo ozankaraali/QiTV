@@ -138,6 +138,7 @@ from ui.overlays.drawer_look import (  # the header's metrics are offered from h
     paint_backdrop,
     paint_highlight,
 )
+from ui.overlays.guide import wrap_lines
 from ui.overlays.painting import (
     Units,
     draw_icon,
@@ -159,6 +160,7 @@ _RIGHT_PRESSES = (QEvent.Type.MouseButtonPress, QEvent.Type.MouseButtonDblClick)
 DRAG_OPACITY = 0.25  # the list while a channel is dragged out of it onto the grid
 FOUND_GENRE_H_U = 5.0  # a genre the find found: its name, then its provider and count
 LINK_ROW_H_U = FOUND_GENRE_H_U  # a link of Network streams: its name, then what it is
+LINK_SUB_LINES = 3  # why a link failed last time wraps onto these at most, its row growing
 FOUND_CHANNEL_SCALE = 0.7  # its channels: a long name (and a 5-digit number) fits whole
 ICONS_TOP_U = 0.6  # 2.9.3: the buttons' row, this far under the Find box's bottom
 REFRESH_ACTION = "refresh"  # the header's refresh button: the provider's channels and guide
@@ -238,6 +240,12 @@ def link_sub(row: LinkRow) -> tuple[str, bool]:
     if row.stopped_ms is None:
         return translate(LINK_FILM_TEXT), False
     return translate(LINK_STOPPED_TEXT, time=fmt_duration(row.stopped_ms)), False
+
+
+def _failed_lines(text: str, font: QFont, width: float) -> list[str]:
+    """Why a link failed last time as its row shows it: wrapped onto LINK_SUB_LINES lines at
+    most, whole but in a window too small for them."""
+    return wrap_lines(text, font, width, LINK_SUB_LINES) or ([text] if text else [])
 
 
 def _hint(what: str, keys: str) -> str:
@@ -507,7 +515,16 @@ class _SimpleRowDelegate(CutTexts, QStyledItemDelegate):
     def sizeHint(self, option, index) -> QSize:
         node = index.data(NodeRole)
         two = isinstance(node, NavNode) and node.layer == LINK_LAYER  # its name, what it is
-        return QSize(0, self._units(option.widget).px(LINK_ROW_H_U if two else ROW_H_U))
+        units = self._units(option.widget)
+        height = units.px(LINK_ROW_H_U if two else ROW_H_U)
+        sub, warn = (index.data(SubRole) or ("", False)) if two else ("", False)
+        if warn:  # why it failed, on its lines: the row grows by those after the first
+            viewport = getattr(option.widget, "viewport", None)
+            width = float(viewport().width()) if viewport is not None else 0.0
+            font = units.font(COUNT_FONT_U)
+            lines = _failed_lines(sub, font, max(0.0, width - 2.4 * units.u))
+            height += round(max(0, len(lines) - 1) * QFontMetricsF(font).height())
+        return QSize(0, height)
 
     def paint(self, p: QPainter, option, index) -> None:
         units = self._units(option.widget)
@@ -594,7 +611,8 @@ class _SimpleRowDelegate(CutTexts, QStyledItemDelegate):
 
     def _paint_link(self, p: QPainter, option, index, units: Units) -> None:
         """A link of Network streams: its name, then (smaller) what it is, grey, or why it
-        did not play last time in the warning colour (SubRole)."""
+        did not play last time in the warning colour (SubRole), on its lines (whole: the keys
+        and the phone have no tooltip; sizeHint grew the row for them)."""
         u = units.u
         rect = QRectF(option.rect)
         p.save()
@@ -606,22 +624,24 @@ class _SimpleRowDelegate(CutTexts, QStyledItemDelegate):
         title_h = QFontMetricsF(title_font).height()
         sub_h = QFontMetricsF(sub_font).height()
         sub, warn = index.data(SubRole) or ("", False)
-        y = rect.y() + (rect.height() - title_h - (sub_h if sub else 0)) / 2
+        p.setFont(sub_font)
+        if warn:
+            subs = _failed_lines(sub, sub_font, width)
+        else:
+            subs = [elided(p, sub, width)] if sub else []
+        y = rect.y() + (rect.height() - title_h - sub_h * len(subs)) / 2
         p.setFont(title_font)
         p.setPen(qcolor(PALETTE.text))
         title = str(index.data(Qt.DisplayRole) or "")
         shown = elided(p, title, width)
         p.drawText(QRectF(left, y, width, title_h), Qt.AlignLeft | Qt.AlignVCenter, shown)
-        shown_sub = sub
-        if sub:
-            p.setFont(sub_font)
-            p.setPen(
-                qcolor(PALETTE.warn) if warn else qcolor(PALETTE.text, PALETTE.text_muted_alpha)
-            )
-            shown_sub = elided(p, sub, width)
-            p.drawText(
-                QRectF(left, y + title_h, width, sub_h), Qt.AlignLeft | Qt.AlignVCenter, shown_sub
-            )
+        p.setFont(sub_font)
+        p.setPen(qcolor(PALETTE.warn) if warn else qcolor(PALETTE.text, PALETTE.text_muted_alpha))
+        y += title_h
+        for line in subs:
+            p.drawText(QRectF(left, y, width, sub_h), Qt.AlignLeft | Qt.AlignVCenter, line)
+            y += sub_h
+        shown_sub = sub if " ".join(subs) == " ".join(sub.split()) else " ".join(subs)
         self.note_cut(index, [(title, shown), (sub, shown_sub)])
         p.restore()
 

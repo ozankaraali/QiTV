@@ -966,11 +966,11 @@ class SettingsDrawerTests(unittest.TestCase):
         )
         self.drawer.grab()
         two, one = self.drawer._box("right", 0), self.drawer._box("right", 1)
-        self.assertEqual(two.sub, "Xtream · in use")
+        self.assertEqual(two.subs, ["Xtream · in use"])
         self.assertGreater(two.line.height(), one.line.height())
         self.drawer.activate()  # a layer down: the left column lists them, with the sub
         self.drawer.grab()
-        self.assertEqual(self.drawer._box("left", 0).sub, "Xtream · in use")
+        self.assertEqual(self.drawer._box("left", 0).subs, ["Xtream · in use"])
 
     def test_a_row_without_help_keeps_its_height_when_focused(self):
         self.open_rows(m.Row("a", "Check the connection"), m.Row("b", "Check again"))
@@ -1515,11 +1515,11 @@ class SettingsDrawerTests(unittest.TestCase):
                     fonts["title"].horizontalAdvance(line), box.title.width() + 0.5, where
                 )
             spacing = fonts["title"].lineSpacing()
-            sub_h = fonts["sub"].lineSpacing() if box.sub else 0.0
+            sub_h = fonts["sub"].lineSpacing() * len(box.subs)
             self.assertLessEqual(spacing * len(box.titles) + sub_h, box.line.height() + 0.5, where)
-            if box.sub:
+            for line in box.subs:  # each sub line fits its room
                 self.assertLessEqual(
-                    fonts["sub"].horizontalAdvance(box.sub), box.title.width() + 0.5, where
+                    fonts["sub"].horizontalAdvance(line), box.title.width() + 0.5, where
                 )
             for part in (box.end, box.chevron, self.drawer.paste_rect(index)):
                 if part.isEmpty():
