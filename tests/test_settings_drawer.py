@@ -91,6 +91,12 @@ def playback_index(key):
     return [r.key for r in playback_rows()].index(key)
 
 
+def with_old():
+    """The sections, and one whose settings are still in the Settings window (made up: the
+    sections move into the drawer one by one)."""
+    return sections("Darwin") + (Section("old", "Old", legacy_tab="old"),)
+
+
 def tip(row):
     """What hovering a row says when nothing of it is cut short: its help, and the restart
     note of a row that applies only once QiTV starts again ("" for a section)."""
@@ -222,12 +228,12 @@ class SettingsDrawerTests(unittest.TestCase):
         self.assertFalse(self.drawer.isVisible())
 
     def test_a_legacy_section_offers_the_old_window(self):
-        self.drawer.open_at(sections("Darwin"), GUIDE)
-        self.assertEqual(self.drawer.path(), (GUIDE,))
+        self.drawer.open_at(with_old(), "old")
+        self.assertEqual(self.drawer.path(), ("old",))
         self.drawer.right()
-        self.assertEqual(self.drawer.focused_row().key, "legacy:guide")
+        self.assertEqual(self.drawer.focused_row().key, "legacy:old")
         self.drawer.activate()
-        self.assertEqual(self.chosen, ["legacy:guide"])
+        self.assertEqual(self.chosen, ["legacy:old"])
 
     def test_highlighting_a_section_shows_its_rows_at_once(self):
         self.drawer.open_at(sections("Darwin"), GUIDE)
@@ -290,10 +296,10 @@ class SettingsDrawerTests(unittest.TestCase):
         self.assertEqual(self.drawer.path(), ("playback", "autoplay"))
         self.assertEqual(self.drawer.focus_side(), "right")
         self.assertEqual(self.steps, [])
-        self.drawer.open_at(sections("Darwin"), GUIDE)  # the keys on the sections
+        self.drawer.open_at(with_old(), "old")  # the keys on the sections
         self.drawer.grab()
         self.click(self.drawer.title_rect(0).center())
-        self.assertEqual(self.chosen, ["legacy:guide"])
+        self.assertEqual(self.chosen, ["legacy:old"])
 
     def test_a_click_on_a_section_shows_its_rows(self):
         self.drawer.open_at(sections("Darwin"), PLAYBACK)
@@ -394,14 +400,14 @@ class SettingsDrawerTests(unittest.TestCase):
         for focused in (False, True):
             with self.subTest(focused=focused):
                 self.chosen.clear()
-                self.drawer.open_at(sections("Darwin"), GUIDE)
+                self.drawer.open_at(with_old(), "old")
                 if focused:
                     self.drawer.right()
                 self.drawer.grab()
                 point = self.drawer.title_rect(0).center()
                 self.click(point)
                 self.double_click(point)
-                self.assertEqual(self.chosen, ["legacy:guide"])
+                self.assertEqual(self.chosen, ["legacy:old"])
 
     def test_a_double_click_on_the_back_step_steps_back_twice(self):
         self.use(*make(640, 360))

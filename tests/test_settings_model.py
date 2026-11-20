@@ -70,9 +70,10 @@ class SettingsModelTests(unittest.TestCase):
 
     def test_unmoved_sections_open_the_old_tab(self):
         by_key = {s.key: s for s in m.sections("Linux")}
-        self.assertEqual(by_key[m.GUIDE].legacy_tab, "epg")
+        for key, tab in m.LEGACY_TABS.items():  # (the sections not moved yet)
+            self.assertEqual(by_key[key].legacy_tab, tab, key)
         self.assertEqual(by_key[m.PLAYBACK].legacy_tab, "")
-        for key in (m.GENERAL, m.FILES, m.ADVANCED):  # plan 3: their rows are here
+        for key in (m.GENERAL, m.FILES, m.ADVANCED, m.GUIDE):  # plan 3: their rows are here
             self.assertEqual(by_key[key].legacy_tab, "", key)
             self.assertNotIn(key, m.LEGACY_TABS)
         self.assertTrue(by_key[m.FILES].empty_text)  # none of its rows can be (from source)
