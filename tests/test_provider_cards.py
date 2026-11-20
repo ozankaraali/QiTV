@@ -781,27 +781,27 @@ class CardsTests(unittest.TestCase):
         self.assertFalse(self.has(self.form, pc.ANYWAY))
         self.assertEqual(self.saved(), ["Lists", "Panel", "Sports"])
 
-    def test_free_channels_closes_the_card_and_opens_the_menu(self):
+    def test_free_channels_closes_the_card_and_opens_its_countries(self):
+        # 2.13.1: Settings' Free channels layer, as the card opened Settings (here: it
+        # showed already), never a menu.
         self.cards.add()
         self.paste(XTREAM_LINK)
-        where = self.form.mapToGlobal(self.form.control_rect("alt", pc.FREE).bottomLeft().toPoint())
         self.press(pc.FREE, zone="alt")
         self.assertFalse(self.form.isVisible())
         self.assertFalse(self.settings.card_shown())
-        self.assertEqual(self.window.free, [where])
+        self.assertEqual((self.window.free, self.window.radio), ([False], []))
         self.cards.add()
         self.assertEqual(self.form.values(), {pc.URL: "", pc.NAME: ""})
 
-    def test_free_radio_closes_the_card_and_opens_its_menu(self):
-        self.cards.add()
+    def test_free_radio_closes_the_card_and_opens_its_countries(self):
+        self.cards.add(opened_settings=True)  # Settings opened for the card
         free = self.form.control_rect("alt", pc.FREE)
         radio = self.form.control_rect("alt", pc.RADIO)
         # After Free channels…: beside it, or on the next line.
         self.assertGreater((radio.top(), radio.left()), (free.top(), free.left()))
-        where = self.form.mapToGlobal(radio.bottomLeft().toPoint())
         self.press(pc.RADIO, zone="alt")
         self.assertFalse(self.form.isVisible())
-        self.assertEqual((self.window.free, self.window.radio), ([], [where]))
+        self.assertEqual((self.window.free, self.window.radio), ([], [True]))
 
     def test_the_cards_stay_under_a_question_of_the_window(self):
         # A question keeps the keys above Settings (stop a recording?): a card shown or

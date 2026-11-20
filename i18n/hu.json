@@ -266,7 +266,6 @@
   "Couldn't start: {why}. QiTV tries again every minute until {until}.": "Nem sikerült elindítani: {why}. A QiTV {until}-ig percenként újrapróbálja.",
   "Couldn't write the channel matching to that file": "A csatornaegyeztetést nem sikerült kiírni abba a fájlba",
   "Couldn’t reach the provider to fetch episodes.": "Nem sikerült elérni a szolgáltatót az epizódok lekéréséhez.",
-  "Country:": "Ország:",
   "Cover": "Borító",
   "Create one on the API consumers page of your free OpenSubtitles account.": "Hozz létre egyet az ingyenes OpenSubtitles-fiókod API consumers oldalán.",
   "Credits and licenses": "Köszönetnyilvánítás és licencek",

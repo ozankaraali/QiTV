@@ -263,7 +263,6 @@
   "Couldn't start: {why}. QiTV tries again every minute until {until}.": "無法開始：{why}。QiTV 會每分鐘重試一次，直到 {until}。",
   "Couldn't write the channel matching to that file": "無法將頻道對應寫入該檔案",
   "Couldn’t reach the provider to fetch episodes.": "無法連線到供應商取得各集。",
-  "Country:": "國家/地區：",
   "Cover": "封面",
   "Create one on the API consumers page of your free OpenSubtitles account.": "請在你的免費 OpenSubtitles 帳號的 API consumers 頁面建立一個。",
   "Credits and licenses": "致謝與授權",

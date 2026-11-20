@@ -263,7 +263,6 @@
   "Couldn't start: {why}. QiTV tries again every minute until {until}.": "Không bắt đầu được: {why}. QiTV thử lại mỗi phút cho đến {until}.",
   "Couldn't write the channel matching to that file": "Không ghi được khớp kênh vào tệp đó",
   "Couldn’t reach the provider to fetch episodes.": "Không kết nối được nhà cung cấp để tải danh sách tập.",
-  "Country:": "Quốc gia:",
   "Cover": "Bìa",
   "Create one on the API consumers page of your free OpenSubtitles account.": "Tạo một khóa trên trang API consumers của tài khoản OpenSubtitles miễn phí của bạn.",
   "Credits and licenses": "Ghi công và giấy phép",

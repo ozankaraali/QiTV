@@ -269,7 +269,6 @@
   "Couldn't start: {why}. QiTV tries again every minute until {until}.": "Nu a putut începe: {why}. QiTV încearcă din nou în fiecare minut până la {until}.",
   "Couldn't write the channel matching to that file": "Asocierea canalelor nu a putut fi scrisă în acel fișier",
   "Couldn’t reach the provider to fetch episodes.": "Furnizorul nu a putut fi contactat pentru preluarea episoadelor.",
-  "Country:": "Țară:",
   "Cover": "Copertă",
   "Create one on the API consumers page of your free OpenSubtitles account.": "Creați una pe pagina API consumers a contului dvs. OpenSubtitles gratuit.",
   "Credits and licenses": "Credite și licențe",

@@ -266,7 +266,6 @@
   "Couldn't start: {why}. QiTV tries again every minute until {until}.": "شروع نہیں ہو سکی: {why}۔ QiTV {until} تک ہر منٹ دوبارہ کوشش کرتا ہے۔",
   "Couldn't write the channel matching to that file": "چینل میچنگ اس فائل میں نہیں لکھی جا سکی",
   "Couldn’t reach the provider to fetch episodes.": "اقساط حاصل کرنے کے لیے فراہم کنندہ تک رسائی نہیں ہو سکی۔",
-  "Country:": "ملک:",
   "Cover": "سرورق",
   "Create one on the API consumers page of your free OpenSubtitles account.": "اپنے مفت OpenSubtitles اکاؤنٹ کے API consumers صفحے پر ایک بنائیں۔",
   "Credits and licenses": "کریڈٹس اور لائسنس",

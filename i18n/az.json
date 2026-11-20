@@ -266,7 +266,6 @@
   "Couldn't start: {why}. QiTV tries again every minute until {until}.": "Başlamadı: {why}. QiTV {until} vaxtına qədər hər dəqiqə yenidən cəhd edir.",
   "Couldn't write the channel matching to that file": "Kanal uyğunlaşdırmanı həmin fayla yazmaq alınmadı",
   "Couldn’t reach the provider to fetch episodes.": "Seriyaları almaq üçün provayderlə əlaqə alınmadı.",
-  "Country:": "Ölkə:",
   "Cover": "Üz qabığı",
   "Create one on the API consumers page of your free OpenSubtitles account.": "Pulsuz OpenSubtitles hesabınızın API consumers səhifəsində birini yaradın.",
   "Credits and licenses": "Müəlliflər və lisenziyalar",

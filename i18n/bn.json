@@ -266,7 +266,6 @@
   "Couldn't start: {why}. QiTV tries again every minute until {until}.": "শুরু করা যায়নি: {why}। QiTV {until} পর্যন্ত প্রতি মিনিটে আবার চেষ্টা করে।",
   "Couldn't write the channel matching to that file": "চ্যানেল ম্যাচিং ওই ফাইলে লেখা যায়নি",
   "Couldn’t reach the provider to fetch episodes.": "পর্ব আনতে প্রোভাইডারে পৌঁছানো যায়নি।",
-  "Country:": "দেশ:",
   "Cover": "কভার",
   "Create one on the API consumers page of your free OpenSubtitles account.": "আপনার বিনামূল্যের OpenSubtitles অ্যাকাউন্টের API consumers পেজে একটি তৈরি করুন।",
   "Credits and licenses": "কৃতজ্ঞতা ও লাইসেন্স",

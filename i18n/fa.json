@@ -266,7 +266,6 @@
   "Couldn't start: {why}. QiTV tries again every minute until {until}.": "شروع نشد: {why}. QiTV تا {until} هر دقیقه دوباره تلاش می‌کند.",
   "Couldn't write the channel matching to that file": "تطبیق کانال‌ها در آن فایل نوشته نشد",
   "Couldn’t reach the provider to fetch episodes.": "برای دریافت قسمت‌ها به ارائه‌دهنده دسترسی نشد.",
-  "Country:": "کشور:",
   "Cover": "جلد",
   "Create one on the API consumers page of your free OpenSubtitles account.": "در صفحهٔ API consumers حساب رایگان OpenSubtitles خود یکی بسازید.",
   "Credits and licenses": "سازندگان و مجوزها",

@@ -269,7 +269,6 @@
   "Couldn't start: {why}. QiTV tries again every minute until {until}.": "Nepodařilo se spustit: {why}. QiTV to každou minutu zkouší znovu až do {until}.",
   "Couldn't write the channel matching to that file": "Přiřazení kanálů se do toho souboru nepodařilo zapsat",
   "Couldn’t reach the provider to fetch episodes.": "Poskytovatel není dostupný, díly nelze načíst.",
-  "Country:": "Země:",
   "Cover": "Obal",
   "Create one on the API consumers page of your free OpenSubtitles account.": "Vytvořte si ho na stránce API consumers svého bezplatného účtu OpenSubtitles.",
   "Credits and licenses": "Poděkování a licence",

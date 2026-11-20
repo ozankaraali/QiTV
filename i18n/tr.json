@@ -263,7 +263,6 @@
   "Couldn't start: {why}. QiTV tries again every minute until {until}.": "Başlatılamadı: {why}. QiTV {until} saatine kadar her dakika yeniden dener.",
   "Couldn't write the channel matching to that file": "Kanal eşleştirmesi bu dosyaya yazılamadı",
   "Couldn’t reach the provider to fetch episodes.": "Bölümleri almak için sağlayıcıya ulaşılamadı.",
-  "Country:": "Ülke:",
   "Cover": "Kapak",
   "Create one on the API consumers page of your free OpenSubtitles account.": "Ücretsiz OpenSubtitles hesabınızın API consumers sayfasında bir tane oluşturun.",
   "Credits and licenses": "Emeği geçenler ve lisanslar",

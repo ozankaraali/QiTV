@@ -263,7 +263,6 @@
   "Couldn't start: {why}. QiTV tries again every minute until {until}.": "Tidak dapat dimulai: {why}. QiTV mencoba lagi setiap menit hingga {until}.",
   "Couldn't write the channel matching to that file": "Pencocokan saluran tidak dapat ditulis ke berkas itu",
   "Couldn’t reach the provider to fetch episodes.": "Tidak dapat menjangkau penyedia untuk mengambil episode.",
-  "Country:": "Negara:",
   "Cover": "Sampul",
   "Create one on the API consumers page of your free OpenSubtitles account.": "Buat di halaman API consumers akun OpenSubtitles gratis Anda.",
   "Credits and licenses": "Kredit dan lisensi",

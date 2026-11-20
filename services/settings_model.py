@@ -7,7 +7,8 @@ own or a card (OPENS), acts (ACTION), acts on something that cannot be undone an
 value a row key means, and how a step or an edit is applied, is for the callers; this module
 only says what exists and how stepping moves. Providers lists the providers' rows its caller
 builds (ui.settings_providers: a name is shown as given, never translated), then ＋ Add
-provider, Free channels and Free radio.
+provider, Free channels and Free radio, each a layer of countries (2.13.1: their rows built by
+ui.free_channels_menu).
 """
 
 from __future__ import annotations
@@ -231,7 +232,8 @@ class Context:
     viewer's own rather than the default). The Guide's rows, built for its source as it is now
     (ui.settings_guide), the phone remote's for its settings and its state
     (ui.settings_remote), and parental controls' for the PIN and the lock now
-    (ui.settings_parental)."""
+    (ui.settings_parental). Free channels' and Free radio's countries, in the active language
+    and its order, the system's region first (ui.free_channels_menu)."""
 
     languages: tuple[tuple[str, str], ...] = ((SOURCE_LANGUAGE, SOURCE_NAME),)
     system_language: str = SOURCE_NAME
@@ -251,6 +253,8 @@ class Context:
     guide: tuple[Row, ...] = ()
     remote: tuple[Row, ...] = ()
     parental: tuple[Row, ...] = ()
+    free_channels: tuple[Row, ...] = ()
+    free_radio: tuple[Row, ...] = ()
 
 
 def _general(title: str, context: Context) -> Section:
@@ -730,10 +734,10 @@ def _playback(system: str) -> Section:
     return Section(PLAYBACK, N_("Playback"), ICONS[PLAYBACK], rows=rows)
 
 
-def _providers(title: str, rows: tuple[Row, ...]) -> Section:
+def _providers(title: str, rows: tuple[Row, ...], context: Context) -> Section:
     """Providers: the providers' rows as given (ui.settings_providers builds them), then ＋ Add
-    provider, ＋ Free channels… and ＋ Free radio…, as the channel list names them (its ＋
-    painted)."""
+    provider, ＋ Free channels and ＋ Free radio (their ＋ painted, as the channel list's), the
+    last two each opening its layer of countries (2.13.1: no menu, no system dialog)."""
     add = Row(
         ADD_PROVIDER,
         ADD_PROVIDER_TEXT,
@@ -742,21 +746,23 @@ def _providers(title: str, rows: tuple[Row, ...]) -> Section:
         kind=ACTION,
         icon="plus",
     )
+    # i18n: a row of Settings → Providers, after a ＋ (an icon); opens its list of countries
+    free_title = N_("Free channels")
     free = Row(
         FREE_CHANNELS,
-        # i18n: a row of Settings → Providers, after a ＋ (an icon); opens iptv-org's menu
-        N_("Free channels…"),
+        free_title,
         # i18n: help under Settings → Providers → Free channels (iptv-org is a project's name)
         N_("iptv-org's free channels: every country's, or one country's."),
-        kind=ACTION,
+        section=Section(FREE_CHANNELS, free_title, rows=context.free_channels, found_inside=True),
         icon="plus",
     )
+    # i18n: a row of Settings → Providers, after a ＋ (an icon), 2.13; opens its countries
+    radio_title = N_("Free radio")
     radio = Row(
         FREE_RADIO,
-        # i18n: a row of Settings → Providers, after a ＋ (an icon), 2.13; opens a menu
-        N_("Free radio…"),
+        radio_title,
         free_radio.HELP_TEXT,
-        kind=ACTION,
+        section=Section(FREE_RADIO, radio_title, rows=context.free_radio, found_inside=True),
         icon="plus",
     )
     return Section(PROVIDERS, title, ICONS[PROVIDERS], rows=rows + (add, free, radio))
@@ -769,8 +775,8 @@ def sections(
     rows of the providers, listed first in Providers, `context` what only the running QiTV
     knows (by default: English only, no TMDB or OpenSubtitles key built in, the image cache's
     default size, no Files rows, nothing to tell of AI captions' files, the time-shift
-    settings' defaults, no Recordings folder of one's own and no Guide, Phone remote or
-    Parental controls rows)."""
+    settings' defaults, no Recordings folder of one's own and no Guide, Phone remote,
+    Parental controls or countries' rows)."""
     context = context if context is not None else Context()
     titles = (
         (PROVIDERS, N_("Providers")),  # i18n: a settings section's title
@@ -787,7 +793,7 @@ def sections(
     built: list[Section] = []
     for key, text in titles:
         if key == PROVIDERS:
-            built.append(_providers(text, tuple(providers)))
+            built.append(_providers(text, tuple(providers), context))
         elif key == PLAYBACK:
             built.append(_playback(system))
         elif key == GENERAL:

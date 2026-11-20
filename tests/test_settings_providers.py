@@ -10,7 +10,7 @@ from unittest import mock
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
-from PySide6.QtCore import QPoint, Qt
+from PySide6.QtCore import Qt
 from PySide6.QtTest import QTest
 from PySide6.QtWidgets import QApplication, QWidget
 from timer_fixtures import elapse, wait_until
@@ -133,11 +133,11 @@ class FakeWindow:
     def closing(self):
         return False
 
-    def show_free_channels(self, global_pos):
-        self.free.append(global_pos)
+    def show_free_channels(self, from_drawer=False, opened_settings=False):
+        self.free.append(opened_settings)
 
-    def show_free_radio(self, global_pos):
-        self.radio.append(global_pos)
+    def show_free_radio(self, from_drawer=False, opened_settings=False):
+        self.radio.append(opened_settings)
 
     def providers_saved(self):
         self.events.append("providers_saved")
@@ -256,9 +256,9 @@ class ProvidersTests(unittest.TestCase):
         )
         self.assertEqual(
             [title_of(Item(row.key, row.text, row=row)) for row in rows],
-            ["Lists", "Panel", "Add provider", "Free channels…", "Free radio…"],
+            ["Lists", "Panel", "Add provider", "Free channels", "Free radio"],
         )
-        self.assertEqual([row.kind for row in rows], [OPENS, OPENS, ACTION, ACTION, ACTION])
+        self.assertEqual([row.kind for row in rows], [OPENS, OPENS, ACTION, OPENS, OPENS])
         self.assertEqual([row.icon for row in rows], ["", "", "plus", "plus", "plus"])
         self.assertEqual([row.sub for row in rows[:2]], ["M3U playlist · in use", "Xtream"])
         self.assertEqual(
@@ -318,27 +318,21 @@ class ProvidersTests(unittest.TestCase):
         self.key(Action.NAV_ACTIVATE)
         self.assertEqual([title_of(Item(r.key, r.text, row=r)) for r in self.shown()], ["Movies"])
 
-    def test_free_channels_opens_the_menu_at_the_row(self):
-        self.settings.open(PROVIDERS)
-        self.key(Action.NAV_RIGHT)
-        self.move_to(FREE_CHANNELS)
-        self.key(Action.NAV_ACTIVATE)
-        index = [row.key for row in self.shown()].index(FREE_CHANNELS)
-        line = self.drawer.row_rect("right", index)
-        self.assertEqual(len(self.window.free), 1)
-        point = self.drawer.mapFromGlobal(self.window.free[0])
-        self.assertTrue(line.adjusted(0, 0, 0, 1).contains(point), (line, point))
-        self.assertEqual(self.drawer.row_anchor(FREE_CHANNELS), self.window.free[0])
-        self.assertTrue(self.settings.visible())  # the menu pops up over Settings
-
-    def test_free_radio_opens_its_menu_at_the_row(self):
-        self.settings.open(PROVIDERS)
-        self.key(Action.NAV_RIGHT)
-        self.move_to(FREE_RADIO)
-        self.key(Action.NAV_ACTIVATE)
-        self.assertEqual(self.window.free, [])
-        self.assertEqual(self.window.radio, [self.drawer.row_anchor(FREE_RADIO)])
-        self.assertTrue(self.settings.visible())
+    def test_free_channels_and_free_radio_open_their_layers(self):
+        # 2.13.1: their countries are a layer (ui.free_channels_menu's rows, none here), never
+        # a menu over Settings.
+        for key in (FREE_CHANNELS, FREE_RADIO):
+            with self.subTest(key):
+                self.settings.open(PROVIDERS)
+                self.key(Action.NAV_RIGHT)
+                self.move_to(key)
+                self.key(Action.NAV_ACTIVATE)
+                self.assertEqual(self.drawer.path(), (PROVIDERS, key))
+                self.assertEqual((self.window.free, self.window.radio), ([], []))
+                self.key(Action.ESCAPE)
+                self.assertEqual(self.drawer.path(), (PROVIDERS,))
+                self.assertEqual(self.drawer.focused_row().key, key)
+                self.settings.close()
 
     def test_address_and_login_asks_for_its_card(self):
         self.on("Panel", "login")
@@ -892,29 +886,21 @@ class ProvidersWindowTests(WindowCase):
         self.assertEqual(keys[:2], [layer_key(PROVIDER_NAME), layer_key("Aardvark")])
         self.assertEqual(drawer.focused_row().key, layer_key(PROVIDER_NAME))
 
-    def test_free_channels_row_opens_the_windows_menu(self):
+    def test_free_channels_and_free_radio_rows_open_their_countries(self):
+        # 2.13.1: All countries, then the countries, the keys on the first.
         self.open_providers()
         controller = self.window.controller
+        drawer = self.window.settings_drawer
         controller.handle(Action.NAV_RIGHT)
-        self.down_to(FREE_CHANNELS)
-        with mock.patch("ui.tv_window.show_free_channels_menu") as menu:
-            controller.handle(Action.NAV_ACTIVATE)
-        menu.assert_called_once()
-        self.assertIsInstance(menu.call_args.args[1], QPoint)
-        self.assertEqual(
-            menu.call_args.args[1], self.window.settings_drawer.row_anchor(FREE_CHANNELS)
-        )
-
-    def test_free_radio_row_opens_the_windows_menu(self):
-        self.open_providers()
-        controller = self.window.controller
-        controller.handle(Action.NAV_RIGHT)
-        self.down_to(FREE_RADIO)
-        with mock.patch("ui.tv_window.show_free_radio_menu") as menu:
-            controller.handle(Action.NAV_ACTIVATE)
-        menu.assert_called_once()
-        self.assertEqual(menu.call_args.args[1], self.window.settings_drawer.row_anchor(FREE_RADIO))
-        self.assertEqual(menu.call_args.args[2], self.window.add_free_radio)
+        for key in (FREE_CHANNELS, FREE_RADIO):
+            with self.subTest(key):
+                self.down_to(key)
+                controller.handle(Action.NAV_ACTIVATE)
+                self.assertEqual(drawer.path(), (PROVIDERS, key))
+                self.assertEqual(drawer.focused_row().key, f"{key}/@all")
+                self.assertGreater(len(drawer._right_rows()), 150)
+                controller.handle(Action.ESCAPE)
+                self.assertEqual(drawer.path(), (PROVIDERS,))
 
 
 if __name__ == "__main__":

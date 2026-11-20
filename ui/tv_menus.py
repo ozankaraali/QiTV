@@ -6,13 +6,15 @@ shortcuts, which the keymap leaves to the menus (a test checks that no screen cl
 The player's keys are disabled while the Library shows. The Providers menu is an exclusive
 group of the configured providers, rebuilt when a provider becomes ready or fails and after
 a provider changes in Settings, then Add provider and the free-channels and free-radio (2.13)
-menus (the welcome card that offers them shows only without providers, and the last one
-stays). Settings… opens Settings in the drawer, as the drawer's Settings row and ⚙ do (backing
-out of it from there gives the drawer back). The drawer's Add provider row opens the same Add
-card in Settings as Add provider, its Free channels and Free radio rows their menus, its Open
-file row the same file dialog, and its header's ⌕ the same search. File → Open Recordings
-Folder opens where recordings go (2.2), as Settings' Open folder does; View → Recordings (2.9.7)
-the Library's Recordings page, as the drawer's Recordings row.
+submenus: All countries, the system's region, and Another country…, which opens their
+countries in Settings (2.13.1; the welcome card that offers them shows only without providers,
+and the last one stays). Settings… opens Settings in the drawer, as the drawer's Settings row
+and ⚙ do (backing out of it from there gives the drawer back). The drawer's Add provider row
+opens the same Add card in Settings as Add provider, its Free channels and Free radio rows
+their countries there, its Open file row the same file dialog, and its header's ⌕ the same
+search. File → Open Recordings Folder opens where recordings go (2.2), as Settings' Open
+folder does; View → Recordings (2.9.7) the Library's Recordings page, as the drawer's
+Recordings row.
 """
 
 from __future__ import annotations
@@ -32,7 +34,7 @@ from PySide6.QtGui import (
 )
 from PySide6.QtWidgets import QDialog, QDialogButtonBox, QLabel, QMenu, QVBoxLayout, QWidget
 
-from services import log_file, recording, system_open
+from services import free_radio, log_file, recording, system_open
 from services.config_manager import get_app_version
 from services.exporter import ExportKind
 from services.i18n import N_, tr, translate
@@ -49,10 +51,10 @@ from services.navigation import (
 from services.provider_ids import ALL_PROVIDERS, ALL_PROVIDERS_TITLE
 from ui.brand import logo_pixmap, scaled_asset
 from ui.free_channels_menu import (
+    OTHER_TEXT as OTHER_COUNTRY_TEXT,
     PICKER_TITLE as FREE_CHANNELS_TITLE,
     RADIO_TITLE as FREE_RADIO_TITLE,
-    build_menu as build_free_channels_menu,
-    build_radio_menu as build_free_radio_menu,
+    quick_choices,
 )
 from ui.keymap import Action
 from ui.overlays.drawer import LIBRARY_ACTION, REFRESH_ACTION, SEARCH_ACTION, SETTINGS_BUTTON
@@ -387,25 +389,51 @@ class TVMenus(QObject):
         self._add_entries(menu)
 
     def _add_entries(self, menu: QMenu) -> None:
-        """Add provider and the free-channels and free-radio menus, under the providers."""
+        """Add provider and the free-channels and free-radio submenus, under the providers."""
         window = self._window
         menu.addSeparator()
         add = menu.addAction(translate(ADD_PROVIDER_TEXT))
         add.triggered.connect(lambda _checked=False: window.add_provider())
-        if self._free_menu is not None:
-            self._free_menu.deleteLater()  # clear() leaves a submenu it held
-        free = self._free_menu = build_free_channels_menu(
-            menu, lambda code: window.add_free_channels(code), styled=False
+        for submenu in (self._free_menu, self._radio_menu):
+            if submenu is not None:
+                submenu.deleteLater()  # clear() leaves a submenu it held
+        self._free_menu = self._free_lists_menu(
+            menu,
+            FREE_CHANNELS_TITLE,
+            lambda code: window.add_free_channels(code),
+            lambda: window.show_free_channels(),
         )
-        free.setTitle(translate(FREE_CHANNELS_TITLE))
-        menu.addMenu(free)
-        if self._radio_menu is not None:
-            self._radio_menu.deleteLater()
-        radio = self._radio_menu = build_free_radio_menu(
-            menu, lambda code: window.add_free_radio(code), styled=False
+        self._radio_menu = self._free_lists_menu(
+            menu,
+            FREE_RADIO_TITLE,
+            lambda code: window.add_free_radio(code),
+            lambda: window.show_free_radio(),
+            free_radio.COUNTRY_CODES,
+            translate(free_radio.HELP_TEXT),
         )
-        radio.setTitle(translate(FREE_RADIO_TITLE))
-        menu.addMenu(radio)
+
+    @staticmethod
+    def _free_lists_menu(
+        menu: QMenu,
+        title: str,
+        add: Callable[[Optional[str]], None],
+        other: Callable[[], None],
+        codes: Optional[tuple[str, ...]] = None,
+        tooltip: str = "",
+    ) -> QMenu:
+        """A submenu (the menu bar's own look): All countries and the system's region add
+        their list at once (`add`), Another country… opens the countries (`other`)."""
+        submenu = menu.addMenu(translate(title))
+        for text, code in quick_choices(codes):
+            submenu.addAction(text).triggered.connect(lambda _checked=False, c=code: add(c))
+        submenu.addAction(translate(OTHER_COUNTRY_TEXT)).triggered.connect(
+            lambda _checked=False: other()
+        )
+        if tooltip:  # where the lists come from
+            submenu.setToolTipsVisible(True)
+            for action in submenu.actions():
+                action.setToolTip(tooltip)
+        return submenu
 
     def _choose_provider(self, source: str) -> None:
         """The exclusive group moved the check; providerReady rebuilds the menu (never here:
@@ -441,19 +469,18 @@ class TVMenus(QObject):
         """The drawer's Settings, Add provider, Free channels, Free radio, Open file, Open a link,
         Open a folder and Recordings rows, and its header's ⚙, Library, ⌕ and refresh buttons.
         Backed out of, Settings gives the list back: on its Settings row from there, where it
-        was from ⚙ and from Add provider (Settings at Providers, its Add card over it)."""
+        was from ⚙, from Add provider (Settings at Providers, its Add card over it) and from
+        Free channels and Free radio (their countries in Settings)."""
         if row == SETTINGS_ROW:
             self._window.open_settings(from_drawer=True)
         elif row == SETTINGS_BUTTON:
             self._window.open_settings(from_drawer=True, keep_place=True)
         elif row == ADD_PROVIDER_ROW:
             self._window.add_provider(from_drawer=True)
-        elif row == FREE_CHANNELS_ROW:
-            drawer = self._window.overlays.drawer
-            self._window.show_free_channels(drawer.row_anchor(row))
+        elif row == FREE_CHANNELS_ROW:  # Settings › Providers › Free channels (2.13.1)
+            self._window.show_free_channels(from_drawer=True)
         elif row == FREE_RADIO_ROW:  # 2.13
-            drawer = self._window.overlays.drawer
-            self._window.show_free_radio(drawer.row_anchor(row))
+            self._window.show_free_radio(from_drawer=True)
         elif row == OPEN_FILE_ROW:
             self._window.screens.open_file()
         elif row == OPEN_LINK_ROW:  # plan 4: File → Open Link…

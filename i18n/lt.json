@@ -269,7 +269,6 @@
   "Couldn't start: {why}. QiTV tries again every minute until {until}.": "Nepavyko pradėti: {why}. QiTV bando kas minutę iki {until}.",
   "Couldn't write the channel matching to that file": "Nepavyko įrašyti kanalų susiejimo į tą failą",
   "Couldn’t reach the provider to fetch episodes.": "Nepavyko pasiekti teikėjo serijoms gauti.",
-  "Country:": "Šalis:",
   "Cover": "Viršelis",
   "Create one on the API consumers page of your free OpenSubtitles account.": "Susikurkite jį nemokamos OpenSubtitles paskyros puslapyje API consumers.",
   "Credits and licenses": "Padėkos ir licencijos",

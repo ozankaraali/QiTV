@@ -266,7 +266,6 @@
   "Couldn't start: {why}. QiTV tries again every minute until {until}.": "Ei saanud alustada: {why}. QiTV proovib iga minut uuesti kuni {until}.",
   "Couldn't write the channel matching to that file": "Kanalite sobitust ei saanud sellesse faili kirjutada",
   "Couldn’t reach the provider to fetch episodes.": "Osade toomiseks ei saa pakkujaga ühendust.",
-  "Country:": "Riik:",
   "Cover": "Esikaas",
   "Create one on the API consumers page of your free OpenSubtitles account.": "Looge see oma tasuta OpenSubtitlesi konto lehel API consumers.",
   "Credits and licenses": "Tänuavaldused ja litsentsid",

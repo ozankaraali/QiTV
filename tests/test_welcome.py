@@ -119,7 +119,7 @@ class WelcomeCardTests(unittest.TestCase):
         QTest.mouseClick(self.card, Qt.MouseButton.LeftButton, pos=button.center().toPoint())
         self.assertEqual(self.added, [True])
 
-    def test_the_free_channels_button_sits_beside_the_first_and_asks_with_a_position(self):
+    def test_the_free_channels_button_sits_beside_the_first_and_asks(self):
         self.card.show_card()
         first, free = self.card.button_rect(), self.card.free_button_rect()
         self.assertFalse(first.intersects(free))
@@ -130,24 +130,23 @@ class WelcomeCardTests(unittest.TestCase):
         row_centre = (first.left() + self.card.radio_button_rect().right()) / 2
         self.assertAlmostEqual(row_centre, self.card.width() / 2, delta=1)
         asked = []
-        self.card.freeRequested.connect(asked.append)
+        self.card.freeRequested.connect(lambda: asked.append(True))
         QTest.mouseClick(self.card, Qt.MouseButton.LeftButton, pos=free.center().toPoint())
         self.assertEqual(self.added, [])  # not Add provider
-        below = self.card.mapToGlobal(free.bottomLeft().toPoint())
-        self.assertEqual(asked, [below])
+        self.assertEqual(asked, [True])  # Settings' Free channels (2.13.1: no menu under it)
 
-    def test_the_free_radio_button_sits_last_and_asks_with_a_position(self):
+    def test_the_free_radio_button_sits_last_and_asks(self):
         self.card.show_card()
         free, radio = self.card.free_button_rect(), self.card.radio_button_rect()
         self.assertLess(free.right(), radio.left())
         self.assertEqual((free.top(), free.height()), (radio.top(), radio.height()))
         self.assertTrue(QRectF(self.card.rect()).contains(radio))
         asked, free_asked = [], []
-        self.card.radioRequested.connect(asked.append)
-        self.card.freeRequested.connect(free_asked.append)
+        self.card.radioRequested.connect(lambda: asked.append(True))
+        self.card.freeRequested.connect(lambda: free_asked.append(True))
         QTest.mouseClick(self.card, Qt.MouseButton.LeftButton, pos=radio.center().toPoint())
         self.assertEqual((self.added, free_asked), ([], []))
-        self.assertEqual(asked, [self.card.mapToGlobal(radio.bottomLeft().toPoint())])
+        self.assertEqual(asked, [True])
 
     def test_the_buttons_fit_the_card_at_small_widths(self):
         self.host.resize(320, 240)

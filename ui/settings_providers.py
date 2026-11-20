@@ -3,7 +3,8 @@
 Providers lists each provider by its name (as the viewer gave it: never translated), its kind
 under it ("Xtream · in use" for the one the TV shows), then Network streams while a link is
 kept (ui.settings_links: never a provider), then ＋ Add provider, Free channels and Free radio
-(services.settings_model). A provider opens a layer of its own:
+(services.settings_model; their layers of countries: ui.free_channels_menu). A provider opens
+a layer of its own:
 
 - Name, edited in place: Enter or a click elsewhere renames it, never a keystroke; another
   provider's name, in any case, is refused and said, and the name stays;
@@ -481,12 +482,6 @@ class ProviderRows(QObject):
         if row.key == ADD_PROVIDER:
             if self.cards is not None:
                 self.cards.add()
-            return
-        if row.key == FREE_CHANNELS:  # the window's menu, under the row
-            self._window.show_free_channels(self._drawer.row_anchor(row.key))
-            return
-        if row.key == FREE_RADIO:  # 2.13: likewise
-            self._window.show_free_radio(self._drawer.row_anchor(row.key))
             return
         parsed = _parsed(row.key)
         if parsed is None or self._find(parsed[0]) is None:
