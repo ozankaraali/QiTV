@@ -517,6 +517,7 @@ class ProviderHostTests(WindowCase):
             "http://portal.example/play/live.php?stream=5",  # an STB portal: one stream
             "http://panel.example:8080/demo/secret/12",  # Xtream's short live form, its max
             "http://lists.example:8000/stream/7",  # a playlist with max_streams
+            "http://PORTAL.example:80/play/live.php?stream=6",  # its host, http's port written
         )
         read = mock.patch.object(open_link, "read_start", return_value=CHANNELS)
         play = mock.patch.object(window, "play_network_link")

@@ -120,6 +120,45 @@ class AddressTests(unittest.TestCase):
             with self.subTest(url):
                 self.assertEqual(host_of(url), host)
 
+    def test_a_default_port_written_out_is_the_same_host(self):
+        # Final review I1: `panel.example:80` was another host than `panel.example`, so a link
+        # written with its scheme's default port booked under no provider.
+        same = (
+            ("http://panel.example:80/live/demo/secret/1.ts", "http://panel.example"),
+            ("https://panel.example:443/x.m3u8", "https://panel.example"),
+            ("http://PANEL.Example/x", "https://panel.example/y"),  # one host, either scheme
+            ("panel.example:80/get.php", "http://panel.example"),  # typed without its scheme
+            ("http://[::1]:80/x", "http://[::1]/y"),
+        )
+        for link, provider in same:
+            with self.subTest(link):
+                self.assertEqual(host_of(link), host_of(provider))
+        other = (
+            ("http://panel.example:8080/x", "http://panel.example"),
+            ("http://panel.example:443/x", "http://panel.example"),  # not http's own port
+            ("https://panel.example:80/x", "https://panel.example"),
+        )
+        for link, provider in other:
+            with self.subTest(link):
+                self.assertNotEqual(host_of(link), host_of(provider))
+
+    def test_a_providers_stream_hosts_and_zone_lookup_compare_alike(self):
+        # The catalog's stream hosts and the catch-up zone's lookup use the same host form.
+        from services.catalog import _host
+        from ui import item_provider
+
+        for url in ("http://Streams.test:80", "https://streams.test:443/", "http://streams.test"):
+            with self.subTest(url):
+                self.assertEqual(_host(url), host_of("http://streams.test"))
+        asked = []
+
+        class Catalog:
+            def xtream_zone_at(self, host):
+                asked.append(host)
+
+        item_provider.xtream_zone_at(Catalog(), "http://Panel.test:80/live/u/p/1.ts")
+        self.assertEqual(asked, [host_of("http://panel.test")])
+
 
 class OwnerTests(unittest.TestCase):
     PANEL = {
@@ -158,6 +197,19 @@ class OwnerTests(unittest.TestCase):
         ):
             with self.subTest(url):
                 self.assertEqual(owner_of(url, self.providers()), "")
+
+    def test_a_default_port_written_out_on_either_side_still_names_the_account(self):
+        # Final review I1: hosts as `host_of` gives them, on both sides.
+        portless = dict(self.PANEL, url="http://panel.example")
+        written = dict(self.PANEL, url="http://panel.example:80")
+        for provider, url in (
+            (portless, "http://panel.example:80/live/demo/secret/12.ts"),
+            (written, "http://panel.example/live/demo/secret/12.ts"),
+            (portless, "https://panel.example:443/demo/secret/12"),
+        ):
+            with self.subTest(url):
+                hosts = {host_of(provider["url"])}
+                self.assertEqual(owner_of(url, [(provider, hosts)]), "Panel")
 
 
 if __name__ == "__main__":

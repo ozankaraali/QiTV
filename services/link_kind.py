@@ -31,6 +31,7 @@ FILM, LIVE, PROBE, NONE = "FILM", "LIVE", "PROBE", "NONE"
 _FILM_EXTENSIONS = (".mp4", ".mkv", ".avi", ".webm", ".mov", ".m4v")
 _LIVE_SCHEMES = ("rtmp", "rtmps", "rtsp", "udp", "rtp")
 PROBE_BYTES = 64 * 1024  # what a caller reads of a PROBE link for probe_text, at most
+_WEB_PORTS = {"http": "80", "https": "443"}  # each scheme's own port: the host without it
 
 
 @dataclass(frozen=True)
@@ -50,17 +51,24 @@ def address(text: str) -> str:
 
 
 def host_of(url: object) -> str:
-    """A web address's host and port, as a link's is compared with a provider's: lower case,
-    without a login ("panel.example:8080"; "" for none). One typed without its scheme
-    ("panel.example:8080/get.php") is read as http."""
+    """A web address's host and port, as a link's is compared with a provider's (and as a
+    provider's stream hosts are kept, services.catalog): case-folded, without a login and
+    without its scheme's own port, as `stream_id` reads it ("panel.example:8080"; "" for
+    none). `panel.example:80` over http is `panel.example`, as is `panel.example:443` over
+    https, and an address at a host over http is at that host over https too. One typed
+    without its scheme ("panel.example:8080/get.php") is read as http."""
     text = address(str(url or ""))
     if text and "://" not in text:
         text = f"http://{text}"
     try:
-        netloc = urlsplit(text).netloc
+        parts = urlsplit(text)
     except ValueError:
         return ""
-    return netloc.rpartition("@")[2].lower()
+    host = parts.netloc.rpartition("@")[2].casefold()
+    name, colon, port = host.rpartition(":")
+    if colon and port == _WEB_PORTS.get(parts.scheme.lower()):
+        return name  # its scheme's own port, written out ("[::1]:80" is "[::1]")
+    return host
 
 
 def _split(text: str):
