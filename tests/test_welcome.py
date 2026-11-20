@@ -16,6 +16,7 @@ from timer_fixtures import elapse, pause, wait_until
 
 from services.config_manager import ConfigManager
 from services.provider_check import Outcome
+from services.provider_link import ProviderLink
 from services.settings_model import ADD_PROVIDER, PROVIDERS
 from tests.test_tv_window import WindowCase
 from ui.keymap import Action
@@ -203,6 +204,19 @@ class WelcomeAddTests(WindowCase):
         self.assertFalse(window.settings.visible())
         self.assertTrue(card.isVisible())
         self.assertEqual(self.provider_manager.providers, [])
+
+    def test_a_portal_link_dropped_over_the_card_keeps_its_way_back(self):
+        # The card from the welcome card filled anew by a drop: its Cancel still gives the
+        # welcome card back.
+        card = self.start()
+        window, form = self.window, self.window.provider_cards.form
+        self.click_add(card)
+        portal = "http://portal.example.test/stalker_portal/c/"
+        window.add_dropped_providers([], [ProviderLink("STB", portal)])
+        self.assertEqual(form.values()["url"], portal)
+        QTest.keyClick(window, Qt.Key.Key_Escape)  # the card's Cancel
+        self.assertFalse(window.settings.visible())
+        self.assertTrue(card.isVisible())
 
     def test_settings_own_add_row_cancels_back_into_settings(self):
         # Settings opened by itself: Cancel on its ＋ Add provider stays in it, and backing out

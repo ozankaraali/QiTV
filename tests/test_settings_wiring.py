@@ -492,9 +492,9 @@ class AddProviderTests(base.WindowCase):
 
     def test_add_provider_while_settings_shows_moves_to_providers(self):
         self.show()
-        self.wait_for_drawer()
+        drawer = self.wait_for_drawer()
         window = self.window
-        self.menu_actions()["Settings…"].trigger()
+        window.menus.on_drawer_action(SETTINGS_ROW)  # from the list's Settings row
         QTest.keyClick(window, Qt.Key.Key_Down)  # another section
         self.assertNotEqual(window.settings_drawer.path()[0], PROVIDERS)
         self.menu_entry("Add provider").trigger()
@@ -503,6 +503,11 @@ class AddProviderTests(base.WindowCase):
         window.controller.handle(Action.PASTE)
         self.menu_entry("Add provider").trigger()  # asked again: what was typed stays
         self.assertEqual(window.provider_cards.form.values()["url"], self.LINK)
+        QTest.keyClick(window, Qt.Key.Key_Escape)  # the card's Cancel
+        QTest.keyClick(window, Qt.Key.Key_Escape)  # out of Settings: where it came from
+        self.assertFalse(window.settings.visible())
+        self.assertTrue(drawer.isVisible())
+        self.assertEqual(drawer.highlighted().key, SETTINGS_ROW)
 
     def test_an_add_through_the_card_reaches_the_toast_and_selects_it(self):
         self.show()

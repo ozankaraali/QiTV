@@ -243,6 +243,7 @@ class ProviderCards(QObject):
 
     # What a card holds (`_reset`).
     _original: dict
+    _alone: bool
     _values: dict[str, str]
     _link: Optional[ProviderLink]
     _line: Optional[tuple[str, bool]]
@@ -275,14 +276,17 @@ class ProviderCards(QObject):
         """The Add card: empty, or filled in from `link` (a dropped portal link, say: the keys
         then on what it lacks, its MAC). Asked again while it shows, with no link, it stays as
         it is, what was typed too. `opened_settings`: Settings opened for it (an Add provider
-        from outside Settings); with no provider yet, its Cancel then closes Settings too,
-        which gives the welcome card back (ProviderFlow.settings_closed)."""
-        if link is None and not self.form.isHidden() and not self._editing:
+        from outside Settings; filled anew, the Add card keeps what it had); with no provider
+        yet, its Cancel then closes Settings too, which gives the welcome card back
+        (ProviderFlow.settings_closed)."""
+        showing = not self.form.isHidden() and not self._editing
+        if link is None and showing:
             self._settings.show_card(self.form)
             self._raise_questions()
             return
+        alone = opened_settings or (showing and self._alone)
         self._close()
-        self._alone = opened_settings
+        self._alone = alone
         if link is not None:
             self._link = link
             self._values = {
