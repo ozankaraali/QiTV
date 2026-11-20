@@ -57,12 +57,15 @@ HELP_FONT_U = 1.05
 HELP_LINES = 3  # a help and its restart note: two lines as written, a third when it needs one
 HELP_PAD_U = 0.8  # under the help
 TITLE_LINES = 2  # a long title wraps, its line growing; beyond this it elides (small windows)
+WHOLE_LINES = 40  # a `whole` info line's title (About's credits): every line it needs
+IMAGE_PAD_U = 0.5  # above and under a row's picture (a line of its own: TMDB's logo)
 VALUE_LINES = 2  # so does a stepper's value too wide for its room
 SUB_LINES = 3  # and a sub line (why a link failed last time: read whole, never cut)
 STEP_U = 1.8  # a stepper's ‹ and › (the panels')
 STEP_GAP_U = 0.6
 TITLE_GAP_U = 0.8  # between a row's title and what is at its right end
 VALUE_SHARE = 0.5  # a value too wide beside its whole title keeps this share of the row
+WHOLE_VALUE_SHARE = 0.7  # a `whole` line's (a key's names: its title wraps on what it needs)
 FIELD_H_U = 2.6  # the field a text is edited in, this tall in its line
 FIELD_PAD_U = 0.7  # the field's text from its sides
 EMPTY_H_U = 6.0  # a layer without rows: its line, centred in this much of the column's top
@@ -108,6 +111,7 @@ class Box:
     entry: QRectF = field(default_factory=QRectF)
     paste: QRectF = field(default_factory=QRectF)
     help: list[str] = field(default_factory=list)
+    image: QRectF = field(default_factory=QRectF)  # a row's picture (Row.image), in its place
 
     def moved(self, dy: float) -> Box:
         """The same line, `dy` lower."""
@@ -123,6 +127,7 @@ class Box:
             "chevron",
             "entry",
             "paste",
+            "image",
         )
         return replace(self, **{name: getattr(self, name).translated(0, dy) for name in names})
 
@@ -270,14 +275,16 @@ def steps_width(
     return least + max(fm.horizontalAdvance(line) for line in lines), step, gap, lines
 
 
-def tail_width(un: Units, room: float, title: str, text: str, editing: bool) -> float:
+def tail_width(
+    un: Units, room: float, title: str, text: str, editing: bool, most: float = VALUE_SHARE
+) -> float:
     """A value or a note at the end of `room`: as wide as it is when that fits beside the
-    whole title on one line, else what the title leaves, at least VALUE_SHARE of the row
-    (eliding). The field a text is edited in takes all the title leaves, at least that share,
-    so that it keeps its width while it is typed into."""
+    whole title on one line, else what the title leaves, at least `most` of the row
+    (VALUE_SHARE; eliding). The field a text is edited in takes all the title leaves, at least
+    that share, so that it keeps its width while it is typed into."""
     title_w = math.ceil(QFontMetricsF(un.font(TITLE_FONT_U)).horizontalAdvance(title))
     left_over = room - TITLE_GAP_U * un.u - title_w
-    share = room * VALUE_SHARE
+    share = room * most
     if editing:
         return max(0.0, left_over, share)
     if not text:
@@ -298,13 +305,15 @@ def place(
     help: Sequence[str] = (),
     editing: bool = False,
     apart: bool = False,
+    image_w: float = 0.0,
 ) -> Box:
     """Line `item` of a column at y 0. `ends`: its row's right end shows (the right column;
     the left lists titles only); `icons`: the column keeps room for the sections' icons, else
     a line with an icon of its own (＋, ▶) has it before its title. `value`: what a stepper, a
     text or an info row shows (`choices`: a stepper's, shown); `help`: the lines under a
     focused row; `editing`: its text is edited, in a field; `apart`: GROUP_GAP_U above it (the
-    first ＋ after the providers)."""
+    first ＋ after the providers); `image_w`: the width of its picture (Row.image) at its
+    height, a line of its own in its title's place (2.13.1)."""
     inset = INSET_U * un.u
     x, right = area.x() + inset, area.right() - inset
     icon_size = ICON_U * un.u
@@ -327,11 +336,13 @@ def place(
         if kind == OPENS:
             tail_right = right - chevron - title_gap
         tail = value if kind in (TEXT, INFO) else row.note
-        tail_w = tail_width(un, tail_right - x, title, tail, editing and kind == TEXT)
+        most = WHOLE_VALUE_SHARE if row.whole else VALUE_SHARE
+        tail_w = tail_width(un, tail_right - x, title, tail, editing and kind == TEXT, most)
         end = tail_right - tail_w - title_gap if tail_w else tail_right
     title_font = un.font(TITLE_FONT_U)
     title_w = max(0.0, end - x)
-    titles = wrap(title, title_font, title_w, most_lines(un, TITLE_FONT_U, TITLE_LINES))
+    lines = WHOLE_LINES if row is not None and row.whole else TITLE_LINES
+    titles = wrap(title, title_font, title_w, most_lines(un, TITLE_FONT_U, lines))
     spacing = QFontMetricsF(title_font).lineSpacing()
     subs: list[str] = []
     sub_h = 0.0
@@ -345,6 +356,10 @@ def place(
         value_spacing = QFontMetricsF(un.font(VALUE_FONT_U)).lineSpacing()
         grown = max(grown, (len(values) - 1) * value_spacing)
     line_h = float(un.px(ROW_H_U)) + grown
+    image_h = float(row.image_u * un.u) if row is not None and row.image else 0.0
+    if image_h:  # the picture alone, a line as tall as it is
+        titles, subs = [], []
+        line_h = image_h + 2 * IMAGE_PAD_U * un.u
     middle = line_h / 2
     box = Box(QRectF(), QRectF(area.x(), 0, area.width(), line_h), QRectF(), titles, subs)
     box.values = values
@@ -358,6 +373,8 @@ def place(
         box.value = QRectF(box.less.right() + gap, 0, value_w, line_h)
     if kind == OPENS:
         box.chevron = QRectF(right - chevron, middle - chevron / 2, chevron, chevron)
+    if image_h:
+        box.image = QRectF(x, middle - image_h / 2, max(0.0, min(image_w, right - x)), image_h)
     if tail_w:
         box.end = QRectF(tail_right - tail_w, 0, tail_w, line_h)
         if editing and kind == TEXT:

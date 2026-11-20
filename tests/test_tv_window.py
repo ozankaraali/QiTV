@@ -37,18 +37,21 @@ from PySide6.QtGui import (
     QKeySequence,
 )
 from PySide6.QtTest import QTest
-from PySide6.QtWidgets import QApplication, QMenu, QWidget
+from PySide6.QtWidgets import QApplication, QDialog, QMenu, QWidget
 from gc_fixtures import collect_on_the_gui_thread
 from timer_fixtures import elapse, pause, wait_until
 
 import main as qitv_main
 from services import update_checker
+from services.catalog import ALL_GROUP_ID
 from services.config_manager import ConfigManager, get_app_version
 from services.epg_manager import EpgManager
+from services.i18n import translate
 from services.image_manager import ImageManager
 from services.playback import NO_VLC_MESSAGE, PlaybackState, create_instance
 from services.provider_ids import ALL_PROVIDERS, ALL_PROVIDERS_TITLE
 from services.provider_manager import ProviderManager
+from services.settings_model import ABOUT, KEYS
 from services.thread_cleanup import has_pending_threads
 from services.vlc_profile import PlayKind
 from tests.fixtures import local_xtream
@@ -65,13 +68,13 @@ from tests.test_keymap import resolve_text
 from tests.ts_fixtures import make_stream
 from ui.brand import logo_aspect
 from ui.export_flow import MAY_HOLD_SIGN_IN
-from ui.keymap import SHORTCUTS, Action, shortcut_keys
+from ui.keymap import SHORTCUT_TITLES, SHORTCUTS, Action, shortcut_keys
 from ui.overlay_host import OverlayHost
 from ui.overlays.drawer import ERROR_TEXT, LIBRARY_ACTION
 from ui.overlays.zap_banner import BannerInfo
 from ui.page_stack import PageStack
-from ui.shortcuts_dialog import ShortcutsDialog, table_rows
-from ui.tv_menus import ISSUES_URL, AboutDialog
+from ui.settings_about import HOME_URL, NOTICES_URL
+from ui.tv_menus import ISSUES_URL
 from ui.tv_window import (
     ABANDONED_EXIT_CODE,
     CLOSE_RETRY_MS,
@@ -1319,6 +1322,40 @@ class RecorderHomeWindowTests(WindowCase):  # 2.9.7: the Recordings tab's home, 
         self.assertTrue(schedule.is_skipped(item["id"], airing.start.timestamp()))
         guide.cancelSeriesRequested.emit(channel, airing)
         self.assertEqual(schedule.items(), [])
+
+    def test_record_at_a_time_is_a_card_on_the_library_page(self):  # 2.13.1: no window
+        window = self.window
+        self.show()
+        self.wait_for_drawer()
+        self.assertTrue(wait_until(lambda: window.catalog.items("live", ALL_GROUP_ID)))
+        window.record_at(window.catalog.items("live", ALL_GROUP_ID)[0])  # a channel's own
+        self.assertTrue(window.record_card.isVisible())  # over the picture, its host shown
+        self.assertIn(window.record_card, window.host.visible_overlays())
+        QTest.keyClick(window, Qt.Key.Key_Escape)
+        self.assertTrue(window.record_card.isHidden())
+        window.screens.open_recordings()
+        self.assertTrue(window.screens.library_shown())
+        desk = window.screens.recordings_desk
+        desk.record_at()  # its Record at a time…
+        card = desk.card()
+        self.assertTrue(card.isVisible())
+        self.assertIs(card.parentWidget(), window.library_page)
+        self.assertEqual(card.focus(), ("field", "channel"))
+        QTest.keyClick(window, Qt.Key.Key_Down)  # the window's keys, in the Library's context
+        self.assertEqual(card.focus(), ("field", "name"))
+        for key, text in ((Qt.Key.Key_A, "a"), (Qt.Key.Key_Space, " "), (Qt.Key.Key_1, "1")):
+            QTest.keyClick(window, key, Qt.KeyboardModifier.NoModifier)
+        self.assertEqual(card.values()["name"], "a 1")  # letters, a space and digits type
+        QTest.keyClick(window, Qt.Key.Key_Escape)
+        self.assertTrue(card.isHidden())
+        self.assertTrue(window.screens.library_shown())  # Esc closed the card alone
+        desk.record_at()
+        window.screens.open_library("movies")  # Ctrl+2: the Recordings tab left, the card too
+        self.assertTrue(card.isHidden())
+        window.screens.open_recordings()
+        desk.record_at()
+        window.screens.back_to_tv()  # the Library left: the card goes with it
+        self.assertTrue(card.isHidden())
 
     def test_a_timer_shows_as_a_band_on_its_channel(self):
         channel, _airing = self.channel_and_airing()
@@ -2852,34 +2889,66 @@ class HelpAndAboutTests(WindowCase):
                             continue
                         self.assertIsNotNone(resolve_text(key, context))
 
+    def no_window_shows(self):
+        """2.13.1: Keyboard Shortcuts and About are Settings' sections: no window of their own."""
+        shown = [
+            w for w in QApplication.topLevelWidgets() if w.isVisible() and w is not self.window
+        ]
+        self.assertEqual([w for w in shown if isinstance(w, QDialog)], [])
+
     def test_help_lists_the_table(self):
-        with mock.patch("ui.tv_menus.ShortcutsDialog") as dialog:
-            self.menu_actions()["Keyboard Shortcuts…"].trigger()
-        dialog.assert_called_once_with(self.window)
-        dialog.return_value.exec.assert_called_once_with()
-        shown = ShortcutsDialog(self.window)
-        self.addCleanup(shown.deleteLater)
-        rows = table_rows()
-        self.assertEqual(len(rows), len(SHORTCUTS) + sum(len(r) for r in SHORTCUTS.values()))
-        self.assertEqual(shown.table.rowCount(), len(rows))
-        self.assertEqual(shown.table.item(0, 0).text(), "Watching TV")
+        self.show()
+        self.menu_actions()["Keyboard Shortcuts…"].trigger()
+        settings, drawer = self.window.settings, self.window.settings_drawer
+        self.assertTrue(settings.visible())
+        self.assertEqual(drawer.path(), (KEYS,))  # Settings at Keys
+        rows = drawer._right_rows()
+        self.assertEqual([r.text for r in rows], [SHORTCUT_TITLES[c] for c in SHORTCUTS])
+        self.assertEqual(
+            sum(len(r.section.rows) for r in rows), sum(len(e) for e in SHORTCUTS.values())
+        )
+        self.assertEqual(translate(rows[0].text), "Watching TV")
+        self.no_window_shows()
+        # The keys alone read the longest screen's to its end, and go back out
+        QTest.keyClick(self.window, Qt.Key.Key_Right)
+        QTest.keyClick(self.window, Qt.Key.Key_Return)  # Watching TV
+        self.assertEqual(drawer.path(), (KEYS, rows[0].key))
+        last = len(rows[0].section.rows) - 1
+        for _ in range(last):
+            QTest.keyClick(self.window, Qt.Key.Key_Down)
+        drawer.grab()
+        self.assertFalse(drawer.row_rect("right", last).isEmpty())
+        QTest.keyClick(self.window, Qt.Key.Key_Escape)
+        self.assertEqual(drawer.path(), (KEYS,))
+        self.assertTrue(settings.visible())
 
     def test_about_names_the_version_and_the_links(self):
-        with mock.patch("ui.tv_menus.AboutDialog") as dialog:
-            self.menu_actions()["About QiTV"].trigger()
-        dialog.assert_called_once_with(self.window)
-        dialog.return_value.exec.assert_called_once_with()
-        about = AboutDialog(self.window)
-        self.addCleanup(about.deleteLater)
-        text = about.text.text()
-        self.assertIn(f"QiTV {get_app_version()}", text)
-        self.assertIn(ISSUES_URL, text)
-        # The same cropped logo as the top bar and the card, above the text, at 64 px.
-        logo = about.logo.pixmap()
-        self.assertEqual(logo.deviceIndependentSize().height(), 64)
-        self.assertAlmostEqual(logo.width() / logo.height(), logo_aspect(), delta=0.02)
-        layout = about.layout()
-        self.assertLess(layout.indexOf(about.logo), layout.indexOf(about.text))
+        self.show()
+        self.menu_actions()["About QiTV"].trigger()
+        settings, drawer = self.window.settings, self.window.settings_drawer
+        self.assertTrue(settings.visible())
+        self.assertEqual(drawer.path(), (ABOUT,))
+        self.no_window_shows()
+        rows = drawer._right_rows()
+        self.assertIn(get_app_version(), [r.note for r in rows])
+        drawer.grab()
+        # QiTV's cropped logo, above its version, 5 u tall (64 px at 1280)
+        logo = next(i for i, r in enumerate(rows) if r.image == "qitv")
+        box = drawer._box("right", logo)
+        self.assertAlmostEqual(box.image.width() / box.image.height(), logo_aspect(), delta=0.05)
+        self.assertLess(logo, next(i for i, r in enumerate(rows) if r.note == get_app_version()))
+        # The keys go to its links, each opened in the browser, the texts above them in sight
+        QTest.keyClick(self.window, Qt.Key.Key_Right)
+        opened = []
+        with mock.patch(
+            "services.system_open.QDesktopServices.openUrl",
+            side_effect=lambda url: opened.append(url.toString()) or True,
+        ):
+            for _ in range(3):
+                QTest.keyClick(self.window, Qt.Key.Key_Return)
+                QTest.keyClick(self.window, Qt.Key.Key_Down)
+        self.assertEqual(opened, [NOTICES_URL, HOME_URL, ISSUES_URL])
+        self.assertTrue(settings.visible())
 
     def test_check_for_updates_and_report_an_issue(self):
         with (

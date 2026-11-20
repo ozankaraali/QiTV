@@ -17,7 +17,9 @@ The buttons: Watch tunes a recording's channel (as the REC sign's Go back), Stop
 time on the item (a series has none), Cancel Recording takes it off the schedule; Dismiss (all)
 lists a problem no more; Play, Show in Folder and Delete… a file (as the Recordings shelf's);
 Open, Use for new recordings, Remove from list and Add a place… the places; Record at a time…
-picks a channel (the list's), Record from the guide opens the guide over live TV.
+picks a channel (the list's), Record from the guide opens the guide over live TV. Record at a
+time is a card over the Library's page (2.13.1: no window), the keys its own while it shows
+(`card_key`, before the page's); it goes with the page.
 """
 
 from __future__ import annotations
@@ -28,7 +30,7 @@ import os
 import time
 from typing import Any, Callable, Optional
 
-from PySide6.QtCore import QObject, Qt, QTimer, Signal
+from PySide6.QtCore import QObject, QTimer, Signal
 from PySide6.QtWidgets import QFileDialog
 
 from services import (
@@ -45,7 +47,7 @@ from services.recordings_list import size_text
 from services.sessions import records
 from ui.keymap import Action
 from ui.library.recordings_view import RecordingsView
-from ui.record_timer_dialog import RecordTimerDialog
+from ui.record_timer_dialog import RecordTimerCard, TimerChoice
 from ui.recording_scheduler import failure_reason
 
 logger = logging.getLogger(__name__)
@@ -87,7 +89,7 @@ class RecordingsDesk(QObject):
         self._files = QTimer(self)
         self._files.setInterval(FILES_MS)
         self._files.timeout.connect(self.refresh_files)
-        self._dialog: Any = None  # Record at a time, open from here
+        self._card: Optional[RecordTimerCard] = None  # Record at a time's, made when first asked
         self._builtin: Optional[str] = None  # QiTV's own folder, looked up once
         self._mark = ""
         self._marks = QTimer(self)  # the tab's dot, while the Library shows
@@ -111,6 +113,8 @@ class RecordingsDesk(QObject):
         self._shown = False
         self._timer.stop()
         self._files.stop()
+        if self._card is not None and not self._card.isHidden():
+            self._card.handle(Action.ESCAPE)  # Record at a time goes with the page, unanswered
 
     def shown(self) -> bool:
         return self._shown
@@ -573,7 +577,19 @@ class RecordingsDesk(QObject):
             logger.warning("The recording places could not be saved: %s", type(e).__name__)
         self.refresh_files()
 
-    # ---- dialogs ------------------------------------------------------------------------------
+    # ---- Record at a time's card, and the folder picker -------------------------------------
+
+    def card(self) -> RecordTimerCard:
+        """Record at a time's card, over the Library's page."""
+        if self._card is None:
+            self._card = RecordTimerCard(self._window.library_page)
+        return self._card
+
+    def card_key(self, action: Action, payload: str = "") -> bool:
+        """A key of the Library's while its card shows: the card's (True), but the sound's and
+        the window's."""
+        card = self._card
+        return card is not None and not card.isHidden() and card.handle(action, payload)
 
     def add_place(self) -> None:
         window = self._window
@@ -613,20 +629,9 @@ class RecordingsDesk(QObject):
             start = today + timedelta(minutes=begin)
             stop = start + timedelta(minutes=minutes)
             days = tuple(item.get("days") or ())
-        dialog = RecordTimerDialog(
-            channel,
-            start=start,
-            stop=stop,
-            title=str(item.get("title") or ""),
-            days=days,
-            save_text=translate(SAVE_TEXT),
-            parent=self._window,
-        )
-        dialog.setAttribute(Qt.WidgetAttribute.WA_DeleteOnClose)
 
-        def chosen() -> None:
-            choice = dialog.choice()
-            if choice is None or self._window.closing():
+        def chosen(choice: TimerChoice, _channel: Optional[dict]) -> None:
+            if self._window.closing():
                 return
             if choice.days:
                 fields: dict[str, Any] = dict(
@@ -647,9 +652,15 @@ class RecordingsDesk(QObject):
             self._window.screens.notify(translate(EDITED_TEXT if edited else EDIT_FAILED))
             self.refresh()
 
-        dialog.accepted.connect(chosen)
-        self._dialog = dialog
-        dialog.open()
+        self.card().ask(
+            channel,
+            start=start,
+            stop=stop,
+            title=str(item.get("title") or ""),
+            days=days,
+            save_text=translate(SAVE_TEXT),
+            done=chosen,
+        )
 
     def record_at(self) -> None:
         """Record at a time… with a channel to choose: the live channels of the list's source,
@@ -660,23 +671,18 @@ class RecordingsDesk(QObject):
             window.screens.notify(translate(NO_CHANNELS))
             return
         playing = window.controller.playing_channel()
-        dialog = RecordTimerDialog(
-            str((playing or {}).get("name") or ""),
-            channels=channels,
-            chosen=playing,
-            parent=window,
-        )
-        dialog.setAttribute(Qt.WidgetAttribute.WA_DeleteOnClose)
 
-        def chosen() -> None:
-            choice, channel = dialog.choice(), dialog.chosen_channel()
-            if choice is not None and channel is not None and not window.closing():
+        def chosen(choice: TimerChoice, channel: Optional[dict]) -> None:
+            if channel is not None and not window.closing():
                 window.schedule_timer(channel, choice)
                 self.refresh()
 
-        dialog.accepted.connect(chosen)
-        self._dialog = dialog
-        dialog.open()
+        self.card().ask(
+            str((playing or {}).get("name") or ""),
+            channels=channels,
+            chosen=playing,
+            done=chosen,
+        )
 
 
 class _Unread:

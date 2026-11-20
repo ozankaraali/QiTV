@@ -313,7 +313,7 @@ def _text(text: str, mods: int, *, windows: bool) -> tuple[Action, str] | None:
 # and "0…9" / "A…Z" stand for every key in between. The "menu" rows are the menu bar's own
 # shortcuts. Tests resolve every key in its context, so the table cannot drift from resolve().
 # The titles and what the keys do stay English here (the README is made from them) and are
-# shown with `translate` (ui/shortcuts_dialog.py); the keys' names are Qt's.
+# shown with `translate` (ui/settings_about.py: Settings › Keys); the keys' names are Qt's.
 SHORTCUT_TITLES = {
     "player": N_("Watching TV"),  # i18n: a heading of Help → Keyboard Shortcuts
     "drawer": N_("Channel list"),

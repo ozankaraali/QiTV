@@ -201,9 +201,10 @@ from ui.page_stack import PageStack
 from ui.pip import PipFrame
 from ui.pointer import PointerHider
 from ui.provider_cards import ProviderCards
-from ui.record_timer_dialog import RecordTimerDialog, TimerChoice
+from ui.record_timer_dialog import RecordTimerCard, TimerChoice
 from ui.recording_scheduler import RecordingScheduler
 from ui.remote_controller import RemoteController
+from ui.settings_about import AboutRows
 from ui.settings_controller import SettingsController
 from ui.settings_general import GeneralRows, hooks as general_hooks
 from ui.settings_guide import GuideRows, hooks as guide_hooks
@@ -809,6 +810,8 @@ class TVWindow(QMainWindow):
         self.subtitle_search = SubtitleSearchPage(host)
         # File → Open Link… and the channel list's Open a link (plan 4): its card over the picture
         self.open_link_card = LinkCard(host)
+        # 2.8 Record at a time (a channel's right-click, the guide's footer): 2.13.1, its card
+        self.record_card = RecordTimerCard(host)
         # 2.13.1: QiTV's own questions and messages (an update's, its download's progress, a
         # recording's deletion), on the page that shows (the TV's, or its twin on the Library
         # page): no system window.
@@ -849,7 +852,6 @@ class TVWindow(QMainWindow):
             os.path.join(config_manager.get_config_dir(), RECORDINGS_INDEX_FILE)
         )
         self.scheduler: Optional[RecordingScheduler] = None
-        self._timer_dialog: Optional[RecordTimerDialog] = None  # "Record at a time", last open
         self.overlays = Overlays(
             banner=ZapBanner(host),
             column=ChannelColumn(self.logos, now_provider, parent=host),
@@ -946,6 +948,7 @@ class TVWindow(QMainWindow):
             self.overlays.welcome,
             self.subtitle_search,
             self.open_link_card,
+            self.record_card,  # 2.13.1
             self.window_cards.tv_card,
             self.corner_controls,
             self.sleep_notice,
@@ -1219,6 +1222,9 @@ class TVWindow(QMainWindow):
         # Settings › Parental controls: the PIN in a card, locked and unlocked, what is hidden
         # only while unlocked; each change through parental_changed.
         self.parental_rows = ParentalRows(self, self.settings, self.settings_drawer)
+        # Settings › Keys and About QiTV (2.13.1: the Help menu's windows before): the keymap's
+        # table to read, and About's links opened in the browser.
+        self.about_rows = AboutRows(self.settings)
         self.catalogs.providersChanged.connect(self.provider_rows.providers_changed)
         self.catalog.providerReady.connect(self.provider_rows.providers_changed)
         # File → Open Link… and the channel list's Open a link (plan 4): while its card shows it
@@ -1238,7 +1244,8 @@ class TVWindow(QMainWindow):
             parent=self,
         )
         controller.add_card(self.open_link_card)
-        controller.add_card(self.window_cards.tv_card)  # over it: one asked meanwhile
+        controller.add_card(self.record_card)  # 2.13.1: Record at a time's, the same way
+        controller.add_card(self.window_cards.tv_card)  # over them: one asked meanwhile
         install_window_cards(self.window_cards)  # what the update's messages show on
         # Network streams (plan 4): the links that played, kept beside the config (read on a
         # worker once the window started, written on one); a stream link plays through the
@@ -1384,23 +1391,21 @@ class TVWindow(QMainWindow):
 
     def record_at(self, channel: dict, programme: Optional[Programme] = None) -> None:
         """2.8: "Record at a time" for `channel` (its right-click, the guide's footer), on the
-        programme's time when one is given; what it is given is scheduled."""
-        dialog = RecordTimerDialog(
+        programme's time when one is given; what it is given is scheduled. 2.13.1: its card
+        over the picture (the keys its own while it shows), answering through a callback."""
+        if self._closing:
+            return
+
+        def chosen(choice: TimerChoice, _channel: Optional[dict]) -> None:
+            if not self._closing:
+                self.schedule_timer(channel, choice)
+
+        self.record_card.ask(
             str(channel.get("name") or ""),
             start=programme.start if programme is not None else None,
             stop=programme.stop if programme is not None else None,
-            parent=self,
+            done=chosen,
         )
-        dialog.setAttribute(Qt.WidgetAttribute.WA_DeleteOnClose)
-
-        def chosen() -> None:
-            choice = dialog.choice()
-            if choice is not None:
-                self.schedule_timer(channel, choice)
-
-        dialog.accepted.connect(chosen)
-        self._timer_dialog = dialog
-        dialog.open()
 
     def schedule_timer(self, channel: dict, choice: TimerChoice) -> str:
         """Once: a programme of its own at that time; else a timer on its days. What the toast
@@ -2924,7 +2929,7 @@ class TVWindow(QMainWindow):
         """What Settings' sections show that only this QiTV knows, each section's from its
         rows: General's, Files' and Advanced's (ui.settings_general), Subtitles' and
         Time-shift's, and the Guide's, the phone remote's and parental controls' rows as they
-        are now; Free channels' and Free radio's countries."""
+        are now; Free channels' and Free radio's countries, then Keys' and About's."""
         context = self.subtitle_rows.context(self.general_rows.context())
         return dataclasses.replace(
             self.timeshift_rows.context(context),
@@ -2933,6 +2938,8 @@ class TVWindow(QMainWindow):
             parental=self.parental_rows.rows(),
             free_channels=self.free_lists.rows(FREE_CHANNELS),
             free_radio=self.free_lists.rows(FREE_RADIO),
+            keys=self.about_rows.keys(),
+            about=self.about_rows.about(),
         )
 
     def _settings_went(self) -> None:

@@ -8,7 +8,9 @@ value a row key means, and how a step or an edit is applied, is for the callers;
 only says what exists and how stepping moves. Providers lists the providers' rows its caller
 builds (ui.settings_providers: a name is shown as given, never translated), then ＋ Add
 provider, Free channels and Free radio, each a layer of countries (2.13.1: their rows built by
-ui.free_channels_menu).
+ui.free_channels_menu). Keys (the keymap's table, a layer of info lines to read for each
+screen) and About QiTV list the rows ui.settings_about builds (2.13.1: they were windows of the
+Help menu's).
 """
 
 from __future__ import annotations
@@ -36,6 +38,8 @@ REMOTE = "remote"
 PARENTAL = "parental"
 FILES = "files"
 ADVANCED = "advanced"
+KEYS = "keys"  # 2.13.1: Help → Keyboard Shortcuts…
+ABOUT = "about"  # 2.13.1: About QiTV
 
 # A row's kind (Row.kind).
 STEP = "step"  # ‹ value ›: ←/→ step it, Enter and a click on it focused step it on
@@ -58,6 +62,8 @@ ICONS: dict[str, str] = {
     PARENTAL: "lock",
     FILES: "folder",
     ADVANCED: "more",
+    KEYS: "keyboard",
+    ABOUT: "info",
 }
 
 
@@ -127,8 +133,10 @@ class Row:
     `literal` row's `text` is too: a name the viewer gave (a provider's, a group's), never
     translated, even when it is also one of QiTV's texts ("General"). A `warn` row's sub line
     is in the warning colour (why a link of Network streams failed last time), else an info
-    line's title. A `secret` text
-    row (a token) shows dots in its text's place, and its last `secret_tail` characters after
+    line's title. A `whole` info line's title wraps on every line it needs (About's credits,
+    a key's long description), never cut short. An `image` is a picture of the assets (its
+    file's name; "qitv": QiTV's own logo) on a line of its own, `image_u` units tall, in place
+    of a title (TMDB's logo in About, under its notice). A `secret` text row (a token) shows dots in its text's place, and its last `secret_tail` characters after
     them when it has that many to show (an API key's last four, as the page that gave it shows
     them); an empty one shows its `placeholder`."""
 
@@ -149,6 +157,9 @@ class Row:
     placeholder: str = ""  # an English text (N_) an empty text row shows, muted
     secret_tail: int = 0  # a secret's last characters shown after its dots
     icon: str = ""  # a drawing (painting.draw_icon) before its title, in the accent: ＋, ▶
+    whole: bool = False  # an info line's title wraps on every line it needs (2.13.1)
+    image: str = ""  # a picture in its title's place: an asset's file name, or "qitv" (2.13.1)
+    image_u: float = 0.0  # its height, in units
 
     def __post_init__(self) -> None:
         if not self.kind:
@@ -163,7 +174,9 @@ class Section:
     """A group of rows. `empty_text` (an English text marked with N_) shows in place of its
     rows while it has none. A `literal` one's `text` is shown as it is given (a provider's
     layer: its name, in the breadcrumb). A `found_inside` one's rows are found only by a find
-    typed inside it (a long list of names: Free channels' countries, 2.13.1)."""
+    typed inside it (a long list of names: Free channels' countries, 2.13.1). A `browse` one's
+    rows are info lines to read (a screen's keys, 2.13.1): the keys go in with no highlight and
+    scroll them."""
 
     key: str
     text: str
@@ -172,6 +185,7 @@ class Section:
     empty_text: str = ""
     literal: bool = False
     found_inside: bool = False
+    browse: bool = False
 
 
 # A setting's On and Off have their own catalog entries: the plain "Off" also names the
@@ -233,7 +247,8 @@ class Context:
     (ui.settings_guide), the phone remote's for its settings and its state
     (ui.settings_remote), and parental controls' for the PIN and the lock now
     (ui.settings_parental). Free channels' and Free radio's countries, in the active language
-    and its order, the system's region first (ui.free_channels_menu)."""
+    and its order, the system's region first (ui.free_channels_menu). Keys' rows and About's
+    (ui.settings_about, 2.13.1)."""
 
     languages: tuple[tuple[str, str], ...] = ((SOURCE_LANGUAGE, SOURCE_NAME),)
     system_language: str = SOURCE_NAME
@@ -255,6 +270,8 @@ class Context:
     parental: tuple[Row, ...] = ()
     free_channels: tuple[Row, ...] = ()
     free_radio: tuple[Row, ...] = ()
+    keys: tuple[Row, ...] = ()
+    about: tuple[Row, ...] = ()
 
 
 def _general(title: str, context: Context) -> Section:
@@ -574,6 +591,16 @@ def _parental(title: str, rows: tuple[Row, ...]) -> Section:
     return Section(PARENTAL, title, ICONS[PARENTAL], rows=rows)
 
 
+def _keys(title: str, rows: tuple[Row, ...]) -> Section:
+    """Keys: a row for each screen, opening its keys (ui.settings_about builds them)."""
+    return Section(KEYS, title, ICONS[KEYS], rows=rows)
+
+
+def _about(title: str, rows: tuple[Row, ...]) -> Section:
+    """About QiTV: its version, credits and links (ui.settings_about builds them)."""
+    return Section(ABOUT, title, ICONS[ABOUT], rows=rows)
+
+
 def _playback(system: str) -> Section:
     pip: tuple[Row, ...] = ()
     if system == "Darwin":
@@ -776,7 +803,7 @@ def sections(
     knows (by default: English only, no TMDB or OpenSubtitles key built in, the image cache's
     default size, no Files rows, nothing to tell of AI captions' files, the time-shift
     settings' defaults, no Recordings folder of one's own and no Guide, Phone remote,
-    Parental controls or countries' rows)."""
+    Parental controls, countries', Keys or About rows)."""
     context = context if context is not None else Context()
     titles = (
         (PROVIDERS, N_("Providers")),  # i18n: a settings section's title
@@ -789,6 +816,8 @@ def sections(
         (PARENTAL, N_("Parental controls")),  # i18n: a settings section's title
         (FILES, N_("Files")),  # i18n: a settings section's title
         (ADVANCED, N_("Advanced")),  # i18n: a settings section's title
+        (KEYS, N_("Keys")),  # i18n: a settings section's title
+        (ABOUT, N_("About QiTV")),  # i18n: a settings section's title
     )
     built: list[Section] = []
     for key, text in titles:
@@ -812,4 +841,8 @@ def sections(
             built.append(_remote(text, tuple(context.remote)))
         elif key == PARENTAL:
             built.append(_parental(text, tuple(context.parental)))
+        elif key == KEYS:
+            built.append(_keys(text, tuple(context.keys)))
+        elif key == ABOUT:
+            built.append(_about(text, tuple(context.about)))
     return tuple(built)

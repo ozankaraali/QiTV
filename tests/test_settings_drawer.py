@@ -1006,6 +1006,134 @@ class SettingsDrawerTests(unittest.TestCase):
         self.assertEqual((self.chosen, self.steps), ([], []))
         self.assertFalse(self.drawer._items("right")[0].selectable)  # painted muted
 
+    # ---- 2.13.1: a layer of info lines to read (Keys), whole titles and pictures (About) ----
+
+    def browse_layer(self, count=30):
+        """Settings with one section whose row opens a layer of `count` info lines to read
+        (as Keys' groups are): the layer open, the keys still on its left column."""
+        lines = tuple(
+            m.Row(f"keys/g/{i}", f"What key {i} does", kind=m.INFO, note=f"K{i}")
+            for i in range(count)
+        )
+        layer = Section("keys/g", "Group", rows=lines, browse=True)
+        other = Section("keys/h", "Other", rows=lines[:2], browse=True)
+        rows = (
+            m.Row("keys/g", "Group", section=layer),
+            m.Row("keys/h", "Other", section=other),
+        )
+        self.drawer.open_at((Section("keys", "Keys", rows=rows),))
+        self.drawer.right()
+        self.drawer.activate()  # into the group, to read it
+        self.assertEqual(self.drawer.path(), ("keys", "keys/g"))
+        self.drawer.left()  # its left column: the groups
+        return lines
+
+    def test_the_keys_scroll_a_layer_of_info_lines_to_its_end(self):
+        # About 13 lines fit at 1280 × 720; keys alone (the phone's arrows) read them all.
+        lines = self.browse_layer()
+        self.assertEqual(self.drawer.focus_side(), "left")  # nothing in it takes the focus
+        self.drawer.right()  # → goes in, to read them
+        self.assertEqual(self.drawer.focus_side(), "right")
+        self.assertIsNone(self.drawer.focused_row())  # no highlight: nothing there acts
+        self.drawer.grab()
+        self.assertTrue(self.drawer.row_rect("right", len(lines) - 1).isEmpty())
+        for _ in range(len(lines)):
+            self.drawer.move_by(1)  # ↓ scrolls a line
+        self.drawer.grab()
+        last = self.drawer.row_rect("right", len(lines) - 1)
+        self.assertFalse(last.isEmpty())
+        self.assertTrue(self.drawer.column_rect("right").contains(last))
+        self.assertTrue(self.drawer.row_rect("right", 0).isEmpty())
+        self.drawer.page(-1)  # a page up, and another: back at its top
+        self.drawer.page(-1)
+        self.drawer.page(-1)
+        self.drawer.grab()
+        self.assertFalse(self.drawer.row_rect("right", 0).isEmpty())
+        self.drawer.page(1)
+        self.drawer.grab()
+        self.assertTrue(self.drawer.row_rect("right", 0).isEmpty())
+        self.drawer.activate()  # Enter: nothing to act on
+        self.assertEqual((self.chosen, self.steps), ([], []))
+        self.drawer.left()  # ← back to the groups, as from any row
+        self.assertEqual(self.drawer.focus_side(), "left")
+        self.assertEqual(self.drawer.path(), ("keys", "keys/g"))
+        self.drawer.right()  # in again, at the line it was read to
+        self.drawer.grab()
+        self.assertTrue(self.drawer.row_rect("right", 0).isEmpty())
+        self.drawer.back()  # Esc and Back: a layer up, as from any layer, on its row
+        self.assertEqual(self.drawer.path(), ("keys",))
+        self.assertEqual(self.drawer.focused_row().key, "keys/g")
+
+    def test_a_line_read_is_said_and_a_short_layer_stays_put(self):
+        lines = self.browse_layer()
+        self.drawer.right()
+        said = []
+        with mock.patch("ui.overlays.settings_drawer.announce", lambda w, t: said.append(t)):
+            self.drawer.move_by(1)
+        self.assertEqual(said, ["What key 1 does, K1"])  # the line now at the top
+        self.assertEqual(lines[1].note, "K1")
+        self.drawer.left()
+        self.drawer.move_by(1)  # the other group: two lines, nothing to scroll
+        self.assertEqual(self.drawer.path(), ("keys", "keys/h"))
+        self.drawer.right()
+        self.drawer.move_by(1)
+        self.drawer.grab()
+        self.assertFalse(self.drawer.row_rect("right", 0).isEmpty())
+        self.assertEqual(self.drawer.focus_side(), "right")
+
+    def test_a_found_info_line_opens_its_layer_in_sight(self):
+        lines = self.browse_layer()
+        self.drawer.back()
+        self.drawer.back()  # the sections
+        self.drawer.find_type("key 25")
+        self.drawer.activate()  # the find's only row
+        self.assertEqual(self.drawer.path(), ("keys", "keys/g"))
+        self.drawer.grab()
+        found = self.drawer.row_rect("right", 25)
+        self.assertFalse(found.isEmpty())
+        self.assertTrue(self.drawer.column_rect("right").contains(found))
+        self.assertEqual(lines[25].text, "What key 25 does")
+
+    def test_a_whole_title_wraps_on_every_line_it_needs(self):
+        text = " ".join(["Plays and casts with VLC, built with Qt and Python."] * 6)
+        self.open_rows(
+            m.Row("credits", text, kind=m.INFO, whole=True),
+            m.Row("cut", text, kind=m.INFO),
+            m.Row("link", "Credits and licenses"),
+        )
+        self.drawer.grab()
+        whole_box, cut_box = self.drawer._box("right", 0), self.drawer._box("right", 1)
+        self.assertGreater(len(whole_box.titles), 2)
+        self.assertEqual(" ".join(whole_box.titles), text)  # none of it cut
+        self.assertEqual(len(cut_box.titles), 2)  # a title as before: two lines at most
+        self.assertTrue(cut_box.titles[-1].endswith("…"))
+
+    def test_a_row_s_picture_shows_under_its_title(self):
+        # TMDB's logo in About (its terms ask for it): a picture of the assets, its height
+        # in units, at the left of the title's room.
+        self.open_rows(
+            m.Row("tmdb", "QiTV uses TMDB.", kind=m.INFO, whole=True),
+            m.Row("logo", "", kind=m.INFO, literal=True, image="tmdb.png", image_u=0.7),
+            m.Row("link", "Credits and licenses"),
+        )
+        image = self.drawer.grab().toImage()
+        box = self.drawer._box("right", 1)
+        units = ui_units(1280)
+        self.assertAlmostEqual(box.image.height(), 0.7 * units.u, delta=1)
+        self.assertGreater(box.image.width(), 4 * box.image.height())  # its own shape
+        self.assertEqual(box.image.left(), box.title.left())
+        self.assertLessEqual(box.line.height(), units.px(2.0))  # a line no taller than it needs
+        ratio = image.devicePixelRatio()
+        r = box.image
+        base = image.pixelColor(int((r.right() + 8) * ratio), int(r.center().y() * ratio))
+        painted = sum(
+            1
+            for y in range(int(r.top() * ratio), int(r.bottom() * ratio))
+            for x in range(int(r.left() * ratio), int(r.right() * ratio))
+            if image.pixelColor(x, y) != base
+        )
+        self.assertGreater(painted, r.width() * r.height() * ratio * ratio / 10)
+
     def test_an_info_row_shows_its_value_and_an_action_its_note(self):
         self.open_rows(
             m.Row("kind", "Kind", kind=m.INFO),
