@@ -524,12 +524,13 @@ class TVWindowTests(WindowCase):
             shortcuts(menus["File"]),
             [
                 ("Open File…", "Ctrl+O"),
+                ("Open Link…", ""),  # plan 4: a stream plays, a provider is added
                 ("Open Folder…", "Ctrl+Shift+O"),  # Plan 4: plays it, on the Folders tab
                 ("Export", ""),
                 ("Open Recordings Folder", ""),
             ],
         )
-        export = menus["File"].actions()[2].menu()
+        export = menus["File"].actions()[3].menu()
         self.assertEqual(
             [a.text() for a in export.actions()],
             ["Cached Content…", "All Live Channels…", "Complete Series (Fetch All)…"],

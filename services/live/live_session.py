@@ -616,6 +616,10 @@ class LiveSession(QObject):
         self._retry_at_seen: Optional[float] = None
         self._retry_due: Optional[float] = None
         self._limited: Optional[str] = None  # the provider's refusal (one of REFUSALS)
+        # Plan 4: the tune is a link's (`start(once=True)`), and how its buffer's input failed
+        # (the helper's kind, its HTTP status) for the words its failure is said in.
+        self._once = False
+        self._failure: tuple[str, Optional[int]] = ("", None)
         self._software = False  # hardware decoding froze this channel's picture
         self._phase = _Phase.IDLE
         self._mode = ""
@@ -855,6 +859,7 @@ class LiveSession(QObject):
         max_height: Optional[int] = None,
         borrowed: Optional[Borrowed] = None,
         revive: bool = True,
+        once: bool = False,
     ) -> None:
         """`ram_bytes`: the memory a disk buffer that fails goes on in (the helper's default
         when None). `channel`: the channel's key in the tuning store ("": nothing kept).
@@ -872,9 +877,13 @@ class LiveSession(QObject):
         new one: no upstream opens; should it fail, the picture fails (`LENT_ENDED`), never
         plays the channel directly (that would be a second stream). `revive` False: a direct
         play that ends or fails is the caller's, as before (an STB portal's channel, whose link
-        is made again instead)."""
+        is made again instead). `once` (plan 4, a link of Network streams that no configured
+        provider owns): its direct play after its buffer is tried once, never again after a
+        quick failure, and its source asks a refused reconnect no more: no closed connection
+        of a provider is waited out there."""
         self.stop()
-        self._played, self._revive_on = False, revive
+        self._played, self._revive_on, self._once = False, revive, once
+        self._failure = ("", None)
         self._revive.reset()
         self._kept = kept
         self._borrowed = borrowed
@@ -918,6 +927,8 @@ class LiveSession(QObject):
             self._open_args["ram_bytes"] = ram_bytes
         if https_first:
             self._open_args["https_first"] = True
+        if once:
+            self._open_args["once"] = True  # its source asks a refused reconnect no more
         if self._memory.max_height > 0:
             self._open_args["max_height"] = self._memory.max_height
         self._stay = StayLive(self._latency)
@@ -1792,6 +1803,7 @@ class LiveSession(QObject):
             https_first=bool(self._open_args.get("https_first")),
             max_height=int(self._open_args.get("max_height", 0)),
             **({"join": True} if join else {}),
+            **({"once": True} if self._open_args.get("once") else {}),
         )
 
     def _on_resumed(self, sid: str) -> None:
@@ -1945,8 +1957,11 @@ class LiveSession(QObject):
         sid, self._sid = self._sid, None
         self._phase = _Phase.FALLING_BACK
         self._fallback_notice = message
-        # A buffer that was open may still count with the provider a while (one stream).
-        self._direct_retries = len(self._direct_waits) if sid is not None else 0
+        # A buffer that was open may still count with the provider a while (one stream); a
+        # link of no provider's (plan 4: `once`) is tried directly once, now or later (its
+        # buffer played on what it had first): nothing counts it anywhere.
+        retried = sid is not None and not self._once
+        self._direct_retries = len(self._direct_waits) if retried else 0
         self._paused = self._source_lost = False
         self._deferred = None
         self._after_update = self._retry = self._failing_since = None
@@ -2124,6 +2139,10 @@ class LiveSession(QObject):
             self._kept_fallback(late=True, why=self._unready_reason())
         else:
             _LOG.info("Playing the channel directly: %s.", self._unready_reason())
+            snapshot = self._snapshot()
+            silent = not _number(snapshot.get("received")) and snapshot.get("answered") is not True
+            if not self._ready_seen and silent and not self._failure[0]:
+                self._failure = ("timeout", None)  # nothing answered in time (plan 4's words)
             self._fall_back(UNAVAILABLE)
 
     def _receiving(self) -> bool:
@@ -2387,6 +2406,7 @@ class LiveSession(QObject):
             return
         # Every other kind is final: the session's input is over.
         status = getattr(self._engine, "failure_status", lambda _sid: None)(sid)
+        self._failure = (kind, status)  # read once its failure is reported (`failure`)
         if self._phase is _Phase.WAITING:
             if not self._limited:  # a refusal plays nothing (`_refuse`)
                 # The engine logged its HTTP status, if it had one.
@@ -2520,6 +2540,12 @@ class LiveSession(QObject):
             if self._reviving:
                 self._set_retry(0.0)  # a try opens now
             self._play_provider()
+
+    def failure(self) -> tuple[str, Optional[int]]:
+        """How this tune's buffer input last failed for good: the helper's kind ("http",
+        "timeout", "network", "tls" …) and its HTTP status (None: none); ("", None) while it has
+        not. A new tune forgets it."""
+        return self._failure
 
     # ---- coming back by itself (`services.revive`) ---------------------------------------
     def revives(self) -> bool:

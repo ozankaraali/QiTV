@@ -8,7 +8,10 @@ from services.link_kind import (
     NONE,
     PROBE,
     Provider,
+    address,
     classify,
+    host_of,
+    owner_of,
     probe_text,
     xtream_account,
 )
@@ -89,7 +92,7 @@ class ProbeTests(unittest.TestCase):
             "#EXTM3U\n#EXTINF:-1 tvg-id=\"a\",Chan A\nhttp://cdn.example/a.ts\n"
             "#EXTINF:-1,Chan B\nhttps://cdn.example/b.m3u8\n"
         )
-        got = probe_text(text)
+        got = probe_text(text, "http://cdn.example/channels.m3u8")
         self.assertIsInstance(got, Provider)
         self.assertEqual(got.link.type, M3U)
 
@@ -97,6 +100,64 @@ class ProbeTests(unittest.TestCase):
         text = "#EXTM3U\n#EXTINF:-1,A\nhttp://cdn.example/a.ts\n"
         got = probe_text(text, "http://cdn.example/list.m3u8")
         self.assertEqual(got.link.url, "http://cdn.example/list.m3u8")
+        # Without the address there is no provider to offer: VLC tries it as one stream.
+        self.assertEqual(probe_text(text), LIVE)
+
+
+class AddressTests(unittest.TestCase):
+    def test_a_links_host_is_compared_as_a_providers(self):
+        self.assertEqual(
+            address('  "http://cdn.example/a.ts"  \nsecond'), "http://cdn.example/a.ts"
+        )
+        cases = (
+            ("http://demo:secret@Panel.Example:8080/live/1.ts", "panel.example:8080"),
+            ("panel.example:8080/get.php", "panel.example:8080"),  # typed without its scheme
+            ("https://cdn.example/watch?v=7", "cdn.example"),  # no port: none added
+            ("", ""),
+            ("http://[::1]:8000/x", "[::1]:8000"),
+        )
+        for url, host in cases:
+            with self.subTest(url):
+                self.assertEqual(host_of(url), host)
+
+
+class OwnerTests(unittest.TestCase):
+    PANEL = {
+        "type": "XTREAM",
+        "name": "Panel",
+        "url": "http://panel.example:8080",
+        "username": "Demo",
+        "password": "secret",
+    }
+    PLAYLIST = {"type": "M3UPLAYLIST", "name": "Lists", "url": "http://panel.example:8080/a.m3u"}
+
+    def providers(self, streams=()):
+        return [
+            (self.PLAYLIST, {"panel.example:8080"}),
+            (self.PANEL, {"panel.example:8080", *streams}),
+        ]
+
+    def test_an_xtream_link_names_its_configured_account(self):
+        for url in (
+            "http://panel.example:8080/live/demo/secret/12.ts",
+            "https://panel.example:8080/movie/demo/secret/55.mkv",
+            "http://panel.example:8080/demo/secret/12",  # Xtream's short form
+            "http://panel.example:8080/demo/secret/12.m3u8",
+            "http://cdn.example/live/demo/secret/12.ts",  # where its streams are
+        ):
+            with self.subTest(url):
+                self.assertEqual(owner_of(url, self.providers({"cdn.example"})), "Panel")
+        for url in (
+            "http://panel.example:8080/live/other/secret/12.ts",  # another account there
+            "http://panel.example:8080/other/secret/12",
+            "http://panel.example:9090/live/demo/secret/12.ts",  # another port: another host
+            "http://panel.example:8080/demo/secret/news",  # no stream number
+            "http://panel.example:8080/hls/demo/12",  # too short for the short form
+            "http://cdn.example/live/demo/secret/12.ts",  # not known as its streams' host
+            "not a link",
+        ):
+            with self.subTest(url):
+                self.assertEqual(owner_of(url, self.providers()), "")
 
 
 if __name__ == "__main__":

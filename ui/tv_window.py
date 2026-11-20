@@ -27,12 +27,13 @@ from datetime import datetime, timedelta
 import logging
 import multiprocessing
 import os
+from pathlib import Path
 import platform
 import stat
 import sys
 import threading
 import time
-from typing import Any, Callable, Optional, Sequence
+from typing import Any, Callable, Iterator, Optional, Sequence
 
 from PySide6.QtCore import (
     QElapsedTimer,
@@ -82,6 +83,7 @@ from services.hidden_groups import HiddenGroups
 from services.i18n import N_, number, tr, tr_n, translate
 from services.jobs import JobRunner
 from services.lazy_import import deferred_modules, load_module
+from services.link_kind import host_of, owner_of
 from services.live.engine import LiveEngine
 from services.live.kept import KeptBuffers
 from services.live.live_session import LiveSession
@@ -103,6 +105,7 @@ from services.local_playlist import (
 from services.media_keys import MediaKeys
 from services.media_reporter import MediaReporter
 from services.navigation import NavModel
+from services.network_streams import FILE_NAME as NETWORK_STREAMS_FILE, NetworkStreams
 from services.open_paths import (
     PLAYLIST_EXTENSIONS,
     Sorted,
@@ -158,6 +161,8 @@ from ui.link_lanes import Target
 from ui.live_tuner import LiveTuner, one_disk_ring, wait_for_each_other
 from ui.logos import LogoCache, PosterCache
 from ui.macos_window import reclaim_first_responder
+from ui.network_player import NetworkPlayer
+from ui.open_link import LinkCard, OpenLink
 from ui.overlay_host import OverlayHost
 from ui.overlays.audio_screen import AudioScreen
 from ui.overlays.back_notice import BackNotice
@@ -793,6 +798,8 @@ class TVWindow(QMainWindow):
         self.pair_overlay = PairOverlay(host)  # the phone remote's pairing QR
         self.layout_row = LayoutRow(host)  # the multiview's layouts, above its layout chip
         self.subtitle_search = SubtitleSearchPage(host)
+        # File → Open Link… and the channel list's Open a link (plan 4): its card over the picture
+        self.open_link_card = LinkCard(host)
         self.corner_controls = CornerControls(host)
         # What a song (or a radio channel) shows where the black picture was: its cover, album
         # and words, lit by the cover's colours (spec §10).
@@ -884,9 +891,9 @@ class TVWindow(QMainWindow):
         # Subtitles and Picture panels, the multiview's layouts and the audio dock's ⋯ menu
         # over it (above their buttons). The statistics sit over the transport, under its title
         # row (they take no click). The drawer, Settings over it, and the guide cover them all;
-        # the OpenSubtitles search covers the player with its backdrop, under the corner
-        # player's controls, the sleep timer's last minute, Resume and the question (2.6) and
-        # the toast.
+        # the OpenSubtitles search covers the player with its backdrop, and the Open Link card
+        # (plan 4) dims it all, both under the corner player's controls, the sleep timer's last
+        # minute, Resume and the question (2.6) and the toast.
         for overlay in (
             self.grid_tiles,
             self.audio_screen,
@@ -911,6 +918,7 @@ class TVWindow(QMainWindow):
             self.overlays.next_card,
             self.overlays.welcome,
             self.subtitle_search,
+            self.open_link_card,
             self.corner_controls,
             self.sleep_notice,
             self.back_notice,
@@ -1159,6 +1167,37 @@ class TVWindow(QMainWindow):
         self.provider_rows.cards = self.provider_cards
         self.catalogs.providersChanged.connect(self.provider_rows.providers_changed)
         self.catalog.providerReady.connect(self.provider_rows.providers_changed)
+        # File → Open Link… and the channel list's Open a link (plan 4): while its card shows it
+        # has the keys; a stream plays (play_network_link), a whole provider goes to Add
+        # provider, filled in (the Add card in Settings at Providers: from over the channel
+        # list, backing out of Settings gives the list back, as its Add provider row's does); a
+        # link's first bytes are read on a worker.
+        self.link_opener = OpenLink(
+            self.open_link_card,
+            self.jobs,
+            play=lambda url, kind: self.play_network_link(url, kind),
+            add_provider=lambda link: self.add_provider(
+                link, from_drawer=self.overlays.drawer.isVisible()
+            ),
+            verify_ssl=lambda url: self._link_verify(url),
+            may_probe=lambda url: self._link_may_probe(url),
+            parent=self,
+        )
+        controller.add_card(self.open_link_card)
+        # Network streams (plan 4): the links that played, kept beside the config (read on a
+        # worker once the window started, written on one); a stream link plays through the
+        # controller as a channel or a film, as the account whose stream it is, if one is
+        # configured.
+        self.network_streams = NetworkStreams(
+            Path(config_manager.get_config_dir()) / NETWORK_STREAMS_FILE
+        )
+        self.network_player = NetworkPlayer(
+            self.network_streams,
+            self.jobs,
+            controller,
+            owner=lambda url: self._link_owner(url),
+            parent=self,
+        )
         # The channel list's find: genres and channels at every provider, found in a worker;
         # its last row looks for films and series in the Library's search.
         self.finder = FindSession(
@@ -1710,6 +1749,77 @@ class TVWindow(QMainWindow):
             self._click_on_release = True
             return
         self.controller.video_clicked()
+
+    # ---- opened links (plan 4) ----------------------------------------------------------------
+
+    def open_link(self, text: str = "") -> None:
+        """File → Open Link… and the channel list's Open a link: the card over live TV, afresh,
+        `text` in its field (a dropped link's). From the Library it goes back to the TV first,
+        and the mini player becomes the window again; the audio dock's ⋯ menu closes. What is
+        under it stays (the channel list, Settings), and has the keys again once it goes; a
+        question keeps the keys, above it."""
+        if self._closing:
+            return
+        if self.screens.library_shown():
+            self.screens.back_to_tv()
+        self.leave_mini_player()
+        self.more_menu.dismiss()
+        self.link_opener.open(text)
+        for card in (self.question_card, self.quality_card, self.captions_card):
+            if card.isVisible():
+                card.raise_()  # the link's card raised itself over it
+
+    def play_network_link(self, url: str, kind: str) -> None:
+        """A link the Open Link card hands over plays, `kind` LIVE or FILM: as a channel or as
+        a film, and it is kept in Network streams (ui.network_player)."""
+        if self._closing:
+            return
+        self.network_player.play(url, kind)
+
+    def _provider_hosts(self) -> Iterator[tuple[dict, set[str]]]:
+        """Each configured provider and the hosts (with their ports) it is at: its own
+        address's, and (one whose list is loaded) where its streams are (stream_hosts)."""
+        catalogs = self.catalogs
+        loaded = set(catalogs.created())
+        for name in catalogs.names():
+            try:
+                provider = catalogs.provider(name)
+            except KeyError:
+                continue
+            hosts = {host_of(provider.get("url"))}
+            if name in loaded:
+                hosts |= catalogs.catalog(name).stream_hosts()
+            yield provider, hosts
+
+    def _link_provider(self, url: str) -> Optional[dict]:
+        """The configured provider the link's host and port are, or None."""
+        host = host_of(url)
+        if not host:
+            return None
+        return next((p for p, hosts in self._provider_hosts() if host in hosts), None)
+
+    def _link_owner(self, url: str) -> str:
+        """The configured Xtream account whose stream the link is ("" for none): one at its
+        host whose user name it carries, in either of Xtream's forms (link_kind.owner_of).
+        Its streams count against that account's limit."""
+        return owner_of(url, self._provider_hosts())
+
+    def _link_may_probe(self, url: str) -> bool:
+        """Whether Open Link may read the link's first bytes: not at a provider that allows
+        only so many streams (an STB portal, an Xtream account with its limit, one with
+        max_streams; services.connection_budget), where the read would be a stream more than
+        it allows, and one closed may stay counted for minutes."""
+        provider = self._link_provider(url)
+        if provider is None:
+            return True
+        reported = self.catalogs.max_connections(str(provider.get("name", "")))
+        return self.budget.limit_for(provider, reported) is None
+
+    def _link_verify(self, url: str) -> bool:
+        """The TLS check for reading the link: its provider's own, else Settings'."""
+        default = bool(self.config_manager.ssl_verify)
+        provider = self._link_provider(url)
+        return bool(provider.get("ssl_verify", default)) if provider is not None else default
 
     # ---- opened files -------------------------------------------------------------------------
 
@@ -2688,12 +2798,15 @@ class TVWindow(QMainWindow):
         `section_key`: the section it opens at (else the first). `from_drawer`: backing out of
         it gives the list back, on its Settings row, or where it was with `keep_place` (its ⚙,
         its Add provider). Asked again while it shows, it stays as it is (where it came from
-        too), but for a section asked for, which it goes to."""
+        too), but for a section asked for, which it goes to: a card over the TV that showed
+        over Settings (File → Open Link…'s) cancels then, as when Settings opens, since
+        Settings and its card come over it."""
         if self._closing:
             return
         if self.settings.visible():
             if not section_key:
                 return
+            self.controller.cancel_cards()  # not make_way_for_settings: it keeps its way back
             self.settings.show_section(section_key)
         else:
             if self.screens.library_shown():
@@ -2748,9 +2861,12 @@ class TVWindow(QMainWindow):
 
     def add_provider(self, link: Optional[ProviderLink] = None, from_drawer: bool = False) -> None:
         """Every Add provider (the channel list's row, the menu bar's, the welcome card's, the
-        Library's): Settings at Providers with the Add card over it (plan 2), filled in from
-        `link` when one came (a dropped portal link, whose MAC the user adds). `from_drawer`
-        (the list's row): backing out of Settings gives the list back where it was. With no
+        Library's, File → Open Link…'s Add as a provider…): Settings at Providers with the Add
+        card over it (plan 2), filled in from `link` when one came (a dropped portal link, whose
+        MAC the user adds; a provider's link opened). `from_drawer` (the list's row, or the
+        Open Link card over the list): backing out of Settings gives the list back where it
+        was. A card over the TV still showing (Open Link…'s) cancels: the Add card has the
+        keys. With no
         provider yet, the card shows over the empty canvas (the welcome card waits under
         Settings), and its Cancel closes the Settings it opened: the welcome card again."""
         if self._closing:
@@ -2988,6 +3104,7 @@ class TVWindow(QMainWindow):
         self._bind_video()
         self.setFocus(Qt.FocusReason.ActiveWindowFocusReason)
         self.media_keys.start(int(self.winId()))
+        self.network_player.start()  # Network streams' file, read on a worker
         self.controller.start()
         self.epg_refresh.start()
         if self.scheduler is not None:

@@ -43,7 +43,7 @@ server's user name) is said first, the keys on its field. Cancel (Esc, Back, the
 picture) always works, while a check is on its way too, and its late answer is dropped;
 nothing typed comes back once a card or Settings closed. The cards show over Settings, which
 gives them the keys (SettingsController.show_card), and stay under a question the window asks
-meanwhile.
+meanwhile, and under File → Open Link…'s card opened over them.
 """
 
 from __future__ import annotations
@@ -100,7 +100,8 @@ _PLAYLISTS = (M3U, "M3USTREAM")
 _LOGIN_KINDS = (XTREAM, JELLYFIN, EMBY)
 _PLAYLIST_SUFFIXES = (".m3u", ".m3u8")
 _COLONS = " :：  "  # after the old window's labels ("MAC Address:")
-_QUESTIONS = ("question_card", "quality_card", "captions_card")  # the window's, over Settings
+# The window's cards over Settings' cards, lowest first: File → Open Link…'s, its questions.
+_OVER_CARDS = ("open_link_card", "question_card", "quality_card", "captions_card")
 
 ADD_TITLE = N_("Add a provider")  # i18n: the title of Settings → Providers → ＋ Add provider's card
 # i18n: the title of a provider's card in Settings ({name}: the provider): its address and login
@@ -476,8 +477,10 @@ class ProviderCards(QObject):
 
     def _raise_questions(self) -> None:
         """A question over the card stays over it: the guard's, and the window's (which keep
-        the keys over Settings)."""
-        cards = [self.question] + [getattr(self._window, name, None) for name in _QUESTIONS]
+        the keys over Settings). So does File → Open Link…'s card opened over it (which has
+        the keys before Settings' cards, TVController.handle): a check's late answer shows
+        under it."""
+        cards = [self.question] + [getattr(self._window, name, None) for name in _OVER_CARDS]
         for card in cards:
             if card is not None and card.isVisible():
                 card.raise_()

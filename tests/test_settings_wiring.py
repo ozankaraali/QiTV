@@ -2,9 +2,11 @@
 and the menu's Settings… (Ctrl/⌘+,) open it over live TV, backing out of it gives the drawer
 back (on its Settings row from there, where it was from ⚙), a step reaches what it changes,
 and the Settings window opens on a tab. Every Add provider opens it at Providers with the Add
-card (plan 2), and a provider added there is selected and said."""
+card (plan 2), and a provider added there is selected and said; so does File → Open Link…'s
+Add as a provider… (plan 4), and whichever card shows on top has the keys."""
 
 import os
+import threading
 import unittest
 from unittest import mock
 
@@ -17,7 +19,7 @@ from PySide6.QtWidgets import QApplication
 from timer_fixtures import elapse, wait_until
 
 from services.config_manager import ConfigManager
-from services.navigation import ADD_PROVIDER_ROW, SETTINGS_ROW
+from services.navigation import ADD_PROVIDER_ROW, OPEN_LINK_ROW, SETTINGS_ROW
 from services.provider_check import Outcome
 from services.settings_model import GENERAL, PROVIDERS, TEXT, Row, Section
 from tests import test_tv_window as base
@@ -538,6 +540,148 @@ class AddProviderTests(base.WindowCase):
         self.assertTrue(window.settings.visible())  # on Providers, the new one listed
         rows = [row.text for row in window.provider_rows.rows()]
         self.assertEqual(rows, [base.PROVIDER_NAME, "127.0.0.1"])
+
+    # ---- File → Open Link…'s Add as a provider… (plan 4) ---------------------------------------
+
+    # A whole Xtream account's playlist link, as Open Link reads it (never asked: no stream).
+    ACCOUNT = "http://panel.example/get.php?username=demo&password=secret&type=m3u_plus"
+
+    def link_in_card(self, text):
+        """The Open Link card over what shows, `text` typed into it."""
+        window, card = self.window, self.window.open_link_card
+        window.open_link()
+        QTest.keyClicks(window, text)
+        self.assertEqual(card.values(), {"link": text})
+        return card
+
+    def assert_on_top(self, upper, lower):
+        stack = self.window.host.children()  # in stacking order: the last raised last
+        at = {id(widget): i for i, widget in enumerate(stack)}
+        self.assertGreater(at[id(upper)], at[id(lower)])
+
+    def test_open_links_add_as_a_provider_opens_the_add_card_filled_in(self):
+        """Its Add as a provider… is plan 2's Add card, filled in from the link, with the keys
+        (never the Settings window's form); opened from the channel list's row, backing out of
+        Settings gives the list back where it was, as the list's Add provider does."""
+        self.show()
+        drawer = self.wait_for_drawer()
+        window = self.window
+        form = window.provider_cards.form
+        highlighted = drawer.highlighted()
+        window.menus.on_drawer_action(OPEN_LINK_ROW)  # the list's Open a link
+        card = window.open_link_card
+        self.assertFalse(card.isHidden())
+        self.assertTrue(drawer.isVisible())  # under the card
+        QTest.keyClicks(window, self.ACCOUNT)
+        self.assertEqual(card.found(), ("✓ Xtream at panel.example, with its login", True))
+        QTest.keyClick(window, Qt.Key.Key_Return)  # Add as a provider…
+        self.assertTrue(card.isHidden())
+        self.assertFalse(drawer.isVisible())  # it gave way to Settings
+        self.assertTrue(window.settings.visible())
+        self.assertEqual(window.settings_drawer.path(), (PROVIDERS,))
+        self.assertTrue(form.isVisible())
+        self.assertEqual(form.title(), "Add a provider")
+        self.assertTrue(window.settings.card_shown())
+        values = form.values()
+        self.assertEqual(
+            (values["url"], values["username"], values["password"]),
+            ("http://panel.example", "demo", "secret"),
+        )
+        self.dialog.assert_not_called()
+        focus = form.focus()
+        QTest.keyClick(window, Qt.Key.Key_Down)  # the Add card's keys
+        self.assertNotEqual(form.focus(), focus)
+        self.assertTrue(card.isHidden())
+        QTest.keyClick(window, Qt.Key.Key_Escape)  # the card's Cancel
+        self.assertFalse(form.isVisible())
+        self.assertTrue(window.settings.visible())
+        QTest.keyClick(window, Qt.Key.Key_Escape)  # out of Settings: the list, where it was
+        self.assertFalse(window.settings.visible())
+        self.assertTrue(drawer.isVisible())
+        self.assertEqual(drawer.highlighted(), highlighted)
+        self.assertEqual(len(self.provider_manager.providers), 1)  # nothing added
+
+    def test_add_provider_over_the_open_link_card_cancels_it(self):
+        """The Open Link card over Settings has the keys; an Add provider meanwhile (the menu
+        bar's, a dropped portal link) brings Settings and its Add card over it: it cancels,
+        as when Settings opens, and the Add card has the keys, not the card under it."""
+        self.show()
+        self.wait_for_drawer()
+        window = self.window
+        form = window.provider_cards.form
+        self.menu_actions()["Settings…"].trigger()
+        card = self.link_in_card("a")  # its keys, not Settings' under it
+        self.assertTrue(window.settings.visible())
+        self.menu_entry("Add provider").trigger()
+        self.assertTrue(card.isHidden())
+        self.assert_the_add_card()
+        QTest.keyClick(window, Qt.Key.Key_B)
+        self.assertEqual(form.values()["url"], "b")
+        QTest.keyClick(window, Qt.Key.Key_Escape)  # the Add card's Cancel
+        self.assertFalse(form.isVisible())
+        self.assertTrue(card.isHidden())  # not back by itself
+        self.assertTrue(window.settings.visible())
+
+    def test_the_open_link_card_over_the_add_card_keeps_the_keys(self):
+        """File → Open Link… over the Add card has the keys; the check's answer, come
+        meanwhile, shows on the Add card under it, and the keys stay where the eye is. Once
+        the link's card goes, the Add card has them again."""
+        self.show()
+        self.wait_for_drawer()
+        window = self.window
+        form = window.provider_cards.form
+        self.menu_entry("Add provider").trigger()
+        QGuiApplication.clipboard().setText(self.LINK)
+        window.controller.handle(Action.PASTE)
+        answer = threading.Event()
+
+        def held(*_args, **_kwargs):
+            answer.wait(10)
+            return Outcome(False, "The provider took too long to answer")
+
+        with mock.patch("services.provider_check.check", side_effect=held):
+            QTest.keyClick(window, Qt.Key.Key_Return)  # Check and add: on its way
+            self.assertTrue(form.busy())
+            card = self.link_in_card("a")  # File → Open Link… meanwhile
+            self.assert_on_top(card, form)
+            answer.set()
+            self.assertTrue(wait_until(lambda: not form.busy()))
+        self.assertTrue(form.isVisible())
+        found, ok = form.found()
+        self.assertFalse(ok)
+        self.assertIn("took too long", found)  # said on the card, under the link's
+        self.assert_on_top(card, form)  # shown again under it
+        QTest.keyClick(window, Qt.Key.Key_B)
+        self.assertEqual(card.values(), {"link": "ab"})  # still the link card's
+        self.assertEqual(form.values()["url"], self.LINK)
+        QTest.keyClick(window, Qt.Key.Key_Escape)  # the link's card goes
+        self.assertTrue(card.isHidden())
+        self.assertTrue(form.isVisible())
+        self.assertTrue(window.settings.card_shown())  # the keys again
+        QTest.keyClick(window, Qt.Key.Key_Escape)  # its Cancel
+        self.assertFalse(form.isVisible())
+        self.assertEqual(len(self.provider_manager.providers), 1)  # nothing added
+
+    def test_a_double_click_on_add_as_a_provider_keeps_the_add_card(self):
+        # Its button acts on the press and the Add card shows under the pointer: a
+        # double-click's second press would land on its dimmed picture, and cancel it.
+        self.show()
+        self.wait_for_drawer()
+        window = self.window
+        form = window.provider_cards.form
+        card = self.link_in_card(self.ACCOUNT)
+        host = card.window()  # the window the cards are on
+        button = card.control_rect("button", "provider").center().toPoint()
+        handle = host.windowHandle()
+        QTest.mouseClick(handle, Qt.MouseButton.LeftButton, pos=card.mapTo(host, button))
+        self.assertTrue(card.isHidden())
+        self.assertTrue(form.isVisible())
+        dimmed = QPoint(20, host.height() - 20)  # the picture beside the card
+        QTest.mouseClick(handle, Qt.MouseButton.LeftButton, pos=dimmed)  # the second, quick
+        self.assertTrue(form.isVisible())  # it reached nothing
+        elapse(QApplication.doubleClickInterval() + 80)
+        QTest.mouseClick(handle, Qt.MouseButton.LeftButton, pos=dimmed)
+        self.assertFalse(form.isVisible())  # a click of its own: the dimmed picture cancels
 
 
 class NoProviderSettingsTests(base.WindowCase):

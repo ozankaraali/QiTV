@@ -6,8 +6,15 @@ reads this file.
 
 An entry's id comes from where the link points, not from its token: a link handed out with a
 fresh `?token=` each day is still the same entry, and keeping it again updates its address.
-The file is versioned ({"v": 1, "entries": [...]}); a missing or unreadable one reads as
-empty. `save_bytes` and `load` keep the file I/O apart, so the UI can write on a worker.
+The file is versioned ({"v": 1, "entries": [...]}; an older build skips what it does not
+know). A missing file reads as empty, and so does an unreadable one, which is `broken`: it is
+set aside before the first write over it (`save`). A row without an id or an address is left
+out, the others are read. Making a store reads nothing: `read_bytes` and `save` are the file's
+(blocking: a worker's), `load`, `merge` and `save_bytes` the store's, so the UI never waits
+for the disk.
+
+A link that failed stays, with why (`failure_reason`: an English text, shown with
+translate()).
 """
 
 from __future__ import annotations
@@ -16,20 +23,44 @@ from dataclasses import asdict, dataclass
 import hashlib
 import json
 import logging
+import math
 import os
 from pathlib import Path
-from typing import Optional
+from typing import Any, Optional
 from urllib.parse import parse_qsl, urlencode, urlsplit
 
-from services.atomic_write import atomic_write
+from services.atomic_write import atomic_write, set_aside as set_file_aside
+from services.i18n import N_
+from services.live.refusals import STREAM_LIMIT, STREAM_REFUSED
+from services.provider_ids import NETWORK_PROVIDER, provider_of
 
 logger = logging.getLogger(__name__)
 
 LIVE, FILM = "LIVE", "FILM"
+FILE_NAME = "network_streams.json"  # beside config.json
 _VERSION = 1
 _DEFAULT_PORTS = {"http": 80, "https": 443, "rtmp": 1935, "rtsp": 554}
 _SCRIPTS = (".php", ".aspx", ".jsp")
 _GENERIC = {"index", "playlist", "master", "main", "manifest", "chunklist", "stream", "live"}
+
+# Why a link failed, as Network streams keeps it (English: shown with translate()).
+# i18n: why a link opened with Open Link did not play: its server answered 401 (its token ended)
+ACCESS_ENDED = N_("401: the link's access ran out")
+# i18n: why a link opened with Open Link did not play: its server answered 403
+REFUSED = N_("403: the link was refused")
+# i18n: why a link opened with Open Link did not play: its server answered 404 (or 410)
+GONE = N_("404: nothing is at this address")
+# i18n: why a link opened with Open Link did not play: its server never answered
+TIMED_OUT = N_("The link didn't answer in time")
+# i18n: why a link opened with Open Link did not play: its server's stream limit is reached
+BUSY = N_("The link's server allows no more streams now")
+# i18n: why a link opened with Open Link stopped: it played, then went down and stayed down
+DOWN = N_("The link stopped answering")
+# i18n: why a link opened with Open Link did not play, when nothing more is known
+FAILED = N_("The link could not be opened")
+_LIMIT_STATUS = (429, 458, 509)
+_REFUSED_STATUS = (403, 407)
+_GONE_STATUS = (404, 410)
 
 
 @dataclass
@@ -84,6 +115,33 @@ def default_name(url: str) -> str:
     return host
 
 
+def is_link(item: dict) -> bool:
+    """Whether a playing item is a link of Network streams: stamped as theirs, or its id is
+    its own address's (a link of a configured account, stamped with that account)."""
+    if provider_of(item) == NETWORK_PROVIDER:
+        return True
+    cmd = str(item.get("cmd") or "").strip()
+    key = item.get("id")
+    return bool(cmd) and isinstance(key, str) and key == stream_id(cmd)
+
+
+def failure_reason(message: str, kind: str = "", status: Optional[int] = None) -> str:
+    """Why a link did not play, in plain words (an English text), from what the player
+    reported: its message, and how its buffer's input failed when it had one (`kind`, as the
+    time-shift helper names it, and the HTTP `status`)."""
+    if status == 401:
+        return ACCESS_ENDED
+    if message == STREAM_LIMIT or status in _LIMIT_STATUS:
+        return BUSY
+    if message == STREAM_REFUSED or status in _REFUSED_STATUS:
+        return REFUSED
+    if status in _GONE_STATUS:
+        return GONE
+    if kind == "timeout":
+        return TIMED_OUT
+    return FAILED
+
+
 def write(path: Path, data: bytes) -> None:
     """Write `data` to `path` whole or not at all (the folder is made when missing)."""
     os.makedirs(os.path.dirname(str(path)) or ".", exist_ok=True)
@@ -91,42 +149,111 @@ def write(path: Path, data: bytes) -> None:
         f.write(data)
 
 
+def read_bytes(path: Path) -> Optional[bytes]:
+    """The file's bytes (blocking: a worker's); None when there is none. One that cannot be
+    read raises OSError."""
+    try:
+        return Path(path).read_bytes()
+    except FileNotFoundError:
+        return None
+
+
+def save(path: Path, data: bytes, *, set_aside: bool = False) -> None:
+    """Write the store's `data` to `path` (blocking: a worker's). `set_aside`: the file there
+    could not be read; it is moved beside it first ("<name>.broken-<time>"), so nothing in it
+    is lost. One that cannot be moved is never written over: OSError."""
+    if set_aside and os.path.exists(path) and set_file_aside(str(path)) is None:
+        raise OSError("the unreadable network streams file could not be set aside")
+    write(path, data)
+
+
+def _entry(row: Any) -> Optional[Entry]:
+    """A stored row as an entry; None for one without an id or an address."""
+    if not isinstance(row, dict):
+        return None
+    key, url = row.get("id"), row.get("url")
+    if isinstance(key, bool) or not isinstance(key, (str, int)) or not str(key):
+        return None
+    if not isinstance(url, str) or not url.strip():
+        return None
+    try:
+        opened = float(row.get("opened") or 0.0)
+    except TypeError, ValueError, OverflowError:  # (an integer too large for a time)
+        opened = 0.0
+    name, failed = row.get("name"), row.get("failed")
+    return Entry(
+        id=str(key),
+        name=name if isinstance(name, str) else "",
+        url=url,
+        kind=FILM if row.get("kind") == FILM else LIVE,
+        opened=opened if math.isfinite(opened) else 0.0,
+        failed=failed if isinstance(failed, str) else "",
+    )
+
+
 class NetworkStreams:
-    """The kept links, read from `path` when made. Changes stay in memory: write
-    `save_bytes()` to the file (on a worker) to keep them."""
+    """The kept links of the file at `path`. Making one reads nothing: `load` (or `merge`)
+    the file's bytes, read on a worker, and write `save_bytes()` there (on a worker too).
+    `broken`: the last data loaded was not this file's (set it aside before writing)."""
 
     def __init__(self, path: Path) -> None:
         self.path = Path(path)
         self._entries: dict[str, Entry] = {}
-        try:
-            data = self.path.read_bytes()
-        except OSError:
-            return
-        self.load(data)
+        self.broken = False
 
-    def load(self, data: bytes) -> None:
-        """Replace the entries with those in `data`; broken data reads as none."""
+    @classmethod
+    def read(cls, path: Path) -> NetworkStreams:
+        """The store as the file at `path` holds it (blocking: a worker's, or a test's)."""
+        store = cls(path)
+        try:
+            data = read_bytes(store.path)
+        except OSError:
+            store.broken = True
+            return store
+        if data is not None:
+            store.load(data)
+        return store
+
+    def load(self, data: bytes) -> bool:
+        """Replace the entries with those in `data`; False (and `broken`) when it is not this
+        file's, read as none. A row without an id or an address is left out."""
         self._entries = {}
         try:
             doc = json.loads(data)
             rows = doc["entries"]
-            if not isinstance(rows, list):
-                return
-            loaded: dict[str, Entry] = {}
-            for row in rows:
-                entry = Entry(
-                    id=str(row["id"]),
-                    name=str(row.get("name", "")),
-                    url=str(row["url"]),
-                    kind=FILM if row.get("kind") == FILM else LIVE,
-                    opened=float(row.get("opened", 0.0)),
-                    failed=str(row.get("failed", "")),
-                )
-                loaded[entry.id] = entry
-        except ValueError, TypeError, KeyError, AttributeError:
+        except ValueError, TypeError, KeyError, RecursionError:
+            rows = None
+        if not isinstance(rows, list):
             logger.warning("Network streams file unreadable: starting empty")
-            return
-        self._entries = loaded
+            self.broken = True
+            return False
+        self.broken = False
+        for row in rows:
+            try:
+                entry = _entry(row)
+            except Exception as e:  # a row of another kind: left out, the others read
+                logger.info("A network stream row could not be read (%s)", type(e).__name__)
+                entry = None
+            if entry is not None:
+                self._entries[entry.id] = entry
+        if len(self._entries) < len(rows):
+            logger.info("Left out %d unreadable network stream(s)", len(rows) - len(self._entries))
+        return True
+
+    def merge(self, data: bytes) -> bool:
+        """`load` the file's `data`, read after links played: what was kept meanwhile stays
+        (its address, kind and times), under the name the file gave it."""
+        since = self._entries
+        loaded = False
+        try:
+            loaded = self.load(data)
+        finally:  # what played meanwhile is never lost, whatever the file held
+            for key, entry in since.items():
+                stored = self._entries.get(key)
+                if stored is not None:
+                    entry.name = stored.name or entry.name
+                self._entries[key] = entry
+        return loaded
 
     def save_bytes(self) -> bytes:
         rows = [asdict(e) for e in self._entries.values()]
@@ -142,7 +269,8 @@ class NetworkStreams:
 
     def keep(self, url: str, name: str, kind: str) -> Entry:
         """Keep a link that played: a new entry, or the same stream's entry with its address
-        and kind updated and its name kept."""
+        and kind updated and its name kept. Only FILM is a film; any other kind is LIVE."""
+        kind = FILM if kind == FILM else LIVE
         id = stream_id(url)
         entry = self._entries.get(id)
         if entry is None:
@@ -164,9 +292,10 @@ class NetworkStreams:
         self._entries.pop(id, None)
 
     def opened(self, id: str, when: float) -> None:
-        """It played at `when`: the last failure is forgotten."""
+        """It played at `when` (Unix seconds; a time that is no number counts as never): the
+        last failure is forgotten."""
         if id in self._entries:
-            self._entries[id].opened = when
+            self._entries[id].opened = when if math.isfinite(when) else 0.0
             self._entries[id].failed = ""
 
     def failed(self, id: str, why: str) -> None:

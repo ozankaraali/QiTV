@@ -21,6 +21,7 @@ from services.navigation import (
     FREE_CHANNELS_ROW,
     OPEN_FILE_ROW,
     OPEN_FOLDER_ROW,
+    OPEN_LINK_ROW,
     RECENT_GROUP,
     RECORDINGS_ROW,
     SETTINGS_ROW,
@@ -690,6 +691,7 @@ class DrawerTests(unittest.TestCase):
                 ("Add provider", "plus"),
                 ("Free channels…", "plus"),
                 ("Open file", "file"),  # Ctrl/⌘+O without the menu bar (2.0.1)
+                ("Open a link", None),  # plan 4: File → Open Link… (no icon of its own)
                 ("Open a folder", "folder"),  # Plan 4: Ctrl/⌘+Shift+O, an empty shelf too
                 ("Recordings", "record"),  # 2.9.7: the Library's Recordings page
             ],
@@ -703,8 +705,10 @@ class DrawerTests(unittest.TestCase):
         self.assertEqual(self.actions, [OPEN_FILE_ROW])
         self.assertEqual(column.current.key, OPEN_FILE_ROW)
         self.assertEqual((self.nav.path, self.catalog.selected, self.library), (path, [], []))
-        self.drawer._on_row_clicked("left", 7)  # Plan 4: Open a folder, right under it
-        self.assertEqual(self.actions, [OPEN_FILE_ROW, OPEN_FOLDER_ROW])
+        self.drawer._on_row_clicked("left", 7)  # plan 4: Open a link, right under it
+        self.assertEqual(self.actions, [OPEN_FILE_ROW, OPEN_LINK_ROW])
+        self.drawer._on_row_clicked("left", 8)  # Plan 4: Open a folder, under that
+        self.assertEqual(self.actions, [OPEN_FILE_ROW, OPEN_LINK_ROW, OPEN_FOLDER_ROW])
         self.assertEqual((self.nav.path, self.catalog.selected, self.library), (path, [], []))
 
     def test_its_resume_point_opens_it_again_where_the_keys_were(self):
@@ -770,6 +774,7 @@ class DrawerTests(unittest.TestCase):
                 ADD_PROVIDER_ROW,
                 FREE_CHANNELS_ROW,
                 OPEN_FILE_ROW,
+                OPEN_LINK_ROW,
                 OPEN_FOLDER_ROW,
                 RECORDINGS_ROW,
             ],
