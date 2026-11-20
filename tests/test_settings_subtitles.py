@@ -25,7 +25,7 @@ from ui.captions_texts import size_text
 from ui.keymap import Action
 from ui.overlays.settings_card import CANCEL
 from ui.overlays.settings_drawer import MASK, SECRET_DOTS
-from ui.settings_subtitles import DELETE
+from ui.settings_subtitles import DELETE, SIGN_OUT_KEY
 
 KEY = "fictional0key0for0the0tests0WXYZ"
 PASSWORD = "fictional-password"
@@ -141,7 +141,7 @@ class SubtitlesTests(SubtitlesCase):
         )
         self.assertEqual(
             [row.kind for row in section.rows],
-            [m.STEP, m.INFO, m.DANGER, m.TEXT, m.TEXT, m.TEXT, m.ACTION],
+            [m.STEP, m.INFO, m.DANGER, m.TEXT, m.TEXT, m.TEXT, m.DANGER],
         )
         for row in section.rows:
             self.assertTrue(row.help, row.key)
@@ -316,14 +316,36 @@ class SubtitlesTests(SubtitlesCase):
         for secret in ("WXYZ", "fictionalnewkey", "ab12", PASSWORD):
             self.assertNotIn(secret, logged)
 
-    def test_sign_out_clears_the_login(self):
+    def test_sign_out_asks_then_clears_the_login(self):
+        # Asked first (the phone can't type the password back), Cancel where the keys start.
         self.config.opensubtitles_api_key = KEY
         self.config.opensubtitles_username = "harbour_viewer"
         self.config.opensubtitles_password = PASSWORD
         row = self.open_at(m.SUBTITLES, m.SIGN_OUT)
-        self.assertEqual(row.kind, m.ACTION)
-        self.assertEqual(self.drawer._help_text(row), "Clears the username and the password.")
+        self.assertEqual(row.kind, m.DANGER)
+        self.assertEqual(
+            self.drawer._help_text(row), "Clears the username and the password. Asked first."
+        )
         self.key(Action.NAV_ACTIVATE)
+        question = self.window.subtitle_rows.question
+        self.assertTrue(self.window.settings.card_shown())
+        self.assertEqual(question.title(), "Sign out of OpenSubtitles?")
+        self.assertEqual(question.body(), "Clears the username and the password.")
+        self.assertEqual(question.focus(), ("button", CANCEL))
+        self.key(Action.NAV_ACTIVATE)  # Cancel: still signed in
+        self.assertFalse(self.window.settings.card_shown())
+        self.assertEqual(
+            (self.config.opensubtitles_username, self.config.opensubtitles_password),
+            ("harbour_viewer", PASSWORD),
+        )
+        self.key(Action.NAV_ACTIVATE)
+        self.key(Action.ESCAPE)  # Esc: the same
+        self.assertEqual(self.config.opensubtitles_username, "harbour_viewer")
+        self.key(Action.NAV_ACTIVATE)
+        self.key(Action.NAV_RIGHT)
+        self.assertEqual(question.focus(), ("button", SIGN_OUT_KEY))
+        self.key(Action.NAV_ACTIVATE)  # Sign out
+        self.assertFalse(self.window.settings.card_shown())
         self.assertEqual(
             (self.config.opensubtitles_username, self.config.opensubtitles_password), ("", "")
         )

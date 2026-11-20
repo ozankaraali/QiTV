@@ -377,10 +377,10 @@ def _subtitles(title: str, context: Context) -> Section:
         ),
         Row(
             SIGN_OUT,
-            N_("Sign out"),  # i18n: forget the OpenSubtitles username and password
-            # i18n: help under Settings → Subtitles → Sign out
-            N_("Clears the username and the password."),
-            kind=ACTION,
+            N_("Sign out"),  # i18n: forget the OpenSubtitles username and password (it asks)
+            # i18n: help under Settings → Subtitles → Sign out (it asks first)
+            N_("Clears the username and the password. Asked first."),
+            kind=DANGER,
         ),
     )
     return Section(SUBTITLES, title, ICONS[SUBTITLES], rows=rows)
