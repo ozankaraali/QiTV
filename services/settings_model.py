@@ -1,8 +1,10 @@
 """The settings' sections and rows, as plain data (no Qt).
 
 The TV window's drawer paints these: sections on the left, a section's rows on the
-right. A row steps through its choices, opens a layer of rows of its own, or acts. Which
-config value a row key means, and how a step is applied, is for the callers; this module
+right. A row is of a kind: it steps through its choices (STEP), opens a layer of rows of its
+own or a card (OPENS), acts (ACTION), acts on something that cannot be undone and asks first
+(DANGER), holds a text edited in place (TEXT), or only says something (INFO). Which config
+value a row key means, and how a step or an edit is applied, is for the callers; this module
 only says what exists and how stepping moves.
 """
 
@@ -23,6 +25,15 @@ REMOTE = "remote"
 PARENTAL = "parental"
 FILES = "files"
 ADVANCED = "advanced"
+
+# A row's kind (Row.kind).
+STEP = "step"  # ‹ value ›: ←/→ step it, Enter and a click on it focused step it on
+OPENS = "opens"  # ›: a layer of rows (`section`), or a card the caller shows (`chosen`)
+ACTION = "action"  # acts at once (`chosen`)
+DANGER = "danger"  # acts, in red, its title ending in "…": the caller asks before it acts
+TEXT = "text"  # a value edited in place: Enter or a click on it focused starts editing
+INFO = "info"  # a muted line with its value: never focused, the keys go past it
+KINDS = (STEP, OPENS, ACTION, DANGER, TEXT, INFO)
 
 # Section key -> the key of the old Settings window's tab that still holds its settings.
 LEGACY_TABS: dict[str, str] = {
@@ -68,7 +79,11 @@ class Choice:
 
 @dataclass(frozen=True)
 class Row:
-    """A line in a section: a stepper (`choices`), a layer (`section`) or an action."""
+    """A line in a section: a stepper (`choices`), a layer (`section`) or an action, unless
+    `kind` says otherwise (KINDS; "" derives it so). `text` and `help` are English texts
+    marked with N_, shown translated; `note` (muted at the right end of a row that has no
+    value of its own: "answered 2 min ago") and `sub` (a second, muted line under the title:
+    "Xtream · in use") are shown as they are given, in the active language already."""
 
     key: str
     text: str
@@ -78,18 +93,30 @@ class Row:
     section: Optional[Section] = None
     action: bool = False
     restart: bool = False  # a change takes effect after QiTV restarts
+    kind: str = ""
+    note: str = ""
+    sub: str = ""
+
+    def __post_init__(self) -> None:
+        if not self.kind:
+            derived = STEP if self.choices else OPENS if self.section is not None else ACTION
+            object.__setattr__(self, "kind", derived)
+        elif self.kind not in KINDS:
+            raise ValueError(f"Unknown row kind: {self.kind!r}")
 
 
 @dataclass(frozen=True)
 class Section:
     """A group of rows. `legacy_tab` names the old Settings tab that still holds the
-    section's settings until its rows move here."""
+    section's settings until its rows move here. `empty_text` (an English text marked with
+    N_) shows in place of its rows while it has none."""
 
     key: str
     text: str
     icon: str = ""
     rows: tuple[Row, ...] = ()
     legacy_tab: str = ""
+    empty_text: str = ""
 
 
 # A setting's On and Off have their own catalog entries: the plain "Off" also names the

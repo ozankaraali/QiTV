@@ -3,16 +3,17 @@ the chosen section's rows on the right, its keys, its clicks and its fit in a sm
 
 import os
 import unittest
+from unittest import mock
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
-from PySide6.QtCore import QEvent, QPoint, QPointF, Qt
-from PySide6.QtGui import QMouseEvent, QWheelEvent
+from PySide6.QtCore import QEvent, QPoint, QPointF, QRectF, Qt
+from PySide6.QtGui import QColor, QImage, QMouseEvent, QWheelEvent
 from PySide6.QtTest import QTest
 from PySide6.QtWidgets import QApplication, QWidget
 from timer_fixtures import elapse
 
-from services import i18n
+from services import i18n, settings_model as m
 from services.i18n import translate
 from services.settings_model import (
     GUIDE,
@@ -24,22 +25,51 @@ from services.settings_model import (
     is_lit,
     sections,
 )
+from ui.keymap import Action
 from ui.overlays.guide import wrap_lines
 from ui.overlays.painting import ui_units
 from ui.overlays.settings_drawer import HELP_FONT_U, INSET_U, RESTART_NOTE, SettingsDrawer
+from ui.theme import PALETTE
 
 
 def make(width=1280, height=720, values=None):
+    """A host and Settings on it; `values` by row key (a stepper's unset one is its default,
+    a text or info row's unset one is "")."""
     host = QWidget()
     host.resize(width, height)
     host.show()
     values = dict(values or {})
+
+    def value_text(row):
+        if not row.choices:
+            return str(values.get(row.key, ""))
+        return choice_of(row, values.get(row.key, row.default)).shown()
+
     drawer = SettingsDrawer(
-        lambda row: choice_of(row, values.get(row.key, row.default)).shown(),
-        lambda row: is_lit(row, values.get(row.key, row.default)),
+        value_text,
+        lambda row: bool(row.choices) and is_lit(row, values.get(row.key, row.default)),
         host,
     )
     return host, drawer, values
+
+
+def near(color: QColor, target: QColor, slack: int = 24) -> bool:
+    """Whether `color` is `target`, give or take the antialiasing at a glyph's edge."""
+    ours = (color.red(), color.green(), color.blue())
+    theirs = (target.red(), target.green(), target.blue())
+    return all(abs(a - b) <= slack for a, b in zip(ours, theirs))
+
+
+def inked(image: QImage, rect: QRectF) -> list[float]:
+    """The x of each pixel in `rect` (every other one) unlike the rect's bottom-right corner."""
+    ratio = image.devicePixelRatio()
+    base = image.pixelColor(int((rect.right() - 3) * ratio), int((rect.bottom() - 3) * ratio))
+    return [
+        x / ratio
+        for y in range(int(rect.top() * ratio), int(rect.bottom() * ratio), 2)
+        for x in range(int(rect.left() * ratio), int(rect.right() * ratio), 2)
+        if image.pixelColor(x, y) != base
+    ]
 
 
 def playback_rows():
@@ -542,6 +572,317 @@ class SettingsDrawerTests(unittest.TestCase):
         self.assertEqual(self.drawer.focus_side(), "left")
         self.drawer.right()
         self.assertEqual(self.drawer.focused_row().key, "autoplay")
+
+    # ---- row kinds (plan 2) ---------------------------------------------------------------
+
+    def open_rows(self, *rows, **values):
+        """One section of `rows` open, the keys on its first row that takes them; `values` by
+        row key."""
+        self.values.update(values)
+        self.drawer.open_at((Section("p", "Provider", rows=rows),))
+        self.drawer.right()
+
+    def edits(self):
+        said = []
+        self.drawer.edited.connect(lambda key, text: said.append((key, text)))
+        return said
+
+    def test_info_rows_are_skipped_by_the_keys(self):
+        self.open_rows(
+            m.Row("kind", "Kind", kind=m.INFO),
+            m.Row("name", "Name", kind=m.TEXT),
+            m.Row("about", "About", kind=m.INFO),
+            m.Row("check", "Check the connection"),
+            m.Row("last", "Last", kind=m.INFO),
+            kind="Xtream",
+            name="Demo TV",
+        )
+        self.assertEqual(self.drawer.focused_row().key, "name")  # never the line above it
+        self.drawer.move_by(1)
+        self.assertEqual(self.drawer.focused_row().key, "check")
+        self.drawer.move_by(1)  # only an info line under it: the focus stays
+        self.assertEqual(self.drawer.focused_row().key, "check")
+        self.drawer.move_by(-1)
+        self.assertEqual(self.drawer.focused_row().key, "name")
+        self.drawer.move_by(-1)
+        self.assertEqual(self.drawer.focused_row().key, "name")
+        self.drawer.grab()
+        self.assertFalse(self.drawer.row_rect("right", 0).isEmpty())  # in sight above it
+        self.click(self.drawer.title_rect(2).center())  # a click on one does nothing
+        self.assertEqual(self.drawer.focused_row().key, "name")
+        self.assertFalse(self.drawer.editing())
+        self.assertEqual((self.chosen, self.steps), ([], []))
+        self.assertFalse(self.drawer._items("right")[0].selectable)  # painted muted
+
+    def test_an_info_row_shows_its_value_and_an_action_its_note(self):
+        self.open_rows(
+            m.Row("kind", "Kind", kind=m.INFO),
+            m.Row("check", "Check the connection", note="answered 2 min ago"),
+            kind="Xtream",
+        )
+        self.drawer.grab()
+        for index in (0, 1):
+            box = self.drawer._box("right", index)
+            self.assertFalse(box.end.isEmpty(), index)
+            self.assertLessEqual(box.title.right(), box.end.left(), index)
+            self.assertTrue(self.drawer.step_rect(index, -1).isEmpty(), index)
+
+    def test_a_danger_row_paints_red(self):
+        self.open_rows(
+            m.Row("plain", "Check the connection"),
+            m.Row("remove", "Remove provider", kind=m.DANGER),
+            m.Row("again", "Remove provider…", kind=m.DANGER),
+        )
+        self.drawer.back()  # the keys on the sections: no highlight over the rows
+        image = self.drawer.grab().toImage()
+        self.assertEqual(self.drawer._box("right", 1).titles, ["Remove provider…"])
+        self.assertEqual(self.drawer._box("right", 2).titles, ["Remove provider…"])  # one "…"
+        live, accent = QColor(PALETTE.live), QColor(PALETTE.accent)
+        self.assertFalse(near(live, accent))  # the test tells them apart
+        ratio = image.devicePixelRatio()
+
+        def reds(index):
+            r = self.drawer.title_rect(index)
+            return sum(
+                1
+                for y in range(int(r.top() * ratio), int(r.bottom() * ratio))
+                for x in range(int(r.left() * ratio), int(r.right() * ratio))
+                if near(image.pixelColor(x, y), live)
+            )
+
+        self.assertGreater(reds(1), 20)
+        self.assertEqual(reds(0), 0)
+
+    def test_a_danger_row_acts_on_the_first_click(self):
+        self.open_rows(m.Row("plain", "Plain"), m.Row("remove", "Remove provider…", kind=m.DANGER))
+        self.drawer.grab()
+        self.click(self.drawer.title_rect(1).center())
+        self.assertEqual(self.chosen, ["remove"])
+
+    def test_an_empty_layer_shows_its_line_and_keeps_the_focus_left(self):
+        def ink():
+            image = self.drawer.grab().toImage()
+            column = self.drawer.column_rect("right")
+            column.setTop(self.drawer.back_rect().bottom() + 8)
+            return inked(image, column), column
+
+        hidden = Section("hidden", "Hidden groups", empty_text="No hidden groups")
+        self.open_rows(
+            m.Row("name", "Name", kind=m.TEXT),
+            m.Row("hidden", "Hidden groups", section=hidden),
+            name="Demo TV",
+        )
+        self.drawer.move_by(1)
+        self.drawer.activate()
+        self.assertEqual(self.drawer.path(), ("p", "hidden"))
+        self.assertEqual(self.drawer.focus_side(), "left")
+        self.assertIsNone(self.drawer.focused_row())
+        self.drawer.right()  # nothing to go to
+        self.assertEqual(self.drawer.focus_side(), "left")
+        xs, column = ink()
+        self.assertTrue(xs)
+        middle = (min(xs) + max(xs)) / 2
+        self.assertLess(abs(middle - column.center().x()), 4)  # centred
+        self.drawer.back()
+        self.assertEqual(self.drawer.path(), ("p",))
+        # A layer without its line shows nothing there; an empty section keeps the keys left.
+        self.drawer.open_at((Section("e", "Empty"),))
+        self.drawer.right()
+        self.assertEqual(self.drawer.focus_side(), "left")
+        self.assertEqual(ink()[0], [])
+
+    def test_a_row_that_opens_a_card_asks_for_it(self):
+        # A row that opens something that is no layer of rows (a card): › and `chosen`.
+        self.open_rows(m.Row("card", "Address and login", kind=m.OPENS))
+        self.drawer.grab()
+        self.assertFalse(self.drawer._box("right", 0).chevron.isEmpty())
+        self.drawer.activate()
+        self.assertEqual(self.chosen, ["card"])
+        self.assertEqual(self.drawer.path(), ("p",))
+
+    def test_a_two_line_row_shows_its_sub_under_the_title(self):
+        layer = Section("demo", "Demo TV", rows=(m.Row("x", "X", kind=m.TEXT),))
+        self.open_rows(
+            m.Row("demo", "Demo TV", section=layer, sub="Xtream · in use"),
+            m.Row("free", "Free TV", section=layer),
+        )
+        self.drawer.grab()
+        two, one = self.drawer._box("right", 0), self.drawer._box("right", 1)
+        self.assertEqual(two.sub, "Xtream · in use")
+        self.assertGreater(two.line.height(), one.line.height())
+        self.drawer.activate()  # a layer down: the left column lists them, with the sub
+        self.drawer.grab()
+        self.assertEqual(self.drawer._box("left", 0).sub, "Xtream · in use")
+
+    def test_a_row_without_help_keeps_its_height_when_focused(self):
+        self.open_rows(m.Row("a", "Check the connection"), m.Row("b", "Check again"))
+        self.drawer.grab()
+        self.assertEqual(self.drawer._box("right", 0).help, [])
+        self.assertEqual(
+            self.drawer.row_rect("right", 0).height(), self.drawer.row_rect("right", 1).height()
+        )
+
+    def test_a_text_row_edits_in_place(self):
+        edits = self.edits()
+        self.open_rows(m.Row("k", "Name", kind=m.TEXT), k="old")
+        self.drawer.grab()
+        box = self.drawer._box("right", 0)
+        self.assertLessEqual(box.title.right(), box.end.left())  # its value, at the right
+        self.assertTrue(self.drawer.step_rect(0, 1).isEmpty())  # no ‹ ›
+        self.assertFalse(self.drawer.editing())
+        self.drawer.activate()  # Enter: editing in the value's place
+        self.assertTrue(self.drawer.editing())
+        self.drawer.grab()
+        self.drawer.type_text("abc")
+        self.assertEqual(edits, [])
+        self.drawer.activate()
+        self.assertEqual(edits, [("k", "oldabc")])
+        self.assertFalse(self.drawer.editing())
+        self.assertEqual(self.steps, [])
+
+    def test_esc_puts_a_text_back(self):
+        edits = self.edits()
+        self.open_rows(m.Row("k", "Name", kind=m.TEXT), k="old")
+        self.drawer.activate()
+        self.drawer.type_text("abc")
+        self.drawer.backspace()
+        self.assertTrue(self.drawer.edit_key(Action.ESCAPE, ""))
+        self.assertFalse(self.drawer.editing())
+        self.assertEqual(edits, [])
+        self.assertEqual(self.drawer.focused_row().key, "k")  # still on it, Settings open
+        self.assertEqual(self.drawer.focus_side(), "right")
+        self.assertEqual(self.closed, [])
+        self.drawer.activate()  # again: from the value, not from what was typed
+        self.drawer.activate()  # kept unchanged: nothing to say
+        self.assertEqual(edits, [])
+        self.drawer.activate()
+        self.drawer.back()  # Back while editing is Esc: the layer stays
+        self.assertFalse(self.drawer.editing())
+        self.assertEqual(self.drawer.focus_side(), "right")
+        self.assertEqual(edits, [])
+
+    def test_the_keys_go_to_the_field_while_editing(self):
+        edits = self.edits()
+        self.open_rows(m.Row("k", "Name", kind=m.TEXT), m.Row("x", "X", "", ON_OFF, True), k="ab")
+        self.drawer.activate()
+        for action in (Action.NAV_LEFT, Action.NAV_LEFT, Action.NAV_RIGHT):  # the caret
+            self.assertTrue(self.drawer.edit_key(action, ""))
+        self.assertTrue(self.drawer.edit_key(Action.NAV_TEXT, "Z"))
+        self.assertTrue(self.drawer.edit_key(Action.FORGET, ""))  # Delete: forward
+        for _ in range(4):  # past the start: never a layer up
+            self.assertTrue(self.drawer.edit_key(Action.NAV_BACKSPACE, ""))
+        self.assertTrue(self.drawer.editing())
+        self.assertTrue(self.drawer.edit_key(Action.NAV_TEXT, "new"))
+        self.assertFalse(self.drawer.edit_key(Action.VOL_UP, ""))  # not the field's
+        self.assertEqual((self.steps, self.closed), ([], []))
+        # ↓ leaves the row as a click elsewhere does: the text kept, then the move.
+        self.assertFalse(self.drawer.edit_key(Action.NAV_DOWN, ""))
+        self.assertEqual(edits, [("k", "new")])
+        self.assertFalse(self.drawer.editing())
+        self.drawer.move_by(1)
+        self.assertEqual(self.drawer.focused_row().key, "x")
+        self.assertFalse(self.drawer.edit_key(Action.NAV_TEXT, "q"))  # not editing
+
+    def test_a_click_edits_a_focused_text_row_and_a_click_elsewhere_keeps_it(self):
+        edits = self.edits()
+        self.open_rows(m.Row("x", "X", "", ON_OFF, True), m.Row("k", "Name", kind=m.TEXT), k="old")
+        self.drawer.grab()
+        self.click(self.drawer.title_rect(1).center())  # unfocused: only the focus
+        self.assertFalse(self.drawer.editing())
+        self.assertEqual(self.drawer.focused_row().key, "k")
+        self.drawer.grab()
+        self.click(self.drawer.title_rect(1).center())
+        self.assertTrue(self.drawer.editing())
+        self.drawer.grab()
+        field = self.drawer._box("right", 1).end
+        self.click(QPointF(field.left() + 2, field.center().y()))  # the caret to the start
+        self.assertTrue(self.drawer.editing())
+        self.drawer.type_text("Z")
+        self.drawer.grab()
+        self.click(self.drawer.title_rect(0).center())  # elsewhere: kept, and focused there
+        self.assertEqual(edits, [("k", "Zold")])
+        self.assertFalse(self.drawer.editing())
+        self.assertEqual(self.drawer.focused_row().key, "x")
+        self.assertEqual(self.steps, [])
+
+    def test_a_double_click_on_an_unfocused_text_row_edits_it(self):
+        self.open_rows(m.Row("x", "X", "", ON_OFF, True), m.Row("k", "Name", kind=m.TEXT), k="old")
+        self.drawer.grab()
+        point = self.drawer.title_rect(1).center()
+        self.click(point)
+        self.double_click(point)
+        self.assertTrue(self.drawer.editing())
+        self.double_click(point)  # its second press again: still editing
+        self.assertTrue(self.drawer.editing())
+
+    def test_paste_goes_into_the_field_while_editing(self):
+        edits = self.edits()
+        self.open_rows(m.Row("k", "Address", kind=m.TEXT), k="http://old.example")
+        with mock.patch("ui.text_edit.clipboard_line", return_value="http://new.example"):
+            self.assertFalse(self.drawer.edit_key(Action.PASTE, ""))  # not editing: not taken
+            self.drawer.activate()
+            self.assertTrue(self.drawer.edit_key(Action.SELECT_ALL, ""))
+            self.assertTrue(self.drawer.edit_key(Action.PASTE, ""))
+        self.assertTrue(self.drawer.edit_key(Action.NAV_ACTIVATE, ""))
+        self.assertEqual(edits, [("k", "http://new.example")])
+
+    def test_hiding_ends_an_edit_without_keeping_it(self):
+        edits = self.edits()
+        self.open_rows(m.Row("k", "Name", kind=m.TEXT), k="old")
+        self.drawer.activate()
+        self.drawer.type_text("abc")
+        self.drawer.hide()
+        self.assertFalse(self.drawer.editing())
+        self.assertEqual(edits, [])
+        self.open_rows(m.Row("k", "Name", kind=m.TEXT))
+        self.assertFalse(self.drawer.editing())
+
+    def test_forward_never_steps_a_value(self):
+        # The mouse's Forward goes a layer down: from the sections into the rows, and into a
+        # row's layer; never a step, an edit or an action.
+        self.drawer.open_at(sections("Darwin"), PLAYBACK)
+        self.drawer.forward()
+        self.assertEqual(self.drawer.focus_side(), "right")
+        self.assertEqual(self.drawer.focused_row().key, "live_latency")
+        self.drawer.forward()
+        self.assertEqual(self.steps, [])
+        self.focus_on("autoplay")
+        self.drawer.forward()
+        self.assertEqual(self.drawer.path(), ("playback", "autoplay"))
+        self.drawer.forward()  # a stepper in it
+        self.assertEqual(self.steps, [])
+        self.open_rows(
+            m.Row("k", "Name", kind=m.TEXT),
+            m.Row("act", "Check the connection"),
+            m.Row("remove", "Remove provider…", kind=m.DANGER),
+        )
+        for _ in range(3):
+            self.drawer.forward()
+            self.assertFalse(self.drawer.editing())
+            self.drawer.move_by(1)
+        self.assertEqual((self.chosen, self.steps), ([], []))
+
+    def test_focus_moves_are_announced(self):
+        with mock.patch("ui.overlays.settings_drawer.announce") as said:
+            self.drawer.open_at(sections("Darwin"), PLAYBACK)
+            self.drawer.right()
+            self.drawer.move_by(1)
+            self.values["hardware_decoding"] = False
+            self.drawer.refresh()
+            self.drawer.refresh()  # nothing changed: nothing said
+            self.drawer.back()  # the sections
+        texts = [call.args[1] for call in said.call_args_list]
+        self.assertEqual(
+            texts,
+            [
+                "Playback",
+                "Live latency, Auto (recommended)",
+                "Hardware video decoding, On",
+                "Hardware video decoding, Off",
+                "Playback",
+            ],
+        )
+        self.assertTrue(all(call.args[0] is self.drawer for call in said.call_args_list))
 
 
 if __name__ == "__main__":

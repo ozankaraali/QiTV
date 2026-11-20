@@ -164,7 +164,7 @@ from ui.song_jobs import AlbumJob, CoverJob, cover_colours
 # i18n: a toast: the multiview cannot open while a picture is cast to a TV
 MULTIVIEW_WHILE_CASTING = N_("Stop casting to show the multiview")
 from ui.record_guard import RecordGuard
-from ui.settings_controller import SettingsController
+from ui.settings_controller import MOUSE_FORWARD, SettingsController
 from ui.stream_question import ScheduledRecording, StreamQuestion, quit_text
 from ui.subtitle_search import OnlineSetup, OnlineSubtitles
 from ui.track_controls import TrackControls
@@ -1795,14 +1795,15 @@ class TVController(QObject):
         self._mouse_layer(Action.NAV_LEFT, Action.ESCAPE)
 
     def mouse_forward(self) -> None:
-        """The mouse's Forward button: a drawer layer down (Settings' too); closed, it opens."""
-        self._mouse_layer(Action.NAV_RIGHT, Action.NAV_RIGHT)
+        """The mouse's Forward button: a drawer layer down (Settings' too, where it never
+        steps a value); closed, it opens."""
+        self._mouse_layer(Action.NAV_RIGHT, Action.NAV_RIGHT, MOUSE_FORWARD)
 
-    def _mouse_layer(self, action: Action, in_settings: Action) -> None:
+    def _mouse_layer(self, action: Action, in_settings: Action, payload: str = "") -> None:
         if self._closed:
             return
         if self._settings_shown():
-            self.handle(in_settings)  # through what shows over it first (a question)
+            self.handle(in_settings, payload)  # through what shows over it first (a question)
         elif self.overlays.drawer.isVisible():
             self.handle(action)
         else:

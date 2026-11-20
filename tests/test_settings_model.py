@@ -116,6 +116,27 @@ class SettingsModelTests(unittest.TestCase):
         self.assertFalse(row.restart)
         self.assertIn("QiTV starts again", row.help)
 
+    def test_explicit_kinds_override_the_derived_one(self):
+        layer = m.Section("layer", "Layer", empty_text="No hidden groups")
+        # Without one, the kind is derived as plan 1 did: choices step, a layer opens, else acts.
+        self.assertEqual(m.Row("a", "A", "", m.ON_OFF, True).kind, m.STEP)
+        self.assertEqual(m.Row("b", "B", section=layer).kind, m.OPENS)
+        self.assertEqual(m.Row("c", "C").kind, m.ACTION)
+        self.assertEqual(_row("live_latency").kind, m.STEP)
+        self.assertEqual(_row("autoplay").kind, m.OPENS)
+        # Given, it stands.
+        self.assertEqual(m.Row("d", "D", "", m.ON_OFF, True, kind=m.INFO).kind, m.INFO)
+        self.assertEqual(m.Row("e", "E", section=layer, kind=m.ACTION).kind, m.ACTION)
+        self.assertEqual(m.Row("f", "F", kind=m.TEXT).kind, m.TEXT)
+        self.assertEqual(m.Row("g", "Remove provider…", kind=m.DANGER).kind, m.DANGER)
+        self.assertEqual(m.Row("h", "Address and login", kind=m.OPENS).kind, m.OPENS)
+        with self.assertRaises(ValueError):
+            m.Row("i", "I", kind="nonsense")
+        row = m.Row("p", "Demo TV", section=layer, sub="Xtream · in use", note="2")
+        self.assertEqual((row.sub, row.note), ("Xtream · in use", "2"))
+        self.assertEqual(layer.empty_text, "No hidden groups")
+        self.assertEqual(m.Section("s", "S").empty_text, "")
+
     def test_playback_row_order(self):
         keys = [r.key for r in next(s for s in m.sections("Darwin") if s.key == m.PLAYBACK).rows]
         self.assertEqual(

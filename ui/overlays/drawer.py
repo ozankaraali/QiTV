@@ -105,17 +105,23 @@ from ui.overlays.channel_rows import (
     column_focused,
     paint_hover,
 )
-from ui.overlays.drawer_look import (
+from ui.overlays.drawer_look import (  # the header's metrics are offered from here too
     COUNT_FONT_U,
     CRUMB_FONT_U,
     CRUMB_H_U,
     FADE_U,
+    FILTER_H_U,
+    GEAR_GAP_U,
+    GEAR_U,
     LEFT_U,
+    MIN_HIT_PX,
     PAD_SIDE_U,
     PAD_TOP_U,
     RIGHT_U,
     ROW_H_U,
+    SEPARATOR,
     TITLE_FONT_U,
+    column_widths,
     draw_back,
     paint_backdrop,
     paint_highlight,
@@ -133,12 +139,8 @@ _RIGHT_PRESSES = (QEvent.Type.MouseButtonPress, QEvent.Type.MouseButtonDblClick)
 DRAG_OPACITY = 0.25  # the list while a channel is dragged out of it onto the grid
 FOUND_GENRE_H_U = 5.0  # a genre the find found: its name, then its provider and count
 FOUND_CHANNEL_SCALE = 0.7  # its channels: a long name (and a 5-digit number) fits whole
-FILTER_H_U = 3.4  # the ⌕ Find box above the right column (the left column's: its buttons)
 FIND_X_U = 2.2  # its ✕, this wide at its right end
-GEAR_U = 1.9  # the header's buttons (Library, Search, refresh, Settings), this wide
-GEAR_GAP_U = 0.7
 ICONS_TOP_U = 0.6  # 2.9.3: the buttons' row, this far under the Find box's bottom
-MIN_HIT_PX = 28  # the header's buttons take clicks over this square at least
 REFRESH_ACTION = "refresh"  # the header's refresh button: the provider's channels and guide
 SEARCH_ACTION = "search"  # the header's ⌕: the Library's search
 LIBRARY_ACTION = "library"  # 2.8: the header's Library button (Movies, or the section last open)
@@ -147,7 +149,6 @@ BACK_BUTTON = "back"  # the header's ‹: a layer up
 # back where it was once backed out of, as the Settings window left it.
 SETTINGS_BUTTON = "settings_button"
 _CRUMB = "crumb:"  # a name in the header, by its path index ("crumb:up": the elided head)
-SEPARATOR = " › "
 # The texts below stay English (the code compares them); translate() shows them, and the
 # tooltips naming a key are made where they show.
 PROVIDER_TOOLTIP = N_("Choose another provider")  # i18n: tooltip of the provider's name
@@ -1646,8 +1647,7 @@ class Drawer(Overlay):
         self._laid_out_for = (host_w, host_h)
         units = ui_units(host_w)
         self._units = units
-        left_w = round(LEFT_U * units.u)
-        right_w = round(RIGHT_U * units.u) - left_w
+        left_w, right_w = column_widths(units)
         self.setGeometry(QRect(0, 0, left_w + right_w + units.px(FADE_U), host_h))
         side = units.px(PAD_SIDE_U)
         for col, x, width, top_u in (

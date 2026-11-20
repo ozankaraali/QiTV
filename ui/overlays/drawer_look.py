@@ -1,6 +1,6 @@
-"""The drawer's look, shared: its column metrics, the two columns' backdrop with the fade at
-the right edge, a row's highlight and the ‹ back chevron. The Settings overlay takes the same
-look from here, so the two read as one."""
+"""The drawer's look, shared: its column metrics and widths, its header's metrics, the two
+columns' backdrop with the fade at the right edge, a row's highlight and the ‹ back chevron.
+The Settings overlay takes the same look from here, so the two read as one."""
 
 from PySide6.QtCore import QPointF, QRect, QRectF, Qt
 from PySide6.QtGui import QColor, QLinearGradient, QPainter, QPainterPath, QPen
@@ -18,13 +18,23 @@ CRUMB_FONT_U = 1.15
 ROW_H_U = 3.6  # a simple row's height
 TITLE_FONT_U = 1.35  # a row's title
 COUNT_FONT_U = 1.1  # a row's count or label
+FILTER_H_U = 3.4  # the ⌕ Find box above the right column (the left column's: its buttons)
+GEAR_U = 1.9  # the header's buttons (Library, Search, refresh, Settings), this wide
+GEAR_GAP_U = 0.7
+MIN_HIT_PX = 28  # the header's buttons take clicks over this square at least
+SEPARATOR = " › "  # between the names of a breadcrumb
+
+
+def column_widths(units: Units) -> tuple[int, int]:
+    """The left and the right column's widths, whole pixels (the fade follows them)."""
+    left_w = round(LEFT_U * units.u)
+    return left_w, round(RIGHT_U * units.u) - left_w
 
 
 def paint_backdrop(p: QPainter, rect: QRect, units: Units) -> None:
     """The left column's raised panel, the right column's panel, and the fade into the video
     at the right edge, over `rect` (the drawer: both columns and the fade wide)."""
-    left_w = round(LEFT_U * units.u)
-    right_w = round(RIGHT_U * units.u) - left_w
+    left_w, right_w = column_widths(units)
     left = QRect(rect.x(), rect.y(), left_w, rect.height())
     right = QRect(left.right() + 1, rect.y(), right_w, rect.height())
     p.fillRect(left, qcolor(PALETTE.panel_raised, 0.95))

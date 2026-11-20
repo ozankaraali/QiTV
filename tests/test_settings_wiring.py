@@ -255,6 +255,20 @@ class SettingsWiringTests(base.WindowCase):
         self.window.controller.mouse_back()  # now Settings': the sections close
         self.assertFalse(self.window.settings.visible())
 
+    def test_the_mouse_forward_goes_a_layer_down_but_never_steps(self):
+        self.show()
+        self.wait_for_drawer()
+        self.menu_actions()["Settings…"].trigger()
+        for key in (Qt.Key.Key_Down, Qt.Key.Key_Down):  # Playback
+            QTest.keyClick(self.window, key)
+        settings = self.window.settings_drawer
+        self.window.controller.mouse_forward()  # into its rows
+        self.assertEqual(settings.focus_side(), "right")
+        self.assertEqual(settings.focused_row().key, "live_latency")
+        self.window.controller.mouse_forward()
+        self.assertEqual(self.config.live_latency, "auto")
+        self.assertTrue(self.window.settings.visible())
+
     def test_the_channel_list_opened_over_settings_closes_it(self):
         # The list opened while Settings shows (a menu, a provider ready) shows on top and
         # takes the keys: Settings goes.

@@ -1,9 +1,11 @@
 """Binds the Settings layer of the drawer to the config and to the key actions.
 
 A step is applied at once (no Save): the row's next choice is written through the values and
-the overlay paints again. A section whose settings still live in the Settings window opens
-that window on its tab. The controller keeps the key actions it uses and hands every other
-one back, so volume, mute and fullscreen still reach the player.
+the overlay paints again; so is a text row's text once it is kept. A section whose settings
+still live in the Settings window opens that window on its tab. The controller keeps the key
+actions it uses and hands every other one back, so volume, mute and fullscreen still reach the
+player. While a text is edited the field has the keys first (typing, Backspace, the caret,
+the clipboard; Enter and Esc).
 """
 
 from __future__ import annotations
@@ -14,12 +16,25 @@ from typing import Optional
 
 from PySide6.QtCore import QEvent, QObject, Signal
 
-from services.settings_model import LEGACY_TABS, Row, Section, choice_of, is_lit, sections, step
+from services.settings_model import (
+    INFO,
+    LEGACY_TABS,
+    TEXT,
+    Row,
+    Section,
+    choice_of,
+    is_lit,
+    sections,
+    step,
+)
 from services.settings_values import SettingsValues
 from ui.keymap import Action
 from ui.overlays.settings_drawer import LEGACY_PREFIX, SettingsDrawer
 
 logger = logging.getLogger(__name__)
+
+# NAV_RIGHT's payload from the mouse's Forward button: a layer down only, never a step.
+MOUSE_FORWARD = "mouse forward"
 
 
 def _walk(rows: tuple[Row, ...]) -> Iterator[Row]:
@@ -51,17 +66,25 @@ class SettingsController(QObject):
         self._sections: tuple[Section, ...] = ()
         drawer.stepped.connect(self._on_stepped)
         drawer.chosen.connect(self._on_chosen)
+        drawer.edited.connect(self._on_edited)
         drawer.closed.connect(self._on_closed)
         drawer.installEventFilter(self)  # its own hide, however it came (`hidden`)
 
     # ---- what the overlay shows -------------------------------------------------------------
 
     def value_text(self, row: Row) -> str:
-        """The translated text of the row's current choice ("" for a row that only opens or
-        acts: it has no config key to ask)."""
-        if not row.choices:
+        """The translated text of a stepper's current choice, or a text or info row's value as
+        it is ("" for a row that only opens or acts: it has no config key to ask, and for a
+        key the values do not know)."""
+        if row.choices:
+            return choice_of(row, self._values.get(row.key)).shown()
+        if row.kind not in (TEXT, INFO):
             return ""
-        return choice_of(row, self._values.get(row.key)).shown()
+        try:
+            value = self._values.get(row.key)
+        except KeyError:
+            return ""
+        return "" if value is None else str(value)
 
     def lit(self, row: Row) -> bool:
         """Whether the row's value differs from its default."""
@@ -87,8 +110,16 @@ class SettingsController(QObject):
         self._drawer.hide()
 
     def handle(self, action: Action, payload: object = None) -> bool:
-        """Do a key action on the overlay; False for one it does not use."""
+        """Do a key action on the overlay; False for one it does not use. While a text is
+        edited its field takes its keys first (Esc there puts the text back, Backspace
+        deletes). NAV_RIGHT with MOUSE_FORWARD is the mouse's Forward: a layer down only."""
         drawer = self._drawer
+        if action is Action.NAV_RIGHT and payload == MOUSE_FORWARD:
+            drawer.forward()
+            return True
+        text = payload if isinstance(payload, str) else ""
+        if drawer.editing() and drawer.edit_key(action, text):
+            return True
         if action is Action.NAV_UP:
             drawer.move_by(-1)
         elif action is Action.NAV_DOWN:
@@ -124,6 +155,14 @@ class SettingsController(QObject):
             logger.warning("A step for %r, which is no stepper row", key)
             return
         self._values.set(key, step(row, self._values.get(key), delta))
+        self._drawer.refresh()
+
+    def _on_edited(self, key: str, text: str) -> None:
+        row = self._find(key)
+        if row is None or row.kind != TEXT:
+            logger.warning("An edit for %r, which is no text row", key)
+            return
+        self._values.set(key, text)
         self._drawer.refresh()
 
     def _on_chosen(self, key: str) -> None:
