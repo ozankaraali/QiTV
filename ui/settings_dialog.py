@@ -59,7 +59,16 @@ from services.picture import DEINTERLACING, deinterlace_name
 from services.provider_link import parse_provider_link
 from services.provider_rename import removed_between, renames_between
 from services.provider_types import EMBY, JELLYFIN, is_media_server
-from services.settings_texts import CLEAR_CACHE_QUESTION, OPENSUBTITLES_BUILT_IN_HINT
+from services.settings_texts import (
+    CLEAR_CACHE_QUESTION,
+    OPENSUBTITLES_BUILT_IN_HINT,
+    cache_size_text,
+    gib_text as _gib_text,
+    memory_rewind_text,
+    mib_text as _mib_text,
+    rewind_minutes,
+    rewind_text,
+)
 from services.tmdb import built_in_token as tmdb_built_in_token
 from ui.captions_files import DELETE_QUESTION, CaptionsFilesJob, captions_space_text
 from ui.captions_texts import size_text
@@ -144,14 +153,6 @@ def offset_text(minutes: int) -> str:
         return tr("{sign}{h} h", sign=sign, h=hours)
     # i18n: a guide time offset: sign is + or −, m minutes (abbreviated)
     return tr("{sign}{m} min", sign=sign, m=rest)
-
-
-def _mib_text(size) -> str:
-    return tr("{size} MiB", size=size)  # i18n: a size in mebibytes (MiB)
-
-
-def _gib_text(size) -> str:
-    return tr("{size} GiB", size=size)  # i18n: a size in gibibytes (GiB), as "1.5"
 
 
 def epg_unit_label(unit: str) -> str:
@@ -1021,15 +1022,10 @@ class OptionsDialog(QDialog):
         mib = (
             self.timeshift_ram_combo.currentData() or ConfigManager.DEFAULT_OPTION_TIMESHIFT_RAM_MIB
         )
-        minutes = max(1, round(mib * 1024 * 1024 * 8 / (8 * 1_000_000 * 60)))
-        # i18n: how far back the memory reaches: n minutes (abbreviated) of HD video at 8 Mb/s
-        self.timeshift_ram_estimate.setText(tr("≈ {n} min of HD at 8 Mb/s", n=minutes))
+        self.timeshift_ram_estimate.setText(memory_rewind_text(mib))
 
     def _update_timeshift_estimates(self, mib):
-        if mib < 1024:
-            size = _mib_text(mib)
-        else:
-            size = _gib_text(i18n.decimal(f"{mib / 1024:.2f}".rstrip("0").rstrip(".")))
+        size = cache_size_text(mib)
         # i18n: size as "512 MiB" or "1.5 GiB"
         self.timeshift_size_label.setText("<b>" + tr("Cache size: {size}", size=size) + "</b>")
         self.timeshift_size_label.setToolTip(
@@ -1040,14 +1036,7 @@ class OptionsDialog(QDialog):
             (8, self.timeshift_1080p_estimate),
             (25, self.timeshift_4k_estimate),
         ):
-            minutes = max(1, round(mib * 1024 * 1024 * 8 / (bitrate * 1_000_000 * 60)))
-            hours, remainder = divmod(minutes, 60)
-            if hours:
-                # i18n: an estimated rewind: h hours and m minutes (abbreviated)
-                label.setText(tr("About {h} h {m} min", h=hours, m=remainder))
-            else:
-                # i18n: an estimated rewind: m minutes (abbreviated)
-                label.setText(tr("About {m} min", m=minutes))
+            label.setText(rewind_text(rewind_minutes(mib, bitrate)))
 
     def create_providers_ui(self):
         self.providers_tab = QWidget(self)

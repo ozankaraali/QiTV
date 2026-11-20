@@ -72,7 +72,7 @@ class SettingsModelTests(unittest.TestCase):
         by_key = {s.key: s for s in m.sections("Linux")}
         self.assertEqual(by_key[m.GUIDE].legacy_tab, "epg")
         self.assertEqual(by_key[m.PLAYBACK].legacy_tab, "")
-        for key in (m.GENERAL, m.SUBTITLES, m.FILES, m.ADVANCED):  # plan 3: their rows are here
+        for key in (m.GENERAL, m.SUBTITLES, m.TIMESHIFT, m.FILES, m.ADVANCED):  # plan 3's
             self.assertEqual(by_key[key].legacy_tab, "", key)
             self.assertNotIn(key, m.LEGACY_TABS)
         self.assertTrue(by_key[m.FILES].empty_text)  # none of its rows can be (from source)

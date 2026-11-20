@@ -206,6 +206,7 @@ from ui.settings_dialog import OptionsDialog
 from ui.settings_general import GeneralRows, hooks as general_hooks
 from ui.settings_providers import ProviderRows
 from ui.settings_subtitles import SubtitlesRows
+from ui.settings_timeshift import TimeshiftRows, hooks as timeshift_hooks
 from ui.song_jobs import PanelCover
 from ui.subtitle_search import OnlineSetup
 from ui.track_controls import SUBTITLE_FILTER
@@ -1147,6 +1148,7 @@ class TVWindow(QMainWindow):
                 "desktop_pip": self._arm_desktop_pip,
                 "covered_pip": self._arm_desktop_pip,
                 **general_hooks(self),  # General's and Advanced's (ui.settings_general)
+                **timeshift_hooks(self),  # Time-shift's (ui.settings_timeshift)
             },
         )
         self.settings = SettingsController(
@@ -1175,6 +1177,9 @@ class TVWindow(QMainWindow):
         # Settings › Subtitles & AI captions: the space AI captions' files take, measured on a
         # worker as Settings opens, their deletion asked first; OpenSubtitles' Sign out.
         self.subtitle_rows = SubtitlesRows(self, self.settings, self.settings_drawer, values)
+        # Settings › Time-shift & recordings: the disk turned off only once asked, the disk
+        # cache's size on a value card, the Recordings folder changed, reset or opened.
+        self.timeshift_rows = TimeshiftRows(self, self.settings, self.settings_drawer, values)
         self.catalogs.providersChanged.connect(self.provider_rows.providers_changed)
         self.catalog.providerReady.connect(self.provider_rows.providers_changed)
         # File → Open Link… and the channel list's Open a link (plan 4): while its card shows it
@@ -2842,7 +2847,8 @@ class TVWindow(QMainWindow):
     def _settings_context(self) -> Context:
         """What Settings' sections show that only this QiTV knows, each section's from its
         rows."""
-        return self.subtitle_rows.context(self.general_rows.context())
+        context = self.subtitle_rows.context(self.general_rows.context())
+        return self.timeshift_rows.context(context)
 
     def _settings_went(self) -> None:
         """Settings in the drawer went: a step's save that failed (written in the background,

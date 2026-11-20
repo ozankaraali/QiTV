@@ -128,6 +128,8 @@ class SettingsValuesTests(unittest.TestCase):
             "detailed_log",
             "max_cache_image_size",
             "ai_captions_model",  # Subtitles' (plan 3)
+            "timeshift_enabled",  # Time-shift's (plan 3)
+            "timeshift_ram_mib",
         ):
             self.assertIn(key, keys)
         for row in rows:

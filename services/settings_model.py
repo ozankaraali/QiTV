@@ -15,8 +15,14 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any, Optional
 
+from services.config_manager import ConfigManager
 from services.i18n import N_, SOURCE_LANGUAGE, SOURCE_NAME, number, translate
-from services.settings_texts import OPENSUBTITLES_BUILT_IN_HINT
+from services.settings_texts import (
+    OPENSUBTITLES_BUILT_IN_HINT,
+    cache_size_text,
+    memory_rewind_text,
+    mib_text,
+)
 
 PROVIDERS = "providers"
 GENERAL = "general"
@@ -40,7 +46,6 @@ KINDS = (STEP, OPENS, ACTION, DANGER, TEXT, INFO)
 
 # Section key -> the key of the old Settings window's tab that still holds its settings.
 LEGACY_TABS: dict[str, str] = {
-    TIMESHIFT: "timeshift",
     GUIDE: "epg",
     REMOTE: "remote",
     PARENTAL: "parental",
@@ -81,6 +86,18 @@ SUBTITLES_PREFIX = "subtitles/"
 CAPTIONS_FILES = SUBTITLES_PREFIX + "captions_files"
 DELETE_CAPTIONS = SUBTITLES_PREFIX + "delete_captions"
 SIGN_OUT = SUBTITLES_PREFIX + "sign_out"
+# Time-shift's own rows (ui.settings_timeshift's): the disk cache's size opens a card while the
+# disk is on, and the Recordings folder's rows act; they are no config value. Turning the disk
+# off asks first: ui.settings_timeshift handles that config row's steps (by its key).
+TIMESHIFT_PREFIX = "timeshift/"
+TIMESHIFT_DISK = "timeshift_enabled"
+DISK_CACHE = TIMESHIFT_PREFIX + "disk_cache"
+RECORDINGS_FOLDER = TIMESHIFT_PREFIX + "recordings_folder"
+CHANGE_FOLDER = TIMESHIFT_PREFIX + "change_folder"
+DEFAULT_FOLDER = TIMESHIFT_PREFIX + "default_folder"
+OPEN_FOLDER = TIMESHIFT_PREFIX + "open_folder"
+# i18n: a setting: the disk cache's size; it opens a card with a slider
+DISK_CACHE_TEXT = N_("Disk cache size")
 # The image cache's largest sizes (MB) the stepper offers; the config's default is 100.
 IMAGE_CACHE_MB = (50, 100, 200, 500, 1000, 2000)
 IMAGE_CACHE_DEFAULT_MB = 100
@@ -206,7 +223,10 @@ class Context:
     open with: a run from source); whether its build carries an OpenSubtitles key; and what AI
     captions' downloaded files take (ui.settings_subtitles measures it): the line that says it,
     in the active language ("" while it is measured; None: this build has no such files to
-    tell of, and no row says it), and whether there is any to delete."""
+    tell of, and no row says it), and whether there is any to delete; the time-shift settings
+    as they are now (whether the disk buffer is on, the memory per stream and the disk cache,
+    in MiB) and the Recordings folder (where recordings go, and whether it is one of the
+    viewer's own rather than the default)."""
 
     languages: tuple[tuple[str, str], ...] = ((SOURCE_LANGUAGE, SOURCE_NAME),)
     system_language: str = SOURCE_NAME
@@ -216,6 +236,11 @@ class Context:
     opensubtitles_built_in: bool = False
     captions_space: Optional[str] = None
     captions_downloaded: bool = False
+    timeshift_disk: bool = ConfigManager.DEFAULT_OPTION_TIMESHIFT_ENABLED
+    timeshift_ram_mib: int = ConfigManager.DEFAULT_OPTION_TIMESHIFT_RAM_MIB
+    timeshift_max_mib: int = ConfigManager.DEFAULT_OPTION_TIMESHIFT_MAX_MIB
+    recordings_folder: str = ""
+    recordings_own: bool = False
 
 
 def _general(title: str, context: Context) -> Section:
@@ -358,6 +383,83 @@ def _subtitles(title: str, context: Context) -> Section:
         ),
     )
     return Section(SUBTITLES, title, ICONS[SUBTITLES], rows=rows)
+
+
+def _timeshift(title: str, context: Context) -> Section:
+    if context.timeshift_disk:
+        # i18n: help under Settings → Time-shift → Disk cache size (it opens a card)
+        cache_help = N_("The room every channel's buffer shares on disk. Applies at once.")
+    else:
+        # i18n: help (a tooltip) of Settings → Time-shift → Disk cache size while the disk is off
+        cache_help = N_("The room the buffers share on disk, once the disk is used.")
+    default_folder: tuple[Row, ...] = ()
+    if context.recordings_own:
+        default_folder = (
+            Row(
+                DEFAULT_FOLDER,
+                # i18n: the Recordings folder goes back to the system's Movies (Videos) folder
+                N_("Use the default"),
+                # i18n: help under Settings → Time-shift → Use the default (the Recordings folder)
+                N_("New recordings go to QiTV's folder in Movies (or Videos) again."),
+                kind=ACTION,
+            ),
+        )
+    rows = (
+        Row(
+            TIMESHIFT_DISK,
+            N_("Use disk for a longer time-shift buffer"),  # i18n: a setting
+            # i18n: help under Settings → Time-shift → Use disk for a longer time-shift buffer
+            N_(
+                "A channel you leave keeps its buffer up to 24 hours."
+                " Applies from the next channel."
+            ),
+            ON_OFF,
+            ConfigManager.DEFAULT_OPTION_TIMESHIFT_ENABLED,
+        ),
+        Row(
+            "timeshift_ram_mib",
+            N_("Memory per stream"),  # i18n: a setting: each stream's time-shift buffer in RAM
+            # i18n: help under Settings → Time-shift → Memory per stream
+            N_("Each picture's buffer when it isn't on disk. Applies from the next channel."),
+            tuple(
+                Choice(mib, mib_text(mib), literal=True)
+                for mib in ConfigManager.TIMESHIFT_RAM_CHOICES
+            ),
+            ConfigManager.DEFAULT_OPTION_TIMESHIFT_RAM_MIB,
+            sub=memory_rewind_text(context.timeshift_ram_mib),
+        ),
+        Row(
+            DISK_CACHE,
+            DISK_CACHE_TEXT,
+            cache_help,
+            kind=ACTION if context.timeshift_disk else INFO,
+            note=cache_size_text(context.timeshift_max_mib),
+        ),
+        Row(
+            RECORDINGS_FOLDER,
+            N_("Recordings folder"),  # i18n: a line of Settings → Time-shift; its path follows
+            # i18n: help (a tooltip) of Settings → Time-shift → Recordings folder
+            N_("Where R or the record button saves the live channel you watch."),
+            kind=INFO,
+            note=context.recordings_folder,
+        ),
+        Row(
+            CHANGE_FOLDER,
+            N_("Change…"),  # i18n: a row under the Recordings folder: picks another one
+            # i18n: help under Settings → Time-shift → Change… (the Recordings folder)
+            N_("Picks the folder new recordings go to."),
+            kind=ACTION,
+        ),
+        *default_folder,
+        Row(
+            OPEN_FOLDER,
+            N_("Open folder"),  # i18n: shows the Recordings folder in the system's file manager
+            # i18n: help under Settings → Time-shift → Open folder
+            N_("Shows the Recordings folder in the system's file manager."),
+            kind=ACTION,
+        ),
+    )
+    return Section(TIMESHIFT, title, ICONS[TIMESHIFT], rows=rows)
 
 
 def _image_cache_choices(current: Any) -> tuple[Choice, ...]:
@@ -603,7 +705,8 @@ def sections(
     """The sections in the drawer's order; `system` is platform.system(), `providers` the
     rows of the providers, listed first in Providers, `context` what only the running QiTV
     knows (by default: English only, no TMDB or OpenSubtitles key built in, the image cache's
-    default size, no Files rows and nothing to tell of AI captions' files)."""
+    default size, no Files rows, nothing to tell of AI captions' files, the time-shift
+    settings' defaults and no Recordings folder of one's own)."""
     context = context if context is not None else Context()
     titles = (
         (PROVIDERS, N_("Providers")),  # i18n: a settings section's title
@@ -627,6 +730,8 @@ def sections(
             built.append(_general(text, context))
         elif key == SUBTITLES:
             built.append(_subtitles(text, context))
+        elif key == TIMESHIFT:
+            built.append(_timeshift(text, context))
         elif key == FILES:
             built.append(_files(text, tuple(context.files)))
         elif key == ADVANCED:
