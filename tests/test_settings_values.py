@@ -127,6 +127,7 @@ class SettingsValuesTests(unittest.TestCase):
             "secure_dns",
             "detailed_log",
             "max_cache_image_size",
+            "ai_captions_model",  # Subtitles' (plan 3)
         ):
             self.assertIn(key, keys)
         for row in rows:
@@ -143,6 +144,17 @@ class SettingsValuesTests(unittest.TestCase):
         values.set("tmdb_token", " eyJ.made \n up ")
         self.assertEqual(self.config.tmdb_token, "eyJ.madeup")
         self.assertEqual(values.get("tmdb_token"), "eyJ.madeup")
+
+    def test_the_opensubtitles_login_is_kept_as_the_old_save_kept_it(self):
+        # The key without any space a paste brings, the username without those at its ends,
+        # the password as typed.
+        values = SettingsValues(self.config)
+        values.set("opensubtitles_api_key", " fictional \n key ")
+        values.set("opensubtitles_username", " harbour viewer ")
+        values.set("opensubtitles_password", " pass word ")
+        self.assertEqual(self.config.opensubtitles_api_key, "fictionalkey")
+        self.assertEqual(self.config.opensubtitles_username, "harbour viewer")
+        self.assertEqual(self.config.opensubtitles_password, " pass word ")
 
     def test_an_unknown_key_is_an_error(self):
         values = SettingsValues(self.config)

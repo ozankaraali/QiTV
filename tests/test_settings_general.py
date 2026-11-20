@@ -20,6 +20,7 @@ from services.config_manager import ConfigManager
 from services.file_types import RegisterResult, Status
 from services.i18n import translate
 from services.provider_manager import ProviderManager
+from services.settings_texts import CLEAR_CACHE_QUESTION
 from tests import test_tv_window as base
 from tests.fixtures.local_provider import PROVIDER_NAME
 from ui import file_types_settings as row_module
@@ -27,7 +28,6 @@ from ui.file_types_settings import FAILED_HINT, MAC_HINT, MUSIC_LABEL, VIDEOS_LA
 from ui.keymap import Action
 from ui.overlays.settings_card import CANCEL
 from ui.overlays.settings_drawer import RESTART_NOTE
-from ui.settings_dialog import CLEAR_CACHE_QUESTION
 from ui.settings_general import (
     CLEAR,
     CLEARED_TEXT,

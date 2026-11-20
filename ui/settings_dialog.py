@@ -1,10 +1,9 @@
 from copy import deepcopy
-import importlib
 import logging
 import os
 import sys
 
-from PySide6.QtCore import QObject, QSize, Qt, QTimer, Signal, Slot
+from PySide6.QtCore import QSize, Qt, QTimer, Slot
 from PySide6.QtGui import QGuiApplication, QIntValidator
 from PySide6.QtWidgets import (
     QAbstractButton,
@@ -60,7 +59,9 @@ from services.picture import DEINTERLACING, deinterlace_name
 from services.provider_link import parse_provider_link
 from services.provider_rename import removed_between, renames_between
 from services.provider_types import EMBY, JELLYFIN, is_media_server
+from services.settings_texts import CLEAR_CACHE_QUESTION, OPENSUBTITLES_BUILT_IN_HINT
 from services.tmdb import built_in_token as tmdb_built_in_token
+from ui.captions_files import DELETE_QUESTION, CaptionsFilesJob, captions_space_text
 from ui.captions_texts import size_text
 from ui.file_types_settings import add_file_types_row
 from ui.free_channels_menu import show_menu as show_free_channels_menu
@@ -81,11 +82,6 @@ def opensubtitles_hint() -> str:
         " page, and paste it here. The subtitles panel's “Search OpenSubtitles…” asks for it too.",
         url=CONSUMERS_URL,
     )
-
-
-OPENSUBTITLES_BUILT_IN_HINT = N_(
-    "This copy of QiTV has a key of its own: yours is optional, and is used instead when set."
-)
 
 
 def opensubtitles_sign_in_hint() -> str:
@@ -127,8 +123,6 @@ PLAYLIST_TYPES = ("M3UPLAYLIST", "M3USTREAM")
 # provider QiTV is on (an STB portal's or an Xtream panel's).
 # i18n: the EPG Source setting's choice: the guide the provider itself gives
 PROVIDER_GUIDE_TEXT = N_("Provider's own guide")
-# i18n: asked by Settings' Clear Image Cache before it clears it (2.9.3)
-CLEAR_CACHE_QUESTION = N_("Clear the image cache? Posters and logos download again as they show.")
 GUIDE_OFFSET_TIP = N_(
     "When this provider's guide is off by whole hours, move its programmes here: with +1 h,"
     " a programme the guide lists at 20:00 shows at 21:00 (the guide, the banner, now and next"
@@ -179,38 +173,6 @@ LINK_KINDS = {
     provider_link.M3U: N_("M3U playlist"),
     provider_link.STB: N_("STB portal"),
 }
-
-
-class CaptionsFilesJob(QObject):
-    """AI captions' downloaded files, off the GUI thread: their size on disk, after deleting
-    them with `delete`. None: this build has no AI captions' files to tell of."""
-
-    finished = Signal(object)
-    error = Signal(str)
-
-    def __init__(self, delete: bool = False) -> None:
-        super().__init__()
-        self._delete = delete
-
-    def run(self) -> None:
-        try:
-            models = importlib.import_module("services.captions.models")
-        except ImportError:
-            self.finished.emit(None)
-            return
-        if self._delete:
-            models.delete_all()
-        self.finished.emit(int(models.space_used()))
-
-
-def captions_space_text(size) -> str:
-    """Settings' line on AI captions' downloaded files (""; nothing to tell)."""
-    if size is None:
-        return ""
-    if size <= 0:
-        return tr("Nothing downloaded")  # i18n: Settings → AI captions: no speech model yet
-    # i18n: Settings → AI captions: the space the speech model takes; size: as "880 MB"
-    return tr("Downloaded: {size}", size=size_text(size))
 
 
 class WidgetGroup:
@@ -844,12 +806,7 @@ class OptionsDialog(QDialog):
         answer = QMessageBox.question(
             self,
             translate(AI_CAPTIONS_TEXT),
-            # i18n: asked before Delete; size: as "880 MB"
-            tr(
-                "Delete AI captions' speech model ({size})? Turning AI captions on downloads it"
-                " again.",
-                size=size_text(size),
-            ),
+            translate(DELETE_QUESTION, size=size_text(size)),
             QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
             QMessageBox.StandardButton.No,
         )

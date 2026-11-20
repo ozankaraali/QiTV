@@ -41,6 +41,7 @@ from services.settings_model import (
     Context,
     Row,
 )
+from services.settings_texts import CLEAR_CACHE_QUESTION
 from ui.file_types_settings import (
     DEFAULT_APPS_TEXT,
     FAILED_HINT,
@@ -51,7 +52,6 @@ from ui.file_types_settings import (
 )
 from ui.overlays.settings_card import CANCEL, CANCEL_TEXT, Button, ChoiceCard
 from ui.settings_controller import SettingsController
-from ui.settings_dialog import CLEAR_CACHE_QUESTION
 from ui.tv_controller import ERROR_MS
 from ui.update_dialogs import check_for_updates
 

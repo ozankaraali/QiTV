@@ -3,8 +3,9 @@
 The drawer applies every step at once: a row key names a ConfigManager property, a step
 writes it, saves in the background and runs the row's hook (the caller's way to make the
 change take effect). `play_in` is no property of its own: it stands for the two old
-exclusive keys, play_in_vlc and play_in_mpv. A text is written as the old Save wrote it (a
-token without the spaces and line breaks a paste brings).
+exclusive keys, play_in_vlc and play_in_mpv. A text is written as the old Save wrote it: a
+token or an API key without the spaces and line breaks a paste brings, a username without those
+at its ends (a password as it is typed).
 """
 
 from __future__ import annotations
@@ -23,8 +24,16 @@ def _no_spaces(text: Any) -> str:
     return "".join(str(text).split())
 
 
+def _stripped(text: Any) -> str:
+    return str(text).strip()
+
+
 # A text row's key -> what of its text is written.
-_CLEANED: dict[str, Callable[[Any], Any]] = {"tmdb_token": _no_spaces}
+_CLEANED: dict[str, Callable[[Any], Any]] = {
+    "tmdb_token": _no_spaces,
+    "opensubtitles_api_key": _no_spaces,
+    "opensubtitles_username": _stripped,
+}
 
 
 class SettingsValues:

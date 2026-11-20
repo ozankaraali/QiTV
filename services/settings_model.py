@@ -16,6 +16,7 @@ from dataclasses import dataclass
 from typing import Any, Optional
 
 from services.i18n import N_, SOURCE_LANGUAGE, SOURCE_NAME, number, translate
+from services.settings_texts import OPENSUBTITLES_BUILT_IN_HINT
 
 PROVIDERS = "providers"
 GENERAL = "general"
@@ -39,7 +40,6 @@ KINDS = (STEP, OPENS, ACTION, DANGER, TEXT, INFO)
 
 # Section key -> the key of the old Settings window's tab that still holds its settings.
 LEGACY_TABS: dict[str, str] = {
-    SUBTITLES: "subtitles",
     TIMESHIFT: "timeshift",
     GUIDE: "epg",
     REMOTE: "remote",
@@ -75,6 +75,12 @@ ADVANCED_PREFIX = "advanced/"
 CLEAR_IMAGE_CACHE = ADVANCED_PREFIX + "clear_image_cache"
 # i18n: the Language setting's first choice; {language}: the system's language, by its own name
 SYSTEM_DEFAULT_TEXT = N_("System default ({language})")
+# Subtitles' own rows (ui.settings_subtitles'): AI captions' downloaded files, their deletion and
+# OpenSubtitles' Sign out act; they are no config value.
+SUBTITLES_PREFIX = "subtitles/"
+CAPTIONS_FILES = SUBTITLES_PREFIX + "captions_files"
+DELETE_CAPTIONS = SUBTITLES_PREFIX + "delete_captions"
+SIGN_OUT = SUBTITLES_PREFIX + "sign_out"
 # The image cache's largest sizes (MB) the stepper offers; the config's default is 100.
 IMAGE_CACHE_MB = (50, 100, 200, 500, 1000, 2000)
 IMAGE_CACHE_DEFAULT_MB = 100
@@ -106,7 +112,9 @@ class Row:
     "Xtream · in use") are shown as they are given, in the active language already. A
     `literal` row's `text` is too: a name the viewer gave (a provider's, a group's), never
     translated, even when it is also one of QiTV's texts ("General"). A `secret` text row (a
-    token) shows dots in its text's place; an empty one shows its `placeholder`."""
+    token) shows dots in its text's place, and its last `secret_tail` characters after them
+    when it has that many to show (an API key's last four, as the page that gave it shows
+    them); an empty one shows its `placeholder`."""
 
     key: str
     text: str
@@ -122,6 +130,7 @@ class Row:
     literal: bool = False
     secret: bool = False  # a text row's text shows as dots, and is never said or copied
     placeholder: str = ""  # an English text (N_) an empty text row shows, muted
+    secret_tail: int = 0  # a secret's last characters shown after its dots
 
     def __post_init__(self) -> None:
         if not self.kind:
@@ -193,14 +202,20 @@ class Context:
     the languages it has texts for, as (code, the language's own name), English first, and the
     name of the one the system's choice gives; whether its build carries a TMDB token; the image
     cache's largest size as set (MB: one the old window took that is none of the steps shows
-    as its own); and Files' rows, as their status is now (none when QiTV cannot be the app
-    files open with: a run from source)."""
+    as its own); Files' rows, as their status is now (none when QiTV cannot be the app files
+    open with: a run from source); whether its build carries an OpenSubtitles key; and what AI
+    captions' downloaded files take (ui.settings_subtitles measures it): the line that says it,
+    in the active language ("" while it is measured; None: this build has no such files to
+    tell of, and no row says it), and whether there is any to delete."""
 
     languages: tuple[tuple[str, str], ...] = ((SOURCE_LANGUAGE, SOURCE_NAME),)
     system_language: str = SOURCE_NAME
     tmdb_built_in: bool = False
     image_cache_mb: Any = IMAGE_CACHE_DEFAULT_MB
     files: tuple[Row, ...] = ()
+    opensubtitles_built_in: bool = False
+    captions_space: Optional[str] = None
+    captions_downloaded: bool = False
 
 
 def _general(title: str, context: Context) -> Section:
@@ -260,6 +275,89 @@ def _general(title: str, context: Context) -> Section:
         ),
     )
     return Section(GENERAL, title, ICONS[GENERAL], rows=rows)
+
+
+def _subtitles(title: str, context: Context) -> Section:
+    files: tuple[Row, ...] = ()
+    if context.captions_space is not None:
+        files = (
+            Row(
+                CAPTIONS_FILES,
+                N_("Downloaded files"),  # i18n: a line of Settings → Subtitles; its size follows
+                # i18n: help (a tooltip) of Settings → Subtitles → Downloaded files
+                N_("The space AI captions' speech models take on this computer."),
+                kind=INFO,
+                note=context.captions_space,
+            ),
+        )
+        if context.captions_downloaded:
+            files += (
+                Row(
+                    DELETE_CAPTIONS,
+                    N_("Delete downloaded files"),  # i18n: deletes AI captions' speech models
+                    # i18n: help under Settings → Subtitles → Delete downloaded files (it asks)
+                    N_("Removes AI captions' speech models from this computer. Asked first."),
+                    kind=DANGER,
+                ),
+            )
+    if context.opensubtitles_built_in:
+        key_help = OPENSUBTITLES_BUILT_IN_HINT
+        key_placeholder = N_("Optional: your own key")  # i18n: the API key field's placeholder
+    else:
+        # i18n: help under Settings → Subtitles → OpenSubtitles API key in a build without one
+        key_help = N_("Create one on the API consumers page of your free OpenSubtitles account.")
+        key_placeholder = N_("Paste your API key")  # i18n: the API key field's placeholder
+    rows = (
+        Row(
+            "ai_captions_model",
+            N_("Speech model"),  # i18n: a setting: AI captions' speech model
+            # i18n: help under Settings → Subtitles → Speech model
+            N_("Automatic takes the more accurate one on a fast computer."),
+            (
+                # i18n: Settings → AI captions → Speech model: QiTV picks it by this computer's
+                # speed
+                Choice("auto", N_("Automatic", ctx="a speech model"), "a speech model"),
+                # i18n: Settings → AI captions → Speech model: the smaller one; keep "0.6B"
+                Choice("small", N_("Faster (0.6B)")),
+                # i18n: Settings → AI captions → Speech model: the larger one; keep "1.7B"
+                Choice("large", N_("More accurate (1.7B)")),
+            ),
+            "auto",
+        ),
+        *files,
+        Row(
+            "opensubtitles_api_key",
+            N_("OpenSubtitles API key"),  # i18n: a setting, edited in place
+            key_help,
+            kind=TEXT,
+            secret=True,
+            placeholder=key_placeholder,
+            secret_tail=4,
+        ),
+        Row(
+            "opensubtitles_username",
+            N_("Username"),  # i18n: Settings → Subtitles: the OpenSubtitles account's username
+            # i18n: help under Settings → Subtitles → Username (OpenSubtitles' sign-in)
+            N_("Optional: signed in, OpenSubtitles allows you more downloads a day."),
+            kind=TEXT,
+        ),
+        Row(
+            "opensubtitles_password",
+            N_("Password"),  # i18n: Settings → Subtitles: the OpenSubtitles account's password
+            # i18n: help under Settings → Subtitles → Password (OpenSubtitles' sign-in)
+            N_("The password of your OpenSubtitles account, to sign in with."),
+            kind=TEXT,
+            secret=True,
+        ),
+        Row(
+            SIGN_OUT,
+            N_("Sign out"),  # i18n: forget the OpenSubtitles username and password
+            # i18n: help under Settings → Subtitles → Sign out
+            N_("Clears the username and the password."),
+            kind=ACTION,
+        ),
+    )
+    return Section(SUBTITLES, title, ICONS[SUBTITLES], rows=rows)
 
 
 def _image_cache_choices(current: Any) -> tuple[Choice, ...]:
@@ -504,8 +602,8 @@ def sections(
 ) -> tuple[Section, ...]:
     """The sections in the drawer's order; `system` is platform.system(), `providers` the
     rows of the providers, listed first in Providers, `context` what only the running QiTV
-    knows (by default: English only, no TMDB token built in, the image cache's default size
-    and no Files rows)."""
+    knows (by default: English only, no TMDB or OpenSubtitles key built in, the image cache's
+    default size, no Files rows and nothing to tell of AI captions' files)."""
     context = context if context is not None else Context()
     titles = (
         (PROVIDERS, N_("Providers")),  # i18n: a settings section's title
@@ -527,6 +625,8 @@ def sections(
             built.append(_playback(system))
         elif key == GENERAL:
             built.append(_general(text, context))
+        elif key == SUBTITLES:
+            built.append(_subtitles(text, context))
         elif key == FILES:
             built.append(_files(text, tuple(context.files)))
         elif key == ADVANCED:

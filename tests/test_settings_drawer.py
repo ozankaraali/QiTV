@@ -1031,6 +1031,20 @@ class SettingsDrawerTests(unittest.TestCase):
         self.drawer.activate()
         self.assertEqual(edits, [("k", "9")])  # the selection typed over
 
+    def test_an_info_line_shows_its_value_else_its_note(self):
+        # A provider's Kind is its value; a measured size or a folder its note.
+        self.open_rows(
+            m.Row("kind", "Kind", kind=m.INFO),
+            m.Row("files", "Downloaded files", kind=m.INFO, note="Downloaded: 880 MB"),
+            m.Row("name", "Name", kind=m.TEXT),
+            kind="Xtream",
+        )
+        self.drawer.grab()
+        rows = {row.key: row for row in self.drawer._right_rows()}
+        self.assertEqual(self.drawer._tail_text(rows["kind"]), "Xtream")
+        self.assertEqual(self.drawer._tail_text(rows["files"]), "Downloaded: 880 MB")
+        self.assertFalse(self.drawer._box("right", 1).end.isEmpty())  # room for it at the end
+
     def test_an_empty_text_shows_its_placeholder(self):
         self.open_rows(
             m.Row("k", "TMDB token", kind=m.TEXT, secret=True, placeholder="Built in"), k=""

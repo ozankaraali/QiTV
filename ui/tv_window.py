@@ -138,7 +138,7 @@ from services.recordings_index import FILE_NAME as RECORDINGS_INDEX_FILE, Record
 from services.recordings_list import timer_text
 from services.redact import safe_message, safe_traceback
 from services.sessions import SessionManager, Slot
-from services.settings_model import PROVIDERS, sections
+from services.settings_model import PROVIDERS, Context, sections
 from services.settings_values import SettingsValues
 from services.sound_sync import FILE_NAME as SOUND_SYNC_FILE, SoundSync
 from services.subtitle_picks import FILE_NAME as SUBTITLE_PICKS_FILE, SubtitlePicks
@@ -205,6 +205,7 @@ from ui.settings_controller import SettingsController
 from ui.settings_dialog import OptionsDialog
 from ui.settings_general import GeneralRows, hooks as general_hooks
 from ui.settings_providers import ProviderRows
+from ui.settings_subtitles import SubtitlesRows
 from ui.song_jobs import PanelCover
 from ui.subtitle_search import OnlineSetup
 from ui.track_controls import SUBTITLE_FILTER
@@ -1151,7 +1152,7 @@ class TVWindow(QMainWindow):
         self.settings = SettingsController(
             self.settings_drawer,
             values,
-            lambda: sections(system, self.provider_rows.rows(), self.general_rows.context()),
+            lambda: sections(system, self.provider_rows.rows(), self._settings_context()),
             self.options_dialog,
             controller.reopen_drawer_on_settings,
         )
@@ -1171,6 +1172,9 @@ class TVWindow(QMainWindow):
         # Files rows' status), and Files' and Advanced's own rows: the file types told on a
         # worker, the image cache cleared on one once asked.
         self.general_rows = GeneralRows(self, self.settings, self.settings_drawer)
+        # Settings › Subtitles & AI captions: the space AI captions' files take, measured on a
+        # worker as Settings opens, their deletion asked first; OpenSubtitles' Sign out.
+        self.subtitle_rows = SubtitlesRows(self, self.settings, self.settings_drawer, values)
         self.catalogs.providersChanged.connect(self.provider_rows.providers_changed)
         self.catalog.providerReady.connect(self.provider_rows.providers_changed)
         # File → Open Link… and the channel list's Open a link (plan 4): while its card shows it
@@ -2834,6 +2838,11 @@ class TVWindow(QMainWindow):
                 dialog.show_tab(tab)
             dialog.exec()
             self._settings_closed()
+
+    def _settings_context(self) -> Context:
+        """What Settings' sections show that only this QiTV knows, each section's from its
+        rows."""
+        return self.subtitle_rows.context(self.general_rows.context())
 
     def _settings_went(self) -> None:
         """Settings in the drawer went: a step's save that failed (written in the background,

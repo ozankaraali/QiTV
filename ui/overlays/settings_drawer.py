@@ -7,15 +7,17 @@ the highlight moves. A row is of a kind (services/settings_model.py's KINDS): it
 its choices ("Live latency  ‹ Auto ›", the value lit in the accent while it is not the
 default), opens a layer of rows of its own or a card (it ends in ›), acts, acts on what cannot
 be undone (in red, its title ending in "…": the caller asks first), holds a text edited in
-place ("Name  Demo TV"), or only says something (muted, and the focus goes past it). A secret
-text (a token) shows dots in its place, in its field too, and is never said, given as a tooltip
-or copied out; an empty text shows its placeholder, muted. A row may have a muted sub line
-under its title, and a note at its right end. In a layer the left column lists the rows the
-layer is one of, the opened one marked as the drawer marks its path; there only the rows that
-open a layer take the highlight, and a click on another goes back up to it. A layer (or a
-section) without rows says its `empty_text` and the keys stay on the left. A
-section whose settings are still in the Settings window has one row that opens it there
-(`legacy:<section key>`). Only the right column's focused row shows its help under it, two
+place ("Name  Demo TV"), or only says something (muted, and the focus goes past it: its value,
+else its note). A secret text (a token) shows dots in its place, in its field too, and is never
+said, given as a tooltip or copied out; one that shows its end (an API key's last four) shows
+it after a fixed row of dots, so that its length doesn't show. An empty text shows its
+placeholder, muted. A row may have a muted sub line under its title, and a note at its right
+end. In a layer the left column lists the rows the layer is one of, the opened one marked as
+the drawer marks its path; there only the rows that open a layer take the highlight, and a
+click on another goes back up to it. A layer (or a section) without rows says its
+`empty_text` and the keys stay on the left. A section whose settings are still in the
+Settings window has one row that opens it there (`legacy:<section key>`). Only the right
+column's focused row shows its help under it, two
 lines at most; a note cut short at its row's end shows there whole instead (a check's
 answer). Where everything goes is ui/overlays/settings_layout.py's.
 
@@ -127,6 +129,7 @@ RESTART_NOTE = N_("Applies when QiTV starts again.")
 LEGACY_TEXT = N_("Open in the Settings window")
 LEGACY_PREFIX = "legacy:"  # the legacy row's key: LEGACY_PREFIX + the section's key
 MASK = "•"  # a secret text's every character, as a FormCard's secret field shows it
+SECRET_DOTS = 8  # the dots before a secret's end that shows (Row.secret_tail), whatever its length
 
 _FALLBACK_HOST_WIDTH = 1280
 _BACK = "back"
@@ -158,6 +161,18 @@ _LEAVING = frozenset({Action.NAV_UP, Action.NAV_DOWN, Action.NAV_PAGE_UP, Action
 def _opens_layer(row: Row) -> bool:
     """Whether the row opens a layer of rows (not a card)."""
     return row.kind == OPENS and row.section is not None
+
+
+def masked(text: str, tail: int = 0) -> str:
+    """A secret as its row shows it: a dot for each character; one that shows its last `tail`
+    characters (an API key's last four) shows them after SECRET_DOTS dots, so that its length
+    doesn't show, and only while at least as many stay hidden (a shorter one is the dots
+    alone)."""
+    if tail <= 0:
+        return MASK * len(text)
+    if len(text) < 2 * tail:
+        return MASK * SECRET_DOTS
+    return MASK * SECRET_DOTS + text[-tail:]
 
 
 def _rekeyed(key: str, renamed: Mapping[str, str]) -> str:
@@ -575,12 +590,15 @@ class SettingsDrawer(Overlay):
 
     def _tail_text(self, row: Row) -> str:
         """What the row shows at its right end: a text or an info line's value (a secret's in
-        dots, an empty text's placeholder), else its note."""
+        dots, an empty text's placeholder; an info line without one, its note), else its
+        note."""
         if row.kind not in (TEXT, INFO):
             return row.note
         value = self._value_text(row)
-        if row.kind == TEXT and row.secret and value:
-            return MASK * len(value)
+        if row.kind == INFO:
+            return value or row.note
+        if row.secret and value:
+            return masked(value, row.secret_tail)
         if self._shows_placeholder(row):
             return translate(row.placeholder)
         return value
@@ -1433,8 +1451,8 @@ class SettingsDrawer(Overlay):
                     cut = not whole(box.values, tail)
                 else:
                     cut = fm.horizontalAdvance(tail) > box.value.width()
-            elif not box.end.isEmpty():
-                tail = self._tail_text(row)
+            elif not box.end.isEmpty() and not (row.kind == TEXT and row.secret):
+                tail = self._tail_text(row)  # (a secret's, even its dots, is never a tooltip)
                 cut = fm.horizontalAdvance(tail) > box.end.width()
             if tail and cut:
                 whole_texts.append(tail)
