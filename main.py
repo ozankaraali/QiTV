@@ -473,7 +473,7 @@ def main() -> int:
                 app.aboutToQuit.connect(dde.close)
         if not_replaced is not None:  # where the new version is, and where the old one stayed
             old_path, new_path = not_replaced
-            QTimer.singleShot(0, window, lambda: replace_failed(old_path, new_path, window))
+            QTimer.singleShot(0, window, lambda: replace_failed(old_path, new_path))
         # 2.8.3: a developer's tools read and drive this QiTV (loopback only, token-guarded).
         from services import control as control_port
 

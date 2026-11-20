@@ -1,9 +1,13 @@
-"""The update's dialogs: the prompt, its progress and its errors (services/update_checker.py
+"""The update's questions, its messages, its progress and its errors (services/update_checker.py
 does the checking, downloading and launching).
 
 `check_for_updates` is what the app calls (at startup, Help → Check for Updates, Settings):
 the service checks on a QThread and reports to `DIALOGS` (the startup check's question waits
-for a film opened in QiTV: `_AfterTheFilm`).
+for a film opened in QiTV: `_AfterTheFilm`). 2.13.1: each question and message is QiTV's own
+card over the window (ui.window_cards: the message box's title, words and buttons, the main
+action accented), answered through a callback: nothing waits in an exec(). Esc, Back and a
+click on the dimmed picture decide nothing: the update is offered again at the next check, a
+recording keeps recording.
 """
 
 import logging
@@ -12,15 +16,22 @@ import sys
 from typing import Callable, Optional
 
 from PySide6.QtCore import QTimer
-from PySide6.QtWidgets import QCheckBox, QGridLayout, QMessageBox, QProgressDialog
+from PySide6.QtWidgets import QProgressDialog
 
 from services import i18n, system_open, update_checker
 from services.config_manager import ConfigManager, get_app_version
-from services.i18n import tr, translate
+from services.i18n import N_, tr, translate
+from ui import window_cards
+from ui.overlays.settings_card import Button
 
 logger = logging.getLogger(__name__)
 
 WhenIdle = Callable[[Callable[[], None]], None]  # TVWindow.when_idle
+
+# The cards' answers, by key.
+DOWNLOAD, RELEASE, SKIP, MUTE = "download", "release", "skip", "mute"
+UPDATE_NOW, NOT_NOW, KEEP, QUIT_NOW, CLOSE = "update", "not_now", "keep", "quit", "close"
+CLOSE_TEXT = N_("Close")
 
 
 def check_for_updates(
@@ -37,99 +48,116 @@ def check_for_updates(
     update_checker.check_for_updates(config_manager, manual, ui)
 
 
+def _lines(*parts: str) -> str:
+    """A message box's text and informative text, as the card's words (one under another)."""
+    return "\n".join(part for part in parts if part)
+
+
+def _button_text(text: str) -> str:
+    """A translated button's text as painted: "&&" is the "&" a Qt button showed."""
+    return text.replace("&&", "&")
+
+
+def _offer_release_page(title: str, body: str, release_url: str) -> None:
+    """A failure, with Open Release Page (the accent) and Close."""
+    buttons = [
+        Button(CLOSE, translate(CLOSE_TEXT)),
+        # i18n: a button: opens the release's web page
+        Button(RELEASE, tr("Open Release Page"), accent=True),
+    ]
+
+    def answered(key: str) -> None:
+        if key == RELEASE:
+            system_open.open_url(release_url)
+
+    window_cards.ask(title, body, buttons, RELEASE, answered, back=CLOSE)
+
+
 class _Dialogs:
     """The update service's `UpdateUI`."""
 
     def up_to_date(self) -> None:
-        msg = QMessageBox()
-        msg.setIcon(QMessageBox.Information)
-        msg.setWindowTitle(tr("No Updates"))  # i18n: a message box's title
-        msg.setText(tr("You're running the latest version ({version}).", version=get_app_version()))
-        _polish_msgbox(msg)
-        msg.exec_()
+        window_cards.tell(
+            tr("No Updates"),  # i18n: a message box's title
+            tr("You're running the latest version ({version}).", version=get_app_version()),
+        )
 
     def check_failed(self, message: str) -> None:
-        msg = QMessageBox()
-        msg.setIcon(QMessageBox.Warning)
-        msg.setWindowTitle(tr("Update Check Failed"))
-        msg.setText(tr("Could not check for updates."))
-        msg.setInformativeText(message)  # the network's own error, as it came
-        _polish_msgbox(msg)
-        msg.exec_()
+        window_cards.tell(
+            tr("Update Check Failed"),
+            # the network's own error, as it came
+            _lines(tr("Could not check for updates."), message),
+        )
 
     def update_available(self, info: dict, config_manager, manual: bool) -> None:
         show_update_dialog(info, config_manager, manual)
 
     def launch_failed(self, downloaded_path: str, release_url: str) -> None:
-        error_dialog = QMessageBox()
-        error_dialog.setIcon(QMessageBox.Warning)
-        error_dialog.setWindowTitle(tr("Update Failed"))
-        error_dialog.setText(tr("Failed to launch the update."))
-        error_dialog.setInformativeText(
-            tr("The update was downloaded to:\n{path}", path=downloaded_path)
+        body = _lines(
+            tr("Failed to launch the update."),
+            tr("The update was downloaded to:\n{path}", path=downloaded_path),
         )
-        # i18n: a button: opens the release's web page
-        open_btn = error_dialog.addButton(tr("Open Release Page"), QMessageBox.ActionRole)
-        error_dialog.addButton(QMessageBox.Close)
-        _polish_msgbox(error_dialog)
+        _offer_release_page(tr("Update Failed"), body, release_url)
 
-        error_dialog.exec_()
-        if error_dialog.clickedButton() == open_btn:
-            system_open.open_url(release_url)
-
-    def confirm_quit_and_open(self) -> bool:
-        """macOS: QiTV closes and opens the downloaded disk image (Update Now), or not now."""
-        msg = QMessageBox()
-        msg.setIcon(QMessageBox.Information)
-        msg.setWindowTitle(tr("Update Downloaded"))
-        msg.setText(tr("QiTV will close and open the update."))
-        msg.setInformativeText(
+    def confirm_quit_and_open(self, then: Callable[[bool], None]) -> None:
+        """macOS: QiTV closes and opens the downloaded disk image (Update Now, the default), or
+        not now (Back too): `then(yes)`."""
+        body = _lines(
+            tr("QiTV will close and open the update."),
             tr(
                 # i18n: Applications, Replace: as Finder names them; Not Now: this dialog's button
                 "In the window that opens, drag QiTV onto Applications and choose Replace.\n\n"
                 "Not Now keeps this version; QiTV offers the update again at its next check."
-            )
+            ),
         )
-        # i18n: a button: QiTV closes and opens the downloaded update
-        update_btn = msg.addButton(tr("Update Now"), QMessageBox.AcceptRole)
-        msg.addButton(tr("Not Now"), QMessageBox.RejectRole)  # i18n: a button
-        msg.setDefaultButton(update_btn)
-        _polish_msgbox(msg)
-        msg.exec_()
-        return msg.clickedButton() == update_btn
+        buttons = [
+            Button(NOT_NOW, tr("Not Now")),  # i18n: a button
+            # i18n: a button: QiTV closes and opens the downloaded update
+            Button(UPDATE_NOW, tr("Update Now"), accent=True),
+        ]
+        window_cards.ask(
+            tr("Update Downloaded"),
+            body,
+            buttons,
+            UPDATE_NOW,
+            lambda key: then(key == UPDATE_NOW),
+            back=NOT_NOW,
+        )
 
-    def confirm_stop_recordings(self, question: str) -> bool:
-        """2.6: channels record: the update quits and stops them (their files are saved), or
-        not now (Keep recording, the default)."""
+    def confirm_stop_recordings(self, question: str, then: Callable[[bool], None]) -> None:
+        """2.6: channels record: the update quits and stops them (their files are saved; Quit,
+        in red), or not now (Keep recording, the default, and Back): `then(quit)`."""
         from ui.stream_question import KEEP_RECORDING, QUIT
 
-        msg = QMessageBox()
-        msg.setIcon(QMessageBox.Warning)
-        msg.setWindowTitle(tr("Update Downloaded"))
-        msg.setText(question)
-        quit_btn = msg.addButton(translate(QUIT), QMessageBox.AcceptRole)
-        keep_btn = msg.addButton(translate(KEEP_RECORDING), QMessageBox.RejectRole)
-        msg.setDefaultButton(keep_btn)
-        _polish_msgbox(msg)
-        msg.exec_()
-        return msg.clickedButton() == quit_btn
+        buttons = [
+            Button(KEEP, translate(KEEP_RECORDING)),
+            Button(QUIT_NOW, translate(QUIT), danger=True),
+        ]
+        window_cards.ask(
+            tr("Update Downloaded"),
+            question,
+            buttons,
+            KEEP,
+            lambda key: then(key == QUIT_NOW),
+            back=KEEP,
+        )
 
     def downloaded(self, downloaded_path: str) -> None:
         """A zip on macOS, or Linux: say where the update is, then open its folder."""
-        msg = QMessageBox()
-        msg.setIcon(QMessageBox.Information)
-        msg.setWindowTitle(tr("Update Downloaded"))
-        msg.setText(tr("Update downloaded successfully!"))
-        msg.setInformativeText(
+        body = _lines(
+            tr("Update downloaded successfully!"),
             tr(
                 "The new version has been saved to:\n{path}\n\n"
                 "Please replace the current application with the downloaded file.",
                 path=downloaded_path,
-            )
+            ),
         )
-        _polish_msgbox(msg)
-        msg.exec_()
-        system_open.open_folder(os.path.dirname(downloaded_path))
+        folder = os.path.dirname(downloaded_path)
+
+        def read(_key: str) -> None:
+            system_open.open_folder(folder)
+
+        window_cards.tell(tr("Update Downloaded"), body, read)
 
 
 DIALOGS = _Dialogs()
@@ -163,60 +191,20 @@ class _AfterTheFilm(_Dialogs):
         waiting = True
 
 
-def replace_failed(old_path: str, new_path: str, parent=None) -> None:
+def replace_failed(old_path: str, new_path: str) -> None:
     """Windows: the new version runs, but could not take the old one's place (the old QiTV
     still held its file after a while, or it cannot be written): where each one is."""
-    msg = QMessageBox(parent)
-    msg.setIcon(QMessageBox.Warning)
-    msg.setWindowTitle(tr("Update Failed"))
-    msg.setText(tr("The update could not replace the old version of QiTV."))
-    msg.setInformativeText(
+    body = _lines(
+        tr("The update could not replace the old version of QiTV."),
         tr(
             # i18n: {new} and {old} are file paths, each on a line of its own
             "This version runs from:\n{new}\n\n"
             "Use that file from now on, or close QiTV and copy it over the old one:\n{old}",
             new=new_path,
             old=old_path,
-        )
+        ),
     )
-    _polish_msgbox(msg)
-    msg.exec_()
-
-
-def _polish_msgbox(msg: QMessageBox):
-    """Reduce icon-to-text spacing and ensure buttons are not truncated.
-
-    Button sizing is deferred to the first show event so that font metrics
-    are fully resolved by the platform style.
-    """
-    layout = msg.layout()
-    if layout:
-        layout.setHorizontalSpacing(10)
-        layout.setContentsMargins(10, 10, 10, 10)
-        if isinstance(layout, QGridLayout):
-            layout.setColumnMinimumWidth(0, 0)
-            layout.setColumnStretch(0, 0)
-            layout.setColumnStretch(1, 1)
-
-    # Defer button width calculation until after the dialog is laid out,
-    # so font metrics are resolved by the platform style engine.
-    original_show = msg.showEvent
-
-    def _on_show(event):
-        original_show(event)
-        total_buttons_width = 0
-        for btn in msg.buttons():
-            fm = btn.fontMetrics()
-            # Strip & accelerator markers for accurate text measurement
-            display_text = btn.text().replace("&&", "\x00").replace("&", "").replace("\x00", "&")
-            text_width = fm.horizontalAdvance(display_text) + 32
-            btn.setMinimumWidth(text_width)
-            total_buttons_width += text_width + 8  # 8px spacing between buttons
-
-        min_dialog_width = max(400, total_buttons_width + 80)
-        msg.setMinimumWidth(min_dialog_width)
-
-    msg.showEvent = _on_show  # type: ignore[method-assign]
+    window_cards.tell(tr("Update Failed"), body)
 
 
 def show_update_dialog(
@@ -224,17 +212,18 @@ def show_update_dialog(
     config_manager: Optional[ConfigManager] = None,
     manual: bool = False,
 ):
-    """Show update dialog with download option if available.
+    """The update offered, in a card (its answer through a callback: nothing waits).
 
     Buttons:
-        - Download & Install  (frozen builds with a download URL)
-        - Open Release Page
+        - Download & Install  (frozen builds with a download URL; the accent)
+        - Open Release Page   (the accent without a download)
         - Skip This Version   (records the version so automatic checks won't show it again)
 
-    Checkbox:
-        - "Do not remind me about updates"  — if checked when the dialog is
-          dismissed via *Skip This Version*, automatic update checks are
-          disabled entirely (not just for this version).
+    The other way, under them (automatic checks only):
+        - "Do not remind me about updates": automatic update checks are disabled entirely
+          (the old box's check box with Skip This Version).
+
+    Esc, Back and the dimmed picture: nothing changes (offered again at the next check).
 
     Args:
         update_info: Dict with keys ``version``, ``url``, and optionally
@@ -249,48 +238,54 @@ def show_update_dialog(
 
     # Check if we're running as a frozen executable
     is_frozen = getattr(sys, "frozen", False)
+    can_download = bool(download_url and is_frozen)
 
-    msg = QMessageBox()
-    msg.setIcon(QMessageBox.Information)
-    msg.setText(tr("A new version ({version}) is available!", version=version))
-    msg.setWindowTitle(tr("Update Available"))
-
-    # "Do not remind me" checkbox — only shown for automatic checks
-    mute_checkbox: Optional[QCheckBox] = None
-    if not manual and config_manager is not None:
-        mute_checkbox = QCheckBox(tr("Do not remind me about updates"))
-        msg.setCheckBox(mute_checkbox)
-
-    download_btn = None
-    if download_url and is_frozen:
-        msg.setInformativeText(tr("Would you like to download and install the update?"))
-        # i18n: a button; "&&" shows as "&" (a single "&" would underline the next letter)
-        download_btn = msg.addButton(tr("Download && Install"), QMessageBox.AcceptRole)
-        browser_btn = msg.addButton(tr("Open Release Page"), QMessageBox.ActionRole)
+    text = tr("A new version ({version}) is available!", version=version)
+    # i18n: a button
+    buttons = [Button(SKIP, tr("Skip This Version"))]
+    if can_download:
+        question = tr("Would you like to download and install the update?")
+        buttons += [
+            Button(RELEASE, tr("Open Release Page")),
+            Button(
+                DOWNLOAD,
+                # i18n: a button; "&&" shows as "&" (a single "&" would underline the next letter)
+                _button_text(tr("Download && Install")),
+                accent=True,
+            ),
+        ]
     else:
         # Fallback: running from source or no download URL available
-        msg.setInformativeText(tr("Would you like to open the release page?"))
-        browser_btn = msg.addButton(tr("Open Release Page"), QMessageBox.AcceptRole)
-    skip_btn = msg.addButton(tr("Skip This Version"), QMessageBox.RejectRole)  # i18n: a button
+        question = tr("Would you like to open the release page?")
+        buttons.append(Button(RELEASE, tr("Open Release Page"), accent=True))
+    # "Do not remind me" — only offered for automatic checks
+    alternates = []
+    if not manual and config_manager is not None:
+        alternates.append(Button(MUTE, tr("Do not remind me about updates")))
 
-    _polish_msgbox(msg)
-    msg.exec_()
-    clicked = msg.clickedButton()
-
-    if download_btn is not None and clicked == download_btn:
-        # Clear any previous skip for this version so it doesn't block
-        # future checks after the download is complete / cancelled.
-        if config_manager:
-            config_manager.skipped_update_version = ""
-            update_checker.save_settings(config_manager)  # a locked file does not stop it
-        start_download(download_url, file_size, release_url)
-    elif clicked == browser_btn:
-        system_open.open_url(release_url)
-    elif clicked == skip_btn:
-        if mute_checkbox and mute_checkbox.isChecked():
-            update_checker.disable_update_reminders(config_manager)
-        else:
+    def answered(key: str) -> None:
+        if key == DOWNLOAD:
+            # Clear any previous skip for this version so it doesn't block
+            # future checks after the download is complete / cancelled.
+            if config_manager:
+                config_manager.skipped_update_version = ""
+                update_checker.save_settings(config_manager)  # a locked file does not stop it
+            start_download(download_url, file_size, release_url)
+        elif key == RELEASE:
+            system_open.open_url(release_url)
+        elif key == SKIP:
             update_checker.skip_version(config_manager, version)
+        elif key == MUTE:
+            update_checker.disable_update_reminders(config_manager)
+
+    window_cards.ask(
+        tr("Update Available"),
+        _lines(text, question),
+        buttons,
+        DOWNLOAD if can_download else RELEASE,
+        answered,
+        alternates=alternates,
+    )
 
 
 # The progress dialogs of downloads under way (kept from the garbage collector).
@@ -343,15 +338,5 @@ def start_download(download_url: str, file_size: int, release_url: str):
 
 def _show_download_error(error_msg: str, release_url: str):
     """Show download error with option to open release page."""
-    error_dialog = QMessageBox()
-    error_dialog.setIcon(QMessageBox.Warning)
-    error_dialog.setWindowTitle(tr("Download Failed"))
-    error_dialog.setText(tr("Failed to download update."))
-    error_dialog.setInformativeText(error_msg)
-    open_btn = error_dialog.addButton(tr("Open Release Page"), QMessageBox.ActionRole)
-    error_dialog.addButton(QMessageBox.Close)
-    _polish_msgbox(error_dialog)
-
-    error_dialog.exec_()
-    if error_dialog.clickedButton() == open_btn:
-        system_open.open_url(release_url)
+    body = _lines(tr("Failed to download update."), error_msg)
+    _offer_release_page(tr("Download Failed"), body, release_url)

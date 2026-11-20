@@ -189,6 +189,7 @@ from ui.overlays.question_card import QuestionCard
 from ui.overlays.rec_sign import RecSign
 from ui.overlays.remote_pair import PairOverlay
 from ui.overlays.retry_notice import RetryNotice
+from ui.overlays.settings_card import ChoiceCard
 from ui.overlays.settings_drawer import SettingsDrawer
 from ui.overlays.sleep_notice import SleepNotice
 from ui.overlays.stats import StatsOverlay
@@ -223,6 +224,7 @@ from ui.tv_menus import TVMenus
 from ui.tv_pages import TVPages
 from ui.video_surface import VideoSurface
 from ui.visualizer import Visualizer
+from ui.window_cards import WindowCards, install as install_window_cards
 
 logger = logging.getLogger(__name__)
 
@@ -810,6 +812,23 @@ class TVWindow(QMainWindow):
         self.subtitle_search = SubtitleSearchPage(host)
         # File → Open Link… and the channel list's Open a link (plan 4): its card over the picture
         self.open_link_card = LinkCard(host)
+        # 2.13.1: QiTV's own questions and messages (an update's, a recording's deletion), on
+        # the page that shows (the TV's, or its twin on the Library page): no system box.
+        self.window_cards = WindowCards(
+            ChoiceCard(host),
+            ChoiceCard(self.library_page),
+            window=self,
+            library_shown=lambda: self.screens.library_shown(),
+            closing=lambda: self._closing,
+            before_tv=self._make_way_for_card,
+            above=lambda: (
+                self.question_card,
+                self.quality_card,
+                self.captions_card,
+                self.library_question,
+            ),
+            parent=self,
+        )
         self.corner_controls = CornerControls(host)
         # What a song (or a radio channel) shows where the black picture was: its cover, album
         # and words, lit by the cover's colours (spec §10).
@@ -929,6 +948,7 @@ class TVWindow(QMainWindow):
             self.overlays.welcome,
             self.subtitle_search,
             self.open_link_card,
+            self.window_cards.tv_card,
             self.corner_controls,
             self.sleep_notice,
             self.back_notice,
@@ -1128,6 +1148,7 @@ class TVWindow(QMainWindow):
         # it bring the player back, × stops it, the speaker mutes.
         self.pages.modeChanged.connect(self._on_page_mode)
         self.pages.modeChanged.connect(self.controller.page_changed)  # 2.6: a question goes along
+        self.pages.modeChanged.connect(self.window_cards.page_changed)  # 2.13.1: so do these
         # The Library (its corner player) lays the player out: a floating picture comes back.
         self.pages.modeChanged.connect(lambda *_: self.desktop_pip.dock())
         self.pages.cornerClicked.connect(self.screens.back_to_player)
@@ -1216,6 +1237,8 @@ class TVWindow(QMainWindow):
             parent=self,
         )
         controller.add_card(self.open_link_card)
+        controller.add_card(self.window_cards.tv_card)  # over it: one asked meanwhile
+        install_window_cards(self.window_cards)  # what the update's messages show on
         # Network streams (plan 4): the links that played, kept beside the config (read on a
         # worker once the window started, written on one); a stream link plays through the
         # controller as a channel or a film, as the account whose stream it is, if one is
@@ -1604,6 +1627,12 @@ class TVWindow(QMainWindow):
         """Back to the normal window (nothing when it is not the mini player)."""
         self._leave_mini()
 
+    def _make_way_for_card(self) -> None:
+        """A question over live TV (2.13.1, ui.window_cards): the window, not the mini player,
+        and the audio dock's ⋯ menu closed (as for Open Link…'s card)."""
+        self.leave_mini_player()
+        self.more_menu.dismiss()
+
     def _on_page_mode(self, mode: str) -> None:
         """The pages moved: in the corner only its controls stay on the host (and a song's
         screen, small: its cover and title), and the picture-in-picture frame leaves the mouse
@@ -1769,6 +1798,8 @@ class TVWindow(QMainWindow):
             return  # Esc while exporting cancels the export
         if self.controller.answer_key(action):
             return  # 2.6: QiTV asks (stop a recording?): its answers' keys, on every page
+        if self.window_cards.library_key(action, payload):
+            return  # 2.13.1: a question over the Library (live TV's is the controller's card)
         if self.screens.library_shown():
             handled = self.library_controller.handle(action, payload)
             if not handled and action is Action.FULLSCREEN:
@@ -1808,7 +1839,8 @@ class TVWindow(QMainWindow):
         self.leave_mini_player()
         self.more_menu.dismiss()
         self.link_opener.open(text)
-        for card in (self.question_card, self.quality_card, self.captions_card):
+        cards = (self.window_cards.tv_card, self.question_card, self.quality_card)
+        for card in (*cards, self.captions_card):
             if card.isVisible():
                 card.raise_()  # the link's card raised itself over it
 

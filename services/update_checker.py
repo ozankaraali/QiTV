@@ -67,9 +67,11 @@ class UpdateUI(Protocol):
 
     def downloaded(self, downloaded_path: str) -> None: ...  # replace the app by hand
 
-    def confirm_quit_and_open(self) -> bool: ...  # macOS: quit and open the disk image now?
+    # macOS: quit and open the disk image now? `then(yes)` once answered (2.13.1: nothing waits)
+    def confirm_quit_and_open(self, then: Callable[[bool], None]) -> None: ...
 
-    def confirm_stop_recordings(self, question: str) -> bool: ...  # 2.6: quit while recording?
+    # 2.6: quit while recording? `then(quit)` once answered
+    def confirm_stop_recordings(self, question: str, then: Callable[[bool], None]) -> None: ...
 
 
 # Keep references to background threads/workers to avoid premature GC
@@ -525,25 +527,36 @@ def set_quit_note(note: Optional[Callable[[], str]]) -> None:
         _quit_note = lambda: note  # noqa: E731
 
 
-def _keeps_recording(ui: UpdateUI) -> bool:
-    """Channels record and the user keeps them: the update does not quit."""
+def _unless_kept_recording(ui: UpdateUI, go: Callable[[], None]) -> None:
+    """`go` (the update quits QiTV), but while channels record only once the user said to
+    stop them: kept, the update does not quit. Asked when it is to quit, not before."""
     ref = _quit_note
     note = ref() if ref is not None else None
     question = note() if note is not None else ""
-    return bool(question) and not ui.confirm_stop_recordings(question)
+    if not question:
+        go()
+        return
+    ui.confirm_stop_recordings(question, lambda stop: go() if stop else None)
 
 
 def perform_update(downloaded_path: str, release_url: str, ui: UpdateUI):
-    """Execute platform-specific update process."""
+    """Execute platform-specific update process; each question answers through its callback
+    (2.13.1), the update going on from the answer."""
     system = platform.system()
 
     if system == "Windows":
-        if not _keeps_recording(ui):
-            _perform_windows_update(downloaded_path, release_url, ui)
+        _unless_kept_recording(
+            ui, lambda: _perform_windows_update(downloaded_path, release_url, ui)
+        )
     elif system == "Darwin" and is_disk_image(downloaded_path):
-        # Or not now: the image waits in Downloads.
-        if ui.confirm_quit_and_open() and not _keeps_recording(ui):
-            _perform_macos_update(downloaded_path, release_url, ui)
+
+        def answered(now: bool) -> None:
+            if now:  # Or not now: the image waits in Downloads.
+                _unless_kept_recording(
+                    ui, lambda: _perform_macos_update(downloaded_path, release_url, ui)
+                )
+
+        ui.confirm_quit_and_open(answered)
     else:
         ui.downloaded(downloaded_path)  # a zip, or Linux: the user replaces the app
 
