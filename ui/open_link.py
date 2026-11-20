@@ -22,8 +22,8 @@ says what it is (services.link_kind.classify):
 
 While the bytes are read the card says "Checking…" and only Cancel works. Each read has its
 request id and only the latest one answers: a cancelled card, or one opened again, drops a
-late answer, and its read stops at its next chunk. Text that is no link: Play says so. The
-link is never logged.
+late answer, and its read stops at its next chunk. Text that is no link: Play says so, and the
+note goes (where a link that plays is kept is no matter then). The link is never logged.
 """
 
 from __future__ import annotations
@@ -191,6 +191,12 @@ class LinkCard(FormCard):
     def note(self) -> str:
         return self._note
 
+    def set_note(self, note: str) -> None:
+        """Another note ("": none), the form as it is."""
+        if note != self._note:
+            self._note = note
+            self.update()
+
     def _place(
         self, un: Units, fonts: dict[str, QFont], width: float, squeeze: float
     ) -> tuple[_Rects, float]:
@@ -333,6 +339,7 @@ class OpenLink(QObject):
             elif not isinstance(kind, Provider):
                 text = translate(NOT_A_LINK_TEXT)
                 self.card.set_found(text, False)
+                self.card.set_note("")  # where a link that plays is kept: no matter here
                 announce(self.card, text, assertive=True)
 
     def _hand_over(self, link: ProviderLink) -> None:

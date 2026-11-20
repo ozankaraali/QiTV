@@ -184,15 +184,20 @@ class CardTests(CardCase):
                 self.assertEqual(self.played[-1], (text.strip("'"), kind))
         self.assertEqual(self.played, [(text.strip("'"), kind) for text, kind in streams])
         self.assertEqual(self.runner.jobs, [])  # its address said it all: nothing was read
-        # Not a link: Play says so (in the warning colour) and the card stays.
+        # Not a link: Play says so (in the warning colour) and the card stays; where a link
+        # that plays is kept is no matter then (no note under it).
         for text in ("not a link", ""):
             with self.subTest(text):
                 self.typed(text)
+                self.assertEqual(self.card.note(), KEPT)
                 self.card.handle(Action.NAV_ACTIVATE)
                 self.assertFalse(self.card.isHidden())
                 self.assertEqual(self.card.found(), (NOT_A_LINK, False))
-        self.card.handle(Action.NAV_TEXT, "x")  # typing on: the line goes
+                self.assertEqual(self.card.note(), "")
+                self.card.grab()
+        self.card.handle(Action.NAV_TEXT, "x")  # typing on: the line goes, the note is back
         self.assertEqual(self.card.found(), ("", True))
+        self.assertEqual(self.card.note(), KEPT)
         self.assertEqual(len(self.played), 4)
         self.assertEqual((self.added, self.runner.jobs), ([], []))
 
