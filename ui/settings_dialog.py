@@ -79,6 +79,7 @@ from ui.parental_settings import build_parental_tab, pin_allows
 from ui.provider_check import ProviderCheck
 from ui.provider_drop import unique_name
 from ui.remote_settings import build_remote_tab, save_remote_settings
+from ui.settings_guide import PROVIDER_GUIDE_TEXT, epg_unit_label
 from ui.theme import PALETTE, accent_button_style
 from ui.track_controls import AI_CAPTIONS_TEXT
 from ui.update_dialogs import check_for_updates
@@ -128,10 +129,6 @@ REMOVE_QUESTION = N_("Remove the provider “{name}”?")
 # i18n: added to "Remove the provider …?" when it has scheduled recordings
 REMOVE_RECORDINGS_NOTE = N_("Its scheduled recordings will be cancelled.")
 PLAYLIST_TYPES = ("M3UPLAYLIST", "M3USTREAM")
-# 2.9.3: the EPG Source setting's choice "STB" (its value in the config): the guide of the
-# provider QiTV is on (an STB portal's or an Xtream panel's).
-# i18n: the EPG Source setting's choice: the guide the provider itself gives
-PROVIDER_GUIDE_TEXT = N_("Provider's own guide")
 GUIDE_OFFSET_TIP = N_(
     "When this provider's guide is off by whole hours, move its programmes here: with +1 h,"
     " a programme the guide lists at 20:00 shows at 21:00 (the guide, the banner, now and next"
@@ -153,19 +150,6 @@ def offset_text(minutes: int) -> str:
         return tr("{sign}{h} h", sign=sign, h=hours)
     # i18n: a guide time offset: sign is + or −, m minutes (abbreviated)
     return tr("{sign}{m} min", sign=sign, m=rest)
-
-
-def epg_unit_label(unit: str) -> str:
-    """The guide's update period unit (a config value, "Hours") as Settings shows it."""
-    labels = {
-        # i18n: the unit of the guide's update period: "Check update every [2] [Hours]"
-        "Minutes": tr("Minutes"),
-        "Hours": tr("Hours"),  # i18n: the unit of "Check update every [2] [Hours]"
-        "Days": tr("Days"),  # i18n: the unit of "Check update every [2] [Days]"
-        "Weeks": tr("Weeks"),  # i18n: the unit of "Check update every [2] [Weeks]"
-        "Months": tr("Months"),  # i18n: the unit of "Check update every [2] [Months]"
-    }
-    return labels.get(unit, unit)
 
 
 # A provider link's kind, as Paste link names it.

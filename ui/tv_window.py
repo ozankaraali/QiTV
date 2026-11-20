@@ -24,6 +24,7 @@ filled in: Enter plays it.
 from __future__ import annotations
 
 import atexit
+import dataclasses
 from datetime import datetime, timedelta
 import logging
 import multiprocessing
@@ -139,7 +140,7 @@ from services.recordings_index import FILE_NAME as RECORDINGS_INDEX_FILE, Record
 from services.recordings_list import timer_text
 from services.redact import safe_message, safe_traceback
 from services.sessions import SessionManager, Slot
-from services.settings_model import PROVIDERS, Context, sections
+from services.settings_model import PROVIDERS, REMOTE, Context, sections
 from services.settings_values import SettingsValues
 from services.sound_sync import FILE_NAME as SOUND_SYNC_FILE, SoundSync
 from services.subtitle_picks import FILE_NAME as SUBTITLE_PICKS_FILE, SubtitlePicks
@@ -205,8 +206,11 @@ from ui.remote_controller import RemoteController
 from ui.settings_controller import SettingsController
 from ui.settings_dialog import OptionsDialog
 from ui.settings_general import GeneralRows, hooks as general_hooks
+from ui.settings_guide import GuideRows, hooks as guide_hooks
 from ui.settings_links import LinkRows
+from ui.settings_parental import ParentalRows
 from ui.settings_providers import ProviderRows
+from ui.settings_remote import RemoteRows
 from ui.settings_subtitles import SubtitlesRows
 from ui.settings_timeshift import TimeshiftRows, hooks as timeshift_hooks
 from ui.song_jobs import PanelCover
@@ -1151,6 +1155,7 @@ class TVWindow(QMainWindow):
                 "covered_pip": self._arm_desktop_pip,
                 **general_hooks(self),  # General's and Advanced's (ui.settings_general)
                 **timeshift_hooks(self),  # Time-shift's (ui.settings_timeshift)
+                **guide_hooks(self),  # the Guide's (ui.settings_guide)
             },
         )
         self.settings = SettingsController(
@@ -1182,6 +1187,15 @@ class TVWindow(QMainWindow):
         # Settings › Time-shift & recordings: the disk turned off only once asked, the disk
         # cache's size on a value card, the Recordings folder changed, reset or opened.
         self.timeshift_rows = TimeshiftRows(self, self.settings, self.settings_drawer, values)
+        # Settings › Guide: its rows follow the guide's source; the update period and each
+        # channel's matching in a card, the matching's files read and written on a worker.
+        self.guide_rows = GuideRows(self, self.settings, self.settings_drawer)
+        # Settings › Phone remote: its switches start or stop the remote at once, its state as
+        # the remote tells it, each paired phone removed once asked.
+        self.remote_rows = RemoteRows(self, self.settings, self.settings_drawer)
+        # Settings › Parental controls: the PIN in a card, locked and unlocked, what is hidden
+        # only while unlocked; each change through parental_changed.
+        self.parental_rows = ParentalRows(self, self.settings, self.settings_drawer)
         self.catalogs.providersChanged.connect(self.provider_rows.providers_changed)
         self.catalog.providerReady.connect(self.provider_rows.providers_changed)
         # File → Open Link… and the channel list's Open a link (plan 4): while its card shows it
@@ -1458,6 +1472,8 @@ class TVWindow(QMainWindow):
             self._relock.stop()
         # 2.9.7: the Recordings tab hides a hidden channel's recordings while locked
         self.screens.library_controller.recordings_changed()
+        if self.settings.visible():  # Settings' Parental controls follow (the hour run out too)
+            self.settings.refresh_sections()
 
     def note_recording(self, path: str, channel: dict, title: str, start: float) -> None:
         """2.9.7: a recording started with R: what its file holds, in the recordings index."""
@@ -2865,6 +2881,19 @@ class TVWindow(QMainWindow):
             if card.isVisible():
                 card.raise_()  # Settings raised itself over it
 
+    def _settings_context(self) -> Context:
+        """What Settings' sections show that only this QiTV knows, each section's from its
+        rows: General's, Files' and Advanced's (ui.settings_general), Subtitles' and
+        Time-shift's, and the Guide's, the phone remote's and parental controls' rows as they
+        are now."""
+        context = self.subtitle_rows.context(self.general_rows.context())
+        return dataclasses.replace(
+            self.timeshift_rows.context(context),
+            guide=self.guide_rows.rows(),
+            remote=self.remote_rows.rows(),
+            parental=self.parental_rows.rows(),
+        )
+
     def options_dialog(self, tab: str = "") -> None:
         """The Settings window, on the tab `tab` names ("general", "timeshift", "subtitles",
         "remote", "parental", "providers", "epg"; "": the first)."""
@@ -2874,12 +2903,6 @@ class TVWindow(QMainWindow):
                 dialog.show_tab(tab)
             dialog.exec()
             self._settings_closed()
-
-    def _settings_context(self) -> Context:
-        """What Settings' sections show that only this QiTV knows, each section's from its
-        rows."""
-        context = self.subtitle_rows.context(self.general_rows.context())
-        return self.timeshift_rows.context(context)
 
     def _settings_went(self) -> None:
         """Settings in the drawer went: a step's save that failed (written in the background,
@@ -2904,8 +2927,8 @@ class TVWindow(QMainWindow):
             return
         if self.remote.hub is None:
             self.remote.turn_on()
-            if self.remote.hub is None:  # settings of a newer QiTV: its Settings tab says so
-                self.options_dialog(tab="remote")
+            if self.remote.hub is None:  # settings of a newer QiTV: Settings says so
+                self.open_settings(section_key=REMOTE)
                 return
         if self.screens.library_shown():
             self.screens.back_to_tv()  # the QR shows over the TV

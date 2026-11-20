@@ -44,12 +44,9 @@ TEXT = "text"  # a value edited in place: Enter or a click on it focused starts 
 INFO = "info"  # a muted line with its value: never focused, the keys go past it
 KINDS = (STEP, OPENS, ACTION, DANGER, TEXT, INFO)
 
-# Section key -> the key of the old Settings window's tab that still holds its settings.
-LEGACY_TABS: dict[str, str] = {
-    GUIDE: "epg",
-    REMOTE: "remote",
-    PARENTAL: "parental",
-}
+# Section key -> the key of the old Settings window's tab that still holds its settings (none
+# now: every section has its rows in the drawer).
+LEGACY_TABS: dict[str, str] = {}
 
 # Section key -> its icon, a drawing of ui/overlays/painting.py's draw_icon. A section with no
 # fitting drawing yet (Phone remote, Parental controls) has none.
@@ -228,7 +225,10 @@ class Context:
     tell of, and no row says it), and whether there is any to delete; the time-shift settings
     as they are now (whether the disk buffer is on, the memory per stream and the disk cache,
     in MiB) and the Recordings folder (where recordings go, and whether it is one of the
-    viewer's own rather than the default)."""
+    viewer's own rather than the default). The Guide's rows, built for its source as it is now
+    (ui.settings_guide), the phone remote's for its settings and its state
+    (ui.settings_remote), and parental controls' for the PIN and the lock now
+    (ui.settings_parental)."""
 
     languages: tuple[tuple[str, str], ...] = ((SOURCE_LANGUAGE, SOURCE_NAME),)
     system_language: str = SOURCE_NAME
@@ -243,6 +243,9 @@ class Context:
     timeshift_max_mib: int = ConfigManager.DEFAULT_OPTION_TIMESHIFT_MAX_MIB
     recordings_folder: str = ""
     recordings_own: bool = False
+    guide: tuple[Row, ...] = ()
+    remote: tuple[Row, ...] = ()
+    parental: tuple[Row, ...] = ()
 
 
 def _general(title: str, context: Context) -> Section:
@@ -530,6 +533,21 @@ def _files(title: str, rows: tuple[Row, ...]) -> Section:
     )
 
 
+def _guide(title: str, rows: tuple[Row, ...]) -> Section:
+    """Guide: its rows as ui.settings_guide builds them (they follow the guide's source)."""
+    return Section(GUIDE, title, ICONS[GUIDE], rows=rows)
+
+
+def _remote(title: str, rows: tuple[Row, ...]) -> Section:
+    """Phone remote: its rows as ui.settings_remote builds them (they follow the remote)."""
+    return Section(REMOTE, title, ICONS.get(REMOTE, ""), rows=rows)
+
+
+def _parental(title: str, rows: tuple[Row, ...]) -> Section:
+    """Parental controls: its rows as ui.settings_parental builds them (they follow the lock)."""
+    return Section(PARENTAL, title, ICONS.get(PARENTAL, ""), rows=rows)
+
+
 def _playback(system: str) -> Section:
     pip: tuple[Row, ...] = ()
     if system == "Darwin":
@@ -708,7 +726,8 @@ def sections(
     rows of the providers, listed first in Providers, `context` what only the running QiTV
     knows (by default: English only, no TMDB or OpenSubtitles key built in, the image cache's
     default size, no Files rows, nothing to tell of AI captions' files, the time-shift
-    settings' defaults and no Recordings folder of one's own)."""
+    settings' defaults, no Recordings folder of one's own and no Guide, Phone remote or
+    Parental controls rows)."""
     context = context if context is not None else Context()
     titles = (
         (PROVIDERS, N_("Providers")),  # i18n: a settings section's title
@@ -738,6 +757,12 @@ def sections(
             built.append(_files(text, tuple(context.files)))
         elif key == ADVANCED:
             built.append(_advanced(text, context))
+        elif key == GUIDE:
+            built.append(_guide(text, tuple(context.guide)))
+        elif key == REMOTE:
+            built.append(_remote(text, tuple(context.remote)))
+        elif key == PARENTAL:
+            built.append(_parental(text, tuple(context.parental)))
         else:
             built.append(Section(key, text, ICONS.get(key, ""), legacy_tab=LEGACY_TABS[key]))
     return tuple(built)

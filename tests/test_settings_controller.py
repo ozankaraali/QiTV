@@ -12,7 +12,7 @@ from timer_fixtures import elapse
 
 from services import i18n, settings_model
 from services.i18n import translate
-from services.settings_model import GUIDE, ON_OFF, PLAYBACK, Choice, Row, Section, sections
+from services.settings_model import ON_OFF, PLAYBACK, Choice, Row, Section, sections
 from ui import settings_controller
 from ui.keymap import Action
 from ui.overlays.base import Overlay
@@ -194,10 +194,14 @@ class SettingsControllerTests(unittest.TestCase):
                 self.assertEqual(translate("Off"), plain)
 
     def test_legacy_closes_then_opens_the_old_tab(self):
-        self.controller.open(GUIDE)
-        self.controller.handle(Action.NAV_RIGHT)
-        self.controller.handle(Action.NAV_ACTIVATE)
-        self.assertEqual(self.legacy, ["epg"])
+        # A section whose settings are still in the Settings window (made up here: the
+        # sections move into the drawer one by one).
+        self.shown = sections("Darwin") + (Section("old", "Old", legacy_tab="old_tab"),)
+        with mock.patch.dict(settings_model.LEGACY_TABS, {"old": "old_tab"}):
+            self.controller.open("old")
+            self.controller.handle(Action.NAV_RIGHT)
+            self.controller.handle(Action.NAV_ACTIVATE)
+        self.assertEqual(self.legacy, ["old_tab"])
         self.assertFalse(self.controller.visible())
 
     def test_back_from_the_sections_reopens_the_drawer_only_when_opened_from_it(self):
