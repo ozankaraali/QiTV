@@ -207,6 +207,37 @@ class SettingsControllerTests(unittest.TestCase):
         self.assertFalse(self.controller.visible())
         self.assertEqual(self.reopened, [])
 
+    def test_backing_out_gives_the_drawer_back_as_back_does(self):
+        # 2.13.1: a choice made in Settings opened for it (a free list's country) closes it
+        # as backing out of it does: opened from the channel list, the list comes back.
+        self.controller.open(PLAYBACK, from_drawer=True)
+        self.controller.back_out()
+        self.assertFalse(self.controller.visible())
+        self.assertEqual(self.reopened, [True])
+        self.controller.open(PLAYBACK)
+        self.controller.back_out()
+        self.assertFalse(self.controller.visible())
+        self.controller.back_out()  # hidden already: nothing
+        self.assertEqual(self.reopened, [True])
+
+    def test_settings_opens_at_a_row_of_a_layer(self):
+        # 2.13.1: opened for a row (Free channels' countries), its section and the layers on
+        # the way open, the keys on it; asked again while it shows, it goes there.
+        self.controller.open(PLAYBACK, row="auto_play_movies")
+        self.assertEqual(self.drawer.path(), (PLAYBACK, "autoplay"))
+        self.assertEqual(self.drawer.focus_side(), "right")
+        self.assertEqual(self.drawer.focused_row().key, "auto_play_movies")
+        self.controller.show_section(PLAYBACK, row="live_latency")  # the section it is in
+        self.assertEqual(self.drawer.path(), (PLAYBACK,))
+        self.assertEqual(self.drawer.focused_row().key, "live_latency")
+        self.assertTrue(self.controller.show_row("auto_play_episodes"))
+        self.assertEqual(self.drawer.path(), (PLAYBACK, "autoplay"))
+        self.assertFalse(self.controller.show_row("no such row"))
+        self.assertEqual(self.drawer.focused_row().key, "auto_play_episodes")  # it stays
+        self.controller.handle(Action.ESCAPE)  # Esc goes up from there, as from a find's match
+        self.assertEqual(self.drawer.path(), (PLAYBACK,))
+        self.assertEqual(self.drawer.focused_row().key, "autoplay")
+
     def test_player_keys_pass_through(self):
         self.controller.open()
         self.assertFalse(self.controller.handle(Action.VOL_UP))

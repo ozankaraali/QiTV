@@ -161,7 +161,8 @@ class Row:
 class Section:
     """A group of rows. `empty_text` (an English text marked with N_) shows in place of its
     rows while it has none. A `literal` one's `text` is shown as it is given (a provider's
-    layer: its name, in the breadcrumb)."""
+    layer: its name, in the breadcrumb). A `found_inside` one's rows are found only by a find
+    typed inside it (a long list of names: Free channels' countries, 2.13.1)."""
 
     key: str
     text: str
@@ -169,6 +170,7 @@ class Section:
     rows: tuple[Row, ...] = ()
     empty_text: str = ""
     literal: bool = False
+    found_inside: bool = False
 
 
 # A setting's On and Off have their own catalog entries: the plain "Off" also names the

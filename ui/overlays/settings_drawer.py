@@ -52,7 +52,10 @@ Forward too) or a click on one opens its section or layer with that row focused 
 the row after it; a section: its first row); Backspace edits the text (`find_backspace`),
 its last letter going ends the find; Esc, ←, ✕, ‹, the fade (`back()`) and a click on the left
 column end it (`end_find`), the right column back as it was. New sections while it shows: the
-find stays, over them.
+find stays, over them. Typed inside a layer, the find lists its rows first, and a long list of
+names (Free channels' countries) is found only from inside it. A row is gone to as a match is
+from outside too (`show_row`: Settings opened at Free channels' countries, a list just added
+focused among the providers).
 
 The mouse: a click on a row focuses it. On the right column a row whose click changes it in
 place (a stepper's value, a text) only takes the focus while it has not got it, so that its
@@ -258,6 +261,7 @@ class SettingsDrawer(Overlay):
         self._found: list[Target] = []
         self._found_rows: tuple[Row, ...] = ()
         self._before_find: Optional[tuple[str, int, int]] = None
+        self._find_here: Optional[tuple[int, tuple[int, ...]]] = None  # the layer it was typed in
         # Each line's place at y 0, by what it is laid out from (`_placed_key`): a line is
         # wrapped once for what it shows, not at each paint or mouse move. Emptied for new
         # sections, a value changed and another width (`_placed_width`: the host's).
@@ -647,6 +651,7 @@ class SettingsDrawer(Overlay):
         if self._targets is None:
             self._targets = find_index(self._sections)
         self._before_find = (self._side, self._right, self._first[RIGHT])
+        self._find_here = (self._section, tuple(self._opened)) if self._opened else None
         self._find = TextEdit(text)
         self._side = RIGHT
         self._match(focus_key)
@@ -656,7 +661,7 @@ class SettingsDrawer(Overlay):
         the best), the right column from its top."""
         if self._find is None:
             return
-        self._found = find(self._targets or [], self._find.text)
+        self._found = find(self._targets or [], self._find.text, self._find_here)
         self._found_rows = tuple(
             Row(
                 target.row.key,
@@ -687,7 +692,7 @@ class SettingsDrawer(Overlay):
         if self._find is None:
             return
         before, self._before_find = self._before_find, None
-        self._find = None
+        self._find, self._find_here = None, None
         self._found, self._found_rows = [], ()
         self._hover = None
         if restore and before is not None:
@@ -703,9 +708,26 @@ class SettingsDrawer(Overlay):
         focused (an info line: the nearest row after it, else before it; a section found by
         its title: its first row, else the section on the left), and the find ends; Esc then
         goes up from there."""
-        if not 0 <= index < len(self._found):
-            return
-        target = self._found[index]
+        if 0 <= index < len(self._found):
+            self._go_to(self._found[index])
+
+    def show_row(self, key: str) -> bool:
+        """Row `key` of the sections focused where it is, its section and the layers on the
+        way opened, as Enter on a find's match goes there (a text being edited is kept first,
+        a find ends); Esc then goes up from there. False, the place unchanged, when no row has
+        that key."""
+        if self._edit is not None:
+            self._end_edit(keep=True)  # (a rename builds the sections again: first)
+        if self._targets is None:
+            self._targets = find_index(self._sections)
+        target = next((t for t in self._targets if t.index >= 0 and t.row.key == key), None)
+        if target is None:
+            return False
+        self._go_to(target)
+        return True
+
+    def _go_to(self, target: Target) -> None:
+        """The keys on `target`'s row, in its section and layer (the find ends)."""
         self._drop_find(restore=False)
         self._pressed = None  # a double-click's second press does not step what it reached
         self._section = target.section
