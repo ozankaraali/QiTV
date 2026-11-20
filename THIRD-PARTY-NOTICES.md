@@ -119,7 +119,7 @@ The libraries they need (as `uv.lock` resolves them):
 | darkdetect | BSD-3-Clause |
 | frozenlist | Apache-2.0 |
 | idna | BSD-3-Clause |
-| multidict | Apache License 2.0 |
+| multidict | Apache-2.0 |
 | propcache | Apache-2.0 |
 | pycares | MIT |
 | pycparser | BSD-3-Clause |
