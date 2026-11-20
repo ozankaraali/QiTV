@@ -57,8 +57,16 @@ class ClassifyTests(unittest.TestCase):
         for ext in ("mp4", "mkv", "avi", "mov", "wmv", "mpg", "mpeg", "webm", "m4v"):
             with self.subTest(ext):  # video files: films by their address
                 self.assertEqual(classify(f"http://cdn.example/a/b.{ext}"), FILM)
-        # An Xtream live path stays live by its address, whatever its extension.
+        # An Xtream live path stays live by its address, whatever its extension, and so does
+        # Xtream's short form of a live stream, U/P/<number>.ts, the common M3U one: its panel
+        # may allow only so many streams, and QiTV may not know it (re-review R2).
         self.assertEqual(classify("http://panel.example/live/u/p/1.ts"), LIVE)
+        for url in ("http://panel.example:8080/demo/secret/12.ts", "https://p.example/u/p/7.TS"):
+            with self.subTest(url):
+                self.assertEqual(classify(url), LIVE)
+        for url in ("http://cdn.example/live/channel.ts", "http://cdn.example/a/b/c/12.ts"):
+            with self.subTest(url):  # any other .ts: its answer says
+                self.assertEqual(classify(url), PROBE)
 
     def test_accounts_and_playlists_are_providers(self):
         got = classify("http://panel.example:8080/get.php?username=u&password=p&type=m3u_plus")
@@ -123,6 +131,16 @@ class ProbeTests(unittest.TestCase):
             (live, "application/vnd.apple.mpegurl", 300, LIVE),  # its tags decide
             (live + "#EXT-X-ENDLIST\n", "audio/mpegurl", None, FILM),
             ("\ufffd\ufffd", "video/x-flv", None, LIVE),  # a live .flv: no size
+            ("\x00\x00\x00\x18ftypmp42", "application/mp4", 9_000_000, FILM),
+            ("OggS\x00\x02", "application/ogg", 4_000_000, FILM),
+            # Re-review R1: a list or a manifest with a size is no file that ends: as before.
+            ('<?xml version="1.0"?><MPD type="dynamic">', "application/dash+xml", 900, LIVE),
+            ("[playlist]\nFile1=http://radio.example/coast\n", "audio/x-scpls", 80, LIVE),
+            ("[playlist]\nFile1=http://radio.example/coast\n", "", 80, LIVE),  # untyped too
+            ('<?xml version="1.0"?><playlist>', "application/xspf+xml", 300, LIVE),
+            ("<asx version='3.0'><entry>", "video/x-ms-asf", 300, LIVE),
+            ('{"url": "http://radio.example/coast"}', "application/json", 40, LIVE),
+            (binary, "application/x-shockwave-flash", 9_000, LIVE),  # nothing VLC plays as a file
         )
         for text, content_type, length, kind in cases:
             with self.subTest(content_type=content_type, length=length, text=text[:12]):

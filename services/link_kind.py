@@ -17,6 +17,7 @@ account out of it for an "Add the whole account" offer.
 from __future__ import annotations
 
 from dataclasses import dataclass
+import re
 from typing import Iterable, Optional, Union
 from urllib.parse import unquote, urlsplit
 
@@ -41,6 +42,16 @@ FILM, LIVE, PROBE, NONE = "FILM", "LIVE", "PROBE", "NONE"
 _EITHER_EXTENSIONS = tuple(
     f".{ext}" for ext in ("mp3", "aac", "ogg", "opus", "m4a", "flac", "wav", "flv", "ts")
 )
+# Xtream's short form of a live stream, /U/P/<number>.ts (the common M3U one): live by its
+# address, as /live/U/P/<number>.ts is, so a panel whose limit QiTV may not know is never
+# read first.
+_SHORT_LIVE = re.compile(r"^/[^/]+/[^/]+/\d+\.ts$")
+# What an answer with a size is a file that ends as (re-review R1): sound or video, but not the
+# lists and manifests sent as such (a station list, DASH, XSPF, ASX); and a file of no named
+# type. Any other answer (a page, JSON, a manifest) keeps the kind it had: live.
+_FILE_TYPES = ("application/octet-stream", "application/mp4", "application/ogg", "")
+_LIST_TYPES = ("mpegurl", "scpls", "x-ms-asf", "asx", "dash+xml", "xspf", "x-ms-wax", "x-ms-wvx")
+_LIST_STARTS = ("[playlist]", "<", "{")  # a station list, XML (DASH, XSPF, ASX, a page), JSON
 # Every other video and music file type QiTV opens from the disk is a file that ends (final
 # review I2: a song played as a live channel replayed from its start for ever).
 _FILM_EXTENSIONS = tuple(
@@ -129,6 +140,8 @@ def classify(url: str) -> Kind:
     if stream is not None:
         return stream[0]
     path = parts.path.lower()
+    if _SHORT_LIVE.match(path):
+        return LIVE  # Xtream's short live form (re-review R2): never read at an unknown panel
     if path.endswith((".m3u8",) + _EITHER_EXTENSIONS):
         return PROBE
     if path.endswith(_FILM_EXTENSIONS):
@@ -154,10 +167,11 @@ def probe_text(
     """What a fetched link is, from its first 64 KB and its answer's `content_type` and
     `length` (its Content-Length; None: not given): FILM when it has an end (a finished
     playlist), LIVE for any other HLS playlist (a master too), a Provider (an M3U playlist at
-    `url`) for a list of channels with their own http(s) links and no HLS tags. Any other
-    answer with a size is a file that ends, a FILM (a song or a film whose address has no
-    extension), unless it is text or a playlist. Anything else is LIVE (a stream that never
-    ends: internet radio, a live channel): VLC decides, and so is a list read without its
+    `url`) for a list of channels with their own http(s) links and no HLS tags. An answer
+    with a size that is sound or video (or of no named type, `_ends`) and no list or manifest
+    is a file that ends, a FILM (a song, or a film whose address has no extension). Anything
+    else is LIVE, as it was (a stream that never ends: internet radio, a live channel; a
+    station list, a DASH manifest, a page): VLC decides, and so is a list read without its
     address (no provider to offer)."""
     lines = [line.strip() for line in text[:PROBE_BYTES].lstrip("\ufeff").splitlines()]
     if any(line.startswith("#EXT-X-") for line in lines):
@@ -175,16 +189,20 @@ def probe_text(
                     return Provider(ProviderLink(M3U, url)) if url.strip() else LIVE
                 break
     playlist = any(line.startswith(("#EXTM3U", "#EXTINF")) for line in lines)
+    playlist = playlist or text.lstrip("\ufeff \t\r\n")[:16].lower().startswith(_LIST_STARTS)
     return FILM if not playlist and _ends(content_type, length) else LIVE
 
 
 def _ends(content_type: str, length: Optional[int]) -> bool:
     """Whether an answer is a file that ends: its size is given (a stream that never ends has
-    none), and it is neither text (a page saying why) nor a playlist."""
+    none), and it is sound or video (not a list or a manifest sent as such), or a file of no
+    named type. Text, JSON, XML manifests and anything else are not (re-review R1)."""
     if length is None or length <= 0:
         return False
     kind = content_type.partition(";")[0].strip().lower()
-    return not (kind.startswith("text/") or "mpegurl" in kind)
+    if any(marker in kind for marker in _LIST_TYPES):
+        return False
+    return kind.startswith(("audio/", "video/")) or kind in _FILE_TYPES
 
 
 def _login_user(url: str) -> Optional[str]:
