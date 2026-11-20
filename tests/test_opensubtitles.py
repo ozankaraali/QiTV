@@ -481,13 +481,21 @@ class FoundTests(unittest.TestCase):
         # one, longer than the 255 bytes file systems allow, after the download was counted.
         self.assertEqual(safe_file_name("a" * 150 + ".srt", "1.srt"), "a" * 120 + ".srt")
         with tempfile.TemporaryDirectory() as folder:
-            for name in ("字" * 90 + ".srt", "Ж" * 119 + ".srt", "字" * 300, "a" * 300):
-                with self.subTest(name=name[:3]):
+            for name, kind in (
+                ("字" * 90 + ".srt", ".srt"),
+                ("Ж" * 119 + ".srt", ".srt"),
+                ("字" * 300, ".srt"),
+                ("a" * 300, ".srt"),
+                ("字" * 90 + ".ass", ".ass"),  # the stem is cut, its kind kept
+                ("a" * 150 + ".VTT", ".VTT"),
+            ):
+                with self.subTest(name=name[:3] + kind):
                     path = opensubtitles.subtitle_path(folder, 7, name)
                     opensubtitles.save_subtitle(path, b"1\n00:00:01,000 --> 00:00:02,000\nHi\n")
                     self.assertTrue(os.path.isfile(path))
                     self.assertLessEqual(len(os.path.basename(path).encode("utf-8")), 204)
-                    self.assertTrue(path.endswith(".srt"))
+                    self.assertTrue(path.endswith(kind))
+                    self.assertEqual(os.path.basename(path).count("."), 1)
 
 
 class KeyTests(unittest.TestCase):
