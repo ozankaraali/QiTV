@@ -332,6 +332,7 @@
     "In the window that opens, drag QiTV onto Applications and choose Replace.\n\nNot Now keeps this version; QiTV offers the update again at its next check.": "Applications, Replace: as Finder names them; Not Now: this dialog's button",
     "In use": "a provider's stream is used for something else",
     "International": "free channels of no single country (a list entry)",
+    "Internet radio from radio-browser.info: every country's most played, or one country's.": "help under Settings → Providers → Free radio, and its menu's tooltip; (radio-browser.info is a website's name)",
     "It can be paired again with the code on the TV.": "under \"Remove the phone …?\": what it takes to use that phone again",
     "It isn't {name} with a new token, but another stream. Keep it as a new link, or replace {name}'s address?": "{name} is the link edited (its name in Network streams); a token is the part of a",
     "Its name, logo and guide IDs, changed or deleted in a card.": "help under a channel in Settings → Guide → Channel matching",

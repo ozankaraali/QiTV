@@ -32,7 +32,7 @@ from PySide6.QtCore import QObject, QPoint
 from PySide6.QtGui import QGuiApplication
 from PySide6.QtWidgets import QMenu, QWidget
 
-from services import external_players, favorites, i18n
+from services import external_players, favorites, free_radio, i18n
 from services.i18n import N_, tr, tr_n, translate
 from services.navigation import (
     FAVORITES_GROUP,
@@ -268,7 +268,8 @@ class ContextActions(QObject):
         """A channel's own entries: favorites, picture-in-picture (with `pip`), Record at a
         time…, Remove from Recents (with `recent`, on a row of ⟲ Recent) and Hide. A link
         has no favorites (★ lists a provider's channels) nor Record at a time… (a scheduled
-        recording asks its provider for the link)."""
+        recording asks its provider for the link), and a radio list's station (2.13) no Record
+        at a time… either (it plays directly: the helper that records can't read it)."""
         item: dict = node.payload
         link = self._link(item)
         if not link:
@@ -280,7 +281,8 @@ class ContextActions(QObject):
             menu.addAction(translate(OPEN_PIP_TEXT)).triggered.connect(
                 lambda _=False: open_pip(node)
             )
-        record_at = self._record_at() if self._record_at is not None and not link else None
+        recordable = not link and not free_radio.is_station(item)
+        record_at = self._record_at() if self._record_at is not None and recordable else None
         if record_at is not None:
             menu.addAction(translate(RECORD_AT_TEXT)).triggered.connect(
                 lambda _=False: record_at(item)

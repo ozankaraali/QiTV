@@ -55,7 +55,7 @@ from typing import Any, Callable, Optional
 
 from PySide6.QtCore import QObject, QTimer, Signal
 
-from services import recording, recording_schedule as rs
+from services import free_radio, recording, recording_schedule as rs
 from services.catalog import EMPTY_LINK_MESSAGE, NO_STREAM_MESSAGE, PROVIDER_LOADING_MESSAGE
 from services.connection_budget import DENIED
 from services.i18n import N_, translate
@@ -321,6 +321,12 @@ class RecordingScheduler(QObject):
             if earlier is not None and now < earlier.at:
                 continue
             busy.add(job.key)
+            if free_radio.is_station(job.channel):
+                # 2.13: a radio list's station plays directly; the helper can't read it. Said
+                # once, at its time: no stream, no link, no try every minute.
+                self.schedule.started(job)
+                self._said(job, rs.FAILED, "unsupported")
+                continue
             holder = self._holder(job)
             if holder is not None:  # within a recording on its channel: in that file
                 holder.covers.append(job)

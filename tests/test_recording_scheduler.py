@@ -163,6 +163,27 @@ class SchedulerTests(unittest.TestCase):
         self.assertEqual(max_s, 24 * 3600)  # the scheduler stops it at its window's end
         self.assertTrue(any("The News" in text for text, _ in self.toasts))
 
+    def test_a_radio_station_is_refused_once_and_never_tried(self):  # 2.13
+        # A radio list's station plays directly: the helper can't read it. Scheduled anyway
+        # (an older build, the guide), it is said failed once, at its time: no stream, no
+        # link, no session, no retry every minute.
+        station = {**CHANNEL, "id": "a1b2", "name": "Wexlo FM", "radio_station": True}
+        self.schedule.add_once(station, programme("Morning Mix", 30))
+        self.scheduler.tick()
+        self.assertEqual(
+            (self.catalogs.asked, self.engine.opened, self.budget.holders("P")), ([], [], [])
+        )
+        (outcome,) = self.schedule.outcomes()
+        self.assertEqual((outcome["state"], outcome["why"]), (rs.FAILED, "unsupported"))
+        self.assertEqual(
+            self.toasts,
+            [("“Morning Mix” could not be recorded (the channel can't be recorded).", "error")],
+        )
+        self.now += 120
+        self.scheduler.tick()
+        self.assertEqual(len(self.toasts), 1)
+        self.assertEqual(self.catalogs.asked, [])
+
     def test_a_scheduled_recording_notes_its_title(self):  # 2.9.7
         self.scheduled_now()
         sid = self.engine.opened[0][0]

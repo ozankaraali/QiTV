@@ -159,7 +159,7 @@ class AllStationsTests(WindowCase):
         self.assertTrue(wait_until(lambda: bool(groups())))
         self.assertEqual(
             groups(),
-            [("All stations", 5), ("News & talk", 1), ("Other", 1), ("Pop", 2), ("Rock", 1)],
+            [("All stations", 5), ("News & talk", 1), ("Pop", 2), ("Rock", 1), ("Other", 1)],
         )
         every = self.tv_catalog().items("live", "*")
         self.assertEqual([c["name"] for c in every][:2], ["Wexlo FM", "Pell Rock"])

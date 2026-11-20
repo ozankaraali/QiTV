@@ -162,6 +162,9 @@ class M3ULoaderWorker(QObject):
                     response.raise_for_status()
                     text = decode_playlist(response)
                     stations = stations_in(text, directory=directory)
+                    if stations == []:  # the directory found none: kept as an empty answer is
+                        last_exc = _NotAPlaylist()
+                        continue
                     if stations is not None:
                         self.finished.emit(parse_stations(stations))  # (read mended)
                         return

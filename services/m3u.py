@@ -245,9 +245,12 @@ def parse_stations(stations: List[Any]) -> Dict:
             group = free_radio.country_of(station)
         else:
             group = free_radio.genre_of(station.get("tags"))
+        uuid = str(station.get("stationuuid") or "").strip()
         items.append(
             {
-                "id": len(items) + 1,
+                # The directory's own id: a refresh sorted anew keeps hidden stations hidden
+                # and the history on the right one (its place in the list moves).
+                "id": uuid or len(items) + 1,
                 "group": group,
                 "xmltv_id": None,
                 "name": str(station.get("name") or "").strip() or _link_name(link),
@@ -312,7 +315,8 @@ def split_cached_groups(payload: Any) -> Any:
 
 def order_cached_groups(payload: Any) -> Any:
     """A cached playlist's groups in the active language's alphabetical order (a cache made
-    before they sorted case-insensitively, or in another language), "All" first; in place."""
+    before they sorted case-insensitively, or in another language), "All" first (a radio list's
+    Other last); in place."""
     categories = payload.get("categories") if isinstance(payload, dict) else None
     if not isinstance(categories, list) or not all(isinstance(c, dict) for c in categories):
         return payload
@@ -323,6 +327,10 @@ def order_cached_groups(payload: Any) -> Any:
             title = str(category.get("title") or category.get("id") or "")
             by_title.setdefault(title, []).append(category)
     payload["categories"] = first + [c for t in group_order(by_title) for c in by_title[t]]
+    if payload.get(free_radio.RADIO_KEY) is True:  # Free radio: Other after the rest
+        others = [c for c in payload["categories"] if c.get("id") == free_radio.OTHER]
+        rest = [c for c in payload["categories"] if c.get("id") != free_radio.OTHER]
+        payload["categories"] = rest + others
     return payload
 
 

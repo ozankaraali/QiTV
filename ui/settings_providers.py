@@ -27,7 +27,7 @@ said, and nothing changes (services.provider_changes puts it back as the disk ho
 
 Keys: `provider/<name>` for a provider's layer and `provider/<name>/<field>` for its rows, the
 name with "%", "/" and a leading "@" escaped (an unnamed provider is named after its address;
-the list's own rows are `provider/@add` and `provider/@free`).
+the list's own rows are `provider/@add`, `provider/@free` and `provider/@radio`).
 """
 
 from __future__ import annotations

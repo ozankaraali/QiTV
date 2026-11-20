@@ -4904,6 +4904,16 @@ class ContextMenuTests(ControllerTestCase):
         self.choose(menu, "Record at a time…")
         self.assertEqual(asked, ["One"])
 
+    def test_a_radio_station_is_never_recorded_at_a_time(self):  # 2.13
+        # It plays directly: the helper a scheduled recording opens can't read it.
+        self.controller.record_at = lambda channel: None  # QiTV can record at a time
+        node = self.channels[0]
+        station = {**node.payload, free_radio.STATION_KEY: True}
+        texts = self.texts(self.menu_for(NavNode(node.layer, node.key, node.title, station)))
+        self.assertNotIn("Record at a time…", texts)
+        self.assertEqual(texts[0], "Add to favorites")
+        self.assertIn("Record at a time…", self.texts(self.menu_for(node)))  # a channel: as ever
+
     def guarded(self):
         from services.parental import Parental
 

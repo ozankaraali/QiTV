@@ -9,14 +9,19 @@ import threading
 from types import SimpleNamespace
 import unittest
 from unittest import mock
+import uuid as uuid_module
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 from services import free_channels, free_radio as fr, i18n, provider_check, workers
 from services.config_manager import get_app_version
 from services.m3u import order_cached_groups, parse_stations, stations_in
+from services.navigation import item_key
+from services.parental import Parental
 from services.provider_api import CLIENT_HEADERS
 from services.provider_manager import ProviderManager
+from services.watch_state import WatchState
+from tests.test_parental import FakeClock, FakeConfig
 
 COUNTRY_URL = (
     "https://all.api.radio-browser.info/json/stations/bycountrycodeexact/GB"
@@ -25,11 +30,14 @@ COUNTRY_URL = (
 ALL_URL = "https://all.api.radio-browser.info/json/stations/topclick/2000?hidebroken=true"
 
 
-def station(name, link, *, tags="", country="TR", favicon="", url=""):
-    """One station as the directory lists it (the fields QiTV reads, and some it doesn't)."""
+def station(name, link, *, tags="", country="TR", favicon="", url="", uuid=None):
+    """One station as the directory lists it (the fields QiTV reads, and some it doesn't); its
+    `stationuuid` is made from its name and link unless given ("" for none)."""
+    if uuid is None:
+        uuid = str(uuid_module.uuid5(uuid_module.NAMESPACE_URL, f"{name}|{link}|{url}"))
     return {
         "changeuuid": "00000000-0000-0000-0000-000000000000",
-        "stationuuid": "00000000-0000-0000-0000-000000000001",
+        "stationuuid": uuid,
         "name": name,
         "url": url or link,
         "url_resolved": link,
@@ -184,7 +192,7 @@ class StationsTests(unittest.TestCase):
         self.assertEqual(
             contents[0],
             {
-                "id": 1,
+                "id": STATIONS[0]["stationuuid"],  # the directory's own: kept across refreshes
                 "group": "Pop",
                 "xmltv_id": None,
                 "name": "Wexlo FM",  # its spaces gone
@@ -210,6 +218,30 @@ class StationsTests(unittest.TestCase):
             ],
         )
 
+    def test_a_station_keeps_its_id_when_the_list_comes_sorted_anew(self):
+        # The directory sorts by clicks: a refresh moves stations. Hidden stations, the
+        # history, Recent and the last channel key on the id: it is the station's own.
+        first = parse_stations(STATIONS)["contents"]
+        again = parse_stations(list(reversed(STATIONS)))["contents"]
+        by_name = {item["name"]: item for item in again}
+        self.assertNotEqual([c["name"] for c in first], [c["name"] for c in again])
+        for item in first:
+            moved = by_name[item["name"]]
+            self.assertEqual(item_key(moved), item_key(item))
+            self.assertEqual(
+                WatchState.content_id("Radio: Türkiye", moved, item_type="channel"),
+                WatchState.content_id("Radio: Türkiye", item, item_type="channel"),
+            )
+        guard = Parental(FakeConfig(), clock=FakeClock())
+        guard.set_pin("1234")
+        self.assertTrue(guard.hide_item("live", first[1]))  # Pell Rock
+        hidden = [item["name"] for item in again if guard.protects("live", item)]
+        self.assertEqual(hidden, ["Pell Rock"])
+
+    def test_a_station_without_its_uuid_is_numbered_by_its_place(self):
+        stations = [station("Bare Test", "http://s.test/bare", uuid="")]
+        self.assertEqual(parse_stations(stations)["contents"][0]["id"], 1)
+
     def test_one_countrys_stations_are_grouped_by_genre(self):
         playlist = parse_stations(STATIONS)
         self.assertEqual(
@@ -217,9 +249,9 @@ class StationsTests(unittest.TestCase):
             [
                 {"id": "*", "title": "All stations"},  # every station, most played first
                 {"id": "News & talk", "title": "News & talk"},
-                {"id": "Other", "title": "Other"},
                 {"id": "Pop", "title": "Pop"},
                 {"id": "Rock", "title": "Rock"},
+                {"id": "Other", "title": "Other"},  # last
             ],
         )
         self.assertEqual(playlist["sorted_channels"]["Pop"], [0, 3])
@@ -238,9 +270,9 @@ class StationsTests(unittest.TestCase):
             [(c["id"], c["title"]) for c in playlist["categories"]],
             [
                 ("*", "All stations"),
-                ("Other", "Other"),
                 ("Türkiye", "Türkiye"),
                 ("United Kingdom", "United Kingdom"),
+                ("Other", "Other"),  # after the countries
             ],
         )
         self.assertEqual(playlist["sorted_channels"]["Türkiye"], [0, 4])
@@ -292,10 +324,10 @@ class TranslatedGroupsTests(unittest.TestCase):
             [(c["id"], c["title"]) for c in playlist["categories"]],
             [
                 ("*", "Tüm istasyonlar"),
-                ("Other", "Diğer"),  # by the shown names: D before H
-                ("News & talk", "Haberler ve sohbet"),
+                ("News & talk", "Haberler ve sohbet"),  # by the shown names
                 ("Pop", "Pop"),
                 ("Rock", "Rock"),
+                ("Other", "Diğer"),  # last, whatever its name
             ],
         )
 
@@ -308,10 +340,10 @@ class TranslatedGroupsTests(unittest.TestCase):
             [(c["id"], c["title"]) for c in payload["categories"]],
             [
                 ("*", "Tüm istasyonlar"),
-                ("Other", "Diğer"),
                 ("News & talk", "Haberler ve sohbet"),
                 ("Pop", "Pop"),
                 ("Rock", "Rock"),
+                ("Other", "Diğer"),
             ],
         )
 
@@ -350,7 +382,7 @@ class TranslatedGroupsTests(unittest.TestCase):
         loaded = again._load_provider_cache(again.current_provider)
         self.assertEqual(
             [c["title"] for c in loaded["itv"]["categories"]],
-            ["Tüm istasyonlar", "Diğer", "Haberler ve sohbet", "Pop", "Rock"],
+            ["Tüm istasyonlar", "Haberler ve sohbet", "Pop", "Rock", "Diğer"],
         )
 
 
@@ -422,12 +454,14 @@ class LoaderTests(unittest.TestCase):
         self.assertEqual(len(playlist["contents"]), len(STATIONS))
         self.assertEqual(self.server.requests[0][2], f"QiTV v{get_app_version()}")
 
-    def test_a_country_with_no_station_is_an_empty_list(self):
+    def test_an_empty_answer_keeps_the_saved_list(self):
+        # As an empty playlist's (2.8.12): no list replaces the saved one with none; a list
+        # added just now says so as an empty playlist does.
         url = f"{self.base}/json/stations/bycountrycodeexact/BQ"
         with mock.patch.object(fr, "is_directory_url", return_value=True):
-            [playlist], errors = self.run_worker(workers.M3ULoaderWorker(url))
-        self.assertEqual(errors, [])
-        self.assertEqual(playlist["contents"], [])
+            results, errors = self.run_worker(workers.M3ULoaderWorker(url))
+        self.assertEqual(results, [])
+        self.assertEqual(errors, [workers.UNEXPECTED_ANSWER_MESSAGE])
 
     def test_other_json_is_still_no_playlist(self):
         results, errors = self.run_worker(workers.M3ULoaderWorker(f"{self.base}/list.json"))

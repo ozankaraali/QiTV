@@ -22,6 +22,7 @@ import unicodedata
 from urllib.parse import urlsplit
 
 from services import free_channels
+from services.config_manager import get_app_version
 from services.i18n import N_, translate
 from services.provider_api import CLIENT_HEADERS
 
@@ -41,9 +42,9 @@ STATION_KEY = "radio_station"  # in each of its stations (`is_station`)
 # i18n: a radio list's first group: every station, most played first
 ALL_STATIONS = N_("All stations")
 
-# i18n: help under Settings → Providers → Free radio, and its menu's tooltip (radio-browser.info
-# is a website's name)
 HELP_TEXT = N_(
+    # i18n: help under Settings → Providers → Free radio, and its menu's tooltip
+    # i18n: (radio-browser.info is a website's name)
     "Internet radio from radio-browser.info: every country's most played, or one country's."
 )
 
@@ -208,6 +209,4 @@ def headers_for(url: Any) -> dict[str, str]:
     one ("QiTV v2.13.0", as OpenSubtitles and TMDB hear it); VLC's to everything else."""
     if not is_directory_url(url):
         return CLIENT_HEADERS
-    from services.opensubtitles import user_agent  # (Qt and more: only when it is asked)
-
-    return {"User-Agent": user_agent()}
+    return {"User-Agent": f"QiTV v{get_app_version()}"}
