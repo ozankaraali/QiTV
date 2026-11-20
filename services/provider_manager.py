@@ -13,7 +13,7 @@ from PySide6.QtCore import QObject, Signal
 import orjson as json
 import tzlocal
 
-from services import free_channels
+from services import free_channels, provider_cache
 from services.atomic_write import atomic_write, set_aside
 from services.catchup import mark_stb_archives
 from services.lazy_import import lazy_module
@@ -35,6 +35,18 @@ requests = lazy_module("requests")
 HANDSHAKE_UNREACHABLE = "unreachable"  # DNS, connection, timeout or a server error
 HANDSHAKE_REJECTED = "rejected"  # an explicit refusal (401/403, blocked) or no token
 HANDSHAKE_UNEXPECTED = "unexpected"  # any other answer: a wrong path, not JSON
+# 2.12: a provider's cache is "<hash>.v2.jsonl", in pieces (services.provider_cache). Before,
+# "<hash>.json", one document: read while it is the newer file (none of the new one yet, or an
+# older build wrote it since), removed with the provider's next lists write (older builds then
+# find no cache and load the lists again).
+CACHE_SUFFIX = ".v2.jsonl"
+LEGACY_CACHE_SUFFIX = ".json"
+# Beside it, what opened one title or group at a time (seasons, episodes, a portal's group
+# pages): opening one writes this small file, not the lists again (save_provider_pages).
+PAGES_SUFFIX = ".v2.pages.jsonl"
+# One cache file is read or written at a time, whichever provider's: four read at once left the
+# GUI thread a fifth of the interpreter (its work took 4.7 times as long), one at a time half.
+_CACHE_FILE_TURN = threading.Lock()
 _PREHASH = "2614ddf9829ba9d284f389d88e8c669d81f6a5c2"
 # When attempts (portal paths, HTTPS then HTTP) fail differently, the stronger reason wins.
 _HANDSHAKE_FAILURE_RANK = {HANDSHAKE_UNREACHABLE: 0, HANDSHAKE_UNEXPECTED: 1, HANDSHAKE_REJECTED: 2}
@@ -69,6 +81,14 @@ def classify_handshake_error(error):
     return HANDSHAKE_UNEXPECTED
 
 
+def _modified(path) -> int:
+    """When `path` was last written (ns); -1 when there is no such file."""
+    try:
+        return os.stat(path).st_mtime_ns
+    except OSError:
+        return -1
+
+
 class ProviderManager(QObject):
     progress = Signal(str)
 
@@ -98,7 +118,8 @@ class ProviderManager(QObject):
         self._cache_writer = ThreadPoolExecutor(max_workers=1, thread_name_prefix="provider-cache")
         self._cache_lock = threading.Lock()
         self._cache_generations: dict[str, int] = {}
-        self._pending_cache_snapshots: dict[str, tuple[int, Any]] = {}
+        # (generation, snapshot, whether its lists are written too: save_provider_pages's not)
+        self._pending_cache_snapshots: dict[str, tuple[int, Any, bool]] = {}
         # Set when index.json could not be read: the caches of the providers it listed stay.
         self._keep_unlisted_caches = False
         if providers is not None:
@@ -108,7 +129,17 @@ class ProviderManager(QObject):
 
     def _provider_cache_name(self, provider_name):
         hashed_name = hashlib.sha256(provider_name.encode("utf-8")).hexdigest()
-        return os.path.join(self.provider_dir, f"{hashed_name}.json")
+        return os.path.join(self.provider_dir, f"{hashed_name}{CACHE_SUFFIX}")
+
+    @staticmethod
+    def _legacy_cache_name(cache_path):
+        """The older builds' file for the cache at `cache_path` (one JSON document)."""
+        return cache_path[: -len(CACHE_SUFFIX)] + LEGACY_CACHE_SUFFIX
+
+    @staticmethod
+    def _pages_name(cache_path):
+        """The pages beside the cache at `cache_path` (PAGES_SUFFIX)."""
+        return cache_path[: -len(CACHE_SUFFIX)] + PAGES_SUFFIX
 
     def _current_provider_cache_name(self):
         return self._provider_cache_name(self.current_provider["name"])
@@ -132,12 +163,10 @@ class ProviderManager(QObject):
         with self._cache_lock:
             pending = self._pending_cache_snapshots.get(cache_path)
             cache = self._snapshot_cache(pending[1]) if pending is not None else None
+            generation = self._cache_generations.get(cache_path, 0)
+        legacy = False
         if cache is None:
-            try:
-                with open(cache_path, "rb") as f:
-                    cache = json.loads(f.read())
-            except OSError, json.JSONDecodeError:
-                return {}
+            cache, legacy = self._read_cache_file(cache_path)
         if not isinstance(cache, dict):
             return {}
         metadata = cache.get("_cache")
@@ -156,8 +185,52 @@ class ProviderManager(QObject):
             # Cached before STB catch-up: the channels the portal marks archived get their
             # archive keys now, from the cache.
             mark_stb_archives(live.get("contents"))
+        if legacy and provider.get("name") == self.current_provider.get("name"):
+            self._rewrite_legacy_cache(cache_path, generation, cache)  # (the content it saves)
         # Raw legacy payloads are readable, but have no trusted freshness timestamp.
         return cache
+
+    def _read_cache_file(self, cache_path):
+        """(The cache saved at `cache_path`, whether it is an older build's): {} when it cannot
+        be read. The older builds' single document instead when it is the newer file: none
+        here, or one an older build wrote since (gone back to, then this build again; this
+        build removes it with each lists' file it writes, an older one never sees that)."""
+        legacy = self._legacy_cache_name(cache_path)
+        with _CACHE_FILE_TURN:
+            if _modified(legacy) > _modified(cache_path):
+                try:
+                    with open(legacy, "rb") as f:
+                        return json.loads(f.read()), True
+                except OSError, json.JSONDecodeError:
+                    return {}, False
+            try:
+                cache = provider_cache.read_cache(cache_path)
+            except OSError, ValueError, TypeError:  # (none, or damaged: loaded again)
+                return {}, False
+            try:  # the seasons and group pages opened, as they were saved with these lists
+                provider_cache.read_pages(self._pages_name(cache_path), cache)
+            except FileNotFoundError:
+                pass
+            except OSError, ValueError, TypeError:
+                logger.info("A provider's opened series and groups can't be read: dropped")
+            return cache, False
+
+    def _rewrite_legacy_cache(self, cache_path, generation, cache):
+        """An older build's cache, just read, is written as the new file (and goes): it is
+        read in one call once. Not when a save or a removal came meanwhile (`generation`)."""
+        snapshot = self._snapshot_cache(cache)
+        with self._cache_lock:
+            if self._cache_generations.get(cache_path, 0) != generation:
+                return
+            generation += 1
+            self._cache_generations[cache_path] = generation
+            self._pending_cache_snapshots[cache_path] = (generation, snapshot, True)
+        try:
+            self._cache_writer.submit(self._write_provider_cache, cache_path, generation, snapshot)
+        except RuntimeError:  # the writer has stopped (its provider went): left to the next start
+            with self._cache_lock:
+                if self._pending_cache_snapshots.get(cache_path, (0,))[0] == generation:
+                    del self._pending_cache_snapshots[cache_path]
 
     def is_content_stale(self, content_type) -> bool:
         if content_type not in self.current_provider_content:
@@ -246,20 +319,35 @@ class ProviderManager(QObject):
         return [free_channels.provider_entry(None)]
 
     def _invalidate_cache_path(self, cache_path) -> None:
-        """Supersede queued writes for this cache file, then delete it."""
+        """Supersede queued writes for this cache file, then delete it (its pages, and an older
+        build's file too). Each is tried: one the system refuses (Windows: a search reading it)
+        leaves the others gone, and its error is raised after them."""
+        refused = None
         with self._cache_lock:
             self._cache_generations[cache_path] = self._cache_generations.get(cache_path, 0) + 1
             self._pending_cache_snapshots.pop(cache_path, None)
-            try:
-                os.remove(cache_path)
-            except FileNotFoundError:
-                pass
+            for path in (
+                cache_path,
+                self._pages_name(cache_path),
+                self._legacy_cache_name(cache_path),
+            ):
+                try:
+                    os.remove(path)
+                except FileNotFoundError:
+                    pass
+                except OSError as e:
+                    refused = refused or e
+        if refused is not None:
+            raise refused
 
     def invalidate_provider_cache(self, provider_name) -> None:
-        """Invalidate queued writes as well as the on-disk cache for this name."""
-        self._invalidate_cache_path(self._provider_cache_name(provider_name))
-        if self.current_provider.get("name") == provider_name:
-            self.current_provider_content = {}
+        """Invalidate queued writes as well as the on-disk cache for this name (its lists in
+        memory go even when a file is refused)."""
+        try:
+            self._invalidate_cache_path(self._provider_cache_name(provider_name))
+        finally:
+            if self.current_provider.get("name") == provider_name:
+                self.current_provider_content = {}
 
     def clear_current_provider_cache(self):
         self.invalidate_provider_cache(self.current_provider["name"])
@@ -346,7 +434,14 @@ class ProviderManager(QObject):
             f.write(serialized)
         if self._keep_unlisted_caches:
             return
+        try:
+            self._prune_unlisted_caches()
+        except OSError as e:
+            # The list is written: a raise now would say it was not (Settings puts back a
+            # change whose write failed). A stale cache only takes room until the next save.
+            logger.warning("Couldn't remove a stale provider cache: %s", type(e).__name__)
 
+    def _prune_unlisted_caches(self) -> None:
         # Delete stale cache files not matching any known provider name hash
         # (malformed provider entries without a string name are ignored).
         expected_files = {
@@ -357,12 +452,17 @@ class ProviderManager(QObject):
 
         with self._cache_lock:
             queued_files = {os.path.basename(path) for path in self._cache_generations}
+        caches = set()
         for entry in set(os.listdir(self.provider_dir)) | queued_files:
-            # Only consider json cache files for pruning
-            if entry == "index.json" or not entry.endswith(".json"):
+            # Only a cache's files are considered for pruning (an older build's "<hash>.json" too)
+            if entry == "index.json":
                 continue
-            if entry not in expected_files:
-                self._invalidate_cache_path(os.path.join(self.provider_dir, entry))
+            for suffix in (CACHE_SUFFIX, PAGES_SUFFIX, LEGACY_CACHE_SUFFIX):
+                if entry.endswith(suffix):
+                    caches.add(entry[: -len(suffix)] + CACHE_SUFFIX)
+                    break
+        for cache in sorted(caches - expected_files):
+            self._invalidate_cache_path(os.path.join(self.provider_dir, cache))
 
     @staticmethod
     def _snapshot_cache(value):
@@ -372,28 +472,61 @@ class ProviderManager(QObject):
         return value
 
     def save_provider(self):
-        self._cache_metadata()
+        """Save the current provider's content: its lists and its pages."""
+        self._save_cache(lists=True)
+
+    def save_provider_pages(self):
+        """Save what opened since (2.12): a series' seasons, a season's episodes, a portal's
+        group pages. The lists' file stays as it is: the small pages file is written, not the
+        whole catalog again (a hundred MB or more on a large account, at each series)."""
+        self._save_cache(lists=False)
+
+    def _save_cache(self, lists):
+        metadata = self.current_provider_content.get("_cache")
+        if self._cache_metadata() is not metadata:  # new (another identity): the lists' too
+            lists = True
         snapshot = self._snapshot_cache(self.current_provider_content)
         cache_path = self._current_provider_cache_name()
         with self._cache_lock:
             generation = self._cache_generations.get(cache_path, 0) + 1
             self._cache_generations[cache_path] = generation
-            self._pending_cache_snapshots[cache_path] = (generation, snapshot)
-        self._cache_writer.submit(self._write_provider_cache, cache_path, generation, snapshot)
+            pending = self._pending_cache_snapshots.get(cache_path)
+            lists = lists or (pending is not None and pending[2])  # (that write is superseded)
+            self._pending_cache_snapshots[cache_path] = (generation, snapshot, lists)
+        self._cache_writer.submit(
+            self._write_provider_cache, cache_path, generation, snapshot, lists
+        )
 
-    def _write_provider_cache(self, cache_path, generation, snapshot):
+    def _write_provider_cache(self, cache_path, generation, snapshot, lists=True):
+        def newest():
+            return self._cache_generations.get(cache_path, 0) == generation
+
         def replace_if_newest(temporary, path):  # a newer snapshot queued meanwhile wins
             with self._cache_lock:
-                if self._cache_generations.get(cache_path, 0) == generation:
+                if newest():
                     os.replace(temporary, path)
 
         try:
             with self._cache_lock:
-                if self._cache_generations.get(cache_path, 0) != generation:
+                if not newest():
                     return
-            serialized = json.dumps(snapshot)
-            with atomic_write(cache_path, replace_if_newest) as f:
-                f.write(serialized)
+            if lists or not os.path.exists(cache_path):
+                # In pieces: one orjson call held the GIL (the GUI thread) for the whole cache.
+                with _CACHE_FILE_TURN:  # (removals too: Windows refuses a file being read)
+                    provider_cache.write_cache(cache_path, snapshot, replace_if_newest)
+                    if os.path.exists(cache_path):  # the older builds' file is read no more
+                        try:
+                            os.remove(self._legacy_cache_name(cache_path))
+                        except FileNotFoundError:
+                            pass
+            pages = self._pages_name(cache_path)
+            if provider_cache.has_pages(snapshot):
+                with _CACHE_FILE_TURN:
+                    provider_cache.write_pages(pages, snapshot, replace_if_newest)
+            else:
+                with _CACHE_FILE_TURN, self._cache_lock:
+                    if newest() and os.path.exists(pages):
+                        os.remove(pages)
         except OSError, TypeError:
             logger.exception("Failed to save provider cache")
         finally:

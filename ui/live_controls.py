@@ -66,8 +66,10 @@ from services.live import parts as live_parts
 from services.live.live_session import UNAVAILABLE, LiveSession
 from services.live.refusals import REFUSALS, STREAM_LIMIT, STREAM_REFUSED
 from services.live.tuning import channel_key
+from services.network_streams import DOWN, failure_reason
 from services.playback import PlaybackState
 from services.provider_api import known_http_only, portal_http_only
+from services.provider_ids import NETWORK_PROVIDER
 from services.revive import revive_wait
 from services.vlc_profile import PlayKind
 from ui import item_provider
@@ -107,6 +109,9 @@ ERROR_MS = 6000
 # gets these only); one that played goes on with the revive's (`services.revive`).
 RECONNECT_MS = (1000, 3000)
 HEALTHY_S = 60.0  # a stream that played this long before it ended has its waits back
+# Plan 4: a link opened with Open Link is tried again this often at most, until it plays well
+# again (HEALTHY_S): one that keeps failing stops and says why, never reconnected forever.
+LINK_TRIES = 1
 # i18n: toast: a live channel's stream ended and is opened again
 RECONNECTING_TEXT = N_("Reconnecting…")
 RETRY_TICK_MS = 1000  # the pill's countdown
@@ -222,6 +227,8 @@ class LiveControls(QObject):
         on_sizes: Callable[[], None] = lambda: None,
         borrow: Callable[[dict, str, str], Any] = lambda item, provider, purpose: None,
         retry_notice: Callable[[], Any] = lambda: None,
+        link: Callable[[dict], bool] = lambda item: False,
+        link_failed: Callable[[Target, str], None] = lambda target, why: None,
         parent: Optional[QObject] = None,
     ) -> None:
         """`explain(item, title)` asks why the failure just toasted happened at the item's
@@ -235,8 +242,17 @@ class LiveControls(QObject):
         `gave_up()`: the channel's live session failed for good (said; a multiview's focused
         tile then stops and shows its card). `on_sizes()`: the channel's picture
         sizes came, or an archive started or ended (2.8: the ⚙ may show or go).
-        `retry_notice()`: the pill that counts down to a channel's next try (None: none)."""
+        `retry_notice()`: the pill that counts down to a channel's next try (None: none).
+        `link(item)`: whether the item is a link of Network streams (plan 4), tried again once
+        at most (`LINK_TRIES`); `link_failed(target, why)` hears why one did not play or went
+        (an English text, `services.network_streams.failure_reason`)."""
         super().__init__(parent)
+        self._link = link
+        self._link_failed = link_failed
+        # A link's tries again since it last played well, and since when it plays (None: it
+        # does not, or a try went since).
+        self._link_tries = 0
+        self._link_well_since: Optional[float] = None
         self._on_sizes = on_sizes
         self._borrow = borrow  # 2.9.7: a scheduled recording's session, to watch
         self._gave_up = gave_up
@@ -411,7 +427,7 @@ class LiveControls(QObject):
         waiting = getattr(live, "retry_in", None)
         seconds = waiting() if callable(waiting) else None
         if seconds is not None:  # its stream was down, small: the pill says so large
-            self._on_live_retrying(seconds)
+            self._live_retrying(seconds, counted=False)
 
     # ---- tuning -------------------------------------------------------------------------------
 
@@ -426,6 +442,8 @@ class LiveControls(QObject):
     def _forget_channel(self) -> None:
         self._ticks = []
         self._reconnects = 0
+        self._link_tries = 0
+        self._link_well_since = None
         self._playing_since = None
         self._played = False
         self._cancel_reopen()
@@ -596,10 +614,23 @@ class LiveControls(QObject):
         kind = item_provider.provider_type(self.catalog, target.item)
         plain = kind == "XTREAM" or portal_http_only(provider)  # its sign-in found no HTTPS
         https = not known_http_only(url) and not (plain and url.startswith("http://"))
-        # An STB portal's channel that fails gets a fresh link (`relink`), never the old again.
-        revive = kind != "STB"
+        # An STB portal's channel that fails gets a fresh link (`relink`), never the old again;
+        # a link of Network streams is tried again once, by the player's own retry. One no
+        # configured provider owns (`once`) has nothing counted anywhere to wait out; one of
+        # an account keeps that provider's patience with a refusal.
+        link = self._link(target.item)
+        revive = kind != "STB" and not link
+        once = link and item_provider.provider_name(self.catalog, target.item) == NETWORK_PROVIDER
         return LiveStart(
-            url, user_agent, verify_ssl, channel, referrer, https, target.max_height, revive
+            url,
+            user_agent,
+            verify_ssl,
+            channel,
+            referrer,
+            https,
+            target.max_height,
+            revive,
+            once=once,
         )
 
     def pipeline_live(self) -> bool:
@@ -695,6 +726,9 @@ class LiveControls(QObject):
         if not self._played and (failed or self._reconnects >= len(RECONNECT_MS)):
             self._hide_retry()  # the caller says why
             return False
+        if not self._link_may_try(current):
+            self._hide_retry()  # a link had its try again: the caller says why
+            return False
         wait_ms = reopen_wait_ms(self._reconnects)
         self._reopen_due = (current, url, kind)
         self._reopen_timer.start(wait_ms)
@@ -757,17 +791,59 @@ class LiveControls(QObject):
     def _on_live_retrying(self, seconds: float) -> None:
         """LiveSession's `retrying`: its channel's stream is down (the helper waits for it,
         or its direct play opens again by itself), or no longer (< 0)."""
+        self._live_retrying(seconds, counted=True)
+
+    def _live_retrying(self, seconds: float, *, counted: bool) -> None:
+        """`counted`: a new try is waited for (a swap only shows the one waited for). A link
+        whose stream went down again after its try stops instead (`_link_may_try`)."""
         current = self._current()
         if self._closed() or current is None or not current.live:
             return
         if seconds < 0.0:
+            if self._link(current.item):
+                self._link_well_since = time.monotonic()  # it came back: it plays again
             if self._retry_from_live:
                 self._hide_retry()
             return
         live = self.live
         if live is None:
             return
+        if counted and not self._link_may_try(current):
+            self._give_up_link(current)
+            return
         self._show_retry(seconds, live.retry_now, from_live=True)
+
+    # ---- plan 4: a link of Network streams is tried again once ---------------------------
+    def _link_may_try(self, current: Target) -> bool:
+        """Whether `current` may be tried again now (counted): any channel; a link once
+        (`LINK_TRIES`) until it played well again (`HEALTHY_S` since it last came back)."""
+        if not self._link(current.item):
+            return True
+        since = self._link_well_since
+        if since is not None and time.monotonic() - since >= HEALTHY_S:
+            self._link_tries = 0
+        if self._link_tries >= LINK_TRIES:
+            return False
+        self._link_tries += 1
+        self._link_well_since = None
+        return True
+
+    def _give_up_link(self, current: Target) -> None:
+        """A link went down again after its try: it stops (its stream goes back), and the
+        player says why; nothing tries it again."""
+        logger.info("Stopping %s: its link went down again after its try", current.title)
+        self.stop_tune()
+        self._link_failed(current, DOWN)
+        self._gave_up()
+
+    def _live_failure(self) -> tuple[str, Optional[int]]:
+        """How the live session's buffer input last failed: (kind, HTTP status)."""
+        failure = getattr(self.live, "failure", None)
+        found = failure() if callable(failure) else None
+        if not isinstance(found, tuple) or len(found) != 2:
+            return "", None
+        kind, status = found
+        return str(kind or ""), status if isinstance(status, int) else None
 
     def _show_retry(
         self, seconds: float, action: Callable[[], object], *, from_live: bool = False
@@ -946,6 +1022,7 @@ class LiveControls(QObject):
         a wait of ours for it is over (LiveSession's own says when its own is)."""
         self._playing_since = time.monotonic()
         self._played = True
+        self._link_well_since = self._playing_since
         if not self._retry_from_live:
             self._hide_retry()
 
@@ -960,7 +1037,7 @@ class LiveControls(QObject):
             # reached, and a retry would only be refused or take another device's slot.
             self.stop_tune()  # nothing plays: its slot goes back
             self._toast(self._refusal_text(message), "error", ERROR_MS)
-            self._explain_failure(current)
+            self._explain_failure(current, message)
             self._gave_up()
             return
         if current is not None and self.may_retry(current):
@@ -972,17 +1049,22 @@ class LiveControls(QObject):
         if message in REFUSALS:
             self.stop_tune()  # nothing plays: its slot goes back
             self._toast(self._refusal_text(message), "error", ERROR_MS)
-            self._explain_failure(current)
+            self._explain_failure(current, message)
             self._gave_up()
             return
-        message = translate(message)  # the player's, or LiveSession's N_ texts
-        self._error(_named(title, message))
-        self._explain_failure(current)
+        self._error(_named(title, translate(message)))  # the player's, or LiveSession's N_
+        self._explain_failure(current, message)
         self._gave_up()
 
-    def _explain_failure(self, current: Optional[Target]) -> None:
-        if current is not None:
-            self._explain(current.item, current.title)
+    def _explain_failure(self, current: Optional[Target], message: str = "") -> None:
+        """Why `current` failed for good: a link says it plainly first (`link_failed`, from
+        `message` and how its buffer's input failed), then its provider's account is asked."""
+        if current is None:
+            return
+        if self._link(current.item):
+            kind, status = self._live_failure()
+            self._link_failed(current, failure_reason(message, kind, status))
+        self._explain(current.item, current.title)
 
     def _refusal_text(self, message: str) -> str:
         current = self._current()

@@ -14,6 +14,9 @@ runs in the worker too, and ranks what it finds:
 4. the provider's own order.
 
 At most GENRE_LIMIT genres are kept, and CHANNEL_LIMIT channels of each provider, once ranked.
+
+Network streams' links (plan 4) are found by their names too, as the channels of one more
+part of the index under NETWORK_PROVIDER, after the providers' (no genres; never a provider).
 """
 
 from __future__ import annotations
@@ -29,7 +32,7 @@ from PySide6.QtCore import QObject, Signal
 
 from services.catalog import ALL_GROUP_ID
 from services.navigation import item_key
-from services.provider_ids import ALL_PROVIDERS, provider_of
+from services.provider_ids import ALL_PROVIDERS, NETWORK_PROVIDER, provider_of
 from services.search import _title, iter_items
 from services.text_fold import fold, fold_all
 
@@ -166,8 +169,9 @@ def live_genres(provider: str, content: Any) -> list[FoundGenre]:
     return genres
 
 
-def build_find_index(caches: list[tuple[str, dict]]) -> FindIndex:
-    """The index of every provider's live genres and channels (in the worker)."""
+def build_find_index(caches: list[tuple[str, dict]], links: Sequence[dict] = ()) -> FindIndex:
+    """The index of every provider's live genres and channels (in the worker), and of
+    Network streams' `links` (plain dicts, their names found) after them."""
     genres: list[tuple[str, FoundGenre]] = []
     channels: list[_Channels] = []
     for provider, cache in caches:
@@ -186,6 +190,11 @@ def build_find_index(caches: list[tuple[str, dict]]) -> FindIndex:
         channels.append(
             _Channels(provider, _spaced([_title(i) for i in items]), items, ids, genre_of)
         )
+    if links:
+        items = [item for item in links if isinstance(item, dict)]
+        none = array("H", [_NO_GENRE]) * len(items)
+        titles = _spaced([_title(i) for i in items])
+        channels.append(_Channels(NETWORK_PROVIDER, titles, items, [], none))
     return FindIndex(genres, channels)
 
 
@@ -324,9 +333,10 @@ def own_keys(items: Sequence[dict], shown: str) -> frozenset[tuple[str, str]]:
 
 class FindWorker(QObject):
     """JobRunner worker: makes the index unless given one (every provider's cached content,
-    the catalogs' own in memory, else the disk), then finds and ranks the genres and the
-    channels; given a `scope` (a group's channels and the provider shown), also its `own_keys`
-    (264,000 channels took 0.3 s, too long for the GUI thread)."""
+    the catalogs' own in memory, else the disk, and Network streams' `links`, plain dicts
+    read on the GUI thread), then finds and ranks the genres and the channels; given a
+    `scope` (a group's channels and the provider shown), also its `own_keys` (264,000
+    channels took 0.3 s, too long for the GUI thread)."""
 
     finished = Signal(object)  # (index, genres, channel hits[, the scope's own_keys])
     error = Signal(str)
@@ -339,6 +349,7 @@ class FindWorker(QObject):
         loaded=None,
         preferences: Preferences = Preferences(),
         scope: Optional[tuple[Sequence[dict], str]] = None,
+        links: Sequence[dict] = (),
     ):
         super().__init__()
         self._provider_manager = provider_manager
@@ -347,12 +358,13 @@ class FindWorker(QObject):
         self._loaded = loaded  # provider name -> content its catalog holds (read only)
         self._preferences = preferences
         self._scope = scope  # (a group's channels, the provider shown): read only
+        self._links = links  # Network streams' links (read only)
 
     def run(self) -> None:
         index = self._index
         if index is None:
             caches = self._provider_manager.get_all_providers_cached_content(self._loaded or None)
-            index = build_find_index(caches)
+            index = build_find_index(caches, self._links)
         started = time.perf_counter()
         genres = find_genres(index, self._text, self._preferences)
         channels = find_channels(index, self._text, self._preferences)

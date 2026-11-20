@@ -10,9 +10,9 @@ Every text QiTV shows is written in English in the code and looked up in a catal
 
 A missing or empty translation shows the English text. Texts are looked up when they are
 shown: the language is chosen once, while QiTV starts (main.set_language), before any window
-exists, and a text kept at module level is only marked (`N_`) and translated where it is used
-(`translate`). scripts/i18n_extract.py collects every marked text into i18n/template.json,
-the starting point of a new language.
+exists, and a text kept at module level is only marked (`N_`, with its `ctx` when it has one)
+and translated where it is used (`translate`, given the same `ctx`). scripts/i18n_extract.py
+collects every marked text into i18n/template.json, the starting point of a new language.
 
 A plural entry holds one form per CLDR category the language uses ("one", "few", "many",
 "other"); Turkish writes one form after a number, so its entries hold "other" alone.
@@ -63,8 +63,9 @@ def catalog_dir() -> Path:
     return Path(__file__).resolve().parent.parent / "i18n"
 
 
-def N_(text: str) -> str:
-    """Marks a text kept in a table or constant for the catalogs; `translate` shows it."""
+def N_(text: str, /, *, ctx: Optional[str] = None) -> str:
+    """Marks a text kept in a table or constant for the catalogs; `translate` shows it. `ctx`
+    is tr()'s (the extractor reads it here); translate() is given it where the text shows."""
     return text
 
 
@@ -91,14 +92,16 @@ def tr_n(singular: str, plural: str, n: int, /, *, ctx: Optional[str] = None, **
     return _finish(english, entry if isinstance(entry, str) and entry else None, fields)
 
 
-def translate(text: str, **fields: Any) -> str:
-    """A text marked with N_ where it was written (a table's, a constant's), shown now.
+def translate(text: str, *, ctx: Optional[str] = None, **fields: Any) -> str:
+    """A text marked with N_ where it was written (a table's, a constant's), shown now; `ctx`
+    is the context it was marked with (N_(text, ctx=...)), if any.
 
     A text that is no catalog's key (a provider's group name, braces and all) comes back as
     it is; fields are filled in only when given.
     """
-    found = _catalog.get(text) if _catalog else None
-    if _pseudo and text not in _pseudo_known():
+    key = _key(text, ctx)
+    found = _catalog.get(key) if _catalog else None
+    if _pseudo and key not in _pseudo_known():
         return text
     found = found if isinstance(found, str) and found else None
     if not fields:

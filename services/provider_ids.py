@@ -9,12 +9,17 @@ from __future__ import annotations
 
 from typing import Iterable
 
-from services.i18n import N_
+from services.i18n import N_, translate
 
 PROVIDER_KEY = "_provider"
 ALL_PROVIDERS = "@all"
 # The source that mixes every provider, as it is named: shown with translate().
 ALL_PROVIDERS_TITLE = N_("All providers")
+# Plan 4: the links opened with Open Link, kept in network_streams.json (never a provider of
+# the list): what their items are stamped with when no configured account owns them.
+NETWORK_PROVIDER = "@network"
+# i18n: the links opened with File → Open Link…, kept to play again (a list's name)
+NETWORK_TITLE = N_("Network streams")
 
 _GROUP_SEPARATOR = "\x1f"
 
@@ -22,6 +27,11 @@ _GROUP_SEPARATOR = "\x1f"
 def provider_of(item: dict) -> str:
     """The provider an item came from; "" when it is not stamped."""
     return str(item.get(PROVIDER_KEY) or "")
+
+
+def provider_title(name: str) -> str:
+    """A provider's name as a row shows it: Network streams' in the active language."""
+    return translate(NETWORK_TITLE) if name == NETWORK_PROVIDER else name
 
 
 def stamp(items: Iterable[dict], provider: str) -> None:

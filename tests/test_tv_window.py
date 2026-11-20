@@ -1,4 +1,3 @@
-import logging
 import os
 from pathlib import Path
 import subprocess
@@ -71,7 +70,6 @@ from ui.overlay_host import OverlayHost
 from ui.overlays.drawer import ERROR_TEXT, LIBRARY_ACTION
 from ui.overlays.zap_banner import BannerInfo
 from ui.page_stack import PageStack
-from ui.settings_dialog import OptionsDialog
 from ui.shortcuts_dialog import ShortcutsDialog, table_rows
 from ui.tv_menus import ISSUES_URL, AboutDialog
 from ui.tv_window import (
@@ -319,7 +317,7 @@ class TVWindowTests(WindowCase):
         banner.dismiss()
         self.assertTrue(wait_until(lambda: frame.small_rect() == corner))
 
-    def test_hosts_the_options_dialog(self):
+    def test_hosts_what_settings_and_its_providers_use(self):
         for name in HOST_METHODS + HOST_ATTRIBUTES:
             self.assertTrue(hasattr(self.window, name), name)
 
@@ -524,12 +522,13 @@ class TVWindowTests(WindowCase):
             shortcuts(menus["File"]),
             [
                 ("Open File…", "Ctrl+O"),
+                ("Open Link…", ""),  # plan 4: a stream plays, a provider is added
                 ("Open Folder…", "Ctrl+Shift+O"),  # Plan 4: plays it, on the Folders tab
                 ("Export", ""),
                 ("Open Recordings Folder", ""),
             ],
         )
-        export = menus["File"].actions()[2].menu()
+        export = menus["File"].actions()[3].menu()
         self.assertEqual(
             [a.text() for a in export.actions()],
             ["Cached Content…", "All Live Channels…", "Complete Series (Fetch All)…"],
@@ -1101,10 +1100,7 @@ class TVWindowTests(WindowCase):
         QTest.keyClick(self.window, Qt.Key.Key_Escape)
         self.assertFalse(drawer.isVisible())
         waiting = [True]
-        with (
-            mock.patch("ui.tv_window.has_pending_threads", side_effect=lambda: waiting[0]),
-            mock.patch("ui.tv_window.OptionsDialog") as dialog,
-        ):
+        with mock.patch("ui.tv_window.has_pending_threads", side_effect=lambda: waiting[0]):
             self.assertFalse(self.window.close())
             self.menu_actions()["Settings…"].trigger()
             QTest.keyClick(self.window, Qt.Key.Key_F)
@@ -1112,7 +1108,7 @@ class TVWindowTests(WindowCase):
             self.window.toggle_fullscreen()
             self.window.toggle_mini_player()
             elapse(50)
-            dialog.assert_not_called()
+            self.assertFalse(self.window.settings.visible())
             self.assertFalse(self.window.isFullScreen())
             self.assert_not_mini()
             self.assertFalse(drawer.isVisible())
@@ -2648,20 +2644,25 @@ class DrawerSettingsTests(WindowCase):
     def test_the_drawer_reaches_settings_and_add_provider_with_arrows_and_enter(self):
         self.show()
         drawer = self.wait_for_drawer()  # on the sections and the groups
-        with mock.patch("ui.tv_window.OptionsDialog") as dialog:
-            for key in (Qt.Key.Key_Left, Qt.Key.Key_Left, Qt.Key.Key_Down):
-                QTest.keyClick(self.window, key)  # the sources column, then ⚙ Settings
-            self.assertEqual(drawer.highlighted().title, "Settings")
-            QTest.keyClick(self.window, Qt.Key.Key_Return)
-            dialog.assert_called_once_with(self.window)
-            dialog.return_value.exec.assert_called_once_with()
-            dialog.return_value.start_new_provider.assert_not_called()
-            QTest.keyClick(self.window, Qt.Key.Key_Down)
-            self.assertEqual(drawer.highlighted().title, "Add provider")
-            QTest.keyClick(self.window, Qt.Key.Key_Return)
-            dialog.return_value.start_new_provider.assert_called_once_with()
-        self.assertEqual(dialog.call_count, 2)
+        for key in (Qt.Key.Key_Left, Qt.Key.Key_Left, Qt.Key.Key_Down):
+            QTest.keyClick(self.window, key)  # the sources column, then ⚙ Settings
+        self.assertEqual(drawer.highlighted().title, "Settings")
+        QTest.keyClick(self.window, Qt.Key.Key_Return)  # Settings in the drawer
+        self.assertTrue(self.window.settings.visible())
+        QTest.keyClick(self.window, Qt.Key.Key_Escape)  # out of it: the list, on its row
         self.assertTrue(drawer.isVisible())
+        self.assertEqual(drawer.highlighted().title, "Settings")
+        QTest.keyClick(self.window, Qt.Key.Key_Down)
+        self.assertEqual(drawer.highlighted().title, "Add provider")
+        QTest.keyClick(self.window, Qt.Key.Key_Return)  # Settings, with the Add card
+        form = self.window.provider_cards.form
+        self.assertTrue(form.isVisible())
+        self.assertEqual(self.window.settings_drawer.path(), ("providers",))
+        QTest.keyClick(self.window, Qt.Key.Key_Escape)  # the card's Cancel
+        self.assertFalse(form.isVisible())
+        QTest.keyClick(self.window, Qt.Key.Key_Escape)  # out of Settings: the list
+        self.assertTrue(drawer.isVisible())
+        self.assertEqual(drawer.highlighted().title, "Add provider")
 
     def test_the_drawers_search_button_opens_the_search(self):
         # Every key has a control on screen (2.0.1): Ctrl/⌘+F has a button in the channel list.
@@ -2827,16 +2828,6 @@ class DrawerSettingsTests(WindowCase):
             refresh.trigger()
             self.assertEqual(set_provider.call_count, 2)
 
-    def test_add_provider_opens_the_providers_tab_on_a_new_entry(self):
-        dialog = OptionsDialog(self.window)
-        self.addCleanup(dialog.deleteLater)
-        before = dialog.provider_combo.count()
-        dialog.start_new_provider()
-        self.assertIs(dialog.options_tab.currentWidget(), dialog.providers_tab)
-        self.assertEqual(dialog.provider_combo.count(), before + 1)
-        self.assertEqual(dialog.provider_combo.currentIndex(), before)
-        self.assertEqual(dialog.name_input.text(), "")
-
 
 class HelpAndAboutTests(WindowCase):
     def test_help_shows_the_log_file(self):  # 2.8.2: no folder to know by heart
@@ -2917,24 +2908,23 @@ class NoProviderTests(WindowCase):
         self.assertAlmostEqual(card.geometry().center().x(), host.width() / 2, delta=2)
         self.assertAlmostEqual(card.geometry().center().y(), host.height() / 2, delta=2)
 
-    def test_its_button_and_enter_open_settings_on_a_new_provider(self):
+    def test_its_button_and_enter_open_the_add_card(self):
         self.show()
         card = self.window.overlays.welcome
         self.assertTrue(wait_until(card.isVisible))
         added = []
         card.addRequested.connect(lambda: added.append(True))
-        with mock.patch("ui.tv_window.OptionsDialog") as dialog:
-            QTest.mouseClick(
-                card, Qt.MouseButton.LeftButton, pos=card.button_rect().center().toPoint()
-            )
-            self.assertEqual(added, [True])
-            dialog.assert_called_once_with(self.window)
-            dialog.return_value.start_new_provider.assert_called_once_with()
-            dialog.return_value.exec.assert_called_once_with()
-            QTest.keyClick(self.window, Qt.Key.Key_Return)  # OK on a remote
+        form = self.window.provider_cards.form
+        QTest.mouseClick(card, Qt.MouseButton.LeftButton, pos=card.button_rect().center().toPoint())
+        self.assertEqual(added, [True])
+        self.assertTrue(form.isVisible())  # in Settings (tests/test_welcome.py)
+        QTest.keyClick(self.window, Qt.Key.Key_Escape)  # its Cancel: the card again
+        self.assertTrue(card.isVisible())
+        QTest.keyClick(self.window, Qt.Key.Key_Return)  # OK on a remote
+        self.assertTrue(form.isVisible())
         self.assertEqual(added, [True, True])
-        self.assertEqual(dialog.call_count, 2)
         self.assertFalse(self.window.overlays.drawer.isVisible())
+        elapse(QApplication.doubleClickInterval() + 80)  # no second-click guard left armed
 
     def test_the_card_hides_once_a_provider_is_saved(self):
         self.show()
@@ -2973,112 +2963,26 @@ class PipShadeWiringTests(WindowCase):
         self.assertEqual(transport._pip_rect, rect.translated(-transport.pos()))
 
 
-class OptionsDialogTests(WindowCase):
-    def dialog(self):
-        dialog = OptionsDialog(self.window)
-        self.addCleanup(dialog.deleteLater)
-        return dialog
-
-    def test_the_detailed_log_is_a_setting_that_applies_at_once(self):  # 2.8.2
-        from services import log_file
-
-        self.addCleanup(log_file.set_detailed, False)
-        dialog = self.dialog()
-        self.assertFalse(dialog.detailed_log_checkbox.isChecked())
-        self.assertEqual(dialog.detailed_log_checkbox.text(), "Detailed log (for troubleshooting)")
-        dialog.detailed_log_checkbox.setChecked(True)
-        dialog.save_settings()
-        self.assertTrue(ConfigManager().detailed_log)
-        self.assertTrue(logging.getLogger("services").isEnabledFor(logging.DEBUG))  # at once
-        with mock.patch.object(self.window, "engine") as engine:
-            self.window.save_config()  # the running time-shift helper too, no restart
-        engine.set_detailed_log.assert_called_once_with(True)
-
-    def test_settings_load_and_save_the_tv_options(self):
+class SaveConfigTests(WindowCase):
+    def test_a_locked_config_is_said_and_the_settings_still_apply(self):
+        # A provider change saves through TVWindow.save_config (ui.provider_actions, Free
+        # channels): a config.json that cannot be written is said, its path stays out of the
+        # log, and what changed applies until QiTV closes.
         self.config.live_latency = "stable"
-        self.config.mouse_wheel_action = "volume"
-        self.config.start_with_last_channel = False
-        dialog = self.dialog()
-        self.assertFalse(hasattr(dialog, "keyboard_remote_checkbox"))
-        self.assertFalse(hasattr(dialog, "smooth_paused_seek_checkbox"))
-        self.assertEqual(dialog.live_latency_combo.currentData(), "stable")
-        self.assertEqual(dialog.mouse_wheel_combo.currentData(), "volume")
-        self.assertFalse(dialog.start_last_channel_checkbox.isChecked())
-        self.assertEqual(
-            [dialog.live_latency_combo.itemText(i) for i in range(4)],
-            ["Auto (recommended)", "Low", "Normal", "Stable"],
-        )
-        self.assertEqual(dialog.live_latency_combo.count(), 4)
-        self.assertEqual(
-            [dialog.mouse_wheel_combo.itemText(i) for i in range(2)], ["Change channel", "Volume"]
-        )
-        dialog.live_latency_combo.setCurrentIndex(dialog.live_latency_combo.findData("low"))
-        dialog.mouse_wheel_combo.setCurrentIndex(dialog.mouse_wheel_combo.findData("channel"))
-        dialog.start_last_channel_checkbox.setChecked(True)
-        dialog.save_settings()
-        saved = ConfigManager()
-        self.assertEqual(saved.live_latency, "low")
-        self.assertEqual(saved.mouse_wheel_action, "channel")
-        self.assertTrue(saved.start_with_last_channel)
-
-    def test_a_new_install_shows_and_saves_auto_latency(self):
-        dialog = self.dialog()
-        self.assertEqual(dialog.live_latency_combo.currentData(), "auto")
-        self.assertEqual(dialog.live_latency_combo.currentIndex(), 0)
-        self.assertIn("Auto", dialog.live_latency_combo.toolTip())
-        dialog.save_settings()
-        self.assertEqual(ConfigManager().live_latency, "auto")
-
-    def test_a_locked_config_on_save_says_so_and_the_settings_still_apply(self):
-        dialog = self.dialog()
-        dialog.live_latency_combo.setCurrentIndex(dialog.live_latency_combo.findData("stable"))
 
         def locked(**_kwargs):
             raise PermissionError(13, "Access is denied", os.path.join(self.config_dir, "c"))
 
         with (
             mock.patch.object(self.config, "save_config", side_effect=locked),
+            mock.patch.object(self.window.controller, "settings_saved") as applied,
             self.assertLogs("ui.tv_window", "WARNING") as logs,
         ):
-            dialog.save_settings()  # raised into Qt before, and the dialog stayed open
-        self.assertEqual(dialog.result(), dialog.DialogCode.Accepted)
-        self.assertEqual(self.config.live_latency, "stable")  # applies until QiTV closes
+            self.window.save_config()  # (once it raised into Qt)
         self.assertIn((SAVE_FAILED_TEXT, "error"), self.toasts)
         self.assertNotIn(self.config_dir, "\n".join(logs.output))
-
-    def test_an_edit_that_keeps_the_connection_reloads_nothing_and_the_list_stays(self):
-        # Polish: one provider, only its stream limit changed. Its cache was cleared, its
-        # channels downloaded again, and the open drawer jumped back to live.
-        self.show()
-        drawer = self.wait_for_drawer()
-        QTest.keyClick(self.window, Qt.Key.Key_Return)  # into the highlighted group (All)
-        nav = self.window.nav
-        self.assertTrue(wait_until(lambda: [n.layer for n in nav.path][-1:] == ["group"]))
-        path = nav.path
-        catalog = self.tv_catalog()
-        cache = catalog.provider_manager._provider_cache_name(PROVIDER_NAME)
-        dialog = self.dialog()
-        dialog.max_streams_input.setValue(2)
-        with mock.patch.object(catalog, "select_provider", wraps=catalog.select_provider) as setup:
-            dialog.save_settings()
-            pause(200)  # a setup would have finished by now
-        setup.assert_not_called()
-        self.assertTrue(os.path.exists(cache))
-        self.assertEqual(nav.path, path)
-        self.assertTrue(drawer.isVisible())
-        self.assertEqual(self.provider_manager.providers[0]["max_streams"], 2)
-        self.assertEqual(catalog.current_provider()["max_streams"], 2)  # the budget reads it
-
-    def test_an_epg_change_reloads_the_guide_in_the_background(self):
-        dialog = self.dialog()
-        dialog.epg_url_input.setText("http://epg.invalid/guide.xml")
-        with (
-            mock.patch.object(self.window.catalog, "refresh_epg") as refresh_epg,
-            mock.patch.object(self.tv_catalog().epg_manager, "set_current_epg") as set_current_epg,
-        ):
-            dialog.save_settings()
-        refresh_epg.assert_called_once_with(force=True)
-        set_current_epg.assert_not_called()  # never on the GUI thread
+        applied.assert_called_once_with()  # the player follows all the same
+        self.assertEqual(self.config.live_latency, "stable")  # kept until QiTV closes
 
 
 class DiskAmountSettingTests(unittest.TestCase):

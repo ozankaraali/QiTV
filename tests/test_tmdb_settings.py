@@ -1,14 +1,11 @@
-"""2.8: TMDB in Settings (on by default, the user's own token) and its credit in About."""
+"""2.8: TMDB's settings in the config (on by default, no token of the user's) and its credit
+in About (Settings' rows for it: tests/test_settings_general.py)."""
 
 import unittest
-from unittest import mock
 
 from PySide6.QtGui import QFontMetricsF
 
-from services import tmdb
-from services.config_manager import ConfigManager
 from tests import test_config_tv, test_tv_window as base
-from ui.settings_dialog import OptionsDialog
 from ui.tv_menus import ABOUT_LOGO_PX, SMALL_TEXT, AboutDialog, about_text
 
 
@@ -31,56 +28,7 @@ class TmdbConfigTests(unittest.TestCase):
                 self.assertIs(config.tmdb_details, expected)
 
 
-class TmdbSettingsTests(base.WindowCase):
-    def dialog(self):
-        dialog = OptionsDialog(self.window)
-        self.addCleanup(dialog.deleteLater)
-        return dialog
-
-    def test_settings_turns_tmdb_off_and_on(self):
-        dialog = self.dialog()
-        box = dialog.tmdb_checkbox
-        self.assertTrue(box.isChecked())
-        self.assertIn("TMDB", box.text())
-        self.assertIn("nothing about you", box.toolTip())
-        box.setChecked(False)
-        dialog.save_settings()
-        self.assertFalse(ConfigManager().tmdb_details)
-        box.setChecked(True)
-        dialog.save_settings()
-        self.assertTrue(ConfigManager().tmdb_details)
-
-    def test_closing_settings_tells_the_library_tmdb_turned_off(self):  # review #7
-        config = self.window.config_manager
-        config.tmdb_token = "tok"
-        self.window.screens.tmdb.settings_changed()  # on, with a token: as the window starts
-        changes = []
-        self.window.screens.tmdb.changed.connect(lambda: changes.append(True))
-
-        class Closing:
-            def __init__(self, _window):
-                pass
-
-            def exec(self):
-                config.tmdb_details = False  # what the user chose
-
-        with mock.patch("ui.tv_window.OptionsDialog", Closing):
-            self.window.options_dialog()
-        self.assertEqual(changes, [True])
-
-    def test_the_user_s_own_token_is_kept_masked_and_without_spaces(self):
-        dialog = self.dialog()
-        field = dialog.tmdb_token_input
-        self.assertEqual(field.echoMode(), field.EchoMode.Password)
-        field.setText(" eyJ.made-up \n")
-        dialog.save_settings()
-        self.assertEqual(ConfigManager().tmdb_token, "eyJ.made-up")
-
-    def test_a_build_with_a_token_says_so(self):
-        with mock.patch.object(tmdb._build_keys, "TMDB_API_TOKEN", "built"):
-            dialog = self.dialog()
-        self.assertIn("built", dialog.tmdb_token_input.placeholderText().lower())
-
+class AboutTests(base.WindowCase):
     def test_about_credits_what_qitv_uses_tmdb_among_them(self):
         text = about_text()
         names = ("VLC", "Qt", "Python", "OpenSubtitles", "iptv-org", "TMDB")

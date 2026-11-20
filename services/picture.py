@@ -17,17 +17,22 @@ so it shows no bars: the picture in picture's, in the window and floating (`box_
 large as the 16:9 box was).
 
 Deinterlacing (`DEINTERLACING`, the config's `deinterlace`): Auto is libVLC's own: pictures the
-decoder marks interlaced are deinterlaced (VLC's `deinterlace=-1`, its "auto" method, X); On
-deinterlaces every picture (yadif) and Off none. libVLC 3 can set only on or off
-(`libvlc_video_set_deinterlace` with a method or NULL; it ignores "auto"), and a player set
-either way keeps it: its video outputs inherit the player's setting, which a media option
-(":deinterlace=-1") does not reach. So a player Auto was left for comes back to it only when
-QiTV starts again. Measured with 3.0.20: On and Off apply at once, without a reopen; with
-hardware decoding (VideoToolbox) VLC has the graphics chip hand an interlaced stream's pictures
-back as I420 and deinterlaces them on the CPU (its cvpx converter in the filter chain).
-On leaves a picture taller than 1080i alone (`never_interlaced`; 2.9.10): no broadcast that tall is
-interlaced (UHD is progressive), and a 2160p 50 fps 10-bit channel deinterlaced so showed 5 of its
-50 pictures a second, garbled, where Off showed them all.
+decoder marks interlaced are deinterlaced (VLC's `deinterlace=-1`, its "auto" setting), with the
+yadif method (`--deinterlace-mode=yadif` in `services.playback.default_args`, so every player has
+it, where VLC deinterlaces in software): it keeps a still picture, or a progressive one carried as
+interlaced, at full detail (measured near-perfect) and costs about the same as VLC's default, X.
+Where VLC deinterlaces on the graphics chip (Windows and Linux with hardware decoding) the option
+is not given: D3D11, DXVA2 and VA-API have their own mode lists, in which "yadif" falls back to
+blend, so VLC's default (its adaptive "x", done by the chip) stays. On the Mac the pictures of a
+hardware-decoded interlaced stream go through the CPU filter anyway (measured), so yadif applies
+there always. It is never applied to a progressive picture; Off deinterlaces none. There is no On:
+it deinterlaced every picture, progressive ones too, for no gain and three times the CPU. libVLC 3
+can set only on or off (`libvlc_video_set_deinterlace` with a method or NULL; it ignores "auto"),
+and a player set either way keeps it: its video outputs inherit the player's setting, which a
+media option (":deinterlace=-1") does not reach. So a player left for Off comes back to Auto only
+when QiTV starts again. Measured with 3.0.20: Off applies at once, without a reopen; with hardware
+decoding (VideoToolbox) VLC has the graphics chip hand an interlaced stream's pictures back as
+I420 and deinterlaces them on the CPU (its cvpx converter in the filter chain).
 
 Statistics (`stats_rows`): the plain dict `PlaybackSession.video_stats()` gives, as rows to
 show. libVLC 3 counts a stream's pictures from its open: decoded, shown, and lost, which are
@@ -52,10 +57,8 @@ _VERSION = 1
 
 AUTO, WIDE, STANDARD, FILL = "auto", "16:9", "4:3", "fill"
 ASPECTS = (AUTO, WIDE, STANDARD, FILL)  # the order ‹ and › (and A) step through
-ON, OFF = "on", "off"
-DEINTERLACING = (AUTO, ON, OFF)
-DEINTERLACE_METHOD = "yadif"  # On: libVLC's deinterlace method
-INTERLACED_MAX_HEIGHT = 1088  # 1080i as coded (16-line blocks): nothing taller is interlaced
+OFF = "off"
+DEINTERLACING = (AUTO, OFF)
 
 # What a stream's source is, as the statistics name it.
 SOURCE_TS, SOURCE_HLS, SOURCE_FMP4, SOURCE_DIRECT = "ts", "hls", "fmp4", "direct"
@@ -169,26 +172,6 @@ def aspect_name(aspect: str) -> str:
     if aspect in (WIDE, STANDARD):
         return aspect
     return tr("Auto", ctx="aspect ratio")  # i18n: the aspect ratio: the stream's own
-
-
-def deinterlace_name(choice: str) -> str:
-    """The Picture panel's name for a deinterlacing `choice`, in the active language."""
-    if choice == ON:
-        return tr("On", ctx="deinterlacing")  # i18n: deinterlacing: every picture
-    if choice == OFF:
-        return tr("Off", ctx="deinterlacing")  # i18n: deinterlacing: none
-    # i18n: deinterlacing: VLC's own, for the pictures marked interlaced
-    return tr("Auto", ctx="deinterlacing")
-
-
-def deinterlace_method(choice: str) -> Optional[str]:
-    """libVLC's method for On, None for Off (Auto sets nothing: see the module docstring)."""
-    return DEINTERLACE_METHOD if choice == ON else None
-
-
-def never_interlaced(height: int) -> bool:
-    """A picture `height` lines tall is never interlaced: On leaves it alone."""
-    return height > INTERLACED_MAX_HEIGHT
 
 
 def stepped(choices: tuple[str, ...], current: str, delta: int) -> str:

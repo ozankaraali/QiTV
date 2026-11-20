@@ -21,6 +21,7 @@ from services.navigation import (
     FREE_CHANNELS_ROW,
     OPEN_FILE_ROW,
     OPEN_FOLDER_ROW,
+    OPEN_LINK_ROW,
     RECENT_GROUP,
     RECORDINGS_ROW,
     SETTINGS_ROW,
@@ -47,11 +48,12 @@ from ui.overlays.drawer import (
     PROVIDER_ERROR_TEXT,
     REFRESH_ACTION,
     SEARCH_ACTION,
+    SETTINGS_BUTTON,
     CountRole,
     Drawer,
     IconRole,
-    find_clear_tooltip,
 )
+from ui.overlays.drawer_look import find_clear_tooltip
 
 PREVIEW_WAIT_MS = PREVIEW_DEBOUNCE_MS + 120
 _OFFSCREEN_NOISE = (
@@ -439,7 +441,7 @@ class DrawerTests(unittest.TestCase):
             self.assertLessEqual(icon.bottom(), d._columns["left"].view.geometry().top())
         self.click(gear.center())
         self.click(refresh.center())
-        self.assertEqual(self.actions, [SETTINGS_ROW, REFRESH_ACTION])
+        self.assertEqual(self.actions, [SETTINGS_BUTTON, REFRESH_ACTION])
 
     def test_the_header_has_search_left_of_refresh(self):
         # Every key has a control on screen (2.0.1): Ctrl/⌘+F has a button in the channel list.
@@ -476,7 +478,7 @@ class DrawerTests(unittest.TestCase):
         for name, rect in (
             (SEARCH_ACTION, d.search_rect()),
             (REFRESH_ACTION, d.refresh_rect()),
-            (SETTINGS_ROW, d.settings_gear_rect()),
+            (SETTINGS_BUTTON, d.settings_gear_rect()),
         ):
             with self.subTest(name=name):
                 hit = d.header_hit_rect(rect)
@@ -522,7 +524,7 @@ class DrawerTests(unittest.TestCase):
         ):
             self.assertTrue(self.drawer._columns["left"].rect.contains(rect.toRect()))
         self.click(self.drawer.settings_gear_rect().center())
-        self.assertEqual(self.actions, [SETTINGS_ROW])
+        self.assertEqual(self.actions, [SETTINGS_BUTTON])
 
     def test_the_sources_have_a_title_and_a_rule_above_their_action_rows(self):
         drawn, elided = [], drawer_module.elided
@@ -689,6 +691,7 @@ class DrawerTests(unittest.TestCase):
                 ("Add provider", "plus"),
                 ("Free channels…", "plus"),
                 ("Open file", "file"),  # Ctrl/⌘+O without the menu bar (2.0.1)
+                ("Open a link", "link"),  # plan 4: File → Open Link… (2.12: its icon)
                 ("Open a folder", "folder"),  # Plan 4: Ctrl/⌘+Shift+O, an empty shelf too
                 ("Recordings", "record"),  # 2.9.7: the Library's Recordings page
             ],
@@ -702,9 +705,30 @@ class DrawerTests(unittest.TestCase):
         self.assertEqual(self.actions, [OPEN_FILE_ROW])
         self.assertEqual(column.current.key, OPEN_FILE_ROW)
         self.assertEqual((self.nav.path, self.catalog.selected, self.library), (path, [], []))
-        self.drawer._on_row_clicked("left", 7)  # Plan 4: Open a folder, right under it
-        self.assertEqual(self.actions, [OPEN_FILE_ROW, OPEN_FOLDER_ROW])
+        self.drawer._on_row_clicked("left", 7)  # plan 4: Open a link, right under it
+        self.assertEqual(self.actions, [OPEN_FILE_ROW, OPEN_LINK_ROW])
+        self.drawer._on_row_clicked("left", 8)  # Plan 4: Open a folder, under that
+        self.assertEqual(self.actions, [OPEN_FILE_ROW, OPEN_LINK_ROW, OPEN_FOLDER_ROW])
         self.assertEqual((self.nav.path, self.catalog.selected, self.library), (path, [], []))
+
+    def test_its_resume_point_opens_it_again_where_the_keys_were(self):
+        # Settings from ⚙ (TVController.make_way_for_settings): the list closed, then opened
+        # again with what resume_point() said, is as it was, the keys on either side.
+        for side in ("left", "right"):
+            with self.subTest(side):
+                self.nav.reset_to("live", "10")
+                self.drawer.open_drawer(focus_side=side)
+                self.drawer.move_by(1)  # off the row it opens on by itself
+                was = self.drawer.highlighted()
+                self.assertIsNotNone(was)
+                point = self.drawer.resume_point()
+                self.assertEqual(point[0], side)
+                self.drawer.close_drawer()
+                path = list(self.nav.path)
+                self.drawer.open_drawer(focus_key=point[1], focus_side=point[0])
+                self.assertEqual(self.nav.path, path)
+                self.assertEqual(self.drawer.focus_side, side)
+                self.assertEqual(self.drawer.highlighted(), was)
 
     def test_arrows_and_enter_reach_settings_and_add_provider(self):
         self.open_on_the_sources()
@@ -724,6 +748,23 @@ class DrawerTests(unittest.TestCase):
         self.assertEqual(self.drawer.highlighted().key, ADD_PROVIDER_ROW)
         self.assertEqual((self.nav.path, self.catalog.selected, self.library), (path, [], []))
 
+    def test_a_focus_key_on_the_left_column_highlights_that_row(self):
+        # Back from Settings opened on its row: the sources, ⚙ Settings highlighted, and
+        # Enter chooses it again.
+        self.nav.focus_source("Home")
+        self.drawer.open_drawer(focus_key=SETTINGS_ROW, focus_side="left")
+        self.record_hand_offs()
+        path = self.nav.path
+        self.assertEqual(self.drawer.focus_side, "left")
+        self.assertEqual(self.drawer.highlighted().key, SETTINGS_ROW)
+        elapse(PREVIEW_WAIT_MS)  # highlighting an action row starts nothing
+        self.assertEqual((self.actions, self.nav.path), ([], path))
+        self.drawer.activate()
+        self.assertEqual(self.actions, [SETTINGS_ROW])
+        self.drawer.close_drawer()
+        self.drawer.open_drawer(focus_side="left")  # without one: on the path's end again
+        self.assertEqual(self.drawer.highlighted(), path[-1])
+
     def test_free_channels_sits_under_add_provider_and_asks_with_a_row_anchor(self):
         column = self.open_on_the_sources()
         self.assertEqual(
@@ -733,6 +774,7 @@ class DrawerTests(unittest.TestCase):
                 ADD_PROVIDER_ROW,
                 FREE_CHANNELS_ROW,
                 OPEN_FILE_ROW,
+                OPEN_LINK_ROW,
                 OPEN_FOLDER_ROW,
                 RECORDINGS_ROW,
             ],

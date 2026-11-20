@@ -1,9 +1,10 @@
 """A provider renamed in Settings keeps what QiTV stored under its name (2.8.12).
 
-QiTV keeps much under a provider's name, never under anything else: Settings → Save calls
-`carry_over()` once the provider list with the new names is saved, and every store's own hook
-moves its entries to the new name, each in the format it always had (older builds read them
-as before). One save may rename several providers at once, a swap among them (`Renames`).
+QiTV keeps much under a provider's name, never under anything else: a rename in Settings
+(ui.provider_actions, through the TV window) calls `carry_over()` once the provider list with
+the new name is saved, and every store's own hook moves its entries to the new name, each in
+the format it always had (older builds read them as before). One call may rename several
+providers at once, a swap among them (`Renames`).
 
 Kept by name, in config.json: the selected provider, the Library's (`library_provider_name`,
 `library_mix`), the stars (`services.favorites`), the history, the resume points, the last film
@@ -85,27 +86,6 @@ class Renames:
         if provider not in self.names:
             return group_id
         return mixed_group_id(self.names[provider], group)
-
-
-def renames_between(before: Iterable[tuple[Any, str]], after: Iterable[Any]) -> Renames:
-    """The renames from (provider entry, its name before) pairs to the entries kept now
-    (`after`, the same dicts): entries are told apart by identity, never by name."""
-    pairs = list(before)
-    kept = {id(entry) for entry in after}
-    names = {
-        old: str(entry.get("name") or "")
-        for entry, old in pairs
-        if id(entry) in kept and str(entry.get("name") or "") != old and old
-    }
-    return Renames({old: new for old, new in names.items() if new}, frozenset(n for _, n in pairs))
-
-
-def removed_between(before: Iterable[tuple[Any, str]], after: Iterable[Any]) -> list[str]:
-    """The names (before the save) of the entries of `before` no longer in `after`: removed,
-    even when a provider kept or added now took the name (what was kept for the removed one
-    was its own: its channels' addresses, its account)."""
-    ids = {id(entry) for entry in after}
-    return [old for entry, old in before if id(entry) not in ids and old]
 
 
 def rename_in_config(config: Any, renames: Renames) -> bool:

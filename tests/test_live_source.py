@@ -2008,6 +2008,77 @@ video.m3u8
         self.assertEqual((raised.exception.kind, raised.exception.status), ("http", 407))
         self.assertGreater(server.counts["/user/secret/live.ts"], 3)
 
+    def test_a_links_refused_reconnect_is_final_at_once_and_an_accounts_is_patient(self):
+        # Plan 4: a link no provider owns (`once`) counts nowhere: a refusal at its reconnect
+        # is final at the first ask. A provider's channel (an account's link too) is asked
+        # again patiently, as its closed connection may still count there.
+        half = len(self.video) // 2 // 188 * 188
+        for once, path in ((True, "/link/live.ts"), (False, "/user/secret/live.ts")):
+
+            def live(_request, count):
+                if count == 1:
+
+                    def broken(request):
+                        request.wfile.write(self.video[:half])
+
+                    return 200, {"Content-Length": str(len(self.video))}, broken
+                if count <= 3:
+                    return 403, {}, b""
+                return 200, {}, self.video[half:]
+
+            server = self.server({path: live})
+            with self.subTest(once=once):
+                source = open_source(
+                    server.url + path,
+                    headers={},
+                    verify_ssl=True,
+                    stop=threading.Event(),
+                    once=once,
+                )
+                patient = {"_REFUSED_RETRY_S": 0.05, "_REFUSED_PATIENCE_S": 5.0}
+                with patch.multiple(source_module, _RECONNECT_DELAYS=FAST_RETRIES, **patient):
+                    if once:
+                        with self.assertRaises(SourceError) as raised:
+                            list(source.chunks())
+                        self.assertEqual(
+                            (raised.exception.kind, raised.exception.status), ("http", 403)
+                        )
+                        self.assertEqual(server.counts[path], 2)  # the stream, one reconnect
+                    else:
+                        received = list(source.chunks())
+                        media_bytes = b"".join(i for i in received if isinstance(i, bytes))
+                        self.assertEqual(media_bytes, self.video)
+                        self.assertEqual(server.counts[path], 4)  # two refusals waited out
+
+    def test_a_link_answered_with_a_recording_is_not_asked_again(self):
+        # Plan 4: the same for a reconnect answered with a recording, not the channel.
+        clip = ts_fixtures.make_stream(2)
+
+        def answer(_request, _count):
+            def body(request):
+                request.wfile.write(clip)
+
+            return 200, {}, body
+
+        server = self.server({"/live.ts": answer})
+        with patch.multiple(source_module, _RECONNECT_DELAYS=FAST_RETRIES, _REFUSED_RETRY_S=0.02):
+            source = open_source(
+                server.url + "/live.ts",
+                headers={},
+                verify_ssl=True,
+                stop=threading.Event(),
+                once=True,
+            )
+            with self.assertRaises(SourceError) as failure:
+                try:
+                    for item in source.chunks():
+                        if isinstance(item, bytes):
+                            source.not_live()  # the guard: a recording, not the channel
+                finally:
+                    source.close()
+        self.assertEqual(str(failure.exception), STREAM_LIMIT)
+        self.assertEqual(server.counts["/live.ts"], 1)
+
     def test_local_paths_and_file_urls_need_allow_local(self):
         with tempfile.TemporaryDirectory(prefix="qitv-source-local-") as directory:
             path = Path(directory) / "local.ts"

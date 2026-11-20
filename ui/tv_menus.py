@@ -5,12 +5,14 @@ keyPressEvent handles those keys through ui.keymap. Modifier combinations are ap
 shortcuts, which the keymap leaves to the menus (a test checks that no screen claims them).
 The player's keys are disabled while the Library shows. The Providers menu is an exclusive
 group of the configured providers, rebuilt when a provider becomes ready or fails and after
-Settings closes, then Add provider and the free-channels menu (the welcome card that offers
-both shows only without providers, and the last one stays). The drawer's Settings and Add
-provider rows open the same dialogs, its Free channels row the free-channels menu, its Open
-file row the same file dialog, and its header's ⌕ the same search. File → Open Recordings
-Folder opens where recordings go (2.2), as Settings' Open folder does; View → Recordings
-(2.9.7) the Library's Recordings page, as the drawer's Recordings row.
+a provider changes in Settings, then Add provider and the free-channels menu (the welcome card
+that offers both shows only without providers, and the last one stays). Settings… opens
+Settings in the drawer, as the drawer's Settings row and ⚙ do (backing out of it from there
+gives the drawer back). The drawer's Add provider row opens the same Add card in Settings as
+Add provider, its Free channels row the free-channels menu, its Open file row the same file
+dialog, and its header's ⌕ the same search. File → Open Recordings Folder opens where
+recordings go (2.2), as Settings' Open folder does; View → Recordings (2.9.7) the Library's
+Recordings page, as the drawer's Recordings row.
 """
 
 from __future__ import annotations
@@ -39,6 +41,7 @@ from services.navigation import (
     FREE_CHANNELS_ROW,
     OPEN_FILE_ROW,
     OPEN_FOLDER_ROW,
+    OPEN_LINK_ROW,
     RECORDINGS_ROW,
     SETTINGS_ROW,
 )
@@ -49,7 +52,7 @@ from ui.free_channels_menu import (
     build_menu as build_free_channels_menu,
 )
 from ui.keymap import Action
-from ui.overlays.drawer import LIBRARY_ACTION, REFRESH_ACTION, SEARCH_ACTION
+from ui.overlays.drawer import LIBRARY_ACTION, REFRESH_ACTION, SEARCH_ACTION, SETTINGS_BUTTON
 from ui.shortcuts_dialog import ShortcutsDialog
 from ui.update_dialogs import check_for_updates
 
@@ -203,8 +206,8 @@ class TVMenus(QObject):
             self.check_updates,
             role.ApplicationSpecificRole,
         )
-        # i18n: a menu entry (opens the Settings window)
-        add(app_menu, tr("Settings…"), "Ctrl+,", window.options_dialog, role.PreferencesRole)
+        # i18n: a menu entry (opens Settings)
+        add(app_menu, tr("Settings…"), "Ctrl+,", window.open_settings, role.PreferencesRole)
         # i18n: a menu entry: the phone remote's pairing code (turning the remote on if it's off)
         add(
             app_menu,
@@ -216,6 +219,8 @@ class TVMenus(QObject):
         add(app_menu, tr("Quit"), "Ctrl+Q", window.quit_chosen, role.QuitRole)  # i18n: a menu entry
         file_menu = bar.addMenu(tr("File"))  # i18n: the menu bar's File menu
         add(file_menu, tr("Open File…"), "Ctrl+O", screens.open_file)
+        # i18n: a menu entry (plan 4): a stream's link plays, a provider's goes to Add provider
+        add(file_menu, tr("Open Link…"), "", window.open_link)
         # i18n: a menu entry (Plan 4): a folder chosen plays, and goes on the Library's Folders tab
         add(file_menu, tr("Open Folder…"), "Ctrl+Shift+O", screens.open_folder)
         export = file_menu.addMenu(tr("Export"))  # i18n: a submenu of File (verb)
@@ -242,14 +247,17 @@ class TVMenus(QObject):
         add(view, tr("Refresh Films and Series"), "Ctrl+Shift+R", self.refresh_library)
         player = self._player_actions  # the player's keys: off while the Library shows
         player.append(add(view, tr("Guide"), "G", self._handler(Action.GUIDE)))
+        # i18n: a View menu entry: opens the channel list
         player.append(add(view, tr("Channel List"), "Return", self._handler(Action.OPEN_DRAWER)))
         add(view, tr("Fullscreen"), "F", window.toggle_fullscreen)
+        # i18n: a View menu entry: the picture in a small window of its own
         player.append(add(view, tr("Mini Player"), "Alt+P", self._handler(Action.MINI_PLAYER)))
         # i18n: a View menu entry, checked while the window stays above other apps' windows
         self.keep_on_top = add(view, tr("Keep on Top"), "", self._toggle_keep_on_top)
         self.keep_on_top.setCheckable(True)
         self.keep_on_top.setChecked(bool(getattr(window.config_manager, "keep_on_top", False)))
         playback = bar.addMenu(tr("Playback"))  # i18n: the menu bar's Playback menu
+        # i18n: a Playback menu entry: plays, or pauses what plays
         player.append(add(playback, tr("Play/Pause"), "Space", self._handler(Action.PLAY_PAUSE)))
         # i18n: a menu entry (2.6): every picture stops, nothing streams (verb)
         player.append(add(playback, tr("Stop"), "X", self._handler(Action.STOP)))
@@ -258,6 +266,7 @@ class TVMenus(QObject):
         player.append(
             add(playback, tr("Previous Channel"), "Backspace", self._handler(Action.PREVIOUS))
         )
+        # i18n: a Playback menu entry: a time-shifted channel back to live (verb)
         player.append(add(playback, tr("Go Live"), "L", self._handler(Action.GO_LIVE)))
         # i18n: a menu entry: record the channel being watched, or stop recording (verb)
         player.append(add(playback, tr("Record"), "R", self._handler(Action.RECORD)))
@@ -418,17 +427,23 @@ class TVMenus(QObject):
         open_folder(str(log_file.log_dir()))
 
     def on_drawer_action(self, row: str) -> None:
-        """The drawer's Settings, Add provider, Free channels, Open file, Open a folder and
-        Recordings rows, and its header's Library, ⌕ and refresh buttons."""
+        """The drawer's Settings, Add provider, Free channels, Open file, Open a link, Open a
+        folder and Recordings rows, and its header's ⚙, Library, ⌕ and refresh buttons. Backed
+        out of, Settings gives the list back: on its Settings row from there, where it was
+        from ⚙ and from Add provider (Settings at Providers, its Add card over it)."""
         if row == SETTINGS_ROW:
-            self._window.options_dialog()
+            self._window.open_settings(from_drawer=True)
+        elif row == SETTINGS_BUTTON:
+            self._window.open_settings(from_drawer=True, keep_place=True)
         elif row == ADD_PROVIDER_ROW:
-            self._window.add_provider()
+            self._window.add_provider(from_drawer=True)
         elif row == FREE_CHANNELS_ROW:
             drawer = self._window.overlays.drawer
             self._window.show_free_channels(drawer.row_anchor(row))
         elif row == OPEN_FILE_ROW:
             self._window.screens.open_file()
+        elif row == OPEN_LINK_ROW:  # plan 4: File → Open Link…
+            self._window.open_link()
         elif row == OPEN_FOLDER_ROW:  # Plan 4: File → Open Folder… (P4-25)
             self._window.screens.open_folder()
         elif row == RECORDINGS_ROW:  # 2.9.7

@@ -182,6 +182,29 @@ class ParseM3uCommonPlaylistTests(unittest.TestCase):
             ],
         )
 
+    def test_a_link_it_cant_read_leaves_its_channel_out_not_the_list(self):  # 2.12
+        # An unbalanced bracket in the host made the whole playlist fail to load.
+        for broken in ("http://[fe80::1/a.ts", "http://user:pa[ss@a.invalid/a.ts", "http://h]/a"):
+            with self.subTest(link=broken):
+                playlist = ("#EXTM3U", "#EXTINF:-1,A", broken, "#EXTINF:-1,B", "http://b.invalid/b")
+                self.assertEqual(self.channels(*playlist), [("B", "http://b.invalid/b")])
+                categorized = parse_m3u("\n".join(playlist), categorize=True)
+                self.assertEqual([item["name"] for item in categorized["contents"]], ["B"])
+        self.assertEqual(  # its backup plays instead, and a backup it can't read is no matter
+            self.channels(
+                "#EXTINF:-1,A", "http://[fe80::1/a.ts", "http://b.invalid/a", "http://[x/2.ts"
+            ),
+            [("A", "http://b.invalid/a")],
+        )
+        self.assertEqual(  # a link alone that it can't read is no channel
+            self.channels("http://[x/1.ts", "http://a.invalid/2.ts"),
+            [("2.ts", "http://a.invalid/2.ts")],
+        )
+        self.assertEqual(
+            self.channels("#EXTINF:-1,Six", "http://[2001:db8::1]:8080/ok.ts"),
+            [("Six", "http://[2001:db8::1]:8080/ok.ts")],
+        )
+
 
 class _Resp:
     def __init__(self, content, content_type=None):

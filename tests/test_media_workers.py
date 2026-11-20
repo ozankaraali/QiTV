@@ -8,6 +8,7 @@ from services.media_workers import (
     MediaLinkWorker,
     MediaSectionWorker,
     MediaSignInWorker,
+    check_access,
 )
 
 BASE = "http://server.test:8096"
@@ -346,6 +347,25 @@ class SignInWorkerTests(unittest.TestCase):
             BASE, "EMBY", "me", "no", True, client=FakeClient(fail=ms.SignInNeeded("401"))
         )
         self.assertEqual(outcome(worker), ("error", "The user name or the password is not right."))
+
+
+class KeptAccessTests(unittest.TestCase):
+    def test_a_kept_sign_in_is_asked_with_its_token(self):
+        # Settings' Check the connection, on a server already added: no password is kept,
+        # so its token is asked (its libraries), never a sign-in.
+        client = FakeClient()
+        self.assertEqual(check_access(PROVIDER, True, client=lambda p, v: client), (True, ""))
+        self.assertTrue(client.closed)
+        refused = FakeClient(fail=ms.SignInNeeded("401"))
+        self.assertEqual(
+            check_access(PROVIDER, True, client=lambda p, v: refused), (False, ms.SIGN_IN_AGAIN)
+        )
+        failed = FakeClient(fail=ms.MediaServerError("The server answered 500"))
+        with self.assertLogs("services.media_workers", "INFO"):
+            ok, why = check_access(PROVIDER, True, client=lambda p, v: failed)
+        self.assertEqual(
+            (ok, why), (False, "The server could not be reached (The server answered 500).")
+        )
 
 
 if __name__ == "__main__":

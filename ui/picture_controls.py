@@ -1,11 +1,10 @@
-"""The Picture panel (2.3): the picture's aspect ratio, deinterlacing, a sleep timer, and the
-statistics over the picture.
+"""The Picture panel (2.3): the picture's aspect ratio, a sleep timer, and the statistics over
+the picture.
 
 The transport's Picture button (or A) opens the panel above it, as ♫ opens the Sound panel
 (ui/overlays/track_panel.py: the same look, keys, idle close, scrolling and click-outside):
 
     Aspect ratio    ‹ Auto ›     Auto, 16:9, 4:3, Fill the window
-    Deinterlacing   ‹ Auto ›     Auto, On, Off
     Sleep timer     ‹ Off ›      Off, 15, 30, 60, 90 min, End of the programme
   ✓ Statistics                   shown or hidden
 
@@ -20,11 +19,12 @@ the GUI thread): it applies whenever a player opens the channel, large or small 
 `prepare_small`), and the player keeps it through each reopen of the same channel. It is kept
 under the channel's key as the channel opened in that player (ui/player_keys.py, shared with
 the sound's sync: the channel list may browse another provider by the time A is pressed). A
-film's stays with its player while it plays; the next title starts on Auto. Fill crops to the shape
-of the player's own surface, which the window reports to the player. Deinterlacing is one setting
-for every player, kept in the config (`deinterlace`, optional: older builds ignore it); libVLC 3
-cannot give a player Auto back once it was set on or off, which a toast says (QiTV's next start
-does).
+film's stays with its player while it plays; the next title starts on Auto. Fill crops to the
+shape of the player's own surface, which the window reports to the player. Deinterlacing is not
+here: it is a setting (Settings, Playback, after Hardware video decoding), one for every
+player, kept in the config (`deinterlace`, optional: older builds ignore it);
+`apply_deinterlacing` gives it to the players once Settings saved it. libVLC 3 cannot give a
+player Auto back once it was set to Off, which a toast says (QiTV's next start does).
 
 The sleep timer (`services.sleep_timer`) is never kept across a restart. While it runs, its row
 shows the time left; "End of the programme" is offered while the guide knows when the programme
@@ -48,7 +48,7 @@ from PySide6.QtCore import QEvent, QObject, QRectF, Qt, QTimer
 
 from services import picture, sleep_manager
 from services.i18n import N_, tr, translate
-from services.picture import ASPECTS, DEINTERLACING, aspect_name, deinterlace_name
+from services.picture import ASPECTS, DEINTERLACING, aspect_name
 from services.sleep_timer import PRESETS_MIN, SleepTimer, clock_text
 from ui.keymap import Action, key_hint
 from ui.link_lanes import Target
@@ -58,15 +58,14 @@ from ui.player_keys import PlayerKeys
 logger = logging.getLogger(__name__)
 
 PICTURE = "picture"  # the transport's button
-ASPECT, DEINTERLACE, SLEEP, STATS = "aspect", "deinterlace", "sleep", "stats"  # the rows
+ASPECT, SLEEP, STATS = "aspect", "sleep", "stats"  # the rows
 PICTURE_TITLE = N_("Picture")  # i18n: the Picture panel's title (aspect ratio, sleep timer…)
 ASPECT_LABEL = N_("Aspect ratio")  # i18n: the Picture panel's row
-DEINTERLACE_LABEL = N_("Deinterlacing")  # i18n: the Picture panel's row (interlaced TV pictures)
 SLEEP_LABEL = N_("Sleep timer")  # i18n: the Picture panel's row: playback stops after a while
 STATS_LABEL = N_("Statistics")  # i18n: the Picture panel's row, and the statistics' title
 # i18n: the sleep timer's choice: stop when the programme being watched ends
 PROGRAMME_END = N_("End of the programme")
-# i18n: a toast: libVLC cannot give a player Auto back once deinterlacing was on or off
+# i18n: a toast: libVLC cannot give a player Auto back once deinterlacing was set to Off
 AUTO_LATER = N_("Deinterlacing is back on Auto when QiTV starts again")
 SLEEP_OFF = N_("Sleep timer off")  # i18n: a toast (Keep watching turned it off)
 STOPPED = N_("Sleep timer: playback stopped")  # i18n: a toast once the sleep timer ended
@@ -303,9 +302,7 @@ class PictureControls(QObject):
 
     def _model(self) -> PanelModel:
         aspect = self._session().aspect()
-        deinterlacing = self._deinterlacing()
         aspects = [aspect_name(a) for a in ASPECTS]
-        modes = [deinterlace_name(d) for d in DEINTERLACING]
         sleeps = [self._sleep_name(choice) for choice in self._sleep_choices()]
         sleeps.append(_time_left(90 * 60.0))  # "1:30:00 left"
         rows = (
@@ -316,13 +313,6 @@ class PictureControls(QObject):
                 widest=max(aspects, key=len),
                 lit=aspect != picture.AUTO,
                 tip=key_hint(translate(ASPECT_LABEL), _ASPECT_KEY),
-            ),
-            PanelRow(
-                DEINTERLACE,
-                translate(DEINTERLACE_LABEL),
-                value=deinterlace_name(deinterlacing),
-                widest=max(modes, key=len),
-                lit=deinterlacing != picture.AUTO,
             ),
             PanelRow(
                 SLEEP,
@@ -365,8 +355,6 @@ class PictureControls(QObject):
             return
         if key == ASPECT:
             self._set_aspect(picture.stepped(ASPECTS, self._session().aspect(), delta))
-        elif key == DEINTERLACE:
-            self._set_deinterlacing(picture.stepped(DEINTERLACING, self._deinterlacing(), delta))
         elif key == SLEEP:
             self._step_sleep(delta)
         self.open_panel()
@@ -402,16 +390,17 @@ class PictureControls(QObject):
         choice = getattr(self._config, "deinterlace", picture.AUTO)
         return choice if choice in DEINTERLACING else picture.AUTO
 
-    def _set_deinterlacing(self, choice: str) -> None:
-        """Every player's deinterlacing, kept in the config."""
-        self._config.deinterlace = choice
-        back = [player.set_deinterlace(choice) for player in self._players()]
+    def apply_deinterlacing(self) -> None:
+        """Settings saved the deinterlacing: every player has it (Auto after Off waits for
+        QiTV's next start, which a toast says)."""
+        choice = self._deinterlacing()
+        back = [
+            player.set_deinterlace(choice)
+            for player in self._players()
+            if player.deinterlace() != choice
+        ]
         if not all(back):
             self._toast(translate(AUTO_LATER))
-        try:
-            self._config.save_config()
-        except Exception as e:  # the setting holds for this run anyway
-            logger.warning("Couldn't save the deinterlacing setting: %s", e)
 
     # ---- the sleep timer ----------------------------------------------------------------------
 

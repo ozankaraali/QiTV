@@ -16,16 +16,22 @@ tune in flight that it overtook (`tuneDropped`); a copied link is never supersed
 The side lane also asks an STB portal for the link of a programme's recording in its archive
 (catch-up, `request_archive`): its answer, or its failure, goes to its asker, which drops
 one that comes too late itself; the lanes never supersede it.
+
+A link whose address is already known (plan 4: one of Network streams, `known(item)`) is no
+provider's to make: the lanes answer it themselves, a turn later as a catalog answers a
+playlist's channel, under a request id of their own (negative: never a catalog's), so a
+choice made meanwhile still queues behind it.
 """
 
 from __future__ import annotations
 
 from collections import deque
 from dataclasses import dataclass, field
+import itertools
 import logging
-from typing import Any, Callable, Optional
+from typing import Any, Callable, Optional, cast
 
-from PySide6.QtCore import QObject, QUrl, Signal
+from PySide6.QtCore import QObject, QTimer, QUrl, Signal
 
 from services.navigation import episode_key
 from services.open_paths import is_video
@@ -118,6 +124,9 @@ class LinkLanes(QObject):
         self._side_queue: deque[_SideJob] = deque()
         self._generation = 0
         self._closed = False
+        # A link's own address (plan 4), or None for an item its provider makes the link of.
+        self.known: Callable[[dict], Optional[str]] = lambda item: None
+        self._own_ids = itertools.count(-1, -1)
         catalog.linkReady.connect(self._on_ready)
         catalog.linkFailed.connect(self._on_failed)
 
@@ -146,13 +155,26 @@ class LinkLanes(QObject):
                 forget(inflight[0])
             self._inflight = None
         self.queued = None  # the target sent now is the newest choice
-        request_id = self.catalog.request_link(
-            target.item,
-            section=target.section,
-            is_episode=target.section == "series",
-            **_quality(target),
-        )
+        request_id = self._ask(target)
         self._inflight = (request_id, target, self._generation)
+
+    def _ask(self, target: Target) -> int:
+        """Ask for `target`'s link: of its provider's catalog, or (a link whose address is
+        known) of nobody: answered a turn later here."""
+        url = self.known(target.item)
+        if not url:
+            return cast(
+                int,
+                self.catalog.request_link(
+                    target.item,
+                    section=target.section,
+                    is_episode=target.section == "series",
+                    **_quality(target),
+                ),
+            )
+        request_id = next(self._own_ids)
+        QTimer.singleShot(0, self, lambda: self._on_ready(request_id, url))
+        return request_id
 
     def _held(self, request_id: int) -> bool:
         """Whether the catalog holds the request for its provider's setup (see `holds`)."""
@@ -221,16 +243,10 @@ class LinkLanes(QObject):
         job = self._next_current_job()
         if job is None:
             return
-        section = job.target.section
         if job.programme:
             request_id = self.catalog.request_archive_link(job.target.item, job.programme)
         else:
-            request_id = self.catalog.request_link(
-                job.target.item,
-                section=section,
-                is_episode=section == "series",
-                **_quality(job.target),
-            )
+            request_id = self._ask(job.target)
         self._side = (request_id, job)
 
     def _next_current_job(self) -> Optional[_SideJob]:

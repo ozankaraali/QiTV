@@ -1,3 +1,7 @@
+"""The welcome card (spec §8): its look, and, in the TV window with no provider yet, its Add
+provider opens the Add card in Settings over the empty canvas, whose Cancel gives the card
+back (plan 2)."""
+
 import os
 import unittest
 from unittest import mock
@@ -5,12 +9,19 @@ from unittest import mock
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 from PySide6.QtCore import QPoint, QRectF, Qt
-from PySide6.QtGui import QFont, QPainter
+from PySide6.QtGui import QFont, QGuiApplication, QPainter
 from PySide6.QtTest import QTest
 from PySide6.QtWidgets import QApplication, QWidget
-from timer_fixtures import pause
+from timer_fixtures import elapse, pause, wait_until
 
+from services.config_manager import ConfigManager
+from services.provider_check import Outcome
+from services.provider_link import ProviderLink
+from services.settings_model import ADD_PROVIDER, PROVIDERS
+from tests.test_tv_window import WindowCase
+from ui.keymap import Action
 from ui.overlays.painting import Units
+from ui.overlays.settings_card import CANCEL
 from ui.overlays.welcome import (
     BODY_OPACITY,
     BODY_TEXT,
@@ -136,6 +147,115 @@ class WelcomeCardTests(unittest.TestCase):
         self.card.show_card()
         self.card.dismiss()
         self.assertFalse(self.card.isVisible())
+
+
+class WelcomeAddTests(WindowCase):
+    """No provider yet: the card's Add provider opens Settings at Providers with the Add card
+    over the empty canvas; its Cancel gives the welcome card back."""
+
+    LINK = "http://127.0.0.1:9/list.m3u"  # a closed port of the loopback
+
+    def provider_list(self):
+        return []
+
+    def tearDown(self):
+        elapse(QApplication.doubleClickInterval() + 80)  # no second-click guard left armed
+        super().tearDown()
+
+    def start(self):
+        self.show()
+        card = self.window.overlays.welcome
+        self.assertTrue(wait_until(card.isVisible))
+        return card
+
+    def click_add(self, card):
+        QTest.mouseClick(card, Qt.MouseButton.LeftButton, pos=card.button_rect().center().toPoint())
+
+    def assert_the_add_card(self, card):
+        window, form = self.window, self.window.provider_cards.form
+        self.assertTrue(window.settings.visible())
+        self.assertEqual(window.settings_drawer.path(), (PROVIDERS,))
+        self.assertTrue(form.isVisible())
+        self.assertEqual(form.title(), "Add a provider")
+        self.assertTrue(card.isHidden())  # over the empty canvas, the welcome card under it
+        self.assertFalse(window.overlays.drawer.isVisible())
+
+    def test_cancel_with_no_provider_goes_back_to_the_welcome_card(self):
+        card = self.start()
+        window, form = self.window, self.window.provider_cards.form
+        self.click_add(card)
+        self.assert_the_add_card(card)
+        QTest.keyClick(window, Qt.Key.Key_Escape)  # the card's Cancel
+        self.assertFalse(form.isVisible())
+        self.assertFalse(window.settings.visible())
+        self.assertTrue(card.isVisible())
+        QTest.keyClick(window, Qt.Key.Key_Return)  # OK on a remote: the card's button
+        self.assert_the_add_card(card)
+        cancel = form.control_rect("button", CANCEL).center().toPoint()
+        QTest.mouseClick(form, Qt.MouseButton.LeftButton, pos=cancel)  # its Cancel button
+        self.assertFalse(form.isVisible())
+        self.assertFalse(window.settings.visible())
+        self.assertTrue(card.isVisible())
+        self.assertEqual(self.provider_manager.providers, [])
+
+    def test_a_portal_link_dropped_over_the_card_keeps_its_way_back(self):
+        # The card from the welcome card filled anew by a drop: its Cancel still gives the
+        # welcome card back.
+        card = self.start()
+        window, form = self.window, self.window.provider_cards.form
+        self.click_add(card)
+        portal = "http://portal.example.test/stalker_portal/c/"
+        window.add_dropped_providers([], [ProviderLink("STB", portal)])
+        self.assertEqual(form.values()["url"], portal)
+        QTest.keyClick(window, Qt.Key.Key_Escape)  # the card's Cancel
+        self.assertFalse(window.settings.visible())
+        self.assertTrue(card.isVisible())
+
+    def test_settings_own_add_row_cancels_back_into_settings(self):
+        # Settings opened by itself: Cancel on its ＋ Add provider stays in it, and backing out
+        # of it gives the welcome card back.
+        card = self.start()
+        window, form = self.window, self.window.provider_cards.form
+        self.menu_actions()["Settings…"].trigger()
+        drawer = window.settings_drawer
+        for _ in range(12):
+            if drawer.path() == (PROVIDERS,):
+                break
+            window.controller.handle(Action.NAV_DOWN)
+        window.controller.handle(Action.NAV_RIGHT)
+        self.assertEqual(drawer.focused_row().key, ADD_PROVIDER)  # no provider: the first row
+        window.controller.handle(Action.NAV_ACTIVATE)
+        self.assertTrue(form.isVisible())
+        QTest.keyClick(window, Qt.Key.Key_Escape)  # the card's Cancel
+        self.assertFalse(form.isVisible())
+        self.assertTrue(window.settings.visible())
+        self.assertTrue(card.isHidden())
+        for _ in range(2):  # rows → sections → closed
+            QTest.keyClick(window, Qt.Key.Key_Escape)
+        self.assertFalse(window.settings.visible())
+        self.assertTrue(card.isVisible())
+
+    def test_a_provider_added_from_the_welcome_card_is_selected_and_said(self):
+        card = self.start()
+        window, form = self.window, self.window.provider_cards.form
+        self.click_add(card)
+        self.assert_the_add_card(card)
+        QGuiApplication.clipboard().setText(self.LINK)
+        window.controller.handle(Action.PASTE)
+        with (
+            mock.patch("services.provider_check.check", return_value=Outcome(True)),
+            mock.patch.object(window.catalog, "select_provider") as select,
+        ):
+            QTest.keyClick(window, Qt.Key.Key_Return)  # Check and add
+            self.assertTrue(wait_until(lambda: not form.isVisible()))
+        self.assertIn(("Added 127.0.0.1 to your providers", "info"), self.toasts)
+        self.assertEqual(ConfigManager().selected_provider_name, "127.0.0.1")
+        select.assert_called_once_with(None, force_refresh=False)
+        self.assertEqual([p["name"] for p in self.provider_manager.providers], ["127.0.0.1"])
+        self.assertTrue(window.settings.visible())  # on Providers, the new one listed
+        QTest.keyClick(window, Qt.Key.Key_Escape)  # out of Settings
+        self.assertFalse(window.settings.visible())
+        self.assertTrue(card.isHidden())  # a provider now: no welcome card
 
 
 if __name__ == "__main__":

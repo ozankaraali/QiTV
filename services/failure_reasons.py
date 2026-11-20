@@ -45,9 +45,10 @@ UNEXPECTED_ANSWER_MESSAGE = N_("The provider sent an unexpected answer")
 FORBIDDEN_MESSAGE = N_("The server refused QiTV (403)")
 NOT_FOUND_MESSAGE = N_("The server has nothing at this address (404)")
 PROXY_MESSAGE = N_("A proxy on your network asks for a sign-in (407)")
-# i18n: a Jellyfin or Emby server refused QiTV's access (its sign-in ended)
+# i18n: a Jellyfin or Emby server refused QiTV's access (its sign-in ended); where to sign in
+# again: in Settings, Providers, the server's own row, then its "Address and login" card
 SIGN_IN_AGAIN_MESSAGE = N_(
-    "The server asks to sign in again: Settings → Providers → Verify Provider."
+    "The server asks to sign in again: Settings → Providers → this server → Address and login."
 )
 # The English start of a block's catalog message (services.catalog lets a message starting
 # with it through) and of a server error's; their whole texts: blocked_text, server_text.
@@ -64,7 +65,7 @@ OK = "ok"
 UNEXPECTED = "unexpected"
 EXPIRED = "expired"
 # A portal's profile dated in the past while the portal still answers: such dates go stale on
-# some portals, so it is said as the portal's word (and Verify Provider only warns of it).
+# some portals, so it is said as the portal's word (and Check the connection only warns of it).
 DATED = "dated"
 LIMIT = "limit"
 WRONG_LOGIN = "wrong_login"
@@ -97,7 +98,7 @@ _BLOCKED_MESSAGE = re.compile(
 @dataclass(frozen=True)
 class Reason:
     kind: str
-    text: str  # in the active language: what Verify Provider and the toasts show
+    text: str  # in the active language: what Check the connection and the toasts show
     # A LIMIT's numbers, as the account reported them (the GUI compares them with QiTV's own
     # streams at that provider, `own_streams_text`).
     limit: Optional[int] = field(default=None, compare=False)

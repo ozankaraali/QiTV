@@ -1,18 +1,16 @@
-"""One provider link fills the add-provider form (2.2): services.provider_link reads it, and
-Settings' "Paste link" (or a link pasted into the address) fills the form. Fictional hosts."""
+"""One provider link fills the Add card (2.2): services.provider_link reads it (the card itself
+is tests/test_provider_cards.py's). Fictional hosts."""
 
-import os
 import unittest
 
-os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
-
-from PySide6.QtGui import QGuiApplication
-from PySide6.QtTest import QTest
-from timer_fixtures import pause
-
-from services.provider_link import M3U, STB, XTREAM, ProviderLink, parse_provider_link
-from tests import test_tv_window as base
-from ui.settings_dialog import NO_LINK_TEXT, OptionsDialog
+from services.provider_link import (
+    M3U,
+    STB,
+    XTREAM,
+    ProviderLink,
+    parse_provider_link,
+    xtream_address,
+)
 
 PANEL = "http://panel.example.test:8080"
 
@@ -118,73 +116,27 @@ class ParseTests(unittest.TestCase):
                 self.assertEqual(parse_provider_link(text).password, password)
 
 
-class PasteLinkTests(base.WindowCase):
-    def dialog(self):
-        dialog = OptionsDialog(self.window)
-        self.addCleanup(dialog.deleteLater)
-        dialog.start_new_provider()
-        return dialog
-
-    def paste(self, text):
-        QGuiApplication.clipboard().setText(text)
-        self.addCleanup(QGuiApplication.clipboard().clear)
-
-    def test_paste_link_fills_an_xtream_provider(self):
-        dialog = self.dialog()
-        self.paste(f"{PANEL}/get.php?username=ann&password=pw1&type=m3u_plus")
-        dialog.paste_link_button.click()
-        self.assertTrue(dialog.type_XTREAM.isChecked())
-        self.assertEqual(dialog.url_input.text(), PANEL)
-        self.assertEqual(dialog.username_input.text(), "ann")
-        self.assertEqual(dialog.password_input.text(), "pw1")
-        self.assertEqual(dialog.name_input.text(), "panel.example.test")
-        self.assertFalse(dialog.username_input.isHidden())
-        self.assertIn("Xtream", dialog.verify_result.text())
-        provider = dialog._provider_from_inputs()
-        self.assertEqual(
-            (provider["type"], provider["url"], provider["username"], provider["password"]),
-            ("XTREAM", PANEL, "ann", "pw1"),
-        )
-
-    def test_a_link_pasted_into_the_address_fills_the_form(self):
-        dialog = self.dialog()
-        dialog.url_input.setFocus()
-        self.paste("http://portal.example.test/stalker_portal/c/")
-        dialog.url_input.paste()
-        pause(10)  # it fills once the paste's own signals are out
-        self.assertTrue(dialog.type_STB.isChecked())
-        self.assertEqual(dialog.url_input.text(), "http://portal.example.test/stalker_portal/c/")
-        self.assertIn("MAC address", dialog.verify_result.text())
-
-    def test_typing_a_link_never_cuts_it_up(self):
-        dialog = self.dialog()
-        QTest.keyClicks(dialog.url_input, f"{PANEL}/get.php?username=ann&password=pw1")
-        pause(10)
-        self.assertEqual(dialog.url_input.text(), f"{PANEL}/get.php?username=ann&password=pw1")
-        self.assertTrue(dialog.type_STB.isChecked())  # a new provider's type, untouched
-
-    def test_no_link_on_the_clipboard_is_said(self):
-        dialog = self.dialog()
-        self.paste("hello")
-        dialog.paste_link_button.click()
-        self.assertEqual(dialog.verify_result.text(), NO_LINK_TEXT)
-        self.assertEqual(dialog.url_input.text(), "")
-
-    def test_a_named_provider_keeps_its_name_and_an_m3u_stream_its_type(self):
-        dialog = self.dialog()
-        dialog.name_input.setText("Living room")
-        dialog.type_M3USTREAM.setChecked(True)
-        self.paste("https://lists.example.test/one/channel.m3u8")
-        dialog.paste_link_button.click()
-        self.assertEqual(dialog.name_input.text(), "Living room")
-        self.assertTrue(dialog.type_M3USTREAM.isChecked())
-        self.assertEqual(dialog.url_input.text(), "https://lists.example.test/one/channel.m3u8")
-
-    def test_the_paste_logs_nothing_of_the_link(self):
-        dialog = self.dialog()
-        self.paste(f"{PANEL}/get.php?username=ann&password=pw1")
-        with self.assertNoLogs(level="DEBUG"):
-            dialog.paste_link_button.click()
+class XtreamAddressTests(unittest.TestCase):
+    def test_a_file_path_is_no_panels(self):
+        # An Xtream address typed or pasted that is no link: a file's path (a film, a page) is
+        # no panel's, so only its server is kept; a panel served under a path keeps it, and an
+        # API file at its end goes, with its query.
+        cases = {
+            f"{PANEL}/media/film.mp4": PANEL,
+            f"{PANEL}/index.html?lang=en": PANEL,
+            f"{PANEL}/xc/clip.MKV#t=3": PANEL,
+            f"{PANEL}/xc/player_api.php": f"{PANEL}/xc",
+            f"{PANEL}/get.php?type=m3u": PANEL,
+            f"{PANEL}/xc": f"{PANEL}/xc",  # as typed
+            f"{PANEL}/xc/": f"{PANEL}/xc/",
+            f"{PANEL}/v1.2": f"{PANEL}/v1.2",  # a folder's dot is no file's
+            PANEL: PANEL,
+            "https://[::1]:8080/a/film.mp4": "https://[::1]:8080",
+            "words, not an address": "words, not an address",
+        }
+        for text, kept in cases.items():
+            with self.subTest(text=text):
+                self.assertEqual(xtream_address(text), kept)
 
 
 if __name__ == "__main__":

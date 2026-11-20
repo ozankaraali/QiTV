@@ -10,11 +10,11 @@ os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 from PySide6.QtWidgets import QApplication
 from job_fixtures import ImmediateRunner
 from mixed_fixtures import DEMO, HARBOR, HeldSetups, live_content, mixed_config, shut_hub
-import orjson
 from test_catalog_lifecycle import RealSetupFactory
 from test_catalog_service import FakeWorker
 from timer_fixtures import pause
 
+from services import provider_cache
 from services.catalogs import Catalogs
 from services.provider_ids import provider_of, with_provider
 from ui.link_lanes import LinkLanes, Target
@@ -353,8 +353,8 @@ class CacheWriteAtExitTests(unittest.TestCase):
             timeout=60,
         )
         self.assertEqual(result.returncode, ABANDONED_EXIT_CODE, result.stderr[-2000:])
-        with open(result.stdout.strip(), "rb") as f:
-            self.assertEqual(orjson.loads(f.read())["itv"], {"categories": [], "contents": []})
+        cache = provider_cache.read_cache(result.stdout.strip())
+        self.assertEqual(cache["itv"], {"categories": [], "contents": []})
 
 
 class HeldGuides(ImmediateRunner):

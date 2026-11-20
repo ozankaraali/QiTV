@@ -223,7 +223,7 @@ class PicturePanelChecks:
         self.controls.toggle_stats()
         self.open()
         cut = Elisions(self)
-        for index, steps in ((0, 4), (1, 3), (2, 7)):
+        for index, steps in ((0, 4), (1, 7)):
             for _ in range(steps):
                 self.panel.grab()
                 self.step(index, 1)
@@ -245,9 +245,7 @@ class TurkishPicturePanelTests(PicturePanelChecks, test_picture_panel.PictureCas
     def test_the_picture_panel_reads_in_turkish_and_whole(self):
         title, rows = self.check_whole()
         self.assertEqual(title, "Görüntü")
-        self.assertEqual(
-            rows, ["En boy oranı", "Geçmeli tarama giderme", "Uyku zamanlayıcısı", "İstatistikler"]
-        )
+        self.assertEqual(rows, ["En boy oranı", "Uyku zamanlayıcısı", "İstatistikler"])
         self.assertEqual(self.notice.text(), "Oynatma 0:30 sonra duracak")
 
 
@@ -560,9 +558,7 @@ class FrenchPicturePanelTests(PicturePanelChecks, test_picture_panel.PictureCase
     def test_the_picture_panel_reads_in_french_and_whole(self):
         title, rows = self.check_whole()
         self.assertEqual(title, "Image")
-        self.assertEqual(
-            rows, ["Format d’image", "Désentrelacement", "Minuteur de veille", "Statistiques"]
-        )
+        self.assertEqual(rows, ["Format d’image", "Minuteur de veille", "Statistiques"])
 
 
 class FrenchCardsTests(unittest.TestCase):

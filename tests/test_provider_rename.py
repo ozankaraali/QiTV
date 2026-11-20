@@ -1,5 +1,5 @@
 """A provider renamed in Settings keeps what is stored under its name; a removed one's
-scheduled recordings go; Settings refuses a name another provider has (2.8.12)."""
+scheduled recordings go (2.8.12)."""
 
 import os
 from pathlib import Path
@@ -10,7 +10,7 @@ from unittest import mock
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
-from PySide6.QtWidgets import QApplication, QMessageBox
+from PySide6.QtWidgets import QApplication
 
 from services import favorites, recording_schedule as rs, watch_state
 from services.channel_store import rekeyed
@@ -23,9 +23,7 @@ from services.provider_rename import (
     Renames,
     carry_over,
     hashed_keys,
-    removed_between,
     rename_in_config,
-    renames_between,
 )
 from services.subtitle_picks import pick_key
 from ui.provider_drop import unique_name
@@ -73,14 +71,6 @@ class RenamesTests(unittest.TestCase):
         item = {"name": "One", "_provider": "A"}
         self.assertEqual(renames.item(item), {"name": "One", "_provider": "B"})
         self.assertEqual(item["_provider"], "A")  # a copy
-
-    def test_entries_are_told_apart_by_identity(self):
-        a, b, c = {"name": "A"}, {"name": "B"}, {"name": "C"}
-        before = [(a, "A"), (b, "B"), (c, "C")]
-        a["name"], b["name"] = "B", "A"  # a swap
-        self.assertEqual(renames_between(before, [a, b]).names, {"A": "B", "B": "A"})
-        self.assertEqual(removed_between(before, [a, b]), ["C"])
-        self.assertFalse(renames_between(before, [c]))
 
     def test_unique_names_ignore_case(self):
         self.assertEqual(unique_name("tv", ["TV"]), "tv (2)")
@@ -293,28 +283,36 @@ class BudgetTests(unittest.TestCase):
         self.assertEqual(budget.provider_of(waiting), "B")  # the waiter took the freed slot
 
 
-from timer_fixtures import wait_until  # noqa: E402
-
 from tests.fixtures.local_provider import PROVIDER_NAME  # noqa: E402
 from tests.test_tv_window import WindowCase  # noqa: E402
-from ui import parental_settings  # noqa: E402
-from ui.settings_dialog import OptionsDialog  # noqa: E402
-
-YES, NO = QMessageBox.StandardButton.Yes, QMessageBox.StandardButton.No
+from ui import settings_parental  # noqa: E402
+from ui.keymap import Action  # noqa: E402
+from ui.settings_providers import layer_key  # noqa: E402
 
 
 class SettingsTests(WindowCase):
-    def dialog(self):
-        dialog = OptionsDialog(self.window)
-        self.addCleanup(dialog.deleteLater)
-        return dialog
+    """A rename in Settings › Providers, in the real window: what is kept under the old name
+    follows it; locked, it needs the PIN."""
 
     def saved_names(self):
         return [p["name"] for p in type(self.provider_manager)(self.config).providers]
 
-    def save(self, dialog):
-        with mock.patch.object(self.window.catalog, "select_provider"):
-            dialog.save_settings()
+    def rename(self, name):
+        """Settings › Providers › the provider › Name: `name` typed in its place, kept."""
+        window = self.window
+        self.show()
+        self.wait_for_drawer()
+        window.open_settings(section_key="providers")
+        self.assertTrue(window.settings.visible())
+        controller = window.controller
+        controller.handle(Action.NAV_RIGHT)
+        self.assertEqual(window.settings_drawer.focused_row().key, layer_key(PROVIDER_NAME))
+        controller.handle(Action.NAV_ACTIVATE)  # its layer, on Name
+        controller.handle(Action.NAV_ACTIVATE)  # editing
+        controller.handle(Action.SELECT_ALL)
+        controller.handle(Action.NAV_TEXT, name)
+        with mock.patch.object(window.catalog, "select_provider"):
+            controller.handle(Action.NAV_ACTIVATE)  # kept
 
     def test_a_rename_carries_the_stars_the_schedule_and_what_is_hidden(self):
         star = {"name": "Channel 1", "_provider": PROVIDER_NAME, "id": 1}
@@ -323,10 +321,8 @@ class SettingsTests(WindowCase):
         self.window.parental.hide_group("live", PROVIDER_NAME, "Fixture", "Fixture")
         start = Programme("Quiz", _at(4_000_000_000), _at(4_000_003_600), "", None)
         self.window.recording_schedule.add_once(star, start)
-        dialog = self.dialog()
-        dialog.name_input.setText("Renamed")
-        with mock.patch.object(parental_settings, "_ask_pin", return_value="2468") as asked:
-            self.save(dialog)
+        with mock.patch.object(settings_parental, "_ask_pin", return_value="2468") as asked:
+            self.rename("Renamed")
         asked.assert_called_once()  # locked: the PIN was asked
         self.assertEqual(self.saved_names(), ["Renamed"])
         self.assertEqual(self.config.selected_provider_name, "Renamed")
@@ -336,77 +332,13 @@ class SettingsTests(WindowCase):
 
     def test_a_wrong_pin_keeps_the_name(self):
         self.window.parental.set_pin("2468")
-        dialog = self.dialog()
-        dialog.name_input.setText("Renamed")
         with (
-            mock.patch.object(parental_settings, "_ask_pin", return_value="1111"),
-            mock.patch.object(parental_settings.QMessageBox, "warning") as said,
+            mock.patch.object(settings_parental, "_ask_pin", return_value="1111"),
+            mock.patch.object(settings_parental.QMessageBox, "warning") as said,
         ):
-            self.save(dialog)
+            self.rename("Renamed")
         said.assert_called_once()
         self.assertEqual(self.saved_names(), [PROVIDER_NAME])
-
-    def test_a_name_another_provider_has_is_refused_in_any_case(self):
-        dialog = self.dialog()
-        dialog.add_new_provider()
-        dialog.type_M3UPLAYLIST.setChecked(True)
-        dialog.url_input.setText("http://playlist.test/list.m3u")
-        dialog.name_input.setText(PROVIDER_NAME.upper())
-        with mock.patch("ui.settings_dialog.QMessageBox.warning") as said:
-            self.save(dialog)
-        self.assertIn("Choose another name", said.call_args.args[2])
-        self.assertEqual(self.saved_names(), [PROVIDER_NAME])
-        dialog.name_input.setText("Second")
-        self.save(dialog)
-        self.assertEqual(self.saved_names(), [PROVIDER_NAME, "Second"])
-
-    def test_an_unnamed_provider_gets_a_name_of_its_own(self):
-        dialog = self.dialog()
-        for _ in range(2):  # one playlist file twice: named after the file, then numbered
-            dialog.add_new_provider()
-            dialog.type_M3UPLAYLIST.setChecked(True)
-            dialog.url_input.setText(os.path.join(self.config_dir, "Sports.m3u"))
-        self.save(dialog)
-        self.assertEqual(self.saved_names(), [PROVIDER_NAME, "Sports", "Sports (2)"])
-
-    def test_an_untouched_new_provider_is_not_saved_and_a_half_filled_one_is_refused(self):
-        dialog = self.dialog()
-        dialog.add_new_provider()
-        self.save(dialog)
-        self.assertEqual(self.saved_names(), [PROVIDER_NAME])
-        self.assertEqual(self.config.selected_provider_name, PROVIDER_NAME)
-        dialog = self.dialog()
-        dialog.add_new_provider()
-        dialog.name_input.setText("Portal")  # an STB portal: no address, no MAC
-        with mock.patch("ui.settings_dialog.QMessageBox.warning") as said:
-            self.save(dialog)
-        self.assertIn("Server URL", said.call_args.args[2])
-        dialog.url_input.setText("http://portal.test/c/")
-        with mock.patch("ui.settings_dialog.QMessageBox.warning") as said:
-            self.save(dialog)
-        self.assertIn("MAC Address", said.call_args.args[2])
-        self.assertEqual(self.saved_names(), [PROVIDER_NAME])
-
-    def test_removing_asks_and_the_last_one_leaves_the_welcome_card(self):
-        self.show()
-        start = Programme("Quiz", _at(4_000_000_000), _at(4_000_003_600), "", None)
-        self.window.recording_schedule.add_once(channel("One", PROVIDER_NAME), start)
-        dialog = self.dialog()
-        with mock.patch("ui.settings_dialog.QMessageBox.question", return_value=NO) as asked:
-            dialog.remove_provider_button.click()
-        self.assertIn(PROVIDER_NAME, asked.call_args.args[2])
-        self.assertIn("recordings will be cancelled", asked.call_args.args[2])
-        self.assertEqual(len(dialog.providers), 1)
-        with mock.patch("ui.settings_dialog.QMessageBox.question", return_value=YES):
-            dialog.remove_provider_button.click()
-        self.assertEqual(dialog.providers, [])
-        self.assertFalse(dialog.name_input.isEnabled())
-        self.assertTrue(dialog.add_provider_button.isEnabled())
-        dialog.save_settings()
-        self.assertEqual(self.saved_names(), [])
-        self.assertEqual(self.window.recording_schedule.items(), [])
-        self.assertTrue(any("removed provider" in text for text, _kind in self.toasts))
-        self.assertTrue(wait_until(self.window.overlays.welcome.isVisible))
 
 
 if __name__ == "__main__":

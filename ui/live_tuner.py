@@ -71,6 +71,8 @@ class LiveStart:
     # Its direct play opens again by itself once it ended or failed after it played
     # (`services.revive`); False: the caller's (an STB portal's channel gets a fresh link).
     revive: bool = True
+    # Plan 4: a link opened with Open Link, tried again once at most (LiveSession's `once`).
+    once: bool = False
 
 
 def start_kwargs(start: LiveStart, config: Any, *, disk: Optional[bool] = None) -> dict[str, Any]:
@@ -82,7 +84,8 @@ def start_kwargs(start: LiveStart, config: Any, *, disk: Optional[bool] = None) 
     M3U names a referrer passes that (`referrer`, and its `Referer` header for the helper).
     A start asked over HTTPS first has the helper try that first (`https_first`, 2.7.1).
     A size cap chosen in the ⚙ goes with it (`max_height`, 2.8; 0: the best again), and so
-    does a start whose direct play the caller brings back itself (`revive=False`).
+    does a start whose direct play the caller brings back itself (`revive=False`), and a
+    link's, tried again once at most (`once`, plan 4).
     """
     consent = bool(config.timeshift_enabled)
     disk = consent if disk is None else disk and consent
@@ -112,6 +115,8 @@ def start_kwargs(start: LiveStart, config: Any, *, disk: Optional[bool] = None) 
         kwargs["max_height"] = start.max_height
     if not start.revive:
         kwargs["revive"] = False
+    if start.once:
+        kwargs["once"] = True
     return kwargs
 
 

@@ -68,6 +68,7 @@ class FakeProviders:
         self.headers = {"Authorization": "Bearer T"}
         self.stale = set()
         self.saved = 0
+        self.pages_saved = 0  # seasons, episodes and portal group pages (2.12)
 
     def is_content_stale(self, ct):
         return ct in self.stale
@@ -82,6 +83,9 @@ class FakeProviders:
 
     def save_provider(self):
         self.saved += 1
+
+    def save_provider_pages(self):
+        self.pages_saved += 1
 
 
 class ManualRunner:

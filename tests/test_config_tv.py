@@ -341,6 +341,47 @@ class TvConfigTests(unittest.TestCase):
         config.live_latency = "low"
         self.assertEqual(config.live_latency, "low")
 
+    def test_the_dead_1x_channel_lists_go_from_the_config_once(self):  # 2.12
+        # An early 1.x build kept two copies of its channel list in "data" (megabytes in a
+        # config carried from 1.x): no 2.x build reads them. They go once; the rest stays.
+        channels = [
+            {"id": str(n), "name": f"Channel {n}", "cmd": f"http://127.0.0.1:9/{n}.ts"}
+            for n in range(50)
+        ]
+        old = {
+            "type": "M3UPLAYLIST",
+            "name": "Old list",
+            "url": "http://127.0.0.1:9/a.m3u",
+            "options": {"proxy": ""},
+            "itv": channels,
+            "channels": list(channels),
+        }
+        portal = {"type": "STB", "name": "Portal", "url": "http://127.0.0.1:9/c/", "mac": "0A"}
+        config, path = self._load({"data": [old, portal, "odd"], "tv_defaults_version": 2})
+        kept = [{key: old[key] for key in ("type", "name", "url", "options")}, portal, "odd"]
+        self.assertEqual(config.config["data"], kept)
+        on_disk = json.loads(path.read_text(encoding="utf-8"))
+        self.assertEqual(on_disk["data"], kept)
+        self.assertEqual(on_disk["legacy_lists_version"], ConfigManager.LEGACY_LISTS_VERSION)
+        with patch.object(ConfigManager, "save_config") as save:
+            again = ConfigManager()  # ran once: nothing to do, nothing saved
+        save.assert_not_called()
+        self.assertEqual(again.config["data"], kept)
+        on_disk["data"][0]["itv"] = channels  # a 1.x build gone back to wrote its list again
+        path.write_text(json.dumps(on_disk), encoding="utf-8")
+        with patch.object(ConfigManager, "save_config") as save:
+            again = ConfigManager()
+        save.assert_not_called()
+        self.assertEqual(again.config["data"][0]["itv"], channels)  # the step ran already
+
+    def test_a_new_config_keeps_its_free_list_entry(self):  # 2.12
+        config, path = self._load(None)
+        free = ConfigManager.default_config()["data"]
+        self.assertEqual(config.config["data"], free)
+        on_disk = json.loads(path.read_text(encoding="utf-8"))
+        self.assertEqual(on_disk["data"], free)
+        self.assertEqual(on_disk["legacy_lists_version"], ConfigManager.LEGACY_LISTS_VERSION)
+
     def test_last_live_channel_round_trips(self):
         config, _ = self._load(None)
         record = {"provider_name": "P", "group_id": "7", "item": {"id": 1, "name": "One"}}

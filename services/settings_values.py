@@ -1,0 +1,98 @@
+"""Reads and writes a settings row's value in the config (no Qt).
+
+The drawer applies every step at once: a row key names a ConfigManager property, a step
+writes it, saves in the background and runs the row's hook (the caller's way to make the
+change take effect). `play_in` is no property of its own: it stands for the two old
+exclusive keys, play_in_vlc and play_in_mpv. A text is written as the old Save wrote it: a
+token or an API key without the spaces and line breaks a paste brings, a username without those
+at its ends (a password as it is typed).
+"""
+
+from __future__ import annotations
+
+import logging
+from typing import Any, Callable, Mapping, Optional
+
+from services.config_manager import ConfigManager
+
+logger = logging.getLogger(__name__)
+
+PLAY_IN = "play_in"
+
+
+def _no_spaces(text: Any) -> str:
+    return "".join(str(text).split())
+
+
+def _stripped(text: Any) -> str:
+    return str(text).strip()
+
+
+# A text row's key -> what of its text is written.
+_CLEANED: dict[str, Callable[[Any], Any]] = {
+    "tmdb_token": _no_spaces,
+    "opensubtitles_api_key": _no_spaces,
+    "opensubtitles_username": _stripped,
+}
+
+
+class SettingsValues:
+    """A row key's value, read from and written to a ConfigManager."""
+
+    def __init__(
+        self,
+        config: ConfigManager,
+        hooks: Optional[Mapping[str, Callable[[], None]]] = None,
+    ) -> None:
+        self._config = config
+        self._hooks = dict(hooks or {})
+
+    def add_hook(self, key: str, hook: Callable[[], None]) -> None:
+        """`hook` runs after a set of `key` too, after the hook it has (a handler whose rows
+        follow the value: Subtitles' Sign out shows while a username is kept)."""
+        before = self._hooks.get(key)
+        if before is None:
+            self._hooks[key] = hook
+            return
+
+        def both() -> None:
+            before()
+            hook()
+
+        self._hooks[key] = both
+
+    def get(self, key: str) -> Any:
+        """The row's current value; KeyError for a key the config has no property for."""
+        if key == PLAY_IN:
+            if self._config.play_in_vlc:
+                return "vlc"
+            return "mpv" if self._config.play_in_mpv else "qitv"
+        self._check(key)
+        return getattr(self._config, key)
+
+    def set(self, key: str, value: Any) -> None:
+        """Writes the value, saves without waiting for the disk, then runs the row's hook;
+        KeyError for a key the config has no settable property for."""
+        if key == PLAY_IN:
+            self._config.play_in_vlc = value == "vlc"
+            self._config.play_in_mpv = value == "mpv"
+        else:
+            self._check(key, writing=True)
+            clean = _CLEANED.get(key)
+            setattr(self._config, key, clean(value) if clean is not None else value)
+        try:
+            self._config.save_config()
+        except Exception:
+            # Only a config without a background writer raises here; the value is applied
+            # in memory and the next save writes it.
+            logger.warning("Couldn't save the setting %s", key, exc_info=True)
+        hook = self._hooks.get(key)
+        if hook is not None:
+            hook()
+
+    def _check(self, key: str, *, writing: bool = False) -> None:
+        """KeyError unless `key` is a property of the config (a typo must not make a key), one
+        with a setter when `writing` (a value worked out from others is no row's)."""
+        prop = getattr(type(self._config), key, None)
+        if not isinstance(prop, property) or (writing and prop.fset is None):
+            raise KeyError(key)

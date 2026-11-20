@@ -1400,6 +1400,7 @@ class LiveLibraryButtonTests(unittest.TestCase):  # 2.11.2
                 self.assertIn("open_library", t._layout())  # room for every button
                 self.assertIn("quality", t._layout())
                 setattr(t, check, lambda rects, row=None: "open_library" in rects)
+                t._layout_cache = None  # (2.12: kept for its inputs; this measure stands in)
                 rects = t._layout()
                 self.assertNotIn("open_library", rects)
                 self.assertIn("quality", rects)

@@ -17,20 +17,13 @@ from urllib.parse import parse_qs, urlsplit
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
-from PySide6.QtWidgets import QCheckBox
 import requests
 
-from services import failure_reasons as reasons, provider_api, workers
+from services import failure_reasons as reasons, provider_api, provider_check, workers
 from services.account_check import AccountChecks, check_account, check_stb, check_xtream
 from services.failure_reasons import Reason
 from services.live.refusals import STREAM_LIMIT
-from tests import test_tv_controller as tv, test_tv_window as tv_window
-from ui.settings_dialog import (
-    HTTP_ONLY_NOTE,
-    WARNING_COLOR,
-    OptionsDialog,
-    ProviderVerificationWorker,
-)
+from tests import test_tv_controller as tv
 from ui.tv_controller import ERROR_MS
 
 NOW = datetime(2026, 10, 19, 20, 0, tzinfo=timezone.utc)
@@ -558,13 +551,9 @@ class VerifyReasonTests(ServerCase):
         return self.reply
 
     def verify(self, **provider):
-        said, verified, self.http_only = [], [], []
-        worker = ProviderVerificationWorker(1, provider, True)
-        worker.reason.connect(lambda _id, text: said.append(text))
-        worker.http_only.connect(lambda _id: self.http_only.append(_id))
-        worker.result.connect(lambda _id, _provider, ok: verified.append(ok))
-        worker.run()
-        return verified[0], said[0]
+        outcome = provider_check.check(provider, True)
+        self.http_only = outcome.http_only
+        return outcome.ok, outcome.why
 
     def test_a_provider_answering_only_over_http_verifies_with_a_note(self):
         # 2.7.1: this one serves HTTP alone; QiTV asked it over HTTPS first
@@ -578,15 +567,15 @@ class VerifyReasonTests(ServerCase):
                 if provider["type"] == "STB":
                     self.reply = (200, {"js": {"token": "T", "id": 7, "name": "F"}}, 0.0)
                 self.assertEqual(self.verify(**provider), (True, ""))
-                self.assertEqual(self.http_only, [1])
+                self.assertTrue(self.http_only)
 
     def test_an_https_address_or_a_failed_one_has_no_note(self):
         self.reply = (200, {"user_info": {"auth": 1, "status": "Expired"}}, 0.0)
         provider = {"type": "XTREAM", "url": self.base, "username": "u", "password": "p"}
         self.assertEqual(self.verify(**provider)[0], False)
-        self.assertEqual(self.http_only, [])
+        self.assertFalse(self.http_only)
         self.assertFalse(self.verify(type="M3UPLAYLIST", url="https://127.0.0.1:9/list")[0])
-        self.assertEqual(self.http_only, [])
+        self.assertFalse(self.http_only)
 
     def test_an_expired_account_does_not_verify_and_says_why(self):
         self.reply = (200, {"user_info": {"auth": 1, "status": "Expired"}}, 0.0)
@@ -608,48 +597,6 @@ class VerifyReasonTests(ServerCase):
         self.assertEqual(note, "The portal says your subscription ended on 3 Oct 2026")
         self.reply = (200, {"js": {"token": "T", "id": 7, "name": "F", "blocked": "1"}}, 0.0)
         self.assertEqual(self.verify(**portal), (False, reasons.DISABLED_MESSAGE))
-
-
-class SettingsNoteTests(tv_window.WindowCase):
-    def test_the_note_shows_in_the_settings(self):
-        dialog = OptionsDialog(self.window)
-        self.addCleanup(dialog.deleteLater)
-        request = dialog._verification_request = 3
-        dialog._verification_reason(
-            request, "The portal says your subscription ended on 3 Oct 2026"
-        )
-        dialog._provider_verified(request, dialog._verification_provider(), True)
-        self.assertEqual(
-            dialog.verify_result.text(),
-            "Provider verified successfully. "
-            "Note: The portal says your subscription ended on 3 Oct 2026.",
-        )
-        self.assertIn(WARNING_COLOR, dialog.verify_result.styleSheet())
-        dialog._verification_reason(request, "Your subscription has expired")
-        dialog._provider_verified(request, dialog._verification_provider(), False)
-        self.assertEqual(
-            dialog.verify_result.text(), "Failed to verify provider: Your subscription has expired."
-        )
-
-    def test_a_provider_without_https_is_noted_where_it_is_saved(self):
-        # 2.7.1: the only place QiTV says a provider has no HTTPS
-        dialog = OptionsDialog(self.window)
-        self.addCleanup(dialog.deleteLater)
-        request = dialog._verification_request = 3
-        dialog._verification_http_only(request)
-        dialog._provider_verified(request, dialog._verification_provider(), True)
-        self.assertEqual(
-            dialog.verify_result.text(), f"Provider verified successfully.\n{HTTP_ONLY_NOTE}"
-        )
-        self.assertIn(WARNING_COLOR, dialog.verify_result.styleSheet())
-        dialog._provider_verified(request, dialog._verification_provider(), True)
-        self.assertEqual(dialog.verify_result.text(), "Provider verified successfully.")
-
-    def test_the_settings_have_no_https_switch(self):
-        dialog = OptionsDialog(self.window)
-        self.addCleanup(dialog.deleteLater)
-        texts = [box.text() for box in dialog.findChildren(QCheckBox)]
-        self.assertFalse([text for text in texts if "HTTPS" in text], texts)
 
 
 if __name__ == "__main__":

@@ -28,6 +28,7 @@ class TightenTests(unittest.TestCase):
             self.settings / "live_tuning.json",
             self.provider / "index.json",
             self.provider / ("a" * 64 + ".json"),  # a provider's lists, their links
+            self.provider / ("b" * 64 + ".v2.jsonl"),  # 2.12: the same, in pieces
             self.logs / "qitv.log",
             self.logs / "qitv.log.1",
         ]

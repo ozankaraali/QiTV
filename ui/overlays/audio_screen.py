@@ -892,8 +892,9 @@ class AudioScreen(Overlay):
 
     def _words_text(self) -> str:
         if self._words_on and self._language:
+            # i18n: the audio screen's pill, lit: a song's words (AI captions) in {language}
             return tr("Words · {language}", language=self._language)
-        return tr("Words")
+        return tr("Words")  # i18n: the audio screen's pill: a song's words, by AI captions
 
     def _info_heights(self, m: _Mock, title_px: float) -> tuple[float, float]:
         return line_height(m.font(title_px, QFont.Weight.Bold)), line_height(m.font(13.5))

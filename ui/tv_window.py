@@ -17,22 +17,25 @@ shortcut or native menu key equivalent (ShortcutOverride), so nothing fires twic
 A subtitle file dropped on the window (the video, its overlays or the Library with its corner
 player) loads with what plays (2.2; the controller says whether it would, while it is dragged).
 A dropped playlist file (.m3u, .m3u8) or provider link becomes a provider (ui/provider_drop.py);
-one drop may carry both kinds.
+one drop may carry both kinds. One stream's link dropped (plan 4) opens the Open Link card,
+filled in: Enter plays it.
 """
 
 from __future__ import annotations
 
 import atexit
+import dataclasses
 from datetime import datetime, timedelta
 import logging
 import multiprocessing
 import os
+from pathlib import Path
 import platform
 import stat
 import sys
 import threading
 import time
-from typing import Any, Callable, Optional, Sequence
+from typing import Any, Callable, Iterator, Optional, Sequence
 
 from PySide6.QtCore import (
     QElapsedTimer,
@@ -82,6 +85,7 @@ from services.hidden_groups import HiddenGroups
 from services.i18n import N_, number, tr, tr_n, translate
 from services.jobs import JobRunner
 from services.lazy_import import deferred_modules, load_module
+from services.link_kind import host_of, owner_of
 from services.live.engine import LiveEngine
 from services.live.kept import KeptBuffers
 from services.live.live_session import LiveSession
@@ -103,6 +107,7 @@ from services.local_playlist import (
 from services.media_keys import MediaKeys
 from services.media_reporter import MediaReporter
 from services.navigation import NavModel
+from services.network_streams import FILE_NAME as NETWORK_STREAMS_FILE, NetworkStreams
 from services.open_paths import (
     PLAYLIST_EXTENSIONS,
     Sorted,
@@ -135,6 +140,8 @@ from services.recordings_index import FILE_NAME as RECORDINGS_INDEX_FILE, Record
 from services.recordings_list import timer_text
 from services.redact import safe_message, safe_traceback
 from services.sessions import SessionManager, Slot
+from services.settings_model import PROVIDERS, REMOTE, Context, sections
+from services.settings_values import SettingsValues
 from services.sound_sync import FILE_NAME as SOUND_SYNC_FILE, SoundSync
 from services.subtitle_picks import FILE_NAME as SUBTITLE_PICKS_FILE, SubtitlePicks
 from services.thread_cleanup import has_pending_threads
@@ -156,6 +163,8 @@ from ui.link_lanes import Target
 from ui.live_tuner import LiveTuner, one_disk_ring, wait_for_each_other
 from ui.logos import LogoCache, PosterCache
 from ui.macos_window import reclaim_first_responder
+from ui.network_player import NetworkPlayer
+from ui.open_link import LinkCard, OpenLink
 from ui.overlay_host import OverlayHost
 from ui.overlays.audio_screen import AudioScreen
 from ui.overlays.back_notice import BackNotice
@@ -177,6 +186,7 @@ from ui.overlays.question_card import QuestionCard
 from ui.overlays.rec_sign import RecSign
 from ui.overlays.remote_pair import PairOverlay
 from ui.overlays.retry_notice import RetryNotice
+from ui.overlays.settings_drawer import SettingsDrawer
 from ui.overlays.sleep_notice import SleepNotice
 from ui.overlays.stats import StatsOverlay
 from ui.overlays.stopped_notice import StoppedNotice
@@ -189,10 +199,19 @@ from ui.overlays.zap_banner import ZapBanner
 from ui.page_stack import PageStack
 from ui.pip import PipFrame
 from ui.pointer import PointerHider
+from ui.provider_cards import ProviderCards
 from ui.record_timer_dialog import RecordTimerDialog, TimerChoice
 from ui.recording_scheduler import RecordingScheduler
 from ui.remote_controller import RemoteController
-from ui.settings_dialog import OptionsDialog
+from ui.settings_controller import SettingsController
+from ui.settings_general import GeneralRows, hooks as general_hooks
+from ui.settings_guide import GuideRows, hooks as guide_hooks
+from ui.settings_links import LinkRows
+from ui.settings_parental import ParentalRows
+from ui.settings_providers import ProviderRows
+from ui.settings_remote import RemoteRows
+from ui.settings_subtitles import SubtitlesRows
+from ui.settings_timeshift import TimeshiftRows, hooks as timeshift_hooks
 from ui.song_jobs import PanelCover
 from ui.subtitle_search import OnlineSetup
 from ui.track_controls import SUBTITLE_FILTER
@@ -222,7 +241,7 @@ FORWARD_WAIT_MS = 1000  # the longest wait for QiTV to come forward before a rem
 FORWARD_POLL_MS = 50
 # config.json could not be written (locked by antivirus, read-only, a full disk).
 SAVE_FAILED_TEXT = N_("Couldn't save the settings; changes will be lost when QiTV closes")
-# i18n: a toast after Settings → Save: the scheduled recordings of a provider removed there were
+# i18n: a toast after a provider is removed in Settings: its scheduled recordings were
 # cancelled ({titles}: their programmes, comma-separated)
 DROPPED_RECORDINGS_TEXT = N_("Recordings of a removed provider were cancelled: {titles}")
 ABANDONED_EXIT_CODE = 3  # QiTV quit while background work still ran (see _exit_now)
@@ -515,7 +534,6 @@ class TVWindow(QMainWindow):
     ):
         super().__init__()
         self.app = app
-        # OptionsDialog reads these from its parent.
         self.config_manager = config_manager
         # 2.9.1: before the first provider request and the time-shift helper's start.
         secure_dns.enable(getattr(config_manager, "secure_dns", False) is True)
@@ -524,6 +542,8 @@ class TVWindow(QMainWindow):
         self.epg_manager = epg_manager
         self._started = False
         self._closing = False
+        # A save that failed was said (SAVE_FAILED_TEXT): not again until a save works.
+        self._save_failure_said = False
         # Windows: the run's DDE owner (services.dde_windows.Serving), set by main(); None
         # elsewhere and from source
         self.dde: Any = None
@@ -785,12 +805,21 @@ class TVWindow(QMainWindow):
         self.pair_overlay = PairOverlay(host)  # the phone remote's pairing QR
         self.layout_row = LayoutRow(host)  # the multiview's layouts, above its layout chip
         self.subtitle_search = SubtitleSearchPage(host)
+        # File → Open Link… and the channel list's Open a link (plan 4): its card over the picture
+        self.open_link_card = LinkCard(host)
         self.corner_controls = CornerControls(host)
         # What a song (or a radio channel) shows where the black picture was: its cover, album
         # and words, lit by the cover's colours (spec §10).
         self.audio_screen = AudioScreen(host)
         self.captions_overlay = CaptionsOverlay(host)  # 2.9: AI captions over the picture
         self.opening_overlay = OpeningOverlay(host)  # QiTV's mark while a file opens
+        # Settings in the drawer, a layer over the channel list: its rows' values are asked of
+        # its controller (self.settings, built once the TV controller is).
+        self.settings_drawer = SettingsDrawer(
+            lambda row: self.settings.value_text(row),
+            lambda row: self.settings.lit(row),
+            parent=host,
+        )
         # 2.8: the recordings scheduled from the guide (a small file beside the config).
         self.recording_schedule = Schedule(
             os.path.join(config_manager.get_config_dir(), SCHEDULE_FILE)
@@ -849,7 +878,9 @@ class TVWindow(QMainWindow):
         self.more_menu = MoreMenu(self.overlays.transport, host)
         self.overlays.more_menu = self.more_menu
         # 2.8.12: the REC sign showed through the channel list, the guide and the grid's tiles.
-        self.rec_sign.cover_with(self.overlays.drawer, self.overlays.guide, self.grid_tiles)
+        self.rec_sign.cover_with(
+            self.overlays.drawer, self.settings_drawer, self.overlays.guide, self.grid_tiles
+        )
         self.rec_sign.follow_hud(self.overlays.transport)  # 2.9.7: up with the controls
         for listing in (self.overlays.column, self.overlays.drawer, self.overlays.guide):
             listing.set_playing(playing)
@@ -866,9 +897,10 @@ class TVWindow(QMainWindow):
         # them (it sits above the transport's controls and beside the PiP), and the Sound,
         # Subtitles and Picture panels, the multiview's layouts and the audio dock's ⋯ menu
         # over it (above their buttons). The statistics sit over the transport, under its title
-        # row (they take no click). The drawer and the guide cover them all; the OpenSubtitles
-        # search covers the player with its backdrop, under the corner player's controls, the
-        # sleep timer's last minute, Resume and the question (2.6) and the toast.
+        # row (they take no click). The drawer, Settings over it, and the guide cover them all;
+        # the OpenSubtitles search covers the player with its backdrop, and the Open Link card
+        # (plan 4) dims it all, both under the corner player's controls, the sleep timer's last
+        # minute, Resume and the question (2.6) and the toast.
         for overlay in (
             self.grid_tiles,
             self.audio_screen,
@@ -888,10 +920,12 @@ class TVWindow(QMainWindow):
             self.layout_row,
             self.more_menu,
             self.overlays.drawer,
+            self.settings_drawer,
             self.overlays.guide,
             self.overlays.next_card,
             self.overlays.welcome,
             self.subtitle_search,
+            self.open_link_card,
             self.corner_controls,
             self.sleep_notice,
             self.back_notice,
@@ -1102,19 +1136,115 @@ class TVWindow(QMainWindow):
         self.corner_controls.soundRequested.connect(self._on_corner_sound)
         # The Library's ⛶: the menu bar, with View → Fullscreen, hides in fullscreen.
         self.library_page.nav.fullscreenRequested.connect(self.toggle_fullscreen)
-        self.overlays.welcome.addRequested.connect(self.add_provider)
+        self.overlays.welcome.addRequested.connect(lambda: self.add_provider())  # the Add card
         self.overlays.welcome.freeRequested.connect(self.show_free_channels)
         self.overlays.drawer.actionRequested.connect(self.menus.on_drawer_action)
-        # The channel list's find: genres and channels at every provider, found in a worker;
-        # its last row looks for films and series in the Library's search.
+        # Settings in the drawer (its Settings row and ⚙, Settings…): a step applies at once
+        # (what takes effect beyond the config, through its hook); backing out of it from the
+        # drawer gives the drawer back on its Settings row. A save that failed meanwhile is said
+        # as it goes.
+        system = platform.system()
+        values = SettingsValues(
+            config_manager,
+            hooks={
+                "live_latency": controller.settings_saved,
+                "deinterlace": controller.apply_deinterlacing,  # every player's, at once
+                "desktop_pip": self._arm_desktop_pip,
+                "covered_pip": self._arm_desktop_pip,
+                **general_hooks(self),  # General's and Advanced's (ui.settings_general)
+                **timeshift_hooks(self),  # Time-shift's (ui.settings_timeshift)
+                **guide_hooks(self),  # the Guide's (ui.settings_guide)
+            },
+        )
+        self.settings = SettingsController(
+            self.settings_drawer,
+            values,
+            lambda: sections(system, self.provider_rows.rows(), self._settings_context()),
+            controller.reopen_drawer_on_settings,
+        )
+        controller.set_settings(self.settings)
+        self.settings.hidden.connect(self._settings_went)
+        # Settings › Providers: each provider's rows (`provider/…`), built from the list as it
+        # is now; again whenever it changes, here or elsewhere (a drop, Free channels), and
+        # when the TV moves to another provider (its "in use").
+        self.provider_rows = ProviderRows(self, self.settings, self.settings_drawer)
+        # Its ＋ Add provider and each provider's Address and login: cards over the picture,
+        # a check before anything is kept.
+        self.provider_cards = ProviderCards(
+            self, self.settings, self.settings_drawer, self.provider_rows
+        )
+        self.provider_rows.cards = self.provider_cards
+        # Settings › General, Files and Advanced: what only this QiTV knows (its languages, the
+        # Files rows' status), and Files' and Advanced's own rows: the file types told on a
+        # worker, the image cache cleared on one once asked.
+        self.general_rows = GeneralRows(self, self.settings, self.settings_drawer)
+        # Settings › Subtitles & AI captions: the space AI captions' files take, measured on a
+        # worker as Settings opens, their deletion asked first; OpenSubtitles' Sign out.
+        self.subtitle_rows = SubtitlesRows(self, self.settings, self.settings_drawer, values)
+        # Settings › Time-shift & recordings: the disk turned off only once asked, the disk
+        # cache's size on a value card, the Recordings folder changed, reset or opened.
+        self.timeshift_rows = TimeshiftRows(self, self.settings, self.settings_drawer, values)
+        # Settings › Guide: its rows follow the guide's source; the update period and each
+        # channel's matching in a card, the matching's files read and written on a worker.
+        self.guide_rows = GuideRows(self, self.settings, self.settings_drawer)
+        # Settings › Phone remote: its switches start or stop the remote at once, its state as
+        # the remote tells it, each paired phone removed once asked.
+        self.remote_rows = RemoteRows(self, self.settings, self.settings_drawer)
+        # Settings › Parental controls: the PIN in a card, locked and unlocked, what is hidden
+        # only while unlocked; each change through parental_changed.
+        self.parental_rows = ParentalRows(self, self.settings, self.settings_drawer)
+        self.catalogs.providersChanged.connect(self.provider_rows.providers_changed)
+        self.catalog.providerReady.connect(self.provider_rows.providers_changed)
+        # File → Open Link… and the channel list's Open a link (plan 4): while its card shows it
+        # has the keys; a stream plays (play_network_link), a whole provider goes to Add
+        # provider, filled in (the Add card in Settings at Providers: from over the channel
+        # list, backing out of Settings gives the list back, as its Add provider row's does); a
+        # link's first bytes are read on a worker.
+        self.link_opener = OpenLink(
+            self.open_link_card,
+            self.jobs,
+            play=lambda url, kind: self.play_network_link(url, kind),
+            add_provider=lambda link: self.add_provider(
+                link, from_drawer=self.overlays.drawer.isVisible()
+            ),
+            verify_ssl=lambda url: self._link_verify(url),
+            may_probe=lambda url: self._link_may_probe(url),
+            parent=self,
+        )
+        controller.add_card(self.open_link_card)
+        # Network streams (plan 4): the links that played, kept beside the config (read on a
+        # worker once the window started, written on one); a stream link plays through the
+        # controller as a channel or a film, as the account whose stream it is, if one is
+        # configured.
+        self.network_streams = NetworkStreams(
+            Path(config_manager.get_config_dir()) / NETWORK_STREAMS_FILE
+        )
+        self.network_player = NetworkPlayer(
+            self.network_streams,
+            self.jobs,
+            controller,
+            owner=lambda url: self._link_owner(url),
+            parent=self,
+        )
+        # The channel list lists them after the providers (never one of them), and so does
+        # Settings › Providers, where each plays, is renamed, has its address replaced or is
+        # removed (written on a worker; its rows follow every change of the links).
+        self.nav.set_links(self.network_player.rows)
+        self.link_rows = LinkRows(self, self.settings, self.settings_drawer, self.network_player)
+        self.provider_rows.links = self.link_rows
+        # The channel list's find: genres and channels at every provider, found in a worker,
+        # and Network streams' links by their names; its last row looks for films and series
+        # in the Library's search.
         self.finder = FindSession(
             self.provider_manager,
             self.jobs,
             loaded=self.catalog.loaded_contents,
             signature=self._find_signature,
             preferences=self._find_preferences,
+            links=self.network_player.find_items,
             parent=self,
         )
+        self.network_player.changed.connect(self._on_links_changed)
         self.overlays.drawer.set_finder(self.finder)
         # Its index holds the catalogs' channels: a refresh or an edited list lets them go.
         self.catalogs.contentChanged.connect(self.finder.content_changed)
@@ -1339,6 +1469,8 @@ class TVWindow(QMainWindow):
             self._relock.stop()
         # 2.9.7: the Recordings tab hides a hidden channel's recordings while locked
         self.screens.library_controller.recordings_changed()
+        if self.settings.visible():  # Settings' Parental controls follow (the hour run out too)
+            self.settings.refresh_sections()
 
     def note_recording(self, path: str, channel: dict, title: str, start: float) -> None:
         """2.9.7: a recording started with R: what its file holds, in the recordings index."""
@@ -1656,6 +1788,83 @@ class TVWindow(QMainWindow):
             self._click_on_release = True
             return
         self.controller.video_clicked()
+
+    # ---- opened links (plan 4) ----------------------------------------------------------------
+
+    def open_link(self, text: str = "") -> None:
+        """File → Open Link… and the channel list's Open a link: the card over live TV, afresh,
+        `text` in its field (a dropped link's). From the Library it goes back to the TV first,
+        and the mini player becomes the window again; the audio dock's ⋯ menu closes. What is
+        under it stays (the channel list, Settings), and has the keys again once it goes; a
+        question keeps the keys, above it."""
+        if self._closing:
+            return
+        if self.screens.library_shown():
+            self.screens.back_to_tv()
+        self.leave_mini_player()
+        self.more_menu.dismiss()
+        self.link_opener.open(text)
+        for card in (self.question_card, self.quality_card, self.captions_card):
+            if card.isVisible():
+                card.raise_()  # the link's card raised itself over it
+
+    def _on_links_changed(self) -> None:
+        """Network streams' links changed (read, kept, failed): the channel list and its find
+        follow."""
+        self.nav.links_changed()
+        self.finder.content_changed()
+
+    def play_network_link(self, url: str, kind: str) -> None:
+        """A link the Open Link card hands over plays, `kind` LIVE or FILM: as a channel or as
+        a film, and it is kept in Network streams (ui.network_player)."""
+        if self._closing:
+            return
+        self.network_player.play(url, kind)
+
+    def _provider_hosts(self) -> Iterator[tuple[dict, set[str]]]:
+        """Each configured provider and the hosts (with their ports) it is at: its own
+        address's, and (one whose list is loaded) where its streams are (stream_hosts)."""
+        catalogs = self.catalogs
+        loaded = set(catalogs.created())
+        for name in catalogs.names():
+            try:
+                provider = catalogs.provider(name)
+            except KeyError:
+                continue
+            hosts = {host_of(provider.get("url"))}
+            if name in loaded:
+                hosts |= catalogs.catalog(name).stream_hosts()
+            yield provider, hosts
+
+    def _link_provider(self, url: str) -> Optional[dict]:
+        """The configured provider the link's host and port are, or None."""
+        host = host_of(url)
+        if not host:
+            return None
+        return next((p for p, hosts in self._provider_hosts() if host in hosts), None)
+
+    def _link_owner(self, url: str) -> str:
+        """The configured Xtream account whose stream the link is ("" for none): one at its
+        host whose user name it carries, in either of Xtream's forms (link_kind.owner_of).
+        Its streams count against that account's limit."""
+        return owner_of(url, self._provider_hosts())
+
+    def _link_may_probe(self, url: str) -> bool:
+        """Whether Open Link may read the link's first bytes: not at a provider that allows
+        only so many streams (an STB portal, an Xtream account with its limit, one with
+        max_streams; services.connection_budget), where the read would be a stream more than
+        it allows, and one closed may stay counted for minutes."""
+        provider = self._link_provider(url)
+        if provider is None:
+            return True
+        reported = self.catalogs.max_connections(str(provider.get("name", "")))
+        return self.budget.limit_for(provider, reported) is None
+
+    def _link_verify(self, url: str) -> bool:
+        """The TLS check for reading the link: its provider's own, else Settings'."""
+        default = bool(self.config_manager.ssl_verify)
+        provider = self._link_provider(url)
+        return bool(provider.get("ssl_verify", default)) if provider is not None else default
 
     # ---- opened files -------------------------------------------------------------------------
 
@@ -2134,16 +2343,23 @@ class TVWindow(QMainWindow):
         files = provider_drop.playlist_files(self._dropped_paths(event))
         return files, provider_drop.links(self._dropped_texts(event))
 
+    def _dropped_streams(self, event: QDropEvent) -> list[str]:
+        """The one-stream links a drop carries (plan 4: for the Open Link card)."""
+        return provider_drop.stream_links(self._dropped_texts(event))
+
     def _on_drag(self, event: QDropEvent) -> None:
         """Dragged over the window (or its overlays): taken only when it may load: a media
-        file, subtitle files for what plays, a playlist file or a provider's link (2.2), or a
-        file of no kind QiTV knows: a folder, maybe, which only the disk tells (Task 11; it is
-        looked at once dropped, and one that is no folder says QiTV can't play it)."""
+        file, subtitle files for what plays, a playlist file or a provider's link (2.2), one
+        stream's link (plan 4), or a file of no kind QiTV knows: a folder, maybe, which only
+        the disk tells (Task 11; it is looked at once dropped, and one that is no folder says
+        QiTV can't play it)."""
         paths = self._dropped_paths(event)
         files, links = self._dropped_providers(event)
+        streams = self._dropped_streams(event)
         kinds = sort_paths(paths)  # by its name: the disk is looked at once dropped
         subtitles = self.controller.accepts_subtitles(paths)
-        if not self._closing and (kinds.media or kinds.others or subtitles or files or links):
+        loads = kinds.media or kinds.others or subtitles or files or links or streams
+        if not self._closing and loads:
             event.acceptProposedAction()
         else:
             event.ignore()
@@ -2153,7 +2369,10 @@ class TVWindow(QMainWindow):
         play as a list); subtitle files alone go to what plays (open_paths). Playlist files and
         folders are read first, as opened ones are (_read_playlists): their links make a
         provider, local files play as a list. Provider links become providers, with the
-        playlists' when some came along (one toast, the link's shown last)."""
+        playlists' when some came along (one toast, the link's shown last). One stream's link
+        (plan 4: a film, a live stream, an Xtream stream's, one only its first bytes tell)
+        opens the Open Link card filled in, when nothing else dropped plays or is read; the
+        first of several."""
         if self._closing:
             event.ignore()
             return
@@ -2172,7 +2391,11 @@ class TVWindow(QMainWindow):
         elif links:
             # After the drop: adding switches the list, and a portal's form is a dialog.
             QTimer.singleShot(0, self, lambda: self.add_dropped_providers([], links))
-        added = bool(read or links)
+        streams = [] if kinds.media or read else self._dropped_streams(event)
+        if streams:
+            first = streams[0]  # after the providers it came with: the card shows over them
+            QTimer.singleShot(0, self, lambda: self.open_link(first))
+        added = bool(read or links or streams)
         if kinds.media or subtitles or added:
             event.acceptProposedAction()
         else:
@@ -2621,18 +2844,62 @@ class TVWindow(QMainWindow):
         if fitted != geometry:
             self.setGeometry(fitted)
 
-    # ---- OptionsDialog host -------------------------------------------------------------------
+    # ---- Settings ---------------------------------------------------------------------------
 
-    def options_dialog(self, tab: str = "") -> None:
-        """Settings; `tab` "remote" opens it on Phone remote."""
-        if not self._closing:
-            dialog = OptionsDialog(self)
-            if tab == "remote":
-                dialog.options_tab.setCurrentWidget(dialog.remote_tab)
-            dialog.exec()
-            self.menus.rebuild_providers()
-            self.screens.tmdb.settings_changed()  # 2.8: TMDB turned off or on
-            self._arm_desktop_pip()  # the covered window's setting turned on or off
+    def open_settings(
+        self, from_drawer: bool = False, keep_place: bool = False, section_key: str = ""
+    ) -> None:
+        """Settings in the drawer (the drawer's Settings row and ⚙, Settings…, Ctrl/⌘+,; at
+        Providers, every Add provider), over live TV: from the Library it goes back to the TV
+        first, and the mini player becomes the window again; the channel list, and whatever
+        else would keep the keys under it, gives way to it (TVController.make_way_for_settings;
+        the audio dock's ⋯ menu too). A question keeps the keys, so it stays above Settings.
+        `section_key`: the section it opens at (else the first). `from_drawer`: backing out of
+        it gives the list back, on its Settings row, or where it was with `keep_place` (its ⚙,
+        its Add provider). Asked again while it shows, it stays as it is (where it came from
+        too), but for a section asked for, which it goes to: a card over the TV that showed
+        over Settings (File → Open Link…'s) cancels then, as when Settings opens, since
+        Settings and its card come over it."""
+        if self._closing:
+            return
+        if self.settings.visible():
+            if not section_key:
+                return
+            self.controller.cancel_cards()  # not make_way_for_settings: it keeps its way back
+            self.settings.show_section(section_key)
+        else:
+            if self.screens.library_shown():
+                self.screens.back_to_tv()
+            self.leave_mini_player()
+            self.more_menu.dismiss()
+            self.controller.make_way_for_settings(keep_place=keep_place)
+            self.settings.open(section_key, from_drawer=from_drawer)
+        for card in (self.question_card, self.quality_card, self.captions_card):
+            if card.isVisible():
+                card.raise_()  # Settings raised itself over it
+
+    def _settings_context(self) -> Context:
+        """What Settings' sections show that only this QiTV knows, each section's from its
+        rows: General's, Files' and Advanced's (ui.settings_general), Subtitles' and
+        Time-shift's, and the Guide's, the phone remote's and parental controls' rows as they
+        are now."""
+        context = self.subtitle_rows.context(self.general_rows.context())
+        return dataclasses.replace(
+            self.timeshift_rows.context(context),
+            guide=self.guide_rows.rows(),
+            remote=self.remote_rows.rows(),
+            parental=self.parental_rows.rows(),
+        )
+
+    def _settings_went(self) -> None:
+        """Settings in the drawer went: a step's save that failed (written in the background,
+        where its failure is only logged) is said, once, until a save works again."""
+        if self._closing:
+            return
+        failed = self.config_manager.save_failed()
+        if failed and not self._save_failure_said:
+            self.screens.notify(translate(SAVE_FAILED_TEXT), "error", ERROR_MS)
+        self._save_failure_said = failed
 
     def open_phone_remote(self) -> None:
         """The menu's Phone Remote…: turns the remote on if it is off, then the pairing QR."""
@@ -2640,32 +2907,35 @@ class TVWindow(QMainWindow):
             return
         if self.remote.hub is None:
             self.remote.turn_on()
-            if self.remote.hub is None:  # settings of a newer QiTV: its Settings tab says so
-                self.options_dialog(tab="remote")
+            if self.remote.hub is None:  # settings of a newer QiTV: Settings says so
+                self.open_settings(section_key=REMOTE)
                 return
         if self.screens.library_shown():
             self.screens.back_to_tv()  # the QR shows over the TV
         self.pair_overlay.open()
 
-    def add_provider(self, link: Optional[ProviderLink] = None) -> None:
-        """Settings on the Providers tab, with a new provider to fill in (spec §8); from
-        `link` when one was dropped (a portal's, whose MAC the user adds)."""
+    def add_provider(self, link: Optional[ProviderLink] = None, from_drawer: bool = False) -> None:
+        """Every Add provider (the channel list's row, the menu bar's, the welcome card's, the
+        Library's, File → Open Link…'s Add as a provider…): Settings at Providers with the Add
+        card over it (plan 2), filled in from `link` when one came (a dropped portal link, whose
+        MAC the user adds; a provider's link opened). `from_drawer` (the list's row, or the
+        Open Link card over the list): backing out of Settings gives the list back where it
+        was. A card over the TV still showing (Open Link…'s) cancels: the Add card has the
+        keys. With no
+        provider yet, the card shows over the empty canvas (the welcome card waits under
+        Settings), and its Cancel closes the Settings it opened: the welcome card again."""
         if self._closing:
             return
-        dialog = OptionsDialog(self)
-        dialog.start_new_provider()
-        if link is not None:
-            dialog.fill_from_link(link)
-        dialog.exec()
-        self.menus.rebuild_providers()
-        self.screens.tmdb.settings_changed()  # 2.8: TMDB turned off or on
-        self._arm_desktop_pip()  # the covered window's setting turned on or off
+        opened = not self.settings.visible()
+        self.open_settings(from_drawer=from_drawer, keep_place=from_drawer, section_key=PROVIDERS)
+        if self.settings.visible():
+            self.provider_cards.add(link, opened_settings=opened)
 
     def add_dropped_providers(self, files: list[str], links: list[ProviderLink]) -> None:
         """Playlist files and provider links dropped on the window (2.2) become providers, as
         Free channels adds one: the list switches to the last one and a toast says so. One
         already in the list is only switched to. A portal's link without its MAC opens the
-        add-provider form filled in instead."""
+        Add card in Settings filled in instead (add_provider), its check before it is kept."""
         if self._closing:
             return
         entries = [provider_drop.file_entry(path) for path in files]
@@ -2719,8 +2989,8 @@ class TVWindow(QMainWindow):
             show_free_channels_menu(self, global_pos, self.add_free_channels)
 
     def add_free_channels(self, code: Optional[str]) -> None:
-        """Add iptv-org's list (all countries, or `code`'s) and load it, as Settings → Save does
-        for a new selected provider; a provider with that URL is only switched to."""
+        """Add iptv-org's list (all countries, or `code`'s), select it and load it, as a provider
+        added in Settings is; a provider with that URL is only switched to."""
         if self._closing:
             return
         entry = free_channels.provider_entry(code)
@@ -2819,7 +3089,8 @@ class TVWindow(QMainWindow):
             self.kept.rekey(keys)
 
     def save_config(self) -> None:
-        """Settings → Save: the new settings apply even when config.json cannot be written."""
+        """The config saved after a change to the providers (ui.provider_actions, Free
+        channels): what it changes applies even when config.json cannot be written."""
         try:
             self.config_manager.save_config(wait=True)  # its failure is said
         except Exception as e:
@@ -2889,6 +3160,7 @@ class TVWindow(QMainWindow):
         self._bind_video()
         self.setFocus(Qt.FocusReason.ActiveWindowFocusReason)
         self.media_keys.start(int(self.winId()))
+        self.network_player.start()  # Network streams' file, read on a worker
         self.controller.start()
         self.epg_refresh.start()
         if self.scheduler is not None:
@@ -2896,6 +3168,7 @@ class TVWindow(QMainWindow):
             self._schedule_changed()
         if self.config_manager.save_failed():  # e.g. the defaults patched in at start
             self.screens.notify(translate(SAVE_FAILED_TEXT), "error", ERROR_MS)
+            self._save_failure_said = True  # Settings going does not say it again
 
     def _fit_restored(self) -> None:
         """Bring the saved geometry onto a screen: its monitor may be gone.
@@ -3103,11 +3376,12 @@ class TVWindow(QMainWindow):
         return [slot.live for slot in self.sessions.slots()]
 
     def _find_signature(self) -> tuple:
-        """Changes when what the channel list's find reads may have: the providers, or the
-        content of a provider's catalog."""
+        """Changes when what the channel list's find reads may have: the providers, the
+        content of a provider's catalog, or Network streams' links (their names)."""
         hub = self.catalogs
         versions = tuple((name, hub.catalog(name).content_version()) for name in hub.created())
-        return tuple(hub.names()), versions
+        links = tuple(sorted((e.id, e.name) for e in self.network_streams.entries()))
+        return tuple(hub.names()), versions, links  # (a link played again moves no name)
 
     def _find_preferences(self) -> Preferences:
         """What ranks first in the channel list's find: the provider it shows, the providers

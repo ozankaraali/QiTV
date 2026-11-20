@@ -8,8 +8,8 @@ import time
 from unittest import mock
 
 from job_fixtures import ImmediateRunner
-import orjson
 
+from services import provider_cache
 from services.config_manager import ConfigManager
 from services.provider_manager import ProviderManager
 
@@ -70,8 +70,7 @@ def mixed_config(
             "identity": manager.provider_cache_identity(provider),
             "refreshed_at": {key: time.time() for key in content},
         }
-        with open(manager._provider_cache_name(provider["name"]), "wb") as f:
-            f.write(orjson.dumps(cache))
+        provider_cache.write_cache(manager._provider_cache_name(provider["name"]), cache)
     return config, manager
 
 

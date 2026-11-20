@@ -12,7 +12,6 @@ import itertools
 import logging
 import re
 from typing import Any, Callable, Iterator, Optional, cast
-from urllib.parse import urlsplit
 
 from PySide6.QtCore import QObject, QTimer, Signal
 
@@ -37,6 +36,7 @@ from services.failure_reasons import (  # noqa: F401 (the catalog's messages, as
 )
 from services.i18n import N_, tr, translate
 from services.jobs import FAILED_MESSAGE, NO_RESULT_MESSAGE, JobRunner
+from services.link_kind import host_of
 from services.provider_api import (
     stb_api_base,
     stb_endpoint,
@@ -132,15 +132,10 @@ _UNREACHABLE = re.compile(
 
 
 def _host(url: Any) -> str:
-    """A web address's host and port, lower case ("" for none); one typed without its scheme
+    """A web address's host and port as a link's is compared with it (link_kind.host_of:
+    without its scheme's own port; "" for none); one typed without its scheme
     ("panel.example:8080") is read as http."""
-    text = str(url or "").strip()
-    if text and "://" not in text:
-        text = f"http://{text}"
-    try:
-        return urlsplit(text).netloc.lower()
-    except ValueError:
-        return ""
+    return host_of(url)
 
 
 def friendly_error(message: object) -> str:
@@ -1062,7 +1057,7 @@ class CatalogService(QObject):
         stamp(loaded, self.current_provider_name())
         content.setdefault("contents", {})[group_id] = loaded
         self._content_version += 1
-        self.provider_manager.save_provider()
+        self.provider_manager.save_provider_pages()  # (beside the lists: 2.12)
         self.groupReady.emit(section, group_id)
 
     def _on_group_error(self, job: _Job, message: str) -> None:
@@ -1136,7 +1131,7 @@ class CatalogService(QObject):
         stamp(items, self.current_provider_name())
         cache.setdefault("seasons", {})[str(series.get("id"))] = items
         self._content_version += 1
-        self.provider_manager.save_provider()
+        self.provider_manager.save_provider_pages()  # (beside the lists: 2.12)
         self.seasonsReady.emit(str(series.get("id")))
 
     def _on_seasons_error(self, job: _Job, message: str) -> None:
@@ -1227,7 +1222,7 @@ class CatalogService(QObject):
         by_season = self._series_cache().setdefault("episodes", {})
         by_season.setdefault(str(series.get("id")), {})[season_id] = episodes
         self._content_version += 1
-        self.provider_manager.save_provider()
+        self.provider_manager.save_provider_pages()  # (beside the lists: 2.12)
         self.episodesReady.emit(str(series.get("id")), season_id)
 
     def _on_episodes_error(self, job: _Job, message: str) -> None:

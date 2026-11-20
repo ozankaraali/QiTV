@@ -8,6 +8,7 @@ from services.epg_time import (
     XMLTV_NAIVE_FORMAT,
     parse_stb,
     parse_xmltv,
+    parse_xmltv_local,
     parse_xmltv_naive,
 )
 
@@ -67,7 +68,6 @@ class XmltvTests(unittest.TestCase):
             "20261015203000\t+0200",
             " 20261015203000 +0200",
             "20261015203000 +0200 ",
-            "2026101520300 +0200",
             "２０２６1015203000 +0200",  # full-width digits
             "20261015203000 +02",
             "20261015203000 Z",
@@ -75,6 +75,29 @@ class XmltvTests(unittest.TestCase):
         ]:
             assert_same(self, parse_xmltv, text, XMLTV_FORMAT)
             assert_same(self, parse_xmltv_naive, text, XMLTV_NAIVE_FORMAT)
+
+    def test_a_time_cut_after_its_minute_hour_or_day_reads_as_written(self):  # 2.12
+        # The XMLTV DTD lets a time stop early; strptime read "202611202030" as 20:03:00.
+        plus_one = timezone(timedelta(hours=1))
+        self.assertEqual(
+            parse_xmltv("202611202030 +0100"), datetime(2026, 11, 20, 20, 30, tzinfo=plus_one)
+        )
+        self.assertEqual(
+            parse_xmltv("2026112020 +0100"), datetime(2026, 11, 20, 20, tzinfo=plus_one)
+        )
+        self.assertEqual(parse_xmltv("20261120 +0100"), datetime(2026, 11, 20, tzinfo=plus_one))
+        self.assertEqual(parse_xmltv_naive("202611202030"), datetime(2026, 11, 20, 20, 30))
+        self.assertEqual(
+            parse_xmltv_local("202611202030"), datetime(2026, 11, 20, 20, 30).astimezone()
+        )
+
+    def test_digits_of_any_other_length_are_refused_not_guessed(self):  # 2.12
+        for text in ("2026101520300 +0200", "202610152030001 +0200", "20261 +0200"):
+            with self.assertRaises(ValueError, msg=text):
+                parse_xmltv(text)
+        for text in ("2026101520300", "202610152", "2026"):
+            with self.assertRaises(ValueError, msg=text):
+                parse_xmltv_naive(text)
 
     def test_zone_objects(self):
         self.assertIs(parse_xmltv("20261015203000 +0000").tzinfo, timezone.utc)

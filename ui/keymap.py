@@ -340,10 +340,7 @@ SHORTCUTS: dict[str, list[tuple[str, str]]] = {
         ("Tab", N_("The mixer's other row (while it shows)")),
         ("J, K", N_("Sound 50 ms earlier / later (sync with the picture)")),
         ("Shift+J, Shift+K", N_("Subtitles 50 ms earlier / later")),
-        (
-            "A",
-            N_("Picture: aspect ratio, deinterlacing, sleep timer; pressed again, the next ratio"),
-        ),
+        ("A", N_("Picture: aspect ratio, sleep timer; pressed again, the next ratio")),
         ("Shift+I", N_("Statistics over the picture: show or hide")),
         ("F, F11, Ctrl+Meta+F", N_("Fullscreen")),
         ("Ctrl+F", N_("Search")),  # i18n: what a key does (verb)

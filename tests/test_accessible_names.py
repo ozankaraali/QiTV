@@ -32,7 +32,19 @@ from ui.overlays.zap_banner import BannerInfo, ZapBanner
 
 ROOT = Path(__file__).resolve().parent.parent
 # Named as they show, after what they say (or no element of their own: TileHits draws nothing).
-NAMED_AS_THEY_SHOW = {"Toast", "QuestionCard", "NextCard", "ZapBanner", "TrackPanel", "TileHits"}
+# Settings' cards say their title as they show (ui/overlays/settings_card.py).
+NAMED_AS_THEY_SHOW = {
+    "Toast",
+    "QuestionCard",
+    "NextCard",
+    "ZapBanner",
+    "TrackPanel",
+    "TileHits",
+    "_Card",
+    "FormCard",
+    "ChoiceCard",
+    "RangeCard",
+}
 
 
 def overlay_classes() -> list[type]:

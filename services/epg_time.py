@@ -5,17 +5,38 @@ mid-range machine. A guide lookup parses each programme's start and stop, and pa
 drawer, the zap column or the guide looks up every visible channel, so strptime alone made
 those paints slow. The fixed-width forms guide data uses are read here by slicing; any other
 text goes to strptime, so every value gives strptime's result or raises its error.
+
+One exception (2.12): an XMLTV time that starts with a run of ASCII digits other than the 14
+of "YYYYmmddHHMMSS". The XMLTV DTD lets a time stop after its day, hour or minute; strptime
+reads such digits another way ("202611202030" as 20:03:00), so here the fields left out are
+zero, and a run of any other length raises instead of being guessed.
 """
 
 from __future__ import annotations
 
 from datetime import datetime, timedelta, timezone
+import re
 
 XMLTV_FORMAT = "%Y%m%d%H%M%S %z"
 XMLTV_NAIVE_FORMAT = "%Y%m%d%H%M%S"
 STB_FORMAT = "%Y-%m-%d %H:%M:%S"
 
 _ZONES: dict[str, timezone] = {}  # "+HHMM" -> its zone; at most 2 × 24 × 60 valid offsets
+_LEADING_DIGITS = re.compile(r"[0-9]+")
+_CUT_SHORT = (8, 10, 12)  # an XMLTV time stopped after its day, its hour or its minute
+
+
+def _whole(text: str) -> str:
+    """`text` with the run of ASCII digits it starts with made all 14 of "YYYYmmddHHMMSS"
+    (the fields left out are zero); `text` as it is when it starts with none or 14.
+    ValueError for a run of another length."""
+    digits = _LEADING_DIGITS.match(text)
+    if digits is None or digits.end() == 14:
+        return text
+    cut = digits.end()
+    if cut not in _CUT_SHORT:
+        raise ValueError(f"an XMLTV time of {cut} digits: {text!r}")
+    return text[:cut] + "0" * (14 - cut) + text[cut:]
 
 
 def _digits(text: str) -> bool:
@@ -49,7 +70,8 @@ def _zone(offset: str) -> timezone:
 
 
 def parse_xmltv(text: str) -> datetime:
-    """datetime.strptime(text, XMLTV_FORMAT): "20261015203000 +0200" → an aware datetime."""
+    """datetime.strptime(text, XMLTV_FORMAT): "20261015203000 +0200" → an aware datetime
+    (one cut short, "202610152030 +0200", with the fields left out zero)."""
     if (
         len(text) == 20
         and text[14] == " "
@@ -61,16 +83,23 @@ def parse_xmltv(text: str) -> datetime:
             return _stamp(text, _zone(text[15:]))
         except ValueError:
             pass  # strptime decides (it may read the digits another way, or raise)
+    whole = _whole(text)
+    if whole != text:
+        return parse_xmltv(whole)
     return datetime.strptime(text, XMLTV_FORMAT)
 
 
 def parse_xmltv_naive(text: str) -> datetime:
-    """datetime.strptime(text, XMLTV_NAIVE_FORMAT): "20261015203000" → a naive datetime."""
+    """datetime.strptime(text, XMLTV_NAIVE_FORMAT): "20261015203000" → a naive datetime
+    (one cut short, "202610152030", with the fields left out zero)."""
     if len(text) == 14 and _digits(text):
         try:
             return _stamp(text, None)
         except ValueError:
             pass
+    whole = _whole(text)
+    if whole != text:
+        return parse_xmltv_naive(whole)
     return datetime.strptime(text, XMLTV_NAIVE_FORMAT)
 
 

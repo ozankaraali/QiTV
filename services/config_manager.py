@@ -159,6 +159,7 @@ class ConfigManager:
     DEFAULT_OPTION_HARDWARE_DECODING = True
     # Bumped by each one-time change of the decoding default (`update_patcher`).
     DECODING_DEFAULTS_VERSION = 1
+    DEINTERLACE_DEFAULTS_VERSION = 1
     DEFAULT_OPTION_TIMESHIFT_MAX_MIB = 2048
     DEFAULT_OPTION_TIMESHIFT_RAM_MIB = 256  # memory per stream not on the disk ring
     TIMESHIFT_RAM_CHOICES = (128, 256, 512)
@@ -168,14 +169,17 @@ class ConfigManager:
     CORNER_PLAYER_CORNER_CHOICES = ("top-left", "top-right", "bottom-left", "bottom-right")
     DEFAULT_OPTION_PIP_VOLUME = 30  # the small picture's own level once it is made audible
     DEFAULT_OPTION_VOLUME = 100  # the large picture's level: libVLC's default
-    DEFAULT_OPTION_DEINTERLACE = "auto"  # 2.3: libVLC's own; "on" or "off" (the Picture panel)
-    DEINTERLACE_CHOICES = ("auto", "on", "off")
+    DEFAULT_OPTION_DEINTERLACE = "auto"  # 2.3: libVLC's own, or "off" (Settings)
+    # 2.11.2 and older also stored "on" (every picture deinterlaced): it reads as "auto" now.
+    DEINTERLACE_CHOICES = ("auto", "off")
     AI_CAPTIONS_MODELS = ("auto", "small", "large")  # 2.9: AI captions' speech model tier
     # 2.2, the multiview: a tile's time-shift buffer while it has no focus (an optional key,
     # never written by default). 48 MiB holds one keyframe interval of a 4K channel.
     DEFAULT_OPTION_MULTIVIEW_TILE_RAM_MIB = 64
     MULTIVIEW_TILE_RAM_RANGE = (48, 512)
     TV_DEFAULTS_VERSION = 2
+    # 2.12: bumped by each one-time clean-up of config["data"] (`update_patcher`).
+    LEGACY_LISTS_VERSION = 1
     DEFAULT_TV_WINDOW = {"x": 80, "y": 80, "width": 1280, "height": 720}
     # A 1.x window smaller than this, or not landscape, does not size the TV window.
     MIN_REUSED_WINDOW = (640, 360)
@@ -347,6 +351,17 @@ class ConfigManager:
             self.config["latency_defaults_version"] = ConfigManager.LATENCY_DEFAULTS_VERSION
             need_update = True
 
+        # 2.12: deinterlacing is Auto or Off (On is gone: it deinterlaced progressive pictures
+        # too, for three times the CPU). Everyone is moved to Auto once, whatever was saved, and
+        # an Off chosen afterwards stays. Older 2.x builds ignore the key and read "deinterlace"
+        # as one of their choices.
+        deinterlace_defaults = self._defaults_version("deinterlace_defaults_version")
+        if deinterlace_defaults < 1 and "deinterlace" in self.config:
+            self.config["deinterlace"] = "auto"
+        if deinterlace_defaults < ConfigManager.DEINTERLACE_DEFAULTS_VERSION:
+            self.config["deinterlace_defaults_version"] = ConfigManager.DEINTERLACE_DEFAULTS_VERSION
+            need_update = True
+
         # 2.9.7: the wheel over the picture changes the volume. Every config saved "channel"
         # as the default, so a choice and the old default look alike: everyone is moved
         # once, and a choice made afterwards stays. Older 2.x builds ignore the key and read
@@ -356,6 +371,22 @@ class ConfigManager:
             self.config["mouse_wheel_action"] = "volume"
         if wheel_defaults < ConfigManager.WHEEL_DEFAULTS_VERSION:
             self.config["wheel_defaults_version"] = ConfigManager.WHEEL_DEFAULTS_VERSION
+            need_update = True
+
+        # 2.12: early 1.x builds kept their channel lists in the providers of "data" ("itv",
+        # and "channels" again): megabytes nothing reads, parsed at every start, held in
+        # memory and written at every save (a film saves every 30 s). No 2.x build reads them;
+        # they go once, and a 1.x build gone back to loads its list again. Everything else in
+        # "data" stays.
+        legacy_lists = self._defaults_version("legacy_lists_version")
+        if legacy_lists < 1:
+            entries = self.config.get("data")
+            for entry in entries if isinstance(entries, list) else ():
+                if isinstance(entry, dict):
+                    entry.pop("itv", None)
+                    entry.pop("channels", None)
+        if legacy_lists < ConfigManager.LEGACY_LISTS_VERSION:
+            self.config["legacy_lists_version"] = ConfigManager.LEGACY_LISTS_VERSION
             need_update = True
 
         if need_update:
@@ -518,7 +549,7 @@ class ConfigManager:
     # 2.8.5, optional (older builds ignore it): the window stays above other apps' windows
     # (View → Keep on Top).
     keep_on_top = _config_property("keep_on_top", False, coerce=lambda value: value is True)
-    # 2.3, optional (older builds ignore it): the Picture panel's deinterlacing, every player's.
+    # 2.3, optional (older builds ignore it): the deinterlacing (Settings), every player's.
     deinterlace = _config_property(
         "deinterlace",
         DEFAULT_OPTION_DEINTERLACE,
@@ -749,7 +780,8 @@ class ConfigManager:
         Once `write_in_background()` was called (QiTV does), the settings are serialised here
         and written by a thread of their own: a save returns before the disk is written and a
         failure is logged there (`save_failed()` tells); `wait` waits for that write and
-        raises its failure, as a save did before (Settings → Save says so).
+        raises its failure, as a save did before (TVWindow.save_config, after a change to the
+        providers, says so).
         """
         retries = _REPLACE_RETRIES if retry and not self._save_failed_recently() else 0
         writer = self._writer

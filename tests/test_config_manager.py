@@ -17,6 +17,42 @@ class WindowConfigMigrationTests(unittest.TestCase):
     def setUpClass(cls):
         cls.app = QApplication.instance() or QApplication([])
 
+    def load(self, stored):
+        directory = tempfile.TemporaryDirectory()
+        self.addCleanup(directory.cleanup)
+        config_path = Path(directory.name) / "config.json"
+        config_path.write_text(json.dumps(stored), encoding="utf-8")
+        with patch.object(ConfigManager, "_get_config_path", return_value=str(config_path)):
+            return ConfigManager(), config_path
+
+    def test_deinterlacing_is_reset_to_auto_once_and_an_off_chosen_later_stays(self):
+        marker = "deinterlace_defaults_version"
+        for stored in ("on", "off"):
+            config, path = self.load({"deinterlace": stored})
+            self.assertEqual(config.deinterlace, "auto", stored)
+            self.assertEqual(json.loads(path.read_text(encoding="utf-8"))[marker], 1, stored)
+        config, _path = self.load({"deinterlace": "off", marker: 1})
+        self.assertEqual(config.deinterlace, "off")
+
+    def test_a_stored_on_reads_as_auto(self):
+        # 2.11.2 and older offered deinterlacing On: it reads as Auto; Auto and Off are kept.
+        with tempfile.TemporaryDirectory() as directory:
+            config_path = Path(directory) / "config.json"
+            config_path.write_text(
+                json.dumps({"deinterlace": "on", "deinterlace_defaults_version": 1}),
+                encoding="utf-8",
+            )
+            with patch.object(ConfigManager, "_get_config_path", return_value=str(config_path)):
+                config = ConfigManager()
+                self.assertEqual(config.deinterlace, "auto")
+                config.deinterlace = "off"
+                self.assertEqual(config.deinterlace, "off")
+                for stored in ("auto", "off", "yadif", None, 1):
+                    config.config["deinterlace"] = stored
+                    self.assertEqual(
+                        config.deinterlace, stored if stored in ("auto", "off") else "auto"
+                    )
+
     def test_the_language_models_answer_survives_a_restart(self):
         # 2.9.6's first question ("download the speech models for your languages?"): the yes was
         # set on the object only and asked again after every restart.

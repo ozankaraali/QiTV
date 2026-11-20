@@ -92,20 +92,24 @@ def write_later(path: str, data: dict) -> None:
 
 def _write_pending() -> None:
     global _writer
+    ended = False
     try:
         while True:
             with _writing:
-                if not _pending:
+                if not _pending:  # ends with the lock held: a save now starts a new writer
+                    _writer, ended = None, True
+                    _writing.notify_all()
                     return
                 path = next(iter(_pending))
                 data = _pending.pop(path)
             write_now(path, data)
-    finally:  # even if a write raised: the next save starts a writer, flush_writes returns
-        with _writing:
-            _writer = None
-            _writing.notify_all()
-            if _pending:  # left by a writer that died: the next save writes them too
-                logger.warning("The recording schedule's writer stopped; the next save retries")
+    finally:  # it died (a write raised): the next save starts a writer, flush_writes returns
+        if not ended:
+            with _writing:
+                _writer = None
+                _writing.notify_all()
+                if _pending:  # left by a writer that died: the next save writes them too
+                    logger.warning("The recording schedule's writer stopped; the next save retries")
 
 
 def flush_writes(timeout: float = 5.0) -> None:

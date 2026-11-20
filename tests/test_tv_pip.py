@@ -6,6 +6,8 @@ sessions and live sessions with real LiveTuners, under the real SessionManager a
 
 from datetime import timedelta
 import os
+from pathlib import Path
+import tempfile
 from unittest import mock
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
@@ -25,7 +27,9 @@ from services.live.live_session import (
 )
 from services.live.refusals import STREAM_LIMIT
 from services.live.tuning import channel_key
-from services.provider_ids import with_provider
+from services.navigation import RECENT_GROUP
+from services.network_streams import NetworkStreams, stream_id
+from services.provider_ids import NETWORK_PROVIDER, with_provider
 from services.sessions import PIP_FAILED, SessionManager, Slot
 from services.vlc_profile import STB_USER_AGENT, PlayKind
 from tests.test_tv_controller import (
@@ -45,6 +49,7 @@ from tests.test_tv_controller import (
 from ui.autoplay import FINISHED_TEXT
 from ui.keymap import Action
 from ui.live_tuner import LiveTuner, one_disk_ring, wait_for_each_other
+from ui.network_player import NetworkPlayer
 from ui.page_stack import PageStack
 from ui.pip_controls import (
     ALREADY_LARGE,
@@ -1641,6 +1646,35 @@ class MixedProviderPipTests(PipCase):
         self.assertIn(("Your provider allows 1 stream at a time", "error"), self.toast.messages())
         self.assertEqual(self.catalog.links, [])  # no link was asked for
         self.assertEqual(self.pip_live.calls, [])
+
+
+class LinkOwnerPipTests(PipCase):
+    """Final review C1: a link kept as Network streams' before its account was configured
+    opens small under that account (its limit and patience), whatever it was kept with."""
+
+    URL = "http://harbor.example:8080/live/demo/secret/7.ts"
+
+    def setUp(self):
+        super().setUp()
+        folder = tempfile.TemporaryDirectory()
+        self.addCleanup(folder.cleanup)
+        store = NetworkStreams(Path(folder.name) / "network_streams.json")
+        owner = lambda url: "Harbor IPTV" if "harbor.example" in url else ""  # noqa: E731
+        self.player = NetworkPlayer(store, mock.Mock(), self.controller, owner=owner)
+
+    def test_a_link_kept_as_no_providers_opens_small_as_its_accounts(self):
+        self.start_large(0)
+        links = len(self.catalog.links)
+        kept = {"id": stream_id(self.URL), "name": "Seven", "cmd": self.URL}
+        kept["_provider"] = NETWORK_PROVIDER  # as ⟲ Recent kept it, before the account
+        self.controller.open_pip(kept, group_key=RECENT_GROUP, channels=[kept])
+        small = self.sessions.other()
+        self.assertTrue(wait_until(lambda: len(small.live.named("start")) == 1))
+        self.assertEqual(small.live.named("start")[0][0], self.URL)
+        self.assertEqual(self.budget.holders("Harbor IPTV"), ["pip"])
+        self.assertEqual(self.budget.holders(NETWORK_PROVIDER), [])
+        self.assertFalse(small.live.named("start")[0][1].get("once", False))
+        self.assertEqual(len(self.catalog.links), links)  # its address is known: none asked
 
 
 class PreviousChannelSourceTests(PipCase):

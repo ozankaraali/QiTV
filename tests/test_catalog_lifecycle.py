@@ -10,8 +10,8 @@ os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 from PySide6.QtCore import QCoreApplication
 from PySide6.QtWidgets import QApplication
-import orjson
 
+from services import provider_cache
 from services.catalog import (
     MAX_CATALOG_JOBS,
     PROVIDER_LOADING_MESSAGE,
@@ -110,8 +110,7 @@ class ProviderSwitchRaceTests(unittest.TestCase):
         path = manager._provider_cache_name(name)
         if not os.path.exists(path):
             return {}
-        with open(path, "rb") as f:
-            return orjson.loads(f.read())
+        return provider_cache.read_cache(path)
 
     def test_section_requested_during_setup_fails_fast_and_never_stores_old_catalog(self):
         a = {"type": "XTREAM", "name": "A", "url": "http://a.example:80", "username": "ua"}

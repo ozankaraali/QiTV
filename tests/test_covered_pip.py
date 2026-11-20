@@ -21,7 +21,6 @@ from tests.test_tv_window import WindowCase  # noqa: E402
 from ui import desktop_pip  # noqa: E402
 from ui.desktop_pip import COVERED, DESKTOP, DesktopPip  # noqa: E402
 from ui.pip import PipFrame  # noqa: E402
-from ui.settings_dialog import OptionsDialog  # noqa: E402
 
 SETTLE_S = desktop_pip.COVERED_SETTLE_MS / 1000
 FLOATING_RECT = QRect(900, 500, 320, 180)
@@ -441,22 +440,14 @@ class CoveredPipWindowTests(WindowCase):
         window._arm_desktop_pip()
         self.assertIsNone(window.desktop_pip.reason())  # only macOS can tell
 
-    def test_settings_arms_it_once_closed(self):
+    def test_a_step_in_settings_arms_it_at_once(self):
+        # Settings › Playback › Picture in picture: its switch's hook arms the watch.
         window = self.window
-
-        class Closing:
-            def __init__(self, _window):
-                self.options_tab = None
-
-            def exec(self):
-                window.config_manager.covered_pip = True  # what the user chose
-
-        with (
-            mock.patch("ui.tv_window._macos_desktops", return_value=True),
-            mock.patch("ui.tv_window.OptionsDialog", Closing),
-        ):
-            window.options_dialog()
-        self.assertEqual(window.desktop_pip.reason(), COVERED)
+        with mock.patch("ui.tv_window._macos_desktops", return_value=True):
+            window.settings._values.set("covered_pip", True)  # a step, as the drawer writes it
+            self.assertEqual(window.desktop_pip.reason(), COVERED)
+            window.settings._values.set("covered_pip", False)
+            self.assertIsNone(window.desktop_pip.reason())
 
     def test_a_covered_window_floats_its_picture_and_takes_it_back(self):
         window = self.window
@@ -506,44 +497,6 @@ class CoveredPipWindowTests(WindowCase):
             nudged.reset_mock()
             window._on_app_state(Qt.ApplicationState.ApplicationInactive)
             nudged.assert_called_once()
-
-
-class CoveredPipSettingsTests(WindowCase):
-    def dialog(self, platform: str) -> OptionsDialog:
-        with mock.patch("ui.settings_dialog.sys", types.SimpleNamespace(platform=platform)):
-            dialog = OptionsDialog(self.window)
-        self.addCleanup(dialog.deleteLater)
-        return dialog
-
-    def test_on_macos_it_sits_under_the_fullscreen_one_off_by_default(self):
-        dialog = self.dialog("darwin")
-        box = dialog.covered_pip_checkbox
-        self.assertFalse(box.isHidden())
-        self.assertFalse(box.isChecked())
-        self.assertIn("covers QiTV", box.text())
-        self.assertIn("Keep on Top", box.toolTip())
-        layout = dialog.settings_layout
-        self.assertEqual(layout.indexOf(box), layout.indexOf(dialog.desktop_pip_checkbox) + 1)
-        box.setChecked(True)
-        with mock.patch("ui.settings_dialog.sys", types.SimpleNamespace(platform="darwin")):
-            dialog.save_settings()
-        self.assertIs(ConfigManager().covered_pip, True)
-        box.setChecked(False)
-        with mock.patch("ui.settings_dialog.sys", types.SimpleNamespace(platform="darwin")):
-            dialog.save_settings()
-        self.assertIs(ConfigManager().covered_pip, False)
-
-    def test_elsewhere_it_is_hidden_and_never_saved(self):
-        for platform in ("win32", "linux"):
-            with self.subTest(platform=platform):
-                dialog = self.dialog(platform)
-                box = dialog.covered_pip_checkbox
-                self.assertTrue(box.isHidden())
-                self.assertTrue(dialog.desktop_pip_checkbox.isHidden())
-                box.setChecked(True)
-                with mock.patch("ui.settings_dialog.sys", types.SimpleNamespace(platform=platform)):
-                    dialog.save_settings()
-                self.assertIs(ConfigManager().covered_pip, False)
 
 
 if __name__ == "__main__":

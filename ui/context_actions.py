@@ -120,6 +120,7 @@ class ContextActions(QObject):
         may_hide: Callable[[], bool] = lambda: True,
         tidy: Optional[Callable[[NavNode], None]] = None,
         record_at: Optional[Callable[[], Optional[Callable[[dict], None]]]] = None,
+        link: Callable[[dict], bool] = lambda item: False,
         parent: Optional[QObject] = None,
     ) -> None:
         """`external` is services.external_players or a stand-in; `notify(text, kind)` toasts.
@@ -127,6 +128,8 @@ class ContextActions(QObject):
         `open_pip(node)` opens a channel row in picture in picture, `forget_recent(item)` takes
         a channel out of ⟲ Recent and `clear_recents()` empties it (None: no such entry).
         `record_at()` is what records a channel at a time (2.8; None while QiTV cannot).
+        `link(item)`: whether a row is a link of Network streams (⟲ Recent's), whose menu
+        has neither favorites nor Record at a time…: neither works for a link.
         """
         super().__init__(parent)
         self._open_pip = open_pip
@@ -134,6 +137,7 @@ class ContextActions(QObject):
         self._may_hide = may_hide  # ... once their PIN is set
         self._tidy = tidy  # 2.9.1: a group leaves the lists, no PIN (services.hidden_groups)
         self._record_at = record_at
+        self._link = link
         self._forget_recent = forget_recent
         self._clear_recents = clear_recents
         self.nav = nav
@@ -262,17 +266,21 @@ class ContextActions(QObject):
         self, menu: QMenu, node: NavNode, *, pip: bool = True, recent: bool = True
     ) -> None:
         """A channel's own entries: favorites, picture-in-picture (with `pip`), Record at a
-        time…, Remove from Recents (with `recent`, on a row of ⟲ Recent) and Hide."""
+        time…, Remove from Recents (with `recent`, on a row of ⟲ Recent) and Hide. A link
+        has no favorites (★ lists a provider's channels) nor Record at a time… (a scheduled
+        recording asks its provider for the link)."""
         item: dict = node.payload
-        kept = favorites.is_favorite(self.config, item)
-        text = tr("Remove from favorites") if kept else tr("Add to favorites")
-        menu.addAction(text).triggered.connect(lambda _=False: self._toggle_favorite(item))
+        link = self._link(item)
+        if not link:
+            kept = favorites.is_favorite(self.config, item)
+            text = tr("Remove from favorites") if kept else tr("Add to favorites")
+            menu.addAction(text).triggered.connect(lambda _=False: self._toggle_favorite(item))
         open_pip = self._open_pip if pip else None
         if open_pip is not None:
             menu.addAction(translate(OPEN_PIP_TEXT)).triggered.connect(
                 lambda _=False: open_pip(node)
             )
-        record_at = self._record_at() if self._record_at is not None else None
+        record_at = self._record_at() if self._record_at is not None and not link else None
         if record_at is not None:
             menu.addAction(translate(RECORD_AT_TEXT)).triggered.connect(
                 lambda _=False: record_at(item)

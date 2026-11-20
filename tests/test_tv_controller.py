@@ -15,6 +15,7 @@ from PySide6.QtGui import QGuiApplication, QPixmap, QWheelEvent
 from PySide6.QtWidgets import QAbstractItemView, QApplication, QMenu, QWidget
 from mixed_fixtures import DEMO, HARBOR, HeldSetups, live_content, mixed_config, shut_hub
 from test_browsed_catalog import FakeEpg, ScriptedFactory
+from test_settings_controller import FakeValues
 from timer_fixtures import elapse, pause, wait_until
 
 from services import media_server as ms, provider_api
@@ -26,24 +27,34 @@ from services.epg_view import Programme
 from services.live.live_session import CRAWLING, UNAVAILABLE
 from services.live.source import STREAM_LIMIT, STREAM_REFUSED
 from services.live.tuning import channel_key
-from services.navigation import FAVORITES_GROUP, RECENT_GROUP, NavModel, NavNode, item_key
+from services.navigation import (
+    FAVORITES_GROUP,
+    RECENT_GROUP,
+    SETTINGS_ROW,
+    NavModel,
+    NavNode,
+    item_key,
+)
 from services.playback import PlaybackState
-from services.provider_ids import ALL_PROVIDERS, mixed_group_id, provider_of
+from services.provider_ids import ALL_PROVIDERS, NETWORK_PROVIDER, mixed_group_id, provider_of
+from services.settings_model import GENERAL, PROVIDERS, sections
 from services.vlc_profile import DEFAULT_USER_AGENT, STB_USER_AGENT, PlayKind
 from services.watch_state import WatchState
 from services.zapping import ZapController
 from tests.test_navigation import FakeCatalog as NavCatalog
-from ui.keymap import Action
+from ui.keymap import Action, resolve
 from ui.link_lanes import Target
 from ui.overlays.channel_column import ChannelColumn
 from ui.overlays.channel_rows import ChannelRowsModel
 from ui.overlays.drawer import LOADING_TEXT, PROVIDER_ERROR_TEXT, Drawer
 from ui.overlays.guide import Guide
 from ui.overlays.next_card import NextCard
+from ui.overlays.settings_drawer import SettingsDrawer
 from ui.overlays.toast import Toast
 from ui.overlays.transport import Transport
 from ui.overlays.welcome import WelcomeCard
 from ui.overlays.zap_banner import ZapBanner
+from ui.settings_controller import SettingsController
 from ui.tv_controller import Overlays, TVController, scrub
 
 NOW = datetime(2026, 10, 15, 20, 30, tzinfo=timezone.utc)
@@ -483,9 +494,13 @@ class FakeDrawer(FakeOverlay):
     closed = Signal()
     highlight = None
     found = False  # the find lists what it found
+    focus_side = "right"
 
     def highlighted(self):
         return self.highlight
+
+    def resume_point(self):
+        return self.focus_side, self.highlight.key if self.highlight is not None else None
 
     def field_key(self, action, payload=""):
         return False  # no Find box caret here (2.9.3: the real one's in test_drawer)
@@ -935,6 +950,7 @@ class FakeWindow:
 class FakeWatch:
     def __init__(self):
         self.plays, self.positions = [], []
+        self.last_channel = None
         self.flushes = 0
         self.resume = {}
 
@@ -945,11 +961,18 @@ class FakeWatch:
     def resume_position(self, cid):
         return self.resume.get(cid)
 
+    def forget_position(self, cid):
+        return self.resume.pop(cid, None) is not None
+
     def resume_from(self, cid, item):
         return self.resume.get(cid) or ms.server_resume(item)
 
-    def record_play(self, provider_name, item, *, item_type, link, group_id=None):
+    def record_play(
+        self, provider_name, item, *, item_type, link, group_id=None, last_channel=True
+    ):
         self.plays.append((provider_name, item, item_type, link, group_id))
+        if item_type == "channel" and last_channel:
+            self.last_channel = (provider_name, item)  # Start with the last channel's
 
     def update_position(self, cid, position_ms, duration_ms):
         self.positions.append((cid, position_ms, duration_ms))
@@ -5183,6 +5206,38 @@ class RecentsTests(ControllerTestCase):
         self.assertEqual(self.config.watch_history, history)
 
 
+class RecentLinkMenuTests(ControllerTestCase):
+    """Final review M3: a link's row of ⟲ Recent offers only what works for a link: no
+    favorites (★ lists a provider's channels only) and no Record at a time… (a scheduled
+    recording asks a provider for the link)."""
+
+    menu_for = ContextMenuTests.menu_for
+    texts = staticmethod(ContextMenuTests.texts)
+
+    def test_a_links_row_leaves_out_favorites_and_record_at_a_time(self):
+        url = "https://cdn.example/live/harbour/index.m3u8"
+        link = {"id": "6ca35429d7503b1b", "name": "Harbour", "cmd": url}
+        link["_provider"] = NETWORK_PROVIDER
+        self.config.watch_history = [watched(NETWORK_PROVIDER, link), watched("Home", CHANNELS[1])]
+        self.controller.record_at = lambda channel: None  # QiTV can record at a time
+        self.controller.start()
+        self.nav.reset_to("live", RECENT_GROUP)
+        rows = self.nav.children(self.nav.path[-1])
+        self.assertEqual([n.title for n in rows], ["Harbour", "Two"])
+        self.assertEqual(
+            self.texts(self.menu_for(rows[0])),
+            [
+                "Remove from Recents",
+                "Clear Recents",
+                "Play in VLC",
+                "Play in MPV",
+                "Copy stream link",
+            ],
+        )
+        texts = self.texts(self.menu_for(rows[1]))  # a provider's channel: as ever
+        self.assertEqual(texts[:2], ["Add to favorites", "Record at a time…"])
+
+
 class ExternalButtonTests(ControllerTestCase):
     """The player controls send what plays now to VLC or MPV, the way the
     channel list's right-click does: the in-app stream is released first."""
@@ -5789,6 +5844,249 @@ class AllProvidersLaunchTests(ControllerTestCase):
         self.assertEqual(self.asked, [])  # nothing to tune
         self.assertEqual(len(self.drawer.named("open_drawer")), 1)  # the idle player's list
         self.assertEqual(self.nav.path[0].key, ALL_PROVIDERS)
+
+
+class SettingsLayerTests(ControllerTestCase):
+    """Settings in the drawer (plan 1): while it shows it takes the drawer's keys before the
+    channel list, which gets none of them; the mouse's Back and Forward and a click on the
+    picture reach it as they reach the list."""
+
+    def setUp(self):
+        super().setUp()
+        self.host = QWidget()
+        self.host.resize(1280, 720)
+        self.host.show()
+        self.addCleanup(self.host.deleteLater)
+        self.addCleanup(self.host.close)
+        self.settings_drawer = SettingsDrawer(
+            lambda row: self.settings.value_text(row),
+            lambda row: self.settings.lit(row),
+            self.host,
+        )
+        self.settings = SettingsController(
+            self.settings_drawer,
+            FakeValues(),
+            lambda: sections("Darwin"),
+            self.controller.reopen_drawer_on_settings,
+        )
+        self.controller.set_settings(self.settings)
+
+    def test_settings_takes_the_keys_over_the_drawer(self):
+        self.play(0)
+        self.drawer.visible = True
+        self.drawer.found = True  # mid-find: its Find box takes the caret keys and Paste
+
+        def field_key(action, payload=""):
+            self.drawer.record("field_key", action)
+            return action in (Action.NAV_LEFT, Action.NAV_RIGHT, Action.PASTE, Action.FORGET)
+
+        self.drawer.field_key = field_key
+        self.settings.open()
+        self.assertEqual(self.controller.key_context(), "drawer")
+        self.assertEqual(self.settings_drawer.path(), (PROVIDERS,))
+        self.controller.handle(Action.NAV_TEXT, "a")  # Settings' find, not the list's
+        self.assertEqual(self.settings_drawer.find_text(), "a")
+        self.controller.handle(Action.ESCAPE)  # the find ends; Settings stays
+        self.assertFalse(self.settings_drawer.finding())
+        self.assertTrue(self.settings.visible())
+        QGuiApplication.clipboard().setText("latency")
+        self.controller.handle(Action.PASTE)  # Settings' find too, never the list's Find box
+        self.assertEqual(self.settings_drawer.find_text(), "latency")
+        self.controller.handle(Action.ESCAPE)
+        QGuiApplication.clipboard().setText("")  # nothing to paste: it reaches nothing
+        for action, payload in (
+            (Action.PASTE, ""),
+            (Action.FORGET, ""),
+            (Action.NAV_DOWN, ""),
+        ):
+            self.controller.handle(action, payload)
+        self.assertEqual(self.settings_drawer.path(), (GENERAL,))  # its next section
+        self.assertEqual(self.drawer.named("move_by"), [])
+        self.assertEqual(self.drawer.named("field_key"), [])
+        self.assertEqual(self.drawer.named("type_text"), [])
+        self.assertEqual(self.drawer.named("escape"), [])
+        self.drawer.visible = False
+        self.assertEqual(self.controller.key_context(), "drawer")  # the list closed under it
+        self.settings.close()
+        self.assertEqual(self.controller.key_context(), "player")
+
+    def test_the_media_keys_and_f11_reach_the_player_under_settings(self):
+        # In the drawer's context the letters type (+ − M F reach nothing, as in the list);
+        # the keyboard's volume key and F11 resolve to the player's actions there too.
+        self.play(0)
+        self.settings.open()
+        for key in (Qt.Key.Key_VolumeUp, Qt.Key.Key_F11):
+            action, payload = resolve(key, NO_MODS, "", context=self.controller.key_context())
+            self.controller.handle(action, payload)
+        self.assertEqual(self.session.level, 55)
+        self.assertEqual(self.window.calls, ["toggle_fullscreen"])
+        self.assertTrue(self.settings.visible())
+
+    def open_settings(self):
+        """As the window opens it (TVWindow.open_settings)."""
+        self.controller.make_way_for_settings()
+        self.settings.open()
+
+    def test_a_provider_ready_while_settings_shows_keeps_it(self):
+        # Ctrl/⌘+, while a provider loads: the idle player's list waits for Settings to go.
+        self.controller.start()
+        self.open_settings()
+        self.catalog.hub_ready("Home")
+        self.catalog.sectionReady.emit("live")
+        self.assertTrue(self.settings.visible())
+        self.assertEqual(self.drawer.named("open_drawer"), [])
+        self.controller.handle(Action.ESCAPE)  # the sections: closed (not from the list)
+        self.assertFalse(self.settings.visible())
+        self.assertEqual(self.drawer.named("open_drawer"), [(None,)])  # the list due, now
+
+    def test_a_provider_failing_while_settings_shows_keeps_it(self):
+        self.controller.start()
+        self.open_settings()
+        self.catalog.hub_failed("Home", "Handshake failed")
+        self.assertTrue(self.settings.visible())
+        self.assertEqual(self.drawer.named("open_drawer"), [])
+        self.controller.handle(Action.ESCAPE)
+        self.assertEqual(self.drawer.named("open_drawer"), [(None, "left")])  # its retry row
+        self.assertEqual([(n.layer, n.key) for n in self.nav.path], [("source", "Home")])
+
+    def test_the_welcome_card_waits_for_a_file_opened_while_settings_shows(self):
+        self.catalog.names = []
+        self.controller.start()
+        self.assertTrue(self.welcome.visible)
+        self.open_settings()
+        self.assertFalse(self.welcome.visible)  # under Settings
+        self.controller.hold_for_file(True)  # a file opened meanwhile (⌘O, a drop)
+        self.controller.play_file("/videos/Film.mkv", size=1234)
+        self.session.stateChanged.emit("playing")
+        self.controller.handle(Action.ESCAPE)  # Settings closes over the playing file
+        self.assertFalse(self.settings.visible())
+        self.assertFalse(self.welcome.visible)  # not over the film
+        self.session.stateChanged.emit("ended")
+        self.session.ended.emit()
+        self.assertTrue(self.welcome.visible)  # the film is over: the card again
+
+    def test_the_welcome_card_comes_back_after_settings(self):
+        self.catalog.names = []
+        self.controller.start()
+        self.open_settings()
+        self.assertFalse(self.welcome.visible)
+        self.controller.handle(Action.ESCAPE)
+        self.assertTrue(self.welcome.visible)
+
+    def test_the_mouse_buttons_go_a_layer_down_and_up_in_settings(self):
+        self.settings.open()
+        self.controller.mouse_forward()
+        self.assertEqual(self.settings_drawer.focus_side(), "right")
+        self.controller.mouse_back()
+        self.assertEqual(self.settings_drawer.focus_side(), "left")
+        self.controller.mouse_back()  # the sections: closed, and the list stays closed
+        self.assertFalse(self.settings.visible())
+        self.assertEqual(self.drawer.named("open_drawer"), [])
+        self.assertEqual(self.drawer.named("left") + self.drawer.named("right"), [])
+
+    def test_backing_out_from_the_drawers_row_reopens_the_drawer_on_it(self):
+        self.settings.open(from_drawer=True)
+        self.controller.handle(Action.ESCAPE)
+        self.assertFalse(self.settings.visible())
+        self.assertEqual([n.layer for n in self.nav.path], ["source"])
+        self.assertEqual(self.drawer.named("open_drawer"), [(SETTINGS_ROW, "left")])
+
+    def in_a_group(self, side, highlight):
+        """The list open in group 10, the keys on `side` on `highlight`; its path."""
+        self.nav.reset_to("live", "10")
+        self.drawer.visible = True
+        self.drawer.focus_side = side
+        self.drawer.highlight = highlight
+        return [(n.layer, n.key) for n in self.nav.path]
+
+    def test_backing_out_from_the_gear_reopens_the_list_where_it_was(self):
+        # ⚙ from inside a group: back out of Settings and the list is there again, the keys
+        # on the side and the row they were on (as the Settings window left it).
+        cases = (
+            ("right", NavNode("item", "2", "Two", CHANNELS[1]), ("2",)),
+            ("left", NavNode("group", "10", "Ten"), ("10", "left")),
+        )
+        for side, highlight, reopened in cases:
+            with self.subTest(side):
+                self.drawer.calls.clear()
+                path = self.in_a_group(side, highlight)
+                self.controller.make_way_for_settings(keep_place=True)  # as TVWindow
+                self.settings.open(from_drawer=True)
+                self.assertFalse(self.drawer.visible)
+                with mock.patch.object(
+                    self.controller, "_update_guides", wraps=self.controller._update_guides
+                ) as guides:
+                    self.controller.handle(Action.NAV_RIGHT)  # the section's rows
+                    self.controller.handle(Action.ESCAPE)
+                    self.controller.handle(Action.ESCAPE)
+                self.assertFalse(self.settings.visible())
+                self.assertEqual([(n.layer, n.key) for n in self.nav.path], path)
+                self.assertEqual(self.drawer.named("open_drawer"), [reopened])
+                guides.assert_called()  # its group's providers are in use again
+
+    def test_backing_out_from_the_settings_row_in_a_group_lands_on_the_row(self):
+        self.in_a_group("left", NavNode("action", SETTINGS_ROW, "Settings"))
+        self.controller.make_way_for_settings()
+        self.settings.open(from_drawer=True)
+        self.controller.handle(Action.ESCAPE)
+        self.assertEqual([n.layer for n in self.nav.path], ["source"])
+        self.assertEqual(self.drawer.named("open_drawer"), [(SETTINGS_ROW, "left")])
+
+    def test_a_place_kept_is_used_once(self):
+        # Closed another way (a click on the picture), the next Settings from the row does not
+        # land where the ⚙ was.
+        self.in_a_group("right", NavNode("item", "2", "Two", CHANNELS[1]))
+        self.controller.make_way_for_settings(keep_place=True)
+        self.settings.open(from_drawer=True)
+        self.controller.video_clicked()
+        self.assertFalse(self.settings.visible())
+        self.settings.open(from_drawer=True)  # the row, the list already closed
+        self.controller.handle(Action.ESCAPE)
+        self.assertEqual(self.drawer.named("open_drawer"), [(SETTINGS_ROW, "left")])
+
+    def test_backing_out_without_a_provider_shows_the_welcome_card(self):
+        # As the list asked for without a provider: the card, never an empty list.
+        self.catalog.names = []
+        self.settings.open(from_drawer=True)
+        self.controller.handle(Action.ESCAPE)
+        self.assertFalse(self.settings.visible())
+        self.assertTrue(self.welcome.visible)
+        self.assertEqual(self.drawer.named("open_drawer"), [])
+
+    def test_close_settings_never_gives_the_list_back(self):
+        self.settings.open(from_drawer=True)
+        self.controller.close_settings()
+        self.assertFalse(self.settings.visible())
+        self.assertEqual(self.drawer.named("open_drawer"), [])
+
+    def test_a_video_click_closes_settings(self):
+        self.settings.open(from_drawer=True)
+        self.controller.video_clicked()
+        self.assertFalse(self.settings.visible())
+        self.assertEqual(self.drawer.named("open_drawer"), [])  # as the list: nothing comes back
+        self.controller.video_clicked()  # the next click opens the list, as ever
+        self.assertEqual(len(self.drawer.named("open_drawer")), 1)
+
+    def test_settings_is_open_for_esc_and_keeps_the_pointer(self):
+        # Esc over a film from the Library goes a layer up in Settings, never to the Library.
+        self.controller.start()
+        self.play(0)
+        self.drawer.visible = self.banner.visible = False  # nothing open over the picture
+        self.assertFalse(self.controller.overlay_open())
+        self.assertTrue(self.controller.pointer_may_hide())
+        self.settings.open()
+        self.assertTrue(self.controller.overlay_open())
+        self.assertFalse(self.controller.pointer_may_hide())
+
+    def test_the_library_closes_settings(self):
+        self.play(0)
+        self.settings.open()
+        self.controller.stop_for_library()
+        self.assertFalse(self.settings.visible())
+        self.settings.open()
+        self.play(1)
+        self.controller.enter_library_playing()  # with the player in its corner
+        self.assertFalse(self.settings.visible())
 
 
 if __name__ == "__main__":

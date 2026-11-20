@@ -26,7 +26,6 @@ from services.config_manager import ConfigManager
 from services.picture_watch import Counters, FrozenPicture
 from services.vlc_profile import PlayKind
 from tests import test_config_tv, test_playback_session as sessions, test_tv_window as base
-from ui.settings_dialog import OptionsDialog
 
 HARDWARE_FLAGS = ("--avcodec-hw", "--no-videotoolbox")
 SOFTWARE = [":avcodec-hw=none", ":no-videotoolbox"]  # on the Mac
@@ -671,40 +670,6 @@ class DecodingConfigTests(unittest.TestCase):
 
 
 class DecodingWindowTests(base.WindowCase):
-    def test_settings_offers_hardware_decoding_with_its_fallback(self):
-        self.config.hardware_decoding = True
-        dialog = OptionsDialog(self.window)
-        self.addCleanup(dialog.deleteLater)
-        box = dialog.hardware_decoding_checkbox
-        self.assertTrue(box.isChecked())
-        self.assertNotIn("experimental", box.text().lower())
-        tip = box.toolTip().lower()
-        self.assertIn("freezes while its sound plays", tip)
-        self.assertIn("switches to software decoding by itself, for a day", tip)
-        self.assertIn("restart", tip)
-        box.setChecked(False)  # Settings turns it off ...
-        dialog.save_settings()
-        self.assertFalse(ConfigManager().hardware_decoding)
-        box.setChecked(True)  # ... and on again
-        dialog.save_settings()
-        self.assertTrue(ConfigManager().hardware_decoding)
-
-    def test_settings_offers_secure_dns_off_and_it_applies_at_once(self):
-        # 2.9.1: the providers' names over HTTPS (services.secure_dns), off by default.
-        from services import secure_dns
-
-        self.addCleanup(secure_dns.enable, False)
-        dialog = OptionsDialog(self.window)
-        self.addCleanup(dialog.deleteLater)
-        box = dialog.secure_dns_checkbox
-        self.assertFalse(box.isChecked())
-        self.assertIn("Cloudflare", box.toolTip())
-        box.setChecked(True)
-        dialog.save_settings()
-        self.assertTrue(ConfigManager().secure_dns)
-        self.window.save_config()  # what Save does after the dialog wrote the config
-        self.assertTrue(secure_dns.enabled())
-
     def test_the_window_creates_libvlc_with_the_setting(self):
         self.config.hardware_decoding = True
         with mock.patch("ui.tv_window.create_instance", return_value=None) as create:

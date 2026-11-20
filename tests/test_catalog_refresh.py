@@ -15,9 +15,9 @@ from PySide6.QtWidgets import QApplication
 from http_fixtures import LocalSource
 from job_fixtures import ImmediateRunner
 from mixed_fixtures import mixed_config, shut_hub
-import orjson
 from timer_fixtures import wait_until
 
+from services import provider_cache
 from services.catalog import UNEXPECTED_ANSWER_MESSAGE, CatalogService
 from services.catalogs import Catalogs
 from services.m3u import parse_m3u
@@ -298,11 +298,9 @@ class PlaylistAnswerTests(unittest.TestCase):
         )
         self.addCleanup(registry._cache_writer.shutdown, wait=True)
         path = registry._provider_cache_name("Playlist")
-        with open(path, "rb") as f:
-            cache = orjson.loads(f.read())
+        cache = provider_cache.read_cache(path)
         cache["_cache"]["refreshed_at"]["itv"] = time.time() - 7 * 3600  # past its time
-        with open(path, "wb") as f:
-            f.write(orjson.dumps(cache))
+        provider_cache.write_cache(path, cache)
         config.selected_provider_name = "Playlist"
         hub = Catalogs(config, registry, runner=ImmediateRunner())
         self.addCleanup(shut_hub, hub)
@@ -317,8 +315,7 @@ class PlaylistAnswerTests(unittest.TestCase):
         self.assertEqual(signals, [("failed", "live", UNEXPECTED_ANSWER_MESSAGE)])
         self.assertEqual(len(catalog.items("live", "*") or []), 3)
         catalog.provider_manager._cache_writer.shutdown(wait=True)
-        with open(path, "rb") as f:
-            self.assertEqual(len(orjson.loads(f.read())["itv"]["contents"]), 3)
+        self.assertEqual(len(provider_cache.read_cache(path)["itv"]["contents"]), 3)
         self.assertTrue(catalog.provider_manager.is_content_stale("itv"))  # tried next time
 
     def test_what_is_a_playlist(self):

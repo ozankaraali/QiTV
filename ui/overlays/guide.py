@@ -463,8 +463,8 @@ class Guide(Overlay):
         while day <= latest.astimezone().date():
             if day == now.astimezone().date():
                 start = now
-            else:
-                moment = shown.replace(year=day.year, month=day.month, day=day.day)
+            else:  # that day's wall-clock time: across a clock change, its own offset (2.12)
+                moment = datetime.combine(day, shown.time()).astimezone()
                 start = min(max(slot_start(moment), earliest), latest)
             choices.append((day_label(start, self._now()), start))
             day += timedelta(days=1)

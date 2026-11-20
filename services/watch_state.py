@@ -99,8 +99,18 @@ class WatchState:
         return cid
 
     def record_play(
-        self, provider_name: str, item: dict, *, item_type: str, link: str, group_id=None
+        self,
+        provider_name: str,
+        item: dict,
+        *,
+        item_type: str,
+        link: str,
+        group_id=None,
+        last_channel: bool = True,
     ) -> None:
+        """`item` played: into the history, and a channel becomes the one Start with the last
+        channel tunes, unless `last_channel` is False (a link of Network streams: the
+        provider's channel watched before stays)."""
         self.config.add_to_watch_history(
             item,
             item_type,
@@ -115,7 +125,7 @@ class WatchState:
             "timestamp": time.strftime("%Y-%m-%dT%H:%M:%S"),
             "provider_name": provider_name,
         }
-        if item_type == "channel":
+        if item_type == "channel" and last_channel:
             self.config.last_live_channel = {
                 "provider_name": provider_name,
                 "group_id": "" if group_id is None else str(group_id),
@@ -145,6 +155,18 @@ class WatchState:
             self._save_timer = QTimer(singleShot=True, interval=self.save_delay_ms)
             self._save_timer.timeout.connect(self._save_settled)
         self._save_timer.start()  # restarted: one save once the zapping settles
+
+    def forget_position(self, cid: str) -> bool:
+        """Drop where `cid` stopped (a link of Network streams whose address now names another
+        film: it starts from its beginning); whether one was kept. Saved as a play is."""
+        positions = getattr(self.config, "playback_positions", None) or {}
+        if cid not in positions:
+            return False
+        del positions[cid]
+        self.config.playback_positions = positions
+        self._films.pop(cid, None)
+        self._save_soon()
+        return True
 
     def resume_position(self, cid: str) -> Optional[int]:
         # The duration needed for the 90% rule lives in the stored entry.

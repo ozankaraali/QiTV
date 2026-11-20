@@ -72,6 +72,16 @@ class WatchStateTests(unittest.TestCase):
         self.assertEqual(self.cfg.saves, 1)
         self.assertEqual(len(self.cfg.history), 1)
 
+    def test_a_play_that_is_no_last_channel_leaves_the_one_before(self):
+        # Final review M2: a link played as a channel stays out of Start with the last channel.
+        news = {"id": 1, "name": "News"}
+        self.ws.record_play("P", news, item_type="channel", link="http://x", group_id=5)
+        link = {"id": "6ca35429d7503b1b", "name": "A link", "cmd": "http://cdn.example/a.ts"}
+        self.ws.record_play("@network", link, item_type="channel", link="u", last_channel=False)
+        self.assertEqual(self.cfg.last_live_channel["item"], news)
+        self.assertEqual(self.cfg.last_watched["item_data"], link)
+        self.assertEqual(len(self.cfg.history), 2)
+
     def test_vod_play_leaves_last_live_channel(self):
         self.ws.record_play("P", {"id": 42, "name": "Film"}, item_type="movie", link="http://x")
         self.assertIsNone(self.cfg.last_live_channel)
@@ -91,6 +101,17 @@ class WatchStateTests(unittest.TestCase):
 
     def test_resume_unknown_is_none(self):
         self.assertIsNone(self.ws.resume_position("nope"))
+
+    def test_a_forgotten_position_starts_from_the_beginning_and_is_saved(self):
+        # A link of Network streams whose address now names another film (plan 4).
+        self.cfg.save_playback_position("c", 50000, 100000)
+        self.cfg.save_playback_position("d", 60000, 100000)
+        saves = self.cfg.saves
+        self.assertTrue(self.ws.forget_position("c"))
+        self.assertIsNone(self.ws.resume_position("c"))
+        self.assertEqual(self.ws.resume_position("d"), 60000)  # another title's stays
+        self.assertGreater(self.cfg.saves, saves)
+        self.assertFalse(self.ws.forget_position("c"))  # none kept any more
 
     def test_a_title_qitv_saw_finished_starts_over_whatever_its_server_said(self):
         # 2.8: the Library's list still carries the server's point from before QiTV played on

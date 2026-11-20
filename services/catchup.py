@@ -119,10 +119,11 @@ class Archive:
 
 
 def _days(value: Any) -> int:
-    """A count of days in a provider's field ("3", 3, "3.0"); 0 when it is none."""
+    """A count of days in a provider's field ("3", 3, "3.0"); 0 when it is none (or not a
+    finite number: "inf" failed a whole playlist before 2.12)."""
     try:
         days = int(float(str(value).strip()))
-    except TypeError, ValueError:
+    except TypeError, ValueError, OverflowError:
         return 0
     return max(0, min(days, MAX_DAYS))
 
@@ -303,9 +304,10 @@ def _offset_minutes(time_now: Any, timestamp_now: Any) -> Optional[int]:
     try:
         local = datetime.strptime(str(time_now).strip(), "%Y-%m-%d %H:%M:%S")
         stamp = float(str(timestamp_now).strip())
-    except TypeError, ValueError:
+        # 2.12: in milliseconds, "nan" or out of range, it failed the whole provider's load
+        utc = datetime.fromtimestamp(stamp, timezone.utc).replace(tzinfo=None)
+    except TypeError, ValueError, OverflowError, OSError:
         return None
-    utc = datetime.fromtimestamp(stamp, timezone.utc).replace(tzinfo=None)
     minutes = (local - utc).total_seconds() / 60.0
     if not math.isfinite(minutes) or abs(minutes) > 15 * 60:
         return None

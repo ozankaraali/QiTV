@@ -209,34 +209,6 @@ class ProvidersMenuTests(WindowCase):
         self.assertEqual(texts.count("Free channels"), 1)
 
 
-class SettingsFreeChannelsTests(WindowCase):
-    def test_settings_lists_a_free_list_until_saved(self):
-        from ui.settings_dialog import OptionsDialog
-
-        dialog = OptionsDialog(self.window)
-        self.addCleanup(dialog.deleteLater)
-        with mock.patch("ui.settings_dialog.show_free_channels_menu") as shown:
-            dialog.free_channels_button.click()
-        (parent, point, choose), _ = shown.call_args
-        self.assertIs(parent, dialog)
-        self.assertIsInstance(point, QPoint)
-        choose("uk")
-        entry = free_channels.provider_entry("uk")
-        self.assertEqual(dialog.providers[-1], entry)
-        self.assertEqual(dialog.provider_combo.currentIndex(), len(dialog.providers) - 1)
-        self.assertEqual(dialog.url_input.text(), entry["url"])
-        self.assertEqual(len(self.provider_manager.providers), 1)  # nothing saved yet
-        choose("uk")  # listed already: shown, not added again
-        self.assertEqual(len(dialog.providers), 2)
-        choose(None)
-        self.assertEqual(dialog.providers[-1], free_channels.provider_entry(None))
-        with mock.patch.object(self.window.catalog, "select_provider"):
-            dialog.save_settings()
-        self.assertEqual(
-            self.provider_manager.providers[1:], [entry, free_channels.provider_entry(None)]
-        )
-
-
 class DrawerRowTests(WindowCase):
     def test_the_row_opens_the_menu_at_the_row(self):
         self.show()

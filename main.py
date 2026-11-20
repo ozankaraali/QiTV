@@ -354,7 +354,7 @@ def main() -> int:
     from services.image_manager import ImageManager
     from services.provider_manager import ProviderManager
     from services.sleep_manager import allow_sleep, prevent_sleep
-    from ui.file_types_settings import refresh_at_start
+    from ui.file_types_switch import refresh_at_start
     from ui.theme import focus_qss
     from ui.tv_window import HANDOVER, LAUNCH, TVWindow
     from ui.update_dialogs import check_for_updates, replace_failed

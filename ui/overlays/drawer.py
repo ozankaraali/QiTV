@@ -9,6 +9,12 @@ Some rows leave the drawer when chosen (Enter, →, a click), and only then: the
 column's Settings and Add provider rows (`actionRequested`), and the Movies and Series
 sections, which the Library shows (`libraryRequested`). Highlighting them previews nothing.
 
+Network streams (plan 4), after the providers among the sources, lists the links that played:
+each row its name, then what it is ("Live", "Film · stopped at 41:12") or, in the warning
+colour, why it did not play last time. A link chosen plays (`playRequested`, as a channel).
+The find lists them by their names too; one found plays as it was kept (`channelFound`), and
+is no channel otherwise: it never drags out onto a tile and has no channel's menu.
+
 The left column's top row starts with ‹ (a layer up, as ← on the left column; hidden on the
 sources), then names where the left column is, each a link: a name shows its node's children
 in the left column, and the provider's name shows the sources, the provider highlighted, to
@@ -55,15 +61,11 @@ from PySide6.QtCore import (
     Signal,
 )
 from PySide6.QtGui import (
-    QColor,
     QFont,
     QFontMetrics,
     QFontMetricsF,
-    QLinearGradient,
     QMouseEvent,
     QPainter,
-    QPainterPath,
-    QPen,
     QWheelEvent,
 )
 from PySide6.QtWidgets import (
@@ -84,18 +86,23 @@ from services.navigation import (
     FAVORITES_GROUP,
     FREE_CHANNELS_ROW,
     LIBRARY_SECTIONS,
+    LINK_LAYER,
+    LINKS_LAYER,
     OPEN_FILE_ROW,
     OPEN_FOLDER_ROW,
+    OPEN_LINK_ROW,
     RECENT_GROUP,
     RECORDINGS_ROW,
     SETTINGS_ROW,
+    LinkRow,
     NavModel,
     NavNode,
     NodeSeq,
     item_key,
     item_title,
 )
-from services.provider_ids import mixed_group_id, provider_of
+from services.network_streams import FILM
+from services.provider_ids import NETWORK_PROVIDER, mixed_group_id, provider_of
 from services.zapping import ZapContext
 from ui.find_session import FindSession
 from ui.keymap import Action, key_hint
@@ -109,10 +116,42 @@ from ui.overlays.channel_rows import (
     column_focused,
     paint_hover,
 )
-from ui.overlays.painting import Units, draw_icon, draw_refresh, elided, fill_round, ui_units
+from ui.overlays.drawer_look import (  # the header's metrics are offered from here too
+    COUNT_FONT_U,
+    CRUMB_FONT_U,
+    CRUMB_H_U,
+    FADE_U,
+    FILTER_H_U,
+    FIND_X_U,
+    GEAR_GAP_U,
+    GEAR_U,
+    LEFT_U,
+    MIN_HIT_PX,
+    PAD_SIDE_U,
+    PAD_TOP_U,
+    RIGHT_U,
+    ROW_H_U,
+    SEPARATOR,
+    TITLE_FONT_U,
+    column_widths,
+    draw_back,
+    find_clear_tooltip,
+    paint_backdrop,
+    paint_highlight,
+)
+from ui.overlays.guide import wrap_lines
+from ui.overlays.painting import (
+    Units,
+    draw_icon,
+    draw_refresh,
+    elided,
+    fill_round,
+    fmt_duration,
+    ui_units,
+)
 from ui.pointer import NAV_BUTTONS, SecondClickGuard
 from ui.text_edit import SELECTION_ALPHA, Dragging, TextEdit, edit_key, paint_edit
-from ui.theme import FOCUS_FILL_ALPHA, PALETTE, qcolor
+from ui.theme import PALETTE, qcolor
 
 logger = logging.getLogger(__name__)
 
@@ -120,32 +159,24 @@ _CONTEXT_LAYERS = ("item", "episode")  # rows with a context menu (channels are 
 _CONTEXT_GROUPS = (RECENT_GROUP,)  # and these groups' rows ("Clear Recents")
 _RIGHT_PRESSES = (QEvent.Type.MouseButtonPress, QEvent.Type.MouseButtonDblClick)
 DRAG_OPACITY = 0.25  # the list while a channel is dragged out of it onto the grid
-LEFT_U = 25.0  # the left column (2.9.3: in u; a quarter of the width up to UNIT_CAP_PX)
-RIGHT_U = 58.0  # the right column's right edge
-FADE_U = 7.0
-PAD_TOP_U = 2.4
-PAD_SIDE_U = 1.6
-CRUMB_H_U = 2.2
 FOUND_GENRE_H_U = 5.0  # a genre the find found: its name, then its provider and count
+LINK_ROW_H_U = FOUND_GENRE_H_U  # a link of Network streams: its name, then what it is
+LINK_SUB_LINES = 3  # why a link failed last time wraps onto these at most, its row growing
 FOUND_CHANNEL_SCALE = 0.7  # its channels: a long name (and a 5-digit number) fits whole
-FILTER_H_U = 3.4  # the ⌕ Find box above the right column (the left column's: its buttons)
-FIND_X_U = 2.2  # its ✕, this wide at its right end
-GEAR_U = 1.9  # the header's buttons (Library, Search, refresh, Settings), this wide
-GEAR_GAP_U = 0.7
 ICONS_TOP_U = 0.6  # 2.9.3: the buttons' row, this far under the Find box's bottom
-MIN_HIT_PX = 28  # the header's buttons take clicks over this square at least
 REFRESH_ACTION = "refresh"  # the header's refresh button: the provider's channels and guide
 SEARCH_ACTION = "search"  # the header's ⌕: the Library's search
 LIBRARY_ACTION = "library"  # 2.8: the header's Library button (Movies, or the section last open)
 BACK_BUTTON = "back"  # the header's ‹: a layer up
+# The header's ⚙ (the Settings row's own key is SETTINGS_ROW): Settings, which gives the list
+# back where it was once backed out of.
+SETTINGS_BUTTON = "settings_button"
 _CRUMB = "crumb:"  # a name in the header, by its path index ("crumb:up": the elided head)
-SEPARATOR = " › "
 # The texts below stay English (the code compares them); translate() shows them, and the
 # tooltips naming a key are made where they show.
 PROVIDER_TOOLTIP = N_("Choose another provider")  # i18n: tooltip of the provider's name
 # i18n: the channel list's title over its providers (the top layer, Settings and Add under them)
 PROVIDERS_TITLE = N_("Providers")
-CRUMB_FONT_U = 1.15
 PREVIEW_DEBOUNCE_MS = 200
 OWN_AT_ONCE = 20_000  # an open group this long or shorter is scoped here, at once (~20 ms)
 LOADING_TEXT = N_("Loading…")
@@ -155,10 +186,6 @@ PROVIDER_ERROR_TEXT = N_("Couldn't connect — click or press Enter to retry")
 _RETRY_TEXTS = (ERROR_TEXT, PROVIDER_ERROR_TEXT)  # a click on the list, or Enter, retries
 FIND_ACTION = "find"  # the ⌕ Find box above the right column
 FIND_CLEAR = "find_clear"  # its ✕
-
-
-def find_clear_tooltip() -> str:
-    return key_hint(tr("Clear the find"), "Esc")  # i18n: the find box's ✕ (tooltip)
 
 
 FIND_PLACEHOLDER = N_("Find a genre or channel")  # i18n: the empty find box's prompt
@@ -175,12 +202,22 @@ FIND_PARENT = NavNode("find", "find", "Find")  # the right column's parent while
 NodeRole = Qt.UserRole + 10
 CountRole = Qt.UserRole + 11
 IconRole = Qt.UserRole + 12
+SubRole = Qt.UserRole + 13  # a link's second line: (its text, whether in the warning colour)
+# i18n: under a link's name in the channel list's Network streams: it is a live stream
+LINK_LIVE_TEXT = N_("Live")
+LINK_FILM_TEXT = N_("Film")  # i18n: under a link's name in Network streams: it is a film
+# i18n: under a link's name in Network streams: a film, and where it stopped ({time}: 41:12)
+LINK_STOPPED_TEXT = N_("Film · stopped at {time}")
+# i18n: under a link's name in Network streams, in the warning colour: it did not play last
+# time, and why ({reason}: "401: the link's access ran out")
+LINK_FAILED_TEXT = N_("Didn't open last time ({reason})")
 _PINNED_ICONS = {FAVORITES_GROUP: "star", RECENT_GROUP: "recent"}
 _ACTION_ICONS = {
     SETTINGS_ROW: "gear",
     ADD_PROVIDER_ROW: "plus",
     FREE_CHANNELS_ROW: "plus",
     OPEN_FILE_ROW: "file",
+    OPEN_LINK_ROW: "link",  # 2.12
     OPEN_FOLDER_ROW: "folder",  # Plan 4
     RECORDINGS_ROW: "record",  # 2.9.7
 }
@@ -194,27 +231,28 @@ _HEADER_TOOLTIPS = {  # the header's buttons: what they do, and their key (see _
 }
 
 
+def link_sub(row: LinkRow) -> tuple[str, bool]:
+    """What a link's row says under its name (the channel list's and Settings'), and whether
+    in the warning colour: that it did not play last time and why, else "Live", or a film's
+    "Film · stopped at 41:12" ("Film" from its start)."""
+    if row.failed:
+        return translate(LINK_FAILED_TEXT, reason=translate(row.failed)), True
+    if row.kind != FILM:
+        return translate(LINK_LIVE_TEXT), False
+    if row.stopped_ms is None:
+        return translate(LINK_FILM_TEXT), False
+    return translate(LINK_STOPPED_TEXT, time=fmt_duration(row.stopped_ms)), False
+
+
+def _failed_lines(text: str, font: QFont, width: float, most: int = LINK_SUB_LINES) -> list[str]:
+    """Why a link failed last time as its row shows it: wrapped onto `most` lines at most
+    (LINK_SUB_LINES), whole but in a window too small for them."""
+    return wrap_lines(text, font, width, most) or ([text] if text else [])
+
+
 def _hint(what: str, keys: str) -> str:
     """A tooltip naming its key; `what` (English, marked N_) in the active language."""
     return key_hint(translate(what), keys)
-
-
-def _draw_back(p: QPainter, rect: QRectF, color: QColor) -> None:
-    """‹: a chevron, drawn like the refresh arrow (a unit box, round caps)."""
-    p.save()
-    p.setRenderHint(QPainter.Antialiasing, True)
-    p.translate(rect.x(), rect.y())
-    p.scale(rect.width(), rect.height())
-    pen = QPen(color, 0.12)
-    pen.setCapStyle(Qt.RoundCap)
-    pen.setJoinStyle(Qt.RoundJoin)
-    p.setPen(pen)
-    p.setBrush(Qt.NoBrush)
-    chevron = QPainterPath(QPointF(0.62, 0.2))
-    chevron.lineTo(0.34, 0.5)
-    chevron.lineTo(0.62, 0.8)
-    p.drawPath(chevron)
-    p.restore()
 
 
 @dataclass(frozen=True)
@@ -270,6 +308,14 @@ def _is_focus_key(node: NavNode, wanted: "str | tuple[str, str]") -> bool:
 def _has_context(node: NavNode) -> bool:
     """Whether a right-click on the row asks for a context menu."""
     return node.layer in _CONTEXT_LAYERS or (node.layer == "group" and node.key in _CONTEXT_GROUPS)
+
+
+def _found_link(node: NavNode) -> bool:
+    """Whether a row of the find is a link of Network streams (its id names it there, not its
+    account: as a channel, a tile or a menu would book it under no provider and play a film
+    live)."""
+    payload = node.payload
+    return isinstance(payload, dict) and provider_of(payload) == NETWORK_PROVIDER
 
 
 def _selectable(node: NavNode) -> bool:
@@ -397,6 +443,8 @@ class _NodeModel(ChannelRowsModel):
                 if isinstance(node.payload, FoundGenre):
                     return _genre_label(node.payload, self._labels)
                 return node.count
+            if role == SubRole:
+                return link_sub(node.payload) if isinstance(node.payload, LinkRow) else None
             if role == IconRole:
                 if node.layer == FOUND_LIBRARY:
                     return "search"
@@ -462,22 +510,23 @@ class _FoundRowDelegate(QStyledItemDelegate):
         return delegate.cut_text(index) if isinstance(delegate, CutTexts) else ""
 
 
-def _paint_highlight(p: QPainter, rect: QRectF, u: float, focused: bool) -> None:
-    """A row's highlight: the accent, stronger in the focused column."""
-    box = rect.adjusted(0.3 * u, 0.2 * u, -0.3 * u, -0.2 * u)
-    fill_round(p, box, qcolor(PALETTE.accent, FOCUS_FILL_ALPHA if focused else 0.1), 1.0 * u)
-    p.setRenderHint(QPainter.Antialiasing, True)
-    p.setPen(qcolor(PALETTE.accent, 0.7 if focused else 0.35))
-    p.setBrush(Qt.NoBrush)
-    p.drawRoundedRect(box.adjusted(0.5, 0.5, -0.5, -0.5), 1.0 * u, 1.0 * u)
-
-
 class _SimpleRowDelegate(CutTexts, QStyledItemDelegate):
     def _units(self, widget) -> Units:
         return ui_units(getattr(widget, "units_width", 100) or 100)
 
     def sizeHint(self, option, index) -> QSize:
-        return QSize(0, self._units(option.widget).px(3.6))
+        node = index.data(NodeRole)
+        two = isinstance(node, NavNode) and node.layer == LINK_LAYER  # its name, what it is
+        units = self._units(option.widget)
+        height = units.px(LINK_ROW_H_U if two else ROW_H_U)
+        sub, warn = (index.data(SubRole) or ("", False)) if two else ("", False)
+        if warn:  # why it failed, on its lines: the row grows by those after the first
+            viewport = getattr(option.widget, "viewport", None)
+            width = float(viewport().width()) if viewport is not None else 0.0
+            font = units.font(COUNT_FONT_U)
+            lines = _failed_lines(sub, font, max(0.0, width - 2.4 * units.u))
+            height += round(max(0, len(lines) - 1) * QFontMetricsF(font).height())
+        return QSize(0, height)
 
     def paint(self, p: QPainter, option, index) -> None:
         units = self._units(option.widget)
@@ -486,6 +535,9 @@ class _SimpleRowDelegate(CutTexts, QStyledItemDelegate):
         selected = bool(option.state & QStyle.State_Selected)
         focused = column_focused(option.widget)
         node = index.data(NodeRole)
+        if isinstance(node, NavNode) and node.layer == LINK_LAYER:
+            self._paint_link(p, option, index, units)
+            return
         p.save()
         if isinstance(node, NavNode) and node.layer == "header":
             # A provider's heading: small, quiet, with a rule; it is never highlighted.
@@ -521,7 +573,7 @@ class _SimpleRowDelegate(CutTexts, QStyledItemDelegate):
             )
         paint_hover(p, option, index, u)
         if selected:
-            _paint_highlight(p, rect, u, focused)
+            paint_highlight(p, rect, units, focused)
         x = rect.x() + 0.9 * u + 0.3 * u
         right = rect.right() - 0.9 * u - 0.3 * u
         title = str(index.data(Qt.DisplayRole) or "")
@@ -538,7 +590,7 @@ class _SimpleRowDelegate(CutTexts, QStyledItemDelegate):
             title = title.lstrip("★⟲ ")
         count = index.data(CountRole)
         if count is not None:
-            p.setFont(units.font(1.1))
+            p.setFont(units.font(COUNT_FONT_U))
             p.setPen(qcolor(PALETTE.text, PALETTE.text_muted_alpha))
             text = str(count)
             width = p.fontMetrics().horizontalAdvance(text)
@@ -548,7 +600,7 @@ class _SimpleRowDelegate(CutTexts, QStyledItemDelegate):
                 text,
             )
             right -= width + 0.8 * u
-        p.setFont(units.font(1.35))
+        p.setFont(units.font(TITLE_FONT_U))
         p.setPen(qcolor(PALETTE.text))
         shown = elided(p, title, right - x)
         self.note_cut(index, [(title, shown)])
@@ -557,6 +609,43 @@ class _SimpleRowDelegate(CutTexts, QStyledItemDelegate):
             Qt.AlignLeft | Qt.AlignVCenter,
             shown,
         )
+        p.restore()
+
+    def _paint_link(self, p: QPainter, option, index, units: Units) -> None:
+        """A link of Network streams: its name, then (smaller) what it is, grey, or why it
+        did not play last time in the warning colour (SubRole), on its lines (whole: the keys
+        and the phone have no tooltip; sizeHint grew the row for them)."""
+        u = units.u
+        rect = QRectF(option.rect)
+        p.save()
+        paint_hover(p, option, index, u)
+        if option.state & QStyle.State_Selected:
+            paint_highlight(p, rect, units, column_focused(option.widget))
+        left, width = rect.x() + 1.2 * u, max(0.0, rect.width() - 2.4 * u)
+        title_font, sub_font = units.font(TITLE_FONT_U), units.font(COUNT_FONT_U)
+        title_h = QFontMetricsF(title_font).height()
+        sub_h = QFontMetricsF(sub_font).height()
+        sub, warn = index.data(SubRole) or ("", False)
+        p.setFont(sub_font)
+        if warn:  # as many lines as its row was given room for (a list of one row height)
+            room = max(1, int((rect.height() - title_h) // sub_h))
+            subs = _failed_lines(sub, sub_font, width, min(LINK_SUB_LINES, room))
+        else:
+            subs = [elided(p, sub, width)] if sub else []
+        y = rect.y() + (rect.height() - title_h - sub_h * len(subs)) / 2
+        p.setFont(title_font)
+        p.setPen(qcolor(PALETTE.text))
+        title = str(index.data(Qt.DisplayRole) or "")
+        shown = elided(p, title, width)
+        p.drawText(QRectF(left, y, width, title_h), Qt.AlignLeft | Qt.AlignVCenter, shown)
+        p.setFont(sub_font)
+        p.setPen(qcolor(PALETTE.warn) if warn else qcolor(PALETTE.text, PALETTE.text_muted_alpha))
+        y += title_h
+        for line in subs:
+            p.drawText(QRectF(left, y, width, sub_h), Qt.AlignLeft | Qt.AlignVCenter, line)
+            y += sub_h
+        shown_sub = sub if " ".join(subs) == " ".join(sub.split()) else " ".join(subs)
+        self.note_cut(index, [(title, shown), (sub, shown_sub)])
         p.restore()
 
 
@@ -575,9 +664,9 @@ class _FoundGenreDelegate(_SimpleRowDelegate):
         p.save()
         paint_hover(p, option, index, u)
         if option.state & QStyle.State_Selected:
-            _paint_highlight(p, rect, u, column_focused(option.widget))
+            paint_highlight(p, rect, units, column_focused(option.widget))
         left, width = rect.x() + 1.2 * u, max(0.0, rect.width() - 2.4 * u)
-        title_font, label_font = units.font(1.35), units.font(1.1)
+        title_font, label_font = units.font(TITLE_FONT_U), units.font(COUNT_FONT_U)
         title_h = QFontMetricsF(title_font).height()
         label_h = QFontMetricsF(label_font).height()
         label = str(index.data(CountRole) or "")
@@ -693,7 +782,7 @@ class Drawer(Overlay):
     playRequested = Signal(object, object, object)
     contextRequested = Signal(object, QPoint)  # node, global position
     # An action row (SETTINGS_ROW, ADD_PROVIDER_ROW, OPEN_FILE_ROW) or a header button
-    # (SETTINGS_ROW, REFRESH_ACTION, SEARCH_ACTION, LIBRARY_ACTION).
+    # (SETTINGS_BUTTON, REFRESH_ACTION, SEARCH_ACTION, LIBRARY_ACTION).
     actionRequested = Signal(str)
     libraryRequested = Signal(str)  # "movies" or "series", for the Library
     # A channel the find found (stamped with its provider), and the genre it is first listed in.
@@ -729,6 +818,8 @@ class Drawer(Overlay):
         self._own: tuple[tuple, frozenset[tuple[str, str]]] = ((), frozenset())
         self._restore: _Place | None = None  # where the right column goes back to (_refresh)
         self._pending_key: str | tuple[str, str] | None = None
+        # open_drawer's focus key for the left column (focus_side "left"): its first fill.
+        self._pending_left: str | tuple[str, str] | None = None
         self._left_choice: NavNode | None = None  # the left highlight, which may lead the path
         self._preview_node: NavNode | None = None
         self._preview_timer = QTimer(self)
@@ -754,11 +845,14 @@ class Drawer(Overlay):
     def open_drawer(
         self, focus_key: str | tuple[str, str] | None = None, focus_side: str = "right"
     ) -> None:
-        """Open on the NavModel's path, focusing the right column (or the left one)."""
+        """Open on the NavModel's path, focusing the right column (or the left one). The
+        focused column's highlight goes to `focus_key`'s row when it lists it (on the left: the
+        list back from Settings, on its Settings row)."""
         self.focus_side = focus_side
         self._drop_find()
         self._left_choice = None  # the left highlight starts at the end of the path
         self._pending_key = focus_key
+        self._pending_left = focus_key if focus_side == "left" else None
         self._cancel_preview()
         self._second_click.disarm()  # open again: the next click is on the list
         self._columns["right"].parent = None  # force the highlight to be re-chosen
@@ -798,6 +892,24 @@ class Drawer(Overlay):
         col = self._columns[self.focus_side]
         return col.current if col.current in col.rows else None
 
+    def resume_point(self) -> tuple[str, str | tuple[str, str] | None]:
+        """Where the keys are, for open_drawer to come back to: the focused column ("left" or
+        "right") and its highlighted row's focus key (None: none). During a find, where they
+        were before it, as Esc leaves them: closing the list ends the find."""
+        side, node = self.focus_side, self.highlighted()
+        if self._before_find is not None:
+            place, side = self._before_find
+            if side == "right":
+                node = place.current
+            else:  # the find lists in the right column: the left one is as it was
+                left = self._columns["left"]
+                node = left.current if left.current in left.rows else None
+        if node is None:
+            return side, None
+        provider = provider_of(node.payload) if isinstance(node.payload, dict) else ""
+        key: str | tuple[str, str] = (provider, node.key) if provider else node.key
+        return side, key
+
     def message_for(self, side: str) -> str | None:
         return self._columns[side].message
 
@@ -805,7 +917,7 @@ class Drawer(Overlay):
         col = self._columns[self.focus_side]
         if not col.nodes:
             return
-        self._pending_key = None
+        self._pending_key = self._pending_left = None
         self._find_moved = self.finding()
         row = col.rows.get(col.current, -1 if delta > 0 else len(col.nodes))
         target = self._selectable_row(col, min(len(col.nodes) - 1, max(0, row + delta)), delta)
@@ -1076,7 +1188,8 @@ class Drawer(Overlay):
 
     def _schedule_preview(self, node: NavNode) -> None:
         path = self._nav.path
-        if node.layer == "source" or _leaves_drawer(node) or (path and node == path[-1]):
+        sources = ("source", LINKS_LAYER)
+        if node.layer in sources or _leaves_drawer(node) or (path and node == path[-1]):
             self._cancel_preview()  # these only highlight; Right/Enter opens or chooses them
             return
         self._preview_node = node
@@ -1154,8 +1267,11 @@ class Drawer(Overlay):
         """A right-click at `pos` (viewport coordinates) of a column's list."""
         col = self._columns[side]
         row = col.view.indexAt(pos).row()
-        if 0 <= row < len(col.nodes) and _has_context(col.nodes[row]):
-            self.contextRequested.emit(col.nodes[row], col.view.viewport().mapToGlobal(pos))
+        if not 0 <= row < len(col.nodes) or not _has_context(col.nodes[row]):
+            return
+        if self.finding() and _found_link(col.nodes[row]):
+            return  # a found link plays as it was kept (Enter, a click): no channel's menu
+        self.contextRequested.emit(col.nodes[row], col.view.viewport().mapToGlobal(pos))
 
     def _on_nav_changed(self) -> None:
         if self.isVisible():
@@ -1249,7 +1365,9 @@ class Drawer(Overlay):
             # (a find's rows are of two heights, as a live list with a label among its rows)
             labelled = live and not isinstance(nodes, NodeSeq)
             labelled = labelled and any(n.layer == "header" for n in nodes)
-            col.view.setUniformItemSizes(not labelled)
+            # (Network streams' links are of two lines: no row of another list's height)
+            links = parent is not None and parent.layer == LINKS_LAYER
+            col.view.setUniformItemSizes(not labelled and not links)
             col.view.setItemDelegate(col.channel_delegate if live else col.simple_delegate)
             col.model.set_nodes(nodes, live, numbers, tagged)
             if moved:
@@ -1291,6 +1409,12 @@ class Drawer(Overlay):
     def _choose_left(self, col: _Column, nodes: Sequence[NavNode]) -> None:
         path = self._nav.path
         end = path[-1] if path else None
+        if self._pending_left is not None and nodes:
+            wanted, self._pending_left = self._pending_left, None
+            # As if ↑/↓ had put the highlight there: Enter chooses it (the path stays).
+            match = next((n for n in nodes if _is_focus_key(n, wanted)), None)
+            if match is not None:
+                self._left_choice = match
         if self._left_choice is not None and self._left_choice not in col.rows:
             # Gone from the list: Enter must choose what is highlighted now, not that row.
             self._left_choice = None
@@ -1394,7 +1518,9 @@ class Drawer(Overlay):
         event.accept()
         button = self._header_button_at(event.position())
         if event.button() == Qt.LeftButton and button is not None:
-            if button in (SETTINGS_ROW, REFRESH_ACTION, SEARCH_ACTION, LIBRARY_ACTION):
+            if button == SETTINGS_ROW:  # (the ⚙'s name here: its hover, its tooltip)
+                self.actionRequested.emit(SETTINGS_BUTTON)
+            elif button in (REFRESH_ACTION, SEARCH_ACTION, LIBRARY_ACTION):
                 self.actionRequested.emit(button)
             elif button == FIND_ACTION:
                 shift = bool(event.modifiers() & Qt.ShiftModifier)
@@ -1612,6 +1738,9 @@ class Drawer(Overlay):
         if node is None or node.layer != "item" or not isinstance(node.payload, dict) or not live:
             self._drag_from = None  # not a channel's row: a plain press and move
             return None
+        if self.finding() and _found_link(node):
+            self._drag_from = None  # a found link is no channel for a tile
+            return None
         return node
 
     def _end_drag(self) -> None:
@@ -1636,8 +1765,7 @@ class Drawer(Overlay):
         self._laid_out_for = (host_w, host_h)
         units = ui_units(host_w)
         self._units = units
-        left_w = round(LEFT_U * units.u)
-        right_w = round(RIGHT_U * units.u) - left_w
+        left_w, right_w = column_widths(units)
         self.setGeometry(QRect(0, 0, left_w + right_w + units.px(FADE_U), host_h))
         side = units.px(PAD_SIDE_U)
         for col, x, width, top_u in (
@@ -1655,15 +1783,7 @@ class Drawer(Overlay):
         p = QPainter(self)
         units = self._units
         left, right = self._columns["left"], self._columns["right"]
-        p.fillRect(left.rect, qcolor(PALETTE.panel_raised, 0.95))
-        p.fillRect(right.rect, qcolor(PALETTE.panel))
-        fade = QRect(
-            right.rect.right() + 1, 0, self.width() - right.rect.right() - 1, self.height()
-        )
-        grad = QLinearGradient(fade.left(), 0, fade.right(), 0)
-        grad.setColorAt(0.0, qcolor(PALETTE.panel))
-        grad.setColorAt(1.0, qcolor(PALETTE.panel, 0.0))
-        p.fillRect(fade, grad)
+        paint_backdrop(p, self.rect(), units)
         self._paint_breadcrumb(p, left)
         self._paint_find(p, units)
         for col in (left, right):
@@ -1806,7 +1926,7 @@ class Drawer(Overlay):
             elif key == LIBRARY_ACTION:
                 draw_icon(p, "clapper", rect, tone)
             elif key == BACK_BUTTON:
-                _draw_back(p, rect, tone)
+                draw_back(p, rect, tone)
             else:
                 draw_refresh(p, rect, tone)
 
@@ -1838,7 +1958,7 @@ class Drawer(Overlay):
         right = (clear.left() if not clear.isEmpty() else box.right()) - 0.6 * u
         inner = QRectF(box.x() + 1.0 * u + size + 0.7 * u, box.y(), 0, box.height())
         inner.setRight(max(inner.left(), right))
-        p.setFont(units.font(1.35))
+        p.setFont(units.font(TITLE_FONT_U))
         if active:
             paint_edit(
                 p,
@@ -1868,7 +1988,7 @@ class Drawer(Overlay):
         u = units.u
         if col.message:
             error = col.message in _RETRY_TEXTS
-            p.setFont(units.font(1.35))
+            p.setFont(units.font(TITLE_FONT_U))
             p.setPen(qcolor(PALETTE.text, 0.75 if error else PALETTE.text_muted_alpha))
             view = col.view.geometry()
             p.drawText(
