@@ -522,6 +522,22 @@ class SettingsDrawerTests(unittest.TestCase):
         self.click(add.line.center())
         self.assertEqual(self.chosen, ["add"])
 
+    def test_the_help_of_a_row_with_an_icon_fits_under_its_title(self):
+        # A link's Play (▶) at 640×360: its help starts under its title, past the icon, and
+        # is wrapped for that room (it ran past the column's end: "Settings close").
+        self.use(*make(640, 360))
+        help_text = "Plays it now, and Settings closes."
+        play = m.Row("play", "Play", help_text, kind=m.ACTION, icon="play")
+        self.open_rows(play, m.Row("name", "Name", kind=m.TEXT))
+        self.drawer.grab()
+        box = self.drawer._box("right", 0)
+        un = ui_units(640)
+        room = box.line.right() - INSET_U * un.u - box.title.x()  # where _paint_help draws it
+        fm = QFontMetricsF(un.font(HELP_FONT_U))
+        self.assertTrue(whole(box.help, help_text), box.help)
+        for line in box.help:
+            self.assertLessEqual(fm.horizontalAdvance(line), room + 0.5, box.help)
+
     def test_a_small_window_elides_without_overlap(self):
         self.use(*make(640, 360))
         self.drawer.open_at(sections("Darwin"), PLAYBACK)

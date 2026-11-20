@@ -111,6 +111,8 @@ from ui.overlays.settings_layout import (  # its metrics are offered from here t
     FIELD_H_U,
     FIELD_PAD_U,
     HELP_FONT_U,
+    ICON_GAP_U,
+    ICON_U,
     INSET_U,
     LEFT,
     PASTE_FONT_U,
@@ -1072,7 +1074,10 @@ class SettingsDrawer(Overlay):
         help_text, restart = self._help_parts(row)
         if self._note_cut(un, area, item):
             help_text = row.note  # whole under it while focused (a check's answer)
-        return help_lines(help_text, restart, un, area.width() - 2 * INSET_U * un.u)
+        width = area.width() - 2 * INSET_U * un.u
+        if item.icon:  # it starts under the title, past the row's own icon (Play's ▶)
+            width -= (ICON_U + ICON_GAP_U) * un.u
+        return help_lines(help_text, restart, un, width)
 
     @staticmethod
     def _note_cut(un: Units, area: QRectF, item: Item) -> bool:
