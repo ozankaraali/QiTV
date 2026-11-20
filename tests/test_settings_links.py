@@ -112,6 +112,9 @@ class FakeController(QObject):
     def set_link_player(self, play):
         self.play_kept = play
 
+    def set_link_stepper(self, step):
+        self.step = step
+
     def play_link(self, item, section):
         self.played.append((dict(item), section))
 

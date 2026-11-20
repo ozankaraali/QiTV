@@ -18,6 +18,7 @@ from unittest import mock
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
+from PySide6.QtCore import Qt
 from timer_fixtures import pause, wait_until
 
 from services import network_streams as ns
@@ -30,6 +31,7 @@ from services.provider_ids import NETWORK_PROVIDER
 from tests import test_tv_controller as tvc
 from tests.test_tv_window import WindowCase
 from ui import live_controls
+from ui.keymap import Action
 from ui.network_player import NetworkPlayer
 
 URL = "https://cdn.example/live/harbour/index.m3u8?token=aaa"
@@ -391,6 +393,140 @@ class KeptTests(PlayerCase):
         aside = [p for p in self.path.parent.iterdir() if ".broken-" in p.name]
         self.assertEqual([p.read_text() for p in aside], ["{not json"])
         self.assertEqual(len(json.loads(self.path.read_text())["entries"]), 1)
+
+
+class LinkStepTests(PlayerCase):
+    """Channel up/down (and the media keys' next and previous) while a kept link plays: the
+    next or previous kept link of Network streams plays, through the network player, round
+    from the last to the first as channels do; a provider's channel zaps as ever."""
+
+    OTHER = "https://cdn.example/live/lighthouse/index.m3u8?token=aaa"
+    THIRD = "https://cdn.example/live/pier/index.m3u8?token=aaa"
+    ACCOUNT = "http://harbor.example:8080/live/demo/secret/7.ts"
+
+    def setUp(self):
+        super().setUp()
+        ticks = iter(range(1, 10_000))
+        self.player._now = lambda: NOW + next(ticks)  # each link opened after the one before
+        self.loaded()
+
+    def keep(self, *urls, kind=LIVE):
+        """Play each of `urls` (kept once its first picture shows), in that order."""
+        for url in urls:
+            self.link(url, kind)
+            self.plays_now()
+
+    def playing(self):
+        return self.controller.now_playing().item["id"]
+
+    def step(self, action):
+        """`action` (a channel key), what it plays opened and showing its first picture."""
+        self.opens(lambda: self.controller.handle(action))
+        self.plays_now()
+
+    def nothing_opens(self, action):
+        opened = len(self.starts()), len(self.session.plays)
+        self.controller.handle(action)
+        pause(50)
+        self.assertEqual((len(self.starts()), len(self.session.plays)), opened)
+
+    def test_channel_up_and_down_step_through_the_kept_links_round(self):
+        self.keep(self.OTHER, URL)  # URL opened last: first in Network streams
+        order = [stream_id(URL), stream_id(self.OTHER)]
+        self.assertEqual([e.id for e in self.store.entries()], order)
+        self.assertEqual(self.playing(), stream_id(URL))
+        with mock.patch.object(self.player, "play_kept", wraps=self.player.play_kept) as kept:
+            self.step(Action.CH_NEXT)
+            kept.assert_called_once_with(stream_id(self.OTHER))  # the network player plays it
+            self.assertEqual(self.playing(), stream_id(self.OTHER))
+            self.assertEqual(self.starts()[-1][0], self.OTHER)
+            self.step(Action.CH_NEXT)  # past the last: the first again
+            self.assertEqual(self.playing(), stream_id(URL))
+            self.step(Action.CH_PREV)  # before the first: the last
+            self.assertEqual(self.playing(), stream_id(self.OTHER))
+            self.step(Action.MEDIA_NEXT)  # the media keys' next too
+            self.assertEqual(self.playing(), stream_id(URL))
+            self.step(Action.MEDIA_PREV)
+            self.assertEqual(self.playing(), stream_id(self.OTHER))
+        self.assertEqual(self.catalog.links, [])  # no provider was asked for a link
+
+    def test_the_steps_keep_the_order_they_began_in(self):
+        # A link that plays moves to the top of Network streams: the steps go on in the order
+        # they began with, never back and forth between the last two.
+        self.keep(self.THIRD, self.OTHER, URL)
+        self.assertEqual(
+            [e.id for e in self.store.entries()],
+            [stream_id(URL), stream_id(self.OTHER), stream_id(self.THIRD)],
+        )
+        played = []
+        for _ in range(4):
+            self.step(Action.CH_NEXT)
+            played.append(self.playing())
+        self.assertEqual(
+            played,
+            [stream_id(self.OTHER), stream_id(self.THIRD), stream_id(URL), stream_id(self.OTHER)],
+        )
+
+    def test_a_link_that_fails_is_stepped_past(self):
+        # A kept link whose access ran out fails as it opens: the next step goes on to the link
+        # after it, never back to it, nor to a provider's channel.
+        self.keep(self.THIRD, self.OTHER, URL)  # Network streams: URL, OTHER, THIRD
+        self.opens(lambda: self.controller.handle(Action.CH_NEXT))
+        self.assertEqual(self.starts()[-1][0], self.OTHER)
+        self.live.failure = lambda: ("http", 403)
+        self.live.failed.emit(STREAM_REFUSED)
+        self.assertEqual(self.store.get(stream_id(self.OTHER)).failed, "403: the link was refused")
+        self.live.released.emit()
+        self.opens(lambda: self.controller.handle(Action.CH_NEXT))
+        self.assertEqual(self.starts()[-1][0], self.THIRD)
+        self.plays_now()
+        self.assertEqual(self.playing(), stream_id(self.THIRD))
+        self.assertEqual(self.catalog.links, [])  # no provider's channel was asked for
+
+    def test_one_link_alone_steps_nowhere(self):
+        self.keep(URL)
+        for action in (Action.CH_NEXT, Action.CH_PREV, Action.MEDIA_NEXT):
+            with self.subTest(action=action):
+                self.nothing_opens(action)
+                self.assertEqual(self.playing(), stream_id(URL))
+        self.assertEqual(self.catalog.links, [])  # nor a provider's channel asked for
+
+    def test_a_link_plays_as_kept_an_account_s_and_a_film(self):
+        self.keep(FILM_URL, kind=FILM)
+        self.keep(self.ACCOUNT, URL)  # URL first, then the account's link, then the film
+        self.step(Action.CH_NEXT)
+        self.assertEqual(self.playing(), stream_id(self.ACCOUNT))
+        self.assertEqual(self.controller.now_playing().item["_provider"], "Harbor IPTV")
+        self.assertTrue(wait_until(lambda: self.budget.holders("Harbor IPTV") == ["main"]))
+        self.step(Action.CH_NEXT)
+        self.assertEqual(self.session.plays[-1][0], FILM_URL)  # as a film
+        self.assertFalse(self.controller.now_playing().live)
+        # A film plays: its channel keys are the volume's, as any film's.
+        self.nothing_opens(Action.CH_NEXT)
+        self.assertEqual(self.playing(), stream_id(FILM_URL))
+
+    def test_the_wheel_over_the_channel_column_moves_in_the_column(self):
+        # The fast-zap column lists the zap's channels: its wheel steps among them, never the
+        # kept links, while a link plays.
+        self.keep(self.OTHER, URL)
+        with (
+            mock.patch.object(self.player, "play_kept") as kept,
+            mock.patch.object(self.controller.zap, "step") as zapped,
+        ):
+            self.controller._on_column_wheel(1, Qt.KeyboardModifier.NoModifier)
+        zapped.assert_called_once_with(1)
+        kept.assert_not_called()
+
+    def test_a_providers_channel_zaps_as_ever(self):
+        self.keep(self.OTHER, URL)
+        with mock.patch.object(self.player, "play_kept", wraps=self.player.play_kept) as kept:
+            self.opens(lambda: self.play(0))
+            self.assertEqual(self.starts()[-1][0], "http://stream/1")
+            self.opens(
+                lambda: (self.controller.handle(Action.CH_NEXT), self.ready("http://stream/2"))
+            )
+            self.assertEqual(self.starts()[-1][0], "http://stream/2")  # the group's next
+        kept.assert_not_called()
 
 
 class FailureTests(PlayerCase):

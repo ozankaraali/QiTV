@@ -10,7 +10,9 @@ only once the previous one is released. The time-shift side (pipeline tunes and 
 slot, the transport's time-shift controls, LiveSession's reports, the STB fresh-link retry) is
 LiveControls' (ui/live_controls.py).
 
-In external-player mode a zap step launches the player only once the zapping settles.
+In external-player mode a zap step launches the player only once the zapping settles. While a
+link kept in Network streams plays, channel up/down steps to the next or previous kept link
+(the network player's `step`), round as channels go.
 
 Movies and episodes play through `play_vod` (the drawer and the Library), resuming where they
 stopped; Autoplay (ui/autoplay.py) offers what follows one that ended. A file opened in QiTV
@@ -385,6 +387,8 @@ class TVController(QObject):
         self._link_heard: Optional[Target] = None
         # Its link kept under an id plays, by the network player (`set_link_player`).
         self._play_kept: Callable[[str], bool] = lambda key: False
+        # Channel up/down while a kept link plays: its neighbour there (`set_link_stepper`).
+        self._step_link: Callable[[dict, int], bool] = lambda item, delta: False
         # A link plays while no provider is configured: held as a file opened in QiTV is (the
         # welcome card waits) until it stops, ends or fails (_hold_for_link); and whether a
         # file's hold (one playing, or looked at) is under it, the file's to end.
@@ -1213,6 +1217,13 @@ class TVController(QObject):
         player's: it knows its kind and whose stream it is); False when none is kept so."""
         self._play_kept = play
 
+    def set_link_stepper(self, step: Callable[[dict, int], bool]) -> None:
+        """`step(item, delta)`: channel up/down while `item` plays, when it is a link kept in
+        Network streams: the next (+1) or previous (−1) kept link plays (the network player's:
+        as kept, whose stream it is); False when `item` is no kept link (the channels' zap
+        steps)."""
+        self._step_link = step
+
     def stopped_at(self, item: dict) -> Optional[int]:
         """Where the film `item` (a link of Network streams) stopped, in ms, as it resumes
         here; None: from its start."""
@@ -1716,7 +1727,7 @@ class TVController(QObject):
             if self._on_demand():
                 self._change_volume(-VOLUME_STEP * delta)  # ↑ is louder
             else:
-                self.zap.step(delta)
+                self._zap(delta)
         elif action in (Action.MEDIA_NEXT, Action.MEDIA_PREV):
             delta = 1 if action is Action.MEDIA_NEXT else -1
             if drawer.isVisible():
@@ -1728,7 +1739,7 @@ class TVController(QObject):
             elif self._on_demand():
                 self._seek(delta * SEEK_STEP_MS)
             else:
-                self.zap.step(delta)
+                self._zap(delta)
                 self._show_transport()
         elif action is Action.DIGIT:
             if not self._on_demand():
@@ -1990,11 +2001,26 @@ class TVController(QObject):
         if as_int(modifiers) & _VOLUME_MODIFIERS:
             self._change_volume(-VOLUME_STEP * steps)
         else:
-            self._zap_steps(steps)  # zap.step re-highlights, which keeps the column open
+            # The column's channels (zap.step re-highlights, which keeps the column open),
+            # never the kept links' steps.
+            self._zap_steps(steps, links=False)
 
-    def _zap_steps(self, steps: int) -> None:
+    def _zap_steps(self, steps: int, links: bool = True) -> None:
         for _ in range(abs(steps)):
-            self.zap.step(1 if steps > 0 else -1)
+            delta = 1 if steps > 0 else -1
+            if links:
+                self._zap(delta)
+            else:
+                self.zap.step(delta)
+
+    def _zap(self, delta: int) -> None:
+        """Channel up/down over the picture (the keys, the media keys', the phone's, the
+        wheel's): while a link kept in Network streams plays, the next or previous kept link
+        (the network player's); else the next or previous channel of the zap's list."""
+        channel = self._channel
+        if channel is not None and self._step_link(channel, delta):
+            return
+        self.zap.step(delta)
 
     # ---- tuning and playing -------------------------------------------------------------------
 

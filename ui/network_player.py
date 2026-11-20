@@ -13,8 +13,10 @@ The controller asks `url_of(item)` for a link's address as it plays now (a link 
 too): the kept entry's, whose address may have been replaced since, else the item's own;
 None for an item its provider makes the link of. A kept link chosen in the channel list's
 Network streams, or found by its find, plays by its id (`play_kept`): its address and kind as
-kept. `rows()` are those links as the list's rows (a film's with where it stopped), and
-`find_items()` as the find's channels, plain dicts without their addresses.
+kept. Channel up/down while a kept link plays steps to the next or previous kept link (`step`),
+in Network streams' order as the steps began, round from the last to the first. `rows()` are
+those links as the list's rows (a film's with where it stopped), and `find_items()` as the
+find's channels, plain dicts without their addresses.
 
 A link that showed its first picture is kept (`keep`, `opened`); one that did not play, or
 went for good, is kept with why (`failed`, in plain words). Its kind changes only as this
@@ -127,8 +129,13 @@ class NetworkPlayer(QObject):
         self._set_aside = False  # the file could not be read: moved aside before the write
         self._handed: dict[str, str] = {}  # each link's kind as this player last played it
         self._removed: set[str] = set()  # links removed: not kept again but by Open Link
+        # Channel up/down's order of the kept links, as the steps began, and the link the last
+        # step played (`step`).
+        self._steps: list[str] = []
+        self._stepped = ""
         controller.set_links(self.url_of)
         controller.set_link_player(self.play_kept)
+        controller.set_link_stepper(self.step)
         controller.linkPlayed.connect(self._on_played)
         controller.linkFailed.connect(self._on_failed)
 
@@ -229,6 +236,25 @@ class NetworkPlayer(QObject):
         if entry is None:
             return False
         self._hand_over(entry.id, entry.name, entry.url, entry.kind)
+        return True
+
+    def step(self, item: dict, delta: int) -> bool:
+        """Channel up (+1) or down (−1) while `item` plays: when it is a kept link, the next
+        or previous kept link plays, as `play_kept` plays it (a film as a film, an account's
+        link as its stream), round from the last to the first as channels go; with it alone,
+        nothing plays. False for anything else (a provider's channel: the channels' zap). The
+        order is Network streams' as the steps began: a link that plays moves to its top, never
+        under the viewer's steps."""
+        key = item.get("id") if isinstance(item, dict) else None
+        if not isinstance(key, str) or self.store.get(key) is None:
+            return False
+        kept = [entry.id for entry in self.store.entries()]
+        if key != self._stepped or set(self._steps) != set(kept):
+            self._steps = kept  # a new run of steps, or the links changed meanwhile
+        if len(self._steps) > 1:
+            at = self._steps.index(key)
+            self._stepped = self._steps[(at + (1 if delta > 0 else -1)) % len(self._steps)]
+            self.play_kept(self._stepped)
         return True
 
     def _hand_over(self, key: str, name: str, url: str, kind: str) -> None:
