@@ -224,7 +224,13 @@ class PanelTests(PictureCase):
         self.controls.apply_deinterlacing()
         self.assertEqual((self.player.deinterlacing, self.small.deinterlacing), ("off", "off"))
         self.assertEqual(self.toasts, [])
+        asked = []
+        for player in (self.player, self.small):
+            player.set_deinterlace = lambda choice, _p=player: asked.append(choice)
         self.controls.apply_deinterlacing()  # nothing new: nothing asked of the players
+        self.assertEqual(asked, [])
+        for player in (self.player, self.small):
+            del player.set_deinterlace
         self.config.deinterlace = picture.AUTO  # libVLC 3 keeps off on a player till a restart
         self.controls.apply_deinterlacing()
         self.assertEqual(self.toasts, ["Deinterlacing is back on Auto when QiTV starts again"])

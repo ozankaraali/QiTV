@@ -17,16 +17,20 @@ so it shows no bars: the picture in picture's, in the window and floating (`box_
 large as the 16:9 box was).
 
 Deinterlacing (`DEINTERLACING`, the config's `deinterlace`): Auto is libVLC's own: pictures the
-decoder marks interlaced are deinterlaced (VLC's `deinterlace=-1`, its "auto" setting), with
-the yadif method (`--deinterlace-mode=yadif` in `services.playback.default_args`, so every
-player has it): it keeps a still picture, or a progressive one carried as interlaced, at
-full detail (measured near-perfect) and costs about the same as VLC's default, X. It is never
-applied to a progressive picture; Off deinterlaces none. There is no On: it deinterlaced every
-picture, progressive ones too, for no gain and three times the CPU. libVLC 3 can set only on or
-off (`libvlc_video_set_deinterlace` with a method or NULL; it ignores "auto"), and a player set
-either way keeps it: its video outputs inherit the player's setting, which a media option
-(":deinterlace=-1") does not reach. So a player left for Off comes back to Auto only when QiTV
-starts again. Measured with 3.0.20: Off applies at once, without a reopen; with hardware
+decoder marks interlaced are deinterlaced (VLC's `deinterlace=-1`, its "auto" setting), with the
+yadif method (`--deinterlace-mode=yadif` in `services.playback.default_args`, so every player has
+it, where VLC deinterlaces in software): it keeps a still picture, or a progressive one carried as
+interlaced, at full detail (measured near-perfect) and costs about the same as VLC's default, X.
+Where VLC deinterlaces on the graphics chip (Windows and Linux with hardware decoding) the option
+is not given: D3D11, DXVA2 and VA-API have their own mode lists, in which "yadif" falls back to
+blend, so VLC's default (its adaptive "x", done by the chip) stays. On the Mac the pictures of a
+hardware-decoded interlaced stream go through the CPU filter anyway (measured), so yadif applies
+there always. It is never applied to a progressive picture; Off deinterlaces none. There is no On:
+it deinterlaced every picture, progressive ones too, for no gain and three times the CPU. libVLC 3
+can set only on or off (`libvlc_video_set_deinterlace` with a method or NULL; it ignores "auto"),
+and a player set either way keeps it: its video outputs inherit the player's setting, which a
+media option (":deinterlace=-1") does not reach. So a player left for Off comes back to Auto only
+when QiTV starts again. Measured with 3.0.20: Off applies at once, without a reopen; with hardware
 decoding (VideoToolbox) VLC has the graphics chip hand an interlaced stream's pictures back as
 I420 and deinterlaces them on the CPU (its cvpx converter in the filter chain).
 
@@ -171,7 +175,7 @@ def aspect_name(aspect: str) -> str:
 
 
 def deinterlace_name(choice: str) -> str:
-    """The Picture panel's name for a deinterlacing `choice`, in the active language."""
+    """Settings' name for a deinterlacing `choice`, in the active language."""
     if choice == OFF:
         return tr("Off", ctx="deinterlacing")  # i18n: deinterlacing: none
     # i18n: deinterlacing: VLC's own, for the pictures marked interlaced

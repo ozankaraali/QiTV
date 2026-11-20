@@ -1605,11 +1605,21 @@ class DefaultArgsTests(unittest.TestCase):
                 ],
             )
 
+    def test_auto_deinterlaces_with_yadif_only_where_vlc_deinterlaces_in_software(self):
+        # 2.12: D3D11, DXVA2 and VA-API have their own mode lists, where "yadif" is blend.
+        yadif = "--deinterlace-mode=yadif"
+        with _on("Darwin"):  # VideoToolbox's pictures reach the CPU filter anyway
+            self.assertIn(yadif, default_args(hardware_decoding=True))
+        with _on("Windows"):
+            self.assertNotIn(yadif, default_args(hardware_decoding=True))
+        with _on("Linux"):
+            self.assertIn(yadif, default_args(hardware_decoding=False))
+            self.assertNotIn(yadif, default_args(hardware_decoding=True))
+
     def test_subtitles_are_drawn_as_the_ai_captions_are(self):
         # 2.9: the owner's: VLC's subtitles (a stream's, a file's) in the captions' look.
         from ui.theme import PALETTE
 
-        self.assertIn("--deinterlace-mode=yadif", default_args())  # Auto's method (2.11.3)
         args = default_args(subtitle_font="Segoe UI")
         self.assertIn("--freetype-font=Segoe UI", args)
         self.assertIn("--freetype-outline-thickness=0", args)
@@ -1631,7 +1641,6 @@ class DefaultArgsTests(unittest.TestCase):
             [
                 "--no-video-title-show",
                 "--no-volume-save",
-                "--deinterlace-mode=yadif",
                 *subtitle_args(),
                 "--aout=directsound",
                 "--quiet",

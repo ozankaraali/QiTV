@@ -2630,10 +2630,14 @@ class TVWindow(QMainWindow):
             if tab == "remote":
                 dialog.options_tab.setCurrentWidget(dialog.remote_tab)
             dialog.exec()
-            self.menus.rebuild_providers()
-            self.screens.tmdb.settings_changed()  # 2.8: TMDB turned off or on
-            self.controller.apply_deinterlacing()  # 2.11.3: its Settings choice
-            self._arm_desktop_pip()  # the covered window's setting turned on or off
+            self._settings_closed()
+
+    def _settings_closed(self) -> None:
+        """What Settings' saved choices change in the window, whichever way it was opened."""
+        self.menus.rebuild_providers()
+        self.screens.tmdb.settings_changed()  # 2.8: TMDB turned off or on
+        self.controller.apply_deinterlacing()  # 2.12: its Settings choice, for every player
+        self._arm_desktop_pip()  # the covered window's setting turned on or off
 
     def open_phone_remote(self) -> None:
         """The menu's Phone Remote…: turns the remote on if it is off, then the pairing QR."""
@@ -2658,9 +2662,7 @@ class TVWindow(QMainWindow):
         if link is not None:
             dialog.fill_from_link(link)
         dialog.exec()
-        self.menus.rebuild_providers()
-        self.screens.tmdb.settings_changed()  # 2.8: TMDB turned off or on
-        self._arm_desktop_pip()  # the covered window's setting turned on or off
+        self._settings_closed()
 
     def add_dropped_providers(self, files: list[str], links: list[ProviderLink]) -> None:
         """Playlist files and provider links dropped on the window (2.2) become providers, as

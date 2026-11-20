@@ -169,7 +169,7 @@ class ConfigManager:
     CORNER_PLAYER_CORNER_CHOICES = ("top-left", "top-right", "bottom-left", "bottom-right")
     DEFAULT_OPTION_PIP_VOLUME = 30  # the small picture's own level once it is made audible
     DEFAULT_OPTION_VOLUME = 100  # the large picture's level: libVLC's default
-    DEFAULT_OPTION_DEINTERLACE = "auto"  # 2.3: libVLC's own, or "off" (the Picture panel)
+    DEFAULT_OPTION_DEINTERLACE = "auto"  # 2.3: libVLC's own, or "off" (Settings)
     # 2.11.2 and older also stored "on" (every picture deinterlaced): it reads as "auto" now.
     DEINTERLACE_CHOICES = ("auto", "off")
     AI_CAPTIONS_MODELS = ("auto", "small", "large")  # 2.9: AI captions' speech model tier
@@ -349,7 +349,7 @@ class ConfigManager:
             self.config["latency_defaults_version"] = ConfigManager.LATENCY_DEFAULTS_VERSION
             need_update = True
 
-        # 2.11.3: deinterlacing is Auto or Off (On is gone: it deinterlaced progressive pictures
+        # 2.12: deinterlacing is Auto or Off (On is gone: it deinterlaced progressive pictures
         # too, for three times the CPU). Everyone is moved to Auto once, whatever was saved, and
         # an Off chosen afterwards stays. Older 2.x builds ignore the key and read "deinterlace"
         # as one of their choices.
@@ -531,7 +531,7 @@ class ConfigManager:
     # 2.8.5, optional (older builds ignore it): the window stays above other apps' windows
     # (View → Keep on Top).
     keep_on_top = _config_property("keep_on_top", False, coerce=lambda value: value is True)
-    # 2.3, optional (older builds ignore it): the Picture panel's deinterlacing, every player's.
+    # 2.3, optional (older builds ignore it): the deinterlacing (Settings), every player's.
     deinterlace = _config_property(
         "deinterlace",
         DEFAULT_OPTION_DEINTERLACE,

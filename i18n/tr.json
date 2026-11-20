@@ -83,7 +83,7 @@
   "Auto (best)": "Otomatik (en iyi)",
   "Auto (recommended)": "Otomatik (önerilen)",
   "Auto adjusts each channel: it starts at Normal and plays further behind on channels that run dry, coming back over time.\nLow starts live channels sooner; Stable buffers more for unreliable streams.": "Otomatik her kanalı ayrı ayarlar: Normal ile başlar, arabelleği tükenen kanallarda daha geriden oynatır ve zamanla yeniden yaklaşır.\nDüşük canlı kanalları daha çabuk başlatır; Kararlı, güvenilmez yayınlar için daha çok arabelleğe alır.",
-  "Auto deinterlaces only the pictures marked interlaced and costs nothing on channels that are not. Off never deinterlaces; back to Auto takes effect when QiTV starts again.": "Otomatik yalnızca geçmeli olarak işaretlenmiş görüntüleri geçmeli taramadan arındırır ve geçmeli olmayan kanallarda hiçbir maliyeti yoktur. Kapalı hiç arındırmaz; Otomatik'e dönüş QiTV yeniden başlayınca geçerli olur.",
+  "Auto deinterlaces only the pictures marked interlaced and costs nothing on channels that are not. Off never deinterlaces; back to Auto takes effect when QiTV starts again.": "Otomatik yalnızca geçmeli olarak işaretlenmiş görüntülerde geçmeli taramayı giderir; geçmeli olmayan kanallarda ek yük getirmez. Kapalı hiç gidermez; Otomatik'e dönüş QiTV yeniden başlayınca geçerli olur.",
   "Auto-Play Settings": "Otomatik oynatma ayarları",
   "Auto-play next episode (10s countdown)": "Sonraki bölümü otomatik oynat (10 sn geri sayım)",
   "Automatic": "Otomatik",

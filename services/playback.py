@@ -210,6 +210,15 @@ def _matching_track(
     return None
 
 
+def deinterlace_args(hardware: bool) -> list[str]:
+    """Auto's deinterlace method, where VLC deinterlaces in software: yadif (services.picture).
+    Elsewhere the graphics chip's own deinterlacer keeps VLC's default: Windows and Linux with
+    `hardware` decoding."""
+    if hardware and platform.system() != "Darwin":
+        return []
+    return ["--deinterlace-mode=yadif"]
+
+
 def decoder_args(hardware: bool) -> list[str]:
     """VLC's video decoder: VLC's own choice with `hardware` (Settings; the default again
     since 2.1, when VLC takes software where the graphics chip can't), else software.
@@ -285,8 +294,7 @@ def default_args(hardware_decoding: bool = False, subtitle_font: str = "") -> li
     args = [
         "--no-video-title-show",
         "--no-volume-save",
-        # Auto's deinterlacing (services.picture): yadif, on the pictures marked interlaced.
-        "--deinterlace-mode=yadif",
+        *deinterlace_args(hardware_decoding),
         *decoder_args(hardware_decoding),
         *subtitle_args(subtitle_font),
     ]
