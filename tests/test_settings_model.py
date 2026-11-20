@@ -1,6 +1,11 @@
+import json
+from pathlib import Path
 import unittest
 
+from scripts import i18n_extract as extract
 from services import settings_model as m
+
+ROOT = Path(__file__).resolve().parents[1]
 
 
 def _row(key, system="Darwin"):
@@ -39,6 +44,11 @@ class SettingsModelTests(unittest.TestCase):
         self.assertEqual(m.step(row, "stable", 1), "auto")
         self.assertEqual(m.step(row, "auto", -1), "stable")
 
+    def test_a_step_of_nothing_leaves_the_value_as_it_is(self):
+        row = _row("live_latency")
+        self.assertEqual(m.step(row, "normal", 0), "normal")
+        self.assertEqual(m.step(row, "turbo", 0), "turbo")  # even one the row does not know
+
     def test_an_unknown_value_steps_from_the_default(self):
         row = _row("live_latency")
         self.assertEqual(m.choice_of(row, "turbo").value, "auto")
@@ -67,6 +77,30 @@ class SettingsModelTests(unittest.TestCase):
         for row in _all_rows():
             self.assertTrue(row.help, row.key)
             self.assertLessEqual(len(row.help), 90, row.key)
+
+    def test_a_restart_rows_help_leaves_the_restart_to_its_note(self):
+        # The note ("Applies when QiTV starts again.") follows the help of such a row.
+        restart = [row for row in _all_rows() if row.restart]
+        self.assertTrue(restart)
+        for row in restart:
+            self.assertNotIn("restart", row.help.lower(), row.key)
+
+    def test_every_choice_is_a_catalog_text(self):
+        # A choice is looked up with its context (a setting's On and Off have their own
+        # entries): the context given to N_ and the Choice's must be the same.
+        template = json.loads((ROOT / "i18n" / "template.json").read_text(encoding="utf-8"))
+        for row in _all_rows():
+            for choice in row.choices:
+                key = f"{choice.ctx}|{choice.text}" if choice.ctx else choice.text
+                self.assertIn(key, template, row.key)
+        self.assertEqual({choice.ctx for choice in m.ON_OFF}, {"setting value"})
+
+    def test_each_section_title_tells_the_translators_what_it_is(self):
+        entries, problems = extract.collect([ROOT / "services" / "settings_model.py"], ROOT)
+        self.assertEqual(problems, [])
+        for section in m.sections("Linux"):
+            comments = entries[section.text].comments
+            self.assertIn("a settings section's title", comments, section.key)
 
     def test_playback_row_order(self):
         keys = [r.key for r in next(s for s in m.sections("Darwin") if s.key == m.PLAYBACK).rows]

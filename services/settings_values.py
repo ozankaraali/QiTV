@@ -39,12 +39,13 @@ class SettingsValues:
         return getattr(self._config, key)
 
     def set(self, key: str, value: Any) -> None:
-        """Writes the value, saves without waiting for the disk, then runs the row's hook."""
+        """Writes the value, saves without waiting for the disk, then runs the row's hook;
+        KeyError for a key the config has no settable property for."""
         if key == PLAY_IN:
             self._config.play_in_vlc = value == "vlc"
             self._config.play_in_mpv = value == "mpv"
         else:
-            self._check(key)
+            self._check(key, writing=True)
             setattr(self._config, key, value)
         try:
             self._config.save_config()
@@ -56,7 +57,9 @@ class SettingsValues:
         if hook is not None:
             hook()
 
-    def _check(self, key: str) -> None:
-        """KeyError unless `key` is a property of the config (a typo must not make a key)."""
-        if not isinstance(getattr(type(self._config), key, None), property):
+    def _check(self, key: str, *, writing: bool = False) -> None:
+        """KeyError unless `key` is a property of the config (a typo must not make a key), one
+        with a setter when `writing` (a value worked out from others is no row's)."""
+        prop = getattr(type(self._config), key, None)
+        if not isinstance(prop, property) or (writing and prop.fset is None):
             raise KeyError(key)

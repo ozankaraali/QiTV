@@ -8,7 +8,16 @@ from unittest.mock import patch
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 from services.config_manager import ConfigManager
+from services.settings_model import sections
 from services.settings_values import SettingsValues
+
+
+def _steppers(rows):
+    for row in rows:
+        if row.choices:
+            yield row
+        if row.section is not None:
+            yield from _steppers(row.section.rows)
 
 
 class SettingsValuesTests(unittest.TestCase):
@@ -71,6 +80,30 @@ class SettingsValuesTests(unittest.TestCase):
             values.set("mouse_wheel_action", "volume" if step % 2 == 0 else "channel")
         self.config.save_config(wait=True)
         self.assertEqual(ConfigManager().mouse_wheel_action, "channel")
+
+    def test_a_property_without_a_setter_is_no_row_to_set(self):
+        # epg_expiration is worked out from two others: never written as a key of its own.
+        values = SettingsValues(self.config, {"epg_expiration": lambda: self.fail("its hook")})
+        before = dict(self.config.config)
+        with self.assertRaises(KeyError):
+            values.set("epg_expiration", 60)
+        self.assertEqual(self.config.config, before)
+        self.assertEqual(values.get("epg_expiration"), self.config.epg_expiration)
+
+    def test_every_row_starts_at_the_configs_default_and_keeps_each_choice(self):
+        # The rows' defaults and choices are the config's own: a fresh config reads as each
+        # row's default (shown unlit), and each choice written reads back as itself (none is
+        # changed by the property's coerce).
+        values = SettingsValues(self.config)
+        rows = [row for s in sections("Darwin") for row in _steppers(s.rows)]
+        self.assertIn("covered_pip", [row.key for row in rows])  # the PiP rows too, on Linux
+        for row in rows:
+            with self.subTest(row.key):
+                self.assertEqual(values.get(row.key), row.default)
+                for choice in row.choices:
+                    values.set(row.key, choice.value)
+                    self.assertEqual(values.get(row.key), choice.value)
+                    self.assertEqual(type(values.get(row.key)), type(choice.value))
 
     def test_an_unknown_key_is_an_error(self):
         values = SettingsValues(self.config)

@@ -8,6 +8,8 @@ os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 from PySide6.QtWidgets import QApplication, QWidget
 from timer_fixtures import elapse
 
+from services import i18n
+from services.i18n import translate
 from services.settings_model import GUIDE, PLAYBACK, sections
 from ui.keymap import Action
 from ui.overlays.settings_drawer import SettingsDrawer
@@ -82,6 +84,45 @@ class SettingsControllerTests(unittest.TestCase):
         self.assertEqual(self.drawer.focused_row().key, "live_latency")
         self.assertTrue(self.controller.handle(Action.NAV_RIGHT))
         self.assertEqual(self.values.sets, [("live_latency", "low")])
+
+    def focus_on(self, key):
+        """The keys on Playback's row `key` (a step through the rows, never past their end)."""
+        self.controller.open(PLAYBACK)
+        self.controller.handle(Action.NAV_RIGHT)
+        for _ in range(len(self.drawer._right_rows())):
+            if self.drawer.focused_row().key == key:
+                return
+            self.controller.handle(Action.NAV_DOWN)
+        self.fail(f"no row {key}")
+
+    def test_a_step_in_a_layer_writes_its_row(self):
+        self.focus_on("autoplay")
+        self.controller.handle(Action.NAV_ACTIVATE)  # its layer
+        self.assertEqual(self.drawer.path(), (PLAYBACK, "autoplay"))
+        self.controller.handle(Action.NAV_DOWN)
+        self.assertEqual(self.drawer.focused_row().key, "auto_play_movies")
+        self.controller.handle(Action.NAV_RIGHT)
+        self.assertEqual(self.values.sets, [("auto_play_movies", False)])
+        self.assertEqual(self.controller.value_text(self.drawer.focused_row()), "Off")
+
+    def test_a_settings_on_and_off_are_its_own_words(self):
+        # The plain "Off" is also the Subtitles panel's row, the relay's state and the phone's
+        # Subtitles row (plural in Spanish and French): a setting's value has its own entry.
+        self.focus_on("hardware_decoding")
+        row = self.drawer.focused_row()
+        for code, on, off, plain in (
+            ("es", "Activado", "Desactivado", "Desactivados"),
+            ("fr", "Activé", "Désactivé", "Désactivés"),
+            ("tr", "Açık", "Kapalı", "Kapalı"),
+        ):
+            with self.subTest(code):
+                self.assertEqual(i18n.set_language(code), code)
+                self.addCleanup(i18n.set_language, "en")
+                self.values.values["hardware_decoding"] = True
+                self.assertEqual(self.controller.value_text(row), on)
+                self.values.values["hardware_decoding"] = False
+                self.assertEqual(self.controller.value_text(row), off)
+                self.assertEqual(translate("Off"), plain)
 
     def test_legacy_closes_then_opens_the_old_tab(self):
         self.controller.open(GUIDE)

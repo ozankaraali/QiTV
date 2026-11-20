@@ -610,7 +610,7 @@ class SettingsDrawer(Overlay):
         step = max(float(un.px(STEP_U)), fm.height())  # the font stops at a floor, u does not
         gap = float(un.px(STEP_GAP_U))
         value = fm.horizontalAdvance(self._value_text(row))
-        widest = max([value] + [fm.horizontalAdvance(translate(c.text)) for c in row.choices])
+        widest = max([value] + [fm.horizontalAdvance(c.shown()) for c in row.choices])
         title_w = math.ceil(
             QFontMetricsF(un.font(TITLE_FONT_U)).horizontalAdvance(translate(row.text))
         )

@@ -11,7 +11,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any, Optional
 
-from services.i18n import N_
+from services.i18n import N_, translate
 
 PROVIDERS = "providers"
 GENERAL = "general"
@@ -53,10 +53,17 @@ ICONS: dict[str, str] = {
 
 @dataclass(frozen=True)
 class Choice:
-    """One value a stepping row can take, and the English text that names it."""
+    """One value a stepping row can take, and the English text that names it; `ctx`, the
+    catalogs' context it is marked with (N_(text, ctx=...)), when that English names another
+    thing elsewhere."""
 
     value: Any
     text: str
+    ctx: Optional[str] = None
+
+    def shown(self) -> str:
+        """Its text in the active language."""
+        return translate(self.text, ctx=self.ctx)
 
 
 @dataclass(frozen=True)
@@ -85,8 +92,14 @@ class Section:
     legacy_tab: str = ""
 
 
-# i18n: a setting's two values, shown as "On" and "Off"
-ON_OFF = (Choice(True, N_("On")), Choice(False, N_("Off")))
+# A setting's On and Off have their own catalog entries: the plain "Off" also names the
+# Subtitles panel's row that shows none, the relay's state and the phone's Subtitles row, which
+# some languages say otherwise (a plural). N_ needs the context written out, as a literal.
+VALUE_CTX = "setting value"
+ON_OFF = (
+    Choice(True, N_("On", ctx="setting value"), VALUE_CTX),  # i18n: a setting's value: on
+    Choice(False, N_("Off", ctx="setting value"), VALUE_CTX),  # i18n: a setting's value: off
+)
 
 
 def _index(row: Row, current: Any) -> int:
@@ -106,7 +119,10 @@ def choice_of(row: Row, current: Any) -> Choice:
 
 
 def step(row: Row, current: Any, delta: int) -> Any:
-    """The value after (`delta` > 0) or before `current`, wrapping round."""
+    """The value after (`delta` > 0) or before (< 0) `current`, wrapping round; a `delta` of 0
+    gives `current` back as it is."""
+    if not delta:
+        return current
     place = _index(row, current)
     return row.choices[(place + (1 if delta > 0 else -1)) % len(row.choices)].value
 
@@ -167,8 +183,8 @@ def _playback(system: str) -> Section:
         Row(
             "hardware_decoding",
             N_("Hardware video decoding"),
-            # i18n: help under the Hardware video decoding setting
-            N_("Lets the graphics chip decode video. Takes effect after a restart."),
+            # i18n: help under the Hardware video decoding setting (the restart note follows it)
+            N_("Lets the graphics chip decode video."),
             ON_OFF,
             True,
             restart=True,
@@ -252,18 +268,17 @@ def _playback(system: str) -> Section:
 
 def sections(system: str) -> tuple[Section, ...]:
     """The sections in the drawer's order; `system` is platform.system()."""
-    # i18n: a settings section's title
     titles = (
-        (PROVIDERS, N_("Providers")),
-        (GENERAL, N_("General")),
-        (PLAYBACK, N_("Playback")),
-        (SUBTITLES, N_("Subtitles & AI captions")),
-        (TIMESHIFT, N_("Time-shift & recordings")),
-        (GUIDE, N_("Guide")),
-        (REMOTE, N_("Phone remote")),
-        (PARENTAL, N_("Parental controls")),
-        (FILES, N_("Files")),
-        (ADVANCED, N_("Advanced")),
+        (PROVIDERS, N_("Providers")),  # i18n: a settings section's title
+        (GENERAL, N_("General")),  # i18n: a settings section's title
+        (PLAYBACK, N_("Playback")),  # i18n: a settings section's title
+        (SUBTITLES, N_("Subtitles & AI captions")),  # i18n: a settings section's title
+        (TIMESHIFT, N_("Time-shift & recordings")),  # i18n: a settings section's title
+        (GUIDE, N_("Guide")),  # i18n: a settings section's title
+        (REMOTE, N_("Phone remote")),  # i18n: a settings section's title
+        (PARENTAL, N_("Parental controls")),  # i18n: a settings section's title
+        (FILES, N_("Files")),  # i18n: a settings section's title
+        (ADVANCED, N_("Advanced")),  # i18n: a settings section's title
     )
     return tuple(
         (

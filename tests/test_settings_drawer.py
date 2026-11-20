@@ -12,6 +12,7 @@ from PySide6.QtTest import QTest
 from PySide6.QtWidgets import QApplication, QWidget
 from timer_fixtures import elapse
 
+from services import i18n
 from services.i18n import translate
 from services.settings_model import (
     GUIDE,
@@ -34,7 +35,7 @@ def make(width=1280, height=720, values=None):
     host.show()
     values = dict(values or {})
     drawer = SettingsDrawer(
-        lambda row: translate(choice_of(row, values.get(row.key, row.default)).text),
+        lambda row: choice_of(row, values.get(row.key, row.default)).shown(),
         lambda row: is_lit(row, values.get(row.key, row.default)),
         host,
     )
@@ -426,12 +427,32 @@ class SettingsDrawerTests(unittest.TestCase):
             self.assertFalse(self.drawer.row_rect("right", focus).isEmpty())
             self.drawer.move_by(1)
 
+    def test_the_hardware_help_and_its_restart_note_show_whole_in_turkish(self):
+        # The help says nothing of the restart: the note under it does, and both fit (at 960
+        # wide, the help that also said so was cut).
+        self.assertEqual(i18n.set_language("tr"), "tr")
+        self.addCleanup(i18n.set_language, "en")
+        index = playback_index("hardware_decoding")
+        for size in ((1280, 720), (960, 540)):
+            with self.subTest(size=size):
+                self.use(*make(*size))
+                self.focus_on("hardware_decoding")
+                self.drawer.grab()
+                lines = self.drawer._box("right", index).help
+                self.assertFalse(any("…" in line for line in lines), lines)
+                self.assertEqual(" ".join(lines).split(), tip(playback_rows()[index]).split())
+
     def test_the_restart_note_keeps_its_line_in_a_small_window(self):
+        # A help too long to share two lines with the note: the note keeps the last one.
         self.use(*make(640, 360))
-        self.focus_on("hardware_decoding")
+        help_text = "Lets the graphics chip decode the video, so that the processor does less."
+        row = Row("long", "Long", help_text, ON_OFF, True, restart=True)
+        self.drawer.open_at((Section("s", "S", rows=(row,)),))
+        self.drawer.right()
         self.drawer.grab()
-        lines = self.drawer._box("right", 1).help
+        lines = self.drawer._box("right", 0).help
         self.assertEqual(len(lines), 2)
+        self.assertTrue(lines[0].endswith("…"), lines)
         self.assertTrue(lines[-1].startswith("Applies"), lines)
 
     def test_a_value_gives_way_to_its_title_in_a_small_window(self):

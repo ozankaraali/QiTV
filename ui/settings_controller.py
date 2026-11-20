@@ -14,7 +14,6 @@ from typing import Optional
 
 from PySide6.QtCore import QEvent, QObject, Signal
 
-from services.i18n import translate
 from services.settings_model import LEGACY_TABS, Row, Section, choice_of, is_lit, sections, step
 from services.settings_values import SettingsValues
 from ui.keymap import Action
@@ -62,7 +61,7 @@ class SettingsController(QObject):
         acts: it has no config key to ask)."""
         if not row.choices:
             return ""
-        return translate(choice_of(row, self._values.get(row.key)).text)
+        return choice_of(row, self._values.get(row.key)).shown()
 
     def lit(self, row: Row) -> bool:
         """Whether the row's value differs from its default."""
