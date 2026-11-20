@@ -15,7 +15,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any, Optional
 
-from services.i18n import N_, translate
+from services.i18n import N_, SOURCE_LANGUAGE, SOURCE_NAME, number, translate
 
 PROVIDERS = "providers"
 GENERAL = "general"
@@ -39,14 +39,11 @@ KINDS = (STEP, OPENS, ACTION, DANGER, TEXT, INFO)
 
 # Section key -> the key of the old Settings window's tab that still holds its settings.
 LEGACY_TABS: dict[str, str] = {
-    GENERAL: "general",
     SUBTITLES: "subtitles",
     TIMESHIFT: "timeshift",
     GUIDE: "epg",
     REMOTE: "remote",
     PARENTAL: "parental",
-    FILES: "general",
-    ADVANCED: "general",
 }
 
 # Section key -> its icon, a drawing of ui/overlays/painting.py's draw_icon. A section with no
@@ -70,6 +67,17 @@ ADD_PROVIDER = PROVIDER_PREFIX + "@add"
 FREE_CHANNELS = PROVIDER_PREFIX + "@free"
 # i18n: a row of Settings → Providers, after "＋ ": adds a provider
 ADD_PROVIDER_TEXT = N_("Add provider")
+
+# Files' rows are `files/…` and Advanced's Clear Image Cache `advanced/…` (ui.settings_general's):
+# they act, they are no config value.
+FILES_PREFIX = "files/"
+ADVANCED_PREFIX = "advanced/"
+CLEAR_IMAGE_CACHE = ADVANCED_PREFIX + "clear_image_cache"
+# i18n: the Language setting's first choice; {language}: the system's language, by its own name
+SYSTEM_DEFAULT_TEXT = N_("System default ({language})")
+# The image cache's largest sizes (MB) the stepper offers; the config's default is 100.
+IMAGE_CACHE_MB = (50, 100, 200, 500, 1000, 2000)
+IMAGE_CACHE_DEFAULT_MB = 100
 
 
 @dataclass(frozen=True)
@@ -97,7 +105,8 @@ class Row:
     value of its own: "answered 2 min ago") and `sub` (a second, muted line under the title:
     "Xtream · in use") are shown as they are given, in the active language already. A
     `literal` row's `text` is too: a name the viewer gave (a provider's, a group's), never
-    translated, even when it is also one of QiTV's texts ("General")."""
+    translated, even when it is also one of QiTV's texts ("General"). A `secret` text row (a
+    token) shows dots in its text's place; an empty one shows its `placeholder`."""
 
     key: str
     text: str
@@ -111,6 +120,8 @@ class Row:
     note: str = ""
     sub: str = ""
     literal: bool = False
+    secret: bool = False  # a text row's text shows as dots, and is never said or copied
+    placeholder: str = ""  # an English text (N_) an empty text row shows, muted
 
     def __post_init__(self) -> None:
         if not self.kind:
@@ -174,6 +185,147 @@ def step(row: Row, current: Any, delta: int) -> Any:
 def is_lit(row: Row, current: Any) -> bool:
     """Whether `current` differs from the default, so the row is shown highlighted."""
     return bool(choice_of(row, current).value != row.default)
+
+
+@dataclass(frozen=True)
+class Context:
+    """What some rows show that only the running QiTV knows (ui.settings_general gathers it):
+    the languages it has texts for, as (code, the language's own name), English first, and the
+    name of the one the system's choice gives; whether its build carries a TMDB token; the image
+    cache's largest size as set (MB: one the old window took that is none of the steps shows
+    as its own); and Files' rows, as their status is now (none when QiTV cannot be the app
+    files open with: a run from source)."""
+
+    languages: tuple[tuple[str, str], ...] = ((SOURCE_LANGUAGE, SOURCE_NAME),)
+    system_language: str = SOURCE_NAME
+    tmdb_built_in: bool = False
+    image_cache_mb: Any = IMAGE_CACHE_DEFAULT_MB
+    files: tuple[Row, ...] = ()
+
+
+def _general(title: str, context: Context) -> Section:
+    system = translate(SYSTEM_DEFAULT_TEXT, language=context.system_language)
+    languages = (Choice(None, system, literal=True),) + tuple(
+        Choice(code, name, literal=True) for code, name in context.languages
+    )
+    if context.tmdb_built_in:
+        # i18n: the TMDB token field's hint in a build that carries one
+        placeholder = N_("Built in; or paste your own")
+    else:
+        # i18n: the TMDB token row's hint in a build without one (from the source code); the
+        # old window's "Your TMDB API Read Access Token", shorter to fit beside its title
+        placeholder = N_("Your TMDB Read Access Token")
+    rows = (
+        Row(
+            "language",
+            N_("Language"),
+            # i18n: help under the Language setting (the restart note follows it)
+            N_("The language of QiTV's menus and texts."),
+            languages,
+            None,
+            restart=True,
+        ),
+        Row(
+            "check_updates",
+            N_("Allow Check for Updates"),
+            # i18n: help under the Allow Check for Updates setting
+            N_("Looks for a newer QiTV as it starts, and asks before it downloads one."),
+            ON_OFF,
+            True,
+        ),
+        Row(
+            "channel_logos",
+            N_("Enable Channel Logos"),
+            # i18n: help under the Enable Channel Logos setting
+            N_("Shows each channel's logo beside its name."),
+            ON_OFF,
+            True,
+        ),
+        Row(
+            "tmdb_details",
+            N_("Film and series details from TMDB"),
+            # i18n: help under the TMDB setting: what QiTV sends TMDB is only a title and its year
+            N_("Fills in posters and stories your provider lacks. TMDB gets the title and year."),
+            ON_OFF,
+            True,
+        ),
+        Row(
+            "tmdb_token",
+            N_("TMDB token"),
+            # i18n: help under the TMDB token (an API Read Access Token), edited in place
+            N_("Your own TMDB API Read Access Token, if you have one."),
+            kind=TEXT,
+            secret=True,
+            placeholder=placeholder,
+        ),
+    )
+    return Section(GENERAL, title, ICONS[GENERAL], rows=rows)
+
+
+def _image_cache_choices(current: Any) -> tuple[Choice, ...]:
+    """The steps, and a size as set that is none of them (the old window took any) in its
+    place among them."""
+    sizes = list(IMAGE_CACHE_MB)
+    if isinstance(current, int) and not isinstance(current, bool) and current not in sizes:
+        sizes = sorted(sizes + [current])
+    return tuple(Choice(size, number(size), literal=True) for size in sizes)
+
+
+def _advanced(title: str, context: Context) -> Section:
+    rows = (
+        Row(
+            "ssl_verify",
+            N_("Verify SSL certificates (recommended)"),
+            N_("Disable only if your provider uses self-signed certificates."),
+            ON_OFF,
+            True,
+        ),
+        Row(
+            "secure_dns",
+            N_("Secure DNS"),
+            # i18n: help under the Secure DNS setting (DNS over HTTPS); keep "DNS"
+            N_("Looks up providers' addresses over HTTPS, with Cloudflare's or Google's resolver."),
+            ON_OFF,
+            False,
+        ),
+        Row(
+            "detailed_log",
+            N_("Detailed log (for troubleshooting)"),
+            # i18n: help under the Detailed log setting
+            N_("The log also gets every step QiTV takes, for a report. Passwords are left out."),
+            ON_OFF,
+            False,
+        ),
+        Row(
+            "max_cache_image_size",
+            N_("Max size of image cache (MB)"),
+            # i18n: help under the image cache's largest size (the restart note follows it)
+            N_("How much room the posters and logos kept on disk may take."),
+            _image_cache_choices(context.image_cache_mb),
+            IMAGE_CACHE_DEFAULT_MB,
+            restart=True,
+        ),
+        Row(
+            CLEAR_IMAGE_CACHE,
+            N_("Clear Image Cache"),
+            # i18n: help under Settings → Advanced → Clear Image Cache (it asks first)
+            N_("Deletes the posters and logos kept on disk. Asked first."),
+            kind=DANGER,
+        ),
+    )
+    return Section(ADVANCED, title, ICONS[ADVANCED], rows=rows)
+
+
+def _files(title: str, rows: tuple[Row, ...]) -> Section:
+    return Section(
+        FILES,
+        title,
+        ICONS[FILES],
+        rows=rows,
+        # i18n: Settings → Files when QiTV runs from its source code: it can't be the app that
+        # opens video or music files
+        empty_text=N_("Not available while QiTV runs from source."),
+    )
 
 
 def _playback(system: str) -> Section:
@@ -347,9 +499,14 @@ def _providers(title: str, rows: tuple[Row, ...]) -> Section:
     return Section(PROVIDERS, title, ICONS[PROVIDERS], rows=rows + (add, free))
 
 
-def sections(system: str, providers: tuple[Row, ...] = ()) -> tuple[Section, ...]:
+def sections(
+    system: str, providers: tuple[Row, ...] = (), context: Optional[Context] = None
+) -> tuple[Section, ...]:
     """The sections in the drawer's order; `system` is platform.system(), `providers` the
-    rows of the providers, listed first in Providers."""
+    rows of the providers, listed first in Providers, `context` what only the running QiTV
+    knows (by default: English only, no TMDB token built in, the image cache's default size
+    and no Files rows)."""
+    context = context if context is not None else Context()
     titles = (
         (PROVIDERS, N_("Providers")),  # i18n: a settings section's title
         (GENERAL, N_("General")),  # i18n: a settings section's title
@@ -368,6 +525,12 @@ def sections(system: str, providers: tuple[Row, ...] = ()) -> tuple[Section, ...
             built.append(_providers(text, tuple(providers)))
         elif key == PLAYBACK:
             built.append(_playback(system))
+        elif key == GENERAL:
+            built.append(_general(text, context))
+        elif key == FILES:
+            built.append(_files(text, tuple(context.files)))
+        elif key == ADVANCED:
+            built.append(_advanced(text, context))
         else:
             built.append(Section(key, text, ICONS.get(key, ""), legacy_tab=LEGACY_TABS[key]))
     return tuple(built)

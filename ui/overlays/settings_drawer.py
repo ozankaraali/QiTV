@@ -7,11 +7,13 @@ the highlight moves. A row is of a kind (services/settings_model.py's KINDS): it
 its choices ("Live latency  ‹ Auto ›", the value lit in the accent while it is not the
 default), opens a layer of rows of its own or a card (it ends in ›), acts, acts on what cannot
 be undone (in red, its title ending in "…": the caller asks first), holds a text edited in
-place ("Name  Demo TV"), or only says something (muted, and the focus goes past it). A row may
-have a muted sub line under its title, and a note at its right end. In a layer the left
-column lists the rows the layer is one of, the opened one marked as the drawer marks its
-path; there only the rows that open a layer take the highlight, and a click on another goes
-back up to it. A layer without rows says its `empty_text` and the keys stay on the left. A
+place ("Name  Demo TV"), or only says something (muted, and the focus goes past it). A secret
+text (a token) shows dots in its place, in its field too, and is never said, given as a tooltip
+or copied out; an empty text shows its placeholder, muted. A row may have a muted sub line
+under its title, and a note at its right end. In a layer the left column lists the rows the
+layer is one of, the opened one marked as the drawer marks its path; there only the rows that
+open a layer take the highlight, and a click on another goes back up to it. A layer (or a
+section) without rows says its `empty_text` and the keys stay on the left. A
 section whose settings are still in the Settings window has one row that opens it there
 (`legacy:<section key>`). Only the right column's focused row shows its help under it, two
 lines at most; a note cut short at its row's end shows there whole instead (a check's
@@ -124,6 +126,7 @@ RESTART_NOTE = N_("Applies when QiTV starts again.")
 # i18n: the one row of a Settings section whose settings are still in the Settings window
 LEGACY_TEXT = N_("Open in the Settings window")
 LEGACY_PREFIX = "legacy:"  # the legacy row's key: LEGACY_PREFIX + the section's key
+MASK = "•"  # a secret text's every character, as a FormCard's secret field shows it
 
 _FALLBACK_HOST_WIDTH = 1280
 _BACK = "back"
@@ -208,6 +211,7 @@ class SettingsDrawer(Overlay):
         self._edit: Optional[TextEdit] = None
         self._edit_row = ""
         self._edit_from = ""
+        self._edit_secret = False  # its row's text is a secret: dots, never copied out
         self._drag = Dragging()  # the field's mouse: the caret, a drag's selection
         self._paste_hovered = False
         self._said = ""  # what assistive technology was last told
@@ -490,6 +494,8 @@ class SettingsDrawer(Overlay):
             self._end_edit(keep=True)
             return False
         elif action in _FIELD_KEYS:
+            if self._edit_secret and action in (Action.COPY, Action.CUT):
+                return True  # a secret is never copied out
             if action is Action.FORGET:
                 action = Action.NAV_DELETE
             field_key(edit, action, payload, arrows=True)
@@ -504,6 +510,7 @@ class SettingsDrawer(Overlay):
         self._edit = TextEdit(text)
         self._edit_row = row.key
         self._edit_from = text
+        self._edit_secret = row.secret
         self._reveal(RIGHT)
         self.update()
 
@@ -557,9 +564,30 @@ class SettingsDrawer(Overlay):
             row = self.focused_row()
             if row is None:
                 return ""
-            value = self._value_text(row) if row.kind in (STEP, TEXT) else row.note
+            if row.kind == STEP:
+                value = self._value_text(row)
+            elif row.kind == TEXT:  # a secret's dots are no value to say
+                value = "" if row.secret and self._value_text(row) else self._tail_text(row)
+            else:
+                value = row.note
             parts = [title_of(Item(row.key, row.text, row=row)), row.sub, value]
         return ", ".join(part for part in parts if part)
+
+    def _tail_text(self, row: Row) -> str:
+        """What the row shows at its right end: a text or an info line's value (a secret's in
+        dots, an empty text's placeholder), else its note."""
+        if row.kind not in (TEXT, INFO):
+            return row.note
+        value = self._value_text(row)
+        if row.kind == TEXT and row.secret and value:
+            return MASK * len(value)
+        if self._shows_placeholder(row):
+            return translate(row.placeholder)
+        return value
+
+    def _shows_placeholder(self, row: Row) -> bool:
+        """Whether the text row shows its placeholder: it has one, and no text."""
+        return row.kind == TEXT and bool(row.placeholder) and not self._value_text(row)
 
     # ---- geometry (widget coordinates) ------------------------------------------------------
 
@@ -749,9 +777,11 @@ class SettingsDrawer(Overlay):
             row = item.row if side == RIGHT else None
             value = ""
             choices: tuple[str, ...] = ()
-            if row is not None and row.kind in (STEP, TEXT, INFO):
+            if row is not None and row.kind == STEP:
                 value = self._value_text(row)
-                choices = tuple(c.shown() for c in row.choices) if row.kind == STEP else ()
+                choices = tuple(c.shown() for c in row.choices)
+            elif row is not None and row.kind in (TEXT, INFO):
+                value = self._tail_text(row)
             focused = row is not None and index == focus
             key = self._placed_key(
                 side, item, un, area, icons, value, choices, focused, index == editing, fonts
@@ -1004,12 +1034,12 @@ class SettingsDrawer(Overlay):
                 if len(lines) > 1:
                     self._paint_value_lines(p, box.value, lines, accent if lit else muted)
             elif index == editing and self._edit is not None:
-                self._paint_field(p, un, box.entry, self._edit)
+                self._paint_field(p, un, box.entry, self._edit, secret=row.secret)
                 self._paint_paste(p, un, box.paste, self._paste_hovered)
             elif not box.end.isEmpty():
-                tail = self._value_text(row) if row.kind in (TEXT, INFO) else row.note
+                tail = self._tail_text(row)
                 p.setFont(un.font(VALUE_FONT_U))
-                p.setPen(text if row.kind == TEXT else muted)
+                p.setPen(text if row.kind == TEXT and not self._shows_placeholder(row) else muted)
                 fm = QFontMetricsF(p.font())
                 shown = fm.elidedText(tail, Qt.TextElideMode.ElideRight, box.end.width())
                 p.drawText(
@@ -1065,9 +1095,11 @@ class SettingsDrawer(Overlay):
             y += spacing
 
     @staticmethod
-    def _paint_field(p: QPainter, un: Units, rect: QRectF, edit: TextEdit) -> None:
+    def _paint_field(
+        p: QPainter, un: Units, rect: QRectF, edit: TextEdit, *, secret: bool = False
+    ) -> None:
         """The field a text is edited in, in its value's place: the find box's look, and the
-        text with its caret and selection."""
+        text (a secret's dots) with its caret and selection."""
         u = un.u
         height = min(rect.height(), float(un.px(FIELD_H_U)))
         box = QRectF(rect.x(), rect.center().y() - height / 2, rect.width(), height)
@@ -1082,7 +1114,10 @@ class SettingsDrawer(Overlay):
         p.setFont(un.font(VALUE_FONT_U))
         inner = box.adjusted(FIELD_PAD_U * u, 0, -FIELD_PAD_U * u, 0)
         selection = qcolor(PALETTE.accent, SELECTION_ALPHA)
-        paint_edit(p, inner, edit, qcolor(PALETTE.text), caret=True, selection=selection)
+        shown = MASK * len(edit.text) if secret else None
+        paint_edit(
+            p, inner, edit, qcolor(PALETTE.text), caret=True, selection=selection, shown=shown
+        )
 
     @staticmethod
     def _paint_paste(p: QPainter, un: Units, rect: QRectF, hovered: bool) -> None:
@@ -1399,7 +1434,7 @@ class SettingsDrawer(Overlay):
                 else:
                     cut = fm.horizontalAdvance(tail) > box.value.width()
             elif not box.end.isEmpty():
-                tail = self._value_text(row) if row.kind in (TEXT, INFO) else row.note
+                tail = self._tail_text(row)
                 cut = fm.horizontalAdvance(tail) > box.end.width()
             if tail and cut:
                 whole_texts.append(tail)

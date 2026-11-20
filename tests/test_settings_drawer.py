@@ -343,7 +343,8 @@ class SettingsDrawerTests(unittest.TestCase):
         everything = sections("Darwin")
         for section in everything:
             self.drawer.open_at(everything, section.key)
-            check(section.key, len(section.rows) or 1)
+            # (A section still in the Settings window has its one row; Files may have none.)
+            check(section.key, len(section.rows) or (1 if section.legacy_tab else 0))
             for i, row in enumerate(section.rows):
                 if row.section is None:
                     continue
@@ -1004,6 +1005,47 @@ class SettingsDrawerTests(unittest.TestCase):
             self.assertTrue(self.drawer.edit_key(Action.PASTE, ""))
         self.assertTrue(self.drawer.edit_key(Action.NAV_ACTIVATE, ""))
         self.assertEqual(edits, [("k", "http://new.example")])
+
+    def test_a_secret_text_shows_dots_and_is_never_said_or_copied(self):
+        # A token: dots in its value's place, in the field while it is edited too; never in the
+        # tooltip, never said, never copied out; what is edited and kept is the text itself.
+        edits = self.edits()
+        token = "eyJ.made-up-token"
+        self.open_rows(m.Row("k", "TMDB token", kind=m.TEXT, secret=True), k=token)
+        row = self.drawer.focused_row()
+        self.drawer.grab()
+        self.assertEqual(self.drawer._tail_text(row), "•" * len(token))
+        tip = self.drawer.tooltip_at(self.drawer._box("right", 0).end.center())
+        self.assertNotIn("eyJ", tip)
+        self.assertNotIn("eyJ", self.drawer._spoken())
+        self.drawer.activate()
+        self.assertEqual(self.drawer._edit.text, token)  # from the text, not from its dots
+        self.drawer.grab()  # painted as dots (paint_edit's `shown`)
+        self.assertTrue(self.drawer.edit_key(Action.SELECT_ALL, ""))
+        with mock.patch("ui.text_edit._copy") as copied:
+            self.assertTrue(self.drawer.edit_key(Action.COPY, ""))  # taken, and nothing copied
+            self.assertTrue(self.drawer.edit_key(Action.CUT, ""))
+        copied.assert_not_called()
+        self.assertEqual(self.drawer._edit.text, token)  # nor cut
+        self.drawer.type_text("9")
+        self.drawer.activate()
+        self.assertEqual(edits, [("k", "9")])  # the selection typed over
+
+    def test_an_empty_text_shows_its_placeholder(self):
+        self.open_rows(
+            m.Row("k", "TMDB token", kind=m.TEXT, secret=True, placeholder="Built in"), k=""
+        )
+        row = self.drawer.focused_row()
+        self.drawer.grab()
+        self.assertEqual(self.drawer._tail_text(row), "Built in")
+        self.assertFalse(self.drawer._box("right", 0).end.isEmpty())
+        self.assertIn("Built in", self.drawer._spoken())
+        self.drawer.activate()
+        self.assertEqual(self.drawer._edit.text, "")  # the placeholder is no text to edit
+        self.drawer.activate()
+        self.values["k"] = "abc"
+        self.drawer.refresh()
+        self.assertEqual(self.drawer._tail_text(row), "•••")
 
     def test_hiding_ends_an_edit_without_keeping_it(self):
         edits = self.edits()

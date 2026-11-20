@@ -203,6 +203,7 @@ from ui.recording_scheduler import RecordingScheduler
 from ui.remote_controller import RemoteController
 from ui.settings_controller import SettingsController
 from ui.settings_dialog import OptionsDialog
+from ui.settings_general import GeneralRows, hooks as general_hooks
 from ui.settings_providers import ProviderRows
 from ui.song_jobs import PanelCover
 from ui.subtitle_search import OnlineSetup
@@ -1144,12 +1145,13 @@ class TVWindow(QMainWindow):
                 "deinterlace": controller.apply_deinterlacing,  # every player's, at once
                 "desktop_pip": self._arm_desktop_pip,
                 "covered_pip": self._arm_desktop_pip,
+                **general_hooks(self),  # General's and Advanced's (ui.settings_general)
             },
         )
         self.settings = SettingsController(
             self.settings_drawer,
             values,
-            lambda: sections(system, self.provider_rows.rows()),
+            lambda: sections(system, self.provider_rows.rows(), self.general_rows.context()),
             self.options_dialog,
             controller.reopen_drawer_on_settings,
         )
@@ -1165,6 +1167,10 @@ class TVWindow(QMainWindow):
             self, self.settings, self.settings_drawer, self.provider_rows
         )
         self.provider_rows.cards = self.provider_cards
+        # Settings › General, Files and Advanced: what only this QiTV knows (its languages, the
+        # Files rows' status), and Files' and Advanced's own rows: the file types told on a
+        # worker, the image cache cleared on one once asked.
+        self.general_rows = GeneralRows(self, self.settings, self.settings_drawer)
         self.catalogs.providersChanged.connect(self.provider_rows.providers_changed)
         self.catalog.providerReady.connect(self.provider_rows.providers_changed)
         # File → Open Link… and the channel list's Open a link (plan 4): while its card shows it

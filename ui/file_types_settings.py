@@ -2,7 +2,8 @@
 registers QiTV with the system for its kind of file, or takes it back (services.file_types),
 on a thread of its own; the hint under it says what the system does then. The rows are
 independent: each follows its own kind's status. At start, a QiTV that was moved registers
-itself again where it is now (`refresh_at_start`).
+itself again where it is now (`refresh_at_start`). A kind's press and its answer are a
+`FileTypesSwitch`'s, which the drawer's Settings → Files rows use too (ui.settings_general).
 
 The service only records what it did in the config; it is saved here, on the GUI thread."""
 
@@ -111,8 +112,16 @@ def hint_text(
 ) -> str:
     """The hint under `kind`'s button ("": none). `open_with_only`: this window registered
     QiTV on Linux without making it the default (no xdg-mime)."""
+    hint = hint_source(state, system, open_with_only, kind)
+    return translate(hint) if hint else ""
+
+
+def hint_source(
+    state: Status, system: str, open_with_only: bool = False, kind: str = "videos"
+) -> str:
+    """`hint_text` in English, as marked (N_): a row's help, translated where it shows."""
     if state is Status.REGISTERED and system == "linux" and open_with_only:
-        return translate(LINUX_OPEN_WITH_HINT)
+        return LINUX_OPEN_WITH_HINT
     texts = TEXTS[kind]
     hints = {
         (Status.NOT_REGISTERED, "win32"): WINDOWS_HINT,
@@ -124,7 +133,7 @@ def hint_text(
     hint = hints.get((state, system))
     if hint is None and state is Status.TEMPORARY:
         hint = TEMPORARY_HINT
-    return translate(hint) if hint else ""
+    return hint or ""
 
 
 def open_default_apps() -> None:
@@ -138,6 +147,13 @@ def open_default_apps() -> None:
             logger.warning("Windows' Default Apps page didn't open", exc_info=True)
 
     threading.Thread(target=body, name=DEFAULT_APPS_THREAD, daemon=True).start()
+
+
+def default_apps_offered(config: Any) -> bool:
+    """Whether Windows' Default Apps… is offered: on Windows, once QiTV opens a kind of file."""
+    return _system() == "win32" and any(
+        file_types.status(kind, config) is Status.REGISTERED for kind in TEXTS
+    )
 
 
 def _save(config: Any) -> None:
@@ -178,6 +194,76 @@ class _Answer(QObject):
         self._handle(answer)
 
 
+class FileTypesSwitch:
+    """A kind's Use QiTV and Stop using it (`press`): the system is told on a thread of its
+    own, and its answer heard on the GUI thread, through `parent` (an answer after it went is
+    dropped: keep it as long as a press may be on its way). The config is saved when it worked,
+    the window's DDE follows it (Windows: a double-click reaches this QiTV while any kind is
+    registered, or no more) and Windows' Default Apps opens after a register, where Windows asks
+    to confirm; then `answered` is called, for the row to follow. `busy` while an answer is on
+    its way, `failed` when the last press failed, `open_with_only` when this switch registered
+    QiTV on Linux without making it the default (no xdg-mime)."""
+
+    def __init__(
+        self,
+        config: Any,
+        window: Any,
+        kind: str,
+        parent: QObject,
+        answered: Callable[[], None] = lambda: None,
+    ) -> None:
+        self.kind = kind
+        self._config = config
+        self._window = window  # TVWindow: its DDE follows a press (Windows)
+        self._then = answered
+        self.busy = False
+        self.failed = False
+        self.open_with_only = False
+        self._answer = _Answer(parent, self._answered)
+
+    def status(self) -> Status:
+        """The kind's status, from the record (no disk, registry or program is touched)."""
+        return file_types.status(self.kind, self._config)
+
+    def hint(self, state: Status) -> str:
+        """The old window's hint under the button for `state`, in English as marked (N_; "":
+        none): what the system does on a press, or what must be done first."""
+        return hint_source(state, _system(), self.open_with_only, self.kind)
+
+    def press(self) -> bool:
+        """Use QiTV for the kind, or stop using it: whether the system is being told (not while
+        a press is on its way, nor for a status that can't be pressed)."""
+        if self.busy:
+            return False
+        config, kind = self._config, self.kind
+        state = file_types.status(kind, config)
+        work: Callable[[], object]
+        if state is Status.REGISTERED:
+            work = lambda: (False, file_types.unregister(kind, config))  # noqa: E731
+        elif state is Status.NOT_REGISTERED:
+            work = lambda: (True, file_types.register(kind, config))  # noqa: E731
+        else:
+            return False
+        self.busy = True
+        self._answer.run(work, PRESS_THREAD)
+        return True
+
+    def _answered(self, answer: object) -> None:
+        self.busy = False
+        registering, result = answer if isinstance(answer, tuple) else (False, None)
+        if result:
+            _save(self._config)
+            follow = getattr(self._window, "dde_follow_registration", None)
+            if follow is not None and isValid(self._window):
+                follow(file_types.any_registered(self._config))
+            if registering and _system() == "win32":
+                open_default_apps()  # where Windows asks the user to confirm
+        self.failed = not result
+        if result and registering:
+            self.open_with_only = not getattr(result, "defaults", True)
+        self._then()
+
+
 class FileTypesRow:
     """A kind's row: its button and hint (`button`, `hint`), with Windows' Default Apps beside
     the button once QiTV is registered there (`default_apps_button`); hidden where QiTV can't
@@ -190,11 +276,7 @@ class FileTypesRow:
         self._texts = TEXTS[kind]
         name = _PREFIXES[kind][1]
         self._config = dialog.config_manager
-        self._window = dialog.parent()  # TVWindow: its DDE follows a press (Windows)
         self._layout = layout
-        self._busy = False  # a press's answer is on its way
-        self._failed = False  # the last press failed: the hint says so
-        self._open_with_only = False  # Linux: this window's register took no default
         self.box = QWidget(parent)
         column = QVBoxLayout(self.box)
         column.setContentsMargins(0, 0, 0, 0)
@@ -218,65 +300,41 @@ class FileTypesRow:
         column.addWidget(self.hint)
         layout.addRow(translate(self._texts.label), self.box)
         # Settings' own: an answer that comes after it closed still saves the config.
-        self._answer = _Answer(dialog, self._answered)
+        self._switch = FileTypesSwitch(
+            self._config, dialog.parent(), kind, dialog, answered=self._answered
+        )
         self.show()
 
     def show(self) -> None:
         """The button and hint as the record says now (for this row's kind only)."""
-        state = file_types.status(self.kind, self._config)
+        switch = self._switch
+        state = switch.status()
         self._layout.setRowVisible(self.box, state is not Status.UNAVAILABLE)
         registered = state is Status.REGISTERED
         if not registered:
-            self._open_with_only = False
+            switch.open_with_only = False
         self.button.setText(translate(self._texts.stop if registered else self._texts.use))
         can_press = state in (Status.REGISTERED, Status.NOT_REGISTERED)
-        self.button.setEnabled(can_press and not self._busy)
+        self.button.setEnabled(can_press and not switch.busy)
         self.default_apps_button.setVisible(registered and _system() == "win32")
-        if self._failed:
+        if switch.failed:
             text = translate(FAILED_HINT)
         else:
-            text = hint_text(state, _system(), self._open_with_only, self.kind)
+            text = hint_text(state, _system(), switch.open_with_only, self.kind)
         self.hint.setText(text)
-        self.hint.setStyleSheet(ERROR_STYLE if self._failed else "")
+        self.hint.setStyleSheet(ERROR_STYLE if switch.failed else "")
         self.hint.setVisible(bool(text))  # (an empty line's height until it says something)
 
     def press(self) -> None:
         """Use QiTV for this row's kind, or Stop using it: the system is told on a worker."""
-        if self._busy:
-            return
-        config, kind = self._config, self.kind
-        state = file_types.status(kind, config)
-        work: Callable[[], object]
-        if state is Status.REGISTERED:
-            work = lambda: (False, file_types.unregister(kind, config))  # noqa: E731
-        elif state is Status.NOT_REGISTERED:
-            work = lambda: (True, file_types.register(kind, config))  # noqa: E731
-        else:
-            return
-        self._busy = True
-        self.button.setEnabled(False)
-        self._answer.run(work, PRESS_THREAD)
+        if self._switch.press():
+            self.button.setEnabled(False)
 
-    def _answered(self, answer: object) -> None:
-        """On the GUI thread: saved when it worked (the service recorded it), the window's DDE
-        following it (Windows: a double-click reaches this QiTV while any kind is registered,
-        or no more), and Windows' Default Apps opened after a register; the row follows while
-        Settings is still there."""
-        self._busy = False
-        registering, result = answer if isinstance(answer, tuple) else (False, None)
-        if result:
-            _save(self._config)
-            follow = getattr(self._window, "dde_follow_registration", None)
-            if follow is not None and isValid(self._window):
-                follow(file_types.any_registered(self._config))
-            if registering and _system() == "win32":
-                open_default_apps()  # where Windows asks the user to confirm
-        if not (isValid(self.button) and isValid(self.hint)):
-            return  # Settings is gone
-        self._failed = not result
-        if result and registering:
-            self._open_with_only = not getattr(result, "defaults", True)
-        self.show()
+    def _answered(self) -> None:
+        """On the GUI thread, once the switch heard the system's answer (and saved it): the row
+        follows while Settings is still there."""
+        if isValid(self.button) and isValid(self.hint):
+            self.show()
 
 
 def add_file_types_row(

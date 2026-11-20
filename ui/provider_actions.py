@@ -16,7 +16,10 @@ Settings window's Save ran for it, in its order:
   under its new name;
 - removed: its scheduled recordings go (`providers_renamed`), so do its lists (as a rename's),
   the catalogs reload; the TV's gives way to the provider after it in the list (the one before
-  it when it was the last; none when it was the only one: the welcome card).
+  it when it was the last; none when it was the only one: the welcome card);
+- Settings' own Verify SSL certificates changed (`global_ssl_changed`): each provider without a
+  check of its own has a new connection, its lists going (the TV's set up again), as the old
+  Save had it: the catalogs are not reloaded for it.
 
 Each ends with the menu bar's provider list rebuilt. A change whose write the disk refuses
 raises its OSError before any follow-up: nothing was changed (ProviderChanges puts the list
@@ -96,6 +99,21 @@ class ProviderActions:
             self._window.save_config()
             self._window.set_provider()  # none left: the welcome card
         self._done()
+
+    def global_ssl_changed(self) -> None:
+        """Settings' Verify SSL certificates changed (already written): the providers that
+        follow it, having none of their own, connect anew. A provider other than the TV's loses
+        its cached lists; the TV's is set up again with it."""
+        following = [
+            str(provider.get("name") or "")
+            for provider in self._window.provider_manager.providers
+            if isinstance(provider, dict) and "ssl_verify" not in provider and provider.get("name")
+        ]
+        for name in following:
+            if not self._selected(name):
+                self._manager_of(name).invalidate_provider_cache(name)
+        if any(self._selected(name) for name in following):
+            self._window.set_provider(force_update=True)
 
     def _selected(self, name: str) -> bool:
         return name == str(self._window.config_manager.selected_provider_name or "")

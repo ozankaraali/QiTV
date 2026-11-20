@@ -72,6 +72,10 @@ class SettingsModelTests(unittest.TestCase):
         by_key = {s.key: s for s in m.sections("Linux")}
         self.assertEqual(by_key[m.GUIDE].legacy_tab, "epg")
         self.assertEqual(by_key[m.PLAYBACK].legacy_tab, "")
+        for key in (m.GENERAL, m.FILES, m.ADVANCED):  # plan 3: their rows are here
+            self.assertEqual(by_key[key].legacy_tab, "", key)
+            self.assertNotIn(key, m.LEGACY_TABS)
+        self.assertTrue(by_key[m.FILES].empty_text)  # none of its rows can be (from source)
 
     def test_providers_list_its_rows_then_add_and_free(self):
         # Providers is no longer the Settings window's tab: the providers' rows, as its caller

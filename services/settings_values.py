@@ -3,7 +3,8 @@
 The drawer applies every step at once: a row key names a ConfigManager property, a step
 writes it, saves in the background and runs the row's hook (the caller's way to make the
 change take effect). `play_in` is no property of its own: it stands for the two old
-exclusive keys, play_in_vlc and play_in_mpv.
+exclusive keys, play_in_vlc and play_in_mpv. A text is written as the old Save wrote it (a
+token without the spaces and line breaks a paste brings).
 """
 
 from __future__ import annotations
@@ -16,6 +17,14 @@ from services.config_manager import ConfigManager
 logger = logging.getLogger(__name__)
 
 PLAY_IN = "play_in"
+
+
+def _no_spaces(text: Any) -> str:
+    return "".join(str(text).split())
+
+
+# A text row's key -> what of its text is written.
+_CLEANED: dict[str, Callable[[Any], Any]] = {"tmdb_token": _no_spaces}
 
 
 class SettingsValues:
@@ -46,7 +55,8 @@ class SettingsValues:
             self._config.play_in_mpv = value == "mpv"
         else:
             self._check(key, writing=True)
-            setattr(self._config, key, value)
+            clean = _CLEANED.get(key)
+            setattr(self._config, key, clean(value) if clean is not None else value)
         try:
             self._config.save_config()
         except Exception:
