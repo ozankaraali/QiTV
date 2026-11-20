@@ -12,6 +12,8 @@ sections, which the Library shows (`libraryRequested`). Highlighting them previe
 Network streams (plan 4), after the providers among the sources, lists the links that played:
 each row its name, then what it is ("Live", "Film · stopped at 41:12") or, in the warning
 colour, why it did not play last time. A link chosen plays (`playRequested`, as a channel).
+The find lists them by their names too; one found plays as it was kept (`channelFound`), and
+is no channel otherwise: it never drags out onto a tile and has no channel's menu.
 
 The left column's top row starts with ‹ (a layer up, as ← on the left column; hidden on the
 sources), then names where the left column is, each a link: a name shows its node's children
@@ -99,7 +101,7 @@ from services.navigation import (
     item_title,
 )
 from services.network_streams import FILM
-from services.provider_ids import mixed_group_id, provider_of
+from services.provider_ids import NETWORK_PROVIDER, mixed_group_id, provider_of
 from services.zapping import ZapContext
 from ui.find_session import FindSession
 from ui.keymap import Action, key_hint
@@ -296,6 +298,14 @@ def _is_focus_key(node: NavNode, wanted: "str | tuple[str, str]") -> bool:
 def _has_context(node: NavNode) -> bool:
     """Whether a right-click on the row asks for a context menu."""
     return node.layer in _CONTEXT_LAYERS or (node.layer == "group" and node.key in _CONTEXT_GROUPS)
+
+
+def _found_link(node: NavNode) -> bool:
+    """Whether a row of the find is a link of Network streams (its id names it there, not its
+    account: as a channel, a tile or a menu would book it under no provider and play a film
+    live)."""
+    payload = node.payload
+    return isinstance(payload, dict) and provider_of(payload) == NETWORK_PROVIDER
 
 
 def _selectable(node: NavNode) -> bool:
@@ -1234,8 +1244,11 @@ class Drawer(Overlay):
         """A right-click at `pos` (viewport coordinates) of a column's list."""
         col = self._columns[side]
         row = col.view.indexAt(pos).row()
-        if 0 <= row < len(col.nodes) and _has_context(col.nodes[row]):
-            self.contextRequested.emit(col.nodes[row], col.view.viewport().mapToGlobal(pos))
+        if not 0 <= row < len(col.nodes) or not _has_context(col.nodes[row]):
+            return
+        if self.finding() and _found_link(col.nodes[row]):
+            return  # a found link plays as it was kept (Enter, a click): no channel's menu
+        self.contextRequested.emit(col.nodes[row], col.view.viewport().mapToGlobal(pos))
 
     def _on_nav_changed(self) -> None:
         if self.isVisible():
@@ -1701,6 +1714,9 @@ class Drawer(Overlay):
         live = self.finding() or (node is not None and self._nav.section_of(node) == "live")
         if node is None or node.layer != "item" or not isinstance(node.payload, dict) or not live:
             self._drag_from = None  # not a channel's row: a plain press and move
+            return None
+        if self.finding() and _found_link(node):
+            self._drag_from = None  # a found link is no channel for a tile
             return None
         return node
 

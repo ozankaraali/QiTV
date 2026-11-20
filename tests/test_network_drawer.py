@@ -12,9 +12,12 @@ from unittest import mock
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
-from PySide6.QtCore import Qt
+from PySide6.QtCore import QEvent, QPoint, QPointF, Qt
+from PySide6.QtGui import QMouseEvent
 from PySide6.QtTest import QTest
 from PySide6.QtWidgets import QApplication, QWidget
+from job_fixtures import ImmediateRunner
+from mixed_fixtures import live_content
 from timer_fixtures import elapse, wait_until
 
 from services.find import build_find_index, find_channels
@@ -30,9 +33,10 @@ from services.navigation import (
 from services.network_streams import ACCESS_ENDED, FILM, LIVE
 from services.provider_ids import ALL_PROVIDERS, NETWORK_PROVIDER
 from services.watch_state import WatchState
+from tests.test_find import FakeProviders
 from tests.test_navigation import FakeCatalog
 from tests.test_tv_window import WindowCase
-from ui.find_session import DEBOUNCE_MS
+from ui.find_session import DEBOUNCE_MS, FindSession
 from ui.overlays import drawer as drawer_module
 from ui.overlays.channel_rows import ChannelRowsModel
 from ui.overlays.drawer import CountRole, Drawer, SubRole
@@ -181,6 +185,98 @@ class RowTests(unittest.TestCase):
         drawer.activate()
         node, _siblings, parent = self.played[-1]
         self.assertEqual((node.layer, node.key, parent), (LINK_LAYER, "b2", source))
+
+
+class FoundLinkTests(unittest.TestCase):
+    """The find over one provider's channel and a film link of Network streams: the link
+    plays as it was kept (Enter, a click), and is no channel otherwise."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.app = QApplication.instance() or QApplication([])
+
+    def setUp(self):
+        self.catalog = OneProvider()
+        self.nav = NavModel(self.catalog, SimpleNamespace(favorites=[], watch_history=[]))
+        self.host = QWidget()
+        self.host.resize(1280, 720)
+        self.host.show()
+        self.addCleanup(self.host.deleteLater)
+        self.addCleanup(self.host.close)
+        self.drawer = Drawer(self.nav, None, lambda item: None, self.host)
+        caches = [("Home", {"itv": live_content(["Lecture One"], {"News": [0]})})]
+        link = {"id": "b2", "name": "Lecture recording", "_provider": NETWORK_PROVIDER}
+        finder = FindSession(FakeProviders(caches), ImmediateRunner(), links=lambda: [link])
+        self.drawer.set_finder(finder)
+        self.events = []
+        for signal, name in (
+            (self.drawer.channelDragged, "drag"),
+            (self.drawer.channelDropped, "drop"),
+            (self.drawer.contextRequested, "menu"),
+            (self.drawer.channelFound, "found"),
+        ):
+            signal.connect(lambda node, *_rest, name=name: self.events.append((name, node)))
+        self.drawer.set_drag_enabled(lambda: True)  # the multiview's grid shows
+        self.nav.reset_to("live", "10")  # a live section under the find
+        self.drawer.open_drawer()
+        self.drawer.type_text("lecture")
+        elapse(FIND_WAIT)
+        self.right = self.drawer._columns["right"]
+        self.assertTrue(wait_until(lambda: self.row("Lecture recording") is not None))
+
+    def row(self, title):
+        return next(
+            (r for r, n in enumerate(self.right.nodes) if n.layer == "item" and n.title == title),
+            None,
+        )
+
+    def centre(self, title):
+        view = self.right.view
+        return view.visualRect(view.model().index(self.row(title), 0)).center()
+
+    def mouse(self, kind, point, buttons=Qt.MouseButton.LeftButton):
+        viewport = self.right.view.viewport()
+        event = QMouseEvent(
+            kind,
+            QPointF(point),
+            QPointF(viewport.mapToGlobal(point)),
+            Qt.MouseButton.LeftButton,
+            buttons,
+            Qt.KeyboardModifier.NoModifier,
+        )
+        QApplication.sendEvent(viewport, event)
+
+    def drag(self, title):
+        start = self.centre(title)
+        self.mouse(QEvent.Type.MouseButtonPress, start)
+        self.mouse(QEvent.Type.MouseMove, start + QPoint(60, 0))
+        self.mouse(QEvent.Type.MouseMove, start + QPoint(700, 40))  # out over the grid
+        self.mouse(QEvent.Type.MouseButtonRelease, start + QPoint(700, 40), Qt.MouseButton.NoButton)
+
+    def right_click(self, title):
+        view = self.right.view
+        point = view.viewport().mapTo(self.host, self.centre(title))
+        QTest.mouseClick(self.host.windowHandle(), Qt.MouseButton.RightButton, pos=point)
+
+    def test_a_found_link_never_drags_onto_a_tile_nor_has_a_channels_menu(self):
+        self.drag("Lecture recording")
+        self.right_click("Lecture recording")
+        self.assertEqual(self.events, [])
+        self.assertIsNone(self.drawer.dragging())
+        # The provider's channel found beside it is a channel: it drags out, it has its menu.
+        self.drag("Lecture One")
+        self.right_click("Lecture One")
+        self.assertEqual(
+            [(kind, node.title) for kind, node in self.events],
+            [("drag", "Lecture One"), ("drop", "Lecture One"), ("menu", "Lecture One")],
+        )
+        elapse(QApplication.doubleClickInterval() + 80)  # (the next press is no double-click)
+        self.events.clear()
+        # A click on the link plays it as it was kept (the find's `channelFound`).
+        view = self.right.view
+        where = self.centre("Lecture recording")
+        QTest.mouseClick(view.viewport(), Qt.MouseButton.LeftButton, pos=where)
+        self.assertEqual([(kind, node.get("id")) for kind, node in self.events], [("found", "b2")])
 
 
 class FindIndexTests(unittest.TestCase):

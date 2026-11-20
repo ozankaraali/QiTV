@@ -184,6 +184,24 @@ class FilmTests(PlayerCase):
 
 
 class KeptTests(PlayerCase):
+    def test_a_kept_film_played_as_a_channel_elsewhere_stays_a_film(self):
+        # Task 5's review: a link played another way than by this player (a tile, ⟲ Recent)
+        # keeps the kind it was kept with; this player playing it so changes it.
+        self.loaded()
+        self.link(FILM_URL, FILM)
+        self.plays_now()
+        key = stream_id(FILM_URL)
+        self.assertEqual(self.store.get(key).kind, FILM)
+        item = {"id": key, "name": "Harbour", "cmd": FILM_URL, "_provider": NETWORK_PROVIDER}
+        self.opens(lambda: self.controller.tune(item, group_key=RECENT_GROUP, channels=[item]))
+        self.plays_now()  # its first picture, heard as a live link's
+        self.assertEqual(self.store.get(key).kind, FILM)
+        self.assertEqual(len(self.store.entries()), 1)
+        self.opens(lambda: self.play(1))  # another channel (the same one again would stay)
+        self.link(FILM_URL, LIVE)  # Open Link said live this time: this player's own choice
+        self.plays_now()
+        self.assertEqual(self.store.get(key).kind, LIVE)
+
     def test_a_link_that_played_is_kept_on_a_worker(self):
         older = NetworkStreams(self.path)
         kept = older.keep(URL, "Harbour News", LIVE)  # renamed in an earlier run

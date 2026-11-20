@@ -17,7 +17,9 @@ kept. `rows()` are those links as the list's rows (a film's with where it stoppe
 `find_items()` as the find's channels, plain dicts without their addresses.
 
 A link that showed its first picture is kept (`keep`, `opened`); one that did not play, or
-went for good, is kept with why (`failed`, in plain words). The store's file is read once on
+went for good, is kept with why (`failed`, in plain words). Its kind changes only as this
+player handed it over: a kept film played another way (as a channel of ⟲ Recent or a tile)
+stays a film. The store's file is read once on
 a worker (`start`), and each change is written on a worker, one write at a time with the
 newest state; nothing is written before the file was read (what played meanwhile is merged
 over it), and a file that could not be read is set aside before the first write. The links
@@ -117,6 +119,7 @@ class NetworkPlayer(QObject):
         self._writing = False  # a write on its way: the next waits for it
         self._dirty = False  # changed since the last write began
         self._set_aside = False  # the file could not be read: moved aside before the write
+        self._handed: dict[str, str] = {}  # each link's kind as this player last played it
         controller.set_links(self.url_of)
         controller.set_link_player(self.play_kept)
         controller.linkPlayed.connect(self._on_played)
@@ -219,6 +222,7 @@ class NetworkPlayer(QObject):
         of the account whose host and user name it has (else Network streams')."""
         owner = self._owner(url) or NETWORK_PROVIDER
         item = {"id": key, "name": name, "cmd": url, "_provider": owner}
+        self._handed[key] = kind
         whose = "its account's" if owner != NETWORK_PROVIDER else "no provider's"
         logger.info("Open Link: a %s link plays (%s stream)", kind.lower(), whose)
         self._controller.play_link(item, "movies" if kind == FILM else "live")
@@ -255,13 +259,17 @@ class NetworkPlayer(QObject):
         return None
 
     def _kept(self, item: dict, kind: str, url: str) -> Entry:
-        """The entry of the link `item` that played `url`: kept now if it was not (or its
-        address and kind updated), else the one its id names (its address replaced since)."""
+        """The entry of the link `item` that played `url` as `kind`: kept now if it was not (or
+        its address updated, and its kind when this player played it so), else the one its
+        id names (its address replaced since)."""
         key = item.get("id")
         entry = self.store.get(key) if isinstance(key, str) else None
-        if entry is None or entry.id == stream_id(url):
-            return self.store.keep(url, str(item.get("name") or ""), kind)
-        return entry
+        if entry is not None and entry.id != stream_id(url):
+            return entry
+        kept = entry or self.store.get(stream_id(url))
+        if kept is not None and self._handed.get(kept.id) != kind:
+            kind = kept.kind  # played another way (⟲ Recent, a tile): what it was kept as
+        return self.store.keep(url, str(item.get("name") or ""), kind)
 
     def _on_played(self, item: object, kind: str, url: str) -> None:
         if not isValid(self) or not isinstance(item, dict):
