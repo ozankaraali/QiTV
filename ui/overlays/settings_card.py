@@ -362,8 +362,8 @@ class _Card(Overlay):
         return len(tops) > 1
 
     def _rows(self) -> list[tuple[str, str]]:
-        """What ↑/↓ go between: each field, the button row (its buttons too, while they stand
-        one under another), the alternates."""
+        """What ↑/↓ go between: each field, the button row, the alternates (and, before it
+        leaves the row, between the buttons standing one under another: `_vertical`)."""
         rows = [("field", f.key) for f in self._fields]
         if self._buttons:
             rows.append(("button", ""))

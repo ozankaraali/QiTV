@@ -344,17 +344,6 @@ def _subtitles(title: str, context: Context) -> Section:
     # is kept: then it is wanted). Sign out only while there is a sign-in to forget.
     # i18n: what Settings → Subtitles' empty Username (and Password) fields show, muted
     optional = N_("Optional")
-    sign_out: tuple[Row, ...] = ()
-    if signed_in:
-        sign_out = (
-            Row(
-                SIGN_OUT,
-                N_("Sign out"),  # i18n: forget the OpenSubtitles username and password
-                # i18n: help under Settings → Subtitles → Sign out
-                N_("Clears the username and the password."),
-                kind=ACTION,
-            ),
-        )
     rows = (
         Row(
             "ai_captions_model",
@@ -398,8 +387,16 @@ def _subtitles(title: str, context: Context) -> Section:
             secret=True,
             placeholder="" if signed_in else optional,
         ),
-        *sign_out,
+        Row(
+            SIGN_OUT,
+            N_("Sign out"),  # i18n: forget the OpenSubtitles username and password
+            # i18n: help under Settings → Subtitles → Sign out
+            N_("Clears the username and the password."),
+            kind=ACTION,
+        ),
     )
+    if not signed_in:
+        rows = tuple(row for row in rows if row.key != SIGN_OUT)
     return Section(SUBTITLES, title, ICONS[SUBTITLES], rows=rows)
 
 
