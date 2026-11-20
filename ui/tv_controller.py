@@ -385,6 +385,8 @@ class TVController(QObject):
         # item its provider makes the link of), and the link whose first picture was heard.
         self._links: Callable[[dict], Optional[str]] = _own_link
         self._link_heard: Optional[Target] = None
+        # Whose stream a link is now (`set_link_owner`; None: no link), asked as it plays.
+        self._whose: Callable[[dict], Optional[str]] = lambda item: None
         # Its link kept under an id plays, by the network player (`set_link_player`).
         self._play_kept: Callable[[str], bool] = lambda key: False
         # Channel up/down while a kept link plays: its neighbour there (`set_link_stepper`).
@@ -750,6 +752,7 @@ class TVController(QObject):
                 explain=self._explain_item,
                 needs_stream=self._ask_for_stream,
                 borrow=lambda item, provider, purpose: self.lend_scheduled(item, provider, purpose),
+                owned=self._owned,
                 parent=self,
             )
             self._pip.changed.connect(self._mixer.refresh)
@@ -1211,6 +1214,24 @@ class TVController(QObject):
         player's: a token replaced since; None for an item its provider makes the link of).
         Without it a link plays its own address."""
         self._links = resolve
+
+    def set_link_owner(self, whose: Callable[[dict], Optional[str]]) -> None:
+        """`whose(item)`: whose stream the link `item` is now (the network player's: the
+        account its address names, else Network streams'; None for an item that is no link).
+        Every way a link plays books it so, and ⟲ Recent lists it so, never as it was kept."""
+        self._whose = whose
+        set_owner = getattr(self.nav, "set_link_owner", None)
+        if set_owner is not None:
+            set_owner(whose)
+
+    def _owned(self, item: dict) -> dict:
+        """`item` stamped with whose stream it is now, when it is a link (final review C1: a
+        link kept before its account was configured books under that account); any other
+        item as it is."""
+        owner = self._whose(item) if isinstance(item, dict) else None
+        if owner is None or provider_of(item) == owner:
+            return item
+        return with_provider(item, owner)
 
     def set_link_player(self, play: Callable[[str], bool]) -> None:
         """`play(id)`: the link of Network streams kept under `id` plays (the network
@@ -2045,6 +2066,9 @@ class TVController(QObject):
         the guide's past programme) instead of live."""
         if self._closed:
             return
+        channel = self._owned(channel)  # a link: whose stream it is now
+        if group_key == RECENT_GROUP:  # (where links are listed: a few rows)
+            channels = [self._owned(c) for c in channels]
         self._cancel_external()  # a newer choice: the settling external launch is dropped
         self._lanes.supersede()  # and an external play still waiting for its link
         context = self.zap.context
@@ -2225,6 +2249,7 @@ class TVController(QObject):
         """
         if self._closed:
             return
+        item = self._owned(item)  # a film link: whose stream it is now
         if from_library is None:
             from_library = self._flow.in_library()
 
@@ -3407,6 +3432,7 @@ class TVController(QObject):
         grid, sessions = self._grid, self.sessions
         if grid is None or sessions is None or self._closed or not grid.shown():
             return
+        channel = self._owned(channel)  # a link: whose stream it is now
         if self._hidden_now(channel):
             return  # 2.12: hidden, and locked: no tile plays it
         if name not in grid.names():
@@ -5704,11 +5730,31 @@ class TVController(QObject):
             self.parental_changed()  # out of the history; locked, it stops if it plays
 
     def _forget_recent(self, item: dict) -> None:
-        """The channel leaves ⟲ Recent: its plays leave the watch history (saved with it)."""
+        """The channel leaves ⟲ Recent: its plays leave the watch history (saved with it). A
+        link's go whoever's stream they were kept as (⟲ Recent lists it once, as whose it is
+        now)."""
         wanted = (provider_of(item), item_key(item))
-        if self.watch.forget(lambda entry: recent_channel(entry) == wanted):
+        if self._network_url(item) is None:
+            matches = lambda entry: recent_channel(entry) == wanted  # noqa: E731
+        else:
+            matches = self._same_link(item)
+        if self.watch.forget(matches):
             self._recents_changed()
             self._toast(tr("Removed from Recents"))  # i18n: a toast (see "Remove from Recents")
+
+    def _same_link(self, item: dict) -> Callable[[dict], bool]:
+        """Whether a watch-history entry is a play of the link `item`, under any stamp."""
+        key = item_key(item)
+
+        def matches(entry: dict) -> bool:
+            channel = recent_channel(entry)
+            if channel is None or channel[1] != key:
+                return False
+            played = entry.get("item_data")
+            stamped = with_provider(played if isinstance(played, dict) else {}, channel[0])
+            return self._network_url(stamped) is not None
+
+        return matches
 
     def _clear_recents(self) -> None:
         """Clear Recents: every channel leaves ⟲ Recent (films and episodes stay in the
@@ -5790,6 +5836,8 @@ class TVController(QObject):
         target = target or self._current
         if self._closed or target is None:
             return False
+        if not target.local:
+            target = replace(target, item=self._owned(target.item))  # a link: whose it is now
         chosen = target
         if target.local:
             path = str(target.item.get("path") or "")
@@ -5822,6 +5870,8 @@ class TVController(QObject):
         `phone`: a phone's Watch (its stream is counted: `_launch`)."""
         if self._closed:
             return
+        if not target.local:
+            target = replace(target, item=self._owned(target.item))  # a link: whose it is now
 
         def again() -> None:
             self._play_external(target, url, launcher, ask_on=ask_on, phone=phone)

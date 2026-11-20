@@ -162,6 +162,97 @@ class LivePlayTests(PlayerCase):
         self.assertEqual(cid, f"{NETWORK_PROVIDER}:movie:{stream_id(film)}")
 
 
+class OwnerAfreshTests(PlayerCase):
+    """Final review C1: an account's link played before that account was configured is kept
+    as Network streams' (no limit). Once the account is added it books under the account on
+    every path, with the account's patience: whose stream a link is is asked each time it
+    plays, never read from the stamp it was kept with. ⟲ Recent lists it once, under whose
+    stream it is now."""
+
+    ACCOUNT = "http://harbor.example:8080/live/demo/secret/7.ts"
+    ACCOUNT_FILM = "http://harbor.example:8080/movie/demo/secret/55.mkv"
+
+    def setUp(self):
+        super().setUp()
+        self.harbor = self.catalog.specs.pop("Harbor IPTV")  # not configured yet
+        self.loaded()
+
+    def kept_before(self, url, kind=LIVE):
+        """`url` played before its account was added (its item as it was kept), then the
+        account added, and a channel of the browsed provider played meanwhile."""
+        self.link(url, kind)
+        self.plays_now()
+        provider, item, *_ = self.watch.plays[-1]
+        self.assertEqual((provider, item["_provider"]), (NETWORK_PROVIDER, NETWORK_PROVIDER))
+        self.catalog.specs["Harbor IPTV"] = self.harbor
+        self.catalog.names.append("Harbor IPTV")
+        self.opens(lambda: self.play(1))
+        self.assertEqual(self.budget.holders(NETWORK_PROVIDER), [])
+        return item
+
+    def recent(self):
+        return self.nav.children(NavNode("group", RECENT_GROUP, "Recent"))
+
+    def test_a_link_kept_as_no_providers_plays_as_its_accounts(self):
+        item = self.kept_before(self.ACCOUNT)
+        self.config.watch_history = [tvc.watched(NETWORK_PROVIDER, item)]
+        self.assertEqual([r.payload["_provider"] for r in self.recent()], ["Harbor IPTV"])
+        # Played as it was kept (a zap context, Play again, a drag made before): the same.
+        self.opens(lambda: self.controller.tune(item, group_key=RECENT_GROUP, channels=[item]))
+        self.assertEqual(self.controller.now_playing().item["_provider"], "Harbor IPTV")
+        self.assertTrue(wait_until(lambda: self.budget.holders("Harbor IPTV") == ["main"]))
+        self.assertEqual(self.budget.holders(NETWORK_PROVIDER), [])
+        self.assertFalse(self.starts()[-1][1].get("once", False))  # the account's patience
+        self.assertEqual(self.watch.plays[-1][0], "Harbor IPTV")
+
+    def test_a_film_kept_as_no_providers_plays_as_its_accounts(self):
+        item = self.kept_before(self.ACCOUNT_FILM, FILM)
+        self.opens(lambda: self.controller.play_vod(item, "movie", tvc.play_context()))
+        self.assertEqual(self.session.plays[-1][0], self.ACCOUNT_FILM)
+        self.assertEqual(self.budget.holders("Harbor IPTV"), ["main"])
+        self.assertEqual(self.budget.holders(NETWORK_PROVIDER), [])
+
+    def test_the_phones_watch_counts_it_as_its_accounts(self):
+        item = self.kept_before(self.ACCOUNT)
+        launched = []
+        target = tvc.Target(item, "live", "Seven", group_key=RECENT_GROUP)
+        stops = len(self.live.named("stop"))
+        self.assertTrue(
+            self.controller.play_elsewhere(
+                lambda t, url: launched.append(url) or (True, ""), target
+            )
+        )
+        self.assertTrue(wait_until(lambda: len(self.live.named("stop")) > stops))
+        self.live.released.emit()  # QiTV's own stream let go first
+        self.assertTrue(wait_until(lambda: launched == [self.ACCOUNT]))
+        self.assertEqual(self.budget.holders("Harbor IPTV"), ["main"])  # the phone's
+        self.assertEqual(self.budget.holders(NETWORK_PROVIDER), [])
+
+    def test_recent_lists_a_link_once_and_takes_it_out_whole(self):
+        item = self.kept_before(self.ACCOUNT)
+        owned = {**item, "_provider": "Harbor IPTV"}
+        self.config.watch_history = [
+            tvc.watched("Harbor IPTV", owned),
+            tvc.watched(NETWORK_PROVIDER, item),
+            tvc.watched("Home", tvc.CHANNELS[1]),
+        ]
+        rows = self.recent()
+        self.assertEqual(
+            [(r.payload["_provider"], r.payload["id"]) for r in rows],
+            [("Harbor IPTV", item["id"]), ("Home", tvc.CHANNELS[1]["id"])],
+        )
+        # Its account removed, it is still listed: a link plays without it, as no provider's.
+        self.catalog.names.remove("Harbor IPTV")
+        del self.catalog.specs["Harbor IPTV"]
+        rows = self.recent()
+        self.assertEqual(rows[0].payload["_provider"], NETWORK_PROVIDER)
+        self.assertEqual(len(rows), 2)
+        # Remove from Recents takes it out whatever it was kept under.
+        self.controller.watch = tvc.WatchState(self.config)
+        self.controller._forget_recent(rows[0].payload)
+        self.assertEqual([e["provider_name"] for e in self.config.watch_history], ["Home"])
+
+
 class FilmTests(PlayerCase):
     def test_a_film_resumes_after_a_fresh_token(self):
         self.loaded()

@@ -109,6 +109,9 @@ class FakeController(QObject):
     def set_links(self, resolve):
         self.resolve = resolve
 
+    def set_link_owner(self, whose):
+        self.whose = whose
+
     def set_link_player(self, play):
         self.play_kept = play
 

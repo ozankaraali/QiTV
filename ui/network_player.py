@@ -11,7 +11,10 @@ its resume point kept under Network streams by its id.
 
 The controller asks `url_of(item)` for a link's address as it plays now (a link of ⟲ Recent
 too): the kept entry's, whose address may have been replaced since, else the item's own;
-None for an item its provider makes the link of. A kept link chosen in the channel list's
+None for an item its provider makes the link of. It asks `whose(item)` whose stream a link is
+each time it plays, from any path (⟲ Recent, a tile, the picture in picture, the phone's
+Watch), and so does ⟲ Recent as it lists it: never the stamp it was kept with (an account
+configured after its link played owns it from then on). A kept link chosen in the channel list's
 Network streams, or found by its find, plays by its id (`play_kept`): its address and kind as
 kept. Channel up/down while a kept link plays steps to the next or previous kept link (`step`),
 in Network streams' order as the steps began, round from the last to the first. `rows()` are
@@ -134,6 +137,7 @@ class NetworkPlayer(QObject):
         self._steps: list[str] = []
         self._stepped = ""
         controller.set_links(self.url_of)
+        controller.set_link_owner(self.whose)
         controller.set_link_player(self.play_kept)
         controller.set_link_stepper(self.step)
         controller.linkPlayed.connect(self._on_played)
@@ -300,6 +304,13 @@ class NetworkPlayer(QObject):
         if is_link(item):
             return str(item.get("cmd") or "").strip() or None
         return None
+
+    def whose(self, item: dict) -> Optional[str]:
+        """Whose stream the link `item` is now: the configured account whose host and user name
+        its address has, else Network streams'; None for an item that is no link. Asked as it
+        plays, never read from the stamp it was kept with."""
+        url = self.url_of(item)
+        return None if url is None else (self._owner(url) or NETWORK_PROVIDER)
 
     def _kept(self, item: dict, kind: str, url: str) -> Entry:
         """The entry of the link `item` that played `url` as `kind`: kept now if it was not (or
