@@ -13,6 +13,7 @@ from PySide6.QtTest import QTest
 from test_tv_window import WindowCase, wait_until
 from timer_fixtures import pause
 
+from services.navigation import SETTINGS_ROW
 from services.remote.protocol import (
     Answered,
     CaptionsLanguage,
@@ -159,6 +160,30 @@ class RemoteDispatchTests(WindowCase):
         self.assertTrue(wait_until(lambda: controller.key_context() == "guide"))
         self.remote().fire("tv")
         self.assertTrue(wait_until(lambda: controller.key_context() == "player"))
+
+    def test_tv_closes_settings_from_any_of_its_layers(self):
+        """The phone's TV over Settings opened from the channel list, in a layer of it with the
+        keys on its rows: Settings goes at once (its Esc goes one layer up), the list does
+        not come back, the picture shows."""
+        self.show()
+        drawer = self.wait_for_drawer()
+        controller = self.window.controller
+        with mock.patch("ui.tv_window.OptionsDialog"):  # never a modal window here
+            self.window.menus.on_drawer_action(SETTINGS_ROW)
+            settings = self.window.settings_drawer
+            for key in (Qt.Key.Key_Down, Qt.Key.Key_Down, Qt.Key.Key_Right):  # Playback's rows
+                QTest.keyClick(self.window, key)
+            for _ in range(len(settings._right_rows())):
+                if settings.focused_row().key == "autoplay":
+                    break
+                QTest.keyClick(self.window, Qt.Key.Key_Down)
+            QTest.keyClick(self.window, Qt.Key.Key_Return)  # its layer
+            self.assertEqual(settings.path(), ("playback", "autoplay"))
+            self.assertEqual(settings.focus_side(), "right")
+            self.remote().fire("tv")
+        self.assertFalse(self.window.settings.visible())
+        self.assertFalse(drawer.isVisible())
+        self.assertEqual(controller.key_context(), "player")
 
     def test_a_press_from_another_thread_reaches_the_gui(self):
         self.show()

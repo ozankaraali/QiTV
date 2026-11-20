@@ -47,6 +47,7 @@ from ui.overlays.drawer import (
     PROVIDER_ERROR_TEXT,
     REFRESH_ACTION,
     SEARCH_ACTION,
+    SETTINGS_BUTTON,
     CountRole,
     Drawer,
     IconRole,
@@ -439,7 +440,7 @@ class DrawerTests(unittest.TestCase):
             self.assertLessEqual(icon.bottom(), d._columns["left"].view.geometry().top())
         self.click(gear.center())
         self.click(refresh.center())
-        self.assertEqual(self.actions, [SETTINGS_ROW, REFRESH_ACTION])
+        self.assertEqual(self.actions, [SETTINGS_BUTTON, REFRESH_ACTION])
 
     def test_the_header_has_search_left_of_refresh(self):
         # Every key has a control on screen (2.0.1): Ctrl/⌘+F has a button in the channel list.
@@ -476,7 +477,7 @@ class DrawerTests(unittest.TestCase):
         for name, rect in (
             (SEARCH_ACTION, d.search_rect()),
             (REFRESH_ACTION, d.refresh_rect()),
-            (SETTINGS_ROW, d.settings_gear_rect()),
+            (SETTINGS_BUTTON, d.settings_gear_rect()),
         ):
             with self.subTest(name=name):
                 hit = d.header_hit_rect(rect)
@@ -522,7 +523,7 @@ class DrawerTests(unittest.TestCase):
         ):
             self.assertTrue(self.drawer._columns["left"].rect.contains(rect.toRect()))
         self.click(self.drawer.settings_gear_rect().center())
-        self.assertEqual(self.actions, [SETTINGS_ROW])
+        self.assertEqual(self.actions, [SETTINGS_BUTTON])
 
     def test_the_sources_have_a_title_and_a_rule_above_their_action_rows(self):
         drawn, elided = [], drawer_module.elided

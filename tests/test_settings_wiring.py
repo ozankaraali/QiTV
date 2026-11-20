@@ -1,6 +1,7 @@
 """Settings in the drawer, wired into the TV window (plan 1): the drawer's Settings row and ⚙
 and the menu's Settings… (Ctrl/⌘+,) open it over live TV, backing out of it gives the drawer
-back on its Settings row when it came from there, and the Settings window opens on a tab."""
+back (on its Settings row from there, where it was from ⚙), a step reaches what it changes,
+and the Settings window opens on a tab."""
 
 import os
 import unittest
@@ -65,7 +66,7 @@ class SettingsWiringTests(base.WindowCase):
         settings = self.window.settings
         QTest.keyClicks(self.window, "o")  # mid-find
         self.assertEqual(drawer.find_text, "o")
-        self.window.menus.on_drawer_action(SETTINGS_ROW)  # its row, or ⚙ in its header
+        self.window.menus.on_drawer_action(SETTINGS_ROW)  # its row
         self.assertTrue(settings.visible())
         self.assertFalse(drawer.isVisible())
         self.assertEqual(drawer.find_text, "")  # the find ended
@@ -81,6 +82,54 @@ class SettingsWiringTests(base.WindowCase):
         self.assertTrue(settings.visible())
         self.assertFalse(drawer.isVisible())
         self.dialog.assert_not_called()
+
+    def test_the_gear_in_a_group_backs_out_to_where_the_list_was(self):
+        # ⚙ in a group, mid-find: backing out of Settings gives the list back in that group, on
+        # the row and the side the keys were on before the find (closing the list ended it).
+        self.show()
+        drawer = self.wait_for_drawer()
+        QTest.keyClick(self.window, Qt.Key.Key_Return)  # into the highlighted group
+
+        def on(title):
+            node = drawer.highlighted()
+            return node is not None and node.layer == "item" and node.title == title
+
+        self.assertTrue(wait_until(lambda: on("Channel 1")))
+        QTest.keyClick(self.window, Qt.Key.Key_Down)
+        self.assertTrue(wait_until(lambda: on("Channel 2")))
+        path = list(self.window.nav.path)
+        QTest.keyClicks(self.window, "o")  # mid-find
+        self.assertTrue(drawer.finding())
+        gear = drawer.settings_gear_rect().center().toPoint()
+        QTest.mouseClick(drawer, Qt.MouseButton.LeftButton, pos=gear)
+        self.assertTrue(self.window.settings.visible())
+        self.assertFalse(drawer.isVisible())
+        QTest.keyClick(self.window, Qt.Key.Key_Right)  # the section's rows
+        for _ in range(2):  # rows → sections → closed
+            QTest.keyClick(self.window, Qt.Key.Key_Escape)
+        self.assertFalse(self.window.settings.visible())
+        self.assertTrue(drawer.isVisible())
+        self.assertEqual(self.window.nav.path, path)
+        self.assertEqual(drawer.focus_side, "right")
+        self.assertTrue(wait_until(lambda: on("Channel 2")))
+        self.assertEqual(drawer.find_text, "")
+        self.dialog.assert_not_called()
+
+    def test_a_live_latency_step_reaches_the_running_channel(self):
+        # The window's hooks are keyed by the rows' keys: a step on Live latency is applied to
+        # the tuners at once (TVController.settings_saved), not only written.
+        self.show()
+        self.wait_for_drawer()
+        self.menu_actions()["Settings…"].trigger()
+        for key in (Qt.Key.Key_Down, Qt.Key.Key_Down, Qt.Key.Key_Right):  # Playback's rows
+            QTest.keyClick(self.window, key)
+        self.assertEqual(self.window.settings_drawer.focused_row().key, "live_latency")
+        self.assertEqual(self.config.live_latency, "auto")
+        tuner = mock.Mock()
+        with mock.patch.object(self.window.controller, "_tuners", return_value=[tuner]):
+            QTest.keyClick(self.window, Qt.Key.Key_Right)
+        self.assertEqual(self.config.live_latency, "low")
+        tuner.set_latency.assert_called_once_with("low")
 
     def test_the_menu_opens_settings_without_the_drawer(self):
         self.show()

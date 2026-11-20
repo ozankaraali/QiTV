@@ -494,9 +494,13 @@ class FakeDrawer(FakeOverlay):
     closed = Signal()
     highlight = None
     found = False  # the find lists what it found
+    focus_side = "right"
 
     def highlighted(self):
         return self.highlight
+
+    def resume_point(self):
+        return self.focus_side, self.highlight.key if self.highlight is not None else None
 
     def field_key(self, action, payload=""):
         return False  # no Find box caret here (2.9.3: the real one's in test_drawer)
@@ -5938,6 +5942,74 @@ class SettingsLayerTests(ControllerTestCase):
         self.assertFalse(self.settings.visible())
         self.assertEqual([n.layer for n in self.nav.path], ["source"])
         self.assertEqual(self.drawer.named("open_drawer"), [(SETTINGS_ROW, "left")])
+
+    def in_a_group(self, side, highlight):
+        """The list open in group 10, the keys on `side` on `highlight`; its path."""
+        self.nav.reset_to("live", "10")
+        self.drawer.visible = True
+        self.drawer.focus_side = side
+        self.drawer.highlight = highlight
+        return [(n.layer, n.key) for n in self.nav.path]
+
+    def test_backing_out_from_the_gear_reopens_the_list_where_it_was(self):
+        # ⚙ from inside a group: back out of Settings and the list is there again, the keys
+        # on the side and the row they were on (as the Settings window left it).
+        cases = (
+            ("right", NavNode("item", "2", "Two", CHANNELS[1]), ("2",)),
+            ("left", NavNode("group", "10", "Ten"), ("10", "left")),
+        )
+        for side, highlight, reopened in cases:
+            with self.subTest(side):
+                self.drawer.calls.clear()
+                path = self.in_a_group(side, highlight)
+                self.controller.make_way_for_settings(keep_place=True)  # as TVWindow
+                self.settings.open(from_drawer=True)
+                self.assertFalse(self.drawer.visible)
+                with mock.patch.object(
+                    self.controller, "_update_guides", wraps=self.controller._update_guides
+                ) as guides:
+                    self.controller.handle(Action.NAV_RIGHT)  # the section's rows
+                    self.controller.handle(Action.ESCAPE)
+                    self.controller.handle(Action.ESCAPE)
+                self.assertFalse(self.settings.visible())
+                self.assertEqual([(n.layer, n.key) for n in self.nav.path], path)
+                self.assertEqual(self.drawer.named("open_drawer"), [reopened])
+                guides.assert_called()  # its group's providers are in use again
+
+    def test_backing_out_from_the_settings_row_in_a_group_lands_on_the_row(self):
+        self.in_a_group("left", NavNode("action", SETTINGS_ROW, "Settings"))
+        self.controller.make_way_for_settings()
+        self.settings.open(from_drawer=True)
+        self.controller.handle(Action.ESCAPE)
+        self.assertEqual([n.layer for n in self.nav.path], ["source"])
+        self.assertEqual(self.drawer.named("open_drawer"), [(SETTINGS_ROW, "left")])
+
+    def test_a_place_kept_is_used_once(self):
+        # Closed another way (a click on the picture), the next Settings from the row does not
+        # land where the ⚙ was.
+        self.in_a_group("right", NavNode("item", "2", "Two", CHANNELS[1]))
+        self.controller.make_way_for_settings(keep_place=True)
+        self.settings.open(from_drawer=True)
+        self.controller.video_clicked()
+        self.assertFalse(self.settings.visible())
+        self.settings.open(from_drawer=True)  # the row, the list already closed
+        self.controller.handle(Action.ESCAPE)
+        self.assertEqual(self.drawer.named("open_drawer"), [(SETTINGS_ROW, "left")])
+
+    def test_backing_out_without_a_provider_shows_the_welcome_card(self):
+        # As the list asked for without a provider: the card, never an empty list.
+        self.catalog.names = []
+        self.settings.open(from_drawer=True)
+        self.controller.handle(Action.ESCAPE)
+        self.assertFalse(self.settings.visible())
+        self.assertTrue(self.welcome.visible)
+        self.assertEqual(self.drawer.named("open_drawer"), [])
+
+    def test_close_settings_never_gives_the_list_back(self):
+        self.settings.open(from_drawer=True)
+        self.controller.close_settings()
+        self.assertFalse(self.settings.visible())
+        self.assertEqual(self.drawer.named("open_drawer"), [])
 
     def test_a_video_click_closes_settings(self):
         self.settings.open(from_drawer=True)

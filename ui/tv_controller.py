@@ -424,6 +424,9 @@ class TVController(QObject):
         )
         # Settings in the drawer (the window's, set_settings): None until it is wired.
         self._settings: Optional[SettingsController] = None
+        # Where the list was when its ⚙ opened Settings (its keys' side and highlighted row,
+        # Drawer.resume_point): it comes back there once Settings is backed out of.
+        self._settings_place: Optional[tuple[str, Any]] = None
         # Provider setups: the loading and welcome hints, the last channel, the Library's
         # hold on live TV.
         self._flow = ProviderFlow(
@@ -1073,7 +1076,7 @@ class TVController(QObject):
         overlays = self.overlays
         overlays.column.close()
         overlays.drawer.close_drawer()
-        self._close_settings()
+        self.close_settings()
         overlays.banner.dismiss()
         overlays.transport.dismiss()
         self._tracks.close()
@@ -1130,7 +1133,7 @@ class TVController(QObject):
         overlays = self.overlays
         overlays.column.close()
         overlays.drawer.close_drawer()
-        self._close_settings()
+        self.close_settings()
         overlays.banner.dismiss()
         overlays.transport.dismiss()
         self._mixer.hide()
@@ -1454,17 +1457,22 @@ class TVController(QObject):
         self.overlays.drawer.installEventFilter(self)
         self.overlays.welcome.installEventFilter(self)
 
-    def make_way_for_settings(self) -> None:
+    def make_way_for_settings(self, keep_place: bool = False) -> None:
         """Settings is opening over the player: what would keep the keys hidden under it
         closes, each as it closes by itself (the channel list, the guide, the OpenSubtitles
         search, the ⚙ quality menu, the phone remote's pairing screen), so the keys always go
         to what shows. The welcome card gives way until Settings goes (ProviderFlow, its
         owner). A question (stop a recording? convert? download?) keeps the keys, and stays
-        above Settings."""
+        above Settings. `keep_place` (the list's ⚙): where the list is, its path and its keys'
+        side and row, is kept for when Settings is backed out of (reopen_drawer_on_settings);
+        closing it leaves the path as it is."""
         if self._closed:
             return
         overlays = self.overlays
+        self._settings_place = None
         if overlays.drawer.isVisible():
+            if keep_place:
+                self._settings_place = overlays.drawer.resume_point()
             overlays.drawer.close_drawer()
         if self._guide.is_open():
             self._guide.close()
@@ -1484,17 +1492,31 @@ class TVController(QObject):
     def _settings_shown(self) -> bool:
         return self._settings is not None and self._settings.visible()
 
-    def _close_settings(self) -> None:
+    def close_settings(self) -> None:
+        """Hide Settings, the list not given back (a click on the picture, the Library, the
+        phone's TV button)."""
+        self._settings_place = None
         if self._settings is not None and self._settings.visible():
             self._settings.close()
 
     def reopen_drawer_on_settings(self) -> None:
-        """Backed out of Settings opened from the drawer (its Settings row or ⚙): the list
-        again, on the sources with Settings highlighted (Enter opens it again)."""
+        """Backed out of Settings opened from the drawer: the list again. From its ⚙, where
+        it was (the path closing left, the keys' side and row: make_way_for_settings); from
+        its Settings row, on the sources with Settings highlighted (Enter opens it again).
+        Without a provider, the welcome card, as the list asked for shows it."""
         if self._closed:
             return
-        self.nav.focus_source(self.catalog.current_provider_name())
-        self.overlays.drawer.open_drawer(focus_key=SETTINGS_ROW, focus_side="left")
+        place, self._settings_place = self._settings_place, None
+        if not self.catalog.provider_names():
+            self._flow.welcome(chosen=True)
+            return
+        if place is not None:
+            side, key = place
+            self.overlays.drawer.open_drawer(focus_key=key, focus_side=side)
+        else:
+            self.nav.focus_source(self.catalog.current_provider_name())
+            self.overlays.drawer.open_drawer(focus_key=SETTINGS_ROW, focus_side="left")
+        self._update_guides()  # the drawer is visible now: its group's providers are in use
 
     def overlay_open(self) -> bool:
         """Whether Esc would close something first: Settings, the drawer, the guide, the Next
@@ -1742,7 +1764,7 @@ class TVController(QObject):
         owner: never the channel list there) the film pauses or plays on, its controls
         showing."""
         if self._settings_shown():
-            self._close_settings()  # as the list: it does not come back
+            self.close_settings()  # as the list: it does not come back
         elif self.overlays.drawer.isVisible():
             self.overlays.drawer.close_drawer()
         elif self._on_demand():
@@ -1830,7 +1852,7 @@ class TVController(QObject):
     def eventFilter(self, watched: QObject, event: QEvent) -> bool:
         if watched is self.overlays.drawer or watched is self.overlays.welcome:
             if event.type() == QEvent.Type.Show and self._settings_shown():
-                self._close_settings()
+                self.close_settings()
             return False
         if isinstance(event, QWheelEvent) and self.overlays.column.isVisible():
             self._column_wheel.wheel_event(event)

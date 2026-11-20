@@ -143,6 +143,9 @@ REFRESH_ACTION = "refresh"  # the header's refresh button: the provider's channe
 SEARCH_ACTION = "search"  # the header's ⌕: the Library's search
 LIBRARY_ACTION = "library"  # 2.8: the header's Library button (Movies, or the section last open)
 BACK_BUTTON = "back"  # the header's ‹: a layer up
+# The header's ⚙ (the Settings row's own key is SETTINGS_ROW): Settings, which gives the list
+# back where it was once backed out of, as the Settings window left it.
+SETTINGS_BUTTON = "settings_button"
 _CRUMB = "crumb:"  # a name in the header, by its path index ("crumb:up": the elided head)
 SEPARATOR = " › "
 # The texts below stay English (the code compares them); translate() shows them, and the
@@ -669,7 +672,7 @@ class Drawer(Overlay):
     playRequested = Signal(object, object, object)
     contextRequested = Signal(object, QPoint)  # node, global position
     # An action row (SETTINGS_ROW, ADD_PROVIDER_ROW, OPEN_FILE_ROW) or a header button
-    # (SETTINGS_ROW, REFRESH_ACTION, SEARCH_ACTION, LIBRARY_ACTION).
+    # (SETTINGS_BUTTON, REFRESH_ACTION, SEARCH_ACTION, LIBRARY_ACTION).
     actionRequested = Signal(str)
     libraryRequested = Signal(str)  # "movies" or "series", for the Library
     # A channel the find found (stamped with its provider), and the genre it is first listed in.
@@ -778,6 +781,24 @@ class Drawer(Overlay):
     def highlighted(self) -> NavNode | None:
         col = self._columns[self.focus_side]
         return col.current if col.current in col.rows else None
+
+    def resume_point(self) -> tuple[str, str | tuple[str, str] | None]:
+        """Where the keys are, for open_drawer to come back to: the focused column ("left" or
+        "right") and its highlighted row's focus key (None: none). During a find, where they
+        were before it, as Esc leaves them: closing the list ends the find."""
+        side, node = self.focus_side, self.highlighted()
+        if self._before_find is not None:
+            place, side = self._before_find
+            if side == "right":
+                node = place.current
+            else:  # the find lists in the right column: the left one is as it was
+                left = self._columns["left"]
+                node = left.current if left.current in left.rows else None
+        if node is None:
+            return side, None
+        provider = provider_of(node.payload) if isinstance(node.payload, dict) else ""
+        key: str | tuple[str, str] = (provider, node.key) if provider else node.key
+        return side, key
 
     def message_for(self, side: str) -> str | None:
         return self._columns[side].message
@@ -1381,7 +1402,9 @@ class Drawer(Overlay):
         event.accept()
         button = self._header_button_at(event.position())
         if event.button() == Qt.LeftButton and button is not None:
-            if button in (SETTINGS_ROW, REFRESH_ACTION, SEARCH_ACTION, LIBRARY_ACTION):
+            if button == SETTINGS_ROW:  # (the ⚙'s name here: its hover, its tooltip)
+                self.actionRequested.emit(SETTINGS_BUTTON)
+            elif button in (REFRESH_ACTION, SEARCH_ACTION, LIBRARY_ACTION):
                 self.actionRequested.emit(button)
             elif button == FIND_ACTION:
                 shift = bool(event.modifiers() & Qt.ShiftModifier)
