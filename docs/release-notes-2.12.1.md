@@ -2,13 +2,13 @@
 
 QiTV 2.12.1 makes Turkish AI captions more accurate: QiTV's own Turkish speech model is now read
 with a language model of its own, which gets fewer words wrong, most on news and read speech,
-at the same speed. 2.12.1 also brings 2.12.0, a pre-release, which moves Settings into the TV
-window. It opens where the channel list opens, beside the picture, which keeps playing, and every
-change applies at once, with no Save. Your providers are a list there, and a pasted link never
-turns one provider into another. File → Open Link… plays a single stream's link, and every link
-that played is kept in Network streams. Deinterlacing is Auto or Off, in Settings › Playback. On
-top of that come 2.11.2's captions, which hear the language the content speaks and remember a
-translation for each spoken language, and 2.11's videos and music from your computer.
+at about the same speed. 2.12.1 also brings 2.12.0, a pre-release, which moves Settings into the
+TV window. It opens where the channel list opens, beside the picture, which keeps playing, and
+every change applies at once, with no Save. Your providers are a list there, and a pasted link
+never turns one provider into another. File → Open Link… plays a single stream's link, and every
+link that played is kept in Network streams. Deinterlacing is Auto or Off, in Settings ›
+Playback. On top of that come 2.11.2's captions, which hear the language the content speaks and
+remember a translation for each spoken language, and 2.11's videos and music from your computer.
 
 **Download QiTV from [qitv.app](https://qitv.app), which picks the right build for your
 computer, or from [Releases](https://github.com/ozankaraali/QiTV/releases). Please don't use
@@ -21,7 +21,7 @@ others' distributions, which may have malware.**
   readings that sound alike. On twelve Turkish test sets it makes 0.6 fewer mistakes in every
   100 words on average, nine sets came out better and none worse. News and read speech gain the
   most, about one word in every 100; TV series and other drama come out about the same.
-- **The same speed.** Captions keep up as before, older processors included.
+- **About the same speed.** Captions keep up as before, older processors included.
 - **A 39 MB download comes with the Turkish model,** which is 317 MB in all instead of 278 MB.
   If you already have the Turkish model, QiTV downloads only the new part, once and without
   asking, the next time Turkish captions start. Turkish captions go on meanwhile and use it as

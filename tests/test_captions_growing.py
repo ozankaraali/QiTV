@@ -608,7 +608,7 @@ class ModelLoadTest(unittest.TestCase):
 
         from services.captions import worker
 
-        path, made = lm_file(), []
+        path, made = lm_file(self), []
 
         def factory(where, api):
             made.append(Path(where))
@@ -642,7 +642,7 @@ class ModelLoadTest(unittest.TestCase):
             raise OSError("lm.int8.onnx is damaged")
 
         with self.assertLogs("services.captions.moon_reading", "WARNING") as logs:
-            model = self.load(self._Beam, [], broken, turkish_lm=str(lm_file()))
+            model = self.load(self._Beam, [], broken, turkish_lm=str(lm_file(self)))
         self.assertEqual(len(logs.records), 1)
         self.assertTrue(model.moonshine)
         self.assertEqual(model.decode(array("f", bytes(4 * 1600)), worker.TURKISH), "iyi akşamlar")
@@ -656,7 +656,7 @@ class ModelLoadTest(unittest.TestCase):
         model = self.load(self._Beam, [], lambda where, api: PrefersEleven())
         sound = array("f", bytes(4 * 1600))
         self.assertEqual(model.decode(sound, worker.TURKISH), "iyi akşamlar")
-        model.use_turkish_lm(str(lm_file()))
+        model.use_turkish_lm(str(lm_file(self)))
         self.assertEqual(model.decode(sound, worker.TURKISH), "11")
 
     def test_a_turkish_lm_message_reaches_the_model(self) -> None:

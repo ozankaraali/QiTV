@@ -2209,6 +2209,21 @@ class StepDownTests(unittest.TestCase):
         self.assertTrue(told[1].endswith(lm))  # ... read with it from the next piece
         self.assertEqual(self.toasts, [])
 
+    def test_while_the_lm_downloads_the_captions_say_what_they_would_say(self):
+        # the review: the Subtitles note and the phones said "Downloading N%" for the 39 MB
+        started = self.lm_started()
+        before = self.captions.status_text()
+        self.captions._offer_specialist()
+        self.assertEqual(started, ["turkish_lm"])
+        self.captions._download = object()
+        self.captions._percent = 40
+        self.assertEqual(self.captions.status_text(), before)
+        self.assertNotIn("Downloading", self.captions.status_text())
+        self.assertFalse(self.captions.downloading())
+        self.captions._fetching = "turkish"  # a language's own model: said, as before
+        self.assertEqual(self.captions.status_text(), "Downloading 40%")
+        self.assertTrue(self.captions.downloading())
+
     def test_the_lm_waits_while_another_question_shows_or_a_download_runs(self):
         started = self.lm_started()
         self.captions._asking = True

@@ -393,7 +393,7 @@ class CaptionsController(QObject):
             self.levels.emit(self._session_key, start_ms, frame_ms, blob)
 
     def status_text(self) -> str:
-        if self._download is not None:
+        if self._download is not None and not self._fetching_quietly():
             if self._unpacking:
                 return translate(PREPARING)
             return translate(DOWNLOADING, percent=self._percent)
@@ -543,7 +543,16 @@ class CaptionsController(QObject):
 
     def downloading(self) -> bool:
         """The speech model downloads: they are on their way (the row's tap calls them off)."""
-        return self._download is not None
+        return self._download is not None and not self._fetching_quietly()
+
+    def _fetching_quietly(self) -> bool:
+        """2.12.1: what a model gained since (the Turkish LM) downloads while captions are on:
+        nothing says so, the captions' own state shows ("Catching up", ...)."""
+        if not self._enabled:
+            return False
+        from services.captions.models import EXTRAS
+
+        return self._fetching in EXTRAS.values()
 
     def asking(self) -> bool:
         """The download's question is up: on the TV, and on a phone that turned them on."""

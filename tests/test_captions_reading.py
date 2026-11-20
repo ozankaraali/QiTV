@@ -6,6 +6,7 @@ record what they were asked; no onnxruntime."""
 from array import array
 from contextlib import contextmanager
 from pathlib import Path
+import shutil
 import tempfile
 import threading
 import time
@@ -38,19 +39,25 @@ class FakeModel:
     def __init__(self, rows=CLOSE_SECOND, fail_at=None):
         self._api = object()
         self.rows = rows
-        self.fail_at = fail_at
+        self.fail_at = fail_at  # each decode's step that fails (onnxruntime's error)
+        self.fail_once = False  # ... only the first decode's
+        self.encode_fails = 0  # encodes that fail, the first ones
         self.encoded = []
         self.steps_made = []
         self.silent = False
 
     def encode(self, samples):
+        if self.encode_fails:
+            self.encode_fails -= 1
+            raise RuntimeError("onnxruntime: the encoder's run")
         encoded = FakeEncoded(self.silent)
         self.encoded.append(encoded)
         return encoded
 
     @contextmanager
     def steps(self, encoded):
-        steps = FakeSteps(table(self.rows), fail_at=self.fail_at)
+        fails = self.fail_at if not (self.fail_once and self.steps_made) else None
+        steps = FakeSteps(table(self.rows), fail_at=fails)
         self.steps_made.append(steps)
         yield steps
 
@@ -86,8 +93,10 @@ class PrefersEleven:
         self.closed = True
 
 
-def lm_file():
+def lm_file(test):
+    """An LM's file in a folder of its own, gone after `test`."""
     folder = Path(tempfile.mkdtemp())
+    test.addCleanup(shutil.rmtree, folder, True)
     path = folder / "lm" / "lm.int8.onnx"
     path.parent.mkdir()
     path.write_bytes(b"x")
@@ -105,7 +114,7 @@ class TurkishReaderTests(unittest.TestCase):
 
     def reader(self, lm="file", model=None, factory=None):
         model = model or FakeModel()
-        path = lm_file() if lm == "file" else lm
+        path = lm_file(self) if lm == "file" else lm
         return moon_reading.TurkishReader(beam_of(model), path, lm_factory=factory or self.factory)
 
     def test_with_the_lm_the_beam_writes_what_the_lm_prefers(self):
@@ -128,7 +137,9 @@ class TurkishReaderTests(unittest.TestCase):
 
         with mock.patch.object(moon_reading, "search", search):
             self.reader().transcribe([0.0] * 16000)
-        self.assertEqual(searched, [(moon_reading.LM_SETTINGS, self.lm)])
+        [(settings, lm)] = searched
+        self.assertEqual(settings, moon_reading.LM_SETTINGS)
+        self.assertIs(lm.lm, self.lm)  # (its errors told from the model's)
 
     def test_without_the_lm_file_it_reads_as_2_12_0(self):
         reader = self.reader(lm=None)
@@ -162,16 +173,35 @@ class TurkishReaderTests(unittest.TestCase):
             self.assertEqual(reader.transcribe([0.0] * 16000), "10")
         self.assertEqual(len(self.lm.asked), asked)  # never asked again
         self.assertEqual(len(logs.records), 1)
-        self.assertIn("failed", logs.records[0].getMessage())
+        self.assertIn("the Turkish language model failed", logs.records[0].getMessage())
+        self.assertIn("RuntimeError: onnxruntime: the LM's run", logs.records[0].getMessage())
         self.assertTrue(all(encoded.released for encoded in model.encoded))
         self.assertTrue(all(steps.alive == set() for steps in model.steps_made))
+
+    def test_the_model_s_own_failure_leaves_the_lm_on(self):
+        # its encoder or its decoder failing once, in a reading with the LM: the beam alone
+        # reads that piece again, and the next piece is the LM's again
+        for where in ("encoder", "decoder"):
+            with self.subTest(where=where):
+                model = FakeModel(fail_at=1)
+                model.fail_once = True
+                if where == "encoder":
+                    model.fail_at, model.encode_fails = None, 1
+                reader = self.reader(model=model)
+                with self.assertLogs("services.captions.moon_reading", "WARNING") as logs:
+                    self.assertEqual(reader.transcribe([0.0] * 16000), "10")  # the beam's
+                [said] = [record.getMessage() for record in logs.records]
+                self.assertIn("a Turkish reading failed (RuntimeError", said)
+                self.assertNotIn("language model", said)
+                self.assertEqual(reader.transcribe([0.0] * 16000), "11")  # the LM's again
 
     def test_a_model_that_fails_with_the_beam_alone_too_is_the_worker_s_to_handle(self):
         # the Turkish model itself failing: as in 2.12.0, the worker's (drop_turkish)
         reader = self.reader(model=FakeModel(fail_at=1))
-        with self.assertLogs("services.captions.moon_reading", "WARNING"):
+        with self.assertLogs("services.captions.moon_reading", "WARNING") as logs:
             with self.assertRaises(RuntimeError):
                 reader.transcribe([0.0] * 16000)
+        self.assertNotIn("language model", logs.records[0].getMessage())
 
     def test_a_reading_narrowed_to_its_best_path_has_no_lm(self):
         widths = []
@@ -222,7 +252,7 @@ class TurkishReaderTests(unittest.TestCase):
         # an install from before 2.12.1: the LM downloaded while the captions process runs
         reader = self.reader(lm=None)
         self.assertEqual(reader.transcribe([0.0] * 16000), "10")
-        reader.use_lm(lm_file())
+        reader.use_lm(lm_file(self))
         self.assertEqual(reader.transcribe([0.0] * 16000), "11")
         reader.use_lm(Path("/elsewhere/lm.int8.onnx"))  # one already given stays
         self.assertEqual([name for name, _api in self.made], ["lm.int8.onnx"])

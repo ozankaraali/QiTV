@@ -8,8 +8,10 @@ points fewer words wrong on average, 9 sets better and none worse, most on news 
 (FLEURS 10.31 → 9.37 %), drama about the same; about 7 % more time on one thread. The int8 LM
 reads exactly on an x86 CPU without VNNI too, at the beam's own speed (2026-11-20).
 
-The LM never costs Turkish its model: one that won't load, or fails in a reading, is logged once
-and the beam reads alone for the process's life (the piece it failed on read again by it). A
+The LM never costs Turkish its model: one that won't load, or raises in a reading, is logged once
+and the beam reads alone for the process's life (the piece it failed on read again by it). The
+model's own failure in a reading with the LM (its encoder, its decoder) leaves the LM on: the beam
+alone reads that piece again, and when it fails too the worker handles it as before. A
 reading narrowed to its best path (`width` 1: the picture faster than real time, or translating
 on a slow computer) stays the beam's alone, without the LM, as before. The LM loads once (warm(),
 else its first reading); an LM downloaded after the load comes by use_lm(). A reading holds the
@@ -34,6 +36,32 @@ LM_SETTINGS = Settings(lm_weight=0.1, length_bonus=0.41)  # λ, β with the LM (
 
 def _lstm(path: Path, api: Any) -> Any:
     return LstmLM(path, api, threads=1)
+
+
+class _LmFailed(Exception):
+    """The LM raised in a search (its error is the cause)."""
+
+
+class _Guarded:
+    """The LM as the search asks of it, its errors told from the model's."""
+
+    __slots__ = ("lm",)
+
+    def __init__(self, lm: Any) -> None:
+        self.lm = lm
+
+    def start(self) -> Any:
+        try:
+            return self.lm.start()
+        except Exception as error:
+            raise _LmFailed() from error
+
+    def score(self, state: Any, token: int) -> tuple[float, Any]:
+        try:
+            value, after = self.lm.score(state, token)
+        except Exception as error:
+            raise _LmFailed() from error
+        return float(value), after
 
 
 class TurkishReader:
@@ -97,9 +125,17 @@ class TurkishReader:
         lm = self._loaded() if width is None else None
         if lm is not None:
             try:
-                return self._read(samples, lm)
-            except Exception as error:  # read again by the beam alone (its failure is its own)
-                self._fail("failed", error)
+                return self._read(samples, _Guarded(lm))
+            except _LmFailed as failed:  # the LM's: the beam alone from now on
+                self._fail("failed", failed.__cause__ or failed)
+            except Exception as error:
+                # the model's own (its encoder, its decoder): the LM stays, the beam alone reads
+                # the piece again; when it fails too, the worker's as in 2.12.0 (drop_turkish)
+                logger.warning(
+                    "AI captions: a Turkish reading failed (%s: %s); the beam reads it again",
+                    type(error).__name__,
+                    error,
+                )
         return str(self.beam.transcribe(samples, width=width))
 
     def _read(self, samples: Any, lm: Any) -> str:
