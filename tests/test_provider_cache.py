@@ -1,17 +1,25 @@
-"""A provider's cache in pieces (2.12): the file, and how ProviderManager reads, writes and
-moves an older build's one over."""
+"""A provider's cache in pieces (2.12): the file, its pages beside it (what opened a series or
+a portal's group at a time), and how ProviderManager reads, writes and moves an older build's
+one over."""
 
 import os
 import tempfile
+import threading
 import time
 from types import SimpleNamespace
 import unittest
 from unittest import mock
 
+os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+
+from PySide6.QtWidgets import QApplication
+from job_fixtures import ImmediateRunner
 import orjson
 
 from services import provider_cache
+from services.catalog import CatalogService
 from services.provider_manager import ProviderManager
+from tests.test_catalog_service import FakeFactory
 
 
 def films(count: int, start: int = 0) -> list[dict]:
@@ -52,16 +60,74 @@ def a_cache() -> dict:
     }
 
 
+def lists_only(cache: dict) -> dict:
+    """`cache` without its pages, as the lists' file holds it."""
+    cache = {key: dict(value) if isinstance(value, dict) else value for key, value in cache.items()}
+    cache["vod"]["contents"] = {}  # a portal's groups: none opened
+    for part in ("seasons", "episodes"):
+        del cache["series"][part]
+    return cache
+
+
 class FileTests(unittest.TestCase):
     def setUp(self):
         directory = tempfile.TemporaryDirectory()
         self.addCleanup(directory.cleanup)
         self.path = os.path.join(directory.name, "x.v2.jsonl")
+        self.pages = os.path.join(directory.name, "x.v2.pages.jsonl")
 
     def test_what_is_written_reads_back_the_same(self):
         cache = a_cache()
         provider_cache.write_cache(self.path, cache)
-        self.assertEqual(provider_cache.read_cache(self.path), cache)
+        provider_cache.write_pages(self.pages, cache)
+        read = provider_cache.read_cache(self.path)
+        self.assertEqual(read, lists_only(cache))  # the lists alone
+        provider_cache.read_pages(self.pages, read)
+        self.assertEqual(read, cache)
+
+    def test_the_pages_hold_what_opened_and_the_lists_none_of_it(self):
+        cache = a_cache()
+        provider_cache.write_pages(self.pages, cache)
+        with open(self.pages, "rb") as f:
+            lines = [orjson.loads(line) for line in f.read().splitlines()]
+        self.assertEqual(lines[0], {"qitv": "provider-pages", "version": 2})
+        self.assertEqual(lines[-1], {"end": True})
+        self.assertEqual(
+            {(line["key"], line["part"], line["token"]) for line in lines[1:-1]},
+            {
+                ("vod", "contents", 1001.0),  # a portal's group pages
+                ("series", "seasons", None),
+                ("series", "episodes", None),
+                ("series", "resolved_base", None),  # where its episodes play from
+            },
+        )
+        self.assertTrue(provider_cache.has_pages(cache))
+        self.assertFalse(provider_cache.has_pages(lists_only(cache)))
+
+    def test_pages_saved_with_another_load_of_their_section_are_left_out(self):
+        # The lists were written (a refresh) and the pages not yet: the old ones' pages stay
+        # out of the new lists (a portal's groups may have changed).
+        cache = a_cache()
+        provider_cache.write_pages(self.pages, cache)
+        cache["_cache"]["refreshed_at"]["vod"] = 2002.0  # loaded again since
+        cache["_cache"]["refreshed_at"]["series"] = 2003.0
+        read = lists_only(cache)
+        provider_cache.read_pages(self.pages, read)
+        self.assertEqual(read, lists_only(cache))
+
+    def test_a_damaged_pages_file_puts_nothing_in(self):
+        cache = a_cache()
+        provider_cache.write_pages(self.pages, cache)
+        with open(self.pages, "rb") as f:
+            whole = f.read()
+        for label, data in (("cut short", whole[: whole.rindex(b'{"end"')]), ("empty", b"")):
+            with self.subTest(label):
+                with open(self.pages, "wb") as f:
+                    f.write(data)
+                read = lists_only(cache)
+                with self.assertRaises(ValueError):
+                    provider_cache.read_pages(self.pages, read)
+                self.assertEqual(read, lists_only(cache))
 
     def test_each_line_is_one_document_of_about_a_piece(self):
         cache = {"_cache": {"identity": "abc"}, "vod": {"categories": [], "contents": films(3000)}}
@@ -127,11 +193,13 @@ class FileTests(unittest.TestCase):
         for cache in ({"itv": {"contents": [object()]}}, {"itv": {"sorted_channels": {1: [0]}}}):
             with self.subTest(cache=cache), self.assertRaises(TypeError):
                 provider_cache.write_cache(self.path, cache)
-        self.assertEqual(provider_cache.read_cache(self.path), a_cache())
+        self.assertEqual(provider_cache.read_cache(self.path), lists_only(a_cache()))
         self.assertEqual(os.listdir(os.path.dirname(self.path)), ["x.v2.jsonl"])  # no temporary
 
 
-class ManagerTests(unittest.TestCase):
+class ManagerCase(unittest.TestCase):
+    """A ProviderManager over a fresh folder: "Fixture" (current) and "Other"."""
+
     def setUp(self):
         directory = tempfile.TemporaryDirectory()
         self.addCleanup(directory.cleanup)
@@ -167,6 +235,8 @@ class ManagerTests(unittest.TestCase):
         identity = manager.provider_cache_identity(manager.providers[0])
         return {**sections, "_cache": {"identity": identity, "refreshed_at": {"vod": time.time()}}}
 
+
+class ManagerTests(ManagerCase):
     def test_its_cache_file_is_the_new_one(self):
         name = self.manager._provider_cache_name("Fixture")
         self.assertTrue(name.endswith(".v2.jsonl"), name)
@@ -229,14 +299,148 @@ class ManagerTests(unittest.TestCase):
         self.assertFalse(os.path.exists(gone_legacy))
         self.assertTrue(os.path.exists(listed))  # read once, when it is set up
 
-    def test_invalidating_removes_both_files(self):
-        self.manager.current_provider_content = {"vod": {"categories": []}}
+    def test_invalidating_removes_every_file(self):
+        self.manager.current_provider_content = {"series": {"seasons": {"42": [{"id": "1"}]}}}
         self.manager.save_provider()
         self.written(self.manager)
+        cache = self.manager._provider_cache_name("Fixture")
+        pages = self.manager._pages_name(cache)
+        self.assertTrue(os.path.exists(pages))
         legacy = self.legacy("Fixture", {"vod": {}})
         self.manager.invalidate_provider_cache("Fixture")
-        self.assertFalse(os.path.exists(self.manager._provider_cache_name("Fixture")))
-        self.assertFalse(os.path.exists(legacy))
+        for path in (cache, pages, legacy):
+            self.assertFalse(os.path.exists(path), path)
+
+
+class PagesTests(ManagerCase):
+    """2.12: a series, a season or a portal's group opened writes its pages beside the lists,
+    never the lists again."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.app = QApplication.instance() or QApplication([])
+
+    def lists(self, manager=None):
+        return (manager or self.manager)._provider_cache_name("Fixture")
+
+    def stamp(self, path):
+        """What a rewrite would change: the file's inode and time (it is replaced whole)."""
+        status = os.stat(path)
+        return status.st_ino, status.st_mtime_ns
+
+    def saved_series(self):
+        manager = self.manager
+        manager.current_provider_content = {
+            "series": {"categories": [], "contents": films(500), "stream_base": "http://b"}
+        }
+        manager.mark_content_fresh("series")
+        manager.save_provider()
+        self.written(manager)
+        return self.stamp(self.lists())
+
+    def service(self, factory):
+        config = SimpleNamespace(
+            selected_provider_name="Fixture", ssl_verify=True, save_config=lambda: None
+        )
+        return CatalogService(config, self.manager, None, runner=ImmediateRunner(), factory=factory)
+
+    def test_opening_a_series_writes_its_seasons_and_not_the_lists(self):
+        before = self.saved_series()
+        factory = FakeFactory()
+        factory.results["xtream_series"] = {
+            "result": {
+                "resolved_base": "http://b",
+                "seasons": [{"id": "1", "name": "Season 1", "episodes": [{"id": "5"}]}],
+            }
+        }
+        written = mock.patch.object(
+            provider_cache, "write_cache", wraps=provider_cache.write_cache
+        ).start()
+        self.addCleanup(mock.patch.stopall)
+        service = self.service(factory)
+        service.request_seasons({"id": 42, "name": "Show"})
+        self.written(self.manager)
+        written.assert_not_called()
+        self.assertEqual(self.stamp(self.lists()), before)  # the 500 series were not written
+        again = self.make()
+        again.set_current_provider(self.progress)
+        [season] = again.current_provider_content["series"]["seasons"]["42"]
+        self.assertEqual(season["name"], "Show.Season 1")
+        self.assertEqual(len(again.current_provider_content["series"]["contents"]), 500)
+
+    def test_opening_a_portals_group_writes_its_page_and_not_the_lists(self):
+        manager = self.manager
+        manager.providers[0] = manager.current_provider = {
+            "name": "Fixture",
+            "type": "STB",
+            "url": "http://127.0.0.1:9/c/",
+            "mac": "00:1A:79",
+        }
+        manager.current_provider_content = {
+            "vod": {"categories": [{"id": "7", "title": "Drama"}], "contents": {}}
+        }
+        manager.mark_content_fresh("vod")
+        manager.save_provider()
+        self.written(manager)
+        before = self.stamp(self.lists())
+        factory = FakeFactory()
+        factory.results["stb_list"] = {"result": {"items": films(3)}}
+        self.service(factory).request_group("movies", "7")
+        self.written(manager)
+        self.assertEqual(self.stamp(self.lists()), before)
+        again = self.make()
+        again.providers[0] = again.current_provider = manager.current_provider
+        loaded = again._load_provider_cache(manager.current_provider)
+        self.assertEqual(
+            [f["name"] for f in loaded["vod"]["contents"]["7"]], ["Film 0", "Film 1", "Film 2"]
+        )
+
+    def test_a_list_loaded_again_drops_its_old_pages(self):
+        self.saved_series()
+        manager = self.manager
+        manager.current_provider_content["series"]["seasons"] = {"42": [{"id": "1"}]}
+        manager.save_provider_pages()
+        self.written(manager)
+        pages = manager._pages_name(self.lists())
+        self.assertTrue(os.path.exists(pages))
+        manager.current_provider_content["series"] = {"categories": [], "contents": films(2)}
+        manager.mark_content_fresh("series")
+        manager.save_provider()  # what _store_section does
+        self.written(manager)
+        self.assertFalse(os.path.exists(pages))  # nothing opened in the new list yet
+        again = self.make()
+        again.set_current_provider(self.progress)
+        self.assertNotIn("seasons", again.current_provider_content["series"])
+
+    def test_a_queued_save_of_the_lists_is_not_lost_to_a_pages_save_after_it(self):
+        before = self.saved_series()
+        manager = self.manager
+        gate = threading.Event()
+        manager._cache_writer.submit(gate.wait, 5)
+        try:
+            manager.current_provider_content["series"] = {"categories": [], "contents": films(3)}
+            manager.save_provider()  # a refresh stored the series list ...
+            manager.current_provider_content["series"]["seasons"] = {"9": [{"id": "1"}]}
+            manager.save_provider_pages()  # ... and a series opened before it was written
+            loaded = manager._load_provider_cache(manager.current_provider)  # (meanwhile)
+            self.assertEqual(loaded["series"]["seasons"], {"9": [{"id": "1"}]})
+        finally:
+            gate.set()
+        self.written(manager)
+        self.assertNotEqual(self.stamp(self.lists()), before)
+        again = self.make()
+        again.set_current_provider(self.progress)
+        self.assertEqual(again.current_provider_content["series"]["contents"], films(3))
+        self.assertEqual(again.current_provider_content["series"]["seasons"], {"9": [{"id": "1"}]})
+
+    def test_an_unlisted_providers_pages_go_too(self):
+        self.manager.current_provider_content = {"series": {"seasons": {"42": [{"id": "1"}]}}}
+        self.manager.save_provider()
+        self.written(self.manager)
+        pages = self.manager._pages_name(self.lists())
+        self.manager.providers = [self.manager.providers[1]]
+        self.manager.save_providers()
+        self.assertFalse(os.path.exists(pages))
 
 
 if __name__ == "__main__":
