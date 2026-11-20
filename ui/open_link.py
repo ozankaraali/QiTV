@@ -12,19 +12,24 @@ says what it is (services.link_kind.classify):
   line names its kind and host (never its login), the note says it is no one stream, and
   "Add as a provider…" hands it to Add provider, filled in, `add_provider(link)`;
 - a link only its first bytes tell (an .m3u8, any other web address): no line yet; Play reads
-  them first, at most 64 KB, on a worker (QiTV's user agent, Settings' TLS check). A list of
-  channels turns the card into the provider offer; anything else plays with the kind they say,
-  and so does a link that refused them or never answered (as LIVE: VLC tries it, and the
-  player says why it failed).
+  them first, at most 64 KB, on a worker (QiTV's user agent, the TLS check of the provider the
+  link's host is, else Settings'). A list of channels turns the card into the provider offer;
+  anything else plays with the kind they say, and so does a link that refused them or never
+  answered (as LIVE: VLC tries it, and the player says why it failed). A link at a provider
+  that allows only so many streams is never read (the read would be one stream more than it
+  allows, and a closed one may stay counted there for minutes): it plays as LIVE at once
+  (`may_probe`).
 
 While the bytes are read the card says "Checking…" and only Cancel works. Each read has its
 request id and only the latest one answers: a cancelled card, or one opened again, drops a
-late answer. Text that is no link: Play says so. The link is never logged.
+late answer, and its read stops at its next chunk. Text that is no link: Play says so. The
+link is never logged.
 """
 
 from __future__ import annotations
 
 import logging
+import threading
 import time
 from typing import Any, Callable, Optional
 
@@ -108,13 +113,21 @@ def provider_found(link: ProviderLink) -> str:
     return translate(_PROVIDER_FOUND.get(link.type, M3U_FOUND), host=link.name)
 
 
-def read_start(url: str, verify_ssl: bool) -> str:
+def read_start(url: str, verify_ssl: bool, stop: Optional[threading.Event] = None) -> str:
     """The first PROBE_BYTES of what `url` answers, as text (blocking: run it on a worker),
-    asked with QiTV's user agent and `verify_ssl` (Settings' TLS check). Only that much is
-    read, however long the answer (a live stream never ends), and the connection is closed
-    after it; a slow answer gives what came within the deadline, a closing window what came
-    so far. An HTTP error raises (requests.HTTPError), as a connection that fails does."""
+    asked with QiTV's user agent and `verify_ssl` (the TLS check). Only that much is read,
+    however long the answer (a live stream never ends), and the connection is closed after
+    it. Between chunks the read ends early with what came so far: past the deadline, once the
+    window asks its jobs to stop, or once `stop` is set (the card dropped the read). An HTTP
+    error raises (requests.HTTPError), as a connection that fails does."""
     deadline = time.monotonic() + _PROBE_DEADLINE_S
+
+    def ended() -> bool:
+        stopped = stop is not None and stop.is_set()
+        return stopped or cancel_requested() or time.monotonic() > deadline
+
+    if ended():
+        return ""  # dropped before it began: nothing is asked
     response = requests.get(
         url, headers=CLIENT_HEADERS, timeout=_PROBE_TIMEOUT, verify=verify_ssl, stream=True
     )
@@ -123,7 +136,7 @@ def read_start(url: str, verify_ssl: bool) -> str:
         body = bytearray()
         for chunk in response.iter_content(_CHUNK):
             body += chunk
-            if len(body) >= PROBE_BYTES or cancel_requested() or time.monotonic() > deadline:
+            if len(body) >= PROBE_BYTES or ended():
                 break
     finally:
         response.close()
@@ -131,19 +144,21 @@ def read_start(url: str, verify_ssl: bool) -> str:
 
 
 class LinkProbeJob(QObject):
-    """One link's first bytes, read on the runner's thread: their text, plain data."""
+    """One link's first bytes, read on the runner's thread: their text, plain data. `stop`,
+    set from the GUI thread, ends the read at its next chunk."""
 
     finished = Signal(object)
     error = Signal(str)
 
-    def __init__(self, url: str, verify_ssl: bool) -> None:
+    def __init__(self, url: str, verify_ssl: bool, stop: threading.Event) -> None:
         super().__init__()
         self._url = url
         self._verify_ssl = verify_ssl
+        self._stop = stop
 
     def run(self) -> None:
         try:
-            text = read_start(self._url, self._verify_ssl)
+            text = read_start(self._url, self._verify_ssl, self._stop)
         except (requests.RequestException, OSError, ValueError) as e:
             # requests' errors name the link, its token and all: the type and host only.
             logger.info("A link's first bytes did not come: %s", safe_exc(e))
@@ -214,7 +229,9 @@ class LinkCard(FormCard):
 class OpenLink(QObject):
     """The Open Link card's side: what it shows for the link in it, what its buttons do, and
     the read of a link's first bytes. `jobs` runs the read (the window's JobRunner); `play`,
-    `add_provider` and `verify_ssl` are the window's (late-bound by the caller)."""
+    `add_provider`, `verify_ssl(url)` (the TLS check for the link's host) and `may_probe(url)`
+    (False at a provider with a stream limit: the link plays as LIVE unread) are the
+    window's, late-bound by the caller."""
 
     def __init__(
         self,
@@ -223,7 +240,8 @@ class OpenLink(QObject):
         *,
         play: Callable[[str, str], None],
         add_provider: Callable[[ProviderLink], None],
-        verify_ssl: Callable[[], bool],
+        verify_ssl: Callable[[str], bool],
+        may_probe: Callable[[str], bool] = lambda url: True,
         parent: Optional[QObject] = None,
     ) -> None:
         super().__init__(parent)
@@ -232,8 +250,10 @@ class OpenLink(QObject):
         self._play = play
         self._add_provider = add_provider
         self._verify_ssl = verify_ssl
+        self._may_probe = may_probe
         self._asked = 0  # the last read's request id
         self._waiting: Optional[int] = None  # the read on its way (its request id)
+        self._stop: Optional[threading.Event] = None  # set: the read on its way ends
         self._probed: Optional[tuple[str, Kind]] = None  # what a link's first bytes said
         card.changed.connect(self._on_changed)
         card.pressed.connect(self._on_pressed)
@@ -251,7 +271,11 @@ class OpenLink(QObject):
         return not self.card.isHidden()
 
     def _forget(self) -> None:
-        """The card went (or shows afresh): a read on its way answers nothing."""
+        """The card went (or shows afresh): a read on its way answers nothing, and stops at
+        its next chunk (never two reads of one link at once)."""
+        if self._stop is not None:
+            self._stop.set()
+        self._stop = None
         self._waiting = None
         self._probed = None
 
@@ -302,6 +326,8 @@ class OpenLink(QObject):
         elif key == PLAY:
             if kind in (LIVE, FILM):
                 self._start(url, str(kind))
+            elif kind == PROBE and not self._may_probe(url):
+                self._start(url, LIVE)  # a provider's with a stream limit: never read first
             elif kind == PROBE:
                 self._probe(url)
             elif not isinstance(kind, Provider):
@@ -325,8 +351,9 @@ class OpenLink(QObject):
         """Read `url`'s first bytes on a worker; the card waits ("Checking…")."""
         self._asked += 1
         self._waiting = self._asked
+        self._stop = threading.Event()
         self.card.set_busy(True)
-        job = LinkProbeJob(url, bool(self._verify_ssl()))
+        job = LinkProbeJob(url, bool(self._verify_ssl(url)), self._stop)
         self._jobs.run_worker(job, self._on_read, self._on_read_failed, context=(self._asked, url))
 
     def _answers(self, request: int) -> bool:
@@ -342,7 +369,7 @@ class OpenLink(QObject):
         request, url = context
         if not self._answers(request):
             return  # cancelled, or the card opened again since
-        self._waiting = None
+        self._waiting, self._stop = None, None
         self.card.set_busy(False)
         kind = probe_text(str(text), url)
         if not isinstance(kind, Provider):
@@ -356,6 +383,6 @@ class OpenLink(QObject):
         request, url = context
         if not self._answers(request):
             return
-        self._waiting = None
+        self._waiting, self._stop = None, None
         self.card.set_busy(False)
         self._start(url, LIVE)  # VLC tries it; the player says why it failed

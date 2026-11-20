@@ -82,6 +82,7 @@ from services.hidden_groups import HiddenGroups
 from services.i18n import N_, number, tr, tr_n, translate
 from services.jobs import JobRunner
 from services.lazy_import import deferred_modules, load_module
+from services.link_kind import host_of
 from services.live.engine import LiveEngine
 from services.live.kept import KeptBuffers
 from services.live.live_session import LiveSession
@@ -1157,7 +1158,8 @@ class TVWindow(QMainWindow):
             self.jobs,
             play=lambda url, kind: self.play_network_link(url, kind),
             add_provider=lambda link: self.add_provider(link),
-            verify_ssl=lambda: bool(config_manager.ssl_verify),
+            verify_ssl=lambda url: self._link_verify(url),
+            may_probe=lambda url: self._link_may_probe(url),
             parent=self,
         )
         controller.add_card(self.open_link_card)
@@ -1738,6 +1740,43 @@ class TVWindow(QMainWindow):
         if self._closing:
             return
         logger.info("Open Link: a %s link was handed over to play", kind.lower())
+
+    def _link_provider(self, url: str) -> Optional[dict]:
+        """The configured provider the link's host and port are, or None: its own address's,
+        or (one whose list is loaded) where its streams are (Catalog.stream_hosts)."""
+        host = host_of(url)
+        if not host:
+            return None
+        catalogs = self.catalogs
+        loaded = set(catalogs.created())
+        for name in catalogs.names():
+            try:
+                provider = catalogs.provider(name)
+            except KeyError:
+                continue
+            hosts = {host_of(provider.get("url"))}
+            if name in loaded:
+                hosts |= catalogs.catalog(name).stream_hosts()
+            if host in hosts:
+                return provider
+        return None
+
+    def _link_may_probe(self, url: str) -> bool:
+        """Whether Open Link may read the link's first bytes: not at a provider that allows
+        only so many streams (an STB portal, an Xtream account with its limit, one with
+        max_streams; services.connection_budget), where the read would be a stream more than
+        it allows, and one closed may stay counted for minutes."""
+        provider = self._link_provider(url)
+        if provider is None:
+            return True
+        reported = self.catalogs.max_connections(str(provider.get("name", "")))
+        return self.budget.limit_for(provider, reported) is None
+
+    def _link_verify(self, url: str) -> bool:
+        """The TLS check for reading the link: its provider's own, else Settings'."""
+        default = bool(self.config_manager.ssl_verify)
+        provider = self._link_provider(url)
+        return bool(provider.get("ssl_verify", default)) if provider is not None else default
 
     # ---- opened files -------------------------------------------------------------------------
 

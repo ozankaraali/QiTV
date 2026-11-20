@@ -8,7 +8,9 @@ from services.link_kind import (
     NONE,
     PROBE,
     Provider,
+    address,
     classify,
+    host_of,
     probe_text,
     xtream_account,
 )
@@ -97,6 +99,23 @@ class ProbeTests(unittest.TestCase):
         text = "#EXTM3U\n#EXTINF:-1,A\nhttp://cdn.example/a.ts\n"
         got = probe_text(text, "http://cdn.example/list.m3u8")
         self.assertEqual(got.link.url, "http://cdn.example/list.m3u8")
+
+
+class AddressTests(unittest.TestCase):
+    def test_a_links_host_is_compared_as_a_providers(self):
+        self.assertEqual(
+            address('  "http://cdn.example/a.ts"  \nsecond'), "http://cdn.example/a.ts"
+        )
+        cases = (
+            ("http://demo:secret@Panel.Example:8080/live/1.ts", "panel.example:8080"),
+            ("panel.example:8080/get.php", "panel.example:8080"),  # typed without its scheme
+            ("https://cdn.example/watch?v=7", "cdn.example"),  # no port: none added
+            ("", ""),
+            ("http://[::1]:8000/x", "[::1]:8000"),
+        )
+        for url, host in cases:
+            with self.subTest(url):
+                self.assertEqual(host_of(url), host)
 
 
 if __name__ == "__main__":

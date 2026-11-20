@@ -6,7 +6,9 @@ pressed: a list of channels becomes the provider offer. Fictional hosts; the byt
 local server, never the network."""
 
 import os
+from pathlib import Path
 import threading
+import time
 import unittest
 from unittest import mock
 
@@ -23,6 +25,7 @@ from services.link_kind import FILM, LIVE, PROBE_BYTES
 from services.navigation import OPEN_FILE_ROW, OPEN_FOLDER_ROW, OPEN_LINK_ROW
 from services.provider_link import M3U, STB, XTREAM, ProviderLink
 from services.vlc_profile import DEFAULT_USER_AGENT
+from tests.fixtures.local_provider import PROVIDER_NAME
 from tests.http_fixtures import LocalSource, leaf
 from tests.job_fixtures import ImmediateRunner
 from tests.test_tv_window import WindowCase
@@ -36,6 +39,7 @@ WHOLE = "This is a whole provider, not one stream."
 NOT_A_LINK = "This isn't a link QiTV can open"
 ACCOUNT = "http://panel.example:8080/live/demo/secret/12.ts"
 PLAYLIST = "http://panel.example/get.php?username=demo&password=secret&type=m3u_plus"
+MAC = "00:1A:79:00:00:01"
 CHANNELS = (
     "#EXTM3U\n"
     '#EXTINF:-1 group-title="News",Harbour News\nhttp://a.example/1.ts\n'
@@ -84,7 +88,8 @@ class CardCase(unittest.TestCase):
             runner,
             play=lambda url, kind: self.played.append((url, kind)),
             add_provider=self.added.append,
-            verify_ssl=lambda: self.verify,
+            verify_ssl=lambda url: self.verify,
+            may_probe=lambda url: "limited.example" not in url,
             parent=self.host,
         )
 
@@ -258,6 +263,20 @@ class CardTests(CardCase):
         self.assertTrue(self.card.isHidden())
         self.assertEqual((self.played, self.added), ([], []))
 
+    def test_a_link_at_a_provider_with_a_stream_limit_plays_unread(self):
+        """Reading it would be one stream more than the provider allows (and a closed one
+        may stay counted there for minutes): it plays as live at once."""
+        limited = "http://limited.example:8080/demo/secret/12"  # Xtream's short live form
+        self.typed(limited)
+        self.card.handle(Action.NAV_ACTIVATE)
+        self.assertTrue(self.card.isHidden())
+        self.assertEqual((self.played, self.runner.jobs), ([(limited, LIVE)], []))
+        self.typed("http://other.example:8080/demo/secret/12")  # elsewhere: read first
+        self.card.handle(Action.NAV_ACTIVATE)
+        self.assertTrue(self.card.busy())
+        self.assertEqual(len(self.runner.jobs), 1)
+        self.assertEqual(self.played, [(limited, LIVE)])
+
 
 class ProbeTests(CardCase):
     """The first bytes, read by the real runner off the GUI thread from a local server."""
@@ -274,25 +293,47 @@ class ProbeTests(CardCase):
                 "/vod/index.m3u8": (200, {}, leaf("a.ts", "b.ts")),
                 "/gone.m3u8": (403, {}, b"Forbidden"),
                 "/big": (200, {}, b"#EXTM3U\n" + b"x" * (1024 * 1024)),
+                "/slow": (200, {}, self.trickle),
             }
         )
         self.addCleanup(self.source.close)
         self.threads = []
         real = open_link.read_start
 
-        def reading(url, verify_ssl):
+        def reading(url, verify_ssl, stop=None):
             self.threads.append(threading.current_thread())
-            return real(url, verify_ssl)
+            return real(url, verify_ssl, stop)
 
         patch = mock.patch.object(open_link, "read_start", side_effect=reading)
         patch.start()
         self.addCleanup(patch.stop)
+
+    def trickle(self, handler):
+        """A stream that never ends, 1 KB every quarter of a second (64 KB in 16 s)."""
+        for _ in range(240):
+            if self.source.stop.is_set():
+                return
+            handler.wfile.write(b"x" * 1024)
+            handler.wfile.flush()
+            time.sleep(0.25)
 
     def play(self, path):
         url = self.source.url + path
         self.typed(url)
         self.card.handle(Action.NAV_ACTIVATE)
         return url
+
+    def test_a_dropped_read_stops_at_its_next_chunk(self):
+        """Cancelled (or opened again), the read on its way ends at once: two reads of one
+        link never run together."""
+        with mock.patch.object(open_link, "_CHUNK", 1024):
+            self.play("/slow")
+            self.assertTrue(wait_until(lambda: self.source.requests))
+            self.card.handle(Action.ESCAPE)
+            self.assertTrue(self.card.isHidden())
+            # Read on, it would take 16 s to reach 64 KB.
+            self.assertTrue(wait_until(lambda: self.jobs.pending() == 0, 3000))
+        self.assertEqual((self.played, self.added), ([], []))
 
     def test_probe_runs_off_the_gui_thread_and_swaps_to_provider_for_a_channel_list(self):
         url = self.play("/lists/tv.m3u8")
@@ -431,6 +472,76 @@ class EntryPointTests(WindowCase):
         self.assertTrue(card.isHidden())
         window.screens.back_to_tv()
         self.assertTrue(card.isHidden())  # not back by itself
+
+
+class ProviderHostTests(WindowCase):
+    """Links at the hosts of configured providers (never contacted: not the one shown)."""
+
+    seed_fixture = True
+
+    def provider_list(self):
+        fixture = {
+            "type": "M3UPLAYLIST",
+            "name": PROVIDER_NAME,
+            "url": str(Path(self.config_dir) / "fixture.m3u"),
+        }
+        return [
+            fixture,
+            {"type": "STB", "name": "Box", "url": "http://portal.example/c/", "mac": MAC},
+            {
+                "type": "XTREAM",
+                "name": "Panel",
+                "url": "http://panel.example:8080",
+                "username": "demo",
+                "password": "secret",
+                "max_streams": 1,
+            },
+            {
+                "type": "M3UPLAYLIST",
+                "name": "Lists",
+                "url": "http://lists.example:8000/tv.m3u",
+                "max_streams": 2,
+            },
+            {
+                "type": "M3UPLAYLIST",
+                "name": "Free",
+                "url": "https://free.example/tv.m3u",
+                "ssl_verify": False,
+            },
+        ]
+
+    def test_a_link_at_a_provider_with_a_stream_limit_is_never_read(self):
+        window, card = self.window, self.window.open_link_card
+        limited = (
+            "http://portal.example/play/live.php?stream=5",  # an STB portal: one stream
+            "http://panel.example:8080/demo/secret/12",  # Xtream's short live form, its max
+            "http://lists.example:8000/stream/7",  # a playlist with max_streams
+        )
+        read = mock.patch.object(open_link, "read_start", return_value=CHANNELS)
+        play = mock.patch.object(window, "play_network_link")
+        with read as reading, play as playing:
+            for url in limited:
+                window.open_link(url)
+                card.handle(Action.NAV_ACTIVATE)
+                self.assertTrue(card.isHidden())
+            reading.assert_not_called()
+            self.assertEqual(playing.call_args_list, [mock.call(url, LIVE) for url in limited])
+            # Elsewhere the link is read: with its provider's TLS check, else Settings'.
+            default = bool(self.config.ssl_verify)
+            for url, verify in (
+                ("https://free.example/live/index.m3u8", False),
+                ("http://lists.example/stream/7", default),  # another port: another host
+                ("https://cdn.example/watch?v=7", default),
+            ):
+                with self.subTest(url):
+                    window.open_link(url)
+                    card.handle(Action.NAV_ACTIVATE)
+                    self.assertTrue(wait_until(lambda: not card.busy()))
+                    self.assertEqual(reading.call_args.args[:2], (url, verify))
+                    self.assertFalse(card.isHidden())  # the channel list's provider offer
+                    card.handle(Action.ESCAPE)
+            self.assertEqual(reading.call_count, 3)
+        self.assertTrue(wait_until(lambda: window.jobs.pending() == 0))
 
 
 if __name__ == "__main__":

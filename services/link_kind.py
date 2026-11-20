@@ -47,6 +47,20 @@ def address(text: str) -> str:
     return _first_line(text)
 
 
+def host_of(url: object) -> str:
+    """A web address's host and port, as a link's is compared with a provider's: lower case,
+    without a login ("panel.example:8080"; "" for none). One typed without its scheme
+    ("panel.example:8080/get.php") is read as http."""
+    text = address(str(url or ""))
+    if text and "://" not in text:
+        text = f"http://{text}"
+    try:
+        netloc = urlsplit(text).netloc
+    except ValueError:
+        return ""
+    return netloc.rpartition("@")[2].lower()
+
+
 def _split(text: str):
     """The link's parts, or None for text that is not one address."""
     line = address(text)
