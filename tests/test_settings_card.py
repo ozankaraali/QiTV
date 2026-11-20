@@ -510,6 +510,73 @@ class ChoiceCardTests(Case):
         self.assertEqual(answered.count(), 6)
         card.grab()
 
+    def test_buttons_too_wide_for_a_row_stand_one_under_another(self):
+        # The guard's three answers in Turkish at 640×360: the default was left alone on a
+        # second row. Too wide for one row, each has its own, at the right, as wide as the
+        # widest, in their order (the accent last); ↑/↓ go between them, as ←/→ do.
+        self.host.resize(640, 360)
+        card = ChoiceCard(self.host)
+        buttons = [
+            Button(CANCEL, "İptal"),
+            Button("replace", "Harbour TV sağlayıcısının adresini değiştir"),
+            Button("new", "Yeni sağlayıcı olarak ekle", accent=True),
+        ]
+        card.ask("Bu başka bir sunucu", "Harbour TV, panel.example sunucusunda.", buttons, "new")
+        rects = [card.control_rect("button", b.key) for b in buttons]
+        tops = [rect.top() for rect in rects]
+        self.assertEqual(tops, sorted(tops))
+        self.assertEqual(len(set(tops)), 3)  # a row each
+        self.assertEqual(len({round(rect.right()) for rect in rects}), 1)  # at the right,
+        self.assertEqual(len({round(rect.width()) for rect in rects}), 1)  # as wide as one
+        panel = card.card_rect()
+        for rect in rects:
+            self.assertTrue(panel.contains(rect))
+        self.assertEqual(card.focus(), ("button", "new"))
+        for action, key in (
+            (Action.NAV_UP, "replace"),
+            (Action.NAV_UP, CANCEL),
+            (Action.NAV_DOWN, "replace"),
+            (Action.NAV_LEFT, CANCEL),
+            (Action.NAV_RIGHT, "replace"),
+            (Action.NAV_DOWN, "new"),
+        ):
+            card.handle(action)
+            self.assertEqual(card.focus(), ("button", key), action)
+        # Those that fit stay on one row.
+        short = [Button(CANCEL, "İptal"), Button("remove", "Kaldır", danger=True)]
+        card.ask("Kaldırılsın mı?", "", short, CANCEL)
+        tops = {card.control_rect("button", b.key).top() for b in short}
+        self.assertEqual(len(tops), 1)
+
+    def test_a_card_under_a_question_shows_none_of_itself(self):
+        # The guard's question over a provider's form: the form's title and buttons peeked
+        # out above and below it. Only the question shows now, over the dimmed picture (one
+        # dim, not two), and the form is back as the question goes.
+        form = self.form(url=LINK)
+        spots = [form.control_rect("title").center(), form.control_rect("alt", "file").center()]
+        form_alone = self.host.grab().toImage()
+        form.hide()
+        question = ChoiceCard(self.host)
+        question.ask("This is another server", "Add it as a new provider?", BUTTONS, "add")
+        question_alone = self.host.grab().toImage()
+        for spot in spots:  # (outside the question's card: the form's title and alternates)
+            self.assertFalse(question.card_rect().contains(spot))
+        question.handle(Action.ESCAPE)
+        add_form(form, url=LINK)  # the form again, then the question over it
+        question.ask("This is another server", "Add it as a new provider?", BUTTONS, "add")
+        self.assertTrue(form.isVisible())  # (it is there, its keys kept: only not painted)
+        both = self.host.grab().toImage()
+        question.handle(Action.ESCAPE)  # answered: the form shows again
+        again = self.host.grab().toImage()
+        for spot in spots:
+            x, y = int(spot.x()), int(spot.y())
+            self.assertEqual(both.pixel(x, y), question_alone.pixel(x, y), spot)
+            self.assertEqual(again.pixel(x, y), form_alone.pixel(x, y), spot)
+        self.assertNotEqual(
+            [form_alone.pixel(int(s.x()), int(s.y())) for s in spots],
+            [question_alone.pixel(int(s.x()), int(s.y())) for s in spots],
+        )
+
 
 class RangeCardTests(Case):
     def ask(self, value=1024, lo=256, hi=16384, step=256) -> RangeCard:

@@ -19,7 +19,8 @@ dark card 48 u wide with a title, then
 
 The keys reach a card through `handle` (the Settings controller gives them to a shown card
 before its rows), and every key is the card's while it shows, but the sound's and the window's.
-↑/↓ go between the fields, the button row and the alternates; ←/→ move the caret in a field
+↑/↓ go between the fields, the button row (between its buttons too while they are too wide for
+one row and stand one under another) and the alternates; ←/→ move the caret in a field
 (at the text's end, → goes on to its Paste), or go between the buttons; typing, Backspace,
 Delete, Home/End and Ctrl/⌘ + A, C, X and V work in the focused field (ui/text_edit.py);
 Enter presses the focused button, or the accent one from a field; Esc cancels. A click focuses
@@ -32,7 +33,9 @@ card shown by a press (a row under it), whose second press would land on the car
 The button keyed CANCEL ("cancel") is the card's Cancel and is never disabled: on a FormCard
 it does what Esc does (`cancelled`, never `pressed("cancel")`); a ChoiceCard answers "cancel"
 for it, for Esc and for the dimmed picture. Either card hides itself when cancelled or
-answered; a FormCard stays up after `pressed`, and its caller hides it when it is done.
+answered; a FormCard stays up after `pressed`, and its caller hides it when it is done. A card
+shown over another (the guard's question over a provider's form) is the only one painted while
+it shows, alone over the dimmed picture; the one under it shows again as it goes.
 
 Paste (the button, or Ctrl/⌘+V off the field) puts the clipboard's first line in the field in
 place of its text (a link in place of the old one), or in place of the part selected in it;
@@ -352,8 +355,15 @@ class _Card(Overlay):
                 index = max(0, min(len(keys) - 1, keys.index(key) + step))
                 self._set_focus((zone, keys[index]))
 
+    def _buttons_stacked(self) -> bool:
+        """Whether the buttons stand one under another (too wide for one row)."""
+        rects = self._layout()
+        tops = {round(rects[("button", b.key)].top()) for b in self._buttons}
+        return len(tops) > 1
+
     def _rows(self) -> list[tuple[str, str]]:
-        """What ↑/↓ go between: each field, the button row, the alternates."""
+        """What ↑/↓ go between: each field, the button row (its buttons too, while they stand
+        one under another), the alternates."""
         rows = [("field", f.key) for f in self._fields]
         if self._buttons:
             rows.append(("button", ""))
@@ -371,6 +381,13 @@ class _Card(Overlay):
         return 0
 
     def _vertical(self, delta: int) -> None:
+        zone, key = self._focus
+        keys = [b.key for b in self._buttons]
+        if zone == "button" and abs(delta) == 1 and key in keys and self._buttons_stacked():
+            at = keys.index(key) + delta  # one under another: ↑/↓ go between them first
+            if 0 <= at < len(keys):
+                self._set_focus(("button", keys[at]))
+                return
         rows = self._rows()
         if not rows:
             return
@@ -492,6 +509,29 @@ class _Card(Overlay):
             self.show()
         self.raise_()
         self.update()
+        self._others_repaint()
+
+    def _covered(self) -> bool:
+        """Whether another card shows over this one (the guard's question over a provider's
+        form): this one paints nothing meanwhile, so that the question stands alone over the
+        dimmed picture (the mockup's), and shows again as it goes."""
+        parent = self.parentWidget()
+        if parent is None:
+            return False
+        under = False
+        for child in parent.children():  # (in the order they are stacked, the top one last)
+            if child is self:
+                under = True
+            elif under and isinstance(child, _Card) and child.isVisible():
+                return True
+        return False
+
+    def _others_repaint(self) -> None:
+        """The other cards paint again: one under this one hides itself, or shows again."""
+        parent = self.parentWidget()
+        for child in parent.children() if parent is not None else ():
+            if child is not self and isinstance(child, _Card) and child.isVisible():
+                child.update()
 
     def _fit(self) -> None:
         parent = self.parentWidget()
@@ -651,22 +691,20 @@ class _Card(Overlay):
         y: float,
         gap: Callable[[float], float],
     ) -> float:
-        """The buttons at the right, in their order; those that do not fit go on a row below.
-        The busy text goes at the left of the last row."""
+        """The buttons at the right, in their order, on one row; when they do not fit on one,
+        each on its own row, one under another, as wide as the widest (the accent, last, at
+        the bottom), never one of them wrapped alone onto a second row. The busy text goes at
+        the left of the last row."""
         if not self._buttons:
             return y
         height = max(float(un.px(_BUTTON_H_U)), _line_h(fonts["button"]) + 2 * un.px(0.5))
         spacing = float(un.px(_BUTTON_GAP_U))
         widths = [min(inner, self._button_width(un, fonts, b)) for b in self._buttons]
-        lines: list[list[int]] = []
-        used = 0.0
-        for index, width in enumerate(widths):
-            if lines and used + spacing + width <= inner + 0.5:
-                lines[-1].append(index)
-                used += spacing + width
-            else:
-                lines.append([index])
-                used = width
+        if sum(widths) + spacing * (len(widths) - 1) <= inner + 0.5:
+            lines = [list(range(len(widths)))]
+        else:
+            widths = [max(widths)] * len(widths)
+            lines = [[index] for index in range(len(widths))]
         for number, line in enumerate(lines):
             if number:
                 y += max(2.0, gap(_BUTTON_GAP_U))
@@ -715,6 +753,8 @@ class _Card(Overlay):
     # ---- painting -----------------------------------------------------------------------------
 
     def paintEvent(self, event: QPaintEvent) -> None:
+        if self._covered():
+            return  # another card over it: that one alone shows, over its own dim
         un = self._units()
         fonts = self._fonts(un)
         rects = self._layout()
@@ -923,6 +963,7 @@ class _Card(Overlay):
 
     def showEvent(self, event: QShowEvent) -> None:
         super().showEvent(event)
+        self._others_repaint()  # one under it: hidden behind it
         if QApplication.mouseButtons() & Qt.MouseButton.LeftButton:
             # Shown by a press (on a row under it: "Remove provider…"): a double-click's second
             # press would land on the card (Qt makes it a press on another widget), on the
@@ -936,6 +977,7 @@ class _Card(Overlay):
             # any window. A press that hides it arms the guard again (mousePressEvent).
             self._second_click.disarm()
         super().hideEvent(event)
+        self._others_repaint()  # one under it: shown again
 
     def mousePressEvent(self, event: QMouseEvent) -> None:
         event.accept()  # never the picture's under it
