@@ -212,7 +212,8 @@ class Context:
     the languages it has texts for, as (code, the language's own name), English first, and the
     name of the one the system's choice gives; whether its build carries a TMDB token; the image
     cache's largest size as set (MB: one the old window took that is none of the steps shows
-    as its own); Files' rows, as their status is now (none when QiTV cannot be the app files
+    as its own) and what it takes now (Clear Image Cache's note, in the active language: ""
+    until ui.settings_general has measured it); Files' rows, as their status is now (none when QiTV cannot be the app files
     open with: a run from source); whether its build carries an OpenSubtitles key; and what AI
     captions' downloaded files take (ui.settings_subtitles measures it): the line that says it,
     in the active language ("" while it is measured; None: this build has no such files to
@@ -228,6 +229,7 @@ class Context:
     system_language: str = SOURCE_NAME
     tmdb_built_in: bool = False
     image_cache_mb: Any = IMAGE_CACHE_DEFAULT_MB
+    image_cache_used: str = ""
     files: tuple[Row, ...] = ()
     opensubtitles_built_in: bool = False
     captions_space: Optional[str] = None
@@ -516,6 +518,7 @@ def _advanced(title: str, context: Context) -> Section:
             # i18n: help under Settings → Advanced → Clear Image Cache (it asks first)
             N_("Deletes the posters and logos kept on disk. Asked first."),
             kind=DANGER,
+            note=context.image_cache_used,
         ),
     )
     return Section(ADVANCED, title, ICONS[ADVANCED], rows=rows)

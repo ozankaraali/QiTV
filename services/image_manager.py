@@ -160,6 +160,12 @@ class ImageManager:
             self.cache.move_to_end(key_hash)  # maintain LRU order
         return True
 
+    def cache_size(self) -> int:
+        """The bytes the cached images take, by the index (it waits while another thread
+        changes it: run it on a worker)."""
+        with self._lock:
+            return int(self.current_cache_size)
+
     def clear_cache(self):
         with self._lock:
             for filename in os.listdir(self.cache_dir):
