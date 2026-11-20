@@ -5,13 +5,16 @@ python-vlc finds libVLC on its own, and a packaged app must not let it: on macOS
 the registry for an installed VLC first, and on Linux the dynamic loader may take the
 system's libvlccore. A different VLC would mix its plugins with the bundled core, or bring a
 libVLC this python-vlc does not fit. So a frozen build loads the bundled libvlccore and
-libvlc itself, by path, and then points python-vlc at them (PYTHON_VLC_LIB_PATH,
-PYTHON_VLC_MODULE_PATH) and libVLC at the bundled plugins only (VLC_PLUGIN_PATH).
+libvlc itself, by path, and then points python-vlc at them (PYTHON_VLC_LIB_PATH). On macOS
+libVLC is pointed at the bundled plugins only (PYTHON_VLC_MODULE_PATH, VLC_PLUGIN_PATH; CI
+writes the plugin cache through this too); on Windows and Linux neither is set, as the
+bundled libvlccore scans its own plugin folder and would scan VLC_PLUGIN_PATH's again.
 
 The layouts are the PyInstaller specs': libvlc and libvlccore at the bundle's top
 (sys._MEIPASS), the plugins where that libvlccore looks for them: <top>/vlc/plugins on
-macOS and Linux, <top>/plugins on Windows. Only the standard library is used: main.py calls
-this before the app's imports.
+macOS and Linux (<libvlccore's folder>/vlc/plugins), <top>/plugins on Windows
+(<libvlccore's folder>/plugins). Only the standard library is used: main.py calls this
+before the app's imports.
 
 On Linux the bundle's libva and libvdpau (hardware decoding) look for the system's drivers
 in the folders of the distribution they were built on (Ubuntu's /usr/lib/x86_64-linux-gnu);
@@ -117,7 +120,15 @@ def use_bundled_vlc(
         _LOG.warning("The app's own libVLC did not load (%s); looking for an installed VLC", error)
         return False
     environ[ENV_LIB] = str(lib)
-    environ[ENV_MODULES] = environ[ENV_PLUGINS] = str(plugins)
+    if system == "Darwin":
+        environ[ENV_MODULES] = environ[ENV_PLUGINS] = str(plugins)
+    else:
+        # The bundled libvlccore scans its own plugin folder, and VLC_PLUGIN_PATH's again:
+        # every plugin was read twice per libVLC (and onefile's unpacking makes plugins.dat
+        # stale, so each read loads it). None: python-vlc sets VLC_PLUGIN_PATH from its
+        # own variable, and one the user set would bring another VLC's plugins.
+        environ.pop(ENV_MODULES, None)
+        environ.pop(ENV_PLUGINS, None)
     if system not in _NAMES:  # Linux: the bundled libva's and libvdpau's drivers
         for variable, directory in drivers().items():
             if not environ.get(variable):
