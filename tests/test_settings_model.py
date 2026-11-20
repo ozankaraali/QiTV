@@ -73,7 +73,7 @@ class SettingsModelTests(unittest.TestCase):
         for key, tab in m.LEGACY_TABS.items():  # (the sections not moved yet)
             self.assertEqual(by_key[key].legacy_tab, tab, key)
         self.assertEqual(by_key[m.PLAYBACK].legacy_tab, "")
-        for key in (m.GENERAL, m.FILES, m.ADVANCED, m.GUIDE):  # plan 3: their rows are here
+        for key in (m.GENERAL, m.FILES, m.ADVANCED, m.GUIDE, m.REMOTE):  # plan 3: rows here
             self.assertEqual(by_key[key].legacy_tab, "", key)
             self.assertNotIn(key, m.LEGACY_TABS)
         self.assertTrue(by_key[m.FILES].empty_text)  # none of its rows can be (from source)

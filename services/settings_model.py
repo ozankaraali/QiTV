@@ -41,7 +41,6 @@ KINDS = (STEP, OPENS, ACTION, DANGER, TEXT, INFO)
 LEGACY_TABS: dict[str, str] = {
     SUBTITLES: "subtitles",
     TIMESHIFT: "timeshift",
-    REMOTE: "remote",
     PARENTAL: "parental",
 }
 
@@ -194,7 +193,8 @@ class Context:
     cache's largest size as set (MB: one the old window took that is none of the steps shows
     as its own); and Files' rows, as their status is now (none when QiTV cannot be the app
     files open with: a run from source). The Guide's rows, built for its source as it is now
-    (ui.settings_guide)."""
+    (ui.settings_guide), and the phone remote's for its settings and its state
+    (ui.settings_remote)."""
 
     languages: tuple[tuple[str, str], ...] = ((SOURCE_LANGUAGE, SOURCE_NAME),)
     system_language: str = SOURCE_NAME
@@ -202,6 +202,7 @@ class Context:
     image_cache_mb: Any = IMAGE_CACHE_DEFAULT_MB
     files: tuple[Row, ...] = ()
     guide: tuple[Row, ...] = ()
+    remote: tuple[Row, ...] = ()
 
 
 def _general(title: str, context: Context) -> Section:
@@ -332,6 +333,11 @@ def _files(title: str, rows: tuple[Row, ...]) -> Section:
 def _guide(title: str, rows: tuple[Row, ...]) -> Section:
     """Guide: its rows as ui.settings_guide builds them (they follow the guide's source)."""
     return Section(GUIDE, title, ICONS[GUIDE], rows=rows)
+
+
+def _remote(title: str, rows: tuple[Row, ...]) -> Section:
+    """Phone remote: its rows as ui.settings_remote builds them (they follow the remote)."""
+    return Section(REMOTE, title, ICONS.get(REMOTE, ""), rows=rows)
 
 
 def _playback(system: str) -> Section:
@@ -511,7 +517,7 @@ def sections(
     """The sections in the drawer's order; `system` is platform.system(), `providers` the
     rows of the providers, listed first in Providers, `context` what only the running QiTV
     knows (by default: English only, no TMDB token built in, the image cache's default size
-    and no Files or Guide rows)."""
+    and no Files, Guide or Phone remote rows)."""
     context = context if context is not None else Context()
     titles = (
         (PROVIDERS, N_("Providers")),  # i18n: a settings section's title
@@ -539,6 +545,8 @@ def sections(
             built.append(_advanced(text, context))
         elif key == GUIDE:
             built.append(_guide(text, tuple(context.guide)))
+        elif key == REMOTE:
+            built.append(_remote(text, tuple(context.remote)))
         else:
             built.append(Section(key, text, ICONS.get(key, ""), legacy_tab=LEGACY_TABS[key]))
     return tuple(built)

@@ -139,7 +139,7 @@ from services.recordings_index import FILE_NAME as RECORDINGS_INDEX_FILE, Record
 from services.recordings_list import timer_text
 from services.redact import safe_message, safe_traceback
 from services.sessions import SessionManager, Slot
-from services.settings_model import PROVIDERS, Context, sections
+from services.settings_model import PROVIDERS, REMOTE, Context, sections
 from services.settings_values import SettingsValues
 from services.sound_sync import FILE_NAME as SOUND_SYNC_FILE, SoundSync
 from services.subtitle_picks import FILE_NAME as SUBTITLE_PICKS_FILE, SubtitlePicks
@@ -207,6 +207,7 @@ from ui.settings_dialog import OptionsDialog
 from ui.settings_general import GeneralRows, hooks as general_hooks
 from ui.settings_guide import GuideRows, hooks as guide_hooks
 from ui.settings_providers import ProviderRows
+from ui.settings_remote import RemoteRows
 from ui.song_jobs import PanelCover
 from ui.subtitle_search import OnlineSetup
 from ui.track_controls import SUBTITLE_FILTER
@@ -1177,6 +1178,9 @@ class TVWindow(QMainWindow):
         # Settings › Guide: its rows follow the guide's source; the update period and each
         # channel's matching in a card, the matching's files read and written on a worker.
         self.guide_rows = GuideRows(self, self.settings, self.settings_drawer)
+        # Settings › Phone remote: its switches start or stop the remote at once, its state as
+        # the remote tells it, each paired phone removed once asked.
+        self.remote_rows = RemoteRows(self, self.settings, self.settings_drawer)
         self.catalogs.providersChanged.connect(self.provider_rows.providers_changed)
         self.catalog.providerReady.connect(self.provider_rows.providers_changed)
         # File → Open Link… and the channel list's Open a link (plan 4): while its card shows it
@@ -2833,8 +2837,13 @@ class TVWindow(QMainWindow):
 
     def _settings_context(self) -> Context:
         """What Settings' sections show that only this QiTV knows: General's, Files' and
-        Advanced's (ui.settings_general), and the Guide's rows as they are now."""
-        return dataclasses.replace(self.general_rows.context(), guide=self.guide_rows.rows())
+        Advanced's (ui.settings_general), and the Guide's and the phone remote's rows as they
+        are now."""
+        return dataclasses.replace(
+            self.general_rows.context(),
+            guide=self.guide_rows.rows(),
+            remote=self.remote_rows.rows(),
+        )
 
     def options_dialog(self, tab: str = "") -> None:
         """The Settings window, on the tab `tab` names ("general", "timeshift", "subtitles",
@@ -2869,8 +2878,8 @@ class TVWindow(QMainWindow):
             return
         if self.remote.hub is None:
             self.remote.turn_on()
-            if self.remote.hub is None:  # settings of a newer QiTV: its Settings tab says so
-                self.options_dialog(tab="remote")
+            if self.remote.hub is None:  # settings of a newer QiTV: Settings says so
+                self.open_settings(section_key=REMOTE)
                 return
         if self.screens.library_shown():
             self.screens.back_to_tv()  # the QR shows over the TV
