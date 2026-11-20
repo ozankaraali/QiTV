@@ -44,6 +44,7 @@ NAMED_AS_THEY_SHOW = {
     "FormCard",
     "ChoiceCard",
     "RangeCard",
+    "ProgressCard",  # 2.13.1: a ChoiceCard with a bar, said as it shows
 }
 
 

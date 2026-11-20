@@ -15,7 +15,8 @@ from timer_fixtures import elapse, wait_until
 from services.i18n import translate
 from ui import window_cards
 from ui.keymap import Action
-from ui.overlays.settings_card import CANCEL, OK, OK_TEXT, Button, ChoiceCard
+from ui.overlays.progress_card import BAR, ProgressCard
+from ui.overlays.settings_card import CANCEL, OK, OK_TEXT, Button
 from ui.window_cards import WindowCards
 
 GO = "go"
@@ -39,8 +40,8 @@ class WindowCardsTests(unittest.TestCase):
         self.closing = False
         self.prepared: list[str] = []
         self.cards = WindowCards(
-            ChoiceCard(self.tv),
-            ChoiceCard(self.library),
+            ProgressCard(self.tv),
+            ProgressCard(self.library),
             window=self.window,
             library_shown=lambda: self.in_library,
             closing=lambda: self.closing,
@@ -241,6 +242,92 @@ class WindowCardsTests(unittest.TestCase):
         card.handle(Action.NAV_ACTIVATE)
         self.assertEqual(self.answers, ["mute"])
 
+    # ---- a progress card (an update's download) ----------------------------------------------
+
+    def progress(self):
+        return self.cards.progress(
+            "Downloading Update",
+            "Downloading update...",
+            [Button("stop", "Cancel")],
+            "stop",
+            self.answers.append,
+            back="hide",
+        )
+
+    def test_a_progress_card_moves_and_closes_unanswered(self):
+        self.show()
+        progress = self.progress()
+        card = self.cards.tv_card
+        self.assertTrue(card.isVisible())
+        self.assertEqual(
+            (card.title(), card.body()), ("Downloading Update", "Downloading update...")
+        )
+        self.assertEqual(card.progress(), 0.0)
+        bar = card.control_rect(*BAR)
+        self.assertFalse(bar.isEmpty())
+        self.assertLess(bar.bottom(), card.control_rect("button", "stop").top())
+        self.assertEqual(card.focus(), ("button", "stop"))
+        progress.set(0.5, "Downloading update... 1.0 / 2.0 MB")
+        self.assertEqual(card.progress(), 0.5)
+        self.assertEqual(card.body(), "Downloading update... 1.0 / 2.0 MB")
+        progress.set(1.5, "Downloading update... 2.0 / 2.0 MB")
+        self.assertEqual(card.progress(), 1.0)  # never past its end
+        self.ask("Update Now?")  # what comes after it waits for it
+        self.assertEqual(card.title(), "Downloading Update")
+        progress.close()  # done: it goes, answering nothing
+        self.assertTrue(card.isHidden())
+        self.assertEqual(self.answers, [])
+        elapse(0)
+        self.assertEqual(card.title(), "Update Now?")
+        self.assertIsNone(card.progress())  # a question has no bar
+        self.assertTrue(card.control_rect(*BAR).isEmpty())
+        progress.set(0.7, "late")  # a closed one's news changes nothing
+        progress.close()
+        self.assertEqual(card.title(), "Update Now?")
+
+    def test_progress_back_takes_the_card_away_and_its_cancel_stops(self):
+        self.show()
+        progress = self.progress()
+        card = self.cards.tv_card
+        card.handle(Action.ESCAPE)  # Back: only the card goes (the download goes on)
+        self.assertEqual(self.answers, ["hide"])
+        self.assertTrue(card.isHidden())
+        progress.set(0.5, "Downloading update... 1.0 / 2.0 MB")
+        self.assertTrue(card.isHidden())
+        elapse(0)
+        self.progress()
+        card.handle(Action.NAV_ACTIVATE)  # its Cancel, focused
+        self.assertEqual(self.answers, ["hide", "stop"])
+
+    def test_a_progress_waiting_shows_where_it_got_to_and_over_the_library(self):
+        self.in_library = True
+        progress = self.progress()  # the window not shown yet
+        progress.set(0.25, "Downloading update... 0.5 / 2.0 MB")
+        self.show()
+        card = self.cards.library_card
+        self.assertTrue(card.isVisible())
+        self.assertEqual(card.progress(), 0.25)
+        self.assertEqual(card.body(), "Downloading update... 0.5 / 2.0 MB")
+        self.assertTrue(self.cards.library_key(Action.NAV_BACKSPACE))
+        self.assertEqual(self.answers, ["hide"])
+
+    def test_a_progress_closed_before_it_showed_never_shows(self):
+        progress = self.progress()
+        progress.close()
+        self.show()
+        self.assertFalse(self.cards.shown())
+        self.assertTrue(self.cards.tv_card.isHidden())
+
+    def test_with_no_window_a_progress_shows_nothing(self):
+        window_cards.install(None)
+        with self.assertLogs("ui.window_cards", "INFO"):
+            progress = window_cards.progress(
+                "Downloading Update", "", [Button("stop", "Cancel")], "stop", self.answers.append
+            )
+        progress.set(0.5, "half")  # nothing to move, nothing raised
+        progress.close()
+        self.assertEqual(self.answers, [])
+
 
 from tests.test_tv_window import WindowCase  # noqa: E402
 from ui import update_dialogs  # noqa: E402
@@ -283,6 +370,36 @@ class WindowCardsWindowTests(WindowCase):
         self.assertEqual(answers, [False, True])
         elapse(0)
         self.assertFalse(window.window_cards.shown())
+
+    def test_back_on_an_update_offer_is_not_now_never_skip(self):
+        self.show()
+        self.wait_for_drawer()
+        info = {"version": "9.9.9", "url": "https://release.invalid/qitv", "download_url": ""}
+        card = self.window.window_cards.tv_card
+        with (
+            mock.patch("services.update_checker.skip_version") as skip,
+            mock.patch("services.update_checker.disable_update_reminders") as mute,
+            mock.patch("services.system_open.open_url") as opened,
+        ):
+            for back in ("esc", "backspace", "dim"):
+                with self.subTest(back=back):
+                    update_dialogs.show_update_dialog(info, self.config, manual=False)
+                    self.assertTrue(card.isVisible())
+                    QTest.keyClick(self.window, Qt.Key.Key_Left)  # on Skip This Version
+                    self.assertEqual(card.focus(), ("button", "skip"))
+                    if back == "esc":
+                        QTest.keyClick(self.window, Qt.Key.Key_Escape)
+                    elif back == "backspace":
+                        self.window.remote_key(Qt.Key.Key_Backspace)
+                    else:
+                        QTest.mouseClick(card, Qt.MouseButton.LeftButton, pos=QPoint(4, 4))
+                        elapse(QApplication.doubleClickInterval() + 80)
+                    self.assertTrue(card.isHidden())
+                    elapse(0)
+        skip.assert_not_called()  # skipping is a choice of its own, never Back
+        mute.assert_not_called()
+        opened.assert_not_called()
+        self.assertEqual(self.config.skipped_update_version, "")
 
     def test_the_library_opening_answers_live_tvs_question_as_back(self):
         self.show()

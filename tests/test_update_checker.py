@@ -864,6 +864,61 @@ class UpdateCardsTests(unittest.TestCase):
         self.assertEqual(answers, [False, True])
 
 
+class DownloadCardTests(unittest.TestCase):
+    """2.13.1: the download's progress is a card too (no system window): its bar, how much
+    came, and Cancel, which stops it; Back takes the card away, the download going on."""
+
+    URL, RELEASE = "https://release.invalid/qitv.dmg", "https://release.invalid/qitv"
+
+    def setUp(self):
+        self.handle = mock.MagicMock()  # the card's progress
+        self.cancel = mock.MagicMock()
+        patches = {
+            "shown": mock.patch.object(window_cards, "progress", return_value=self.handle),
+            "start": mock.patch.object(update_checker, "start_download", return_value=self.cancel),
+            "perform": mock.patch.object(update_checker, "perform_update"),
+        }
+        for name, patch in patches.items():
+            setattr(self, name, patch.start())
+            self.addCleanup(patch.stop)
+        update_dialogs.start_download(self.URL, 1, self.RELEASE)
+        self.assertEqual(self.start.call_args.args, (self.URL, 1))
+        self.callbacks = self.start.call_args.kwargs
+
+    def test_the_download_shows_its_progress_and_cancel(self):
+        (title, text, buttons, default, then), kwargs = self.shown.call_args
+        self.assertEqual((title, text), ("Downloading Update", "Downloading update..."))
+        self.assertEqual(
+            [(b.key, b.text, b.accent, b.danger) for b in buttons],
+            [("stop", "Cancel", False, False)],
+        )
+        self.assertEqual((default, kwargs["back"]), ("stop", "hide"))
+        self.callbacks["progress"](5 * 1024 * 1024, 10 * 1024 * 1024)
+        self.handle.set.assert_called_once_with(0.5, "Downloading update... 5.0 / 10.0 MB")
+        self.callbacks["progress"](1, 0)  # no size known: nothing to say
+        self.assertEqual(self.handle.set.call_count, 1)
+        then("hide")  # Back: the card goes, the download goes on
+        self.cancel.assert_not_called()
+        then("stop")  # Cancel
+        self.cancel.assert_called_once_with()
+
+    def test_once_downloaded_the_card_goes_and_the_update_goes_on(self):
+        path = "/Users/someone/Library/Caches/QiTV/Updates/qitv.dmg"
+        self.callbacks["finished"](path)
+        self.handle.close.assert_called_once_with()
+        self.perform.assert_called_once_with(path, self.RELEASE, update_dialogs.DIALOGS)
+
+    def test_a_failed_download_says_so_a_cancelled_one_not(self):
+        with Asked() as asked:
+            self.callbacks["failed"](update_checker.DOWNLOAD_CANCELLED)
+            self.assertEqual(asked.cards, [])
+            self.callbacks["failed"]("Download failed: timed out")
+        self.assertEqual(self.handle.close.call_count, 2)
+        card = asked.only()
+        self.assertEqual(card.title, "Download Failed")
+        self.assertEqual(card.body, "Failed to download update.\nDownload failed: timed out")
+
+
 class LayoutTests(unittest.TestCase):
     """services/ holds the update logic; its dialogs are ui/'s."""
 
@@ -873,11 +928,11 @@ class LayoutTests(unittest.TestCase):
         for name in ("QMessageBox", "QProgressDialog", "QCheckBox", "webbrowser"):
             self.assertFalse(hasattr(update_checker, name), name)
 
-    def test_no_system_message_box_opens(self):
-        # 2.13.1: every update message is QiTV's own card (ui.window_cards); nothing waits in
-        # an exec() (the download's progress window is the one left).
+    def test_no_system_window_opens(self):
+        # 2.13.1: every update message, and the download's progress, is QiTV's own card
+        # (ui.window_cards); nothing waits in an exec().
         source = Path(update_dialogs.__file__).read_text(encoding="utf-8")
-        for name in ("QMessageBox", "QInputDialog", "QCheckBox", "exec_()", ".exec()"):
+        for name in ("QMessageBox", "QInputDialog", "QCheckBox", "QProgressDialog", ".exec"):
             self.assertNotIn(name, source, name)
 
     def test_the_dialogs_check_through_the_service(self):

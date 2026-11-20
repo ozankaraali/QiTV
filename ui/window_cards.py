@@ -18,8 +18,12 @@ dimmed picture. A question goes with its page, answered as its Back: live TV's c
 Open Link's does when the Library, Settings or a stop comes; the Library's when live TV comes.
 An answer while the window closes is its Back too, and nothing is asked once it closes.
 
-`install` makes a window's cards the ones `ask` and `tell` use (held weakly: a window that went
-asks nothing); with none, nothing is asked (logged).
+A progress (`progress`: an update's download) is such a question with a bar (ProgressCard):
+`Progress.set` moves it, `Progress.close` takes it away unanswered once its work is done, and
+what waited for it comes then.
+
+`install` makes a window's cards the ones `ask`, `tell` and `progress` use (held weakly: a
+window that went asks nothing); with none, nothing is asked (logged).
 """
 
 from __future__ import annotations
@@ -37,22 +41,45 @@ from shiboken6 import isValid
 
 from services.i18n import translate
 from ui.keymap import Action
-from ui.overlays.settings_card import CANCEL, OK, OK_TEXT, Button, ChoiceCard
+from ui.overlays.progress_card import ProgressCard
+from ui.overlays.settings_card import CANCEL, OK, OK_TEXT, Button
 
 logger = logging.getLogger(__name__)
 
 Answer = Callable[[str], None]  # a question's: the key answered
 
 
-@dataclass(frozen=True)
+@dataclass(eq=False)
 class _Question:
     title: str
-    body: str
+    body: str  # (a progress's changes)
     buttons: tuple[Button, ...]
     default: str
     then: Answer
     alternates: tuple[Button, ...]
     back: str
+    progress: Optional[float] = None  # a progress's bar (None: a question's, none)
+    closed: bool = False  # a progress whose work is done
+
+
+class Progress:
+    """A progress card's handle (WindowCards.progress): `set` moves its bar and changes its
+    words (shown now, or once it shows), `close` takes it away unanswered. Once it was answered
+    or closed, neither changes anything."""
+
+    def __init__(self, cards: Optional[WindowCards], question: Optional[_Question]) -> None:
+        self._cards = cards
+        self._question = question
+
+    def set(self, fraction: float, text: str) -> None:
+        cards, question = self._cards, self._question
+        if cards is not None and question is not None and isValid(cards):
+            cards._moved(question, fraction, text)
+
+    def close(self) -> None:
+        cards, question = self._cards, self._question
+        if cards is not None and question is not None and isValid(cards):
+            cards._close(question)
 
 
 class WindowCards(QObject):
@@ -64,8 +91,8 @@ class WindowCards(QObject):
 
     def __init__(
         self,
-        tv_card: ChoiceCard,
-        library_card: ChoiceCard,
+        tv_card: ProgressCard,
+        library_card: ProgressCard,
         *,
         window: QWidget,
         library_shown: Callable[[], bool],
@@ -84,7 +111,7 @@ class WindowCards(QObject):
         self._above = above
         self._waiting: deque[_Question] = deque()
         self._asked: Optional[_Question] = None  # the one shown
-        self._card: Optional[ChoiceCard] = None  # where it shows
+        self._card: Optional[ProgressCard] = None  # where it shows
         for card in (tv_card, library_card):
             card.answered.connect(partial(self._answered, card))
         window.installEventFilter(self)  # its first show: what waited for it
@@ -110,6 +137,25 @@ class WindowCards(QObject):
         self._waiting.append(question)
         self._next()
 
+    def progress(
+        self,
+        title: str,
+        text: str,
+        buttons: Sequence[Button],
+        default: str,
+        then: Answer,
+        *,
+        back: str = CANCEL,
+    ) -> Progress:
+        """A question with a bar, at 0 (`text` under the title), asked as `ask` asks: its
+        handle moves it, and closes it once its work is done (unanswered)."""
+        question = _Question(title, text, tuple(buttons), default, then, (), back, progress=0.0)
+        if self._closing():
+            return Progress(None, None)
+        self._waiting.append(question)
+        self._next()
+        return Progress(self, question)
+
     def shown(self) -> bool:
         """Whether a question shows (it has the keys)."""
         return self._asked is not None
@@ -133,7 +179,7 @@ class WindowCards(QObject):
 
     # ---- showing ------------------------------------------------------------------------------
 
-    def _front(self) -> ChoiceCard:
+    def _front(self) -> ProgressCard:
         return self.library_card if self._library_shown() else self.tv_card
 
     def _next(self) -> None:
@@ -155,15 +201,38 @@ class WindowCards(QObject):
             list(question.buttons),
             question.default,
             alternates=list(question.alternates),
+            progress=question.progress,
         )
         for widget in self._above():
             if widget is not None and isValid(widget) and widget.isVisible():
                 widget.raise_()
 
-    def _answered(self, card: ChoiceCard, key: str) -> None:
+    def _moved(self, question: _Question, fraction: float, text: str) -> None:
+        if question.closed or question.progress is None:
+            return
+        question.progress, question.body = fraction, text
+        if question is self._asked and self._card is not None:
+            self._card.set_progress(fraction, text)
+
+    def _close(self, question: _Question) -> None:
+        """A progress's work is done: it goes unanswered (shown: what waited comes next)."""
+        if question.closed:
+            return
+        question.closed = True
+        if question in self._waiting:
+            self._waiting.remove(question)
+        if question is not self._asked:
+            return
+        card, self._asked, self._card = self._card, None, None
+        if card is not None:
+            card.hide()  # (a card hidden by its caller answers nothing)
+        QTimer.singleShot(0, self, self._next)
+
+    def _answered(self, card: ProgressCard, key: str) -> None:
         if card is not self._card or self._asked is None:
             return
         question, self._asked, self._card = self._asked, None, None
+        question.closed = True  # answered: its handle changes nothing more
         if key == CANCEL or self._closing():
             key = question.back
         try:
@@ -214,6 +283,24 @@ def ask(
         logger.info("A question with no window to ask it on: not asked (%s)", title)
         return
     cards.ask(title, body, buttons, default, then, alternates=alternates, back=back)
+
+
+def progress(
+    title: str,
+    text: str,
+    buttons: Sequence[Button],
+    default: str,
+    then: Answer,
+    *,
+    back: str = CANCEL,
+) -> Progress:
+    """WindowCards.progress on the installed window's cards; with none, a handle that moves
+    nothing (the work goes on unseen)."""
+    cards = installed()
+    if cards is None:
+        logger.info("A progress with no window to show it on: not shown (%s)", title)
+        return Progress(None, None)
+    return cards.progress(title, text, buttons, default, then, back=back)
 
 
 def tell(title: str, body: str, then: Optional[Answer] = None) -> None:

@@ -185,11 +185,11 @@ from ui.overlays.next_card import NextCard
 from ui.overlays.opening import OpeningOverlay
 from ui.overlays.painting import fmt_clock
 from ui.overlays.pip_label import PipLabel
+from ui.overlays.progress_card import ProgressCard
 from ui.overlays.question_card import QuestionCard
 from ui.overlays.rec_sign import RecSign
 from ui.overlays.remote_pair import PairOverlay
 from ui.overlays.retry_notice import RetryNotice
-from ui.overlays.settings_card import ChoiceCard
 from ui.overlays.settings_drawer import SettingsDrawer
 from ui.overlays.sleep_notice import SleepNotice
 from ui.overlays.stats import StatsOverlay
@@ -812,11 +812,12 @@ class TVWindow(QMainWindow):
         self.subtitle_search = SubtitleSearchPage(host)
         # File → Open Link… and the channel list's Open a link (plan 4): its card over the picture
         self.open_link_card = LinkCard(host)
-        # 2.13.1: QiTV's own questions and messages (an update's, a recording's deletion), on
-        # the page that shows (the TV's, or its twin on the Library page): no system box.
+        # 2.13.1: QiTV's own questions and messages (an update's, its download's progress, a
+        # recording's deletion), on the page that shows (the TV's, or its twin on the Library
+        # page): no system window.
         self.window_cards = WindowCards(
-            ChoiceCard(host),
-            ChoiceCard(self.library_page),
+            ProgressCard(host),
+            ProgressCard(self.library_page),
             window=self,
             library_shown=lambda: self.screens.library_shown(),
             closing=lambda: self._closing,

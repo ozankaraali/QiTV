@@ -1,13 +1,14 @@
-"""The update's questions, its messages, its progress and its errors (services/update_checker.py
-does the checking, downloading and launching).
+"""The update's questions, its messages, its download's progress and its errors
+(services/update_checker.py does the checking, downloading and launching).
 
 `check_for_updates` is what the app calls (at startup, Help → Check for Updates, Settings):
 the service checks on a QThread and reports to `DIALOGS` (the startup check's question waits
-for a film opened in QiTV: `_AfterTheFilm`). 2.13.1: each question and message is QiTV's own
-card over the window (ui.window_cards: the message box's title, words and buttons, the main
-action accented), answered through a callback: nothing waits in an exec(). Esc, Back and a
-click on the dimmed picture decide nothing: the update is offered again at the next check, a
-recording keeps recording.
+for a film opened in QiTV: `_AfterTheFilm`). 2.13.1: each question and message, and the
+download's progress, is QiTV's own card over the window (ui.window_cards: the message box's
+title, words and buttons, the main action accented), answered through a callback: nothing
+waits in an exec(). Esc, Back and a click on the dimmed picture are the safe answer: Not now
+(the update is offered again at the next check; never Skip This Version), Keep recording,
+Close; on the download's progress they only take the card away.
 """
 
 import logging
@@ -16,7 +17,6 @@ import sys
 from typing import Callable, Optional
 
 from PySide6.QtCore import QTimer
-from PySide6.QtWidgets import QProgressDialog
 
 from services import i18n, system_open, update_checker
 from services.config_manager import ConfigManager, get_app_version
@@ -31,6 +31,7 @@ WhenIdle = Callable[[Callable[[], None]], None]  # TVWindow.when_idle
 # The cards' answers, by key.
 DOWNLOAD, RELEASE, SKIP, MUTE = "download", "release", "skip", "mute"
 UPDATE_NOW, NOT_NOW, KEEP, QUIT_NOW, CLOSE = "update", "not_now", "keep", "quit", "close"
+STOP, HIDE = "stop", "hide"  # the download's Cancel; its Back (the card goes, it goes on)
 CLOSE_TEXT = N_("Close")
 
 
@@ -223,7 +224,8 @@ def show_update_dialog(
         - "Do not remind me about updates": automatic update checks are disabled entirely
           (the old box's check box with Skip This Version).
 
-    Esc, Back and the dimmed picture: nothing changes (offered again at the next check).
+    Esc, Back and the dimmed picture: Not now, nothing changes (offered again at the next
+    check); skipping is a choice of its own.
 
     Args:
         update_info: Dict with keys ``version``, ``url``, and optionally
@@ -277,6 +279,7 @@ def show_update_dialog(
             update_checker.skip_version(config_manager, version)
         elif key == MUTE:
             update_checker.disable_update_reminders(config_manager)
+        # NOT_NOW (Esc, Back, the dimmed picture): nothing; offered again at the next check
 
     window_cards.ask(
         tr("Update Available"),
@@ -285,55 +288,57 @@ def show_update_dialog(
         DOWNLOAD if can_download else RELEASE,
         answered,
         alternates=alternates,
+        back=NOT_NOW,
     )
 
 
-# The progress dialogs of downloads under way (kept from the garbage collector).
-_progress_dialogs: list[QProgressDialog] = []
-
-
 def start_download(download_url: str, file_size: int, release_url: str):
-    """Download the update with a progress dialog; then launch it, or say why not."""
-    progress = QProgressDialog(tr("Downloading update..."), tr("Cancel"), 0, 100)
-    progress.setWindowTitle(tr("Downloading Update"))
-    progress.setMinimumDuration(0)
-    progress.setValue(0)
-    _progress_dialogs.append(progress)
+    """Download the update, its progress in a card (2.13.1: QiTV's own, over the page that
+    shows): the bar, how much came, and Cancel, which stops it. Back (Esc, the dimmed picture)
+    only takes the card away: the download goes on, and what comes after it shows once it is
+    done. Then launch it, or say why not."""
+    cancel: Callable[[], None] = lambda: None
+
+    def answered(key: str) -> None:
+        if key == STOP:
+            cancel()
+
+    progress = window_cards.progress(
+        tr("Downloading Update"),
+        tr("Downloading update..."),
+        [Button(STOP, tr("Cancel"))],
+        STOP,
+        answered,
+        back=HIDE,
+    )
 
     def on_progress(downloaded: int, total: int):
-        if progress.wasCanceled() or total <= 0:
+        if total <= 0:
             return
-        progress.setValue(int(downloaded * 100 / total))
         mb_downloaded = downloaded / (1024 * 1024)
         mb_total = total / (1024 * 1024)
-        progress.setLabelText(
+        progress.set(
+            downloaded / total,
             tr(
                 # i18n: done and total are megabytes, as "12.5"
                 "Downloading update... {done} / {total} MB",
                 done=i18n.decimal(f"{mb_downloaded:.1f}"),
                 total=i18n.decimal(f"{mb_total:.1f}"),
-            )
+            ),
         )
 
-    def done():
-        progress.canceled.disconnect(cancel)
-        progress.close()
-        _progress_dialogs.remove(progress)
-
     def on_finished(path: str):
-        done()
+        progress.close()
         update_checker.perform_update(path, release_url, DIALOGS)
 
     def on_failed(message: str):
-        done()
+        progress.close()
         if "cancelled" not in message.lower():  # the English DOWNLOAD_CANCELLED: never shown
             _show_download_error(message, release_url)
 
     cancel = update_checker.start_download(
         download_url, file_size, progress=on_progress, finished=on_finished, failed=on_failed
     )
-    progress.canceled.connect(cancel)
-    progress.show()
 
 
 def _show_download_error(error_msg: str, release_url: str):
