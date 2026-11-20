@@ -26,7 +26,8 @@ Enter presses the focused button, or the accent one from a field; Esc cancels. A
 or presses, and a click on the dimmed picture (or the mouse's Back) cancels. On a button or an
 alternate, Backspace (the phone's "previous" too) is Back, which in a card is Cancel; in a
 field it deletes and never cancels. A mouse press that hides the card swallows a
-double-click's second press, which would land on what is behind it (ui.pointer).
+double-click's second press, which would land on what is behind it (ui.pointer); so does a
+card shown by a press (a row under it), whose second press would land on the card.
 
 The button keyed CANCEL ("cancel") is the card's Cancel and is never disabled: on a FormCard
 it does what Esc does (`cancelled`, never `pressed("cancel")`); a ChoiceCard answers "cancel"
@@ -57,9 +58,10 @@ from PySide6.QtGui import (
     QPainter,
     QPaintEvent,
     QPen,
+    QShowEvent,
     QWheelEvent,
 )
-from PySide6.QtWidgets import QFileDialog, QWidget
+from PySide6.QtWidgets import QApplication, QFileDialog, QWidget
 
 from services.i18n import N_, translate
 from ui.keymap import Action, key_hint
@@ -917,6 +919,14 @@ class _Card(Overlay):
                 continue
             return name
         return PANEL
+
+    def showEvent(self, event: QShowEvent) -> None:
+        super().showEvent(event)
+        if QApplication.mouseButtons() & Qt.MouseButton.LeftButton:
+            # Shown by a press (on a row under it: "Remove provider…"): a double-click's second
+            # press would land on the card (Qt makes it a press on another widget), on the
+            # dimmed picture, and cancel it. It reaches nothing.
+            self._second_click.arm()
 
     def mousePressEvent(self, event: QMouseEvent) -> None:
         event.accept()  # never the picture's under it

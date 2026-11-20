@@ -4,8 +4,8 @@ An STB portal or an Xtream panel is asked as the account check asks it (services
 no stream is opened); a playlist must answer a HEAD, or be a file on this computer; a Jellyfin
 or Emby server is signed in to. Each is asked over HTTPS first, and one that answered only over
 HTTP says so (2.7.1). A media server's sign-in hands back its access (a token, the user's id and
-the device's id) to keep in place of the password, which is used here only; one already added
-(its token kept, no password given) is asked with its token instead.
+the device's id) to keep in place of the password, which is used here only; `check_kept` asks
+one already added (its token kept, no password) with its token instead.
 
 `check` runs on a worker thread (ui.provider_check runs it for Settings) and answers an
 `Outcome`, plain data. Nothing here logs a URL or a credential: the failure's type and host.
@@ -71,8 +71,6 @@ def check(provider: dict, ssl_verify: bool, password: str = "") -> Outcome:
                 why = found.text  # why it failed, or (DATED) the warning
         elif kind in PLAYLIST_TYPES:
             ok = verify_url(str(provider.get("url") or ""), verify_ssl=verify)
-        elif is_media_server(kind) and provider.get("token") and not provider.get("password"):
-            ok, why = _kept_sign_in(provider, verify)  # one added: its token, no password kept
         elif is_media_server(kind):
             ok, why, access = _sign_in(provider, verify)
         http_only = ok and not is_media_server(kind) and answered_only_over_http(provider, verify)
@@ -99,12 +97,22 @@ def _sign_in(provider: dict, verify: bool) -> tuple[bool, str, dict[str, Any]]:
     return True, "", {key: value[key] for key in ACCESS_KEYS if key in value}
 
 
-def _kept_sign_in(provider: dict, verify: bool) -> tuple[bool, str]:
-    """A Jellyfin or Emby server already added, asked with its kept token: (answered, why
-    not)."""
+def check_kept(provider: dict, ssl_verify: bool) -> Outcome:
+    """`check` for a provider as it is kept (Settings' Check the connection, blocking): a
+    Jellyfin or Emby server, which keeps no password, is asked with its kept token instead of
+    a sign-in. A form being edited (another user name, no password typed) is never asked so:
+    it signs in with `check`."""
+    kind = str(provider.get("type") or "")
+    if not is_media_server(kind) or not provider.get("token") or provider.get("password"):
+        return check(provider, ssl_verify)
     from services import media_workers
 
-    return media_workers.check_access(provider, verify)
+    try:
+        ok, why = media_workers.check_access(provider, bool(provider.get("ssl_verify", ssl_verify)))
+    except Exception as e:
+        logger.warning("Provider verification failed: %s", safe_exc(e))
+        return Outcome(False)
+    return Outcome(ok, why)
 
 
 def answered_only_over_http(provider: dict, verify: bool) -> bool:

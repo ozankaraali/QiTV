@@ -20,7 +20,7 @@ from timer_fixtures import wait_until
 from services import failure_reasons as reasons, media_workers, provider_api, provider_check
 from services.failure_reasons import Reason
 from services.jobs import JobRunner
-from services.provider_check import Outcome, check
+from services.provider_check import Outcome, check, check_kept
 from tests import test_tv_window as base
 from ui.provider_check import ProviderCheck
 from ui.settings_dialog import OptionsDialog
@@ -202,16 +202,26 @@ class CheckTests(unittest.TestCase):
             mock.patch.object(media_workers, "sign_in", side_effect=AssertionError),
             mock.patch.object(media_workers, "check_access", return_value=(True, "")) as asked,
         ):
-            self.assertEqual(check(kept, True), Outcome(True))
+            self.assertEqual(check_kept(kept, True), Outcome(True))
             asked.assert_called_once_with(kept, True)
         with mock.patch.object(media_workers, "check_access", return_value=(False, "Again")):
-            self.assertEqual(check({**kept, "ssl_verify": False}, True), Outcome(False, "Again"))
-        # A password given (the address card) signs in with it, as before.
+            outcome = check_kept({**kept, "ssl_verify": False}, True)
+        self.assertEqual(outcome, Outcome(False, "Again"))
+        with mock.patch.object(media_workers, "check_access", side_effect=RuntimeError("x")):
+            with self.assertLogs("services.provider_check", "WARNING"):
+                self.assertEqual(check_kept(kept, True), Outcome(False))
+        # A form (the old window's Verify, the address card) signs in, even with a token: a
+        # user name changed without its password is never passed on the old token.
         with (
             mock.patch.object(media_workers, "check_access", side_effect=AssertionError),
-            mock.patch.object(media_workers, "sign_in", return_value=(True, ACCESS)),
+            mock.patch.object(media_workers, "sign_in", return_value=(False, WRONG)) as signed,
         ):
-            self.assertEqual(check(kept, True, password="pw"), Outcome(True, "", False, ACCESS))
+            self.assertEqual(check({**kept, "username": "bob"}, True), Outcome(False, WRONG))
+            self.assertEqual(signed.call_args.args[2:4], ("bob", ""))
+        # Any other provider as kept is checked as ever.
+        with mock.patch.object(provider_check, "check", return_value=Outcome(True)) as plain:
+            self.assertEqual(check_kept(PANEL, False), Outcome(True))
+        plain.assert_called_once_with(PANEL, False)
 
 
 class ProviderCheckTests(unittest.TestCase):

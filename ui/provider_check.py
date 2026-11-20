@@ -23,14 +23,21 @@ class ProviderCheckJob(QObject):
     finished = Signal(object)
     error = Signal(str)
 
-    def __init__(self, provider: dict, ssl_verify: bool, password: str = "") -> None:
+    def __init__(
+        self, provider: dict, ssl_verify: bool, password: str = "", kept: bool = False
+    ) -> None:
         super().__init__()
         self._provider = provider
         self._ssl_verify = ssl_verify
         self._password = password  # held here only, for the sign-in
+        self._kept = kept
 
     def run(self) -> None:
-        self.finished.emit(provider_check.check(self._provider, self._ssl_verify, self._password))
+        if self._kept:
+            outcome = provider_check.check_kept(self._provider, self._ssl_verify)
+        else:
+            outcome = provider_check.check(self._provider, self._ssl_verify, self._password)
+        self.finished.emit(outcome)
 
 
 class ProviderCheck(QObject):
@@ -46,10 +53,14 @@ class ProviderCheck(QObject):
         self._runner = runner if runner is not None else JobRunner(self)
         self._request = 0
 
-    def start(self, provider: dict, ssl_verify: bool, password: str = "") -> int:
-        """Check `provider` (copied: the caller may change its own); the request's id."""
+    def start(
+        self, provider: dict, ssl_verify: bool, password: str = "", kept: bool = False
+    ) -> int:
+        """Check `provider` (copied: the caller may change its own); the request's id. `kept`:
+        it is the provider as listed (Check the connection: services.provider_check.check_kept,
+        a media server asked with its kept token)."""
         self._request += 1
-        job = ProviderCheckJob(dict(provider), bool(ssl_verify), password)
+        job = ProviderCheckJob(dict(provider), bool(ssl_verify), password, kept)
         self._runner.run_worker(job, self._on_answer, self._on_error, context=self._request)
         return self._request
 

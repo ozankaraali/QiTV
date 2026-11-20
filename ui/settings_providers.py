@@ -489,7 +489,7 @@ class ProviderRows(QObject):
         self._checks[check] = name  # (a runner may answer inside start)
         self._notes[name] = translate(BUSY_TEXT)
         self._settings.refresh_sections()
-        check.start(dict(self._find(name) or {}), self._global_ssl())
+        check.start(dict(self._find(name) or {}), self._global_ssl(), kept=True)
 
     def _answered(self, check: ProviderCheck, outcome: Outcome) -> None:
         name = self._checks.pop(check, None)

@@ -14,7 +14,8 @@ path; there only the rows that open a layer take the highlight, and a click on a
 back up to it. A layer without rows says its `empty_text` and the keys stay on the left. A
 section whose settings are still in the Settings window has one row that opens it there
 (`legacy:<section key>`). Only the right column's focused row shows its help under it, two
-lines at most. Where everything goes is ui/overlays/settings_layout.py's.
+lines at most; a note cut short at its row's end shows there whole instead (a check's
+answer). Where everything goes is ui/overlays/settings_layout.py's.
 
 It changes nothing itself: a step is `stepped(key, ±1)`, an action (a card's row too)
 `chosen(key)`, a text kept `edited(key, text)`, and backing out of the sections `closed`; the
@@ -715,7 +716,10 @@ class SettingsDrawer(Overlay):
                 value = self._value_text(row)
                 choices = [choice.shown() for choice in row.choices] if row.kind == STEP else []
             if row is not None and index == focus:
-                help = help_lines(*self._help_parts(row), un, width)
+                help_text, restart = self._help_parts(row)
+                if self._note_cut(un, area, item):
+                    help_text = row.note  # whole under it while focused (a check's answer)
+                help = help_lines(help_text, restart, un, width)
             boxes.append(
                 place(
                     un,
@@ -730,6 +734,18 @@ class SettingsDrawer(Overlay):
                 )
             )
         return boxes
+
+    @staticmethod
+    def _note_cut(un: Units, area: QRectF, item: Item) -> bool:
+        """Whether the right column's row `item` has a note cut short at its end ("Failed to
+        verify pro…"): the note is then shown whole under it, in its help's place, while it is
+        focused (the keys and the phone have no tooltip)."""
+        row = item.row
+        if row is None or not row.note or row.kind in (STEP, TEXT, INFO):
+            return False
+        box = place(un, area, item, ends=True, icons=False)
+        advance = QFontMetricsF(un.font(VALUE_FONT_U)).horizontalAdvance(row.note)
+        return advance > box.end.width() + 0.5
 
     def _heights(self, side: str, un: Units, area: QRectF) -> list[float]:
         return [box.rect.height() for box in self._boxes(side, un, area)]

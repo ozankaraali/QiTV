@@ -10,7 +10,7 @@ from unittest import mock
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
-from PySide6.QtCore import QPoint
+from PySide6.QtCore import QPoint, Qt
 from PySide6.QtTest import QTest
 from PySide6.QtWidgets import QApplication, QWidget
 from timer_fixtures import elapse, wait_until
@@ -40,7 +40,7 @@ from ui import parental_settings
 from ui.keymap import Action
 from ui.overlays.settings_card import BUSY_TEXT, CANCEL
 from ui.overlays.settings_drawer import SettingsDrawer
-from ui.overlays.settings_layout import Item, title_of
+from ui.overlays.settings_layout import Item, title_of, whole
 from ui.settings_controller import SettingsController
 from ui.settings_dialog import (
     HTTP_ONLY_NOTE,
@@ -48,7 +48,7 @@ from ui.settings_dialog import (
     REMOVE_QUESTION,
     REMOVE_RECORDINGS_NOTE,
 )
-from ui.settings_providers import ProviderRows, kind_text, layer_key, row_key
+from ui.settings_providers import REMOVE as REMOVE_KEY, ProviderRows, kind_text, layer_key, row_key
 from ui.tv_window import SAVE_FAILED_TEXT
 
 PIN = "2468"
@@ -514,10 +514,12 @@ class ProvidersTests(unittest.TestCase):
         self.assertEqual(self.row("Panel", "check").note, "Provider verified successfully.")
         self.key(Action.NAV_ACTIVATE)
         answer(Outcome(False, "The username or password is wrong"))
-        self.assertEqual(
-            self.row("Panel", "check").note,
-            "Failed to verify provider: The username or password is wrong.",
-        )
+        failed = "Failed to verify provider: The username or password is wrong."
+        self.assertEqual(self.row("Panel", "check").note, failed)
+        # Cut short at the row's end, the answer shows whole under the focused row (the keys
+        # and the phone have no tooltip).
+        index = [row.key for row in self.shown()].index(row_key("Panel", "check"))
+        self.assertTrue(whole(self.drawer._box("right", index).help, failed))
         self.key(Action.NAV_ACTIVATE)
         answer(Outcome(True, http_only=True))  # the only place QiTV says so
         self.assertEqual(
@@ -588,6 +590,24 @@ class ProvidersTests(unittest.TestCase):
         self.assertEqual(question.body(), "")
         self.key(Action.ESCAPE)
         self.assertEqual(self.saved(), ["Panel"])
+
+    def test_remove_by_the_mouse_and_a_double_click_keeps_the_question(self):
+        self.on("Lists", "remove")
+        index = [row.key for row in self.shown()].index(row_key("Lists", "remove"))
+        point = self.drawer.row_rect("right", index).center().toPoint()
+        window = self.host.windowHandle()
+        for _ in range(2):  # a double-click: its second press lands on the card it opened
+            QTest.mouseClick(window, Qt.MouseButton.LeftButton, pos=point)
+        question = self.rows.question
+        self.assertTrue(question.isVisible())  # never cancelled by that second press
+        self.assertEqual(question.focus(), ("button", CANCEL))
+        elapse(QApplication.doubleClickInterval() + 80)
+        remove = question.control_rect("button", REMOVE_KEY).center().toPoint()
+        QTest.mouseClick(window, Qt.MouseButton.LeftButton, pos=remove)
+        self.assertFalse(question.isVisible())
+        self.assertEqual(self.saved(), ["Panel"])
+        self.assertEqual(self.drawer.path(), (PROVIDERS,))
+        self.assertEqual(self.drawer.focused_row().key, layer_key("Panel"))
 
 
 class ProvidersWindowTests(WindowCase):

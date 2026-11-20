@@ -37,6 +37,7 @@ from ui.overlays.settings_drawer import (
     VALUE_FONT_U,
     SettingsDrawer,
 )
+from ui.overlays.settings_layout import whole
 from ui.theme import PALETTE
 
 
@@ -1098,6 +1099,23 @@ class SettingsDrawerTests(unittest.TestCase):
         # Without the hint, the renamed layer is one that went (plan 2, Task 2).
         self.drawer.set_sections(self.providers("A", "Dee", "Q"))
         self.assertEqual(self.drawer.path(), ("providers",))
+
+    def test_a_note_cut_short_shows_whole_under_its_focused_row(self):
+        # A check's answer is longer than a row's end holds: the keys and the phone have no
+        # tooltip, so while its row is focused it shows whole in its help's place.
+        answer = "Failed to verify provider: The username or password is wrong."
+        self.open_rows(
+            m.Row("check", "Check the connection", "Asks the provider.", note=answer),
+            m.Row("short", "Hidden group", "Shows it again.", note="Show again"),
+        )
+        self.drawer.grab()
+        box = self.drawer._box("right", 0)
+        fm = QFontMetricsF(ui_units(1280).font(VALUE_FONT_U))
+        self.assertGreater(fm.horizontalAdvance(answer), box.end.width())  # cut at the end
+        self.assertTrue(whole(box.help, answer))
+        self.drawer.move_by(1)
+        self.assertEqual(self.drawer._box("right", 0).help, [])  # only while focused
+        self.assertEqual(self.drawer._box("right", 1).help, ["Shows it again."])  # it fits
 
     def test_back_after_a_rename_goes_up_once(self):
         # ‹ or the fade pressed while the name is edited: the edit is kept first. A rename
