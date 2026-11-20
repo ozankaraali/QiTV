@@ -732,18 +732,19 @@ print(json.dumps({
 }))
 """
 
-# The day menu two days after the clocks went back (Sunday 25 October 2026, 03:00), the
-# window at 20:00 and an archive four days back.
+# The day menu on a Tuesday at 12:10, two days after the clocks changed (in spring on Sunday
+# 29 March 2026, 02:00 to 03:00; in autumn on Sunday 25 October 2026, 03:00 back to 02:00),
+# the window at 20:00 and an archive four days back.
 _DAY_MENU_SCRIPT = """
 import json
 from datetime import datetime, timedelta
 from types import SimpleNamespace
 from ui.overlays.guide import Guide
-now = datetime(2026, 10, 27, 12, 10).astimezone()
+now = datetime(2026, {month}, {day}, 12, 10).astimezone()
 guide = SimpleNamespace(
     _now=lambda: now,
     _back=timedelta(days=4),
-    _window_start=datetime(2026, 10, 27, 20, 0).astimezone(),
+    _window_start=datetime(2026, {month}, {day}, 20, 0).astimezone(),
 )
 print(json.dumps([s.astimezone().strftime("%a %H:%M %z") for _, s in Guide.day_choices(guide)]))
 """
@@ -789,9 +790,11 @@ class LocalTimeTests(unittest.TestCase):
         )
 
     def test_a_day_across_a_clock_change_keeps_the_windows_time_of_day(self):  # 2.12
-        # The window's 20:00 kept its offset (+0100) on the days before the change: 21:00.
+        # The window's 20:00 kept its offset on the days before the change: in autumn
+        # (+0100 carried back to +0200 days) 21:00, in spring (+0200 to +0100 days) 19:00.
+        zone = "CET-1CEST,M3.5.0,M10.5.0/3"
         self.assertEqual(
-            self.run_in_zone("CET-1CEST,M3.5.0,M10.5.0/3", _DAY_MENU_SCRIPT),
+            self.run_in_zone(zone, _DAY_MENU_SCRIPT.format(month=10, day=27)),
             [
                 "Fri 20:00 +0200",
                 "Sat 20:00 +0200",
@@ -799,6 +802,17 @@ class LocalTimeTests(unittest.TestCase):
                 "Mon 20:00 +0100",
                 "Tue 12:00 +0100",  # today: now
                 "Wed 12:00 +0100",  # tomorrow: as far as the guide reaches
+            ],
+        )
+        self.assertEqual(
+            self.run_in_zone(zone, _DAY_MENU_SCRIPT.format(month=3, day=31)),
+            [
+                "Fri 20:00 +0100",
+                "Sat 20:00 +0100",
+                "Sun 20:00 +0200",
+                "Mon 20:00 +0200",
+                "Tue 12:00 +0200",
+                "Wed 12:00 +0200",
             ],
         )
 
