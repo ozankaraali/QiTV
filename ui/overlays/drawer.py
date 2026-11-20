@@ -90,6 +90,7 @@ from services.navigation import (
     LINKS_LAYER,
     OPEN_FILE_ROW,
     OPEN_FOLDER_ROW,
+    OPEN_LINK_ROW,
     RECENT_GROUP,
     RECORDINGS_ROW,
     SETTINGS_ROW,
@@ -216,6 +217,7 @@ _ACTION_ICONS = {
     ADD_PROVIDER_ROW: "plus",
     FREE_CHANNELS_ROW: "plus",
     OPEN_FILE_ROW: "file",
+    OPEN_LINK_ROW: "link",  # 2.12
     OPEN_FOLDER_ROW: "folder",  # Plan 4
     RECORDINGS_ROW: "record",  # 2.9.7
 }

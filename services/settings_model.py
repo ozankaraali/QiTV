@@ -44,8 +44,7 @@ TEXT = "text"  # a value edited in place: Enter or a click on it focused starts 
 INFO = "info"  # a muted line with its value: never focused, the keys go past it
 KINDS = (STEP, OPENS, ACTION, DANGER, TEXT, INFO)
 
-# Section key -> its icon, a drawing of ui/overlays/painting.py's draw_icon. A section with no
-# fitting drawing yet (Phone remote, Parental controls) has none.
+# Section key -> its icon, a drawing of ui/overlays/painting.py's draw_icon.
 ICONS: dict[str, str] = {
     PROVIDERS: "tv",
     GENERAL: "gear",
@@ -53,6 +52,8 @@ ICONS: dict[str, str] = {
     SUBTITLES: "subtitles",
     TIMESHIFT: "record",
     GUIDE: "guide",
+    REMOTE: "phone",
+    PARENTAL: "lock",
     FILES: "folder",
     ADVANCED: "more",
 }
@@ -542,12 +543,12 @@ def _guide(title: str, rows: tuple[Row, ...]) -> Section:
 
 def _remote(title: str, rows: tuple[Row, ...]) -> Section:
     """Phone remote: its rows as ui.settings_remote builds them (they follow the remote)."""
-    return Section(REMOTE, title, ICONS.get(REMOTE, ""), rows=rows)
+    return Section(REMOTE, title, ICONS[REMOTE], rows=rows)
 
 
 def _parental(title: str, rows: tuple[Row, ...]) -> Section:
     """Parental controls: its rows as ui.settings_parental builds them (they follow the lock)."""
-    return Section(PARENTAL, title, ICONS.get(PARENTAL, ""), rows=rows)
+    return Section(PARENTAL, title, ICONS[PARENTAL], rows=rows)
 
 
 def _playback(system: str) -> Section:

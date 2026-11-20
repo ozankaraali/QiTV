@@ -458,9 +458,8 @@ class SettingsDrawerTests(unittest.TestCase):
                 if (c := image.pixelColor(x, y)).red() > 170 and c.blue() < 140
             )
 
-        for key in ("general", "playback", "guide", "advanced"):
+        for key in keys:  # every section has one (2.12: the phone remote's and the lock too)
             self.assertGreater(accent_pixels(keys.index(key)), 0, key)
-        self.assertEqual(accent_pixels(keys.index("remote")), 0)  # none fits yet: room kept
 
     def test_a_small_window_elides_without_overlap(self):
         self.use(*make(640, 360))

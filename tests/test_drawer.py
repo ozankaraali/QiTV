@@ -691,7 +691,7 @@ class DrawerTests(unittest.TestCase):
                 ("Add provider", "plus"),
                 ("Free channels…", "plus"),
                 ("Open file", "file"),  # Ctrl/⌘+O without the menu bar (2.0.1)
-                ("Open a link", None),  # plan 4: File → Open Link… (no icon of its own)
+                ("Open a link", "link"),  # plan 4: File → Open Link… (2.12: its icon)
                 ("Open a folder", "folder"),  # Plan 4: Ctrl/⌘+Shift+O, an empty shelf too
                 ("Recordings", "record"),  # 2.9.7: the Library's Recordings page
             ],
