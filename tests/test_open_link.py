@@ -292,6 +292,8 @@ class ProbeTests(CardCase):
                 "/live/index.m3u8": (200, {}, leaf("a.ts", "b.ts", ended=False)),
                 "/vod/index.m3u8": (200, {}, leaf("a.ts", "b.ts")),
                 "/gone.m3u8": (403, {}, b"Forbidden"),
+                "/podcast": (200, {"Content-Type": "audio/mpeg"}, b"ID3\x04" + b"\x00" * 4096),
+                "/radio": (200, {"Content-Type": "audio/mpeg"}, self.endless),
                 "/big": (200, {}, b"#EXTM3U\n" + b"x" * (1024 * 1024)),
                 "/slow": (200, {}, self.trickle),
             }
@@ -316,6 +318,18 @@ class ProbeTests(CardCase):
             handler.wfile.write(b"x" * 1024)
             handler.wfile.flush()
             time.sleep(0.25)
+
+    def endless(self, handler):
+        """Internet radio: sound that never ends (no size), until the read lets go."""
+        for _ in range(200):
+            if self.source.stop.is_set():
+                return
+            try:
+                handler.wfile.write(b"\xff\xfb" + b"\x00" * 4094)
+                handler.wfile.flush()
+            except OSError:
+                return
+            time.sleep(0.01)
 
     def play(self, path):
         url = self.source.url + path
@@ -355,7 +369,13 @@ class ProbeTests(CardCase):
         self.assertEqual(len(self.source.requests), 1)  # its answer was kept: no second read
 
     def test_a_stream_plays_with_the_kind_its_first_bytes_say(self):
-        cases = (("/live/index.m3u8", LIVE), ("/vod/index.m3u8", FILM), ("/gone.m3u8", LIVE))
+        cases = (
+            ("/live/index.m3u8", LIVE),
+            ("/vod/index.m3u8", FILM),
+            ("/gone.m3u8", LIVE),
+            ("/podcast", FILM),  # final review I2: a sized answer is a file that ends
+            ("/radio", LIVE),  # its sound never ends
+        )
         for path, kind in cases:  # a refusal plays as live: VLC (and the player) say why
             with self.subTest(path):
                 self.played.clear()
@@ -367,7 +387,7 @@ class ProbeTests(CardCase):
 
     def test_at_most_64_kb_are_read_with_the_tls_setting(self):
         with mock.patch("requests.get", wraps=open_link.requests.get) as get:
-            text = open_link.read_start(self.source.url + "/big", False)  # a 1 MB answer
+            text = open_link.read_start(self.source.url + "/big", False).text  # a 1 MB answer
         self.assertTrue(text.startswith("#EXTM3U\n"))
         self.assertEqual(len(text.encode()), PROBE_BYTES)
         self.assertIs(get.call_args.kwargs["verify"], False)

@@ -1,9 +1,11 @@
 """What a link is, from its address or its first bytes (no Qt, no network).
 
 File > Open Link takes any link a person pastes. Most say what they are by their address: a
-film file, a live `.ts`, an account's playlist or API link, a portal. A `.m3u8` (or any other
-address over http) may be one stream or a list of channels, so `classify` answers PROBE and
-the caller fetches the first 64 KB for `probe_text`.
+film or a song (any file type QiTV opens from the disk, services.open_paths: it ends, so it
+seeks and resumes), a live `.ts`, an account's playlist or API link, a portal. A `.m3u8` (or
+any other address over http) may be one stream or a list of channels, so `classify` answers
+PROBE and the caller fetches the first 64 KB for `probe_text`, with what the answer's headers
+say of it.
 
 A kind is FILM, LIVE, PROBE, NONE (not a link QiTV opens), or a `Provider` holding what
 `parse_provider_link` read, for the "Add provider" offer. An Xtream stream path
@@ -17,6 +19,11 @@ from dataclasses import dataclass
 from typing import Iterable, Optional, Union
 from urllib.parse import unquote, urlsplit
 
+from services.open_paths import (
+    EXTRA_MUSIC_EXTENSIONS,
+    EXTRA_VIDEO_EXTENSIONS,
+    MEDIA_EXTENSIONS,
+)
 from services.provider_link import (
     _STREAM_ID,
     M3U,
@@ -28,7 +35,13 @@ from services.provider_link import (
 )
 
 FILM, LIVE, PROBE, NONE = "FILM", "LIVE", "PROBE", "NONE"
-_FILM_EXTENSIONS = (".mp4", ".mkv", ".avi", ".webm", ".mov", ".m4v")
+# Every video and music file type QiTV opens from the disk is a file that ends (final review
+# I2: a song played as a live channel replayed from its start for ever); a .ts is live.
+_FILM_EXTENSIONS = tuple(
+    f".{ext}"
+    for ext in sorted(MEDIA_EXTENSIONS | EXTRA_VIDEO_EXTENSIONS | EXTRA_MUSIC_EXTENSIONS)
+    if ext != "ts"
+)
 _LIVE_SCHEMES = ("rtmp", "rtmps", "rtsp", "udp", "rtp")
 PROBE_BYTES = 64 * 1024  # what a caller reads of a PROBE link for probe_text, at most
 _WEB_PORTS = {"http": "80", "https": "443"}  # each scheme's own port: the host without it
@@ -131,13 +144,18 @@ def xtream_account(url: str) -> Optional[ProviderLink]:
     return stream[1] if stream is not None else None
 
 
-def probe_text(text: str, url: str = "") -> Kind:
-    """What a fetched playlist is, from its first 64 KB: FILM when it has an end (a finished
+def probe_text(
+    text: str, url: str = "", content_type: str = "", length: Optional[int] = None
+) -> Kind:
+    """What a fetched link is, from its first 64 KB and its answer's `content_type` and
+    `length` (its Content-Length; None: not given): FILM when it has an end (a finished
     playlist), LIVE for any other HLS playlist (a master too), a Provider (an M3U playlist at
-    `url`) for a list of channels with their own http(s) links and no HLS tags. Anything
-    else is LIVE: VLC decides, and so is a list read without its address (no provider to
-    offer)."""
-    lines = [line.strip() for line in text[:PROBE_BYTES].lstrip("﻿").splitlines()]
+    `url`) for a list of channels with their own http(s) links and no HLS tags. Any other
+    answer with a size is a file that ends, a FILM (a song or a film whose address has no
+    extension), unless it is text or a playlist. Anything else is LIVE (a stream that never
+    ends: internet radio, a live channel): VLC decides, and so is a list read without its
+    address (no provider to offer)."""
+    lines = [line.strip() for line in text[:PROBE_BYTES].lstrip("\ufeff").splitlines()]
     if any(line.startswith("#EXT-X-") for line in lines):
         vod = any(
             line.startswith("#EXT-X-ENDLIST") or line.upper() == "#EXT-X-PLAYLIST-TYPE:VOD"
@@ -152,7 +170,17 @@ def probe_text(text: str, url: str = "") -> Kind:
                 if nxt.lower().startswith(("http://", "https://")):
                     return Provider(ProviderLink(M3U, url)) if url.strip() else LIVE
                 break
-    return LIVE
+    playlist = any(line.startswith(("#EXTM3U", "#EXTINF")) for line in lines)
+    return FILM if not playlist and _ends(content_type, length) else LIVE
+
+
+def _ends(content_type: str, length: Optional[int]) -> bool:
+    """Whether an answer is a file that ends: its size is given (a stream that never ends has
+    none), and it is neither text (a page saying why) nor a playlist."""
+    if length is None or length <= 0:
+        return False
+    kind = content_type.partition(";")[0].strip().lower()
+    return not (kind.startswith("text/") or "mpegurl" in kind)
 
 
 def _login_user(url: str) -> Optional[str]:
