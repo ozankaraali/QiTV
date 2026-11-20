@@ -1350,6 +1350,10 @@ class RecorderHomeWindowTests(WindowCase):  # 2.9.7: the Recordings tab's home, 
         self.assertTrue(card.isHidden())
         self.assertTrue(window.screens.library_shown())  # Esc closed the card alone
         desk.record_at()
+        window.screens.open_library("movies")  # Ctrl+2: the Recordings tab left, the card too
+        self.assertTrue(card.isHidden())
+        window.screens.open_recordings()
+        desk.record_at()
         window.screens.back_to_tv()  # the Library left: the card goes with it
         self.assertTrue(card.isHidden())
 
