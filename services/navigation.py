@@ -29,6 +29,7 @@ from services.i18n import N_, tr, translate
 from services.provider_ids import (
     ALL_PROVIDERS,
     ALL_PROVIDERS_TITLE,
+    NETWORK_PROVIDER,
     mixed_group_id,
     provider_of,
     split_group_id,
@@ -735,11 +736,11 @@ class NavModel(QObject):
 
     def _compute_recent(self) -> list[dict]:
         # What was watched at any provider in the list, newest first (a removed provider's
-        # entries can no longer play).
+        # entries can no longer play), and the live links of Network streams (plan 4).
         from services import parental
 
         guard = parental.installed()
-        known = set(self.catalog.provider_names())
+        known = {*self.catalog.provider_names(), NETWORK_PROVIDER}
         seen, result = set(), []
         for entry in self.config.watch_history or []:
             key = recent_channel(entry)

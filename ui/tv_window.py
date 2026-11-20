@@ -27,12 +27,13 @@ from datetime import datetime, timedelta
 import logging
 import multiprocessing
 import os
+from pathlib import Path
 import platform
 import stat
 import sys
 import threading
 import time
-from typing import Any, Callable, Optional, Sequence
+from typing import Any, Callable, Iterator, Optional, Sequence
 
 from PySide6.QtCore import (
     QElapsedTimer,
@@ -82,7 +83,7 @@ from services.hidden_groups import HiddenGroups
 from services.i18n import N_, number, tr, tr_n, translate
 from services.jobs import JobRunner
 from services.lazy_import import deferred_modules, load_module
-from services.link_kind import host_of
+from services.link_kind import host_of, owner_of
 from services.live.engine import LiveEngine
 from services.live.kept import KeptBuffers
 from services.live.live_session import LiveSession
@@ -104,6 +105,7 @@ from services.local_playlist import (
 from services.media_keys import MediaKeys
 from services.media_reporter import MediaReporter
 from services.navigation import NavModel
+from services.network_streams import FILE_NAME as NETWORK_STREAMS_FILE, NetworkStreams
 from services.open_paths import (
     PLAYLIST_EXTENSIONS,
     Sorted,
@@ -159,6 +161,7 @@ from ui.link_lanes import Target
 from ui.live_tuner import LiveTuner, one_disk_ring, wait_for_each_other
 from ui.logos import LogoCache, PosterCache
 from ui.macos_window import reclaim_first_responder
+from ui.network_player import NetworkPlayer
 from ui.open_link import LinkCard, OpenLink
 from ui.overlay_host import OverlayHost
 from ui.overlays.audio_screen import AudioScreen
@@ -1163,6 +1166,20 @@ class TVWindow(QMainWindow):
             parent=self,
         )
         controller.add_card(self.open_link_card)
+        # Network streams (plan 4): the links that played, kept beside the config (read on a
+        # worker once the window started, written on one); a stream link plays through the
+        # controller as a channel or a film, as the account whose stream it is, if one is
+        # configured.
+        self.network_streams = NetworkStreams(
+            Path(config_manager.get_config_dir()) / NETWORK_STREAMS_FILE
+        )
+        self.network_player = NetworkPlayer(
+            self.network_streams,
+            self.jobs,
+            controller,
+            owner=lambda url: self._link_owner(url),
+            parent=self,
+        )
         # The channel list's find: genres and channels at every provider, found in a worker;
         # its last row looks for films and series in the Library's search.
         self.finder = FindSession(
@@ -1736,17 +1753,14 @@ class TVWindow(QMainWindow):
 
     def play_network_link(self, url: str, kind: str) -> None:
         """A link the Open Link card hands over plays, `kind` LIVE or FILM: as a channel or as
-        a film, and it is kept in Network streams (plan 4, Task 4: the network player)."""
+        a film, and it is kept in Network streams (ui.network_player)."""
         if self._closing:
             return
-        logger.info("Open Link: a %s link was handed over to play", kind.lower())
+        self.network_player.play(url, kind)
 
-    def _link_provider(self, url: str) -> Optional[dict]:
-        """The configured provider the link's host and port are, or None: its own address's,
-        or (one whose list is loaded) where its streams are (Catalog.stream_hosts)."""
-        host = host_of(url)
-        if not host:
-            return None
+    def _provider_hosts(self) -> Iterator[tuple[dict, set[str]]]:
+        """Each configured provider and the hosts (with their ports) it is at: its own
+        address's, and (one whose list is loaded) where its streams are (stream_hosts)."""
         catalogs = self.catalogs
         loaded = set(catalogs.created())
         for name in catalogs.names():
@@ -1757,9 +1771,20 @@ class TVWindow(QMainWindow):
             hosts = {host_of(provider.get("url"))}
             if name in loaded:
                 hosts |= catalogs.catalog(name).stream_hosts()
-            if host in hosts:
-                return provider
-        return None
+            yield provider, hosts
+
+    def _link_provider(self, url: str) -> Optional[dict]:
+        """The configured provider the link's host and port are, or None."""
+        host = host_of(url)
+        if not host:
+            return None
+        return next((p for p, hosts in self._provider_hosts() if host in hosts), None)
+
+    def _link_owner(self, url: str) -> str:
+        """The configured Xtream account whose stream the link is ("" for none): one at its
+        host whose user name it carries, in either of Xtream's forms (link_kind.owner_of).
+        Its streams count against that account's limit."""
+        return owner_of(url, self._provider_hosts())
 
     def _link_may_probe(self, url: str) -> bool:
         """Whether Open Link may read the link's first bytes: not at a provider that allows
@@ -3044,6 +3069,7 @@ class TVWindow(QMainWindow):
         self._bind_video()
         self.setFocus(Qt.FocusReason.ActiveWindowFocusReason)
         self.media_keys.start(int(self.winId()))
+        self.network_player.start()  # Network streams' file, read on a worker
         self.controller.start()
         self.epg_refresh.start()
         if self.scheduler is not None:

@@ -14,11 +14,13 @@ account out of it for an "Add the whole account" offer.
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Optional, Union
-from urllib.parse import urlsplit
+from typing import Iterable, Optional, Union
+from urllib.parse import unquote, urlsplit
 
 from services.provider_link import (
+    _STREAM_ID,
     M3U,
+    XTREAM,
     ProviderLink,
     _first_line,
     _stream_login,
@@ -125,7 +127,8 @@ def probe_text(text: str, url: str = "") -> Kind:
     """What a fetched playlist is, from its first 64 KB: FILM when it has an end (a finished
     playlist), LIVE for any other HLS playlist (a master too), a Provider (an M3U playlist at
     `url`) for a list of channels with their own http(s) links and no HLS tags. Anything
-    else is LIVE: VLC decides."""
+    else is LIVE: VLC decides, and so is a list read without its address (no provider to
+    offer)."""
     lines = [line.strip() for line in text[:PROBE_BYTES].lstrip("﻿").splitlines()]
     if any(line.startswith("#EXT-X-") for line in lines):
         vod = any(
@@ -139,6 +142,39 @@ def probe_text(text: str, url: str = "") -> Kind:
                 if not nxt or nxt.startswith("#"):
                     continue
                 if nxt.lower().startswith(("http://", "https://")):
-                    return Provider(ProviderLink(M3U, url))
+                    return Provider(ProviderLink(M3U, url)) if url.strip() else LIVE
                 break
     return LIVE
+
+
+def _login_user(url: str) -> Optional[str]:
+    """The user name an Xtream stream link carries: /live|movie|series/U/P/<id>, or the short
+    /U/P/<id> Xtream also serves live channels at; None for any other link."""
+    parts = _split(url)
+    if parts is None or parts.scheme.lower() not in ("http", "https") or not parts.hostname:
+        return None
+    segments = [s for s in parts.path.split("/") if s]
+    login = _stream_login(segments)
+    if login is not None:
+        return login[1]
+    if len(segments) >= 3 and _STREAM_ID.match(segments[-1]):
+        return unquote(segments[-3])
+    return None
+
+
+def owner_of(url: str, providers: Iterable[tuple[dict, set[str]]]) -> str:
+    """The name of the configured Xtream account whose stream `url` is ("" for none): a
+    provider of `providers` ((its settings, the hosts its address and streams are at, as
+    `host_of` gives them)) whose host the link's is and whose user name it carries (any case).
+    Only against a configured account is the short form /U/P/<id> told from another path."""
+    user = _login_user(url)
+    host = host_of(url)
+    if user is None or not host:
+        return ""
+    for provider, hosts in providers:
+        if str(provider.get("type") or "").upper() != XTREAM or host not in hosts:
+            continue
+        name = str(provider.get("username") or "").strip()
+        if name and name.casefold() == user.casefold():
+            return str(provider.get("name") or "")
+    return ""

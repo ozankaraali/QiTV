@@ -109,11 +109,14 @@ from services.navigation import (
     payloads,
     recent_channel,
 )
+from services.network_streams import FILM, LIVE, failure_reason, is_link
 from services.next_episode import LOCAL_NEXT, play_context
 from services.open_paths import PLAYLIST_EXTENSIONS, is_music, is_song, is_video
 from services.picture import SOURCE_DIRECT, ChannelPictures
+from services.playback import NO_VLC_MESSAGE
 from services.provider_ids import (
     ALL_PROVIDERS,
+    NETWORK_PROVIDER,
     mixed_group_id,
     provider_of,
     split_group_id,
@@ -244,6 +247,13 @@ class Overlays:
     more_menu: Any = None  # the audio dock's ⋯ menu (MoreMenu)
 
 
+def _own_link(item: dict) -> Optional[str]:
+    """A link of Network streams' own address (its items carry it); None for any other."""
+    if not is_link(item):
+        return None
+    return str(item.get("cmd") or "").strip() or None
+
+
 @dataclass
 class _LocalList:
     """A playlist of local files that plays (TVController.play_list): its name, its files with
@@ -268,6 +278,10 @@ class TVController(QObject):
     # An outside player (Play in VLC, a phone's Watch) took over what the large picture played:
     # the phones watching before let go (one screen at a time, as when the TV plays again).
     handedOn = Signal()
+    # Plan 4: a link of Network streams played (its item, LIVE or FILM, its address), or did
+    # not, or went for good (and why: an English text, `network_streams.failure_reason`).
+    linkPlayed = Signal(object, str, str)
+    linkFailed = Signal(object, str, str, str)
 
     def __init__(
         self,
@@ -364,7 +378,12 @@ class TVController(QObject):
         self._media_quality: dict[str, Any] = {}
         self._guides_applied: Optional[set[str]] = None  # what the hub was last told
         self._phone_guides: set[str] = set()  # the providers the phone remote lists
+        # Plan 4: a link of Network streams' address as it plays now (`set_links`; None: an
+        # item its provider makes the link of), and the link whose first picture was heard.
+        self._links: Callable[[dict], Optional[str]] = _own_link
+        self._link_heard: Optional[Target] = None
         self._lanes = LinkLanes(catalog, self)
+        self._lanes.known = self._network_url  # no provider is asked for a link's address
         # The live channel's time-shift side: pipeline tunes, its controls and reports.
         self._live_controls = LiveControls(
             tuner=self._tuner,
@@ -397,6 +416,8 @@ class TVController(QObject):
             gave_up=self._fail_focused_tile,
             on_sizes=self._offer_live_quality,
             retry_notice=lambda: self.overlays.retry_notice,
+            link=lambda item: self._network_url(item) is not None,
+            link_failed=self._on_link_failed,
             parent=self,
         )
         # Provider setups: the loading and welcome hints, the last channel, the Library's
@@ -1163,6 +1184,53 @@ class TVController(QObject):
         self._flow.leave_library()
         listed = self._all_live() if channels is None else channels
         self.tune(channel, group_key=group_key, channels=listed)
+
+    # ---- plan 4: links of Network streams ------------------------------------------------------
+
+    def set_links(self, resolve: Callable[[dict], Optional[str]]) -> None:
+        """`resolve(item)`: a link of Network streams' address as it plays now (the network
+        player's: a token replaced since; None for an item its provider makes the link of).
+        Without it a link plays its own address."""
+        self._links = resolve
+
+    def play_link(self, item: dict, section: str) -> None:
+        """A link of Network streams plays (the network player hands it over): `section`
+        "live" as a channel (in ⟲ Recent's group, where it lands), else as a film, where it
+        stopped. Its address is known: the link lanes answer it, no provider is asked."""
+        if self._closed:
+            return
+        if section == "live":
+            self.tune_live(item, RECENT_GROUP, [item])
+        else:
+            self.play_vod(item, "movie", play_context())
+
+    def _network_url(self, item: dict) -> Optional[str]:
+        return self._links(item) or None
+
+    def _resume_owner(self, item: dict, provider_name: str) -> str:
+        """Whose resume points `item`'s are: a link's are Network streams' (its id stays
+        whatever token, or account, its address names)."""
+        return NETWORK_PROVIDER if self._network_url(item) is not None else provider_name
+
+    def _link_played(self) -> None:
+        """What plays large shows its first picture: a link's is heard once per target."""
+        current = self._current
+        if current is None or current is self._link_heard:
+            return
+        url = self._network_url(current.item)
+        if url is None:
+            return
+        self._link_heard = current
+        self.linkPlayed.emit(current.item, LIVE if current.live else FILM, url)
+
+    def _on_link_failed(self, target: Target, why: str) -> None:
+        """A link did not play, or went for good: said plainly (the toast before it said
+        how), and the network player keeps why."""
+        url = self._network_url(target.item)
+        if self._closed or url is None:
+            return
+        self._error(self._named(target.title, translate(why)))
+        self.linkFailed.emit(target.item, LIVE if target.live else FILM, url, why)
 
     def watch_from_start(
         self, channel: dict, programme: Programme, group_key: str, channels: list
@@ -2004,9 +2072,10 @@ class TVController(QObject):
         if target.live or target.local:
             return None
         provider_name = item_provider.provider_name(self.catalog, target.item)
+        owner = self._resume_owner(target.item, provider_name)
         return cast(
             Optional[str],
-            self.watch.content_id(provider_name, target.item, item_type=target.item_type),
+            self.watch.content_id(owner, target.item, item_type=target.item_type),
         )
 
     def play_vod(
@@ -2491,7 +2560,8 @@ class TVController(QObject):
             if self.overlays.transport.isVisible():
                 self._live_controls.show_live_transport(target)
         else:
-            cid = self.watch.content_id(provider_name, item, item_type=target.item_type)
+            owner = self._resume_owner(item, provider_name)  # a link's: Network streams'
+            cid = self.watch.content_id(owner, item, item_type=target.item_type)
             start: Optional[int]
             if target.start_ms is not None:  # 2.8: its quality changed: on from where it was
                 start = target.start_ms
@@ -4010,6 +4080,7 @@ class TVController(QObject):
         if state == "playing":
             self._skipped_to = None  # it plays: no longer a row of songs that can't
             self._live_controls.on_playing()  # direct play: a held "unavailable" shows now
+            self._link_played()  # plan 4: a link that played is kept
             self._picture.on_playing()  # after the sleep timer: the computer stays awake again
             self._video_file_playing()
         self._sound_state(state)
@@ -4080,6 +4151,8 @@ class TVController(QObject):
             self._give_small_channel_large()
         self._error(self._named(title, message))
         if current is not None:
+            if message != translate(NO_VLC_MESSAGE):  # QiTV's own trouble, not the link's
+                self._on_link_failed(current, failure_reason(message))
             self._explain_item(current.item, title)
             if current.live:
                 self._fail_focused_tile()

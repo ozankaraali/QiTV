@@ -7718,6 +7718,44 @@ class NightAuditSessionTests(LiveSessionCase):
         self.assertEqual(self.failures, ["The stream could not be opened"])
         self.assertNotIn(RECONNECTING, self.notices)
 
+    def test_a_link_refused_by_its_buffer_is_tried_directly_once(self):
+        # Plan 4: a link opened with Open Link (`once`) that answers 401 is not tried three
+        # times more: the direct play after its buffer is its one try again. Why it failed
+        # is kept for the player's words until the next tune.
+        self.live = self.make(retry_ms=(20, 30, 40))
+        self.live.start(
+            URL,
+            headers={"User-Agent": "QiTV-Test"},
+            verify_ssl=True,
+            latency="normal",
+            user_agent="QiTV-Test",
+            disk=False,
+            max_bytes=128 * MiB,
+            revive=False,
+            once=True,
+        )
+        sid = self.engine.last_sid
+        self.assertEqual(self.live.failure(), ("", None))
+        self.engine.failure_status = lambda failed: 401 if failed == sid else None
+        self.engine.sessionFailed.emit(sid, "http", "The channel could not be reached over HTTP.")
+        self.assertEqual(self.live.failure(), ("http", 401))
+        self.engine.answer()
+        self.assertEqual(self.playback.plays[-1], DIRECT)
+        self.playback.set_state(PlaybackState.ERROR)
+        self.playback.errorOccurred.emit("The stream could not be opened")
+        self.assertEqual(self.failures, ["The stream could not be opened"])
+        self.assertNotIn(RECONNECTING, self.notices)
+        self.assertEqual(self.live.failure(), ("http", 401))
+        self.start()  # the next tune: a channel, which keeps its quick tries
+        self.assertEqual(self.live.failure(), ("", None))
+        sid = self.engine.last_sid
+        self.engine.sessionFailed.emit(sid, "http", "The channel could not be reached over HTTP.")
+        self.engine.answer()
+        self.playback.set_state(PlaybackState.ERROR)
+        self.playback.errorOccurred.emit("The stream could not be opened")
+        self.assertEqual(len(self.failures), 1)
+        self.assertIn(RECONNECTING, self.notices)
+
     def test_back_before_the_buffer_while_leaving_a_part_waits_for_its_close(self):
         # Review: one stream; leaving a part makes the live resume wait for its close; going
         # back before the buffer meanwhile opened the new part at once (two connections), and

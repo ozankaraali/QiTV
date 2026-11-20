@@ -35,7 +35,7 @@ from PySide6.QtWidgets import (
 )
 
 from services.catalog import shown_label
-from services.provider_ids import provider_of
+from services.provider_ids import provider_of, provider_title
 from services.zapping import ZapContext
 from ui.overlays.base import plain_tooltip
 from ui.overlays.painting import Units, draw_logo, draw_progress, elided, fill_round, ui_units
@@ -225,8 +225,8 @@ class ChannelRowsModel(QAbstractListModel):
             return shown_label(name) if isinstance(name, str) else name
         if role == NumberRole:
             return self._numbers[row] if self._numbers is not None else item.get("number")
-        if role == ProviderRole:
-            return provider_of(item) if self.show_provider else ""
+        if role == ProviderRole:  # Network streams' links by that name (plan 4)
+            return provider_title(provider_of(item)) if self.show_provider else ""
         if role == PlayingRole:
             return ZapContext.same(item, self.playing())
         if role == NowRole:
