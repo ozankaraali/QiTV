@@ -36,8 +36,28 @@ class SettingsModelTests(unittest.TestCase):
                 m.PARENTAL,
                 m.FILES,
                 m.ADVANCED,
+                m.KEYS,  # 2.13.1: Help → Keyboard Shortcuts…, a section of its own
+                m.ABOUT,  # 2.13.1: About QiTV, a section of its own
             ),
         )
+
+    def test_keys_and_about_show_the_rows_they_are_given(self):
+        # 2.13.1: their rows come from ui/settings_about.py (the keymap is Qt's), as the
+        # Guide's do from theirs; each section has its icon.
+        layer = m.Section("keys/player", "Watching TV", rows=(m.Row("k", "Mute", kind=m.INFO),))
+        keys = (m.Row("keys/player", "Watching TV", section=layer),)
+        about = (m.Row("about/qitv", "QiTV", kind=m.INFO, literal=True),)
+        by_key = {s.key: s for s in m.sections("Linux", context=m.Context(keys=keys, about=about))}
+        self.assertEqual(by_key[m.KEYS].rows, keys)
+        self.assertEqual(by_key[m.ABOUT].rows, about)
+        self.assertEqual((by_key[m.KEYS].text, by_key[m.ABOUT].text), ("Keys", "About QiTV"))
+        self.assertEqual((m.ICONS[m.KEYS], m.ICONS[m.ABOUT]), ("keyboard", "info"))
+        # Opt-ins (2.13.1): a layer of info lines to read, a title wrapped whole, a picture
+        self.assertFalse(m.Section("s", "S").browse)
+        self.assertTrue(m.Section("s", "S", browse=True).browse)
+        row = m.Row("t", "TMDB", kind=m.INFO, whole=True, image="tmdb.png", image_u=0.7)
+        self.assertEqual((row.whole, row.image, row.image_u), (True, "tmdb.png", 0.7))
+        self.assertEqual((m.Row("u", "U").whole, m.Row("u", "U").image), (False, ""))
 
     def test_step_wraps_both_ways(self):
         row = _row("live_latency")

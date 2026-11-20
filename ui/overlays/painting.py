@@ -634,6 +634,21 @@ def draw_icon(p: QPainter, name: str, rect: QRectF, color: QColor) -> None:
             body.closeSubpath()
             line(body)
             fill(_poly([(0.42, 0.44), (0.62, 0.57), (0.42, 0.7)]))
+        elif name == "keyboard":  # Settings' Keys (2.13.1): a keyboard, its keys, its space bar
+            line(_rrect(0.08, 0.26, 0.84, 0.5, 0.08))
+            for row, y in enumerate((0.36, 0.48)):
+                for k in range(4):
+                    x = 0.21 + k * 0.17 + (0.04 if row else 0.0)
+                    fill(_rrect(x - 0.045, y - 0.035, 0.09, 0.07, 0.015))
+            fill(_rrect(0.3, 0.6, 0.4, 0.06, 0.02))
+        elif name == "info":  # Settings' About QiTV (2.13.1): an i in a ring
+            ring = QPainterPath()
+            ring.addEllipse(QPointF(0.5, 0.5), 0.38, 0.38)
+            line(ring)
+            dot = QPainterPath()
+            dot.addEllipse(QPointF(0.5, 0.33), 0.055, 0.055)
+            fill(dot)
+            fill(_rrect(0.455, 0.44, 0.09, 0.28, 0.03))
         elif name in ("chevron_left", "chevron_right"):  # ‹ and ›: earlier and later
             tip, back = (0.34, 0.62) if name == "chevron_left" else (0.66, 0.38)
             chevron = QPainterPath(QPointF(back, 0.2))

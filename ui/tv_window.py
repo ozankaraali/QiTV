@@ -206,6 +206,7 @@ from ui.provider_cards import ProviderCards
 from ui.record_timer_dialog import RecordTimerDialog, TimerChoice
 from ui.recording_scheduler import RecordingScheduler
 from ui.remote_controller import RemoteController
+from ui.settings_about import AboutRows
 from ui.settings_controller import SettingsController
 from ui.settings_general import GeneralRows, hooks as general_hooks
 from ui.settings_guide import GuideRows, hooks as guide_hooks
@@ -1197,6 +1198,9 @@ class TVWindow(QMainWindow):
         # Settings › Parental controls: the PIN in a card, locked and unlocked, what is hidden
         # only while unlocked; each change through parental_changed.
         self.parental_rows = ParentalRows(self, self.settings, self.settings_drawer)
+        # Settings › Keys and About QiTV (2.13.1: the Help menu's windows before): the keymap's
+        # table to read, and About's links opened in the browser.
+        self.about_rows = AboutRows(self.settings)
         self.catalogs.providersChanged.connect(self.provider_rows.providers_changed)
         self.catalog.providerReady.connect(self.provider_rows.providers_changed)
         # File → Open Link… and the channel list's Open a link (plan 4): while its card shows it
@@ -2886,13 +2890,15 @@ class TVWindow(QMainWindow):
         """What Settings' sections show that only this QiTV knows, each section's from its
         rows: General's, Files' and Advanced's (ui.settings_general), Subtitles' and
         Time-shift's, and the Guide's, the phone remote's and parental controls' rows as they
-        are now."""
+        are now, then Keys' and About's."""
         context = self.subtitle_rows.context(self.general_rows.context())
         return dataclasses.replace(
             self.timeshift_rows.context(context),
             guide=self.guide_rows.rows(),
             remote=self.remote_rows.rows(),
             parental=self.parental_rows.rows(),
+            keys=self.about_rows.keys(),
+            about=self.about_rows.about(),
         )
 
     def _settings_went(self) -> None:
