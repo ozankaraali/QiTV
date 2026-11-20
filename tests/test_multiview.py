@@ -27,8 +27,9 @@ from timer_fixtures import elapse, pause, wait_until
 from services.connection_budget import ConnectionBudget
 from services.live.refusals import STREAM_LIMIT
 from services.navigation import NavNode, item_key
+from services.network_streams import stream_id
 from services.parental import Parental
-from services.provider_ids import with_provider
+from services.provider_ids import NETWORK_PROVIDER, with_provider
 from services.sessions import SessionManager, Slot
 from services.zapping import ZapContext
 from tests.test_tv_controller import CHANNELS, FakeLiveSession, FakeSession
@@ -1540,6 +1541,30 @@ class ParentalGridTests(MultiviewCase):
         self.assertEqual(asked, ["Four"])
         self.assertNotIn("Harbor IPTV", self.catalog.catalogs.ensured)  # never waited for
         self.assertEqual((self.grid.state("pip"), self.grid.state("t2")), (EMPTY, EMPTY))
+
+    def test_a_link_plays_in_a_tile_while_locked_and_the_lock_leaves_it(self):
+        # A link of Network streams (or of the account whose address it has) is no hidden
+        # channel: only a hide of that very link would hide it. Its tile plays it while a
+        # channel is hidden and locked, nothing asks a provider for its address, and the
+        # lock-out coming again leaves its tile.
+        url = "http://links.example/live/one.m3u8"
+        link = {"id": stream_id(url), "name": "A link", "cmd": url, "_provider": NETWORK_PROVIDER}
+        owned = {**link, "_provider": "Home"}
+        self.hide(HOME_THREE)
+        self.assertTrue(self.controller._hidden_now(HOME_THREE))
+        self.assertFalse(self.controller._hidden_now(link))
+        self.assertFalse(self.controller._hidden_now(owned))
+        self.assertFalse(self.controller._hidden_now({"_provider": NETWORK_PROVIDER}))
+        self.start_large(0)
+        self.v()
+        links = len(self.catalog.links)
+        self.controller.play_in_tile("t3", link)
+        slot = self.sessions.slot("t3")  # made as its link is asked for
+        self.assertTrue(wait_until(lambda: slot.live.running and slot.live.url == url))
+        self.assertEqual(len(self.catalog.links), links)
+        self.controller.parental_changed()  # the lock-out again (an unlocked hour ran out)
+        self.assertTrue(slot.live.running)
+        self.assertNotEqual(self.grid.state("t3"), EMPTY)
 
 
 class DrawerDragTests(unittest.TestCase):
