@@ -185,6 +185,7 @@ from ui.overlays.next_card import NextCard
 from ui.overlays.opening import OpeningOverlay
 from ui.overlays.painting import fmt_clock
 from ui.overlays.pip_label import PipLabel
+from ui.overlays.popup_menu import PopupMenu
 from ui.overlays.question_card import QuestionCard
 from ui.overlays.rec_sign import RecSign
 from ui.overlays.remote_pair import PairOverlay
@@ -651,6 +652,7 @@ class TVWindow(QMainWindow):
         self.library_toast = Toast(self.library_page)  # the overlay host hides with the player
         self.library_question = QuestionCard(self.library_page)  # 2.6: stop a recording?
         self.library_rec_sign = RecSign(self.library_page, bottom=True)  # 2.6: recordings on
+        self.library_menu = PopupMenu(self.library_page)  # 2.13.1: its menus, painted
         # Both pages are always the stack's children: the player page is the whole picture, the
         # Library, or a small one in a corner over the Library while it plays on.
         self.pages = PageStack(self.player_page, self.library_page, config_manager, self)
@@ -880,6 +882,10 @@ class TVWindow(QMainWindow):
         # The audio dock's "⋯": the player's controls the dock has no button for (Plan 4).
         self.more_menu = MoreMenu(self.overlays.transport, host)
         self.overlays.more_menu = self.more_menu
+        # 2.13.1: the player's right-click and button menus, painted; while the Library is in
+        # front (the player in its corner) they open on the Library's page, beside the corner.
+        self.popup_menu = PopupMenu(host)
+        self.popup_menu.defer_to(self.library_menu, lambda: self.screens.library_shown())
         # 2.8.12: the REC sign showed through the channel list, the guide and the grid's tiles.
         self.rec_sign.cover_with(
             self.overlays.drawer, self.settings_drawer, self.overlays.guide, self.grid_tiles
@@ -940,6 +946,7 @@ class TVWindow(QMainWindow):
             self.quality_card,
             self.captions_card,
             self.pair_overlay,
+            self.popup_menu,  # 2.13.1: a menu over everything but the toast
             self.overlays.toast,
         ):
             host.add_overlay(overlay)
@@ -1656,7 +1663,10 @@ class TVWindow(QMainWindow):
     # ---- input --------------------------------------------------------------------------------
 
     def _key_context(self) -> str:
-        """The Library's page takes the keys; else the open guide or drawer, else the player."""
+        """A menu that shows takes the keys, as the drawer's (2.13.1); else the Library's page;
+        else the open guide or drawer, else the player."""
+        if self.popup_menu.shown() or self.library_menu.shown():
+            return "drawer"
         return "library" if self.screens.library_shown() else self.controller.key_context()
 
     def _resolve(self, event: QKeyEvent):
@@ -1765,6 +1775,9 @@ class TVWindow(QMainWindow):
             self._act(action, payload, key=as_int(event.key()))
 
     def _act(self, action: Action, payload: str, key: int) -> None:
+        for menu in (self.popup_menu, self.library_menu):
+            if menu.handle(action, payload):
+                return  # 2.13.1: a menu's keys (the sound's and fullscreen go on)
         if action is Action.ESCAPE and self.exports.cancel():
             return  # Esc while exporting cancels the export
         if self.controller.answer_key(action):

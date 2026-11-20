@@ -12,7 +12,7 @@ os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 from PySide6.QtCore import QObject, QPoint, QPointF, QRectF, Qt, Signal
 from PySide6.QtGui import QGuiApplication, QPixmap, QWheelEvent
-from PySide6.QtWidgets import QAbstractItemView, QApplication, QMenu, QWidget
+from PySide6.QtWidgets import QAbstractItemView, QApplication, QWidget
 from mixed_fixtures import DEMO, HARBOR, HeldSetups, live_content, mixed_config, shut_hub
 from test_browsed_catalog import FakeEpg, ScriptedFactory
 from test_settings_controller import FakeValues
@@ -49,6 +49,7 @@ from ui.overlays.channel_rows import ChannelRowsModel
 from ui.overlays.drawer import LOADING_TEXT, PROVIDER_ERROR_TEXT, Drawer
 from ui.overlays.guide import Guide
 from ui.overlays.next_card import NextCard
+from ui.overlays.popup_menu import ABOVE
 from ui.overlays.settings_drawer import SettingsDrawer
 from ui.overlays.toast import Toast
 from ui.overlays.transport import Transport
@@ -59,6 +60,19 @@ from ui.tv_controller import Overlays, TVController, scrub
 
 NOW = datetime(2026, 10, 15, 20, 30, tzinfo=timezone.utc)
 MIB = 1024 * 1024
+
+
+def shown_menus():
+    """Catches the painted menus asked for meanwhile (ui.overlays.popup_menu.popup): the fake
+    overlays are no widgets to show them on. `menus_of(popup)` lists them."""
+    return mock.patch("ui.overlays.popup_menu.popup")
+
+
+def menus_of(popup) -> list:
+    """Each menu asked for and where: (menu, {"at" | "beside", "side", "follow"})."""
+    return [(call.args[0], call.kwargs) for call in popup.call_args_list]
+
+
 CHANNELS = [
     {"id": i, "name": name, "number": str(i), "cmd": f"ffrt http://tv/{i}"}
     for i, name in ((1, "One"), (2, "Two"), (3, "Three"), (4, "Four"))
@@ -3769,11 +3783,9 @@ class LocalFileExternalTests(PipelineCase):
     def test_an_opened_file_sent_to_vlc_takes_no_slot_and_leaves_no_history(self):
         path = Path("clip.mkv")
         self.controller.play_file(str(path))
-        shown = []
-        with mock.patch.object(QMenu, "popup", lambda menu, pos, *a: shown.append(menu)):
+        with shown_menus() as popup:
             self.transport.externalRequested.emit(QPoint(300, 600))
-        [menu] = shown
-        self.addCleanup(menu.deleteLater)
+        [(menu, _where)] = menus_of(popup)
         with mock.patch.object(self.budget, "request", wraps=self.budget.request) as request:
             ContextMenuTests.choose(menu, "Play in VLC")
         self.assertEqual(self.external.calls, [("vlc", path.absolute().as_uri())])
@@ -4869,23 +4881,22 @@ class ContextMenuTests(ControllerTestCase):
         QGuiApplication.clipboard().setText("")
 
     def menu_for(self, node):
-        shown = []
-        with mock.patch.object(QMenu, "popup", lambda menu, pos, *a: shown.append((menu, pos))):
+        with shown_menus() as popup:
             self.drawer.contextRequested.emit(node, QPoint(40, 50))
+        shown = menus_of(popup)
         if not shown:
             return None
-        menu, pos = shown[0]
-        self.addCleanup(menu.deleteLater)
-        self.assertEqual(pos, QPoint(40, 50))
+        menu, where = shown[0]
+        self.assertEqual(where["at"], QPoint(40, 50))  # at the pointer
         return menu
 
     @staticmethod
     def texts(menu):
-        return [a.text() for a in menu.actions() if not a.isSeparator()]
+        return menu.texts()
 
     @staticmethod
     def choose(menu, text):
-        next(a for a in menu.actions() if a.text() == text).trigger()
+        menu.entry(text).trigger()
 
     def test_a_channel_offers_favorites_external_players_and_its_link(self):
         menu = self.menu_for(self.channels[0])
@@ -5189,7 +5200,7 @@ class RecentsTests(ControllerTestCase):
 
     def test_clear_recents_asks_once_more_then_empties_the_list_and_goes_up(self):
         menu = self.menu_for(self.rows[2])
-        sub = next(a for a in menu.actions() if a.text() == "Clear Recents").menu()
+        sub = menu.entry("Clear Recents").submenu
         self.assertEqual(self.texts(sub), ["Clear all 3 channels"])
         self.assertEqual(self.config.watch_history, self.history)  # the submenu only asks
         saves = self.config.saves
@@ -5205,7 +5216,7 @@ class RecentsTests(ControllerTestCase):
         recent = next(n for n in self.nav.children(self.nav.path[1]) if n.key == RECENT_GROUP)
         menu = self.menu_for(recent)
         self.assertEqual(self.texts(menu), ["Clear Recents"])
-        sub = menu.actions()[0].menu()
+        sub = menu.entries[0].submenu
         self.choose(sub, "Clear all 3 channels")
         self.assertEqual(self.config.watch_history, [self.film])
         self.assertIsNone(self.menu_for(recent))  # nothing left to clear
@@ -5277,15 +5288,15 @@ class ExternalButtonTests(ControllerTestCase):
         self.controller.start()
 
     def open_menu(self):
-        shown = []
-        with mock.patch.object(QMenu, "popup", lambda menu, pos, *a: shown.append((menu, pos))):
+        with shown_menus() as popup:
             self.transport.externalRequested.emit(self.BUTTON)
+        shown = menus_of(popup)
         if not shown:
             return None
-        menu, pos = shown[0]
-        self.addCleanup(menu.deleteLater)
-        self.assertEqual(pos.x(), self.BUTTON.x())
-        self.assertLess(pos.y(), self.BUTTON.y())  # it opens upwards, over the video
+        menu, where = shown[0]
+        self.assertEqual(where["beside"].topLeft(), self.BUTTON)
+        self.assertEqual(where["side"], ABOVE)  # it opens upwards, over the video
+        self.assertFalse(where["follow"])  # the controls fade: the menu stays
         return menu
 
     def choose(self, text):
@@ -5355,12 +5366,10 @@ class LibraryMenuTests(ControllerTestCase):
         self.controller.stop_for_library()  # the window shows the Library
 
     def menu_for(self, item, section):
-        shown = []
-        with mock.patch.object(QMenu, "popup", lambda menu, pos, *a: shown.append((menu, pos))):
+        with shown_menus() as popup:
             self.controller.show_library_menu(item, section, QPoint(40, 50))
-        menu, pos = shown[0]
-        self.addCleanup(menu.deleteLater)
-        self.assertEqual(pos, QPoint(40, 50))
+        menu, where = menus_of(popup)[0]
+        self.assertEqual(where["at"], QPoint(40, 50))
         return menu
 
     def test_a_movie_offers_the_players_and_its_link(self):

@@ -36,6 +36,7 @@ past programme chosen); the others, Record (its red dot) among them, are outline
 from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import datetime, timedelta
+from functools import partial
 from itertools import repeat
 import logging
 import math
@@ -48,6 +49,7 @@ from PySide6.QtCore import (
     QObject,
     QPoint,
     QPointF,
+    QRect,
     QRectF,
     Qt,
     QTimer,
@@ -64,7 +66,7 @@ from PySide6.QtGui import (
     QTextLayout,
     QWheelEvent,
 )
-from PySide6.QtWidgets import QMenu, QWidget
+from PySide6.QtWidgets import QWidget
 
 from services import i18n
 from services.catalog import shown_label
@@ -74,6 +76,7 @@ from services.i18n import N_, tr, translate
 from services.navigation import item_key
 from services.zapping import ZapContext
 from ui.keymap import key_hint
+from ui.overlays import popup_menu
 from ui.overlays.base import Overlay
 from ui.overlays.channel_rows import draw_playing_mark
 from ui.overlays.painting import (
@@ -471,20 +474,15 @@ class Guide(Overlay):
         return choices
 
     def _show_day_menu(self) -> None:
-        """The day's button: a menu of the days (the one shown ticked)."""
-        menu = QMenu(self)
-        from ui.context_actions import menu_style  # (the drawer's menus' look)
-
-        menu.setStyleSheet(menu_style())
+        """The day's button: a menu of the days (the one shown ticked), under it."""
+        menu = popup_menu.Menu()
         shown = self._window_start.astimezone().date()
         for label, start in self.day_choices():
-            action = menu.addAction(label)
-            action.setCheckable(True)
-            action.setChecked(start.astimezone().date() == shown)
-            action.triggered.connect(lambda _=False, at=start: self._go_to(at))
-        rect = self.header_buttons()["day"]
-        menu.aboutToHide.connect(menu.deleteLater)
-        menu.popup(self.mapToGlobal(QPoint(int(rect.left()), int(rect.bottom()))))
+            ticked = start.astimezone().date() == shown
+            menu.add(label, partial(self._go_to, start), checked=ticked)
+        rect = self.header_buttons()["day"].toAlignedRect()
+        button = QRect(self.mapToGlobal(rect.topLeft()), rect.size())
+        popup_menu.popup(menu, self, beside=button, side=popup_menu.BELOW)
 
     def _scroll_rows_to(self, first: float) -> None:
         """The scroll indicator's drag: these rows on screen (the highlight stays its own)."""

@@ -246,6 +246,34 @@ class WindowCase(unittest.TestCase):
 
 
 class TVWindowTests(WindowCase):
+    def test_a_rows_menu_is_painted_and_the_keys_and_the_phone_reach_it(self):  # 2.13.1
+        from services import favorites
+
+        self.show()
+        drawer = self.wait_for_drawer()
+        QTest.keyClick(self.window, Qt.Key.Key_Return)  # into the highlighted group (All)
+        self.assertTrue(wait_until(lambda: getattr(drawer.highlighted(), "layer", "") == "item"))
+        node = drawer.highlighted()
+        menu = self.window.popup_menu
+        self.assertIn(menu, self.window.host.findChildren(type(menu)))  # on the player's host
+        drawer.contextRequested.emit(node, drawer.mapToGlobal(QPoint(200, 150)))
+        self.assertTrue(menu.isVisible())
+        self.assertEqual(menu.menu().texts()[0], "Add to favorites")
+        QTest.keyClick(self.window, Qt.Key.Key_Down)  # the menu's, not the channel list's
+        self.assertIs(drawer.highlighted(), node)
+        self.assertEqual(menu.current().text, menu.menu().texts()[1])
+        QTest.keyClick(self.window, Qt.Key.Key_Home)
+        QTest.keyClick(self.window, Qt.Key.Key_P)  # a letter: Play in VLC, typed into nothing
+        self.assertEqual(menu.current().text, "Play in VLC")
+        self.assertEqual(drawer.find_text, "")
+        self.window.remote_key(Qt.Key.Key_Escape.value)  # the phone's Back closes the menu
+        self.assertFalse(menu.shown())
+        self.assertTrue(drawer.isVisible())  # and only it
+        drawer.contextRequested.emit(node, drawer.mapToGlobal(QPoint(200, 150)))
+        self.window.remote_key(Qt.Key.Key_Return.value)  # the phone's OK: Add to favorites
+        self.assertFalse(menu.shown())
+        self.assertTrue(favorites.is_favorite(self.config, node.payload))
+
     def test_constructs_and_shows_with_the_overlay_host(self):
         self.show()
         window = self.window
@@ -1474,6 +1502,16 @@ class RecorderHomeWindowTests(WindowCase):  # 2.9.7: the Recordings tab's home, 
     def test_the_guides_source_menu_lists_favorites_recent_and_all(self):
         labels = [label for label, _key in self.window.screens.guide_sources()]
         self.assertEqual(labels[:3], ["★ Favorites", "Recent", "All channels"])
+        pages = self.window.screens
+        pages._guide_source_menu(self.window.library_page.mapToGlobal(QPoint(20, 20)))
+        menu = self.window.library_menu.menu()  # 2.13.1: painted on the Library's page
+        self.assertEqual(menu.texts(), labels)
+        keys = [key for _label, key in pages.guide_sources()]
+        ticked = [entry.checked for entry in menu.entries]
+        self.assertEqual(ticked, [key == pages._guide_source for key in keys])
+        self.window.library_menu.handle(Action.NAV_HOME)
+        self.window.library_menu.handle(Action.NAV_ACTIVATE)  # ★ Favorites
+        self.assertEqual(pages._guide_source, keys[0])
 
 
 class FarChannelWindowTests(WindowCase):
@@ -2342,18 +2380,19 @@ class XtreamLibraryTests(TwoProviderCase):
         self.menu_actions()["Movies"].trigger()
         grid = self.wait_for_titles()
         item, point = grid.item(1), grid.item_rect(1).center()
-        shown = []
-        with mock.patch.object(QMenu, "popup", lambda menu, pos, *a: shown.append(menu)):
-            event = QContextMenuEvent(
-                QContextMenuEvent.Reason.Mouse, point, grid.viewport().mapToGlobal(point)
-            )
-            QApplication.sendEvent(grid.viewport(), event)
-        [menu] = shown
-        self.addCleanup(menu.deleteLater)
-        actions = {a.text(): a for a in menu.actions() if not a.isSeparator()}
-        self.assertEqual(list(actions), ["Play in VLC", "Play in MPV", "Copy stream link"])
+        event = QContextMenuEvent(
+            QContextMenuEvent.Reason.Mouse, point, grid.viewport().mapToGlobal(point)
+        )
+        QApplication.sendEvent(grid.viewport(), event)
+        shown = window.library_menu  # 2.13.1: painted on the Library's page, at the pointer
+        self.assertTrue(shown.isVisible())
+        self.assertEqual(shown.menu().texts(), ["Play in VLC", "Play in MPV", "Copy stream link"])
+        at = grid.viewport().mapTo(window.library_page, point)
+        self.assertTrue(shown.panel().adjusted(-1, -1, 1, 1).contains(at))  # a corner there
         QGuiApplication.clipboard().setText("")
-        actions["Copy stream link"].trigger()
+        QTest.keyClick(window, Qt.Key.Key_End)  # the window's keys reach it, not the Library
+        QTest.keyClick(window, Qt.Key.Key_Return)
+        self.assertFalse(shown.shown())
         clipboard = QGuiApplication.clipboard()
         self.assertTrue(wait_until(lambda: clipboard.text() == item["cmd"]), clipboard.text())
         self.assertEqual(window.library_toast.text(), "Link copied")

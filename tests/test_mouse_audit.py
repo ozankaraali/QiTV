@@ -499,7 +499,7 @@ def _drawer_and_context(host: QWidget) -> tuple[set[str], set[str]]:
         drawer.open_drawer()
         menu = actions.menu(drawer._columns["right"].nodes[0])
         if menu is not None:
-            entries.update(a.text() for a in menu.actions() if not a.isSeparator())
+            entries.update(menu.texts())
     nav.focus_source("Home")  # the sources on the left, the provider's sections on the right
     drawer.open_drawer(focus_side="left")
     for side in ("left", "right"):

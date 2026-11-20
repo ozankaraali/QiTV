@@ -400,7 +400,7 @@
     "Max size of image cache (MB)": "a setting (Advanced): the largest room posters and logos may take on disk",
     "Media files": "a file type in the Open File dialog",
     "Memory per stream": "a setting: each stream's time-shift buffer in RAM",
-    "Menu": "the phone remote: the ⋯ button opening its menu (screen reader)",
+    "Menu": "what a screen reader calls a right-click menu (or a button's menu) as it opens; the phone remote: the ⋯ button opening its menu (screen reader)",
     "Mini Player": "a View menu entry: the picture in a small window of its own",
     "Mini player (Alt+P)": "tooltip; the whole window small in a corner",
     "Minutes": "the unit of the guide's update period: \"Check update every [2] [Hours]\"",

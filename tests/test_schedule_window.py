@@ -143,18 +143,19 @@ class ScheduleWindowTests(WindowCase):
     def test_delete_follows_whether_the_file_is_written_now(self):  # 2.8 review
         # The shelf was read while it recorded (or before): its menu asks now.
         from PySide6.QtCore import QPoint
-        from PySide6.QtWidgets import QMenu
 
         pages = self.window.screens
         item = {"path": "/rec/a.ts", "_writing": False}
 
         def delete_enabled():
             pages._recording_menu(item, QPoint(0, 0))
-            menu = self.window.library_page.findChildren(QMenu)[-1]
-            action = next(a for a in menu.actions() if a.text() == "Delete Recording…")
-            menu.close()
-            menu.deleteLater()
-            return action.isEnabled()
+            shown = self.window.library_menu  # 2.13.1: painted on the Library's page
+            self.assertEqual(
+                shown.menu().texts(), ["Show in Folder", "Delete Recording…", "Manage Recordings…"]
+            )
+            entry = shown.menu().entry("Delete Recording…")
+            shown.close_menu()
+            return entry.enabled
 
         with mock.patch.object(self.window, "engine", mock.Mock(writing=frozenset({"/rec/a.ts"}))):
             self.assertFalse(delete_enabled())

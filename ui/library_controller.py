@@ -45,8 +45,7 @@ from datetime import datetime
 import logging
 from typing import Any, Callable, Optional
 
-from PySide6.QtCore import QObject, QPoint, Qt, Signal
-from PySide6.QtWidgets import QMenu
+from PySide6.QtCore import QObject, QPoint, QRect, Signal
 
 from services import i18n, recording_desk, recordings_library as rl
 from services.catalog import PROVIDER_LOADING_MESSAGE
@@ -82,9 +81,10 @@ from ui.library.library_screen import LibraryScreen
 from ui.library.poster_grid import poster_url
 from ui.library.search_session import DEBOUNCE_MS, SearchSession
 from ui.library.top_nav import REFRESH_TEXT
+from ui.overlays import popup_menu
 from ui.overlays.guide import day_label
+from ui.overlays.popup_menu import RIGHT, Menu
 from ui.text_edit import edit_key
-from ui.tick_menu import TickMenu
 
 logger = logging.getLogger(__name__)
 
@@ -673,20 +673,21 @@ class LibraryController(QObject):
         if library is None or item is None:
             return
         grid = self._screen.rec_grid
-        menu = QMenu(grid)
-        menu.setAttribute(Qt.WidgetAttribute.WA_DeleteOnClose)
         entry = item.get("_desk")
         if not isinstance(entry, recording_desk.Entry):
             return
+        menu = Menu()
         for name, label, style in library.details(item).buttons:
-            action = menu.addAction(label, self._tile_action(entry, name))
-            action.setEnabled(style != "off")
+            menu.add(label, self._tile_action(entry, name), enabled=style != "off")
         self._tile_menu = menu
         if at is None:  # the keys: beside the tile
-            at = grid.viewport().mapToGlobal(grid.item_rect(index).center())
-        menu.popup(at)
+            rect = grid.item_rect(index)
+            tile = QRect(grid.viewport().mapToGlobal(rect.topLeft()), rect.size())
+            popup_menu.popup(menu, grid, beside=tile, side=RIGHT)
+        else:
+            popup_menu.popup(menu, grid, at=at)
 
-    def tile_menu(self) -> Optional[QMenu]:
+    def tile_menu(self) -> Optional[Menu]:
         """The last tile menu shown (tests)."""
         return getattr(self, "_tile_menu", None)
 
@@ -1274,50 +1275,41 @@ class LibraryController(QObject):
             self.open(self._section)
 
     def _show_source_menu(self, pos: QPoint) -> None:
-        menu = self._source_menu()
-        menu.aboutToHide.connect(menu.deleteLater)
-        menu.popup(pos)
+        popup_menu.popup(self._source_menu(), self._screen, at=pos)
 
-    def _source_menu(self) -> QMenu:
+    def _source_menu(self) -> Menu:
         """A tick for each provider the Library shows (2.8: several mix), and All providers,
         which ticks every one or, with every one ticked, none (2.8.1: to pick one). The menu
         stays open while ticks change; what is ticked shows once it closes (nothing ticked:
         what showed stays)."""
-        menu = TickMenu(self._screen)
+        menu = Menu()
         names = self._catalog.provider_names()
         shown = self._shown_providers()
-        ticks = []
-        for name in names:
-            action = menu.addAction(name)
-            action.setCheckable(True)
-            action.setChecked(name in shown)
-            ticks.append(action)
+        ticks = [menu.add(name, checked=name in shown, keep_open=True) for name in names]
         if len(names) > 1:  # with one provider there is nothing to mix
-            menu.addSeparator()
-            every = menu.addAction(translate(ALL_PROVIDERS_TITLE))
-            every.setCheckable(True)
+            menu.add_separator()
+            every = menu.add(translate(ALL_PROVIDERS_TITLE), checked=False, keep_open=True)
 
-            def tick_all(checked: bool) -> None:
-                for action in ticks:
-                    action.setChecked(checked)
+            def tick_all() -> None:
+                for tick in ticks:
+                    tick.checked = every.checked
 
             def follow() -> None:
-                every.setChecked(all(action.isChecked() for action in ticks))
+                every.checked = all(tick.checked for tick in ticks)
 
             follow()
-            every.triggered.connect(tick_all)
-            for action in ticks:
-                action.triggered.connect(follow)
+            every.act = tick_all
+            for tick in ticks:
+                tick.act = follow
 
         def apply() -> None:
-            chosen = [action.text() for action in ticks if action.isChecked()]
+            chosen = [tick.text for tick in ticks if tick.checked]
             if chosen and set(chosen) != set(shown):
                 self._mix_sources([] if len(chosen) == len(names) else chosen)
 
-        menu.aboutToHide.connect(apply)
-        menu.addSeparator()
-        refresh = menu.addAction(translate(REFRESH_TEXT))
-        refresh.triggered.connect(lambda _checked=False: self.refresh_lists())
+        menu.on_close(apply)
+        menu.add_separator()
+        menu.add(translate(REFRESH_TEXT), self.refresh_lists)
         return menu
 
     def set_hiding(
@@ -1335,10 +1327,9 @@ class LibraryController(QObject):
     def _show_genre_menu(self, gid: str, pos: QPoint) -> None:
         menu = self.genre_menu(gid)
         if menu is not None:
-            menu.aboutToHide.connect(menu.deleteLater)
-            menu.popup(pos)
+            popup_menu.popup(menu, self._screen, at=pos)
 
-    def genre_menu(self, gid: str) -> Optional[QMenu]:
+    def genre_menu(self, gid: str) -> Optional[Menu]:
         """A genre's right-click menu: Hide (parental controls); None for a pinned row (My
         list, Continue …), a genre not shown, or without a PIN."""
         hide = self._hide_genre if self._may_hide() else None
@@ -1351,15 +1342,13 @@ class LibraryController(QObject):
         name, own = split_group_id(gid)
         provider = name or self._catalog.current_provider_name()
         section = self._model.section
-        menu = QMenu(self._screen)
+        menu = Menu()
         if tidy is not None:
-            menu.addAction(translate(TIDY_GENRE_TEXT)).triggered.connect(
-                lambda _=False: tidy(section, provider, own or gid, genre.title)
+            menu.add(
+                translate(TIDY_GENRE_TEXT), lambda: tidy(section, provider, own or gid, genre.title)
             )
         if hide is not None:
-            menu.addAction(translate(HIDE_TEXT)).triggered.connect(
-                lambda _=False: hide(section, provider, own or gid, genre.title)
-            )
+            menu.add(translate(HIDE_TEXT), lambda: hide(section, provider, own or gid, genre.title))
         return menu
 
     def refresh_lists(self) -> None:

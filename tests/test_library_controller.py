@@ -35,6 +35,7 @@ from ui.library_controller import (
     UNKNOWN_PROVIDER_NOTICE,
     LibraryController,
 )
+from ui.overlays.popup_menu import popup_for
 from ui.theme import PALETTE, qcolor
 
 app = QApplication.instance() or QApplication([])
@@ -1056,9 +1057,8 @@ class LibraryControllerTests(unittest.TestCase):
         ctl = self.search_salt()
         self.activate_name(ctl, "Salt Lake")  # waits for Q
         menu = ctl._source_menu()
-        self.addCleanup(menu.deleteLater)
-        menu.actions()[1].trigger()  # Q joins what the Library shows (2.8: the ticks mix)
-        menu.aboutToHide.emit()
+        menu.entries[1].trigger()  # Q joins what the Library shows (2.8: the ticks mix)
+        menu.closed()
         self.assertEqual(self.catalog.selected, [ALL_PROVIDERS])
         self.make_ready("Q")
         self.assertEqual(self.played_names(), ["Salt Lake"])  # still played, once
@@ -1301,14 +1301,14 @@ class LibraryControllerTests(unittest.TestCase):
     def test_source_menu_lists_providers_and_all_providers_and_mixes(self):
         ctl = self.open_movies()
         menu = ctl._source_menu()
-        self.addCleanup(menu.deleteLater)
-        actions = [a for a in menu.actions() if not a.isSeparator()]
+        entries = [e for e in menu.entries if not e.separator]
         self.assertEqual(
-            [a.text() for a in actions], ["P", "Q", "All providers", "Refresh films and series"]
+            [e.text for e in entries], ["P", "Q", "All providers", "Refresh films and series"]
         )
-        self.assertEqual([a.isChecked() for a in actions], [True, False, False, False])
-        actions[1].trigger()  # 2.8: Q joins P
-        menu.aboutToHide.emit()  # 2.8.1: as the menu closes
+        self.assertEqual([e.checked for e in entries], [True, False, False, None])
+        self.assertEqual([e.keep_open for e in entries], [True, True, True, False])
+        entries[1].trigger()  # 2.8: Q joins P
+        menu.closed()  # 2.8.1: as the menu closes
         self.assertEqual(self.catalog.mixes, [[]])  # P and Q: every provider
         self.catalog.providerReady.emit(ALL_PROVIDERS)
         self.assertEqual(self.catalog.requests[-1], ("section", "movies"))  # re-opened
@@ -1318,9 +1318,7 @@ class LibraryControllerTests(unittest.TestCase):
         self.catalog.names = ["P"]
         ctl = self.open_movies()
         menu = ctl._source_menu()
-        self.addCleanup(menu.deleteLater)
-        shown = [a.text() for a in menu.actions() if not a.isSeparator()]
-        self.assertEqual(shown, ["P", "Refresh films and series"])  # no All providers
+        self.assertEqual(menu.texts(), ["P", "Refresh films and series"])  # no All providers
 
     def mix(self):
         """The Library over both providers (All providers), movies of each under its heading."""
@@ -1405,9 +1403,8 @@ class LibraryControllerTests(unittest.TestCase):
     def test_choosing_all_providers_selects_the_mix(self):
         ctl = self.open_movies()
         menu = ctl._source_menu()
-        self.addCleanup(menu.deleteLater)
-        [a for a in menu.actions() if a.text() == "All providers"][0].trigger()
-        menu.aboutToHide.emit()
+        menu.entry("All providers").trigger()
+        menu.closed()
         self.assertEqual(self.catalog.selected, [ALL_PROVIDERS])
 
     # 7 -----------------------------------------------------------------------------------
@@ -1602,19 +1599,18 @@ class SourceMixTests(unittest.TestCase):  # 2.8: the source menu's ticks mix pro
 
     def menu(self, ctl):
         menu = ctl._source_menu()
-        self.addCleanup(menu.deleteLater)
-        self.closing = menu.aboutToHide.emit  # 2.8.1: the ticks apply as it closes
-        return {a.text(): a for a in menu.actions() if a.text()}
+        self.closing = menu.closed  # 2.8.1: the ticks apply as it closes
+        return {e.text: e for e in menu.entries if not e.separator}
 
     def ticked(self, actions):
-        return [n for n in "PQR" if actions[n].isChecked()]
+        return [n for n in "PQR" if actions[n].checked]
 
     def test_the_ticks_say_what_the_library_shows_and_a_tick_adds_a_provider(self):
         ctl = self.build()
         ctl.open("movies")  # P alone
         actions = self.menu(ctl)
         self.assertEqual(self.ticked(actions), ["P"])
-        self.assertFalse(actions["All providers"].isChecked())
+        self.assertFalse(actions["All providers"].checked)
         actions["Q"].trigger()
         self.assertEqual(self.catalog.mixes, [])  # the menu is still open: nothing yet
         self.closing()
@@ -1655,20 +1651,20 @@ class SourceMixTests(unittest.TestCase):  # 2.8: the source menu's ticks mix pro
         self.closing()
         self.assertEqual(self.catalog.mixes[-1], [])
         actions = self.menu(ctl)
-        self.assertTrue(all(actions[n].isChecked() for n in "PQR"))
-        self.assertTrue(actions["All providers"].isChecked())
+        self.assertTrue(all(actions[n].checked for n in "PQR"))
+        self.assertTrue(actions["All providers"].checked)
         self.assertEqual(ctl._source_title(), "All providers")
 
     def test_all_providers_when_all_are_ticked_clears_them_to_pick_one(self):  # 2.8.1
         ctl = self.build()
         self.catalog.select_mix([])  # every provider
         actions = self.menu(ctl)
-        self.assertTrue(actions["All providers"].isChecked())
+        self.assertTrue(actions["All providers"].checked)
         actions["All providers"].trigger()
         self.assertEqual(self.ticked(actions), [])
         actions["R"].trigger()
         self.assertEqual(self.ticked(actions), ["R"])
-        self.assertFalse(actions["All providers"].isChecked())
+        self.assertFalse(actions["All providers"].checked)
         self.closing()
         self.assertEqual(self.catalog.mixes[-1], ["R"])
         self.assertEqual(self.catalog.current_provider_name(), "R")
@@ -1678,9 +1674,9 @@ class SourceMixTests(unittest.TestCase):  # 2.8: the source menu's ticks mix pro
         ctl.open("movies")  # P alone
         actions = self.menu(ctl)
         actions["Q"].trigger()
-        self.assertFalse(actions["All providers"].isChecked())
+        self.assertFalse(actions["All providers"].checked)
         actions["R"].trigger()
-        self.assertTrue(actions["All providers"].isChecked())
+        self.assertTrue(actions["All providers"].checked)
 
 
 class GenreHideTests(unittest.TestCase):  # 2.8: parental controls hide a Library genre
@@ -1700,10 +1696,9 @@ class GenreHideTests(unittest.TestCase):  # 2.8: parental controls hide a Librar
     def test_a_genre_hides_once_a_pin_is_set(self):
         ctl = self.built()
         menu = ctl.genre_menu("c")
-        self.addCleanup(menu.deleteLater)
-        (action,) = menu.actions()
-        self.assertEqual(action.text(), "Hide (parental controls)")
-        action.trigger()
+        (entry,) = menu.entries
+        self.assertEqual(entry.text, "Hide (parental controls)")
+        entry.trigger()
         self.assertEqual(self.hidden, [("movies", "P", "c", "Comedy")])
 
     def test_without_a_pin_or_for_another_row_there_is_no_menu(self):
@@ -1720,11 +1715,10 @@ class GenreHideTests(unittest.TestCase):  # 2.8: parental controls hide a Librar
         ctl.open("movies")
         self.catalog.sectionReady.emit("movies")
         menu = ctl.genre_menu("c")
-        self.addCleanup(menu.deleteLater)
-        (action,) = menu.actions()  # no PIN: the tidy one alone
-        self.assertEqual(action.text(), "Hide genre")
+        (entry,) = menu.entries  # no PIN: the tidy one alone
+        self.assertEqual(entry.text, "Hide genre")
         ctl.set_hiding(lambda *a: None, lambda: False, lambda *args: tidied.append(args))
-        ctl.genre_menu("c").actions()[0].trigger()
+        ctl.genre_menu("c").entries[0].trigger()
         self.assertEqual(tidied, [("movies", "P", "c", "Comedy")])
 
     def test_a_right_click_on_a_genre_asks_for_its_menu(self):
@@ -1733,6 +1727,19 @@ class GenreHideTests(unittest.TestCase):  # 2.8: parental controls hide a Librar
         ctl.genre_menu = lambda gid: shown.append(gid)  # the menu itself is asked for
         self.screen.genres.genreMenuRequested.emit("c", QPoint(10, 10))
         self.assertEqual(shown, ["c"])
+
+    def test_the_genres_menu_shows_painted_at_the_pointer_and_its_keys_hide_it(self):
+        ctl = self.built()
+        ctl.set_hiding(lambda *args: self.hidden.append(args), lambda: True, lambda *a: None)
+        point = self.screen.mapToGlobal(QPoint(30, 200))
+        self.screen.genres.genreMenuRequested.emit("c", point)
+        shown = popup_for(self.screen)  # 2.13.1: on the Library's page
+        self.assertEqual(shown.menu().texts(), ["Hide genre", "Hide (parental controls)"])
+        self.assertEqual(shown.panel().topLeft(), QPoint(30, 200))
+        shown.handle(Action.NAV_DOWN)
+        shown.handle(Action.NAV_ACTIVATE)
+        self.assertFalse(shown.shown())
+        self.assertEqual(self.hidden, [("movies", "P", "c", "Comedy")])
 
 
 class RefreshTests(unittest.TestCase):  # 2.8: the Library's Refresh
@@ -1746,8 +1753,7 @@ class RefreshTests(unittest.TestCase):  # 2.8: the Library's Refresh
         ctl.open("movies")
         notices = []
         ctl.notice.connect(notices.append)
-        actions = {a.text(): a for a in ctl._source_menu().actions() if a.text()}
-        actions["Refresh films and series"].trigger()
+        ctl._source_menu().entry("Refresh films and series").trigger()
         self.assertEqual(self.catalog.refreshed, 1)
         self.assertEqual(notices, ["Refreshing films and series…"])
 
@@ -2152,11 +2158,16 @@ class RecordingsTabTests(unittest.TestCase):  # 2.9.7: the Library's Recordings 
         self.ctl.handle(Action.NAV_ACTIVATE)  # Enter: its buttons as a menu
         menu = self.ctl.tile_menu()
         self.assertEqual(
-            [(a.text(), a.isEnabled()) for a in menu.actions()], [("Edit…", True), ("Skip", False)]
+            [(e.text, e.enabled) for e in menu.entries], [("Edit…", True), ("Skip", False)]
         )
-        menu.actions()[0].trigger()
+        shown = popup_for(grid)  # 2.13.1: painted on the Library's page, beside the tile
+        self.assertIs(shown.menu(), menu)
+        tile = grid.item_rect(1)
+        tile.moveTopLeft(grid.viewport().mapTo(shown.parentWidget(), tile.topLeft()))
+        self.assertFalse(shown.panel().intersects(tile))
+        shown.handle(Action.NAV_ACTIVATE)  # its keys: Edit… (Skip is off)
+        self.assertFalse(shown.shown())
         self.assertEqual(self.desk.pressed[-1], ("airing:t@1", "edit"))
-        menu.close()
         self.ctl.handle(Action.NAV_DELETE)  # not a recording: nothing to delete
         self.assertEqual(self.deleted, [])
 
@@ -2172,9 +2183,9 @@ class RecordingsTabTests(unittest.TestCase):  # 2.9.7: the Library's Recordings 
         started = desk.Entry("rec:main", desk.NOW, "Harbor Sports", status="REC")
         self.desk.entries = [started] + self.desk_entries()  # a recording began meanwhile
         self.desk.refreshed.emit()  # the tiles shift by one
-        menu.actions()[0].trigger()
+        menu.entries[0].trigger()
         self.assertEqual(self.desk.pressed[-1], ("airing:t@1", "edit"))
-        menu.close()
+        popup_for(grid).close_menu()
 
     def test_the_tiles_follow_the_desk(self):
         self.desk.entries = self.desk_entries()

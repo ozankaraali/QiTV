@@ -22,7 +22,7 @@ import time
 from typing import Any, Callable, Iterator, Optional
 
 from PySide6.QtCore import QObject, QPoint, QThread
-from PySide6.QtWidgets import QFileDialog, QMenu, QMessageBox, QWidget
+from PySide6.QtWidgets import QFileDialog, QMessageBox, QWidget
 
 from services import parental, recording_desk as desk, recordings_library as rl, system_open
 from services.catalog import ALL_GROUP_ID
@@ -40,6 +40,8 @@ from services.recordings_list import RecordingsList
 from ui.keymap import Action
 from ui.library.folders_view import FoldersDesk
 from ui.library_controller import LibraryController
+from ui.overlays import popup_menu
+from ui.overlays.popup_menu import Menu
 from ui.overlays.question_card import QuestionCard
 from ui.overlays.rec_sign import MANAGE_TEXT
 from ui.page_stack import PageStack
@@ -381,12 +383,11 @@ class TVPages(QObject):
         self._set_guide_source(key)
 
     def _guide_source_menu(self, at: Any) -> None:
-        menu = QMenu(self._window.library_page)
+        menu = Menu()
         for label, key in self.guide_sources():
-            action = menu.addAction(label, partial(self._choose_guide_source, key))
-            action.setCheckable(True)
-            action.setChecked(key == self._guide_source)
-        menu.popup(at)
+            act = partial(self._choose_guide_source, key)
+            menu.add(label, act, checked=key == self._guide_source)
+        popup_menu.popup(menu, self._window.library_page, at=at)
 
     def _recordings_counts(self) -> dict[str, int]:
         """2.9.7: the Recordings tab's rail counts: the rows of each list (rows of buttons
@@ -714,17 +715,17 @@ class TVPages(QObject):
             self._recording_menu(item, global_pos)
             return
         if section == "scheduled":  # 2.8: a recording still to come
-            menu = QMenu(window.library_page)
+            menu = Menu()
             item_id = str(item.get("_item_id") or "")
             # i18n: a scheduled recording's right-click menu entry: it will not be recorded
-            menu.addAction(tr("Cancel Recording"), lambda: window.cancel_scheduled(item_id))
+            menu.add(tr("Cancel Recording"), lambda: window.cancel_scheduled(item_id))
             scheduled = window.recording_schedule.item(item_id) or {}
             if scheduled.get("kind") in ("once", "timer"):  # 2.9.7: its time, days or name
                 edit = translate(desk.BUTTON_TEXTS[desk.EDIT])
-                action = menu.addAction(edit, lambda: self.recordings_desk.edit(item_id))
-                action.setEnabled(not self.recordings_desk.records_now(item_id))
+                editable = not self.recordings_desk.records_now(item_id)
+                menu.add(edit, lambda: self.recordings_desk.edit(item_id), enabled=editable)
             self._manage_entry(menu, COMING)
-            menu.popup(global_pos)
+            popup_menu.popup(menu, window.library_page, at=global_pos)
             return
         window.controller.show_library_menu(item, section, global_pos, window.library_page)
 
@@ -733,19 +734,19 @@ class TVPages(QObject):
         path = str(item.get("path") or "")
         if not path:
             return
-        menu = QMenu(self._window.library_page)
+        menu = Menu()
         # i18n: a recording's right-click menu entry: opens the folder that holds its file
-        menu.addAction(tr("Show in Folder"), lambda: self._show_in_folder(path))
+        menu.add(tr("Show in Folder"), lambda: self._show_in_folder(path))
+        writing = self.recordings.is_writing(path)  # one still written stays
         # i18n: a recording's right-click menu entry: deletes its file (asks first)
-        delete = menu.addAction(tr("Delete Recording…"), lambda: self.delete_recording(item))
-        delete.setEnabled(not self.recordings.is_writing(path))  # one still written stays
+        menu.add(tr("Delete Recording…"), lambda: self.delete_recording(item), enabled=not writing)
         self._manage_entry(menu, RECORDED)
-        menu.popup(global_pos)
+        popup_menu.popup(menu, self._window.library_page, at=global_pos)
 
-    def _manage_entry(self, menu: QMenu, section: str) -> None:
+    def _manage_entry(self, menu: Menu, section: str) -> None:
         """2.9.7: a recording's right-click ends with the Recordings page, on its section."""
-        menu.addSeparator()
-        menu.addAction(translate(MANAGE_TEXT), lambda: self.open_recordings(section))
+        menu.add_separator()
+        menu.add(translate(MANAGE_TEXT), lambda: self.open_recordings(section))
 
     def _show_in_folder(self, path: str) -> None:
         system_open.open_folder(os.path.dirname(path))

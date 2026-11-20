@@ -1825,13 +1825,13 @@ class ChannelMenuElsewhereTests(unittest.TestCase):
         )
         self.shown = []
         patcher = mock.patch(
-            "ui.context_actions.QMenu.popup", lambda menu, pos: self.shown.append(menu)
+            "ui.overlays.popup_menu.popup", lambda menu, near, **where: self.shown.append(menu)
         )
         patcher.start()
         self.addCleanup(patcher.stop)
 
     def texts(self, menu):
-        return [a.text() for a in menu.actions() if not a.isSeparator()]
+        return menu.texts()
 
     def test_a_guides_channel_has_its_rows_entries_whatever_the_list_shows(self):
         self.nav.focus_source("Home")  # the channel list on its sources: no live section
