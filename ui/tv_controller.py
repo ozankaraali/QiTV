@@ -2726,7 +2726,7 @@ class TVController(QObject):
                 self._live_controls.show_live_transport(target)
         elif target.live:
             kind = classify(url, self.catalog.is_live("live"))
-            if self._live_controls.through_pipeline(url, kind):
+            if self._live_controls.through_pipeline(url, kind, item):
                 if not self._live_controls.tune_pipeline(target, url):
                     return  # over the provider's stream limit: nothing opens
                 if target.max_height is not None:
@@ -3427,7 +3427,7 @@ class TVController(QObject):
         self._current, self._cid = target, None
         session = self.session  # the focused tile's, whatever has the focus when it opens
         limit = self._live_controls.limit(item)
-        if self._live_controls.through_pipeline(url, kind):
+        if self._live_controls.through_pipeline(url, kind, item):
             # In memory: the session manager sizes the buffer as the tile starts (focused
             # then, or not: `SessionManager.tile_bytes`).
             start = self._live_controls.live_start(target, url)
@@ -3534,7 +3534,7 @@ class TVController(QObject):
         provider_name = item_provider.provider_name(self.catalog, item)
         limit = self._live_controls.limit(item)
         kind = classify(url, self.catalog.is_live("live"))
-        if self._live_controls.through_pipeline(url, kind):
+        if self._live_controls.through_pipeline(url, kind, item):
             kwargs = tune_kwargs(
                 self._live_controls.live_start(target, url), self.config, disk=False
             )

@@ -223,10 +223,11 @@ def stations_in(raw: Union[bytes, str], directory: bool = False) -> Optional[Lis
 def parse_stations(stations: List[Any]) -> Dict:
     """The directory's stations as a categorized playlist (parse_m3u's, categorize=True): each
     a channel as an M3U line makes it (its name, its stream `url_resolved`, else its `url`, its
-    `favicon` for a logo), in the directory's order (the most played first). One country's are
-    grouped by genre (free_radio.genre_of), stations of more than one country by country; the
-    groups' ids are English and their titles in the active language, in its alphabet (a cached
-    list's are made so again: free_radio.retitle)."""
+    `favicon` for a logo, marked a station: free_radio.is_station), in the directory's order (the
+    most played first). The list's "All" is All stations; then one country's are grouped by
+    genre (free_radio.genre_of), stations of more than one country by country; the groups' ids
+    are English and their titles in the active language, in its alphabet (a cached list's are
+    made so again: free_radio.retitle)."""
     items: List[Dict] = []
     left_out = 0
     countries = {
@@ -253,6 +254,7 @@ def parse_stations(stations: List[Any]) -> Dict:
                 "logo": str(station.get("favicon") or "").strip() or None,
                 "user_agent": None,
                 "cmd": link,
+                free_radio.STATION_KEY: True,  # played directly (free_radio.is_station)
             }
         )
     if left_out:

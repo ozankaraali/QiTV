@@ -128,6 +128,12 @@ class GenreTests(unittest.TestCase):
     def test_a_stations_tags_give_its_group(self):
         for tags, group in (
             ("pop,turkish pop", "Pop"),
+            ("arabesk fantazi", "Folk & traditional"),
+            ("fantezi", "Folk & traditional"),
+            ("turkish music", "Folk & traditional"),
+            ("turkish music,pop", "Pop"),  # the table's order
+            ("türk sanat müziği", "Classical"),  # Turkish art music
+            ("Türk Halk Müziği", "Folk & traditional"),
             ("pop rock", "Rock"),  # the first group in the table's order wins
             ("rock,news", "News & talk"),  # whatever the tags' order
             ("classic rock", "Rock"),  # whole words: no Classical
@@ -152,7 +158,8 @@ class GenreTests(unittest.TestCase):
         path = os.path.join(os.path.dirname(__file__), "..", "i18n", "template.json")
         with open(path, encoding="utf-8") as f:
             template = json.load(f)
-        for name in [name for name, _words in fr.GENRES] + [fr.OTHER, fr.HELP_TEXT]:
+        names = [name for name, _words in fr.GENRES] + [fr.OTHER, fr.HELP_TEXT, fr.ALL_STATIONS]
+        for name in names:
             self.assertIn(name, template)
 
 
@@ -184,6 +191,7 @@ class StationsTests(unittest.TestCase):
                 "logo": "https://logo.test/w.png",
                 "user_agent": None,
                 "cmd": "http://stream.test/wexlo",
+                "radio_station": True,  # played directly, never time-shifted
                 "tv_genre_id": "Pop",
                 "number": "1",
             },
@@ -207,7 +215,7 @@ class StationsTests(unittest.TestCase):
         self.assertEqual(
             playlist["categories"],
             [
-                {"id": "*", "title": "All"},
+                {"id": "*", "title": "All stations"},  # every station, most played first
                 {"id": "News & talk", "title": "News & talk"},
                 {"id": "Other", "title": "Other"},
                 {"id": "Pop", "title": "Pop"},
@@ -229,7 +237,7 @@ class StationsTests(unittest.TestCase):
         self.assertEqual(
             [(c["id"], c["title"]) for c in playlist["categories"]],
             [
-                ("*", "All"),
+                ("*", "All stations"),
                 ("Other", "Other"),
                 ("Türkiye", "Türkiye"),
                 ("United Kingdom", "United Kingdom"),
@@ -253,11 +261,16 @@ class StationsTests(unittest.TestCase):
 
     def test_no_station_is_an_empty_list(self):
         playlist = parse_stations([])
-        self.assertEqual(playlist["categories"], [{"id": "*", "title": "All"}])
+        self.assertEqual(playlist["categories"], [{"id": "*", "title": "All stations"}])
         self.assertEqual(playlist["contents"], [])
 
 
-TURKISH = {"News & talk": "Haberler ve sohbet", "Other": "Diğer", "Türkiye": "Türkiye"}
+TURKISH = {
+    "All stations": "Tüm istasyonlar",
+    "News & talk": "Haberler ve sohbet",
+    "Other": "Diğer",
+    "Türkiye": "Türkiye",
+}
 
 
 class TranslatedGroupsTests(unittest.TestCase):
@@ -278,7 +291,7 @@ class TranslatedGroupsTests(unittest.TestCase):
         self.assertEqual(
             [(c["id"], c["title"]) for c in playlist["categories"]],
             [
-                ("*", "All"),
+                ("*", "Tüm istasyonlar"),
                 ("Other", "Diğer"),  # by the shown names: D before H
                 ("News & talk", "Haberler ve sohbet"),
                 ("Pop", "Pop"),
@@ -294,7 +307,7 @@ class TranslatedGroupsTests(unittest.TestCase):
         self.assertEqual(
             [(c["id"], c["title"]) for c in payload["categories"]],
             [
-                ("*", "All"),
+                ("*", "Tüm istasyonlar"),
                 ("Other", "Diğer"),
                 ("News & talk", "Haberler ve sohbet"),
                 ("Pop", "Pop"),
@@ -310,7 +323,7 @@ class TranslatedGroupsTests(unittest.TestCase):
         }
         self.turkish()
         fr.retitle(payload)
-        self.assertEqual(payload["categories"][1]["title"], "Other")
+        self.assertEqual([c["title"] for c in payload["categories"]], ["All", "Other"])
 
     def test_the_provider_manager_retitles_a_radio_cache_as_it_reads_it(self):
         directory = tempfile.TemporaryDirectory()
@@ -337,7 +350,7 @@ class TranslatedGroupsTests(unittest.TestCase):
         loaded = again._load_provider_cache(again.current_provider)
         self.assertEqual(
             [c["title"] for c in loaded["itv"]["categories"]],
-            ["All", "Diğer", "Haberler ve sohbet", "Pop", "Rock"],
+            ["Tüm istasyonlar", "Diğer", "Haberler ve sohbet", "Pop", "Rock"],
         )
 
 

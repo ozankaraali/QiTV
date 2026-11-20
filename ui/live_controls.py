@@ -58,7 +58,7 @@ from urllib.parse import urlsplit
 from PySide6.QtCore import QObject, QTimer, SignalInstance
 from PySide6.QtGui import QPixmap
 
-from services import favorites, recording
+from services import favorites, free_radio, recording
 from services.catchup_memory import CatchupMemory
 from services.epg_view import Programme
 from services.i18n import N_, tr, tr_n, translate
@@ -524,12 +524,13 @@ class LiveControls(QObject):
             live_playing=False,
         )
 
-    def through_pipeline(self, url: str, kind: PlayKind) -> bool:
+    def through_pipeline(self, url: str, kind: PlayKind, item: Optional[dict] = None) -> bool:
         """Whether a live link plays through the time-shift pipeline.
 
-        Its source reads http(s) only; container files listed as channels (M3U) play as files.
+        Its source reads http(s) only; container files listed as channels (M3U) play as files,
+        and a radio list's stations (2.13: `item`'s, free_radio.is_station) directly in VLC.
         """
-        if self.live is None or kind is PlayKind.VOD_FILE:
+        if self.live is None or kind is PlayKind.VOD_FILE or free_radio.is_station(item):
             return False
         return urlsplit(url).scheme.lower() in _PIPELINE_SCHEMES
 

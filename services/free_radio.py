@@ -4,9 +4,11 @@ menu's and Settings → Providers' "Free radio…").
 
 A list is an ordinary M3U provider whose address is the directory's station JSON: the M3U loader
 reads it (services.m3u.stations_in, parse_stations) and makes each station a channel as an M3U
-line would. One country's stations are grouped by genre (`genre_of`, from their tags); the list
-of all countries, the 2,000 most played worldwide, by country. Older 2.x builds read the entry
-as any M3U playlist and say its answer is no playlist.
+line would, marked a station (`is_station`: it plays directly in VLC, never through the
+time-shift helper). Its first group, All stations (the list's "All", renamed), holds every
+station, the most played first; then one country's stations are grouped by genre (`genre_of`,
+from their tags), the list of all countries' (the 2,000 most played worldwide) by country.
+Older 2.x builds read the entry as any M3U playlist and say its answer is no playlist.
 
 The directory is asked with QiTV's own name (it asks apps for one), and only for its lists: no
 "click" is reported and nothing of the user's is sent. Data only, no widgets.
@@ -35,6 +37,9 @@ _COUNTRY_URL = (
 ALL_NAME = "Radio: all countries"  # saved in English, as Free channels' names are
 _NAME_PREFIX = "Radio: "
 RADIO_KEY = "radio"  # in a list made from the directory's stations (its groups: `retitle`)
+STATION_KEY = "radio_station"  # in each of its stations (`is_station`)
+# i18n: a radio list's first group: every station, most played first
+ALL_STATIONS = N_("All stations")
 
 # i18n: help under Settings → Providers → Free radio, and its menu's tooltip (radio-browser.info
 # is a website's name)
@@ -62,7 +67,7 @@ GENRES: tuple[tuple[str, tuple[str, ...]], ...] = (
     (
         N_("Classical"),  # i18n: a group of radio stations: classical music
         ("classical", "classique", "clásica", "klassik", "klasik", "opera", "baroque")
-        + ("symphony", "orchestra"),
+        + ("symphony", "orchestra", "türk sanat", "sanat müziği"),  # Turkish art music
     ),
     (
         N_("Jazz & blues"),  # i18n: a group of radio stations
@@ -85,8 +90,9 @@ GENRES: tuple[tuple[str, tuple[str, ...]], ...] = (
     ),
     (
         N_("Folk & traditional"),  # i18n: a group of radio stations
-        ("folk", "traditional", "türkü", "halk", "ethnic", "world", "country", "celtic")
-        + ("flamenco", "fado", "tango"),
+        ("folk", "traditional", "türkü", "halk", "türk halk", "ethnic", "world", "country")
+        + ("celtic", "flamenco", "fado", "tango", "arabesk", "fantezi", "fantazi")
+        + ("turkish music",),
     ),
     (
         N_("Religious"),  # i18n: a group of radio stations
@@ -137,16 +143,24 @@ def country_of(station: dict) -> str:
 
 def retitle(payload: Any) -> Any:
     """A list made from the directory's stations, its groups' titles in the active language
-    (cached in the language of the start that loaded it); any other list as it is. In place:
-    services.m3u.order_cached_groups orders them after."""
+    (cached in the language of the start that loaded it), its "All" (id "*") named All
+    stations; any other list as it is. In place: services.m3u.order_cached_groups orders them
+    after ("*" first)."""
     if not isinstance(payload, dict) or payload.get(RADIO_KEY) is not True:
         return payload
     categories = payload.get("categories")
     if isinstance(categories, list):
         for category in categories:
-            if isinstance(category, dict) and category.get("id") != "*":
-                category["title"] = translate(str(category.get("id") or ""))
+            if isinstance(category, dict):
+                group = str(category.get("id") or "")
+                category["title"] = translate(ALL_STATIONS if group == "*" else group)
     return payload
+
+
+def is_station(item: Any) -> bool:
+    """Whether a channel is a station of a radio list: VLC plays it directly (it is a sound
+    stream; the time-shift helper would only fail to read most of them)."""
+    return isinstance(item, dict) and item.get(STATION_KEY) is True
 
 
 def iso_code(code: str) -> str:

@@ -14,9 +14,11 @@ from timer_fixtures import wait_until
 
 from services import free_channels, free_radio
 from services.i18n import translate
+from services.m3u import parse_stations
 from services.navigation import FREE_RADIO_ROW
 from tests.fixtures.local_provider import PROVIDER_NAME
 from tests.test_free_channels_flow import NoProviderCase
+from tests.test_free_radio import STATIONS
 from tests.test_tv_window import WindowCase
 from ui import free_channels_menu
 from ui.free_channels_menu import ALL_TEXT, OTHER_TEXT, RADIO_TITLE, build_radio_menu
@@ -135,6 +137,32 @@ class ProvidersMenuTests(WindowCase):
         self.window.menus.rebuild_providers()
         texts = [a.text() for a in self.window.menus.providers_menu.actions()]
         self.assertEqual(texts.count("Free radio"), 1)
+
+
+class AllStationsTests(WindowCase):
+    """A radio list's first group is All stations (its "All", renamed): every station, the
+    most played first; its genres follow."""
+
+    def seed(self, provider):
+        manager = self.provider_manager
+        manager.current_provider = provider
+        manager.current_provider_content = {"itv": parse_stations(STATIONS)}
+        manager.mark_content_fresh("itv")
+        manager.save_provider()
+
+    def test_the_first_group_holds_every_station_in_the_directorys_order(self):
+        def groups():
+            return [(g.title, g.count) for g in self.tv_catalog().groups("live")]
+
+        self.show()
+        self.wait_for_drawer()  # the list loaded (from the saved one)
+        self.assertTrue(wait_until(lambda: bool(groups())))
+        self.assertEqual(
+            groups(),
+            [("All stations", 5), ("News & talk", 1), ("Other", 1), ("Pop", 2), ("Rock", 1)],
+        )
+        every = self.tv_catalog().items("live", "*")
+        self.assertEqual([c["name"] for c in every][:2], ["Wexlo FM", "Pell Rock"])
 
 
 class DrawerRowTests(WindowCase):
