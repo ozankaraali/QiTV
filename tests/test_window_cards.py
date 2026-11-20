@@ -257,6 +257,7 @@ class WindowCardsWindowTests(WindowCase):
     def test_the_updates_quit_question_over_live_tv(self):
         self.show()
         drawer = self.wait_for_drawer()
+        drawer.close_drawer()  # the player's keys: ← and → would seek, but for the card
         window = self.window
         answers: list[bool] = []
         update_dialogs.DIALOGS.confirm_stop_recordings(QUESTION, answers.append)
@@ -273,7 +274,8 @@ class WindowCardsWindowTests(WindowCase):
         QTest.keyClick(window, Qt.Key.Key_Escape)  # Back: kept, Quit or not
         self.assertEqual(answers, [False])
         self.assertTrue(card.isHidden())
-        self.assertTrue(drawer.isVisible())  # Esc was the card's alone
+        elapse(50)
+        self.assertTrue(drawer.isHidden())  # Esc was the card's alone; nothing came after it
         update_dialogs.DIALOGS.confirm_stop_recordings(QUESTION, answers.append)
         self.assertTrue(card.isVisible())
         window.remote_key(Qt.Key.Key_Right)  # the phone's arrows and OK

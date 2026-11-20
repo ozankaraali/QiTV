@@ -110,11 +110,6 @@ class WindowCards(QObject):
         self._waiting.append(question)
         self._next()
 
-    def tell(self, title: str, body: str, then: Optional[Answer] = None) -> None:
-        """A message with OK (the accent: its only answer); `then` once it is read."""
-        ok = Button(OK, translate(OK_TEXT), accent=True)
-        self.ask(title, body, [ok], OK, then or _nothing, back=OK)
-
     def shown(self) -> bool:
         """Whether a question shows (it has the keys)."""
         return self._asked is not None
@@ -222,6 +217,7 @@ def ask(
 
 
 def tell(title: str, body: str, then: Optional[Answer] = None) -> None:
-    """WindowCards.tell on the installed window's cards (through `ask`)."""
+    """A message with OK (the accent: its only answer, Back too) on the installed window's
+    cards (through `ask`); `then` once it is read."""
     ok = Button(OK, translate(OK_TEXT), accent=True)
     ask(title, body, [ok], OK, then or _nothing, back=OK)
