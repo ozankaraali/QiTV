@@ -17,7 +17,8 @@ player's right-click) opens there, beside the corner (`defer_to`).
 - Keys reach it through the shell while it shows (`handle`; the shell resolves them as the
   drawer's then, so the phone's arrows, OK and Back reach it too): ↑ ↓ move (round), Home,
   End and Page ↑ ↓ to the ends, Enter, Space and → choose (→ opens a submenu), Esc, ← and
-  Backspace close one level, a letter goes to the next entry it starts. The sound keys and
+  Backspace close one level, a letter goes to the next entry it starts, the menu key (or
+  Shift+F10, which open a highlighted row's menu beside it: `at` its rect) closes it. The sound keys and
   fullscreen go on; every other key is the menu's while it shows.
 - The pointer: the entry under it is highlighted; a click (pressed and released on it, either
   button) chooses it; a click anywhere else in the window closes the menu and does nothing more
@@ -37,7 +38,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 import logging
 import math
-from typing import Callable, Optional
+from typing import Callable, Optional, Union
 
 from PySide6.QtCore import QElapsedTimer, QEvent, QObject, QPoint, QPointF, QRect, QRectF, QSize, Qt
 from PySide6.QtGui import (
@@ -65,6 +66,9 @@ logger = logging.getLogger(__name__)
 
 RIGHT, BELOW, ABOVE = "right", "below", "above"  # beside a row; under or over a button
 _POINT = "point"  # at the pointer
+# Where a menu opens, in global coordinates: the point a right-click was at, or the rect of the
+# row (a poster, a tile) the menu key was pressed on: beside it (2.13.1).
+Where = Union[QPoint, QRect]
 # i18n: what a screen reader calls a right-click menu (or a button's menu) as it opens
 MENU_NAME = N_("Menu")
 TICK_SAID = "✓ "  # before a ticked entry's text, as assistive technology hears it
@@ -237,14 +241,17 @@ class PopupMenu(Overlay):
         self,
         menu: Menu,
         *,
-        at: Optional[QPoint] = None,
+        at: Optional[Where] = None,
         beside: Optional[QRect] = None,
         side: str = RIGHT,
         opener: Optional[QWidget] = None,
     ) -> PopupMenu:
-        """Show `menu` at `at` (a global point: a right-click's), else beside `beside` (a
-        global rect: a row's, a button's) on `side`; a menu shown closes first. It closes too
-        when `opener` (the list that asked) hides. Returns the overlay that shows it."""
+        """Show `menu` at `at` (a global point: a right-click's; a rect: the row the menu key
+        was pressed on, beside it), else beside `beside` (a global rect: a row's, a button's)
+        on `side`; a menu shown closes first. It closes too when `opener` (the list that
+        asked) hides. Returns the overlay that shows it."""
+        if isinstance(at, QRect):
+            at, beside, side = None, at, RIGHT
         parent = self.parentWidget()
         if self._defer is not None and parent is not None and self._defer[1]():
             page = QRect(parent.mapToGlobal(QPoint(0, 0)), parent.size())
@@ -348,6 +355,8 @@ class PopupMenu(Overlay):
                 self._choose(len(self._levels) - 1, level.current)
         elif action in _BACK:
             self.back()
+        elif action is Action.CONTEXT_MENU:
+            self.close_menu()  # the menu key again: as it opened it, it closes it (2.13.1)
         elif action is Action.NAV_TEXT:
             self._jump(payload)
         return True
@@ -849,14 +858,14 @@ def popup(
     menu: Menu,
     near: Optional[QObject],
     *,
-    at: Optional[QPoint] = None,
+    at: Optional[Where] = None,
     beside: Optional[QRect] = None,
     side: str = RIGHT,
     follow: bool = True,
 ) -> Optional[PopupMenu]:
-    """Show `menu` on the page of `near` (the widget that asks), at the global point `at` (a
-    right-click's) or beside the global rect `beside` on `side` (a row's for the keys, a
-    button's). With `follow` it closes when `near` hides (a list; not the player controls,
+    """Show `menu` on the page of `near` (the widget that asks), at `at` (Where: a
+    right-click's point, or the row the menu key was pressed on) or beside the global rect
+    `beside` on `side` (a button's). With `follow` it closes when `near` hides (a list; not the player controls,
     which fade). Returns the overlay that shows it (None: `near` is no widget, and the menu
     closes at once)."""
     overlay = popup_for(near)

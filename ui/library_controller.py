@@ -83,7 +83,7 @@ from ui.library.search_session import DEBOUNCE_MS, SearchSession
 from ui.library.top_nav import REFRESH_TEXT
 from ui.overlays import popup_menu
 from ui.overlays.guide import day_label
-from ui.overlays.popup_menu import RIGHT, Menu
+from ui.overlays.popup_menu import RIGHT, Menu, Where
 from ui.text_edit import edit_key
 
 logger = logging.getLogger(__name__)
@@ -167,7 +167,7 @@ class LibraryController(QObject):
         play: Callable[[dict, str, dict], None],
         tune_live: Callable[[dict], None],
         back_to_tv: Callable[[], None],
-        context_menu: Optional[Callable[[dict, str, QPoint], None]] = None,
+        context_menu: Optional[Callable[[dict, str, Where], None]] = None,
         tmdb=None,
         cancel_scheduled: Optional[Callable[[str], None]] = None,
         parent: Optional[QObject] = None,
@@ -1006,6 +1006,8 @@ class LibraryController(QObject):
         elif action is Action.FAVORITE:
             if grid.current_index() >= 0:
                 self._toggle_favorite(grid.current_index())
+        elif action is Action.CONTEXT_MENU:
+            self._context_key(grid, self._on_grid_context)
         elif action is Action.ESCAPE:
             self._focus("search" if self._mode == "search" else "genres")
         elif action in (Action.NAV_TEXT, Action.NAV_BACKSPACE, Action.PASTE):
@@ -1158,6 +1160,8 @@ class LibraryController(QObject):
                 grid.activate()
             elif action is Action.NAV_DELETE:  # its strip's Delete… (asks first)
                 self._recording_action(grid.current_index(), self.delete_recording)
+            elif action is Action.CONTEXT_MENU:
+                self._context_key(grid, self._on_recording_context)
             elif action in (Action.NAV_TEXT, Action.NAV_BACKSPACE, Action.PASTE):
                 return self._type_in_search(action, payload)
             else:
@@ -1605,7 +1609,16 @@ class LibraryController(QObject):
 
     # ---- right-click menus -------------------------------------------------------------------
 
-    def _on_grid_context(self, index: int, global_pos: QPoint) -> None:
+    @staticmethod
+    def _context_key(grid: Any, open_menu: Callable[[int, Where], None]) -> None:
+        """The menu key or Shift+F10 (2.13.1): the highlighted poster's or tile's menu, as its
+        right-click opens it, beside it."""
+        index = grid.current_index()
+        if index >= 0:
+            rect = grid.item_rect(index)
+            open_menu(index, QRect(grid.viewport().mapToGlobal(rect.topLeft()), rect.size()))
+
+    def _on_grid_context(self, index: int, global_pos: Where) -> None:
         if self._closed:
             return
         if self._grid_content == "search":
@@ -1629,7 +1642,7 @@ class LibraryController(QObject):
         if not self._closed:
             self._menu(episode, "series", self._series_owner(), global_pos)
 
-    def _menu(self, item: dict, section: str, provider: str, global_pos: QPoint) -> None:
+    def _menu(self, item: dict, section: str, provider: str, global_pos: Where) -> None:
         """The shell's menu for `item`, when its links can be asked of the provider shown (with
         All providers, of any provider: a link goes to the title's own, and waits there for
         its setup, whichever provider sets up)."""

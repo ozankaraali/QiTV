@@ -277,6 +277,13 @@ class KeyTests(PopupCase):
         overlay.handle(Action.NAV_TEXT, "f")
         self.assertEqual(self.current(overlay), "★ Favorites")  # its first letter, not ★
 
+    def test_the_menu_key_closes_it(self):  # 2.13.1: as it opened it
+        overlay = self.open_at(self.overlay(), self.channel_menu())
+        self.click(overlay, "Clear Recents")
+        self.assertTrue(overlay.handle(Action.CONTEXT_MENU))
+        self.assertFalse(overlay.shown())
+        self.assertEqual(self.done, ["closed"])
+
     def test_the_sound_keys_and_fullscreen_go_on_and_every_other_key_is_its_own(self):
         overlay = self.open_at(self.overlay(), self.channel_menu())
         for action in (Action.MUTE, Action.VOL_UP, Action.VOL_DOWN, Action.FULLSCREEN):
@@ -433,6 +440,14 @@ class PlaceTests(PopupCase):
         overlay.open(self.small_menu(), beside=button, side=ABOVE)
         self.assertLessEqual(overlay.panel().bottom(), 300)
         self.assertEqual(overlay.panel().left(), 500)
+
+    def test_a_rect_for_where_it_opens_is_a_row_the_keys_are_on(self):  # the menu key
+        host = self.host()
+        overlay = self.overlay(host)
+        row = QRect(host.mapToGlobal(QPoint(100, 200)), QSize(300, 40))
+        self.assertIs(popup(self.small_menu(), host, at=row), overlay)
+        self.assertGreaterEqual(overlay.panel().left(), 400)  # beside it, not at a point
+        self.assertLessEqual(abs(overlay.panel().top() - 200), 12)
 
     def test_it_turns_over_at_the_windows_edges(self):
         host = self.host()

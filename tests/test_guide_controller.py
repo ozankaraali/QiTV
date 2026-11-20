@@ -4,6 +4,7 @@ import unittest
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
+from PySide6.QtCore import QPointF, QRect
 from PySide6.QtWidgets import QApplication, QWidget
 from timer_fixtures import pause
 
@@ -63,6 +64,19 @@ class GuideControllerTests(unittest.TestCase):
         self.controller.handle(Action.DIGIT, "9")
         self.controller.handle(Action.DIGIT, "9")
         self.assertEqual(self.current(), "Chan 99")  # 999 does not exist
+
+    def test_the_menu_key_asks_for_the_highlighted_channels_menu_beside_its_name(self):
+        # 2.13.1: the menu key (Menu, Shift+F10) asks as a right-click on the row does.
+        asked = []
+        self.guide.contextRequested.connect(lambda channel, where: asked.append((channel, where)))
+        self.assertTrue(self.controller.handle(Action.CONTEXT_MENU))
+        [(channel, where)] = asked
+        self.assertEqual(channel["name"], "Chan 5")
+        self.assertIsInstance(where, QRect)  # a row: the menu opens beside it
+        name = QPointF(self.guide.mapFromGlobal(where.center()))
+        self.assertEqual(self.guide._row_at(name.y()), self.guide._current)
+        self.assertTrue(self.guide._on_channel_cell(name))  # its channel's cell
+        self.assertTrue(self.controller.is_open())
 
     def test_channel_keys_move_by_one(self):
         self.controller.handle(Action.CH_NEXT)

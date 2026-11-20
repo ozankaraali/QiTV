@@ -6,7 +6,7 @@ from unittest import mock
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
-from PySide6.QtCore import QPoint, QPointF, Qt, qInstallMessageHandler
+from PySide6.QtCore import QPoint, QPointF, QRect, Qt, qInstallMessageHandler
 from PySide6.QtTest import QTest
 from PySide6.QtWidgets import QApplication, QWidget
 from job_fixtures import ImmediateRunner
@@ -1072,6 +1072,22 @@ class HostedDrawerInputTests(unittest.TestCase):
         self.right_click(left.view, 0)
         self.assertEqual(requests, [left.nodes[0]])
         self.assertEqual(requests[0].layer, "group")
+        self.assertEqual(self.events, [])
+
+    def test_the_menu_key_asks_for_the_highlighted_rows_menu_beside_it(self):  # 2.13.1
+        requests = []
+        self.drawer.contextRequested.connect(lambda node, where: requests.append((node, where)))
+        for side in ("right", "left"):  # a channel, then its group
+            with self.subTest(side=side):
+                if side == "left":
+                    self.drawer.left()
+                node = self.drawer.highlighted()
+                self.assertEqual(node.layer, "item" if side == "right" else "group")
+                self.assertTrue(self.drawer.context_key())
+                col = self.drawer._columns[side]
+                rect = col.view.visualRect(col.model.index(col.rows[node], 0))
+                row = QRect(col.view.viewport().mapToGlobal(rect.topLeft()), rect.size())
+                self.assertEqual(requests[-1], (node, row))  # the row itself: beside it
         self.assertEqual(self.events, [])
 
     def test_a_right_click_on_recent_asks_for_its_menu(self):

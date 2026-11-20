@@ -46,7 +46,7 @@ from services.navigation import (
 )
 from ui.link_lanes import LinkLanes, Target
 from ui.overlays import popup_menu
-from ui.overlays.popup_menu import ABOVE, Menu
+from ui.overlays.popup_menu import ABOVE, Menu, Where
 from ui.theme import FOCUS_FILL_ALPHA, PALETTE, qcolor
 
 logger = logging.getLogger(__name__)
@@ -153,9 +153,10 @@ class ContextActions(QObject):
         self._play_external = play_external
         self._notify = notify
 
-    def show(self, node: NavNode, global_pos: QPoint, parent: Optional[QObject] = None) -> None:
-        """Show `node`'s menu at `global_pos`, on `parent`'s page (the drawer's); it closes
-        when the drawer does."""
+    def show(self, node: NavNode, global_pos: Where, parent: Optional[QObject] = None) -> None:
+        """Show `node`'s menu at `global_pos` (a right-click's point, or the row the menu key
+        was pressed on: beside it), on `parent`'s page (the drawer's); it closes when the
+        drawer does."""
         menu = self.menu(node)
         if menu is not None:
             popup_menu.popup(menu, parent, at=global_pos)
@@ -172,7 +173,7 @@ class ContextActions(QObject):
         popup_menu.popup(menu, parent, beside=beside, side=ABOVE, follow=False)
 
     def show_target(
-        self, target: Target, global_pos: QPoint, parent: Optional[QObject] = None
+        self, target: Target, global_pos: Where, parent: Optional[QObject] = None
     ) -> None:
         """A Library title's or episode's menu: the players and its link (no favorites)."""
         menu = Menu()
@@ -182,7 +183,7 @@ class ContextActions(QObject):
     def show_channel(
         self,
         item: dict,
-        global_pos: QPoint,
+        global_pos: Where,
         parent: Optional[QObject] = None,
         *,
         group_key: str = "",

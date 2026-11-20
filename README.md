@@ -181,6 +181,7 @@ These are also in the app under Help → Keyboard Shortcuts. <kbd>Ctrl/⌘</kbd>
 | <kbd>Ctrl/⌘+D</kbd> | Add or remove a favorite channel |
 | <kbd>Ctrl/⌘+P</kbd> | Open the channel in picture-in-picture |
 | <kbd>Delete (fn+⌫ on a Mac)</kbd> | Remove the channel from Recents |
+| <kbd>Menu</kbd> / <kbd>Shift+F10</kbd> | Open the highlighted item's menu (as a right-click does) |
 | <kbd>Ctrl/⌘+F</kbd> | Search |
 | <kbd>F11</kbd> / <kbd>⌃⌘F (Mac)</kbd> | Fullscreen |
 | <kbd>Esc</kbd> | End the find, then close |
@@ -195,6 +196,7 @@ These are also in the app under Help → Keyboard Shortcuts. <kbd>Ctrl/⌘</kbd>
 | <kbd>0–9</kbd> | Jump to a channel number |
 | <kbd>Enter</kbd> | Watch the channel; a past programme from its start |
 | <kbd>R</kbd> | Record the programme at its time, or cancel its recording |
+| <kbd>Menu</kbd> / <kbd>Shift+F10</kbd> | Open the highlighted item's menu (as a right-click does) |
 | <kbd>Ctrl/⌘+F</kbd> | Search |
 | <kbd>F</kbd> / <kbd>F11</kbd> / <kbd>⌃⌘F (Mac)</kbd> | Fullscreen |
 | <kbd>G</kbd> / <kbd>Esc</kbd> | Close the guide |
@@ -211,6 +213,7 @@ These are also in the app under Help → Keyboard Shortcuts. <kbd>Ctrl/⌘</kbd>
 | <kbd>/</kbd> | Search, or type it in the search |
 | <kbd>Ctrl/⌘+D</kbd> | Add to or remove from My list |
 | <kbd>Delete (fn+⌫ on a Mac)</kbd> | Delete a recording (it asks first), or take a folder off Folders |
+| <kbd>Menu</kbd> / <kbd>Shift+F10</kbd> | Open the highlighted item's menu (as a right-click does) |
 | <kbd>F11</kbd> / <kbd>⌃⌘F (Mac)</kbd> | Fullscreen |
 | <kbd>Esc</kbd> | Back; from the genres, back to live TV |
 

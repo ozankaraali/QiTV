@@ -277,6 +277,22 @@ class TVWindowTests(WindowCase):
         self.window.remote_key(Qt.Key.Key_Return.value)  # the phone's OK: Add to favorites
         self.assertFalse(menu.shown())
         self.assertTrue(favorites.is_favorite(self.config, node.payload))
+        # 2.13.1: the menu key and Shift+F10 open the highlighted row's menu beside the row;
+        # the menu key again closes it.
+        col = drawer._columns[drawer.focus_side]
+        rect = col.view.visualRect(col.model.index(col.rows[drawer.highlighted()], 0))
+        row = QRect(col.view.viewport().mapTo(self.window.host, rect.topLeft()), rect.size())
+        for key, mods in (
+            (Qt.Key.Key_Menu, Qt.KeyboardModifier.NoModifier),
+            (Qt.Key.Key_F10, Qt.KeyboardModifier.ShiftModifier),
+        ):
+            with self.subTest(key=key):
+                QTest.keyClick(self.window, key, mods)
+                self.assertTrue(menu.shown())
+                self.assertEqual(menu.menu().texts()[0], "Remove from favorites")
+                self.assertFalse(menu.panel().intersects(row))  # beside it
+                QTest.keyClick(self.window, Qt.Key.Key_Menu)
+                self.assertFalse(menu.shown())
 
     def test_constructs_and_shows_with_the_overlay_host(self):
         self.show()

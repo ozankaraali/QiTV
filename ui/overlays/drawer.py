@@ -784,7 +784,9 @@ class _Column:
 class Drawer(Overlay):
     accessible_name = N_("Channel list")
     playRequested = Signal(object, object, object)
-    contextRequested = Signal(object, QPoint)  # node, global position
+    # node, where its menu opens (popup_menu.Where): a right-click's global point, or the
+    # global rect of the row the menu key was pressed on (2.13.1)
+    contextRequested = Signal(object, object)
     # An action row (SETTINGS_ROW, ADD_PROVIDER_ROW, OPEN_FILE_ROW) or a header button
     # (SETTINGS_BUTTON, REFRESH_ACTION, SEARCH_ACTION, LIBRARY_ACTION).
     actionRequested = Signal(str)
@@ -1276,6 +1278,20 @@ class Drawer(Overlay):
         if self.finding() and _found_link(col.nodes[row]):
             return  # a found link plays as it was kept (Enter, a click): no channel's menu
         self.contextRequested.emit(col.nodes[row], col.view.viewport().mapToGlobal(pos))
+
+    def context_key(self) -> bool:
+        """The menu key or Shift+F10 (2.13.1): the highlighted row's menu, as its right-click
+        asks for it, beside the row (its global rect). False: the row has none."""
+        col = self._columns[self.focus_side]
+        node = self.highlighted()
+        if node is None or not _has_context(node) or (self.finding() and _found_link(node)):
+            return False
+        view = col.view
+        rect = view.visualRect(col.model.index(col.rows[node], 0))
+        self.contextRequested.emit(
+            node, QRect(view.viewport().mapToGlobal(rect.topLeft()), rect.size())
+        )
+        return True
 
     def _on_nav_changed(self) -> None:
         if self.isVisible():

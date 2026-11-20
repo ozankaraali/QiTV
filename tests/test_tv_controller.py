@@ -10,7 +10,7 @@ from unittest import mock
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
-from PySide6.QtCore import QObject, QPoint, QPointF, QRectF, Qt, Signal
+from PySide6.QtCore import QObject, QPoint, QPointF, QRect, QRectF, Qt, Signal
 from PySide6.QtGui import QGuiApplication, QPixmap, QWheelEvent
 from PySide6.QtWidgets import QAbstractItemView, QApplication, QWidget
 from mixed_fixtures import DEMO, HARBOR, HeldSetups, live_content, mixed_config, shut_hub
@@ -518,6 +518,10 @@ class FakeDrawer(FakeOverlay):
 
     def field_key(self, action, payload=""):
         return False  # no Find box caret here (2.9.3: the real one's in test_drawer)
+
+    def context_key(self):  # 2.13.1: the menu key (the real one's in test_drawer)
+        self.record("context_key")
+        return True
 
     def finding(self):
         return self.found
@@ -4906,6 +4910,19 @@ class ContextMenuTests(ControllerTestCase):
         self.choose(menu, "Add to favorites")
         self.assertEqual(self.config.favorites, ["One"])
         self.assertEqual(self.texts(self.menu_for(self.channels[0]))[0], "Remove from favorites")
+
+    def test_the_menu_key_opens_the_highlighted_rows_menu_beside_it(self):  # 2.13.1
+        self.controller.handle(Action.CONTEXT_MENU)
+        self.assertEqual(self.drawer.named("context_key"), [])  # the list is closed
+        self.drawer.visible = True
+        self.controller.handle(Action.CONTEXT_MENU)
+        self.assertEqual(self.drawer.named("context_key"), [()])
+        row = QRect(300, 100, 400, 40)  # what the drawer asks with: its highlighted row
+        with shown_menus() as popup:
+            self.drawer.contextRequested.emit(self.channels[0], row)
+        [(menu, where)] = menus_of(popup)
+        self.assertEqual(where["at"], row)  # a row, not a point: the menu opens beside it
+        self.assertEqual(menu.texts()[0], "Add to favorites")
 
     def test_with_recordings_a_channel_can_be_recorded_at_a_time(self):  # 2.8 (owner)
         asked = []

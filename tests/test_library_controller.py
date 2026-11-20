@@ -6,7 +6,7 @@ from unittest import mock
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
-from PySide6.QtCore import QCoreApplication, QObject, QPoint, QRectF, Qt, Signal
+from PySide6.QtCore import QCoreApplication, QObject, QPoint, QRect, QRectF, Qt, Signal
 from PySide6.QtGui import QColor, QPixmap
 from PySide6.QtTest import QTest
 from PySide6.QtWidgets import QApplication
@@ -1407,6 +1407,16 @@ class LibraryControllerTests(unittest.TestCase):
         menu.closed()
         self.assertEqual(self.catalog.selected, [ALL_PROVIDERS])
 
+    def test_the_menu_key_opens_the_highlighted_titles_menu_beside_it(self):  # 2.13.1
+        ctl = self.open_movies()
+        ctl.handle(Action.NAV_RIGHT)  # Salt Roads
+        grid = self.screen.grid
+        self.assertTrue(ctl.handle(Action.CONTEXT_MENU))
+        index = grid.current_index()
+        rect = grid.item_rect(index)
+        poster = QRect(grid.viewport().mapToGlobal(rect.topLeft()), rect.size())
+        self.assertEqual(self.menus, [(grid.item(index), "movies", poster)])  # as a right-click
+
     # 7 -----------------------------------------------------------------------------------
     def test_ctrl_d_toggles_the_favorite_and_the_strip_star_turns_accent(self):
         ctl = self.open_movies()
@@ -2170,6 +2180,20 @@ class RecordingsTabTests(unittest.TestCase):  # 2.9.7: the Library's Recordings 
         self.assertEqual(self.desk.pressed[-1], ("airing:t@1", "edit"))
         self.ctl.handle(Action.NAV_DELETE)  # not a recording: nothing to delete
         self.assertEqual(self.deleted, [])
+
+    def test_the_menu_key_opens_a_tiles_menu_beside_it(self):  # 2.13.1
+        self.desk.entries = self.desk_entries()
+        self.ctl.open_recordings(rl.COMING)
+        grid = self.screen.rec_grid
+        grid.set_current_index(1)
+        self.assertTrue(self.ctl.handle(Action.CONTEXT_MENU))
+        shown = popup_for(grid)
+        self.assertIs(shown.menu(), self.ctl.tile_menu())
+        self.assertEqual(shown.menu().texts(), ["Edit…", "Skip"])
+        tile = grid.item_rect(1)
+        tile.moveTopLeft(grid.viewport().mapTo(shown.parentWidget(), tile.topLeft()))
+        self.assertFalse(shown.panel().intersects(tile))
+        shown.close_menu()
 
     def test_a_tiles_menu_acts_on_its_own_tile_after_a_refresh(self):  # review 6
         from services import recording_desk as desk

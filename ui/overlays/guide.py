@@ -292,8 +292,9 @@ class Guide(Overlay):
     accessible_name = N_("Programme guide")
     tuneRequested = Signal(object)  # channel dict
     programmeRequested = Signal(object, object)  # channel dict, Programme: from its start
-    # 2.9.3: a right-click on a row (channel dict, global position): its menu, as the list's
-    contextRequested = Signal(object, QPoint)
+    # 2.9.3: a right-click on a row (channel dict, global position): its menu, as the list's;
+    # 2.13.1: the menu key's (channel dict, the global rect of its name: beside it)
+    contextRequested = Signal(object, object)
     closed = Signal()
     searchRequested = Signal()  # the header's ⌕
     fullscreenRequested = Signal()  # the header's ⛶
@@ -803,6 +804,19 @@ class Guide(Overlay):
         if 0 <= self._current < len(self._channels):
             return self._channels[self._current]
         return None
+
+    def context_key(self) -> bool:
+        """The menu key or Shift+F10 (2.13.1): the highlighted channel's menu, as its row's
+        right-click asks for it, beside its name. False: no channel."""
+        channel = self.current_channel()
+        if channel is None:
+            return False
+        layout = self._layout()
+        row = self._row_rect(layout, self._current)
+        name = QRectF(row.left(), row.top(), layout.times.left() - row.left(), row.height())
+        cell = name.toAlignedRect()
+        self.contextRequested.emit(channel, QRect(self.mapToGlobal(cell.topLeft()), cell.size()))
+        return True
 
     def window_start(self) -> datetime:
         return self._window_start

@@ -21,7 +21,7 @@ import os
 import time
 from typing import Any, Callable, Iterator, Optional
 
-from PySide6.QtCore import QObject, QPoint, QThread
+from PySide6.QtCore import QObject, QThread
 from PySide6.QtWidgets import QFileDialog, QMessageBox, QWidget
 
 from services import parental, recording_desk as desk, recordings_library as rl, system_open
@@ -41,7 +41,7 @@ from ui.keymap import Action
 from ui.library.folders_view import FoldersDesk
 from ui.library_controller import LibraryController
 from ui.overlays import popup_menu
-from ui.overlays.popup_menu import Menu
+from ui.overlays.popup_menu import Menu, Where
 from ui.overlays.question_card import QuestionCard
 from ui.overlays.rec_sign import MANAGE_TEXT
 from ui.page_stack import PageStack
@@ -706,8 +706,9 @@ class TVPages(QObject):
             and self._window.controller.vod_chosen()
         )
 
-    def context_menu(self, item: dict, section: str, global_pos: QPoint) -> None:
-        """A right-click on a Library film or episode: Play in VLC/MPV or Copy stream link."""
+    def context_menu(self, item: dict, section: str, global_pos: Where) -> None:
+        """A right-click on a Library film or episode (or the menu key on it: `global_pos` its
+        poster's rect, 2.13.1): Play in VLC/MPV or Copy stream link."""
         window = self._window
         if window.closing():
             return
@@ -729,7 +730,7 @@ class TVPages(QObject):
             return
         window.controller.show_library_menu(item, section, global_pos, window.library_page)
 
-    def _recording_menu(self, item: dict, global_pos: QPoint) -> None:
+    def _recording_menu(self, item: dict, global_pos: Where) -> None:
         """A recording's right-click (2.8): its folder, or deleting its file (asked first)."""
         path = str(item.get("path") or "")
         if not path:
