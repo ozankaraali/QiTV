@@ -114,6 +114,7 @@ from PySide6.QtGui import (
     QRadialGradient,
     QRegion,
     QResizeEvent,
+    QShowEvent,
 )
 from PySide6.QtWidgets import QWidget
 
@@ -564,6 +565,13 @@ class Transport(Overlay):
         self._clock.setInterval(30_000)
         self._clock.timeout.connect(self._tick)
         self._clock.start()
+        # 2.12: kept until what they were measured for changes (`_layout_key`, the title row's
+        # texts, the width and language): a tick laid the row out again 4 times a second.
+        self._layout_cache: Optional[tuple[tuple, dict[str, QRectF]]] = None
+        self._title_cache: Optional[tuple[tuple, _TitleRow]] = None
+        self._steady_cache: Optional[tuple[tuple, float]] = None
+        self._band_stale = False  # hidden, its controls changed: told as it shows
+        self._look: Optional[tuple] = None  # the last tick's (`_tick_look`); None: hidden
         if parent is not None:
             parent.installEventFilter(self)
         self._fit()
@@ -671,6 +679,8 @@ class Transport(Overlay):
         Optional `auto` and `adjusted` keys: Auto latency, and its target for the channel moved.
         Catch-up: `buffer_start`, where the buffer starts on a bar that reaches into the
         provider's archive; `archive`, the archive plays (the bar is its own).
+        2.12: hidden, it only keeps the state (it is laid out as it shows); shown, it repaints
+        only what changed since the last tick (`_repaint_tick`).
         """
         tl = _Timeline.from_state(state)
         self._timeline = tl
@@ -687,13 +697,15 @@ class Transport(Overlay):
         self._rate = tl.nudge if tl.nudge != 1.0 else tl.rate  # the nudge's, not the ramp's
         self._speed = 1.0 if live else tl.rate  # stay-live's nudges are not a chosen speed
         self._paused = tl.paused
-        self.update()
+        if self.isVisible():
+            self._repaint_tick()
         self._controls_changed()
 
     def update_position(self, position_ms: int, length_ms: int) -> None:
         self._position = max(0, position_ms)
         self._length = max(0, length_ms)
-        self.update()
+        if self.isVisible():
+            self._repaint_tick()
 
     def set_paused(self, paused: bool) -> None:
         self._paused = paused
@@ -931,7 +943,12 @@ class Transport(Overlay):
         return self.geometry().top() + math.ceil(bottom + un.px(1.0))
 
     def _controls_changed(self) -> None:
-        """The host masks the PiP anew when this shows other controls (a mode, the bar)."""
+        """The host masks the PiP anew when this shows other controls (a mode, the bar).
+        2.12: hidden, nothing is laid out for it: it runs as the controls show (showEvent)."""
+        if self.isHidden():
+            self._band_stale = True
+            return
+        self._band_stale = False
         layout = self._layout()
         grid = self._grid_shown  # over the grid its labels and subtitle are claimed too
         claimed = (
@@ -1282,7 +1299,7 @@ class Transport(Overlay):
             self.setGeometry(parent.rect())
 
     def eventFilter(self, obj: QObject, event: QEvent) -> bool:
-        # Even while hidden: the next show then needs no layout pass.
+        # Even while hidden (2.12: noted then, and laid out as it shows).
         if obj is self.parentWidget() and event.type() == QEvent.Type.Resize:
             self._fit()
             self._controls_changed()
@@ -1324,10 +1341,14 @@ class Transport(Overlay):
         return un.font(1.15, QFont.Weight.Bold)
 
     def _title_row(self) -> _TitleRow:
+        clock = fmt_clock(self._wall(0.0))
+        text = self.rec_text() if self._live else ""
+        key = (self.width(), self._title, self._live, clock, text)  # (2.12: kept for these)
+        if self._title_cache is not None and self._title_cache[0] == key:
+            return self._title_cache[1]
         un = ui_units(self.width())
         left, right = float(un.px(3)), float(self.width() - un.px(3))
         y, row_h = float(un.px(2.4)), float(un.px(2.6))
-        clock = fmt_clock(self._wall(0.0))
         clock_w = QFontMetrics(un.font(1.8, QFont.Weight.DemiBold)).horizontalAdvance(clock)
         clock_rect = QRectF(right - clock_w, y, clock_w, row_h)
         badge = self.badge_rect()
@@ -1335,7 +1356,6 @@ class Transport(Overlay):
             left = badge.right() + un.px(1.2)
         gap = un.px(0.6)
         room = right - left - clock_w - un.px(4)
-        text = self.rec_text() if self._live else ""
         rec_w = 0.0
         if text:
             fm = QFontMetricsF(self._indicator_font(un))
@@ -1357,9 +1377,99 @@ class Transport(Overlay):
                 h = self._chip_h(un)
                 rec = QRectF(subtitle_x, y + (row_h - h) / 2, rec_w, h)
                 subtitle_x = rec.right() + un.px(1.2)
-        return _TitleRow(name, name_rect, star, record, rec, subtitle_x, clock, clock_rect)
+        row = _TitleRow(name, name_rect, star, record, rec, subtitle_x, clock, clock_rect)
+        self._title_cache = (key, row)
+        return row
 
     def _layout(self) -> dict[str, QRectF]:
+        """The controls' rects (`_layout_now`), kept while what they are measured for stays
+        (2.12: `_layout_key`; a tick measured some 30 texts again 4 times a second)."""
+        key = self._layout_key()
+        cached = self._layout_cache
+        if cached is None or cached[0] != key:
+            cached = self._layout_cache = (key, self._layout_now())
+        return cached[1]
+
+    def _layout_key(self) -> tuple:
+        """What the controls' rects depend on: the size, the language, the mode, the row that
+        shows and what it holds, the right-hand buttons, and at a time-shifted channel's live
+        edge the Stay live indicator's text. The audio dock's: the size and how many digits
+        its times have."""
+        size = (self.width(), self.height())
+        if self._audio:
+            return (size, tuple(re.sub(r"\d", "0", text) for text in self.texts()))
+        bar = self._shows_bar()
+        indicator: tuple = ()
+        if self._timeshift and not bar:
+            indicator = (
+                self._edge_lag,
+                self._stalled,
+                self._reconnecting,
+                self._captions_wait,
+                self._auto,
+                self._catching_up,
+                self._rate,
+            )
+        return (
+            size,
+            i18n.language(),
+            self._live,
+            self._timeshift,
+            self._failed,
+            bar,
+            self._timeline is None,
+            self._behind(),
+            self._edge_lag is None,
+            self._auto is None,
+            indicator,
+            self._next_available,
+            self._library,
+            self._quality,
+            self._cast_available,
+            self._pip_available,
+            self._grid_available,
+            self._grid_shown,
+            self._grid_layout,
+            self._grid_restorable,
+        )
+
+    def _tick_look(self) -> tuple:
+        """What a tick may change on screen: the controls' places, and the bottom band."""
+        return (self._layout_key(), self._band_look())
+
+    def _band_look(self) -> tuple:
+        """What the bottom band shows that a tick changes without moving a control: play or
+        pause, the speed, and on the bar the knob's pixel, the times, the bubble, the ticks,
+        the archive's part and the breaks (the indicator's text is the layout's)."""
+        seek = self._layout().get("seek")
+        if seek is None:
+            return (self._paused, self._speed)
+        width = seek.width()
+        look: list = [self._paused, self._speed, round(width * self._shown_frac()), self.texts()]
+        if self._timeshift and self._timeline is not None:
+            bar = self._bar()
+            look += [
+                self.bubble_text(),
+                tuple((round(width * bar.frac(t)), label) for t, label in self._ticks),
+                round(width * self.archive_fraction()),
+                tuple(round(width * bar.frac(cut)) for cut in bar.cuts),
+            ]
+        return tuple(look)
+
+    def _repaint_tick(self) -> None:
+        """Repaint what changed since the last tick (its `_tick_look`, the clock's seconds in
+        the bubble among it): everything when a control moved, the bottom band when only what
+        it shows did, else nothing (2.12: the whole window-sized overlay was painted again 4
+        times a second)."""
+        look, last = self._tick_look(), self._look
+        self._look = look
+        if last is not None and look[0] != last[0]:
+            self.update()
+        elif last is None or look[1] != last[1]:
+            top = max(0, self.controls_top() - self.geometry().top() - 3)  # (the bubble's ring)
+            self.update(QRect(0, top, self.width(), self.height() - top))
+
+    def _layout_now(self) -> dict[str, QRectF]:
         """The controls' rects; in a row too crowded for them (a small window, a longer
         language, every button of the multiview and the second channel), the icons sit closer
         before a text gives way: the multiview's chips, the Stay live indicator or the speed
@@ -1413,7 +1523,11 @@ class Transport(Overlay):
     def _steady_width(self, un: Units) -> float:
         """The indicator's width for its busiest text, whatever it reads now: its name with a
         two-digit lag (and "adjusted", under Auto) and the wider of its rates, or a stall's
-        text: the icons' spacing then depends on the width and the language alone."""
+        text: the icons' spacing then depends on the width and the language alone (2.12: kept
+        for them)."""
+        key = (un.width, un.u, i18n.language(), self._auto is not None)
+        if self._steady_cache is not None and self._steady_cache[0] == key:
+            return self._steady_cache[1]
         fm = QFontMetricsF(self._indicator_font(un))
         seconds = i18n.decimal("88.8")
         if self._auto is not None:
@@ -1427,7 +1541,9 @@ class Transport(Overlay):
         busiest = lag + " · " + max(rates, key=fm.horizontalAdvance)
         tails = (busiest, translate(RECONNECTING), translate(WAITING), translate(CAPTIONS_WAIT))
         head = tr("Stay live")
-        return self._indicator_bare(un, fm, head) + max(fm.horizontalAdvance(t) for t in tails)
+        width = self._indicator_bare(un, fm, head) + max(fm.horizontalAdvance(t) for t in tails)
+        self._steady_cache = (key, width)
+        return width
 
     def _grid_chips_short(self, rects: dict[str, QRectF]) -> bool:
         """While the grid shows: its layout chip went without its name, or left out, or
@@ -1597,7 +1713,7 @@ class Transport(Overlay):
         or the knob's halo when taller) down. The mockup's box starts 14 px higher, over the
         album list's last row: that part is only its shade's clear start, so it takes none of
         the row's clicks."""
-        rects = self._dock_layout()
+        rects = self._layout() if self._audio else self._dock_layout()
         seek = rects["seek"]
         knob = (_DOCK_KNOB / 2 + _DOCK_HALO) * self._dock_unit()
         top = math.floor(min(rects["times"].top(), seek.center().y() - knob))
@@ -1786,7 +1902,10 @@ class Transport(Overlay):
             return
         un = ui_units(self.width())
         self._paint_scrims(p)
-        self._paint_title(p, un)
+        row = self._title_row()
+        bottoms = (row.name_rect.bottom(), row.clock_rect.bottom(), self.badge_rect().bottom())
+        if event.rect().top() <= max(bottoms) + 1:  # (a tick repaints the bottom band alone)
+            self._paint_title(p, un)
         rects = self._layout()
         text = qcolor(PALETTE.text)
         if "seek" not in rects:
@@ -2429,7 +2548,18 @@ class Transport(Overlay):
         # Hidden mid-drag (the host hides with a minimized window): no release will come.
         self._end_drag()
         self._end_level_drag()
+        self._look = None  # (shown again, it is painted whole)
         super().hideEvent(event)
+
+    def showEvent(self, event: QShowEvent) -> None:
+        super().showEvent(event)
+        if self._band_stale:  # what changed while it was hidden: the band, the PiP's mask
+            self._controls_changed()
+
+    def changeEvent(self, event: QEvent) -> None:
+        if event.type() == QEvent.Type.FontChange:  # (the application's font: measured anew)
+            self._layout_cache = self._title_cache = self._steady_cache = None
+        super().changeEvent(event)
 
     def _end_drag(self) -> None:
         """Drop a drag whose release was lost, without seeking; the idle fade runs again."""
