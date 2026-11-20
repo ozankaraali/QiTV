@@ -11,7 +11,11 @@ dark card 48 u wide with a title, then
   it), the line that says what was found under the first one (green when good, else in the
   warning colour), the buttons at the right with the accent one filled, and the other ways to
   go on in a muted line below ("Or: M3U file…  STB portal");
-- a ChoiceCard's words and its buttons.
+- a ChoiceCard's words and its buttons;
+- a RangeCard's value, a track with a thumb under it (a muted line, an accent thumb), a note
+  that follows the value (the estimated rewind of a cache size), and Cancel and OK. ←/→ step,
+  PgUp/PgDn move ten steps, Home/End go to the ends, Enter keeps, Esc and Back cancel
+  (`answered` with the value, or None); a click or a drag on the track sets it.
 
 The keys reach a card through `handle` (the Settings controller gives them to a shown card
 before its rows), and every key is the card's while it shows, but the sound's and the window's.
@@ -55,7 +59,7 @@ from PySide6.QtGui import (
     QPen,
     QWheelEvent,
 )
-from PySide6.QtWidgets import QWidget
+from PySide6.QtWidgets import QFileDialog, QWidget
 
 from services.i18n import N_, translate
 from ui.keymap import Action, key_hint
@@ -75,6 +79,9 @@ from ui.theme import FOCUS_FILL_ALPHA, PALETTE, RADIUS_PANEL, qcolor
 
 CANCEL = "cancel"  # the key of a card's Cancel button
 PASTE_TEXT = N_("Paste")
+CANCEL_TEXT = N_("Cancel")
+OK_TEXT = N_("OK")
+OK = "ok"  # the key of a RangeCard's OK button
 BUSY_TEXT = N_("Checking…")  # i18n: beside a card's buttons while a provider is checked
 # i18n: before a card's other ways to go on, in a muted line: "Or: M3U file…  STB portal"
 OR_TEXT = N_("Or:")
@@ -109,14 +116,20 @@ _DIM = ("#05070a", 0.62)  # the picture under the card
 _MASK = "•"
 _DISABLED_OPACITY = 0.4
 _PLACEHOLDER_ALPHA = 0.45
+_TRACK_H_U = 0.35  # the line
+_TRACK_ROW_U = 3.0  # the track's row (what a press takes)
+_THUMB_U = 0.95  # the thumb's radius
+_TRACK_ALPHA = 0.22
+_PAGE_STEPS = 10
 
 # Where things are, by (zone, key): one rect per field, button and alternate.
 _Rects = dict[tuple[str, str], QRectF]
 PANEL, TITLE, BODY, MIDDLE = ("panel", ""), ("title", ""), ("body", ""), ("middle", "")
 FOUND, BUSY, RULE, LEAD = ("found", ""), ("busy", ""), ("rule", ""), ("lead", "")
 _FOOTER = frozenset({"button", "busy", "rule", "lead", "alt"})  # stays in a small window
-_MIDDLE = frozenset({"body", "label", "field", "paste", "found"})  # cut in a small window
-_HITS = ("paste", "field", "label", "button", "alt")
+# cut in a small window
+_MIDDLE = frozenset({"body", "label", "field", "paste", "found", "value", "track", "note"})
+_HITS = ("paste", "field", "label", "button", "alt", "track")
 # Words that wrap (the question's, the found line's), from the top left.
 _WRAP = int(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignTop | Qt.TextFlag.TextWordWrap)
 
@@ -1144,3 +1157,257 @@ class ChoiceCard(_Card):
 
     def _back(self) -> None:
         self._answer(CANCEL)
+
+
+class RangeCard(_Card):
+    """A value on a track, for what would clutter a row (a cache size, say)."""
+
+    answered = Signal(object)  # the value kept, or None for Esc, Back, Cancel, the dimmed picture
+
+    def __init__(self, parent: Optional[QWidget] = None) -> None:
+        super().__init__(parent)
+        self._value = self._min = 0
+        self._max = self._step = 1
+        self._text: Callable[[int], str] = str
+        self._note: Callable[[int], str] = lambda value: ""
+        self._dragging = False
+
+    def ask(
+        self,
+        title: str,
+        value: int,
+        minimum: int,
+        maximum: int,
+        step: int,
+        text: Callable[[int], str],
+        note: Callable[[int], str],
+    ) -> None:
+        """Show the card (one still shown is replaced, unanswered), the keys on the track.
+        `text` words the value ("1024 MiB"), `note` the line under the track."""
+        self._title, self._body = title, ""
+        self._fields, self._edits = [], {}
+        self._found, self._found_ok = "", True
+        self._min, self._max = int(minimum), max(int(minimum), int(maximum))
+        self._step = max(1, int(step))
+        self._text, self._note = text, note
+        self._value = self._clamp(int(value))
+        self._buttons = [
+            Button(CANCEL, translate(CANCEL_TEXT)),
+            Button(OK, translate(OK_TEXT), accent=True),
+        ]
+        self._alternates = []
+        self._busy = self._dragging = False
+        self._hover = None
+        self._focus = ("track", "")
+        self._last_button = OK
+        self._open()
+        announce(self, "\n".join((title, self._text(self._value), self._note(self._value))))
+
+    def value(self) -> int:
+        return self._value
+
+    def value_text(self) -> str:
+        return self._text(self._value)
+
+    def note_text(self) -> str:
+        return self._note(self._value)
+
+    def _clamp(self, value: int) -> int:
+        return max(self._min, min(self._max, value))
+
+    def _set_value(self, value: int, *, say: bool = True) -> None:
+        value = self._clamp(value)
+        if value == self._value:
+            return
+        self._value = value
+        self.update()
+        if say:
+            self._say()
+
+    def _at(self, x: float) -> int:
+        """The value at the card's x: on the grid of steps from the minimum."""
+        track = self._track_line()
+        if track.width() <= 0 or self._max == self._min:
+            return self._min
+        fraction = max(0.0, min(1.0, (x - track.left()) / track.width()))
+        steps = round(fraction * (self._max - self._min) / self._step)
+        return self._clamp(self._min + steps * self._step)
+
+    def _track_line(self) -> QRectF:
+        """Where the thumb's centre travels, in the card's coordinates."""
+        row = self.control_rect("track")
+        edge = self._units().px(_THUMB_U)
+        return QRectF(row.left() + edge, row.center().y(), max(0.0, row.width() - 2 * edge), 0)
+
+    # ---- the keys -------------------------------------------------------------------------
+
+    def handle(self, action: Action, payload: object = "") -> bool:
+        if not self.isHidden() and self._focus[0] == "track":
+            moves = {
+                Action.NAV_PAGE_UP: self._value + _PAGE_STEPS * self._step,
+                Action.NAV_PAGE_DOWN: self._value - _PAGE_STEPS * self._step,
+                Action.NAV_HOME: self._min,
+                Action.NAV_END: self._max,
+            }
+            if action in moves:
+                self._set_value(moves[action])
+                return True
+        return super().handle(action, payload)
+
+    def _horizontal(self, action: Action, payload: str) -> None:
+        if self._focus[0] != "track":
+            super()._horizontal(action, payload)
+            return
+        self._set_value(self._value + (-self._step if action is Action.NAV_LEFT else self._step))
+
+    def _rows(self) -> list[tuple[str, str]]:
+        return [("track", ""), ("button", "")]
+
+    def _activate(self) -> None:
+        if self._focus[0] == "track":
+            self._keep()
+        else:
+            super()._activate()
+
+    def _say(self) -> None:
+        if self._focus[0] == "track":
+            announce(self, f"{self._text(self._value)}. {self._note(self._value)}")
+        else:
+            super()._say()
+
+    def _keep(self) -> None:
+        if self.isHidden():
+            return
+        self._dragging = False
+        self.hide()
+        self.answered.emit(self._value)
+
+    def _pressed(self, key: str) -> None:
+        self._keep()
+
+    def _cancel(self) -> None:
+        if self.isHidden():
+            return
+        self._dragging = False
+        self.hide()
+        self.answered.emit(None)
+
+    def _back(self) -> None:
+        self._cancel()
+
+    # ---- the layout and the painting --------------------------------------------------------
+
+    @staticmethod
+    def _fonts(un: Units) -> dict[str, QFont]:
+        fonts = _Card._fonts(un)
+        fonts["value"] = un.font(1.6, QFont.Weight.DemiBold)
+        return fonts
+
+    def _place(
+        self, un: Units, fonts: dict[str, QFont], width: float, squeeze: float
+    ) -> tuple[_Rects, float]:
+        def gap(units: float) -> float:
+            return un.px(units) * squeeze
+
+        pad = float(un.px(_PAD_X_U))
+        left, inner = pad, max(1.0, width - 2 * pad)
+        rects: _Rects = {}
+        y = gap(_PAD_Y_U)
+        title_h = _line_h(fonts["title"])
+        rects[TITLE] = QRectF(left, y, inner, title_h)
+        y += title_h
+        middle_top = y + gap(_TITLE_GAP_U)
+        y = middle_top
+        value_h = _line_h(fonts["value"])
+        rects[("value", "")] = QRectF(left, y, inner, value_h)
+        y += value_h + gap(_ROW_GAP_U)
+        row_h = float(un.px(_TRACK_ROW_U))
+        rects[("track", "")] = QRectF(left, y, inner, row_h)
+        y += row_h + gap(_ROW_GAP_U)
+        note = self._note(self._value)
+        note_h = self._wrapped_height(fonts["found"], note, inner)
+        rects[("note", "")] = QRectF(left, y, inner, note_h)
+        y += note_h + gap(_FOOT_GAP_U)
+        footer = y
+        rects[MIDDLE] = QRectF(0, middle_top, width, footer - middle_top)
+        y = self._place_buttons(rects, un, fonts, left, inner, y, gap)
+        y += gap(_PAD_Y_U)
+        rects[PANEL] = QRectF(0, 0, width, y)
+        return rects, footer
+
+    def _paint_middle(self, p: QPainter, un: Units, fonts: dict[str, QFont], rects: _Rects) -> None:
+        left = Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter
+        value = rects[("value", "")]
+        p.setFont(fonts["value"])
+        p.setPen(qcolor(PALETTE.text))
+        p.drawText(value, left, _elided(fonts["value"], self._text(self._value), value.width()))
+        row = rects[("track", "")]
+        edge = float(un.px(_THUMB_U))
+        x0, x1, cy = row.left() + edge, row.right() - edge, row.center().y()
+        thick = max(2.0, float(un.px(_TRACK_H_U)))
+        line = QRectF(x0, cy - thick / 2, max(0.0, x1 - x0), thick)
+        fill_round(p, line, qcolor(PALETTE.text, _TRACK_ALPHA), thick / 2)
+        span = self._max - self._min
+        fraction = (self._value - self._min) / span if span else 0.0
+        cx = x0 + (x1 - x0) * fraction
+        if self._focus == ("track", ""):
+            p.save()
+            p.setPen(QPen(qcolor(PALETTE.text), 2.0))
+            p.setBrush(Qt.BrushStyle.NoBrush)
+            p.drawEllipse(QPointF(cx, cy), edge + 3, edge + 3)
+            p.restore()
+        p.save()
+        p.setRenderHint(QPainter.RenderHint.Antialiasing, True)
+        p.setPen(Qt.PenStyle.NoPen)
+        p.setBrush(qcolor(PALETTE.accent))
+        p.drawEllipse(QPointF(cx, cy), edge, edge)
+        p.restore()
+        note = rects[("note", "")]
+        p.setFont(fonts["found"])
+        p.setPen(qcolor(PALETTE.text, PALETTE.text_muted_alpha))
+        p.drawText(note, _WRAP, self._note(self._value))
+
+    # ---- the mouse --------------------------------------------------------------------------
+
+    def _mouse_press(self, event: QMouseEvent) -> None:
+        if event.button() == Qt.MouseButton.LeftButton:
+            hit = self._hit(event.position())
+            if hit is not None and hit[0] == "track":
+                self._set_focus(("track", ""))
+                self._dragging = True
+                self._set_value(self._at(event.position().x()))
+                return
+        super()._mouse_press(event)
+
+    def mouseMoveEvent(self, event: QMouseEvent) -> None:
+        if self._dragging and event.buttons() & Qt.MouseButton.LeftButton:
+            self._set_value(self._at(event.position().x()), say=False)
+            event.accept()
+            return
+        super().mouseMoveEvent(event)
+
+    def mouseReleaseEvent(self, event: QMouseEvent) -> None:
+        if self._dragging:
+            self._dragging = False
+            self._say()
+        super().mouseReleaseEvent(event)
+
+    def mouseDoubleClickEvent(self, event: QMouseEvent) -> None:
+        hit = self._hit(event.position())
+        if hit is not None and hit[0] == "track":
+            self.mousePressEvent(event)  # quick clicks on the track are clicks
+            return
+        super().mouseDoubleClickEvent(event)
+
+
+def pick_folder(parent: Optional[QWidget], title: str, start: str) -> Optional[str]:
+    """The system's folder picker; the folder chosen, or None. Tests patch this one place."""
+    path = QFileDialog.getExistingDirectory(parent, title, start)
+    return path or None
+
+
+def pick_file(parent: Optional[QWidget], title: str, filters: str) -> Optional[str]:
+    """The system's file picker (`filters` as Qt words them: "M3U (*.m3u *.m3u8)"); the file
+    chosen, or None. Tests patch this one place."""
+    path, _selected = QFileDialog.getOpenFileName(parent, title, "", filters)
+    return path or None

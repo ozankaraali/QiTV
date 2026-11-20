@@ -14,7 +14,16 @@ from PySide6.QtWidgets import QApplication, QWidget
 
 from ui.keymap import Action, key_hint
 from ui.overlays.painting import ui_units
-from ui.overlays.settings_card import CANCEL, Button, ChoiceCard, Field, FormCard
+from ui.overlays.settings_card import (
+    CANCEL,
+    Button,
+    ChoiceCard,
+    Field,
+    FormCard,
+    RangeCard,
+    pick_file,
+    pick_folder,
+)
 from ui.pointer import SecondClickGuard
 from ui.theme import PALETTE, qcolor
 
@@ -460,6 +469,138 @@ class ChoiceCardTests(Case):
         self.assertEqual(answered.at(5), ["remove"])
         self.assertEqual(answered.count(), 6)
         card.grab()
+
+
+class RangeCardTests(Case):
+    def ask(self, value=1024, lo=256, hi=16384, step=256) -> RangeCard:
+        card = RangeCard(self.host)
+        card.ask(
+            "Disk cache",
+            value,
+            lo,
+            hi,
+            step,
+            lambda v: f"{v} MiB",
+            lambda v: f"about {v // 64} minutes of rewind",
+        )
+        return card
+
+    def test_range_card_steps_and_pages_and_clamps(self):
+        card = self.ask(256)
+        self.assertTrue(card.isVisible())
+        self.assertEqual(card.value(), 256)
+        card.handle(Action.NAV_LEFT)
+        self.assertEqual(card.value(), 256)  # clamped at the start
+        card.handle(Action.NAV_RIGHT)
+        self.assertEqual(card.value(), 512)
+        card.handle(Action.NAV_PAGE_UP)
+        self.assertEqual(card.value(), 512 + 2560)
+        card.handle(Action.NAV_PAGE_DOWN)
+        self.assertEqual(card.value(), 512)
+        card.handle(Action.NAV_END)
+        self.assertEqual(card.value(), 16384)
+        card.handle(Action.NAV_RIGHT)
+        self.assertEqual(card.value(), 16384)
+        card.handle(Action.NAV_PAGE_UP)
+        self.assertEqual(card.value(), 16384)
+        card.handle(Action.NAV_HOME)
+        self.assertEqual(card.value(), 256)
+        self.assertFalse(card.handle(Action.MUTE))
+
+    def test_the_note_follows_the_value(self):
+        card = self.ask(1024)
+        self.assertEqual(card.value_text(), "1024 MiB")
+        self.assertEqual(card.note_text(), "about 16 minutes of rewind")
+        card.handle(Action.NAV_RIGHT)
+        self.assertEqual(card.value_text(), "1280 MiB")
+        self.assertEqual(card.note_text(), "about 20 minutes of rewind")
+
+    def test_enter_keeps_esc_cancels(self):
+        card = self.ask(1024)
+        answered = QSignalSpy(card.answered)
+        card.handle(Action.NAV_RIGHT)
+        card.handle(Action.OK)
+        self.assertEqual(answered.at(0), [1280])
+        self.assertFalse(card.isVisible())
+        card = self.ask(1024)
+        card.handle(Action.NAV_RIGHT)
+        card.handle(Action.ESCAPE)
+        self.assertEqual(card.value(), 1280)
+        card = self.ask(1024)
+        answered = QSignalSpy(card.answered)
+        card.handle(Action.ESCAPE)
+        self.assertEqual(answered.at(0), [None])
+        card = self.ask(1024)
+        answered = QSignalSpy(card.answered)
+        card.handle(Action.PREVIOUS)  # the phone's Back
+        self.assertEqual(answered.at(0), [None])
+        card = self.ask(1024)
+        answered = QSignalSpy(card.answered)
+        card.handle(Action.NAV_DOWN)
+        self.assertEqual(card.focus(), ("button", "ok"))
+        card.handle(Action.NAV_LEFT)
+        card.handle(Action.NAV_ACTIVATE)  # Cancel
+        self.assertEqual(answered.at(0), [None])
+        card = self.ask(1024)
+        answered = QSignalSpy(card.answered)
+        self.click(card, card.control_rect("button", "ok").center())
+        self.assertEqual(answered.at(0), [1024])
+        card = self.ask(1024)
+        answered = QSignalSpy(card.answered)
+        self.click(card, QPointF(5, 5))  # the dimmed picture
+        self.assertEqual(answered.at(0), [None])
+
+    def test_dragging_the_thumb_sets_the_value(self):
+        card = self.ask(1024)
+        track = card.control_rect("track")
+        self.assertFalse(track.isEmpty())
+        y = track.center().y()
+        QTest.mousePress(
+            card,
+            Qt.MouseButton.LeftButton,
+            Qt.KeyboardModifier.NoModifier,
+            QPointF(track.left(), y).toPoint(),
+        )
+        self.assertEqual(card.value(), 256)
+        QTest.mouseMove(card, QPointF(track.center().x(), y).toPoint())
+        self.assertIn(card.value(), range(8192 - 256, 8192 + 257))
+        QTest.mouseMove(card, QPointF(track.right() + 500, y).toPoint())
+        self.assertEqual(card.value(), 16384)
+        QTest.mouseRelease(
+            card,
+            Qt.MouseButton.LeftButton,
+            Qt.KeyboardModifier.NoModifier,
+            QPointF(track.right(), y).toPoint(),
+        )
+        QTest.mouseMove(card, QPointF(track.left(), y).toPoint())
+        self.assertEqual(card.value(), 16384)  # released: it stays
+        self.click(card, QPointF(track.center().x(), y))
+        self.assertEqual(card.value() % 256, 0)
+        self.assertLess(abs(card.value() - 8192), 300)
+        card.grab()
+
+    def test_a_small_window_keeps_the_card_inside(self):
+        self.host.resize(480, 260)
+        card = self.ask(1024)
+        card.grab()
+        rect = card.card_rect()
+        self.assertTrue(QRectF(0, 0, 480, 260).contains(rect))
+        self.assertFalse(card.control_rect("button", "ok").isEmpty())
+
+
+class PickerTests(unittest.TestCase):
+    def test_the_pickers_wrap_the_system_dialogs(self):
+        from unittest import mock
+
+        with mock.patch("ui.overlays.settings_card.QFileDialog") as dialog:
+            dialog.getExistingDirectory.return_value = "/media"
+            dialog.getOpenFileName.return_value = ("/a/b.m3u", "")
+            self.assertEqual(pick_folder(None, "Folder", "/home"), "/media")
+            self.assertEqual(pick_file(None, "File", "M3U (*.m3u)"), "/a/b.m3u")
+            dialog.getExistingDirectory.return_value = ""
+            dialog.getOpenFileName.return_value = ("", "")
+            self.assertIsNone(pick_folder(None, "Folder", ""))
+            self.assertIsNone(pick_file(None, "File", ""))
 
 
 if __name__ == "__main__":
