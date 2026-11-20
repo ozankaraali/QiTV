@@ -1095,7 +1095,6 @@
   "The relay can't carry films. To watch this one on the phone, be at home on QiTV's network (not a guest network or a VPN).": "Retransliatorius negali perduoti filmų. Norėdami žiūrėti šį filmą telefone, būkite namuose, QiTV tinkle (ne svečių tinkle ar VPN).",
   "The relay can't carry recordings. To watch this one on the phone, be at home on QiTV's network (not a guest network or a VPN).": "Retransliatorius negali perduoti įrašų. Norėdami žiūrėti šį įrašą telefone, būkite namuose, QiTV tinkle (ne svečių tinkle ar VPN).",
   "The same PIN again:": "Tas pats PIN dar kartą:",
-  "The server asks to sign in again: Settings → Providers → Verify Provider.": "Serveris prašo prisijungti iš naujo: Nustatymai → Teikėjai → Patikrinti teikėją.",
   "The server could not be reached ({reason}).": "Nepavyko pasiekti serverio ({reason}).",
   "The server has nothing at this address (404)": "Šiuo adresu serveryje nieko nėra (404)",
   "The server refused QiTV (403)": "Serveris atmetė QiTV (403)",

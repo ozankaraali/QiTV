@@ -1128,7 +1128,6 @@
   "The relay can't carry films. To watch this one on the phone, be at home on QiTV's network (not a guest network or a VPN).": "لا يستطيع خادم الترحيل نقل الأفلام. لمشاهدة هذا الفيلم على الهاتف، كن في المنزل على شبكة QiTV (لا شبكة ضيوف ولا VPN).",
   "The relay can't carry recordings. To watch this one on the phone, be at home on QiTV's network (not a guest network or a VPN).": "لا يستطيع خادم الترحيل نقل التسجيلات. لمشاهدة هذا التسجيل على الهاتف، كن في المنزل على شبكة QiTV (لا شبكة ضيوف ولا VPN).",
   "The same PIN again:": "رمز PIN نفسه مجددًا:",
-  "The server asks to sign in again: Settings → Providers → Verify Provider.": "يطلب الخادم تسجيل الدخول مجددًا: الإعدادات ← المزوّدون ← التحقق من المزوّد.",
   "The server could not be reached ({reason}).": "تعذّر الوصول إلى الخادم ({reason}).",
   "The server has nothing at this address (404)": "لا يوجد شيء على هذا العنوان في الخادم (404)",
   "The server refused QiTV (403)": "رفض الخادم QiTV ‏(403)",

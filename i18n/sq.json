@@ -1084,7 +1084,6 @@
   "The relay can't carry films. To watch this one on the phone, be at home on QiTV's network (not a guest network or a VPN).": "Releja nuk mund të bartë filma. Për ta parë këtë në telefon, jini në shtëpi në rrjetin e QiTV (jo në një rrjet mysafirësh ose VPN).",
   "The relay can't carry recordings. To watch this one on the phone, be at home on QiTV's network (not a guest network or a VPN).": "Releja nuk mund të bartë regjistrime. Për ta parë këtë në telefon, jini në shtëpi në rrjetin e QiTV (jo në një rrjet mysafirësh ose VPN).",
   "The same PIN again:": "I njëjti PIN sërish:",
-  "The server asks to sign in again: Settings → Providers → Verify Provider.": "Serveri kërkon të hyni sërish: Cilësimet → Ofruesit → Verifiko ofruesin.",
   "The server could not be reached ({reason}).": "Serveri nuk u arrit ({reason}).",
   "The server has nothing at this address (404)": "Serveri s'ka asgjë në këtë adresë (404)",
   "The server refused QiTV (403)": "Serveri e refuzoi QiTV (403)",

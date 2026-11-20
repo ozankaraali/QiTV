@@ -1084,7 +1084,6 @@
   "The relay can't carry films. To watch this one on the phone, be at home on QiTV's network (not a guest network or a VPN).": "रिले फ़िल्में नहीं ले जा सकता। इसे फ़ोन पर देखने के लिए घर पर QiTV के नेटवर्क पर रहें (गेस्ट नेटवर्क या VPN नहीं)।",
   "The relay can't carry recordings. To watch this one on the phone, be at home on QiTV's network (not a guest network or a VPN).": "रिले रिकॉर्डिंग नहीं ले जा सकता। इसे फ़ोन पर देखने के लिए घर पर QiTV के नेटवर्क पर रहें (गेस्ट नेटवर्क या VPN नहीं)।",
   "The same PIN again:": "वही PIN फिर से:",
-  "The server asks to sign in again: Settings → Providers → Verify Provider.": "सर्वर फिर से साइन इन माँग रहा है: सेटिंग्स → प्रोवाइडर → प्रोवाइडर सत्यापित करें।",
   "The server could not be reached ({reason}).": "सर्वर तक नहीं पहुँच सके ({reason})।",
   "The server has nothing at this address (404)": "इस पते पर सर्वर में कुछ नहीं है (404)",
   "The server refused QiTV (403)": "सर्वर ने QiTV को मना कर दिया (403)",

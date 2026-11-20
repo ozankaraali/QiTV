@@ -1073,7 +1073,6 @@
   "The relay can't carry films. To watch this one on the phone, be at home on QiTV's network (not a guest network or a VPN).": "릴레이로는 영화를 보낼 수 없어요. 휴대폰으로 보려면 집에서 QiTV와 같은 네트워크(게스트 네트워크나 VPN 제외)에 연결하세요.",
   "The relay can't carry recordings. To watch this one on the phone, be at home on QiTV's network (not a guest network or a VPN).": "릴레이로는 녹화를 보낼 수 없어요. 휴대폰으로 보려면 집에서 QiTV와 같은 네트워크(게스트 네트워크나 VPN 제외)에 연결하세요.",
   "The same PIN again:": "같은 PIN을 한 번 더:",
-  "The server asks to sign in again: Settings → Providers → Verify Provider.": "서버가 다시 로그인을 요청해요: 설정 → 제공자 → 제공자 확인.",
   "The server could not be reached ({reason}).": "서버에 연결하지 못했어요 ({reason}).",
   "The server has nothing at this address (404)": "이 주소에 아무것도 없어요 (404)",
   "The server refused QiTV (403)": "서버가 QiTV를 거부했어요 (403)",

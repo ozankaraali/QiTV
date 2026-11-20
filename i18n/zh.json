@@ -1073,7 +1073,6 @@
   "The relay can't carry films. To watch this one on the phone, be at home on QiTV's network (not a guest network or a VPN).": "中继无法传输电影。要在手机上观看，请在家中连接 QiTV 所在的网络（不能是访客网络或 VPN）。",
   "The relay can't carry recordings. To watch this one on the phone, be at home on QiTV's network (not a guest network or a VPN).": "中继无法传输录像。要在手机上观看，请在家中连接 QiTV 所在的网络（不能是访客网络或 VPN）。",
   "The same PIN again:": "再次输入相同的 PIN：",
-  "The server asks to sign in again: Settings → Providers → Verify Provider.": "服务器要求重新登录：设置 → 提供商 → 验证提供商。",
   "The server could not be reached ({reason}).": "无法连接服务器（{reason}）。",
   "The server has nothing at this address (404)": "服务器在此地址上没有内容（404）",
   "The server refused QiTV (403)": "服务器拒绝了 QiTV（403）",

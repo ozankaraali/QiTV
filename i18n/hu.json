@@ -1084,7 +1084,6 @@
   "The relay can't carry films. To watch this one on the phone, be at home on QiTV's network (not a guest network or a VPN).": "A továbbító nem tud filmeket továbbítani. Ha ezt a telefonon akarod nézni, légy otthon a QiTV hálózatán (ne vendéghálózaton vagy VPN-en).",
   "The relay can't carry recordings. To watch this one on the phone, be at home on QiTV's network (not a guest network or a VPN).": "A továbbító nem tud felvételeket továbbítani. Ha ezt a telefonon akarod nézni, légy otthon a QiTV hálózatán (ne vendéghálózaton vagy VPN-en).",
   "The same PIN again:": "Ugyanaz a PIN-kód még egyszer:",
-  "The server asks to sign in again: Settings → Providers → Verify Provider.": "A szerver újbóli bejelentkezést kér: Beállítások → Szolgáltatók → Szolgáltató ellenőrzése.",
   "The server could not be reached ({reason}).": "A szerver nem érhető el ({reason}).",
   "The server has nothing at this address (404)": "A szerveren nincs semmi ezen a címen (404)",
   "The server refused QiTV (403)": "A szerver elutasította a QiTV-t (403)",

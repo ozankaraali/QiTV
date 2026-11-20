@@ -1095,7 +1095,6 @@
   "The relay can't carry films. To watch this one on the phone, be at home on QiTV's network (not a guest network or a VPN).": "Relé nedokáže prenášať filmy. Ak ho chcete pozerať v telefóne, buďte doma v sieti QiTV (nie v sieti pre hostí ani cez VPN).",
   "The relay can't carry recordings. To watch this one on the phone, be at home on QiTV's network (not a guest network or a VPN).": "Relé nedokáže prenášať nahrávky. Ak ju chcete pozerať v telefóne, buďte doma v sieti QiTV (nie v sieti pre hostí ani cez VPN).",
   "The same PIN again:": "Ten istý PIN znova:",
-  "The server asks to sign in again: Settings → Providers → Verify Provider.": "Server žiada znova sa prihlásiť: Nastavenia → Poskytovatelia → Overiť poskytovateľa.",
   "The server could not be reached ({reason}).": "Server sa nepodarilo dosiahnuť ({reason}).",
   "The server has nothing at this address (404)": "Server na tejto adrese nič nemá (404)",
   "The server refused QiTV (403)": "Server odmietol QiTV (403)",

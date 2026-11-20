@@ -1084,7 +1084,6 @@
   "The relay can't carry films. To watch this one on the phone, be at home on QiTV's network (not a guest network or a VPN).": "رله نمی‌تواند فیلم منتقل کند. برای تماشای این فیلم روی گوشی، در خانه به شبکهٔ QiTV وصل باشید (نه شبکهٔ مهمان یا VPN).",
   "The relay can't carry recordings. To watch this one on the phone, be at home on QiTV's network (not a guest network or a VPN).": "رله نمی‌تواند ضبط‌ها را منتقل کند. برای تماشای این ضبط روی گوشی، در خانه به شبکهٔ QiTV وصل باشید (نه شبکهٔ مهمان یا VPN).",
   "The same PIN again:": "همان PIN دوباره:",
-  "The server asks to sign in again: Settings → Providers → Verify Provider.": "سرور ورود دوباره می‌خواهد: تنظیمات → ارائه‌دهندگان → تأیید ارائه‌دهنده.",
   "The server could not be reached ({reason}).": "به سرور دسترسی نشد ({reason}).",
   "The server has nothing at this address (404)": "سرور در این نشانی چیزی ندارد (404)",
   "The server refused QiTV (403)": "سرور QiTV را رد کرد (403)",

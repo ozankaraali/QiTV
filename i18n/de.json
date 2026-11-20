@@ -1100,7 +1100,6 @@
   "The relay can't carry films. To watch this one on the phone, be at home on QiTV's network (not a guest network or a VPN).": "Das Relay kann keine Filme weiterleiten. Um diesen auf dem Handy zu sehen, sei zu Hause im Netzwerk von QiTV (nicht in einem Gastnetz oder über VPN).",
   "The relay can't carry recordings. To watch this one on the phone, be at home on QiTV's network (not a guest network or a VPN).": "Das Relay kann keine Aufnahmen weiterleiten. Um diese auf dem Handy zu sehen, sei zu Hause im Netzwerk von QiTV (nicht in einem Gastnetz oder über VPN).",
   "The same PIN again:": "Dieselbe PIN noch einmal:",
-  "The server asks to sign in again: Settings → Providers → Verify Provider.": "Der Server verlangt eine neue Anmeldung: Einstellungen → Anbieter → Anbieter prüfen.",
   "The server could not be reached ({reason}).": "Der Server war nicht erreichbar ({reason}).",
   "The server has nothing at this address (404)": "Unter dieser Adresse gibt es auf dem Server nichts (404)",
   "The server refused QiTV (403)": "Der Server hat QiTV abgewiesen (403)",

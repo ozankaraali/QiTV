@@ -1084,7 +1084,6 @@
   "The relay can't carry films. To watch this one on the phone, be at home on QiTV's network (not a guest network or a VPN).": "El relé no pot transmetre pel·lícules. Per veure aquesta al telèfon, has de ser a casa, a la xarxa de QiTV (no en una xarxa de convidats ni amb VPN).",
   "The relay can't carry recordings. To watch this one on the phone, be at home on QiTV's network (not a guest network or a VPN).": "El relé no pot transmetre gravacions. Per veure aquesta al telèfon, has de ser a casa, a la xarxa de QiTV (no en una xarxa de convidats ni amb VPN).",
   "The same PIN again:": "El mateix PIN una altra vegada:",
-  "The server asks to sign in again: Settings → Providers → Verify Provider.": "El servidor demana tornar a iniciar sessió: Configuració → Proveïdors → Verifica el proveïdor.",
   "The server could not be reached ({reason}).": "No s'ha pogut connectar amb el servidor ({reason}).",
   "The server has nothing at this address (404)": "El servidor no té res en aquesta adreça (404)",
   "The server refused QiTV (403)": "El servidor ha rebutjat QiTV (403)",

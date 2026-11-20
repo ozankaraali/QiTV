@@ -1084,7 +1084,6 @@
   "The relay can't carry films. To watch this one on the phone, be at home on QiTV's network (not a guest network or a VPN).": "Relee ei saa filme edastada. Selle vaatamiseks telefonis olge kodus QiTV võrgus (mitte külalisvõrgus ega VPN-is).",
   "The relay can't carry recordings. To watch this one on the phone, be at home on QiTV's network (not a guest network or a VPN).": "Relee ei saa salvestisi edastada. Selle vaatamiseks telefonis olge kodus QiTV võrgus (mitte külalisvõrgus ega VPN-is).",
   "The same PIN again:": "Sama PIN-kood uuesti:",
-  "The server asks to sign in again: Settings → Providers → Verify Provider.": "Server palub uuesti sisse logida: Seaded → Pakkujad → Kontrolli pakkujat.",
   "The server could not be reached ({reason}).": "Serveriga ei saanud ühendust ({reason}).",
   "The server has nothing at this address (404)": "Serveris pole sellel aadressil midagi (404)",
   "The server refused QiTV (403)": "Server keeldus QiTV-st (403)",

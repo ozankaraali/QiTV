@@ -1089,7 +1089,6 @@
   "The relay can't carry films. To watch this one on the phone, be at home on QiTV's network (not a guest network or a VPN).": "Aktarıcı film iletemez. Bu filmi telefonda izlemek için evde, QiTV'nin ağında olun (misafir ağı ya da VPN değil).",
   "The relay can't carry recordings. To watch this one on the phone, be at home on QiTV's network (not a guest network or a VPN).": "Aktarıcı kayıt iletemez. Bu kaydı telefonda izlemek için evde, QiTV'nin ağında olun (misafir ağı ya da VPN değil).",
   "The same PIN again:": "Aynı PIN'i tekrar girin:",
-  "The server asks to sign in again: Settings → Providers → Verify Provider.": "Sunucu yeniden giriş istiyor: Ayarlar → Sağlayıcılar → Sağlayıcıyı doğrula.",
   "The server could not be reached ({reason}).": "Sunucuya ulaşılamadı ({reason}).",
   "The server has nothing at this address (404)": "Sunucuda bu adreste bir şey yok (404)",
   "The server refused QiTV (403)": "Sunucu QiTV'yi reddetti (403)",

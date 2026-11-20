@@ -1106,7 +1106,6 @@
   "The relay can't carry films. To watch this one on the phone, be at home on QiTV's network (not a guest network or a VPN).": "Ретранслятор не передає фільми. Щоб дивитися цей фільм на телефоні, будьте вдома в мережі QiTV (не в гостьовій мережі й не через VPN).",
   "The relay can't carry recordings. To watch this one on the phone, be at home on QiTV's network (not a guest network or a VPN).": "Ретранслятор не передає записи. Щоб дивитися цей запис на телефоні, будьте вдома в мережі QiTV (не в гостьовій мережі й не через VPN).",
   "The same PIN again:": "Той самий PIN-код ще раз:",
-  "The server asks to sign in again: Settings → Providers → Verify Provider.": "Сервер просить увійти знову: Налаштування → Провайдери → Перевірити провайдера.",
   "The server could not be reached ({reason}).": "Сервер недоступний ({reason}).",
   "The server has nothing at this address (404)": "На сервері нічого немає за цією адресою (404)",
   "The server refused QiTV (403)": "Сервер відмовив QiTV у доступі (403)",

@@ -1084,7 +1084,6 @@
   "The relay can't carry films. To watch this one on the phone, be at home on QiTV's network (not a guest network or a VPN).": "Välityspalvelu ei voi välittää elokuvia. Katsoaksesi tämän puhelimella ole kotona QiTV:n verkossa (et vierasverkossa tai VPN:n kautta).",
   "The relay can't carry recordings. To watch this one on the phone, be at home on QiTV's network (not a guest network or a VPN).": "Välityspalvelu ei voi välittää tallenteita. Katsoaksesi tämän puhelimella ole kotona QiTV:n verkossa (et vierasverkossa tai VPN:n kautta).",
   "The same PIN again:": "Sama PIN-koodi uudelleen:",
-  "The server asks to sign in again: Settings → Providers → Verify Provider.": "Palvelin pyytää kirjautumaan uudelleen: Asetukset → Palveluntarjoajat → Tarkista palveluntarjoaja.",
   "The server could not be reached ({reason}).": "Palvelimeen ei saatu yhteyttä ({reason}).",
   "The server has nothing at this address (404)": "Palvelimella ei ole mitään tässä osoitteessa (404)",
   "The server refused QiTV (403)": "Palvelin torjui QiTV:n (403)",
