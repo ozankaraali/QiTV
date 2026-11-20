@@ -2963,6 +2963,28 @@ class PipShadeWiringTests(WindowCase):
         self.assertEqual(transport._pip_rect, rect.translated(-transport.pos()))
 
 
+class SaveConfigTests(WindowCase):
+    def test_a_locked_config_is_said_and_the_settings_still_apply(self):
+        # A provider change saves through TVWindow.save_config (ui.provider_actions, Free
+        # channels): a config.json that cannot be written is said, its path stays out of the
+        # log, and what changed applies until QiTV closes.
+        self.config.live_latency = "stable"
+
+        def locked(**_kwargs):
+            raise PermissionError(13, "Access is denied", os.path.join(self.config_dir, "c"))
+
+        with (
+            mock.patch.object(self.config, "save_config", side_effect=locked),
+            mock.patch.object(self.window.controller, "settings_saved") as applied,
+            self.assertLogs("ui.tv_window", "WARNING") as logs,
+        ):
+            self.window.save_config()  # (once it raised into Qt)
+        self.assertIn((SAVE_FAILED_TEXT, "error"), self.toasts)
+        self.assertNotIn(self.config_dir, "\n".join(logs.output))
+        applied.assert_called_once_with()  # the player follows all the same
+        self.assertEqual(self.config.live_latency, "stable")  # kept until QiTV closes
+
+
 class DiskAmountSettingTests(unittest.TestCase):
     def window(self, enabled):
         self.amounts, self.dropped, self.secure = [], [], []
