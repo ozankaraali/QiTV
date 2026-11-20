@@ -21,12 +21,13 @@ os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 from PySide6.QtCore import Qt
 from timer_fixtures import elapse, pause, wait_until
 
-from services import network_streams as ns
+from services import network_streams as ns, parental
 from services.jobs import JobRunner
 from services.link_kind import FILM, LIVE, host_of, owner_of
 from services.live.refusals import STREAM_REFUSED
-from services.navigation import RECENT_GROUP, NavNode
+from services.navigation import LINKS_LAYER, RECENT_GROUP, NavNode
 from services.network_streams import NetworkStreams, stream_id
+from services.parental import Parental
 from services.provider_ids import NETWORK_PROVIDER
 from tests import test_tv_controller as tvc
 from tests.test_tv_window import WindowCase
@@ -619,6 +620,125 @@ class LinkStepTests(PlayerCase):
             )
             self.assertEqual(self.starts()[-1][0], "http://stream/2")  # the group's next
         kept.assert_not_called()
+
+
+class _Kept:
+    """Where parental controls keep their rules (the config's `parental`)."""
+
+    parental = None
+
+    def save_config(self):
+        pass
+
+
+class HiddenLinkTests(PlayerCase):
+    """Final review (maintenance) I1: a link hidden with "Hide (parental controls)" is hidden
+    as a hidden channel is while locked. Network streams doesn't list it, nothing plays it
+    (its row, the find, Open Link of its address), channel up/down steps past it, and one
+    playing at the lock stops. That holds whoever's stream it is: an account added after it
+    was hidden too, and a kept film as well."""
+
+    OTHER = LinkStepTests.OTHER
+    ACCOUNT = "http://harbor.example:8080/live/demo/secret/7.ts"
+
+    def setUp(self):
+        super().setUp()
+        ticks = iter(range(1, 10_000))
+        self.player._now = lambda: NOW + next(ticks)  # each link opened after the one before
+        self.harbor = self.catalog.specs.pop("Harbor IPTV")  # not configured yet
+        self.nav.set_links(self.player.rows)  # as the window lists them
+        self.loaded()
+        self.guard = Parental(_Kept())
+        self.guard.set_pin("1234")
+        self.assertTrue(self.guard.unlock("1234"))
+        self.controller.parental = self.guard
+        parental.install(self.guard)  # as the window installs it, for the lists
+        self.addCleanup(parental.install, None)
+
+    def keep(self, *urls, kind=LIVE):
+        for url in urls:
+            self.link(url, kind)
+            self.plays_now()
+
+    def hide(self, url):
+        """`url`'s ⟲ Recent row hidden with its menu's Hide (unlocked), as Network streams'
+        link (its account not configured yet)."""
+        item = {"id": stream_id(url), "name": "Hidden", "cmd": url, "_provider": NETWORK_PROVIDER}
+        self.config.watch_history = [tvc.watched(NETWORK_PROVIDER, item)]
+        rows = self.nav.children(NavNode("group", RECENT_GROUP, "Recent"))
+        self.controller._hide_from_menu(next(n for n in rows if n.payload["id"] == item["id"]))
+        self.assertEqual(len(self.guard.hidden()), 1)
+        return item
+
+    def add_account_and_lock(self):
+        self.catalog.specs["Harbor IPTV"] = self.harbor
+        self.catalog.names.append("Harbor IPTV")
+        self.guard.lock()
+        self.controller.parental_changed()  # as the window tells it
+
+    def nothing_opens(self, action):
+        opened = len(self.starts()), len(self.session.plays)
+        action()
+        pause(50)
+        self.assertEqual((len(self.starts()), len(self.session.plays)), opened)
+
+    def listed(self):
+        layer = NavNode(LINKS_LAYER, NETWORK_PROVIDER, "Network streams", NETWORK_PROVIDER)
+        return [node.key for node in self.nav.children(layer)]
+
+    def test_a_hidden_link_is_not_listed_played_or_stepped_onto_while_locked(self):
+        self.keep(self.ACCOUNT, self.OTHER, URL)  # Network streams: URL, OTHER, ACCOUNT
+        hidden = self.hide(self.ACCOUNT)
+        self.add_account_and_lock()  # it is the account's stream now
+        self.assertEqual(self.listed(), [stream_id(URL), stream_id(self.OTHER)])
+        self.assertEqual([row.id for row in self.player.rows()], self.listed())
+        source = next(n for n in self.nav.children(None) if n.layer == LINKS_LAYER)
+        self.assertEqual(source.count, 2)  # Network streams' count among the sources
+        # Played again as the account's (⟲ Recent kept it so), it is still not listed there.
+        owned = {**hidden, "_provider": "Harbor IPTV"}
+        self.config.watch_history = [tvc.watched("Harbor IPTV", owned)]
+        recent = self.nav.children(NavNode("group", RECENT_GROUP, "Recent"))
+        self.assertEqual(recent, [])
+        self.assertTrue(self.controller._hidden_now(owned))  # no tile plays it
+        # Its row, the find and Open Link of its address play nothing.
+        self.nothing_opens(lambda: self.player.play_kept(hidden["id"]))
+        self.nothing_opens(lambda: self.player.play(self.ACCOUNT, LIVE))
+        self.nothing_opens(
+            lambda: self.controller.tune(owned, group_key=RECENT_GROUP, channels=[owned])
+        )
+        # Channel up/down steps past it, round.
+        self.assertEqual(self.controller.now_playing().item["id"], stream_id(URL))
+        played = []
+        for action in (Action.CH_NEXT, Action.CH_NEXT, Action.CH_PREV):
+            self.opens(lambda: self.controller.handle(action))
+            self.plays_now()
+            played.append(self.controller.now_playing().item["id"])
+        self.assertEqual(played, [stream_id(self.OTHER), stream_id(URL), stream_id(self.OTHER)])
+        self.assertEqual(self.budget.holders("Harbor IPTV"), [])
+
+    def test_a_hidden_link_that_plays_stops_at_the_lock_and_never_enters_the_history(self):
+        self.keep(self.OTHER, self.ACCOUNT)
+        self.hide(self.ACCOUNT)
+        self.catalog.specs["Harbor IPTV"] = self.harbor
+        self.catalog.names.append("Harbor IPTV")
+        plays = len(self.watch.plays)
+        self.opens(lambda: self.player.play(self.ACCOUNT, LIVE))  # unlocked: it plays
+        self.assertEqual(self.controller.now_playing().item["_provider"], "Harbor IPTV")
+        self.assertEqual(len(self.watch.plays), plays)  # hidden: kept out of the history
+        self.guard.lock()
+        self.controller.parental_changed()
+        self.assertEqual(self.live.calls[-1], ("stop",))
+        self.assertIsNone(self.controller.now_playing())
+
+    def test_a_hidden_film_link_is_not_listed_or_played_while_locked(self):
+        self.keep(FILM_URL, kind=FILM)
+        self.keep(URL)
+        film = self.hide(FILM_URL)  # its row of ⟲ Recent (played there as a channel once)
+        self.guard.lock()
+        self.controller.parental_changed()
+        self.assertEqual(self.listed(), [stream_id(URL)])
+        self.nothing_opens(lambda: self.player.play_kept(film["id"]))
+        self.nothing_opens(lambda: self.player.play(FILM_URL, FILM))
 
 
 class ExternalLinkStepTests(PlayerCase):

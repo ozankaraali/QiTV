@@ -112,6 +112,9 @@ class FakeController(QObject):
     def set_link_owner(self, whose):
         self.whose = whose
 
+    def hides_link(self, item):  # parental controls hide nothing here
+        return False
+
     def set_link_player(self, play):
         self.play_kept = play
 

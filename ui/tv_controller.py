@@ -1267,9 +1267,10 @@ class TVController(QObject):
         stopped. Its address is known: the link lanes answer it, no provider is asked. With no
         provider configured it is held as a file opened in QiTV is (_hold_for_link).
         `zapped`: channel up/down stepped to it over the picture, a zap step as a channel's
-        (an outside player opens only once the steps settle)."""
-        if self._closed:
-            return
+        (an outside player opens only once the steps settle). A link parental controls hide
+        plays nowhere while locked, as a hidden channel (its list leaves it out)."""
+        if self._closed or self.hides_link(item):
+            return  # (before the hold: nothing would replace it)
         self._hold_for_link()
         if section == "live" and zapped:
             self._tune(item, RECENT_GROUP, [item], from_zap=True)
@@ -1280,6 +1281,27 @@ class TVController(QObject):
 
     def _network_url(self, item: dict) -> Optional[str]:
         return self._links(item) or None
+
+    def _guard_view(self, section: str, item: dict) -> tuple[str, dict]:
+        """`item` of `section` as parental controls know it: a link as one live link of
+        Network streams by its id, whoever's stream it is now (an account added after it was
+        hidden) and a film too; anything else as it is."""
+        if self._network_url(item) is not None:
+            return "live", with_provider(item, NETWORK_PROVIDER)
+        return section, item
+
+    def hides_link(self, item: dict) -> bool:
+        """Whether parental controls hide the link `item` now (locked): it is not listed,
+        never plays, and channel up/down steps past it. False for an item that is no link."""
+        guard = self.parental
+        if guard is None or self._network_url(item) is None:
+            return False
+        return bool(guard.hides_item(*self._guard_view("live", item)))
+
+    def _protects_play(self, guard: Any, target: Target) -> bool:
+        """`guard.protects_play` for what `target` plays, a link as `_guard_view` says."""
+        section, item = self._guard_view(target.section, target.item)
+        return bool(guard.protects_play(section, item, target.context))
 
     def _hold_for_link(self) -> None:
         """A link is about to play while no provider is configured: nothing opens over it (the
@@ -2067,6 +2089,8 @@ class TVController(QObject):
         if self._closed:
             return
         channel = self._owned(channel)  # a link: whose stream it is now
+        if self.hides_link(channel):
+            return  # parental controls hide it while locked (a link held from before)
         if group_key == RECENT_GROUP:  # (where links are listed: a few rows)
             channels = [self._owned(c) for c in channels]
         self._cancel_external()  # a newer choice: the settling external launch is dropped
@@ -2250,6 +2274,8 @@ class TVController(QObject):
         if self._closed:
             return
         item = self._owned(item)  # a film link: whose stream it is now
+        if self.hides_link(item):
+            return  # parental controls hide it while locked
         if from_library is None:
             from_library = self._flow.in_library()
 
@@ -2848,7 +2874,7 @@ class TVController(QObject):
 
     def _record_watched(self, target: Target, url: str) -> None:
         guard = self.parental
-        if guard is not None and guard.protects_play(target.section, target.item, target.context):
+        if guard is not None and self._protects_play(guard, target):
             return  # 2.8: what parental controls hide never enters the history (nor Recent)
         try:
             self.watch.record_play(
@@ -5579,6 +5605,9 @@ class TVController(QObject):
             if guard.active():
                 self._lock_out(guard)
             self._forget_protected_tiles(guard)  # after it: a grid it left was saved
+        links_changed = getattr(self.nav, "links_changed", None)
+        if links_changed is not None:
+            links_changed()  # Network streams leaves out a hidden link (emptied: it goes)
         self._repaint()
         self._guide.invalidate()
 
@@ -5592,9 +5621,8 @@ class TVController(QObject):
             if not isinstance(item, dict):
                 return False
             section = sections.get(str(entry.get("item_type") or ""), "live")
-            return bool(
-                guard.protects(section, with_provider(item, str(entry.get("provider_name") or "")))
-            )
+            stamped = with_provider(item, str(entry.get("provider_name") or ""))
+            return bool(guard.protects(*self._guard_view(section, stamped)))
 
         forget = getattr(self.watch, "forget", None)
         if forget is not None and forget(protected):
@@ -5616,19 +5644,19 @@ class TVController(QObject):
         picture closes, a multiview tile closes)."""
         context = self.zap.context
         channels = guard.visible("live", context.channels)
+        if context.group_key == RECENT_GROUP:  # ⟲ Recent's links (a few rows), as known
+            channels = [channel for channel in channels if not self.hides_link(channel)]
         fallback = guard.visible("live", context.fallback)
         if len(channels) != len(context.channels) or len(fallback) != len(context.fallback):
             self.zap.set_context(
                 ZapContext(context.group_key, channels, fallback=fallback, source=context.source)
             )
         small = self._beside_target()
-        if small is not None and guard.protects_play(small.section, small.item, small.context):
+        if small is not None and self._protects_play(guard, small):
             self._close_pip()
         self._close_hidden_tiles()
         current = self._current or self._lanes.pending()
-        if current is not None and guard.protects_play(
-            current.section, current.item, current.context
-        ):
+        if current is not None and self._protects_play(guard, current):
             self.stop()
 
     def _hidden_now(self, channel: dict) -> bool:
@@ -5638,7 +5666,7 @@ class TVController(QObject):
         if guard is None:
             return False
         provider = item_provider.provider_name(self.catalog, channel)
-        return bool(guard.hides_item("live", with_provider(channel, provider)))
+        return bool(guard.hides_item(*self._guard_view("live", with_provider(channel, provider))))
 
     def _close_hidden_tiles(self) -> None:
         """Locked (2.12): a multiview tile whose channel is hidden closes, as its ✕ does: one
@@ -5669,7 +5697,7 @@ class TVController(QObject):
             if not isinstance(item, dict):
                 return False
             provider = str(record.get("provider_name") or "")
-            return bool(guard.protects("live", with_provider(item, provider)))
+            return bool(guard.protects(*self._guard_view("live", with_provider(item, provider))))
 
         if not any(protected(record) for record in tiles):
             return
@@ -5693,7 +5721,7 @@ class TVController(QObject):
             provider = name or self.catalog.current_provider_name()
             self.hide_group(section, provider, own or node.key, node.title)
             return
-        if guard.hide_item(section, node.payload):
+        if guard.hide_item(*self._guard_view(section, node.payload)):  # a link: by its id
             self._toast(translate(HIDDEN_TEXT))
             self.parental_changed()  # out of the history; locked, it stops if it plays
 

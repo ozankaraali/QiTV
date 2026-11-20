@@ -818,11 +818,13 @@ class NavModel(QObject):
             provider, item = key[0], entry.get("item_data") or {}
             owner = self._link_owner(with_provider(item, provider))
             once: tuple = key
+            hidden_as = provider
             if owner is not None:
                 provider, once = owner, (None, key[1])  # a link: one row, whoever's it was
+                hidden_as = NETWORK_PROVIDER  # and hidden as Network streams', by its id
             elif provider not in known:
                 continue
-            if guard is not None and guard.hides_item("live", with_provider(item, provider)):
+            if guard is not None and guard.hides_item("live", with_provider(item, hidden_as)):
                 continue  # 2.8: hidden by parental controls while locked
             if once not in seen:
                 seen.add(once)

@@ -19,7 +19,9 @@ Network streams, or found by its find, plays by its id (`play_kept`): its addres
 kept. Channel up/down while a kept link plays steps to the next or previous kept link (`step`),
 in Network streams' order as the steps began, round from the last to the first. `rows()` are
 those links as the list's rows (a film's with where it stopped), and `find_items()` as the
-find's channels, plain dicts without their addresses.
+find's channels, plain dicts without their addresses. A link hidden with "Hide (parental
+controls)" is hidden as a channel is while locked: its row goes, the steps pass it, and the
+controller plays it nowhere (`hides_link`: by its id, whoever's stream it is now).
 
 A link that showed its first picture is kept (`keep`, `opened`); one that did not play, or
 went for good, is kept with why (`failed`, in plain words). Its kind changes only as this
@@ -254,7 +256,7 @@ class NetworkPlayer(QObject):
         key = item.get("id") if isinstance(item, dict) else None
         if not isinstance(key, str) or self.store.get(key) is None:
             return False
-        kept = [entry.id for entry in self.store.entries()]
+        kept = [e.id for e in self.store.entries() if e.id == key or not self._hidden(e)]
         if key != self._stepped or set(self._steps) != set(kept):
             self._steps = kept  # a new run of steps, or the links changed meanwhile
         if len(self._steps) > 1:
@@ -274,11 +276,19 @@ class NetworkPlayer(QObject):
         logger.info("Open Link: a %s link plays (%s stream)", kind.lower(), whose)
         self._controller.play_link(item, "movies" if kind == FILM else "live", zapped=zapped)
 
+    def _hidden(self, entry: Entry) -> bool:
+        """Whether parental controls hide the kept link now (locked; the controller's)."""
+        item = {"id": entry.id, "name": entry.name, "cmd": entry.url}
+        return bool(self._controller.hides_link({**item, "_provider": NETWORK_PROVIDER}))
+
     def rows(self) -> list[LinkRow]:
-        """The kept links as the channel list's rows, newest opened first: a film's with
-        where it stopped (as it resumes), one that failed with why."""
+        """The kept links as the channel list's rows (and Settings'), newest opened first: a
+        film's with where it stopped (as it resumes), one that failed with why; none that
+        parental controls hide now."""
         rows = []
         for entry in self.store.entries():
+            if self._hidden(entry):
+                continue
             stopped = None
             if entry.kind == FILM:
                 item = {"id": entry.id, "cmd": entry.url, "_provider": NETWORK_PROVIDER}
