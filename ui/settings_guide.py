@@ -365,7 +365,7 @@ class GuideRows(QObject):
                     EVERY_TEXT,
                     # i18n: help under Settings → Guide → Check for updates every
                     N_("How long QiTV keeps the guide before it loads it again."),
-                    kind=ACTION,
+                    kind=OPENS,  # its card: ›, as every row that opens one
                     note=every_text(
                         _count(config.epg_expiration_value), config.epg_expiration_unit
                     ),

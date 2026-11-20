@@ -228,6 +228,16 @@ class UpdatePeriodTests(GuideCase):
     def unit(self, card):
         return next(b.text for b in card._buttons if b.key == guide.UNIT)
 
+    def test_the_row_ends_in_its_chevron(self):
+        # It opens a card, as every row that opens one: › after its note (2.12).
+        self.go_to(guide.EVERY)
+        self.assertEqual(self.drawer.focused_row().kind, m.OPENS)
+        self.drawer.grab()
+        box = self.drawer._box("right", self.keys().index(guide.EVERY))
+        self.assertFalse(box.chevron.isEmpty())
+        self.assertLessEqual(box.end.right(), box.chevron.left())
+        self.assertTrue(self.note(guide.EVERY))
+
     def test_update_every_card_keeps_minutes(self):
         self.config.epg_expiration_value = 30
         self.config.epg_expiration_unit = "Minutes"  # an older QiTV's

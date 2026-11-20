@@ -436,7 +436,7 @@ def _timeshift(title: str, context: Context) -> Section:
             DISK_CACHE,
             DISK_CACHE_TEXT,
             cache_help,
-            kind=ACTION if context.timeshift_disk else INFO,
+            kind=OPENS if context.timeshift_disk else INFO,  # its card: ›
             note=cache_size_text(context.timeshift_max_mib),
         ),
         Row(
