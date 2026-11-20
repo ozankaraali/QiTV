@@ -609,6 +609,33 @@ class SettingsDrawerTests(unittest.TestCase):
                     wider = wrap_lines(translate(row.help), font, width / 1.1, 3)
                     self.assertLessEqual(len(wider), 2, wider)
 
+    def test_the_turkish_add_provider_help_shows_whole_in_a_wider_font(self):
+        # ＋ Add provider's help, wrapped for the room under its title past the ＋, filled all
+        # four lines of a small window in Turkish: macOS's wider font would cut it. Whole at
+        # every size, and in a font 10% wider it keeps a line to spare, as the deinterlacing
+        # help's translations do.
+        self.assertEqual(i18n.set_language("tr"), "tr")
+        self.addCleanup(i18n.set_language, "en")
+        rows = next(s for s in sections("Darwin") if s.key == m.PROVIDERS).rows
+        index = [r.key for r in rows].index(m.ADD_PROVIDER)
+        text = translate(rows[index].help)
+        self.assertNotEqual(text, rows[index].help)
+        for size in ((1600, 900), (1280, 720), (960, 540), (640, 360)):
+            with self.subTest(size=size):
+                self.use(*make(*size))
+                self.drawer.open_at(sections("Darwin"), m.PROVIDERS)
+                self.drawer.right()
+                self.assertEqual(self.drawer.focused_row().key, m.ADD_PROVIDER)
+                self.drawer.grab()
+                box = self.drawer._box("right", index)
+                self.assertFalse(any("…" in line for line in box.help), box.help)
+                self.assertTrue(whole(box.help, text), box.help)
+                un = ui_units(size[0])
+                room = box.line.right() - INSET_U * un.u - box.title.x()  # where it is drawn
+                most = settings_layout.most_lines(un, HELP_FONT_U, settings_layout.HELP_LINES)
+                wider = wrap_lines(text, un.font(HELP_FONT_U), room / 1.1, most)
+                self.assertLessEqual(len(wider), most - 1, wider)
+
     def test_a_help_takes_a_third_line_at_any_size(self):
         # A help written for two lines may need a third in a wider font (macOS's): at
         # 1280×720 too it shows whole on three, the restart note last.
