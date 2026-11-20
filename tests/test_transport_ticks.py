@@ -114,6 +114,20 @@ class TickTests(unittest.TestCase):
         self.assertGreater(rect.top(), 720 * 0.6)  # the band, the bubble in it
         self.assertEqual(t.bubble_text(), "19:41:23")
 
+    def test_the_clock_at_the_top_right_turns_with_the_minute(self):
+        # A tick repaints the band alone: the title row's clock waited for the 30 s timer.
+        clock = [NOW + timedelta(seconds=59.9)]
+        t = self.make(now=lambda: clock[0])
+        t.update_timeline(at_edge(), PROGRAMME)
+        updates = self.updates(t)
+        clock[0] = NOW + timedelta(seconds=60.1)
+        t.update_timeline(at_edge(), PROGRAMME)  # at the live edge: only the clock changed
+        [call] = updates.call_args_list
+        [rect] = call.args
+        self.assertEqual((rect.left(), rect.top(), rect.right()), (0, 0, 1279))
+        self.assertLess(rect.bottom(), 720 * 0.2)  # the title row
+        self.assertEqual(t._title_row().clock, "19:43")
+
     def test_a_film_repaints_its_band_once_a_second_not_at_every_tick(self):
         t = self.make()
         t.show_vod("A film", "")

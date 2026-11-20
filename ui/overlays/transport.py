@@ -1434,8 +1434,10 @@ class Transport(Overlay):
         )
 
     def _tick_look(self) -> tuple:
-        """What a tick may change on screen: the controls' places, and the bottom band."""
-        return (self._layout_key(), self._band_look())
+        """What a tick may change on screen: the controls' places, the bottom band, and the
+        clock at the top right (its minute: the audio dock shows none)."""
+        clock = "" if self._audio else fmt_clock(self._wall(0.0))
+        return (self._layout_key(), self._band_look(), clock)
 
     def _band_look(self) -> tuple:
         """What the bottom band shows that a tick changes without moving a control: play or
@@ -1465,9 +1467,17 @@ class Transport(Overlay):
         self._look = look
         if last is not None and look[0] != last[0]:
             self.update()
-        elif last is None or look[1] != last[1]:
+            return
+        if last is None or look[1] != last[1]:
             top = max(0, self.controls_top() - self.geometry().top() - 3)  # (the bubble's ring)
             self.update(QRect(0, top, self.width(), self.height() - top))
+        if last is not None and look[2] != last[2]:  # a new minute: the title row's clock
+            self.update(QRect(0, 0, self.width(), math.ceil(self._title_bottom()) + 2))
+
+    def _title_bottom(self) -> float:
+        """Where the title row ends (the name, the clock, the logo)."""
+        row = self._title_row()
+        return max(row.name_rect.bottom(), row.clock_rect.bottom(), self.badge_rect().bottom())
 
     def _layout_now(self) -> dict[str, QRectF]:
         """The controls' rects; in a row too crowded for them (a small window, a longer
@@ -1902,9 +1912,7 @@ class Transport(Overlay):
             return
         un = ui_units(self.width())
         self._paint_scrims(p)
-        row = self._title_row()
-        bottoms = (row.name_rect.bottom(), row.clock_rect.bottom(), self.badge_rect().bottom())
-        if event.rect().top() <= max(bottoms) + 1:  # (a tick repaints the bottom band alone)
+        if event.rect().top() <= self._title_bottom() + 1:  # (a tick may repaint the band alone)
             self._paint_title(p, un)
         rects = self._layout()
         text = qcolor(PALETTE.text)
