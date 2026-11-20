@@ -611,6 +611,15 @@ class ProvidersTests(unittest.TestCase):
         self.assertEqual(self.drawer.focus_side(), "left")  # nothing left to focus
         self.assertEqual(self.drawer._chain()[-1].empty_text, "No hidden groups")
 
+    def test_the_hidden_groups_count_is_the_languages_number(self):
+        # As every other count in Settings: in the language's own digits.
+        self.window.hidden_groups.hide("live", "Panel", "10", "Foreign news")
+        self.window.hidden_groups.hide("movies", "Panel", "20", "Drama")
+        self.assertEqual(i18n.set_language("ar"), "ar")
+        self.addCleanup(i18n.set_language, "en")
+        self.assertNotEqual(i18n.number(2), "2")  # (its digits are other than English's)
+        self.assertEqual(self.on("Panel", "hidden").note, i18n.number(2))
+
     def test_no_hidden_groups_says_so(self):
         hidden = self.on("Lists", "hidden")
         self.assertEqual(hidden.note, "")

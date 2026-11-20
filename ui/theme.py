@@ -51,8 +51,8 @@ def focus_qss() -> str:
 
 
 def accent_button_style() -> str:
-    """A widget button that is its window's main action (Settings' Save, the Library's Add
-    provider): filled with the accent, as the TV's ▶ buttons are."""
+    """A widget button that is its window's main action (the Library's Add provider): filled
+    with the accent, as the TV's ▶ buttons are."""
     return (
         f"QPushButton {{ background: {PALETTE.accent}; color: {PALETTE.canvas}; border: none;"
         " border-radius: 6px; padding: 6px 22px; font-weight: 600; }"

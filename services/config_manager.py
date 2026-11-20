@@ -780,7 +780,8 @@ class ConfigManager:
         Once `write_in_background()` was called (QiTV does), the settings are serialised here
         and written by a thread of their own: a save returns before the disk is written and a
         failure is logged there (`save_failed()` tells); `wait` waits for that write and
-        raises its failure, as a save did before (Settings → Save says so).
+        raises its failure, as a save did before (TVWindow.save_config, after a change to the
+        providers, says so).
         """
         retries = _REPLACE_RETRIES if retry and not self._save_failed_recently() else 0
         writer = self._writer

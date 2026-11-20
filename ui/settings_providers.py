@@ -47,7 +47,7 @@ from services.epg_view import (
     GUIDE_OFFSET_STEP,
     guide_offset_minutes,
 )
-from services.i18n import N_, tr, translate
+from services.i18n import N_, number, tr, translate
 from services.provider_changes import NameTaken
 from services.provider_check import Outcome
 from services.provider_link import ProviderLink
@@ -114,7 +114,7 @@ SHOW_AGAIN_TEXT = N_("Show again")  # i18n: Settings → Providers → Hidden gr
 # i18n: a toast: the provider list could not be written, so the change in Settings didn't happen
 SAVE_FAILED_TEXT = N_("Couldn't save the providers; nothing was changed")
 REMOVE_TEXT = N_("Remove")  # i18n: a button of "Remove the provider …?" (verb); its key: REMOVE
-# i18n: Verify Provider's note under "Provider verified successfully."
+# i18n: Check the connection's note, after "Provider verified successfully."
 HTTP_ONLY_NOTE = N_("This provider does not answer over HTTPS, so QiTV connects to it over HTTP.")
 # i18n: Settings → Providers: the name typed is another provider's (QiTV finds providers by name)
 NAME_TAKEN_TEXT = N_("Another provider is named “{name}” already. Choose another name.")
@@ -377,7 +377,7 @@ class ProviderRows(QObject):
                 hidden.text,
                 HIDDEN_INTRO,
                 section=hidden,
-                note=str(len(groups)) if groups else "",
+                note=number(len(groups)) if groups else "",
             ),
             Row(
                 row_key(name, CHECK),

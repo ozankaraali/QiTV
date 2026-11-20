@@ -231,7 +231,7 @@ def _int(value: Any) -> int:
         return 0  # a hand-edited bad value means none (Automatic, no offset)
 
 
-# ---- names and comparisons (also ui.provider_drop's) ----------------------------------------------
+# ---- names and comparisons (also ui.provider_drop's) ------------------------------------------
 
 
 def same_provider(a: dict, b: dict) -> bool:
