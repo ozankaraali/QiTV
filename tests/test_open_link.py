@@ -308,6 +308,17 @@ class ProbeTests(CardCase):
                 "/onair.aac": (200, {"Content-Type": "audio/aac"}, self.endless),
                 "/channel.ts": (200, {"Content-Type": "video/mp2t"}, self.endless),
                 "/recorded.ts": (200, {"Content-Type": "video/mp2t"}, b"G" * 4096),
+                # Re-review R1: a sized manifest or station list stays live, as before.
+                "/live/manifest.mpd": (
+                    200,
+                    {"Content-Type": "application/dash+xml"},
+                    b'<?xml version="1.0"?><MPD type="dynamic"></MPD>',
+                ),
+                "/coast.pls": (
+                    200,
+                    {"Content-Type": "audio/x-scpls"},
+                    b"[playlist]\nFile1=http://radio.example/coast\nNumberOfEntries=1\n",
+                ),
                 "/big": (200, {}, b"#EXTM3U\n" + b"x" * (1024 * 1024)),
                 "/slow": (200, {}, self.trickle),
             }
@@ -395,6 +406,8 @@ class ProbeTests(CardCase):
             ("/onair.aac", LIVE),  # no size: it streams
             ("/channel.ts", LIVE),
             ("/recorded.ts", FILM),
+            ("/live/manifest.mpd", LIVE),
+            ("/coast.pls", LIVE),
         )
         for path, kind in cases:  # a refusal plays as live: VLC (and the player) say why
             with self.subTest(path):
@@ -559,6 +572,7 @@ class ProviderHostTests(WindowCase):
             "http://lists.example:8000/stream/7",  # a playlist with max_streams
             "http://PORTAL.example:80/play/live.php?stream=6",  # its host, http's port written
             "http://panel.example:8080/demo/secret/12.ts",  # the account's .ts: live, unread
+            "http://panel.example:8080/streams/harbour.ts",  # any .ts there: as it was, live
             "http://panel.example:8080/radio/coast.mp3",  # a song there: as it was, live
         )
         read = mock.patch.object(open_link, "read_start", return_value=CHANNELS)

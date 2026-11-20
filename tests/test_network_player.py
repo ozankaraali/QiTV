@@ -749,6 +749,22 @@ class HiddenLinkTests(PlayerCase):
         self.assertEqual(self.live.calls[-1], ("stop",))
         self.assertIsNone(self.controller.now_playing())
 
+    def test_play_again_of_a_hidden_link_without_a_provider_holds_nothing(self):
+        # Re-review R3: Play again held the TV for the link, then nothing played it: black,
+        # and no welcome card.
+        self.catalog.names = []
+        self.controller.start()
+        self.keep(URL)  # held: no provider
+        self.hide(URL)
+        self.controller.stop()
+        self.assertTrue(self.welcome.visible)
+        self.guard.lock()
+        self.controller.parental_changed()
+        self.nothing_opens(self.controller.play_again)
+        self.assertTrue(self.welcome.visible)
+        self.assertFalse(self.controller._link_hold)
+        self.assertFalse(self.controller._flow.held())
+
     def test_a_hidden_film_link_is_not_listed_or_played_while_locked(self):
         self.keep(FILM_URL, kind=FILM)
         self.keep(URL)
