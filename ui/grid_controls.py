@@ -370,6 +370,21 @@ class GridControls(QObject):
                 found.append(slot.channel)
         return found
 
+    def tiles_with(self, chosen: Callable[[dict], bool]) -> list[str]:
+        """The tiles beside the focused one whose channel (playing, opening, its link on its
+        way, or on its card) is `chosen` (2.12: one parental controls hide, locked)."""
+        large = self.sessions.large().name
+        found = []
+        for name in self.names():
+            card = self._cards.get(name)
+            if card is not None:
+                channel: Optional[dict] = card.channel
+            else:
+                channel = self._linking.get(name) or self._tile_channel(name)
+            if name != large and channel is not None and chosen(channel):
+                found.append(name)
+        return found
+
     # ---- showing and leaving ------------------------------------------------------------
 
     def toggle(self) -> None:
