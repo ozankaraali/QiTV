@@ -1,7 +1,8 @@
 """Settings › Phone remote in the drawer (plan 3): the old Settings window's Phone remote tab,
-row by row, each change applied at once (the remote started, changed or stopped), its state as
-the remote tells it, the paired phones each removed once asked, and a newer QiTV's settings
-left as they are. Over a real TV window; the remote's hub is a stub (no network)."""
+row by row, each change applied at once (the remote started, changed or stopped; turned off
+only once asked), its state as the remote tells it, the paired phones each removed once asked,
+and a newer QiTV's settings left as they are. Over a real TV window; the remote's hub is a stub
+(no network)."""
 
 from datetime import datetime
 import os
@@ -10,6 +11,8 @@ from unittest import mock
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
+from PySide6.QtCore import Qt
+from PySide6.QtTest import QTest
 from timer_fixtures import wait_until
 
 from services import settings_model as m
@@ -90,7 +93,9 @@ class RemoteTests(RemoteCase):
         self.assertEqual(self.drawer.focused_row().key, remote_rows.ENABLED)
         self.config.save_config(wait=True)
         self.assertTrue(ConfigManager().remote["enabled"])
-        self.key(Action.NAV_RIGHT)  # off: it stops
+        self.key(Action.NAV_RIGHT)  # off: asked first (RemoteOnTests), then it stops
+        self.key(Action.NAV_RIGHT)
+        self.key(Action.NAV_ACTIVATE)
         self.assertFalse(self.config.remote["enabled"])
         self.hub.return_value.stop_soon.assert_called_once()
         self.assertIsNone(self.window.remote.hub)
@@ -106,7 +111,9 @@ class RemoteTests(RemoteCase):
         self.assertEqual(self.kinds()[remote_rows.RELAY], m.STEP)
         self.key(Action.NAV_DOWN)
         self.assertEqual(self.drawer.focused_row().key, remote_rows.RELAY)
+        self.key(Action.NAV_RIGHT)  # off: asked first (RemoteOnTests)
         self.key(Action.NAV_RIGHT)
+        self.key(Action.NAV_ACTIVATE)
         self.assertIs(self.config.remote["relay"], False)
         self.assertIs(self.config.remote["enabled"], True)
         self.hub.return_value.apply.assert_called_once()  # the running remote follows
@@ -151,6 +158,108 @@ class RemoteTests(RemoteCase):
         self.assertTrue(self.window.pair_overlay.isVisible())  # the remote turned on for it
         self.assertTrue(self.config.remote["enabled"])
         self.hub.return_value.set_pairing.assert_called_with(True)
+
+
+class RemoteOnTests(RemoteCase):
+    stored = {"version": 1, "enabled": True, "relay": True, "devices": [PHONE_A], "room": "r"}
+
+    def index(self, key):
+        return [row.key for row in self.drawer._right_rows()].index(key)
+
+    def test_turning_the_remote_off_asks_first(self):
+        # The first row the keys reach, so the phone's ← (meant as "back") and OK step it: a
+        # question first, Cancel where the keys start; nothing changes until Turn off.
+        row = self.open_at(m.REMOTE, remote_rows.ENABLED)
+        self.window.remote.hub = self.hub.return_value  # (it runs)
+        self.hub.return_value.reset_mock()
+        self.assertEqual(self.window.settings.value_text(row), "On")
+        for action in (Action.NAV_LEFT, Action.NAV_ACTIVATE, Action.NAV_RIGHT):
+            self.key(action)
+            question = self.window.remote_rows.question
+            self.assertTrue(self.window.settings.card_shown(), action)
+            self.assertEqual(question.title(), "Turn off the phone remote?")
+            self.assertEqual(
+                question.body(), "Paired phones can't control QiTV until it's on again."
+            )
+            self.assertEqual(question.focus(), ("button", CANCEL))
+            self.key(Action.NAV_ACTIVATE if action is not Action.NAV_RIGHT else Action.ESCAPE)
+            self.assertFalse(self.window.settings.card_shown())
+            self.assertIs(self.config.remote["enabled"], True)
+        # The mouse's ‹ asks too.
+        QTest.mouseClick(
+            self.drawer,
+            Qt.MouseButton.LeftButton,
+            pos=self.drawer.step_rect(self.index(row.key), -1).center().toPoint(),
+        )
+        self.assertTrue(self.window.settings.card_shown())
+        self.key(Action.ESCAPE)
+        # Settings going with the question up keeps it on.
+        self.key(Action.NAV_LEFT)
+        self.window.settings.close()
+        self.assertTrue(wait_until(lambda: not self.window.settings.visible()))
+        self.assertTrue(self.window.remote_rows.question.isHidden())
+        self.assertIs(self.config.remote["enabled"], True)
+        self.hub.return_value.stop_soon.assert_not_called()
+        # Turn off: off, saved, and the remote stops.
+        self.open_at(m.REMOTE, remote_rows.ENABLED)
+        self.key(Action.NAV_LEFT)
+        self.key(Action.NAV_RIGHT)
+        self.assertEqual(self.window.remote_rows.question.focus(), ("button", remote_rows.TURN_OFF))
+        self.key(Action.NAV_ACTIVATE)
+        self.assertFalse(self.window.settings.card_shown())
+        self.assertIs(self.config.remote["enabled"], False)
+        self.hub.return_value.stop_soon.assert_called_once()
+        self.assertIsNone(self.window.remote.hub)
+        self.assertEqual(self.value(remote_rows.ENABLED), "Off")
+        self.config.save_config(wait=True)
+        self.assertIs(ConfigManager().remote["enabled"], False)
+        # On again: at once, unasked.
+        self.key(Action.NAV_LEFT)
+        self.assertFalse(self.window.settings.card_shown())
+        self.assertIs(self.config.remote["enabled"], True)
+
+    def test_turning_the_relay_off_asks_first(self):
+        self.open_at(m.REMOTE, remote_rows.RELAY)
+        self.window.remote.hub = self.hub.return_value  # (it runs)
+        self.hub.return_value.reset_mock()
+        self.key(Action.NAV_LEFT)
+        question = self.window.remote_rows.question
+        self.assertTrue(self.window.settings.card_shown())
+        self.assertEqual(question.title(), "Turn off the relay?")
+        self.assertEqual(
+            question.body(), "Phones on other networks can't reach QiTV until it's on again."
+        )
+        self.assertEqual(question.focus(), ("button", CANCEL))
+        self.key(Action.NAV_ACTIVATE)  # Cancel: it stays on
+        self.assertIs(self.config.remote["relay"], True)
+        self.hub.return_value.apply.assert_not_called()
+        self.key(Action.NAV_ACTIVATE)
+        self.key(Action.NAV_RIGHT)
+        self.key(Action.NAV_ACTIVATE)  # Turn off
+        self.assertIs(self.config.remote["relay"], False)
+        self.assertIs(self.config.remote["enabled"], True)
+        self.hub.return_value.apply.assert_called_once()
+        self.assertIs(self.hub.return_value.apply.call_args.args[0]["relay"], False)
+        self.key(Action.NAV_RIGHT)  # on again: at once, unasked
+        self.assertFalse(self.window.settings.card_shown())
+        self.assertIs(self.config.remote["relay"], True)
+        self.assertEqual(self.hub.return_value.apply.call_count, 2)
+
+    def test_a_phones_removal_after_a_cancelled_turn_off_removes_only_it(self):
+        # One card asks both questions: an answer is its own question's.
+        self.open_at(m.REMOTE, remote_rows.ENABLED)
+        self.window.remote.hub = self.hub.return_value  # (it runs)
+        self.hub.return_value.reset_mock()
+        self.key(Action.NAV_LEFT)
+        self.key(Action.ESCAPE)  # the remote's question, cancelled
+        self.window.remote_rows._ask("d1", "Phone A")
+        question = self.window.remote_rows.question
+        self.assertEqual(question.title(), "Remove the phone “Phone A”?")
+        self.key(Action.NAV_RIGHT)
+        self.key(Action.NAV_ACTIVATE)
+        self.hub.return_value.remove_device.assert_called_once_with("d1")
+        self.assertIs(self.config.remote["enabled"], True)  # only the phone goes
+        self.hub.return_value.stop_soon.assert_not_called()
 
 
 class RelayAddressTests(RemoteCase):

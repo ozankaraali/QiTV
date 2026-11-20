@@ -3,7 +3,11 @@ each change applied at once.
 
 - Phone remote turns the remote on or off (RemoteController.apply_config starts, changes or
   stops it), and Reach QiTV from any network its relay; while the remote is off, the relay's
-  row only says how it is set, as the old tab's box was greyed;
+  row only says how it is set, as the old tab's box was greyed. Turned on, either applies at
+  once; turned off, it asks first in a card (Turn off, or Cancel where the keys start), since a
+  phone can't turn it on again (the first row the keys reach: the phone's ← or OK there would
+  have cut it off). Nothing changes until Turn off is answered; Settings going with the question
+  up keeps it on;
 - Home address and Relay say where the remote is now, as the remote tells it (its
   statusChanged builds the rows again while Settings shows);
 - Paired phones › lists the phones, when each was last used under it; one asks before it goes
@@ -45,6 +49,7 @@ PHONES = REMOTE_PREFIX + "phones"
 PHONE_PREFIX = PHONES + "/"  # + the phone's id, quoted
 PAIR = REMOTE_PREFIX + "pair"
 REMOVE = "remove"  # the key of the question's Remove
+TURN_OFF = "turn_off"  # the key of the question's Turn off
 _FIELDS = {ENABLED: "enabled", RELAY: "relay"}  # a switch's row -> its key in `remote`
 
 # i18n: Settings → Phone remote: the switch that turns the remote on
@@ -65,6 +70,21 @@ REMOVE_QUESTION = N_("Remove the phone “{name}”?")
 # i18n: under "Remove the phone …?": what it takes to use that phone again
 REMOVE_BODY = N_("It can be paired again with the code on the TV.")
 REMOVE_TEXT = N_("Remove")  # i18n: a button: unpairs the phone (verb)
+# i18n: asked before Settings → Phone remote → Phone remote is turned off
+TURN_OFF_REMOTE_QUESTION = N_("Turn off the phone remote?")
+# i18n: under "Turn off the phone remote?": the phones are cut off until it is on again
+TURN_OFF_REMOTE_BODY = N_("Paired phones can't control QiTV until it's on again.")
+# i18n: asked before Settings → Phone remote → Reach QiTV from any network is turned off
+TURN_OFF_RELAY_QUESTION = N_("Turn off the relay?")
+# i18n: under "Turn off the relay?": phones away from home are cut off until it is on again
+TURN_OFF_RELAY_BODY = N_("Phones on other networks can't reach QiTV until it's on again.")
+# i18n: a button: turns the phone remote (or its relay) off (verb)
+TURN_OFF_TEXT = N_("Turn off")
+# The question asked before a switch is turned off: its row's field -> (title, body).
+_TURN_OFF = {
+    "enabled": (TURN_OFF_REMOTE_QUESTION, TURN_OFF_REMOTE_BODY),
+    "relay": (TURN_OFF_RELAY_QUESTION, TURN_OFF_RELAY_BODY),
+}
 # i18n: Settings → Phone remote: the settings were written by a newer QiTV
 NEWER_SETTINGS = N_("These phone remote settings come from a newer QiTV; it keeps them.")
 # The relay's state, as Settings → Phone remote says it.
@@ -110,13 +130,15 @@ class RemoteRows(QObject):
         self._drawer = drawer
         self._question: Optional[ChoiceCard] = None
         self._asked = ""  # the phone the question is about
+        self._turning_off = ""  # or the switch it is about (its field)
         settings.register(REMOTE_PREFIX, self)
         window.remote.statusChanged.connect(self._follow)
         window.remote.devicesChanged.connect(self._follow)
 
     @property
     def question(self) -> Optional[ChoiceCard]:
-        """The card that asks before a phone is removed (None until it first asked)."""
+        """The card that asks before a phone is removed or a switch is turned off (None until
+        it first asked)."""
         return self._question
 
     def _data(self) -> dict:
@@ -243,10 +265,18 @@ class RemoteRows(QObject):
         return None
 
     def step(self, row: Row, delta: int) -> None:
+        """A switch turned on at once; off only once asked."""
         field = _FIELDS.get(row.key)
         if field is None or row.kind != STEP or not _known(self._data()):
             return  # a newer QiTV's settings are never written
-        self._write(field, bool(stepped(row, self.value(row), delta)))
+        on = bool(self.value(row))
+        wanted = bool(stepped(row, on, delta))
+        if wanted == on:
+            return
+        if wanted:
+            self._write(field, True)
+        else:
+            self._ask_turn_off(field)
 
     def edited(self, row: Row, text: str) -> None:
         pass
@@ -281,13 +311,18 @@ class RemoteRows(QObject):
         self._window.remote.apply_config()  # started, changed or stopped
         self._settings.refresh_sections()  # the relay's row: a switch only while it is on
 
-    def _ask(self, device_id: str, name: str) -> None:
-        """Remove the phone…?: asked first, Cancel the answer the keys start on."""
+    def _card(self) -> ChoiceCard:
+        """The one card both questions are asked in (an answer is its own question's)."""
         if self._question is None:
             self._question = ChoiceCard(self._drawer.parentWidget())
             self._question.answered.connect(self._on_answered)
-        self._asked = device_id
-        self._question.ask(
+        return self._question
+
+    def _ask(self, device_id: str, name: str) -> None:
+        """Remove the phone…?: asked first, Cancel the answer the keys start on."""
+        card = self._card()
+        self._asked, self._turning_off = device_id, ""
+        card.ask(
             translate(REMOVE_QUESTION, name=name),
             translate(REMOVE_BODY),
             [
@@ -296,9 +331,38 @@ class RemoteRows(QObject):
             ],
             CANCEL,
         )
-        self._settings.show_card(self._question)
+        self._settings.show_card(card)
+
+    def _ask_turn_off(self, field: str) -> None:
+        """Turn off the phone remote (or its relay)?: asked first, Cancel the answer the keys
+        start on (a phone, cut off, can't turn it on again)."""
+        card = self._card()
+        self._asked, self._turning_off = "", field
+        title, body = _TURN_OFF[field]
+        card.ask(
+            translate(title),
+            translate(body),
+            [
+                Button(CANCEL, translate(CANCEL_TEXT)),
+                Button(TURN_OFF, translate(TURN_OFF_TEXT), danger=True),
+            ],
+            CANCEL,
+        )
+        self._settings.show_card(card)
 
     def _on_answered(self, key: str) -> None:
         device_id, self._asked = self._asked, ""
-        if key == REMOVE and device_id and _known(self._data()):
+        field, self._turning_off = self._turning_off, ""
+        if not _known(self._data()):
+            return
+        if key == REMOVE and device_id:
             self._window.remote.remove_device(device_id)  # its devicesChanged: the rows follow
+        elif key == TURN_OFF and field and self._is_on(field):
+            self._write(field, False)
+
+    def _is_on(self, field: str) -> bool:
+        """Whether the switch is on now (the question may have waited)."""
+        data = self._data()
+        if field == "enabled":
+            return data.get("enabled") is True
+        return data.get("enabled") is True and data.get("relay", True) is not False
