@@ -133,10 +133,15 @@ def read_pages(path: str, content: dict) -> None:
         doc = _document(line)
         if doc.get("end") is True:
             break
+        part = doc.get("part")
         if not (
             isinstance(doc.get("key"), str)
-            and isinstance(doc.get("part"), str)
-            and ("value" in doc or isinstance(doc.get("entries"), dict))
+            and isinstance(part, str)
+            and (
+                part in _PAGE_VALUES
+                if "value" in doc
+                else part in _PAGES and isinstance(doc.get("entries"), dict)
+            )
         ):
             raise ValueError("a provider's page without its place")
         docs.append(doc)
@@ -207,6 +212,8 @@ def _apply(content: dict, doc: dict) -> None:
     target = content.get(key)
     part = doc.get("part")
     if part is not None:
+        if not isinstance(part, str):  # (a key in its section, as write_cache writes it)
+            raise ValueError("a provider cache piece without its place")
         target = target.get(part) if isinstance(target, dict) else None
     items, entries = doc.get("items"), doc.get("entries")
     if isinstance(items, list) and isinstance(target, list):

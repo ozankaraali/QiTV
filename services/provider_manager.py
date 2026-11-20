@@ -80,6 +80,14 @@ def classify_handshake_error(error):
     return HANDSHAKE_UNEXPECTED
 
 
+def _modified(path) -> int:
+    """When `path` was last written (ns); -1 when there is no such file."""
+    try:
+        return os.stat(path).st_mtime_ns
+    except OSError:
+        return -1
+
+
 class ProviderManager(QObject):
     progress = Signal(str)
 
@@ -183,27 +191,28 @@ class ProviderManager(QObject):
 
     def _read_cache_file(self, cache_path):
         """(The cache saved at `cache_path`, whether it is an older build's): {} when it cannot
-        be read; without the file, the older builds' single document."""
+        be read. The older builds' single document instead when it is the newer file: none
+        here, or one an older build wrote since (gone back to, then this build again; this
+        build removes it with each lists' file it writes, an older one never sees that)."""
+        legacy = self._legacy_cache_name(cache_path)
         with _CACHE_FILE_TURN:
+            if _modified(legacy) > _modified(cache_path):
+                try:
+                    with open(legacy, "rb") as f:
+                        return json.loads(f.read()), True
+                except OSError, json.JSONDecodeError:
+                    return {}, False
             try:
                 cache = provider_cache.read_cache(cache_path)
+            except OSError, ValueError, TypeError:  # (none, or damaged: loaded again)
+                return {}, False
+            try:  # the seasons and group pages opened, as they were saved with these lists
+                provider_cache.read_pages(self._pages_name(cache_path), cache)
             except FileNotFoundError:
                 pass
-            except OSError, ValueError:
-                return {}, False
-            else:
-                try:  # the seasons and group pages opened, as they were saved with these lists
-                    provider_cache.read_pages(self._pages_name(cache_path), cache)
-                except FileNotFoundError:
-                    pass
-                except OSError, ValueError:
-                    logger.info("A provider's opened series and groups can't be read: dropped")
-                return cache, False
-            try:
-                with open(self._legacy_cache_name(cache_path), "rb") as f:
-                    return json.loads(f.read()), True
-            except OSError, json.JSONDecodeError:
-                return {}, False
+            except OSError, ValueError, TypeError:
+                logger.info("A provider's opened series and groups can't be read: dropped")
+            return cache, False
 
     def _rewrite_legacy_cache(self, cache_path, generation, cache):
         """An older build's cache, just read, is written as the new file (and goes): it is
@@ -486,19 +495,19 @@ class ProviderManager(QObject):
                     return
             if lists or not os.path.exists(cache_path):
                 # In pieces: one orjson call held the GIL (the GUI thread) for the whole cache.
-                with _CACHE_FILE_TURN:
+                with _CACHE_FILE_TURN:  # (removals too: Windows refuses a file being read)
                     provider_cache.write_cache(cache_path, snapshot, replace_if_newest)
-                if os.path.exists(cache_path):  # the older builds' file is read no more
-                    try:
-                        os.remove(self._legacy_cache_name(cache_path))
-                    except FileNotFoundError:
-                        pass
+                    if os.path.exists(cache_path):  # the older builds' file is read no more
+                        try:
+                            os.remove(self._legacy_cache_name(cache_path))
+                        except FileNotFoundError:
+                            pass
             pages = self._pages_name(cache_path)
             if provider_cache.has_pages(snapshot):
                 with _CACHE_FILE_TURN:
                     provider_cache.write_pages(pages, snapshot, replace_if_newest)
             else:
-                with self._cache_lock:
+                with _CACHE_FILE_TURN, self._cache_lock:
                     if newest() and os.path.exists(pages):
                         os.remove(pages)
         except OSError, TypeError:

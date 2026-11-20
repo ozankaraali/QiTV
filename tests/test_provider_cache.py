@@ -16,7 +16,7 @@ from PySide6.QtWidgets import QApplication
 from job_fixtures import ImmediateRunner
 import orjson
 
-from services import provider_cache
+from services import provider_cache, provider_manager
 from services.catalog import CatalogService
 from services.provider_manager import ProviderManager
 from tests.test_catalog_service import FakeFactory
@@ -270,21 +270,102 @@ class ManagerTests(ManagerCase):
         self.assertTrue(os.path.exists(legacy))
         self.assertFalse(os.path.exists(self.manager._provider_cache_name("Other")))
 
-    def test_the_new_file_wins_over_an_older_builds_left_beside_it(self):
+    @staticmethod
+    def age(path: str, seconds: float) -> None:
+        """`path` as written `seconds` ago."""
+        then = time.time() - seconds
+        os.utime(path, (then, then))
+
+    def test_an_older_builds_file_written_since_wins_over_the_new_one(self):
+        # 2.12, then 2.11 gone back to (it writes only "<hash>.json"), then 2.12 again: the
+        # newer lists are 2.11's. They are read, and written anew in pieces at once.
         self.manager.current_provider_content = {"vod": {"categories": [], "contents": films(2)}}
         self.manager.save_provider()
         self.written(self.manager)
+        lists = self.manager._provider_cache_name("Fixture")
+        self.age(lists, 3600)
+        newer = self.fresh(self.manager, {"vod": {"categories": [], "contents": films(9)}})
+        legacy = self.legacy("Fixture", newer)
+        again = self.make()
+        again.set_current_provider(self.progress)
+        self.assertEqual(again.current_provider_content, newer)
+        self.written(again)
+        self.assertFalse(os.path.exists(legacy))
+        self.assertEqual(provider_cache.read_cache(lists), newer)
+
+    def test_the_new_file_wins_over_an_older_builds_older_one(self):
+        legacy = self.legacy("Fixture", {"vod": {"categories": [], "contents": films(9)}})
+        self.age(legacy, 3600)  # (left behind: never a newer one)
+        self.manager.current_provider_content = {"vod": {"categories": [], "contents": films(2)}}
+        self.manager.save_provider()
+        self.written(self.manager)
+        self.assertFalse(os.path.exists(legacy))  # the lists' file written: it goes
         self.legacy("Fixture", {"vod": {"categories": [], "contents": films(9)}})
+        self.age(legacy, 3600)
         again = self.make()
         again.set_current_provider(self.progress)
         self.assertEqual(again.current_provider_content["vod"]["contents"], films(2))
 
+    def test_the_files_it_removes_go_in_their_turn(self):
+        # Windows refuses to remove a file being read: a search reading the older build's
+        # file or the pages made the removal fail.
+        removed = []
+        remove = os.remove
+
+        def removing(path):
+            if path.endswith((".json", ".pages.jsonl")):
+                removed.append((os.path.basename(path), provider_manager._CACHE_FILE_TURN.locked()))
+            remove(path)
+
+        manager = self.manager
+        self.age(self.legacy("Fixture", {"vod": {}}), 3600)
+        manager.current_provider_content = {"series": {"seasons": {"42": [{"id": "1"}]}}}
+        with mock.patch("services.provider_manager.os.remove", removing):
+            manager.save_provider()  # the lists' file: the older build's goes
+            self.written(manager)
+            manager.current_provider_content = {"series": {"categories": []}}
+            manager.save_provider()  # no pages left: the pages' file goes
+            self.written(manager)
+        self.assertEqual({name.split(".", 1)[1] for name, _ in removed}, {"json", "v2.pages.jsonl"})
+        self.assertTrue(all(turn for _, turn in removed))
+
     def test_a_damaged_cache_loads_nothing(self):
-        with open(self.manager._provider_cache_name("Fixture"), "wb") as f:
-            f.write(b'{"qitv": "provider-cache", "version": 2}\n{"key": "vod", "val')
-        self.legacy("Fixture", {"vod": {"categories": [], "contents": films(9)}})
-        self.manager.set_current_provider(self.progress)
-        self.assertEqual(self.manager.current_provider_content, {})
+        lists = self.manager._provider_cache_name("Fixture")
+        for label, data in (
+            ("cut mid-line", b'{"key": "vod", "val'),
+            ("a part that is no key", b'{"key": "vod", "part": ["contents"], "items": []}'),
+            ("a part that is a map", b'{"key": "vod", "part": {"a": 1}, "entries": {}}'),
+        ):
+            with self.subTest(label):
+                header = b'{"qitv": "provider-cache", "version": 2}\n'
+                head = b'{"key": "vod", "value": {"contents": []}}\n'
+                with open(lists, "wb") as f:
+                    f.write(header + head + data + b'\n{"end": true}\n')
+                legacy = self.legacy("Fixture", {"vod": {"categories": [], "contents": films(9)}})
+                self.age(legacy, 3600)
+                self.manager.set_current_provider(self.progress)  # (raises nothing)
+                self.assertEqual(self.manager.current_provider_content, {})
+
+    def test_pages_in_no_place_of_theirs_are_dropped_and_the_lists_load(self):
+        manager = self.manager
+        manager.current_provider_content = {"series": {"categories": [], "contents": films(2)}}
+        manager.save_provider()
+        self.written(manager)
+        pages = manager._pages_name(manager._provider_cache_name("Fixture"))
+        page = {"key": "series", "token": None}
+        for label, line in (
+            ("a value no page has", {**page, "part": "contents", "value": 1}),
+            ("entries no page has", {**page, "part": "categories", "entries": {}}),
+            ("a part that is a list", {**page, "part": [1], "entries": {}}),
+        ):
+            with self.subTest(label):
+                lines = [{"qitv": "provider-pages", "version": 2}, line, {"end": True}]
+                with open(pages, "wb") as f:
+                    f.write(b"".join(orjson.dumps(doc) + b"\n" for doc in lines))
+                again = self.make()
+                again.set_current_provider(self.progress)
+                series = again.current_provider_content["series"]
+                self.assertEqual(series, {"categories": [], "contents": films(2)})
 
     def test_an_unlisted_providers_files_go_and_a_listed_ones_older_file_stays(self):
         self.manager.current_provider_content = {"vod": {"categories": []}}
