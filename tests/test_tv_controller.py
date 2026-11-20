@@ -5849,8 +5849,12 @@ class SettingsLayerTests(ControllerTestCase):
         self.settings.open()
         self.assertEqual(self.controller.key_context(), "drawer")
         self.assertEqual(self.settings_drawer.path(), (PROVIDERS,))
+        self.controller.handle(Action.NAV_TEXT, "a")  # Settings' find, not the list's
+        self.assertEqual(self.settings_drawer.find_text(), "a")
+        self.controller.handle(Action.ESCAPE)  # the find ends; Settings stays
+        self.assertFalse(self.settings_drawer.finding())
+        self.assertTrue(self.settings.visible())
         for action, payload in (
-            (Action.NAV_TEXT, "a"),
             (Action.PASTE, ""),
             (Action.FORGET, ""),
             (Action.NAV_DOWN, ""),
@@ -5860,6 +5864,7 @@ class SettingsLayerTests(ControllerTestCase):
         self.assertEqual(self.drawer.named("move_by"), [])
         self.assertEqual(self.drawer.named("field_key"), [])
         self.assertEqual(self.drawer.named("type_text"), [])
+        self.assertEqual(self.drawer.named("escape"), [])
         self.drawer.visible = False
         self.assertEqual(self.controller.key_context(), "drawer")  # the list closed under it
         self.settings.close()

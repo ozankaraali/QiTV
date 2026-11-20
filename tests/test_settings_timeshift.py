@@ -276,6 +276,34 @@ class DiskOffTests(TimeshiftCase):
         self.config.save_config(wait=True)
         self.assertEqual(ConfigManager().recordings_dir, "")
 
+    def test_a_default_folder_picked_as_ones_own_is_the_default(self):
+        # An older window kept a picked folder as it was given, the default one too: that is
+        # no folder of one's own, so Use the default (which would change nothing) is no row.
+        default = recording.default_folder()
+        elsewhere = os.path.join(self.config_dir, "Elsewhere")
+        for stored, own in (
+            (default, False),
+            (os.path.join(default, ""), False),
+            (elsewhere, True),
+        ):
+            self.config.recordings_dir = stored
+            self.window.open_settings(section_key=m.TIMESHIFT)
+            shown = self.shown()
+            self.window.settings.close()
+            self.assertTrue(wait_until(lambda: not self.window.settings.visible()))
+            self.assertEqual(m.DEFAULT_FOLDER in shown, own, stored)
+
+    def test_a_folder_picked_as_the_window_closes_is_not_used(self):
+        chosen = os.path.join(self.config_dir, "Elsewhere")
+        self.open_at(m.TIMESHIFT, m.CHANGE_FOLDER)
+        with (
+            mock.patch.object(settings_card, "pick_folder", return_value=chosen),
+            mock.patch.object(self.window, "closing", return_value=True),
+        ):
+            self.key(Action.NAV_ACTIVATE)
+        self.assertEqual(self.config.recordings_dir, "")
+        self.assertEqual(recording.places(self.config), [recording.default_folder()])
+
 
 if __name__ == "__main__":
     unittest.main()

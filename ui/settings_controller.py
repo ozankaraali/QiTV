@@ -5,7 +5,8 @@ the overlay paints again; so is a text row's text once it is kept. A section who
 still live in the Settings window opens that window on its tab. The controller keeps the key
 actions it uses and hands every other one back, so volume, mute and fullscreen still reach the
 player. While a text is edited the field has the keys first (typing, Backspace, the caret,
-the clipboard; Enter and Esc).
+the clipboard; Enter and Esc); else typing finds a setting, and while a find shows Backspace
+edits its text (Esc, ← or Enter on a match end it: SettingsDrawer's find).
 
 The sections are built by the caller's function, again whenever what they show changed
 (`refresh_sections`: a provider added, removed or renamed, here or elsewhere), and the drawer
@@ -236,8 +237,9 @@ class SettingsController(QObject):
         """Do a key action on the overlay; False for one it does not use. A card shown over it
         takes every key first (False for the ones it gives back: the sound's, the window's),
         and the rows hear none. While a text is edited its field takes its keys first (Esc
-        there puts the text back, Backspace deletes). NAV_RIGHT with MOUSE_FORWARD is the
-        mouse's Forward: a layer down only (none over a card)."""
+        there puts the text back, Backspace deletes); else typing finds a setting, Backspace
+        editing the find's text while it shows. NAV_RIGHT with MOUSE_FORWARD is the mouse's
+        Forward: a layer down only (none over a card)."""
         card = self._card()
         if card is not None:
             if action is Action.NAV_RIGHT and payload == MOUSE_FORWARD:
@@ -250,7 +252,11 @@ class SettingsController(QObject):
         text = payload if isinstance(payload, str) else ""
         if drawer.editing() and drawer.edit_key(action, text):
             return True
-        if action is Action.NAV_UP:
+        if action is Action.NAV_TEXT:
+            drawer.find_type(text)  # (a space alone starts no find: it reaches nothing)
+        elif action is Action.NAV_BACKSPACE and drawer.finding():
+            drawer.find_backspace()
+        elif action is Action.NAV_UP:
             drawer.move_by(-1)
         elif action is Action.NAV_DOWN:
             drawer.move_by(1)

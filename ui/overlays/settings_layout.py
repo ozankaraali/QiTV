@@ -21,6 +21,7 @@ from PySide6.QtGui import QFont, QFontMetricsF
 
 from services.i18n import N_, translate
 from services.settings_model import DANGER, INFO, OPENS, STEP, TEXT, Row
+from ui.overlays.drawer import FIND_X_U
 from ui.overlays.drawer_look import (
     COUNT_FONT_U,
     CRUMB_FONT_U,
@@ -127,6 +128,9 @@ class Layout:
     back: QRectF  # ‹ in the header
     crumbs: list[tuple[str, QRectF]]  # the breadcrumb's names (the last is where it is)
     boxes: dict[str, list[Optional[Box]]]  # by column, each line's (None: out of sight)
+    # While a find shows: its line above the right column, and the ✕ at its end.
+    find: QRectF = field(default_factory=QRectF)
+    find_clear: QRectF = field(default_factory=QRectF)
 
 
 def wrap(text: str, font: QFont, width: float, most: int) -> list[str]:
@@ -349,15 +353,16 @@ def field_and_paste(un: Units, end: QRectF) -> tuple[QRectF, QRectF]:
 
 
 def header(
-    un: Units, cols: dict[str, QRectF], names: list[str]
+    un: Units, cols: dict[str, QRectF], names: list[str], upto: str = RIGHT
 ) -> tuple[QRectF, list[tuple[str, QRectF]]]:
-    """‹, then `names` ("Settings › Playback", › a layer's name): the names between the first
-    and the last fold into "…" when they do not fit, and the last elides."""
+    """‹, then `names` ("Settings › Playback", › a layer's name), across the columns up to
+    the end of `upto` (the left one's while a find's line is over the right one): the names
+    between the first and the last fold into "…" when they do not fit, and the last elides."""
     side = float(un.px(PAD_SIDE_U))
     row = QRectF(
         side,
         un.px(PAD_TOP_U) + (un.px(FILTER_H_U) - un.px(CRUMB_H_U)) / 2,
-        cols[RIGHT].right() - 2 * side,
+        cols[upto].right() - 2 * side,
         un.px(CRUMB_H_U),
     )
     size = float(un.px(GEAR_U))
@@ -381,6 +386,18 @@ def header(
         crumbs.append((text, QRectF(x, row.y(), text_w, row.height())))
         x += text_w + sep
     return back, crumbs
+
+
+def find_line(un: Units, cols: dict[str, QRectF]) -> tuple[QRectF, QRectF]:
+    """The find's line over the right column, where the channel list has its Find box (and
+    the box's look), and the ✕ at its right end."""
+    side = float(un.px(PAD_SIDE_U))
+    col = cols[RIGHT]
+    box = QRectF(
+        col.x() + side, PAD_TOP_U * un.u, col.width() - 2 * side, FILTER_H_U * un.u
+    ).adjusted(0.5, 0.5, -0.5, -0.5)
+    width = min(box.width(), FIND_X_U * un.u)
+    return box, QRectF(box.right() - width, box.y(), width, box.height())
 
 
 def back_hit(rect: QRectF, un: Units) -> QRectF:

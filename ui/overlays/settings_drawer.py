@@ -41,6 +41,17 @@ Assistive technology hears the focused line and its value as they change (`annou
 "Settings" first as it opens, and a layer's empty line as it is entered. Hidden, it is named
 "Settings" again.
 
+Typing finds a setting (`find_type`; a text being edited takes the typing instead): the find's
+line shows over the right column, as the channel list's Find box, with the text and a ✕ (the
+breadcrumb keeps to the left column meanwhile), and the right column lists the rows of every
+section and layer whose title or help has the words (ui/overlays/settings_find.py), each with
+where it is as its sub line ("Providers › Demo TV"); the keys are on the first. ↑/↓ move among
+them; Enter, → (the mouse's Forward too) or a click on one opens its section or layer with
+that row focused (an info line: the row after it); Backspace edits the text (`find_backspace`),
+its last letter going ends the find; Esc, ←, ✕, ‹, the fade (`back()`) and a click on the left
+column end it (`end_find`), the right column back as it was. New sections while it shows: the
+find stays, over them.
+
 The mouse: a click on a row focuses it. On the right column a row whose click changes it in
 place (a stepper's value, a text) only takes the focus while it has not got it, so that its
 help shows before anything changes; a click on it focused steps it on or starts editing. A
@@ -79,6 +90,7 @@ from ui import text_edit
 from ui.keymap import Action, key_hint
 from ui.overlays.base import Overlay, announce
 from ui.overlays.channel_rows import HOVER_ALPHA
+from ui.overlays.drawer import find_clear_tooltip
 from ui.overlays.drawer_look import (
     CRUMB_FONT_U,
     FADE_U,
@@ -91,6 +103,7 @@ from ui.overlays.drawer_look import (
 )
 from ui.overlays.painting import Units, draw_icon, fill_round, paint_value_steps, ui_units
 from ui.overlays.scroll_indicator import ScrollIndicator
+from ui.overlays.settings_find import Target, find, find_index
 from ui.overlays.settings_layout import (  # its metrics are offered from here too
     EMPTY_H_U,
     FIELD_H_U,
@@ -108,6 +121,7 @@ from ui.overlays.settings_layout import (  # its metrics are offered from here t
     Layout,
     back_hit,
     columns,
+    find_line,
     header,
     help_lines,
     last_first,
@@ -125,6 +139,8 @@ logger = logging.getLogger(__name__)
 SETTINGS_TITLE = N_("Settings")
 # i18n: under a setting whose change takes effect only once QiTV restarts
 RESTART_NOTE = N_("Applies when QiTV starts again.")
+# i18n: in Settings' right column while what was typed finds no setting; {typed} is what was typed
+NO_SETTING_FOUND = N_("No setting has “{typed}”")
 # i18n: the one row of a Settings section whose settings are still in the Settings window
 LEGACY_TEXT = N_("Open in the Settings window")
 LEGACY_PREFIX = "legacy:"  # the legacy row's key: LEGACY_PREFIX + the section's key
@@ -134,6 +150,8 @@ SECRET_DOTS = 8  # the dots before a secret's end that shows (Row.secret_tail), 
 _FALLBACK_HOST_WIDTH = 1280
 _BACK = "back"
 _FADE = "fade"
+_FIND = "find"  # the find's line
+_FIND_CLEAR = "find_clear"  # its ✕
 _FIELD = "field"  # the part of the row being edited that is its field
 _PASTE = "paste"  # and its Paste
 _FAILED_ICONS: set[str] = set()  # icon names draw_icon has no drawing for (logged once each)
@@ -231,6 +249,15 @@ class SettingsDrawer(Overlay):
         self._drag = Dragging()  # the field's mouse: the caret, a drag's selection
         self._paste_hovered = False
         self._said = ""  # what assistive technology was last told
+        # The find: its text (None while there is none), the rows it looks through (made at
+        # an opening's first find, again for new sections), what it found (and those as the
+        # right column lists them), and where the keys and the right column were before it
+        # (its side, focused row and first row in sight: Esc puts them back).
+        self._find: Optional[TextEdit] = None
+        self._targets: Optional[list[Target]] = None
+        self._found: list[Target] = []
+        self._found_rows: tuple[Row, ...] = ()
+        self._before_find: Optional[tuple[str, int, int]] = None
         # Each line's place at y 0, by what it is laid out from (`_placed_key`): a line is
         # wrapped once for what it shows, not at each paint or mouse move. Emptied for new
         # sections, a value changed and another width (`_placed_width`: the host's).
@@ -264,6 +291,8 @@ class SettingsDrawer(Overlay):
         self._pressed = None
         self._edit = None
         self._drag.release()
+        self._drop_find(restore=False)
+        self._targets = None
         self._said = ""
         self._second_click.disarm()
         self._placed.clear()
@@ -286,6 +315,10 @@ class SettingsDrawer(Overlay):
         changed went, and another came, unless `renamed` says it is the same one under a new
         key (old key → new: a provider renamed, `provider/<name>` and every key under it), so
         that the viewer stays where they were in it."""
+        find_text, found_key = "", ""
+        if self._find is not None:  # the place before it is kept by key, then it finds anew
+            find_text, found_key = self._find.text, self._focused_key()
+            self._drop_find(restore=True)
         old_section = self._sections[self._section].key if self._sections else ""
         old_path = self.path()[1:]
         old_opened = list(self._opened)
@@ -294,11 +327,13 @@ class SettingsDrawer(Overlay):
         if renamed:
             old_path = tuple(_rekeyed(key, renamed) for key in old_path)
             old_focus = _rekeyed(old_focus, renamed)
+            found_key = _rekeyed(found_key, renamed)
             self._edit_row = _rekeyed(self._edit_row, renamed)
             if self._pressed is not None:
                 target, key, part, did = self._pressed
                 self._pressed = (target, _rekeyed(key, renamed), part, did)
         self._sections = tuple(sections)
+        self._targets = None
         self._placed.clear()
         self._hover = None
         keys = [section.key for section in self._sections]
@@ -321,6 +356,8 @@ class SettingsDrawer(Overlay):
         if self._edit is not None and self._editing_index() < 0:
             self._edit = None  # its row went (or the keys left it): the text is put back
             self._drag.release()
+        if find_text:
+            self._start_find(find_text, found_key)
         self._reveal(LEFT)
         self._reveal(RIGHT)
         self.update()
@@ -414,6 +451,9 @@ class SettingsDrawer(Overlay):
         if self._edit is not None:
             self.edit_key(Action.NAV_LEFT)
             return
+        if self._find is not None:
+            self.end_find()  # as ← in the channel list's find: back to where it started
+            return
         if self._side == LEFT:
             self.back()  # a layer up, as ← on the drawer's left column
             return
@@ -462,9 +502,12 @@ class SettingsDrawer(Overlay):
     def back(self) -> None:
         """One layer up: a layer gives way to the rows it is one of (the keys staying in their
         column), the rows to the sections, and the sections close. While a text is edited, it
-        puts the text back instead (Esc)."""
+        puts the text back instead (Esc); in a find, it ends the find."""
         if self._edit is not None:
             self._end_edit(keep=False)
+            return
+        if self._find is not None:
+            self.end_find()
             return
         if self._opened:
             self._right = self._opened.pop()
@@ -551,6 +594,135 @@ class SettingsDrawer(Overlay):
             return self._right
         return -1
 
+    # ---- the find ---------------------------------------------------------------------------
+
+    def finding(self) -> bool:
+        """Whether the right column lists what the find found (its line shows)."""
+        return self._find is not None
+
+    def find_text(self) -> str:
+        """What the find finds ("" while there is none)."""
+        return self._find.text if self._find is not None else ""
+
+    def find_type(self, text: str) -> None:
+        """Typing while no text is edited: into the find, a find started by it (a space alone
+        starts none). While a text is edited the field has the typing (`edit_key`)."""
+        if self._edit is not None:
+            return
+        if self._find is None:
+            if not text.strip():
+                return
+            self._start_find(text)
+        else:
+            if not self._find.insert(text):
+                return
+            self._match()
+        self._find_shown()
+
+    def find_backspace(self) -> None:
+        """Backspace in the find: its last letter goes; with it, the find (`end_find`)."""
+        if self._find is None or not self._find.backspace():
+            return
+        if not self._find.text:
+            self.end_find()
+            return
+        self._match()
+        self._find_shown()
+
+    def end_find(self) -> None:
+        """Esc, ←, ✕, ‹ or the fade in the find: it ends, the keys and the right column back
+        where they were before it."""
+        if self._find is None:
+            return
+        self._drop_find(restore=True)
+        self._reveal(LEFT)
+        self._reveal(RIGHT)
+        self._refit_indicators()
+        self.update()
+        self._say()
+
+    def _start_find(self, text: str, focus_key: str = "") -> None:
+        """A find of `text` (the place it starts from kept for Esc), the keys on the match
+        `focus_key` (else the first). Its rows are made once for the sections shown."""
+        if self._targets is None:
+            self._targets = find_index(self._sections)
+        self._before_find = (self._side, self._right, self._first[RIGHT])
+        self._find = TextEdit(text)
+        self._side = RIGHT
+        self._match(focus_key)
+
+    def _match(self, focus_key: str = "") -> None:
+        """What the find's text finds, the keys on the match `focus_key` (else the first:
+        the best), the right column from its top."""
+        if self._find is None:
+            return
+        self._found = find(self._targets or [], self._find.text)
+        self._found_rows = tuple(
+            Row(
+                target.row.key,
+                target.title,  # as shown already (translated, "…" on a destructive row)
+                target.row.help,
+                kind=OPENS,
+                restart=target.row.restart,
+                sub=target.where,
+                literal=True,
+            )
+            for target in self._found
+        )
+        keys = [row.key for row in self._found_rows]
+        self._right = keys.index(focus_key) if focus_key in keys else 0
+        self._first[RIGHT] = 0
+        self._hover = None
+        self._indicators[RIGHT].refit()  # other rows
+
+    def _find_shown(self) -> None:
+        """The find's line and rows changed: in sight, painted and said."""
+        self._reveal(RIGHT)
+        self.update()
+        self._say()
+
+    def _drop_find(self, restore: bool) -> None:
+        """No find any more; with `restore`, the keys and the right column where they were
+        before it."""
+        if self._find is None:
+            return
+        before, self._before_find = self._before_find, None
+        self._find = None
+        self._found, self._found_rows = [], ()
+        self._hover = None
+        if restore and before is not None:
+            self._side, self._right, self._first[RIGHT] = before
+        self._indicators[RIGHT].refit()  # other rows
+
+    def _focused_key(self) -> str:
+        rows = self._right_rows()
+        return rows[self._right].key if 0 <= self._right < len(rows) else ""
+
+    def _go_to_found(self, index: int) -> None:
+        """Enter, → or a click on the find's row `index`: its section or layer opens, that row
+        focused (an info line: the nearest row after it, else before it), and the find ends;
+        Esc then goes up from there."""
+        if not 0 <= index < len(self._found):
+            return
+        target = self._found[index]
+        self._drop_find(restore=False)
+        self._pressed = None  # a double-click's second press does not step what it reached
+        self._section = target.section
+        self._opened = list(target.opened)
+        self._right = target.index
+        self._first = {LEFT: 0, RIGHT: 0}
+        if not self._focus_rows():
+            self._side = LEFT
+        self._reveal(LEFT)
+        self._reveal(RIGHT)
+        self._refit_indicators()
+        self.update()
+        self._say()
+
+    def _find_notice(self) -> str:
+        """What the right column says while the find finds nothing."""
+        return translate(NO_SETTING_FOUND, typed=" ".join(self.find_text().split()))
+
     # ---- what assistive technology hears ----------------------------------------------------
 
     def _say(self, opening: bool = False) -> None:
@@ -579,7 +751,7 @@ class SettingsDrawer(Overlay):
         else:
             row = self.focused_row()
             if row is None:
-                return ""
+                return self._find_notice() if self._find is not None else ""
             if row.kind == STEP:
                 value = self._value_text(row)
             elif row.kind == TEXT:  # a secret's dots are no value to say
@@ -665,6 +837,8 @@ class SettingsDrawer(Overlay):
         return chain
 
     def _right_rows(self) -> tuple[Row, ...]:
+        if self._find is not None:
+            return self._found_rows
         chain = self._chain()
         if not chain:
             return ()
@@ -731,7 +905,11 @@ class SettingsDrawer(Overlay):
     def _act(self, row: Row) -> None:
         """→, Enter or a click on a right-column row: step it on, start editing its text,
         open its layer, or act (a card's row too). A layer with no row to focus leaves the
-        keys on the left column, on the row that opened it."""
+        keys on the left column, on the row that opened it. A row the find found goes to its
+        row, in its section or layer."""
+        if self._find is not None:
+            self._go_to_found(self._right)
+            return
         if row.kind == STEP:
             self.stepped.emit(row.key, 1)
         elif row.kind == TEXT:
@@ -968,7 +1146,8 @@ class SettingsDrawer(Overlay):
         cols, areas = columns(un, float(self.height()))
         names = [translate(SETTINGS_TITLE)]
         names += [s.text if s.literal else translate(s.text) for s in self._chain()]
-        back, crumbs = header(un, cols, names)
+        finding = self._find is not None
+        back, crumbs = header(un, cols, names, upto=LEFT if finding else RIGHT)
         shown: dict[str, list[Optional[Box]]] = {}
         for side in (LEFT, RIGHT):
             area = areas[side]
@@ -983,7 +1162,10 @@ class SettingsDrawer(Overlay):
                 out[index] = boxes[index].moved(y)
                 y += heights[index]
             shown[side] = out
-        return Layout(un, cols, areas, back, crumbs, shown)
+        lay = Layout(un, cols, areas, back, crumbs, shown)
+        if finding:
+            lay.find, lay.find_clear = find_line(un, cols)
+        return lay
 
     def _box(self, side: str, index: int) -> Optional[Box]:
         boxes = self._layout().boxes[side]
@@ -997,6 +1179,8 @@ class SettingsDrawer(Overlay):
         p.setRenderHint(QPainter.RenderHint.TextAntialiasing, True)
         paint_backdrop(p, self.rect(), lay.units)
         self._paint_header(p, lay)
+        if self._find is not None:
+            self._paint_find(p, lay, self._find)
         for side in (LEFT, RIGHT):
             p.save()
             p.setClipRect(lay.columns[side])
@@ -1017,6 +1201,34 @@ class SettingsDrawer(Overlay):
                 p.setPen(qcolor(PALETTE.text, 0.6))
                 after = QRectF(rect.right(), rect.y(), self.width() - rect.right(), rect.height())
                 p.drawText(after, align, SEPARATOR)
+
+    def _paint_find(self, p: QPainter, lay: Layout, edit: TextEdit) -> None:
+        """The find's line: the channel list's Find box as it looks while it finds (⌕, the
+        text and its caret, ✕)."""
+        u = lay.units.u
+        box, clear = lay.find, lay.find_clear
+        fill_round(p, box, qcolor(PALETTE.canvas, 0.6), 0.9 * u)
+        p.save()
+        p.setRenderHint(QPainter.RenderHint.Antialiasing, True)
+        p.setPen(qcolor(PALETTE.accent, 0.7))
+        p.setBrush(Qt.BrushStyle.NoBrush)
+        p.drawRoundedRect(box, 0.9 * u, 0.9 * u)
+        p.restore()
+        size = 1.5 * u
+        icon = QRectF(box.x() + 1.0 * u, box.center().y() - size / 2, size, size)
+        draw_icon(p, "search", icon, qcolor(PALETTE.text, 0.8))
+        inner = QRectF(icon.right() + 0.7 * u, box.y(), 0, box.height())
+        inner.setRight(max(inner.left(), clear.left() - 0.6 * u))
+        p.setFont(lay.units.font(TITLE_FONT_U))
+        selection = qcolor(PALETTE.accent, SELECTION_ALPHA)
+        paint_edit(p, inner, edit, qcolor(PALETTE.text), caret=True, selection=selection)
+        mark = 1.1 * u
+        hovered = self._hover == (_FIND_CLEAR, 0)
+        tone = qcolor(PALETTE.accent) if hovered else qcolor(PALETTE.text, 0.6)
+        center = clear.center()
+        draw_icon(
+            p, "close", QRectF(center.x() - mark / 2, center.y() - mark / 2, mark, mark), tone
+        )
 
     def _paint_column(self, p: QPainter, lay: Layout, side: str) -> None:
         un = lay.units
@@ -1155,10 +1367,13 @@ class SettingsDrawer(Overlay):
         p.drawText(rect, Qt.AlignmentFlag.AlignCenter, label)
 
     def _paint_empty(self, p: QPainter, lay: Layout) -> None:
-        """A layer without rows: its line, muted and centred at the column's top (as the
-        drawer's column says it has nothing)."""
+        """A layer without rows (or a find that found none): its line, muted and centred at
+        the column's top (as the drawer's column says it has nothing)."""
         chain = self._chain()
-        text = translate(chain[-1].empty_text) if chain and chain[-1].empty_text else ""
+        if self._find is not None:
+            text = self._find_notice()
+        else:
+            text = translate(chain[-1].empty_text) if chain and chain[-1].empty_text else ""
         if not text:
             return
         area = lay.areas[RIGHT]
@@ -1184,10 +1399,15 @@ class SettingsDrawer(Overlay):
     # ---- mouse: consumed here, so it never reaches the video behind -------------------------
 
     def _hit(self, pos: QPointF) -> Optional[tuple[str, int, str]]:
-        """What is at `pos`: (_BACK, 0, ""), (_FADE, 0, ""), or (column, line, part), the part
-        of a right-column row being "less", "more", "line", "help" or, on the row being
-        edited, _FIELD or its _PASTE; None elsewhere."""
+        """What is at `pos`: (_BACK, 0, ""), (_FADE, 0, ""), the find's line ((_FIND, 0, "")
+        or its ✕: (_FIND_CLEAR, 0, "")), or (column, line, part), the part of a right-column
+        row being "less", "more", "line", "help" or, on the row being edited, _FIELD or its
+        _PASTE; None elsewhere."""
         lay = self._layout()
+        if lay.find_clear.contains(pos):
+            return (_FIND_CLEAR, 0, "")
+        if lay.find.contains(pos):
+            return (_FIND, 0, "")
         if back_hit(lay.back, lay.units).contains(pos):
             return (_BACK, 0, "")
         editing = self._editing_index()
@@ -1219,8 +1439,19 @@ class SettingsDrawer(Overlay):
             self._pressed = (target, "", "", True)
             self._back_by_mouse()
             return
+        if target == _FIND_CLEAR:
+            self.end_find()
+            return
+        if target == _FIND:
+            return  # its text is typed, not clicked into
         if target == LEFT:
+            if self._find is not None:
+                self._drop_find(restore=True)  # the left column's rows: the find gives way
             self._click_left(index)
+            return
+        if self._find is not None:
+            if part == "line":
+                self._go_to_found(index)  # at once, as a row that opens
             return
         row = self._right_rows()[index]
         if row.kind == INFO:
@@ -1346,7 +1577,7 @@ class SettingsDrawer(Overlay):
         if hit is None:
             return None
         target, index, _part = hit
-        if target in (_BACK, _FADE):
+        if target in (_BACK, _FADE, _FIND, _FIND_CLEAR):
             return (target, "")
         items = self._items(target)
         return (target, items[index].key) if 0 <= index < len(items) else None
@@ -1402,7 +1633,7 @@ class SettingsDrawer(Overlay):
         if over != self._hover or paste != self._paste_hovered:
             self._hover = over
             self._paste_hovered = paste
-            button = paste or (over is not None and over[0] == _BACK)
+            button = paste or (over is not None and over[0] in (_BACK, _FIND_CLEAR))
             self.setCursor(
                 Qt.CursorShape.PointingHandCursor if button else Qt.CursorShape.ArrowCursor
             )
@@ -1436,10 +1667,12 @@ class SettingsDrawer(Overlay):
         value or note) whole; a row says its help and its restart note (under it only while it
         is focused), so that they can be read before a click."""
         hit = self._hit(pos)
-        if hit is None or hit[0] == _FADE:
+        if hit is None or hit[0] in (_FADE, _FIND):
             return ""
         if hit[0] == _BACK:
             return key_hint(tr("Back"), "Esc")  # i18n: tooltip of ‹: a layer up (verb)
+        if hit[0] == _FIND_CLEAR:
+            return find_clear_tooltip()
         if hit[2] == _PASTE:
             return key_hint(translate(PASTE_TEXT), "Ctrl+V")
         side, index, _part = hit
@@ -1485,6 +1718,7 @@ class SettingsDrawer(Overlay):
             indicator.hide()  # not there when Settings opens again, on rows that may fit
         self._edit = None  # hidden while editing: the text is put back
         self._drag.release()
+        self._drop_find(restore=True)  # (shown again, as it was before the find)
         # announce() named it after what it said last: assistive technology finds "Settings".
         announce(self, translate(SETTINGS_TITLE), speak=False)
         super().hideEvent(event)

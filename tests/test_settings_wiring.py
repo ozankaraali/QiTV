@@ -387,9 +387,10 @@ class SettingsWiringTests(base.WindowCase):
 
     def test_every_drawer_action_is_handled_or_passed_on_purpose(self):
         # Settings has the drawer's keys: each action they give is Settings' own (a move, a
-        # step, a layer up or down; while a text is edited, its field's too), one of the
-        # channel list's that reaches nothing under it (_LIST_KEYS: the field's keys, while no
-        # text is edited), or one it lets through on purpose (PASSED_ON). An action added to
+        # step, a layer up or down, typing, which finds a setting; while a text is edited, its
+        # field's too), one of the channel list's that reaches nothing under it (_LIST_KEYS:
+        # the field's keys, while no text is edited), or one it lets through on purpose
+        # (PASSED_ON), whether a text is edited, a find shows or neither. An action added to
         # the drawer's keys fails here until it is one of them.
         produced = drawer_actions()
         self.assertLessEqual(PASSED_ON, set(produced))
@@ -408,37 +409,41 @@ class SettingsWiringTests(base.WindowCase):
             answers.append(real(what, data))
             return answers[-1]
 
-        own: dict = {False: set(), True: set()}
-        swallowed: dict = {False: set(), True: set()}
-        passed: dict = {False: set(), True: set()}
+        states = ("rows", "editing", "finding")
+        own: dict = {state: set() for state in states}
+        swallowed: dict = {state: set() for state in states}
+        passed: dict = {state: set() for state in states}
         values = settings._values
         with (
             mock.patch.object(settings, "_make_sections", return_value=only),
             mock.patch.object(values, "get", return_value="old"),
             mock.patch.object(values, "set"),
         ):
-            for editing in (False, True):
+            for state in states:
                 for action, payload in produced.items():
                     settings.open()  # afresh: Esc, Backspace and ← on the sections close it
-                    if editing:
+                    if state == "editing":
                         settings.handle(Action.NAV_RIGHT)  # onto Name,
                         settings.handle(Action.NAV_ACTIVATE)  # edited
                         self.assertTrue(self.window.settings_drawer.editing())
+                    elif state == "finding":
+                        settings.handle(Action.NAV_TEXT, "na")  # finds Name
+                        self.assertTrue(self.window.settings_drawer.finding())
                     self.assertTrue(layer.shown())
                     answers.clear()
                     with mock.patch.object(settings, "handle", side_effect=spy):
                         taken = layer.handle(action, payload)
-                    where = (action, payload, editing)
+                    where = (action, payload, state)
                     self.assertEqual(len(answers), 1, where)
                     if answers[0]:
-                        own[editing].add(action)
+                        own[state].add(action)
                     elif taken:
-                        swallowed[editing].add(action)
+                        swallowed[state].add(action)
                     else:
-                        passed[editing].add(action)
-        for editing in (False, True):
-            self.assertEqual(passed[editing], PASSED_ON, editing)
-            self.assertLessEqual(swallowed[editing], settings_layer._LIST_KEYS, editing)
+                        passed[state].add(action)
+        for state in states:
+            self.assertEqual(passed[state], PASSED_ON, state)
+            self.assertLessEqual(swallowed[state], settings_layer._LIST_KEYS, state)
         moves = {
             Action.NAV_UP,
             Action.NAV_DOWN,
@@ -450,12 +455,17 @@ class SettingsWiringTests(base.WindowCase):
             Action.NAV_BACKSPACE,
             Action.ESCAPE,
         }
-        self.assertEqual(own[False], moves)
+        # Typing is Settings' own: it finds a setting (a space alone starts none, and reaches
+        # nothing); while a find shows, Backspace edits its text and the moves go among what
+        # it found.
+        self.assertEqual(own["rows"], moves | {Action.NAV_TEXT})
+        self.assertEqual(own["finding"], moves | {Action.NAV_TEXT})
         # Each of the list's keys that Settings does not use is a key of the field being
         # edited: while one is, Settings uses every action the keys give but PASSED_ON.
-        self.assertEqual(swallowed[True], set())
-        self.assertEqual(own[True], set(produced) - PASSED_ON)
-        self.assertEqual(swallowed[False], own[True] - moves)
+        self.assertEqual(swallowed["editing"], set())
+        self.assertEqual(own["editing"], set(produced) - PASSED_ON)
+        self.assertEqual(swallowed["rows"], own["editing"] - own["rows"])
+        self.assertEqual(swallowed["finding"], swallowed["rows"])
 
     def test_a_failed_save_is_said_once_when_settings_hides(self):
         # A step saves in the background (its failure is only logged there): Settings says
