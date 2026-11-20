@@ -739,6 +739,7 @@ class PlaybackSession(QObject):
             self._player.video_set_spu_delay(self._subtitle_delay_ms * 1000)
         self._shown_due = True  # pictureShown once its video output appears
         self._ratio_known = False  # (the last media's shape stays until this one's is read)
+        self._stream_turned = False  # (the last one's turn was its own)
         if self._picture_wanted():
             self._apply_picture()  # the player's, for a new video output
             self._picture_due = True  # and again for a kept one, once it is this media's

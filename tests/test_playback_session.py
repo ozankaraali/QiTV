@@ -1927,6 +1927,11 @@ class BoxFillTests(unittest.TestCase):
         self.boxed((360, 640))
         self.assertNotIn("9:16", self.aspects())
         self.assertEqual(set(self.aspects()), {None})
+        self.session.set_aspect("16:9")  # then a channel, stretched to 16:9 by the viewer
+        self.shape = (16 / 9, False)
+        self.play(A)
+        self.boxed((1000, 562))
+        self.assertEqual(self.aspects()[-1], "500:281")  # filled: the turn was the video's
 
     def test_without_libvlc_a_box_is_nothing(self):
         NullSession().set_box_size((1000, 562))

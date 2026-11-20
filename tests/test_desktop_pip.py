@@ -506,6 +506,9 @@ class DesktopPipWindowTests(WindowCase):
             self.assertEqual(window.surface.size(), QSize(500, 284))
             self.assertEqual(main.box(), (1000, 568))
             self.assertIsNone(small.box())
+            pip.floating_window().resize(640, 360)  # an edge dragged
+            self.app.processEvents()
+            self.assertEqual(main.box(), (1280, 720))
             shown["value"] = True
             pip.check()  # back in the fullscreen window
             self.app.processEvents()
