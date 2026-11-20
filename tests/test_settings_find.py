@@ -461,6 +461,54 @@ class SettingsFindTests(FindCase):
                 self.assertEqual(self.found_keys(), keys)
                 self.controller.close()
 
+    def test_a_long_list_is_found_from_inside_it_and_a_layers_rows_first(self):
+        # 2.13.1: a layer of names (Free channels' and Free radio's countries) is found only
+        # by a find typed inside it, and first there: a country typed in Free radio is never
+        # Free channels' first. A find typed in any layer lists that layer's rows first.
+        def countries(key, text):
+            names = (("dz", "Algeria"), ("de", "Germany"), ("ge", "Georgia"))
+            rows = tuple(Row(f"{key}/{c}", n, kind=m.ACTION, literal=True) for c, n in names)
+            return Row(key, text, section=Section(key, text, rows=rows, found_inside=True))
+
+        lists = (
+            countries("provider/@free", "Free channels"),
+            countries("provider/@radio", "Free radio"),
+        )
+        self.shown = tuple(
+            Section(s.key, s.text, s.icon, s.rows + lists) if s.key == PROVIDERS else s
+            for s in with_providers("Demo TV", "Harbour")
+        )
+        self.controller.open(PLAYBACK)
+        self.type("germ")
+        self.assertEqual(self.found(), [])  # neither list's, from outside them
+        self.key(Action.ESCAPE)
+        self.type("ge")
+        self.assertFalse(
+            [k for k in self.found_keys() if k.startswith(("provider/@f", "provider/@r"))]
+        )
+        self.key(Action.ESCAPE)
+        self.assertTrue(self.controller.show_row("provider/@radio/dz"))  # in Free radio
+        self.type("germ")
+        self.assertEqual(
+            self.found(), [("provider/@radio/de", "Germany", "Providers › Free radio")]
+        )
+        self.key(Action.NAV_ACTIVATE)
+        self.assertEqual(self.drawer.path(), (PROVIDERS, "provider/@radio"))
+        self.assertEqual(self.drawer.focused_row().key, "provider/@radio/de")
+        self.type("ge")  # its own rows first, those a word starts first, then the rest
+        self.assertEqual(
+            self.found_keys()[:3],
+            ["provider/@radio/de", "provider/@radio/ge", "provider/@radio/dz"],
+        )
+        self.assertNotIn("provider/@free/de", self.found_keys())
+        self.assertGreater(len(self.found_keys()), 3)  # General, its section: after them
+        self.type("r")  # "ger": Germany, then Algeria
+        self.assertEqual(self.found_keys()[:2], ["provider/@radio/de", "provider/@radio/dz"])
+        self.key(Action.ESCAPE)
+        self.assertTrue(self.controller.show_row("provider/Harbour/name"))
+        self.type("check the conn")
+        self.assertEqual(self.found_keys(), ["provider/Harbour/check", "provider/Demo TV/check"])
+
 
 class EverySectionFindTests(base.WindowCase):
     def test_the_find_reaches_the_rows_this_qitv_builds(self):

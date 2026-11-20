@@ -266,7 +266,6 @@
   "Couldn't start: {why}. QiTV tries again every minute until {until}.": "No s'ha pogut iniciar: {why}. QiTV ho torna a provar cada minut fins a les {until}.",
   "Couldn't write the channel matching to that file": "No s'ha pogut escriure la correspondència de canals en aquest fitxer",
   "Couldn’t reach the provider to fetch episodes.": "No s'ha pogut connectar amb el proveïdor per obtenir els episodis.",
-  "Country:": "País:",
   "Cover": "Coberta",
   "Create one on the API consumers page of your free OpenSubtitles account.": "Crea'n una a la pàgina API consumers del teu compte gratuït d'OpenSubtitles.",
   "Credits and licenses": "Crèdits i llicències",

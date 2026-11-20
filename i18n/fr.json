@@ -266,7 +266,6 @@
   "Couldn't start: {why}. QiTV tries again every minute until {until}.": "Démarrage impossible : {why}. QiTV réessaie chaque minute jusqu’à {until}.",
   "Couldn't write the channel matching to that file": "Impossible d’écrire la correspondance des chaînes dans ce fichier",
   "Couldn’t reach the provider to fetch episodes.": "Impossible de joindre le fournisseur pour récupérer les épisodes.",
-  "Country:": "Pays :",
   "Cover": "Pochette",
   "Create one on the API consumers page of your free OpenSubtitles account.": "Créez-en une sur la page API consumers de votre compte OpenSubtitles gratuit.",
   "Credits and licenses": "Crédits et licences",

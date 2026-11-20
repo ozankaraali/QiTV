@@ -266,7 +266,6 @@
   "Couldn't start: {why}. QiTV tries again every minute until {until}.": "Kon niet starten: {why}. QiTV probeert het elke minuut opnieuw tot {until}.",
   "Couldn't write the channel matching to that file": "De zenderkoppeling kon niet naar dat bestand worden geschreven",
   "Couldn’t reach the provider to fetch episodes.": "Kon de provider niet bereiken om afleveringen op te halen.",
-  "Country:": "Land:",
   "Cover": "Cover",
   "Create one on the API consumers page of your free OpenSubtitles account.": "Maak er een aan op de pagina API consumers van je gratis OpenSubtitles-account.",
   "Credits and licenses": "Credits en licenties",

@@ -263,7 +263,6 @@
   "Couldn't start: {why}. QiTV tries again every minute until {until}.": "시작하지 못했어요: {why}. QiTV가 {until}까지 매분 다시 시도해요.",
   "Couldn't write the channel matching to that file": "채널 매칭을 그 파일에 쓰지 못했어요",
   "Couldn’t reach the provider to fetch episodes.": "제공자에 연결하지 못해 에피소드를 가져올 수 없었어요.",
-  "Country:": "국가:",
   "Cover": "커버",
   "Create one on the API consumers page of your free OpenSubtitles account.": "무료 OpenSubtitles 계정의 API consumers 페이지에서 만들 수 있어요.",
   "Credits and licenses": "크레딧 및 라이선스",

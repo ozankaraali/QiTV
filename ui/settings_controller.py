@@ -194,12 +194,15 @@ class SettingsController(QObject):
 
     # ---- opening and closing ----------------------------------------------------------------
 
-    def open(self, section_key: str = "", from_drawer: bool = False) -> None:
-        """Show Settings at `section_key` (else the first section). `from_drawer`: backing out
-        of the sections gives the TV drawer back."""
+    def open(self, section_key: str = "", from_drawer: bool = False, row: str = "") -> None:
+        """Show Settings at `section_key` (else the first section), on its `row` when one is
+        given (any layer's: Free channels' countries, 2.13.1). `from_drawer`: backing out of
+        the sections gives the TV drawer back."""
         self._from_drawer = from_drawer
         self._sections = self._make_sections()
         self._drawer.open_at(self._sections, section_key)
+        if row:
+            self._drawer.show_row(row)
 
     def refresh_sections(self, renamed: Optional[Mapping[str, str]] = None) -> None:
         """The sections built again: what they show changed (a provider added, removed or
@@ -210,18 +213,28 @@ class SettingsController(QObject):
         if self._drawer.isVisible():
             self._drawer.set_sections(self._sections, renamed=renamed)
 
-    def show_section(self, section_key: str) -> None:
+    def show_section(self, section_key: str, row: str = "") -> None:
         """While Settings shows elsewhere: at `section_key`, from its top (a card of that
-        section asked for from outside it, as the menu bar's Add provider). Where it was opened
-        from stays: backing out of it gives back what it would have, and a card over it stays
-        over it."""
-        if not self._drawer.isVisible() or self._drawer.path()[:1] == (section_key,):
+        section asked for from outside it, as the menu bar's Add provider), or on its `row`
+        (in it already too: the Add card's Free channels…). Where it was opened from stays:
+        backing out of it gives back what it would have, and a card over it stays over it."""
+        if not self._drawer.isVisible():
             return
-        self._sections = self._make_sections()
-        self._drawer.open_at(self._sections, section_key)
+        if self._drawer.path()[:1] != (section_key,):
+            self._sections = self._make_sections()
+            self._drawer.open_at(self._sections, section_key)
+        elif not row:
+            return
+        if row:
+            self._drawer.show_row(row)
         for card in self._cards:
             if card.isVisible():
                 card.raise_()  # the drawer raised itself over it
+
+    def show_row(self, key: str) -> bool:
+        """While Settings shows: the keys on row `key`, wherever it is (a provider just added,
+        among the providers); False when there is no such row."""
+        return self._drawer.isVisible() and self._drawer.show_row(key)
 
     def visible(self) -> bool:
         return self._drawer.isVisible()
@@ -269,6 +282,14 @@ class SettingsController(QObject):
         """Hide Settings; the TV drawer is not reopened."""
         self._from_drawer = False
         self._drawer.hide()
+
+    def back_out(self) -> None:
+        """Hide Settings as backing out of its sections does: opened from the TV drawer, it
+        gives the drawer back (a choice made in Settings opened for it: a free list's
+        country, 2.13.1)."""
+        if self._drawer.isVisible():
+            self._drawer.hide()
+            self._on_closed()
 
     def handle(self, action: Action, payload: object = None) -> bool:
         """Do a key action on the overlay; False for one it does not use. A card shown over it

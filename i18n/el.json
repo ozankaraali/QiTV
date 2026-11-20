@@ -266,7 +266,6 @@
   "Couldn't start: {why}. QiTV tries again every minute until {until}.": "Δεν ξεκίνησε: {why}. Το QiTV ξαναδοκιμάζει κάθε λεπτό έως τις {until}.",
   "Couldn't write the channel matching to that file": "Δεν ήταν δυνατή η εγγραφή της αντιστοίχισης καναλιών σε αυτό το αρχείο",
   "Couldn’t reach the provider to fetch episodes.": "Δεν ήταν δυνατή η σύνδεση με τον πάροχο για λήψη επεισοδίων.",
-  "Country:": "Χώρα:",
   "Cover": "Εξώφυλλο",
   "Create one on the API consumers page of your free OpenSubtitles account.": "Δημιουργήστε ένα στη σελίδα API consumers του δωρεάν λογαριασμού σας στο OpenSubtitles.",
   "Credits and licenses": "Συντελεστές και άδειες",

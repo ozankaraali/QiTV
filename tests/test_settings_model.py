@@ -84,10 +84,12 @@ class SettingsModelTests(unittest.TestCase):
             ["provider/A", m.ADD_PROVIDER, m.FREE_CHANNELS, m.FREE_RADIO],
         )
         add, free, radio = providers.rows[1:]
-        # As the channel list names them, each with its ＋ painted in the accent (2.12).
+        # Each with its ＋ painted in the accent (2.12), as the channel list's. Free channels
+        # and Free radio open a layer of their countries (2.13.1; ui.free_channels_menu builds
+        # their rows, given in the context): never a menu or a system dialog.
         self.assertEqual((add.text, add.kind, add.icon), ("Add provider", m.ACTION, "plus"))
-        self.assertEqual((free.text, free.kind, free.icon), ("Free channels…", m.ACTION, "plus"))
-        self.assertEqual((radio.text, radio.kind, radio.icon), ("Free radio…", m.ACTION, "plus"))
+        self.assertEqual((free.text, free.kind, free.icon), ("Free channels", m.OPENS, "plus"))
+        self.assertEqual((radio.text, radio.kind, radio.icon), ("Free radio", m.OPENS, "plus"))
         self.assertIn("radio-browser.info", radio.help)  # 2.13: the source is named
         for row in (add, free, radio):
             self.assertTrue(row.help, row.key)
@@ -96,6 +98,18 @@ class SettingsModelTests(unittest.TestCase):
             [row.key for row in m.sections("Linux")[0].rows],
             [m.ADD_PROVIDER, m.FREE_CHANNELS, m.FREE_RADIO],
         )
+        countries = (m.Row(f"{m.FREE_CHANNELS}/de", "Germany", kind=m.ACTION, literal=True),)
+        stations = (m.Row(f"{m.FREE_RADIO}/de", "Germany", kind=m.ACTION, literal=True),)
+        context = m.Context(free_channels=countries, free_radio=stations)
+        free, radio = m.sections("Linux", context=context)[0].rows[1:]
+        for row, rows, title in (
+            (free, countries, "Free channels"),
+            (radio, stations, "Free radio"),
+        ):
+            with self.subTest(title):
+                layer = row.section
+                self.assertEqual((layer.key, layer.text, layer.rows), (row.key, title, rows))
+                self.assertTrue(layer.found_inside)  # a long list: found from inside it
         # A literal choice is shown as it is given (a number, a text in the language already).
         self.assertEqual(m.Choice(3, "3", literal=True).shown(), "3")
 

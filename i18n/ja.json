@@ -263,7 +263,6 @@
   "Couldn't start: {why}. QiTV tries again every minute until {until}.": "開始できませんでした: {why}。QiTVは{until}まで毎分再試行します。",
   "Couldn't write the channel matching to that file": "チャンネルの対応付けをそのファイルに書き込めませんでした",
   "Couldn’t reach the provider to fetch episodes.": "プロバイダーに接続できず、エピソードを取得できませんでした。",
-  "Country:": "国:",
   "Cover": "カバー",
   "Create one on the API consumers page of your free OpenSubtitles account.": "無料のOpenSubtitlesアカウントのAPI consumersページで作成してください。",
   "Credits and licenses": "クレジットとライセンス",

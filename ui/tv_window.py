@@ -140,7 +140,7 @@ from services.recordings_index import FILE_NAME as RECORDINGS_INDEX_FILE, Record
 from services.recordings_list import timer_text
 from services.redact import safe_message, safe_traceback
 from services.sessions import SessionManager, Slot
-from services.settings_model import PROVIDERS, REMOTE, Context, sections
+from services.settings_model import FREE_CHANNELS, FREE_RADIO, PROVIDERS, REMOTE, Context, sections
 from services.settings_values import SettingsValues
 from services.sound_sync import FILE_NAME as SOUND_SYNC_FILE, SoundSync
 from services.subtitle_picks import FILE_NAME as SUBTITLE_PICKS_FILE, SubtitlePicks
@@ -155,10 +155,7 @@ from ui.captions_controller import CaptionsController
 from ui.desktop_pip import COVERED, DESKTOP, DesktopPip, corner_rect
 from ui.export_flow import ExportFlow
 from ui.find_session import FindSession
-from ui.free_channels_menu import (
-    show_menu as show_free_channels_menu,
-    show_radio_menu as show_free_radio_menu,
-)
+from ui.free_channels_menu import FreeLists
 from ui.grid_frame import GridFrame
 from ui.keymap import Action, as_int, resolve
 from ui.library.library_screen import LibraryScreen
@@ -1140,8 +1137,8 @@ class TVWindow(QMainWindow):
         # The Library's ⛶: the menu bar, with View → Fullscreen, hides in fullscreen.
         self.library_page.nav.fullscreenRequested.connect(self.toggle_fullscreen)
         self.overlays.welcome.addRequested.connect(lambda: self.add_provider())  # the Add card
-        self.overlays.welcome.freeRequested.connect(self.show_free_channels)
-        self.overlays.welcome.radioRequested.connect(self.show_free_radio)  # 2.13
+        self.overlays.welcome.freeRequested.connect(lambda: self.show_free_channels())
+        self.overlays.welcome.radioRequested.connect(lambda: self.show_free_radio())  # 2.13
         self.overlays.drawer.actionRequested.connect(self.menus.on_drawer_action)
         # Settings in the drawer (its Settings row and ⚙, Settings…): a step applies at once
         # (what takes effect beyond the config, through its hook); backing out of it from the
@@ -1178,6 +1175,9 @@ class TVWindow(QMainWindow):
             self, self.settings, self.settings_drawer, self.provider_rows
         )
         self.provider_rows.cards = self.provider_cards
+        # Its Free channels and Free radio: a layer of countries each (2.13.1), a choice adding
+        # the list as the welcome card's buttons and the channel list's rows do (they open it).
+        self.free_lists = FreeLists(self, self.settings, self.settings_drawer)
         # Settings › General, Files and Advanced: what only this QiTV knows (its languages, the
         # Files rows' status), and Files' and Advanced's own rows: the file types told on a
         # worker, the image cache cleared on one once asked.
@@ -2851,33 +2851,38 @@ class TVWindow(QMainWindow):
     # ---- Settings ---------------------------------------------------------------------------
 
     def open_settings(
-        self, from_drawer: bool = False, keep_place: bool = False, section_key: str = ""
+        self,
+        from_drawer: bool = False,
+        keep_place: bool = False,
+        section_key: str = "",
+        row: str = "",
     ) -> None:
         """Settings in the drawer (the drawer's Settings row and ⚙, Settings…, Ctrl/⌘+,; at
         Providers, every Add provider), over live TV: from the Library it goes back to the TV
         first, and the mini player becomes the window again; the channel list, and whatever
         else would keep the keys under it, gives way to it (TVController.make_way_for_settings;
         the audio dock's ⋯ menu too). A question keeps the keys, so it stays above Settings.
-        `section_key`: the section it opens at (else the first). `from_drawer`: backing out of
-        it gives the list back, on its Settings row, or where it was with `keep_place` (its ⚙,
-        its Add provider). Asked again while it shows, it stays as it is (where it came from
-        too), but for a section asked for, which it goes to: a card over the TV that showed
-        over Settings (File → Open Link…'s) cancels then, as when Settings opens, since
-        Settings and its card come over it."""
+        `section_key`: the section it opens at (else the first), on its `row` when one is given
+        (a layer's: Free channels' countries). `from_drawer`: backing out of it gives the list
+        back, on its Settings row, or where it was with `keep_place` (its ⚙, its Add provider,
+        its Free channels and Free radio). Asked again while it shows, it stays as it is (where
+        it came from too), but for a section asked for, which it goes to: a card over the TV
+        that showed over Settings (File → Open Link…'s) cancels then, as when Settings opens,
+        since Settings and its card come over it."""
         if self._closing:
             return
         if self.settings.visible():
             if not section_key:
                 return
             self.controller.cancel_cards()  # not make_way_for_settings: it keeps its way back
-            self.settings.show_section(section_key)
+            self.settings.show_section(section_key, row)
         else:
             if self.screens.library_shown():
                 self.screens.back_to_tv()
             self.leave_mini_player()
             self.more_menu.dismiss()
             self.controller.make_way_for_settings(keep_place=keep_place)
-            self.settings.open(section_key, from_drawer=from_drawer)
+            self.settings.open(section_key, from_drawer=from_drawer, row=row)
         for card in (self.question_card, self.quality_card, self.captions_card):
             if card.isVisible():
                 card.raise_()  # Settings raised itself over it
@@ -2886,13 +2891,15 @@ class TVWindow(QMainWindow):
         """What Settings' sections show that only this QiTV knows, each section's from its
         rows: General's, Files' and Advanced's (ui.settings_general), Subtitles' and
         Time-shift's, and the Guide's, the phone remote's and parental controls' rows as they
-        are now."""
+        are now; Free channels' and Free radio's countries."""
         context = self.subtitle_rows.context(self.general_rows.context())
         return dataclasses.replace(
             self.timeshift_rows.context(context),
             guide=self.guide_rows.rows(),
             remote=self.remote_rows.rows(),
             parental=self.parental_rows.rows(),
+            free_channels=self.free_lists.rows(FREE_CHANNELS),
+            free_radio=self.free_lists.rows(FREE_RADIO),
         )
 
     def _settings_went(self) -> None:
@@ -2987,10 +2994,11 @@ class TVWindow(QMainWindow):
         if name != self.catalog.current_provider_name():
             self.set_provider()
 
-    def show_free_channels(self, global_pos: QPoint) -> None:
-        """The Free channels… menu under `global_pos` (the welcome card's and the drawer's)."""
-        if not self._closing:
-            show_free_channels_menu(self, global_pos, self.add_free_channels)
+    def show_free_channels(self, from_drawer: bool = False, opened_settings: bool = False) -> None:
+        """Free channels…: Settings at Providers › Free channels, its countries (2.13.1: the
+        welcome card's, the channel list's row's with `from_drawer`, the menu bar's Another
+        country…, the Add card's with `opened_settings`; ui.free_channels_menu)."""
+        self.free_lists.open(FREE_CHANNELS, from_drawer, opened_settings)
 
     def add_free_channels(self, code: Optional[str]) -> None:
         """Add iptv-org's list (all countries, or `code`'s), select it and load it, as a provider
@@ -2998,10 +3006,9 @@ class TVWindow(QMainWindow):
         if not self._closing:
             self._add_free_list(free_channels.provider_entry(code), free_channels.same_list)
 
-    def show_free_radio(self, global_pos: QPoint) -> None:
-        """The Free radio… menu (2.13) under `global_pos`, as Free channels…'."""
-        if not self._closing:
-            show_free_radio_menu(self, global_pos, self.add_free_radio)
+    def show_free_radio(self, from_drawer: bool = False, opened_settings: bool = False) -> None:
+        """Free radio… (2.13): Settings at Providers › Free radio, as Free channels…'."""
+        self.free_lists.open(FREE_RADIO, from_drawer, opened_settings)
 
     def add_free_radio(self, code: Optional[str]) -> None:
         """Add radio-browser.info's list (2.13: all countries, or `code`'s) as add_free_channels

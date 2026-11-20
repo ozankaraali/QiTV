@@ -263,7 +263,6 @@
   "Couldn't start: {why}. QiTV tries again every minute until {until}.": "เริ่มไม่ได้: {why} QiTV จะลองใหม่ทุกนาทีจนถึง {until}",
   "Couldn't write the channel matching to that file": "เขียนการจับคู่ช่องลงไฟล์นั้นไม่ได้",
   "Couldn’t reach the provider to fetch episodes.": "เชื่อมต่อผู้ให้บริการเพื่อดึงตอนต่างๆ ไม่ได้",
-  "Country:": "ประเทศ:",
   "Cover": "ปกอัลบั้ม",
   "Create one on the API consumers page of your free OpenSubtitles account.": "สร้างได้ที่หน้า API consumers ของบัญชี OpenSubtitles ฟรีของคุณ",
   "Credits and licenses": "เครดิตและสัญญาอนุญาต",

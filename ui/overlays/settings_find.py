@@ -10,13 +10,18 @@ card has no rows to look through (its card is made when it opens).
 
 A row matches when every word typed is in its title or its help, whole or as a part of a word;
 a section, when every word is in its title. Those with every word in the title come first, then
-those the help matched; each in Settings' order (a section before its rows).
+those the help matched; each in Settings' order (a section before its rows). A find typed inside
+a layer lists that layer's rows first (2.13.1), and a long list of names (a `found_inside`
+layer: Free channels' countries) is looked through only by a find typed inside it: a country
+typed in Free radio is Free radio's, and never floods a find typed elsewhere. There the names
+a typed word starts come first ("ger": Germany before Algeria).
 """
 
 from __future__ import annotations
 
 from collections.abc import Iterator, Sequence
 from dataclasses import dataclass
+from typing import Optional
 
 from services.find import words
 from services.i18n import translate
@@ -34,7 +39,8 @@ class Target:
     layers on the way to it (an index each, from the section's rows) and its index among its
     layer's rows (-1: the section itself, `row` standing for it); its title as shown and where
     it is ("Providers › Demo TV"; "" for a section); and the folded words of its title and its
-    help, a space around each ("  live latency  ")."""
+    help, a space around each ("  live latency  "). `inside`: its layer is found only from
+    inside it (Section.found_inside)."""
 
     section: int
     opened: tuple[int, ...]
@@ -44,6 +50,7 @@ class Target:
     where: str
     title_words: str
     help_words: str
+    inside: bool = False
 
 
 def _shown_name(section: Section) -> str:
@@ -54,15 +61,19 @@ def _spaced(text: str) -> str:
     return f" {' '.join(words(text))} "
 
 
-def _targets(at: int, opened: tuple[int, ...], rows: Sequence[Row], where: str) -> Iterator[Target]:
+def _targets(
+    at: int, opened: tuple[int, ...], rows: Sequence[Row], where: str, inside: bool = False
+) -> Iterator[Target]:
     for index, row in enumerate(rows):
         title = title_of(Item(row.key, row.text, row=row))
         help_text = translate(row.help) if row.help else ""
-        yield Target(at, opened, index, row, title, where, _spaced(title), _spaced(help_text))
+        yield Target(
+            at, opened, index, row, title, where, _spaced(title), _spaced(help_text), inside
+        )
         layer = row.section
         if layer is not None:
             inner = SEPARATOR.join((where, _shown_name(layer)))
-            yield from _targets(at, opened + (index,), layer.rows, inner)
+            yield from _targets(at, opened + (index,), layer.rows, inner, layer.found_inside)
 
 
 def find_index(sections: Sequence[Section]) -> list[Target]:
@@ -77,16 +88,28 @@ def find_index(sections: Sequence[Section]) -> list[Target]:
     return found
 
 
-def find(targets: Sequence[Target], text: str) -> list[Target]:
+def find(
+    targets: Sequence[Target], text: str, here: Optional[tuple[int, tuple[int, ...]]] = None
+) -> list[Target]:
     """The rows of `targets` (find_index) that have every word of `text` in their title or
-    their help: those whose title has them all first. None for a text without a word."""
+    their help: those whose title has them all first. None for a text without a word. `here`
+    is the layer the find was typed in ((section, opened), as a Target's; None: a section):
+    its rows come first, and only there are a `found_inside` layer's rows looked through."""
     typed = words(text)
     if not typed:
         return []
     titled, helped = [], []
     for target in targets:
+        if target.inside and (target.section, target.opened) != here:
+            continue
         if all(word in target.title_words for word in typed):
             titled.append(target)
         elif all(word in target.title_words or word in target.help_words for word in typed):
             helped.append(target)
-    return titled + helped
+    found = titled + helped
+    if here is None:
+        return found
+    ours = [target for target in found if (target.section, target.opened) == here]
+    if ours and ours[0].inside:  # names: those a typed word starts first ("ger": Germany)
+        ours.sort(key=lambda target: not all(f" {word}" in target.title_words for word in typed))
+    return ours + [target for target in found if (target.section, target.opened) != here]

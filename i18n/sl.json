@@ -272,7 +272,6 @@
   "Couldn't start: {why}. QiTV tries again every minute until {until}.": "Začetek ni uspel: {why}. QiTV poskusi znova vsako minuto do {until}.",
   "Couldn't write the channel matching to that file": "Ujemanja kanalov ni bilo mogoče zapisati v to datoteko",
   "Couldn’t reach the provider to fetch episodes.": "Ponudnik ni dosegljiv za pridobitev epizod.",
-  "Country:": "Država:",
   "Cover": "Naslovnica",
   "Create one on the API consumers page of your free OpenSubtitles account.": "Ustvarite ga na strani API consumers svojega brezplačnega računa OpenSubtitles.",
   "Credits and licenses": "Zasluge in licence",

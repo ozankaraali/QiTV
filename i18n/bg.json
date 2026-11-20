@@ -266,7 +266,6 @@
   "Couldn't start: {why}. QiTV tries again every minute until {until}.": "Не можа да започне: {why}. QiTV опитва отново всяка минута до {until}.",
   "Couldn't write the channel matching to that file": "Съпоставянето на канали не можа да се запише във файла",
   "Couldn’t reach the provider to fetch episodes.": "Няма връзка с доставчика за изтегляне на епизодите.",
-  "Country:": "Държава:",
   "Cover": "Обложка",
   "Create one on the API consumers page of your free OpenSubtitles account.": "Създайте такъв на страницата API consumers на безплатния си акаунт в OpenSubtitles.",
   "Credits and licenses": "Благодарности и лицензи",

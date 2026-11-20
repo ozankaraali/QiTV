@@ -266,7 +266,6 @@
   "Couldn't start: {why}. QiTV tries again every minute until {until}.": "Imeshindwa kuanza: {why}. QiTV hujaribu tena kila dakika hadi {until}.",
   "Couldn't write the channel matching to that file": "Imeshindwa kuandika ulinganishaji wa chaneli kwenye faili hiyo",
   "Couldn’t reach the provider to fetch episodes.": "Haikuweza kufikia mtoa huduma ili kuleta sehemu.",
-  "Country:": "Nchi:",
   "Cover": "Jalada",
   "Create one on the API consumers page of your free OpenSubtitles account.": "Unda moja kwenye ukurasa wa API consumers wa akaunti yako ya bure ya OpenSubtitles.",
   "Credits and licenses": "Shukrani na leseni",

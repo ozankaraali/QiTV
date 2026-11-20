@@ -278,7 +278,6 @@
   "Couldn't start: {why}. QiTV tries again every minute until {until}.": "تعذّر البدء: {why}. يحاول QiTV مجددًا كل دقيقة حتى {until}.",
   "Couldn't write the channel matching to that file": "تعذّرت كتابة مطابقة القنوات في هذا الملف",
   "Couldn’t reach the provider to fetch episodes.": "تعذّر الوصول إلى المزوّد لجلب الحلقات.",
-  "Country:": "الدولة:",
   "Cover": "الغلاف",
   "Create one on the API consumers page of your free OpenSubtitles account.": "أنشئ واحدًا في صفحة API consumers بحسابك المجاني في OpenSubtitles.",
   "Credits and licenses": "الإشادات والتراخيص",

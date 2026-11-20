@@ -269,7 +269,6 @@
   "Couldn't start: {why}. QiTV tries again every minute until {until}.": "Neizdevās sākt: {why}. QiTV mēģina katru minūti līdz {until}.",
   "Couldn't write the channel matching to that file": "Nevarēja ierakstīt kanālu saskaņošanu šajā failā",
   "Couldn’t reach the provider to fetch episodes.": "Neizdevās sasniegt nodrošinātāju, lai ielādētu sērijas.",
-  "Country:": "Valsts:",
   "Cover": "Vāks",
   "Create one on the API consumers page of your free OpenSubtitles account.": "Izveidojiet to sava bezmaksas OpenSubtitles konta lapā „API consumers”.",
   "Credits and licenses": "Pateicības un licences",

@@ -266,7 +266,6 @@
   "Couldn't start: {why}. QiTV tries again every minute until {until}.": "Hindi makapagsimula: {why}. Sinusubukan ulit ng QiTV bawat minuto hanggang {until}.",
   "Couldn't write the channel matching to that file": "Hindi naisulat ang pagtutugma ng channel sa file na iyon",
   "Couldn’t reach the provider to fetch episodes.": "Hindi maabot ang provider para kunin ang mga episode.",
-  "Country:": "Bansa:",
   "Cover": "Cover",
   "Create one on the API consumers page of your free OpenSubtitles account.": "Gumawa ng isa sa pahina ng API consumers ng libreng OpenSubtitles account mo.",
   "Credits and licenses": "Mga credit at lisensya",
