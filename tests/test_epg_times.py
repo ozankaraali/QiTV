@@ -179,5 +179,67 @@ class PastWindowTests(unittest.TestCase):
         self.assertEqual([p["title"] for p in raw], ["1h ago", "On now"])
 
 
+class UnreadableTimeTests(unittest.TestCase):
+    """2.12: a programme whose time can't be read is left out of its channel's guide; before,
+    one such entry emptied the whole guide (now and next, the banner, catch-up, and the
+    airings a series recording is due by)."""
+
+    def manager(self, source, kind, guide):
+        directory = tempfile.TemporaryDirectory()
+        self.addCleanup(directory.cleanup)
+        config = SimpleNamespace(
+            epg_source=source,
+            epg_list_window_hours=24,
+            xmltv_channel_map=MultiKeyDict(),
+            get_config_dir=lambda: directory.name,
+        )
+        provider = {"type": kind, "name": "P", "url": "http://panel.test", "username": "u"}
+        manager = EpgManager(config, SimpleNamespace(current_provider=provider))
+        manager.epg = guide
+        return manager
+
+    def xmltv_titles(self, at, start):
+        """The guide's titles with programme `at`'s start written as `start`."""
+        now = datetime.now(timezone.utc).replace(second=0, microsecond=0)
+        written = "%Y%m%d%H%M%S +0000"
+        entries = [
+            {
+                "@start": (now + timedelta(hours=h)).strftime(written),
+                "@stop": (now + timedelta(hours=h + 1)).strftime(written),
+                "title": f"P{h}",
+            }
+            for h in range(4)
+        ]
+        entries[at] = dict(entries[at], **{"@start": start})
+        guide = MultiKeyDict()
+        guide[("ch1",)] = entries
+        found = programmes_for_channel(self.manager("URL", "M3UPLAYLIST", guide), CHANNEL, now)
+        return [p.title for p in found]
+
+    def test_an_xmltv_time_it_cant_read_leaves_that_programme_out(self):
+        self.assertEqual(self.xmltv_titles(2, "2026-11-20T10:30:00Z"), ["P0", "P1", "P3"])
+        self.assertEqual(self.xmltv_titles(0, "garbage"), ["P1", "P2", "P3"])
+        self.assertEqual(self.xmltv_titles(3, "garbage"), ["P0", "P1", "P2"])
+        self.assertEqual(self.xmltv_titles(0, "2026-11-20 10:30:00"), ["P1", "P2", "P3"])
+
+    def test_a_portal_time_it_cant_read_leaves_that_programme_out(self):
+        now = datetime.now().astimezone().replace(second=0, microsecond=0)
+        written = "%Y-%m-%d %H:%M:%S"
+        entries = [
+            {
+                "time": (now + timedelta(hours=h)).strftime(written),
+                "time_to": (now + timedelta(hours=h + 1)).strftime(written),
+                "name": f"S{h}",
+            }
+            for h in range(3)
+        ]
+        broken = {"time": "0000-00-00 00:00:00", "time_to": "0000-00-00 00:00:00", "name": "X"}
+        guide = MultiKeyDict()
+        guide[("7",)] = [entries[2], broken, entries[0], {"name": "No time"}, entries[1]]
+        manager = self.manager("STB", "STB", guide)
+        found = programmes_for_channel(manager, {"id": "7"}, now)
+        self.assertEqual([p.title for p in found], ["S0", "S1", "S2"])
+
+
 if __name__ == "__main__":
     unittest.main()
