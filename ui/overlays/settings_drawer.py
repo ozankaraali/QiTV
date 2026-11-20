@@ -16,8 +16,9 @@ end. In a layer the left column lists the rows the layer is one of, the opened o
 the drawer marks its path; there only the rows that open a layer take the highlight, and a
 click on another goes back up to it. A layer (or a section) without rows says its
 `empty_text` and the keys stay on the left. Only the right column's focused row shows its
-help under it, two lines at most; a note cut short at its row's end shows there whole instead
-(a check's answer). Where everything goes is ui/overlays/settings_layout.py's.
+help under it, two lines at most (three in a small window); a note cut short at its row's end
+shows there whole instead (a check's answer). Where everything goes is
+ui/overlays/settings_layout.py's.
 
 It changes nothing itself: a step is `stepped(key, ±1)`, an action (a card's row too)
 `chosen(key)`, a text kept `edited(key, text)`, and backing out of the sections `closed`; the

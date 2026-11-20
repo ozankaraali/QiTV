@@ -6,7 +6,10 @@ row's muted sub line ("Xtream · in use"); at its right end, by the row's kind, 
 ‹ value › (a value too wide for its room wraps onto a second line too), a text row's value
 (the field it is edited in, while it is, with its Paste at the field's end), an info row's
 value or a row's note ("answered 2 min ago"), and the › of a row that opens; under a focused
-row, its help. Geometry only: the overlay keeps the state and paints.
+row, its help. In a small window (640×360) the columns go on shrinking with the window while
+the fonts stop at their floor (MIN_FONT_PX): a title, a stepper's value and a help then take a
+line more each before they elide, and a value's word never elides while the title can wrap to
+give it room. Geometry only: the overlay keeps the state and paints.
 """
 
 from __future__ import annotations
@@ -38,7 +41,7 @@ from ui.overlays.drawer_look import (
     column_widths,
 )
 from ui.overlays.guide import wrap_lines
-from ui.overlays.painting import STEP_ICON_U, Units
+from ui.overlays.painting import MIN_FONT_PX, STEP_ICON_U, Units
 
 LEFT, RIGHT = "left", "right"
 HEAD_TOP_U = 1.0  # the lists start this far under the header row (the drawer's right column)
@@ -190,16 +193,27 @@ def last_first(heights: list[float], room: float) -> int:
     return min(first, max(0, len(heights) - 1))
 
 
+def most_lines(un: Units, font_u: float, most: int) -> int:
+    """How many lines a text set `font_u` tall may take: `most`, and one more while that font
+    is held at its floor (MIN_FONT_PX) in a small window, where the columns keep shrinking
+    with the window: the text is wider for its room there than the layout is made for. A
+    window wide enough for every font (1280, 1600) is laid out as before."""
+    return most + 1 if un.px(font_u) < MIN_FONT_PX else most
+
+
 def help_lines(help_text: str, note: str, un: Units, width: float) -> list[str]:
-    """The help under a focused row, two lines at most (the last elided), its restart `note`
-    after it; when both do not fit, the note keeps the last line to itself."""
+    """The help under a focused row, two lines at most (three in a small window: most_lines),
+    the last elided, its restart `note` after it; when both do not fit, the note keeps the
+    last lines it needs to itself (all but the first), the help the lines before it."""
     font = un.font(HELP_FONT_U)
     text = " ".join(part for part in (help_text, note) if part)
     if not text:
         return []  # a row without help keeps its height when focused
-    lines = wrap(text, font, width, HELP_LINES)
+    most = most_lines(un, HELP_FONT_U, HELP_LINES)
+    lines = wrap(text, font, width, most)
     if help_text and note and not whole(lines, text):
-        lines = wrap(help_text, font, width, HELP_LINES - 1) + wrap(note, font, width, 1)
+        notes = wrap(note, font, width, most - 1)
+        lines = wrap(help_text, font, width, most - len(notes)) + notes
     return lines
 
 
@@ -219,14 +233,17 @@ def steps_width(
     shown, when that does. Else the title wraps and the value keeps its widest width within
     VALUE_SHARE of the row, or what the title leaves (at least that share); a value wider
     than that wraps there, as a title does ("Auf einem / 4K-Bildschirm"), onto VALUE_LINES
-    lines at most, the last elided, and is as wide as its widest line."""
+    lines at most (a line more in a small window: most_lines), the last elided, and is as wide
+    as its widest line. A word of the value wider than that room ("Sağlayıcının" at 640)
+    widens it, the title wrapping on what is left, as narrow as its own widest word."""
     font = un.font(VALUE_FONT_U)
     fm = QFontMetricsF(font)
     step = max(float(un.px(STEP_U)), fm.height())  # the font stops at a floor, u does not
     gap = float(un.px(STEP_GAP_U))
     shown = fm.horizontalAdvance(value)
     widest = max([shown] + [fm.horizontalAdvance(choice) for choice in choices])
-    title_w = math.ceil(QFontMetricsF(un.font(TITLE_FONT_U)).horizontalAdvance(title))
+    title_fm = QFontMetricsF(un.font(TITLE_FONT_U))
+    title_w = math.ceil(title_fm.horizontalAdvance(title))
     least = 2 * step + 2 * gap
     left_over = room - TITLE_GAP_U * un.u - title_w
     share = room * VALUE_SHARE
@@ -237,7 +254,12 @@ def steps_width(
     if least + widest <= share:
         return least + widest, step, gap, [value]
     most = max(least, left_over, share) - least  # the value's room
-    lines = wrap(value, font, most, VALUE_LINES) if shown > most else []
+    word = max((fm.horizontalAdvance(part) for part in value.split()), default=0.0)
+    if word > most:  # the title wraps instead of the word eliding
+        title_word = max((title_fm.horizontalAdvance(part) for part in title.split()), default=0.0)
+        most = max(most, min(word, room - TITLE_GAP_U * un.u - math.ceil(title_word) - least))
+    count = most_lines(un, VALUE_FONT_U, VALUE_LINES)
+    lines = wrap(value, font, most, count) if shown > most else []
     if not lines:  # it fits (or there is no room at all: it elides)
         return least + min(shown, most), step, gap, [value]
     return least + max(fm.horizontalAdvance(line) for line in lines), step, gap, lines
@@ -301,7 +323,7 @@ def place(
         end = tail_right - tail_w - title_gap if tail_w else tail_right
     title_font = un.font(TITLE_FONT_U)
     title_w = max(0.0, end - x)
-    titles = wrap(title, title_font, title_w, TITLE_LINES)
+    titles = wrap(title, title_font, title_w, most_lines(un, TITLE_FONT_U, TITLE_LINES))
     spacing = QFontMetricsF(title_font).lineSpacing()
     sub = ""
     sub_h = 0.0

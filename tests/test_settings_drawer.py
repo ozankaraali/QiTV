@@ -522,17 +522,73 @@ class SettingsDrawerTests(unittest.TestCase):
                     self.assertEqual(" ".join(lines).split(), translate(row.help).split())
 
     def test_the_restart_note_keeps_its_line_in_a_small_window(self):
-        # A help too long to share two lines with the note: the note keeps the last one.
+        # A help too long to share its three lines (a small window's) with the note: the note
+        # keeps the last one, whole.
         self.use(*make(640, 360))
-        help_text = "Lets the graphics chip decode the video, so that the processor does less."
+        help_text = (
+            "Lets the graphics chip decode the video, so that the processor does less and the"
+            " fans of a small computer stay quiet while a film or a channel plays."
+        )
         row = Row("long", "Long", help_text, ON_OFF, True, restart=True)
         self.drawer.open_at((Section("s", "S", rows=(row,)),))
         self.drawer.right()
         self.drawer.grab()
         lines = self.drawer._box("right", 0).help
-        self.assertEqual(len(lines), 2)
-        self.assertTrue(lines[0].endswith("…"), lines)
-        self.assertTrue(lines[-1].startswith("Applies"), lines)
+        self.assertEqual(len(lines), 3)
+        self.assertTrue(lines[1].endswith("…"), lines)
+        self.assertEqual(lines[-1], translate(RESTART_NOTE))
+
+    def test_a_small_window_gives_a_help_a_title_and_a_value_a_line_more(self):
+        # At 640×360 the columns shrink with the window but the fonts stop at their floor:
+        # a help (its restart note too), a title and a stepper's value take a third line
+        # before they elide, and a value's long word widens its room, the title wrapping
+        # instead. A window wide enough for every font keeps two lines (1280, 1600).
+        for width in (1280, 1600):
+            un = ui_units(width)
+            for font_u, most in (
+                (HELP_FONT_U, settings_layout.HELP_LINES),
+                (TITLE_FONT_U, settings_layout.TITLE_LINES),
+                (VALUE_FONT_U, settings_layout.VALUE_LINES),
+            ):
+                self.assertEqual(settings_layout.most_lines(un, font_u, most), most, width)
+        self.addCleanup(i18n.set_language, "en")
+        self.assertEqual(i18n.set_language("tr"), "tr")
+        self.use(*make(640, 360))
+        self.drawer.open_at(sections("Darwin"), m.GENERAL)
+        self.drawer.right()  # Language: "QiTV'nin menülerinin ve metinlerinin dili." + restart
+        self.drawer.grab()
+        lines = self.drawer._box("right", 0).help
+        self.assertEqual(len(lines), 3, lines)
+        language = next(s for s in sections("Darwin") if s.key == m.GENERAL).rows[0]
+        self.assertEqual(" ".join(lines).split(), tip(language).split())  # whole
+        advanced = next(s for s in sections("Darwin") if s.key == m.ADVANCED)
+        self.drawer.open_at(sections("Darwin"), m.ADVANCED)
+        self.drawer.grab()
+        index = [r.key for r in advanced.rows].index("detailed_log")
+        title = translate(advanced.rows[index].text)  # "Ayrıntılı günlük (sorun gidermek için)"
+        titles = self.drawer._box("right", index).titles
+        self.assertEqual(len(titles), 3, titles)
+        self.assertTrue(whole(titles, title), titles)
+        source = Row(
+            "source",
+            "Rehber kaynağı",
+            "",
+            (m.Choice("stb", "Sağlayıcının kendi rehberi", literal=True),),
+            "stb",
+            literal=True,
+        )
+        self.drawer.open_at((Section("s", "S", rows=(source,)),))
+        self.drawer.grab()
+        box = self.drawer._box("right", 0)
+        self.assertTrue(whole(box.values, "Sağlayıcının kendi rehberi"), box.values)
+        value_fm = QFontMetricsF(ui_units(640).font(VALUE_FONT_U))
+        title_fm = QFontMetricsF(ui_units(640).font(TITLE_FONT_U))
+        for line in box.values:
+            self.assertLessEqual(value_fm.horizontalAdvance(line), box.value.width() + 0.5)
+        self.assertTrue(whole(box.titles, "Rehber kaynağı"), box.titles)
+        for line in box.titles:
+            self.assertLessEqual(title_fm.horizontalAdvance(line), box.title.width() + 0.5)
+        self.assertLessEqual(box.title.right(), box.less.left() + 0.5)
 
     def test_a_value_gives_way_to_its_title_in_a_small_window(self):
         # "Mouse wheel  ‹ Volume ›": the column sized for "Change channel" would cut the title.
@@ -737,20 +793,23 @@ class SettingsDrawerTests(unittest.TestCase):
                     self.assertTrue(inked(image, part), (part, box.values))
                 point = box.value.center()
                 self.assertEqual(self.drawer.tooltip_at(point), tip(playback_rows()[index]))
-        # Past two lines, it elides (a small window).
+        # Past its lines, it elides (a small window: three).
         i18n.set_language("en")
         self.use(*make(640, 360))
-        text = "A value of many words that cannot fit in two short lines at all"
+        text = (
+            "A value of many words that cannot fit in three short lines at all, not even in a"
+            " window much larger than this one"
+        )
         long = Row("long", "Long", "", (m.Choice("a", text),), "a")
         self.drawer.open_at((Section("s", "S", rows=(long,)),))
         self.drawer.grab()
         box = self.drawer._box("right", 0)
-        self.assertEqual(len(box.values), 2, box.values)
+        self.assertEqual(len(box.values), 3, box.values)
         self.assertTrue(box.values[-1].endswith("…"), box.values)
         small = QFontMetricsF(ui_units(640).font(VALUE_FONT_U))
         for line in box.values:
             self.assertLessEqual(small.horizontalAdvance(line), box.value.width() + 0.5)
-        self.assertLessEqual(2 * small.lineSpacing(), box.line.height())
+        self.assertLessEqual(3 * small.lineSpacing(), box.line.height())
         self.assertIn(text, self.drawer.tooltip_at(box.value.center()))
 
     def test_a_parent_row_on_the_left_opens_its_own_layer(self):
