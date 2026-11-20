@@ -561,6 +561,24 @@ class CardsTests(unittest.TestCase):
         self.run_check(Outcome(True))
         self.assertEqual(self.saved("Panel"), {**PANEL, "url": "http://panel.test:8081"})
 
+    def test_a_pasted_file_link_leaves_an_xtream_address_its_server(self):
+        # The same host's film or page (no provider link): its path is no panel's, so the
+        # provider keeps its server (the panel answered at its root all along); a panel's own
+        # path stays, an API file named at its end goes.
+        for typed, kept in (
+            ("http://panel.test:8080/media/film.mp4", "http://panel.test:8080"),
+            ("http://panel.test:8080/xc/player_api.php", "http://panel.test:8080/xc"),
+            ("http://panel.test:8080/xc", "http://panel.test:8080/xc"),
+        ):
+            with self.subTest(typed=typed):
+                self.cards.edit("Panel")
+                self.type_text(pc.URL, typed, at_once=True)
+                self.press(pc.CHECK)
+                self.assertFalse(self.question.isVisible())  # the same server and account
+                provider, _ssl, _password = self.run_check(Outcome(True))
+                self.assertEqual(provider["url"], kept)  # what was checked
+                self.assertEqual(self.saved("Panel"), {**PANEL, "url": kept})
+
     def test_a_new_password_saves_without_asking(self):
         self.cards.edit("Panel")
         self.type_text(pc.PASSWORD, "newpass")

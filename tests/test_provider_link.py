@@ -3,7 +3,14 @@ is tests/test_provider_cards.py's). Fictional hosts."""
 
 import unittest
 
-from services.provider_link import M3U, STB, XTREAM, ProviderLink, parse_provider_link
+from services.provider_link import (
+    M3U,
+    STB,
+    XTREAM,
+    ProviderLink,
+    parse_provider_link,
+    xtream_address,
+)
 
 PANEL = "http://panel.example.test:8080"
 
@@ -107,6 +114,29 @@ class ParseTests(unittest.TestCase):
         for text, password in cases.items():
             with self.subTest(text=text):
                 self.assertEqual(parse_provider_link(text).password, password)
+
+
+class XtreamAddressTests(unittest.TestCase):
+    def test_a_file_path_is_no_panels(self):
+        # An Xtream address typed or pasted that is no link: a file's path (a film, a page) is
+        # no panel's, so only its server is kept; a panel served under a path keeps it, and an
+        # API file at its end goes, with its query.
+        cases = {
+            f"{PANEL}/media/film.mp4": PANEL,
+            f"{PANEL}/index.html?lang=en": PANEL,
+            f"{PANEL}/xc/clip.MKV#t=3": PANEL,
+            f"{PANEL}/xc/player_api.php": f"{PANEL}/xc",
+            f"{PANEL}/get.php?type=m3u": PANEL,
+            f"{PANEL}/xc": f"{PANEL}/xc",  # as typed
+            f"{PANEL}/xc/": f"{PANEL}/xc/",
+            f"{PANEL}/v1.2": f"{PANEL}/v1.2",  # a folder's dot is no file's
+            PANEL: PANEL,
+            "https://[::1]:8080/a/film.mp4": "https://[::1]:8080",
+            "words, not an address": "words, not an address",
+        }
+        for text, kept in cases.items():
+            with self.subTest(text=text):
+                self.assertEqual(xtream_address(text), kept)
 
 
 if __name__ == "__main__":
