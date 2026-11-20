@@ -40,6 +40,7 @@ from services.settings_model import (
     ADD_PROVIDER,
     DANGER,
     FREE_CHANNELS,
+    FREE_RADIO,
     INFO,
     OPENS,
     PROVIDERS,
@@ -261,13 +262,15 @@ class LinksTests(unittest.TestCase):
         self.settings.open(PROVIDERS)
         providers = [layer_key("Lists"), layer_key("Panel")]
         self.assertEqual(
-            [row.key for row in self.shown()], providers + [ADD_PROVIDER, FREE_CHANNELS]
+            [row.key for row in self.shown()],
+            providers + [ADD_PROVIDER, FREE_CHANNELS, FREE_RADIO],
         )
         # The first link that plays: its row after the providers', at once while Settings shows.
         self.controller.linkPlayed.emit(item_of(LIVE_URL, "Harbour News"), LIVE, LIVE_URL)
         rows = self.shown()
         self.assertEqual(
-            [row.key for row in rows], providers + [LINKS, ADD_PROVIDER, FREE_CHANNELS]
+            [row.key for row in rows],
+            providers + [LINKS, ADD_PROVIDER, FREE_CHANNELS, FREE_RADIO],
         )
         self.assertEqual(self.titles()[2], "Network streams")
         self.assertEqual((rows[2].kind, rows[2].sub), (OPENS, "1 link"))

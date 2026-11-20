@@ -80,17 +80,21 @@ class SettingsModelTests(unittest.TestCase):
         providers = m.sections("Linux", given)[0]
         self.assertEqual(providers.key, m.PROVIDERS)
         self.assertEqual(
-            [row.key for row in providers.rows], ["provider/A", m.ADD_PROVIDER, m.FREE_CHANNELS]
+            [row.key for row in providers.rows],
+            ["provider/A", m.ADD_PROVIDER, m.FREE_CHANNELS, m.FREE_RADIO],
         )
-        add, free = providers.rows[1:]
+        add, free, radio = providers.rows[1:]
         # As the channel list names them, each with its ＋ painted in the accent (2.12).
         self.assertEqual((add.text, add.kind, add.icon), ("Add provider", m.ACTION, "plus"))
         self.assertEqual((free.text, free.kind, free.icon), ("Free channels…", m.ACTION, "plus"))
-        for row in (add, free):
+        self.assertEqual((radio.text, radio.kind, radio.icon), ("Free radio…", m.ACTION, "plus"))
+        self.assertIn("radio-browser.info", radio.help)  # 2.13: the source is named
+        for row in (add, free, radio):
             self.assertTrue(row.help, row.key)
             self.assertLessEqual(len(row.help), 90, row.key)
         self.assertEqual(
-            [row.key for row in m.sections("Linux")[0].rows], [m.ADD_PROVIDER, m.FREE_CHANNELS]
+            [row.key for row in m.sections("Linux")[0].rows],
+            [m.ADD_PROVIDER, m.FREE_CHANNELS, m.FREE_RADIO],
         )
         # A literal choice is shown as it is given (a number, a text in the language already).
         self.assertEqual(m.Choice(3, "3", literal=True).shown(), "3")

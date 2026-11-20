@@ -13,7 +13,7 @@ from PySide6.QtCore import QObject, Signal
 import orjson as json
 import tzlocal
 
-from services import free_channels, provider_cache
+from services import free_channels, free_radio, provider_cache
 from services.atomic_write import atomic_write, set_aside
 from services.catchup import mark_stb_archives
 from services.lazy_import import lazy_module
@@ -179,6 +179,7 @@ class ProviderManager(QObject):
         if ptype == "M3UPLAYLIST" and "itv" in cache:
             # Cached before "A;B" group titles were split: split now, from the cache.
             cache["itv"] = split_cached_groups(cache["itv"])
+            free_radio.retitle(cache["itv"])  # Free radio's groups in the start's language
             order_cached_groups(cache["itv"])  # in the language's alphabet, case aside
         live = cache.get("itv")
         if ptype == "STB" and isinstance(live, dict):

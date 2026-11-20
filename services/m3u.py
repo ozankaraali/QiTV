@@ -2,9 +2,10 @@ from functools import cmp_to_key
 import logging
 import re
 import sys
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Union
 from urllib.parse import unquote, urlparse, urlsplit
 
+from services import free_radio, surrogates
 from services.catchup import SOURCE_KEY, TYPE_KEY, m3u_archive_fields, playlist_fields
 from services.i18n import N_
 
@@ -27,6 +28,7 @@ PLAYLIST_SOURCE_KEY = "catchup_source"  # the #EXTM3U line's template, beside th
 
 # A channel's link: any "scheme://" line (http, udp, rtp, rtsp, rtmp, mms…).
 _LINK = re.compile(r"[A-Za-z][A-Za-z0-9+.-]*://")
+_UTF8_BOM = b"\xef\xbb\xbf"
 
 
 def _extinf_name(line: str) -> Optional[str]:
@@ -189,6 +191,89 @@ def parse_m3u(data: str, categorize: bool = False):
     if defaults.get("catchup-source"):
         result[PLAYLIST_SOURCE_KEY] = defaults["catchup-source"]
     return result
+
+
+def stations_in(raw: Union[bytes, str], directory: bool = False) -> Optional[List[Any]]:
+    """The stations of radio-browser.info's station JSON (Free radio, 2.13): a list of objects
+    with a `url_resolved`; None for anything else (a playlist, other JSON, no JSON). From the
+    directory itself (`directory`: free_radio.is_directory_url) any list is its stations, an
+    empty one too (a country with none)."""
+    if isinstance(raw, bytes):
+        raw = raw.lstrip()
+        if raw.startswith(_UTF8_BOM):
+            raw = raw[len(_UTF8_BOM) :].lstrip()
+        if raw[:1] != b"[":
+            return None
+    else:
+        raw = raw.lstrip("\ufeff \t\r\n")
+        if raw[:1] != "[":
+            return None
+    try:
+        data = surrogates.loads(raw)
+    except ValueError:  # orjson's JSONDecodeError is one
+        return None
+    if not isinstance(data, list):
+        return None
+    if directory:
+        return data
+    first = data[0] if data else None
+    return data if isinstance(first, dict) and "url_resolved" in first else None
+
+
+def parse_stations(stations: List[Any]) -> Dict:
+    """The directory's stations as a categorized playlist (parse_m3u's, categorize=True): each
+    a channel as an M3U line makes it (its name, its stream `url_resolved`, else its `url`, its
+    `favicon` for a logo), in the directory's order (the most played first). One country's are
+    grouped by genre (free_radio.genre_of), stations of more than one country by country; the
+    groups' ids are English and their titles in the active language, in its alphabet (a cached
+    list's are made so again: free_radio.retitle)."""
+    items: List[Dict] = []
+    left_out = 0
+    countries = {
+        str(s.get("countrycode") or "").strip().upper() for s in stations if isinstance(s, dict)
+    }
+    by_country = len(countries - {""}) > 1
+    for station in stations:
+        if not isinstance(station, dict):
+            continue
+        link = _station_link(station)
+        if not link:
+            left_out += 1  # never logged: a link may hold an account
+            continue
+        if by_country:
+            group = free_radio.country_of(station)
+        else:
+            group = free_radio.genre_of(station.get("tags"))
+        items.append(
+            {
+                "id": len(items) + 1,
+                "group": group,
+                "xmltv_id": None,
+                "name": str(station.get("name") or "").strip() or _link_name(link),
+                "logo": str(station.get("favicon") or "").strip() or None,
+                "user_agent": None,
+                "cmd": link,
+            }
+        )
+    if left_out:
+        logger.warning("%d stations of the radio list have no link: they were left out", left_out)
+    result = _build_categorized_structure(items)
+    result[free_radio.RADIO_KEY] = True
+    free_radio.retitle(result)
+    order_cached_groups(result)  # by the titles shown
+    return result
+
+
+def _station_link(station: Dict) -> str:
+    """A station's stream (its `url_resolved`, else its `url`), "" when it has no link."""
+    for key in ("url_resolved", "url"):
+        link = str(station.get(key) or "").strip()
+        if _LINK.match(link):
+            try:
+                return urlparse(link).geturl()
+            except ValueError:  # an unbalanced bracket in its host
+                continue
+    return ""
 
 
 def split_group_title(title: Optional[str]) -> List[str]:

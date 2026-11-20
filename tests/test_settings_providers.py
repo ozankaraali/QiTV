@@ -26,6 +26,7 @@ from services.settings_model import (
     ADD_PROVIDER,
     DANGER,
     FREE_CHANNELS,
+    FREE_RADIO,
     INFO,
     OPENS,
     PROVIDER_PREFIX,
@@ -114,6 +115,7 @@ class FakeWindow:
         self.events = []
         self.toasts = []
         self.free = []
+        self.radio = []
         self.scheduled = set()
         self.rows = None  # the ProviderRows, once built
         self.catalogs = SimpleNamespace(created=lambda: [], catalog=None)
@@ -133,6 +135,9 @@ class FakeWindow:
 
     def show_free_channels(self, global_pos):
         self.free.append(global_pos)
+
+    def show_free_radio(self, global_pos):
+        self.radio.append(global_pos)
 
     def providers_saved(self):
         self.events.append("providers_saved")
@@ -247,14 +252,14 @@ class ProvidersTests(unittest.TestCase):
         rows = self.shown()
         self.assertEqual(
             [row.key for row in rows],
-            [layer_key("Lists"), layer_key("Panel"), ADD_PROVIDER, FREE_CHANNELS],
+            [layer_key("Lists"), layer_key("Panel"), ADD_PROVIDER, FREE_CHANNELS, FREE_RADIO],
         )
         self.assertEqual(
             [title_of(Item(row.key, row.text, row=row)) for row in rows],
-            ["Lists", "Panel", "Add provider", "Free channels…"],
+            ["Lists", "Panel", "Add provider", "Free channels…", "Free radio…"],
         )
-        self.assertEqual([row.kind for row in rows], [OPENS, OPENS, ACTION, ACTION])
-        self.assertEqual([row.icon for row in rows], ["", "", "plus", "plus"])
+        self.assertEqual([row.kind for row in rows], [OPENS, OPENS, ACTION, ACTION, ACTION])
+        self.assertEqual([row.icon for row in rows], ["", "", "plus", "plus", "plus"])
         self.assertEqual([row.sub for row in rows[:2]], ["M3U playlist · in use", "Xtream"])
         self.assertEqual(
             [kind_text(kind) for kind in ("STB", "JELLYFIN", "EMBY", "M3USTREAM", "ODD")],
@@ -325,6 +330,15 @@ class ProvidersTests(unittest.TestCase):
         self.assertTrue(line.adjusted(0, 0, 0, 1).contains(point), (line, point))
         self.assertEqual(self.drawer.row_anchor(FREE_CHANNELS), self.window.free[0])
         self.assertTrue(self.settings.visible())  # the menu pops up over Settings
+
+    def test_free_radio_opens_its_menu_at_the_row(self):
+        self.settings.open(PROVIDERS)
+        self.key(Action.NAV_RIGHT)
+        self.move_to(FREE_RADIO)
+        self.key(Action.NAV_ACTIVATE)
+        self.assertEqual(self.window.free, [])
+        self.assertEqual(self.window.radio, [self.drawer.row_anchor(FREE_RADIO)])
+        self.assertTrue(self.settings.visible())
 
     def test_address_and_login_asks_for_its_card(self):
         self.on("Panel", "login")
@@ -890,6 +904,17 @@ class ProvidersWindowTests(WindowCase):
         self.assertEqual(
             menu.call_args.args[1], self.window.settings_drawer.row_anchor(FREE_CHANNELS)
         )
+
+    def test_free_radio_row_opens_the_windows_menu(self):
+        self.open_providers()
+        controller = self.window.controller
+        controller.handle(Action.NAV_RIGHT)
+        self.down_to(FREE_RADIO)
+        with mock.patch("ui.tv_window.show_free_radio_menu") as menu:
+            controller.handle(Action.NAV_ACTIVATE)
+        menu.assert_called_once()
+        self.assertEqual(menu.call_args.args[1], self.window.settings_drawer.row_anchor(FREE_RADIO))
+        self.assertEqual(menu.call_args.args[2], self.window.add_free_radio)
 
 
 if __name__ == "__main__":

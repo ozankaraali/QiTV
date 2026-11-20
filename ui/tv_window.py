@@ -71,7 +71,7 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from services import favorites, free_channels, secure_dns, system_open, thread_cleanup
+from services import favorites, free_channels, free_radio, secure_dns, system_open, thread_cleanup
 from services.account_check import AccountChecks
 from services.browsed_catalog import BrowsedCatalog
 from services.casting import CastDevices, LibVlcDiscovery
@@ -155,7 +155,10 @@ from ui.captions_controller import CaptionsController
 from ui.desktop_pip import COVERED, DESKTOP, DesktopPip, corner_rect
 from ui.export_flow import ExportFlow
 from ui.find_session import FindSession
-from ui.free_channels_menu import show_menu as show_free_channels_menu
+from ui.free_channels_menu import (
+    show_menu as show_free_channels_menu,
+    show_radio_menu as show_free_radio_menu,
+)
 from ui.grid_frame import GridFrame
 from ui.keymap import Action, as_int, resolve
 from ui.library.library_screen import LibraryScreen
@@ -1138,6 +1141,7 @@ class TVWindow(QMainWindow):
         self.library_page.nav.fullscreenRequested.connect(self.toggle_fullscreen)
         self.overlays.welcome.addRequested.connect(lambda: self.add_provider())  # the Add card
         self.overlays.welcome.freeRequested.connect(self.show_free_channels)
+        self.overlays.welcome.radioRequested.connect(self.show_free_radio)  # 2.13
         self.overlays.drawer.actionRequested.connect(self.menus.on_drawer_action)
         # Settings in the drawer (its Settings row and ⚙, Settings…): a step applies at once
         # (what takes effect beyond the config, through its hook); backing out of it from the
@@ -2991,10 +2995,22 @@ class TVWindow(QMainWindow):
     def add_free_channels(self, code: Optional[str]) -> None:
         """Add iptv-org's list (all countries, or `code`'s), select it and load it, as a provider
         added in Settings is; a provider with that URL is only switched to."""
-        if self._closing:
-            return
-        entry = free_channels.provider_entry(code)
-        name, existing = self._add_provider_entry(entry, free_channels.same_list)
+        if not self._closing:
+            self._add_free_list(free_channels.provider_entry(code), free_channels.same_list)
+
+    def show_free_radio(self, global_pos: QPoint) -> None:
+        """The Free radio… menu (2.13) under `global_pos`, as Free channels…'."""
+        if not self._closing:
+            show_free_radio_menu(self, global_pos, self.add_free_radio)
+
+    def add_free_radio(self, code: Optional[str]) -> None:
+        """Add radio-browser.info's list (2.13: all countries, or `code`'s) as add_free_channels
+        adds iptv-org's: a provider like any other."""
+        if not self._closing:
+            self._add_free_list(free_radio.provider_entry(code), free_radio.same_list)
+
+    def _add_free_list(self, entry: dict, same) -> None:
+        name, existing = self._add_provider_entry(entry, same)
         self.config_manager.selected_provider_name = name
         self.save_config()
         self.menus.rebuild_providers()

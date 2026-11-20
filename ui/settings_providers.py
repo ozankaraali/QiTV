@@ -2,7 +2,7 @@
 
 Providers lists each provider by its name (as the viewer gave it: never translated), its kind
 under it ("Xtream · in use" for the one the TV shows), then Network streams while a link is
-kept (ui.settings_links: never a provider), then ＋ Add provider and Free channels
+kept (ui.settings_links: never a provider), then ＋ Add provider, Free channels and Free radio
 (services.settings_model). A provider opens a layer of its own:
 
 - Name, edited in place: Enter or a click elsewhere renames it, never a keystroke; another
@@ -57,6 +57,7 @@ from services.settings_model import (
     ADD_PROVIDER,
     DANGER,
     FREE_CHANNELS,
+    FREE_RADIO,
     INFO,
     ON_OFF,
     OPENS,
@@ -183,7 +184,7 @@ def row_key(name: str, field: str) -> str:
 def _parsed(key: str) -> Optional[tuple[str, str, str]]:
     """(provider name, field, what follows: a hidden group's key) of a provider's row key;
     None for a key of no provider (the list's own rows)."""
-    if not key.startswith(PROVIDER_PREFIX) or key in (ADD_PROVIDER, FREE_CHANNELS):
+    if not key.startswith(PROVIDER_PREFIX) or key in (ADD_PROVIDER, FREE_CHANNELS, FREE_RADIO):
         return None
     parts = key[len(PROVIDER_PREFIX) :].split("/", 2) + ["", ""]
     return unquote(parts[0]), parts[1], unquote(parts[2])
@@ -483,6 +484,9 @@ class ProviderRows(QObject):
             return
         if row.key == FREE_CHANNELS:  # the window's menu, under the row
             self._window.show_free_channels(self._drawer.row_anchor(row.key))
+            return
+        if row.key == FREE_RADIO:  # 2.13: likewise
+            self._window.show_free_radio(self._drawer.row_anchor(row.key))
             return
         parsed = _parsed(row.key)
         if parsed is None or self._find(parsed[0]) is None:

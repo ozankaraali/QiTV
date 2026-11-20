@@ -190,7 +190,7 @@ class ProvidersMenuTests(WindowCase):
         menu = self.window.menus.providers_menu
         texts = [action.text() for action in menu.actions()]
         self.assertEqual(texts[0], PROVIDER_NAME)
-        self.assertEqual(texts[-2:], ["Add provider", "Free channels"])
+        self.assertEqual(texts[-3:-1], ["Add provider", "Free channels"])  # then Free radio
         free = self.entries()["Free channels"].menu()
         self.assertEqual(free.styleSheet(), "")  # the menu bar's own look
         self.assertEqual(free.actions()[0].text(), ALL_TEXT)
