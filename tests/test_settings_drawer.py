@@ -25,7 +25,7 @@ from services.settings_model import (
 )
 from ui.overlays.guide import wrap_lines
 from ui.overlays.painting import ui_units
-from ui.overlays.settings_drawer import HELP_FONT_U, INSET_U, SettingsDrawer
+from ui.overlays.settings_drawer import HELP_FONT_U, INSET_U, RESTART_NOTE, SettingsDrawer
 
 
 def make(width=1280, height=720, values=None):
@@ -43,6 +43,22 @@ def make(width=1280, height=720, values=None):
 
 def playback_rows():
     return next(s for s in sections("Darwin") if s.key == PLAYBACK).rows
+
+
+def playback_index(key):
+    return [r.key for r in playback_rows()].index(key)
+
+
+def tip(row):
+    """What hovering a row says when nothing of it is cut short: its help, and the restart
+    note of a row that applies only once QiTV starts again ("" for a section)."""
+    if row is None:
+        return ""
+    parts = (
+        translate(row.help) if row.help else "",
+        translate(RESTART_NOTE) if row.restart else "",
+    )
+    return " ".join(part for part in parts if part)
 
 
 class SettingsDrawerTests(unittest.TestCase):
@@ -164,9 +180,8 @@ class SettingsDrawerTests(unittest.TestCase):
         self.assertFalse(self.drawer.isVisible())
 
     def test_a_legacy_section_offers_the_old_window(self):
-        self.drawer.open_at(sections("Darwin"))
-        while self.drawer.path() != (GUIDE,):
-            self.drawer.move_by(1)
+        self.drawer.open_at(sections("Darwin"), GUIDE)
+        self.assertEqual(self.drawer.path(), (GUIDE,))
         self.drawer.right()
         self.assertEqual(self.drawer.focused_row().key, "legacy:guide")
         self.drawer.activate()
@@ -188,20 +203,59 @@ class SettingsDrawerTests(unittest.TestCase):
         self.assertEqual(self.steps, [("live_latency", 1), ("live_latency", -1)])
         self.assertEqual(self.drawer.focus_side(), "right")
 
-    def test_a_click_on_a_stepper_steps_on(self):
+    def test_a_click_on_an_unfocused_row_only_focuses_it(self):
+        # Its help shows first, so that a click never changes what was not read ("Play in"
+        # VLC by mistake); a click on the row now focused steps it on.
         self.drawer.open_at(sections("Darwin"), PLAYBACK)
         self.drawer.grab()
-        self.click(self.drawer.title_rect(1).center())
-        self.assertEqual(self.steps, [("hardware_decoding", 1)])
-        self.assertEqual(self.drawer.focused_row().key, "hardware_decoding")
+        index = playback_index("play_in")
+        self.click(self.drawer.title_rect(index).center())
+        self.assertEqual(self.steps, [])
+        self.assertEqual(self.drawer.focus_side(), "right")
+        self.assertEqual(self.drawer.focused_row().key, "play_in")
+        self.drawer.grab()
+        self.assertTrue(self.drawer._box("right", index).help)  # its help shows under it
+        self.click(self.drawer.title_rect(index).center())
+        self.assertEqual(self.steps, [("play_in", 1)])
+
+    def test_the_steps_of_an_unfocused_row_step_it_at_once(self):
+        self.drawer.open_at(sections("Darwin"), PLAYBACK)
+        self.drawer.grab()
+        index = playback_index("play_in")
+        self.click(self.drawer.step_rect(index, 1).center())
+        self.assertEqual(self.steps, [("play_in", 1)])
+        self.assertEqual(self.drawer.focused_row().key, "play_in")
+
+    def test_hovering_a_row_shows_its_help(self):
+        # The help of a row not focused, the restart note too; nothing steps.
+        self.drawer.open_at(sections("Darwin"), PLAYBACK)
+        self.drawer.grab()
+        rows = playback_rows()
+        for key in ("play_in", "hardware_decoding", "autoplay"):
+            index = playback_index(key)
+            tooltip = self.drawer.tooltip_at(self.drawer.title_rect(index).center())
+            self.assertEqual(tooltip, tip(rows[index]), key)
+            self.assertTrue(tooltip, key)
+        self.assertIn(translate(RESTART_NOTE), tip(rows[playback_index("hardware_decoding")]))
+        self.assertEqual(self.steps, [])
 
     def test_clicks_open_a_layer_and_choose_an_action(self):
+        # As a stepper: the first click focuses the row, the next one opens or acts.
         self.drawer.open_at(sections("Darwin"), PLAYBACK)
-        index = [r.key for r in playback_rows()].index("autoplay")
-        self.click(self.drawer.row_rect("right", index).center())
+        self.drawer.grab()
+        index = playback_index("autoplay")
+        self.click(self.drawer.title_rect(index).center())
+        self.assertEqual(self.drawer.path(), ("playback",))
+        self.assertEqual(self.drawer.focused_row().key, "autoplay")
+        self.drawer.grab()
+        self.click(self.drawer.title_rect(index).center())
         self.assertEqual(self.drawer.path(), ("playback", "autoplay"))
         self.drawer.open_at(sections("Darwin"), GUIDE)
-        self.click(self.drawer.row_rect("right", 0).center())
+        self.drawer.grab()
+        self.click(self.drawer.title_rect(0).center())
+        self.assertEqual(self.chosen, [])
+        self.drawer.grab()
+        self.click(self.drawer.title_rect(0).center())
         self.assertEqual(self.chosen, ["legacy:guide"])
 
     def test_a_click_on_a_section_shows_its_rows(self):
@@ -243,7 +297,9 @@ class SettingsDrawerTests(unittest.TestCase):
                     rect = self.drawer.row_rect(side, i)
                     self.assertFalse(rect.isEmpty(), (where, side, i))
                     point = self.drawer.title_rect(i).center() if side == "right" else rect.center()
-                    self.assertEqual(self.drawer.tooltip_at(point), "", (where, side, i))
+                    row = self.drawer._items(side)[i].row
+                    # Nothing cut short: only the help (a section has none).
+                    self.assertEqual(self.drawer.tooltip_at(point), tip(row), (where, side, i))
 
         everything = sections("Darwin")
         for section in everything:
@@ -272,16 +328,39 @@ class SettingsDrawerTests(unittest.TestCase):
         )
         self.assertLessEqual(self.drawer.title_rect(0).right(), self.drawer.step_rect(0, -1).left())
 
-    def test_a_double_click_steps_the_row_it_was_on_twice(self):
-        # The first press moves the help from Hardware video decoding to the row clicked, so
-        # the rows under it move: the second press is that row's, not the one now under it.
+    def test_a_double_click_on_an_unfocused_row_steps_that_row_once(self):
+        # The first press focuses the row clicked and moves the help from Hardware video
+        # decoding to it, so the rows under it move: the second press is a click on that row,
+        # now focused, not on the one now under the pointer.
         self.focus_on("hardware_decoding")
         self.drawer.grab()
         rect = self.drawer.row_rect("right", 3)  # Start with the last channel
         point = QPointF(self.drawer.title_rect(3).center().x(), rect.bottom() - 3)
         self.click(point)
+        self.assertEqual(self.steps, [])
+        self.double_click(point)
+        self.assertEqual(self.steps, [("start_with_last_channel", 1)])
+
+    def test_a_double_click_on_the_focused_row_steps_it_twice(self):
+        self.focus_on("start_with_last_channel")
+        self.drawer.grab()
+        point = self.drawer.title_rect(playback_index("start_with_last_channel")).center()
+        self.click(point)
         self.double_click(point)
         self.assertEqual(self.steps, [("start_with_last_channel", 1)] * 2)
+
+    def test_a_double_click_takes_an_action_once(self):
+        for focused in (False, True):
+            with self.subTest(focused=focused):
+                self.chosen.clear()
+                self.drawer.open_at(sections("Darwin"), GUIDE)
+                if focused:
+                    self.drawer.right()
+                self.drawer.grab()
+                point = self.drawer.title_rect(0).center()
+                self.click(point)
+                self.double_click(point)
+                self.assertEqual(self.chosen, ["legacy:guide"])
 
     def test_a_double_click_on_the_back_step_steps_back_twice(self):
         self.use(*make(640, 360))
@@ -360,8 +439,9 @@ class SettingsDrawerTests(unittest.TestCase):
         self.use(*make(640, 360))
         self.focus_on("mouse_wheel_action")
         self.drawer.grab()
-        index = [r.key for r in playback_rows()].index("mouse_wheel_action")
-        self.assertEqual(self.drawer.tooltip_at(self.drawer.title_rect(index).center()), "")
+        index = playback_index("mouse_wheel_action")
+        point = self.drawer.title_rect(index).center()
+        self.assertEqual(self.drawer.tooltip_at(point), tip(playback_rows()[index]))  # no title
 
     def test_a_click_over_the_picture_backs_out(self):
         self.drawer.open_at(sections("Darwin"), PLAYBACK)

@@ -20,10 +20,13 @@ Enter steps on; on another right-column row ← goes to the left column, and →
 layer or acts. On the left column → or Enter goes right, and ← is `back()`. `back()` goes one
 layer up: a layer, the rows it is one of, the sections, closed.
 
-The mouse: a click on a row focuses it, and on the right column does what Enter does (on ‹
-it steps back); a quick second click steps again. The wheel scrolls the column under the
-pointer. ‹ in the header and a click on the fade over the picture are `back()`. The mouse's
-Back and Forward buttons go on to the shell, as over the drawer.
+The mouse: a click on a row focuses it, so that its help shows before anything changes; a
+click on the right column's focused row does what Enter does, and ‹ or › step their row at
+once, focused or not. A double-click's second press is a click on the row the first one
+focused (an action is taken once). Hovering a row shows its help, the restart note too, as
+its tooltip. The wheel scrolls the column under the pointer. ‹ in the header and a click on
+the fade over the picture are `back()`. The mouse's Back and Forward buttons go on to the
+shell, as over the drawer.
 """
 
 from __future__ import annotations
@@ -170,7 +173,8 @@ def _whole(lines: list[str], text: str) -> bool:
 
 class SettingsDrawer(Overlay):
     accessible_name = SETTINGS_TITLE
-    stepped = Signal(str, int)  # a stepper's key, and -1 (‹, ←) or +1 (›, →, Enter, a click)
+    # A stepper's key, and -1 (‹, ←) or +1 (›, →, Enter, a click on it focused).
+    stepped = Signal(str, int)
     chosen = Signal(str)  # an action row's key (the legacy rows': "legacy:<section key>")
     closed = Signal()  # backed out of the sections (not when hidden otherwise)
 
@@ -194,9 +198,10 @@ class SettingsDrawer(Overlay):
         self._first = {LEFT: 0, RIGHT: 0}  # each column's first row in sight
         self._hover: Optional[tuple[str, int]] = None  # (column or _BACK, line)
         self._wheel = 0  # a wheel's turn not yet a whole row
-        # The last press: (column, row key, part), or (_BACK or _FADE, "", ""): a double-click's
-        # second press repeats it (_click_again).
-        self._pressed: Optional[tuple[str, str, str]] = None
+        # The last press: (column, row key, part, whether it stepped, opened or acted), or
+        # (_BACK or _FADE, "", "", True): a double-click's second press follows it
+        # (_click_again).
+        self._pressed: Optional[tuple[str, str, str, bool]] = None
         self._second_click = SecondClickGuard(self)
         parent.installEventFilter(self)
         self.hide()
@@ -451,13 +456,24 @@ class SettingsDrawer(Overlay):
         }
         return columns, areas
 
+    @staticmethod
+    def _help_parts(row: Row) -> tuple[str, str]:
+        """The row's help and its restart note, translated ("" for what it has not)."""
+        return (
+            translate(row.help) if row.help else "",
+            translate(RESTART_NOTE) if row.restart else "",
+        )
+
+    def _help_text(self, row: Row) -> str:
+        """The row's help, then its restart note, whole (its tooltip)."""
+        return " ".join(part for part in self._help_parts(row) if part)
+
     def _help_lines(self, row: Row, un: Units, width: float) -> list[str]:
         """The help under a focused row, two lines at most (the last elided). The restart note
         follows it; when both do not fit, the note keeps the last line to itself."""
         font = un.font(HELP_FONT_U)
-        help_text = translate(row.help) if row.help else ""
-        note = translate(RESTART_NOTE) if row.restart else ""
-        text = " ".join(part for part in (help_text, note) if part)
+        help_text, note = self._help_parts(row)
+        text = self._help_text(row)
         lines = _wrap(text, font, width, HELP_LINES)
         if help_text and note and not _whole(lines, text):
             lines = _wrap(help_text, font, width, HELP_LINES - 1) + _wrap(note, font, width, 1)
@@ -768,43 +784,55 @@ class SettingsDrawer(Overlay):
             return
         target, index, part = hit
         if target in (_BACK, _FADE):
-            self._pressed = (target, "", "")
+            self._pressed = (target, "", "", True)
             self._back_by_mouse()
             return
         if target == LEFT:
             self._click_left(index)
             return
         row = self._right_rows()[index]
-        self._pressed = (RIGHT, row.key, part)
+        focused = self._side == RIGHT and self._right == index
         self._side = RIGHT
         self._right = index
         self._reveal(RIGHT)
-        if part == "less":
-            self.stepped.emit(row.key, -1)
-        elif part != "help":
-            self._act(row)
+        self._pressed = (RIGHT, row.key, part, self._press(row, part, focused))
         self.update()
 
+    def _press(self, row: Row, part: str, focused: bool) -> bool:
+        """A click on the right column's `row`, the focused row now: ‹ or › step it, and its
+        line does what Enter does if it was `focused` before; else the click only focused it,
+        so that its help shows before anything changes (a click on the help does nothing).
+        True when it stepped, opened or acted."""
+        if part in ("less", "more"):
+            self.stepped.emit(row.key, -1 if part == "less" else 1)
+        elif part == "line" and focused:
+            self._act(row)
+        else:
+            return False
+        return True
+
     def _click_again(self) -> None:
-        """A double-click's second press: ‹ or the fade go up again, and a stepper the first
-        press stepped steps the same way again. Its row is found by its key, not under the
-        pointer: the first press moved the help to it, so the rows below it (and, in a small
-        window, its ‹ beside a value of another width) moved. Anything else is left alone: a
-        layer the first press opened, an action, a section."""
+        """A double-click's second press: ‹ or the fade go up again, else a click on the row
+        the first press was on, focused now: a row that only took the focus steps on, opens
+        or acts; a stepper the first press stepped steps the same way again. Its row is found
+        by its key, not under the pointer: the first press moved the help to it, so the rows
+        below it (and, in a small window, its ‹ beside a value of another width) moved. An
+        action is not taken twice, and a layer the first press opened or a section is left
+        alone."""
         pressed, self._pressed = self._pressed, None
         if pressed is None:
             return
-        target, key, part = pressed
+        target, key, part, did = pressed
         if target in (_BACK, _FADE):
             self._back_by_mouse()
             return
         rows = self._right_rows()
         index = next((i for i, row in enumerate(rows) if row.key == key), None)
-        if index is None or _kind(rows[index]) != "step" or part == "help":
+        if index is None or (did and _kind(rows[index]) != "step"):
             return
         self._side = RIGHT
         self._right = index
-        self.stepped.emit(key, -1 if part == "less" else 1)
+        self._press(rows[index], part, focused=True)
         self.update()
 
     def _back_by_mouse(self) -> None:
@@ -884,7 +912,9 @@ class SettingsDrawer(Overlay):
             self._scroll_by(LEFT if x < columns[LEFT].right() else RIGHT, -rows)
 
     def tooltip_at(self, pos: QPointF) -> str:
-        """‹ names its key; a line cut short ("…") says its title (and value) whole."""
+        """‹ names its key; a line cut short ("…") says its title (and value) whole; a row
+        says its help and its restart note (under it only while it is focused), so that they
+        can be read before a click."""
         hit = self._hit(pos)
         if hit is None or hit[0] == _FADE:
             return ""
@@ -904,6 +934,8 @@ class SettingsDrawer(Overlay):
             fm = QFontMetricsF(un.font(VALUE_FONT_U))
             if fm.horizontalAdvance(value) > box.value.width():
                 whole.append(value)
+        if item.row is not None and (help_text := self._help_text(item.row)):
+            whole.append(help_text)
         return "\n".join(whole)
 
     def hideEvent(self, event) -> None:
