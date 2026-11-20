@@ -8,7 +8,6 @@ the pure decision; the question itself is the UI's.
 from __future__ import annotations
 
 from services.provider_changes import normal_address
-from services.provider_types import is_media_server
 
 SAME = "SAME"
 OTHER_KIND = "OTHER_KIND"
@@ -37,8 +36,8 @@ def _text(provider: dict, key: str) -> str:
 
 def judge(old: dict, new: dict) -> str:
     """How `new` relates to `old`: SAME, OTHER_KIND (another type), OTHER_HOST (another
-    server; for a media server the host with the user name) or OTHER_ACCOUNT (the same
-    server with another user name, or a portal with another MAC). A password, a name or a
+    server) or OTHER_ACCOUNT (the same server with another user name, or a portal with
+    another MAC). A password, a name or a
     path after the host never decides."""
     if _kind(old) != _kind(new):
         return OTHER_KIND
@@ -48,7 +47,7 @@ def judge(old: dict, new: dict) -> str:
     if kind in _PLAYLISTS:
         return SAME
     if _text(old, "username").casefold() != _text(new, "username").casefold():
-        return OTHER_HOST if is_media_server(kind) else OTHER_ACCOUNT
+        return OTHER_ACCOUNT
     if kind == "STB" and _text(old, "mac").casefold() != _text(new, "mac").casefold():
         return OTHER_ACCOUNT
     return SAME
