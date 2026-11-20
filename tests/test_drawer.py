@@ -707,6 +707,25 @@ class DrawerTests(unittest.TestCase):
         self.assertEqual(self.actions, [OPEN_FILE_ROW, OPEN_FOLDER_ROW])
         self.assertEqual((self.nav.path, self.catalog.selected, self.library), (path, [], []))
 
+    def test_its_resume_point_opens_it_again_where_the_keys_were(self):
+        # Settings from ⚙ (TVController.make_way_for_settings): the list closed, then opened
+        # again with what resume_point() said, is as it was, the keys on either side.
+        for side in ("left", "right"):
+            with self.subTest(side):
+                self.nav.reset_to("live", "10")
+                self.drawer.open_drawer(focus_side=side)
+                self.drawer.move_by(1)  # off the row it opens on by itself
+                was = self.drawer.highlighted()
+                self.assertIsNotNone(was)
+                point = self.drawer.resume_point()
+                self.assertEqual(point[0], side)
+                self.drawer.close_drawer()
+                path = list(self.nav.path)
+                self.drawer.open_drawer(focus_key=point[1], focus_side=point[0])
+                self.assertEqual(self.nav.path, path)
+                self.assertEqual(self.drawer.focus_side, side)
+                self.assertEqual(self.drawer.highlighted(), was)
+
     def test_arrows_and_enter_reach_settings_and_add_provider(self):
         self.open_on_the_sources()
         path = self.nav.path
