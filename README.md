@@ -119,7 +119,7 @@ These are also in the app under Help → Keyboard Shortcuts. <kbd>Ctrl/⌘</kbd>
 | <kbd>Tab</kbd> | The mixer's other row (while it shows) |
 | <kbd>J</kbd> / <kbd>K</kbd> | Sound 50 ms earlier / later (sync with the picture) |
 | <kbd>Shift+J</kbd> / <kbd>Shift+K</kbd> | Subtitles 50 ms earlier / later |
-| <kbd>A</kbd> | Picture: aspect ratio, deinterlacing, sleep timer; pressed again, the next ratio |
+| <kbd>A</kbd> | Picture: aspect ratio, sleep timer; pressed again, the next ratio |
 | <kbd>Shift+I</kbd> | Statistics over the picture: show or hide |
 | <kbd>F</kbd> / <kbd>F11</kbd> / <kbd>⌃⌘F (Mac)</kbd> | Fullscreen |
 | <kbd>Ctrl/⌘+F</kbd> | Search |
@@ -229,7 +229,6 @@ Without signing in, OpenSubtitles allows 5 downloads a day per internet connecti
 The picture button beside the subtitles button (or <kbd>A</kbd>) opens the **Picture** panel. Click **‹** or **›** on a row (or use <kbd>←</kbd> and <kbd>→</kbd>) to change it:
 
 - **Aspect ratio**: **Auto** (the channel's own shape), **16:9**, **4:3**, or **Fill the window**, which crops the picture to the window's shape so there are no black bars. QiTV remembers it for each live channel, also after a restart. Pressing <kbd>A</kbd> again while the panel is open moves to the next ratio.
-- **Deinterlacing**, for TV channels whose picture shows fine horizontal lines on movement: **Auto** (VLC deinterlaces pictures marked as interlaced), **On** or **Off**, for every channel. After switching it on or off, **Auto** comes back the next time QiTV starts.
 - **Sleep timer**: **15**, **30**, **60** or **90 minutes**, or **End of the programme** when the guide knows when the programme ends. The row shows the time left. A minute before the end QiTV says playback stops soon; click **Keep watching** (or press <kbd>Enter</kbd>) to turn the timer off. Otherwise playback stops, fullscreen ends, and your computer may go to sleep again. The timer is not kept after QiTV closes.
 - **Statistics** (or <kbd>Shift+I</kbd>) shows technical details over the picture: the video and audio format, the picture size and frame rate, pictures shown and dropped, the bitrate, hardware or software decoding, whether the channel plays through time-shift, and how far behind live it is.
 
@@ -272,6 +271,10 @@ Press <kbd>R</kbd>, or the red **●** after the channel's name and ★ at the t
 - **As the channel sends it.** Each file is named after the channel and the time, for example `My Channel 2026-10-19 21.30.ts`: an MPEG-TS file with the channel's own picture and sound, not re-encoded, which VLC, MPV and most players play.
 - **No new stream to start.** A recording is written from the time-shift buffer of the stream that plays, so starting one never asks your provider for another stream. That is also why a channel that plays without time-shift can't be recorded: its button is dimmed and says so.
 - In the multiview the button records the focused tile. A recording goes on when the focus moves, or when its channel becomes the small picture of picture-in-picture: that tile or small picture says **REC** on its label. Changing or closing a tile that records asks first; leaving the multiview keeps its recordings going.
+
+### Deinterlacing
+
+Settings → General → **Deinterlacing**: **Auto** deinterlaces only the pictures marked as interlaced and adds nothing on progressive channels, **Off** never deinterlaces. Going back to **Auto** takes effect the next time QiTV starts.
 
 ### Live latency
 

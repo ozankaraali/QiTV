@@ -44,7 +44,7 @@ class ShortcutsDialogLayoutTests(unittest.TestCase):
                 self.assertGreaterEqual(table.rowHeight(row), needed.height())
 
     def test_every_action_shows_whole(self):
-        # "Picture: aspect ratio, deinterlacing, sleep timer; press…" was cut at 560 px.
+        # "Picture: aspect ratio, sleep timer; press…" was cut at 560 px.
         for scale in (1.0, 1.4):
             with self.subTest(scale=scale):
                 dialog = self.dialog(scale)

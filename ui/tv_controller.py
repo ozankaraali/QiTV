@@ -28,7 +28,7 @@ toast. Only this controller holds the LiveTuner and the session: the others call
 play_vod, tune or the external play.
 
 The Picture panel (2.3, ui/picture_controls.py) acts on the large picture as the Sound panel
-does: its aspect ratio, kept per channel, deinterlacing, the statistics, and a sleep timer that
+does: its aspect ratio, kept per channel, the statistics, and a sleep timer that
 stops playback the Library's way (`stop_for_sleep`) and leaves fullscreen.
 
 Picture in picture (spec §7) is PipControls' (ui/pip_controls.py) over the window's
@@ -601,7 +601,7 @@ class TVController(QObject):
             show_transport=self._show_transport,
             parent=self,
         )
-        # The picture's aspect ratio (kept per channel), deinterlacing, the statistics and the
+        # The picture's aspect ratio (kept per channel), the statistics and the
         # sleep timer: the Picture panel (2.3).
         self._picture = PictureControls(
             panel=overlays.picture_panel,
@@ -3557,6 +3557,10 @@ class TVController(QObject):
                 signal.connect(slot)
             else:
                 signal.disconnect(slot)
+
+    def apply_deinterlacing(self) -> None:
+        """Settings was closed: the players have the deinterlacing it saved."""
+        self._picture.apply_deinterlacing()
 
     def _players(self) -> list[tuple[str, Any]]:
         sessions = self.sessions

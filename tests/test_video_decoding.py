@@ -689,6 +689,38 @@ class DecodingWindowTests(base.WindowCase):
         dialog.save_settings()
         self.assertTrue(ConfigManager().hardware_decoding)
 
+    def test_settings_offers_deinterlacing_after_hardware_decoding(self):
+        dialog = OptionsDialog(self.window)
+        self.addCleanup(dialog.deleteLater)
+        combo = dialog.deinterlace_combo
+        self.assertEqual([combo.itemText(i) for i in range(combo.count())], ["Auto", "Off"])
+        self.assertEqual(combo.currentData(), "auto")
+        self.assertIn("marked interlaced", combo.toolTip())
+        self.assertIn("starts again", combo.toolTip())
+        layout = dialog.settings_layout
+        rows = [layout.itemAt(i).widget() for i in range(layout.count())]
+        self.assertEqual(
+            rows[rows.index(dialog.hardware_decoding_checkbox) + 2], combo
+        )  # the label, then the combo
+        combo.setCurrentIndex(combo.findData("off"))
+        dialog.save_settings()
+        self.assertEqual(ConfigManager().deinterlace, "off")
+        self.assertEqual(self.window.config_manager.deinterlace, "off")
+
+    def test_the_players_get_the_saved_deinterlacing_from_either_way_into_settings(self):
+        # 2.12: Settings opens from the menu and from "Add provider"; both end the same way.
+        players = [player for _name, player in self.window._players()]
+        for opener in (self.window.options_dialog, self.window.add_provider):
+            for player in players:
+                player.set_deinterlace = mock.Mock(return_value=True)
+            self.config.deinterlace = "off"  # what Settings saved
+            with mock.patch.object(OptionsDialog, "exec", return_value=0):
+                opener()
+            for player in players:
+                player.set_deinterlace.assert_called_once_with("off")
+                del player.set_deinterlace
+                player.set_deinterlace("auto")  # the next opener starts from Auto again
+
     def test_settings_offers_secure_dns_off_and_it_applies_at_once(self):
         # 2.9.1: the providers' names over HTTPS (services.secure_dns), off by default.
         from services import secure_dns

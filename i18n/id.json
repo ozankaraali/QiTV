@@ -83,6 +83,7 @@
   "Auto (best)": "Otomatis (terbaik)",
   "Auto (recommended)": "Otomatis (disarankan)",
   "Auto adjusts each channel: it starts at Normal and plays further behind on channels that run dry, coming back over time.\nLow starts live channels sooner; Stable buffers more for unreliable streams.": "Otomatis menyesuaikan tiap saluran: dimulai di Normal dan diputar lebih jauh di belakang pada saluran yang kehabisan data, lalu kembali seiring waktu.\nRendah memulai saluran langsung lebih cepat; Stabil menyangga lebih banyak untuk stream yang tidak andal.",
+  "Auto deinterlaces only the pictures marked interlaced and costs nothing on channels that are not. Off never deinterlaces; back to Auto takes effect when QiTV starts again.": "",
   "Auto-Play Settings": "Pengaturan Putar Otomatis",
   "Auto-play next episode (10s countdown)": "Putar otomatis episode berikutnya (hitung mundur 10 dtk)",
   "Automatic": "Otomatis",
@@ -736,7 +737,7 @@
   "Picture-in-picture is for live TV": "Gambar dalam gambar untuk TV langsung",
   "Picture-in-picture is off while channels play in an external player": "Gambar dalam gambar nonaktif saat saluran diputar di pemutar eksternal",
   "Picture-in-picture with the previous channel, or close it": "Gambar dalam gambar dengan saluran sebelumnya, atau tutup",
-  "Picture: aspect ratio, deinterlacing, sleep timer; pressed again, the next ratio": "Gambar: rasio aspek, deinterlacing, timer tidur; tekan lagi untuk rasio berikutnya",
+  "Picture: aspect ratio, sleep timer; pressed again, the next ratio": "",
   "Pictures": "Bingkai",
   "Pinned": "Disematkan",
   "Play": "Putar",
@@ -1267,7 +1268,6 @@
   "catching up {rate}×": "mengejar {rate}×",
   "deinterlacing|Auto": "Otomatis",
   "deinterlacing|Off": "Nonaktif",
-  "deinterlacing|On": "Aktif",
   "in {h} h {mm}": "dalam {h} j {mm} mnt",
   "in {n} min": {
     "other": "dalam {n} mnt"

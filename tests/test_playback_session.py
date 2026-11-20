@@ -1596,8 +1596,25 @@ class DefaultArgsTests(unittest.TestCase):
         with mock.patch.dict(os.environ, {VLC_LOG_ENV: ""}), _on("Darwin"):
             self.assertEqual(
                 default_args(hardware_decoding=True),  # decoding: tests/test_video_decoding.py
-                ["--no-video-title-show", "--no-volume-save", *subtitle_args(), "--quiet"],
+                [
+                    "--no-video-title-show",
+                    "--no-volume-save",
+                    "--deinterlace-mode=yadif",
+                    *subtitle_args(),
+                    "--quiet",
+                ],
             )
+
+    def test_auto_deinterlaces_with_yadif_only_where_vlc_deinterlaces_in_software(self):
+        # 2.12: D3D11, DXVA2 and VA-API have their own mode lists, where "yadif" is blend.
+        yadif = "--deinterlace-mode=yadif"
+        with _on("Darwin"):  # VideoToolbox's pictures reach the CPU filter anyway
+            self.assertIn(yadif, default_args(hardware_decoding=True))
+        with _on("Windows"):
+            self.assertNotIn(yadif, default_args(hardware_decoding=True))
+        with _on("Linux"):
+            self.assertIn(yadif, default_args(hardware_decoding=False))
+            self.assertNotIn(yadif, default_args(hardware_decoding=True))
 
     def test_subtitles_are_drawn_as_the_ai_captions_are(self):
         # 2.9: the owner's: VLC's subtitles (a stream's, a file's) in the captions' look.

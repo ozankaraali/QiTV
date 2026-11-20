@@ -17,7 +17,7 @@ Screens and their controls:
   and "reset";
 - "subtitles": the Subtitles panel its button opens, alike, and its "Load a file…";
 - "picture_panel": the Picture panel its button opens (2.3): its setting rows' ‹ and › by
-  their keys ("aspect", "deinterlace", "sleep") and its "stats" row;
+  their keys ("aspect", "sleep") and its "stats" row;
 - "subtitle_search": the OpenSubtitles search its "Search OpenSubtitles…" opens: the key page's
   "field", "clear" (✕), "get_key", "paste" and "save", the search's "field", "clear", "paste" and
   "search", its "languages" and "files" rows, and "close" (×);
@@ -75,7 +75,7 @@ from ui.overlays.pip_label import PipLabel
 from ui.overlays.subtitle_search import LanguageRow, SubtitleSearchPage
 from ui.overlays.track_panel import PanelModel, PanelRow, PanelSync, TrackPanel
 from ui.overlays.transport import Transport
-from ui.picture_controls import ASPECT, DEINTERLACE, SLEEP, STATS
+from ui.picture_controls import ASPECT, SLEEP, STATS
 from ui.pip import corner_rect
 from ui.video_surface import VideoSurface
 
@@ -416,7 +416,6 @@ def _picture_panel(host: QWidget) -> set[str]:
     panel = TrackPanel(host)
     rows = (
         PanelRow(ASPECT, "Aspect ratio", value="Auto", widest="Fill the window"),
-        PanelRow(DEINTERLACE, "Deinterlacing", value="Auto"),
         PanelRow(SLEEP, "Sleep timer", value="Off", widest="1:30:00 left"),
         PanelRow(STATS, "Statistics"),
     )

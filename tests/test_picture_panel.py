@@ -13,7 +13,6 @@ import json
 import os
 import tempfile
 import unittest
-from unittest import mock
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
@@ -22,7 +21,7 @@ from PySide6.QtTest import QTest
 from PySide6.QtWidgets import QApplication, QWidget
 from timer_fixtures import elapse
 
-from services import i18n, picture, playback
+from services import i18n, picture
 from services.picture import FILL, STANDARD, WIDE, ChannelPictures, stats_rows
 from services.playback import PlaybackSession
 from services.sleep_timer import SleepTimer, clock_text
@@ -182,7 +181,6 @@ class PanelTests(PictureCase):
             self.shown(),
             [
                 ("Aspect ratio", "Auto"),
-                ("Deinterlacing", "Auto"),
                 ("Sleep timer", "Off"),
                 "Statistics",
             ],
@@ -216,18 +214,32 @@ class PanelTests(PictureCase):
         self.assertEqual(self.player.shape, WIDE)
         self.assertEqual(self.store._entries, {})
 
-    def test_deinterlacing_is_every_players_and_kept_in_the_config(self):
+    def test_the_panel_has_no_deinterlacing_row_it_is_a_setting(self):
         self.open()
-        self.step(1, 1)
-        self.assertEqual((self.player.deinterlacing, self.small.deinterlacing), ("on", "on"))
-        self.assertEqual((self.config.deinterlace, self.config.saves), ("on", 1))
-        self.assertEqual(self.shown()[1], ("Deinterlacing", "On"))
-        self.step(1, 1)
-        self.assertEqual(self.shown()[1], ("Deinterlacing", "Off"))
+        self.assertEqual([row.key for row in self.panel.model().rows], ["aspect", "sleep", "stats"])
+        self.assertNotIn("Deinterlacing", [row[0] for row in self.shown()[:-1]])
+
+    def test_the_settings_deinterlacing_reaches_every_player(self):
+        self.config.deinterlace = "off"  # what Settings saved
+        self.controls.apply_deinterlacing()
+        self.assertEqual((self.player.deinterlacing, self.small.deinterlacing), ("off", "off"))
         self.assertEqual(self.toasts, [])
-        self.step(1, 1)  # back to Auto: libVLC 3 keeps on or off on a player till a restart
-        self.assertEqual(self.config.deinterlace, picture.AUTO)
+        asked = []
+        for player in (self.player, self.small):
+            player.set_deinterlace = lambda choice, _p=player: asked.append(choice)
+        self.controls.apply_deinterlacing()  # nothing new: nothing asked of the players
+        self.assertEqual(asked, [])
+        for player in (self.player, self.small):
+            del player.set_deinterlace
+        self.config.deinterlace = picture.AUTO  # libVLC 3 keeps off on a player till a restart
+        self.controls.apply_deinterlacing()
         self.assertEqual(self.toasts, ["Deinterlacing is back on Auto when QiTV starts again"])
+
+    def test_the_deinterlacing_choices_are_auto_and_off(self):
+        self.assertEqual(picture.DEINTERLACING, (picture.AUTO, picture.OFF))
+        self.assertEqual(
+            [picture.deinterlace_name(d) for d in picture.DEINTERLACING], ["Auto", "Off"]
+        )
 
     def test_a_player_made_later_deinterlaces_as_the_config_says(self):
         self.config.deinterlace = "off"
@@ -242,9 +254,9 @@ class PanelTests(PictureCase):
     def test_the_statistics_row_shows_and_hides_them(self):
         self.player.stats = {"video_codec": "h264", "width": 1920, "height": 1080, "fps": 25.0}
         self.open()
-        self.click_label(3)
+        self.click_label(2)
         self.assertTrue(self.stats.isVisible())
-        self.assertEqual(self.shown()[3], "*Statistics")
+        self.assertEqual(self.shown()[2], "*Statistics")
         self.assertEqual(self.stats.rows()[:1], [("Video", "H.264 · 1920×1080 · 25 fps")])
         self.assertIn(("Source", "Time-shift, HLS"), self.stats.rows())
         self.assertIn(("Behind live", "7.5 s"), self.stats.rows())
@@ -254,7 +266,7 @@ class PanelTests(PictureCase):
         self.controls.handle(Action.STATS)  # Shift+I, the panel stays
         self.assertFalse(self.stats.isVisible())
         self.assertTrue(self.panel.isVisible())
-        self.assertEqual(self.shown()[3], "Statistics")
+        self.assertEqual(self.shown()[2], "Statistics")
 
     def test_shift_i_shows_them_without_the_panel_and_nothing_playing_hides_them(self):
         self.controls.toggle_stats()
@@ -287,12 +299,9 @@ class PanelTests(PictureCase):
         self.assertEqual(self.player.shape, WIDE)
         self.assertTrue(self.controls.handle(Action.SEEK_BACK))
         self.assertEqual(self.player.shape, picture.AUTO)
-        self.assertTrue(self.controls.handle(Action.CH_NEXT, DOWN))
-        self.assertTrue(self.controls.handle(Action.OK))  # Enter on a setting: on
-        self.assertEqual(self.config.deinterlace, "on")
         for _ in range(2):
-            self.controls.handle(Action.CH_NEXT, DOWN)
-        self.assertEqual(self.panel.focused(), 3)
+            self.assertTrue(self.controls.handle(Action.CH_NEXT, DOWN))
+        self.assertEqual(self.panel.focused(), 2)
         self.controls.handle(Action.OK)
         self.assertTrue(self.controls.stats_shown())
         self.assertTrue(self.controls.handle(Action.ESCAPE))
@@ -313,7 +322,7 @@ class PanelTests(PictureCase):
 
     def test_the_setting_rows_name_their_keys(self):
         self.open()
-        tips = [self.panel.tooltip_at(self.panel.row_rect(i).center()) for i in (0, 3)]
+        tips = [self.panel.tooltip_at(self.panel.row_rect(i).center()) for i in (0, 2)]
         self.assertEqual(tips, [key_hint("Aspect ratio", "A"), key_hint("Statistics", "Shift+I")])
 
     def test_without_a_panel_a_steps_the_aspect_with_a_toast(self):
@@ -603,23 +612,23 @@ class SleepFlowTests(PictureCase):
         self.open()
         values = []
         for _ in range(5):
-            self.step(2, 1)
+            self.step(1, 1)
             values.append(self.controls.sleep_choice())
         self.assertEqual(values, [15, 30, 60, 90, "off"])
         self.left = 47 * 60.0
-        self.step(2, -1)
+        self.step(1, -1)
         self.assertEqual(self.controls.sleep_choice(), "end")
         self.assertEqual(self.timer.remaining(), 47 * 60.0)
-        self.assertEqual(self.shown()[2], ("Sleep timer", "47:00 left"))
-        self.assertTrue(self.panel.model().rows[2].lit)
+        self.assertEqual(self.shown()[1], ("Sleep timer", "47:00 left"))
+        self.assertTrue(self.panel.model().rows[1].lit)
 
     def test_the_row_counts_down_while_the_panel_shows(self):
         self.open()
-        self.step(2, 1)
-        self.assertEqual(self.shown()[2], ("Sleep timer", "15:00 left"))
+        self.step(1, 1)
+        self.assertEqual(self.shown()[1], ("Sleep timer", "15:00 left"))
         self.clock.now += 61
         elapse(40)
-        self.assertEqual(self.shown()[2], ("Sleep timer", "13:59 left"))
+        self.assertEqual(self.shown()[1], ("Sleep timer", "13:59 left"))
 
     def test_a_minute_before_a_notice_says_so_and_keep_watching_turns_it_off(self):
         self.controls.set_sleep(15)
@@ -747,44 +756,20 @@ class PictureSessionTests(unittest.TestCase):
         self.assertEqual(self.picture_calls()[-1], ("video_set_crop_geometry", "2:1"))
         self.assertEqual(len(self.picture_calls()), 2)  # once, after the last
 
-    def test_deinterlacing_on_or_off_stays_and_auto_needs_a_restart(self):
+    def test_deinterlacing_off_stays_and_auto_needs_a_restart(self):
         self.play(sessions.A)
-        self.assertTrue(self.session.set_deinterlace(picture.ON))
-        self.assertIn(("video_set_deinterlace", "yadif"), self.picture_calls())
         self.assertTrue(self.session.set_deinterlace(picture.OFF))
         self.assertEqual(self.picture_calls()[-1], ("video_set_deinterlace", None))
         self.assertFalse(self.session.set_deinterlace(picture.AUTO))
         self.assertEqual(self.session.deinterlace(), picture.AUTO)
-        self.session.set_deinterlace(picture.ON)
-        self.session.set_deinterlace(picture.AUTO)  # libVLC keeps On till a restart
-        self.session.set_aspect(WIDE)  # another call: deinterlacing is given again
-        self.assertEqual(self.picture_calls()[-1], ("video_set_deinterlace", "yadif"))
+        self.session.set_aspect(WIDE)  # another call: libVLC keeps Off till a restart
+        self.assertEqual(self.picture_calls()[-1], ("video_set_deinterlace", None))
 
-    def test_on_leaves_a_picture_taller_than_1080i_alone_and_the_next_media_gets_it(self):
-        # 2.9.10: a 2160p 50 fps channel with On showed 5 of its 50 pictures a second, garbled:
-        # VLC 3 deinterlaces on the CPU. No broadcast taller than 1080i is interlaced.
-        self.player.media = _Media()
-        heights = {"height": 0}
-        with mock.patch.object(playback, "_track_stats", side_effect=lambda _m: dict(heights)):
-            self.session.set_deinterlace(picture.ON)
-            self.play(sessions.A)
-            self.assertEqual(self.picture_calls()[-1], ("video_set_deinterlace", "yadif"))
-            self.player.calls.clear()
-            self.session._tick()  # its size not known yet
-            self.assertEqual(self.picture_calls(), [])
-            heights["height"] = 2160
-            self.session._tick()
-            self.assertEqual(self.picture_calls()[-1], ("video_set_deinterlace", None))
-            self.player.calls.clear()
-            self.session._tick()  # read once per media
-            self.assertEqual(self.picture_calls(), [])
-            self.session.set_aspect(WIDE)  # given again: still none for this picture
-            self.assertEqual(self.picture_calls()[-1], ("video_set_deinterlace", None))
-            heights["height"] = 1080
-            self.play(sessions.B)  # a 1080i channel: deinterlaced again
-            self.runner.finish()
-            self.session._tick()
-            self.assertEqual(self.picture_calls()[-1], ("video_set_deinterlace", "yadif"))
+    def test_auto_never_sets_deinterlacing_on_libvlc(self):
+        self.play(sessions.A)
+        self.assertTrue(self.session.set_deinterlace(picture.AUTO))
+        self.session.set_aspect(WIDE)
+        self.assertNotIn("video_set_deinterlace", [c[0] for c in self.picture_calls()])
 
     def test_a_fill_crop_waiting_for_a_worker_follows_once_it_let_go(self):
         self.session.set_video_size(1280, 720)

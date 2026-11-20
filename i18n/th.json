@@ -83,6 +83,7 @@
   "Auto (best)": "อัตโนมัติ (ดีที่สุด)",
   "Auto (recommended)": "อัตโนมัติ (แนะนำ)",
   "Auto adjusts each channel: it starts at Normal and plays further behind on channels that run dry, coming back over time.\nLow starts live channels sooner; Stable buffers more for unreliable streams.": "อัตโนมัติจะปรับแต่ละช่อง: เริ่มที่ปกติ และเล่นตามหลังมากขึ้นในช่องที่ข้อมูลขาดช่วง แล้วค่อยๆ กลับมา\nต่ำจะเริ่มช่องสดเร็วขึ้น ส่วนเสถียรจะบัฟเฟอร์มากขึ้นสำหรับสตรีมที่ไม่เสถียร",
+  "Auto deinterlaces only the pictures marked interlaced and costs nothing on channels that are not. Off never deinterlaces; back to Auto takes effect when QiTV starts again.": "",
   "Auto-Play Settings": "การตั้งค่าเล่นอัตโนมัติ",
   "Auto-play next episode (10s countdown)": "เล่นตอนถัดไปอัตโนมัติ (นับถอยหลัง 10 วิ)",
   "Automatic": "อัตโนมัติ",
@@ -736,7 +737,7 @@
   "Picture-in-picture is for live TV": "ภาพซ้อนภาพใช้ได้กับทีวีสดเท่านั้น",
   "Picture-in-picture is off while channels play in an external player": "ภาพซ้อนภาพปิดอยู่ขณะช่องเล่นในเครื่องเล่นภายนอก",
   "Picture-in-picture with the previous channel, or close it": "ภาพซ้อนภาพกับช่องก่อนหน้า หรือปิด",
-  "Picture: aspect ratio, deinterlacing, sleep timer; pressed again, the next ratio": "ภาพ: อัตราส่วนภาพ ดีอินเทอร์เลซ ตั้งเวลาปิด; กดอีกครั้งเพื่อเปลี่ยนอัตราส่วนถัดไป",
+  "Picture: aspect ratio, sleep timer; pressed again, the next ratio": "",
   "Pictures": "เฟรม",
   "Pinned": "ปักหมุด",
   "Play": "เล่น",
@@ -1267,7 +1268,6 @@
   "catching up {rate}×": "กำลังตามให้ทัน {rate}×",
   "deinterlacing|Auto": "อัตโนมัติ",
   "deinterlacing|Off": "ปิด",
-  "deinterlacing|On": "เปิด",
   "in {h} h {mm}": "อีก {h} ชม. {mm} น.",
   "in {n} min": {
     "other": "อีก {n} นาที"

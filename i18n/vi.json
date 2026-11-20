@@ -83,6 +83,7 @@
   "Auto (best)": "Tự động (tốt nhất)",
   "Auto (recommended)": "Tự động (khuyên dùng)",
   "Auto adjusts each channel: it starts at Normal and plays further behind on channels that run dry, coming back over time.\nLow starts live channels sooner; Stable buffers more for unreliable streams.": "Tự động điều chỉnh từng kênh: bắt đầu ở Bình thường và phát lùi hơn trên kênh bị cạn dữ liệu, rồi dần quay lại.\nThấp mở kênh trực tiếp nhanh hơn; Ổn định đệm nhiều hơn cho luồng kém ổn định.",
+  "Auto deinterlaces only the pictures marked interlaced and costs nothing on channels that are not. Off never deinterlaces; back to Auto takes effect when QiTV starts again.": "",
   "Auto-Play Settings": "Cài đặt tự động phát",
   "Auto-play next episode (10s countdown)": "Tự động phát tập tiếp theo (đếm ngược 10 giây)",
   "Automatic": "Tự động",
@@ -736,7 +737,7 @@
   "Picture-in-picture is for live TV": "Hình trong hình chỉ dùng cho truyền hình trực tiếp",
   "Picture-in-picture is off while channels play in an external player": "Hình trong hình tắt khi kênh đang phát trong trình phát ngoài",
   "Picture-in-picture with the previous channel, or close it": "Hình trong hình với kênh trước đó, hoặc đóng nó",
-  "Picture: aspect ratio, deinterlacing, sleep timer; pressed again, the next ratio": "Hình ảnh: tỷ lệ khung hình, khử xen kẽ, hẹn giờ tắt; bấm lần nữa để đổi tỷ lệ tiếp theo",
+  "Picture: aspect ratio, sleep timer; pressed again, the next ratio": "",
   "Pictures": "Khung hình",
   "Pinned": "Đã ghim",
   "Play": "Phát",
@@ -1267,7 +1268,6 @@
   "catching up {rate}×": "đang bắt kịp {rate}×",
   "deinterlacing|Auto": "Tự động",
   "deinterlacing|Off": "Tắt",
-  "deinterlacing|On": "Bật",
   "in {h} h {mm}": "sau {h} giờ {mm} phút",
   "in {n} min": {
     "other": "sau {n} phút"

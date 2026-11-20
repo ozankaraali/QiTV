@@ -84,6 +84,7 @@
   "Auto (best)": "Otomatik (en iyi)",
   "Auto (recommended)": "Otomatik (önerilen)",
   "Auto adjusts each channel: it starts at Normal and plays further behind on channels that run dry, coming back over time.\nLow starts live channels sooner; Stable buffers more for unreliable streams.": "Otomatik her kanalı ayrı ayarlar: Normal ile başlar, arabelleği tükenen kanallarda daha geriden oynatır ve zamanla yeniden yaklaşır.\nDüşük canlı kanalları daha çabuk başlatır; Kararlı, güvenilmez yayınlar için daha çok arabelleğe alır.",
+  "Auto deinterlaces only the pictures marked interlaced and costs nothing on channels that are not. Off never deinterlaces; back to Auto takes effect when QiTV starts again.": "Otomatik yalnızca geçmeli olarak işaretlenmiş görüntülerde geçmeli taramayı giderir; geçmeli olmayan kanallarda ek yük getirmez. Kapalı hiç gidermez; Otomatik'e dönüş QiTV yeniden başlayınca geçerli olur.",
   "Auto-Play Settings": "Otomatik oynatma ayarları",
   "Auto-play next episode (10s countdown)": "Sonraki bölümü otomatik oynat (10 sn geri sayım)",
   "Automatic": "Otomatik",
@@ -747,7 +748,7 @@
   "Picture-in-picture is for live TV": "Resim içinde resim canlı TV içindir",
   "Picture-in-picture is off while channels play in an external player": "Kanallar harici oynatıcıda oynarken resim içinde resim kapalıdır",
   "Picture-in-picture with the previous channel, or close it": "Önceki kanalla resim içinde resim aç veya kapat",
-  "Picture: aspect ratio, deinterlacing, sleep timer; pressed again, the next ratio": "Görüntü: en boy oranı, geçmeli tarama giderme, uyku zamanlayıcısı; yeniden basınca sonraki oran",
+  "Picture: aspect ratio, sleep timer; pressed again, the next ratio": "Görüntü: en boy oranı, uyku zamanlayıcısı; yeniden basınca sonraki oran",
   "Pictures": "Kareler",
   "Pinned": "Sabitlenenler",
   "Play": "Oynat",
@@ -1289,7 +1290,6 @@
   "catching up {rate}×": "yetişiyor {rate}×",
   "deinterlacing|Auto": "Otomatik",
   "deinterlacing|Off": "Kapalı",
-  "deinterlacing|On": "Açık",
   "in {h} h {mm}": "{h} sa {mm} dk sonra",
   "in {n} min": {
     "other": "{n} dk sonra"

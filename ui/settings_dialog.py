@@ -59,6 +59,7 @@ from services.jobs import JobRunner
 from services.lazy_import import lazy_module
 from services.multikeydict import MultiKeyDict
 from services.opensubtitles import ANONYMOUS_DAILY, CONSUMERS_URL, built_in_key
+from services.picture import DEINTERLACING, deinterlace_name
 from services.provider_api import (
     CLIENT_HEADERS,
     https_fallback_candidates,
@@ -657,6 +658,23 @@ class OptionsDialog(QDialog):
         )
         self.hardware_decoding_checkbox.setChecked(self.config_manager.hardware_decoding)
         self.settings_layout.addRow(self.hardware_decoding_checkbox)
+
+        # libVLC's own deinterlacing, or none (2.3; "on" of older builds reads as Auto).
+        self.deinterlace_combo = QComboBox(self.settings_tab)
+        for choice in DEINTERLACING:
+            self.deinterlace_combo.addItem(deinterlace_name(choice), choice)
+        self.deinterlace_combo.setCurrentIndex(
+            max(0, self.deinterlace_combo.findData(self.config_manager.deinterlace))
+        )
+        self.deinterlace_combo.setToolTip(
+            tr(
+                "Auto deinterlaces only the pictures marked interlaced and costs nothing on"
+                " channels that are not. Off never deinterlaces; back to Auto takes effect when"
+                " QiTV starts again."
+            )
+        )
+        # i18n: a setting (General): Auto or Off for interlaced TV pictures
+        self.settings_layout.addRow(tr("Deinterlacing"), self.deinterlace_combo)
 
         # 2.9.1: the providers' names looked up over HTTPS (services.secure_dns).
         # i18n: a setting (General): DNS over HTTPS; keep "DNS"
@@ -1878,6 +1896,7 @@ class OptionsDialog(QDialog):
         self.config_manager.ssl_verify = self.ssl_verify_checkbox.isChecked()
         self.config_manager.live_latency = self.live_latency_combo.currentData()
         self.config_manager.hardware_decoding = self.hardware_decoding_checkbox.isChecked()
+        self.config_manager.deinterlace = self.deinterlace_combo.currentData() or "auto"
         self.config_manager.secure_dns = self.secure_dns_checkbox.isChecked()
         self.config_manager.media_4k_versions = self.media_4k_combo.currentData() or "screen"
         self.config_manager.tmdb_details = self.tmdb_checkbox.isChecked()
