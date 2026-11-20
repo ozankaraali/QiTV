@@ -1259,16 +1259,6 @@ class Drawer(Overlay):
             # multiview, leaving the grid or focusing another tile; it reaches nothing.
             self._second_click.arm()
 
-    def row_anchor(self, key: str) -> QPoint:
-        """The global point under the sources column's row `key` (where its menu opens)."""
-        col = self._columns["left"]
-        node = next((n for n in col.nodes if n.key == key), None)
-        view = col.view
-        if node is None or node not in col.rows:
-            return view.mapToGlobal(QPoint(0, 0))
-        rect = view.visualRect(col.model.index(col.rows[node], 0))
-        return view.viewport().mapToGlobal(rect.bottomLeft())
-
     def _on_row_context(self, side: str, pos: QPoint) -> None:
         """A right-click at `pos` (viewport coordinates) of a column's list."""
         col = self._columns[side]

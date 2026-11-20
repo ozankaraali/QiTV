@@ -88,7 +88,7 @@ from functools import partial
 import logging
 from typing import Optional
 
-from PySide6.QtCore import QEvent, QObject, QPoint, QPointF, QRect, QRectF, Qt, Signal
+from PySide6.QtCore import QEvent, QObject, QPointF, QRect, QRectF, Qt, Signal
 from PySide6.QtGui import QColor, QFontMetricsF, QMouseEvent, QPainter, QPixmap, QWheelEvent
 from PySide6.QtWidgets import QWidget
 
@@ -881,15 +881,6 @@ class SettingsDrawer(Overlay):
     def back_rect(self) -> QRectF:
         """‹ at the start of the breadcrumb."""
         return QRectF(self._layout().back)
-
-    def row_anchor(self, key: str) -> QPoint:
-        """The global point under the right column's row `key`, at its left (where something
-        it opens would pop up); the overlay's corner while it is out of sight."""
-        keys = [row.key for row in self._right_rows()]
-        box = self._box(RIGHT, keys.index(key)) if key in keys else None
-        if box is None:
-            return self.mapToGlobal(QPoint(0, 0))
-        return self.mapToGlobal(box.line.bottomLeft().toPoint())
 
     # ---- state ------------------------------------------------------------------------------
 

@@ -823,6 +823,7 @@ class TVWindow(QMainWindow):
             window=self,
             library_shown=lambda: self.screens.library_shown(),
             closing=lambda: self._closing,
+            before=self._close_menus,
             before_tv=self._make_way_for_card,
             above=lambda: (
                 self.question_card,
@@ -1411,6 +1412,7 @@ class TVWindow(QMainWindow):
             if not self._closing:
                 self.schedule_timer(channel, choice)
 
+        self._close_menus()
         self.record_card.ask(
             str(channel.get("name") or ""),
             start=programme.start if programme is not None else None,
@@ -1650,6 +1652,13 @@ class TVWindow(QMainWindow):
         self.leave_mini_player()
         self.more_menu.dismiss()
 
+    def _close_menus(self) -> None:
+        """A card or Settings comes over the page (2.13.1): a painted menu that shows closes
+        first. A menu that shows has the keys before everything (`_act`), so it is only ever
+        the topmost thing: nothing opens over it and leaves it the keys."""
+        self.popup_menu.close_menu()
+        self.library_menu.close_menu()
+
     def _on_page_mode(self, mode: str) -> None:
         """The pages moved: in the corner only its controls stay on the host (and a song's
         screen, small: its cover and title), and the picture-in-picture frame leaves the mouse
@@ -1861,9 +1870,11 @@ class TVWindow(QMainWindow):
             self.screens.back_to_tv()
         self.leave_mini_player()
         self.more_menu.dismiss()
+        self._close_menus()
         self.link_opener.open(text)
-        cards = (self.window_cards.tv_card, self.question_card, self.quality_card)
-        for card in (*cards, self.captions_card):
+        # (the cards added after the link's have the keys first: they stay over it)
+        cards = (self.record_card, self.window_cards.tv_card, self.question_card)
+        for card in (*cards, self.quality_card, self.captions_card):
             if card.isVisible():
                 card.raise_()  # the link's card raised itself over it
 
@@ -2929,9 +2940,11 @@ class TVWindow(QMainWindow):
         if self.settings.visible():
             if not section_key:
                 return
+            self._close_menus()
             self.controller.cancel_cards()  # not make_way_for_settings: it keeps its way back
             self.settings.show_section(section_key, row)
         else:
+            self._close_menus()  # (Help → Keys from the menu bar while one shows)
             if self.screens.library_shown():
                 self.screens.back_to_tv()
             self.leave_mini_player()

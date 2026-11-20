@@ -47,7 +47,6 @@ from services.navigation import (
 from ui.link_lanes import LinkLanes, Target
 from ui.overlays import popup_menu
 from ui.overlays.popup_menu import ABOVE, Menu, Where
-from ui.theme import FOCUS_FILL_ALPHA, PALETTE, qcolor
 
 logger = logging.getLogger(__name__)
 
@@ -85,25 +84,6 @@ def is_channel(nav: NavModel, node: Optional[NavNode]) -> bool:
         and node.layer == "item"
         and isinstance(node.payload, dict)
         and nav.section_of(node) == "live"
-    )
-
-
-def _css(value: str, alpha: Optional[float] = None) -> str:
-    color = qcolor(value, alpha)
-    return f"rgba({color.red()}, {color.green()}, {color.blue()}, {color.alphaF():.2f})"
-
-
-def menu_style() -> str:
-    """A QMenu in the shell's colours, with the shared focus style (Free channels' own menu,
-    ui/free_channels_menu.py; QiTV's other menus are painted: ui/overlays/popup_menu.py)."""
-    line = _css(PALETTE.text, 0.12)
-    return (
-        f"QMenu {{ background: {_css(PALETTE.panel_raised)}; color: {_css(PALETTE.text)};"
-        f" border: 1px solid {line}; padding: 4px; }}"
-        " QMenu::item { padding: 6px 22px; border: 1.5px solid transparent; border-radius: 6px; }"
-        f" QMenu::item:selected {{ background: {_css(PALETTE.accent, FOCUS_FILL_ALPHA)};"
-        f" border-color: {_css(PALETTE.accent)}; }}"
-        f" QMenu::separator {{ height: 1px; background: {line}; margin: 4px 8px; }}"
     )
 
 

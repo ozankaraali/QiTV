@@ -47,7 +47,6 @@ from PySide6.QtCore import (
     QEvent,
     QLocale,
     QObject,
-    QPoint,
     QPointF,
     QRect,
     QRectF,

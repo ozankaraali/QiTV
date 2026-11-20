@@ -297,6 +297,36 @@ class TVWindowTests(WindowCase):
                 QTest.keyClick(self.window, Qt.Key.Key_Menu)
                 self.assertFalse(menu.shown())
 
+    def test_a_card_or_settings_over_a_menu_closes_it_and_has_the_keys(self):  # 2.13.1
+        from ui import window_cards
+        from ui.overlays.popup_menu import Menu
+        from ui.overlays.settings_card import OK
+
+        self.show()
+        drawer = self.wait_for_drawer()
+        QTest.keyClick(self.window, Qt.Key.Key_Return)  # into the highlighted group (All)
+        self.assertTrue(wait_until(lambda: getattr(drawer.highlighted(), "layer", "") == "item"))
+        menu = self.window.popup_menu
+        drawer.contextRequested.emit(drawer.highlighted(), drawer.mapToGlobal(QPoint(200, 150)))
+        self.assertTrue(menu.shown())
+        read: list[str] = []
+        window_cards.tell("Up to date", "QiTV is up to date.", read.append)  # (an update's)
+        self.assertTrue(self.window.window_cards.shown())
+        self.assertFalse(menu.shown())  # it closed for the card, which has the keys
+        QTest.keyClick(self.window, Qt.Key.Key_Escape)
+        self.assertEqual(read, [OK])  # the card's Back, not the menu's
+        self.assertFalse(self.window.window_cards.shown())
+        chosen: list[str] = []
+        entries = Menu()
+        entries.add("Entry", lambda: chosen.append("entry"))
+        menu.open(entries, at=self.window.host.mapToGlobal(QPoint(200, 150)))
+        self.assertTrue(menu.shown())
+        self.menu_actions()["Keyboard Shortcuts…"].trigger()  # the menu bar's, while it shows
+        self.assertFalse(menu.shown())
+        self.assertEqual(chosen, [])  # closed, not chosen
+        self.assertTrue(self.window.settings.visible())
+        self.assertEqual(self.window.settings_drawer.path(), (KEYS,))
+
     def test_constructs_and_shows_with_the_overlay_host(self):
         self.show()
         window = self.window

@@ -767,7 +767,7 @@ class DrawerTests(unittest.TestCase):
         self.drawer.open_drawer(focus_side="left")  # without one: on the path's end again
         self.assertEqual(self.drawer.highlighted(), path[-1])
 
-    def test_free_channels_sits_under_add_provider_and_asks_with_a_row_anchor(self):
+    def test_free_channels_sits_under_add_provider_and_asks_for_its_countries(self):
         column = self.open_on_the_sources()
         self.assertEqual(
             [n.key for n in column.nodes[3:]],
@@ -784,11 +784,8 @@ class DrawerTests(unittest.TestCase):
         )
         self.drawer._on_row_clicked("left", 5)
         self.assertEqual(self.actions, [FREE_CHANNELS_ROW])
-        self.assertTrue(self.drawer.isVisible())  # the menu opens over it
-        # The menu opens right under the row, in the column.
-        anchor = self.drawer.row_anchor(FREE_CHANNELS_ROW)
-        rect = column.view.visualRect(column.model.index(5, 0))
-        self.assertEqual(column.view.viewport().mapFromGlobal(anchor), rect.bottomLeft())
+        # The window opens Settings at its countries (2.13.1): the list leaves that to it.
+        self.assertTrue(self.drawer.isVisible())
 
     def test_a_click_on_settings_asks_for_it(self):
         column = self.open_on_the_sources()
