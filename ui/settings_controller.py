@@ -172,6 +172,19 @@ class SettingsController(QObject):
         if self._drawer.isVisible():
             self._drawer.set_sections(self._sections, renamed=renamed)
 
+    def show_section(self, section_key: str) -> None:
+        """While Settings shows elsewhere: at `section_key`, from its top (a card of that
+        section asked for from outside it, as the menu bar's Add provider). Where it was opened
+        from stays: backing out of it gives back what it would have, and a card over it stays
+        over it."""
+        if not self._drawer.isVisible() or self._drawer.path()[:1] == (section_key,):
+            return
+        self._sections = self._make_sections()
+        self._drawer.open_at(self._sections, section_key)
+        for card in self._cards:
+            if card.isVisible():
+                card.raise_()  # the drawer raised itself over it
+
     def visible(self) -> bool:
         return self._drawer.isVisible()
 

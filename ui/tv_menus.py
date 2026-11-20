@@ -422,13 +422,14 @@ class TVMenus(QObject):
     def on_drawer_action(self, row: str) -> None:
         """The drawer's Settings, Add provider, Free channels, Open file, Open a folder and
         Recordings rows, and its header's ⚙, Library, ⌕ and refresh buttons. Backed out of,
-        Settings gives the list back: on its Settings row from there, where it was from ⚙."""
+        Settings gives the list back: on its Settings row from there, where it was from ⚙ and
+        from Add provider (Settings at Providers, its Add card over it)."""
         if row == SETTINGS_ROW:
             self._window.open_settings(from_drawer=True)
         elif row == SETTINGS_BUTTON:
             self._window.open_settings(from_drawer=True, keep_place=True)
         elif row == ADD_PROVIDER_ROW:
-            self._window.add_provider()
+            self._window.add_provider(from_drawer=True)
         elif row == FREE_CHANNELS_ROW:
             drawer = self._window.overlays.drawer
             self._window.show_free_channels(drawer.row_anchor(row))

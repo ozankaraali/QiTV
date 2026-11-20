@@ -2660,11 +2660,16 @@ class DrawerSettingsTests(WindowCase):
             self.assertEqual(drawer.highlighted().title, "Settings")
             QTest.keyClick(self.window, Qt.Key.Key_Down)
             self.assertEqual(drawer.highlighted().title, "Add provider")
-            QTest.keyClick(self.window, Qt.Key.Key_Return)  # the Settings window, still
-            dialog.assert_called_once_with(self.window)
-            dialog.return_value.start_new_provider.assert_called_once_with()
-            dialog.return_value.exec.assert_called_once_with()
+            QTest.keyClick(self.window, Qt.Key.Key_Return)  # Settings, with the Add card
+            form = self.window.provider_cards.form
+            self.assertTrue(form.isVisible())
+            self.assertEqual(self.window.settings_drawer.path(), ("providers",))
+            QTest.keyClick(self.window, Qt.Key.Key_Escape)  # the card's Cancel
+            self.assertFalse(form.isVisible())
+            QTest.keyClick(self.window, Qt.Key.Key_Escape)  # out of Settings: the list
+            dialog.assert_not_called()
         self.assertTrue(drawer.isVisible())
+        self.assertEqual(drawer.highlighted().title, "Add provider")
 
     def test_the_drawers_search_button_opens_the_search(self):
         # Every key has a control on screen (2.0.1): Ctrl/⌘+F has a button in the channel list.
@@ -2920,24 +2925,27 @@ class NoProviderTests(WindowCase):
         self.assertAlmostEqual(card.geometry().center().x(), host.width() / 2, delta=2)
         self.assertAlmostEqual(card.geometry().center().y(), host.height() / 2, delta=2)
 
-    def test_its_button_and_enter_open_settings_on_a_new_provider(self):
+    def test_its_button_and_enter_open_the_add_card(self):
         self.show()
         card = self.window.overlays.welcome
         self.assertTrue(wait_until(card.isVisible))
         added = []
         card.addRequested.connect(lambda: added.append(True))
+        form = self.window.provider_cards.form
         with mock.patch("ui.tv_window.OptionsDialog") as dialog:
             QTest.mouseClick(
                 card, Qt.MouseButton.LeftButton, pos=card.button_rect().center().toPoint()
             )
             self.assertEqual(added, [True])
-            dialog.assert_called_once_with(self.window)
-            dialog.return_value.start_new_provider.assert_called_once_with()
-            dialog.return_value.exec.assert_called_once_with()
+            self.assertTrue(form.isVisible())  # in Settings (tests/test_welcome.py)
+            QTest.keyClick(self.window, Qt.Key.Key_Escape)  # its Cancel: the card again
+            self.assertTrue(card.isVisible())
             QTest.keyClick(self.window, Qt.Key.Key_Return)  # OK on a remote
+            self.assertTrue(form.isVisible())
+            dialog.assert_not_called()
         self.assertEqual(added, [True, True])
-        self.assertEqual(dialog.call_count, 2)
         self.assertFalse(self.window.overlays.drawer.isVisible())
+        elapse(QApplication.doubleClickInterval() + 80)  # no second-click guard left armed
 
     def test_the_card_hides_once_a_provider_is_saved(self):
         self.show()

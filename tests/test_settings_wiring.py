@@ -1,7 +1,8 @@
 """Settings in the drawer, wired into the TV window (plan 1): the drawer's Settings row and ⚙
 and the menu's Settings… (Ctrl/⌘+,) open it over live TV, backing out of it gives the drawer
 back (on its Settings row from there, where it was from ⚙), a step reaches what it changes,
-and the Settings window opens on a tab."""
+and the Settings window opens on a tab. Every Add provider opens it at Providers with the Add
+card (plan 2), and a provider added there is selected and said."""
 
 import os
 import unittest
@@ -10,12 +11,15 @@ from unittest import mock
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 from PySide6.QtCore import Qt
-from PySide6.QtGui import QKeySequence
+from PySide6.QtGui import QGuiApplication, QKeySequence
 from PySide6.QtTest import QTest
-from timer_fixtures import wait_until
+from PySide6.QtWidgets import QApplication
+from timer_fixtures import elapse, wait_until
 
-from services.navigation import SETTINGS_ROW
-from services.settings_model import GENERAL, TEXT, Row, Section
+from services.config_manager import ConfigManager
+from services.navigation import ADD_PROVIDER_ROW, SETTINGS_ROW
+from services.provider_check import Outcome
+from services.settings_model import GENERAL, PROVIDERS, TEXT, Row, Section
 from tests import test_tv_window as base
 from ui import settings_layer
 from ui.keymap import Action
@@ -48,7 +52,7 @@ class SettingsWiringTests(base.WindowCase):
             [
                 mock.call.back_to_tv(),
                 mock.call.leave_mini_player(),
-                mock.call.open(from_drawer=True),
+                mock.call.open("", from_drawer=True),
             ],
         )
 
@@ -388,6 +392,128 @@ class SettingsWiringTests(base.WindowCase):
         QTest.keyClick(self.window, Qt.Key.Key_F, Qt.KeyboardModifier.ControlModifier)
         self.assertTrue(self.window.screens.library_shown())
         self.assertTrue(self.window.settings_drawer.isHidden())  # not only behind the page
+
+
+class AddProviderTests(base.WindowCase):
+    """Every Add provider opens Settings at Providers with the Add card over it (plan 2)."""
+
+    # A playlist on a closed port of the loopback: the new provider's setup is never real.
+    LINK = "http://127.0.0.1:9/list.m3u"
+
+    def setUp(self):
+        super().setUp()
+        patch = mock.patch("ui.tv_window.OptionsDialog")  # never the Settings window's form
+        self.dialog = patch.start()
+        self.addCleanup(patch.stop)
+
+    def tearDown(self):
+        elapse(QApplication.doubleClickInterval() + 80)  # no second-click guard left armed
+        super().tearDown()
+
+    def menu_entry(self, text):
+        menu = self.window.menus.providers_menu
+        return next(action for action in menu.actions() if action.text() == text)
+
+    def assert_the_add_card(self):
+        window, form = self.window, self.window.provider_cards.form
+        self.assertTrue(window.settings.visible())
+        self.assertEqual(window.settings_drawer.path(), (PROVIDERS,))
+        self.assertTrue(form.isVisible())
+        self.assertEqual(form.title(), "Add a provider")
+        self.assertTrue(window.settings.card_shown())  # it has the keys
+        self.assertEqual(form.focus(), ("field", "url"))
+        self.dialog.assert_not_called()
+
+    def test_every_add_provider_opens_the_card(self):
+        self.show()
+        drawer = self.wait_for_drawer()
+        window = self.window
+        screens = window.screens
+        form = window.provider_cards.form
+
+        def the_drawers_row():
+            for key in (Qt.Key.Key_Left, Qt.Key.Key_Left):  # the sources column
+                QTest.keyClick(window, key)
+            for _ in range(8):
+                if drawer.highlighted().key == ADD_PROVIDER_ROW:
+                    break
+                QTest.keyClick(window, Qt.Key.Key_Down)
+            self.assertEqual(drawer.highlighted().key, ADD_PROVIDER_ROW)
+            QTest.keyClick(window, Qt.Key.Key_Return)
+
+        def the_menu_bar():
+            self.menu_entry("Add provider").trigger()
+
+        def the_welcome_card():
+            window.overlays.welcome.addRequested.emit()  # its button (tests/test_welcome.py)
+
+        def the_library():
+            screens.open_library("movies")
+            self.assertTrue(screens.library_shown())
+            window.library_controller.addProviderRequested.emit()  # "… has no movies"
+            self.assertFalse(screens.library_shown())  # back to the TV first
+
+        for source in (the_drawers_row, the_menu_bar, the_welcome_card, the_library):
+            with self.subTest(source=source.__name__):
+                source()
+                self.assert_the_add_card()
+                self.assertFalse(drawer.isVisible())  # it gave way
+                QTest.keyClick(window, Qt.Key.Key_Escape)  # the card's Cancel
+                self.assertFalse(form.isVisible())
+                self.assertTrue(window.settings.visible())  # a provider: Settings stays
+                self.assertEqual(window.settings_drawer.path(), (PROVIDERS,))
+                QTest.keyClick(window, Qt.Key.Key_Escape)  # out of Settings
+                self.assertFalse(window.settings.visible())
+                if source is the_drawers_row:  # the list again, where it was
+                    self.assertTrue(drawer.isVisible())
+                    self.assertEqual(drawer.highlighted().key, ADD_PROVIDER_ROW)
+                    drawer.close_drawer()
+        self.assertEqual(self.provider_manager.providers[0]["name"], base.PROVIDER_NAME)
+        self.assertEqual(len(self.provider_manager.providers), 1)  # nothing added
+
+    def test_add_provider_while_settings_shows_moves_to_providers(self):
+        self.show()
+        self.wait_for_drawer()
+        window = self.window
+        self.menu_actions()["Settings…"].trigger()
+        QTest.keyClick(window, Qt.Key.Key_Down)  # another section
+        self.assertNotEqual(window.settings_drawer.path()[0], PROVIDERS)
+        self.menu_entry("Add provider").trigger()
+        self.assert_the_add_card()
+        QGuiApplication.clipboard().setText(self.LINK)
+        window.controller.handle(Action.PASTE)
+        self.menu_entry("Add provider").trigger()  # asked again: what was typed stays
+        self.assertEqual(window.provider_cards.form.values()["url"], self.LINK)
+
+    def test_an_add_through_the_card_reaches_the_toast_and_selects_it(self):
+        self.show()
+        self.wait_for_drawer()
+        window = self.window
+        form = window.provider_cards.form
+        self.menu_entry("Add provider").trigger()
+        self.assert_the_add_card()
+        QGuiApplication.clipboard().setText(self.LINK)
+        window.controller.handle(Action.PASTE)  # Ctrl/⌘+V into the link's field
+        self.assertEqual(form.found(), ("✓ M3U playlist at 127.0.0.1:9", True))
+        with (
+            mock.patch("services.provider_check.check", return_value=Outcome(True)) as check,
+            mock.patch.object(window.catalog, "select_provider") as select,
+        ):
+            QTest.keyClick(window, Qt.Key.Key_Return)  # Check and add
+            self.assertTrue(wait_until(lambda: not form.isVisible()))
+        asked = check.call_args.args[0]
+        self.assertEqual((asked["type"], asked["url"]), ("M3UPLAYLIST", self.LINK))
+        self.assertIn(("Added 127.0.0.1 to your providers", "info"), self.toasts)
+        self.assertEqual(self.config.selected_provider_name, "127.0.0.1")
+        self.assertEqual(ConfigManager().selected_provider_name, "127.0.0.1")  # saved
+        select.assert_called_once_with(None, force_refresh=False)  # the TV shows it
+        names = [p["name"] for p in self.provider_manager.providers]
+        self.assertEqual(names, [base.PROVIDER_NAME, "127.0.0.1"])
+        menu = [a.text() for a in window.menus.providers_menu.actions() if a.isCheckable()]
+        self.assertIn("127.0.0.1", menu)
+        self.assertTrue(window.settings.visible())  # on Providers, the new one listed
+        rows = [row.text for row in window.provider_rows.rows()]
+        self.assertEqual(rows, [base.PROVIDER_NAME, "127.0.0.1"])
 
 
 class NoProviderSettingsTests(base.WindowCase):

@@ -135,7 +135,7 @@ from services.recordings_index import FILE_NAME as RECORDINGS_INDEX_FILE, Record
 from services.recordings_list import timer_text
 from services.redact import safe_message, safe_traceback
 from services.sessions import SessionManager, Slot
-from services.settings_model import sections
+from services.settings_model import PROVIDERS, sections
 from services.settings_values import SettingsValues
 from services.sound_sync import FILE_NAME as SOUND_SYNC_FILE, SoundSync
 from services.subtitle_picks import FILE_NAME as SUBTITLE_PICKS_FILE, SubtitlePicks
@@ -1121,7 +1121,7 @@ class TVWindow(QMainWindow):
         self.corner_controls.soundRequested.connect(self._on_corner_sound)
         # The Library's ⛶: the menu bar, with View → Fullscreen, hides in fullscreen.
         self.library_page.nav.fullscreenRequested.connect(self.toggle_fullscreen)
-        self.overlays.welcome.addRequested.connect(self.add_provider)
+        self.overlays.welcome.addRequested.connect(lambda: self.add_provider())  # the Add card
         self.overlays.welcome.freeRequested.connect(self.show_free_channels)
         self.overlays.drawer.actionRequested.connect(self.menus.on_drawer_action)
         # Settings in the drawer (its Settings row and ⚙, Settings…): a step applies at once
@@ -2677,22 +2677,31 @@ class TVWindow(QMainWindow):
 
     # ---- OptionsDialog host -------------------------------------------------------------------
 
-    def open_settings(self, from_drawer: bool = False, keep_place: bool = False) -> None:
-        """Settings in the drawer (the drawer's Settings row and ⚙, Settings…, Ctrl/⌘+,), over
-        live TV: from the Library it goes back to the TV first, and the mini player becomes the
-        window again; the channel list, and whatever else would keep the keys under it, gives
-        way to it (TVController.make_way_for_settings; the audio dock's ⋯ menu too). A question
-        keeps the keys, so it stays above Settings. `from_drawer`: backing out of it gives the
-        list back, on its Settings row, or where it was with `keep_place` (its ⚙). Asked again
-        while it shows, it stays as it is (where it came from too)."""
-        if self._closing or self.settings.visible():
+    def open_settings(
+        self, from_drawer: bool = False, keep_place: bool = False, section_key: str = ""
+    ) -> None:
+        """Settings in the drawer (the drawer's Settings row and ⚙, Settings…, Ctrl/⌘+,; at
+        Providers, every Add provider), over live TV: from the Library it goes back to the TV
+        first, and the mini player becomes the window again; the channel list, and whatever
+        else would keep the keys under it, gives way to it (TVController.make_way_for_settings;
+        the audio dock's ⋯ menu too). A question keeps the keys, so it stays above Settings.
+        `section_key`: the section it opens at (else the first). `from_drawer`: backing out of
+        it gives the list back, on its Settings row, or where it was with `keep_place` (its ⚙,
+        its Add provider). Asked again while it shows, it stays as it is (where it came from
+        too), but for a section asked for, which it goes to."""
+        if self._closing:
             return
-        if self.screens.library_shown():
-            self.screens.back_to_tv()
-        self.leave_mini_player()
-        self.more_menu.dismiss()
-        self.controller.make_way_for_settings(keep_place=keep_place)
-        self.settings.open(from_drawer=from_drawer)
+        if self.settings.visible():
+            if not section_key:
+                return
+            self.settings.show_section(section_key)
+        else:
+            if self.screens.library_shown():
+                self.screens.back_to_tv()
+            self.leave_mini_player()
+            self.more_menu.dismiss()
+            self.controller.make_way_for_settings(keep_place=keep_place)
+            self.settings.open(section_key, from_drawer=from_drawer)
         for card in (self.question_card, self.quality_card, self.captions_card):
             if card.isVisible():
                 card.raise_()  # Settings raised itself over it
@@ -2737,23 +2746,25 @@ class TVWindow(QMainWindow):
             self.screens.back_to_tv()  # the QR shows over the TV
         self.pair_overlay.open()
 
-    def add_provider(self, link: Optional[ProviderLink] = None) -> None:
-        """Settings on the Providers tab, with a new provider to fill in (spec §8); from
-        `link` when one was dropped (a portal's, whose MAC the user adds)."""
+    def add_provider(self, link: Optional[ProviderLink] = None, from_drawer: bool = False) -> None:
+        """Every Add provider (the channel list's row, the menu bar's, the welcome card's, the
+        Library's): Settings at Providers with the Add card over it (plan 2), filled in from
+        `link` when one came (a dropped portal link, whose MAC the user adds). `from_drawer`
+        (the list's row): backing out of Settings gives the list back where it was. With no
+        provider yet, the card shows over the empty canvas (the welcome card waits under
+        Settings), and its Cancel closes the Settings it opened: the welcome card again."""
         if self._closing:
             return
-        dialog = OptionsDialog(self)
-        dialog.start_new_provider()
-        if link is not None:
-            dialog.fill_from_link(link)
-        dialog.exec()
-        self._settings_closed()
+        opened = not self.settings.visible()
+        self.open_settings(from_drawer=from_drawer, keep_place=from_drawer, section_key=PROVIDERS)
+        if self.settings.visible():
+            self.provider_cards.add(link, opened_settings=opened)
 
     def add_dropped_providers(self, files: list[str], links: list[ProviderLink]) -> None:
         """Playlist files and provider links dropped on the window (2.2) become providers, as
         Free channels adds one: the list switches to the last one and a toast says so. One
         already in the list is only switched to. A portal's link without its MAC opens the
-        add-provider form filled in instead."""
+        Add card in Settings filled in instead (add_provider), its check before it is kept."""
         if self._closing:
             return
         entries = [provider_drop.file_entry(path) for path in files]

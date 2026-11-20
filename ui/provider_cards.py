@@ -263,7 +263,7 @@ class ProviderCards(QObject):
         self._check = ProviderCheck(runner=window.jobs, parent=self)
         self.form.changed.connect(self._on_changed)
         self.form.pressed.connect(self._on_pressed)
-        self.form.cancelled.connect(self._reset)
+        self.form.cancelled.connect(self._on_cancelled)
         self.question.answered.connect(self._on_guard)
         self._check.answered.connect(self._on_answered)
         settings.hidden.connect(self._close)  # (its cards cancelled already)
@@ -271,9 +271,18 @@ class ProviderCards(QObject):
 
     # ---- opening ------------------------------------------------------------------------------
 
-    def add(self, link: Optional[ProviderLink] = None) -> None:
-        """The Add card: empty, or filled in from `link` (a dropped portal link, say)."""
+    def add(self, link: Optional[ProviderLink] = None, opened_settings: bool = False) -> None:
+        """The Add card: empty, or filled in from `link` (a dropped portal link, say: the keys
+        then on what it lacks, its MAC). Asked again while it shows, with no link, it stays as
+        it is, what was typed too. `opened_settings`: Settings opened for it (an Add provider
+        from outside Settings); with no provider yet, its Cancel then closes Settings too,
+        which gives the welcome card back (ProviderFlow.settings_closed)."""
+        if link is None and not self.form.isHidden() and not self._editing:
+            self._settings.show_card(self.form)
+            self._raise_questions()
+            return
         self._close()
+        self._alone = opened_settings
         if link is not None:
             self._link = link
             self._values = {
@@ -283,6 +292,8 @@ class ProviderCards(QObject):
                 MAC: link.mac,
             }
         self._render()
+        if link is not None:
+            self._focus_first_empty()
 
     def edit(self, name: str) -> None:
         """Provider `name`'s Address-and-login card, filled in from it (a media server's
@@ -311,6 +322,7 @@ class ProviderCards(QObject):
         """No card: nothing kept of what was typed (a password least of all), no answer
         awaited."""
         self._editing = ""  # the provider edited ("": the Add card)
+        self._alone = False  # Settings opened for the Add card (`add`)
         self._original = {}  # as it is listed
         self._values = {}  # every field's text, those hidden for now too
         self._link = None  # what the link field was read as
@@ -328,6 +340,15 @@ class ProviderCards(QObject):
             if not card.isHidden():
                 card.hide()
         self._reset()
+
+    def _on_cancelled(self) -> None:
+        """The card's Cancel (Esc, Back, the dimmed picture): nothing kept. Settings opened
+        for the Add card with no provider yet closes too: the welcome card again (not while
+        Settings is going anyway, which cancels its cards)."""
+        alone = self._alone
+        self._reset()
+        if alone and self._settings.visible() and not self._rows.actions.changes.names():
+            self._settings.close()
 
     def _text(self, key: str) -> str:
         return self._values.get(key, "").strip()
