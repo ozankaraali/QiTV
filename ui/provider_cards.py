@@ -70,7 +70,13 @@ from ui.overlays.settings_card import (
 from ui.provider_check import ProviderCheck
 from ui.settings_controller import SettingsController
 from ui.settings_dialog import NO_LINK_TEXT
-from ui.settings_providers import ProviderRows, answer_text, kind_text, where
+from ui.settings_providers import (
+    SAVE_FAILED_TEXT,
+    ProviderRows,
+    answer_text,
+    kind_text,
+    where,
+)
 
 # The fields, by the provider keys they fill.
 URL, USERNAME, PASSWORD, MAC, SERIAL, DEVICE, NAME = (
@@ -532,8 +538,8 @@ class ProviderCards(QObject):
     def _pick_file(self) -> None:
         """M3U file…: the system's file picker (as the old window's Load File)."""
         path = pick_file(self.form.window(), self.form.title(), "")
-        if not path:
-            return
+        if not path or self.form.isHidden():
+            return  # none picked, or the card went meanwhile (the picker waits for its answer)
         self._values[URL] = path
         self._link, self._chosen, self._line, self._failed = None, "", None, False
         self._render()
@@ -657,7 +663,7 @@ class ProviderCards(QObject):
         entry = {**entry, **(outcome.access if outcome is not None else {})}
         added: list[str] = []
         if not self._rows.apply(lambda: added.append(self._rows.actions.add(entry))):
-            self._render()
+            self._refused()
             return
         name = added[0]
         if outcome is not None:
@@ -682,7 +688,13 @@ class ProviderCards(QObject):
             if saved:
                 self._rows.checked(name, outcome)
         if not saved:
-            self._render()
+            self._refused()
             return
         self._close()
         self._settings.refresh_sections()
+
+    def _refused(self) -> None:
+        """The disk refused the list (said in a toast too, which the card may cover): the card
+        stays as it was, and says so."""
+        self._line = (translate(SAVE_FAILED_TEXT), False)
+        self._render()

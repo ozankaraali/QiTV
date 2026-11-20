@@ -31,7 +31,7 @@ from ui.overlays.settings_drawer import SettingsDrawer
 from ui.provider_cards import ProviderCards
 from ui.settings_controller import SettingsController
 from ui.settings_dialog import HTTP_ONLY_NOTE, NO_LINK_TEXT
-from ui.settings_providers import ProviderRows, layer_key, row_key
+from ui.settings_providers import SAVE_FAILED_TEXT, ProviderRows, layer_key, row_key
 
 XTREAM_LINK = "http://other.test:8080/get.php?username=other&password=s3cret&type=m3u_plus"
 PORTAL_LINK = "http://portal.test/stalker_portal/c/index.html?mac=00:1a:79:00:00:01"
@@ -298,7 +298,8 @@ class CardsTests(unittest.TestCase):
         self.assertTrue(self.form.isVisible())
         self.assertFalse(self.form.busy())
         self.assertEqual(self.form.values()[pc.URL], M3U_LINK.replace("news", "sport"))
-        self.assertEqual(self.window.toasts[-1][1], "error")
+        self.assertEqual(self.window.toasts[-1], (translate(SAVE_FAILED_TEXT), "error"))
+        self.assertEqual(self.form.found(), (translate(SAVE_FAILED_TEXT), False))  # on it too
         self.assertEqual(len(self.saved()), 4)
 
     def test_a_failed_check_offers_add_anyway_but_not_for_media_servers(self):
@@ -675,6 +676,20 @@ class CardsTests(unittest.TestCase):
         self.assertEqual(
             self.saved("Sports"), {"type": "M3UPLAYLIST", "name": "Sports", "url": path}
         )
+        # The card gone while the picker waited (Settings closed under it): nothing shows.
+        self.cards.add()
+
+        def picked_after_settings_closed(*_args):
+            self.settings.close()
+            return path, ""
+
+        with mock.patch.object(
+            QFileDialog, "getOpenFileName", side_effect=picked_after_settings_closed
+        ):
+            self.press(pc.FILE, zone="alt")
+        self.assertFalse(self.form.isVisible())
+        self.assertFalse(self.settings.card_shown())
+        self.settings.open(PROVIDERS)
         # The picker cancelled: the address stays.
         self.cards.add()
         self.type_text(pc.URL, M3U_LINK, at_once=True)
