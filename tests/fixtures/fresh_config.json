@@ -56,5 +56,6 @@
   "decoding_defaults_version": 1,
   "latency_defaults_version": 1,
   "deinterlace_defaults_version": 1,
-  "wheel_defaults_version": 1
+  "wheel_defaults_version": 1,
+  "legacy_lists_version": 1
 }

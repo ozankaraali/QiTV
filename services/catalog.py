@@ -1062,7 +1062,7 @@ class CatalogService(QObject):
         stamp(loaded, self.current_provider_name())
         content.setdefault("contents", {})[group_id] = loaded
         self._content_version += 1
-        self.provider_manager.save_provider()
+        self.provider_manager.save_provider_pages()  # (beside the lists: 2.12)
         self.groupReady.emit(section, group_id)
 
     def _on_group_error(self, job: _Job, message: str) -> None:
@@ -1136,7 +1136,7 @@ class CatalogService(QObject):
         stamp(items, self.current_provider_name())
         cache.setdefault("seasons", {})[str(series.get("id"))] = items
         self._content_version += 1
-        self.provider_manager.save_provider()
+        self.provider_manager.save_provider_pages()  # (beside the lists: 2.12)
         self.seasonsReady.emit(str(series.get("id")))
 
     def _on_seasons_error(self, job: _Job, message: str) -> None:
@@ -1227,7 +1227,7 @@ class CatalogService(QObject):
         by_season = self._series_cache().setdefault("episodes", {})
         by_season.setdefault(str(series.get("id")), {})[season_id] = episodes
         self._content_version += 1
-        self.provider_manager.save_provider()
+        self.provider_manager.save_provider_pages()  # (beside the lists: 2.12)
         self.episodesReady.emit(str(series.get("id")), season_id)
 
     def _on_episodes_error(self, job: _Job, message: str) -> None:
