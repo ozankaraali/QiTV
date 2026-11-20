@@ -28,6 +28,11 @@ itself (its setup, its hint, the welcome card, the last channel, the drawer) wai
 does `when_idle`, but nothing of it is spent. A list of files then holds it as a film does
 (`hold_for_file(True)` takes the read's place); a provider's list lets it start as any start.
 
+The window may begin the start's setup as it is built, behind the splash (`set_up_early`,
+2.13.1): what that setup says before the start waits for it (the last channel and the list
+need the window on screen). A list at hand by then opens with no "Loading <provider>…"; one
+that failed is said at the start, never set up again (a portal counts each sign-in).
+
 TVController owns the links, the zapping and the player, and hands this unit callbacks.
 """
 
@@ -126,6 +131,8 @@ class ProviderFlow(QObject):
         self._started = False  # the start ran (start): a read no longer holds it
         self._reading = False  # the start's playlist is read (hold_for_read)
         self._start_due = False  # the start came while it was read: it runs once it is over
+        self._early = False  # the window began the start's setup as it was built (set_up_early)
+        self._early_failure: Optional[tuple[str, str]] = None  # what it said, before the start
 
     def wire(self) -> None:
         catalog = self.catalog
@@ -154,7 +161,9 @@ class ProviderFlow(QObject):
 
     def start(self) -> None:
         """The start: the selected provider's setup (or the welcome card). While the start's
-        playlist is read it waits (hold_for_read), and runs once that is over."""
+        playlist is read it waits (hold_for_read), and runs once that is over. A setup begun
+        early (set_up_early) is taken over: its list at hand shows with no hint, and its
+        failure is said now, with no second setup."""
         if self._reading:
             self._start_due = True
             return
@@ -163,8 +172,27 @@ class ProviderFlow(QObject):
             # ProviderManager cannot set up without providers; the setup would only fail.
             self.welcome()
             return
-        self._show_loading(self._setup_name(None), chosen=False)
-        self.catalog.select_provider()
+        failure, self._early_failure = self._early_failure, None
+        if failure is not None:
+            self._on_provider_failed(*failure)
+            return
+        if not (self._early and self._at_hand()):
+            self._show_loading(self._setup_name(None), chosen=False)
+        self.catalog.select_provider()  # (its ready again at once when it is at hand)
+
+    def set_up_early(self) -> None:
+        """The window began the start's setup as it was built (2.13.1): until start(), what the
+        catalog says waits for it (start() asks the catalog again, and says a failure)."""
+        self._early = True
+
+    def _before_start(self) -> bool:
+        """An early setup's word, heard before the start: it waits for it."""
+        return self._early and not self._started
+
+    def _at_hand(self) -> bool:
+        """The page's channels show at once (BrowsedCatalog.at_hand): nothing loads."""
+        at_hand = getattr(self.catalog, "at_hand", None)
+        return bool(at_hand("live")) if at_hand is not None else False
 
     def select_provider(self, name: Optional[str] = None, *, force_refresh: bool = False) -> None:
         """A setup the viewer asked for (the menu bar, Settings, a refresh, a list added): its
@@ -428,7 +456,7 @@ class ProviderFlow(QObject):
         return bool(self.catalog.current_provider_name() == ALL_PROVIDERS)
 
     def _on_provider_ready(self, name: str) -> None:
-        if self._closed():
+        if self._closed() or self._before_start():
             return
         if name != ALL_PROVIDERS and self._mixed():
             # One provider of All: new content in the lists (the path stays); a last channel
@@ -584,6 +612,9 @@ class ProviderFlow(QObject):
     def _on_provider_failed(self, name: str, message: str) -> None:
         if self._closed():
             return
+        if self._before_start():
+            self._early_failure = (name, message)  # said at the start (no setup again)
+            return
         self._end_loading()
         shown = shown_message(message)
         self._error(f"{name}: {shown}" if name else shown)
@@ -618,7 +649,7 @@ class ProviderFlow(QObject):
             self._show_loading(name, chosen=True)
 
     def _on_section_ready(self, section: str) -> None:
-        if self._closed() or section != "live":
+        if self._closed() or section != "live" or self._before_start():
             return
         self._live_section_loaded()
         if not self._await_live:
@@ -636,7 +667,7 @@ class ProviderFlow(QObject):
             self._open_drawer_if_idle()
 
     def _on_section_failed(self, section: str, message: str) -> None:
-        if self._closed() or section != "live" or not self._await_live:
+        if self._closed() or section != "live" or not self._await_live or self._before_start():
             return
         if message == PROVIDER_LOADING_MESSAGE:
             return  # a setup is running; its providerReady arms this again

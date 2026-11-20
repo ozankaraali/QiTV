@@ -989,6 +989,10 @@ class TVController(QObject):
     def select_provider(self, name: Optional[str] = None, *, force_refresh: bool = False) -> None:
         self._flow.select_provider(name, force_refresh=force_refresh)
 
+    def set_up_early(self) -> None:
+        """The window began the start's setup as it was built: ProviderFlow.set_up_early."""
+        self._flow.set_up_early()
+
     def hold_for_file(self, on: bool) -> None:
         """A file opened in QiTV is on its way or plays (`on`): nothing opens over it (see
         ProviderFlow.hold_for_file), nor does the Next card's episode (it would count as a

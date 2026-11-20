@@ -115,6 +115,15 @@ class MainModuleTests(unittest.TestCase):
             body,
         )
 
+    def test_the_tv_list_loads_while_the_window_is_built_behind_the_splash(self):
+        # 2.13.1: the window begins its provider's setup as it is built (on a fair day the
+        # list is there as it opens), unless no splash shows (the window shows at once, as
+        # before) or the start opens files (the film first, as before).
+        body = (REPO / "main.py").read_text(encoding="utf-8").split("def main()", 1)[1]
+        early = body.index("load_early=with_splash and not (paths + app.kept_opened()),")
+        self.assertLess(body.index("window = TVWindow("), early)
+        self.assertLess(early, body.index("window.show()"))
+
     def test_the_settings_lock_goes_last(self):
         # Review M4: the window's close stops answering other starts (TVWindow); the lock stays
         # until the settings are written, so a start that waited for it reads the last save.

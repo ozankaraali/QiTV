@@ -426,7 +426,16 @@ def main() -> int:
     control = None
     dde = None
     try:
-        window = TVWindow(app, config_manager, provider_manager, image_manager, epg_manager)
+        window = TVWindow(
+            app,
+            config_manager,
+            provider_manager,
+            image_manager,
+            epg_manager,
+            # 2.13.1: the channel list loads as the window is built, behind the splash (it
+            # is there as the window opens); a start that opens files plays them first.
+            load_early=with_splash and not (paths + app.kept_opened()),
+        )
         if instance is not None:
             instance.activated.connect(window.come_to_front)
             window.instance = instance  # it answers no start once the window's close begins

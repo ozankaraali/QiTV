@@ -11,9 +11,10 @@ from datetime import datetime, tzinfo
 import itertools
 import logging
 import re
+import time
 from typing import Any, Callable, Iterator, Optional, cast
 
-from PySide6.QtCore import QObject, QTimer, Signal
+from PySide6.QtCore import QObject, Qt, QTimer, Signal
 
 from services.body_limits import TOO_LARGE_MESSAGE
 from services.catchup import known_zone
@@ -184,6 +185,11 @@ _LOADER_LABELS = frozenset(
     }
 )
 _NUMBERED_LABEL = re.compile(r"(Season|Episode|Stream) (\d+)")
+
+
+def _noting(ended: list[tuple[str, float]], outcome: str) -> Callable[..., None]:
+    """A setup worker's end, noted on its own thread: (outcome, time.monotonic())."""
+    return lambda *_args: ended.append((outcome, time.monotonic()))
 
 
 def shown_label(text: str) -> str:
@@ -471,6 +477,9 @@ class CatalogService(QObject):
         self._state_job: Optional[str] = None  # "provider" or "epg" while one runs
         self._pending_setup: Optional[tuple[Optional[str], bool]] = None
         self._setup_target: Optional[str] = None  # the provider the running setup loads
+        # How the newest setup's worker ended and when ((outcome, time.monotonic()), its thread
+        # appends it as it ends): setup_end, before the GUI thread hears the result.
+        self._setup_end: list[tuple[str, float]] = []
         self._pending_epg: Optional[bool] = None  # a queued EPG load (its force flag)
         self._epg_load: Optional[tuple] = None  # (generation, provider, releases) of the load
         # Catalog network jobs: keys are (generation, kind, ...) for queued and running jobs;
@@ -589,6 +598,12 @@ class CatalogService(QObject):
                 logger.warning("Couldn't save the provider choice: %s", safe_message(e))
         target = self._target(name)
         worker = self.factory.provider_setup(self.provider_manager, force_refresh)
+        ended: list[tuple[str, float]] = []
+        self._setup_end = ended
+        for outcome, signal_name in (("ready", "finished"), ("failed", "error")):
+            signal = getattr(worker, signal_name, None)
+            if signal is not None:  # on the worker's thread: a time noted, nothing else
+                signal.connect(_noting(ended, outcome), Qt.ConnectionType.DirectConnection)
         self._state_job = "provider"
         self._setup_target = target
         self._start(
@@ -802,7 +817,7 @@ class CatalogService(QObject):
             return
         ct = SECTION_CONTENT_TYPES[section]
         content = self.provider_manager.current_provider_content.get(ct)
-        if not force and self._usable(content) and not self.provider_manager.is_content_stale(ct):
+        if not force and self._fresh(section):
             self._emit_later(self.sectionReady, section)
             return
         provider, ptype = self.current_provider(), self.provider_type()
@@ -840,6 +855,29 @@ class CatalogService(QObject):
             return
         self._waited_sections.add(section)
         self._request_catalog(("section", section), "section", section, self._section_worker)
+
+    def _fresh(self, section: str) -> bool:
+        """The section's saved list is held and not past its time: asking for it loads nothing."""
+        ct = SECTION_CONTENT_TYPES[section]
+        content = self.provider_manager.current_provider_content.get(ct)
+        return self._usable(content) and not self.provider_manager.is_content_stale(ct)
+
+    def at_hand(self, section: str) -> bool:
+        """Whether the list of `section` shows at once (2.13.1): the provider is set up (no
+        setup runs or waits) and asking for it loads nothing, as request_section answers from
+        the saved list; a provider without the section has none to load."""
+        if self._closed or self._setup_active() or self._ready_provider is None:
+            return False
+        if section not in self.sections():
+            return True
+        return self.provider_type() == "M3USTREAM" or self._fresh(section)
+
+    def setup_end(self) -> Optional[tuple[str, float]]:
+        """How the newest setup's worker ended ("ready" or "failed") and when (time.monotonic,
+        as its thread ended): None while it runs. Its result reaches this catalog only once the
+        GUI thread's event loop turns (main() builds the window first)."""
+        ended = self._setup_end
+        return ended[0] if ended else None
 
     def refresh_section(self, section: str) -> bool:
         """Load the section's list again (2.8: the Library's Refresh). An Xtream panel's and a

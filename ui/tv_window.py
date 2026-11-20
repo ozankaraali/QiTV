@@ -534,7 +534,10 @@ class TVWindow(QMainWindow):
         *,
         vlc_instance=None,
         catalogs: Optional[Catalogs] = None,
+        load_early: bool = False,
     ):
+        """`load_early` (main(), behind the splash): the TV page's provider begins its setup
+        now, while the rest of the window is built; the window's start takes it over."""
         super().__init__()
         self.app = app
         self.config_manager = config_manager
@@ -683,6 +686,14 @@ class TVWindow(QMainWindow):
             all_key="tv_all_providers",
             parent=self,
         )
+        # 2.13.1: the channel list loads while the rest is built (the splash is a process of its
+        # own): on a fair day it is there as the window opens, with no "Loading…" over it. One
+        # provider's page only (All providers sets each up at the start, as before).
+        self._early_list: Optional[float] = None  # when that setup began (time.monotonic)
+        self._shown_at: Optional[float] = None
+        if load_early and not self.catalog.all_providers() and self.catalog.source():
+            self._early_list = time.monotonic()
+            self.catalogs.ensure(self.catalog.source())
         self.library_catalog = BrowsedCatalog(
             self.catalogs,
             config_manager,
@@ -1047,6 +1058,8 @@ class TVWindow(QMainWindow):
         # Wired before the Library connects to the catalog: on providerReady the controller
         # settles the provider change before a Library play waiting for it runs.
         controller.wire()
+        if self._early_list is not None:
+            controller.set_up_early()  # what that setup says waits for the start (_start)
         # 2.8.13: the system's media keys (the player listed in the system's media panel gets
         # them: macOS only so): each acts as the keyboard's, and the system hears what the
         # large picture plays (after the controller hears the state: it knows what plays by
@@ -3166,6 +3179,7 @@ class TVWindow(QMainWindow):
         super().showEvent(event)
         if not self._started:
             self._started = True
+            self._shown_at = time.monotonic()
             # After the native window exists and is on screen.
             QTimer.singleShot(0, self, self._start)
 
@@ -3178,6 +3192,7 @@ class TVWindow(QMainWindow):
         self.media_keys.start(int(self.winId()))
         self.network_player.start()  # Network streams' file, read on a worker
         self.controller.start()
+        self._say_early_list()
         self.epg_refresh.start()
         if self.scheduler is not None:
             self.scheduler.start()  # what was missed meanwhile is said; then the schedule
@@ -3185,6 +3200,33 @@ class TVWindow(QMainWindow):
         if self.config_manager.save_failed():  # e.g. the defaults patched in at start
             self.screens.notify(translate(SAVE_FAILED_TEXT), "error", ERROR_MS)
             self._save_failure_said = True  # Settings going does not say it again
+
+    def _say_early_list(self) -> None:
+        """The log says whether the list that began loading as the window was built was there
+        when it showed, and how long before (its worker's own time: its result waits for the
+        event loop, which turns only once the window shows)."""
+        began, self._early_list = self._early_list, None
+        if began is None:
+            return
+        shown = self._shown_at if self._shown_at is not None else time.monotonic()
+        name = self.catalog.source()
+        catalog = self.catalogs.catalog(name) if name in self.catalogs.created() else None
+        end = catalog.setup_end() if catalog is not None else None
+        if end is None or end[1] > shown:
+            logger.info(
+                "The channel list was still loading as the window showed, %.2f s after it began.",
+                shown - began,
+            )
+        elif end[0] == "ready":
+            logger.info(
+                "The channel list was ready %.2f s before the window showed (set up in %.2f s).",
+                shown - end[1],
+                end[1] - began,
+            )
+        else:
+            logger.info(
+                "The channel list's setup failed %.2f s before the window showed.", shown - end[1]
+            )
 
     def _fit_restored(self) -> None:
         """Bring the saved geometry onto a screen: its monitor may be gone.
