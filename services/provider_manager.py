@@ -36,8 +36,9 @@ HANDSHAKE_UNREACHABLE = "unreachable"  # DNS, connection, timeout or a server er
 HANDSHAKE_REJECTED = "rejected"  # an explicit refusal (401/403, blocked) or no token
 HANDSHAKE_UNEXPECTED = "unexpected"  # any other answer: a wrong path, not JSON
 # 2.12: a provider's cache is "<hash>.v2.jsonl", in pieces (services.provider_cache). Before,
-# "<hash>.json", one document: read once when there is no new file, removed by the first save
-# (older builds then find no cache and load the lists again).
+# "<hash>.json", one document: read while it is the newer file (none of the new one yet, or an
+# older build wrote it since), removed with the provider's next lists write (older builds then
+# find no cache and load the lists again).
 CACHE_SUFFIX = ".v2.jsonl"
 LEGACY_CACHE_SUFFIX = ".json"
 # Beside it, what opened one title or group at a time (seasons, episodes, a portal's group
