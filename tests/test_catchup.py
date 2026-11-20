@@ -61,6 +61,25 @@ class FieldTests(unittest.TestCase):
             with self.subTest(stream=stream):
                 self.assertEqual(xtream_archive_fields(stream), {})
 
+    def test_days_that_are_not_a_finite_number_count_as_none(self):  # 2.12
+        # int(float("inf")) raised OverflowError: the whole playlist (or panel) didn't load.
+        self.assertEqual(
+            xtream_archive_fields({"tv_archive": 1, "tv_archive_duration": "inf"}), {ARCHIVE_KEY: 1}
+        )
+        self.assertEqual(xtream_archive_fields({"tv_archive": "1e400"}), {})
+        self.assertEqual(m3u_archive_fields({"catchup-days": "inf"}), {})
+        self.assertEqual(
+            m3u_archive_fields({"catchup": "flussonic", "timeshift": "1e400"}),
+            {ARCHIVE_KEY: 1, "catchup": "flussonic"},
+        )
+        playlist = (
+            '#EXTM3U catchup-days="Infinity"\n#EXTINF:-1 catchup-days="inf",A\n'
+            "http://a.invalid/a.ts\n#EXTINF:-1,B\nhttp://a.invalid/b.ts\n"
+        )
+        self.assertEqual([item["name"] for item in parse_m3u(playlist)], ["A", "B"])
+        categorized = parse_m3u(playlist, categorize=True)
+        self.assertEqual([item["name"] for item in categorized["contents"]], ["A", "B"])
+
     def test_m3u_types_need_what_they_fill_in(self):
         self.assertEqual(
             m3u_archive_fields({"catchup": "append", "catchup-source": "?utc={utc}"}),

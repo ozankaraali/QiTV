@@ -119,10 +119,11 @@ class Archive:
 
 
 def _days(value: Any) -> int:
-    """A count of days in a provider's field ("3", 3, "3.0"); 0 when it is none."""
+    """A count of days in a provider's field ("3", 3, "3.0"); 0 when it is none (or not a
+    finite number: "inf" failed a whole playlist before 2.12)."""
     try:
         days = int(float(str(value).strip()))
-    except TypeError, ValueError:
+    except TypeError, ValueError, OverflowError:
         return 0
     return max(0, min(days, MAX_DAYS))
 
