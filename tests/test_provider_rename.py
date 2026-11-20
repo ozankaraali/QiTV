@@ -283,6 +283,7 @@ class BudgetTests(unittest.TestCase):
         self.assertEqual(budget.provider_of(waiting), "B")  # the waiter took the freed slot
 
 
+from services.i18n import translate  # noqa: E402
 from tests.fixtures.local_provider import PROVIDER_NAME  # noqa: E402
 from tests.test_tv_window import WindowCase  # noqa: E402
 from ui import settings_parental  # noqa: E402
@@ -321,23 +322,35 @@ class SettingsTests(WindowCase):
         self.window.parental.hide_group("live", PROVIDER_NAME, "Fixture", "Fixture")
         start = Programme("Quiz", _at(4_000_000_000), _at(4_000_003_600), "", None)
         self.window.recording_schedule.add_once(star, start)
-        with mock.patch.object(settings_parental, "_ask_pin", return_value="2468") as asked:
-            self.rename("Renamed")
-        asked.assert_called_once()  # locked: the PIN was asked
+        self.rename("Renamed")
+        self.assertEqual(self.saved_names(), [PROVIDER_NAME])  # locked: the PIN first
+        with mock.patch.object(self.window.catalog, "select_provider"):
+            self.type_pin("2468")
         self.assertEqual(self.saved_names(), ["Renamed"])
         self.assertEqual(self.config.selected_provider_name, "Renamed")
         self.assertEqual(favorites.entries(self.config)[0]["provider"], "Renamed")
         self.assertTrue(self.window.parental.hides_group("live", "Renamed", "Fixture"))
         self.assertEqual(self.window.recording_schedule.providers(), {"Renamed"})
 
+    def type_pin(self, pin):
+        """The PIN typed in its card over Settings (2.13.1), then OK; the card that asked."""
+        card = self.window.parental_rows.card
+        self.assertTrue(card is not None and card.isVisible())
+        self.assertEqual(card.title(), translate(settings_parental.PARENTAL_TITLE))
+        controller = self.window.controller
+        controller.handle(Action.NAV_TEXT, pin)
+        controller.handle(Action.NAV_ACTIVATE)
+        return card
+
     def test_a_wrong_pin_keeps_the_name(self):
         self.window.parental.set_pin("2468")
-        with (
-            mock.patch.object(settings_parental, "_ask_pin", return_value="1111"),
-            mock.patch.object(settings_parental.QMessageBox, "warning") as said,
-        ):
-            self.rename("Renamed")
-        said.assert_called_once()
+        self.rename("Renamed")
+        card = self.type_pin("1111")
+        self.assertTrue(card.isVisible())  # said in the card, which stays
+        self.assertEqual(card.found(), (translate(settings_parental.WRONG_TEXT), False))
+        self.window.controller.handle(Action.ESCAPE)
+        self.assertTrue(card.isHidden())
+        self.assertTrue(self.window.settings.visible())  # Esc was the card's alone
         self.assertEqual(self.saved_names(), [PROVIDER_NAME])
 
 

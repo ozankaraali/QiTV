@@ -72,7 +72,7 @@ from ui.overlays.settings_card import BUSY_TEXT, CANCEL, CANCEL_TEXT, Button, Ch
 from ui.provider_actions import ProviderActions
 from ui.provider_check import ProviderCheck
 from ui.settings_controller import SettingsController, Settled
-from ui.settings_parental import pin_allows
+from ui.settings_parental import ask_pin
 from ui.tv_controller import ERROR_MS
 
 logger = logging.getLogger(__name__)
@@ -536,8 +536,11 @@ class ProviderRows(QObject):
         """Provider `name` renamed to `text` (blank: after its address), the PIN asked first
         while parental controls are locked; another provider's name is said and refused. The
         viewer stays in its layer, under the new name."""
-        if not self._parental_allows():
-            return
+        self._with_pin(lambda: self._rename_now(name, text))
+
+    def _rename_now(self, name: str, text: str) -> None:
+        if self._find(name) is None:
+            return  # it went while the PIN was asked
         index = self._actions.changes.names().index(name)
         try:
             self.apply(lambda: self._actions.rename(name, text))
@@ -591,8 +594,11 @@ class ProviderRows(QObject):
 
     def _ask_remove(self, name: str) -> None:
         """Remove provider…: the PIN while locked, then asked in a card (Cancel first)."""
-        if not self._parental_allows():
-            return
+        self._with_pin(lambda: self._ask_remove_now(name))
+
+    def _ask_remove_now(self, name: str) -> None:
+        if self._find(name) is None:
+            return  # it went while the PIN was asked
         schedule = getattr(self._window, "recording_schedule", None)
         scheduled = schedule is not None and name in schedule.providers()
         if self._question is None:
@@ -621,14 +627,22 @@ class ProviderRows(QObject):
 
     # ---- what they need ---------------------------------------------------------------------
 
-    def _parental_allows(self) -> bool:
-        """Renaming or removing while parental controls are locked asks the PIN, once per
-        visit of Settings (what they hide is kept by provider name)."""
+    def _with_pin(self, then: Callable[[], None]) -> None:
+        """`then`, but renaming or removing while parental controls are locked asks the PIN
+        first (in a card over Settings, 2.13.1), once per visit of Settings (what they hide is
+        kept by provider name): `then` once it is right, nothing when the card goes without it
+        (Settings going cancels it)."""
         guard = getattr(self._window, "parental", None)
         if guard is None or not guard.locked() or self._pin_granted:
-            return True
-        self._pin_granted = pin_allows(self._drawer.window(), guard)
-        return self._pin_granted
+            then()
+            return
+
+        def answered(right: bool) -> None:
+            if right:
+                self._pin_granted = True
+                then()
+
+        ask_pin(self._window, guard, answered)
 
     def _on_settings_hidden(self) -> None:
         self._pin_granted = False

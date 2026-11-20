@@ -45,6 +45,7 @@ from ui.overlays.settings_card import BUSY_TEXT, CANCEL
 from ui.overlays.settings_drawer import SettingsDrawer
 from ui.overlays.settings_layout import Item, title_of, whole
 from ui.settings_controller import STEPS_SETTLE_MS, SettingsController
+from ui.settings_parental import ParentalRows
 from ui.settings_providers import (
     HTTP_ONLY_NOTE,
     NAME_TAKEN_TEXT,
@@ -186,6 +187,8 @@ class ProvidersTests(unittest.TestCase):
         )
         self.rows = ProviderRows(self.window, self.settings, self.drawer, cards=self.cards)
         self.window.rows = self.rows
+        # The PIN's card (2.13.1: Settings › Parental controls' own, over Settings).
+        self.window.parental_rows = ParentalRows(self.window, self.settings, self.drawer)
 
     def tearDown(self):
         elapse(QApplication.doubleClickInterval() + 80)  # no second-click guard left armed
@@ -575,29 +578,58 @@ class ProvidersTests(unittest.TestCase):
         self.assertEqual(self.saved("@add")["max_streams"], 1)
         self.cards.add.assert_not_called()
 
+    def pin_card(self):
+        """The PIN's card, showing over Settings with the keys (2.13.1: no system window)."""
+        card = self.window.parental_rows.card
+        self.assertIsNotNone(card)
+        self.assertTrue(card.isVisible())
+        self.assertTrue(self.settings.card_shown())
+        return card
+
+    def type_pin(self, pin):
+        self.key(Action.NAV_TEXT, pin)
+        self.key(Action.NAV_ACTIVATE)  # OK, from the field
+
     def test_rename_asks_the_pin_when_locked(self):
         self.window.parental.is_locked = True
         self.on("Panel", "name")
-        with (
-            mock.patch.object(settings_parental, "_ask_pin", return_value="1111") as asked,
-            mock.patch.object(settings_parental.QMessageBox, "warning") as wrong,
-        ):
-            self.type_name("Renamed", replace=True)
-        asked.assert_called_once()
-        wrong.assert_called_once()
+        self.type_name("Renamed", replace=True)
+        card = self.pin_card()
+        self.assertEqual(card.title(), translate(settings_parental.PARENTAL_TITLE))
+        self.assertEqual([f.key for f in card._fields], [settings_parental.YOURS])
+        self.assertTrue(card._fields[0].secret)
+        self.assertEqual(self.saved(), ["Lists", "Panel"])  # not before the PIN
+        self.key(Action.NAV_TEXT, "1a1")  # digits only
+        self.assertEqual(card.values(), {settings_parental.YOURS: "11"})
+        self.type_pin("11")
+        # A wrong PIN is said in the card, which stays for another try, its field emptied.
+        self.assertTrue(card.isVisible())
+        self.assertEqual(card.found(), (translate(settings_parental.WRONG_TEXT), False))
+        self.assertEqual(card.values(), {settings_parental.YOURS: ""})
+        self.assertEqual(self.saved(), ["Lists", "Panel"])
+        self.key(Action.ESCAPE)  # cancelled: the name stays
+        self.assertFalse(self.settings.card_shown())
         self.assertEqual(self.saved(), ["Lists", "Panel"])
         self.assertEqual(self.value("Panel", "name"), "Panel")
-        with mock.patch.object(settings_parental, "_ask_pin", return_value=PIN) as asked:
-            self.type_name("Renamed", replace=True)
-            self.type_name(" again")  # once per visit
-        asked.assert_called_once()
+        self.type_name("Renamed", replace=True)
+        self.type_pin(PIN)
+        self.assertFalse(card.isVisible())
+        self.assertEqual(self.saved(), ["Lists", "Renamed"])
+        self.type_name(" again")  # once per visit
+        self.assertFalse(self.settings.card_shown())
         self.assertEqual(self.saved(), ["Lists", "Renamed again"])
         self.settings.close()  # the visit is over: asked again
-        with mock.patch.object(settings_parental, "_ask_pin", return_value=None) as asked:
-            self.on("Renamed again", "name")
-            self.type_name("Third", replace=True)
-        asked.assert_called_once()
+        self.on("Renamed again", "name")
+        self.type_name("Third", replace=True)
+        self.pin_card()
+        self.settings.close()  # Settings going cancels the card: nothing renamed
+        self.assertFalse(card.isVisible())
         self.assertEqual(self.saved(), ["Lists", "Renamed again"])
+        self.settings.open(PROVIDERS)
+        self.on("Renamed again", "name")
+        self.type_name("Third", replace=True)
+        self.pin_card()  # never granted by the cancelled card
+        self.key(Action.ESCAPE)
 
     # ---- hidden groups -----------------------------------------------------------------------
 
@@ -757,12 +789,14 @@ class ProvidersTests(unittest.TestCase):
         self.window.parental.is_locked = True
         self.key(Action.NAV_ACTIVATE)
         self.move_to(row_key("Panel", "remove"))
-        with mock.patch.object(settings_parental, "_ask_pin", return_value=None) as asked:
-            self.key(Action.NAV_ACTIVATE)
-        asked.assert_called_once()
+        self.key(Action.NAV_ACTIVATE)
+        self.pin_card()
+        self.assertFalse(question.isVisible())  # the PIN first
+        self.key(Action.ESCAPE)
         self.assertFalse(self.settings.card_shown())  # refused: never asked
-        with mock.patch.object(settings_parental, "_ask_pin", return_value=PIN):
-            self.key(Action.NAV_ACTIVATE)
+        self.key(Action.NAV_ACTIVATE)
+        self.type_pin(PIN)
+        self.assertTrue(question.isVisible())
         self.assertEqual(question.body(), "")
         self.key(Action.ESCAPE)
         self.assertEqual(self.saved(), ["Panel"])
