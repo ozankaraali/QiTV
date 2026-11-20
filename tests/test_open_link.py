@@ -451,8 +451,8 @@ class EntryPointTests(WindowCase):
         self.assertEqual(actions[at : at + 3], [OPEN_FILE_ROW, OPEN_LINK_ROW, OPEN_FOLDER_ROW])
         for key in (Qt.Key.Key_Left, Qt.Key.Key_Left):
             QTest.keyClick(window, key)  # the sources column
-        for _ in range(5):
-            QTest.keyClick(window, Qt.Key.Key_Down)  # ⚙, ＋, ＋ free, Open file, Open a link
+        for _ in range(6):  # ⚙, ＋, ＋ free channels, ＋ free radio, Open file, Open a link
+            QTest.keyClick(window, Qt.Key.Key_Down)
         self.assertEqual(drawer.highlighted().key, OPEN_LINK_ROW)
         self.assertEqual(drawer.highlighted().title, "Open a link")
         QTest.keyClick(window, Qt.Key.Key_Return)
