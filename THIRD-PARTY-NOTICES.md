@@ -9,11 +9,13 @@ and the `licenses/` folder are inside every packaged app.
 - libVLC and libVLCcore: GNU Lesser General Public License, version 2.1 or later
   (LGPL-2.1-or-later). Some VLC plugins: GNU General Public License, version 2 or later
   (GPL-2.0-or-later).
-- QiTV ships VLC's own build unchanged: on macOS from VLC.app, on Windows from VLC's installer
-  (VideoLAN), on Linux from the distribution's VLC packages.
+- QiTV ships VLC unchanged. On macOS (from VLC.app) and Windows (from VLC's installer) it is
+  VideoLAN's own build of the current 3.0 release when the app is built (now 3.0.24). On Linux
+  it is the distribution's libVLC packages the app is built with (Ubuntu 24.04's 3.0.20, with
+  Ubuntu's patches).
 - Source code: <https://www.videolan.org/vlc/> and <https://code.videolan.org/videolan/vlc>.
 - License texts: `licenses/vlc/COPYING` (GPL-2.0) and `licenses/vlc/COPYING.LIB` (LGPL-2.1),
-  VLC's own copies from its 3.0.20 source.
+  VLC's own copies from its 3.0.20 source (3.0.24's are the same).
 - Casting to a Chromecast, and finding the devices on the network, are VLC's own (its
   renderer and service-discovery modules, part of the build above); QiTV uses no Google Cast
   SDK.
