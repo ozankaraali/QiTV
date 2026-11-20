@@ -1946,6 +1946,8 @@ class TVController(QObject):
             self.play_file(QUrl(str(target.item.get("cmd") or "")).toLocalFile())
             return
         if self._network_url(target.item) is not None:
+            if self.hides_link(target.item):
+                return  # parental controls hide it while locked: nothing is held for it
             self._hold_for_link()  # a link again: held as its first play was, without a provider
         if target.live:
             key = target.group_key or ALL_GROUP_ID
