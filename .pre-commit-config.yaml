@@ -14,7 +14,7 @@ repos:
         name: Black Linter
         exclude: ^.*\b(migrations)\b.*$
 -   repo: https://github.com/pycqa/flake8
-    rev: 7.4.1
+    rev: 7.5.0
     hooks:
     -   id: flake8
         name: Flake8 syntax errors or undefined names
@@ -27,11 +27,11 @@ repos:
         exclude: ^.*\b(migrations)\b.*$
         args: [--count, --exit-zero, --max-complexity=10, --max-line-length=100, "--extend-ignore=E203,E402", --statistics]
 -   repo: https://github.com/pre-commit/mirrors-mypy
-    rev: 'v2.4.0'
+    rev: 'v2.4.1'
     hooks:
     -   id: mypy
         additional_dependencies:
-              - types-requests==2.33.0.20260906
+              - types-requests==2.33.0.20261030
         exclude: ^.*\b(migrations)\b.*$
 -   repo: https://github.com/pycqa/isort
     rev: 9.0.2
