@@ -10,6 +10,12 @@ the same rules, so the list stays as older 2.x builds read it:
 - `ssl_verify` only when the provider had the key or the value differs from the global setting;
 - a media server's password never (it signs in once; its token is kept instead).
 
+The old Save compared with the list as the window opened, so a value stepped away and back
+wrote nothing. A caller that writes each step gives the provider as it was before its steps
+began (`since`): "had the key" and "changed" are then read from that, so steps back to where
+they began leave the provider as it was (one that followed the global setting follows it
+again, with no `ssl_verify` of its own).
+
 Each write saves the list (`ProviderManager.save_providers`, which also lets go of the cache
 of a name no longer listed). A write the disk refuses (OSError) changes nothing: the list goes
 back to what it was, as the disk still holds it, and the error is the caller's to say. What the
@@ -26,7 +32,7 @@ from collections.abc import Iterable
 from copy import deepcopy
 from dataclasses import dataclass, field
 import os
-from typing import TYPE_CHECKING, Any, Callable
+from typing import TYPE_CHECKING, Any, Callable, Optional
 from urllib.parse import urlsplit
 
 from services.epg_view import GUIDE_OFFSET_KEY
@@ -91,15 +97,32 @@ class ProviderChanges:
         self._save(listed)
         return name
 
-    def update(self, name: str, changes: dict) -> Change:
+    def update(self, name: str, changes: dict, since: Optional[dict] = None) -> Change:
         """Change provider `name`'s fields by `changes` (not its name: `rename`); saved when
-        anything changed. KeyError when no provider has the name."""
+        anything changed. `since`: the provider as it was before a run of steps on its rows
+        began, what the rules compare with (whether it had the key, whether the value changed),
+        so that steps back to where they began write it as it was; the provider as it is by
+        default. KeyError when no provider has the name."""
         index = self._index(name)
         changes = dict(changes)
         if changes.pop("name", name) != name:
             raise ValueError("A provider is renamed with rename()")
         before = self._providers[index]
-        after = self._written(before, changes)
+        after = self._written(before, changes, since)
+        change = self._change(before, after)
+        if not change.fields:
+            return change
+        listed = list(self._providers)
+        self._providers[index] = after
+        self._save(listed)
+        return change
+
+    def since(self, name: str, before: dict) -> Change:
+        """What differs in provider `name` now from `before`, the provider as it was (its
+        fields, and whether its connection did). KeyError when no provider has the name."""
+        return self._change(before, self._providers[self._index(name)])
+
+    def _change(self, before: dict, after: dict) -> Change:
         fields = {
             key
             for key in before.keys() | after.keys()
@@ -110,9 +133,6 @@ class ProviderChanges:
         verify = self._global_ssl_verify()
         identity = self._manager.provider_cache_identity
         changed = identity(before, ssl_verify=verify) != identity(after, ssl_verify=verify)
-        listed = list(self._providers)
-        self._providers[index] = after
-        self._save(listed)
         return Change(identity_changed=changed, fields=fields)
 
     def rename(self, old: str, new: str) -> str:
@@ -152,14 +172,19 @@ class ProviderChanges:
 
     # ---- the writing rules ----------------------------------------------------------------------
 
-    def _written(self, before: dict, changes: dict) -> dict:
-        """`before` with `changes` as the old Settings window wrote them (see the module)."""
+    def _written(self, before: dict, changes: dict, since: Optional[dict] = None) -> dict:
+        """`before` with `changes` as the old Settings window wrote them (see the module), the
+        rules comparing with `since` when given (else with `before`): a key they leave out
+        goes."""
         after = deepcopy(before)  # nothing shared with the entry listed before (as the old copy)
+        rules = before if since is None else since
         for key, value in changes.items():
             if key == "max_streams":
                 streams = _int(value)
-                if "max_streams" in before or streams != _int(before.get("max_streams")):
+                if "max_streams" in rules or streams != _int(rules.get("max_streams")):
                     after[key] = streams
+                else:
+                    after.pop(key, None)
             elif key == GUIDE_OFFSET_KEY:
                 minutes = _int(value)
                 if minutes:
@@ -168,8 +193,10 @@ class ProviderChanges:
                     after.pop(key, None)
             elif key == "ssl_verify":
                 verify = bool(value)
-                if "ssl_verify" in before or verify != self._global_ssl_verify():
+                if "ssl_verify" in rules or verify != self._global_ssl_verify():
                     after[key] = verify
+                else:
+                    after.pop(key, None)
             else:
                 after[key] = deepcopy(value)
         if is_media_server(after.get("type")):

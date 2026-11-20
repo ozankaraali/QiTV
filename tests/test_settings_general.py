@@ -383,6 +383,26 @@ class SslTests(GeneralCase):
                 elapse(STEPS_SETTLE_MS + 80)
             changed.assert_called_once_with()
 
+    def test_verify_ssl_stepped_back_to_where_it_was_connects_nothing(self):
+        # ← meant as "back" turns it off, → puts it back: the steps stop where they began, so
+        # no provider connects anew. Off, then on only after the steps stopped: each stop
+        # changed it.
+        actions = self.window.provider_rows.actions
+        with mock.patch.object(actions, "global_ssl_changed") as changed:
+            self.open_at(m.ADVANCED, "ssl_verify")
+            self.key(Action.NAV_LEFT)
+            self.assertFalse(self.config.ssl_verify)
+            self.key(Action.NAV_RIGHT)
+            self.assertTrue(self.config.ssl_verify)
+            elapse(STEPS_SETTLE_MS + 80)
+            changed.assert_not_called()
+            self.key(Action.NAV_LEFT)
+            elapse(STEPS_SETTLE_MS + 80)
+            self.assertEqual(changed.call_count, 1)
+            self.key(Action.NAV_RIGHT)
+            elapse(STEPS_SETTLE_MS + 80)
+            self.assertEqual(changed.call_count, 2)
+
 
 class AdvancedTests(GeneralCase):
     def test_secure_dns_and_detailed_log_hooks(self):

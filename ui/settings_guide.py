@@ -4,9 +4,10 @@ applied at once.
 - Guide source steps through no guide, the provider's own, a local file and a web address (the
   config's "No Source", "STB", "Local File" and "URL"). The rows follow a step at once, as the
   old tab's did, and the guide loads again in the background (TVWindow.reload_epg) once the
-  steps stop (passing through the sources loads it once): the address for
-  a web address (an edit loads it again), the file for a local file (the system's picker, then a
-  load), how often it is checked for a web address and the provider's guide, the channel
+  steps stop (passing through the sources loads it once; steps back to the source they began
+  on, never): the address for a web address (an edit loads it again), the file for a local
+  file (the system's picker, then a load), how often it is checked for a web address and the
+  provider's guide, the channel
   matching for the XMLTV guides (a file, a web address), and the portal's fetch period for the
   provider's guide while a portal is among the providers;
 - Check for updates every opens a card: a number (digits only, 1 to 9999) and its unit, a
@@ -277,10 +278,16 @@ class ExportMapping(QObject):
 def hooks(window: Any) -> dict[str, Callable[[], None]]:
     """The hooks of the Guide's config rows (SettingsValues'): a new source's rows follow it at
     once, and the guide loads again in the background once the steps stop (Settled: passing
-    through the sources loads once); a new address loads it again. `window` is the TV window,
-    read as a hook runs."""
+    through the sources loads once; steps back to the source they began on, none); a new
+    address loads it again. `window` is the TV window, read as a hook runs."""
     # In the background; the guide repaints when ready.
-    reload = Settled(lambda: window.reload_epg(), lambda: window.closing(), window)
+    config = window.config_manager
+    reload = Settled(
+        lambda: window.reload_epg(),
+        lambda: window.closing(),
+        window,
+        value=lambda: config.epg_source,
+    )
 
     def source() -> None:
         reload.start()

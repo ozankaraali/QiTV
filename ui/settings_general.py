@@ -10,7 +10,8 @@ General tab, its rows where the spec puts them, each applied at once.
   registered for (a run from source) has no row. On Windows, Default Apps… once QiTV opens a
   kind there;
 - Advanced: Verify SSL certificates (the providers that follow it connect anew, as the old
-  Save had them: ProviderActions.global_ssl_changed, once its steps stop), Secure DNS, the
+  Save had them: ProviderActions.global_ssl_changed, once its steps stop, and only when they
+  changed it), Secure DNS, the
   detailed log, the image cache's largest size (from the next start), and Clear Image Cache…,
   asked first in a card, cleared on a worker, then said.
 
@@ -87,9 +88,12 @@ def hooks(window: Any) -> dict[str, Callable[[], None]]:
         window.screens.tmdb.settings_changed()
 
     # The providers that follow Verify SSL connect anew once its steps stop (Settled: on, off
-    # and on again connects once).
+    # and on again connects once), and only when they changed it (off and on: none).
     reconnect = Settled(
-        lambda: window.provider_rows.actions.global_ssl_changed(), lambda: window.closing(), window
+        lambda: window.provider_rows.actions.global_ssl_changed(),
+        lambda: window.closing(),
+        window,
+        value=lambda: bool(config.ssl_verify),
     )
 
     def ssl() -> None:
