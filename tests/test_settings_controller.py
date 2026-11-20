@@ -6,14 +6,16 @@ from unittest import mock
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
+from PySide6.QtCore import Signal
 from PySide6.QtWidgets import QApplication, QWidget
 from timer_fixtures import elapse
 
 from services import i18n, settings_model
 from services.i18n import translate
-from services.settings_model import GUIDE, PLAYBACK, Row, Section, sections
+from services.settings_model import GUIDE, ON_OFF, PLAYBACK, Choice, Row, Section, sections
 from ui import settings_controller
 from ui.keymap import Action
+from ui.overlays.base import Overlay
 from ui.overlays.settings_drawer import SettingsDrawer
 from ui.settings_controller import SettingsController
 
@@ -45,6 +47,70 @@ class FakeValues:
         self.values[key] = value
 
 
+class FakeHandler:
+    """A RowHandler: each call, by its row's key; `values` by row key."""
+
+    def __init__(self, **values):
+        self.values = dict(values)
+        self.calls = []
+
+    def value(self, row):
+        return self.values.get(row.key)
+
+    def step(self, row, delta):
+        self.calls.append(("step", row.key, delta))
+
+    def edited(self, row, text):
+        self.calls.append(("edited", row.key, text))
+        self.values[row.key] = text
+
+    def chosen(self, row):
+        self.calls.append(("chosen", row.key))
+
+
+class FakeCard(Overlay):
+    """A card over the picture as ui/overlays/settings_card.py's are: every key but the sound's
+    is its own while it shows, and Esc cancels it (it hides)."""
+
+    cancelled = Signal()
+
+    def __init__(self, parent):
+        super().__init__(parent)
+        self.keys = []
+        self.hide()
+
+    def handle(self, action, payload=""):
+        if self.isHidden() or action is Action.VOL_UP:
+            return False
+        self.keys.append(action)
+        if action is Action.ESCAPE:
+            self.hide()
+            self.cancelled.emit()
+        return True
+
+
+def provider_layer(name):
+    """A provider's layer, its rows keyed provider/<name>/<field>."""
+    return Section(
+        f"provider/{name}",
+        name,
+        rows=(
+            Row(f"provider/{name}/name", "Name", kind=settings_model.TEXT),
+            Row(f"provider/{name}/check", "Check the connection"),
+        ),
+    )
+
+
+def providers_section(*names):
+    """Settings' Providers: a row per provider opening its layer, then Add provider."""
+    rows = tuple(
+        Row(f"provider/{name}", name, section=provider_layer(name), sub="Xtream") for name in names
+    )
+    return Section(
+        settings_model.PROVIDERS, "Providers", rows=rows + (Row("provider/@add", "Add provider"),)
+    )
+
+
 class SettingsControllerTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
@@ -63,10 +129,11 @@ class SettingsControllerTests(unittest.TestCase):
             lambda row: self.controller.lit(row),
             self.host,
         )
+        self.shown = sections("Darwin")  # what the controller builds its sections from
         self.controller = SettingsController(
             self.drawer,
             self.values,
-            "Darwin",
+            lambda: self.shown,
             self.legacy.append,
             lambda: self.reopened.append(True),
         )
@@ -171,9 +238,8 @@ class SettingsControllerTests(unittest.TestCase):
             Row("name", "Name", kind=settings_model.TEXT),
             next(r for r in playback.rows if r.key == "live_latency"),
         )
-        only = (Section("s", "S", rows=rows),)
-        with mock.patch("ui.settings_controller.sections", return_value=only):
-            self.controller.open()
+        self.shown = (Section("s", "S", rows=rows),)
+        self.controller.open()
         self.controller.handle(Action.NAV_RIGHT)
         self.assertEqual(self.drawer.focused_row().key, "name")
 
@@ -233,6 +299,138 @@ class SettingsControllerTests(unittest.TestCase):
         self.controller.handle(Action.NAV_DOWN)  # leaving the row keeps it, then moves
         self.assertEqual(self.values.sets, [("name", "abz")])
         self.assertEqual(self.drawer.focused_row().key, "live_latency")
+
+    # ---- sections that change, row namespaces, cards (plan 2) ---------------------------------
+
+    def focus_row(self, key):
+        """The keys onto the right column's row `key` (from its top, a row at a time)."""
+        if self.drawer.focus_side() == "left":
+            self.controller.handle(Action.NAV_RIGHT)
+        for _ in range(len(self.drawer._right_rows())):
+            self.controller.handle(Action.NAV_UP)
+        for _ in range(len(self.drawer._right_rows())):
+            if self.drawer.focused_row().key == key:
+                return
+            self.controller.handle(Action.NAV_DOWN)
+        self.fail(f"no row {key}")
+
+    def test_sections_change_under_the_viewer_and_keep_the_place(self):
+        self.shown = (providers_section("A", "B", "C"),)
+        self.controller.open()
+        self.focus_row("provider/B")
+        self.shown = (providers_section("A", "C"),)  # B removed (here, a drop, the old window)
+        self.controller.refresh_sections()
+        self.assertEqual(self.drawer.focused_row().key, "provider/C")  # its neighbour
+        self.assertEqual(self.drawer.path(), (settings_model.PROVIDERS,))
+        self.assertEqual(self.drawer.focus_side(), "right")
+        self.shown = (providers_section("0", "A", "C", "D"),)  # added, one before the focus
+        self.controller.refresh_sections()
+        self.assertEqual(self.drawer.focused_row().key, "provider/C")  # the focus stays
+        self.controller.handle(Action.NAV_ACTIVATE)  # its layer, from the new sections
+        self.assertEqual(self.drawer.path(), (settings_model.PROVIDERS, "provider/C"))
+        self.controller.handle(Action.NAV_DOWN)
+        self.controller.handle(Action.NAV_ACTIVATE)  # an action of the new rows: no warning
+        self.assertEqual(self.values.sets, [])
+
+    def test_a_prefix_handler_gets_its_rows(self):
+        streams = (Choice(0, "Automatic"), Choice(1, "1"), Choice(2, "2"))
+        latency = next(r for r in self.shown[2].rows if r.key == "live_latency")
+        rows = (
+            Row("provider/x/name", "Name", kind=settings_model.TEXT),
+            Row("provider/x/streams", "Streams at once", "", streams, 0),
+            Row("provider/x/ssl", "Verify certificates", "", ON_OFF, True),
+            Row("provider/x/kind", "Kind", kind=settings_model.INFO),
+            Row("provider/x/check", "Check the connection"),
+            Row("provider/x/card", "Address and login", kind=settings_model.OPENS),
+            latency,
+        )
+        self.shown = (Section("p", "Provider", rows=rows),)
+        handler = FakeHandler(
+            **{
+                "provider/x/name": "Demo TV",
+                "provider/x/streams": 2,
+                "provider/x/ssl": True,
+                "provider/x/kind": "Xtream",
+            }
+        )
+        self.controller.register("provider/", handler)
+        self.controller.open()
+        by_key = {row.key: row for row in rows}
+        value_text = self.controller.value_text
+        self.assertEqual(value_text(by_key["provider/x/name"]), "Demo TV")
+        self.assertEqual(value_text(by_key["provider/x/streams"]), "2")
+        self.assertTrue(self.controller.lit(by_key["provider/x/streams"]))
+        self.assertFalse(self.controller.lit(by_key["provider/x/ssl"]))
+        self.assertEqual(value_text(by_key["provider/x/kind"]), "Xtream")
+        self.assertEqual(value_text(by_key["provider/x/check"]), "")
+        self.focus_row("provider/x/streams")
+        self.controller.handle(Action.NAV_RIGHT)
+        self.controller.handle(Action.NAV_LEFT)
+        self.focus_row("provider/x/name")
+        self.controller.handle(Action.NAV_ACTIVATE)
+        self.controller.handle(Action.NAV_TEXT, "!")
+        self.controller.handle(Action.NAV_ACTIVATE)
+        self.focus_row("provider/x/check")
+        self.controller.handle(Action.NAV_ACTIVATE)
+        self.controller.handle(Action.NAV_DOWN)
+        self.controller.handle(Action.NAV_ACTIVATE)  # it opens a card: the handler's to show
+        self.assertEqual(
+            handler.calls,
+            [
+                ("step", "provider/x/streams", 1),
+                ("step", "provider/x/streams", -1),
+                ("edited", "provider/x/name", "Demo TV!"),
+                ("chosen", "provider/x/check"),
+                ("chosen", "provider/x/card"),
+            ],
+        )
+        self.assertEqual(self.values.sets, [])  # none reached the config
+        self.controller.handle(Action.NAV_DOWN)  # a key of no prefix: the config, as ever
+        self.controller.handle(Action.NAV_RIGHT)
+        self.assertEqual(self.values.sets, [("live_latency", "low")])
+        self.assertEqual(len(handler.calls), 5)
+
+    def test_a_card_takes_the_keys_first_and_esc_cancels_it(self):
+        self.controller.open(PLAYBACK)
+        self.controller.handle(Action.NAV_RIGHT)
+        card = FakeCard(self.host)
+        cancelled = []
+        card.cancelled.connect(lambda: cancelled.append(True))
+        self.assertFalse(self.controller.card_shown())
+        self.controller.show_card(card)
+        self.assertTrue(self.controller.card_shown())
+        self.assertTrue(card.isVisible())
+        before = self.drawer.focused_row().key
+        for action in (Action.NAV_DOWN, Action.NAV_RIGHT, Action.NAV_ACTIVATE, Action.NAV_TEXT):
+            self.assertTrue(self.controller.handle(action, "x"))
+        self.assertTrue(self.controller.handle(Action.NAV_RIGHT, settings_controller.MOUSE_FORWARD))
+        self.assertFalse(self.controller.handle(Action.VOL_UP))  # the card's no: the player's
+        self.assertEqual(self.drawer.focused_row().key, before)  # the rows heard nothing
+        self.assertEqual(self.values.sets, [])
+        self.assertTrue(self.controller.handle(Action.ESCAPE))  # its Cancel, not a layer up
+        self.assertEqual(cancelled, [True])
+        self.assertTrue(card.isHidden())
+        self.assertFalse(self.controller.card_shown())
+        self.assertTrue(self.controller.visible())
+        self.assertEqual(self.drawer.focus_side(), "right")
+        self.controller.handle(Action.ESCAPE)  # now the rows': a layer up
+        self.assertEqual(self.drawer.focus_side(), "left")
+
+    def test_a_card_over_a_card_and_settings_going_cancels_them(self):
+        self.controller.open(PLAYBACK)
+        form, question = FakeCard(self.host), FakeCard(self.host)
+        self.controller.show_card(form)
+        self.controller.show_card(question)  # a question over the form: it has the keys
+        self.controller.handle(Action.NAV_DOWN)
+        self.assertEqual((form.keys, question.keys), ([], [Action.NAV_DOWN]))
+        self.controller.handle(Action.ESCAPE)
+        self.assertTrue(question.isHidden())
+        self.controller.handle(Action.NAV_DOWN)  # the form's again
+        self.assertEqual(form.keys, [Action.NAV_DOWN])
+        self.controller.close()  # the phone's TV, the list opened over it: the card goes too
+        self.assertTrue(form.isHidden())
+        self.assertEqual(form.keys[-1], Action.ESCAPE)  # cancelled as its Esc cancels it
+        self.assertFalse(self.controller.card_shown())
 
 
 if __name__ == "__main__":

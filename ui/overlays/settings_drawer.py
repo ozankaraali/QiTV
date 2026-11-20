@@ -19,7 +19,9 @@ lines at most. Where everything goes is ui/overlays/settings_layout.py's.
 It changes nothing itself: a step is `stepped(key, ±1)`, an action (a card's row too)
 `chosen(key)`, a text kept `edited(key, text)`, and backing out of the sections `closed`; the
 caller applies them and calls `refresh()`. The value a row shows and whether it is lit are
-asked of the caller at each paint (`value_text`, `lit`).
+asked of the caller at each paint (`value_text`, `lit`). The sections may change while they
+show (a provider added or removed, here or elsewhere: `set_sections`): the place is kept by
+key, and a line that went gives its place to its neighbour.
 
 The keys (the shell hands them over): ↑/↓ move. On a stepper of the right column ←/→ step and
 Enter steps on; on another right-column row ← goes to the left column, and → or Enter opens its
@@ -28,15 +30,19 @@ layer or card, acts, or starts editing its text. On the left column → or Enter
 While a text is edited the field has the keys (`edit_key`): typing, Backspace, the caret keys,
 ⌘A, copy, cut and paste; Enter keeps the text, Esc (and Back) puts it back, the row staying
 focused; ↑/↓ keep it and move on. The mouse's Forward (`forward()`) only goes a layer down.
-Assistive technology hears the focused line and its value as they change (`announce`).
+Assistive technology hears the focused line and its value as they change (`announce`):
+"Settings" first as it opens, and a layer's empty line as it is entered. Hidden, it is named
+"Settings" again.
 
 The mouse: a click on a row focuses it. On the right column a row whose click changes it in
 place (a stepper's value, a text) only takes the focus while it has not got it, so that its
 help shows before anything changes; a click on it focused steps it on or starts editing. A
 row that opens or acts does so on the first click, as the drawer's rows do; an info line
 takes no click. ‹ or › step their row at once, focused or not. While a text is edited, a
-click in its field puts the caret (a drag selects, a double-click takes a word) and a click
-elsewhere keeps the text, then does what it does. A double-click's second press is a click on
+click in its field puts the caret (a drag selects, a double-click takes a word), its Paste at
+the field's end puts the clipboard's first line in (a mouse cannot press Ctrl/⌘+V; the phone
+types its own text in), and a click elsewhere keeps the text, then does what it does, unless
+keeping it changed the rows under it (a rename). A double-click's second press is a click on
 the row the first one was on (an action is taken once). Hovering a row shows its help, the
 restart note too, as its tooltip. The wheel scrolls the column under the pointer. ‹ in the
 header and a click on the fade over the picture are `back()`. The mouse's Back and Forward
@@ -55,6 +61,7 @@ from PySide6.QtWidgets import QWidget
 
 from services.i18n import N_, tr, translate
 from services.settings_model import DANGER, INFO, OPENS, STEP, TEXT, Row, Section
+from ui import text_edit
 from ui.keymap import Action, key_hint
 from ui.overlays.base import Overlay, announce
 from ui.overlays.channel_rows import HOVER_ALPHA
@@ -76,6 +83,8 @@ from ui.overlays.settings_layout import (  # its metrics are offered from here t
     HELP_FONT_U,
     INSET_U,
     LEFT,
+    PASTE_FONT_U,
+    PASTE_TEXT,
     RIGHT,
     SUB_FONT_U,
     VALUE_FONT_U,
@@ -109,6 +118,7 @@ _FALLBACK_HOST_WIDTH = 1280
 _BACK = "back"
 _FADE = "fade"
 _FIELD = "field"  # the part of the row being edited that is its field
+_PASTE = "paste"  # and its Paste
 _FAILED_ICONS: set[str] = set()  # icon names draw_icon has no drawing for (logged once each)
 # While a text is edited: the keys that are its field's, and those that leave the row (the
 # text kept, then the move).
@@ -178,6 +188,7 @@ class SettingsDrawer(Overlay):
         self._edit_row = ""
         self._edit_from = ""
         self._drag = Dragging()  # the field's mouse: the caret, a drag's selection
+        self._paste_hovered = False
         self._said = ""  # what assistive technology was last told
         parent.installEventFilter(self)
         self.hide()
@@ -204,7 +215,62 @@ class SettingsDrawer(Overlay):
         self._reveal(LEFT)
         self.show()
         self.raise_()
+        self._say(opening=True)
+
+    def set_sections(self, sections: Sequence[Section]) -> None:
+        """The sections as they are now, while they show (a provider added or removed, here or
+        elsewhere): the place stays, by key. A section, layer or row that is still there keeps
+        its place (its line may have moved); one that went gives it to its neighbour, the line
+        that took its place (else the one before), past the info lines. A layer that went
+        closes, the keys going onto the rows it was one of, on its neighbour (never into the
+        layer that took its place: that is another provider). A text being edited stays while
+        its row does, else it is put back. A line is known by its key alone: one whose key
+        changed (a provider renamed, `provider/<name>/…`) went, and another came."""
+        old_section = self._sections[self._section].key if self._sections else ""
+        old_path = self.path()[1:]
+        old_opened = list(self._opened)
+        rows = self._right_rows()
+        old_focus = rows[self._right].key if 0 <= self._right < len(rows) else ""
+        self._sections = tuple(sections)
+        self._hover = None
+        keys = [section.key for section in self._sections]
+        if old_section in keys:
+            self._section = keys.index(old_section)
+        else:  # the section went: its neighbour, from its top
+            self._section = max(0, min(self._section, len(keys) - 1))
+            old_path, old_focus, self._side, self._right = (), "", LEFT, 0
+        gone_at = self._reopen(old_path, old_opened)
+        items = self._items(RIGHT)
+        if gone_at is not None:
+            at, self._side = gone_at, RIGHT
+            self._first = {LEFT: 0, RIGHT: 0}
+        else:
+            at = next((i for i, item in enumerate(items) if item.key == old_focus), self._right)
+        found = self._selectable(items, max(0, min(len(items) - 1, at)), 1) if items else None
+        self._right = 0 if found is None else found
+        if found is None:
+            self._side = LEFT
+        if self._edit is not None and self._editing_index() < 0:
+            self._edit = None  # its row went (or the keys left it): the text is put back
+            self._drag.release()
+        self._reveal(LEFT)
+        self._reveal(RIGHT)
+        self.update()
         self._say()
+
+    def _reopen(self, keys: Sequence[str], indices: list[int]) -> Optional[int]:
+        """The layers `keys` opened again in the new sections, as far as each is still there;
+        where one went, the index it had (`indices`), else None."""
+        self._opened = []
+        rows = self._sections[self._section].rows if self._sections else ()
+        for key, index in zip(keys, indices):
+            at = next((i for i, row in enumerate(rows) if row.key == key), None)
+            if at is None or not _opens_layer(rows[at]):
+                return index
+            self._opened.append(at)
+            section = rows[at].section
+            rows = section.rows if section is not None else ()
+        return None
 
     def path(self) -> tuple[str, ...]:
         """The highlighted section's key, then the key of each row opened as a layer."""
@@ -410,16 +476,19 @@ class SettingsDrawer(Overlay):
 
     # ---- what assistive technology hears ----------------------------------------------------
 
-    def _say(self) -> None:
+    def _say(self, opening: bool = False) -> None:
         """The focused line, and a row's value, said when either changed: the focus moved or
-        a value did."""
+        a value did. `opening`: what it is is said first ("Settings, Playback")."""
         text = self._spoken() if self.isVisible() else ""
+        if text and opening:
+            text = ", ".join((translate(SETTINGS_TITLE), text))
         if text and text != self._said:
             self._said = text
             announce(self, text)
 
     def _spoken(self) -> str:
-        """The focused line's title, then its sub line, value or note ("Live latency, Auto")."""
+        """The focused line's title, then its sub line, value or note ("Live latency, Auto");
+        on the left, the line its layer shows when it has no rows ("No hidden groups")."""
         if self._side == LEFT:
             items = self._items(LEFT)
             index = self._left_index()
@@ -427,6 +496,9 @@ class SettingsDrawer(Overlay):
                 return ""
             item = items[index]
             parts = [title_of(item), item.row.sub if item.row is not None else ""]
+            chain = self._chain()
+            if not self._right_rows() and chain and chain[-1].empty_text:
+                parts.append(translate(chain[-1].empty_text))
         else:
             row = self.focused_row()
             if row is None:
@@ -454,6 +526,12 @@ class SettingsDrawer(Overlay):
         """The room the right column's row `index` has for its title."""
         box = self._box(RIGHT, index)
         return QRectF(box.title) if box is not None else QRectF()
+
+    def paste_rect(self, index: int) -> QRectF:
+        """The Paste at the end of the field the right column's row `index` is edited in;
+        empty while it is not edited."""
+        box = self._box(RIGHT, index)
+        return QRectF(box.paste) if box is not None else QRectF()
 
     def column_rect(self, side: str) -> QRectF:
         return QRectF(self._layout().columns[side])
@@ -743,7 +821,8 @@ class SettingsDrawer(Overlay):
                 accent = qcolor(PALETTE.accent)
                 paint_value_steps(p, un, box.less, box.value, box.more, value, lit, accent)
             elif index == editing and self._edit is not None:
-                self._paint_field(p, un, box.end, self._edit)
+                self._paint_field(p, un, box.entry, self._edit)
+                self._paint_paste(p, un, box.paste, self._paste_hovered)
             elif not box.end.isEmpty():
                 tail = self._value_text(row) if row.kind in (TEXT, INFO) else row.note
                 p.setFont(un.font(VALUE_FONT_U))
@@ -809,6 +888,19 @@ class SettingsDrawer(Overlay):
         selection = qcolor(PALETTE.accent, SELECTION_ALPHA)
         paint_edit(p, inner, edit, qcolor(PALETTE.text), caret=True, selection=selection)
 
+    @staticmethod
+    def _paint_paste(p: QPainter, un: Units, rect: QRectF, hovered: bool) -> None:
+        """The field's Paste: a button as the OpenSubtitles page's that is not the accent."""
+        if rect.isEmpty():
+            return
+        fill_round(p, rect, qcolor(PALETTE.text, 0.22 if hovered else 0.14), rect.height() / 2)
+        p.setFont(un.font(PASTE_FONT_U))
+        p.setPen(qcolor(PALETTE.text))
+        label = QFontMetricsF(p.font()).elidedText(
+            translate(PASTE_TEXT), Qt.TextElideMode.ElideRight, rect.width()
+        )
+        p.drawText(rect, Qt.AlignmentFlag.AlignCenter, label)
+
     def _paint_empty(self, p: QPainter, lay: Layout) -> None:
         """A layer without rows: its line, muted and centred at the column's top (as the
         drawer's column says it has nothing)."""
@@ -841,7 +933,7 @@ class SettingsDrawer(Overlay):
     def _hit(self, pos: QPointF) -> Optional[tuple[str, int, str]]:
         """What is at `pos`: (_BACK, 0, ""), (_FADE, 0, ""), or (column, line, part), the part
         of a right-column row being "less", "more", "line", "help" or, on the row being
-        edited, _FIELD; None elsewhere."""
+        edited, _FIELD or its _PASTE; None elsewhere."""
         lay = self._layout()
         if back_hit(lay.back, lay.units).contains(pos):
             return (_BACK, 0, "")
@@ -854,6 +946,8 @@ class SettingsDrawer(Overlay):
                     return (side, index, "less")
                 if box.more.contains(pos):
                     return (side, index, "more")
+                if side == RIGHT and index == editing and box.paste.contains(pos):
+                    return (side, index, _PASTE)
                 if side == RIGHT and index == editing and box.end.contains(pos):
                     return (side, index, _FIELD)
                 return (side, index, "line" if box.line.contains(pos) else "help")
@@ -952,14 +1046,18 @@ class SettingsDrawer(Overlay):
         self, pos: QPointF, hit: Optional[tuple[str, int, str]], shift: bool, double: bool
     ) -> bool:
         """A press on `hit` while a text is edited: on its field it puts the caret (with Shift,
-        it selects; a double-click takes a word), and elsewhere on its row it does nothing
-        (True: taken). Elsewhere it keeps the text, and the press goes on as a click on what
-        was under it (False): the field gone, the rows under it may have moved."""
+        it selects; a double-click takes a word), on its Paste it pastes (a double-click's
+        second press does not again), and elsewhere on its row it does nothing (True: taken).
+        Elsewhere it keeps the text, and the press goes on as a click on what was under it
+        (False): the field gone, the rows under it may have moved."""
         if self._edit is None:
             return False
         if hit is not None and hit[0] == RIGHT and hit[1] == self._editing_index():
             self._pressed = None
-            if hit[2] == _FIELD:
+            if hit[2] == _PASTE:
+                if not double:
+                    self._paste_by_mouse()
+            elif hit[2] == _FIELD:
                 if double:
                     self._drag.double(self._edit, pos.x())
                 else:
@@ -969,6 +1067,30 @@ class SettingsDrawer(Overlay):
         self._end_edit(keep=True)
         return False
 
+    def _paste_by_mouse(self) -> None:
+        """The field's Paste: the clipboard's first line in place of the text, or of the part
+        selected in it (as the cards' Paste; Ctrl/⌘+V types it at the caret)."""
+        edit = self._edit
+        line = text_edit.clipboard_line() if edit is not None else ""
+        if edit is None or not line:
+            return
+        if edit.has_selection():
+            edit.insert(line)
+        else:
+            edit.set_text(line)
+        self.update()
+
+    def _line_at(self, hit: Optional[tuple[str, int, str]]) -> Optional[tuple[str, str]]:
+        """The column and key of the line `hit` is on (‹ and the fade: theirs alone); None
+        for none, or for a line no longer there."""
+        if hit is None:
+            return None
+        target, index, _part = hit
+        if target in (_BACK, _FADE):
+            return (target, "")
+        items = self._items(target)
+        return (target, items[index].key) if 0 <= index < len(items) else None
+
     def mousePressEvent(self, event: QMouseEvent) -> None:
         if event.button() in NAV_BUTTONS:
             event.ignore()  # Back/Forward go on to the host: the shell's layer up/down
@@ -977,8 +1099,11 @@ class SettingsDrawer(Overlay):
         if event.button() == Qt.MouseButton.LeftButton:
             pos = event.position()
             hit = self._hit(pos)
+            line = self._line_at(hit)
             shift = bool(event.modifiers() & Qt.KeyboardModifier.ShiftModifier)
             if not self._press_while_editing(pos, hit, shift, double=False):
+                if self._line_at(hit) != line:
+                    hit = None  # keeping the text changed the rows under it (a rename)
                 self._click(hit)
             self._hover_at(pos)
 
@@ -1007,17 +1132,20 @@ class SettingsDrawer(Overlay):
     def _hover_at(self, pos: QPointF) -> None:
         hit = self._hit(pos) if self.isVisible() else None
         over = (hit[0], hit[1]) if hit is not None and hit[0] != _FADE else None
-        if over != self._hover:
+        paste = hit is not None and hit[2] == _PASTE
+        if over != self._hover or paste != self._paste_hovered:
             self._hover = over
-            back = over is not None and over[0] == _BACK
+            self._paste_hovered = paste
+            button = paste or (over is not None and over[0] == _BACK)
             self.setCursor(
-                Qt.CursorShape.PointingHandCursor if back else Qt.CursorShape.ArrowCursor
+                Qt.CursorShape.PointingHandCursor if button else Qt.CursorShape.ArrowCursor
             )
             self.update()
 
     def leaveEvent(self, event: QEvent) -> None:
-        if self._hover is not None:
+        if self._hover is not None or self._paste_hovered:
             self._hover = None
+            self._paste_hovered = False
             self.unsetCursor()
             self.update()
         super().leaveEvent(event)
@@ -1036,14 +1164,16 @@ class SettingsDrawer(Overlay):
             self._scroll_by(LEFT if x < cols[LEFT].right() else RIGHT, -rows)
 
     def tooltip_at(self, pos: QPointF) -> str:
-        """‹ names its key; a line cut short ("…") says its title (and value or note) whole;
-        a row says its help and its restart note (under it only while it is focused), so that
-        they can be read before a click."""
+        """‹ and the field's Paste name their key; a line cut short ("…") says its title (and
+        value or note) whole; a row says its help and its restart note (under it only while it
+        is focused), so that they can be read before a click."""
         hit = self._hit(pos)
         if hit is None or hit[0] == _FADE:
             return ""
         if hit[0] == _BACK:
             return key_hint(tr("Back"), "Esc")  # i18n: tooltip of ‹: a layer up (verb)
+        if hit[2] == _PASTE:
+            return key_hint(translate(PASTE_TEXT), "Ctrl+V")
         side, index, _part = hit
         box, item = self._box(side, index), self._items(side)[index]
         if box is None:
@@ -1071,8 +1201,11 @@ class SettingsDrawer(Overlay):
 
     def hideEvent(self, event) -> None:
         self._hover = None
+        self._paste_hovered = False
         self._edit = None  # hidden while editing: the text is put back
         self._drag.release()
+        # announce() named it after what it said last: assistive technology finds "Settings".
+        announce(self, translate(SETTINGS_TITLE), speak=False)
         super().hideEvent(event)
 
     def eventFilter(self, obj: QObject, event: QEvent) -> bool:

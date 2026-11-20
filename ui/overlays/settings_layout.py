@@ -3,9 +3,10 @@ two columns and the areas their lines scroll in, the breadcrumb, and each line's
 
 A line has its title, wrapped onto a second line when it does not fit on one, and under it a
 row's muted sub line ("Xtream · in use"); at its right end, by the row's kind, a stepper's
-‹ value ›, a text row's value (the field it is edited in, while it is), an info row's value
-or a row's note ("answered 2 min ago"), and the › of a row that opens; under a focused row,
-its help. Geometry only: the overlay keeps the state and paints.
+‹ value ›, a text row's value (the field it is edited in, while it is, with its Paste at the
+field's end), an info row's value or a row's note ("answered 2 min ago"), and the › of a row
+that opens; under a focused row, its help. Geometry only: the overlay keeps the state and
+paints.
 """
 
 from __future__ import annotations
@@ -18,7 +19,7 @@ from typing import Optional
 from PySide6.QtCore import QRectF, Qt
 from PySide6.QtGui import QFont, QFontMetricsF
 
-from services.i18n import translate
+from services.i18n import N_, translate
 from services.settings_model import DANGER, INFO, OPENS, STEP, TEXT, Row
 from ui.overlays.drawer_look import (
     COUNT_FONT_U,
@@ -56,7 +57,12 @@ VALUE_SHARE = 0.5  # a value too wide beside its whole title keeps this share of
 FIELD_H_U = 2.6  # the field a text is edited in, this tall in its line
 FIELD_PAD_U = 0.7  # the field's text from its sides
 EMPTY_H_U = 6.0  # a layer without rows: its line, centred in this much of the column's top
+PASTE_FONT_U = 1.05  # the field's Paste: its label
+PASTE_PAD_U = 0.7  # its label from its sides
+PASTE_GAP_U = 0.5  # between the field and it
 ELLIPSIS = "…"
+# The field's Paste (a mouse cannot press Ctrl/⌘+V; the phone types its own text in).
+PASTE_TEXT = N_("Paste")  # i18n: a button and its tooltip (verb)
 
 
 @dataclass(frozen=True)
@@ -87,11 +93,26 @@ class Box:
     more: QRectF = field(default_factory=QRectF)
     end: QRectF = field(default_factory=QRectF)  # a text or info row's value, a note, a field
     chevron: QRectF = field(default_factory=QRectF)  # a row that opens: ›
+    # While its text is edited: its field (in `end`), and the field's Paste at the end of `end`.
+    entry: QRectF = field(default_factory=QRectF)
+    paste: QRectF = field(default_factory=QRectF)
     help: list[str] = field(default_factory=list)
 
     def moved(self, dy: float) -> Box:
         """The same line, `dy` lower."""
-        names = ("rect", "line", "title", "icon", "less", "value", "more", "end", "chevron")
+        names = (
+            "rect",
+            "line",
+            "title",
+            "icon",
+            "less",
+            "value",
+            "more",
+            "end",
+            "chevron",
+            "entry",
+            "paste",
+        )
         return replace(self, **{name: getattr(self, name).translated(0, dy) for name in names})
 
 
@@ -288,9 +309,24 @@ def place(
         box.chevron = QRectF(right - chevron, middle - chevron / 2, chevron, chevron)
     if tail_w:
         box.end = QRectF(tail_right - tail_w, 0, tail_w, line_h)
+        if editing and kind == TEXT:
+            box.entry, box.paste = field_and_paste(un, box.end)
     box.rect = QRectF(area.x(), 0, area.width(), line_h + help_height(list(help), un))
     box.help = list(help)
     return box
+
+
+def field_and_paste(un: Units, end: QRectF) -> tuple[QRectF, QRectF]:
+    """The field a text is edited in, in `end` (its line's right end), and its Paste at its
+    right end, as tall as the field: the label's width, at most a third of `end`."""
+    fm = QFontMetricsF(un.font(PASTE_FONT_U))
+    label_w = math.ceil(fm.horizontalAdvance(translate(PASTE_TEXT))) + 2 * PASTE_PAD_U * un.u
+    paste_w = min(label_w, end.width() / 3)
+    height = min(end.height(), float(un.px(FIELD_H_U)))
+    top = end.center().y() - height / 2
+    paste = QRectF(end.right() - paste_w, top, paste_w, height)
+    field_w = max(0.0, paste.left() - PASTE_GAP_U * un.u - end.left())
+    return QRectF(end.left(), end.top(), field_w, end.height()), paste
 
 
 def header(

@@ -135,6 +135,7 @@ from services.recordings_index import FILE_NAME as RECORDINGS_INDEX_FILE, Record
 from services.recordings_list import timer_text
 from services.redact import safe_message, safe_traceback
 from services.sessions import SessionManager, Slot
+from services.settings_model import sections
 from services.settings_values import SettingsValues
 from services.sound_sync import FILE_NAME as SOUND_SYNC_FILE, SoundSync
 from services.subtitle_picks import FILE_NAME as SUBTITLE_PICKS_FILE, SubtitlePicks
@@ -527,6 +528,8 @@ class TVWindow(QMainWindow):
         self.epg_manager = epg_manager
         self._started = False
         self._closing = False
+        # A save that failed was said (SAVE_FAILED_TEXT): not again until a save works.
+        self._save_failure_said = False
         # Windows: the run's DDE owner (services.dde_windows.Serving), set by main(); None
         # elsewhere and from source
         self.dde: Any = None
@@ -1122,7 +1125,8 @@ class TVWindow(QMainWindow):
         # Settings in the drawer (its Settings row and ⚙, Settings…): a step applies at once
         # (what takes effect beyond the config, through its hook); a section still kept in the
         # Settings window opens it on its tab; backing out of it from the drawer gives the
-        # drawer back on its Settings row.
+        # drawer back on its Settings row. A save that failed meanwhile is said as it goes.
+        system = platform.system()
         values = SettingsValues(
             config_manager,
             hooks={
@@ -1135,11 +1139,12 @@ class TVWindow(QMainWindow):
         self.settings = SettingsController(
             self.settings_drawer,
             values,
-            platform.system(),
+            lambda: sections(system),
             self.options_dialog,
             controller.reopen_drawer_on_settings,
         )
         controller.set_settings(self.settings)
+        self.settings.hidden.connect(self._settings_went)
         # The channel list's find: genres and channels at every provider, found in a worker;
         # its last row looks for films and series in the Library's search.
         self.finder = FindSession(
@@ -2688,6 +2693,16 @@ class TVWindow(QMainWindow):
             dialog.exec()
             self._settings_closed()
 
+    def _settings_went(self) -> None:
+        """Settings in the drawer went: a step's save that failed (written in the background,
+        where its failure is only logged) is said, once, until a save works again."""
+        if self._closing:
+            return
+        failed = self.config_manager.save_failed()
+        if failed and not self._save_failure_said:
+            self.screens.notify(translate(SAVE_FAILED_TEXT), "error", ERROR_MS)
+        self._save_failure_said = failed
+
     def _settings_closed(self) -> None:
         """What Settings' saved choices change in the window, whichever way it was opened."""
         self.menus.rebuild_providers()
@@ -2955,6 +2970,7 @@ class TVWindow(QMainWindow):
             self._schedule_changed()
         if self.config_manager.save_failed():  # e.g. the defaults patched in at start
             self.screens.notify(translate(SAVE_FAILED_TEXT), "error", ERROR_MS)
+            self._save_failure_said = True  # Settings going does not say it again
 
     def _fit_restored(self) -> None:
         """Bring the saved geometry onto a screen: its monitor may be gone.

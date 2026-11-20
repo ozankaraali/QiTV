@@ -37,7 +37,7 @@ from services.navigation import (
 )
 from services.playback import PlaybackState
 from services.provider_ids import ALL_PROVIDERS, mixed_group_id, provider_of
-from services.settings_model import GENERAL, PROVIDERS
+from services.settings_model import GENERAL, PROVIDERS, sections
 from services.vlc_profile import DEFAULT_USER_AGENT, STB_USER_AGENT, PlayKind
 from services.watch_state import WatchState
 from services.zapping import ZapController
@@ -5827,7 +5827,7 @@ class SettingsLayerTests(ControllerTestCase):
         self.settings = SettingsController(
             self.settings_drawer,
             FakeValues(),
-            "Darwin",
+            lambda: sections("Darwin"),
             self.legacy.append,
             self.controller.reopen_drawer_on_settings,
         )

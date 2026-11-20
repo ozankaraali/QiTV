@@ -20,6 +20,11 @@ def _steppers(rows):
             yield from _steppers(row.section.rows)
 
 
+def mock_save_raising(config):
+    """config.save_config raising, as writing config.json at once fails (a locked file)."""
+    return patch.object(config, "save_config", side_effect=PermissionError(13, "Access is denied"))
+
+
 class SettingsValuesTests(unittest.TestCase):
     def setUp(self):
         self._directory = tempfile.TemporaryDirectory()
@@ -80,6 +85,20 @@ class SettingsValuesTests(unittest.TestCase):
             values.set("mouse_wheel_action", "volume" if step % 2 == 0 else "channel")
         self.config.save_config(wait=True)
         self.assertEqual(ConfigManager().mouse_wheel_action, "channel")
+
+    def test_a_save_that_raises_is_logged_and_the_step_still_applies(self):
+        # Only a config without its background writer raises (QiTV's has one): the value is
+        # kept in memory, the next save writes it, and its hook runs all the same.
+        calls = []
+        values = SettingsValues(self.config, {"live_latency": lambda: calls.append(1)})
+        with (
+            mock_save_raising(self.config),
+            self.assertLogs("services.settings_values", "WARNING") as logs,
+        ):
+            values.set("live_latency", "low")
+        self.assertEqual(self.config.live_latency, "low")
+        self.assertEqual(calls, [1])
+        self.assertIn("live_latency", "\n".join(logs.output))
 
     def test_a_property_without_a_setter_is_no_row_to_set(self):
         # epg_expiration is worked out from two others: never written as a key of its own.

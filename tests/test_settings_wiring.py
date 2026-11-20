@@ -17,8 +17,11 @@ from timer_fixtures import wait_until
 from services.navigation import SETTINGS_ROW
 from services.settings_model import GENERAL, TEXT, Row, Section
 from tests import test_tv_window as base
+from ui import settings_layer
 from ui.keymap import Action
 from ui.settings_dialog import OptionsDialog
+from ui.settings_layer import SettingsLayer
+from ui.tv_window import SAVE_FAILED_TEXT
 
 
 class SettingsWiringTests(base.WindowCase):
@@ -276,7 +279,7 @@ class SettingsWiringTests(base.WindowCase):
         self.wait_for_drawer()
         only = (Section("s", "S", rows=(Row("probe", "Name", kind=TEXT),)),)
         settings = self.window.settings
-        with mock.patch("ui.settings_controller.sections", return_value=only):
+        with mock.patch.object(settings, "_make_sections", return_value=only):
             self.menu_actions()["Settings…"].trigger()
         values = settings._values
         with (
@@ -290,6 +293,80 @@ class SettingsWiringTests(base.WindowCase):
             self.window.controller.video_clicked()
         written.assert_called_once_with("probe", "oldx")
         self.assertFalse(settings.visible())
+
+    def test_the_wiring_moved_without_change(self):
+        # Plan 1's wiring is ui/settings_layer.py's now (the tests above run through it): the
+        # TV controller hands its Settings entry points on, and the list's keys are as before.
+        controller = self.window.controller
+        layer = controller.settings_layer
+        self.assertIsInstance(layer, SettingsLayer)
+        for name, kwargs in (
+            ("make_way_for_settings", {"keep_place": True}),
+            ("reopen_drawer_on_settings", {}),
+            ("close_settings", {}),
+        ):
+            with mock.patch.object(layer, name) as moved:
+                getattr(controller, name)(**kwargs)
+            moved.assert_called_once_with(**kwargs)
+        self.assertEqual(
+            settings_layer._LIST_KEYS,
+            {
+                Action.NAV_UP,
+                Action.NAV_DOWN,
+                Action.NAV_PAGE_UP,
+                Action.NAV_PAGE_DOWN,
+                Action.NAV_LEFT,
+                Action.NAV_RIGHT,
+                Action.NAV_ACTIVATE,
+                Action.NAV_TEXT,
+                Action.NAV_BACKSPACE,
+                Action.NAV_HOME,
+                Action.NAV_END,
+                Action.NAV_DELETE,
+                Action.FORGET,
+                Action.SELECT_ALL,
+                Action.COPY,
+                Action.CUT,
+                Action.PASTE,
+            },
+        )
+
+    def test_a_failed_save_is_said_once_when_settings_hides(self):
+        # A step saves in the background (its failure is only logged there): Settings says
+        # so as it goes, once, not at each step nor at each visit while it still fails.
+        self.show()
+        self.wait_for_drawer()
+
+        def visit(*keys):
+            self.menu_actions()["Settings…"].trigger()
+            for key in keys:
+                QTest.keyClick(self.window, key)
+            for _ in range(3):  # rows → sections → closed, at most
+                if self.window.settings.visible():
+                    QTest.keyClick(self.window, Qt.Key.Key_Escape)
+            self.assertFalse(self.window.settings.visible())
+
+        def said():
+            return self.toasts.count((SAVE_FAILED_TEXT, "error"))
+
+        down, right = Qt.Key.Key_Down, Qt.Key.Key_Right
+        with mock.patch.object(self.config, "save_failed", return_value=True):
+            self.menu_actions()["Settings…"].trigger()
+            for key in (down, down, right, right, right):  # Live latency, stepped twice
+                QTest.keyClick(self.window, key)
+            self.assertEqual(self.config.live_latency, "normal")
+            self.assertEqual(said(), 0)  # never at a step
+            QTest.keyClick(self.window, Qt.Key.Key_Escape)
+            QTest.keyClick(self.window, Qt.Key.Key_Escape)
+            self.assertFalse(self.window.settings.visible())
+            self.assertEqual(said(), 1)
+            visit(down, down, right, right)  # it still fails: said already
+            self.assertEqual(said(), 1)
+        visit()  # a save worked since: nothing to say
+        self.assertEqual(said(), 1)
+        with mock.patch.object(self.config, "save_failed", return_value=True):
+            visit(down, down, right, right)  # it fails again: said again
+        self.assertEqual(said(), 2)
 
     def test_the_channel_list_opened_over_settings_closes_it(self):
         # The list opened while Settings shows (a menu, a provider ready) shows on top and
