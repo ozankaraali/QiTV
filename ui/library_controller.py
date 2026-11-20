@@ -962,6 +962,9 @@ class LibraryController(QObject):
             return False
         if self._folders is not None and self._folders.answer_key(action):
             return True  # Plan 4: Clear's question has the keys while it shows
+        card_key = getattr(self._desk, "card_key", None)
+        if card_key is not None and card_key(action, payload):
+            return True  # 2.13.1: Record at a time's card has them while it shows
         if action is Action.SEARCH:
             if payload and (self._zone == "search" or self._genre_field):
                 return self.handle(Action.NAV_TEXT, payload)  # "/" types where text goes

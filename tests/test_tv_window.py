@@ -43,6 +43,7 @@ from timer_fixtures import elapse, pause, wait_until
 
 import main as qitv_main
 from services import update_checker
+from services.catalog import ALL_GROUP_ID
 from services.config_manager import ConfigManager, get_app_version
 from services.epg_manager import EpgManager
 from services.i18n import translate
@@ -1321,6 +1322,36 @@ class RecorderHomeWindowTests(WindowCase):  # 2.9.7: the Recordings tab's home, 
         self.assertTrue(schedule.is_skipped(item["id"], airing.start.timestamp()))
         guide.cancelSeriesRequested.emit(channel, airing)
         self.assertEqual(schedule.items(), [])
+
+    def test_record_at_a_time_is_a_card_on_the_library_page(self):  # 2.13.1: no window
+        window = self.window
+        self.show()
+        self.wait_for_drawer()
+        self.assertTrue(wait_until(lambda: window.catalog.items("live", ALL_GROUP_ID)))
+        window.record_at(window.catalog.items("live", ALL_GROUP_ID)[0])  # a channel's own
+        self.assertTrue(window.record_card.isVisible())  # over the picture, its host shown
+        self.assertIn(window.record_card, window.host.visible_overlays())
+        QTest.keyClick(window, Qt.Key.Key_Escape)
+        self.assertTrue(window.record_card.isHidden())
+        window.screens.open_recordings()
+        self.assertTrue(window.screens.library_shown())
+        desk = window.screens.recordings_desk
+        desk.record_at()  # its Record at a time…
+        card = desk.card()
+        self.assertTrue(card.isVisible())
+        self.assertIs(card.parentWidget(), window.library_page)
+        self.assertEqual(card.focus(), ("field", "channel"))
+        QTest.keyClick(window, Qt.Key.Key_Down)  # the window's keys, in the Library's context
+        self.assertEqual(card.focus(), ("field", "name"))
+        for key, text in ((Qt.Key.Key_A, "a"), (Qt.Key.Key_Space, " "), (Qt.Key.Key_1, "1")):
+            QTest.keyClick(window, key, Qt.KeyboardModifier.NoModifier)
+        self.assertEqual(card.values()["name"], "a 1")  # letters, a space and digits type
+        QTest.keyClick(window, Qt.Key.Key_Escape)
+        self.assertTrue(card.isHidden())
+        self.assertTrue(window.screens.library_shown())  # Esc closed the card alone
+        desk.record_at()
+        window.screens.back_to_tv()  # the Library left: the card goes with it
+        self.assertTrue(card.isHidden())
 
     def test_a_timer_shows_as_a_band_on_its_channel(self):
         channel, _airing = self.channel_and_airing()

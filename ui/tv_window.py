@@ -203,7 +203,7 @@ from ui.page_stack import PageStack
 from ui.pip import PipFrame
 from ui.pointer import PointerHider
 from ui.provider_cards import ProviderCards
-from ui.record_timer_dialog import RecordTimerDialog, TimerChoice
+from ui.record_timer_dialog import RecordTimerCard, TimerChoice
 from ui.recording_scheduler import RecordingScheduler
 from ui.remote_controller import RemoteController
 from ui.settings_about import AboutRows
@@ -811,6 +811,8 @@ class TVWindow(QMainWindow):
         self.subtitle_search = SubtitleSearchPage(host)
         # File → Open Link… and the channel list's Open a link (plan 4): its card over the picture
         self.open_link_card = LinkCard(host)
+        # 2.8 Record at a time (a channel's right-click, the guide's footer): 2.13.1, its card
+        self.record_card = RecordTimerCard(host)
         self.corner_controls = CornerControls(host)
         # What a song (or a radio channel) shows where the black picture was: its cover, album
         # and words, lit by the cover's colours (spec §10).
@@ -833,7 +835,6 @@ class TVWindow(QMainWindow):
             os.path.join(config_manager.get_config_dir(), RECORDINGS_INDEX_FILE)
         )
         self.scheduler: Optional[RecordingScheduler] = None
-        self._timer_dialog: Optional[RecordTimerDialog] = None  # "Record at a time", last open
         self.overlays = Overlays(
             banner=ZapBanner(host),
             column=ChannelColumn(self.logos, now_provider, parent=host),
@@ -930,6 +931,7 @@ class TVWindow(QMainWindow):
             self.overlays.welcome,
             self.subtitle_search,
             self.open_link_card,
+            self.record_card,  # 2.13.1
             self.corner_controls,
             self.sleep_notice,
             self.back_notice,
@@ -1220,6 +1222,7 @@ class TVWindow(QMainWindow):
             parent=self,
         )
         controller.add_card(self.open_link_card)
+        controller.add_card(self.record_card)  # 2.13.1: Record at a time's, the same way
         # Network streams (plan 4): the links that played, kept beside the config (read on a
         # worker once the window started, written on one); a stream link plays through the
         # controller as a channel or a film, as the account whose stream it is, if one is
@@ -1364,23 +1367,21 @@ class TVWindow(QMainWindow):
 
     def record_at(self, channel: dict, programme: Optional[Programme] = None) -> None:
         """2.8: "Record at a time" for `channel` (its right-click, the guide's footer), on the
-        programme's time when one is given; what it is given is scheduled."""
-        dialog = RecordTimerDialog(
+        programme's time when one is given; what it is given is scheduled. 2.13.1: its card
+        over the picture (the keys its own while it shows), answering through a callback."""
+        if self._closing:
+            return
+
+        def chosen(choice: TimerChoice, _channel: Optional[dict]) -> None:
+            if not self._closing:
+                self.schedule_timer(channel, choice)
+
+        self.record_card.ask(
             str(channel.get("name") or ""),
             start=programme.start if programme is not None else None,
             stop=programme.stop if programme is not None else None,
-            parent=self,
+            done=chosen,
         )
-        dialog.setAttribute(Qt.WidgetAttribute.WA_DeleteOnClose)
-
-        def chosen() -> None:
-            choice = dialog.choice()
-            if choice is not None:
-                self.schedule_timer(channel, choice)
-
-        dialog.accepted.connect(chosen)
-        self._timer_dialog = dialog
-        dialog.open()
 
     def schedule_timer(self, channel: dict, choice: TimerChoice) -> str:
         """Once: a programme of its own at that time; else a timer on its days. What the toast

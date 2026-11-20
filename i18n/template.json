@@ -623,7 +623,7 @@
     "Recently recorded": "the Recordings home's shelf of the recordings made last; the phone remote's Recordings: the latest recordings' heading (2.9.7)",
     "Recents cleared": "a toast: the \"Recent\" list was emptied",
     "Reconnecting…": "toast: a live channel's stream ended and is opened again; the Stay live indicator: a new connection to the channel is being opened; toast: the channel's stream is opened again; the phone remote: the connection dropped",
-    "Record": "the guide's footer button: record this programme (QiTV records it at its time); tooltip of the record button: record the channel being watched (verb); a menu entry: record the channel being watched, or stop recording (verb); the phone remote: a button (verb)",
+    "Record": "the guide's footer button: record this programme (QiTV records it at its time); tooltip of the record button: record the channel being watched (verb); the button of \"Record at a time\" that adds the recording to the schedule (verb); a menu entry: record the channel being watched, or stop recording (verb); the phone remote: a button (verb)",
     "Record at a time": "the window that records a channel at a time of the user's choosing (no guide needed)",
     "Record at a time…": "a channel's right-click entry: record it from one time to another (no guide needed); a Recordings page button: a channel recorded at a time of the user's choosing",
     "Record from the guide": "a Recordings page button: the programme guide opens, to record from it",

@@ -8,12 +8,12 @@ os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 import unittest
 from unittest import mock
 
-from PySide6.QtCore import QEvent, QPoint, QPointF, Qt
+from PySide6.QtCore import QEvent, QPoint, QPointF
 from PySide6.QtGui import QHelpEvent
 from PySide6.QtWidgets import QApplication, QToolTip
 
 from ui.overlays.base import TooltipWidget, plain_tooltip
-from ui.record_timer_dialog import RecordTimerDialog
+from ui.record_timer_dialog import RecordTimerCard
 
 HOSTILE = '<h1>News</h1><img src="file:///etc/hosts">'
 
@@ -44,10 +44,11 @@ class PlainTextTests(unittest.TestCase):
         self.assertEqual(show.call_args.args[1], plain_tooltip(HOSTILE))
 
     def test_record_at_a_time_names_the_channel_as_it_is(self):
-        dialog = RecordTimerDialog(HOSTILE)
-        self.addCleanup(dialog.deleteLater)
-        self.assertEqual(dialog.channel.textFormat(), Qt.TextFormat.PlainText)
-        self.assertEqual(dialog.channel.text(), HOSTILE)
+        card = RecordTimerCard()  # 2.13.1: a painted card, its text drawn as it is
+        self.addCleanup(card.deleteLater)
+        card.ask(HOSTILE, done=lambda choice, channel: None)
+        self.assertEqual(card.channel_text(), HOSTILE)
+        card.grab()
 
 
 if __name__ == "__main__":
