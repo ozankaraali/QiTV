@@ -3,7 +3,7 @@ from pathlib import Path
 import unittest
 
 from scripts import i18n_extract as extract
-from services import settings_model as m
+from services import picture, settings_model as m
 
 ROOT = Path(__file__).resolve().parents[1]
 
@@ -102,6 +102,20 @@ class SettingsModelTests(unittest.TestCase):
             comments = entries[section.text].comments
             self.assertIn("a settings section's title", comments, section.key)
 
+    def test_deinterlacing_is_auto_or_off_and_its_help_names_the_restart(self):
+        # Auto and Off as the old window names them (the "deinterlacing" context); only back to
+        # Auto waits for a restart, so the help says it and the row has no restart note.
+        row = _row("deinterlace", "Linux")
+        self.assertEqual(tuple(c.value for c in row.choices), picture.DEINTERLACING)
+        self.assertEqual(
+            [c.shown() for c in row.choices],
+            [picture.deinterlace_name(d) for d in picture.DEINTERLACING],
+        )
+        self.assertEqual({c.ctx for c in row.choices}, {"deinterlacing"})
+        self.assertEqual(row.default, picture.AUTO)
+        self.assertFalse(row.restart)
+        self.assertIn("QiTV starts again", row.help)
+
     def test_playback_row_order(self):
         keys = [r.key for r in next(s for s in m.sections("Darwin") if s.key == m.PLAYBACK).rows]
         self.assertEqual(
@@ -109,6 +123,7 @@ class SettingsModelTests(unittest.TestCase):
             [
                 "live_latency",
                 "hardware_decoding",
+                "deinterlace",
                 "media_4k_versions",
                 "start_with_last_channel",
                 "mouse_wheel_action",

@@ -273,14 +273,16 @@ class SettingsDrawerTests(unittest.TestCase):
     def test_the_help_shows_under_the_focused_row_only(self):
         self.focus_on("hardware_decoding")
         self.drawer.grab()
-        focused = self.drawer.row_rect("right", 1)
-        other = self.drawer.row_rect("right", 3)  # (both titles on one line)
-        self.assertGreater(focused.height(), other.height())
-        self.assertLessEqual(focused.bottom(), self.drawer.row_rect("right", 2).top())
+        index = playback_index("hardware_decoding")
+        other = playback_index("start_with_last_channel")  # (both titles on one line)
+        focused = self.drawer.row_rect("right", index)
+        self.assertGreater(focused.height(), self.drawer.row_rect("right", other).height())
+        self.assertLessEqual(focused.bottom(), self.drawer.row_rect("right", index + 1).top())
         self.drawer.back()  # the sections: no help on the right
         self.drawer.grab()
         self.assertEqual(
-            self.drawer.row_rect("right", 1).height(), self.drawer.row_rect("right", 3).height()
+            self.drawer.row_rect("right", index).height(),
+            self.drawer.row_rect("right", other).height(),
         )
 
     def test_every_title_shows_whole_at_the_default_size(self):
@@ -330,8 +332,9 @@ class SettingsDrawerTests(unittest.TestCase):
         # now focused, not on the one now under the pointer.
         self.focus_on("hardware_decoding")
         self.drawer.grab()
-        rect = self.drawer.row_rect("right", 3)  # Start with the last channel
-        point = QPointF(self.drawer.title_rect(3).center().x(), rect.bottom() - 3)
+        index = playback_index("start_with_last_channel")
+        rect = self.drawer.row_rect("right", index)
+        point = QPointF(self.drawer.title_rect(index).center().x(), rect.bottom() - 3)
         self.click(point)
         self.assertEqual(self.steps, [])
         self.double_click(point)
@@ -436,6 +439,26 @@ class SettingsDrawerTests(unittest.TestCase):
                 lines = self.drawer._box("right", index).help
                 self.assertFalse(any("…" in line for line in lines), lines)
                 self.assertEqual(" ".join(lines).split(), tip(playback_rows()[index]).split())
+
+    def test_the_deinterlacing_help_shows_whole_with_its_restart(self):
+        # Only back to Auto waits for a restart, so the row has no restart note: its help says
+        # it, last, where an elided line would lose it.
+        index = playback_index("deinterlace")
+        row = playback_rows()[index]
+        self.assertFalse(row.restart)
+        self.addCleanup(i18n.set_language, "en")
+        for language in ("en", "tr", "de", "es", "fr"):
+            self.assertEqual(i18n.set_language(language), language)
+            if language != "en":
+                self.assertNotEqual(translate(row.help), row.help, language)
+            for size in ((1280, 720), (960, 540)):
+                with self.subTest(language=language, size=size):
+                    self.use(*make(*size))
+                    self.focus_on("deinterlace")
+                    self.drawer.grab()
+                    lines = self.drawer._box("right", index).help
+                    self.assertFalse(any("…" in line for line in lines), lines)
+                    self.assertEqual(" ".join(lines).split(), translate(row.help).split())
 
     def test_the_restart_note_keeps_its_line_in_a_small_window(self):
         # A help too long to share two lines with the note: the note keeps the last one.

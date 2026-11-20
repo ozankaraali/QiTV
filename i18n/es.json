@@ -85,6 +85,7 @@
   "Auto (best)": "Automático (la mejor)",
   "Auto (recommended)": "Automática (recomendada)",
   "Auto adjusts each channel: it starts at Normal and plays further behind on channels that run dry, coming back over time.\nLow starts live channels sooner; Stable buffers more for unreliable streams.": "Automática ajusta cada canal: empieza en Normal y reproduce con más retraso los canales que se quedan sin datos, y vuelve a acercarse con el tiempo.\nBaja inicia antes los canales en directo; Estable acumula más búfer para emisiones poco fiables.",
+  "Auto deinterlaces only interlaced pictures. Back to Auto applies when QiTV starts again.": "Automático solo actúa en imágenes entrelazadas. Volver a Automático se aplica al reiniciar QiTV.",
   "Auto deinterlaces only the pictures marked interlaced and costs nothing on channels that are not. Off never deinterlaces; back to Auto takes effect when QiTV starts again.": "Automático desentrelaza solo las imágenes marcadas como entrelazadas y no cuesta nada en los canales que no lo son. Desactivado nunca desentrelaza; volver a Automático surte efecto cuando QiTV se inicie de nuevo.",
   "Auto-Play Settings": "Reproducción automática",
   "Auto-play next episode (10s countdown)": "Reproducir el siguiente episodio (cuenta atrás de 10 s)",

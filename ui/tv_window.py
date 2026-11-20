@@ -1127,6 +1127,7 @@ class TVWindow(QMainWindow):
             config_manager,
             hooks={
                 "live_latency": controller.settings_saved,
+                "deinterlace": controller.apply_deinterlacing,  # every player's, at once
                 "desktop_pip": self._arm_desktop_pip,
                 "covered_pip": self._arm_desktop_pip,
             },

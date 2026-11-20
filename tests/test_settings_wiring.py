@@ -131,6 +131,42 @@ class SettingsWiringTests(base.WindowCase):
         self.assertEqual(self.config.live_latency, "low")
         tuner.set_latency.assert_called_once_with("low")
 
+    def test_a_deinterlacing_step_reaches_every_player(self):
+        # Off is given to the players at the step (TVController.apply_deinterlacing), not only
+        # once the Settings window closes; back to Auto waits for QiTV's next start, as a toast
+        # says (libVLC 3 keeps the Off a player was given).
+        self.show()
+        self.wait_for_drawer()
+        self.menu_actions()["Settings…"].trigger()
+        for key in (Qt.Key.Key_Down, Qt.Key.Key_Down, Qt.Key.Key_Right):  # Playback's rows
+            QTest.keyClick(self.window, key)
+        for _ in range(2):  # past Hardware video decoding
+            QTest.keyClick(self.window, Qt.Key.Key_Down)
+        self.assertEqual(self.window.settings_drawer.focused_row().key, "deinterlace")
+        self.assertEqual(self.config.deinterlace, "auto")
+        players = [player for _name, player in self.window._players()]
+        self.assertTrue(players)
+        given = {}
+        for player in players:
+            given[player] = mock.Mock(return_value=True)
+            patch = mock.patch.object(player, "set_deinterlace", given[player])
+            patch.start()
+            self.addCleanup(patch.stop)
+        QTest.keyClick(self.window, Qt.Key.Key_Right)
+        self.assertEqual(self.config.deinterlace, "off")
+        for player in players:
+            given[player].assert_called_once_with("off")
+            given[player].reset_mock(return_value=True)
+            given[player].return_value = False  # Auto cannot come back to it before a restart
+            patch = mock.patch.object(player, "deinterlace", return_value="off")
+            patch.start()
+            self.addCleanup(patch.stop)
+        QTest.keyClick(self.window, Qt.Key.Key_Right)  # round to Auto
+        self.assertEqual(self.config.deinterlace, "auto")
+        for player in players:
+            given[player].assert_called_once_with("auto")
+        self.assertIn(("Deinterlacing is back on Auto when QiTV starts again", "info"), self.toasts)
+
     def test_the_menu_opens_settings_without_the_drawer(self):
         self.show()
         drawer = self.wait_for_drawer()

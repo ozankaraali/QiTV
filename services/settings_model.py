@@ -189,6 +189,22 @@ def _playback(system: str) -> Section:
             True,
             restart=True,
         ),
+        # Off applies at once; Auto again only once QiTV starts again (libVLC 3 keeps the Off a
+        # player was given). So no restart note, which would say it of Off too: the help says it.
+        Row(
+            "deinterlace",
+            N_("Deinterlacing"),
+            # i18n: help under the Deinterlacing setting (Off applies at once, Auto after a restart)
+            N_(
+                "Auto deinterlaces only interlaced pictures."
+                " Back to Auto applies when QiTV starts again."
+            ),
+            (
+                Choice("auto", N_("Auto", ctx="deinterlacing"), "deinterlacing"),
+                Choice("off", N_("Off", ctx="deinterlacing"), "deinterlacing"),
+            ),
+            "auto",
+        ),
         Row(
             "media_4k_versions",
             N_("4K versions (Jellyfin, Emby)"),
