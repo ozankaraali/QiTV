@@ -174,14 +174,6 @@ def aspect_name(aspect: str) -> str:
     return tr("Auto", ctx="aspect ratio")  # i18n: the aspect ratio: the stream's own
 
 
-def deinterlace_name(choice: str) -> str:
-    """Settings' name for a deinterlacing `choice`, in the active language."""
-    if choice == OFF:
-        return tr("Off", ctx="deinterlacing")  # i18n: deinterlacing: none
-    # i18n: deinterlacing: VLC's own, for the pictures marked interlaced
-    return tr("Auto", ctx="deinterlacing")
-
-
 def stepped(choices: tuple[str, ...], current: str, delta: int) -> str:
     """The choice `delta` steps from `current`, round the ends."""
     index = choices.index(current) if current in choices else 0

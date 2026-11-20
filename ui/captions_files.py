@@ -1,6 +1,6 @@
-"""AI captions' downloaded files in Settings (2.9), the drawer's and the old window's: the space
-they take, measured off the GUI thread (deleted first, when asked), how Settings says it, and
-the question it asks before deleting them."""
+"""AI captions' downloaded files in Settings › Subtitles & AI captions (2.9): the space they
+take, measured off the GUI thread (deleted first, when asked), how Settings says it, and the
+question it asks before deleting them."""
 
 from __future__ import annotations
 

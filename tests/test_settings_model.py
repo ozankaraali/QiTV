@@ -124,14 +124,11 @@ class SettingsModelTests(unittest.TestCase):
             self.assertIn("a settings section's title", comments, section.key)
 
     def test_deinterlacing_is_auto_or_off_and_its_help_names_the_restart(self):
-        # Auto and Off as the old window names them (the "deinterlacing" context); only back to
-        # Auto waits for a restart, so the help says it and the row has no restart note.
+        # Auto and Off, in the "deinterlacing" context; only back to Auto waits for a restart,
+        # so the help says it and the row has no restart note.
         row = _row("deinterlace", "Linux")
         self.assertEqual(tuple(c.value for c in row.choices), picture.DEINTERLACING)
-        self.assertEqual(
-            [c.shown() for c in row.choices],
-            [picture.deinterlace_name(d) for d in picture.DEINTERLACING],
-        )
+        self.assertEqual([c.shown() for c in row.choices], ["Auto", "Off"])
         self.assertEqual({c.ctx for c in row.choices}, {"deinterlacing"})
         self.assertEqual(row.default, picture.AUTO)
         self.assertFalse(row.restart)

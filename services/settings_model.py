@@ -620,7 +620,9 @@ def _playback(system: str) -> Section:
                 " Back to Auto applies when QiTV starts again."
             ),
             (
+                # i18n: deinterlacing: VLC's own, for the pictures marked interlaced
                 Choice("auto", N_("Auto", ctx="deinterlacing"), "deinterlacing"),
+                # i18n: deinterlacing: none
                 Choice("off", N_("Off", ctx="deinterlacing"), "deinterlacing"),
             ),
             "auto",

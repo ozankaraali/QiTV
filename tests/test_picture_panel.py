@@ -24,6 +24,7 @@ from timer_fixtures import elapse
 from services import i18n, picture
 from services.picture import FILL, STANDARD, WIDE, ChannelPictures, stats_rows
 from services.playback import PlaybackSession
+from services.settings_model import PLAYBACK, sections
 from services.sleep_timer import SleepTimer, clock_text
 from services.sound_sync import SoundSync
 from services.vlc_profile import PlayKind
@@ -237,9 +238,10 @@ class PanelTests(PictureCase):
 
     def test_the_deinterlacing_choices_are_auto_and_off(self):
         self.assertEqual(picture.DEINTERLACING, (picture.AUTO, picture.OFF))
-        self.assertEqual(
-            [picture.deinterlace_name(d) for d in picture.DEINTERLACING], ["Auto", "Off"]
-        )
+        playback = next(s for s in sections("Linux") if s.key == PLAYBACK)
+        row = next(r for r in playback.rows if r.key == "deinterlace")  # Settings' names
+        self.assertEqual([c.value for c in row.choices], list(picture.DEINTERLACING))
+        self.assertEqual([c.shown() for c in row.choices], ["Auto", "Off"])
 
     def test_a_player_made_later_deinterlaces_as_the_config_says(self):
         self.config.deinterlace = "off"

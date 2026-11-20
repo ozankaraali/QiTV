@@ -166,7 +166,7 @@ SEARCH_ACTION = "search"  # the header's ⌕: the Library's search
 LIBRARY_ACTION = "library"  # 2.8: the header's Library button (Movies, or the section last open)
 BACK_BUTTON = "back"  # the header's ‹: a layer up
 # The header's ⚙ (the Settings row's own key is SETTINGS_ROW): Settings, which gives the list
-# back where it was once backed out of, as the Settings window left it.
+# back where it was once backed out of.
 SETTINGS_BUTTON = "settings_button"
 _CRUMB = "crumb:"  # a name in the header, by its path index ("crumb:up": the elided head)
 # The texts below stay English (the code compares them); translate() shows them, and the

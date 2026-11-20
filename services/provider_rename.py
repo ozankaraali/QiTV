@@ -87,27 +87,6 @@ class Renames:
         return mixed_group_id(self.names[provider], group)
 
 
-def renames_between(before: Iterable[tuple[Any, str]], after: Iterable[Any]) -> Renames:
-    """The renames from (provider entry, its name before) pairs to the entries kept now
-    (`after`, the same dicts): entries are told apart by identity, never by name."""
-    pairs = list(before)
-    kept = {id(entry) for entry in after}
-    names = {
-        old: str(entry.get("name") or "")
-        for entry, old in pairs
-        if id(entry) in kept and str(entry.get("name") or "") != old and old
-    }
-    return Renames({old: new for old, new in names.items() if new}, frozenset(n for _, n in pairs))
-
-
-def removed_between(before: Iterable[tuple[Any, str]], after: Iterable[Any]) -> list[str]:
-    """The names (before the save) of the entries of `before` no longer in `after`: removed,
-    even when a provider kept or added now took the name (what was kept for the removed one
-    was its own: its channels' addresses, its account)."""
-    ids = {id(entry) for entry in after}
-    return [old for entry, old in before if id(entry) not in ids and old]
-
-
 def rename_in_config(config: Any, renames: Renames) -> bool:
     """Every reference config.json keeps by name (but parental controls': the window's guard
     holds them) moved to the new names; True when anything changed (the caller saves)."""

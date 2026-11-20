@@ -23,9 +23,7 @@ from services.provider_rename import (
     Renames,
     carry_over,
     hashed_keys,
-    removed_between,
     rename_in_config,
-    renames_between,
 )
 from services.subtitle_picks import pick_key
 from ui.provider_drop import unique_name
@@ -73,14 +71,6 @@ class RenamesTests(unittest.TestCase):
         item = {"name": "One", "_provider": "A"}
         self.assertEqual(renames.item(item), {"name": "One", "_provider": "B"})
         self.assertEqual(item["_provider"], "A")  # a copy
-
-    def test_entries_are_told_apart_by_identity(self):
-        a, b, c = {"name": "A"}, {"name": "B"}, {"name": "C"}
-        before = [(a, "A"), (b, "B"), (c, "C")]
-        a["name"], b["name"] = "B", "A"  # a swap
-        self.assertEqual(renames_between(before, [a, b]).names, {"A": "B", "B": "A"})
-        self.assertEqual(removed_between(before, [a, b]), ["C"])
-        self.assertFalse(renames_between(before, [c]))
 
     def test_unique_names_ignore_case(self):
         self.assertEqual(unique_name("tv", ["TV"]), "tv (2)")
