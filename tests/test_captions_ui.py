@@ -1052,6 +1052,7 @@ class TranslationTests(unittest.TestCase):
         self.captions._config_set = self.config.__setitem__
         self.disk = dict.fromkeys(("small", "large", "turkish", "european", "cohere"), True)
         self.disk["translation"] = True
+        self.disk["turkish_lm"] = True  # 2.12.1: the Turkish model's LM
         self.captions._here = lambda name: self.disk[name]
         self.toasts = []
         self.captions._toast = lambda text, kind="info": self.toasts.append(text)

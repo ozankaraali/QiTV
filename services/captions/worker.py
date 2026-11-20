@@ -15,8 +15,9 @@ guessed, read_on),
 ("viewer", position), ("language", name), ("translate", target[, folder]) (2.10: the language
 lines are translated into, MiLMMT's name, None off; the translation model's folder when it came
 after the load; the load's "translate_to" and "translation" start them), ("levels", on) (Plan 4:
-a film's run sends its sound's band levels too, for the audio screen's Stage), ("stop",),
-("quit",).
+a film's run sends its sound's band levels too, for the audio screen's Stage), ("turkish_lm",
+path) (2.12.1: the Turkish model's language model, downloaded since the load; the load's
+"turkish_lm" names one already here), ("stop",), ("quit",).
 From it: ("ready",), ("failed", reason), ("caption", run, start, end, text[, parts[, original]])
 (parts, a line of more than one: [(text, start, end), ...], services.captions.parts; a
 translated line, `translated_caption`: the translation as its text, its parts as heard ([] for
@@ -156,7 +157,9 @@ class _Model:
     Turkish than Qwen's, at a twenty-fifth of its time) once the files are given."""
 
     moonshine = False  # our Turkish Moonshine writes Turkish (2.10)
-    beam: Any = None  # ... read with our beam (moon_beam.BeamReader)
+    # ... read with our beam (moon_beam.BeamReader); 2.12.1: and its language model, once here
+    # (moon_reading.TurkishReader round the beam)
+    beam: Any = None
     # 2026-11-08, the owner: "Write to logs which one writes": each model's name in the log,
     # by its part (_QWEN, _TURKISH_ROLE, _COHERE, _EUROPEAN)
     names: dict[str, str] = {}
@@ -189,13 +192,18 @@ class _Model:
             # 2.10: QiTV's own Turkish Moonshine medium (models.TURKISH_FILES), read with our
             # 4-path beam alone (no n-gram), as its model card's beam numbers were read; one
             # that does not load leaves Turkish to Qwen (the final review: it failed the whole
-            # process, every language)
+            # process, every language). 2.12.1: with its LSTM language model when the load names
+            # it (models.TURKISH_LM); one that won't load or fails leaves the beam alone, never
+            # Qwen
             folder = Path(turkish)
             self.names[_TURKISH_ROLE] = _folder_name(folder)
             try:
                 from services.captions.moon_beam import BeamReader
+                from services.captions.moon_reading import TurkishReader
 
-                self.beam = self.turkish = BeamReader(folder, None, threads=min(2, threads))
+                lm = spec.get("turkish_lm")
+                beam = BeamReader(folder, None, threads=min(2, threads))
+                self.beam = self.turkish = TurkishReader(beam, Path(lm) if lm else None)
                 self.moonshine = True
             except Exception as error:
                 self.drop_turkish("did not load", error)
@@ -231,9 +239,16 @@ class _Model:
                 self.decode(array("f", bytes(16000 * 4)), "")
             if self.beam is not None:
                 try:
-                    self.beam.warm()  # (silence is skipped: a quiet tone)
+                    self.beam.warm()  # (silence is skipped: a quiet tone; 2.12.1: the LM loads)
                 except Exception as error:
                     self.drop_turkish("did not load", error)
+
+    def use_turkish_lm(self, path: str) -> None:
+        """2.12.1: the Turkish model's language model, downloaded since the load: Turkish is read
+        with it from the next piece."""
+        use = getattr(self.beam, "use_lm", None)
+        if callable(use):
+            use(path)
 
     def drop_turkish(self, what: str, error: BaseException) -> None:
         """Our Turkish Moonshine writes no more, for the process's life: Qwen writes Turkish."""
@@ -1307,6 +1322,9 @@ def _serve(link: _Link) -> None:
                 run._maybe_stream()
         elif kind == "translate":
             translation.set(message[1], message[2] if len(message) > 2 else None)
+        elif kind == "turkish_lm":  # 2.12.1: downloaded since the load
+            if model is not None:
+                model.use_turkish_lm(str(message[1]))
         elif kind == "stop":
             if run is not None:
                 run.stop()

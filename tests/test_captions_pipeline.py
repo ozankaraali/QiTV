@@ -2092,6 +2092,7 @@ class StepDownTests(unittest.TestCase):
             "small": True,
             "large": True,
             "turkish": True,
+            "turkish_lm": True,  # 2.12.1: the Turkish model's LM
             "european": True,
             "cohere": True,
         }
@@ -2176,6 +2177,117 @@ class StepDownTests(unittest.TestCase):
         with mock.patch("services.captions.models.download_size", return_value=1_700_000_000):
             self.captions._offer_specialist()
         self.assertEqual((self.card.asked, started), ([], ["cohere"]))
+
+    # ---- 2.12.1: the Turkish model's LM ------------------------------------------------------
+    def lm_started(self) -> list:
+        """The Turkish model here without its LM (an install from before 2.12.1), Turkish
+        playing; the downloads started, by what they fetch."""
+        self.disk["turkish_lm"] = False
+        self.captions._language = ("Turkish", "")
+        started: list = []
+        self.captions._start_download = lambda: started.append(self.captions._fetching)
+        return started
+
+    def test_an_install_from_before_the_lm_fetches_it_unasked_once(self):
+        from unittest import mock
+
+        started = self.lm_started()
+        with mock.patch(
+            "services.captions.models.download_size", side_effect=AssertionError("asked")
+        ):
+            self.captions._offer_specialist()
+            self.captions._offer_specialist()  # once while QiTV runs
+        self.assertEqual((self.card.asked, started), ([], ["turkish_lm"]))  # no question
+        download = object()
+        self.captions._download = download
+        self.disk["turkish_lm"] = True
+        self.sent.clear()
+        self.captions._on_downloaded(download)
+        self.assertEqual((self.stopped, self.loaded), ([], []))  # no restart for it ...
+        [told] = [message for message in self.sent if message[0] == "turkish_lm"]
+        lm = os.path.join("qitv-asr-tr-moonshine-mid", "lm", "lm.int8.onnx")
+        self.assertTrue(told[1].endswith(lm))  # ... read with it from the next piece
+        self.assertEqual(self.toasts, [])
+
+    def test_while_the_lm_downloads_the_captions_say_what_they_would_say(self):
+        # the review: the Subtitles note and the phones said "Downloading N%" for the 39 MB
+        started = self.lm_started()
+        before = self.captions.status_text()
+        self.captions._offer_specialist()
+        self.assertEqual(started, ["turkish_lm"])
+        self.captions._download = object()
+        self.captions._percent = 40
+        self.assertEqual(self.captions.status_text(), before)
+        self.assertNotIn("Downloading", self.captions.status_text())
+        self.assertFalse(self.captions.downloading())
+        self.captions._fetching = "turkish"  # a language's own model: said, as before
+        self.assertEqual(self.captions.status_text(), "Downloading 40%")
+        self.assertTrue(self.captions.downloading())
+
+    def test_the_lm_waits_while_another_question_shows_or_a_download_runs(self):
+        started = self.lm_started()
+        self.captions._asking = True
+        self.captions._offer_specialist()
+        self.captions._asking = False
+        self.captions._download = object()
+        self.captions._offer_specialist()
+        self.assertEqual(started, [])
+        self.captions._download = None
+        self.captions._offer_specialist()  # the next start
+        self.assertEqual(started, ["turkish_lm"])
+
+    def test_an_lm_that_does_not_download_is_only_logged_and_not_fetched_again(self):
+        started = self.lm_started()
+        self.captions._offer_specialist()
+        download = object()
+        self.captions._download = download
+        with self.assertLogs("ui.captions_controller", "WARNING"):
+            self.captions._on_download_failed(download, "Download failed: 404 Client Error")
+        self.assertEqual((self.toasts, self.stopped, self.card.asked), ([], [], []))
+        self.captions._offer_specialist()
+        self.assertEqual(started, ["turkish_lm"])  # not again while QiTV runs
+
+    def test_the_load_names_the_lm_once_it_is_here_beside_the_model(self):
+        self.captions._load_model()
+        lm = os.path.join("qitv-asr-tr-moonshine-mid", "lm", "lm.int8.onnx")
+        self.assertTrue(self.loaded[-1]["turkish_lm"].endswith(lm))
+        self.disk["turkish_lm"] = False
+        self.captions._load_model()
+        self.assertIsNone(self.loaded[-1]["turkish_lm"])
+        self.disk.update(turkish=False, turkish_lm=True)
+        self.captions._load_model()
+        self.assertEqual((self.loaded[-1]["turkish"], self.loaded[-1]["turkish_lm"]), (None, None))
+
+    def test_a_turkish_download_whose_lm_failed_still_brings_the_model(self):
+        # its own files came, then the LM failed: the model writes Turkish, not Qwen
+        from unittest import mock
+
+        started = self.lm_started()
+        self.disk["turkish"] = False
+        self.config["ai_captions_language_models"] = True
+        with mock.patch("services.captions.models.download_size", return_value=317_000_000):
+            self.captions._offer_specialist()
+        self.assertEqual(started, ["turkish"])
+        download = object()
+        self.captions._download = download
+        self.disk["turkish"] = True
+        with self.assertLogs("ui.captions_controller", "WARNING"):
+            self.captions._on_download_failed(download, "Download failed: 404 Client Error")
+        self.assertEqual(self.toasts, [])
+        self.assertEqual(self.stopped, [True])  # the captions process again, with the model
+        self.assertTrue(self.loaded[-1]["turkish"].endswith("qitv-asr-tr-moonshine-mid"))
+        self.assertIsNone(self.loaded[-1]["turkish_lm"])
+        self.captions._offer_specialist()
+        self.assertEqual(started, ["turkish"])  # its LM not again while QiTV runs
+
+    def test_a_turkish_download_that_failed_before_the_model_came_says_so_as_before(self):
+        self.disk.update(turkish=False, turkish_lm=False)
+        self.captions._fetching = "turkish"
+        download = object()
+        self.captions._download = download
+        self.captions._on_download_failed(download, "Download failed: 404 Client Error")
+        self.assertEqual(self.toasts, ["Download failed: 404 Client Error"])
+        self.assertEqual(self.stopped, [])
 
     def test_the_first_question_says_what_it_starts_with_and_what_it_may_come_to(self):
         from unittest import mock

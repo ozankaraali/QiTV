@@ -450,6 +450,8 @@ class InstalledTierTests(DownloadTestCase):
         )
         vad = self.remote("silero_vad.onnx", blob(400, seed=14))
         turkish = (self.remote("tokens.txt", blob(300, seed=15)),)  # 2.9.1: ufakzeka-kulak's
+        self.lm_body = blob(500, seed=18)  # 2.12.1: the Turkish model's LM, in its lm/ folder
+        self.lm = self.remote("lm/lm.int8.onnx", self.lm_body)
         european = (self.remote("joiner.int8.onnx", blob(300, seed=16)),)  # 2.9.3: Parakeet's
         cohere_files = {"top/tokens.txt": blob(200, seed=17)}  # 2.9.3: Cohere's archive
         cohere = self.remote(
@@ -459,6 +461,7 @@ class InstalledTierTests(DownloadTestCase):
             mock.patch.dict(models.TIERS, {"small": tiny}),
             mock.patch.object(models, "VAD", vad),
             mock.patch.object(models, "TURKISH_FILES", turkish),
+            mock.patch.object(models, "TURKISH_LM", self.lm),
             mock.patch.object(models, "EUROPEAN_FILES", european),
             mock.patch.object(models, "COHERE_FILE", cohere),
             mock.patch.object(models, "COHERE_CONTENTS", (("tokens.txt", 200),)),
@@ -562,8 +565,76 @@ class InstalledTierTests(DownloadTestCase):
             turkish = [d.file.path for d in models.needed("turkish", self.root)]
             cohere = [d.file.path for d in models.needed("cohere", self.root)]
         self.assertEqual(names, ["silero_vad.onnx", "model.tar.bz2"])  # the VAD, the tier's
-        # 2.9.6: each language's own model comes once that language is wanted
-        self.assertEqual((turkish, cohere), (["tokens.txt"], ["cohere.tar.bz2"]))
+        # 2.9.6: each language's own model comes once that language is wanted (2.12.1: the
+        # Turkish one with its LM, last)
+        self.assertEqual((turkish, cohere), (["tokens.txt", "lm/lm.int8.onnx"], ["cohere.tar.bz2"]))
+
+    def turkish_without_its_lm(self) -> None:
+        """An install from before 2.12.1: the Turkish model's own files, downloaded, checked."""
+        before = [d for d in models.needed("turkish", self.root) if d.file is not self.lm]
+        job = CaptionsDownload(root=self.root, plan=lambda _key: before)
+        seen = _Recorder(job)
+        job.start("turkish")
+        self.wait_until(seen.ended)
+        self.assertEqual(seen.failed, [])
+
+    def test_the_turkish_model_downloads_with_its_lm_counted_in_its_size(self):
+        # 2.12.1: the question's size and what captions may come to count it; it comes last,
+        # after the model's own files, into the model's folder as the repository has it (lm/)
+        downloads = models.needed("turkish", self.root)
+        self.assertEqual(downloads[-1].file, self.lm)
+        lm = self.root / models.TURKISH_FOLDER / "lm" / "lm.int8.onnx"
+        self.assertEqual(downloads[-1].target, lm)
+        self.assertEqual(
+            models.download_size("turkish", self.root), sum(d.file.size for d in downloads)
+        )
+        keys = ("small", *models.SPECIALISTS)
+        everything = sum(d.file.size for key in keys for d in models.needed(key, self.root))
+        self.assertEqual(models.full_size("small", self.root), everything)
+        job = CaptionsDownload(root=self.root)
+        seen = _Recorder(job)
+        job.start("turkish")
+        self.wait_until(seen.ended)
+        self.assertEqual(seen.failed, [])
+        self.assertTrue(models.installed("turkish", self.root))
+        self.assertTrue(models.installed(models.TURKISH_LM_KEY, self.root))
+        self.assertEqual(models.model_paths("small", self.root).turkish_lm, lm)
+        self.assertEqual(lm.read_bytes(), self.lm_body)
+
+    def test_an_install_from_before_the_lm_is_the_turkish_model_and_gets_only_the_lm(self):
+        self.turkish_without_its_lm()
+        self.assertTrue(models.installed("turkish", self.root))  # Beam reads Turkish meanwhile
+        self.assertFalse(models.installed(models.TURKISH_LM_KEY, self.root))
+        self.assertEqual(
+            [d.file for d in models.missing(models.TURKISH_LM_KEY, self.root)], [self.lm]
+        )
+        self.assertEqual(models.download_size(models.TURKISH_LM_KEY, self.root), self.lm.size)
+        self.assertEqual(models.download_size("turkish", self.root), self.lm.size)
+        asked = len(self.server.requests)
+        job = CaptionsDownload(root=self.root)
+        seen = _Recorder(job)
+        job.start(models.TURKISH_LM_KEY)
+        self.wait_until(seen.ended)
+        self.assertEqual(seen.failed, [])
+        self.assertEqual([path for path, _ in self.server.requests[asked:]], ["/lm/lm.int8.onnx"])
+        self.assertTrue(models.installed(models.TURKISH_LM_KEY, self.root))
+        self.assertEqual(models.download_size("turkish", self.root), 0)
+
+    def test_an_lm_not_as_pinned_is_not_there_and_the_model_still_is(self):
+        job = CaptionsDownload(root=self.root)
+        seen = _Recorder(job)
+        job.start("turkish")
+        self.wait_until(seen.ended)
+        lm = models.model_paths("small", self.root).turkish_lm
+        lm.write_bytes(b"cut")
+        self.assertFalse(models.installed(models.TURKISH_LM_KEY, self.root))
+        self.assertTrue(models.installed("turkish", self.root))
+        lm.write_bytes(self.lm_body)
+        self.assertTrue(models.installed(models.TURKISH_LM_KEY, self.root))
+        # checked against another sha256 than the one pinned now
+        models.mark_verified(self.root, f"{models.TURKISH_FOLDER}/lm/lm.int8.onnx", "ab" * 32)
+        self.assertFalse(models.installed(models.TURKISH_LM_KEY, self.root))
+        self.assertTrue(models.installed("turkish", self.root))
 
     def test_without_a_runtime_for_this_computer_nothing_is_installed(self):
         with mock.patch.object(models, "runtime_files", side_effect=models.Unsupported("x")):
@@ -639,6 +710,39 @@ class PinnedFilesTests(unittest.TestCase):
 
     def test_the_runtime_folder_names_its_version_and_python(self):
         self.assertEqual(models.runtime_folder_name("cp314"), "runtime-2.0.1-cp314")
+
+    def test_the_turkish_lm_is_pinned_in_the_model_s_repository(self):
+        # 2.12.1: lm/lm.int8.onnx of the Turkish model's own repository at the revision that
+        # added it, by its size and sha256; the model's files stay at their revision
+        lm = models.TURKISH_LM
+        self.assertEqual(
+            (lm.path, lm.size, lm.sha256, lm.extract),
+            (
+                "lm/lm.int8.onnx",
+                38648607,
+                "440f7dba99f592de1b1ce7d47e28bd5d68652ae606cc70fd94c7c5bddb13bbd4",
+                "",
+            ),
+        )
+        repository = "https://huggingface.co/ozankaraali/qitv-asr-tr-moonshine-mid/resolve/"
+        self.assertEqual(
+            lm.url, repository + "ed8d50119886bd96f0437d49b84b58551ddb886d/lm/lm.int8.onnx"
+        )
+        for file in models.TURKISH_FILES:
+            self.assertTrue(
+                file.url.startswith(repository + "d81f33cbdc992b78b7dd9e4a949f2862bd47f62c/")
+            )
+        self.assertEqual(models.TURKISH_LM_KEY, "turkish_lm")
+        self.assertNotIn(models.TURKISH_LM_KEY, models.SPECIALISTS)  # never asked for alone
+        root = Path("/captions")
+        self.assertEqual(
+            models.model_paths("small", root).turkish_lm,
+            root / "qitv-asr-tr-moonshine-mid" / "lm" / "lm.int8.onnx",
+        )
+        [download] = models.needed(models.TURKISH_LM_KEY, root)
+        self.assertEqual(download.file, lm)
+        self.assertEqual(download.contents, (("lm/lm.int8.onnx", 38648607),))
+        self.assertEqual(models.needed("turkish", root)[-1], download)
 
 
 class TranslationDownloadTests(unittest.TestCase):
