@@ -28,7 +28,7 @@ from services.provider_link import (
 FILM, LIVE, PROBE, NONE = "FILM", "LIVE", "PROBE", "NONE"
 _FILM_EXTENSIONS = (".mp4", ".mkv", ".avi", ".webm", ".mov", ".m4v")
 _LIVE_SCHEMES = ("rtmp", "rtmps", "rtsp", "udp", "rtp")
-_PROBE_BYTES = 64 * 1024
+PROBE_BYTES = 64 * 1024  # what a caller reads of a PROBE link for probe_text, at most
 
 
 @dataclass(frozen=True)
@@ -41,9 +41,15 @@ class Provider:
 Kind = Union[str, Provider]
 
 
+def address(text: str) -> str:
+    """The link `classify` reads in `text`, as it plays: its first line, without the quotes or
+    angle brackets around it."""
+    return _first_line(text)
+
+
 def _split(text: str):
     """The link's parts, or None for text that is not one address."""
-    line = _first_line(text)
+    line = address(text)
     if not line or any(c.isspace() for c in line):
         return None
     try:
@@ -106,7 +112,7 @@ def probe_text(text: str, url: str = "") -> Kind:
     playlist), LIVE for any other HLS playlist (a master too), a Provider (an M3U playlist at
     `url`) for a list of channels with their own http(s) links and no HLS tags. Anything
     else is LIVE: VLC decides."""
-    lines = [line.strip() for line in text[:_PROBE_BYTES].lstrip("﻿").splitlines()]
+    lines = [line.strip() for line in text[:PROBE_BYTES].lstrip("﻿").splitlines()]
     if any(line.startswith("#EXT-X-") for line in lines):
         vod = any(
             line.startswith("#EXT-X-ENDLIST") or line.upper() == "#EXT-X-PLAYLIST-TYPE:VOD"

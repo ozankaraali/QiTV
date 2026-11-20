@@ -14,6 +14,7 @@ from services.navigation import (
     FREE_CHANNELS_ROW,
     OPEN_FILE_ROW,
     OPEN_FOLDER_ROW,
+    OPEN_LINK_ROW,
     RECENT_GROUP,
     RECORDINGS_ROW,
     SETTINGS_ROW,
@@ -158,6 +159,7 @@ class NavModelTests(unittest.TestCase):
                 ("action", ADD_PROVIDER_ROW, "Add provider"),
                 ("action", FREE_CHANNELS_ROW, "Free channels…"),
                 ("action", OPEN_FILE_ROW, "Open file"),
+                ("action", OPEN_LINK_ROW, "Open a link"),  # plan 4: File → Open Link…
                 ("action", OPEN_FOLDER_ROW, "Open a folder"),  # Plan 4: File → Open Folder…
                 ("action", RECORDINGS_ROW, "Recordings"),  # 2.9.7: the Recordings page
             ],

@@ -41,6 +41,7 @@ from services.navigation import (
     FREE_CHANNELS_ROW,
     OPEN_FILE_ROW,
     OPEN_FOLDER_ROW,
+    OPEN_LINK_ROW,
     RECORDINGS_ROW,
     SETTINGS_ROW,
 )
@@ -218,6 +219,8 @@ class TVMenus(QObject):
         add(app_menu, tr("Quit"), "Ctrl+Q", window.quit_chosen, role.QuitRole)  # i18n: a menu entry
         file_menu = bar.addMenu(tr("File"))  # i18n: the menu bar's File menu
         add(file_menu, tr("Open File…"), "Ctrl+O", screens.open_file)
+        # i18n: a menu entry (plan 4): a stream's link plays, a provider's goes to Add provider
+        add(file_menu, tr("Open Link…"), "", window.open_link)
         # i18n: a menu entry (Plan 4): a folder chosen plays, and goes on the Library's Folders tab
         add(file_menu, tr("Open Folder…"), "Ctrl+Shift+O", screens.open_folder)
         export = file_menu.addMenu(tr("Export"))  # i18n: a submenu of File (verb)
@@ -420,9 +423,10 @@ class TVMenus(QObject):
         open_folder(str(log_file.log_dir()))
 
     def on_drawer_action(self, row: str) -> None:
-        """The drawer's Settings, Add provider, Free channels, Open file, Open a folder and
-        Recordings rows, and its header's ⚙, Library, ⌕ and refresh buttons. Backed out of,
-        Settings gives the list back: on its Settings row from there, where it was from ⚙."""
+        """The drawer's Settings, Add provider, Free channels, Open file, Open a link, Open a
+        folder and Recordings rows, and its header's ⚙, Library, ⌕ and refresh buttons. Backed
+        out of, Settings gives the list back: on its Settings row from there, where it was
+        from ⚙."""
         if row == SETTINGS_ROW:
             self._window.open_settings(from_drawer=True)
         elif row == SETTINGS_BUTTON:
@@ -434,6 +438,8 @@ class TVMenus(QObject):
             self._window.show_free_channels(drawer.row_anchor(row))
         elif row == OPEN_FILE_ROW:
             self._window.screens.open_file()
+        elif row == OPEN_LINK_ROW:  # plan 4: File → Open Link…
+            self._window.open_link()
         elif row == OPEN_FOLDER_ROW:  # Plan 4: File → Open Folder… (P4-25)
             self._window.screens.open_folder()
         elif row == RECORDINGS_ROW:  # 2.9.7

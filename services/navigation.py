@@ -44,6 +44,7 @@ SETTINGS_ROW = "settings"
 ADD_PROVIDER_ROW = "add_provider"
 FREE_CHANNELS_ROW = "free_channels"  # iptv-org's free lists, in a menu at the row
 OPEN_FILE_ROW = "open_file"  # File → Open File… without the menu bar (fullscreen hides it)
+OPEN_LINK_ROW = "open_link"  # plan 4: File → Open Link…, likewise
 OPEN_FOLDER_ROW = "open_folder"  # Plan 4: File → Open Folder…, likewise
 RECORDINGS_ROW = "recordings"  # 2.9.7: the Library's Recordings page (View → Recordings)
 FAVORITES_GROUP = "@favorites"
@@ -82,13 +83,15 @@ class NavNode:
         return isinstance(other, NavNode) and self._identity() == other._identity()
 
 
-# The drawer paints their icons (a gear, a plus, a file, a folder, a record dot); action_rows()
-# has their titles shown.
+# The drawer paints their icons (a gear, a plus, a file, a folder, a record dot; Open a link has
+# none); action_rows() has their titles shown.
 ACTION_ROWS = (
     NavNode("action", SETTINGS_ROW, N_("Settings")),
     NavNode("action", ADD_PROVIDER_ROW, N_("Add provider")),  # i18n: a row of the channel list
     NavNode("action", FREE_CHANNELS_ROW, N_("Free channels…")),  # i18n: a row; opens a menu
     NavNode("action", OPEN_FILE_ROW, N_("Open file")),  # i18n: a row of the channel list (verb)
+    # i18n: a row of the channel list (plan 4): play one stream's link, as File → Open Link…
+    NavNode("action", OPEN_LINK_ROW, N_("Open a link")),
     # i18n: a row of the channel list (Plan 4): choose a folder to play, as File → Open Folder…
     NavNode("action", OPEN_FOLDER_ROW, N_("Open a folder")),
     # i18n: a row of the channel list (2.9.7): what is recorded, recording and scheduled

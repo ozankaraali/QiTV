@@ -622,6 +622,8 @@ class TVController(QObject):
             update_guides=lambda: self._update_guides(),
             parent=self,
         )
+        # Cards over the TV of their own (File → Open Link…'s, plan 4; add_card).
+        self._cards: list[Any] = []
         # 2.6: before a recording is stopped for a stream, the question.
         # 2.8: a Jellyfin or Emby server hears where its title plays (None: none told).
         self._media = media_reporter
@@ -1421,7 +1423,10 @@ class TVController(QObject):
 
     def key_context(self) -> str:
         """The keymap context for the next key: the OpenSubtitles search, the open guide,
-        Settings (the drawer's keys) or the drawer takes the keys."""
+        Settings (the drawer's keys) or the drawer takes the keys; a card over the TV types as
+        the drawer does."""
+        if self._shown_card() is not None:
+            return "drawer"
         if self._online is not None and self._online.visible():
             return "subtitles"
         if self._guide.is_open():
@@ -1455,13 +1460,27 @@ class TVController(QObject):
         (SettingsLayer.reopen_drawer_on_settings)."""
         self.settings_layer.reopen_drawer_on_settings()
 
+    # ---- cards over the TV ---------------------------------------------------------------------
+
+    def add_card(self, card: Any) -> None:
+        """A card over the TV of its own, not Settings' (File → Open Link…'s; a FormCard of
+        ui/overlays/settings_card.py): while it shows it has every key but QiTV's questions'
+        (it hands back the sound's and the window's), before the OpenSubtitles search, the
+        guide, Settings and the channel list, so none reaches what is under it; the keys type
+        into it (the drawer's context), and Esc is its own."""
+        self._cards.append(card)
+
+    def _shown_card(self) -> Optional[Any]:
+        return next((card for card in reversed(self._cards) if not card.isHidden()), None)
+
     def overlay_open(self) -> bool:
-        """Whether Esc would close something first: Settings, the drawer, the guide, the Next
-        card (or the wait for the next season), a number being typed, the zap column or the
-        banner."""
+        """Whether Esc would close something first: a card over the TV (Open Link…'s),
+        Settings, the drawer, the guide, the Next card (or the wait for the next season), a
+        number being typed, the zap column or the banner."""
         overlays = self.overlays
         return bool(
-            (self._online is not None and self._online.visible())
+            self._shown_card() is not None
+            or (self._online is not None and self._online.visible())
             or self._guide.is_open()
             or self._settings_shown()
             or self._mixer.visible()
@@ -1505,6 +1524,9 @@ class TVController(QObject):
         captions = getattr(self.window_actions, "captions", None)
         if captions is not None and captions.handle(action):
             return  # 2.9: its question (download AI captions' speech model?)
+        card = self._shown_card()
+        if card is not None and card.handle(action, payload):
+            return  # a card over the TV (File → Open Link…'s): its keys, none under it
         if self._online is not None and self._online.handle(action, payload):
             return  # the OpenSubtitles search shows: typing, the lists, Enter and Esc
         if self._guide.is_open() and self._guide.handle(action, payload):
@@ -1760,7 +1782,7 @@ class TVController(QObject):
         no list, guide, mixer or card that the pointer clicks is open."""
         if self._closed or self._current is None or not self._has_media():
             return False
-        if self._flow.in_library() or self._settings_shown():
+        if self._flow.in_library() or self._settings_shown() or self._shown_card() is not None:
             return False
         overlays = self.overlays
         menus = (

@@ -158,6 +158,7 @@ from ui.link_lanes import Target
 from ui.live_tuner import LiveTuner, one_disk_ring, wait_for_each_other
 from ui.logos import LogoCache, PosterCache
 from ui.macos_window import reclaim_first_responder
+from ui.open_link import LinkCard, OpenLink
 from ui.overlay_host import OverlayHost
 from ui.overlays.audio_screen import AudioScreen
 from ui.overlays.back_notice import BackNotice
@@ -791,6 +792,8 @@ class TVWindow(QMainWindow):
         self.pair_overlay = PairOverlay(host)  # the phone remote's pairing QR
         self.layout_row = LayoutRow(host)  # the multiview's layouts, above its layout chip
         self.subtitle_search = SubtitleSearchPage(host)
+        # File → Open Link… and the channel list's Open a link (plan 4): its card over the picture
+        self.open_link_card = LinkCard(host)
         self.corner_controls = CornerControls(host)
         # What a song (or a radio channel) shows where the black picture was: its cover, album
         # and words, lit by the cover's colours (spec §10).
@@ -882,9 +885,9 @@ class TVWindow(QMainWindow):
         # Subtitles and Picture panels, the multiview's layouts and the audio dock's ⋯ menu
         # over it (above their buttons). The statistics sit over the transport, under its title
         # row (they take no click). The drawer, Settings over it, and the guide cover them all;
-        # the OpenSubtitles search covers the player with its backdrop, under the corner
-        # player's controls, the sleep timer's last minute, Resume and the question (2.6) and
-        # the toast.
+        # the OpenSubtitles search covers the player with its backdrop, and the Open Link card
+        # (plan 4) dims it all, both under the corner player's controls, the sleep timer's last
+        # minute, Resume and the question (2.6) and the toast.
         for overlay in (
             self.grid_tiles,
             self.audio_screen,
@@ -909,6 +912,7 @@ class TVWindow(QMainWindow):
             self.overlays.next_card,
             self.overlays.welcome,
             self.subtitle_search,
+            self.open_link_card,
             self.corner_controls,
             self.sleep_notice,
             self.back_notice,
@@ -1145,6 +1149,18 @@ class TVWindow(QMainWindow):
         )
         controller.set_settings(self.settings)
         self.settings.hidden.connect(self._settings_went)
+        # File → Open Link… and the channel list's Open a link (plan 4): while its card shows it
+        # has the keys; a stream plays (play_network_link), a whole provider goes to Add
+        # provider, filled in; a link's first bytes are read on a worker.
+        self.link_opener = OpenLink(
+            self.open_link_card,
+            self.jobs,
+            play=lambda url, kind: self.play_network_link(url, kind),
+            add_provider=lambda link: self.add_provider(link),
+            verify_ssl=lambda: bool(config_manager.ssl_verify),
+            parent=self,
+        )
+        controller.add_card(self.open_link_card)
         # The channel list's find: genres and channels at every provider, found in a worker;
         # its last row looks for films and series in the Library's search.
         self.finder = FindSession(
@@ -1696,6 +1712,32 @@ class TVWindow(QMainWindow):
             self._click_on_release = True
             return
         self.controller.video_clicked()
+
+    # ---- opened links (plan 4) ----------------------------------------------------------------
+
+    def open_link(self, text: str = "") -> None:
+        """File → Open Link… and the channel list's Open a link: the card over live TV, afresh,
+        `text` in its field (a dropped link's). From the Library it goes back to the TV first,
+        and the mini player becomes the window again; the audio dock's ⋯ menu closes. What is
+        under it stays (the channel list, Settings), and has the keys again once it goes; a
+        question keeps the keys, above it."""
+        if self._closing:
+            return
+        if self.screens.library_shown():
+            self.screens.back_to_tv()
+        self.leave_mini_player()
+        self.more_menu.dismiss()
+        self.link_opener.open(text)
+        for card in (self.question_card, self.quality_card, self.captions_card):
+            if card.isVisible():
+                card.raise_()  # the link's card raised itself over it
+
+    def play_network_link(self, url: str, kind: str) -> None:
+        """A link the Open Link card hands over plays, `kind` LIVE or FILM: as a channel or as
+        a film, and it is kept in Network streams (plan 4, Task 4: the network player)."""
+        if self._closing:
+            return
+        logger.info("Open Link: a %s link was handed over to play", kind.lower())
 
     # ---- opened files -------------------------------------------------------------------------
 
