@@ -247,14 +247,17 @@ class TVMenus(QObject):
         add(view, tr("Refresh Films and Series"), "Ctrl+Shift+R", self.refresh_library)
         player = self._player_actions  # the player's keys: off while the Library shows
         player.append(add(view, tr("Guide"), "G", self._handler(Action.GUIDE)))
+        # i18n: a View menu entry: opens the channel list
         player.append(add(view, tr("Channel List"), "Return", self._handler(Action.OPEN_DRAWER)))
         add(view, tr("Fullscreen"), "F", window.toggle_fullscreen)
+        # i18n: a View menu entry: the picture in a small window of its own
         player.append(add(view, tr("Mini Player"), "Alt+P", self._handler(Action.MINI_PLAYER)))
         # i18n: a View menu entry, checked while the window stays above other apps' windows
         self.keep_on_top = add(view, tr("Keep on Top"), "", self._toggle_keep_on_top)
         self.keep_on_top.setCheckable(True)
         self.keep_on_top.setChecked(bool(getattr(window.config_manager, "keep_on_top", False)))
         playback = bar.addMenu(tr("Playback"))  # i18n: the menu bar's Playback menu
+        # i18n: a Playback menu entry: plays, or pauses what plays
         player.append(add(playback, tr("Play/Pause"), "Space", self._handler(Action.PLAY_PAUSE)))
         # i18n: a menu entry (2.6): every picture stops, nothing streams (verb)
         player.append(add(playback, tr("Stop"), "X", self._handler(Action.STOP)))
@@ -263,6 +266,7 @@ class TVMenus(QObject):
         player.append(
             add(playback, tr("Previous Channel"), "Backspace", self._handler(Action.PREVIOUS))
         )
+        # i18n: a Playback menu entry: a time-shifted channel back to live (verb)
         player.append(add(playback, tr("Go Live"), "L", self._handler(Action.GO_LIVE)))
         # i18n: a menu entry: record the channel being watched, or stop recording (verb)
         player.append(add(playback, tr("Record"), "R", self._handler(Action.RECORD)))

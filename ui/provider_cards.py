@@ -115,15 +115,16 @@ CHECK_SAVE_TEXT = N_("Check and save")  # i18n: a button: ask the provider first
 ADD_ANYWAY_TEXT = N_("Add anyway")
 M3U_FILE_TEXT = N_("M3U file…")  # i18n: the Add provider card's other way: a playlist file
 FREE_TEXT = N_("Free channels…")
-# i18n: under a provider's link: what QiTV found it to be ({kind}: "M3U playlist", "STB
-# portal"…; {host}: its server)
+# Under a provider's link: what QiTV found it to be.
+# i18n: under a provider's link: what it is ({kind}: "M3U playlist", "STB portal"…; {host})
 FOUND_TEXT = N_("✓ {kind} at {host}")
 # i18n: under a provider's link: an Xtream link, its username and password now in their fields
 FOUND_LOGIN_TEXT = N_("✓ Xtream at {host}, with its login")
 # i18n: under a provider's link: a playlist file on this computer ({name}: the file's name)
 FOUND_FILE_TEXT = N_("✓ M3U playlist file “{name}”")
-# i18n: under a provider's address that is no link QiTV knows: it is added as {kind} (Xtream
-# with a username and password, M3U playlist without), unless another kind is picked under it
+# Under a provider's address that is no link QiTV knows: it is added as {kind} (Xtream with a
+# username and password, M3U playlist without), unless another kind is picked under it.
+# i18n: under an address that is no known link: the kind it is added as, unless another is picked
 GUESS_TEXT = N_("{kind} at {host}, or pick its kind below")
 # i18n: a provider card's line: a field it needs is empty ({field}: its label, as "Password")
 FILL_IN_TEXT = N_("Fill in “{field}” first.")
@@ -177,9 +178,9 @@ _LABELS = {
     URL: LINK_TEXT,
     USERNAME: N_("Username"),
     PASSWORD: N_("Password"),
-    MAC: N_("MAC Address:"),
-    SERIAL: N_("Serial Number (Optional):"),
-    DEVICE: N_("Device ID (Optional):"),
+    MAC: N_("MAC Address:"),  # i18n: an STB portal's field: the device's MAC address
+    SERIAL: N_("Serial Number (Optional):"),  # i18n: an STB portal's field, may stay empty
+    DEVICE: N_("Device ID (Optional):"),  # i18n: an STB portal's field, may stay empty
     NAME: N_("Name"),
 }
 

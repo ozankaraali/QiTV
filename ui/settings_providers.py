@@ -96,8 +96,8 @@ _KINDS = {
     JELLYFIN: "Jellyfin",
     EMBY: "Emby",
 }
-# i18n: under a provider's name in Settings → Providers: its kind ("Xtream"), and that the TV
-# shows it now
+# Under a provider's name in Settings → Providers: its kind ("Xtream"), and that the TV shows it.
+# i18n: under a provider's name in Settings: its kind ("Xtream") and that the TV shows it now
 IN_USE_TEXT = N_("{kind} · in use")
 # i18n: the Max simultaneous streams setting's value for "as the provider reports"
 AUTOMATIC_TEXT = N_("Automatic")
@@ -105,8 +105,8 @@ _STREAM_CHOICES = (Choice(0, AUTOMATIC_TEXT),) + tuple(
     Choice(n, str(n), literal=True) for n in range(1, STREAMS_MOST + 1)
 )
 SHOW_AGAIN_TEXT = N_("Show again")  # i18n: Settings → Providers → Hidden groups: a group's action
-# i18n: a toast: the provider list could not be written (a full disk, a read-only folder), so the
-# change made in Settings → Providers did not happen
+# A toast: the provider list could not be written (a full disk, a read-only folder).
+# i18n: a toast: the provider list could not be written, so the change in Settings didn't happen
 SAVE_FAILED_TEXT = N_("Couldn't save the providers; nothing was changed")
 REMOVE_TEXT = N_("Remove")  # i18n: a button of "Remove the provider …?" (verb); its key: REMOVE
 # i18n: Verify Provider's note under "Provider verified successfully."
@@ -200,6 +200,7 @@ def answer_text(outcome: Outcome) -> str:
             # i18n: why is a warning, as "The portal says your subscription ended on 3 Oct 2026"
             text = tr("Provider verified successfully. Note: {why}.", why=why)
         else:
+            # i18n: Check the connection's answer at the end of its row: the provider answered
             text = tr("Provider verified successfully.")
         if outcome.http_only:  # the only place QiTV says so (2.7.1)
             text = f"{text} {translate(HTTP_ONLY_NOTE)}"
@@ -207,6 +208,7 @@ def answer_text(outcome: Outcome) -> str:
     if why:
         # i18n: why is the reason, as "The username or password is wrong"
         return tr("Failed to verify provider: {why}.", why=why)
+    # i18n: Check the connection's answer at the end of its row: the provider didn't answer
     return tr("Failed to verify provider.")
 
 
@@ -345,6 +347,7 @@ class ProviderRows(QObject):
             Row(
                 row_key(name, STREAMS),
                 N_("Streams at once"),  # i18n: a provider's setting: how many streams it allows
+                # i18n: help under a provider's Streams at once ("Automatic" is its first value)
                 N_(
                     "How many streams this provider allows at once. Automatic uses what the"
                     " provider reports."

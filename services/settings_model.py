@@ -251,8 +251,8 @@ def _general(title: str, context: Context) -> Section:
         # i18n: the TMDB token field's hint in a build that carries one
         placeholder = N_("Built in; or paste your own")
     else:
-        # i18n: the TMDB token row's hint in a build without one (from the source code); the
-        # old window's "Your TMDB API Read Access Token", shorter to fit beside its title
+        # The old window's "Your TMDB API Read Access Token", shorter to fit beside its title.
+        # i18n: the TMDB token row's hint (muted, empty) in a build without one of its own
         placeholder = N_("Your TMDB Read Access Token")
     rows = (
         Row(
@@ -266,6 +266,7 @@ def _general(title: str, context: Context) -> Section:
         ),
         Row(
             "check_updates",
+            # i18n: a setting (General): QiTV may look for a newer version as it starts
             N_("Allow Check for Updates"),
             # i18n: help under the Allow Check for Updates setting
             N_("Looks for a newer QiTV as it starts, and asks before it downloads one."),
@@ -274,7 +275,7 @@ def _general(title: str, context: Context) -> Section:
         ),
         Row(
             "channel_logos",
-            N_("Enable Channel Logos"),
+            N_("Enable Channel Logos"),  # i18n: a setting (General): logos in the channel list
             # i18n: help under the Enable Channel Logos setting
             N_("Shows each channel's logo beside its name."),
             ON_OFF,
@@ -282,6 +283,7 @@ def _general(title: str, context: Context) -> Section:
         ),
         Row(
             "tmdb_details",
+            # i18n: a setting (General): posters and stories from TMDB (a service's name)
             N_("Film and series details from TMDB"),
             # i18n: help under the TMDB setting: what QiTV sends TMDB is only a title and its year
             N_("Fills in posters and stories your provider lacks. TMDB gets the title and year."),
@@ -290,6 +292,7 @@ def _general(title: str, context: Context) -> Section:
         ),
         Row(
             "tmdb_token",
+            # i18n: a setting: the token QiTV uses with TMDB (an API Read Access Token)
             N_("TMDB token"),
             # i18n: help under the TMDB token (an API Read Access Token), edited in place
             N_("Your own TMDB API Read Access Token, if you have one."),
@@ -338,8 +341,7 @@ def _subtitles(title: str, context: Context) -> Section:
             # i18n: help under Settings → Subtitles → Speech model
             N_("Automatic takes the more accurate one on a fast computer."),
             (
-                # i18n: Settings → AI captions → Speech model: QiTV picks it by this computer's
-                # speed
+                # i18n: Settings → AI captions → Speech model: QiTV picks it by the computer's speed
                 Choice("auto", N_("Automatic", ctx="a speech model"), "a speech model"),
                 # i18n: Settings → AI captions → Speech model: the smaller one; keep "0.6B"
                 Choice("small", N_("Faster (0.6B)")),
@@ -474,14 +476,16 @@ def _advanced(title: str, context: Context) -> Section:
     rows = (
         Row(
             "ssl_verify",
+            # i18n: a setting (Advanced): whether QiTV checks providers' HTTPS certificates
             N_("Verify SSL certificates (recommended)"),
+            # i18n: help under the Verify SSL certificates setting
             N_("Disable only if your provider uses self-signed certificates."),
             ON_OFF,
             True,
         ),
         Row(
             "secure_dns",
-            N_("Secure DNS"),
+            N_("Secure DNS"),  # i18n: a setting (Advanced): DNS over HTTPS; keep "DNS"
             # i18n: help under the Secure DNS setting (DNS over HTTPS); keep "DNS"
             N_("Looks up providers' addresses over HTTPS, with Cloudflare's or Google's resolver."),
             ON_OFF,
@@ -489,6 +493,7 @@ def _advanced(title: str, context: Context) -> Section:
         ),
         Row(
             "detailed_log",
+            # i18n: a setting (Advanced): QiTV's log file gets every step, for a report
             N_("Detailed log (for troubleshooting)"),
             # i18n: help under the Detailed log setting
             N_("The log also gets every step QiTV takes, for a report. Passwords are left out."),
@@ -497,6 +502,7 @@ def _advanced(title: str, context: Context) -> Section:
         ),
         Row(
             "max_cache_image_size",
+            # i18n: a setting (Advanced): the largest room posters and logos may take on disk
             N_("Max size of image cache (MB)"),
             # i18n: help under the image cache's largest size (the restart note follows it)
             N_("How much room the posters and logos kept on disk may take."),
@@ -506,7 +512,7 @@ def _advanced(title: str, context: Context) -> Section:
         ),
         Row(
             CLEAR_IMAGE_CACHE,
-            N_("Clear Image Cache"),
+            N_("Clear Image Cache"),  # i18n: a row of Settings → Advanced: empties it (asks)
             # i18n: help under Settings → Advanced → Clear Image Cache (it asks first)
             N_("Deletes the posters and logos kept on disk. Asked first."),
             kind=DANGER,
@@ -521,8 +527,9 @@ def _files(title: str, rows: tuple[Row, ...]) -> Section:
         title,
         ICONS[FILES],
         rows=rows,
-        # i18n: Settings → Files when QiTV runs from its source code: it can't be the app that
-        # opens video or music files
+        # Settings → Files when QiTV runs from its source code: it can't be the app that opens
+        # video or music files.
+        # i18n: Settings → Files, in place of its rows, when QiTV runs from its source code
         empty_text=N_("Not available while QiTV runs from source."),
     )
 
@@ -557,6 +564,7 @@ def _playback(system: str) -> Section:
                     rows=(
                         Row(
                             "desktop_pip",
+                            # i18n: a setting (macOS): a small window when you switch desktops
                             N_("Float the picture when you leave a fullscreen desktop"),
                             # i18n: help under the setting that floats the picture
                             N_("Keeps watching in a small window when you switch desktops."),
@@ -565,6 +573,7 @@ def _playback(system: str) -> Section:
                         ),
                         Row(
                             "covered_pip",
+                            # i18n: a setting (macOS): a small window when QiTV is covered
                             N_("Float the picture when another window covers QiTV"),
                             # i18n: help under the setting that floats the picture
                             N_("Keeps watching in a small window when something covers QiTV."),
@@ -578,7 +587,7 @@ def _playback(system: str) -> Section:
     rows = (
         Row(
             "live_latency",
-            N_("Live latency"),
+            N_("Live latency"),  # i18n: a setting: how far behind live a channel plays
             # i18n: help under the Live latency setting
             N_("How far behind live channels play. Auto adjusts each channel."),
             (
@@ -592,6 +601,7 @@ def _playback(system: str) -> Section:
         ),
         Row(
             "hardware_decoding",
+            # i18n: a setting (Playback): the graphics chip decodes the video
             N_("Hardware video decoding"),
             # i18n: help under the Hardware video decoding setting (the restart note follows it)
             N_("Lets the graphics chip decode video."),
@@ -603,7 +613,7 @@ def _playback(system: str) -> Section:
         # player was given). So no restart note, which would say it of Off too: the help says it.
         Row(
             "deinterlace",
-            N_("Deinterlacing"),
+            N_("Deinterlacing"),  # i18n: a setting: Auto or Off for interlaced TV pictures
             # i18n: help under the Deinterlacing setting (Off applies at once, Auto after a restart)
             N_(
                 "Auto deinterlaces only interlaced pictures."
@@ -617,18 +627,21 @@ def _playback(system: str) -> Section:
         ),
         Row(
             "media_4k_versions",
+            # i18n: a setting (Jellyfin and Emby): when a title's 4K version plays
             N_("4K versions (Jellyfin, Emby)"),
             # i18n: help under the 4K versions setting
             N_("Whether a title plays its 4K version when the server has one."),
             (
+                # i18n: the 4K versions setting's choice: a title's 4K version plays on a 4K screen
                 Choice("screen", N_("On a 4K screen")),
-                Choice("always", N_("Always")),
-                Choice("never", N_("Never")),
+                Choice("always", N_("Always")),  # i18n: a choice: always play a title's 4K version
+                Choice("never", N_("Never")),  # i18n: a choice: never play a title's 4K version
             ),
             "screen",
         ),
         Row(
             "start_with_last_channel",
+            # i18n: a setting (Playback): QiTV opens on the channel watched last
             N_("Start with the last channel"),
             # i18n: help under the Start with the last channel setting
             N_("Opens QiTV on the channel you watched last."),
@@ -637,11 +650,11 @@ def _playback(system: str) -> Section:
         ),
         Row(
             "mouse_wheel_action",
-            N_("Mouse wheel"),
+            N_("Mouse wheel"),  # i18n: a setting: what the mouse wheel does over the picture
             # i18n: help under the Mouse wheel setting
             N_("What the mouse wheel does over the picture."),
             (
-                Choice("volume", N_("Volume")),
+                Choice("volume", N_("Volume")),  # i18n: the Mouse wheel setting's choice
                 # i18n: the Mouse wheel setting's choice
                 Choice("channel", N_("Change channel")),
             ),
@@ -649,28 +662,29 @@ def _playback(system: str) -> Section:
         ),
         Row(
             "play_in",
-            N_("Play in"),
+            N_("Play in"),  # i18n: a setting: which player shows the picture (QiTV, VLC, MPV)
             # i18n: help under the Play in setting
             N_("Which player shows the picture: QiTV's own, or VLC or MPV outside it."),
             (
-                Choice("qitv", N_("QiTV")),
-                Choice("vlc", N_("VLC")),
-                Choice("mpv", N_("MPV")),
+                Choice("qitv", N_("QiTV")),  # i18n: the Play in setting's choice: QiTV's own
+                Choice("vlc", N_("VLC")),  # i18n: the Play in setting's choice (a player's name)
+                Choice("mpv", N_("MPV")),  # i18n: the Play in setting's choice (a player's name)
             ),
             "qitv",
         ),
         *pip,
         Row(
             "autoplay",
-            N_("Autoplay"),
+            N_("Autoplay"),  # i18n: a setting (Playback): what plays next; opens its rows
             # i18n: help under the Autoplay setting
             N_("What plays next when an episode or a movie ends."),
             section=Section(
                 "autoplay",
-                N_("Autoplay"),
+                N_("Autoplay"),  # i18n: the Autoplay layer's name, in Settings' breadcrumb
                 rows=(
                     Row(
                         "auto_play_episodes",
+                        # i18n: a setting (Autoplay): the next episode starts after a countdown
                         N_("Auto-play next episode (10s countdown)"),
                         # i18n: help under the Auto-play next episode setting
                         N_("Starts the next episode after a 10 second countdown."),
@@ -679,6 +693,7 @@ def _playback(system: str) -> Section:
                     ),
                     Row(
                         "auto_play_movies",
+                        # i18n: a setting (Autoplay): another movie of the category is offered
                         N_("Suggest next movie from category (10s countdown)"),
                         # i18n: help under the Suggest next movie setting
                         N_("Offers the next movie of the category after a 10 second countdown."),

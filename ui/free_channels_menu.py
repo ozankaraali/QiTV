@@ -21,7 +21,7 @@ from ui.context_actions import menu_style
 ALL_TEXT = N_("All countries")  # i18n: a menu entry: the free channels of every country
 OTHER_TEXT = N_("Another country…")  # i18n: a menu entry; opens a list of countries
 PICKER_TITLE = N_("Free channels")  # i18n: the country list's window title
-PICKER_LABEL = N_("Country:")
+PICKER_LABEL = N_("Country:")  # i18n: the label of the country list (free channels)
 
 
 def system_territory() -> str:

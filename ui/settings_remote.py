@@ -49,7 +49,8 @@ _FIELDS = {ENABLED: "enabled", RELAY: "relay"}  # a switch's row -> its key in `
 
 # i18n: Settings → Phone remote: the switch that turns the remote on
 REMOTE_TEXT = N_("Phone remote")
-RELAY_TEXT = N_("Reach QiTV from any network")  # i18n: Settings → Phone remote: the relay's
+# i18n: Settings → Phone remote: the relay's switch
+RELAY_TEXT = N_("Reach QiTV from any network")
 HOME_TEXT = N_("Home address")  # i18n: Settings → Phone remote: QiTV's address at home
 RELAY_STATE_TEXT = N_("Relay")  # i18n: Settings → Phone remote: the relay's state now
 PHONES_TEXT = N_("Paired phones")  # i18n: Settings → Phone remote: opens their list
