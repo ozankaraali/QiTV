@@ -350,21 +350,20 @@ class RawUrlLogTests(unittest.TestCase):
         self.assertNoSecrets(logs.output)
 
     def test_provider_verification_failures(self):
-        from ui.settings_dialog import ProviderVerificationWorker
+        from services import provider_check
 
         stb = {"type": "STB", "url": "http://h/c/", "mac": MAC}
-        worker = ProviderVerificationWorker(1, stb, True)
         with (
             patch("services.provider_manager.StbHandshake.run", side_effect=refused()),
             self.assertLogs(level="DEBUG") as logs,
         ):
-            worker.run()
+            provider_check.check(stb, True)
         self.assertNoSecrets(logs.output)
         with (
-            patch("ui.settings_dialog.requests.head", side_effect=ValueError(CREDENTIAL_URL)),
+            patch("services.provider_check.requests.head", side_effect=ValueError(CREDENTIAL_URL)),
             self.assertLogs(level="DEBUG") as logs,
         ):
-            self.assertFalse(ProviderVerificationWorker.verify_url(CREDENTIAL_URL))
+            self.assertFalse(provider_check.verify_url(CREDENTIAL_URL))
         self.assertNoSecrets(logs.output)
 
     def test_a_job_callback_that_raises(self):

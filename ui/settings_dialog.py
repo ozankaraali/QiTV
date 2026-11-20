@@ -4,7 +4,7 @@ import logging
 import os
 import sys
 
-from PySide6.QtCore import QObject, QSize, Qt, QThread, QTimer, Signal, Slot
+from PySide6.QtCore import QObject, QSize, Qt, QTimer, Signal, Slot
 from PySide6.QtGui import QGuiApplication, QIntValidator
 from PySide6.QtWidgets import (
     QAbstractButton,
@@ -38,7 +38,6 @@ import orjson as json
 from shiboken6 import isValid
 
 from services import (
-    failure_reasons as reasons,
     free_channels,
     i18n,
     log_file,
@@ -46,7 +45,6 @@ from services import (
     recording,
     system_open,
 )
-from services.account_check import check_account
 from services.config_manager import ConfigManager
 from services.epg_view import (
     GUIDE_OFFSET_KEY,
@@ -56,27 +54,19 @@ from services.epg_view import (
 )
 from services.i18n import N_, tr, tr_n, translate
 from services.jobs import JobRunner
-from services.lazy_import import lazy_module
 from services.multikeydict import MultiKeyDict
 from services.opensubtitles import ANONYMOUS_DAILY, CONSUMERS_URL, built_in_key
 from services.picture import DEINTERLACING, deinterlace_name
-from services.provider_api import (
-    CLIENT_HEADERS,
-    https_fallback_candidates,
-    known_http_only,
-    remember_http_only,
-)
 from services.provider_link import parse_provider_link
 from services.provider_rename import removed_between, renames_between
 from services.provider_types import EMBY, JELLYFIN, is_media_server
-from services.redact import safe_exc
-from services.thread_cleanup import ThreadCleanup
 from services.tmdb import built_in_token as tmdb_built_in_token
 from ui.captions_texts import size_text
 from ui.file_types_settings import add_file_types_row
 from ui.free_channels_menu import show_menu as show_free_channels_menu
 from ui.hidden_groups_settings import add_hidden_groups_box
 from ui.parental_settings import build_parental_tab, pin_allows
+from ui.provider_check import ProviderCheck
 from ui.provider_drop import unique_name
 from ui.remote_settings import build_remote_tab, save_remote_settings
 from ui.theme import PALETTE, accent_button_style
@@ -190,11 +180,6 @@ LINK_KINDS = {
     provider_link.STB: N_("STB portal"),
 }
 
-requests = lazy_module("requests")
-
-# Jobs outlive a closed dialog; a running QThread must never be owned by that dialog.
-_verification_jobs: list[tuple[QThread, QObject]] = []
-
 
 class CaptionsFilesJob(QObject):
     """AI captions' downloaded files, off the GUI thread: their size on disk, after deleting
@@ -226,121 +211,6 @@ def captions_space_text(size) -> str:
         return tr("Nothing downloaded")  # i18n: Settings → AI captions: no speech model yet
     # i18n: Settings → AI captions: the space the speech model takes; size: as "880 MB"
     return tr("Downloaded: {size}", size=size_text(size))
-
-
-class ProviderVerificationWorker(QObject):
-    """Settings' Verify Provider, off the GUI thread: an STB or Xtream account is asked as
-    the account check asks it (services.account_check: no stream is opened), and a refusal
-    says why in plain words (`reason`, before `result`); a playlist must answer. Each is
-    asked over HTTPS first: one that answered only over HTTP says so (`http_only`, before
-    `result`; 2.7.1)."""
-
-    result = Signal(int, object, bool)
-    reason = Signal(int, str)  # the plain reason a verification failed ("" when none)
-    http_only = Signal(int)  # the verified provider answered only over HTTP
-    # 2.8: a media server's sign-in: {token, user_id, device_id} to keep (before `result`)
-    signed_in = Signal(int, object)
-    finished = Signal()
-
-    def __init__(self, request_id, provider, ssl_verify):
-        super().__init__()
-        self.request_id = request_id
-        self.provider = provider
-        self.ssl_verify = ssl_verify
-
-    @Slot()
-    def run(self):
-        verified, why, http_only = False, "", False
-        try:
-            provider = self.provider
-            if provider["type"] in ("STB", "XTREAM"):
-                found = check_account(provider, ssl_verify=self.ssl_verify)
-                # An account at its stream limit is still a working account, and a portal
-                # profile dated in the past alone is only warned of (such dates go stale).
-                working = (reasons.OK, reasons.LIMIT, reasons.DATED)
-                verified = found is not None and found.kind in working
-                if found is not None and found.kind != reasons.LIMIT and found.plain:
-                    why = found.text  # why it failed, or (DATED) the warning
-            elif provider["type"] in ("M3UPLAYLIST", "M3USTREAM"):
-                verified = self.verify_url(provider["url"], verify_ssl=self.ssl_verify)
-            elif is_media_server(provider["type"]):
-                verified, why = self.sign_in(provider)
-            http_only = (
-                verified
-                and not is_media_server(provider["type"])
-                and self.answered_only_over_http(provider)
-            )
-        except Exception as e:
-            # requests exceptions name the URL, credentials and all: the type and host only.
-            logging.getLogger(__name__).warning("Provider verification failed: %s", safe_exc(e))
-        finally:
-            self.reason.emit(self.request_id, why)
-            if http_only:
-                self.http_only.emit(self.request_id)
-            self.result.emit(self.request_id, self.provider, verified)
-            self.finished.emit()
-
-    def sign_in(self, provider) -> tuple[bool, str]:
-        """A Jellyfin or Emby server's sign-in (2.8): (signed in, why not). Its access goes out
-        through `signed_in`; the password is used here only."""
-        from services import media_workers
-
-        ok, value = media_workers.sign_in(  # this thread's: it blocks only the verification
-            str(provider.get("url") or ""),
-            str(provider.get("type") or ""),
-            str(provider.get("username") or ""),
-            str(provider.get("password") or ""),
-            self.ssl_verify,
-            device_id=str(provider.get("device_id") or ""),
-        )
-        if ok:
-            self.signed_in.emit(self.request_id, value)
-            return True, ""
-        return False, str(value)
-
-    def answered_only_over_http(self, provider) -> bool:
-        """Whether the verified `provider`, asked over HTTPS first, answered only over HTTP:
-        an Xtream panel at neither its address's HTTPS form nor the HTTPS port it advertises;
-        a portal or a playlist at its address's HTTPS form."""
-        url = str(provider.get("url") or "").strip()
-        if not url.startswith("http://"):
-            return False
-        if provider["type"] == "XTREAM":
-            from services.workers import xtream_answers_https
-
-            username, password = provider.get("username"), provider.get("password")
-            return not xtream_answers_https(
-                url, str(username or ""), str(password or ""), verify_ssl=self.ssl_verify
-            )
-        return known_http_only(url)
-
-    @staticmethod
-    def verify_url(url, *, verify_ssl=True):
-        """Whether the playlist at `url` answers (over HTTPS first: an HTTP address that
-        answers only over HTTP is remembered so, `known_http_only`)."""
-        if url.startswith(("http://", "https://")):
-            try:
-                for turl in https_fallback_candidates(url, True):
-                    try:
-                        response = requests.head(
-                            turl, timeout=5, headers=CLIENT_HEADERS, verify=verify_ssl
-                        )
-                        if response.status_code == 200:
-                            if turl.startswith("http://"):
-                                remember_http_only(turl)
-                            return True
-                    except requests.RequestException:
-                        continue
-                return False
-            except Exception as e:
-                logging.getLogger(__name__).warning("Error verifying URL: %s", safe_exc(e))
-                return False
-        else:
-            return os.path.isfile(url)
-
-
-def _release_verification_job(thread, worker):
-    _verification_jobs.remove((thread, worker))
 
 
 class WidgetGroup:
@@ -476,10 +346,13 @@ class OptionsDialog(QDialog):
         }
         self.edited_provider = None
         self._refresh_provider_ids = set()
+        # Verify Provider: the check awaited (0: none) and the provider it asks. The window's
+        # runner outlives this window: a check on its way ends after a close.
+        jobs = getattr(parent, "jobs", None)
+        self._provider_check = ProviderCheck(jobs if isinstance(jobs, JobRunner) else None, self)
+        self._provider_check.answered.connect(self._provider_checked)
         self._verification_request = 0
-        self._verification_why = ""  # the plain reason the verification on its way failed
-        self._verification_insecure = False  # the provider it verifies answered only over HTTP
-        self._media_access: dict = {}  # 2.8: a media server's sign-in on its way gave this
+        self._verification_asked: dict = {}
         self._verification_closed = False
         self.selected_provider_name = self.config_manager.selected_provider_name
         self.selected_provider_index = 0
@@ -1540,7 +1413,7 @@ class OptionsDialog(QDialog):
             return
         if self.edited_provider is not None and self.providers[index] is not self.edited_provider:
             self._store_provider_edits()
-        self._verification_request += 1
+        self._verification_request = 0  # an answer on its way is for the form left
         self.verify_button.setEnabled(True)
         self.verify_result.clear()
         self.selected_provider_name = self.providers[index].get(
@@ -2050,59 +1923,27 @@ class OptionsDialog(QDialog):
 
     def verify_provider(self):
         provider = self._verification_provider()
-        self._verification_request += 1
-        request_id = self._verification_request
         self.verify_result.setText(tr("Verifying..."))
         self.verify_result.setStyleSheet("")
         self.verify_button.setEnabled(False)
-        thread = QThread()
-        worker = ProviderVerificationWorker(
-            request_id, provider, provider.get("ssl_verify", self.ssl_verify_checkbox.isChecked())
+        self._verification_asked = provider
+        self._verification_request = self._provider_check.start(
+            provider, provider.get("ssl_verify", self.ssl_verify_checkbox.isChecked())
         )
-        worker.moveToThread(thread)
-        thread.started.connect(worker.run)
-        worker.reason.connect(self._verification_reason, Qt.QueuedConnection)
-        worker.http_only.connect(self._verification_http_only, Qt.QueuedConnection)
-        worker.signed_in.connect(self._media_signed_in, Qt.QueuedConnection)
-        worker.result.connect(self._provider_verified, Qt.QueuedConnection)
-        worker.finished.connect(thread.quit, Qt.DirectConnection)
-        ThreadCleanup(thread, worker).finished.connect(
-            lambda finished_thread: _release_verification_job(finished_thread, worker)
-        )
-        _verification_jobs.append((thread, worker))
-        thread.start()
-
-    @Slot(int, str)
-    def _verification_reason(self, request_id, reason):
-        """Why the verification on its way failed, in plain words; `_provider_verified` says it."""
-        if request_id == self._verification_request:
-            self._verification_why = reason
 
     @Slot(int, object)
-    def _media_signed_in(self, request_id, access):
-        """A media server's sign-in on its way gave its access: `_provider_verified` keeps it."""
-        if request_id == self._verification_request:
-            self._media_access = dict(access or {})
-
-    @Slot(int)
-    def _verification_http_only(self, request_id):
-        """The provider on its way answered only over HTTP: `_provider_verified` notes it."""
-        if request_id == self._verification_request:
-            self._verification_insecure = True
-
-    @Slot(int, object, bool)
-    def _provider_verified(self, request_id, provider, verified):
+    def _provider_checked(self, request_id, outcome):
+        """Verify Provider's answer (services.provider_check.Outcome), said under the form."""
         if self._verification_closed or request_id != self._verification_request:
             return
-        why, self._verification_why = self._verification_why, ""
-        insecure, self._verification_insecure = self._verification_insecure, False
-        access, self._media_access = self._media_access, {}
+        self._verification_request = 0
         self.verify_button.setEnabled(True)
-        if provider != self._verification_provider():
+        if self._verification_asked != self._verification_provider():
             self.verify_result.clear()
             return
+        why, insecure, access = outcome.why, outcome.http_only, outcome.access
         # `why` is the account check's reason, already in the language.
-        if verified:
+        if outcome.ok:
             if access and self.edited_provider is not None:
                 # 2.8: a media server's access is kept; its password goes from the field.
                 self.edited_provider.update(access)
@@ -2129,7 +1970,7 @@ class OptionsDialog(QDialog):
 
     def done(self, result):
         self._verification_closed = True
-        self._verification_request += 1
+        self._verification_request = 0
         super().done(result)
 
     def _verification_provider(self):
