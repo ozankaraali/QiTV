@@ -11,7 +11,10 @@ its resume point kept under Network streams by its id.
 
 The controller asks `url_of(item)` for a link's address as it plays now (a link of ⟲ Recent
 too): the kept entry's, whose address may have been replaced since, else the item's own;
-None for an item its provider makes the link of.
+None for an item its provider makes the link of. A kept link chosen in the channel list's
+Network streams, or found by its find, plays by its id (`play_kept`): its address and kind as
+kept. `rows()` are those links as the list's rows (a film's with where it stopped), and
+`find_items()` as the find's channels, plain dicts without their addresses.
 
 A link that showed its first picture is kept (`keep`, `opened`); one that did not play, or
 went for good, is kept with why (`failed`, in plain words). The store's file is read once on
@@ -32,6 +35,7 @@ from PySide6.QtCore import QObject, Signal
 from shiboken6 import isValid
 
 from services import network_streams
+from services.navigation import LinkRow
 from services.network_streams import (
     FILM,
     Entry,
@@ -114,6 +118,7 @@ class NetworkPlayer(QObject):
         self._dirty = False  # changed since the last write began
         self._set_aside = False  # the file could not be read: moved aside before the write
         controller.set_links(self.url_of)
+        controller.set_link_player(self.play_kept)
         controller.linkPlayed.connect(self._on_played)
         controller.linkFailed.connect(self._on_failed)
 
@@ -197,16 +202,46 @@ class NetworkPlayer(QObject):
             self.store.set_url(key, url)  # the newest address handed over is the one it plays
             self.changed.emit()
             self._save()
+        name = entry.name if entry is not None else default_name(url)
+        self._hand_over(key, name, url, kind)
+
+    def play_kept(self, key: str) -> bool:
+        """The link kept under `key` plays (its row in the channel list, or the find's), its
+        address and kind as kept; False when none is kept under it."""
+        entry = self.store.get(key)
+        if entry is None:
+            return False
+        self._hand_over(entry.id, entry.name, entry.url, entry.kind)
+        return True
+
+    def _hand_over(self, key: str, name: str, url: str, kind: str) -> None:
+        """The controller plays the link `url` as `key`'s: as a channel or a film, the stream
+        of the account whose host and user name it has (else Network streams')."""
         owner = self._owner(url) or NETWORK_PROVIDER
-        item = {
-            "id": key,
-            "name": entry.name if entry is not None else default_name(url),
-            "cmd": url,
-            "_provider": owner,
-        }
+        item = {"id": key, "name": name, "cmd": url, "_provider": owner}
         whose = "its account's" if owner != NETWORK_PROVIDER else "no provider's"
         logger.info("Open Link: a %s link plays (%s stream)", kind.lower(), whose)
         self._controller.play_link(item, "movies" if kind == FILM else "live")
+
+    def rows(self) -> list[LinkRow]:
+        """The kept links as the channel list's rows, newest opened first: a film's with
+        where it stopped (as it resumes), one that failed with why."""
+        rows = []
+        for entry in self.store.entries():
+            stopped = None
+            if entry.kind == FILM:
+                item = {"id": entry.id, "cmd": entry.url, "_provider": NETWORK_PROVIDER}
+                stopped = self._controller.stopped_at(item)
+            rows.append(LinkRow(entry.id, entry.name, entry.kind, entry.failed, stopped))
+        return rows
+
+    def find_items(self) -> list[dict]:
+        """The kept links as the channel list's find reads them (plain data for its worker):
+        their ids and names, Network streams' (never their addresses)."""
+        return [
+            {"id": e.id, "name": e.name, "_provider": NETWORK_PROVIDER}
+            for e in self.store.entries()
+        ]
 
     def url_of(self, item: dict) -> Optional[str]:
         """A link's address as it plays now: its kept entry's (by its id: a token replaced

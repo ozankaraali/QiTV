@@ -9,6 +9,10 @@ Some rows leave the drawer when chosen (Enter, →, a click), and only then: the
 column's Settings and Add provider rows (`actionRequested`), and the Movies and Series
 sections, which the Library shows (`libraryRequested`). Highlighting them previews nothing.
 
+Network streams (plan 4), after the providers among the sources, lists the links that played:
+each row its name, then what it is ("Live", "Film · stopped at 41:12") or, in the warning
+colour, why it did not play last time. A link chosen plays (`playRequested`, as a channel).
+
 The left column's top row starts with ‹ (a layer up, as ← on the left column; hidden on the
 sources), then names where the left column is, each a link: a name shows its node's children
 in the left column, and the provider's name shows the sources, the provider highlighted, to
@@ -80,17 +84,21 @@ from services.navigation import (
     FAVORITES_GROUP,
     FREE_CHANNELS_ROW,
     LIBRARY_SECTIONS,
+    LINK_LAYER,
+    LINKS_LAYER,
     OPEN_FILE_ROW,
     OPEN_FOLDER_ROW,
     RECENT_GROUP,
     RECORDINGS_ROW,
     SETTINGS_ROW,
+    LinkRow,
     NavModel,
     NavNode,
     NodeSeq,
     item_key,
     item_title,
 )
+from services.network_streams import FILM
 from services.provider_ids import mixed_group_id, provider_of
 from services.zapping import ZapContext
 from ui.find_session import FindSession
@@ -126,7 +134,15 @@ from ui.overlays.drawer_look import (  # the header's metrics are offered from h
     paint_backdrop,
     paint_highlight,
 )
-from ui.overlays.painting import Units, draw_icon, draw_refresh, elided, fill_round, ui_units
+from ui.overlays.painting import (
+    Units,
+    draw_icon,
+    draw_refresh,
+    elided,
+    fill_round,
+    fmt_duration,
+    ui_units,
+)
 from ui.pointer import NAV_BUTTONS, SecondClickGuard
 from ui.text_edit import SELECTION_ALPHA, Dragging, TextEdit, edit_key, paint_edit
 from ui.theme import PALETTE, qcolor
@@ -138,6 +154,7 @@ _CONTEXT_GROUPS = (RECENT_GROUP,)  # and these groups' rows ("Clear Recents")
 _RIGHT_PRESSES = (QEvent.Type.MouseButtonPress, QEvent.Type.MouseButtonDblClick)
 DRAG_OPACITY = 0.25  # the list while a channel is dragged out of it onto the grid
 FOUND_GENRE_H_U = 5.0  # a genre the find found: its name, then its provider and count
+LINK_ROW_H_U = FOUND_GENRE_H_U  # a link of Network streams: its name, then what it is
 FOUND_CHANNEL_SCALE = 0.7  # its channels: a long name (and a 5-digit number) fits whole
 FIND_X_U = 2.2  # its ✕, this wide at its right end
 ICONS_TOP_U = 0.6  # 2.9.3: the buttons' row, this far under the Find box's bottom
@@ -183,6 +200,12 @@ FIND_PARENT = NavNode("find", "find", "Find")  # the right column's parent while
 NodeRole = Qt.UserRole + 10
 CountRole = Qt.UserRole + 11
 IconRole = Qt.UserRole + 12
+SubRole = Qt.UserRole + 13  # a link's second line: (its text, whether in the warning colour)
+# i18n: under a link's name in the channel list's Network streams: it is a live stream
+LINK_LIVE_TEXT = N_("Live")
+LINK_FILM_TEXT = N_("Film")  # i18n: under a link's name in Network streams: it is a film
+# i18n: under a link's name in Network streams: a film, and where it stopped ({time}: 41:12)
+LINK_STOPPED_TEXT = N_("Film · stopped at {time}")
 _PINNED_ICONS = {FAVORITES_GROUP: "star", RECENT_GROUP: "recent"}
 _ACTION_ICONS = {
     SETTINGS_ROW: "gear",
@@ -200,6 +223,19 @@ _HEADER_TOOLTIPS = {  # the header's buttons: what they do, and their key (see _
     REFRESH_ACTION: (N_("Refresh channels and guide"), "Ctrl+R"),
     SETTINGS_ROW: (N_("Settings"), "Ctrl+,"),
 }
+
+
+def link_sub(row: LinkRow) -> tuple[str, bool]:
+    """What a link's row says under its name, and whether in the warning colour: why it did
+    not play last time, else "Live", or a film's "Film · stopped at 41:12" ("Film" from its
+    start)."""
+    if row.failed:
+        return translate(row.failed), True
+    if row.kind != FILM:
+        return translate(LINK_LIVE_TEXT), False
+    if row.stopped_ms is None:
+        return translate(LINK_FILM_TEXT), False
+    return translate(LINK_STOPPED_TEXT, time=fmt_duration(row.stopped_ms)), False
 
 
 def _hint(what: str, keys: str) -> str:
@@ -387,6 +423,8 @@ class _NodeModel(ChannelRowsModel):
                 if isinstance(node.payload, FoundGenre):
                     return _genre_label(node.payload, self._labels)
                 return node.count
+            if role == SubRole:
+                return link_sub(node.payload) if isinstance(node.payload, LinkRow) else None
             if role == IconRole:
                 if node.layer == FOUND_LIBRARY:
                     return "search"
@@ -457,7 +495,9 @@ class _SimpleRowDelegate(CutTexts, QStyledItemDelegate):
         return ui_units(getattr(widget, "units_width", 100) or 100)
 
     def sizeHint(self, option, index) -> QSize:
-        return QSize(0, self._units(option.widget).px(ROW_H_U))
+        node = index.data(NodeRole)
+        two = isinstance(node, NavNode) and node.layer == LINK_LAYER  # its name, what it is
+        return QSize(0, self._units(option.widget).px(LINK_ROW_H_U if two else ROW_H_U))
 
     def paint(self, p: QPainter, option, index) -> None:
         units = self._units(option.widget)
@@ -466,6 +506,9 @@ class _SimpleRowDelegate(CutTexts, QStyledItemDelegate):
         selected = bool(option.state & QStyle.State_Selected)
         focused = column_focused(option.widget)
         node = index.data(NodeRole)
+        if isinstance(node, NavNode) and node.layer == LINK_LAYER:
+            self._paint_link(p, option, index, units)
+            return
         p.save()
         if isinstance(node, NavNode) and node.layer == "header":
             # A provider's heading: small, quiet, with a rule; it is never highlighted.
@@ -537,6 +580,39 @@ class _SimpleRowDelegate(CutTexts, QStyledItemDelegate):
             Qt.AlignLeft | Qt.AlignVCenter,
             shown,
         )
+        p.restore()
+
+    def _paint_link(self, p: QPainter, option, index, units: Units) -> None:
+        """A link of Network streams: its name, then (smaller) what it is, grey, or why it
+        did not play last time in the warning colour (SubRole)."""
+        u = units.u
+        rect = QRectF(option.rect)
+        p.save()
+        paint_hover(p, option, index, u)
+        if option.state & QStyle.State_Selected:
+            paint_highlight(p, rect, units, column_focused(option.widget))
+        left, width = rect.x() + 1.2 * u, max(0.0, rect.width() - 2.4 * u)
+        title_font, sub_font = units.font(TITLE_FONT_U), units.font(COUNT_FONT_U)
+        title_h = QFontMetricsF(title_font).height()
+        sub_h = QFontMetricsF(sub_font).height()
+        sub, warn = index.data(SubRole) or ("", False)
+        y = rect.y() + (rect.height() - title_h - (sub_h if sub else 0)) / 2
+        p.setFont(title_font)
+        p.setPen(qcolor(PALETTE.text))
+        title = str(index.data(Qt.DisplayRole) or "")
+        shown = elided(p, title, width)
+        p.drawText(QRectF(left, y, width, title_h), Qt.AlignLeft | Qt.AlignVCenter, shown)
+        shown_sub = sub
+        if sub:
+            p.setFont(sub_font)
+            p.setPen(
+                qcolor(PALETTE.warn) if warn else qcolor(PALETTE.text, PALETTE.text_muted_alpha)
+            )
+            shown_sub = elided(p, sub, width)
+            p.drawText(
+                QRectF(left, y + title_h, width, sub_h), Qt.AlignLeft | Qt.AlignVCenter, shown_sub
+            )
+        self.note_cut(index, [(title, shown), (sub, shown_sub)])
         p.restore()
 
 
@@ -1079,7 +1155,8 @@ class Drawer(Overlay):
 
     def _schedule_preview(self, node: NavNode) -> None:
         path = self._nav.path
-        if node.layer == "source" or _leaves_drawer(node) or (path and node == path[-1]):
+        sources = ("source", LINKS_LAYER)
+        if node.layer in sources or _leaves_drawer(node) or (path and node == path[-1]):
             self._cancel_preview()  # these only highlight; Right/Enter opens or chooses them
             return
         self._preview_node = node
@@ -1252,7 +1329,9 @@ class Drawer(Overlay):
             # (a find's rows are of two heights, as a live list with a label among its rows)
             labelled = live and not isinstance(nodes, NodeSeq)
             labelled = labelled and any(n.layer == "header" for n in nodes)
-            col.view.setUniformItemSizes(not labelled)
+            # (Network streams' links are of two lines: no row of another list's height)
+            links = parent is not None and parent.layer == LINKS_LAYER
+            col.view.setUniformItemSizes(not labelled and not links)
             col.view.setItemDelegate(col.channel_delegate if live else col.simple_delegate)
             col.model.set_nodes(nodes, live, numbers, tagged)
             if moved:

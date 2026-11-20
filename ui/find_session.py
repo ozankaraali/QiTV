@@ -7,7 +7,8 @@ letter typed narrows what was found at
 once, here; the genres and channels for the new text, ranked, follow from a worker after a
 short pause (`preferences`, read here, rank the user's own first). One worker runs at a time:
 a text typed meanwhile waits, and only the latest one runs. The worker also makes the keys of
-a long group the list has open (`own_keys`), for its channels to come first.
+a long group the list has open (`own_keys`), for its channels to come first. Network streams'
+links (`links`, plan 4) are found by their names too: read here as the index is made.
 """
 
 from __future__ import annotations
@@ -47,6 +48,7 @@ class FindSession(QObject):
         loaded: Optional[Callable[[], dict]] = None,
         signature: Optional[Callable[[], Any]] = None,
         preferences: Optional[Callable[[], Preferences]] = None,
+        links: Optional[Callable[[], list[dict]]] = None,
         idle_ms: int = IDLE_DROP_MS,
         parent: Optional[QObject] = None,
     ) -> None:
@@ -56,6 +58,7 @@ class FindSession(QObject):
         self._loaded = loaded  # the content the catalogs hold: found without a re-read
         self._signature = signature  # changes when the catalogs' content may have
         self._preferences = preferences  # the browsed provider, what was watched, the stars
+        self._links = links  # Network streams' links, plain dicts (none: none found)
         self._query = ""
         self._index: Optional[FindIndex] = None
         self._made_for: Any = None  # the signature the index was made for
@@ -174,9 +177,11 @@ class FindSession(QObject):
         self._queued = False
         self._running = True
         loaded = signature = None
+        links: list[dict] = []
         if self._index is None:
             loaded = self._loaded() if self._loaded is not None else None
             signature = self._signature() if self._signature is not None else None
+            links = self._links() if self._links is not None else []
         preferences = self._preferences() if self._preferences is not None else Preferences()
         scope, token = None, None
         if self._scope is not None and (self._own is None or self._own[0] != self._scope[0]):
@@ -189,6 +194,7 @@ class FindSession(QObject):
             loaded=loaded,
             preferences=preferences,
             scope=scope,
+            links=links,
         )
         context = (self._generation, self._snapshot, signature, self._query, token)
         self._jobs.run_worker(worker, self._on_done, self._on_error, context=context)

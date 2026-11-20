@@ -102,6 +102,7 @@ from services.local_episodes import next_in_folder, parse_episode
 from services.media_reporter import MediaReporter
 from services.navigation import (
     FAVORITES_GROUP,
+    LINK_LAYER,
     RECENT_GROUP,
     NavNode,
     item_key,
@@ -382,6 +383,8 @@ class TVController(QObject):
         # item its provider makes the link of), and the link whose first picture was heard.
         self._links: Callable[[dict], Optional[str]] = _own_link
         self._link_heard: Optional[Target] = None
+        # Its link kept under an id plays, by the network player (`set_link_player`).
+        self._play_kept: Callable[[str], bool] = lambda key: False
         self._lanes = LinkLanes(catalog, self)
         self._lanes.known = self._network_url  # no provider is asked for a link's address
         # The live channel's time-shift side: pipeline tunes, its controls and reports.
@@ -1192,6 +1195,17 @@ class TVController(QObject):
         player's: a token replaced since; None for an item its provider makes the link of).
         Without it a link plays its own address."""
         self._links = resolve
+
+    def set_link_player(self, play: Callable[[str], bool]) -> None:
+        """`play(id)`: the link of Network streams kept under `id` plays (the network
+        player's: it knows its kind and whose stream it is); False when none is kept so."""
+        self._play_kept = play
+
+    def stopped_at(self, item: dict) -> Optional[int]:
+        """Where the film `item` (a link of Network streams) stopped, in ms, as it resumes
+        here; None: from its start."""
+        key = self.resume_key(self.title_target(item, "movie"))
+        return self.watch.resume_position(key) if key else None
 
     def play_link(self, item: dict, section: str) -> None:
         """A link of Network streams plays (the network player hands it over): `section`
@@ -2006,9 +2020,14 @@ class TVController(QObject):
         self._tuning.start(TUNING_KEEP_MS)
 
     def play_item(self, node: NavNode, siblings: Sequence[NavNode], parent: NavNode) -> None:
-        """A drawer row was chosen. Only channels play from the drawer: Movies and Series
-        open the Library, whose titles and episodes play through play_vod()."""
+        """A drawer row was chosen. Only channels (and Network streams' links) play from the
+        drawer: Movies and Series open the Library, whose titles and episodes play through
+        play_vod()."""
         if self._closed:
+            return
+        if node.layer == LINK_LAYER:  # Network streams' (plan 4): as it was kept
+            if self._play_kept(node.key):
+                self.overlays.drawer.close_drawer()
             return
         if node.layer != "item" or self.nav.section_of(node) != "live":
             logger.debug("Not playable from the drawer: %s", node)
@@ -2023,8 +2042,13 @@ class TVController(QObject):
         """A channel the drawer's find found (any provider's), and the list closes. ↑/↓ then
         walk the genre it is first listed in (`group_id`, its provider's), as from that genre's
         list, when the list shows that provider (or every one); else every channel, as a
-        channel found by the Library's search."""
+        channel found by the Library's search. A link of Network streams plays as it was kept
+        (a film as a film)."""
         if self._closed:
+            return
+        if provider_of(channel) == NETWORK_PROVIDER:
+            if self._play_kept(str(channel.get("id") or "")):
+                self.overlays.drawer.close_drawer()
             return
         key, channels = self._found_group(channel, group_id)
         if key is None:

@@ -4,6 +4,11 @@ The sources column ends with three action rows, Settings, Add provider and Open 
 choose, not providers or layers to open (the drawer hands them to the shell, as it does the
 Library's sections).
 
+Network streams (plan 4: the links opened with Open Link that played, `set_links`) sits after
+the providers once there is one, a source of its own layer: it is no provider, so nothing that
+counts providers sees it (All providers comes with two providers, as before), and opening it
+chooses none. Its rows are its links (LinkRow), played when chosen, never opened.
+
 In "All providers" each provider's groups follow a heading row with its name; a provider with
 no groups there yet has a notice row under its heading instead ("Loading…" while it sets up or
 its list comes, or why its setup failed). One provider's setup ending there is new content, not
@@ -30,6 +35,7 @@ from services.provider_ids import (
     ALL_PROVIDERS,
     ALL_PROVIDERS_TITLE,
     NETWORK_PROVIDER,
+    NETWORK_TITLE,
     mixed_group_id,
     provider_of,
     split_group_id,
@@ -58,6 +64,8 @@ _MEMO_LIMIT = 64  # memoized child lists kept (least recently used are dropped)
 LAZY_ROWS = 2000  # a list of items this long gets its nodes made on demand (see NodeSeq)
 LOADING_NOTICE = N_("Loading…")  # under a provider's heading in "All providers" while it loads
 _UNREADABLE = ("header", "notice")  # rows that only label: never opened or played
+LINKS_LAYER = "links"  # plan 4: Network streams among the sources (keyed NETWORK_PROVIDER)
+LINK_LAYER = "link"  # one of its links (a LinkRow), keyed by its id
 
 
 @dataclass(frozen=True)
@@ -82,6 +90,18 @@ class NavNode:
 
     def __eq__(self, other):
         return isinstance(other, NavNode) and self._identity() == other._identity()
+
+
+@dataclass(frozen=True)
+class LinkRow:
+    """A link of Network streams as its row shows it: plain data, compared by value (a row
+    that says something new is shown anew)."""
+
+    id: str
+    name: str
+    kind: str  # LIVE or FILM (services.network_streams)
+    failed: str = ""  # why it did not play last time (English: shown with translate())
+    stopped_ms: Optional[int] = None  # a film's resume point (None: from its start)
 
 
 # The drawer paints their icons (a gear, a plus, a file, a folder, a record dot; Open a link has
@@ -314,6 +334,7 @@ class NavModel(QObject):
         self._refused_sections: set[str] = set()
         self._pending_group: Optional[tuple[str, str]] = None
         self._revealed: Optional[dict] = None  # the row the list opened on (see reveal)
+        self._links: Callable[[], Sequence[LinkRow]] = lambda: ()  # Network streams' (set_links)
         # children() results, keyed by parent and stamped with what they depend on.
         self._memo: OrderedDict[tuple, tuple[tuple, Any, int]] = OrderedDict()  # deps, list, token
         self._events = 0  # bumped by every catalog event handled here, and by retry()
@@ -338,6 +359,29 @@ class NavModel(QObject):
         title = translate(ALL_PROVIDERS_TITLE) if name == ALL_PROVIDERS else name
         return NavNode("source", name, title, name)
 
+    def set_links(self, rows: Callable[[], Sequence[LinkRow]]) -> None:
+        """`rows()`: Network streams' links as their rows, newest opened first (asked each
+        time the list is made: there are few)."""
+        self._links = rows
+
+    def links_changed(self) -> None:
+        """Network streams' links changed (read, kept, renamed, failed): the list follows.
+        Emptied while its links show, the list goes back to the provider's sources."""
+        if self._path and self._path[0].layer == LINKS_LAYER and not self._links():
+            self._path = [self._source()]
+        self.changed.emit()
+
+    def _links_source(self) -> Optional[NavNode]:
+        """Network streams' row among the sources, its count the links'; None without any."""
+        count = len(self._links())
+        if not count:
+            return None
+        title = translate(NETWORK_TITLE)
+        return NavNode(LINKS_LAYER, NETWORK_PROVIDER, title, NETWORK_PROVIDER, count)
+
+    def _link_nodes(self) -> list[NavNode]:
+        return [NavNode(LINK_LAYER, r.id, item_title({"name": r.name}), r) for r in self._links()]
+
     def all_mode(self) -> bool:
         """Whether the channel list shows every provider (the "All providers" source)."""
         return bool(self.catalog.current_provider_name() == ALL_PROVIDERS)
@@ -358,7 +402,12 @@ class NavModel(QObject):
             if len(names) >= 2:  # one provider has nothing to mix
                 title = translate(ALL_PROVIDERS_TITLE)
                 sources.insert(0, NavNode("source", ALL_PROVIDERS, title, ALL_PROVIDERS))
-            return sources + action_rows()
+            links = self._links_source()  # never a provider: it is not in the count above
+            return sources + ([links] if links is not None else []) + action_rows()
+        if parent.layer == LINKS_LAYER:
+            return self._link_nodes()
+        if parent.layer == LINK_LAYER:
+            return []
         if parent.layer == "source":
             sections = self.catalog.sections()
             if parent.key == self.catalog.current_provider_name() and self._without_live():
@@ -558,7 +607,10 @@ class NavModel(QObject):
         return None if message == PROVIDER_LOADING_MESSAGE else message
 
     def is_loading(self, node: NavNode) -> bool:
-        """True while `node`'s children are on their way, or while a provider sets up."""
+        """True while `node`'s children are on their way, or while a provider sets up (never
+        Network streams': its links are known)."""
+        if node.layer in (LINKS_LAYER, LINK_LAYER):
+            return False
         # In "All providers" one provider's setup must not hold the others' lists back: a
         # section is loading until some provider has answered for it.
         if not self.all_mode() and self.catalog.is_loading():
@@ -799,14 +851,16 @@ class NavModel(QObject):
 
     # --- movement ----------------------------------------------------------------------
     def is_playable(self, node: NavNode) -> bool:
-        if node.layer == "episode":
+        if node.layer in ("episode", LINK_LAYER):
             return True
         return node.layer == "item" and self.section_of(node) in ("live", "movies")
 
     def open(self, node: NavNode) -> None:
-        if node.layer in _UNREADABLE:
-            return  # a provider's heading (or its notice) in the mixed lists only labels
-        if node.layer == "source":
+        if node.layer in _UNREADABLE or node.layer == LINK_LAYER:
+            return  # a provider's heading (or its notice) only labels; a link plays
+        if node.layer == LINKS_LAYER:
+            self._path = [node]  # Network streams' links: no provider is chosen
+        elif node.layer == "source":
             # Another provider is only shown (its setup runs once, if it has not); the
             # current one is set up again when its last setup failed. A ready provider
             # answers at once and reopens its list, so the path is set first.
@@ -1080,7 +1134,8 @@ class NavModel(QObject):
         self._provider_errors.pop(name, None)
         self._ready_sections.clear()
         self._pending_group = None
-        if not self._path or self._path[0].key != name:
+        links = bool(self._path) and self._path[0].layer == LINKS_LAYER  # (they stay shown)
+        if not links and (not self._path or self._path[0].key != name):
             self._path = [self._source()]
         self.changed.emit()
 

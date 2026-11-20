@@ -17,7 +17,8 @@ shortcut or native menu key equivalent (ShortcutOverride), so nothing fires twic
 A subtitle file dropped on the window (the video, its overlays or the Library with its corner
 player) loads with what plays (2.2; the controller says whether it would, while it is dragged).
 A dropped playlist file (.m3u, .m3u8) or provider link becomes a provider (ui/provider_drop.py);
-one drop may carry both kinds.
+one drop may carry both kinds. One stream's link dropped (plan 4) opens the Open Link card,
+filled in: Enter plays it.
 """
 
 from __future__ import annotations
@@ -1198,16 +1199,21 @@ class TVWindow(QMainWindow):
             owner=lambda url: self._link_owner(url),
             parent=self,
         )
-        # The channel list's find: genres and channels at every provider, found in a worker;
-        # its last row looks for films and series in the Library's search.
+        # The channel list lists them after the providers (never one of them).
+        self.nav.set_links(self.network_player.rows)
+        # The channel list's find: genres and channels at every provider, found in a worker,
+        # and Network streams' links by their names; its last row looks for films and series
+        # in the Library's search.
         self.finder = FindSession(
             self.provider_manager,
             self.jobs,
             loaded=self.catalog.loaded_contents,
             signature=self._find_signature,
             preferences=self._find_preferences,
+            links=self.network_player.find_items,
             parent=self,
         )
+        self.network_player.changed.connect(self._on_links_changed)
         self.overlays.drawer.set_finder(self.finder)
         # Its index holds the catalogs' channels: a refresh or an edited list lets them go.
         self.catalogs.contentChanged.connect(self.finder.content_changed)
@@ -1769,6 +1775,12 @@ class TVWindow(QMainWindow):
             if card.isVisible():
                 card.raise_()  # the link's card raised itself over it
 
+    def _on_links_changed(self) -> None:
+        """Network streams' links changed (read, kept, failed): the channel list and its find
+        follow."""
+        self.nav.links_changed()
+        self.finder.content_changed()
+
     def play_network_link(self, url: str, kind: str) -> None:
         """A link the Open Link card hands over plays, `kind` LIVE or FILM: as a channel or as
         a film, and it is kept in Network streams (ui.network_player)."""
@@ -2298,16 +2310,23 @@ class TVWindow(QMainWindow):
         files = provider_drop.playlist_files(self._dropped_paths(event))
         return files, provider_drop.links(self._dropped_texts(event))
 
+    def _dropped_streams(self, event: QDropEvent) -> list[str]:
+        """The one-stream links a drop carries (plan 4: for the Open Link card)."""
+        return provider_drop.stream_links(self._dropped_texts(event))
+
     def _on_drag(self, event: QDropEvent) -> None:
         """Dragged over the window (or its overlays): taken only when it may load: a media
-        file, subtitle files for what plays, a playlist file or a provider's link (2.2), or a
-        file of no kind QiTV knows: a folder, maybe, which only the disk tells (Task 11; it is
-        looked at once dropped, and one that is no folder says QiTV can't play it)."""
+        file, subtitle files for what plays, a playlist file or a provider's link (2.2), one
+        stream's link (plan 4), or a file of no kind QiTV knows: a folder, maybe, which only
+        the disk tells (Task 11; it is looked at once dropped, and one that is no folder says
+        QiTV can't play it)."""
         paths = self._dropped_paths(event)
         files, links = self._dropped_providers(event)
+        streams = self._dropped_streams(event)
         kinds = sort_paths(paths)  # by its name: the disk is looked at once dropped
         subtitles = self.controller.accepts_subtitles(paths)
-        if not self._closing and (kinds.media or kinds.others or subtitles or files or links):
+        loads = kinds.media or kinds.others or subtitles or files or links or streams
+        if not self._closing and loads:
             event.acceptProposedAction()
         else:
             event.ignore()
@@ -2317,7 +2336,10 @@ class TVWindow(QMainWindow):
         play as a list); subtitle files alone go to what plays (open_paths). Playlist files and
         folders are read first, as opened ones are (_read_playlists): their links make a
         provider, local files play as a list. Provider links become providers, with the
-        playlists' when some came along (one toast, the link's shown last)."""
+        playlists' when some came along (one toast, the link's shown last). One stream's link
+        (plan 4: a film, a live stream, an Xtream stream's, one only its first bytes tell)
+        opens the Open Link card filled in, when nothing else dropped plays or is read; the
+        first of several."""
         if self._closing:
             event.ignore()
             return
@@ -2336,7 +2358,11 @@ class TVWindow(QMainWindow):
         elif links:
             # After the drop: adding switches the list, and a portal's form is a dialog.
             QTimer.singleShot(0, self, lambda: self.add_dropped_providers([], links))
-        added = bool(read or links)
+        streams = [] if kinds.media or read else self._dropped_streams(event)
+        if streams:
+            first = streams[0]  # after the providers it came with: the card shows over them
+            QTimer.singleShot(0, self, lambda: self.open_link(first))
+        added = bool(read or links or streams)
         if kinds.media or subtitles or added:
             event.acceptProposedAction()
         else:
@@ -3320,11 +3346,12 @@ class TVWindow(QMainWindow):
         return [slot.live for slot in self.sessions.slots()]
 
     def _find_signature(self) -> tuple:
-        """Changes when what the channel list's find reads may have: the providers, or the
-        content of a provider's catalog."""
+        """Changes when what the channel list's find reads may have: the providers, the
+        content of a provider's catalog, or Network streams' links (their names)."""
         hub = self.catalogs
         versions = tuple((name, hub.catalog(name).content_version()) for name in hub.created())
-        return tuple(hub.names()), versions
+        links = tuple(sorted((e.id, e.name) for e in self.network_streams.entries()))
+        return tuple(hub.names()), versions, links  # (a link played again moves no name)
 
     def _find_preferences(self) -> Preferences:
         """What ranks first in the channel list's find: the provider it shows, the providers
