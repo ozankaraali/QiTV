@@ -47,6 +47,20 @@ class SettingsValues:
         self._config = config
         self._hooks = dict(hooks or {})
 
+    def add_hook(self, key: str, hook: Callable[[], None]) -> None:
+        """`hook` runs after a set of `key` too, after the hook it has (a handler whose rows
+        follow the value: Subtitles' Sign out shows while a username is kept)."""
+        before = self._hooks.get(key)
+        if before is None:
+            self._hooks[key] = hook
+            return
+
+        def both() -> None:
+            before()
+            hook()
+
+        self._hooks[key] = both
+
     def get(self, key: str) -> Any:
         """The row's current value; KeyError for a key the config has no property for."""
         if key == PLAY_IN:

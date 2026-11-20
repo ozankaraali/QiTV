@@ -31,8 +31,10 @@ KEY = "fictional0zebrafish0key0WXYZ"
 
 
 def with_providers(*names):
-    """Settings' sections ("Darwin"), Providers listing `names`, each opening its layer."""
-    return tuple(providers_section(*names) if s.key == PROVIDERS else s for s in sections("Darwin"))
+    """Settings' sections ("Darwin"), Providers listing `names`, each opening its layer;
+    someone signed in to OpenSubtitles (its Sign out shows), as the values say."""
+    shown = sections("Darwin", context=m.Context(opensubtitles_signed_in=True))
+    return tuple(providers_section(*names) if s.key == PROVIDERS else s for s in shown)
 
 
 class FindCase(unittest.TestCase):

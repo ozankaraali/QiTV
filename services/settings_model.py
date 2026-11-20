@@ -216,8 +216,9 @@ class Context:
     name of the one the system's choice gives; whether its build carries a TMDB token; the image
     cache's largest size as set (MB: one the old window took that is none of the steps shows
     as its own); Files' rows, as their status is now (none when QiTV cannot be the app files
-    open with: a run from source); whether its build carries an OpenSubtitles key; and what AI
-    captions' downloaded files take (ui.settings_subtitles measures it): the line that says it,
+    open with: a run from source); whether its build carries an OpenSubtitles key, and whether
+    a username is kept for it (Sign out shows only then); and what AI captions' downloaded files
+    take (ui.settings_subtitles measures it): the line that says it,
     in the active language ("" while it is measured; None: this build has no such files to
     tell of, and no row says it), and whether there is any to delete; the time-shift settings
     as they are now (whether the disk buffer is on, the memory per stream and the disk cache,
@@ -233,6 +234,7 @@ class Context:
     image_cache_mb: Any = IMAGE_CACHE_DEFAULT_MB
     files: tuple[Row, ...] = ()
     opensubtitles_built_in: bool = False
+    opensubtitles_signed_in: bool = False
     captions_space: Optional[str] = None
     captions_downloaded: bool = False
     timeshift_disk: bool = ConfigManager.DEFAULT_OPTION_TIMESHIFT_ENABLED
@@ -337,6 +339,22 @@ def _subtitles(title: str, context: Context) -> Section:
         # i18n: help under Settings → Subtitles → OpenSubtitles API key in a build without one
         key_help = N_("Create one on the API consumers page of your free OpenSubtitles account.")
         key_placeholder = N_("Paste your API key")  # i18n: the API key field's placeholder
+    signed_in = context.opensubtitles_signed_in
+    # Signing in is optional: the empty fields say so (the password's only while no username
+    # is kept: then it is wanted). Sign out only while there is a sign-in to forget.
+    # i18n: what Settings → Subtitles' empty Username (and Password) fields show, muted
+    optional = N_("Optional")
+    sign_out: tuple[Row, ...] = ()
+    if signed_in:
+        sign_out = (
+            Row(
+                SIGN_OUT,
+                N_("Sign out"),  # i18n: forget the OpenSubtitles username and password
+                # i18n: help under Settings → Subtitles → Sign out
+                N_("Clears the username and the password."),
+                kind=ACTION,
+            ),
+        )
     rows = (
         Row(
             "ai_captions_model",
@@ -369,6 +387,7 @@ def _subtitles(title: str, context: Context) -> Section:
             # i18n: help under Settings → Subtitles → Username (OpenSubtitles' sign-in)
             N_("Optional: signed in, OpenSubtitles allows you more downloads a day."),
             kind=TEXT,
+            placeholder=optional,
         ),
         Row(
             "opensubtitles_password",
@@ -377,14 +396,9 @@ def _subtitles(title: str, context: Context) -> Section:
             N_("The password of your OpenSubtitles account, to sign in with."),
             kind=TEXT,
             secret=True,
+            placeholder="" if signed_in else optional,
         ),
-        Row(
-            SIGN_OUT,
-            N_("Sign out"),  # i18n: forget the OpenSubtitles username and password
-            # i18n: help under Settings → Subtitles → Sign out
-            N_("Clears the username and the password."),
-            kind=ACTION,
-        ),
+        *sign_out,
     )
     return Section(SUBTITLES, title, ICONS[SUBTITLES], rows=rows)
 

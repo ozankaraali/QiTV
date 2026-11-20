@@ -113,7 +113,11 @@ class SubtitlesCase(GeneralCase):
 
 class SubtitlesTests(SubtitlesCase):
     def test_speech_model_steps(self):
-        context = m.Context(captions_space="Downloaded: 880 MB", captions_downloaded=True)
+        context = m.Context(
+            captions_space="Downloaded: 880 MB",
+            captions_downloaded=True,
+            opensubtitles_signed_in=True,  # (Sign out shows only then)
+        )
         section = {s.key: s for s in m.sections("Linux", (), context)}[m.SUBTITLES]
         self.assertEqual(
             [row.key for row in section.rows],
@@ -290,7 +294,8 @@ class SubtitlesTests(SubtitlesCase):
         password = self.shown()["opensubtitles_password"]
         self.assertEqual((password.secret, password.secret_tail), (True, 0))
         self.assertEqual(self.drawer._tail_text(password), MASK * len(PASSWORD))
-        self.assertEqual(self.drawer._tail_text(self.shown()["opensubtitles_username"]), "")
+        username = self.shown()["opensubtitles_username"]
+        self.assertEqual(self.drawer._tail_text(username), "Optional")  # (empty: its placeholder)
         # Edited from the text itself, shown in dots; never copied out.
         self.key(Action.NAV_ACTIVATE)
         self.assertEqual(self.drawer._edit.text, KEY)
@@ -328,21 +333,52 @@ class SubtitlesTests(SubtitlesCase):
             (self.config.opensubtitles_username, self.config.opensubtitles_password), ("", "")
         )
         self.assertEqual(self.config.opensubtitles_api_key, KEY)  # the key stays
-        shown = self.shown()
-        self.assertEqual(self.drawer._tail_text(shown["opensubtitles_username"]), "")
-        self.assertEqual(self.drawer._tail_text(shown["opensubtitles_password"]), "")
+        shown = self.shown()  # signed out: no Sign out, the fields empty again (placeholders)
+        self.assertNotIn(m.SIGN_OUT, shown)
+        self.assertEqual(self.drawer._tail_text(shown["opensubtitles_username"]), "Optional")
+        self.assertEqual(self.drawer._tail_text(shown["opensubtitles_password"]), "Optional")
         self.config.save_config(wait=True)
         saved = ConfigManager()
         self.assertEqual((saved.opensubtitles_username, saved.opensubtitles_password), ("", ""))
         self.assertEqual(saved.opensubtitles_api_key, KEY)
         # Signed in again: the username kept without the spaces at its ends, as the old Save did.
-        self.key(Action.NAV_UP)
+        self.assertEqual(self.drawer.focused_row().key, "opensubtitles_password")  # its place
         self.key(Action.NAV_UP)
         self.assertEqual(self.drawer.focused_row().key, "opensubtitles_username")
         self.key(Action.NAV_ACTIVATE)
         self.key(Action.NAV_TEXT, " harbour viewer ")
         self.key(Action.NAV_ACTIVATE)
         self.assertEqual(self.config.opensubtitles_username, "harbour viewer")
+
+    def test_sign_out_shows_while_a_username_is_kept(self):
+        # Nobody signed in: the sign-in's empty fields say that it is optional (muted, as the
+        # API key's), and no Sign out is offered. A username typed in brings Sign out at once,
+        # reached by the keys, and the password field is wanted then (no placeholder).
+        self.open_at(m.SUBTITLES, "opensubtitles_username")
+        shown = self.shown()
+        self.assertNotIn(m.SIGN_OUT, shown)
+        for key in ("opensubtitles_username", "opensubtitles_password"):
+            self.assertTrue(self.drawer._shows_placeholder(shown[key]), key)
+            self.assertEqual(self.drawer._tail_text(shown[key]), "Optional")
+        self.key(Action.NAV_ACTIVATE)
+        self.key(Action.NAV_TEXT, "harbour_viewer")
+        self.key(Action.NAV_ACTIVATE)
+        shown = self.shown()
+        self.assertIn(m.SIGN_OUT, shown)
+        self.assertEqual(self.drawer.focused_row().key, "opensubtitles_username")
+        self.assertEqual(self.drawer._tail_text(shown["opensubtitles_password"]), "")
+        self.key(Action.NAV_DOWN)
+        self.key(Action.NAV_DOWN)
+        self.assertEqual(self.drawer.focused_row().key, m.SIGN_OUT)
+        # The username cleared by hand: no sign-in to forget, Sign out goes.
+        self.key(Action.NAV_UP)
+        self.key(Action.NAV_UP)
+        self.key(Action.NAV_ACTIVATE)
+        self.key(Action.SELECT_ALL)
+        self.key(Action.NAV_BACKSPACE)
+        self.key(Action.NAV_ACTIVATE)
+        self.assertEqual(self.config.opensubtitles_username, "")
+        self.assertNotIn(m.SIGN_OUT, self.shown())
 
 
 if __name__ == "__main__":

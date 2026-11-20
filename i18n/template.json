@@ -525,7 +525,7 @@
     "Opening on this phone…": "the phone remote, while it waits",
     "Opens QiTV on the channel you watched last.": "help under the Start with the last channel setting",
     "Opens Windows' Default Apps settings on QiTV's page.": "help under Settings → Files → Default Apps… (Windows' settings page, as Windows names it)",
-    "Optional": "the placeholder of \"Record at a time\"'s Name field",
+    "Optional": "the placeholder of \"Record at a time\"'s Name field; what Settings → Subtitles' empty Username (and Password) fields show, muted",
     "Optional: signed in, OpenSubtitles allows you more downloads a day.": "help under Settings → Subtitles → Username (OpenSubtitles' sign-in)",
     "Optional: your own key": "the API key field's placeholder",
     "Or:": "before a card's other ways to go on, in a muted line: \"Or: M3U file…  STB portal\"",

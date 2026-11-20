@@ -91,9 +91,14 @@ def playback_index(key):
     return [r.key for r in playback_rows()].index(key)
 
 
+def signed_in():
+    """The sections with someone signed in to OpenSubtitles: Subtitles has its Sign out."""
+    return sections("Darwin", context=m.Context(opensubtitles_signed_in=True))
+
+
 def subtitles_index(key):
     """Where the row `key` is in Subtitles & AI captions (its Sign out acts at once)."""
-    rows = next(s for s in sections("Darwin") if s.key == m.SUBTITLES).rows
+    rows = next(s for s in signed_in() if s.key == m.SUBTITLES).rows
     return [r.key for r in rows].index(key)
 
 
@@ -288,7 +293,7 @@ class SettingsDrawerTests(unittest.TestCase):
         self.assertEqual(self.drawer.path(), ("playback", "autoplay"))
         self.assertEqual(self.drawer.focus_side(), "right")
         self.assertEqual(self.steps, [])
-        self.drawer.open_at(sections("Darwin"), m.SUBTITLES)  # the keys on the sections
+        self.drawer.open_at(signed_in(), m.SUBTITLES)  # the keys on the sections
         self.drawer.grab()
         self.click(self.drawer.title_rect(subtitles_index(m.SIGN_OUT)).center())
         self.assertEqual(self.chosen, [m.SIGN_OUT])
@@ -306,7 +311,7 @@ class SettingsDrawerTests(unittest.TestCase):
             elapse(QApplication.doubleClickInterval() + 80)  # the modal window, a while
 
         self.drawer.chosen.connect(close_and_wait)
-        self.drawer.open_at(sections("Darwin"), m.SUBTITLES)
+        self.drawer.open_at(signed_in(), m.SUBTITLES)
         self.drawer.grab()
         self.click(self.drawer.title_rect(subtitles_index(m.SIGN_OUT)).center())
         self.assertEqual(self.chosen, [m.SIGN_OUT])
@@ -411,7 +416,7 @@ class SettingsDrawerTests(unittest.TestCase):
         for focused in (False, True):
             with self.subTest(focused=focused):
                 self.chosen.clear()
-                self.drawer.open_at(sections("Darwin"), m.SUBTITLES)
+                self.drawer.open_at(signed_in(), m.SUBTITLES)
                 if focused:
                     self.drawer.right()
                     while self.drawer.focused_row().key != m.SIGN_OUT:
