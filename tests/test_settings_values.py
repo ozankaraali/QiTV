@@ -8,7 +8,7 @@ from unittest.mock import patch
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 from services.config_manager import ConfigManager
-from services.settings_model import sections
+from services.settings_model import Context, sections
 from services.settings_values import SettingsValues
 
 
@@ -114,8 +114,24 @@ class SettingsValuesTests(unittest.TestCase):
         # row's default (shown unlit), and each choice written reads back as itself (none is
         # changed by the property's coerce).
         values = SettingsValues(self.config)
-        rows = [row for s in sections("Darwin") for row in _steppers(s.rows)]
-        self.assertIn("covered_pip", [row.key for row in rows])  # the PiP rows too, on Linux
+        context = Context(languages=(("en", "English"), ("de", "Deutsch")), image_cache_mb=100)
+        rows = [row for s in sections("Darwin", (), context) for row in _steppers(s.rows)]
+        keys = [row.key for row in rows]
+        self.assertIn("covered_pip", keys)  # the PiP rows too, on Linux
+        for key in (  # General's and Advanced's (plan 3)
+            "language",
+            "check_updates",
+            "channel_logos",
+            "tmdb_details",
+            "ssl_verify",
+            "secure_dns",
+            "detailed_log",
+            "max_cache_image_size",
+            "ai_captions_model",  # Subtitles' (plan 3)
+            "timeshift_enabled",  # Time-shift's (plan 3)
+            "timeshift_ram_mib",
+        ):
+            self.assertIn(key, keys)
         for row in rows:
             with self.subTest(row.key):
                 self.assertEqual(values.get(row.key), row.default)
@@ -123,6 +139,24 @@ class SettingsValuesTests(unittest.TestCase):
                     values.set(row.key, choice.value)
                     self.assertEqual(values.get(row.key), choice.value)
                     self.assertEqual(type(values.get(row.key)), type(choice.value))
+
+    def test_a_token_is_kept_without_its_spaces(self):
+        # As the old Save kept it: a pasted token's spaces and line breaks are no part of it.
+        values = SettingsValues(self.config)
+        values.set("tmdb_token", " eyJ.made \n up ")
+        self.assertEqual(self.config.tmdb_token, "eyJ.madeup")
+        self.assertEqual(values.get("tmdb_token"), "eyJ.madeup")
+
+    def test_the_opensubtitles_login_is_kept_as_the_old_save_kept_it(self):
+        # The key without any space a paste brings, the username without those at its ends,
+        # the password as typed.
+        values = SettingsValues(self.config)
+        values.set("opensubtitles_api_key", " fictional \n key ")
+        values.set("opensubtitles_username", " harbour viewer ")
+        values.set("opensubtitles_password", " pass word ")
+        self.assertEqual(self.config.opensubtitles_api_key, "fictionalkey")
+        self.assertEqual(self.config.opensubtitles_username, "harbour viewer")
+        self.assertEqual(self.config.opensubtitles_password, " pass word ")
 
     def test_an_unknown_key_is_an_error(self):
         values = SettingsValues(self.config)

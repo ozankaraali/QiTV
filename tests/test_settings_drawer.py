@@ -11,7 +11,7 @@ from PySide6.QtCore import QEvent, QPoint, QPointF, QRectF, Qt
 from PySide6.QtGui import QColor, QFontMetricsF, QImage, QMouseEvent, QWheelEvent
 from PySide6.QtTest import QTest
 from PySide6.QtWidgets import QApplication, QWidget
-from timer_fixtures import elapse
+from timer_fixtures import elapse, wait_until
 
 from services import i18n, settings_model as m
 from services.i18n import translate
@@ -26,8 +26,10 @@ from services.settings_model import (
     sections,
 )
 from ui.keymap import Action, key_hint
+from ui.overlays import settings_layout
 from ui.overlays.guide import wrap_lines
 from ui.overlays.painting import ui_units
+from ui.overlays.scroll_indicator import LINGER_MS
 from ui.overlays.settings_drawer import (
     HELP_FONT_U,
     INSET_U,
@@ -361,7 +363,8 @@ class SettingsDrawerTests(unittest.TestCase):
         everything = sections("Darwin")
         for section in everything:
             self.drawer.open_at(everything, section.key)
-            check(section.key, len(section.rows) or 1)
+            # (A section still in the Settings window has its one row; Files may have none.)
+            check(section.key, len(section.rows) or (1 if section.legacy_tab else 0))
             for i, row in enumerate(section.rows):
                 if row.section is None:
                     continue
@@ -582,6 +585,174 @@ class SettingsDrawerTests(unittest.TestCase):
         QApplication.sendEvent(self.drawer, wheel)
         self.assertFalse(self.drawer.row_rect("right", 0).isEmpty())
         self.assertEqual(self.drawer.focused_row().key, "row39")  # the wheel only scrolls
+
+    # ---- long lists and long values (plan 3) ------------------------------------------------
+
+    def mouse(self, widget, kind, point, buttons=Qt.MouseButton.NoButton):
+        """A mouse event at `point` (`widget`'s coordinates), as Qt reports it: a press or a
+        release of the left button, or a move with `buttons` held."""
+        where = QPointF(point)
+        moving = kind == QEvent.Type.MouseMove
+        event = QMouseEvent(
+            kind,
+            where,
+            QPointF(widget.mapToGlobal(where.toPoint())),
+            Qt.MouseButton.NoButton if moving else Qt.MouseButton.LeftButton,
+            buttons,
+            Qt.KeyboardModifier.NoModifier,
+        )
+        QApplication.sendEvent(widget, event)
+
+    def move_to(self, point):
+        self.mouse(self.drawer, QEvent.Type.MouseMove, point)
+
+    def test_a_long_column_shows_its_scroll_indicator(self):
+        # Forty rows in a small window: the right column's thumb shows while it scrolls and
+        # while the pointer is over it, in the column's side padding (never over a row's ‹ or
+        # ›), and dragging it scrolls the column; the sections, which fit, have none.
+        self.use(*make(640, 360))
+        rows = tuple(Row(f"row{i}", f"Row {i}", "Its help.", ON_OFF, True) for i in range(40))
+        self.drawer.open_at((Section("long", "Long", rows=rows), Section("short", "Short")))
+        right = self.drawer.scroll_indicator("right")
+        left = self.drawer.scroll_indicator("left")
+        self.assertTrue(right.scrollable())
+        self.assertFalse(left.scrollable())
+        self.assertFalse(right.isVisible())  # not until it scrolls, or the pointer comes
+        self.drawer.right()
+        self.drawer.move_by(39)
+        self.drawer.grab()
+        self.assertTrue(right.isVisible())
+        self.assertFalse(left.isVisible())
+        strip = QRectF(right.geometry())
+        self.assertTrue(self.drawer.column_rect("right").contains(strip), strip)
+        for i in range(40):
+            for delta in (-1, 1):
+                self.assertFalse(strip.intersects(self.drawer.step_rect(i, delta)), (i, delta))
+        thumb = right.thumb_rect()
+        self.assertFalse(thumb.isEmpty())
+        self.assertAlmostEqual(thumb.bottom(), right.height(), delta=1)  # at the end
+        # Dragged to the top, the column shows its first rows; the focus stays.
+        press = thumb.center()
+        self.mouse(right, QEvent.Type.MouseButtonPress, press, Qt.MouseButton.LeftButton)
+        self.mouse(
+            right,
+            QEvent.Type.MouseMove,
+            QPointF(press.x(), press.y() - right.height()),
+            Qt.MouseButton.LeftButton,
+        )
+        self.mouse(right, QEvent.Type.MouseButtonRelease, press)
+        self.drawer.grab()
+        self.assertFalse(self.drawer.row_rect("right", 0).isEmpty())
+        self.assertTrue(self.drawer.row_rect("right", 39).isEmpty())
+        self.assertEqual(self.drawer.focused_row().key, "row39")
+        self.assertAlmostEqual(right.thumb_rect().top(), 0, delta=1)
+        elapse(LINGER_MS + 100)
+        self.assertFalse(right.isVisible())  # it fades once nothing moves
+        # The pointer over the column shows it, and it fades after the pointer left.
+        self.move_to(self.drawer.row_rect("right", 2).center())
+        self.assertTrue(right.isVisible())
+        self.move_to(self.drawer.row_rect("left", 0).center())
+        self.assertFalse(left.isVisible())  # the sections fit
+        elapse(LINGER_MS + 100)
+        self.assertFalse(right.isVisible())
+        # Shown as Settings went, it is not there when it opens on rows that fit.
+        self.move_to(self.drawer.row_rect("right", 2).center())
+        self.assertTrue(right.isVisible())
+        self.drawer.hide()
+        self.drawer.open_at((Section("short", "Short", rows=rows[:3]),))
+        self.drawer.grab()
+        self.assertFalse(right.isVisible())
+        self.assertFalse(right.scrollable())
+
+    def test_a_long_list_lays_out_once_per_change(self):
+        # The pointer moving over a long list never wraps a line again: each line is laid out
+        # once per change (the sections, a value, the window's size), not at each mouse move.
+        rows = tuple(
+            Row(f"row{i}", f"Row {i} of a long list of settings", "Its help.", ON_OFF, True)
+            for i in range(60)
+        )
+        section = (Section("long", "Long", rows=rows),)
+        self.drawer.open_at(section)
+        self.drawer.right()
+        self.drawer.move_by(3)
+        self.drawer.grab()
+        once = len(rows) + 1 + 3  # a title each (the section's too), the focused row's help
+
+        def moves():
+            for i in range(50):
+                column = self.drawer.column_rect("left" if i % 7 == 0 else "right")
+                self.move_to(QPointF(column.center().x(), 60 + (i * 37) % 600))
+                self.drawer.tooltip_at(QPointF(column.center().x(), 60 + (i * 53) % 600))
+                if i % 10 == 0:
+                    self.drawer.grab()  # its paints too
+
+        with mock.patch.object(settings_layout, "wrap", wraps=settings_layout.wrap) as wrap:
+            moves()
+            self.assertEqual(wrap.call_count, 0)
+            for name, change in (
+                ("a value", self.drawer.refresh),
+                ("the sections", lambda: self.drawer.set_sections(section)),
+                ("the size", lambda: self.host.resize(1100, 700)),
+            ):
+                with self.subTest(change=name):
+                    wrap.reset_mock()
+                    change()
+                    self.assertTrue(wait_until(lambda: self.drawer.height() == self.host.height()))
+                    self.drawer.grab()
+                    moves()
+                    self.assertGreater(wrap.call_count, 0)  # laid out again,
+                    self.assertLessEqual(wrap.call_count, once)  # once
+
+    def test_a_long_value_wraps_instead_of_cutting(self):
+        # "4K-Versionen (Jellyfin, Emby)  ‹ Auf einem 4K-Bildschirm ›" at 1280×720: the value,
+        # wider than half the row, takes a second line as a title does, whole, and its row
+        # grows; nothing overlaps, and nothing is cut short to read in a tooltip.
+        self.addCleanup(i18n.set_language, "en")
+        fm = QFontMetricsF(ui_units(1280).font(VALUE_FONT_U))
+        for language, key, english in (
+            ("de", "media_4k_versions", "On a 4K screen"),
+            ("es", "live_latency", "Auto (recommended)"),
+        ):
+            with self.subTest(language=language):
+                self.assertEqual(i18n.set_language(language), language)
+                self.drawer.open_at(sections("Darwin"), PLAYBACK)
+                image = self.drawer.grab().toImage()
+                index = playback_index(key)
+                box = self.drawer._box("right", index)
+                value = translate(english)
+                self.assertGreater(fm.horizontalAdvance(value), box.value.width())
+                self.assertEqual(len(box.values), 2, box.values)
+                self.assertTrue(whole(box.values, value), box.values)
+                for line in box.values:
+                    self.assertLessEqual(fm.horizontalAdvance(line), box.value.width() + 0.5)
+                self.assertLessEqual(2 * fm.lineSpacing(), box.line.height())
+                self.assertLessEqual(box.title.right(), box.less.left() + 0.5)
+                self.assertTrue(box.line.contains(box.more))
+                below = self.drawer.row_rect("right", index + 1)
+                self.assertLessEqual(box.rect.bottom(), below.top() + 0.01)
+                # A line painted in each half of the value's room (the gap before › is in the
+                # rect: its corner is the background).
+                room = box.value.adjusted(0, 0, box.more.left() - box.value.right() - 1, 0)
+                half = room.height() / 2
+                for part in (room.adjusted(0, 0, 0, -half - 1), room.adjusted(0, half + 1, 0, 0)):
+                    self.assertTrue(inked(image, part), (part, box.values))
+                point = box.value.center()
+                self.assertEqual(self.drawer.tooltip_at(point), tip(playback_rows()[index]))
+        # Past two lines, it elides (a small window).
+        i18n.set_language("en")
+        self.use(*make(640, 360))
+        text = "A value of many words that cannot fit in two short lines at all"
+        long = Row("long", "Long", "", (m.Choice("a", text),), "a")
+        self.drawer.open_at((Section("s", "S", rows=(long,)),))
+        self.drawer.grab()
+        box = self.drawer._box("right", 0)
+        self.assertEqual(len(box.values), 2, box.values)
+        self.assertTrue(box.values[-1].endswith("…"), box.values)
+        small = QFontMetricsF(ui_units(640).font(VALUE_FONT_U))
+        for line in box.values:
+            self.assertLessEqual(small.horizontalAdvance(line), box.value.width() + 0.5)
+        self.assertLessEqual(2 * small.lineSpacing(), box.line.height())
+        self.assertIn(text, self.drawer.tooltip_at(box.value.center()))
 
     def test_a_parent_row_on_the_left_opens_its_own_layer(self):
         # Deeper, the left column lists the parent's rows: only those that open a layer take
@@ -854,6 +1025,61 @@ class SettingsDrawerTests(unittest.TestCase):
             self.assertTrue(self.drawer.edit_key(Action.PASTE, ""))
         self.assertTrue(self.drawer.edit_key(Action.NAV_ACTIVATE, ""))
         self.assertEqual(edits, [("k", "http://new.example")])
+
+    def test_a_secret_text_shows_dots_and_is_never_said_or_copied(self):
+        # A token: dots in its value's place, in the field while it is edited too; never in the
+        # tooltip, never said, never copied out; what is edited and kept is the text itself.
+        edits = self.edits()
+        token = "eyJ.made-up-token"
+        self.open_rows(m.Row("k", "TMDB token", kind=m.TEXT, secret=True), k=token)
+        row = self.drawer.focused_row()
+        self.drawer.grab()
+        self.assertEqual(self.drawer._tail_text(row), "•" * len(token))
+        tip = self.drawer.tooltip_at(self.drawer._box("right", 0).end.center())
+        self.assertNotIn("eyJ", tip)
+        self.assertNotIn("eyJ", self.drawer._spoken())
+        self.drawer.activate()
+        self.assertEqual(self.drawer._edit.text, token)  # from the text, not from its dots
+        self.drawer.grab()  # painted as dots (paint_edit's `shown`)
+        self.assertTrue(self.drawer.edit_key(Action.SELECT_ALL, ""))
+        with mock.patch("ui.text_edit._copy") as copied:
+            self.assertTrue(self.drawer.edit_key(Action.COPY, ""))  # taken, and nothing copied
+            self.assertTrue(self.drawer.edit_key(Action.CUT, ""))
+        copied.assert_not_called()
+        self.assertEqual(self.drawer._edit.text, token)  # nor cut
+        self.drawer.type_text("9")
+        self.drawer.activate()
+        self.assertEqual(edits, [("k", "9")])  # the selection typed over
+
+    def test_an_info_line_shows_its_value_else_its_note(self):
+        # A provider's Kind is its value; a measured size or a folder its note.
+        self.open_rows(
+            m.Row("kind", "Kind", kind=m.INFO),
+            m.Row("files", "Downloaded files", kind=m.INFO, note="Downloaded: 880 MB"),
+            m.Row("name", "Name", kind=m.TEXT),
+            kind="Xtream",
+        )
+        self.drawer.grab()
+        rows = {row.key: row for row in self.drawer._right_rows()}
+        self.assertEqual(self.drawer._tail_text(rows["kind"]), "Xtream")
+        self.assertEqual(self.drawer._tail_text(rows["files"]), "Downloaded: 880 MB")
+        self.assertFalse(self.drawer._box("right", 1).end.isEmpty())  # room for it at the end
+
+    def test_an_empty_text_shows_its_placeholder(self):
+        self.open_rows(
+            m.Row("k", "TMDB token", kind=m.TEXT, secret=True, placeholder="Built in"), k=""
+        )
+        row = self.drawer.focused_row()
+        self.drawer.grab()
+        self.assertEqual(self.drawer._tail_text(row), "Built in")
+        self.assertFalse(self.drawer._box("right", 0).end.isEmpty())
+        self.assertIn("Built in", self.drawer._spoken())
+        self.drawer.activate()
+        self.assertEqual(self.drawer._edit.text, "")  # the placeholder is no text to edit
+        self.drawer.activate()
+        self.values["k"] = "abc"
+        self.drawer.refresh()
+        self.assertEqual(self.drawer._tail_text(row), "•••")
 
     def test_hiding_ends_an_edit_without_keeping_it(self):
         edits = self.edits()

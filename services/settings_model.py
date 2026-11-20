@@ -15,7 +15,14 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any, Optional
 
-from services.i18n import N_, translate
+from services.config_manager import ConfigManager
+from services.i18n import N_, SOURCE_LANGUAGE, SOURCE_NAME, number, translate
+from services.settings_texts import (
+    OPENSUBTITLES_BUILT_IN_HINT,
+    cache_size_text,
+    memory_rewind_text,
+    mib_text,
+)
 
 PROVIDERS = "providers"
 GENERAL = "general"
@@ -39,14 +46,9 @@ KINDS = (STEP, OPENS, ACTION, DANGER, TEXT, INFO)
 
 # Section key -> the key of the old Settings window's tab that still holds its settings.
 LEGACY_TABS: dict[str, str] = {
-    GENERAL: "general",
-    SUBTITLES: "subtitles",
-    TIMESHIFT: "timeshift",
     GUIDE: "epg",
     REMOTE: "remote",
     PARENTAL: "parental",
-    FILES: "general",
-    ADVANCED: "general",
 }
 
 # Section key -> its icon, a drawing of ui/overlays/painting.py's draw_icon. A section with no
@@ -70,6 +72,35 @@ ADD_PROVIDER = PROVIDER_PREFIX + "@add"
 FREE_CHANNELS = PROVIDER_PREFIX + "@free"
 # i18n: a row of Settings → Providers, after "＋ ": adds a provider
 ADD_PROVIDER_TEXT = N_("Add provider")
+
+# Files' rows are `files/…` and Advanced's Clear Image Cache `advanced/…` (ui.settings_general's):
+# they act, they are no config value.
+FILES_PREFIX = "files/"
+ADVANCED_PREFIX = "advanced/"
+CLEAR_IMAGE_CACHE = ADVANCED_PREFIX + "clear_image_cache"
+# i18n: the Language setting's first choice; {language}: the system's language, by its own name
+SYSTEM_DEFAULT_TEXT = N_("System default ({language})")
+# Subtitles' own rows (ui.settings_subtitles'): AI captions' downloaded files, their deletion and
+# OpenSubtitles' Sign out act; they are no config value.
+SUBTITLES_PREFIX = "subtitles/"
+CAPTIONS_FILES = SUBTITLES_PREFIX + "captions_files"
+DELETE_CAPTIONS = SUBTITLES_PREFIX + "delete_captions"
+SIGN_OUT = SUBTITLES_PREFIX + "sign_out"
+# Time-shift's own rows (ui.settings_timeshift's): the disk cache's size opens a card while the
+# disk is on, and the Recordings folder's rows act; they are no config value. Turning the disk
+# off asks first: ui.settings_timeshift handles that config row's steps (by its key).
+TIMESHIFT_PREFIX = "timeshift/"
+TIMESHIFT_DISK = "timeshift_enabled"
+DISK_CACHE = TIMESHIFT_PREFIX + "disk_cache"
+RECORDINGS_FOLDER = TIMESHIFT_PREFIX + "recordings_folder"
+CHANGE_FOLDER = TIMESHIFT_PREFIX + "change_folder"
+DEFAULT_FOLDER = TIMESHIFT_PREFIX + "default_folder"
+OPEN_FOLDER = TIMESHIFT_PREFIX + "open_folder"
+# i18n: a setting: the disk cache's size; it opens a card with a slider
+DISK_CACHE_TEXT = N_("Disk cache size")
+# The image cache's largest sizes (MB) the stepper offers; the config's default is 100.
+IMAGE_CACHE_MB = (50, 100, 200, 500, 1000, 2000)
+IMAGE_CACHE_DEFAULT_MB = 100
 
 
 @dataclass(frozen=True)
@@ -98,7 +129,10 @@ class Row:
     "Xtream · in use") are shown as they are given, in the active language already. A
     `literal` row's `text` is too: a name the viewer gave (a provider's, a group's), never
     translated, even when it is also one of QiTV's texts ("General"). A `warn` row's sub line
-    is in the warning colour (why a link of Network streams failed last time)."""
+    is in the warning colour (why a link of Network streams failed last time). A `secret` text
+    row (a token) shows dots in its text's place, and its last `secret_tail` characters after
+    them when it has that many to show (an API key's last four, as the page that gave it shows
+    them); an empty one shows its `placeholder`."""
 
     key: str
     text: str
@@ -112,7 +146,10 @@ class Row:
     note: str = ""
     sub: str = ""
     literal: bool = False
-    warn: bool = False
+    warn: bool = False  # its sub line in the warning colour
+    secret: bool = False  # a text row's text shows as dots, and is never said or copied
+    placeholder: str = ""  # an English text (N_) an empty text row shows, muted
+    secret_tail: int = 0  # a secret's last characters shown after its dots
 
     def __post_init__(self) -> None:
         if not self.kind:
@@ -176,6 +213,321 @@ def step(row: Row, current: Any, delta: int) -> Any:
 def is_lit(row: Row, current: Any) -> bool:
     """Whether `current` differs from the default, so the row is shown highlighted."""
     return bool(choice_of(row, current).value != row.default)
+
+
+@dataclass(frozen=True)
+class Context:
+    """What some rows show that only the running QiTV knows (ui.settings_general gathers it):
+    the languages it has texts for, as (code, the language's own name), English first, and the
+    name of the one the system's choice gives; whether its build carries a TMDB token; the image
+    cache's largest size as set (MB: one the old window took that is none of the steps shows
+    as its own); Files' rows, as their status is now (none when QiTV cannot be the app files
+    open with: a run from source); whether its build carries an OpenSubtitles key; and what AI
+    captions' downloaded files take (ui.settings_subtitles measures it): the line that says it,
+    in the active language ("" while it is measured; None: this build has no such files to
+    tell of, and no row says it), and whether there is any to delete; the time-shift settings
+    as they are now (whether the disk buffer is on, the memory per stream and the disk cache,
+    in MiB) and the Recordings folder (where recordings go, and whether it is one of the
+    viewer's own rather than the default)."""
+
+    languages: tuple[tuple[str, str], ...] = ((SOURCE_LANGUAGE, SOURCE_NAME),)
+    system_language: str = SOURCE_NAME
+    tmdb_built_in: bool = False
+    image_cache_mb: Any = IMAGE_CACHE_DEFAULT_MB
+    files: tuple[Row, ...] = ()
+    opensubtitles_built_in: bool = False
+    captions_space: Optional[str] = None
+    captions_downloaded: bool = False
+    timeshift_disk: bool = ConfigManager.DEFAULT_OPTION_TIMESHIFT_ENABLED
+    timeshift_ram_mib: int = ConfigManager.DEFAULT_OPTION_TIMESHIFT_RAM_MIB
+    timeshift_max_mib: int = ConfigManager.DEFAULT_OPTION_TIMESHIFT_MAX_MIB
+    recordings_folder: str = ""
+    recordings_own: bool = False
+
+
+def _general(title: str, context: Context) -> Section:
+    system = translate(SYSTEM_DEFAULT_TEXT, language=context.system_language)
+    languages = (Choice(None, system, literal=True),) + tuple(
+        Choice(code, name, literal=True) for code, name in context.languages
+    )
+    if context.tmdb_built_in:
+        # i18n: the TMDB token field's hint in a build that carries one
+        placeholder = N_("Built in; or paste your own")
+    else:
+        # i18n: the TMDB token row's hint in a build without one (from the source code); the
+        # old window's "Your TMDB API Read Access Token", shorter to fit beside its title
+        placeholder = N_("Your TMDB Read Access Token")
+    rows = (
+        Row(
+            "language",
+            N_("Language"),
+            # i18n: help under the Language setting (the restart note follows it)
+            N_("The language of QiTV's menus and texts."),
+            languages,
+            None,
+            restart=True,
+        ),
+        Row(
+            "check_updates",
+            N_("Allow Check for Updates"),
+            # i18n: help under the Allow Check for Updates setting
+            N_("Looks for a newer QiTV as it starts, and asks before it downloads one."),
+            ON_OFF,
+            True,
+        ),
+        Row(
+            "channel_logos",
+            N_("Enable Channel Logos"),
+            # i18n: help under the Enable Channel Logos setting
+            N_("Shows each channel's logo beside its name."),
+            ON_OFF,
+            True,
+        ),
+        Row(
+            "tmdb_details",
+            N_("Film and series details from TMDB"),
+            # i18n: help under the TMDB setting: what QiTV sends TMDB is only a title and its year
+            N_("Fills in posters and stories your provider lacks. TMDB gets the title and year."),
+            ON_OFF,
+            True,
+        ),
+        Row(
+            "tmdb_token",
+            N_("TMDB token"),
+            # i18n: help under the TMDB token (an API Read Access Token), edited in place
+            N_("Your own TMDB API Read Access Token, if you have one."),
+            kind=TEXT,
+            secret=True,
+            placeholder=placeholder,
+        ),
+    )
+    return Section(GENERAL, title, ICONS[GENERAL], rows=rows)
+
+
+def _subtitles(title: str, context: Context) -> Section:
+    files: tuple[Row, ...] = ()
+    if context.captions_space is not None:
+        files = (
+            Row(
+                CAPTIONS_FILES,
+                N_("Downloaded files"),  # i18n: a line of Settings → Subtitles; its size follows
+                # i18n: help (a tooltip) of Settings → Subtitles → Downloaded files
+                N_("The space AI captions' speech models take on this computer."),
+                kind=INFO,
+                note=context.captions_space,
+            ),
+        )
+        if context.captions_downloaded:
+            files += (
+                Row(
+                    DELETE_CAPTIONS,
+                    N_("Delete downloaded files"),  # i18n: deletes AI captions' speech models
+                    # i18n: help under Settings → Subtitles → Delete downloaded files (it asks)
+                    N_("Removes AI captions' speech models from this computer. Asked first."),
+                    kind=DANGER,
+                ),
+            )
+    if context.opensubtitles_built_in:
+        key_help = OPENSUBTITLES_BUILT_IN_HINT
+        key_placeholder = N_("Optional: your own key")  # i18n: the API key field's placeholder
+    else:
+        # i18n: help under Settings → Subtitles → OpenSubtitles API key in a build without one
+        key_help = N_("Create one on the API consumers page of your free OpenSubtitles account.")
+        key_placeholder = N_("Paste your API key")  # i18n: the API key field's placeholder
+    rows = (
+        Row(
+            "ai_captions_model",
+            N_("Speech model"),  # i18n: a setting: AI captions' speech model
+            # i18n: help under Settings → Subtitles → Speech model
+            N_("Automatic takes the more accurate one on a fast computer."),
+            (
+                # i18n: Settings → AI captions → Speech model: QiTV picks it by this computer's
+                # speed
+                Choice("auto", N_("Automatic", ctx="a speech model"), "a speech model"),
+                # i18n: Settings → AI captions → Speech model: the smaller one; keep "0.6B"
+                Choice("small", N_("Faster (0.6B)")),
+                # i18n: Settings → AI captions → Speech model: the larger one; keep "1.7B"
+                Choice("large", N_("More accurate (1.7B)")),
+            ),
+            "auto",
+        ),
+        *files,
+        Row(
+            "opensubtitles_api_key",
+            N_("OpenSubtitles API key"),  # i18n: a setting, edited in place
+            key_help,
+            kind=TEXT,
+            secret=True,
+            placeholder=key_placeholder,
+            secret_tail=4,
+        ),
+        Row(
+            "opensubtitles_username",
+            N_("Username"),  # i18n: Settings → Subtitles: the OpenSubtitles account's username
+            # i18n: help under Settings → Subtitles → Username (OpenSubtitles' sign-in)
+            N_("Optional: signed in, OpenSubtitles allows you more downloads a day."),
+            kind=TEXT,
+        ),
+        Row(
+            "opensubtitles_password",
+            N_("Password"),  # i18n: Settings → Subtitles: the OpenSubtitles account's password
+            # i18n: help under Settings → Subtitles → Password (OpenSubtitles' sign-in)
+            N_("The password of your OpenSubtitles account, to sign in with."),
+            kind=TEXT,
+            secret=True,
+        ),
+        Row(
+            SIGN_OUT,
+            N_("Sign out"),  # i18n: forget the OpenSubtitles username and password
+            # i18n: help under Settings → Subtitles → Sign out
+            N_("Clears the username and the password."),
+            kind=ACTION,
+        ),
+    )
+    return Section(SUBTITLES, title, ICONS[SUBTITLES], rows=rows)
+
+
+def _timeshift(title: str, context: Context) -> Section:
+    if context.timeshift_disk:
+        # i18n: help under Settings → Time-shift → Disk cache size (it opens a card)
+        cache_help = N_("The room every channel's buffer shares on disk. Applies at once.")
+    else:
+        # i18n: help (a tooltip) of Settings → Time-shift → Disk cache size while the disk is off
+        cache_help = N_("The room the buffers share on disk, once the disk is used.")
+    default_folder: tuple[Row, ...] = ()
+    if context.recordings_own:
+        default_folder = (
+            Row(
+                DEFAULT_FOLDER,
+                # i18n: the Recordings folder goes back to the system's Movies (Videos) folder
+                N_("Use the default"),
+                # i18n: help under Settings → Time-shift → Use the default (the Recordings folder)
+                N_("New recordings go to QiTV's folder in Movies (or Videos) again."),
+                kind=ACTION,
+            ),
+        )
+    rows = (
+        Row(
+            TIMESHIFT_DISK,
+            N_("Use disk for a longer time-shift buffer"),  # i18n: a setting
+            # i18n: help under Settings → Time-shift → Use disk for a longer time-shift buffer
+            N_(
+                "A channel you leave keeps its buffer up to 24 hours."
+                " Applies from the next channel."
+            ),
+            ON_OFF,
+            ConfigManager.DEFAULT_OPTION_TIMESHIFT_ENABLED,
+        ),
+        Row(
+            "timeshift_ram_mib",
+            N_("Memory per stream"),  # i18n: a setting: each stream's time-shift buffer in RAM
+            # i18n: help under Settings → Time-shift → Memory per stream
+            N_("Each picture's buffer when it isn't on disk. Applies from the next channel."),
+            tuple(
+                Choice(mib, mib_text(mib), literal=True)
+                for mib in ConfigManager.TIMESHIFT_RAM_CHOICES
+            ),
+            ConfigManager.DEFAULT_OPTION_TIMESHIFT_RAM_MIB,
+            sub=memory_rewind_text(context.timeshift_ram_mib),
+        ),
+        Row(
+            DISK_CACHE,
+            DISK_CACHE_TEXT,
+            cache_help,
+            kind=ACTION if context.timeshift_disk else INFO,
+            note=cache_size_text(context.timeshift_max_mib),
+        ),
+        Row(
+            RECORDINGS_FOLDER,
+            N_("Recordings folder"),  # i18n: a line of Settings → Time-shift; its path follows
+            # i18n: help (a tooltip) of Settings → Time-shift → Recordings folder
+            N_("Where R or the record button saves the live channel you watch."),
+            kind=INFO,
+            note=context.recordings_folder,
+        ),
+        Row(
+            CHANGE_FOLDER,
+            N_("Change…"),  # i18n: a row under the Recordings folder: picks another one
+            # i18n: help under Settings → Time-shift → Change… (the Recordings folder)
+            N_("Picks the folder new recordings go to."),
+            kind=ACTION,
+        ),
+        *default_folder,
+        Row(
+            OPEN_FOLDER,
+            N_("Open folder"),  # i18n: shows the Recordings folder in the system's file manager
+            # i18n: help under Settings → Time-shift → Open folder
+            N_("Shows the Recordings folder in the system's file manager."),
+            kind=ACTION,
+        ),
+    )
+    return Section(TIMESHIFT, title, ICONS[TIMESHIFT], rows=rows)
+
+
+def _image_cache_choices(current: Any) -> tuple[Choice, ...]:
+    """The steps, and a size as set that is none of them (the old window took any) in its
+    place among them."""
+    sizes = list(IMAGE_CACHE_MB)
+    if isinstance(current, int) and not isinstance(current, bool) and current not in sizes:
+        sizes = sorted(sizes + [current])
+    return tuple(Choice(size, number(size), literal=True) for size in sizes)
+
+
+def _advanced(title: str, context: Context) -> Section:
+    rows = (
+        Row(
+            "ssl_verify",
+            N_("Verify SSL certificates (recommended)"),
+            N_("Disable only if your provider uses self-signed certificates."),
+            ON_OFF,
+            True,
+        ),
+        Row(
+            "secure_dns",
+            N_("Secure DNS"),
+            # i18n: help under the Secure DNS setting (DNS over HTTPS); keep "DNS"
+            N_("Looks up providers' addresses over HTTPS, with Cloudflare's or Google's resolver."),
+            ON_OFF,
+            False,
+        ),
+        Row(
+            "detailed_log",
+            N_("Detailed log (for troubleshooting)"),
+            # i18n: help under the Detailed log setting
+            N_("The log also gets every step QiTV takes, for a report. Passwords are left out."),
+            ON_OFF,
+            False,
+        ),
+        Row(
+            "max_cache_image_size",
+            N_("Max size of image cache (MB)"),
+            # i18n: help under the image cache's largest size (the restart note follows it)
+            N_("How much room the posters and logos kept on disk may take."),
+            _image_cache_choices(context.image_cache_mb),
+            IMAGE_CACHE_DEFAULT_MB,
+            restart=True,
+        ),
+        Row(
+            CLEAR_IMAGE_CACHE,
+            N_("Clear Image Cache"),
+            # i18n: help under Settings → Advanced → Clear Image Cache (it asks first)
+            N_("Deletes the posters and logos kept on disk. Asked first."),
+            kind=DANGER,
+        ),
+    )
+    return Section(ADVANCED, title, ICONS[ADVANCED], rows=rows)
+
+
+def _files(title: str, rows: tuple[Row, ...]) -> Section:
+    return Section(
+        FILES,
+        title,
+        ICONS[FILES],
+        rows=rows,
+        # i18n: Settings → Files when QiTV runs from its source code: it can't be the app that
+        # opens video or music files
+        empty_text=N_("Not available while QiTV runs from source."),
+    )
 
 
 def _playback(system: str) -> Section:
@@ -349,9 +701,15 @@ def _providers(title: str, rows: tuple[Row, ...]) -> Section:
     return Section(PROVIDERS, title, ICONS[PROVIDERS], rows=rows + (add, free))
 
 
-def sections(system: str, providers: tuple[Row, ...] = ()) -> tuple[Section, ...]:
+def sections(
+    system: str, providers: tuple[Row, ...] = (), context: Optional[Context] = None
+) -> tuple[Section, ...]:
     """The sections in the drawer's order; `system` is platform.system(), `providers` the
-    rows of the providers, listed first in Providers."""
+    rows of the providers, listed first in Providers, `context` what only the running QiTV
+    knows (by default: English only, no TMDB or OpenSubtitles key built in, the image cache's
+    default size, no Files rows, nothing to tell of AI captions' files, the time-shift
+    settings' defaults and no Recordings folder of one's own)."""
+    context = context if context is not None else Context()
     titles = (
         (PROVIDERS, N_("Providers")),  # i18n: a settings section's title
         (GENERAL, N_("General")),  # i18n: a settings section's title
@@ -370,6 +728,16 @@ def sections(system: str, providers: tuple[Row, ...] = ()) -> tuple[Section, ...
             built.append(_providers(text, tuple(providers)))
         elif key == PLAYBACK:
             built.append(_playback(system))
+        elif key == GENERAL:
+            built.append(_general(text, context))
+        elif key == SUBTITLES:
+            built.append(_subtitles(text, context))
+        elif key == TIMESHIFT:
+            built.append(_timeshift(text, context))
+        elif key == FILES:
+            built.append(_files(text, tuple(context.files)))
+        elif key == ADVANCED:
+            built.append(_advanced(text, context))
         else:
             built.append(Section(key, text, ICONS.get(key, ""), legacy_tab=LEGACY_TABS[key]))
     return tuple(built)

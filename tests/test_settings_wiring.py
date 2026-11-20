@@ -5,6 +5,7 @@ and the Settings window opens on a tab. Every Add provider opens it at Providers
 card (plan 2), and a provider added there is selected and said; so does File → Open Link…'s
 Add as a provider… (plan 4), and whichever card shows on top has the keys."""
 
+from itertools import combinations
 import os
 import threading
 import unittest
@@ -24,10 +25,57 @@ from services.provider_check import Outcome
 from services.settings_model import GENERAL, PROVIDERS, TEXT, Row, Section
 from tests import test_tv_window as base
 from ui import settings_layer
-from ui.keymap import Action
+from ui.keymap import Action, resolve
 from ui.settings_dialog import OptionsDialog
 from ui.settings_layer import SettingsLayer
 from ui.tv_window import SAVE_FAILED_TEXT
+
+# The actions the drawer's keys give that Settings lets through on purpose, as over the picture:
+# the playback and window keys (play/pause, Stop, the media keys' next and previous, the volume,
+# mute, fullscreen, the mini player) and the shortcuts of every context: the quick search (it
+# leaves Settings for the Library), Ctrl/⌘+D (the channel playing's favourite) and Ctrl/⌘+P
+# (picture in picture).
+PASSED_ON = frozenset(
+    {
+        Action.PLAY_PAUSE,
+        Action.STOP,
+        Action.MEDIA_NEXT,
+        Action.MEDIA_PREV,
+        Action.VOL_UP,
+        Action.VOL_DOWN,
+        Action.MUTE,
+        Action.FULLSCREEN,
+        Action.MINI_PLAYER,
+        Action.SEARCH,
+        Action.FAVORITE,
+        Action.PIP,
+    }
+)
+
+
+def drawer_actions() -> dict:
+    """Every action keymap.resolve() gives in the drawer's context (Settings has the drawer's
+    keys), with a payload it comes with: each key, held with each set of modifiers, typing
+    nothing or its character, on each platform."""
+    flags = [
+        Qt.KeyboardModifier.ShiftModifier.value,
+        Qt.KeyboardModifier.ControlModifier.value,
+        Qt.KeyboardModifier.AltModifier.value,
+        Qt.KeyboardModifier.MetaModifier.value,
+        Qt.KeyboardModifier.KeypadModifier.value,
+    ]
+    held = [sum(chosen) for n in range(len(flags) + 1) for chosen in combinations(flags, n)]
+    found: dict = {}
+    for platform in ("darwin", "win32", "linux"):
+        for key in Qt.Key:
+            code = key.value
+            texts = {""} | ({chr(code), chr(code).lower()} if 0x20 <= code < 0x7F else set())
+            for mods in held:
+                for text in texts:
+                    got = resolve(code, mods, text, context="drawer", platform=platform)
+                    if got is not None:
+                        found.setdefault(got[0], got[1])
+    return found
 
 
 class SettingsWiringTests(base.WindowCase):
@@ -336,6 +384,78 @@ class SettingsWiringTests(base.WindowCase):
                 Action.PASTE,
             },
         )
+
+    def test_every_drawer_action_is_handled_or_passed_on_purpose(self):
+        # Settings has the drawer's keys: each action they give is Settings' own (a move, a
+        # step, a layer up or down; while a text is edited, its field's too), one of the
+        # channel list's that reaches nothing under it (_LIST_KEYS: the field's keys, while no
+        # text is edited), or one it lets through on purpose (PASSED_ON). An action added to
+        # the drawer's keys fails here until it is one of them.
+        produced = drawer_actions()
+        self.assertLessEqual(PASSED_ON, set(produced))
+        # Delete is the list's FORGET in the drawer's keys; NAV_DELETE (the forward Delete of
+        # the Library's and the subtitle search's fields) never comes from them.
+        self.assertEqual(settings_layer._LIST_KEYS - set(produced), {Action.NAV_DELETE})
+        self.show()
+        self.wait_for_drawer()
+        rows = (Row("probe", "Name", kind=TEXT), Row("other", "Other", kind=TEXT))
+        only = (Section("s", "S", rows=rows),)
+        settings, layer = self.window.settings, self.window.controller.settings_layer
+        real = settings.handle
+        answers: list = []  # what Settings' own handle answered, under the layer's
+
+        def spy(what, data=None):
+            answers.append(real(what, data))
+            return answers[-1]
+
+        own: dict = {False: set(), True: set()}
+        swallowed: dict = {False: set(), True: set()}
+        passed: dict = {False: set(), True: set()}
+        values = settings._values
+        with (
+            mock.patch.object(settings, "_make_sections", return_value=only),
+            mock.patch.object(values, "get", return_value="old"),
+            mock.patch.object(values, "set"),
+        ):
+            for editing in (False, True):
+                for action, payload in produced.items():
+                    settings.open()  # afresh: Esc, Backspace and ← on the sections close it
+                    if editing:
+                        settings.handle(Action.NAV_RIGHT)  # onto Name,
+                        settings.handle(Action.NAV_ACTIVATE)  # edited
+                        self.assertTrue(self.window.settings_drawer.editing())
+                    self.assertTrue(layer.shown())
+                    answers.clear()
+                    with mock.patch.object(settings, "handle", side_effect=spy):
+                        taken = layer.handle(action, payload)
+                    where = (action, payload, editing)
+                    self.assertEqual(len(answers), 1, where)
+                    if answers[0]:
+                        own[editing].add(action)
+                    elif taken:
+                        swallowed[editing].add(action)
+                    else:
+                        passed[editing].add(action)
+        for editing in (False, True):
+            self.assertEqual(passed[editing], PASSED_ON, editing)
+            self.assertLessEqual(swallowed[editing], settings_layer._LIST_KEYS, editing)
+        moves = {
+            Action.NAV_UP,
+            Action.NAV_DOWN,
+            Action.NAV_PAGE_UP,
+            Action.NAV_PAGE_DOWN,
+            Action.NAV_LEFT,
+            Action.NAV_RIGHT,
+            Action.NAV_ACTIVATE,
+            Action.NAV_BACKSPACE,
+            Action.ESCAPE,
+        }
+        self.assertEqual(own[False], moves)
+        # Each of the list's keys that Settings does not use is a key of the field being
+        # edited: while one is, Settings uses every action the keys give but PASSED_ON.
+        self.assertEqual(swallowed[True], set())
+        self.assertEqual(own[True], set(produced) - PASSED_ON)
+        self.assertEqual(swallowed[False], own[True] - moves)
 
     def test_a_failed_save_is_said_once_when_settings_hides(self):
         # A step saves in the background (its failure is only logged there): Settings says

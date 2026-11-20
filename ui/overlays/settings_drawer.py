@@ -7,13 +7,17 @@ the highlight moves. A row is of a kind (services/settings_model.py's KINDS): it
 its choices ("Live latency  ‹ Auto ›", the value lit in the accent while it is not the
 default), opens a layer of rows of its own or a card (it ends in ›), acts, acts on what cannot
 be undone (in red, its title ending in "…": the caller asks first), holds a text edited in
-place ("Name  Demo TV"), or only says something (muted, and the focus goes past it). A row may
-have a muted sub line under its title, and a note at its right end. In a layer the left
-column lists the rows the layer is one of, the opened one marked as the drawer marks its
-path; there only the rows that open a layer take the highlight, and a click on another goes
-back up to it. A layer without rows says its `empty_text` and the keys stay on the left. A
-section whose settings are still in the Settings window has one row that opens it there
-(`legacy:<section key>`). Only the right column's focused row shows its help under it, two
+place ("Name  Demo TV"), or only says something (muted, and the focus goes past it: its value,
+else its note). A secret text (a token) shows dots in its place, in its field too, and is never
+said, given as a tooltip or copied out; one that shows its end (an API key's last four) shows
+it after a fixed row of dots, so that its length doesn't show. An empty text shows its
+placeholder, muted. A row may have a muted sub line under its title, and a note at its right
+end. In a layer the left column lists the rows the layer is one of, the opened one marked as
+the drawer marks its path; there only the rows that open a layer take the highlight, and a
+click on another goes back up to it. A layer (or a section) without rows says its
+`empty_text` and the keys stay on the left. A section whose settings are still in the
+Settings window has one row that opens it there (`legacy:<section key>`). Only the right
+column's focused row shows its help under it, two
 lines at most; a note cut short at its row's end shows there whole instead (a check's
 answer). Where everything goes is ui/overlays/settings_layout.py's.
 
@@ -48,13 +52,20 @@ types its own text in), and a click elsewhere keeps the text, then does what it 
 keeping it changed the rows under it or the layer (a rename: ‹ and the fade too). A
 double-click's second press is a click on the row the first one was on (an action is taken
 once). Hovering a row shows its help, the restart note too, as its tooltip. The wheel scrolls
-the column under the pointer. ‹ in the header and a click on the fade over the picture are
-`back()`. The mouse's Back and Forward buttons go on to the shell, as over the drawer.
+the column under the pointer. A column longer than its room shows the drawer's thin scrollbar
+(ui/overlays/scroll_indicator.py) in its side padding at its right edge while it scrolls and
+while the pointer is over it, and dragging it scrolls the column. ‹ in the header and a click
+on the fade over the picture are `back()`. The mouse's Back and Forward buttons go on to the
+shell, as over the drawer.
+
+Each line is laid out (its title and a long value wrapped) once for what it shows: again after
+new sections, a value changed (`refresh`) or the window's width, never at a mouse move.
 """
 
 from __future__ import annotations
 
 from collections.abc import Callable, Mapping, Sequence
+from functools import partial
 import logging
 from typing import Optional
 
@@ -79,6 +90,7 @@ from ui.overlays.drawer_look import (
     paint_highlight,
 )
 from ui.overlays.painting import Units, draw_icon, fill_round, paint_value_steps, ui_units
+from ui.overlays.scroll_indicator import ScrollIndicator
 from ui.overlays.settings_layout import (  # its metrics are offered from here too
     EMPTY_H_U,
     FIELD_H_U,
@@ -116,6 +128,8 @@ RESTART_NOTE = N_("Applies when QiTV starts again.")
 # i18n: the one row of a Settings section whose settings are still in the Settings window
 LEGACY_TEXT = N_("Open in the Settings window")
 LEGACY_PREFIX = "legacy:"  # the legacy row's key: LEGACY_PREFIX + the section's key
+MASK = "•"  # a secret text's every character, as a FormCard's secret field shows it
+SECRET_DOTS = 8  # the dots before a secret's end that shows (Row.secret_tail), whatever its length
 
 _FALLBACK_HOST_WIDTH = 1280
 _BACK = "back"
@@ -147,6 +161,18 @@ _LEAVING = frozenset({Action.NAV_UP, Action.NAV_DOWN, Action.NAV_PAGE_UP, Action
 def _opens_layer(row: Row) -> bool:
     """Whether the row opens a layer of rows (not a card)."""
     return row.kind == OPENS and row.section is not None
+
+
+def masked(text: str, tail: int = 0) -> str:
+    """A secret as its row shows it: a dot for each character; one that shows its last `tail`
+    characters (an API key's last four) shows them after SECRET_DOTS dots, so that its length
+    doesn't show, and only while at least as many stay hidden (a shorter one is the dots
+    alone)."""
+    if tail <= 0:
+        return MASK * len(text)
+    if len(text) < 2 * tail:
+        return MASK * SECRET_DOTS
+    return MASK * SECRET_DOTS + text[-tail:]
 
 
 def _rekeyed(key: str, renamed: Mapping[str, str]) -> str:
@@ -201,9 +227,24 @@ class SettingsDrawer(Overlay):
         self._edit: Optional[TextEdit] = None
         self._edit_row = ""
         self._edit_from = ""
+        self._edit_secret = False  # its row's text is a secret: dots, never copied out
         self._drag = Dragging()  # the field's mouse: the caret, a drag's selection
         self._paste_hovered = False
         self._said = ""  # what assistive technology was last told
+        # Each line's place at y 0, by what it is laid out from (`_placed_key`): a line is
+        # wrapped once for what it shows, not at each paint or mouse move. Emptied for new
+        # sections, a value changed and another width (`_placed_width`: the host's).
+        self._placed: dict[tuple, Box] = {}
+        self._placed_width = -1
+        self._indicators = {
+            side: ScrollIndicator(
+                self,
+                partial(self._scroll_metrics, side),
+                partial(self._drag_to, side),
+                partial(self._list_area, side),
+            )
+            for side in (LEFT, RIGHT)
+        }
         parent.installEventFilter(self)
         self.hide()
 
@@ -225,6 +266,7 @@ class SettingsDrawer(Overlay):
         self._drag.release()
         self._said = ""
         self._second_click.disarm()
+        self._placed.clear()
         self._relayout()
         self._reveal(LEFT)
         self.show()
@@ -257,6 +299,7 @@ class SettingsDrawer(Overlay):
                 target, key, part, did = self._pressed
                 self._pressed = (target, _rekeyed(key, renamed), part, did)
         self._sections = tuple(sections)
+        self._placed.clear()
         self._hover = None
         keys = [section.key for section in self._sections]
         if old_section in keys:
@@ -326,10 +369,16 @@ class SettingsDrawer(Overlay):
         return self._edit is not None
 
     def refresh(self) -> None:
-        """A value changed: paint the rows again (their values are asked anew), and say the
-        focused row's new value."""
+        """A value changed: lay the rows out and paint them again (their values are asked
+        anew), and say the focused row's new value."""
+        self._placed.clear()
+        self._refit_indicators()
         self.update()
         self._say()
+
+    def scroll_indicator(self, side: str) -> ScrollIndicator:
+        """The thin scrollbar of the column `side` ("left" or "right")."""
+        return self._indicators[side]
 
     def move_by(self, delta: int) -> None:
         if not delta:
@@ -461,6 +510,8 @@ class SettingsDrawer(Overlay):
             self._end_edit(keep=True)
             return False
         elif action in _FIELD_KEYS:
+            if self._edit_secret and action in (Action.COPY, Action.CUT):
+                return True  # a secret is never copied out
             if action is Action.FORGET:
                 action = Action.NAV_DELETE
             field_key(edit, action, payload, arrows=True)
@@ -475,6 +526,7 @@ class SettingsDrawer(Overlay):
         self._edit = TextEdit(text)
         self._edit_row = row.key
         self._edit_from = text
+        self._edit_secret = row.secret
         self._reveal(RIGHT)
         self.update()
 
@@ -528,9 +580,33 @@ class SettingsDrawer(Overlay):
             row = self.focused_row()
             if row is None:
                 return ""
-            value = self._value_text(row) if row.kind in (STEP, TEXT) else row.note
+            if row.kind == STEP:
+                value = self._value_text(row)
+            elif row.kind == TEXT:  # a secret's dots are no value to say
+                value = "" if row.secret and self._value_text(row) else self._tail_text(row)
+            else:
+                value = row.note
             parts = [title_of(Item(row.key, row.text, row=row)), row.sub, value]
         return ", ".join(part for part in parts if part)
+
+    def _tail_text(self, row: Row) -> str:
+        """What the row shows at its right end: a text or an info line's value (a secret's in
+        dots, an empty text's placeholder; an info line without one, its note), else its
+        note."""
+        if row.kind not in (TEXT, INFO):
+            return row.note
+        value = self._value_text(row)
+        if row.kind == INFO:
+            return value or row.note
+        if row.secret and value:
+            return masked(value, row.secret_tail)
+        if self._shows_placeholder(row):
+            return translate(row.placeholder)
+        return value
+
+    def _shows_placeholder(self, row: Row) -> bool:
+        """Whether the text row shows its placeholder: it has one, and no text."""
+        return row.kind == TEXT and bool(row.placeholder) and not self._value_text(row)
 
     # ---- geometry (widget coordinates) ------------------------------------------------------
 
@@ -622,6 +698,7 @@ class SettingsDrawer(Overlay):
                 self._section = index
             self._right = 0
             self._first[RIGHT] = 0
+            self._indicators[RIGHT].refit()  # other rows
         self._reveal(LEFT)
 
     def _focus_rows(self) -> bool:
@@ -666,6 +743,7 @@ class SettingsDrawer(Overlay):
             self._reveal(LEFT)
             if not self._focus_rows():
                 self._side = LEFT
+            self._refit_indicators()
             self.update()
             self._say()
         elif row.kind != INFO:
@@ -682,11 +760,15 @@ class SettingsDrawer(Overlay):
         parent = self.parentWidget()
         if parent is None:
             return
+        if parent.width() != self._placed_width:
+            self._placed.clear()  # other units: every line is laid out again
+            self._placed_width = parent.width()
         un = self._units()
         left_w, right_w = column_widths(un)
         rect = QRect(0, 0, left_w + right_w + un.px(FADE_U), parent.height())
         if rect != self.geometry():
             self.setGeometry(rect)
+        self._refit_indicators()
         self.update()
 
     @staticmethod
@@ -703,26 +785,30 @@ class SettingsDrawer(Overlay):
 
     def _boxes(self, side: str, un: Units, area: QRectF) -> list[Box]:
         """Each line of a column, as tall as its title's lines, its sub line and its help, at
-        y 0."""
+        y 0: laid out once for what it shows (`_placed`)."""
         items = self._items(side)
         icons = side == LEFT and any(item.icon for item in items)
         focus = self._right if side == RIGHT and self._side == RIGHT else -1
         editing = self._editing_index() if side == RIGHT else -1
-        width = area.width() - 2 * INSET_U * un.u
+        fonts = un.font(TITLE_FONT_U).key()  # the family and the size the lines are set in
         boxes = []
         for index, item in enumerate(items):
             row = item.row if side == RIGHT else None
-            value, choices, help = "", [], []
-            if row is not None and row.kind in (STEP, TEXT, INFO):
+            value = ""
+            choices: tuple[str, ...] = ()
+            if row is not None and row.kind == STEP:
                 value = self._value_text(row)
-                choices = [choice.shown() for choice in row.choices] if row.kind == STEP else []
-            if row is not None and index == focus:
-                help_text, restart = self._help_parts(row)
-                if self._note_cut(un, area, item):
-                    help_text = row.note  # whole under it while focused (a check's answer)
-                help = help_lines(help_text, restart, un, width)
-            boxes.append(
-                place(
+                choices = tuple(c.shown() for c in row.choices)
+            elif row is not None and row.kind in (TEXT, INFO):
+                value = self._tail_text(row)
+            focused = row is not None and index == focus
+            key = self._placed_key(
+                side, item, un, area, icons, value, choices, focused, index == editing, fonts
+            )
+            box = self._placed.get(key)
+            if box is None:
+                help = self._focused_help(un, area, item) if focused else []
+                box = place(
                     un,
                     area,
                     item,
@@ -733,8 +819,59 @@ class SettingsDrawer(Overlay):
                     help=help,
                     editing=index == editing,
                 )
-            )
+                self._placed[key] = box
+            boxes.append(box)
         return boxes
+
+    def _placed_key(
+        self,
+        side: str,
+        item: Item,
+        un: Units,
+        area: QRectF,
+        icons: bool,
+        value: str,
+        choices: tuple[str, ...],
+        focused: bool,
+        editing: bool,
+        fonts: str,
+    ) -> tuple:
+        """All that a line's place (settings_layout.place) is laid out from, as shown now (the
+        texts translated): two lines with the same key have the same place."""
+        row = item.row
+        kind, sub, note = (row.kind, row.sub, row.note) if row is not None else ("", "", "")
+        warn = row is not None and row.warn  # (its sub line's colour: painted, kept apart)
+        helps = self._help_parts(row) if focused and row is not None else None
+        paste = translate(PASTE_TEXT) if editing else ""
+        return (
+            side,
+            title_of(item),
+            kind,
+            sub,
+            warn,
+            note,
+            value,
+            choices,
+            helps,
+            editing,
+            paste,
+            icons,
+            un.u,
+            area.x(),
+            area.width(),
+            fonts,
+        )
+
+    def _focused_help(self, un: Units, area: QRectF, item: Item) -> list[str]:
+        """The lines under the focused row `item`: its help and its restart note, or its note
+        whole when it is cut short at the row's end."""
+        row = item.row
+        if row is None:
+            return []
+        help_text, restart = self._help_parts(row)
+        if self._note_cut(un, area, item):
+            help_text = row.note  # whole under it while focused (a check's answer)
+        return help_lines(help_text, restart, un, area.width() - 2 * INSET_U * un.u)
 
     @staticmethod
     def _note_cut(un: Units, area: QRectF, item: Item) -> bool:
@@ -760,6 +897,7 @@ class SettingsDrawer(Overlay):
         heights = self._heights(side, un, area)
         if not heights:
             self._first[side] = 0
+            self._indicators[side].refit()
             return
         index = self._right if side == RIGHT else self._left_index()
         index = max(0, min(len(heights) - 1, index))
@@ -768,19 +906,62 @@ class SettingsDrawer(Overlay):
         while top > 0 and not items[top - 1].selectable:
             top -= 1
         first = min(self._first[side], top)
-        while first < index and sum(heights[first : index + 1]) > area.height() + 0.5:
+        total = sum(heights[first : index + 1])
+        while first < index and total > area.height() + 0.5:
+            total -= heights[first]
             first += 1
-        self._first[side] = min(first, last_first(heights, area.height()))
+        first = min(first, last_first(heights, area.height()))
+        if first != self._first[side]:
+            self._first[side] = first
+            self._indicators[side].poke()  # it moved: its thumb shows a moment
+        else:
+            self._indicators[side].refit()  # a help shown elsewhere: another length
 
     def _scroll_by(self, side: str, rows: int) -> None:
+        self._scroll_to(side, self._first[side] + rows)
+
+    def _scroll_to(self, side: str, first: int) -> None:
+        """The column `side` scrolled to show its line `first` first (as far as it goes: its
+        last line at its bottom); the highlight stays where it is."""
         un = self._units()
         area = columns(un, float(self.height()))[1][side]
         heights = self._heights(side, un, area)
-        first = max(0, min(self._first[side] + rows, last_first(heights, area.height())))
+        first = max(0, min(first, last_first(heights, area.height())))
         if first != self._first[side]:
             self._first[side] = first
             self._hover = None
+            self._indicators[side].poke()
             self.update()
+
+    # ---- the columns' scrollbars ------------------------------------------------------------
+
+    def _list_rect(self, side: str) -> QRectF:
+        """Where the column `side`'s lines scroll, its side padding included: its scrollbar
+        runs down its right edge, in the padding (never over a row's ›)."""
+        cols, areas = columns(self._units(), float(self.height()))
+        col, area = cols[side], areas[side]
+        return QRectF(col.x(), area.y(), col.width(), area.height())
+
+    def _list_area(self, side: str) -> QRect:
+        return self._list_rect(side).toAlignedRect()
+
+    def _drag_to(self, side: str, first: float) -> None:
+        """The scrollbar dragged: the column shows its line `first` (rounded) first."""
+        self._scroll_to(side, round(first))
+
+    def _scroll_metrics(self, side: str) -> tuple[float, float, float]:
+        """For the column's scrollbar, in lines: (the first in sight, the lines its end shows,
+        all of them); it scrolls when all of them do not fit."""
+        un = self._units()
+        area = columns(un, float(self.height()))[1][side]
+        heights = self._heights(side, un, area)
+        last = last_first(heights, area.height())
+        return float(min(self._first[side], last)), float(len(heights) - last), float(len(heights))
+
+    def _refit_indicators(self) -> None:
+        """The scrollbars over the columns as they are now (gone from one that fits)."""
+        for indicator in self._indicators.values():
+            indicator.refit()
 
     def _layout(self) -> Layout:
         un = self._units()
@@ -868,16 +1049,19 @@ class SettingsDrawer(Overlay):
                 continue
             if row.kind == STEP:
                 p.setFont(un.font(VALUE_FONT_U))
-                value, lit = self._value_text(row), self._lit(row)
-                accent = qcolor(PALETTE.accent)
-                paint_value_steps(p, un, box.less, box.value, box.more, value, lit, accent)
+                lit, accent = self._lit(row), qcolor(PALETTE.accent)
+                lines = box.values
+                one = lines[0] if len(lines) == 1 else ""  # (it paints a value on one line)
+                paint_value_steps(p, un, box.less, box.value, box.more, one, lit, accent)
+                if len(lines) > 1:
+                    self._paint_value_lines(p, box.value, lines, accent if lit else muted)
             elif index == editing and self._edit is not None:
-                self._paint_field(p, un, box.entry, self._edit)
+                self._paint_field(p, un, box.entry, self._edit, secret=row.secret)
                 self._paint_paste(p, un, box.paste, self._paste_hovered)
             elif not box.end.isEmpty():
-                tail = self._value_text(row) if row.kind in (TEXT, INFO) else row.note
+                tail = self._tail_text(row)
                 p.setFont(un.font(VALUE_FONT_U))
-                p.setPen(text if row.kind == TEXT else muted)
+                p.setPen(text if row.kind == TEXT and not self._shows_placeholder(row) else muted)
                 fm = QFontMetricsF(p.font())
                 shown = fm.elidedText(tail, Qt.TextElideMode.ElideRight, box.end.width())
                 p.drawText(
@@ -907,6 +1091,19 @@ class SettingsDrawer(Overlay):
             p.drawText(QRectF(box.title.x(), y, box.title.width(), sub_h), align, box.sub)
 
     @staticmethod
+    def _paint_value_lines(p: QPainter, rect: QRectF, lines: list[str], color: QColor) -> None:
+        """A stepper's value too wide for one line, on its lines (wrapped and elided to fit
+        `rect`), centred one under another between its ‹ and ›, in the painter's font."""
+        spacing = QFontMetricsF(p.font()).lineSpacing()
+        y = rect.center().y() - spacing * len(lines) / 2
+        p.setPen(color)
+        for line in lines:
+            p.drawText(
+                QRectF(rect.x(), y, rect.width(), spacing), Qt.AlignmentFlag.AlignCenter, line
+            )
+            y += spacing
+
+    @staticmethod
     def _paint_help(p: QPainter, un: Units, box: Box, muted: QColor) -> None:
         align = Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter
         font = un.font(HELP_FONT_U)
@@ -920,9 +1117,11 @@ class SettingsDrawer(Overlay):
             y += spacing
 
     @staticmethod
-    def _paint_field(p: QPainter, un: Units, rect: QRectF, edit: TextEdit) -> None:
+    def _paint_field(
+        p: QPainter, un: Units, rect: QRectF, edit: TextEdit, *, secret: bool = False
+    ) -> None:
         """The field a text is edited in, in its value's place: the find box's look, and the
-        text with its caret and selection."""
+        text (a secret's dots) with its caret and selection."""
         u = un.u
         height = min(rect.height(), float(un.px(FIELD_H_U)))
         box = QRectF(rect.x(), rect.center().y() - height / 2, rect.width(), height)
@@ -937,7 +1136,10 @@ class SettingsDrawer(Overlay):
         p.setFont(un.font(VALUE_FONT_U))
         inner = box.adjusted(FIELD_PAD_U * u, 0, -FIELD_PAD_U * u, 0)
         selection = qcolor(PALETTE.accent, SELECTION_ALPHA)
-        paint_edit(p, inner, edit, qcolor(PALETTE.text), caret=True, selection=selection)
+        shown = MASK * len(edit.text) if secret else None
+        paint_edit(
+            p, inner, edit, qcolor(PALETTE.text), caret=True, selection=selection, shown=shown
+        )
 
     @staticmethod
     def _paint_paste(p: QPainter, un: Units, rect: QRectF, hovered: bool) -> None:
@@ -1191,7 +1393,10 @@ class SettingsDrawer(Overlay):
         event.ignore()  # the host still hears the pointer move (the transport, the cursor)
 
     def _hover_at(self, pos: QPointF) -> None:
-        hit = self._hit(pos) if self.isVisible() else None
+        shown = self.isVisible()
+        for side, indicator in self._indicators.items():
+            indicator.pointer_over(shown and self._list_rect(side).contains(pos))
+        hit = self._hit(pos) if shown else None
         over = (hit[0], hit[1]) if hit is not None and hit[0] != _FADE else None
         paste = hit is not None and hit[2] == _PASTE
         if over != self._hover or paste != self._paste_hovered:
@@ -1204,6 +1409,8 @@ class SettingsDrawer(Overlay):
             self.update()
 
     def leaveEvent(self, event: QEvent) -> None:
+        for indicator in self._indicators.values():
+            indicator.pointer_over(False)
         if self._hover is not None or self._paste_hovered:
             self._hover = None
             self._paste_hovered = False
@@ -1247,14 +1454,18 @@ class SettingsDrawer(Overlay):
         if row is not None and row.sub and box.sub != " ".join(row.sub.split()):
             whole_texts.append(row.sub)
         if side == RIGHT and row is not None and index != self._editing_index():
-            tail, room = "", 0.0
-            if row.kind == STEP:
-                tail, room = self._value_text(row), box.value.width()
-            elif not box.end.isEmpty():
-                tail = self._value_text(row) if row.kind in (TEXT, INFO) else row.note
-                room = box.end.width()
+            tail, cut = "", False
             fm = QFontMetricsF(self._units().font(VALUE_FONT_U))
-            if tail and fm.horizontalAdvance(tail) > room:
+            if row.kind == STEP:
+                tail = self._value_text(row)
+                if len(box.values) > 1:  # wrapped: whole unless its last line was elided
+                    cut = not whole(box.values, tail)
+                else:
+                    cut = fm.horizontalAdvance(tail) > box.value.width()
+            elif not box.end.isEmpty() and not (row.kind == TEXT and row.secret):
+                tail = self._tail_text(row)  # (a secret's, even its dots, is never a tooltip)
+                cut = fm.horizontalAdvance(tail) > box.end.width()
+            if tail and cut:
                 whole_texts.append(tail)
         if row is not None and (help_text := self._help_text(row)):
             whole_texts.append(help_text)
@@ -1269,6 +1480,9 @@ class SettingsDrawer(Overlay):
             self._second_click.arm()
         self._hover = None
         self._paste_hovered = False
+        for indicator in self._indicators.values():
+            indicator.pointer_over(False)
+            indicator.hide()  # not there when Settings opens again, on rows that may fit
         self._edit = None  # hidden while editing: the text is put back
         self._drag.release()
         # announce() named it after what it said last: assistive technology finds "Settings".

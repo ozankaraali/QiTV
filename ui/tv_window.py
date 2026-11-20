@@ -139,7 +139,7 @@ from services.recordings_index import FILE_NAME as RECORDINGS_INDEX_FILE, Record
 from services.recordings_list import timer_text
 from services.redact import safe_message, safe_traceback
 from services.sessions import SessionManager, Slot
-from services.settings_model import PROVIDERS, sections
+from services.settings_model import PROVIDERS, Context, sections
 from services.settings_values import SettingsValues
 from services.sound_sync import FILE_NAME as SOUND_SYNC_FILE, SoundSync
 from services.subtitle_picks import FILE_NAME as SUBTITLE_PICKS_FILE, SubtitlePicks
@@ -204,8 +204,11 @@ from ui.recording_scheduler import RecordingScheduler
 from ui.remote_controller import RemoteController
 from ui.settings_controller import SettingsController
 from ui.settings_dialog import OptionsDialog
+from ui.settings_general import GeneralRows, hooks as general_hooks
 from ui.settings_links import LinkRows
 from ui.settings_providers import ProviderRows
+from ui.settings_subtitles import SubtitlesRows
+from ui.settings_timeshift import TimeshiftRows, hooks as timeshift_hooks
 from ui.song_jobs import PanelCover
 from ui.subtitle_search import OnlineSetup
 from ui.track_controls import SUBTITLE_FILTER
@@ -1146,12 +1149,14 @@ class TVWindow(QMainWindow):
                 "deinterlace": controller.apply_deinterlacing,  # every player's, at once
                 "desktop_pip": self._arm_desktop_pip,
                 "covered_pip": self._arm_desktop_pip,
+                **general_hooks(self),  # General's and Advanced's (ui.settings_general)
+                **timeshift_hooks(self),  # Time-shift's (ui.settings_timeshift)
             },
         )
         self.settings = SettingsController(
             self.settings_drawer,
             values,
-            lambda: sections(system, self.provider_rows.rows()),
+            lambda: sections(system, self.provider_rows.rows(), self._settings_context()),
             self.options_dialog,
             controller.reopen_drawer_on_settings,
         )
@@ -1167,6 +1172,16 @@ class TVWindow(QMainWindow):
             self, self.settings, self.settings_drawer, self.provider_rows
         )
         self.provider_rows.cards = self.provider_cards
+        # Settings › General, Files and Advanced: what only this QiTV knows (its languages, the
+        # Files rows' status), and Files' and Advanced's own rows: the file types told on a
+        # worker, the image cache cleared on one once asked.
+        self.general_rows = GeneralRows(self, self.settings, self.settings_drawer)
+        # Settings › Subtitles & AI captions: the space AI captions' files take, measured on a
+        # worker as Settings opens, their deletion asked first; OpenSubtitles' Sign out.
+        self.subtitle_rows = SubtitlesRows(self, self.settings, self.settings_drawer, values)
+        # Settings › Time-shift & recordings: the disk turned off only once asked, the disk
+        # cache's size on a value card, the Recordings folder changed, reset or opened.
+        self.timeshift_rows = TimeshiftRows(self, self.settings, self.settings_drawer, values)
         self.catalogs.providersChanged.connect(self.provider_rows.providers_changed)
         self.catalog.providerReady.connect(self.provider_rows.providers_changed)
         # File → Open Link… and the channel list's Open a link (plan 4): while its card shows it
@@ -2859,6 +2874,12 @@ class TVWindow(QMainWindow):
                 dialog.show_tab(tab)
             dialog.exec()
             self._settings_closed()
+
+    def _settings_context(self) -> Context:
+        """What Settings' sections show that only this QiTV knows, each section's from its
+        rows."""
+        context = self.subtitle_rows.context(self.general_rows.context())
+        return self.timeshift_rows.context(context)
 
     def _settings_went(self) -> None:
         """Settings in the drawer went: a step's save that failed (written in the background,
