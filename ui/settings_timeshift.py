@@ -135,7 +135,7 @@ class TimeshiftRows(QObject):
             timeshift_ram_mib=config.timeshift_ram_mib,
             timeshift_max_mib=config.timeshift_max_mib,
             recordings_folder=recording.folder(config),
-            recordings_own=bool(config.recordings_dir.strip()),  # (recording.folder's rule)
+            recordings_own=recording.own_folder(config),
         )
 
     # ---- RowHandler -------------------------------------------------------------------------
@@ -225,7 +225,7 @@ class TimeshiftRows(QObject):
         chosen = settings_card.pick_folder(
             self._window, translate(CHOOSE_FOLDER_TITLE), recording.folder(config)
         )
-        if chosen:
+        if chosen and not self._window.closing():  # (the window may close while it asks)
             self._use_folder(os.path.normpath(chosen))
 
     def _use_folder(self, path: str) -> None:

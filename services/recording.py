@@ -90,6 +90,15 @@ def _same_folder(a: str, b: str) -> bool:
     return os.path.normcase(os.path.normpath(a)) == os.path.normcase(os.path.normpath(b))
 
 
+def own_folder(config: Any) -> bool:
+    """Whether recordings go to a folder of one's own: Settings names one, and it is not the
+    default folder itself (an older Settings window kept a picked folder as it was given)."""
+    chosen = getattr(config, "recordings_dir", "")
+    if not isinstance(chosen, str) or not chosen.strip():
+        return False
+    return not _same_folder(chosen, default_folder())
+
+
 def places(config: Any) -> list[str]:
     """2.9.7: the folders recordings are listed from: where they go (`folder`) first, then the
     others the Recordings page added (the optional config key `recording_places`), each once."""

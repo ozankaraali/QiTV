@@ -14,7 +14,7 @@ from unittest import mock
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
-from timer_fixtures import wait_until
+from timer_fixtures import pause, wait_until
 
 from services import _build_keys, settings_model as m
 from services.config_manager import ConfigManager
@@ -47,16 +47,24 @@ class FakeModels(SimpleNamespace):
 
 
 class FakeCaptions:
-    """CaptionsController.release: off, then `then()` once nothing holds the files."""
+    """CaptionsController.release: off, then `then()` once nothing holds the files: later, as
+    the real one polls for the captions process (and a cancelled download) to let go
+    (`let_go`)."""
 
     def __init__(self):
         self.on = True
         self.released = 0
+        self.waiting = []
 
     def release(self, then):
         self.on = False
         self.released += 1
-        then()
+        self.waiting.append(then)
+
+    def let_go(self):
+        waiting, self.waiting = self.waiting, []
+        for then in waiting:
+            then()
 
 
 class Records(logging.Handler):
@@ -230,6 +238,9 @@ class SubtitlesTests(SubtitlesCase):
             self.assertEqual(question.focus(), ("button", DELETE))
             measured = len(self.models.threads)
             self.key(Action.NAV_ACTIVATE)
+            self.assertNotIn(m.DELETE_CAPTIONS, self.shown())  # on its way
+            self.assertEqual((captions.released, self.models.deleted), (1, 0))
+            captions.let_go()
             self.assertTrue(wait_until(lambda: self.note(m.CAPTIONS_FILES) == "Nothing downloaded"))
         self.assertEqual((captions.released, self.models.deleted), (1, 1))
         self.assertFalse(captions.on)  # they stopped first
@@ -237,6 +248,30 @@ class SubtitlesTests(SubtitlesCase):
         self.assertNotIn(m.DELETE_CAPTIONS, self.shown())
         self.assertEqual(self.drawer.path(), (m.SUBTITLES,))
         self.assertIsNotNone(self.drawer.focused_row())  # on its neighbour
+
+    def test_settings_opened_while_a_delete_waits_keeps_it_on_its_way(self):
+        # The captions process (or a cancelled download) lets go of the files only after a
+        # while: Settings opened again meanwhile neither brings Delete back nor deletes twice.
+        self.models.size = MB_880
+        captions = FakeCaptions()
+        with mock.patch.object(self.window, "captions", captions):
+            self.open_at(m.SUBTITLES, m.DELETE_CAPTIONS)
+            self.key(Action.NAV_ACTIVATE)
+            self.key(Action.NAV_RIGHT)
+            self.key(Action.NAV_ACTIVATE)  # Delete
+            self.assertEqual(captions.released, 1)
+            self.window.settings.close()
+            self.assertTrue(wait_until(lambda: not self.window.settings.visible()))
+            self.window.open_settings(section_key=m.SUBTITLES)
+            self.assertTrue(wait_until(lambda: self.window.jobs.pending() == 0))
+            pause(100)  # a measure's answer, had one been asked for, has landed
+            self.assertNotIn(m.DELETE_CAPTIONS, self.shown())
+            self.window.subtitle_rows.chosen(m.Row(m.DELETE_CAPTIONS, "", kind=m.DANGER))
+            self.assertFalse(self.window.settings.card_shown())  # never asked again
+            captions.let_go()
+            self.assertTrue(wait_until(lambda: self.note(m.CAPTIONS_FILES) == "Nothing downloaded"))
+        self.assertEqual((captions.released, self.models.deleted), (1, 1))
+        self.assertNotIn(m.DELETE_CAPTIONS, self.shown())
 
     def test_secret_rows_mask_but_the_last_four(self):
         records = self.listen()

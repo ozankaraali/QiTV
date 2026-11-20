@@ -65,7 +65,9 @@ class SubtitlesRows(QObject):
         self._busy = False  # a measure (or a delete) on its way
         self._again = False  # asked for again meanwhile
         self._again_delete = False  # ... with a delete
-        self._deleting = False  # a delete answered, until it is measured
+        # A delete answered, until the measure after it (once the captions let the files go:
+        # CaptionsController.release can take a while) says what is left.
+        self._deleting = False
         settings.register(SUBTITLES_PREFIX, self)
         drawer.installEventFilter(self)  # Settings opening: the size measured anew
 
@@ -93,8 +95,8 @@ class SubtitlesRows(QObject):
 
     def eventFilter(self, watched: QObject, event: QEvent) -> bool:
         if watched is self._drawer and event.type() == QEvent.Type.Show:
-            if not self._drawer.isHidden():
-                self._measure()
+            if not self._drawer.isHidden() and not self._deleting:
+                self._measure()  # (while a delete waits, the measure after it says it)
         return False
 
     def _measure(self, delete: bool = False) -> None:
@@ -105,22 +107,28 @@ class SubtitlesRows(QObject):
             self._again_delete = self._again_delete or delete
             return
         self._busy = True
-        self._window.jobs.run_worker(CaptionsFilesJob(delete), self._sized, self._unsized)
+        self._window.jobs.run_worker(
+            CaptionsFilesJob(delete), self._sized, self._unsized, context=delete
+        )
 
-    def _sized(self, _context: object, size: Optional[int]) -> None:
+    def _sized(self, deleted: object, size: Optional[int]) -> None:
+        """A measure's answer (`deleted`: its job deleted the files first). While a delete
+        waits for the captions to let go, only the measure after it says what is left."""
         self._busy = False
         if self._again:
             delete, self._again, self._again_delete = self._again_delete, False, False
             self._measure(delete)
             return
+        if self._deleting and deleted is not True:
+            return  # measured before the files went: Delete stays on its way
         self._size = size
         self._measured = True
         self._deleting = False
         self._settings.refresh_sections()  # the line says it; Delete only with something
 
-    def _unsized(self, _context: object, message: str) -> None:
+    def _unsized(self, deleted: object, message: str) -> None:
         logger.warning("AI captions' files: %s", message)
-        self._sized(None, None)
+        self._sized(deleted, None)
 
     # ---- RowHandler -------------------------------------------------------------------------
 
