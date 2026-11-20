@@ -176,6 +176,8 @@ class ConfigManager:
     DEFAULT_OPTION_MULTIVIEW_TILE_RAM_MIB = 64
     MULTIVIEW_TILE_RAM_RANGE = (48, 512)
     TV_DEFAULTS_VERSION = 2
+    # 2.12: bumped by each one-time clean-up of config["data"] (`update_patcher`).
+    LEGACY_LISTS_VERSION = 1
     DEFAULT_TV_WINDOW = {"x": 80, "y": 80, "width": 1280, "height": 720}
     # A 1.x window smaller than this, or not landscape, does not size the TV window.
     MIN_REUSED_WINDOW = (640, 360)
@@ -356,6 +358,22 @@ class ConfigManager:
             self.config["mouse_wheel_action"] = "volume"
         if wheel_defaults < ConfigManager.WHEEL_DEFAULTS_VERSION:
             self.config["wheel_defaults_version"] = ConfigManager.WHEEL_DEFAULTS_VERSION
+            need_update = True
+
+        # 2.12: early 1.x builds kept their channel lists in the providers of "data" ("itv",
+        # and "channels" again): megabytes nothing reads, parsed at every start, held in
+        # memory and written at every save (a film saves every 30 s). No 2.x build reads them;
+        # they go once, and a 1.x build gone back to loads its list again. Everything else in
+        # "data" stays.
+        legacy_lists = self._defaults_version("legacy_lists_version")
+        if legacy_lists < 1:
+            entries = self.config.get("data")
+            for entry in entries if isinstance(entries, list) else ():
+                if isinstance(entry, dict):
+                    entry.pop("itv", None)
+                    entry.pop("channels", None)
+        if legacy_lists < ConfigManager.LEGACY_LISTS_VERSION:
+            self.config["legacy_lists_version"] = ConfigManager.LEGACY_LISTS_VERSION
             need_update = True
 
         if need_update:
