@@ -14,7 +14,7 @@ import unittest
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 from PySide6.QtCore import QEvent, QPoint, QPointF, QRectF, Qt
-from PySide6.QtGui import QColor, QImage, QMouseEvent, QWheelEvent
+from PySide6.QtGui import QColor, QImage, QMouseEvent, QRegion, QWheelEvent
 from PySide6.QtTest import QSignalSpy, QTest
 from PySide6.QtWidgets import QApplication, QWidget
 from timer_fixtures import elapse
@@ -506,6 +506,86 @@ class DockBehaviourTests(AudioCase):
         host.resize(960, 540)  # the band follows the host
         self.assertEqual(t.mask().boundingRect().bottom(), 539)
         self.assertGreater(t.mask().boundingRect().top(), 540 * 0.7)
+
+    def test_live_controls_over_a_radio_screen_leave_it_its_own_controls(self):
+        # 2.13.3, the owner: on a radio station live TV's controls showed over the audio screen
+        # and its view switch (the visualizer's Stage) took no click. The transport covers the
+        # host over the screen and takes every press while it shows: it leaves the screen's
+        # own controls to it and draws nothing over them, and the screen's top bar holds still
+        # as the controls come and fade (it moved from under the pointer).
+        for name, mode in (
+            ("Free radio: played directly", lambda t: t.show_live("Radio One", "")),
+            ("a provider's radio: time-shifted", lambda t: _timeshift(t, False)),
+        ):
+            with self.subTest(name):
+                host = self.host()
+                screen = AudioScreen(host)
+                screen.show_song("Radio One", "Wexlo Tide - Pell", "")
+                t = Transport(host, idle_ms=60_000, now=lambda: NOON)
+                screen.follow(t)
+                screen.show()
+                mode(t)
+                t.raise_()
+                self.assertTrue(t.isVisible())
+                controls = screen.controls()
+                self.assertIn("view_stage", controls)
+                ink = QImage(t.size(), QImage.Format.Format_ARGB32_Premultiplied)
+                ink.fill(0)
+                flags = QWidget.RenderFlag.DrawChildren | QWidget.RenderFlag.IgnoreMask
+                t.render(ink, QPoint(), QRegion(), flags)
+                for control, rect in controls.items():
+                    self.assertIs(host.childAt(rect.center()), screen, control)
+                    painted = max(
+                        QColor.fromRgba(ink.pixel(x, y)).alpha()
+                        for x in range(rect.left(), rect.right() + 1)
+                        for y in range(rect.top(), rect.bottom() + 1)
+                    )
+                    self.assertEqual(painted, 0, f"live TV's controls drawn over {control}")
+                picked = QSignalSpy(screen.viewPicked)
+                stage = controls["view_stage"].center()
+                QTest.mouseClick(host.windowHandle(), Qt.LeftButton, Qt.NoModifier, stage)
+                self.assertEqual(picked.count(), 1)
+                self.assertEqual(screen.view(), "stage")
+                # Live TV's own controls and the page keep theirs: a click there is the
+                # transport's, as over a channel's picture.
+                self.assertIs(host.childAt(t._layout()["play"].center().toPoint()), t)
+                for rect in t.title_rects().values():
+                    self.assertIs(host.childAt(rect.center().toPoint()), t)
+                self.assertIs(host.childAt(QPoint(640, 300)), t)
+                t.dismiss()  # the controls fade: the bar stays where it was
+                self.assertEqual(screen.controls(), controls)
+                self.assertIs(host.childAt(stage), screen)
+                screen.hide()  # a picture showed: nothing is left out any more
+                t.poke()
+                self.assertIs(host.childAt(stage), t)
+
+    def test_a_radio_screens_bar_follows_a_resize_with_the_controls_hidden(self):
+        # A hidden transport hears no resize of its own until it shows: the bar takes the new
+        # size's band all the same, whichever of the two hears the page's resize first (the
+        # window re-parents the screen after the transport is made), and holds still as the
+        # controls show again.
+        for first in ("screen", "transport"):
+            with self.subTest(first=first):
+                host = self.host()
+                if first == "screen":
+                    screen = AudioScreen(host)
+                    t = Transport(host, idle_ms=60_000, now=lambda: NOON)
+                else:
+                    t = Transport(host, idle_ms=60_000, now=lambda: NOON)
+                    screen = AudioScreen(host)
+                screen.show_song("Radio One", "", "")
+                screen.follow(t)
+                screen.show()
+                t.show_live("Radio One", "")
+                t.raise_()
+                t.dismiss()
+                host.resize(960, 540)
+                elapse(10)
+                bar = screen.controls()["back"]
+                self.assertEqual(bar.top(), t.top_band_bottom())
+                t.poke()
+                self.assertEqual(screen.controls()["back"], bar)
+                self.assertIs(host.childAt(screen.controls()["view_stage"].center()), screen)
 
     def test_other_modes_lay_out_exactly_as_before_audio_mode(self):
         # Each old mode, set up on a transport that never saw the dock and on one that comes

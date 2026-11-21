@@ -76,7 +76,10 @@ shows. It never fades, it is only its own band (the screen's top bar, its album 
 page under it take their clicks), and it draws no title row: the screen shows the song. Without
 an album list shuffle and the next track are dim and do nothing. A quick second press on the
 previous or the next track counts (restart, then the song before; two songs on). Any other
-mode ends it, and `end_audio` ends it and hides it.
+mode ends it, and `end_audio` ends it and hides it. A radio channel keeps live TV's controls
+over the audio screen (no dock): there they leave the screen's own controls (its top bar, below
+the title row) their clicks with a widget mask, and shade only the title row's band, lighter,
+above them (`leave_to_screen`, 2.13.3: they took every click on the screen).
 """
 
 from dataclasses import dataclass
@@ -155,6 +158,9 @@ _HIT_FLOOR_PX = 28.0
 # 2.8.12: the top shade, deeper and flat over the title row's half (the name read 2.8:1, the
 # programme 2.2:1 over a white picture; now about 11:1 and 7:1), then fading out.
 _TOP_SHADE = 0.8
+# 2.13.3: over the audio screen (a radio channel), which has its own shade, a lighter one over
+# the title row's band, eased out above the screen's top bar: (where in the band, its alpha).
+_SCREEN_TOP_SHADE = ((0.0, 0.6), (0.55, 0.42), (1.0, 0.0))
 _TIGHT_GAP_U = 1.0  # in a crowded row
 MINUS = "−"
 # The source stalled, its connection still open (the texts are shown with translate()).
@@ -530,6 +536,8 @@ class Transport(Overlay):
         self._grid_cells = 0  # its tiles: the chip's picture (painting's "layout_4")
         self._grid_restorable = False  # the last grid can come back: its chip shows
         self._pip_rect = QRect()  # the small picture: the shades leave it alone
+        # 2.13.3: the audio screen's own controls under it, a radio channel's (leave_to_screen)
+        self._screen_controls = QRegion()
         self._muted = False  # the large picture's mute: the speaker shows it
         self._level = 100  # and its volume (libVLC's default until the mixer says)
         self._mini = self._fullscreen = False  # their buttons then show the way back
@@ -649,6 +657,18 @@ class Transport(Overlay):
         self.hide()
         self.update()
         self._controls_changed()
+
+    def leave_to_screen(self, controls: QRegion) -> None:
+        """The audio screen's own controls under it (this widget's coordinates; empty: none),
+        over which live TV's controls show for a radio channel (2.13.3): they take their own
+        clicks (a widget mask leaves them out), and nothing is drawn over them (the top shade
+        stays within the title row's band, above the screen's top bar). The dock has its own
+        mask: there they are left out already."""
+        if controls == self._screen_controls:
+            return
+        self._screen_controls = QRegion(controls)
+        self._sync_mask()
+        self.update()
 
     def control_text(self, name: str) -> str:
         """What a control says (its tooltip: what it does, and its key), as hovering it does;
@@ -1311,13 +1331,19 @@ class Transport(Overlay):
 
     def _sync_mask(self) -> None:
         """The audio dock is its band alone (a widget mask): it covers the host over the audio
-        screen, whose controls and page take the clicks above it. Other modes have no mask."""
+        screen, whose controls and page take the clicks above it. Live TV's controls over a
+        radio channel's screen are all but the screen's own controls (leave_to_screen). Other
+        modes have no mask."""
         if self._audio:
-            band = QRegion(self._dock_band())
-            if self.mask() != band:
-                self.setMask(band)
-        elif not self.mask().isEmpty():
-            self.clearMask()
+            mask = QRegion(self._dock_band())
+        elif not self._screen_controls.isEmpty():
+            mask = QRegion(self.rect()).subtracted(self._screen_controls)
+        else:
+            if not self.mask().isEmpty():
+                self.clearMask()
+            return
+        if self.mask() != mask:
+            self.setMask(mask)
 
     @staticmethod
     def _chip_font(un: Units) -> QFont:
@@ -2115,12 +2141,17 @@ class Transport(Overlay):
     def _paint_scrim_bands(self, p: QPainter) -> None:
         top_h = self.height() * TOP_FRACTION
         grad = QLinearGradient(0, 0, 0, top_h)
-        # Flat behind the title row (its logo ends near 5.7u, wider windows run lower in the
-        # band), then fading out.
-        flat = min(0.85, max(0.5, ui_units(self.width()).px(6.2) / top_h)) if top_h > 0 else 0.5
-        grad.setColorAt(0, qcolor("#000000", _TOP_SHADE))
-        grad.setColorAt(flat, qcolor("#000000", _TOP_SHADE))
-        grad.setColorAt(1, qcolor("#000000", 0.0))
+        if self._screen_controls.isEmpty():
+            # Flat behind the title row (its logo ends near 5.7u, wider windows run lower in
+            # the band), then fading out.
+            flat = min(0.85, max(0.5, ui_units(self.width()).px(6.2) / top_h)) if top_h else 0.5
+            for at, alpha in ((0.0, _TOP_SHADE), (flat, _TOP_SHADE), (1.0, 0.0)):
+                grad.setColorAt(at, qcolor("#000000", alpha))
+        else:  # over a radio channel's screen, which shades itself: gone above its top bar
+            top_h = min(top_h, float(self._screen_controls.boundingRect().top()))
+            grad.setFinalStop(0, top_h)
+            for at, alpha in _SCREEN_TOP_SHADE:
+                grad.setColorAt(at, qcolor("#000000", alpha))
         p.fillRect(QRectF(0, 0, self.width(), top_h), grad)
         bottom_h = self.height() * BOTTOM_FRACTION
         y = self.height() - bottom_h

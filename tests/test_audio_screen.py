@@ -532,9 +532,10 @@ class CaptionsRoomTests(ScreenCase):
 
 
 class FollowAndCornerTests(ScreenCase):
-    def test_the_top_bar_steps_below_the_live_controls_while_they_show(self):
+    def test_the_top_bar_sits_below_the_live_controls_title_row(self):
         # Task 5, review item 9: a radio channel keeps live TV's controls, whose title row and
-        # clock sit where the top bar is: while they show, the bar sits below them.
+        # clock sit where the top bar is: the bar sits below them. 2.13.3: whether they show or
+        # not (it stepped up as they faded, from under the pointer).
         from ui.overlays.transport import Transport
 
         screen = self.make(view="cover", tracks=[], current=-1)
@@ -554,8 +555,10 @@ class FollowAndCornerTests(ScreenCase):
                 self.assertGreaterEqual(rect.top(), band)
                 self.assertFalse(any(rect.intersects(row) for row in rows))
         self.assert_laid_out(screen)
-        transport.dismiss()  # they fade: the bar goes back up
-        self.assertEqual(screen.controls()["back"].top(), top)
+        stepped = screen.controls()
+        transport.dismiss()  # they fade: the bar stays
+        self.assertTrue(transport.isHidden())
+        self.assertEqual(screen.controls(), stepped)
         self.assertEqual(screen.cover_rect(), cover)
         transport.show_audio("Ferries at Night", "")  # a song's dock has no title row
         self.assertEqual(transport.top_band_bottom(), 0)

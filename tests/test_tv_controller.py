@@ -3324,7 +3324,8 @@ class HttpsFirstTuneTests(PipelineCase):
 
 
 class BackNoticeTests(PipelineCase):
-    """2.6: coming back to a channel plays it live and offers where it was left, a minute."""
+    """2.6: coming back to a channel plays it live and offers where it was left (2.13.3: for
+    15 s, a minute before), until Esc or its ✕ closes it."""
 
     def setUp(self):
         super().setUp()
@@ -3363,10 +3364,32 @@ class BackNoticeTests(PipelineCase):
             [c for c in self.live.calls if c[0] == "go_back_to"], [("go_back_to", 30.0)]
         )
 
-    def test_it_goes_after_a_minute_and_with_the_channel(self):
+    def test_esc_the_phones_back_and_its_x_close_it(self):
+        # 2.13.3, the owner: "they will know if they want to stay in 10-15 secs, or
+        # dismissable". Esc (the phone's Back is its Esc) closes the pill once nothing over
+        # it has the keys, and so does its ✕; the offer goes with it, as at its end.
+        self.live.backOffered.emit(30.0, self.left_at)
+        self.controller.overlays.drawer.visible = True  # the channel list has the keys
+        self.controller.handle(Action.ESCAPE)
+        self.assertTrue(self.notice.isVisible())
+        self.assertEqual(self.controller.back_label(), "20:10")
+        self.controller.overlays.drawer.visible = False
+        self.controller.handle(Action.ESCAPE)
+        self.assertFalse(self.notice.isVisible())
+        self.assertIsNone(self.controller.back_label())  # the phone's Resume goes too
+        self.controller.handle(Action.BACK_TO)
+        self.assertNotIn(("go_back_to", 30.0), self.live.calls)
+        self.live.backOffered.emit(30.0, self.left_at)
+        self.assertTrue(self.notice.isVisible())
+        self.notice.closeRequested.emit()  # its ✕
+        self.assertFalse(self.notice.isVisible())
+        self.assertIsNone(self.controller.back_label())
+        self.assertNotIn(("go_back_to", 30.0), self.live.calls)
+
+    def test_it_goes_after_15_seconds_and_with_the_channel(self):
         import ui.live_controls as live_controls
 
-        self.assertEqual(live_controls.BACK_NOTICE_MS, 60_000)
+        self.assertEqual(live_controls.BACK_NOTICE_MS, 15_000)  # 2.13.3 (was a minute)
         with mock.patch.object(live_controls, "BACK_NOTICE_MS", 30):
             self.live.backOffered.emit(30.0, self.left_at)
             elapse(60)

@@ -18,8 +18,10 @@ holds still when the system asks for less motion.
 The top bar is the screen's: back (‹), the Words pill (the AI captions; lit: "Words · <its
 language>"), "Up next · N" (Cover, with a list) and the view switch. The bottom DOCK_FRACTION is
 left for the player controls' audio dock (the transport, above this overlay); nothing of the
-screen is drawn there but its light. A radio channel keeps live TV's controls instead: while
-they show, the top bar sits below their title row (`follow`). In the Library's corner player
+screen is drawn there but its light. A radio channel keeps live TV's controls instead: the top
+bar sits below their title row, whether they show or not (it never moves from under the
+pointer), and they leave the screen's own controls their clicks and draw nothing over them
+(`follow`; 2.13.3: they took every click on the screen). In the Library's corner player
 the screen is the cover and the title only (`set_compact`), and its light holds still while
 its window is covered whole.
 
@@ -29,7 +31,8 @@ the mouse's moves (the controls show at a move). It never takes the focus.
 
 It holds no playback state of its own: the controller says what plays (show_song, set_cover,
 set_tracks, set_playing), which view shows (set_view: never a pick; a click on the switch is,
-and says so with viewPicked), the words (set_words, show_lines) and the sound's bands
+and so is a step of the Picture panel's View row by the keys and the phone, step_view: each
+says so with viewPicked), the words (set_words, show_lines) and the sound's bands
 (set_levels: ui.visualizer feeds them while its Stage moves, stageMoving). The AI captions feed
 its lines (ui.captions_controller: a place that shows lines); while its Stage shows
 (takes_words, stageShown) the captions over the picture give way.
@@ -436,6 +439,12 @@ class AudioScreen(Overlay):
         self._mini_timer = QTimer(self)
         self._mini_timer.setInterval(MINI_FRAME_MS)
         self._mini_timer.timeout.connect(self._mini_tick)
+        # The band looked at again once the page's resize is through: a hidden transport takes
+        # its new size then, and hears no resize of its own until it shows (_follow_transport).
+        self._band_check = QTimer(self)
+        self._band_check.setSingleShot(True)
+        self._band_check.setInterval(0)
+        self._band_check.timeout.connect(self._follow_transport)
         self._compact = False  # the Library's corner player: the cover and the title only
         self._inset = 0  # the top bar's top, below live TV's title row while it shows (follow)
         self._transport: Any = None
@@ -510,6 +519,23 @@ class AudioScreen(Overlay):
     def view(self) -> str:
         return self._view
 
+    def views(self) -> tuple[str, ...]:
+        """The views it can show now, as its switch offers them (Album only with a list)."""
+        return tuple(view for view in VIEWS if view != "album" or self._has_list())
+
+    def step_view(self, delta: int) -> None:
+        """The view `delta` places on from the one shown, among views() and round the ends,
+        picked as on the switch (viewPicked): the Picture panel's View row, by the keys and
+        the phone (2.13.3: the switch was the mouse's alone)."""
+        views = self.views()
+        shown = self.shown_view()
+        at = views.index(shown) if shown in views else 0
+        self._pick(views[(at + delta) % len(views)])
+
+    def _pick(self, view: str) -> None:
+        self.set_view(view)
+        self.viewPicked.emit(view)
+
     def takes_words(self) -> bool:
         """Its Stage shows (it is shown, and draws the Stage): the words are its own, and the
         captions over its page give way (ui.captions_controller, show_lines)."""
@@ -518,6 +544,7 @@ class AudioScreen(Overlay):
     def setVisible(self, visible: bool) -> None:  # show()/hide() route through here
         super().setVisible(visible)
         self._say_stage()
+        self._leave_controls()
         self.shownChanged.emit()
 
     def _say_stage(self) -> None:
@@ -559,10 +586,12 @@ class AudioScreen(Overlay):
         return self._compact
 
     def follow(self, transport: Any) -> None:
-        """Lay the top bar out below `transport`'s top band while it shows one: live TV's title
+        """Lay the top bar out below `transport`'s top band where it has one: live TV's title
         row and clock, over a radio channel (Transport.top_band_bottom: 0 for a film's controls
-        and the audio dock). It follows the band (bandChanged), and the controls' showing and
-        fading."""
+        and the audio dock), whether the controls show or not, so that it never moves from
+        under the pointer as they come and fade (2.13.3). It follows the band (bandChanged),
+        and tells `transport` where the screen's own controls are while it shows
+        (Transport.leave_to_screen): over them it takes no click and draws nothing."""
         self._transport = transport
         transport.installEventFilter(self)
         transport.bandChanged.connect(self._follow_transport)
@@ -571,7 +600,7 @@ class AudioScreen(Overlay):
     def _follow_transport(self) -> None:
         transport = self._transport
         inset = 0
-        if transport is not None and not transport.isHidden():
+        if transport is not None and isValid(transport):
             inset = max(0, int(transport.top_band_bottom()) - self.geometry().top())
         if inset != self._inset:
             self._inset = inset
@@ -579,6 +608,19 @@ class AudioScreen(Overlay):
             self._update_timers()
         elif self._room and self._controls_top() != self._floor_seen:
             self._relayout()  # the room left for the captions follows the controls' top
+
+    def _leave_controls(self) -> None:
+        """Tell the followed transport where this screen's own controls are (none while it is
+        hidden): live TV's controls over a radio channel leave them their clicks."""
+        transport = self._transport
+        leave = getattr(transport, "leave_to_screen", None)
+        if leave is None or not isValid(transport):
+            return
+        region = QRegion()
+        if not self.isHidden():
+            offset = self.geometry().topLeft() - transport.geometry().topLeft()
+            region = self.hole_claims().translated(offset)
+        leave(region)
 
     def leave_room_for(self, captions: Any) -> None:
         """While Words is on, Cover and Album lift the cover and its title, and Album's list ends
@@ -680,6 +722,7 @@ class AudioScreen(Overlay):
         self._laid = None
         self._words = None
         self.update()
+        self._leave_controls()  # (they may have moved)
 
     def _update_rect(self, rect: QRectF) -> None:
         if not rect.isEmpty():
@@ -721,6 +764,9 @@ class AudioScreen(Overlay):
         self._backdrop = None
         self._words = None
         self._shadows.clear()
+        self._leave_controls()
+        self._follow_transport()  # the band at the new size (the transport may follow later)
+        self._band_check.start()
 
     def showEvent(self, event: Any) -> None:
         super().showEvent(event)
@@ -841,9 +887,9 @@ class AudioScreen(Overlay):
         self._lay_out_top(lay, m, w)
         dock_top = h * (1 - DOCK_FRACTION)
         top_bar = lay.controls["back"].bottom()
-        # The cover and the list hold still as live TV's controls show and fade over a radio
-        # channel: they're laid out below the bar where it rests. Only Stage's small head,
-        # which the stepped bar would cover, moves with it.
+        # The cover and the list are laid out as on a song's screen, below the bar where it
+        # rests at the top. Over a radio channel the bar sits lower, below live TV's title row
+        # (follow): only Stage's small head, which it would cover, moves down with it.
         resting = top_bar - (lay.controls["back"].top() - m(14))
         if view == "cover":
             self._lay_out_cover(lay, m, w, resting, self._column_bottom(m, dock_top))
@@ -1057,9 +1103,7 @@ class AudioScreen(Overlay):
         elif name == "up_next":
             self.upNextRequested.emit()
         elif name.startswith("view_"):
-            view = name[len("view_") :]
-            self.set_view(view)
-            self.viewPicked.emit(view)
+            self._pick(name[len("view_") :])
         elif name.startswith("track_"):
             self.trackPicked.emit(int(name[len("track_") :]))
 
