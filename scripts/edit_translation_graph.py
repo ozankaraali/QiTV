@@ -21,9 +21,10 @@ the initializers (with their places in model.onnx.data), the inputs and outputs,
         python scripts/edit_translation_graph.py <shipped>/model.onnx <new>/model.onnx
 
 Put model.onnx.data beside the output for onnx.checker's look at the external data (else only
-the shipped folder's copy is looked at). Made 2026-11-21 with onnx 1.23.2 and protobuf 7.36.2
-(the shipped file serializes back to itself byte for byte with them): 295,402 bytes in, 295,408
-out. Not run by QiTV; `onnx` isn't one of its dependencies.
+the shipped folder's copy is looked at). It must be a file of its own there: onnx.checker
+refuses a hard link (and a symlink, as the Hugging Face cache has). Made 2026-11-21 with onnx
+1.23.2 and protobuf 7.36.2 (the shipped file serializes back to itself byte for byte with them):
+295,402 bytes in, 295,408 out. Not run by QiTV; `onnx` isn't one of its dependencies.
 """
 
 from __future__ import annotations

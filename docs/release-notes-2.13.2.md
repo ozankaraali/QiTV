@@ -11,7 +11,7 @@ pre-release, plays free internet radio.
 computer, or from [Releases](https://github.com/ozankaraali/QiTV/releases). Please don't use
 others' distributions, which may have malware.**
 
-## Translated captions start sooner
+## A faster translation model
 
 - **The same translations, sooner.** Before it writes a line's translation, the model reads
   the prompt: the line and the words around it. Its last step, which picks the next word, ran
