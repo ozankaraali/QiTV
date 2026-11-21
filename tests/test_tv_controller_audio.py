@@ -28,11 +28,13 @@ from PySide6.QtTest import QTest
 from test_tv_controller import ControllerTestCase, FakeOverlay, FakeSession, FakeTransport
 from timer_fixtures import pause, wait_until
 
+from services import free_radio
 from services.local_episodes import list_folder
 from services.playback import PlaybackState
 from services.song_facts import song_tags
 from services.watch_state import local_key
 from tests import test_tv_pip, test_tv_window as base
+from tests.fixtures.local_provider import seed_channels
 from ui.keymap import Action
 from ui.overlays.audio_screen import AudioScreen
 from ui.overlays.transport import Transport
@@ -1986,6 +1988,56 @@ class WindowSongTests(base.WindowCase):
                 window.more_menu.dismiss()
                 try_hide()
                 self.assertTrue(pointer.hidden())
+        window.controller.stop()
+
+
+@unittest.skipUnless(FFMPEG, "ffmpeg makes the station's sound")
+class WindowRadioTests(base.WindowCase):
+    """A Free radio station in a real window (libVLC with no picture or sound): a local tone
+    with no video track, as the fixture provider's third channel."""
+
+    vlc_instance = base.INSTANCE
+
+    def setUp(self):
+        directory = tempfile.TemporaryDirectory()
+        self.addCleanup(directory.cleanup)
+        station = Path(directory.name) / "station.m4a"
+        subprocess.run(
+            ["ffmpeg", "-y", "-loglevel", "error", "-f", "lavfi", "-i"]
+            + ["sine=frequency=440:duration=60", "-c:a", "aac", str(station)],
+            check=True,
+        )
+        self.station_url = station.as_uri()
+        super().setUp()
+
+    def seed(self, provider):
+        seed_channels(self.provider_manager, provider, live_url=self.station_url)
+        content = self.provider_manager.current_provider_content["itv"]["contents"]
+        content[2][free_radio.STATION_KEY] = True
+        self.provider_manager.save_provider()
+
+    def test_a_stations_screen_takes_its_clicks_under_live_tvs_controls(self):
+        # 2.13.3, the owner: on a radio station live TV's controls showed and the audio
+        # screen's view switch could not be picked.
+        window = self.window
+        self.show()
+        self.wait_for_drawer()
+        QTest.keyClick(window, Qt.Key.Key_Escape)
+        station = window.catalog.items("live", "*")[2]
+        self.assertTrue(free_radio.is_station(station))
+        window.controller.tune_live(station)
+        screen, host = window.audio_screen, window.host
+        transport = window.overlays.transport
+        self.assertTrue(wait_until(screen.isVisible, 20_000), "the station's screen")
+        window.controller.mouse_moved()  # live TV's controls, over the screen
+        self.assertTrue(transport.isVisible())
+        self.assertFalse(transport.audio())  # no dock: a station keeps live TV's controls
+        stage = screen.controls()["view_stage"].center()
+        self.assertIs(host.childAt(stage), screen)
+        QTest.mouseMove(host.windowHandle(), stage)
+        QTest.mouseClick(host.windowHandle(), Qt.MouseButton.LeftButton, pos=stage)
+        self.assertEqual(screen.view(), "stage")
+        self.assertEqual(self.config.audio_view, "stage")  # picked: remembered
         window.controller.stop()
 
 
