@@ -2,8 +2,9 @@
 
 QiTV 2.13.1 opens nothing in a system window any more. Every menu, question and card is drawn
 in QiTV's own look, the same as the channel list and Settings, and the keys, the remote and the
-phone reach all of them. The channel list also loads while QiTV starts, and picture in picture
-shows no bars. 2.13.1 also brings 2.13.0, a pre-release, which plays free internet radio.
+phone reach all of them. The channel list also loads while QiTV starts, picture in picture
+shows no bars, and at home the phone shows posters and logos. 2.13.1 also brings 2.13.0, a
+pre-release, which plays free internet radio.
 
 **Download QiTV from [qitv.app](https://qitv.app), which picks the right build for your
 computer, or from [Releases](https://github.com/ozankaraali/QiTV/releases). Please don't use
@@ -50,6 +51,16 @@ others' distributions, which may have malware.**
   bars are right, for example a 16:9 picture on a 16:10 screen.
 - **After a zap in picture in picture,** a thin bar may show for half a second until the new
   channel's shape is known, so a 4:3 channel is never stretched into a 16:9 box.
+
+## Pictures on your phone
+
+- **At home, the phone shows pictures.** When the phone is on the same network as QiTV, its
+  Library shows the films' and series' posters, its channel lists show the channels' logos
+  (while **Enable Channel Logos** is on in Settings), and what plays shows its artwork.
+- **They come from QiTV.** QiTV takes each picture from its own cache and sends it only to
+  your paired phone. A picture that doesn't load tries again a little later.
+- **Away from home, nothing changes.** Through the relay the phone shows its coloured cards as
+  before, and the relay never sees what you watch.
 
 ## Free radio
 
