@@ -632,6 +632,7 @@ class TVController(QObject):
             live_info=self._live_info,
             stop=self.stop_for_sleep,
             show_transport=self._show_transport,
+            audio_screen=lambda: self._screen() if self.sound_shown() else None,
             parent=self,
         )
         # 2.8: the ⚙ quality menu: a media server's versions and conversions.

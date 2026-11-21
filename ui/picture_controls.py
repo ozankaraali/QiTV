@@ -4,13 +4,17 @@ the picture.
 The transport's Picture button (or A) opens the panel above it, as ♫ opens the Sound panel
 (ui/overlays/track_panel.py: the same look, keys, idle close, scrolling and click-outside):
 
+    View            ‹ Cover ›    Cover, Album, Stage (the audio screen's, while it shows)
     Aspect ratio    ‹ Auto ›     Auto, 16:9, 4:3, Fill the window
     Sleep timer     ‹ Off ›      Off, 15, 30, 60, 90 min, End of the programme
   ✓ Statistics                   shown or hidden
 
 ‹ and › (←/→ on the row, Enter, a click on the row) step a setting through its choices, round
-the ends. A opens the panel on the aspect ratio, and again while it shows steps it on; Shift+I
-shows or hides the statistics from anywhere on the player. While the panel shows, the keys are
+the ends. A opens the panel on its first row (the aspect ratio, or the audio screen's View), and
+again while it shows steps the aspect ratio on; Shift+I shows or hides the statistics from
+anywhere on the player. The View row (2.13.3) is there while the audio screen shows what plays
+(a song, a radio channel): it steps the screen's views as its switch picks them (Album only with
+an album's list), so the keys and the phone's Picture button and arrows reach them too. While the panel shows, the keys are
 its own (↑/↓, ←/→, Enter, Esc); another key closes it and goes on.
 
 Everything acts on the large picture (a multiview's focused tile is the large one). A live
@@ -52,6 +56,7 @@ from services.picture import ASPECTS, DEINTERLACING, aspect_name
 from services.sleep_timer import PRESETS_MIN, SleepTimer, clock_text
 from ui.keymap import Action, key_hint
 from ui.link_lanes import Target
+from ui.overlays.audio_screen import VIEW_NAMES
 from ui.overlays.track_panel import PanelModel, PanelRow
 from ui.player_keys import PlayerKeys
 
@@ -59,6 +64,7 @@ logger = logging.getLogger(__name__)
 
 PICTURE = "picture"  # the transport's button
 ASPECT, SLEEP, STATS = "aspect", "sleep", "stats"  # the rows
+VIEW = "view"  # 2.13.3: the audio screen's view, while it shows
 PICTURE_TITLE = N_("Picture")  # i18n: the Picture panel's title (aspect ratio, sleep timer…)
 ASPECT_LABEL = N_("Aspect ratio")  # i18n: the Picture panel's row
 SLEEP_LABEL = N_("Sleep timer")  # i18n: the Picture panel's row: playback stops after a while
@@ -101,6 +107,7 @@ class PictureControls(QObject):
         live_info: Callable[[], dict],
         stop: Callable[[], None],
         show_transport: Callable[[], None] = lambda: None,
+        audio_screen: Callable[[], Any] = lambda: None,
         allow_sleep: Callable[[], None] = sleep_manager.allow_sleep,
         prevent_sleep: Callable[[], None] = sleep_manager.prevent_sleep,
         timer: Optional[SleepTimer] = None,
@@ -113,8 +120,9 @@ class PictureControls(QObject):
         `programme_left()` the seconds until the programme watched ends (None: not known),
         `live_info()` the statistics' "source" and "lag"; `stop()` stops playback for the
         sleep timer; `show_transport()` shows the player controls (A opens the panel above
-        them). `allow_sleep` and `prevent_sleep` let the computer sleep or keep it awake
-        (services.sleep_manager's)."""
+        them). `audio_screen()` is the audio screen while it shows what plays (None: it does
+        not): its View row. `allow_sleep` and `prevent_sleep` let the computer sleep or keep it
+        awake (services.sleep_manager's)."""
         super().__init__(parent)
         self._panel = panel
         self._transport = transport
@@ -132,6 +140,7 @@ class PictureControls(QObject):
         self._live_info = live_info
         self._stop = stop
         self._show_transport = show_transport
+        self._audio_screen = audio_screen
         self._allow_sleep = allow_sleep
         self._prevent_sleep = prevent_sleep
         self._timer = timer if timer is not None else SleepTimer(self)
@@ -251,7 +260,7 @@ class PictureControls(QObject):
         aspect = picture.stepped(ASPECTS, self._session().aspect(), 1)
         self._set_aspect(aspect)
         if self.visible():
-            self._panel.focus_row(0)
+            self._panel.focus_row(self._row_index(ASPECT))
             self.open_panel()
         else:
             # i18n: a toast: the aspect ratio chosen ("Aspect ratio: 16:9")
@@ -305,7 +314,7 @@ class PictureControls(QObject):
         aspects = [aspect_name(a) for a in ASPECTS]
         sleeps = [self._sleep_name(choice) for choice in self._sleep_choices()]
         sleeps.append(_time_left(90 * 60.0))  # "1:30:00 left"
-        rows = (
+        rows: tuple[PanelRow, ...] = (
             PanelRow(
                 ASPECT,
                 translate(ASPECT_LABEL),
@@ -328,7 +337,23 @@ class PictureControls(QObject):
                 tip=key_hint(translate(STATS_LABEL), _STATS_KEY),
             ),
         )
+        screen = self._audio_screen()
+        if screen is not None:
+            names = [translate(VIEW_NAMES[view]) for view in screen.views()]
+            view = PanelRow(
+                VIEW,
+                tr("View"),  # i18n: the Picture panel's row: the audio screen's view (Cover…)
+                value=translate(VIEW_NAMES[screen.shown_view()]),
+                widest=max(names, key=len),
+            )
+            rows = (view, *rows)
         return PanelModel(translate(PICTURE_TITLE), rows)
+
+    def _row_index(self, key: str) -> int:
+        """Where the row `key` sits in the panel shown (the View row comes first)."""
+        model = self._panel.model() if self._panel is not None else None
+        keys = [row.key for row in model.rows] if model is not None else []
+        return keys.index(key) if key in keys else 0
 
     def _anchor(self) -> Optional[QRectF]:
         """The transport's Picture button, in the host's coordinates (None: not shown)."""
@@ -353,7 +378,11 @@ class PictureControls(QObject):
     def _on_step(self, key, delta: int) -> None:
         if not self._playing():
             return
-        if key == ASPECT:
+        if key == VIEW:
+            screen = self._audio_screen()
+            if screen is not None:
+                screen.step_view(delta)
+        elif key == ASPECT:
             self._set_aspect(picture.stepped(ASPECTS, self._session().aspect(), delta))
         elif key == SLEEP:
             self._step_sleep(delta)

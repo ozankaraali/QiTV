@@ -31,7 +31,8 @@ the mouse's moves (the controls show at a move). It never takes the focus.
 
 It holds no playback state of its own: the controller says what plays (show_song, set_cover,
 set_tracks, set_playing), which view shows (set_view: never a pick; a click on the switch is,
-and says so with viewPicked), the words (set_words, show_lines) and the sound's bands
+and so is a step of the Picture panel's View row by the keys and the phone, step_view: each
+says so with viewPicked), the words (set_words, show_lines) and the sound's bands
 (set_levels: ui.visualizer feeds them while its Stage moves, stageMoving). The AI captions feed
 its lines (ui.captions_controller: a place that shows lines); while its Stage shows
 (takes_words, stageShown) the captions over the picture give way.
@@ -517,6 +518,23 @@ class AudioScreen(Overlay):
 
     def view(self) -> str:
         return self._view
+
+    def views(self) -> tuple[str, ...]:
+        """The views it can show now, as its switch offers them (Album only with a list)."""
+        return tuple(view for view in VIEWS if view != "album" or self._has_list())
+
+    def step_view(self, delta: int) -> None:
+        """The view `delta` places on from the one shown, among views() and round the ends,
+        picked as on the switch (viewPicked): the Picture panel's View row, by the keys and
+        the phone (2.13.3: the switch was the mouse's alone)."""
+        views = self.views()
+        shown = self.shown_view()
+        at = views.index(shown) if shown in views else 0
+        self._pick(views[(at + delta) % len(views)])
+
+    def _pick(self, view: str) -> None:
+        self.set_view(view)
+        self.viewPicked.emit(view)
 
     def takes_words(self) -> bool:
         """Its Stage shows (it is shown, and draws the Stage): the words are its own, and the
@@ -1085,9 +1103,7 @@ class AudioScreen(Overlay):
         elif name == "up_next":
             self.upNextRequested.emit()
         elif name.startswith("view_"):
-            view = name[len("view_") :]
-            self.set_view(view)
-            self.viewPicked.emit(view)
+            self._pick(name[len("view_") :])
         elif name.startswith("track_"):
             self.trackPicked.emit(int(name[len("track_") :]))
 

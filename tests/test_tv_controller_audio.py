@@ -1894,6 +1894,23 @@ class WindowSongTests(base.WindowCase):
         self.assertIs(window.controller.session.state(), PlaybackState.PLAYING)
         window.controller.stop()
 
+    def test_the_keys_pick_a_songs_view_in_the_picture_panel(self):
+        # 2.13.3: a song's screen too (its dock's ⋯ has the Picture panel; A opens it).
+        window = self.window
+        screen = self.play_song()
+        panel = window.picture_panel
+        self.assertEqual(screen.view(), "cover")  # a lone song: Cover and Stage
+        QTest.keyClick(window, Qt.Key.Key_A)
+        self.assertTrue(panel.isVisible())
+        row = panel.model().rows[panel.focused()]
+        self.assertEqual((row.text, row.value), ("View", "Cover"))
+        QTest.keyClick(window, Qt.Key.Key_Right)
+        self.assertEqual(screen.view(), "stage")
+        self.assertEqual(self.config.audio_view, "stage")
+        QTest.keyClick(window, Qt.Key.Key_Escape)
+        self.assertFalse(panel.isVisible())
+        window.controller.stop()
+
     def test_the_words_pill_turns_ai_captions_as_their_row_does(self):
         # The real pill and the real CaptionsController. Where no speech model can run (hel: no
         # runtime for its processor) it says so and changes nothing, even a moment later; where
@@ -2038,6 +2055,38 @@ class WindowRadioTests(base.WindowCase):
         QTest.mouseClick(host.windowHandle(), Qt.MouseButton.LeftButton, pos=stage)
         self.assertEqual(screen.view(), "stage")
         self.assertEqual(self.config.audio_view, "stage")  # picked: remembered
+        window.controller.stop()
+
+    def test_the_keys_and_the_phone_pick_the_screens_view_in_the_picture_panel(self):
+        # 2.13.3: the view switch was the mouse's alone (a song's screen's too). The Picture
+        # panel (A, the phone's Picture button) has a View row while the screen shows, first:
+        # ←/→ (the phone's arrows) step it as the switch picks.
+        window = self.window
+        self.show()
+        self.wait_for_drawer()
+        QTest.keyClick(window, Qt.Key.Key_Escape)
+        window.controller.tune_live(window.catalog.items("live", "*")[2])
+        screen, panel = window.audio_screen, window.picture_panel
+        self.assertTrue(wait_until(screen.isVisible, 20_000), "the station's screen")
+        QTest.keyClick(window, Qt.Key.Key_A)
+        self.assertTrue(panel.isVisible())
+        self.assertEqual(panel.focused(), 0)
+        row = panel.model().rows[0]
+        self.assertEqual((row.text, row.value), ("View", "Cover"))
+        QTest.keyClick(window, Qt.Key.Key_Right)  # no list: Album is skipped
+        self.assertEqual(screen.view(), "stage")
+        self.assertEqual(panel.model().rows[0].value, "Stage")
+        self.assertEqual(self.config.audio_view, "stage")  # picked: remembered
+        QTest.keyClick(window, Qt.Key.Key_Escape)
+        self.assertFalse(panel.isVisible())
+        window.remote.fire("picture")  # the phone's
+        self.assertTrue(panel.isVisible())
+        window.remote.fire("left")
+        self.assertEqual(screen.view(), "cover")
+        self.assertEqual(self.config.audio_view, "cover")
+        window.remote.fire("back")
+        self.assertFalse(panel.isVisible())
+        self.assertEqual(screen.view(), "cover")
         window.controller.stop()
 
 
