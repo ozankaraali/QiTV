@@ -169,13 +169,20 @@ def invented_logo(n: int) -> bytes:
 class InventedImages:
     """QiTV's image cache as the home door reads it (services/image_manager.py), for the page's
     pictures: invented posters and logos made here, by the name an address ends in
-    (poster-<n>.png, logo-<n>.png). Nothing goes to the network."""
+    (poster-<n>.png, logo-<n>.png; flaky-<n>.png: a poster whose first download fails). Nothing
+    goes to the network."""
 
     def __init__(self) -> None:
         self.folder = Path(tempfile.mkdtemp(prefix="qitv-page-pictures-"))
+        self.flaky: set[str] = set()  # those whose first download failed already
 
     async def cache_image_from_url(self, session: Any, url: str, iconified: bool) -> Optional[str]:
         name = url.rsplit("/", 1)[-1]
+        if name.startswith("flaky-"):
+            if url not in self.flaky:
+                self.flaky.add(url)
+                return None
+            name = "poster-" + name.removeprefix("flaky-")
         path = self.folder / name
         if not path.exists():
             kind, _, number = name.removesuffix(".png").partition("-")
@@ -811,7 +818,7 @@ def scenario_pictures(rig: Rig) -> None:
     """At home, QiTV's pictures over its tiles and cards: the now-playing logo (kept while it
     is drawn again), the Guide's logos, the Library's posters (2:3, as the cards were: nothing
     moves when they land, a poster says its own title). A picture that fails leaves its card as
-    it was, and isn't asked for again."""
+    it was; it is asked for again after 20 s while its card shows, not before."""
     rig.allowed.append("404")  # the picture that fails, on purpose
     sid = paired_sid(rig)
     shelf = rig.hub.pictures
@@ -862,16 +869,37 @@ def scenario_pictures(rig: Rig) -> None:
     for i, item in enumerate(page["items"]):
         item.update(img=poster(i + 1), hue=round((0.1 + i * 0.17) % 1, 3), plays=True)
     page["items"][2]["img"] = "AAAAAAAAAAAAAAAAAAAAAA"  # a token QiTV never gave: it fails
+    flaky = shelf.issue(sid, "https://posters.invalid/flaky-4.png", "poster")
+    page["items"][3]["img"] = flaky  # its host fails once, then answers
+    requests: list[str] = []
+    rig.page.on("request", lambda request: requests.append(request.url))
     answer(rig, sid, ask, page)
     rig.page.wait_for_selector("#libraryRows .card >> nth=5")
     cards = rig.page.locator("#libraryRows .card")
     rig.page.wait_for_function(
-        "() => document.querySelectorAll('#libraryRows .card img.pic.in').length === 5"
+        "() => document.querySelectorAll('#libraryRows .card img.pic.in').length === 4"
     )
-    rig.page.wait_for_function(
-        "() => { const c = document.querySelectorAll('#libraryRows .card')[2];"
+    without = (
+        "(n) => { const c = document.querySelectorAll('#libraryRows .card')[n];"
         " return c && !c.querySelector('img'); }"
     )
+    rig.page.wait_for_function(without, arg=2)
+    rig.page.wait_for_function(without, arg=3)
+    failed_at = time.monotonic()
+    rig.page.wait_for_timeout(1000)
+    rig.hub.send(sid, page)  # drawn again (QiTV's own resend) soon after: not asked again
+    rig.page.wait_for_selector("#libraryRows .card >> nth=5")
+    rig.page.wait_for_timeout(500)
+    assert sum(flaky in url for url in requests) == 1, requests
+    # 20 s on, while its card shows, it is asked for again: and now it comes.
+    rig.page.wait_for_function(
+        "(n) => { const c = document.querySelectorAll('#libraryRows .card')[n];"
+        " const i = c && c.querySelector('img.pic.in'); return i && i.naturalWidth > 0; }",
+        arg=3,
+        timeout=30000,
+    )
+    waited = time.monotonic() - failed_at
+    assert 19 <= waited <= 28, waited
     failed, pictured = cards.nth(2), cards.nth(0)
     assert "linear-gradient" in failed.evaluate("e => getComputedStyle(e).backgroundImage")
     title = failed.evaluate("e => getComputedStyle(e.querySelector('.card-title')).color")
@@ -892,12 +920,8 @@ def scenario_pictures(rig: Rig) -> None:
     assert abs(picture["height"] - boxes[0]["height"]) < 1, (picture, boxes[0])  # it fills its card
     rig.page.wait_for_timeout(300)
     rig.shot("shot-library-posters")
-    # Drawn again (QiTV's own resend), the failed one isn't asked for again.
-    requests: list[str] = []
-    rig.page.on("request", lambda request: requests.append(request.url))
-    rig.hub.send(sid, page)
-    rig.page.wait_for_timeout(500)
-    assert not any("AAAAAAAAAAAAAAAAAAAAAA" in url for url in requests), requests
+    # The one QiTV never gave was asked twice: at first, and once 20 s on (then it waits longer).
+    assert sum("AAAAAAAAAAAAAAAAAAAAAA" in url for url in requests) == 2, requests
 
 
 KNOB_SIDE = """(s) => {

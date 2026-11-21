@@ -4,6 +4,7 @@ is good for its session alone (and the address it came from); through the relay 
 """
 
 import asyncio
+import gc
 import logging
 from pathlib import Path
 import struct
@@ -22,7 +23,15 @@ from test_remote_home_door import Recorder, code_from
 from services.image_manager import ImageManager
 from services.remote import pictures
 from services.remote.hub import RemoteHub, _Conn
-from services.remote.pictures import AS_IS_MAX, LOGO, POSTER, PictureShelf, sniff
+from services.remote.pictures import (
+    AS_IS_MAX,
+    LOGO,
+    MAX_SIDE,
+    POSTER,
+    PictureShelf,
+    picture_size,
+    sniff,
+)
 from services.remote.protocol import Closed, Code, Opened, PictureWanted
 from services.remote.session import Reply
 
@@ -46,7 +55,32 @@ def png(width=2, height=3, pad=0) -> bytes:
     )
 
 
-JPEG = b"\xff\xd8\xff\xe0" + b"\x00" * 64
+def jpeg(width=4, height=6, sof=True) -> bytes:
+    """A JPEG's opening as far as its size (APP0, then SOF0 unless `sof` is False)."""
+    app0 = b"\xff\xe0" + struct.pack(">H", 16) + b"JFIF\x00\x01\x01\x00\x00\x01\x00\x01\x00\x00"
+    frame = struct.pack(">BHHB", 8, height, width, 3) + b"\x01\x22\x00\x02\x11\x01\x03\x11\x01"
+    sof0 = b"\xff\xc0" + struct.pack(">H", len(frame) + 2) + frame if sof else b""
+    return b"\xff\xd8" + app0 + sof0 + b"\xff\xda" + b"\x00" * 32 + b"\xff\xd9"
+
+
+def webp(kind: bytes, width: int, height: int) -> bytes:
+    """A WebP's opening as far as its size: a lossy (VP8 ), lossless (VP8L) or extended one."""
+    if kind == b"VP8 ":
+        body = b"\x00\x00\x00\x9d\x01\x2a" + struct.pack("<HH", width, height)
+    elif kind == b"VP8L":
+        bits = (width - 1) | ((height - 1) << 14)
+        body = b"\x2f" + struct.pack("<I", bits)
+    else:
+        body = (
+            b"\x00\x00\x00\x00"
+            + (width - 1).to_bytes(3, "little")
+            + (height - 1).to_bytes(3, "little")
+        )
+    chunk = kind + struct.pack("<I", len(body)) + body
+    return b"RIFF" + struct.pack("<I", 4 + len(chunk)) + b"WEBP" + chunk
+
+
+JPEG = jpeg()
 
 
 class ShelfTests(unittest.TestCase):
@@ -97,6 +131,18 @@ class ShelfTests(unittest.TestCase):
 
 
 class SniffTests(unittest.TestCase):
+    def test_a_pictures_size_from_its_header_alone(self):
+        self.assertEqual(picture_size(png(2, 3)), (2, 3))
+        self.assertEqual(picture_size(jpeg(640, 960)), (640, 960))
+        self.assertEqual(
+            picture_size(b"GIF89a" + struct.pack("<HH", 300, 200) + b"\x00" * 8), (300, 200)
+        )
+        for kind in (b"VP8 ", b"VP8L", b"VP8X"):
+            self.assertEqual(picture_size(webp(kind, 1000, 1500)), (1000, 1500), kind)
+        self.assertIsNone(picture_size(jpeg(sof=False)))  # no frame found: not known
+        self.assertIsNone(picture_size(png()[:20]))
+        self.assertIsNone(picture_size(b"<svg/>"))
+
     def test_only_the_webs_own_picture_formats(self):
         self.assertEqual(sniff(png()), "image/png")
         self.assertEqual(sniff(JPEG), "image/jpeg")
@@ -122,11 +168,24 @@ class FakeImages:
         self.calls: list[tuple[str, bool, str]] = []
         self.discarded: list[str] = []
         self.gate: threading.Event | None = None
+        self.delay = 0.0  # a download's time
+        self.hold = False  # downloads wait until called off
+        self.cancelled: list[str] = []
+        self.sessions: list = []
 
     async def cache_image_from_url(self, session, url, iconified):
         self.calls.append((url, iconified, threading.current_thread().name))
+        self.sessions.append(session)
         if self.gate is not None:
             await asyncio.get_running_loop().run_in_executor(None, self.gate.wait, 5)
+        try:
+            if self.hold:
+                await asyncio.sleep(30)
+            if self.delay:
+                await asyncio.sleep(self.delay)
+        except asyncio.CancelledError:
+            self.cancelled.append(url)
+            raise
         data = self.files.get(url, self.fetched.get(url))
         if data is None:
             return None
@@ -433,10 +492,158 @@ class HomeDoorPictureTests(HubCase):
         sid = asyncio.run_coroutine_threadsafe(relayed(), self.hub._loop).result(3)
         self.assertEqual(self.hub.pictures.issue(sid, "https://img.example/a.jpg", POSTER), "")
 
+    def test_a_scaled_copy_that_comes_late_is_kept_for_the_next_ask(self):
+        """The TV's cache was busy past SCALE_S: its copy, when it comes, is the next answer."""
+        self.images.files["https://img.example/big.png"] = png(pad=AS_IS_MAX + 10)
+
+        async def go():
+            async with aiohttp.ClientSession() as s:
+                ws, sid = await self.pair(s)
+                token = self.hub.pictures.issue(sid, "https://img.example/big.png", POSTER)
+                first = await self.get(s, f"/img/{token}")
+                wanted = self.events.wait(PictureWanted)
+                self.hub.put_picture(wanted.source, wanted.kind, JPEG, "image/jpeg")  # late
+                await asyncio.sleep(0.2)
+                again = await self.get(s, f"/img/{token}")
+                await ws.close()
+                return first, again
+
+        with mock.patch.object(pictures, "SCALE_S", 0.3):
+            (status, headers, _body), again = self.run_async(go())
+        self.assertEqual(status, 404)
+        self.assertEqual(headers["Cache-Control"], "no-store")  # a retry reaches QiTV
+        self.assertEqual((again[0], again[2]), (200, JPEG))
+
+    def test_a_picture_that_failed_is_tried_again_after_a_while(self):
+        async def go():
+            async with aiohttp.ClientSession() as s:
+                ws, sid = await self.pair(s)
+                token = self.hub.pictures.issue(sid, "https://img.example/late.jpg", POSTER)
+                first = (await self.get(s, f"/img/{token}"))[0]
+                self.images.fetched["https://img.example/late.jpg"] = JPEG  # the host is back
+                await asyncio.sleep(0.3)
+                again = (await self.get(s, f"/img/{token}"))[0]
+                await ws.close()
+                return first, again
+
+        with mock.patch.object(pictures, "FAILED_S", 0.2):
+            self.assertEqual(self.run_async(go()), (404, 200))
+        self.assertEqual(len(self.images.calls), 2)
+        self.assertLess(pictures.FAILED_S, 20)  # before the page asks again (screens.js)
+
+    def test_waiting_for_a_download_slot_is_not_counted_in_its_time(self):
+        for i in range(2):
+            self.images.fetched[f"https://img.example/q{i}.jpg"] = JPEG
+        self.images.delay = 0.35
+
+        async def go():
+            async with aiohttp.ClientSession() as s:
+                ws, sid = await self.pair(s)
+                tokens = [
+                    self.hub.pictures.issue(sid, f"https://img.example/q{i}.jpg", POSTER)
+                    for i in range(2)
+                ]
+                answers = await asyncio.gather(*(self.get(s, f"/img/{t}") for t in tokens))
+                await ws.close()
+                return [a[0] for a in answers]
+
+        with mock.patch.object(pictures, "FETCHES", 1), mock.patch.object(pictures, "FETCH_S", 0.5):
+            self.assertEqual(self.run_async(go()), [200, 200])
+
+    def test_a_picture_of_many_pixels_goes_scaled_however_few_its_bytes(self):
+        wide = png(width=MAX_SIDE + 1, height=2)
+        self.assertLess(len(wide), AS_IS_MAX)
+        self.images.files["https://img.example/wide.png"] = wide
+
+        async def go():
+            async with aiohttp.ClientSession() as s:
+                ws, sid = await self.pair(s)
+                token = self.hub.pictures.issue(sid, "https://img.example/wide.png", POSTER)
+                answer = asyncio.ensure_future(self.get(s, f"/img/{token}"))
+                wanted = await asyncio.get_running_loop().run_in_executor(
+                    None, lambda: self.events.wait(PictureWanted)
+                )
+                self.hub.put_picture(wanted.source, wanted.kind, png(), "image/png")
+                result = await answer
+                await ws.close()
+                return result
+
+        status, _headers, body = self.run_async(go())
+        self.assertEqual((status, body), (200, png()))
+
+    def test_a_jpeg_whose_size_isnt_found_goes_scaled(self):
+        self.images.files["https://img.example/odd.jpg"] = jpeg(sof=False)
+
+        async def go():
+            async with aiohttp.ClientSession() as s:
+                ws, sid = await self.pair(s)
+                token = self.hub.pictures.issue(sid, "https://img.example/odd.jpg", POSTER)
+                answer = await self.get(s, f"/img/{token}")
+                await ws.close()
+                return answer[0]
+
+        with mock.patch.object(pictures, "SCALE_S", 0.3):
+            self.assertEqual(self.run_async(go()), 404)
+        self.assertTrue(self.events.wait(PictureWanted))
+
+    def test_a_scaled_copy_of_many_pixels_is_refused(self):
+        self.images.files["https://img.example/big.png"] = png(pad=AS_IS_MAX + 10)
+
+        async def go():
+            async with aiohttp.ClientSession() as s:
+                ws, sid = await self.pair(s)
+                token = self.hub.pictures.issue(sid, "https://img.example/big.png", POSTER)
+                answer = asyncio.ensure_future(self.get(s, f"/img/{token}"))
+                wanted = await asyncio.get_running_loop().run_in_executor(
+                    None, lambda: self.events.wait(PictureWanted)
+                )
+                self.hub.put_picture(wanted.source, wanted.kind, png(MAX_SIDE + 1, 1), "image/png")
+                result = await answer
+                await ws.close()
+                return result[0]
+
+        with mock.patch.object(pictures, "SCALE_S", 0.5):
+            self.assertEqual(self.run_async(go()), 404)
+
+    def test_stopping_calls_off_the_downloads_and_closes_their_session(self):
+        self.images.fetched["https://img.example/slow.jpg"] = JPEG
+        self.images.hold = True
+        records: list[logging.LogRecord] = []
+
+        class Keep(logging.Handler):
+            def emit(self, record):
+                records.append(record)
+
+        handler = Keep(logging.DEBUG)
+        logging.getLogger("asyncio").addHandler(handler)
+        self.addCleanup(logging.getLogger("asyncio").removeHandler, handler)
+
+        async def go():
+            async with aiohttp.ClientSession() as s:
+                ws, sid = await self.pair(s)
+                token = self.hub.pictures.issue(sid, "https://img.example/slow.jpg", POSTER)
+                asking = asyncio.ensure_future(self.get(s, f"/img/{token}"))
+                end = time.monotonic() + 3
+                while not self.images.calls and time.monotonic() < end:
+                    await asyncio.sleep(0.02)
+                await asyncio.get_running_loop().run_in_executor(None, self.hub.stop)
+                await asyncio.gather(asking, return_exceptions=True)
+
+        self.run_async(go())
+        end = time.monotonic() + 3
+        while not self.images.cancelled and time.monotonic() < end:
+            time.sleep(0.02)
+        self.assertEqual(self.images.cancelled, ["https://img.example/slow.jpg"])
+        self.assertTrue(self.images.sessions and all(s.closed for s in self.images.sessions))
+        gc.collect()
+        text = "\n".join(r.getMessage() for r in records)
+        self.assertNotIn("Task was destroyed", text)
+        self.assertNotIn("Unclosed", text)
+
     def test_nothing_is_fetched_once_the_hub_stops(self):
         self.images.fetched["https://img.example/late.jpg"] = JPEG
         server = self.hub._core.pictures
-        server.stop()
+        asyncio.run_coroutine_threadsafe(server.stop(), self.hub._loop).result(3)
 
         async def go():
             async with aiohttp.ClientSession() as s:

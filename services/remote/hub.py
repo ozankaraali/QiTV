@@ -193,7 +193,7 @@ class HubCore:
         await asyncio.gather(*(self._goodbye(conn) for conn in list(self.conns.values())))
         for sid in list(self.conns):
             self.pictures.shelf.close(sid)  # their tokens end with them
-        self.pictures.stop()
+        await self.pictures.stop()  # and what was being had for them is called off
         if self.relay is not None:
             await self.relay.stop()
             self.relay = None

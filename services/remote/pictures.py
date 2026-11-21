@@ -38,13 +38,16 @@ POSTER, LOGO = "poster", "logo"  # a title's poster (2:3), a channel's logo (the
 KINDS = (POSTER, LOGO)
 SESSION_PICTURES = 3000  # the tokens a session keeps: its latest
 AS_IS_MAX = 400 * 1024  # a cached file this size or smaller goes as it is
+MAX_SIDE = 2048  # and this many pixels a side at most (a phone decodes it whole)
 SCALED_MAX = 2 * 1024 * 1024  # QiTV's own scaled copy, at most
 KEPT_BYTES = 16 * 1024 * 1024  # what was served, kept in memory for the next ask
 KEPT_COUNT = 400
 FETCHES = 4  # pictures downloaded at once
-FETCH_S = 25.0  # a picture's download (the image cache tries twice) and read, at most
-SCALE_S = 10.0  # QiTV's GUI scaling one, at most
-FAILED_S = 120.0  # a picture that couldn't be had isn't tried again for this long
+FETCH_S = 25.0  # a picture's download (the image cache tries twice), at most, once begun
+SCALE_S = 10.0  # QiTV's GUI scaling one, at most (a copy that comes later is kept)
+# A picture that couldn't be had isn't tried again for this long: less than the page waits
+# before it asks again (screens.js, 20 s), so that ask reaches the host (or the TV's cache).
+FAILED_S = 15.0
 FAILED_COUNT = 1000
 _HEAD = 64
 # What a picture's answer says: its own type, nothing to run, for this page alone; a phone may
@@ -56,6 +59,10 @@ ANSWER_HEADERS = {
     "Cross-Origin-Resource-Policy": "same-origin",
 }
 _PAGES = (b"<!doctype html", b"<html", b"<head", b"<body", b"{", b"[")
+_JPEG_SCAN = 64 * 1024  # how far into a JPEG its frame (and size) is looked for
+# The JPEG markers that start a frame (SOF0–SOF15 but DHT, JPG and DAC) and those without length.
+_SOF = frozenset(range(0xC0, 0xD0)) - {0xC4, 0xC8, 0xCC}
+_BARE = frozenset((0x01, *range(0xD0, 0xD9)))
 
 Found = tuple[bytes, str]  # a picture's bytes and their type
 
@@ -83,6 +90,67 @@ def sniff(data: bytes) -> Optional[str]:
     if data[:4] == b"RIFF" and data[8:12] == b"WEBP":
         return "image/webp"
     return None
+
+
+def picture_size(data: bytes) -> Optional[tuple[int, int]]:
+    """A picture's width and height from its header alone (nothing decoded): PNG, GIF, WebP,
+    and a JPEG's frame within its first 64 KB; None when not found."""
+    try:
+        if data.startswith(b"\x89PNG\r\n\x1a\n") and data[12:16] == b"IHDR" and len(data) >= 24:
+            return int.from_bytes(data[16:20], "big"), int.from_bytes(data[20:24], "big")
+        if data[:6] in (b"GIF87a", b"GIF89a") and len(data) >= 10:
+            return int.from_bytes(data[6:8], "little"), int.from_bytes(data[8:10], "little")
+        if data[:4] == b"RIFF" and data[8:12] == b"WEBP":
+            return _webp_size(data)
+        if data.startswith(b"\xff\xd8"):
+            return _jpeg_size(data[:_JPEG_SCAN])
+    except IndexError:
+        return None
+    return None
+
+
+def _webp_size(data: bytes) -> Optional[tuple[int, int]]:
+    kind, body = data[12:16], data[20:]
+    if kind == b"VP8 " and body[3:6] == b"\x9d\x01\x2a" and len(body) >= 10:
+        width = int.from_bytes(body[6:8], "little") & 0x3FFF
+        return width, int.from_bytes(body[8:10], "little") & 0x3FFF
+    if kind == b"VP8L" and body[:1] == b"\x2f" and len(body) >= 5:
+        bits = int.from_bytes(body[1:5], "little")
+        return (bits & 0x3FFF) + 1, ((bits >> 14) & 0x3FFF) + 1
+    if kind == b"VP8X" and len(body) >= 10:
+        width = int.from_bytes(body[4:7], "little") + 1
+        return width, int.from_bytes(body[7:10], "little") + 1
+    return None
+
+
+def _jpeg_size(data: bytes) -> Optional[tuple[int, int]]:
+    at = 2
+    while at + 4 <= len(data):
+        if data[at] != 0xFF:
+            return None  # not a marker where one belongs
+        marker = data[at + 1]
+        if marker == 0xFF:  # a fill byte
+            at += 1
+            continue
+        if marker in _BARE:
+            at += 2
+            continue
+        if marker in (0xD9, 0xDA):  # the end, or the picture's data, before any frame
+            return None
+        length = int.from_bytes(data[at + 2 : at + 4], "big")
+        if marker in _SOF and at + 9 <= len(data):
+            height = int.from_bytes(data[at + 5 : at + 7], "big")
+            return int.from_bytes(data[at + 7 : at + 9], "big"), height
+        if length < 2:
+            return None
+        at += 2 + length
+    return None
+
+
+def _small(data: bytes) -> bool:
+    """Whether a picture is known to be no more than MAX_SIDE pixels a side."""
+    size = picture_size(data)
+    return size is not None and 0 < size[0] <= MAX_SIDE and 0 < size[1] <= MAX_SIDE
 
 
 def _a_page(head: bytes) -> bool:
@@ -187,19 +255,26 @@ class _Fetcher:
                 self._loop = loop
             return self._loop
 
-    @staticmethod
-    def _run(loop: asyncio.AbstractEventLoop) -> None:
+    def _run(self, loop: asyncio.AbstractEventLoop) -> None:
         asyncio.set_event_loop(loop)
         try:
             loop.run_forever()
         finally:
-            loop.close()
+            try:
+                loop.run_until_complete(self._drain())  # what began as it stopped, too
+                loop.run_until_complete(loop.shutdown_asyncgens())
+            finally:
+                loop.close()
 
     async def _load(self, picture: Picture) -> Optional[tuple[str, bytes, str]]:
         if self._limit is None:
             self._limit = asyncio.Semaphore(FETCHES)
-        async with self._limit:
-            path = await self._cached(picture)
+        async with self._limit:  # FETCH_S counts from here: the wait for a turn isn't its
+            try:
+                path = await asyncio.wait_for(self._cached(picture), FETCH_S)
+            except TimeoutError:
+                logger.info("Phone remote: a picture's download took too long")
+                return None
         return self._read(path) if path else None
 
     async def _cached(self, picture: Picture) -> Optional[str]:
@@ -209,12 +284,16 @@ class _Fetcher:
             path = await self._images.cache_image_from_base64(source, iconified)
         elif source.lower().startswith(("http://", "https://")):
             session = self._session(picture.verify)
+            if session is None:
+                return None
             path = await self._images.cache_image_from_url(session, source, iconified)
         else:
             return None  # a file, a share: nothing QiTV downloads
         return path if isinstance(path, str) and path else None
 
     def _session(self, verify: bool) -> Any:
+        if self._stopped:
+            return None  # none made that the stop's close would miss
         session = self._sessions.get(verify)
         if session is None or session.closed:
             from aiohttp import ClientSession, TCPConnector
@@ -234,7 +313,9 @@ class _Fetcher:
                 head = file.read(_HEAD)
                 kind = sniff(head)
                 if kind is not None and size <= AS_IS_MAX:
-                    return "as_is", head + file.read(AS_IS_MAX), kind
+                    data = head + file.read(AS_IS_MAX)
+                    if _small(data):  # else the phone would decode it whole: scaled
+                        return "as_is", data, kind
         except OSError as error:
             logger.info(
                 "Phone remote: a cached picture couldn't be read (%s)", type(error).__name__
@@ -247,21 +328,35 @@ class _Fetcher:
             return None
         return "scale", b"", ""  # too large, or a format the page isn't sent as it is
 
+    async def _drain(self) -> None:
+        """On this fetcher's loop: every download called off (begun or waiting its turn), then
+        its sessions closed."""
+        current = asyncio.current_task()
+        for _ in range(3):  # those begun while the others ended, too
+            others = [task for task in asyncio.all_tasks() if task is not current]
+            if not others:
+                break
+            for task in others:
+                task.cancel()
+            await asyncio.gather(*others, return_exceptions=True)
+        sessions, self._sessions = list(self._sessions.values()), {}
+        for session in sessions:
+            try:
+                await session.close()
+            except Exception as error:
+                logger.debug("Phone remote: a pictures session's close: %s", error)
+
     def stop(self) -> None:
-        """Its sessions close and its loop ends, without waiting (the hub's stop is short)."""
+        """Its downloads are called off, its sessions close and its loop ends, on its own thread:
+        not waited for (the hub's stop is short)."""
         with self._lock:
             loop, self._loop = self._loop, None
             self._stopped = True
         if loop is None:
             return
-        sessions, self._sessions = list(self._sessions.values()), {}
 
         async def close() -> None:
-            for session in sessions:
-                try:
-                    await session.close()
-                except Exception as error:
-                    logger.debug("Phone remote: a pictures session's close: %s", error)
+            await self._drain()
             asyncio.get_running_loop().stop()
 
         try:
@@ -313,11 +408,9 @@ class PictureServer:
         found: Optional[Found] = None
         read = None
         if self._fetcher is not None:
-            try:
-                read = await asyncio.wait_for(
-                    asyncio.wrap_future(self._fetcher.load(picture)), FETCH_S
-                )
-            except Exception as error:  # too slow, or the image cache's own fault
+            try:  # bounded there, once its turn came (FETCH_S)
+                read = await asyncio.wrap_future(self._fetcher.load(picture))
+            except Exception as error:  # the image cache's own fault
                 logger.info("Phone remote: a picture couldn't be had (%s)", type(error).__name__)
         if read is not None and read[0] == "as_is":
             found = (read[1], read[2])
@@ -348,12 +441,15 @@ class PictureServer:
 
     def put(self, source: str, kind: str, data: bytes) -> None:
         """QiTV's GUI's scaled copy of a picture asked for (PictureWanted): served if it is one
-        of the web's formats, and not too large."""
-        future = self._scaling.pop((source, kind), None)
-        if future is None or future.done():
-            return
-        kind_of = sniff(data[:_HEAD]) if isinstance(data, bytes) else None
-        future.set_result((data, kind_of) if kind_of and len(data) <= SCALED_MAX else None)
+        of the web's formats, not too large. One that came after SCALE_S is the next answer."""
+        key = (source, kind)
+        copy = _scaled_copy(data)
+        future = self._scaling.pop(key, None)
+        if future is not None and not future.done():
+            future.set_result(copy)
+        elif copy is not None and key in self._failed:  # late (the TV's cache was busy)
+            del self._failed[key]
+            self._keep(key, copy)
 
     def _keep(self, key: tuple[str, str], found: Found) -> None:
         old = self._kept.pop(key, None)
@@ -366,13 +462,28 @@ class PictureServer:
         ):
             self._kept_bytes -= len(self._kept.popitem(last=False)[1][0])
 
-    def stop(self) -> None:
-        if self._fetcher is not None:
-            self._fetcher.stop()
+    async def stop(self) -> None:
+        """Every picture being had is called off, the fetcher's downloads with them."""
+        loading = list(self._loading.values())
+        for task in loading:
+            task.cancel()
         for future in self._scaling.values():
             if not future.done():
                 future.cancel()
         self._scaling.clear()
+        if loading:
+            await asyncio.wait(loading, timeout=0.5)
+        if self._fetcher is not None:
+            self._fetcher.stop()
+
+
+def _scaled_copy(data: object) -> Optional[Found]:
+    """QiTV's scaled copy, as it is served: one of the web's formats, small in bytes and in
+    pixels; None else."""
+    if not isinstance(data, bytes) or len(data) > SCALED_MAX:
+        return None
+    kind = sniff(data[:_HEAD])
+    return (data, kind) if kind is not None and _small(data) else None
 
 
 def add_routes(app: Any, server: PictureServer) -> None:
@@ -381,8 +492,8 @@ def add_routes(app: Any, server: PictureServer) -> None:
 
     async def picture(request: web.Request) -> web.StreamResponse:
         found = await server.answer(request.match_info["token"], request.remote or "")
-        if found is None:
-            raise web.HTTPNotFound(text="404: Not Found")
+        if found is None:  # never kept by the phone: its next ask reaches QiTV
+            raise web.HTTPNotFound(text="404: Not Found", headers={"Cache-Control": "no-store"})
         data, kind = found
         return web.Response(body=data, content_type=kind, headers=ANSWER_HEADERS)
 

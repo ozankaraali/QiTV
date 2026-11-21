@@ -141,30 +141,60 @@ function logoTile(name, className = "logo", hue = name, tint = "", img = "") {
 // the picture comes from QiTV, by that token alone (nothing here names where it comes from).
 // Through the relay rows carry none, and the page draws its cards and tiles as before. A card
 // or tile stays as it is under its picture until that loads, and is all there is if it fails.
+// One that failed is asked for again 20 s on while it shows (QiTV may have it by then: a busy
+// moment, a host slow once), then whenever it is drawn anew, waiting twice as long each time.
 
+const PICTURE_RETRY_MS = 20000;
+const PICTURE_RETRY_MAX_MS = 600000;
 let pictures = false; // this session came through QiTV's own door
-const failedPictures = new Set(); // the tokens that didn't load: not asked for again
+const failedPictures = new Map(); // token → { at, times }: when it last failed, how often
+
+function pictureWaits(token) {
+  const failed = failedPictures.get(token);
+  if (!failed) return false;
+  const wait = Math.min(PICTURE_RETRY_MS * 2 ** (failed.times - 1), PICTURE_RETRY_MAX_MS);
+  return Date.now() - failed.at < wait;
+}
 
 function picture(box, token, fit = "cover") {
-  if (!pictures || typeof token !== "string" || !/^[\w-]{16,64}$/.test(token) || failedPictures.has(token)) return null;
+  if (!pictures || typeof token !== "string" || !/^[\w-]{16,64}$/.test(token)) return null;
+  box.dataset.pic = token; // what a retry looks for
+  box.dataset.fit = fit;
+  if (pictureWaits(token)) return null;
   const img = document.createElement("img");
   img.className = `pic ${fit}`;
   img.alt = ""; // the card's or the row's name says what it is
   img.loading = "lazy";
   img.decoding = "async";
   img.draggable = false;
+  img.dataset.token = token;
   img.addEventListener("load", () => {
+    failedPictures.delete(token);
     img.classList.add("in");
     box.classList.add("pictured");
   }, { once: true });
   img.addEventListener("error", () => {
-    failedPictures.add(token);
     box.classList.remove("pictured");
     img.remove();
+    pictureFailed(token);
   }, { once: true });
   img.src = `/img/${token}`;
   box.prepend(img); // under the card's title, badges and line
   return img;
+}
+
+function pictureFailed(token) {
+  const failed = failedPictures.get(token);
+  if (failed && Date.now() - failed.at < 1000) return; // the same failure, in another of its boxes
+  const times = failed ? failed.times + 1 : 1;
+  failedPictures.set(token, { at: Date.now(), times });
+  if (times > 1) return; // from now on: when it is drawn anew
+  setTimeout(() => {
+    // Once, 20 s on: every card or tile still showing it, drawn since or not, asks again.
+    for (const box of document.querySelectorAll(`[data-pic="${token}"]`)) {
+      if (!box.querySelector("img.pic")) picture(box, token, box.dataset.fit);
+    }
+  }, PICTURE_RETRY_MS + 100);
 }
 
 // A tile's initials, beside the picture that may cover them (drawn again, the picture stays).
@@ -181,8 +211,8 @@ function nowPicture(token, fit) {
   if (shown && shown.dataset.token === token && shown.classList.contains(fit)) return;
   if (shown) shown.remove();
   logo.classList.remove("pictured");
-  const img = picture(logo, token, fit);
-  if (img) img.dataset.token = token;
+  if (!token) delete logo.dataset.pic; // nothing for a retry to find here
+  picture(logo, token, fit);
 }
 
 // 2.9.7: a channel's number (or a time) as the TV's menu draws it: thin, in its own column.
