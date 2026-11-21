@@ -1,7 +1,8 @@
 # QiTV 2.13.2
 
 QiTV 2.13.2 starts translated captions sooner. The translation model's last step now runs once
-per line instead of once per word of the prompt, and the translations are the same. 2.13.2 also
+when it reads a line instead of once for every piece of it, and the translations are the same.
+2.13.2 also
 brings 2.13.1, a pre-release, which opens nothing in a system window any more: every menu,
 question and card is drawn in QiTV's own look. The channel list also loads while QiTV starts,
 picture in picture shows no bars, and at home the phone shows posters and logos. 2.13.0, also a
@@ -14,8 +15,9 @@ others' distributions, which may have malware.**
 ## A faster translation model
 
 - **The same translations, sooner.** Before it writes a line's translation, the model reads
-  the prompt: the line and the words around it. Its last step, which picks the next word, ran
-  for every word of that prompt, and only the last one was used. Now it runs once per line.
+  the prompt: the line and the words around it, in small pieces. Its last step, which picks the
+  next word, ran for every piece of that prompt, and only the last one was used. Now it runs
+  once when the prompt is read, and once for each word it writes, as before.
 - **Word for word the same.** QiTV compared 120 lines in six language pairs, Chinese among
   them, on its own and with the line before, and every translation matched.
 - **How much sooner.** On a fast desktop processor, a medium line (7 to 9 words, Turkish into
