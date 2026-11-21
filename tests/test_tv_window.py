@@ -326,6 +326,9 @@ class TVWindowTests(WindowCase):
         self.assertEqual(chosen, [])  # closed, not chosen
         self.assertTrue(self.window.settings.visible())
         self.assertEqual(self.window.settings_drawer.path(), (KEYS,))
+        QTest.keyClick(self.window, Qt.Key.Key_Menu)  # passed on by Settings: no list under it
+        self.assertFalse(menu.shown())
+        self.assertTrue(self.window.settings.visible())
 
     def test_constructs_and_shows_with_the_overlay_host(self):
         self.show()
