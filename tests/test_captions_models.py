@@ -30,6 +30,15 @@ from services.captions.models import Download, RemoteFile, Tier
 from services.live.server import ThreadingLoopbackHTTPServer
 from services.vlc_profile import DEFAULT_USER_AGENT
 
+# 2.13.2: the translation model's graph with the lm head on the last position only
+# (scripts/edit_translation_graph.py), and 2.10's, which an install from before it has
+NEW_GRAPH_REVISION = "9ce2d29ea7a806c86200b0c2c1eb6cd93a5585e5"
+NEW_GRAPH_SHA256 = "40285a45ea7569cbce83217e79d51f3a5c75afb1fac8bcc0ed2193d5f3b32a5f"
+OLD_GRAPH_SHA256 = "e8652dbcd810fb2026255996547c64a2e872f32dcdc290f2f478e3806a4eae30"
+OLD_GRAPH_SIZE = 295402
+DATA_SHA256 = "48ed68e06bc41cd138e7bc5d513b33c1461d735e1dcd5a50d58d057d0eaa6f3d"
+GRAPH_KEY = "qitv-mt-milmmt-46-1b/model.onnx"  # its name in verified.json
+
 
 def sha(data: bytes) -> str:
     return hashlib.sha256(data).hexdigest()
@@ -785,22 +794,106 @@ class TranslationDownloadTests(unittest.TestCase):
         self.assertEqual(
             sizes,
             {
-                "model.onnx": 295402,
+                "model.onnx": 295408,  # 2.13.2: the lm head on the last position only
                 "model.onnx.data": 692490752,
                 "tokenizer.json": 33384567,
                 "config.json": 1538,
             },
         )
+        repo = "https://huggingface.co/ozankaraali/qitv-mt-milmmt-46-1b/resolve/"
+        before = "73356cb2ee11aeb7be2b2bbe14e37126612bc66b"  # 2.10's: unchanged since
+        revisions = {
+            "model.onnx": NEW_GRAPH_REVISION,
+            "model.onnx.data": before,
+            "tokenizer.json": before,
+            "config.json": before,
+        }
         for file in models.TRANSLATION_FILES:
-            self.assertTrue(
-                file.url.startswith(
-                    "https://huggingface.co/ozankaraali/qitv-mt-milmmt-46-1b/resolve/"
-                    "73356cb2ee11aeb7be2b2bbe14e37126612bc66b/"
-                )
-            )
-            self.assertTrue(file.url.endswith("/" + file.path))
+            self.assertEqual(file.url, f"{repo}{revisions[file.path]}/{file.path}")
             self.assertEqual(len(file.sha256), 64)
             self.assertEqual(file.extract, "")
+        shas = {f.path: f.sha256 for f in models.TRANSLATION_FILES}
+        self.assertEqual(shas["model.onnx"], NEW_GRAPH_SHA256)
+        self.assertEqual(shas["model.onnx.data"], DATA_SHA256)  # the weights are 2.10's
+
+    def test_a_fresh_install_downloads_six_bytes_more_than_before(self):
+        self.assertEqual(sum(f.size for f in models.TRANSLATION_FILES), 726_172_259 + 6)
+        total = models.download_size(models.TRANSLATION_KEY, self.root)
+        self.assertEqual(total, 726_172_265 + 321)  # (the tokenizers wheel's 321)
+
+    # ---- 2.13.2: the new graph, for an install from before it --------------------------------
+    def place_old_graph(self) -> None:
+        """An install from 2.10 to 2.13.1: every file as pinned, but 2.10's model.onnx."""
+        self.place_model()
+        self.place_wheel()
+        with open(self.folder / "model.onnx", "wb") as out:
+            out.truncate(OLD_GRAPH_SIZE)
+        models.mark_verified(self.root, GRAPH_KEY, OLD_GRAPH_SHA256)
+
+    def test_2_10_s_graph_is_superseded_and_fetched_by_its_own_key(self):
+        self.assertEqual(models.SUPERSEDED, {GRAPH_KEY: (OLD_GRAPH_SHA256, OLD_GRAPH_SIZE)})
+        self.assertEqual(models.TRANSLATION_UPDATE_KEY, "translation_update")
+        self.assertEqual(models.UPDATES, {models.TRANSLATION_KEY: models.TRANSLATION_UPDATE_KEY})
+        self.assertNotIn(models.TRANSLATION_UPDATE_KEY, models.SPECIALISTS)  # never asked for
+
+    def test_an_install_with_the_old_graph_is_installed_and_gets_only_model_onnx(self):
+        self.place_old_graph()
+        self.assertTrue(models.installed(models.TRANSLATION_KEY, self.root))  # it translates
+        self.assertFalse(models.installed(models.TRANSLATION_UPDATE_KEY, self.root))
+        [download] = models.missing(models.TRANSLATION_UPDATE_KEY, self.root)
+        self.assertEqual((download.folder, download.file.path), (self.folder, "model.onnx"))
+        self.assertEqual(download.file.sha256, NEW_GRAPH_SHA256)
+        self.assertEqual(models.download_size(models.TRANSLATION_UPDATE_KEY, self.root), 295408)
+        self.assertEqual(models.download_size(models.TRANSLATION_KEY, self.root), 295408)
+
+    def test_the_update_lists_model_onnx_alone_never_the_wheel(self):
+        [download] = models.needed(models.TRANSLATION_UPDATE_KEY, self.root)
+        self.assertEqual(download.target, self.folder / "model.onnx")
+        self.assertEqual(download.contents, (("model.onnx", 295408),))
+        with mock.patch.object(models, "tokenizers_file", side_effect=models.Unsupported("x")):
+            self.assertEqual(len(models.needed(models.TRANSLATION_UPDATE_KEY, self.root)), 1)
+
+    def test_the_new_graph_in_place_is_the_update_installed(self):
+        self.place_model()
+        self.place_wheel()
+        self.assertTrue(models.installed(models.TRANSLATION_KEY, self.root))
+        self.assertTrue(models.installed(models.TRANSLATION_UPDATE_KEY, self.root))
+        self.assertEqual(models.download_size(models.TRANSLATION_UPDATE_KEY, self.root), 0)
+
+    def test_the_old_graph_counts_only_as_recorded_and_at_its_size(self):
+        self.place_old_graph()
+        graph = self.folder / "model.onnx"
+        graph.unlink()  # its record alone: not there
+        self.assertFalse(models.installed(models.TRANSLATION_KEY, self.root))
+        with open(graph, "wb") as out:
+            out.truncate(OLD_GRAPH_SIZE - 1)  # cut short
+        self.assertFalse(models.installed(models.TRANSLATION_KEY, self.root))
+        with open(graph, "wb") as out:
+            out.truncate(OLD_GRAPH_SIZE)
+        self.assertTrue(models.installed(models.TRANSLATION_KEY, self.root))
+        models.mark_verified(self.root, GRAPH_KEY, "ab" * 32)  # checked against another
+        self.assertFalse(models.installed(models.TRANSLATION_KEY, self.root))
+        models.mark_verified(self.root, GRAPH_KEY, NEW_GRAPH_SHA256)  # the new one's record
+        self.assertFalse(models.installed(models.TRANSLATION_KEY, self.root))  # (not its size)
+
+    def test_the_moment_between_the_new_graph_s_swap_and_its_record_is_installed(self):
+        self.place_old_graph()
+        with open(self.folder / "model.onnx", "wb") as out:
+            out.truncate(295408)  # swapped in whole and checked; verified.json not written yet
+        self.assertTrue(models.installed(models.TRANSLATION_KEY, self.root))
+        self.assertFalse(models.installed(models.TRANSLATION_UPDATE_KEY, self.root))
+
+    def test_a_folder_without_model_onnx_is_not_installed(self):
+        self.place_model()
+        self.place_wheel()
+        (self.folder / "model.onnx").unlink()
+        self.assertFalse(models.installed(models.TRANSLATION_KEY, self.root))
+        records = models.read_verified(self.root)
+        del records[GRAPH_KEY]
+        (self.root / models.VERIFIED_FILE).unlink()
+        for key, value in records.items():
+            models.mark_verified(self.root, key, value)
+        self.assertFalse(models.installed(models.TRANSLATION_KEY, self.root))
 
     def test_needed_lists_the_files_and_the_tokenizers_wheel_into_site(self):
         downloads = models.needed(models.TRANSLATION_KEY, self.root)
@@ -852,6 +945,71 @@ class TranslationDownloadTests(unittest.TestCase):
         models.delete_all(self.root)
         self.assertFalse(self.folder.exists())
         self.assertFalse(models.installed(models.TRANSLATION_KEY, self.root))
+
+
+class TranslationGraphUpdateTests(DownloadTestCase):
+    """2.13.2: an install from before it fetches the new model.onnx alone, and translates with
+    the old one until the new one is whole, checked and in its place."""
+
+    def setUp(self) -> None:
+        super().setUp()
+        self.old_body, self.new_body = blob(3000, seed=21), blob(3006, seed=22)
+        files = (
+            self.remote("model.onnx", self.new_body),
+            self.remote("model.onnx.data", blob(5000, seed=23)),
+            self.remote("tokenizer.json", blob(800, seed=24)),
+            self.remote("config.json", blob(100, seed=25)),
+        )
+        superseded = {GRAPH_KEY: (sha(self.old_body), len(self.old_body))}
+        for patch in (
+            mock.patch.object(models, "TRANSLATION_FILES", files),
+            mock.patch.dict(models.SUPERSEDED, superseded, clear=True),  # (download's too)
+            mock.patch.object(models, "tokenizers_importable", return_value=True),
+        ):
+            patch.start()
+            self.addCleanup(patch.stop)
+        folder = self.root / models.TRANSLATION_FOLDER
+        folder.mkdir(parents=True)
+        for file in files:  # downloaded and checked before 2.13.2, model.onnx 2.10's
+            route = self.server.routes["/" + file.path]
+            body = self.old_body if file.path == "model.onnx" else route.body
+            (folder / file.path).write_bytes(body)
+            models.mark_verified(self.root, f"{models.TRANSLATION_FOLDER}/{file.path}", sha(body))
+        self.graph = folder / "model.onnx"
+
+    def fetch(self, fails: bool = False) -> _Recorder:
+        job = CaptionsDownload(root=self.root)
+        seen = _Recorder(job)
+        with self.assertLogs("services.captions", "WARNING") if fails else nullcontext():
+            self.assertTrue(job.start(models.TRANSLATION_UPDATE_KEY))
+            self.wait_until(seen.ended)
+        return seen
+
+    def test_only_model_onnx_comes_and_takes_the_old_one_s_place(self):
+        self.assertTrue(models.installed(models.TRANSLATION_KEY, self.root))
+        self.assertFalse(models.installed(models.TRANSLATION_UPDATE_KEY, self.root))
+        seen = self.fetch()
+        self.assertEqual(seen.failed, [])
+        self.assertEqual([path for path, _ in self.server.requests], ["/model.onnx"])
+        self.assertEqual(self.graph.read_bytes(), self.new_body)
+        self.assertEqual(models.read_verified(self.root)[GRAPH_KEY], sha(self.new_body))
+        self.assertTrue(models.installed(models.TRANSLATION_UPDATE_KEY, self.root))
+        self.assertTrue(models.installed(models.TRANSLATION_KEY, self.root))
+
+    def test_a_fetch_that_fails_leaves_the_old_graph_translating(self):
+        route = self.server.routes.pop("/model.onnx")  # not found
+        seen = self.fetch(fails=True)
+        self.assertEqual(len(seen.failed), 1)
+        self.assertEqual(self.graph.read_bytes(), self.old_body)
+        self.assertTrue(models.installed(models.TRANSLATION_KEY, self.root))
+        self.server.routes["/model.onnx"] = route
+        route.body = blob(3006, seed=99)  # damaged on its way: not its sha256
+        seen = self.fetch(fails=True)
+        self.assertIn("sha256", seen.failed[0])
+        self.assertEqual(self.graph.read_bytes(), self.old_body)
+        self.assertFalse(self.graph.with_name("model.onnx.part").exists())
+        self.assertTrue(models.installed(models.TRANSLATION_KEY, self.root))
+        self.assertFalse(models.installed(models.TRANSLATION_UPDATE_KEY, self.root))
 
 
 class TokenizersWheelTests(unittest.TestCase):

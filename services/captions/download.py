@@ -32,6 +32,7 @@ from services.captions.models import (
     EXTRACT_TAR_BZ2,
     EXTRACT_WHEEL,
     SKIPPED_IN_ARCHIVE,
+    SUPERSEDED,
     Download,
     Unsupported,
     captions_root,
@@ -295,7 +296,10 @@ class _DownloadWorker(QObject):
         if target.is_file():  # arrived in an earlier run (an archive not yet unpacked)
             if _size(target) == file.size and file_sha256(target, self._cancelled) == file.sha256:
                 return
-            target.unlink()
+            # 2.13.2: a file a newer pin replaced stays (its model runs with it) until the new
+            # one is whole and checked: os.replace below swaps it
+            if download.key(self._root) not in SUPERSEDED:
+                target.unlink()
         for attempt in range(ATTEMPTS):
             try:
                 digest = self._transfer(session, download)

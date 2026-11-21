@@ -338,19 +338,26 @@ COHERE_CONTENTS: tuple[tuple[str, Optional[int]], ...] = (
 
 
 # 2.10: caption translation, MiLMMT-46-1B (Xiaomi) as an int4 ONNX export with the greedy pick
-# inside the graph. Sizes and sha256 as Hugging Face serves them (revision 73356cb2). Its top-level
-# config.json comes too (1.5 KB, unused here): the Hub counts a model's downloads by that file.
+# inside the graph. Sizes and sha256 as Hugging Face serves them: the weights, the tokenizer and
+# config.json at revision 73356cb2 (2.10's, unchanged since), model.onnx at revision 9ce2d29e
+# (2.13.2: the lm head runs on the last position only, scripts/edit_translation_graph.py; the
+# same tokens, the prompt sooner). Its top-level config.json comes too (1.5 KB, unused here): the
+# Hub counts a model's downloads by that file.
 _TRANSLATION_REPO = (
     "https://huggingface.co/ozankaraali/qitv-mt-milmmt-46-1b/resolve/"
     "73356cb2ee11aeb7be2b2bbe14e37126612bc66b/"
 )
+_TRANSLATION_GRAPH_REPO = (
+    "https://huggingface.co/ozankaraali/qitv-mt-milmmt-46-1b/resolve/"
+    "9ce2d29ea7a806c86200b0c2c1eb6cd93a5585e5/"
+)
 TRANSLATION_FOLDER = "qitv-mt-milmmt-46-1b"
 TRANSLATION_FILES = (
     RemoteFile(
-        _TRANSLATION_REPO + "model.onnx",
+        _TRANSLATION_GRAPH_REPO + "model.onnx",
         "model.onnx",
-        295402,
-        "e8652dbcd810fb2026255996547c64a2e872f32dcdc290f2f478e3806a4eae30",
+        295408,
+        "40285a45ea7569cbce83217e79d51f3a5c75afb1fac8bcc0ed2193d5f3b32a5f",
     ),
     RemoteFile(
         _TRANSLATION_REPO + "model.onnx.data",
@@ -371,6 +378,16 @@ TRANSLATION_FILES = (
         "221aeaf24f0e52f590f1fa5555366edd78906c75ef79b8bddd2fa192d358f904",
     ),
 )
+# 2.13.2: files a newer pin replaced that their model still runs with, by their name in
+# verified.json: the sha256 and size each had. installed() takes one recorded so as in place,
+# missing() still lists it, and its model's key in UPDATES fetches the new one alone, unasked.
+SUPERSEDED: dict[str, tuple[str, int]] = {
+    # 2.10's graph (revision 73356cb2), whose lm head ran on every position of the prompt
+    f"{TRANSLATION_FOLDER}/model.onnx": (
+        "e8652dbcd810fb2026255996547c64a2e872f32dcdc290f2f478e3806a4eae30",
+        295402,
+    ),
+}
 
 
 def _wheel(folder: str, name: str, size: int, sha256: str) -> RemoteFile:
@@ -634,6 +651,11 @@ TURKISH_LM_KEY = "turkish_lm"
 # 2.12.1: what a specialist's download brings beside its model, which the model runs without:
 # `needed` lists it after the model's files, `installed` doesn't wait for it
 EXTRAS = {TURKISH_KEY: TURKISH_LM_KEY}
+# 2.13.2: the translation model's model.onnx alone (an install from before 2.13.2 has 2.10's:
+# SUPERSEDED)
+TRANSLATION_UPDATE_KEY = "translation_update"
+# 2.13.2: a model's key → the key that fetches the new pins of its SUPERSEDED files
+UPDATES = {TRANSLATION_KEY: TRANSLATION_UPDATE_KEY}
 
 
 def needed(key: str, root: Optional[Path] = None) -> list[Download]:
@@ -644,6 +666,8 @@ def needed(key: str, root: Optional[Path] = None) -> list[Download]:
     base = _root(root)
     if key == TRANSLATION_KEY:
         return _translation(base)
+    if key == TRANSLATION_UPDATE_KEY:
+        return [d for d in _translation_files(base) if d.key(base) in SUPERSEDED]
     if key == TURKISH_LM_KEY:
         return [Download(base / TURKISH_FOLDER, TURKISH_LM, ((TURKISH_LM.path, TURKISH_LM.size),))]
     if key in SPECIALISTS:
@@ -686,11 +710,16 @@ def _translation(base: Path) -> list[Download]:
     """The model's files and, unless this Python imports tokenizers, its wheel unpacked into
     the model's `site` folder (the translator puts that on sys.path); Unsupported when no wheel
     suits this computer."""
-    folder = base / TRANSLATION_FOLDER
-    downloads = [Download(folder, file, ((file.path, file.size),)) for file in TRANSLATION_FILES]
+    downloads = _translation_files(base)
     if not tokenizers_importable():
+        folder = base / TRANSLATION_FOLDER
         downloads.append(Download(folder / "site", tokenizers_file(), _TOKENIZERS_CONTENTS))
     return downloads
+
+
+def _translation_files(base: Path) -> list[Download]:
+    folder = base / TRANSLATION_FOLDER
+    return [Download(folder, file, ((file.path, file.size),)) for file in TRANSLATION_FILES]
 
 
 def missing(tier: str, root: Optional[Path] = None) -> list[Download]:
@@ -709,16 +738,32 @@ def missing(tier: str, root: Optional[Path] = None) -> list[Download]:
 def installed(tier: str, root: Optional[Path] = None) -> bool:
     """The tier, the VAD and the runtime are in place: each downloaded whole, checked, and
     each file present at its size. False where no runtime suits this computer. A specialist
-    is in place without its `EXTRAS` (2.12.1: the Turkish model without its LM)."""
+    is in place without its `EXTRAS` (2.12.1: the Turkish model without its LM). 2.13.2: a model
+    is in place with a file a newer pin replaced, as it was (SUPERSEDED: 2.10's translation
+    graph translates until the new one is here); its UPDATES key is not."""
     try:
-        left = missing(tier, root)
+        base = _root(root)
+        left = missing(tier, base)
         extra = EXTRAS.get(tier)
         if left and extra is not None:
-            beside = needed(extra, root)
+            beside = needed(extra, base)
             left = [download for download in left if download not in beside]
+        if left and tier not in UPDATES.values():
+            verified = read_verified(base)
+            left = [download for download in left if not _as_it_was(download, base, verified)]
         return not left
     except Unsupported:
         return False
+
+
+def _as_it_was(download: Download, base: Path, verified: dict[str, str]) -> bool:
+    """`download`'s file is the one its pin replaced (SUPERSEDED): recorded as checked, and at
+    its size, or at the new one's (the moment between the new file's swap and its record)."""
+    key = download.key(base)
+    old = SUPERSEDED.get(key)
+    if old is None or verified.get(key) != old[0]:
+        return False
+    return _file_size(download.target) in (old[1], download.file.size)
 
 
 def download_size(tier: str, root: Optional[Path] = None) -> int:
