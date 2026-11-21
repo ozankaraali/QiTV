@@ -212,6 +212,7 @@ def _rekeyed(key: str, renamed: Mapping[str, str]) -> str:
 
 
 class SettingsDrawer(Overlay):
+    takes_keys = True  # (Overlay.takes_keys)
     accessible_name = SETTINGS_TITLE
     # A stepper's key, and -1 (‹, ←) or +1 (›, →, Enter, a click on it focused).
     stepped = Signal(str, int)

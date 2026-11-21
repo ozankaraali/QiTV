@@ -27,6 +27,7 @@ _EDGE_U = 1.0
 
 
 class SleepNotice(Overlay):
+    takes_keys = True  # (Overlay.takes_keys)
     accessible_name = N_("Sleep timer")
     keepWatching = Signal()
 

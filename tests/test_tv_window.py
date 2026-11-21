@@ -330,6 +330,31 @@ class TVWindowTests(WindowCase):
         self.assertFalse(menu.shown())
         self.assertTrue(self.window.settings.visible())
 
+    def test_what_takes_the_keys_closes_a_menu_as_it_comes_a_toast_does_not(self):  # 2.13.1
+        from ui.overlays.popup_menu import Menu
+
+        self.show()
+        self.wait_for_drawer()
+        menu, window = self.window.popup_menu, self.window
+        entries = Menu()
+        entries.add("Entry")
+        at = window.host.mapToGlobal(QPoint(200, 150))
+        menu.open(entries, at=at)
+        window.screens.notify("A toast", "info", 2000)  # says something, takes no key
+        self.assertTrue(window.overlays.toast.isVisible())
+        self.assertTrue(menu.shown())
+        # The controller's own questions (2.6's, 2.8's, 2.9's), each as it is asked
+        for card in (window.question_card, window.quality_card, window.captions_card):
+            with self.subTest(card=card):
+                menu.open(entries, at=at)
+                self.assertTrue(menu.shown())
+                card.ask("A question?", "Yes", "No")
+                self.assertFalse(menu.shown())
+                card.withdraw()
+        menu.open(entries, at=at)
+        window.sound_panel.show()  # a panel too
+        self.assertFalse(menu.shown())
+
     def test_constructs_and_shows_with_the_overlay_host(self):
         self.show()
         window = self.window

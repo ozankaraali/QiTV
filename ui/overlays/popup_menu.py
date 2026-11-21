@@ -26,7 +26,9 @@ player's right-click) opens there, beside the corner (`defer_to`).
 - It never waits: what an entry does is its callback, run once the menu closed. The menu's
   close callbacks (`Menu.on_close`) run first, once, whatever closes it: a choice, Esc, a
   click elsewhere, its page changing size or hiding, the list that opened it hiding (`opener`),
-  another menu opening.
+  another menu opening, or anything in its window that has the keys showing (an overlay with
+  `takes_keys`: a card, a question, a panel, Settings), since the keys reach a menu that shows
+  first: it is only ever the topmost thing.
 
 It is painted as the drawer's rows are: the raised panel, the row's metrics and font, the
 accent highlight (the parent's entry dimmer while its submenu is open). Assistive technology
@@ -814,6 +816,8 @@ class PopupMenu(Overlay):
             self.close_menu()
         elif obj is self._opener and kind == QEvent.Type.Hide:
             self.close_menu()  # the list that opened it went
+        elif kind == QEvent.Type.Show and self._over_it(obj):
+            self.close_menu()  # what has the keys came over it (it shows on)
         elif kind in _PRESSES and isinstance(event, QMouseEvent) and self._outside(obj):
             if kind == QEvent.Type.MouseButtonDblClick and self._just_opened():
                 return True  # the second press of the double-click that opened it
@@ -823,6 +827,16 @@ class PopupMenu(Overlay):
                 self.close_menu()
             return True  # it closed the menu (or a level), and does nothing more
         return False
+
+    def _over_it(self, obj: QObject) -> bool:
+        """`obj` takes the keys while it shows (Overlay.takes_keys) and is in this window:
+        showing, it comes over the menu."""
+        return (
+            obj is not self
+            and isinstance(obj, QWidget)
+            and getattr(obj, "takes_keys", False) is True
+            and obj.window() is self.window()
+        )
 
     def _outside(self, obj: QObject) -> bool:
         """A press on another widget of this window (its pages, the overlays, the video): not

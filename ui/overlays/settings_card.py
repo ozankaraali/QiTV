@@ -212,6 +212,8 @@ class _Card(Overlay):
     fields and buttons, the keys and the mouse. The subclasses say what pressing and
     cancelling do."""
 
+    takes_keys = True  # (Overlay.takes_keys)
+
     def __init__(self, parent: Optional[QWidget] = None) -> None:
         super().__init__(parent)
         self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)

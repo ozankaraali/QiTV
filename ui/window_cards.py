@@ -86,10 +86,8 @@ class WindowCards(QObject):
     """The window's two cards, `tv_card` (on the TV's overlay host: the caller adds it to the
     host's overlays and to TVController.add_card) and `library_card` (on the Library page), and
     the questions waiting for them. `library_shown()` says whether the Library is the page in
-    front, `closing()` whether the window closes; `before()` makes way for either card (the
-    painted menus close: a menu that shows has the keys, so it never stays under a card),
-    `before_tv()` for the TV's (the mini player, the ⋯ menu); `above()` the cards that stay
-    over this one."""
+    front, `closing()` whether the window closes; `before_tv()` makes way for the TV's card
+    (the mini player, the ⋯ menu); `above()` the cards that stay over this one."""
 
     def __init__(
         self,
@@ -99,7 +97,6 @@ class WindowCards(QObject):
         window: QWidget,
         library_shown: Callable[[], bool],
         closing: Callable[[], bool],
-        before: Callable[[], None] = lambda: None,
         before_tv: Callable[[], None] = lambda: None,
         above: Callable[[], Iterable[QWidget]] = tuple,
         parent: Optional[QObject] = None,
@@ -110,7 +107,6 @@ class WindowCards(QObject):
         self._window = window
         self._library_shown = library_shown
         self._closing = closing
-        self._before = before
         self._before_tv = before_tv
         self._above = above
         self._waiting: deque[_Question] = deque()
@@ -194,9 +190,6 @@ class WindowCards(QObject):
             return
         if not self._window.isVisible():
             return  # its show asks (`eventFilter`)
-        self._before()  # (a menu's close callbacks may ask: then that one shows)
-        if self._asked is not None or not self._waiting:
-            return
         question = self._waiting.popleft()
         card = self._front()
         if card is self.tv_card:

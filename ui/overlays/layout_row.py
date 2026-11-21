@@ -75,6 +75,7 @@ class LayoutChoice:
 
 
 class LayoutRow(Overlay):
+    takes_keys = True  # (Overlay.takes_keys)
     # i18n: what a screen reader calls the row of multiview layouts to pick from
     accessible_name = N_("Multiview layouts")
     pass_empty_tooltip = True  # off its layouts, the parent's tooltip shows

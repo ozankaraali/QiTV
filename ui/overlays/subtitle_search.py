@@ -151,6 +151,7 @@ class _Rects:
 
 
 class SubtitleSearchPage(Overlay):
+    takes_keys = True  # (Overlay.takes_keys)
     accessible_name = N_("Subtitles from OpenSubtitles")
     pass_empty_tooltip = True  # off its controls, the parent's tooltip shows
 

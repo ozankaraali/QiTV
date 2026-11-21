@@ -77,6 +77,7 @@ class _RowRects:
 
 
 class Mixer(Overlay):
+    takes_keys = True  # (Overlay.takes_keys)
     # i18n: what a screen reader calls the volume mixer (a level per picture)
     accessible_name = N_("Volume mixer")
     levelRequested = Signal(int, int)  # row, level: a click or a drag on its slider

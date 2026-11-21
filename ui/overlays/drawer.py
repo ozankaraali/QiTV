@@ -782,6 +782,7 @@ class _Column:
 
 
 class Drawer(Overlay):
+    takes_keys = True  # (Overlay.takes_keys)
     accessible_name = N_("Channel list")
     playRequested = Signal(object, object, object)
     # node, where its menu opens (popup_menu.Where): a right-click's global point, or the

@@ -149,6 +149,7 @@ class _Rects:
 
 
 class TrackPanel(Overlay):
+    takes_keys = True  # (Overlay.takes_keys)
     pass_empty_tooltip = True  # off its controls, the parent's tooltip shows
 
     rowChosen = Signal(object)  # a row's key: a click, or Enter on it

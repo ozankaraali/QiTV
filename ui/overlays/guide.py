@@ -287,6 +287,7 @@ def _number_digits(channels: list[dict]) -> int:
 
 
 class Guide(Overlay):
+    takes_keys = True  # (Overlay.takes_keys)
     # i18n: what a screen reader calls the guide (channels as rows, time as columns)
     accessible_name = N_("Programme guide")
     tuneRequested = Signal(object)  # channel dict
