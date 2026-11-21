@@ -58,6 +58,73 @@ MT_LANGUAGES: tuple[str, ...] = (
     "Chinese (Traditional)",
 )
 
+# 2.13.1: the targets whose third person says whether it is a man or a woman (he/she, or a verb
+# that agrees: Hindi's and Urdu's), which a line alone often can't tell: each line is translated
+# with the line before and its translation ("Turkish: s1 s / English: t1"; 2026-11-21: the right
+# pronoun in 16-17 of 19 TV scenes against 7 alone). Vietnamese's everyday "anh ấy"/"cô ấy" and
+# Tamil's he/she both need it; Chinese writes 他/她 but says them alike, and is left alone
+GENDERED = frozenset(
+    {
+        "Arabic",
+        "Bulgarian",
+        "Catalan",
+        "Czech",
+        "Danish",
+        "German",
+        "Greek",
+        "English",
+        "Spanish",
+        "French",
+        "Hebrew",
+        "Hindi",
+        "Croatian",
+        "Italian",
+        "Norwegian",
+        "Dutch",
+        "Polish",
+        "Portuguese",
+        "Romanian",
+        "Russian",
+        "Slovak",
+        "Slovenian",
+        "Swedish",
+        "Tamil",
+        "Urdu",
+        "Vietnamese",
+    }
+)
+# ... and the rest: one third person for both (Turkish "o", Finnish "hän", Persian "او", ...)
+NOT_GENDERED = frozenset(
+    {
+        "Azerbaijani",
+        "Bengali",
+        "Persian",
+        "Finnish",
+        "Hungarian",
+        "Indonesian",
+        "Japanese",
+        "Kazakh",
+        "Khmer",
+        "Korean",
+        "Lao",
+        "Malay",
+        "Burmese",
+        "Thai",
+        "Tagalog",
+        "Turkish",
+        "Uzbek",
+        "Cantonese",
+        "Chinese (Simplified)",
+        "Chinese (Traditional)",
+    }
+)
+
+
+def needs_context(target: str) -> bool:
+    """A line translated into `target` (MiLMMT's name) goes with the line before (`GENDERED`)."""
+    return target in GENDERED
+
+
 # QiTV's caption languages (Qwen's names) that the model names differently
 _SOURCE = {"Chinese": "Chinese (Simplified)", "Filipino": "Tagalog"}
 

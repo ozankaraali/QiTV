@@ -477,7 +477,7 @@ class TranslationTests(unittest.TestCase):
     model."""
 
     def setUp(self):
-        from services.captions import translate, worker
+        from services.captions import tier, translate, worker
 
         self.run_class, self.film_class = worker._Run, worker._FilmRun
         self.sent: list = []
@@ -487,6 +487,8 @@ class TranslationTests(unittest.TestCase):
         self.calls: list = []  # (text, source, target, seconds it had) of each translation
         self.answer: Any = lambda text, source, target, deadline: f"<{target}> {text}"
         self.warm: Any = lambda: True  # its load: True when it loaded
+        self.speed: Any = None  # 2.13.1: what its timed warm-up gives (None: nothing)
+        self.contexts: list = []  # 2.13.1: the line before and its translation, each call's
         test = self
 
         class Translator:  # services.captions.translate.Translator's interface
@@ -498,13 +500,21 @@ class TranslationTests(unittest.TestCase):
             def warm(self):
                 return test.warm()
 
-            def translate(self, text, source, target, deadline=None):
+            def speed(self):
+                return test.speed
+
+            def translate(self, text, source, target, deadline=None, context=None):
                 test.calls.append((text, source, target, deadline - time.monotonic()))
+                test.contexts.append(context)
                 return test.answer(text, source, target, deadline)
 
         patch = mock.patch.object(translate, "Translator", Translator)
         patch.start()
         self.addCleanup(patch.stop)
+        # 2.13.1: the translator's threads are this computer's (tier.translator_threads): 2 here
+        threads = mock.patch.object(tier, "translator_threads", return_value=2)
+        threads.start()
+        self.addCleanup(threads.stop)
 
     def until(self, done):
         """`done()`, waited for (5 s at most)."""
@@ -1186,6 +1196,181 @@ class TranslationTests(unittest.TestCase):
         self.assertEqual(len([r for r in logs.records if "translation model" in r.getMessage()]), 1)
         self.assertEqual(self.sent[1:], [("caption", 5, 104.0, 105.0, "Bir.")])  # straight out
         self.assertEqual(self.made, [])
+
+    # ---- 2.13.1: threads, the warm-up's speed, the GUI's lead, lateness, the line before ----
+    def test_the_translator_runs_on_the_threads_this_computer_gives_it(self):
+        from services.captions import tier
+
+        with mock.patch.object(tier, "translator_threads", return_value=4):
+            self.translation("English")
+        self.assertEqual(self.made, [(MT_FOLDER, 4)])
+
+    def test_the_timed_warm_up_is_told_to_the_gui(self):
+        self.speed = 0.43
+        with self.assertLogs("services.captions.worker", logging.INFO) as logs:
+            self.translation("English")
+        self.assertEqual(self.sent, [("translate_speed", 0.43)])
+        self.assertTrue([r for r in logs.records if "medium line in 0.43 s" in r.getMessage()])
+        self.sent.clear()
+        self.speed = None  # nothing timed (it gave nothing): the GUI keeps its lead
+        self.translation("German", "another-folder")
+        self.assertEqual(self.sent, [])
+
+    def test_the_reserve_is_the_lead_the_gui_gives(self):
+        from services.captions.streaming import TRANSLATE_LEAD_S
+
+        translation = self.translation("English")
+        self.assertEqual(translation.reserve(), TRANSLATE_LEAD_S)  # none given: 2.10's
+        translation.set_lead(2.5)
+        self.assertEqual(translation.reserve(), 2.5)
+        translation.set(None)
+        self.assertEqual(translation.reserve(), 0.0)  # off
+        translation.set("English")
+        self.assertEqual(translation.reserve(), 2.5)  # on again: the lead it was given
+        translation.set_lead(None)  # (a load that names none)
+        self.assertEqual(translation.reserve(), 2.5)
+        self.assertTrue(self.until(translation._ready))  # (loaded again while the fake is in)
+
+    def test_the_process_takes_the_lead_from_its_load_and_as_the_command_says(self):
+        seen: list = []
+        self.serve(
+            (
+                "load",
+                {"translation": str(MT_FOLDER), "translate_to": "English", "translate_lead": 4.0},
+            ),
+            ("start", 5, "http://127.0.0.1/side", 100.0, None, "Turkish"),
+            lambda: seen.append(self.runs[0].translation.reserve()),
+            ("translate_lead", 3.0),
+            lambda: seen.append(self.runs[0].translation.reserve()),
+            lambda: self.until(lambda: self.runs[0].translation._ready()),  # (the fake's load)
+        )
+        self.assertEqual(seen, [4.0, 3.0])
+
+    def test_a_line_late_for_its_translation_that_had_the_lead_says_the_lead_is_short(self):
+        go = self.held()
+
+        def answer(text, source, target, deadline):
+            if text == "Bir.":
+                go.wait(5)
+            return f"<{target}> {text}"
+
+        self.answer = answer
+        translation = self.translation("English")
+        translation.set_lead(2.0)
+        run = self.a_run(translation, "Turkish", newest=104.0)
+        self.plays(translation, 100.0)
+        run._write("qwen", "heard", "Bir.", 100.5, 101.0)  # being translated
+        run._write("qwen", "heard", "İki.", 101.5, 102.0)  # 1.5 s to its deadline: enough
+        began = time.monotonic()
+        while time.monotonic() - began < 1.7:  # the picture plays on (the command loop's view)
+            self.plays(translation, 100.0 + time.monotonic() - began)
+            time.sleep(0.05)
+        go.set()  # its deadline passed while the line before was translated
+        self.assertTrue(self.until(lambda: len(self.sent) >= 3))
+        self.assertIn(("translate_late", 1, 2.0), self.sent)
+        self.assertEqual(self.sent[-1], self.written("İki.", 101.5, 102.0))  # as written
+
+    def test_a_line_cut_off_at_its_deadline_that_had_the_lead_says_so_too(self):
+        def gives_up(text, source, target, deadline):  # as Translator at its deadline
+            time.sleep(max(0.0, deadline - time.monotonic()) + 0.01)
+
+        self.answer = gives_up
+        translation = self.translation("English")
+        translation.set_lead(2.0)
+        run = self.a_run(translation, "Turkish", newest=104.0)
+        self.plays(translation, 100.0)
+        run._write("qwen", "heard", "Bir.", 101.2, 102.0)  # 1.2 s to translate it
+        self.assertTrue(self.until(lambda: len(self.sent) >= 2))
+        self.assertEqual(
+            self.sent, [("translate_late", 1, 2.0), self.written("Bir.", 101.2, 102.0)]
+        )
+
+    def test_a_line_written_late_for_the_lead_does_not_count(self):
+        # a run's first lines after a seek: written with the picture already near their words
+        def gives_up(text, source, target, deadline):
+            time.sleep(max(0.0, deadline - time.monotonic()) + 0.01)
+
+        self.answer = gives_up
+        translation = self.translation("English")
+        translation.set_lead(2.0)
+        run = self.a_run(translation, "Turkish", newest=104.0)
+        self.plays(translation, 100.0)
+        run._write("qwen", "heard", "Bir.", 100.4, 101.0)  # 0.4 s: well short of the lead
+        self.plays(translation, 100.5)
+        run._write("qwen", "heard", "İki.", 100.6, 101.0)  # past due already
+        self.assertEqual(
+            self.captions(2),
+            [self.written("Bir.", 100.4, 101.0), self.written("İki.", 100.6, 101.0)],
+        )
+        time.sleep(0.05)
+        self.assertNotIn("translate_late", [message[0] for message in self.sent])
+
+    def test_into_a_target_with_he_and_she_a_line_goes_with_the_one_before(self):
+        run = self.a_run(self.translation("English"), "Turkish")
+        run._write("qwen", "heard", "Ayşe aradı.", 104.0, 105.0)
+        run._write("qwen", "heard", "Geldi.", 106.0, 107.0)
+        run._write("qwen", "heard", "Gitti.", 107.5, 108.0)
+        self.captions(3)
+        self.assertEqual(
+            self.contexts,
+            [None, ("Ayşe aradı.", "<English> Ayşe aradı."), ("Geldi.", "<English> Geldi.")],
+        )
+
+    def test_into_a_target_without_them_each_line_goes_alone(self):
+        run = self.a_run(self.translation("Turkish"), "English")
+        run._write("qwen", "heard", "She called.", 104.0, 105.0)
+        run._write("qwen", "heard", "She came.", 105.5, 106.0)
+        self.captions(2)
+        self.assertEqual(self.contexts, [None, None])
+
+    def test_the_line_before_is_never_one_across_a_gap_a_run_a_language_or_a_target(self):
+        translation = self.translation("English")
+        run = self.a_run(translation, "Turkish")
+        run._write("qwen", "heard", "Bir.", 104.0, 105.0)
+        run._write("qwen", "heard", "İki.", 115.5, 116.0)  # 10.5 s later: another scene
+        run._write("qwen", "heard", "Üç.", 116.5, 117.0)  # (with "İki.")
+        self.captions(3)
+        run.language = "German"  # ("language", name): another language heard
+        run._write("qwen", "heard", "Vier.", 117.5, 118.0)
+        self.captions(4)
+        new = self.a_run(translation, "German", 2)  # a zap, a tune, a seek: a new run
+        new._write("qwen", "heard", "Fünf.", 118.5, 119.0)
+        self.captions(5)
+        translation.set("French")  # another target
+        self.assertTrue(self.until(translation._ready))
+        new._write("qwen", "heard", "Sechs.", 119.5, 120.0)
+        self.captions(6)
+        self.assertEqual(self.contexts, [None, None, ("İki.", "<English> İki."), None, None, None])
+
+    def test_a_line_before_that_went_out_as_written_is_none(self):
+        self.answer = lambda text, source, target, deadline: (
+            None if text == "Bir." else f"<{target}> {text}"
+        )
+        run = self.a_run(self.translation("English"), "Turkish")
+        run._write("qwen", "heard", "Bir.", 104.0, 105.0)  # no usable translation
+        run._write("qwen", "heard", "İki.", 105.5, 106.0)
+        run.language = "English"  # a line not to translate breaks the chain too
+        run._write("qwen", "heard", "Three.", 106.5, 107.0)
+        run.language = "Turkish"
+        run._write("qwen", "heard", "Dört.", 107.5, 108.0)
+        self.captions(4)
+        self.assertEqual(self.contexts, [None, None, None])
+
+    def test_the_gui_hears_the_translators_speed_and_its_late_lines(self):
+        from PySide6.QtWidgets import QApplication
+
+        from services.captions.process import CaptionsProcess
+
+        QApplication.instance() or QApplication([])
+        process = CaptionsProcess()
+        heard: list = []
+        process.translateSpeed.connect(lambda seconds: heard.append(("speed", seconds)))
+        process.translateLate.connect(lambda run, lead: heard.append(("late", run, lead)))
+        process._supervisor, process._serial = object(), 1  # type: ignore[assignment]
+        process._on_message(1, ("translate_speed", 0.43))
+        process._on_message(1, ("translate_late", 3, 2.5))
+        process._supervisor = None
+        self.assertEqual(heard, [("speed", 0.43), ("late", 3, 2.5)])
 
 
 class StreamClockTests(unittest.TestCase):

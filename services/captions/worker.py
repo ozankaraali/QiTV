@@ -17,7 +17,8 @@ lines are translated into, MiLMMT's name, None off; the translation model's fold
 after the load; the load's "translate_to" and "translation" start them), ("levels", on) (Plan 4:
 a film's run sends its sound's band levels too, for the audio screen's Stage), ("turkish_lm",
 path) (2.12.1: the Turkish model's language model, downloaded since the load; the load's
-"turkish_lm" names one already here), ("stop",), ("quit",).
+"turkish_lm" names one already here), ("translate_lead", seconds) (2.13.1: the lead a line's
+translation has; the load's "translate_lead" too), ("stop",), ("quit",).
 From it: ("ready",), ("failed", reason), ("caption", run, start, end, text[, parts[, original]])
 (parts, a line of more than one: [(text, start, end), ...], services.captions.parts; a
 translated line, `translated_caption`: the translation as its text, its parts as heard ([] for
@@ -27,6 +28,8 @@ a line of one), and the line as heard, the original, last),
 ("levels", run, start_ms, frame_ms, blob) while levels are on, from a film's sound as it is read
 (services.levels.LevelStream: the visualizer decodes nothing these captions read),
 ("detected", run, language) once the pieces agree on one (none was given),
+("translate_speed", seconds) (2.13.1: the translator's medium line, timed as it loaded),
+("translate_late", run, lead) (a line late for its translation that had the lead),
 ("log", level, text); loaded without a model (`load` with "model": None, the packaged smoke
 test's probe), ("piece", run, start, end, speech_share) for each piece instead. No traceback
 or URL crosses: URLs carry the session token.
@@ -36,7 +39,7 @@ from __future__ import annotations
 
 from array import array
 from collections import deque
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 import logging
 import multiprocessing
 from multiprocessing.connection import Connection, wait
@@ -52,11 +55,17 @@ import urllib.request
 from services.captions import guards, numbers_tr, text_language
 from services.captions.growing import GrowingWriter
 from services.captions.languages import COHERE, EUROPEAN, QWEN_LANGUAGES, iso_code
-from services.captions.mt_languages import source_for
+from services.captions.mt_languages import needs_context, source_for
 from services.captions.parts import parts_of
 from services.captions.pieces import END_PAUSE_S, MAX_PIECE_S, Cutter, Piece
 from services.captions.stream_clock import StreamClock, TsTimes
-from services.captions.streaming import FIRST_WORD_S, HELD_AFTER_S, TRANSLATE_LEAD_S, time_left
+from services.captions.streaming import (
+    FIRST_WORD_S,
+    HELD_AFTER_S,
+    TRANSLATE_LEAD_S,
+    TRANSLATE_LEAD_STEP_S,
+    time_left,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -121,6 +130,9 @@ _IDLE_S = 0.25  # the growing writer looks at the picture this often when no sou
 FAST_RATE = 1.25
 LINE_LEVEL = logging.DEBUG  # each caption line is logged at this level (2026-11-08)
 DEADLINE_MARGIN_S = 0.3  # 2.10: a line's translation is done this long before the line shows
+# 2.13.1: a line is translated with the one before (into a target with he and she) when that
+# one ended at most this long before it started: the same scene
+CONTEXT_GAP_S = 10.0
 
 
 def _folder_name(folder: Any) -> str:
@@ -528,7 +540,7 @@ class _Run:
         message += (said,) if len(said) > 1 else ()
         translation = self.translation
         if translation is None or not translation.take(
-            _Line(self, self.language, shown, start, message)
+            _Line(self, self.language, shown, start, message, end)
         ):
             self.link.send(message)
 
@@ -674,7 +686,7 @@ class _Run:
 
     def _reserve(self) -> float:
         """Seconds a line must be out before the picture gets to it, for its translation (2.10:
-        TRANSLATE_LEAD_S while translating, else 0)."""
+        the translation's lead while translating, `_Translation.reserve`; else 0)."""
         translation = self.translation
         return 0.0 if translation is None else translation.reserve()
 
@@ -933,13 +945,30 @@ def translated_caption(message: tuple, text: str) -> tuple:
 @dataclass
 class _Line:
     """A caption line for the translator (2.10): its run, the language the run wrote it in, what
-    shows, where its sound starts, and the message that sends it as written."""
+    shows, where its sound starts, and the message that sends it as written; 2.13.1: where its
+    sound ends, and when it was written (time.monotonic())."""
 
     run: _Run
     language: str
     shown: str
     start: float
     message: tuple
+    end: float = 0.0
+    written: float = field(default_factory=time.monotonic)
+
+
+@dataclass
+class _Said:
+    """2.13.1: the last line that went out translated, for the next one's context: its run, its
+    language and target, its sound's span, the line and its translation."""
+
+    run: _Run
+    language: str
+    target: str
+    start: float
+    end: float
+    shown: str
+    text: str
 
 
 class _Translation:
@@ -953,7 +982,16 @@ class _Translation:
     once: none waits for the load. A line of a run no longer the current one (stopped, or another
     started) is dropped. The speech threads only queue: translation's time is never theirs
     (progress, rtf, the step down). The translator is imported on that thread alone (the GUI's
-    process imports this module)."""
+    process imports this module).
+
+    2.13.1: the translator runs on this computer's threads (tier.translator_threads); its
+    warm-up's medium line is timed and told to the GUI ("translate_speed"), which keeps the lead
+    (services.captions.streaming.TranslationLead) and tells it back ("translate_lead", and the
+    load's "translate_lead": the reserve the speech side leaves it). A line late for its
+    translation that had that lead (less a step) from being written to its deadline says so
+    ("translate_late"): the lead is short. Into a target with he and she
+    (mt_languages.needs_context) a line goes with the one before and its translation when that
+    one went out translated, in the same run and language, at most CONTEXT_GAP_S before it."""
 
     def __init__(self, link: _Link, viewer: list) -> None:
         self.link = link
@@ -972,12 +1010,21 @@ class _Translation:
         self._failed: set[Path] = set()  # folders whose model did not load: never tried again
         self._thread: Optional[threading.Thread] = None
         self._told = False  # a target without the model's folder: said once
+        self._lead = TRANSLATE_LEAD_S  # 2.13.1: the GUI's lead (an older GUI's: 2.10's)
+        self._before: Optional[_Said] = None  # 2.13.1: the last line out translated
 
     def follow(self, run: Optional[_Run]) -> None:
         """`run`'s lines go out from now on (None: no run's), from its start: the picture waits."""
         with self._lock:
             self._current = run
+            self._before = None  # (a zap, a tune, a seek: no line before)
             self.moved = time.monotonic() - HELD_AFTER_S
+
+    def set_lead(self, seconds: Any) -> None:
+        """2.13.1: the GUI's lead for a line's translation (None: the one it has stays)."""
+        if seconds is not None:
+            with self._lock:
+                self._lead = max(0.0, float(seconds))
 
     def set(self, target: Optional[str], folder: Any = None) -> None:
         """Lines are translated into `target` (MiLMMT's name; None: they are not) by the model in
@@ -987,6 +1034,7 @@ class _Translation:
             if folder:
                 self._folder = Path(folder)
             self._target = target or None
+            self._before = None
             if self._target and self._folder is None and not self._told:
                 self._told = True
                 logger.info(
@@ -1023,12 +1071,12 @@ class _Translation:
         return True
 
     def reserve(self) -> float:
-        """Seconds the speech side leaves the translator before a line shows: TRANSLATE_LEAD_S
-        while lines are to be translated (a target, and a model's folder that did not fail,
-        loaded or loading), else 0."""
+        """Seconds the speech side leaves the translator before a line shows: the lead (the
+        GUI's, else TRANSLATE_LEAD_S) while lines are to be translated (a target, and a model's
+        folder that did not fail, loaded or loading), else 0."""
         with self._lock:
             on = self._on() and self._folder not in self._failed
-        return TRANSLATE_LEAD_S if on else 0.0
+            return self._lead if on else 0.0
 
     def _on(self) -> bool:
         return bool(self._target) and self._folder is not None
@@ -1049,6 +1097,7 @@ class _Translation:
         waiting = list(self._lines) if self._busy is None else [self._busy, *self._lines]
         self._busy = None
         self._lines.clear()
+        self._before = None
         for line in waiting:
             if line.run is self._current:
                 logger.log(LINE_LEVEL, "AI captions: shown as written, %s: %r", why, line.shown)
@@ -1075,13 +1124,17 @@ class _Translation:
         translator: Any = None
         failure = ""  # (services.captions.translate logs its own)
         try:
+            from services.captions import tier
             from services.captions.translate import Translator
 
-            translator = Translator(folder, threads=2)
+            threads = tier.translator_threads()
+            translator = Translator(folder, threads=threads)
             loaded = bool(translator.warm())
             cause = "" if loaded else str(getattr(translator, "error", "") or "")
             if cause:
                 failure = f": {cause}"  # (the owner's log gets a record's message alone)
+            elif loaded:
+                self._timed(translator, threads)
         except Exception as error:
             loaded, failure = False, f": {type(error).__name__}: {error}"
         with self._lock:
@@ -1106,6 +1159,20 @@ class _Translation:
                     failure,
                 )
 
+    def _timed(self, translator: Any, threads: int) -> None:
+        """2.13.1: the loaded translator's medium line, timed (its warm-up), told to the GUI,
+        which sets the lead by it; nothing when it gave none (the GUI's lead stays)."""
+        speed = getattr(translator, "speed", None)
+        seconds = speed() if callable(speed) else None
+        if seconds is None:
+            return
+        logger.info(
+            "AI captions: the translator does a medium line in %.2f s (%d threads)",
+            seconds,
+            threads,
+        )
+        self.link.send(("translate_speed", round(float(seconds), 3)))
+
     def _next(self) -> None:
         """The next line waiting out, translated or as written."""
         with self._lock:
@@ -1113,8 +1180,9 @@ class _Translation:
                 return  # sent as written meanwhile
             line = self._busy = self._lines.popleft()
             target, translator = self._target, self._translator
+            context = self._context_for(line, target)
         try:
-            text, why = self._translated(line, target, translator)
+            text, why = self._translated(line, target, translator, context)
         except Exception as error:  # the thread lives on: every line goes through it
             logger.warning("AI captions: a translation failed: %s", type(error).__name__)
             text, why = None, "its translation failed"
@@ -1122,28 +1190,53 @@ class _Translation:
             if self._busy is not line:
                 return  # sent as written meanwhile (turned off, another model)
             self._busy = None
+            self._before = None
             if line.run is not self._current:
                 return  # its run ended (a seek, another channel, captions off): dropped
             if text is not None and target != self._target:
                 text, why = None, "the target changed"
-            if text is not None:
+            if text is not None and target is not None:
                 logger.log(LINE_LEVEL, "AI captions: translated %r: %r", line.shown, text)
                 self.link.send(translated_caption(line.message, text))
+                self._before = _Said(
+                    line.run, line.language, target, line.start, line.end, line.shown, text
+                )
                 return
             if why:
                 logger.log(LINE_LEVEL, "AI captions: shown as written, %s: %r", why, line.shown)
             self.link.send(line.message)
 
+    def _context_for(self, line: _Line, target: Optional[str]) -> Optional[tuple[str, str]]:
+        """2.13.1: the line before `line` and its translation, for a target with he and she
+        (the lock is held): the last line out translated, of the same run, language and target,
+        ended at most CONTEXT_GAP_S before this one starts; else None (translated alone)."""
+        before = self._before
+        if before is None or not target or not needs_context(target):
+            return None
+        if before.run is not line.run or before.language != line.language:
+            return None
+        if before.target != target or line.start < before.start:
+            return None
+        if line.start - before.end > CONTEXT_GAP_S:
+            return None  # another scene
+        return before.shown, before.text
+
     def _translated(
-        self, line: _Line, target: Optional[str], translator: Any
+        self,
+        line: _Line,
+        target: Optional[str],
+        translator: Any,
+        context: Optional[tuple[str, str]] = None,
     ) -> tuple[Optional[str], str]:
-        """`line` in `target` when it is to be translated and that is done in time; else None
-        (it goes out as written) and why, "" for a line not to translate."""
+        """`line` in `target` when it is to be translated and that is done in time (2.13.1: with
+        `context`, the line before, when given); else None (it goes out as written) and why, ""
+        for a line not to translate."""
         source = source_for(line.language)  # None: not known yet ("") or not MiLMMT's
         if translator is None or not target or source is None or source == target:
             return None, ""
         with self._lock:
             current = line.run is self._current
+            lead = self._lead
         if not current:
             return None, ""  # dropped
         if line.run.stopped.is_set():
@@ -1151,13 +1244,24 @@ class _Translation:
         deadline = self._deadline(line)
         began = time.monotonic()
         if began >= deadline:
+            self._late(line, deadline, lead)
             return None, f"{began - deadline:.1f} s late for its translation"
-        text: Optional[str] = translator.translate(line.shown, source, target, deadline)
+        text: Optional[str] = translator.translate(
+            line.shown, source, target, deadline, context=context
+        )
         if text is not None:
             return text, ""
         if time.monotonic() > deadline:
+            self._late(line, deadline, lead)
             return None, f"not translated in the {deadline - began:.1f} s it had"
         return None, "no usable translation"
+
+    def _late(self, line: _Line, deadline: float, lead: float) -> None:
+        """2.13.1: `line` missed its deadline. One that had the lead (less a step) from being
+        written to its deadline tells the GUI the lead is short; one written later (a run's
+        first lines after a seek, the speech side behind) is not the translator's."""
+        if deadline - line.written >= lead - TRANSLATE_LEAD_STEP_S:
+            self.link.send(("translate_late", getattr(line.run, "run", 0), lead))
 
     def _deadline(self, line: _Line) -> float:
         """When `line`'s translation must be done (a time.monotonic() value): DEADLINE_MARGIN_S
@@ -1254,6 +1358,7 @@ def _serve(link: _Link) -> None:
                 link.send(("failed", type(error).__name__))
                 continue
             # after the speech model: the translator finds onnxruntime in its runtime (sys.path)
+            translation.set_lead(spec.get("translate_lead"))  # 2.13.1 (an older GUI's: none)
             translation.set(spec.get("translate_to"), spec.get("translation"))
         elif kind == "start":
             _, number, url, segment_start, audio_track, language = message[:6]
@@ -1322,6 +1427,8 @@ def _serve(link: _Link) -> None:
                 run._maybe_stream()
         elif kind == "translate":
             translation.set(message[1], message[2] if len(message) > 2 else None)
+        elif kind == "translate_lead":  # 2.13.1: the GUI's lead for a line's translation
+            translation.set_lead(message[1])
         elif kind == "turkish_lm":  # 2.12.1: downloaded since the load
             if model is not None:
                 model.use_turkish_lm(str(message[1]))

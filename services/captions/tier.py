@@ -81,6 +81,18 @@ def model_threads(cpus: Optional[int] = None) -> int:
     return max(2, min(6, count // 2))
 
 
+def translator_threads(cpus: Optional[int] = None, *, arm_mac: Optional[bool] = None) -> int:
+    """2.13.1: the threads the caption translator (MiLMMT, in the captions process beside the
+    speech model) runs on: 4 with at least 8 logical cores and on any arm64 Mac, else 2. Going
+    from 2 to 4 threads took 33-39 % off a line on a 4-core ARM box and 24-29 % on a 7950X; more
+    add little, decoding is memory-bound (2026-11-21). With 8 logical cores the speech model has
+    the other half; with fewer, 2 each."""
+    count = (os.cpu_count() or 4) if cpus is None else cpus
+    if is_arm_mac() if arm_mac is None else arm_mac:
+        return 4
+    return 4 if count >= 8 else 2
+
+
 @functools.cache
 def cpu_score() -> float:
     """The model's threads × single-thread speed, relative to the reference machine's (1.0):

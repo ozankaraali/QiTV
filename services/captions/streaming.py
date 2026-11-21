@@ -12,6 +12,7 @@ may still change (`time_left` says when the picture gets there).
 from __future__ import annotations
 
 from dataclasses import dataclass
+import math
 from typing import Optional
 
 SENTENCE_ENDS = (".", "?", "!", "…")
@@ -25,8 +26,62 @@ HOLD_FLOOR_S = 7.5  # a waiting picture plays on once this far behind the sound 
 FIRST_WORD_S = 0.3  # the captions show a line this long after its start (ui.captions_controller)
 # 2.10: while translating, a line's translation takes this long before the line shows: the
 # picture is held this much further back (ui.captions_controller) and the speech side writes each
-# line this much sooner (services.captions.worker, the growing writer's `reserve`)
+# line this much sooner (services.captions.worker, the growing writer's `reserve`). 2.13.1: the
+# lead until the translator's speed is known, and the most a measured one is (`TranslationLead`)
 TRANSLATE_LEAD_S = 5.0
+TRANSLATE_LEAD_MIN_S = 2.0
+TRANSLATE_LEAD_STEP_S = 1.0  # a translation came late: the lead grows by this ...
+TRANSLATE_LEAD_MAX_S = 7.0  # ... to this at most
+
+
+def measured_lead(seconds: float) -> float:
+    """2.13.1: the lead for a translator whose medium line takes `seconds` (the faster of two
+    warm-up translations): four times that and half a second, rounded up to a half second, 2 to
+    5 seconds. 2026-11-21's queue simulation of the deadline rule on measured line times: 2.5 s
+    on a 7950X, 4.0 s on a 4-core ARM box and 4.5 s on the reference i7 keep 95-97 % of the
+    lines in time beside the speech model."""
+    raw = math.ceil((4.0 * max(0.0, seconds) + 0.5) * 2.0 - 1e-9) / 2.0
+    return min(TRANSLATE_LEAD_S, max(TRANSLATE_LEAD_MIN_S, raw))
+
+
+class TranslationLead:
+    """2.13.1: how long before a line shows its translation has (the GUI keeps it; the captions
+    process is told it, services.captions.worker). TRANSLATE_LEAD_S until the translator's
+    warm-up is timed (`measure`); TRANSLATE_LEAD_STEP_S more each time a translation comes late
+    (`late`), to TRANSLATE_LEAD_MAX_S. Never lowered mid-playback (the picture would be steered
+    toward live, which the viewer sees): only at a natural point (`natural`: a zap or a tune, a
+    seek, play after a pause, translation turned on), and then to the measured lead."""
+
+    def __init__(self) -> None:
+        self.value = TRANSLATE_LEAD_S
+        self.measured: Optional[float] = None
+        self._fastest: Optional[float] = None  # the quickest warm-up timed while QiTV runs
+
+    def measure(self, seconds: float) -> bool:
+        """The translator's medium line took `seconds` (its warm-up): the measured lead, by the
+        quickest such time while QiTV runs (a slower one had the speech model beside it); taken
+        at once only when it is higher. True when the lead changed."""
+        if self._fastest is None or seconds < self._fastest:
+            self._fastest = seconds
+        self.measured = measured_lead(self._fastest)
+        if self.measured > self.value:
+            self.value = self.measured
+            return True
+        return False
+
+    def late(self) -> bool:
+        """A translation came late for its line: a step longer, to the cap. True when it grew."""
+        if self.value >= TRANSLATE_LEAD_MAX_S:
+            return False
+        self.value = min(TRANSLATE_LEAD_MAX_S, self.value + TRANSLATE_LEAD_STEP_S)
+        return True
+
+    def natural(self) -> bool:
+        """A natural point: the measured lead, when it is lower. True when the lead changed."""
+        if self.measured is None or self.measured >= self.value:
+            return False
+        self.value = self.measured
+        return True
 
 
 def time_left(t: float, position: float, still: float, newest: float) -> float:
