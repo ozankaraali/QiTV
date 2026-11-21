@@ -582,13 +582,14 @@ class CaptionsController(QObject):
         return self._download is not None and not self._fetching_quietly()
 
     def _fetching_quietly(self) -> bool:
-        """2.12.1: what a model gained since (the Turkish LM) downloads while captions are on:
-        nothing says so, the captions' own state shows ("Catching up", ...)."""
+        """2.12.1: what a model gained since (the Turkish LM; 2.13.2: the translation model's new
+        graph) downloads while captions are on: nothing says so, the captions' own state shows
+        ("Catching up", ...)."""
         if not self._enabled:
             return False
-        from services.captions.models import EXTRAS
+        from services.captions.models import EXTRAS, UPDATES
 
-        return self._fetching in EXTRAS.values()
+        return self._fetching in (*EXTRAS.values(), *UPDATES.values())
 
     def asking(self) -> bool:
         """The download's question is up: on the TV, and on a phone that turned them on."""
@@ -803,12 +804,16 @@ class CaptionsController(QObject):
     def _offer_translation(self) -> None:
         """A language to translate into whose model isn't here: its download's question, while
         they are on and nothing else asks or downloads (else when the next run starts), as a
-        language's own speech model's (QiTV's own: every phone hears it)."""
+        language's own speech model's (QiTV's own: every phone hears it). 2.13.2: here, its new
+        graph comes unasked when it has the old one (`_fetch_extra`)."""
         from services.captions import models
 
         if not self.translate_to() or not self._enabled:
             return
-        if self._here(models.TRANSLATION_KEY) or self._asking or self._download is not None:
+        if self._here(models.TRANSLATION_KEY):
+            self._fetch_extra(models.TRANSLATION_KEY)
+            return
+        if self._asking or self._download is not None:
             return
         if self._card is None:
             return
@@ -1208,15 +1213,15 @@ class CaptionsController(QObject):
         self._disk.clear()
         self._unpacking = False
         self._download = None
-        from services.captions.models import EXTRAS, SPECIALISTS, TRANSLATION_KEY
+        from services.captions.models import EXTRAS, SPECIALISTS, TRANSLATION_KEY, UPDATES
 
         if self._fetching == TRANSLATION_KEY:  # 2.10: translated from now on
             self._follow_translation("")
             self._offer_specialist()  # one wanted while this one downloaded (every phone hears)
             self.changed.emit()
             return
-        if self._fetching in EXTRAS.values():  # 2.12.1: the Turkish model's LM is here
-            self._extra_arrived()
+        if self._fetching in (*EXTRAS.values(), *UPDATES.values()):
+            self._extra_arrived()  # 2.12.1: the Turkish model's LM; 2.13.2: a new graph
             return
         if self._fetching in SPECIALISTS:  # 2.9.6: a language's own model is here
             if self._enabled:
@@ -1257,11 +1262,12 @@ class CaptionsController(QObject):
     # ---- 2.12.1: what a language's model brings beside it (the Turkish model's LM) ----------
     def _fetch_extra(self, key: str) -> None:
         """The model of `key` is here; what came with its download since (models.EXTRAS: the
-        Turkish LM, for an install from before it) comes unasked, once while QiTV runs, when
+        Turkish LM, for an install from before it; 2.13.2, models.UPDATES: the translation
+        model's new graph, for one with the old) comes unasked, once while QiTV runs, when
         nothing else asks or downloads (else at the next start). The model writes meanwhile."""
         from services.captions import models
 
-        extra = models.EXTRAS.get(key)
+        extra = models.EXTRAS.get(key) or models.UPDATES.get(key)
         if extra is None or extra in self._offered or self._here(extra):
             return
         if self._asking or self._download is not None:
@@ -1272,22 +1278,40 @@ class CaptionsController(QObject):
 
     def _extra_arrived(self) -> None:
         """The Turkish LM came: the captions process reads Turkish with it from the next piece,
-        without starting again; a translation wanted meanwhile is asked for now."""
+        without starting again. 2.13.2: the translation model's new graph came: the translator
+        reads it at its next load (nothing starts again for it). What was wanted meanwhile (a
+        translation's model, a language's own) is asked for, or comes, now."""
         from services.captions import models
 
-        if self._enabled and self._process.running():
-            self._process.send("turkish_lm", str(models.model_paths(self._tier).turkish_lm))
+        if self._fetching == models.TURKISH_LM_KEY:
+            if self._enabled and self._process.running():
+                self._process.send("turkish_lm", str(models.model_paths(self._tier).turkish_lm))
+        else:
+            logger.info(
+                "AI captions: the translation model's new graph is here (from its next load)"
+            )
         self._offer_translation()
+        self._offer_specialist()
         self.changed.emit()
 
     def _extra_failed(self, reason: str) -> bool:
         """The Turkish LM didn't come, alone or after the model's own files: only the log says
         so, it isn't fetched again while QiTV runs, and the model reads Turkish without it (from
-        now on, when its own files came). False when more than the LM failed."""
+        now on, when its own files came). False when more than the LM failed. 2.13.2: the
+        translation model's new graph alike: it translates with the one it has."""
         from services.captions import models
         from services.captions.download import CANCELLED
 
         fetching = self._fetching
+        if fetching in models.UPDATES.values():
+            if reason != CANCELLED:
+                logger.warning(
+                    "AI captions: the translation model's new graph did not download (%s); it "
+                    "translates with the one it has",
+                    reason,
+                )
+            self.changed.emit()
+            return True
         if fetching in models.EXTRAS.values():
             extra = fetching
         elif fetching in models.EXTRAS and self._here(fetching):

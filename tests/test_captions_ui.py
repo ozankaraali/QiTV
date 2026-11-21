@@ -1054,6 +1054,7 @@ class TranslationTests(unittest.TestCase):
         self.disk = dict.fromkeys(("small", "large", "turkish", "european", "cohere"), True)
         self.disk["translation"] = True
         self.disk["turkish_lm"] = True  # 2.12.1: the Turkish model's LM
+        self.disk["translation_update"] = True  # 2.13.2: the translation model's new graph
         self.captions._here = lambda name: self.disk[name]
         self.toasts = []
         self.captions._toast = lambda text, kind="info": self.toasts.append(text)
@@ -1509,6 +1510,80 @@ class TranslationTests(unittest.TestCase):
             self.assertNoLogs("ui.captions_controller", "WARNING"),
         ):
             self.captions._start_run()  # the next run: nothing looked at again
+
+    # ---- 2.13.2: the translation model's new graph, for an install from before it ----------
+    def graph_started(self) -> list:
+        """The translation model here with 2.10's graph (an install from before 2.13.2), Turkish
+        heard; the downloads started, by what they fetch."""
+        self.disk["translation_update"] = False
+        self.captions.set_language("Turkish")
+        started: list = []
+        self.captions._start_download = lambda: started.append(self.captions._fetching)
+        return started
+
+    def test_an_install_with_the_old_graph_fetches_the_new_one_unasked_once(self):
+        from services.captions import models
+
+        started = self.graph_started()
+        self.captions._start_run()
+        self.assertEqual(started, [])  # nothing translated: nothing fetched for it
+        with mock.patch.object(models, "download_size", side_effect=AssertionError("asked")):
+            self.captions.set_translate_to("English")
+            self.captions._start_run()  # once while QiTV runs
+        self.assertEqual((self.card.asked, started), ([], [models.TRANSLATION_UPDATE_KEY]))
+        self.assertFalse(self.captions.asking())
+        # the old graph translates meanwhile
+        self.assertEqual(self.captions._translation(), "English")
+        self.assertIn(("translate", "English", self.folder()), self.sent)
+        floor = self.window.live_session.floor
+        download = self.captions._download = object()
+        self.disk["translation_update"] = True
+        self.sent.clear()
+        self.captions._on_downloaded(download)
+        # nothing restarts for it: the translator reads it at its next load
+        self.assertEqual((self.loaded, self.stopped, self.toasts), ([], [], []))
+        self.assertEqual([m for m in self.sent if m[0] in ("translate", "turkish_lm")], [])
+        self.assertEqual(self.captions._translation(), "English")
+        self.assertEqual(self.window.live_session.floor, floor)
+        self.assertTrue(self.captions.enabled())
+
+    def test_while_the_new_graph_downloads_the_captions_say_what_they_would_say(self):
+        started = self.graph_started()
+        self.captions.set_translate_to("English")
+        before = self.captions.status_text()
+        self.assertEqual(started, ["translation_update"])
+        self.captions._download = object()
+        self.captions._percent = 40
+        self.assertEqual(self.captions.status_text(), before)
+        self.assertFalse(self.captions.downloading())
+        self.assertEqual(self.captions._translation(), "English")
+
+    def test_a_new_graph_that_does_not_download_is_only_logged_and_translation_goes_on(self):
+        started = self.graph_started()
+        self.captions.set_translate_to("English")
+        download = self.captions._download = object()
+        with self.assertLogs("ui.captions_controller", "WARNING"):
+            self.captions._on_download_failed(download, "Download failed: 404 Client Error")
+        self.assertEqual((self.toasts, self.stopped, self.card.asked), ([], [], []))
+        self.assertEqual(self.captions.translate_to(), "English")  # the rule stays
+        self.assertEqual(self.config["ai_captions_translations"], {"Turkish": "English"})
+        self.captions._start_run()
+        self.assertEqual(started, ["translation_update"])  # not again while QiTV runs
+
+    def test_the_new_graph_then_the_turkish_lm_one_after_the_other(self):
+        # an install from before 2.12.1: both come unasked as Turkish is translated
+        from services.captions import models
+
+        started = self.graph_started()
+        self.disk["turkish_lm"] = False
+        self.captions.set_translate_to("English")
+        self.captions._download = object()  # (the graph's: the LM waits for it)
+        self.captions._start_run()
+        self.assertEqual(started, [models.TRANSLATION_UPDATE_KEY])
+        download = self.captions._download
+        self.disk["translation_update"] = True
+        self.captions._on_downloaded(download)
+        self.assertEqual(started, [models.TRANSLATION_UPDATE_KEY, models.TURKISH_LM_KEY])
 
     def test_the_load_and_the_command_name_one_folder(self):
         from ui.captions_controller import CaptionsController
