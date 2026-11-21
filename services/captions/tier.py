@@ -14,6 +14,7 @@ import functools
 import json
 import logging
 import os
+from pathlib import Path
 import platform
 import sys
 import threading
@@ -81,16 +82,108 @@ def model_threads(cpus: Optional[int] = None) -> int:
     return max(2, min(6, count // 2))
 
 
-def translator_threads(cpus: Optional[int] = None, *, arm_mac: Optional[bool] = None) -> int:
+TRANSLATOR_CORES = 6  # 2.13.1: physical cores from which the translator runs on 4 threads
+
+
+def translator_threads(*, physical: Optional[int] = None, arm_mac: Optional[bool] = None) -> int:
     """2.13.1: the threads the caption translator (MiLMMT, in the captions process beside the
-    speech model) runs on: 4 with at least 8 logical cores and on any arm64 Mac, else 2. Going
-    from 2 to 4 threads took 33-39 % off a line on a 4-core ARM box and 24-29 % on a 7950X; more
-    add little, decoding is memory-bound (2026-11-21). With 8 logical cores the speech model has
-    the other half; with fewer, 2 each."""
-    count = (os.cpu_count() or 4) if cpus is None else cpus
+    speech model) runs on: 4 with at least TRANSLATOR_CORES physical cores and on any arm64
+    Mac, else 2. Going from 2 to 4 threads took 33-39 % off a line on a 4-core ARM box and
+    24-29 % on a 7950X; more add little, decoding is memory-bound (2026-11-21). The owner: the
+    reference i7's 4 cores (8 threads) stay at 2, so that speech and translation don't fight
+    over them. `physical` and `arm_mac` default to this machine's."""
     if is_arm_mac() if arm_mac is None else arm_mac:
         return 4
-    return 4 if count >= 8 else 2
+    cores = physical_cores() if physical is None else physical
+    return 4 if cores >= TRANSLATOR_CORES else 2
+
+
+@functools.cache
+def physical_cores() -> int:
+    """This machine's physical cores (once per run; `_physical_cores`)."""
+    return _physical_cores()
+
+
+def _physical_cores() -> int:
+    """The physical cores (a core's hyper-threads counted once), with no dependency: macOS's
+    sysctl, Linux's CPU topology (else /proc/cpuinfo), Windows' processor-core records; half
+    the logical cores when the system doesn't say. Never more than the logical ones."""
+    logical = os.cpu_count() or 2
+    found: Optional[int] = None
+    try:
+        if sys.platform == "darwin":
+            found = _sysctl_int("hw.physicalcpu")
+        elif sys.platform.startswith("linux"):
+            found = _linux_physical()
+        elif sys.platform.startswith("win"):
+            found = _windows_physical()
+    except (OSError, ValueError, AttributeError) as error:
+        logger.debug("physical cores not read: %s", error)
+    if not found or found < 1:
+        return max(1, logical // 2)
+    return min(int(found), logical)
+
+
+def _linux_physical(
+    sysfs: Path = Path("/sys/devices/system/cpu"), cpuinfo: Path = Path("/proc/cpuinfo")
+) -> Optional[int]:
+    """The cores of a Linux machine: each online CPU's siblings (the CPUs of its core) counted
+    once; without a topology, /proc/cpuinfo's (physical id, core id) pairs; None when neither
+    says (an ARM cpuinfo names no cores)."""
+    cores: set[str] = set()
+    for topology in sysfs.glob("cpu[0-9]*/topology"):
+        for name in ("core_cpus_list", "thread_siblings_list"):
+            listed = topology / name
+            if listed.is_file():
+                cores.add(listed.read_text(encoding="ascii", errors="replace").strip())
+                break
+    if cores:
+        return len(cores)
+    if not cpuinfo.is_file():
+        return None
+    pairs: set[tuple[Optional[str], str]] = set()
+    package: Optional[str] = None
+    core: Optional[str] = None
+    for line in cpuinfo.read_text(encoding="ascii", errors="replace").splitlines() + [""]:
+        key, _, value = line.partition(":")
+        key = key.strip()
+        if key == "physical id":
+            package = value.strip()
+        elif key == "core id":
+            core = value.strip()
+        elif not line.strip():  # a processor's block ends
+            if core is not None:
+                pairs.add((package, core))
+            package = core = None
+    return len(pairs) or None
+
+
+def _windows_physical() -> Optional[int]:
+    """The processor-core records GetLogicalProcessorInformationEx gives (RelationProcessorCore,
+    0): one a core."""
+    from ctypes import wintypes
+
+    kernel32 = getattr(ctypes, "windll").kernel32
+    length = wintypes.DWORD(0)
+    kernel32.GetLogicalProcessorInformationEx(0, None, ctypes.byref(length))
+    if not length.value:
+        return None
+    buffer = ctypes.create_string_buffer(length.value)
+    if not kernel32.GetLogicalProcessorInformationEx(0, buffer, ctypes.byref(length)):
+        return None
+    return _core_records(buffer.raw[: length.value]) or None
+
+
+def _core_records(raw: bytes) -> int:
+    """How many records `raw` holds: each starts with its relation and its size (two DWORDs)."""
+    count = offset = 0
+    while offset + 8 <= len(raw):
+        size = int.from_bytes(raw[offset + 4 : offset + 8], "little")
+        if size <= 0:
+            break
+        count += 1
+        offset += size
+    return count
 
 
 @functools.cache

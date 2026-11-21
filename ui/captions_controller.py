@@ -42,8 +42,11 @@ read that much further ahead), on every channel. 2.13.1: the lead adapts (servic
 lead came late (`_on_translate_late`: the picture waits that second once, the captions staying
 on); lowered only at a natural point (a zap or a tune, a seek, play after a pause, translation or
 captions turned on, the picture still waiting for its distance), never mid-playback (stay-live
-would steer the picture toward live: the viewer would see it). The captions process is given a
-raise only once the picture has its distance (`_follow_lead`). On a computer too slow for the
+would steer the picture toward live: the viewer would see it); once grown, never below what it
+grew to while QiTV runs, but a step after five minutes with no late line. The next run starts
+from the last one's timed line on the same threads (`_seed_lead`, the config's optional
+ai_captions_translate_t). The captions process is given a raise only once the picture has its
+distance (`_follow_lead`). On a computer too slow for the
 1.7B and the translator both, Automatic takes the 0.6B (services.captions.tier
 .TRANSLATE_SMALL_BELOW) and Turkish is read with its best path alone while translating (the
 load's "slow_to_translate").
@@ -141,6 +144,8 @@ _TRANSLATIONS = "ai_captions_translations"
 _LOCAL_ON = "ai_captions_local_on"  # turned on (or off) during the last video file
 # 2.13.1: the picture this close to its distance has it (LiveSession's own wait ends 0.1 s short)
 _LEAD_REACHED_S = 0.2
+# 2.13.1: the translator's timed medium line per thread count, from the last run that timed it
+_TRANSLATE_T = "ai_captions_translate_t"
 
 from ui.captions_texts import (  # noqa: E402  (the texts, with their translations)
     CANT_KEEP_UP,
@@ -366,6 +371,10 @@ class CaptionsController(QObject):
             except Exception as error:  # no speed: Automatic goes by memory alone
                 logger.warning("AI captions: the speed was not measured: %s", error)
                 self._unmeasured = True
+            try:
+                tier.physical_cores()  # 2.13.1: read here once (the translator's saved time)
+            except Exception as error:
+                logger.debug("AI captions: no core count: %s", error)
             try:
                 self._scored.emit()  # (a signal: the GUI thread hears it)
             except RuntimeError:
@@ -904,12 +913,21 @@ class CaptionsController(QObject):
         return FILM_AHEAD_S + self._translate_lead.value if self._translation() else FILM_AHEAD_S
 
     # ---- 2.13.1: the translation's lead ----------------------------------------------------
-    def _on_translate_speed(self, seconds: float) -> None:
-        """The captions process timed its translator's medium line (as it loaded): the lead by
-        it. Higher, at once; lower, at the next natural point, or now while the picture still
-        waits for its distance (it plays at none yet)."""
+    def _on_translate_speed(self, seconds: float, threads: int = 0) -> None:
+        """The captions process timed its translator's medium line (as it loaded) on `threads`:
+        the lead by it. Higher, at once; lower, at the next natural point, or now while the
+        picture still waits for its distance (it plays at none yet). This run's quickest is
+        kept for the next run (`_seed_lead`)."""
         before = self._translate_lead.value
-        if self._translate_lead.measure(float(seconds)):
+        changed = self._translate_lead.measure(float(seconds))
+        fastest = self._translate_lead.fastest
+        if threads > 0 and fastest is not None:
+            from services.captions.streaming import translate_times
+
+            saved = translate_times(self._config_get(_TRANSLATE_T, {}))
+            if saved.get(str(threads)) != round(fastest, 3):
+                self._config_set(_TRANSLATE_T, {**saved, str(threads): round(fastest, 3)})
+        if changed:
             self._lead_changed(f"a medium line translates in {seconds:.2f} s", whole=True)
             return
         measured = self._translate_lead.measured
@@ -939,6 +957,24 @@ class CaptionsController(QObject):
             return
         if self._translate_lead.late():
             self._lead_changed("a translation came late", whole=True)
+
+    def _seed_lead(self) -> None:
+        """2.13.1: the lead from the medium line's time an earlier run saved for the threads
+        the translator runs on here (until this run times its own)."""
+        from services.captions import tier
+        from services.captions.streaming import translate_times
+
+        saved = translate_times(self._config_get(_TRANSLATE_T, {}))
+        if not saved:
+            return
+        try:
+            threads = tier.translator_threads()
+        except Exception as error:
+            logger.debug("AI captions: no translator threads: %s", error)
+            return
+        seconds = saved.get(str(threads))
+        if seconds is not None:
+            self._translate_lead.seed(seconds)
 
     def _settling(self) -> bool:
         """The live picture waits for its distance (not for a raise of the lead): it plays at
@@ -1276,7 +1312,8 @@ class CaptionsController(QObject):
         self._starting = time.monotonic()  # "Starting captions…" till their first words
         self._forget_cues()
         self._resolve_language()
-        self._lead_natural("captions on")  # 2.13.1: (the picture waits for its distance)
+        self._seed_lead()  # 2.13.1: from the last run's timed line, till this one's own
+        self._lead_natural("captions on")  # (the picture waits for its distance)
         self._hold_floor()
         self._route_film()  # a provider's film: through the film relay while the model loads
         if not self._process.running():

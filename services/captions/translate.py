@@ -143,6 +143,9 @@ class Translator:
         self._prefix_pair: Optional[tuple[str, str]] = None
         self._prefix_ids: list[int] = []
         self._prefix_kv: Optional[list[Any]] = None
+        # 2.13.1: the last translation was made again alone after the line before leaked into
+        # it (or gave nothing): its time past the first try is not the lead's (the worker)
+        self.second_try = False
 
     def _load(self) -> None:
         site = self._folder / "site"  # the tokenizers wheel, unpacked with the model
@@ -225,8 +228,9 @@ class Translator:
         time.monotonic() value) passed between tokens. 2.13.1: with `context` (the line before
         and its translation), translated with them (`context_prompt`); what that gives holding
         the line before (`leaks`), or nothing to show, the line is translated alone, by the same
-        deadline."""
+        deadline (`second_try`)."""
         with self._lock:
+            self.second_try = False
             if not self._ready():
                 return None
             try:
@@ -236,6 +240,7 @@ class Translator:
                         return shown
                     if deadline is not None and time.monotonic() > deadline:
                         return None
+                    self.second_try = True
                 decoded = self._decoded(prompt(text, source, target), source, target, deadline)
             except Exception:
                 logger.exception("caption translation failed; the original shows")

@@ -13,7 +13,8 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 import math
-from typing import Optional
+import time
+from typing import Callable, Optional
 
 SENTENCE_ENDS = (".", "?", "!", "…")
 MAX_LINE_CHARS = 84  # two caption rows
@@ -32,6 +33,7 @@ TRANSLATE_LEAD_S = 5.0
 TRANSLATE_LEAD_MIN_S = 2.0
 TRANSLATE_LEAD_STEP_S = 1.0  # a translation came late: the lead grows by this ...
 TRANSLATE_LEAD_MAX_S = 7.0  # ... to this at most
+TRANSLATE_LEAD_QUIET_S = 300.0  # grown, a step lower only after this long with none late
 
 
 def measured_lead(seconds: float) -> float:
@@ -44,43 +46,86 @@ def measured_lead(seconds: float) -> float:
     return min(TRANSLATE_LEAD_S, max(TRANSLATE_LEAD_MIN_S, raw))
 
 
+def translate_times(value: object) -> dict[str, float]:
+    """2.13.1: the translator's timed medium line as the config keeps it (optional key
+    ai_captions_translate_t, older builds ignore it): {its threads, as text: seconds}; anything
+    else gives nothing (a count of 1 to 64, more than 0 and under a minute)."""
+    if not isinstance(value, dict):
+        return {}
+    kept: dict[str, float] = {}
+    for threads, seconds in value.items():
+        if not isinstance(threads, str) or not threads.isdigit() or not 1 <= int(threads) <= 64:
+            continue
+        if isinstance(seconds, bool) or not isinstance(seconds, (int, float)):
+            continue
+        if 0.0 < float(seconds) < 60.0:
+            kept[threads] = round(float(seconds), 3)
+    return kept
+
+
 class TranslationLead:
     """2.13.1: how long before a line shows its translation has (the GUI keeps it; the captions
     process is told it, services.captions.worker). TRANSLATE_LEAD_S until the translator's
-    warm-up is timed (`measure`); TRANSLATE_LEAD_STEP_S more each time a translation comes late
-    (`late`), to TRANSLATE_LEAD_MAX_S. Never lowered mid-playback (the picture would be steered
-    toward live, which the viewer sees): only at a natural point (`natural`: a zap or a tune, a
-    seek, play after a pause, translation turned on), and then to the measured lead."""
+    warm-up is timed (`measure`; a time an earlier run saved starts it, `seed`);
+    TRANSLATE_LEAD_STEP_S more each time a translation comes late (`late`), to
+    TRANSLATE_LEAD_MAX_S. Never lowered mid-playback (the picture would be steered toward live,
+    which the viewer sees): only at a natural point (`natural`: a zap or a tune, a seek, play
+    after a pause, translation turned on), and then to the measured lead; once grown, never
+    below what it grew to while QiTV runs (no wait for a second and a late line after each
+    zap), but for a step down after TRANSLATE_LEAD_QUIET_S with no late line, and again after
+    as long again. `clock` is time.monotonic (tests give their own)."""
 
-    def __init__(self) -> None:
+    def __init__(self, clock: Callable[[], float] = time.monotonic) -> None:
         self.value = TRANSLATE_LEAD_S
         self.measured: Optional[float] = None
-        self._fastest: Optional[float] = None  # the quickest warm-up timed while QiTV runs
+        self.fastest: Optional[float] = None  # the quickest warm-up this run timed
+        self._clock = clock
+        self._earned: Optional[float] = None  # what late translations grew it to
+        self._quiet_since = 0.0  # the last late translation (or step down since)
+
+    def seed(self, seconds: float) -> None:
+        """A medium line's time an earlier run measured (its config): the measured lead until
+        this run times its own."""
+        if self.fastest is None:
+            self.measured = measured_lead(seconds)
 
     def measure(self, seconds: float) -> bool:
         """The translator's medium line took `seconds` (its warm-up): the measured lead, by the
-        quickest such time while QiTV runs (a slower one had the speech model beside it); taken
-        at once only when it is higher. True when the lead changed."""
-        if self._fastest is None or seconds < self._fastest:
-            self._fastest = seconds
-        self.measured = measured_lead(self._fastest)
+        quickest such time this run timed (a slower one had the speech model beside it; a saved
+        one is replaced); taken at once only when it is higher. True when the lead changed."""
+        if self.fastest is None or seconds < self.fastest:
+            self.fastest = seconds
+        self.measured = measured_lead(self.fastest)
         if self.measured > self.value:
             self.value = self.measured
             return True
         return False
 
     def late(self) -> bool:
-        """A translation came late for its line: a step longer, to the cap. True when it grew."""
+        """A translation came late for its line: a step longer, to the cap, and what it grew to
+        kept. True when it grew."""
+        self._quiet_since = self._clock()
         if self.value >= TRANSLATE_LEAD_MAX_S:
             return False
         self.value = min(TRANSLATE_LEAD_MAX_S, self.value + TRANSLATE_LEAD_STEP_S)
+        self._earned = self.value
         return True
 
     def natural(self) -> bool:
-        """A natural point: the measured lead, when it is lower. True when the lead changed."""
-        if self.measured is None or self.measured >= self.value:
+        """A natural point: the measured lead (TRANSLATE_LEAD_S unmeasured) when it is lower,
+        never below what it grew to; that a step lower after TRANSLATE_LEAD_QUIET_S with no
+        late translation. True when the lead changed."""
+        base = self.measured if self.measured is not None else TRANSLATE_LEAD_S
+        now = self._clock()
+        if self._earned is not None and now - self._quiet_since >= TRANSLATE_LEAD_QUIET_S:
+            self._earned -= TRANSLATE_LEAD_STEP_S
+            self._quiet_since = now  # the next step down after as long again
+            if self._earned <= base:
+                self._earned = None
+        target = base if self._earned is None else max(base, self._earned)
+        if target >= self.value - 1e-9:
             return False
-        self.value = self.measured
+        self.value = target
         return True
 
 

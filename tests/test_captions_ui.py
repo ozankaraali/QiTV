@@ -7,6 +7,7 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import time
 import unittest
 from unittest import mock
 
@@ -17,7 +18,7 @@ from PySide6.QtWidgets import QApplication, QWidget
 from test_track_panel import CHANNEL, FILM, FakePlayer, PanelCase
 
 from services.captions.languages import QWEN_LANGUAGES, iso_code, own_name, qwen_name
-from services.captions.streaming import TRANSLATE_LEAD_S
+from services.captions.streaming import TRANSLATE_LEAD_S, TranslationLead
 from services.config_manager import ConfigManager
 from services.i18n import translate
 from services.playback import AudioTrackInfo, NullSession
@@ -1804,10 +1805,61 @@ class TranslationTests(unittest.TestCase):
             self.tick(160.25)
         self.assertEqual(live.floor, 13.0)
         self.window.session = SimpleNamespace(state=lambda: SimpleNamespace(value="playing"))
-        self.tick(160.5)  # play after the pause: the measured lead again
-        self.assertEqual((live.floor, self.leads()), (12.0, [5.0, 4.0]))
+        self.tick(160.5)  # play after the pause: a natural point, but it grew in this run
+        self.assertEqual(live.floor, 13.0)
+        clock = self.lead_clock()
+        clock[0] += 300.0  # five minutes with no late line
+        self.captions._last = (160.5, time.monotonic())
+        self.tick(220.0)  # a seek: a step toward the measured lead
+        self.assertEqual((live.floor, self.leads()[-1]), (12.0, 4.0))
         self.assertFalse(self.captions._lead_waits)
         self.assertEqual(self.captions._translate_lead.value, 4.0)
+
+    def lead_clock(self):
+        """The lead's clock (TranslationLead's), the test's own from now: [now]."""
+        clock = [1000.0]
+        self.captions._translate_lead._clock = lambda: clock[0]
+        self.captions._translate_lead._quiet_since = clock[0]
+        return clock
+
+    def test_a_saved_time_starts_the_lead_and_this_runs_own_replaces_it(self):
+        from services.captions import tier
+
+        live = self.window.live_session
+        threads = mock.patch.object(tier, "translator_threads", return_value=2)
+        threads.start()
+        self.addCleanup(threads.stop)
+        self.config["ai_captions_translate_t"] = {"2": 0.43, "4": 0.2}  # an earlier run's
+        self.captions._disable()
+        self.captions._enable("small")  # on: from the saved time on these threads
+        self.assertEqual(self.loaded[-1]["translate_lead"], 2.5)
+        self.captions._on_ready()
+        self.captions.set_language("Turkish")
+        self.captions.set_translate_to("English")
+        self.assertEqual(live.floor, 8.0 + 2.5)
+        self.captions._on_translate_speed(0.85, 2)  # its own warm-up: 4.0 s, at once
+        self.assertEqual((live.floor, live.whole), (12.0, True))
+        self.assertEqual(self.config["ai_captions_translate_t"], {"2": 0.85, "4": 0.2})
+        self.captions._on_translate_speed(0.6, 2)  # quicker: kept
+        self.assertEqual(self.config["ai_captions_translate_t"], {"2": 0.6, "4": 0.2})
+        self.captions._on_translate_speed(1.5, 2)  # slower (beside the speech model): not
+        self.assertEqual(self.config["ai_captions_translate_t"], {"2": 0.6, "4": 0.2})
+        self.captions._on_translate_speed(0.3)  # (threads not said: nothing kept)
+        self.assertEqual(self.config["ai_captions_translate_t"], {"2": 0.6, "4": 0.2})
+
+    def test_a_saved_time_of_other_threads_or_a_broken_one_is_not_used(self):
+        from services.captions import tier
+
+        threads = mock.patch.object(tier, "translator_threads", return_value=2)
+        threads.start()
+        self.addCleanup(threads.stop)
+        for saved in ({"4": 0.2}, {"2": "fast"}, {"2": -1}, ["0.43"], "0.43", None):
+            with self.subTest(saved=saved):
+                self.captions._translate_lead = TranslationLead()
+                self.config["ai_captions_translate_t"] = saved
+                self.captions._disable()
+                self.captions._enable("small")
+                self.assertEqual(self.loaded[-1]["translate_lead"], 5.0)
 
     def test_the_picture_still_waiting_for_its_distance_takes_a_lower_lead_at_once(self):
         live = self.window.live_session
@@ -1852,8 +1904,12 @@ class TranslationTests(unittest.TestCase):
         for second in (100.75, 101.0, 101.25):
             self.tick(second)
         self.assertEqual(live.floor, 15.0)  # never lowered mid-playback
+        clock = self.lead_clock()
         self.zap(101.5)
-        self.assertEqual((live.floor, self.leads()[-1]), (10.5, 2.5))
+        self.assertEqual(live.floor, 15.0)  # nor at a tune: it grew in this run
+        clock[0] += 300.0
+        self.zap(102.0)  # five quiet minutes: a step down
+        self.assertEqual((live.floor, self.leads()[-1]), (14.0, 6.0))
 
     def test_the_load_gives_the_process_the_lead_it_had(self):
         self.translated()

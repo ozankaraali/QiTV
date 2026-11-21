@@ -489,6 +489,7 @@ class TranslationTests(unittest.TestCase):
         self.warm: Any = lambda: True  # its load: True when it loaded
         self.speed: Any = None  # 2.13.1: what its timed warm-up gives (None: nothing)
         self.contexts: list = []  # 2.13.1: the line before and its translation, each call's
+        self.second_try = False  # 2.13.1: its last call translated the line alone after a leak
         test = self
 
         class Translator:  # services.captions.translate.Translator's interface
@@ -502,6 +503,10 @@ class TranslationTests(unittest.TestCase):
 
             def speed(self):
                 return test.speed
+
+            @property
+            def second_try(self):
+                return test.second_try
 
             def translate(self, text, source, target, deadline=None, context=None):
                 test.calls.append((text, source, target, deadline - time.monotonic()))
@@ -1209,7 +1214,7 @@ class TranslationTests(unittest.TestCase):
         self.speed = 0.43
         with self.assertLogs("services.captions.worker", logging.INFO) as logs:
             self.translation("English")
-        self.assertEqual(self.sent, [("translate_speed", 0.43)])
+        self.assertEqual(self.sent, [("translate_speed", 0.43, 2)])  # (its threads: 2 here)
         self.assertTrue([r for r in logs.records if "medium line in 0.43 s" in r.getMessage()])
         self.sent.clear()
         self.speed = None  # nothing timed (it gave nothing): the GUI keeps its lead
@@ -1307,13 +1312,30 @@ class TranslationTests(unittest.TestCase):
 
     def test_into_a_target_with_he_and_she_a_line_goes_with_the_one_before(self):
         run = self.a_run(self.translation("English"), "Turkish")
-        run._write("qwen", "heard", "Ayşe aradı.", 104.0, 105.0)
-        run._write("qwen", "heard", "Geldi.", 106.0, 107.0)
+        run._write("qwen", "heard", "Ayşe bugün aradı.", 104.0, 105.0)
+        run._write("qwen", "heard", "Yarın sabah geliyor.", 106.0, 107.0)
         run._write("qwen", "heard", "Gitti.", 107.5, 108.0)
         self.captions(3)
         self.assertEqual(
             self.contexts,
-            [None, ("Ayşe aradı.", "<English> Ayşe aradı."), ("Geldi.", "<English> Geldi.")],
+            [
+                None,
+                ("Ayşe bugün aradı.", "<English> Ayşe bugün aradı."),
+                ("Yarın sabah geliyor.", "<English> Yarın sabah geliyor."),
+            ],
+        )
+
+    def test_a_line_before_of_under_three_words_is_none(self):
+        # the owner: "Yes." before a line made the leak's second translation often
+        run = self.a_run(self.translation("English"), "Turkish")
+        run._write("qwen", "heard", "Evet.", 104.0, 104.5)
+        run._write("qwen", "heard", "Ayşe aradı.", 105.0, 106.0)
+        run._write("qwen", "heard", "Yarın sabah geliyor.", 106.5, 107.5)
+        run._write("qwen", "heard", "Sonra gidecek.", 108.0, 109.0)
+        self.captions(4)
+        self.assertEqual(self.contexts, [None, None, None, self.contexts[3]])
+        self.assertEqual(
+            self.contexts[3], ("Yarın sabah geliyor.", "<English> Yarın sabah geliyor.")
         )
 
     def test_into_a_target_without_them_each_line_goes_alone(self):
@@ -1326,35 +1348,61 @@ class TranslationTests(unittest.TestCase):
     def test_the_line_before_is_never_one_across_a_gap_a_run_a_language_or_a_target(self):
         translation = self.translation("English")
         run = self.a_run(translation, "Turkish")
-        run._write("qwen", "heard", "Bir.", 104.0, 105.0)
-        run._write("qwen", "heard", "İki.", 115.5, 116.0)  # 10.5 s later: another scene
-        run._write("qwen", "heard", "Üç.", 116.5, 117.0)  # (with "İki.")
+        run._write("qwen", "heard", "Bir iki üç.", 104.0, 105.0)
+        run._write("qwen", "heard", "Dört beş altı.", 115.5, 116.0)  # 10.5 s on: another scene
+        run._write("qwen", "heard", "Yedi sekiz dokuz.", 116.5, 117.0)  # (with the one before)
         self.captions(3)
         run.language = "German"  # ("language", name): another language heard
-        run._write("qwen", "heard", "Vier.", 117.5, 118.0)
+        run._write("qwen", "heard", "Eins zwei drei.", 117.5, 118.0)
         self.captions(4)
         new = self.a_run(translation, "German", 2)  # a zap, a tune, a seek: a new run
-        new._write("qwen", "heard", "Fünf.", 118.5, 119.0)
+        new._write("qwen", "heard", "Vier fünf sechs.", 118.5, 119.0)
         self.captions(5)
         translation.set("French")  # another target
         self.assertTrue(self.until(translation._ready))
-        new._write("qwen", "heard", "Sechs.", 119.5, 120.0)
+        new._write("qwen", "heard", "Sieben acht neun.", 119.5, 120.0)
         self.captions(6)
-        self.assertEqual(self.contexts, [None, None, ("İki.", "<English> İki."), None, None, None])
+        before = ("Dört beş altı.", "<English> Dört beş altı.")
+        self.assertEqual(self.contexts, [None, None, before, None, None, None])
 
     def test_a_line_before_that_went_out_as_written_is_none(self):
         self.answer = lambda text, source, target, deadline: (
-            None if text == "Bir." else f"<{target}> {text}"
+            None if text == "Bir iki üç." else f"<{target}> {text}"
         )
         run = self.a_run(self.translation("English"), "Turkish")
-        run._write("qwen", "heard", "Bir.", 104.0, 105.0)  # no usable translation
-        run._write("qwen", "heard", "İki.", 105.5, 106.0)
+        run._write("qwen", "heard", "Bir iki üç.", 104.0, 105.0)  # no usable translation
+        run._write("qwen", "heard", "Dört beş altı.", 105.5, 106.0)
         run.language = "English"  # a line not to translate breaks the chain too
-        run._write("qwen", "heard", "Three.", 106.5, 107.0)
+        run._write("qwen", "heard", "Seven eight nine.", 106.5, 107.0)
         run.language = "Turkish"
-        run._write("qwen", "heard", "Dört.", 107.5, 108.0)
+        run._write("qwen", "heard", "On on bir.", 107.5, 108.0)
         self.captions(4)
         self.assertEqual(self.contexts, [None, None, None])
+
+    def test_a_deadline_missed_on_the_second_try_is_not_the_leads(self):
+        # the line before leaked into it: translated again alone, and that ran out of its time
+        def answer(text, source, target, deadline):
+            time.sleep(max(0.0, deadline - time.monotonic()) + 0.01)
+            self.second_try = self.contexts[-1] is not None
+
+        self.answer = answer
+        translation = self.translation("English")
+        translation.set_lead(2.0)
+        run = self.a_run(translation, "Turkish", newest=104.0)
+        self.plays(translation, 100.0)
+        with translation._lock:  # the line before went out translated
+            translation._before = worker_said(run, "Ayşe bugün aradı.", 99.0, 100.9)
+        run._write("qwen", "heard", "Yarın geliyor.", 101.2, 102.0)  # 1.2 s: the lead's
+        self.assertTrue(self.until(lambda: len(self.sent) >= 1))
+        time.sleep(0.05)
+        self.assertIsNotNone(self.contexts[-1])
+        self.assertEqual(self.sent, [self.written("Yarın geliyor.", 101.2, 102.0)])  # no word
+        self.sent.clear()
+        self.plays(translation, 100.0)
+        run._write("qwen", "heard", "Sonra gidecek.", 101.2, 102.0)  # alone: its first try
+        self.assertTrue(self.until(lambda: len(self.sent) >= 2))
+        self.assertIsNone(self.contexts[-1])
+        self.assertEqual(self.sent[0], ("translate_late", 1, 2.0))
 
     def test_the_gui_hears_the_translators_speed_and_its_late_lines(self):
         from PySide6.QtWidgets import QApplication
@@ -1364,13 +1412,14 @@ class TranslationTests(unittest.TestCase):
         QApplication.instance() or QApplication([])
         process = CaptionsProcess()
         heard: list = []
-        process.translateSpeed.connect(lambda seconds: heard.append(("speed", seconds)))
+        process.translateSpeed.connect(lambda *args: heard.append(("speed", *args)))
         process.translateLate.connect(lambda run, lead: heard.append(("late", run, lead)))
         process._supervisor, process._serial = object(), 1  # type: ignore[assignment]
-        process._on_message(1, ("translate_speed", 0.43))
+        process._on_message(1, ("translate_speed", 0.43, 4))
+        process._on_message(1, ("translate_speed", 0.5))  # (no threads said: 0)
         process._on_message(1, ("translate_late", 3, 2.5))
         process._supervisor = None
-        self.assertEqual(heard, [("speed", 0.43), ("late", 3, 2.5)])
+        self.assertEqual(heard, [("speed", 0.43, 4), ("speed", 0.5, 0), ("late", 3, 2.5)])
 
 
 class StreamClockTests(unittest.TestCase):
@@ -2233,6 +2282,13 @@ class ControllerTimingTests(unittest.TestCase):
         self.captions._disable()
         self.assertEqual(self.overlay.text, "")
         self.assertEqual(self.window.live_session.floor, 0.0)
+
+
+def worker_said(run, shown, start, end, language="Turkish", target="English"):
+    """A line that went out translated (services.captions.worker._Said), for the next one."""
+    from services.captions.worker import _Said
+
+    return _Said(run, language, target, start, end, shown, f"<{target}> {shown}")
 
 
 class _Card:

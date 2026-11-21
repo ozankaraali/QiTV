@@ -28,7 +28,8 @@ a line of one), and the line as heard, the original, last),
 ("levels", run, start_ms, frame_ms, blob) while levels are on, from a film's sound as it is read
 (services.levels.LevelStream: the visualizer decodes nothing these captions read),
 ("detected", run, language) once the pieces agree on one (none was given),
-("translate_speed", seconds) (2.13.1: the translator's medium line, timed as it loaded),
+("translate_speed", seconds, threads) (2.13.1: the translator's medium line, timed as it loaded,
+on its threads),
 ("translate_late", run, lead) (a line late for its translation that had the lead),
 ("log", level, text); loaded without a model (`load` with "model": None, the packaged smoke
 test's probe), ("piece", run, start, end, speech_share) for each piece instead. No traceback
@@ -133,6 +134,7 @@ DEADLINE_MARGIN_S = 0.3  # 2.10: a line's translation is done this long before t
 # 2.13.1: a line is translated with the one before (into a target with he and she) when that
 # one ended at most this long before it started: the same scene
 CONTEXT_GAP_S = 10.0
+CONTEXT_MIN_WORDS = 3  # ... and has at least this many words (the owner: "Yes." leaked)
 
 
 def _folder_name(folder: Any) -> str:
@@ -991,7 +993,9 @@ class _Translation:
     translation that had that lead (less a step) from being written to its deadline says so
     ("translate_late"): the lead is short. Into a target with he and she
     (mt_languages.needs_context) a line goes with the one before and its translation when that
-    one went out translated, in the same run and language, at most CONTEXT_GAP_S before it."""
+    one went out translated, in the same run and language, at most CONTEXT_GAP_S before it, and
+    was CONTEXT_MIN_WORDS words or more. A line translated again alone after the line before
+    leaked (Translator.second_try) is not late for the lead."""
 
     def __init__(self, link: _Link, viewer: list) -> None:
         self.link = link
@@ -1171,7 +1175,7 @@ class _Translation:
             seconds,
             threads,
         )
-        self.link.send(("translate_speed", round(float(seconds), 3)))
+        self.link.send(("translate_speed", round(float(seconds), 3), threads))
 
     def _next(self) -> None:
         """The next line waiting out, translated or as written."""
@@ -1219,6 +1223,8 @@ class _Translation:
             return None
         if line.start - before.end > CONTEXT_GAP_S:
             return None  # another scene
+        if len(before.shown.split()) < CONTEXT_MIN_WORDS:
+            return None  # ("Yes.": it leaked into the next, translated again alone)
         return before.shown, before.text
 
     def _translated(
@@ -1252,7 +1258,8 @@ class _Translation:
         if text is not None:
             return text, ""
         if time.monotonic() > deadline:
-            self._late(line, deadline, lead)
+            if not getattr(translator, "second_try", False):  # (the first try's time alone)
+                self._late(line, deadline, lead)
             return None, f"not translated in the {deadline - began:.1f} s it had"
         return None, "no usable translation"
 

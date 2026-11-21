@@ -103,9 +103,9 @@ class CaptionsProcess(QObject):
     piece = Signal(int, float, float, float)  # run, start, end, speech share (no model loaded)
     # Plan 4: run, start_ms, frame_ms, a chunk of a film's band levels (services.levels.pack)
     levels = Signal(int, int, int, object)
-    # 2.13.1: the translator's medium line in seconds (timed as it loaded); and a run's line late
-    # for its translation that had the lead (the lead it had)
-    translateSpeed = Signal(float)
+    # 2.13.1: the translator's medium line in seconds (timed as it loaded) and its threads (0:
+    # not said); and a run's line late for its translation that had the lead (the lead it had)
+    translateSpeed = Signal(float, int)
     translateLate = Signal(int, float)
 
     def __init__(self, parent: Optional[QObject] = None) -> None:
@@ -195,7 +195,8 @@ class CaptionsProcess(QObject):
         elif kind == "ended":
             self.ended.emit(int(message[1]), str(message[2]))
         elif kind == "translate_speed":
-            self.translateSpeed.emit(float(message[1]))
+            threads = int(message[2]) if len(message) > 2 else 0
+            self.translateSpeed.emit(float(message[1]), threads)
         elif kind == "translate_late":
             self.translateLate.emit(int(message[1]), float(message[2]))
         elif kind == "failed":

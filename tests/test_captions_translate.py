@@ -581,6 +581,7 @@ class ContextTests(unittest.TestCase):
         t = Fake([99] + letters(" She came.") + [1], CharTokenizer())  # (99: the prefix's)
         shown = t.translate("Geldi.", "Turkish", "English", context=self.CONTEXT)
         self.assertEqual(shown, "She came.")
+        self.assertFalse(t.second_try)
         self.assertEqual(
             t.fake_tokenizer.texts,
             [PREFIX, context_prompt("Geldi.", "Turkish", "English", *self.CONTEXT)],
@@ -606,6 +607,7 @@ class ContextTests(unittest.TestCase):
                 with self.assertLogs(translate.logger, "DEBUG"):
                     shown = t.translate("Geldi.", "Turkish", "English", context=self.CONTEXT)
                 self.assertEqual(shown, "He came.")
+                self.assertTrue(t.second_try)  # (its time is not the lead's: the worker)
                 self.assertEqual(
                     t.fake_tokenizer.texts[1:],
                     [
@@ -629,6 +631,7 @@ class ContextTests(unittest.TestCase):
         with mock.patch.object(translate.time, "monotonic", return_value=9.0):
             shown = t.translate("Geldi.", "Turkish", "English", 5.0, context=self.CONTEXT)
         self.assertIsNone(shown)
+        self.assertFalse(t.second_try)  # its first try missed the deadline
         self.assertEqual(len(t.session.calls), 2)  # the prefix, and the line's first token
         self.assertEqual(len(t.fake_tokenizer.texts), 2)  # not encoded alone
         kept = t.session.made[1 : 1 + len(PRESENTS)]
