@@ -11,7 +11,17 @@ from unittest import mock
 
 from services.captions import onnx_c, translate
 from services.captions.mt_languages import MT_LANGUAGES, app_default, own_name, source_for
-from services.captions.translate import EOS_IDS, MAX_NEW_TOKENS, Translator, clean, prompt
+from services.captions.translate import (
+    EOS_IDS,
+    MAX_NEW_TOKENS,
+    SPEED_LINE,
+    Translator,
+    clean,
+    context_prompt,
+    leaks,
+    prefix,
+    prompt,
+)
 
 LAYERS = 2
 PASTS = [f"past_key_values.{i}.{kv}" for i in range(LAYERS) for kv in ("key", "value")]
@@ -143,6 +153,37 @@ class FakeSession:
         return outs
 
 
+class HistorySession(FakeSession):
+    """A tiny model whose keys and values are the ids it has seen (every layer's alike) and
+    whose next token is `next_of` them all: a step fed the wrong pasts, or a mask that does not
+    cover them, writes other tokens (or fails)."""
+
+    def __init__(self) -> None:
+        super().__init__([])
+
+    def run(self, values: list[FakeValue], selection: Any) -> list[FakeValue]:
+        fed = dict(zip(self.inputs, values))
+        pasts = [fed[name] for name in PASTS]
+        seen = list(pasts[0].data or [])
+        assert all(list(value.data or []) == seen for value in pasts), "the layers disagree"
+        assert not any(value.released for value in values), "fed a released value"
+        history = seen + list(fed["input_ids"].data)
+        assert len(fed["attention_mask"].data) == len(history), "the mask is not the history"
+        self.calls.append(
+            {
+                "ids": list(fed["input_ids"].data),
+                "mask": len(fed["attention_mask"].data),
+                "pasts": pasts,
+                "released": [v.released for v in values],
+            }
+        )
+        token = FakeValue()
+        token._cell.value = next_of(history)
+        outs = [token] + [FakeValue(list(history)) for _ in PRESENTS]
+        self.made.extend(outs)
+        return outs
+
+
 class FakeTokenizer:
     """Ids 10..: words; 7 is a newline; 1 and 106 end it."""
 
@@ -151,17 +192,69 @@ class FakeTokenizer:
     def encode(self, text: str, add_special_tokens: bool = True) -> Any:
         self.special = add_special_tokens
         self.encoded = text
-        return mock.Mock(ids=[2, 20, 21])
+        self.texts = getattr(self, "texts", []) + [text]
+        return mock.Mock(ids=self.ids(text))
+
+    def ids(self, text: str) -> list[int]:
+        return [2, 20, 21]
 
     def decode(self, ids: list[int], skip_special_tokens: bool = True) -> str:
         return "".join(self.WORDS.get(i, "") for i in ids)
 
 
+class CharTokenizer(FakeTokenizer):
+    """A letter a token (1000 + its code point), so that a prompt's start is its ids' start, as
+    the real tokenizer's is up to the source's colon; ids 20..29 are words " w0" ... " w9"."""
+
+    WORDS = {**FakeTokenizer.WORDS, **{20 + k: f" w{k}" for k in range(10)}}
+
+    def ids(self, text: str) -> list[int]:
+        return [1000 + ord(char) for char in text]
+
+    def decode(self, ids: list[int], skip_special_tokens: bool = True) -> str:
+        return "".join(chr(i - 1000) if i >= 1000 else self.WORDS.get(i, "") for i in ids)
+
+
+class MergingTokenizer(CharTokenizer):
+    """As CharTokenizer, but ": " is one token: a prompt's ids don't start with its prefix's."""
+
+    def ids(self, text: str) -> list[int]:
+        out: list[int] = []
+        for char in text:
+            if char == " " and out and out[-1] == 1000 + ord(":"):
+                out[-1] = 999
+            else:
+                out.append(1000 + ord(char))
+        return out
+
+
+def letters(text: str) -> list[int]:
+    """`text` as CharTokenizer's ids (a translation the model writes, a letter at a time)."""
+    return [1000 + ord(char) for char in text]
+
+
+def next_of(history: list[int]) -> int:
+    """HistorySession's model: the next token by everything seen (as a real model's is by its
+    context); it ends (EOS) once it wrote four words."""
+    if len(history) >= 4 and all(i < 100 for i in history[-4:]):
+        return 1
+    return 20 + (sum(history) + 3 * len(history)) % 10
+
+
+def greedy(ids: list[int]) -> list[int]:
+    """What HistorySession writes after the prompt `ids`, the whole prompt at once."""
+    history, tokens = list(ids), []
+    while (token := next_of(history)) != 1:
+        tokens.append(token)
+        history.append(token)
+    return tokens
+
+
 class Fake(Translator):
-    def __init__(self, script: list[int]) -> None:
+    def __init__(self, script: list[int], tokenizer: Any = None, session: Any = None) -> None:
         super().__init__(Path("."))
-        self.session = FakeSession(script)
-        self.fake_tokenizer = FakeTokenizer()
+        self.session = session if session is not None else FakeSession(script)
+        self.fake_tokenizer = tokenizer if tokenizer is not None else FakeTokenizer()
 
     def _load(self) -> None:
         self._api = FakeApi()  # type: ignore[assignment]
@@ -386,6 +479,231 @@ class TranslatorTest(unittest.TestCase):
         self.assertEqual(own_name("Chinese (Simplified)"), "简体中文")
         for name in MT_LANGUAGES:
             self.assertTrue(own_name(name))
+
+
+PREFIX = "Translate this from Turkish to English:\nTurkish:"
+
+
+class PrefixCacheTests(unittest.TestCase):
+    """2.13.1: the prompt's fixed start runs once per language pair; each line runs from its keys
+    and values on, and writes the tokens the whole prompt run at once writes (a model whose
+    next token is a function of all it has seen: services.captions.translate's output stays
+    token for token)."""
+
+    def setUp(self) -> None:
+        self.session = HistorySession()
+        self.t = Fake([], CharTokenizer(), self.session)
+
+    def written(self, first: int) -> list[int]:
+        """The tokens written from call `first` on (each step feeds the token before)."""
+        return [call["ids"][0] for call in self.session.calls[first:]]
+
+    def test_a_line_runs_from_the_cached_prefix_and_writes_what_the_whole_prompt_would(self):
+        full = letters(prompt("Pekala tamam", "Turkish", "English"))
+        head = letters(PREFIX)
+        self.assertEqual(prefix("Turkish", "English"), PREFIX)
+        self.assertEqual(full[: len(head)], head)  # (the space after "Turkish:" is the line's)
+        shown = self.t.translate("Pekala tamam", "Turkish", "English")
+        calls = self.session.calls
+        self.assertEqual((calls[0]["ids"], calls[0]["mask"]), (head, len(head)))  # alone
+        self.assertTrue(all(value is self.t._empty for value in calls[0]["pasts"]))
+        kept = self.session.made[1 : 1 + len(PRESENTS)]  # the prefix's presents
+        self.assertEqual((calls[1]["ids"], calls[1]["mask"]), (full[len(head) :], len(full)))
+        self.assertEqual([id(v) for v in calls[1]["pasts"]], [id(v) for v in kept])
+        tokens = greedy(full)
+        self.assertEqual(len(tokens), 4)
+        self.assertEqual(self.written(2), tokens)  # token for token
+        self.assertEqual(shown, clean("Pekala tamam", CharTokenizer().decode(tokens), "English"))
+        self.assertFalse(any(v.released for v in kept))  # kept for the next line
+        rest = [v for v in self.session.made if all(v is not k for k in kept)]
+        self.assertTrue(all(v.released for v in rest))
+
+        before = len(calls)
+        self.t.translate("Bugün eve gidiyorum", "Turkish", "English")  # the same pair
+        second = letters(prompt("Bugün eve gidiyorum", "Turkish", "English"))
+        self.assertEqual(calls[before]["ids"], second[len(head) :])  # no prefix run again
+        self.assertEqual([id(v) for v in calls[before]["pasts"]], [id(v) for v in kept])
+        self.assertEqual(self.written(before + 1), greedy(second))
+        self.assertFalse(any(v.released for v in kept))
+        self.assertEqual(len(self.t.fake_tokenizer.texts), 3)  # the prefix encoded once
+
+        before = len(calls)
+        self.t.translate("Good evening", "English", "Turkish")  # another pair: its own prefix
+        other = letters(prompt("Good evening", "English", "Turkish"))
+        own = letters(prefix("English", "Turkish"))
+        self.assertEqual(calls[before]["ids"], own)
+        self.assertEqual(calls[before + 1]["ids"], other[len(own) :])
+        self.assertEqual(self.written(before + 2), greedy(other))
+        self.assertTrue(all(v.released for v in kept))  # the one before is let go
+
+    def test_a_prompt_that_does_not_start_with_the_prefixs_ids_runs_whole(self):
+        session = HistorySession()
+        t = Fake([], MergingTokenizer(), session)
+        full = MergingTokenizer().ids(prompt("Pekala tamam", "Turkish", "English"))
+        t.translate("Pekala tamam", "Turkish", "English")
+        self.assertEqual((session.calls[0]["ids"], session.calls[0]["mask"]), (full, len(full)))
+        self.assertEqual([call["ids"][0] for call in session.calls[1:]], greedy(full))
+        self.assertTrue(all(v.released for v in session.made))
+
+    def test_a_failing_line_keeps_the_prefix_for_the_next(self):
+        self.t.translate("Pekala tamam", "Turkish", "English")
+        kept = self.session.made[1 : 1 + len(PRESENTS)]
+        original = self.session.run
+
+        def run(values: Any, selection: Any) -> Any:
+            raise RuntimeError("boom")
+
+        self.session.run = run  # type: ignore[method-assign]
+        with self.assertLogs(translate.logger, "ERROR"):
+            self.assertIsNone(self.t.translate("Bir", "Turkish", "English"))
+        self.assertFalse(any(v.released for v in kept))
+        self.session.run = original  # type: ignore[method-assign]
+        before = len(self.session.calls)
+        self.t.translate("Bugün", "Turkish", "English")
+        second = letters(prompt("Bugün", "Turkish", "English"))
+        self.assertEqual(self.written(before + 1), greedy(second))
+
+
+class ContextTests(unittest.TestCase):
+    """2.13.1 ("f2", 2026-11-21): a line translated with the line before and its translation, in
+    the model card's own prompt; never with the line before in what it shows."""
+
+    CONTEXT = ("Ayşe aradı.", "Ayşe called.")
+
+    def test_the_prompt_is_the_cards_over_both_lines_with_the_one_before_translated(self):
+        self.assertEqual(
+            context_prompt("Geldi.", "Turkish", "English", *self.CONTEXT),
+            "Translate this from Turkish to English:\nTurkish: Ayşe aradı. Geldi.\n"
+            "English: Ayşe called.",
+        )
+
+    def test_the_model_goes_on_from_the_line_befores_translation(self):
+        t = Fake([99] + letters(" She came.") + [1], CharTokenizer())  # (99: the prefix's)
+        shown = t.translate("Geldi.", "Turkish", "English", context=self.CONTEXT)
+        self.assertEqual(shown, "She came.")
+        self.assertFalse(t.second_try)
+        self.assertEqual(
+            t.fake_tokenizer.texts,
+            [PREFIX, context_prompt("Geldi.", "Turkish", "English", *self.CONTEXT)],
+        )
+        self.assertTrue(all(v.released for v in t.session.made[1 + len(PRESENTS) :]))
+
+    def test_a_mark_it_goes_on_with_is_not_shown(self):
+        t = Fake([99] + letters(", she came.") + [1], CharTokenizer())
+        self.assertEqual(
+            t.translate("Geldi.", "Turkish", "English", context=self.CONTEXT), "she came."
+        )
+        t = Fake([99] + letters(" ...and then she came.") + [1], CharTokenizer())
+        self.assertEqual(
+            t.translate("Sonra geldi.", "Turkish", "English", context=self.CONTEXT),
+            "...and then she came.",
+        )
+
+    def test_the_line_before_in_it_is_a_leak_and_the_line_is_translated_alone(self):
+        for leaked in (" Ayşe called. She came.", " Ayşe aradı. She came."):
+            with self.subTest(leaked=leaked):
+                script = [99] + letters(leaked) + [1] + letters(" He came.") + [1]
+                t = Fake(script, CharTokenizer())
+                with self.assertLogs(translate.logger, "DEBUG"):
+                    shown = t.translate("Geldi.", "Turkish", "English", context=self.CONTEXT)
+                self.assertEqual(shown, "He came.")
+                self.assertTrue(t.second_try)  # (its time is not the lead's: the worker)
+                self.assertEqual(
+                    t.fake_tokenizer.texts[1:],
+                    [
+                        context_prompt("Geldi.", "Turkish", "English", *self.CONTEXT),
+                        prompt("Geldi.", "Turkish", "English"),
+                    ],
+                )
+                self.assertEqual(t.session.script, [])  # both ran
+                kept = t.session.made[1 : 1 + len(PRESENTS)]
+                rest = [v for v in t.session.made if all(v is not k for k in kept)]
+                self.assertTrue(all(v.released for v in rest))
+
+    def test_an_answer_taken_from_the_question_before_is_translated_alone(self):
+        script = [99] + letters(" Yes, she's in the kitchen.") + [1]
+        script += letters(" She's in the kitchen.") + [1]
+        t = Fake(script, CharTokenizer())
+        context = ("Annen geldi mi?", "Did your mother come?")
+        with self.assertLogs(translate.logger, "DEBUG"):
+            shown = t.translate("Mutfakta.", "Turkish", "English", context=context)
+        self.assertEqual(shown, "She's in the kitchen.")
+        self.assertTrue(t.second_try)
+
+    def test_nothing_usable_with_the_line_before_translates_it_alone(self):
+        t = Fake([99, 7] + letters(" He came.") + [1], CharTokenizer())  # a newline at once
+        self.assertEqual(
+            t.translate("Geldi.", "Turkish", "English", context=self.CONTEXT), "He came."
+        )
+
+    def test_past_its_deadline_it_is_not_tried_alone(self):
+        t = Fake([99] + letters(" She came.") + [1], CharTokenizer())
+        with mock.patch.object(translate.time, "monotonic", return_value=9.0):
+            shown = t.translate("Geldi.", "Turkish", "English", 5.0, context=self.CONTEXT)
+        self.assertIsNone(shown)
+        self.assertFalse(t.second_try)  # its first try missed the deadline
+        self.assertEqual(len(t.session.calls), 2)  # the prefix, and the line's first token
+        self.assertEqual(len(t.fake_tokenizer.texts), 2)  # not encoded alone
+        kept = t.session.made[1 : 1 + len(PRESENTS)]
+        rest = [v for v in t.session.made if all(v is not k for k in kept)]
+        self.assertTrue(all(v.released for v in rest))
+
+    def test_what_counts_as_the_line_before_in_a_translation(self):
+        before, translated = "Ayşe aradı mı?", "Did Ayşe call you?"
+        self.assertTrue(leaks("Did Ayşe call you? Yes.", before, translated, "Evet."))
+        self.assertTrue(leaks("She asked: did Ayşe call you?", before, translated, "Sordu."))
+        self.assertFalse(leaks("Did Ayşe call, she asked.", before, translated, "Sordu."))  # 3 of 4
+        self.assertFalse(leaks("Ayşe came.", before, translated, "Ayşe geldi."))  # her name
+        self.assertFalse(leaks("Yes, she called me.", before, translated, "Evet, aradı."))
+        # a shorter line before: all of it
+        self.assertTrue(leaks("Yes, she did.", "Evet.", "Yes.", "Aradı."))
+        self.assertFalse(leaks("She did.", "Evet.", "Yes.", "Aradı."))
+        self.assertTrue(leaks("Ayşe aradı, she came.", "Ayşe aradı.", "Ayşe called.", "Geldi."))
+        self.assertFalse(leaks("Ayşe came.", "Ayşe aradı.", "Ayşe called.", "Ayşe geldi."))
+        self.assertFalse(leaks("She came.", "", "", "Geldi."))
+
+    def test_an_answer_to_the_question_before_is_a_leak(self):
+        # the 2026-11-21 report's scenes: "Yes," taken from the question before
+        before, translated = "Annen geldi mi?", "Did your mother come?"
+        self.assertTrue(leaks("Yes, she's in the kitchen.", before, translated, "Mutfakta."))
+        self.assertTrue(leaks("No, she is not here.", before, translated, "Burada değil."))
+        self.assertTrue(leaks("Yes. She came.", before, translated, "Geldi."))
+        self.assertFalse(leaks("Yes, she's in the kitchen.", before, translated, "Evet, mutfakta."))
+        self.assertFalse(leaks("She's in the kitchen.", before, translated, "Mutfakta."))
+        self.assertFalse(leaks("In the kitchen, cooking.", before, translated, "Mutfakta."))  # 2+
+        for question in ("هل جاءت أمك؟", "妈妈来了吗？", "Ήρθε η μητέρα σου;"):
+            self.assertTrue(leaks("Yes, she came.", question, translated, "Geldi."), question)
+        self.assertFalse(leaks("Yes, she came.", "Annen geldi.", "Your mother came.", "Geldi."))
+
+    def test_the_line_befores_translation_ending_it_again_is_a_leak(self):
+        # the report's FLORES case: "yavaş oldu." of the translation before, again
+        self.assertTrue(
+            leaks("yavaş oldu. Sonra durdu.", "It was slow.", "Çok yavaş oldu.", "Then it stopped.")
+        )
+        self.assertTrue(
+            leaks("Kitchen. Then she left.", "Nerede?", "In the kitchen.", "Sonra gitti.")
+        )
+        self.assertFalse(
+            leaks("Ayşe left later.", "Ayşe'yi gördüm.", "I saw Ayşe.", "Ayşe sonra gitti.")
+        )  # her name, said in this line too
+        self.assertFalse(leaks("Then she left.", "Nerede?", "In the kitchen.", "Sonra gitti."))
+
+
+class SpeedTests(unittest.TestCase):
+    """2.13.1: the translator's pace, from its warm-up (the adaptive lead's T)."""
+
+    def test_two_timed_medium_lines_the_faster_one(self):
+        t = Fake([10, 1, 12, 1])
+        with mock.patch.object(translate.time, "perf_counter", side_effect=[0.0, 0.9, 1.0, 1.6]):
+            self.assertAlmostEqual(t.speed(), 0.6)
+        self.assertEqual(t.fake_tokenizer.encoded, prompt(SPEED_LINE, "Turkish", "English"))
+        self.assertEqual(len(t.session.calls), 4)
+        self.assertTrue(8 <= len(SPEED_LINE.split()) <= 12)  # the report's "medium" line
+
+    def test_no_speed_from_a_model_that_gives_nothing(self):
+        self.assertIsNone(Fake([7, 7]).speed())  # a newline at once: nothing to show
+        with self.assertLogs(translate.logger, "ERROR"):
+            self.assertIsNone(Fake([]).speed())  # its run fails
 
 
 if __name__ == "__main__":

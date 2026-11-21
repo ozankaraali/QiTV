@@ -23,7 +23,7 @@ import time
 from typing import Any, Optional
 
 from services.captions import onnx_c, text_language
-from services.captions.mt_languages import MT_LANGUAGES
+from services.captions.mt_languages import DENSE, MT_LANGUAGES
 
 logger = logging.getLogger(__name__)
 
@@ -53,12 +53,72 @@ def prompt(text: str, source: str, target: str) -> str:
     return f"Translate this from {source} to {target}:\n{source}: {text}\n{target}:"
 
 
-# scripts where a character carries about a word: the cap on a translation's length counts
-# each as 3 (a 10-character Chinese line translates to 50 or more English characters)
-_DENSE = re.compile(
-    "[\u0e00-\u0eff\u1000-\u109f\u1780-\u17ff\u3040-\u30ff\u3400-\u4dbf"
-    "\u4e00-\u9fff\uac00-\ud7af\u1100-\u11ff]"
-)
+def prefix(source: str, target: str) -> str:
+    """2.13.1: the start every line's prompt from `source` to `target` has, run once and kept
+    (`Translator`): up to the source's colon (the space after it is the line's first word's)."""
+    return f"Translate this from {source} to {target}:\n{source}:"
+
+
+def context_prompt(text: str, source: str, target: str, before: str, translated: str) -> str:
+    """2.13.1 ("f2", 2026-11-21): the card's prompt over the line before (`before`) and this one,
+    joined, with the line before's translation (`translated`) already written: the model goes
+    on with this line's. Into English it gave the right he or she in 16-17 of 19 TV scenes,
+    against 7 alone."""
+    return f"{prompt(f'{before} {text}', source, target)} {translated}"
+
+
+_WORD = re.compile(r"\w+")
+# the mark a translation goes on from the one before's with (", she came"); never an ellipsis
+_LEADING_MARKS = re.compile(r"^(?:\s|[,;:!?]|\.(?![.…]))+")
+
+
+def _grams(words: list[str], n: int) -> set[tuple[str, ...]]:
+    return {tuple(words[i : i + n]) for i in range(len(words) - n + 1)}
+
+
+# a question's last mark (Arabic's, the full-width one, Greek's semicolon and its own sign)
+_QUESTION_ENDS = ("?", "؟", "？", ";", "\u037e")
+_CLOSING_QUOTES = "\"'»”’"
+_CLAUSE_MARKS = re.compile(r"[,.!?;:…，。！？、؟\u037e]+")
+
+
+def _words(text: str) -> list[str]:
+    return [word.casefold() for word in _WORD.findall(text)]
+
+
+def _clauses(text: str) -> list[str]:
+    """`text`'s clauses: its stretches between commas and sentence marks, each with a word."""
+    return [part for part in _CLAUSE_MARKS.split(text) if _WORD.search(part)]
+
+
+def leaks(shown: str, before: str, translated: str, text: str) -> bool:
+    """A translation made with the line before (`context_prompt`) holds that line: four words in
+    a row of its translation (`translated`) or of the line itself (`before`), or all of a
+    shorter one, that the line heard (`text`) doesn't hold too (a name said in both). 2026-11-21's
+    other two (its §5): the translation before's last one to three words again at its start
+    ("yavaş oldu."), and after a question an answer the line doesn't say: one clause more than
+    the line heard, its first of one or two words ("Annen geldi mi?" then "Mutfakta.": "Yes,
+    she's in the kitchen.")."""
+    out, own = _words(shown), _words(text)
+    for earlier in (translated, before):
+        words = _words(earlier)
+        n = min(4, len(words))
+        if n and len(out) >= n and (_grams(out, n) & _grams(words, n)) - _grams(own, n):
+            return True
+    tail = _words(translated)
+    for k in range(1, min(3, len(tail), len(out)) + 1):
+        if out[:k] == tail[-k:] and tuple(out[:k]) not in _grams(own, k):
+            return True
+    if before.rstrip().rstrip(_CLOSING_QUOTES).endswith(_QUESTION_ENDS):
+        clauses = _clauses(shown)
+        if len(clauses) == len(_clauses(text)) + 1 and len(_WORD.findall(clauses[0])) <= 2:
+            return True
+    return False
+
+
+# 2.13.1: the line the translator's warm-up is timed on (`Translator.speed`): a medium one, as
+# 2026-11-21's measurements' (8 to 12 words; the growing writer's lines are at most that long)
+SPEED_LINE = "Bu akşam eve geç geleceğim, yemeği bensiz yiyin lütfen."
 
 
 def clean(source: str, output: str, target: str) -> Optional[str]:
@@ -66,7 +126,7 @@ def clean(source: str, output: str, target: str) -> Optional[str]:
     longer than the source, a word said over and over, or not in the target's script (each of
     MiLMMT's targets has its own in text_language)."""
     text = _DASH.sub(", ", _EDGE_DASHES.sub("", output.split("\n", 1)[0]))
-    dense = len(_DENSE.findall(source))
+    dense = len(DENSE.findall(source))  # (a character about a word: counted as 3)
     if not text or len(text) > 3 * (len(source) + 2 * dense) + 20:
         return None
     if _REPEAT.search(text):
@@ -78,7 +138,10 @@ def clean(source: str, output: str, target: str) -> Optional[str]:
 
 class Translator:
     """The model in one folder (model.onnx, model.onnx.data, tokenizer.json), `threads` intra-op
-    threads. It loads on first use (`warm` does it ahead); one translation at a time."""
+    threads. It loads on first use (`warm` does it ahead); one translation at a time. 2.13.1:
+    the prompt's start (`prefix`) runs once per language pair and each line runs on from its
+    keys and values (the same tokens; 2026-11-21: about 10 % sooner, its first token 100 ms
+    sooner on a 4-core ARM box); a line may go with the one before (`translate`'s `context`)."""
 
     def __init__(self, folder: Path, threads: int = 2, library: Optional[Path] = None) -> None:
         self._folder = Path(folder)
@@ -94,6 +157,13 @@ class Translator:
         self._empty: Any = None
         self._broken = False
         self.error = ""  # why the model is of no use ("OSError: ..."), once it is not
+        # 2.13.1: the prompt's start for one language pair: its ids, its presents once run
+        self._prefix_pair: Optional[tuple[str, str]] = None
+        self._prefix_ids: list[int] = []
+        self._prefix_kv: Optional[list[Any]] = None
+        # 2.13.1: the last translation was made again alone after the line before leaked into
+        # it (or gave nothing): its time past the first try is not the lead's (the worker)
+        self.second_try = False
 
     def _load(self) -> None:
         site = self._folder / "site"  # the tokenizers wheel, unpacked with the model
@@ -164,28 +234,116 @@ class Translator:
             return True
 
     def translate(
-        self, text: str, source: str, target: str, deadline: Optional[float] = None
+        self,
+        text: str,
+        source: str,
+        target: str,
+        deadline: Optional[float] = None,
+        context: Optional[tuple[str, str]] = None,
     ) -> Optional[str]:
         """`text` from `source` to `target` (MiLMMT's names); None when the original should
         show: a bad output, one cut off at MAX_NEW_TOKENS, an error (logged), or `deadline` (a
-        time.monotonic() value) passed between tokens."""
+        time.monotonic() value) passed between tokens. 2.13.1: with `context` (the line before
+        and its translation), translated with them (`context_prompt`); what that gives holding
+        the line before (`leaks`), or nothing to show, the line is translated alone, by the same
+        deadline (`second_try`)."""
         with self._lock:
+            self.second_try = False
             if not self._ready():
                 return None
             try:
-                ids = list(
-                    self._tokenizer.encode(
-                        prompt(text, source, target), add_special_tokens=False
-                    ).ids
-                )
-                tokens = self._generate(ids, MAX_NEW_TOKENS, deadline)
-                if tokens is None:
-                    return None
-                decoded = self._tokenizer.decode(tokens, skip_special_tokens=True)
+                if context is not None:
+                    shown = self._with_context(text, source, target, deadline, context)
+                    if shown is not None:
+                        return shown
+                    if deadline is not None and time.monotonic() > deadline:
+                        return None
+                    self.second_try = True
+                decoded = self._decoded(prompt(text, source, target), source, target, deadline)
             except Exception:
                 logger.exception("caption translation failed; the original shows")
                 return None
-            return clean(text, decoded, target)
+            return None if decoded is None else clean(text, decoded, target)
+
+    def speed(self) -> Optional[float]:
+        """2.13.1: the faster of two timed translations of a medium line (SPEED_LINE, Turkish to
+        English), in seconds: the adaptive lead's measure (services.captions.streaming
+        .measured_lead); None when either gave nothing."""
+        best: Optional[float] = None
+        for _ in range(2):
+            began = time.perf_counter()
+            if self.translate(SPEED_LINE, "Turkish", "English") is None:
+                return None
+            took = time.perf_counter() - began
+            best = took if best is None else min(best, took)
+        return best
+
+    def _with_context(
+        self,
+        text: str,
+        source: str,
+        target: str,
+        deadline: Optional[float],
+        context: tuple[str, str],
+    ) -> Optional[str]:
+        """`text` translated with the line before (`context`), as it shows; None when it gave
+        nothing to show or held the line before (the lock is held)."""
+        before, translated = context
+        decoded = self._decoded(
+            context_prompt(text, source, target, before, translated), source, target, deadline
+        )
+        if decoded is None:
+            return None
+        shown = clean(text, _LEADING_MARKS.sub("", decoded), target)
+        if shown is None:
+            logger.debug("caption translation: nothing usable with the line before; alone")
+        elif leaks(shown, before, translated, text):
+            logger.debug("caption translation: the line before leaked into %r; alone", shown)
+            shown = None
+        return shown
+
+    def _decoded(
+        self, text: str, source: str, target: str, deadline: Optional[float]
+    ) -> Optional[str]:
+        """What the model writes after the prompt `text` (from `source` to `target`), from the
+        pair's kept prefix when the prompt's ids start with it; None when cut off (the lock is
+        held)."""
+        ids, cached = self._ids(text, source, target)
+        tokens = self._generate(ids, MAX_NEW_TOKENS, deadline, cached)
+        return None if tokens is None else self._tokenizer.decode(tokens, skip_special_tokens=True)
+
+    def _ids(self, text: str, source: str, target: str) -> tuple[list[int], int]:
+        """The prompt `text` as ids, and how many of them the pair's prefix covers: its ids
+        when the prompt's start strictly with them, else 0 (the whole prompt runs)."""
+        if self._prefix_pair != (source, target):
+            self._drop_prefix()
+            encoded = self._tokenizer.encode(prefix(source, target), add_special_tokens=False)
+            self._prefix_ids = list(encoded.ids)
+            self._prefix_pair = (source, target)
+        ids = list(self._tokenizer.encode(text, add_special_tokens=False).ids)
+        head = self._prefix_ids
+        return ids, len(head) if 0 < len(head) < len(ids) and ids[: len(head)] == head else 0
+
+    def _prefix_pasts(self) -> list[Any]:
+        """The pair's prefix run, its presents kept (each line's pasts from here)."""
+        if self._prefix_kv is None:
+            head = self._prefix_ids
+            empty = [self._empty] * len(self._past_names)
+            feed, own = self._feed(array("q", head), len(head), empty)
+            try:
+                outs = self._session.run(feed, self._selection)
+            finally:
+                for value in own:
+                    value.release()
+            outs[0].release()  # (its next token: the line's own first piece follows)
+            self._prefix_kv = outs[1:]
+        return self._prefix_kv
+
+    def _drop_prefix(self) -> None:
+        kept, self._prefix_kv = self._prefix_kv, None
+        self._prefix_pair, self._prefix_ids = None, []
+        for value in kept or ():
+            value.release()
 
     def _feed(self, ids: array, mask: int, pasts: list[Any]) -> tuple[list[Any], list[Any]]:
         api = self._api
@@ -196,15 +354,19 @@ class Translator:
         return [by_name[name] for name in self._session.inputs], [ids_value, mask_value]
 
     def _generate(
-        self, prompt_ids: list[int], limit: int, deadline: Optional[float]
+        self, prompt_ids: list[int], limit: int, deadline: Optional[float], cached: int = 0
     ) -> Optional[list[int]]:
         """Greedy tokens after the prompt, until EOS or a newline; None when `limit` tokens or
         the deadline came first (the final review: a translation cut off at MAX_NEW_TOKENS
-        showed; the original shows instead)."""
+        showed; the original shows instead). 2.13.1: its first `cached` ids are the pair's
+        prefix (`_ids`): the rest runs from its kept presents, which are never released here."""
         session = self._session
         total = len(prompt_ids)
-        step = array("q", prompt_ids)
-        pasts: list[Any] = [self._empty] * len(self._past_names)
+        step = array("q", prompt_ids[cached:])
+        pasts: list[Any] = (
+            list(self._prefix_pasts()) if cached else [self._empty] * len(self._past_names)
+        )
+        owned = False  # the pasts are this call's own (not the empties, not the prefix's)
         tokens: list[int] = []
         try:
             while True:
@@ -214,10 +376,10 @@ class Translator:
                 finally:
                     for value in own:
                         value.release()
-                for value in pasts:
-                    if value is not self._empty:
+                if owned:
+                    for value in pasts:
                         value.release()
-                pasts = outs[1:]
+                pasts, owned = outs[1:], True
                 token = ctypes.c_int64.from_address(outs[0].address()).value
                 outs[0].release()
                 if token in EOS_IDS:
@@ -232,7 +394,7 @@ class Translator:
                 total += 1
                 step = array("q", [token])
         finally:
-            for value in pasts:
-                if value is not self._empty:
+            if owned:
+                for value in pasts:
                     value.release()
         return tokens
