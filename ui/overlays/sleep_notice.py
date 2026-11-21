@@ -2,6 +2,12 @@
 "Playback stops in 0:42", with a Keep watching button. A click anywhere on it keeps watching
 (`keepWatching`), and so does Enter (the shell's keys, ui/picture_controls.py). It stays until
 then, or until the timer ends; the text is the controller's, set each second.
+
+A pill that may simply be closed (`closable`: the Left-off pill's, ui/overlays/back_notice.py;
+2.13.3) has a small ✕ at its right end, after its button, drawn as the channel list's find box
+draws its own: a click there asks to close it (`closeRequested`), and the shell closes it on
+Esc too. The sleep timer's has none: it warns that playback stops, and closing the warning
+would leave the timer running unsaid.
 """
 
 from __future__ import annotations
@@ -15,12 +21,14 @@ from PySide6.QtWidgets import QWidget
 from services.i18n import N_, translate
 from ui.keymap import key_hint
 from ui.overlays.base import Overlay, announce
-from ui.overlays.painting import Units, fill_round, ui_units
+from ui.overlays.drawer_look import FIND_X_U
+from ui.overlays.painting import Units, draw_icon, fill_round, ui_units
 from ui.pointer import NAV_BUTTONS
 from ui.theme import PALETTE, qcolor
 
 # i18n: the sleep timer's last minute: a button that turns the timer off; short
 KEEP_WATCHING = N_("Keep watching")
+CLOSE = N_("Close")  # i18n: a pill's ✕ (the Left-off pill's): its tooltip, with Esc (verb)
 _FALLBACK_HOST_WIDTH = 1280
 _TOP_U = 7.4  # under the toast (2.4u, its pill about 4u tall)
 _EDGE_U = 1.0
@@ -29,13 +37,16 @@ _EDGE_U = 1.0
 class SleepNotice(Overlay):
     takes_keys = True  # (Overlay.takes_keys)
     accessible_name = N_("Sleep timer")
+    closable = False  # a ✕ closes it (closeRequested), and Esc: the module's docstring
     keepWatching = Signal()
+    closeRequested = Signal()  # its ✕ (a closable pill's)
 
     def __init__(self, parent: Optional[QWidget] = None) -> None:
         super().__init__(parent)
         self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
         self.setMouseTracking(True)
         self._text = ""
+        self._on_x = False  # the pointer is on its ✕
         if parent is not None:
             parent.installEventFilter(self)
         self.hide()
@@ -60,12 +71,23 @@ class SleepNotice(Overlay):
         return translate(KEEP_WATCHING)
 
     def button_rect(self) -> QRectF:
-        """Keep watching (the whole pill keeps watching too)."""
+        """Keep watching (the whole pill keeps watching too, but for a ✕)."""
         un = self._units()
         label = QFontMetricsF(self._fonts(un)[1]).horizontalAdvance(self.button_text())
         h = self.height() - 2 * un.px(0.6)
         width = label + 2 * un.px(1.2)
-        return QRectF(self.width() - un.px(0.6) - width, un.px(0.6), width, h)
+        return QRectF(self.width() - self._end_w(un) - width, un.px(0.6), width, h)
+
+    def close_rect(self) -> QRectF:
+        """A closable pill's ✕, the end after its button (where it takes clicks); else empty."""
+        if not self.closable:
+            return QRectF()
+        end = self._end_w(self._units())
+        return QRectF(self.width() - end, 0.0, end, float(self.height()))
+
+    def _end_w(self, un: Units) -> float:
+        """What follows the button: the pill's inner edge, or a closable pill's ✕."""
+        return un.px(FIND_X_U + 0.6) if self.closable else float(un.px(0.6))
 
     def _units(self) -> Units:
         parent = self.parentWidget()
@@ -84,7 +106,9 @@ class SleepNotice(Overlay):
         text_w = QFontMetricsF(text_font).horizontalAdvance(self._text)
         button_w = QFontMetricsF(button_font).horizontalAdvance(self.button_text())
         height = round(QFontMetricsF(text_font).height() + un.px(2.0))
-        width = round(un.px(1.6) + text_w + un.px(1.6) + button_w + 2 * un.px(1.2) + un.px(0.6))
+        width = round(
+            un.px(1.6) + text_w + un.px(1.6) + button_w + 2 * un.px(1.2) + self._end_w(un)
+        )
         width = min(width, parent.width() - 2 * un.px(_EDGE_U))
         rect = QRect((parent.width() - width) // 2, un.px(_TOP_U), width, height)
         if rect != self.geometry():
@@ -97,6 +121,8 @@ class SleepNotice(Overlay):
         return False
 
     def tooltip_at(self, pos: QPointF) -> str:
+        if self.close_rect().contains(pos):
+            return key_hint(translate(CLOSE), "Esc")
         return key_hint(self.button_text(), "Return")
 
     def paintEvent(self, event: QPaintEvent) -> None:
@@ -126,6 +152,14 @@ class SleepNotice(Overlay):
         p.setFont(button_font)
         p.setPen(qcolor(PALETTE.canvas))
         p.drawText(button, Qt.AlignmentFlag.AlignCenter, self.button_text())
+        x = self.close_rect()
+        if not x.isEmpty():  # the find box's ✕ (ui/overlays/drawer.py), in the end's middle
+            mark = un.px(1.1)
+            centre = QPointF(button.right() + (x.right() - button.right()) / 2, x.center().y())
+            tone = qcolor(PALETTE.accent) if self._on_x else qcolor(PALETTE.text, 0.6)
+            draw_icon(
+                p, "close", QRectF(centre.x() - mark / 2, centre.y() - mark / 2, mark, mark), tone
+            )
         p.end()
 
     def mousePressEvent(self, event: QMouseEvent) -> None:
@@ -133,8 +167,25 @@ class SleepNotice(Overlay):
             event.ignore()  # Back/Forward go on to the host
             return
         event.accept()  # never the host's: it would open the channel list
-        if event.button() == Qt.MouseButton.LeftButton:
+        if event.button() != Qt.MouseButton.LeftButton:
+            return
+        if self.close_rect().contains(event.position()):
+            self.closeRequested.emit()
+        else:
             self.keepWatching.emit()
+
+    def mouseMoveEvent(self, event: QMouseEvent) -> None:
+        self._point_at(self.close_rect().contains(event.position()))
+        super().mouseMoveEvent(event)
+
+    def leaveEvent(self, event: QEvent) -> None:
+        self._point_at(False)
+        super().leaveEvent(event)
+
+    def _point_at(self, on_x: bool) -> None:
+        if on_x != self._on_x:
+            self._on_x = on_x
+            self.update()
 
     def mouseDoubleClickEvent(self, event: QMouseEvent) -> None:
         event.accept()  # never fullscreen

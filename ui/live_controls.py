@@ -21,7 +21,8 @@ revive's waits. A refusal for the provider's connection limit is never retried a
 Kept buffers (2.6): coming back to a channel whose buffer was kept, it plays live and the
 session offers where the user was (`LiveSession.backOffered`): the Resume pill
 (ui/overlays/back_notice.py) says when for `BACK_NOTICE_MS`, until the channel changes; a click,
-Enter or the phone's Resume plays on from there (`go_back`).
+Enter or the phone's Resume plays on from there (`go_back`). 2.13.3: its ✕, Esc and the phone's
+Back close it, and the offer goes with it (`dismiss_back`).
 
 The live ⚙ (2.8): a channel whose HLS stream comes in several picture sizes (the helper names
 them, `LiveSession`'s timeline carries them) offers them; the sizes are kept per channel for
@@ -84,7 +85,9 @@ from ui.overlays.transport import NO_RECORDING, NOTHING_PLAYING, Transport
 logger = logging.getLogger(__name__)
 
 LIVE_SEEK_S = 10.0  # ←/→ while time-shifting (spec §6.7)
-BACK_NOTICE_MS = 60_000  # 2.6: the Resume pill shows this long (the owner: "a minute or so")
+# 2.6: the Resume pill shows this long (2.13.3, the owner: "they will know if they want to
+# stay in 10-15 secs"; a minute before)
+BACK_NOTICE_MS = 15_000
 _PAST_BUFFER_S = 1.0  # a point this far before the buffer's start is the archive's
 
 
@@ -388,6 +391,7 @@ class LiveControls(QObject):
             if id(notice) not in self._wired_notices:
                 self._wired_notices.add(id(notice))
                 notice.keepWatching.connect(self.go_back)
+                notice.closeRequested.connect(self.forget_back)  # 2.13.3: its ✕
             notice.show_notice(translate(LEFT_OFF, time=self._back_label))
         self._back_timer.start(BACK_NOTICE_MS)
 
@@ -400,6 +404,15 @@ class LiveControls(QObject):
         self.forget_back()
         self.live.go_back_to(back)
         self._show_transport()
+        return True
+
+    def dismiss_back(self) -> bool:
+        """Esc and the phone's Back (2.13.3): the Resume pill that shows closes, its offer gone
+        as at its end; False when none shows."""
+        notice = self._back_notice()
+        if self._back is None or notice is None or not notice.isVisible():
+            return False
+        self.forget_back()
         return True
 
     def back_label(self) -> Optional[str]:

@@ -5456,6 +5456,8 @@ class TVController(QObject):
             overlays.banner.dismiss()
         elif overlays.column.isVisible():
             overlays.column.close()  # the zap forgets its highlight, so no rest tune follows
+        elif self._live_controls.dismiss_back():
+            pass  # 2.13.3: the Resume pill closes (Esc, the phone's Back), its offer gone
         elif overlays.banner.isVisible():
             overlays.banner.dismiss()
         elif self.multiview_shown():

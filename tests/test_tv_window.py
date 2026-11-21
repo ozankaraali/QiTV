@@ -297,6 +297,28 @@ class TVWindowTests(WindowCase):
                 QTest.keyClick(self.window, Qt.Key.Key_Menu)
                 self.assertFalse(menu.shown())
 
+    def test_esc_and_the_phones_back_close_the_left_off_pill_after_whats_over_it(self):
+        # 2.13.3: the Resume pill of a channel come back to closes on Esc and the phone's Back
+        # once nothing over it has the keys (the channel list open at the start has them).
+        window = self.window
+        self.show()
+        drawer = self.wait_for_drawer()
+        notice, live = window.back_notice, window.controller._live_controls
+        left_at = time.time() - 600
+        live._on_back_offered(30.0, left_at)
+        self.assertTrue(notice.isVisible())
+        QTest.keyClick(window, Qt.Key.Key_Escape)  # the channel list's
+        self.assertFalse(drawer.isVisible())
+        self.assertTrue(notice.isVisible())
+        QTest.keyClick(window, Qt.Key.Key_Escape)
+        self.assertFalse(notice.isVisible())
+        self.assertIsNone(window.controller.back_label())
+        live._on_back_offered(30.0, left_at)
+        self.assertTrue(notice.isVisible())
+        window.remote.fire("back")
+        self.assertFalse(notice.isVisible())
+        self.assertIsNone(window.controller.back_label())
+
     def test_a_card_or_settings_over_a_menu_closes_it_and_has_the_keys(self):  # 2.13.1
         from ui import window_cards
         from ui.overlays.popup_menu import Menu
