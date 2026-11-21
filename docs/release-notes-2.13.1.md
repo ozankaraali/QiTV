@@ -3,8 +3,8 @@
 QiTV 2.13.1 opens nothing in a system window any more. Every menu, question and card is drawn
 in QiTV's own look, the same as the channel list and Settings, and the keys, the remote and the
 phone reach all of them. The channel list also loads while QiTV starts, picture in picture
-shows no bars, and at home the phone shows posters and logos. 2.13.1 also brings 2.13.0, a
-pre-release, which plays free internet radio.
+shows no bars, at home the phone shows posters and logos, and translated captions come sooner.
+2.13.1 also brings 2.13.0, a pre-release, which plays free internet radio.
 
 **Download QiTV from [qitv.app](https://qitv.app), which picks the right build for your
 computer, or from [Releases](https://github.com/ozankaraali/QiTV/releases). Please don't use
@@ -61,6 +61,21 @@ others' distributions, which may have malware.**
   your paired phone. A picture that doesn't load tries again a little later.
 - **Away from home, nothing changes.** Through the relay the phone shows its coloured cards as
   before, and the relay never sees what you watch.
+
+## Translated captions sooner
+
+- **The picture waits only as long as your computer needs.** With a translation on, the
+  picture used to wait 5 seconds for everyone. Now it waits as long as this computer takes to
+  translate a line: about 2 to 2.5 seconds on a fast computer or a Mac with Apple silicon, and
+  4 to 4.5 seconds on an older computer with 4 cores.
+- **QiTV measures it once and remembers.** It times its translations as they start and keeps
+  that. If a line still comes late, the picture waits a second longer, and it stays that way
+  for as long as QiTV runs.
+- **More of the processor, where there's room.** On a computer with cores to spare,
+  translations use more of them.
+- **The line before, for "he" and "she".** Translations into English, German, French and the
+  other languages that say "he" or "she" now read the line before, so they get who is
+  speaking right more often.
 
 ## Free radio
 
