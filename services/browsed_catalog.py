@@ -430,6 +430,14 @@ class BrowsedCatalog(QObject):
         catalog = self._cat()
         return catalog.is_loading() if catalog is not None else False
 
+    def at_hand(self, section: str) -> bool:
+        """Whether the page's list of `section` shows at once (CatalogService.at_hand: its
+        provider is set up and asking for it loads nothing). Never in all mode."""
+        if self.all_providers():
+            return False
+        catalog = self._cat()
+        return catalog is not None and catalog.at_hand(section)
+
     def shutdown(self) -> None:
         """The window is closing: every catalog stops (the pages share them)."""
         self._catalogs.shutdown()
