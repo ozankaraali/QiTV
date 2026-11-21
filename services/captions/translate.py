@@ -91,14 +91,36 @@ def _clauses(text: str) -> list[str]:
     return [part for part in _CLAUSE_MARKS.split(text) if _WORD.search(part)]
 
 
+# A line's first word that answers by itself (a yes, a no, an okay; Turkish's and the other
+# sources' everyday ones): its translation's clause of its own for it is the line's, no leak
+# ("Evet geldi." → "Yes, she came."). Casefolded, as `_words` gives them.
+_ANSWER_WORDS = frozenset(
+    {
+        # Turkish
+        *("evet", "hayır", "tamam", "peki", "olur", "yok", "var", "he", "yo"),
+        # English, French, German, Dutch, the Scandinavian ones
+        *("yes", "yeah", "yep", "no", "nope", "ok", "okay", "sure"),
+        *("oui", "non", "si", "ja", "nein", "doch", "nee", "nej", "nei", "jo"),
+        # Spanish, Italian, Portuguese, Romanian, Polish, Czech
+        *("sí", "sì", "vale", "claro", "certo", "sim", "não", "da", "nu", "tak", "nie", "ano"),
+        # Russian, Ukrainian, Bulgarian, Serbian; Greek; Arabic, Persian, Hebrew
+        *("да", "нет", "ладно", "хорошо", "так", "ні", "не", "ne", "ναι", "όχι", "εντάξει"),
+        *("نعم", "لا", "أجل", "بله", "نه", "آره", "כן", "לא"),
+        # Japanese, Korean, Chinese (when a mark parts them from the rest)
+        *("はい", "いいえ", "うん", "ええ", "네", "예", "아니요", "응", "是", "是的", "对", "好"),
+    }
+)
+
+
 def leaks(shown: str, before: str, translated: str, text: str) -> bool:
     """A translation made with the line before (`context_prompt`) holds that line: four words in
     a row of its translation (`translated`) or of the line itself (`before`), or all of a
     shorter one, that the line heard (`text`) doesn't hold too (a name said in both). 2026-11-21's
-    other two (its §5): the translation before's last one to three words again at its start
-    ("yavaş oldu."), and after a question an answer the line doesn't say: one clause more than
-    the line heard, its first of one or two words ("Annen geldi mi?" then "Mutfakta.": "Yes,
-    she's in the kitchen.")."""
+    other two (its §5): the translation before's last two or three words again at its start
+    ("yavaş oldu."; one alone is often right: "I love you." then "You are mine."), and after a
+    question an answer the line doesn't say: one clause more than the line heard, its first of
+    one or two words ("Annen geldi mi?" then "Mutfakta.": "Yes, she's in the kitchen."), unless
+    the line itself starts with one (`_ANSWER_WORDS`: "Evet geldi.")."""
     out, own = _words(shown), _words(text)
     for earlier in (translated, before):
         words = _words(earlier)
@@ -106,10 +128,11 @@ def leaks(shown: str, before: str, translated: str, text: str) -> bool:
         if n and len(out) >= n and (_grams(out, n) & _grams(words, n)) - _grams(own, n):
             return True
     tail = _words(translated)
-    for k in range(1, min(3, len(tail), len(out)) + 1):
+    for k in range(2, min(3, len(tail), len(out)) + 1):
         if out[:k] == tail[-k:] and tuple(out[:k]) not in _grams(own, k):
             return True
-    if before.rstrip().rstrip(_CLOSING_QUOTES).endswith(_QUESTION_ENDS):
+    answers = bool(own) and own[0] in _ANSWER_WORDS
+    if not answers and before.rstrip().rstrip(_CLOSING_QUOTES).endswith(_QUESTION_ENDS):
         clauses = _clauses(shown)
         if len(clauses) == len(_clauses(text)) + 1 and len(_WORD.findall(clauses[0])) <= 2:
             return True

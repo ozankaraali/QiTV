@@ -1019,7 +1019,8 @@ class CaptionsController(QObject):
             return
         want, sent = self._translate_lead.value, self._lead_sent
         if sent is not None and abs(want - sent) < 1e-6:
-            self._lead_waits = False  # (a raise taken back at a natural point)
+            self._lead_waits = False  # (a raise taken back at a natural point: its wait goes)
+            self._lead_raised, self._lead_retried = None, False
             return
         if sent is not None and want > sent and not self._has_distance(want):
             if not self._lead_overdue(want):

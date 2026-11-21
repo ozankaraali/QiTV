@@ -675,6 +675,33 @@ class ContextTests(unittest.TestCase):
             self.assertTrue(leaks("Yes, she came.", question, translated, "Geldi."), question)
         self.assertFalse(leaks("Yes, she came.", "Annen geldi.", "Your mother came.", "Geldi."))
 
+    def test_an_answer_the_line_itself_starts_with_is_no_leak(self):  # the re-review
+        # its first word is a yes, a no or an okay: the translation's own clause for it is right
+        before, translated = "Annen geldi mi?", "Did your mother come?"
+        for text, shown in (
+            ("Evet geldi.", "Yes, she came."),
+            ("Hayır gelmedi.", "No, she didn't come."),
+            ("Tamam geliyorum.", "Okay, I'm coming."),
+            ("Yok gelmedi.", "No, she didn't come."),
+        ):
+            with self.subTest(text=text):
+                self.assertFalse(leaks(shown, before, translated, text))
+        for text, question in (
+            ("Oui elle est venue.", "Ta mère est venue ?"),
+            ("Ja sie kam.", "Kam deine Mutter?"),
+            ("Sí vino.", "¿Vino tu madre?"),
+            ("Да пришла.", "Мама пришла?"),
+        ):
+            with self.subTest(text=text):
+                self.assertFalse(leaks("Yes, she came.", question, "Did she come?", text))
+        self.assertTrue(leaks("Yes, she came.", before, translated, "Geldi."))  # still one
+
+    def test_the_line_befores_last_word_alone_again_is_no_leak(self):  # the re-review
+        self.assertFalse(leaks("You are mine.", "Seni seviyorum.", "I love you.", "Sen benimsin."))
+        self.assertTrue(  # two words of its end again are one
+            leaks("love you, mine.", "Seni seviyorum.", "I love you.", "Sen benimsin.")
+        )
+
     def test_the_line_befores_translation_ending_it_again_is_a_leak(self):
         # the report's FLORES case: "yavaş oldu." of the translation before, again
         self.assertTrue(

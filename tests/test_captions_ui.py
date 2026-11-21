@@ -1937,6 +1937,29 @@ class TranslationTests(unittest.TestCase):
         self.assertEqual((live.reaches, self.leads()), (1, [5.0, 2.5, 3.5]))
         self.assertFalse(self.captions._lead_waits)
 
+    def test_a_raise_taken_back_at_a_natural_point_leaves_no_wait_behind(self):  # re-review
+        live = self.window.live_session
+        self.translated()
+        self.captions._on_translate_speed(0.43)
+        self.zap()
+        now = [5000.0]
+        self.captions._clock = lambda: now[0]
+        live.caption_lag = lambda: 10.5
+        self.captions._on_translate_late(self.captions._run, 2.5)  # 3.5 s, waited for whole
+        self.tick(100.25)
+        now[0] += 11.0  # short of it ten seconds on: waited for whole once more
+        self.tick(100.5)
+        self.assertEqual((live.reaches, self.leads()), (1, [5.0, 2.5]))
+        self.captions._translate_lead.value = 2.5  # taken back at a natural point
+        self.captions._follow_lead()
+        now[0] += 11.0
+        self.captions._translate_lead.value = 3.5  # a raise again, the picture short of it
+        self.captions._follow_lead()
+        self.assertEqual((live.reaches, self.leads()), (1, [5.0, 2.5]))  # its ten seconds anew
+        now[0] += 11.0
+        self.tick(100.75)
+        self.assertEqual((live.reaches, self.leads()), (2, [5.0, 2.5]))  # waited for whole again
+
     def test_a_landing_within_stay_lives_band_has_the_distance(self):
         live = self.window.live_session
         self.translated()
