@@ -35,9 +35,9 @@ LARGE = "large"
 # kernel keep some), hence 11.5 GiB.
 LARGE_MIN_SCORE = 0.9
 LARGE_MIN_RAM = int(11.5 * 1024**3)
-# 2.10: while AI captions are translated, the translator (MiLMMT-46 1B, 2 threads) shares the
-# CPU with the speech model: below this score Automatic takes the small one (an arm64 Mac keeps
-# its rule)
+# 2.10: while AI captions are translated, the translator (MiLMMT-46 1B, on `translator_threads`)
+# shares the CPU with the speech model: below this score Automatic takes the small one (an arm64
+# Mac keeps its rule)
 TRANSLATE_SMALL_BELOW = 1.5
 
 # The reference, score 1.0: a 2017 MacBook Pro, an Intel i7-7820HQ (4 cores, 8 threads), on
