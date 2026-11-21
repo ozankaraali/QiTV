@@ -5,7 +5,8 @@ client; every phone connection is a Session. Events go to `emit` on the loop's t
 objects (services/remote/protocol.py); the GUI marshals them to its own thread. RemoteHub's
 methods are safe to call from the GUI thread: they only schedule work on the loop and never wait
 on the network. The home door also hands phones the MKV films they play as HLS
-(services/remote/films.py), read from their providers on this loop.
+(services/remote/films.py), read from their providers on this loop, and the pictures a phone at
+home shows (services/remote/pictures.py): only a session through the home door may have them.
 """
 
 from __future__ import annotations
@@ -29,6 +30,7 @@ from services.remote.films import OPEN_S, PROVIDER, Film, FilmRefused, FilmShelf
 from services.remote.page_id import page_id
 from services.remote.page_strings import page_hello
 from services.remote.pairing import RemoteStore
+from services.remote.pictures import PictureServer, PictureShelf
 from services.remote.protocol import (
     CODE_ROTATE_S,
     HANDSHAKE_S,
@@ -38,6 +40,7 @@ from services.remote.protocol import (
     PORTS,
     Code,
     Forgot,
+    Opened,
     Paired,
     Status,
     StoreSaved,
@@ -79,6 +82,7 @@ class _Conn:
     session: Session
     send: Callable[[bytes | str], Awaitable[None]]
     close: Callable[[int, str], Awaitable[None]]
+    peer: str = ""  # the home door's: the phone's address (the relay's: none)
 
 
 class HubCore:
@@ -95,6 +99,8 @@ class HubCore:
         hello: Callable[[], dict],
         handshake_s: float,
         host: str,
+        pictures: Optional[PictureShelf] = None,
+        images: Any = None,
     ) -> None:
         self.emit = emit
         self.host = host
@@ -120,6 +126,9 @@ class HubCore:
         self.films = FilmShelf()
         self._http: Any = None  # the films' aiohttp session, made when first needed
         self._openings: dict[str, asyncio.Task] = {}  # the films being opened, by phone
+        # The pictures phones at home show: QiTV's image cache (`images`) through the shelf's
+        # tokens, which the GUI issues.
+        self.pictures = PictureServer(pictures or PictureShelf(), images, emit)
 
     # ---- lifecycle -------------------------------------------------------------------------
 
@@ -182,6 +191,9 @@ class HubCore:
         # through the relay too: so before the relay client stops, which lets its phones go.
         # (The relay passes 1001 on as 1000; the page goes by the reason.)
         await asyncio.gather(*(self._goodbye(conn) for conn in list(self.conns.values())))
+        for sid in list(self.conns):
+            self.pictures.shelf.close(sid)  # their tokens end with them
+        self.pictures.stop()
         if self.relay is not None:
             await self.relay.stop()
             self.relay = None
@@ -421,6 +433,9 @@ class HubCore:
         for frame in reply.frames:
             await conn.send(frame)
         for event in reply.events:
+            if isinstance(event, Opened) and event.door == "home" and conn.peer:
+                # First, so the GUI that hears it may hand this phone its pictures.
+                self.pictures.shelf.open(conn.session.sid, conn.peer)
             self.emit(event)
             if isinstance(event, Paired) and self.store.current_code() is not None:
                 self.emit(Code(self.code_url()))  # the code was burnt: show the next one
@@ -430,6 +445,7 @@ class HubCore:
             await _quietly(conn.close(*reply.close))
 
     def unregister(self, conn: _Conn) -> None:
+        self.pictures.shelf.close(conn.session.sid)  # its pictures' tokens end with it
         if self.conns.pop(conn.session.sid, None) is not None and conn.session.device_id:
             if conn.session.established:
                 self.emit(conn.session.closed_event())
@@ -476,6 +492,10 @@ class HubCore:
         for sid in list(self.conns):
             self.send(sid, message)
 
+    def put_picture(self, source: str, kind: str, data: bytes) -> None:
+        """QiTV's GUI's scaled copy of a picture a phone at home asked for (PictureWanted)."""
+        self.pictures.put(source, kind, data)
+
     # ---- the home door's WebSocket ---------------------------------------------------------
 
     async def handle_ws(self, request: Any) -> Any:
@@ -501,7 +521,7 @@ class HubCore:
         async def close(code: int, reason: str) -> None:
             await ws.close(code=code, message=reason.encode("utf-8"))
 
-        conn = _Conn(self.new_session("home", None), send, close)
+        conn = _Conn(self.new_session("home", None), send, close, peer=request.remote or "")
         self.register(conn)
         try:
             async for message in ws:
@@ -558,8 +578,13 @@ class RemoteHub:
         hello: Callable[[], dict] = page_hello,
         handshake_s: float = HANDSHAKE_S,
         host: str = "0.0.0.0",
+        pictures: Optional[PictureShelf] = None,
+        images: Any = None,
     ) -> None:
+        """`pictures`: the tokens of the pictures phones at home show, which the GUI issues;
+        `images`: QiTV's image cache (an ImageManager) they come from."""
         self._emit = emit
+        self.pictures = pictures if pictures is not None else PictureShelf()
         self._core = HubCore(
             emit,
             web_dir,
@@ -569,6 +594,8 @@ class RemoteHub:
             hello=hello,
             handshake_s=handshake_s,
             host=host,
+            pictures=self.pictures,
+            images=images,
         )
         self._loop: Optional[asyncio.AbstractEventLoop] = None
         self._thread: Optional[threading.Thread] = None
@@ -669,6 +696,11 @@ class RemoteHub:
 
     def broadcast(self, message: dict) -> None:
         self._call(self._core.broadcast, message)
+
+    def put_picture(self, source: str, kind: str, data: bytes, content_type: str = "") -> None:
+        """The scaled copy QiTV's GUI made of a picture the hub asked for (PictureWanted);
+        `content_type` is the GUI's word for it, checked against the bytes themselves."""
+        self._call(self._core.put_picture, source, kind, bytes(data))
 
     def open_film(
         self, sid: str, device: str, url: str, headers: dict, verify: bool, message: dict

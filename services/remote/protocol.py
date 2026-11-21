@@ -618,6 +618,15 @@ class StoreSaved:
 
 
 @dataclass(frozen=True)
+class PictureWanted:
+    """A phone at home asked for a picture too large (or in a format) not to send as it is:
+    QiTV's GUI scales the TV's own copy and hands it back (RemoteHub.put_picture)."""
+
+    source: str  # the picture's address, as the TV's image cache knows it (never a phone's)
+    kind: str  # "poster" or "logo" (services/remote/pictures.py)
+
+
+@dataclass(frozen=True)
 class Code:
     url: str  # the pairing QR's address; "" when the pairing screen is closed
 
