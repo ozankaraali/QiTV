@@ -126,6 +126,11 @@ class EarlyWindowCase(base.WindowCase):
 
         class Failing(ProviderSetupWorker):
             def run(self):
+                # As the real one: its provider is chosen, then its sign-in fails (a portal
+                # down): the provider in use is that one from then on.
+                manager = self.provider_manager
+                wanted = manager._pinned_provider
+                manager.current_provider = next(p for p in manager.providers if p["name"] == wanted)
                 self.error.emit("Timed out")
 
         def provider_setup(factory, provider_manager, force_refresh):
