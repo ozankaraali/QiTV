@@ -29,7 +29,9 @@ The floating window has its picture's shape, so it shows no bars: `shape()` (the
 `picture_ratio`) is asked as it floats and at each check while it does, and a new shape (the
 stream's picture becomes known, a zap, another aspect ratio) reshapes it, as large as it was,
 its corner nearest the screen's corner staying where it is. Its edges and corners resize it in
-that shape; while the shape is not known (or fits any: Fill) it keeps the one it has.
+that shape; while the shape is not known (or fits any: Fill) it keeps the one it has. A window
+as good as its picture's shape already (within 1%) is left as it is, and the lent player fills
+it to the last pixel (the TV window tells it the window's size, services.picture.box_aspect).
 """
 
 from __future__ import annotations

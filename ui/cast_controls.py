@@ -12,14 +12,17 @@ now large, and the one now small plays here again. The multiview waits for the c
 
 from __future__ import annotations
 
+from functools import partial
 import logging
 from typing import Any, Callable, Optional
 
-from PySide6.QtCore import QObject, QPoint
-from PySide6.QtWidgets import QMenu, QWidget
+from PySide6.QtCore import QObject, QPoint, QRect, QSize
+from PySide6.QtWidgets import QWidget
 
 from services.casting import CastDevices
 from services.i18n import N_, translate
+from ui.overlays import popup_menu
+from ui.overlays.popup_menu import ABOVE, Menu
 
 logger = logging.getLogger(__name__)
 
@@ -99,18 +102,19 @@ class CastControls(QObject):
         return entries
 
     def show_menu(self, global_pos: QPoint, parent: Optional[QWidget] = None) -> None:
-        menu = QMenu(parent)
+        """The cast button's menu (2.13.1: painted), above the button whose top left is
+        `global_pos`: a note is dimmed, the device cast to ticked. It stays while the
+        controls fade."""
+        menu = Menu()
         for text, name, checked in self.menu_entries():
-            action = menu.addAction(text)
             if name is None:
-                action.setEnabled(False)
+                menu.add(text, enabled=False)
             elif name == "":
-                action.triggered.connect(self.stop)
+                menu.add(text, self.stop)
             else:
-                action.setCheckable(True)
-                action.setChecked(checked)
-                action.triggered.connect(lambda _on=False, n=name: self.cast_to(n))
-        menu.popup(global_pos)
+                menu.add(text, partial(self.cast_to, name), checked=checked)
+        button = QRect(global_pos, QSize(1, 1))
+        popup_menu.popup(menu, parent, beside=button, side=ABOVE, follow=False)
 
     # ---- casting ----------------------------------------------------------------------------
 

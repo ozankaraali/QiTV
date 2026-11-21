@@ -11,7 +11,7 @@ dark card 48 u wide with a title, then
   it), the line that says what was found under the first one (green when good, else in the
   warning colour), the buttons at the right with the accent one filled, and the other ways to
   go on in a muted line below ("Or: M3U file…  STB portal");
-- a ChoiceCard's words and its buttons;
+- a ChoiceCard's words and its buttons (and its other ways in the muted line, 2.13.1);
 - a RangeCard's value, a track with a thumb under it (a muted line, an accent thumb), a note
   that follows the value (the estimated rewind of a cache size), and Cancel and OK. ←/→ step,
   PgUp/PgDn move ten steps, Home/End go to the ends, Enter keeps, Esc and Back cancel
@@ -211,6 +211,8 @@ class _Card(Overlay):
     """What both cards share: the dimmed picture, the card in its middle, its title, words,
     fields and buttons, the keys and the mouse. The subclasses say what pressing and
     cancelling do."""
+
+    takes_keys = True  # (Overlay.takes_keys)
 
     def __init__(self, parent: Optional[QWidget] = None) -> None:
         super().__init__(parent)
@@ -1190,13 +1192,22 @@ class ChoiceCard(_Card):
 
     answered = Signal(str)  # the button's key; "cancel" for Esc, Back and the dimmed picture
 
-    def ask(self, title: str, body: str, buttons: list[Button], default: str) -> None:
+    def ask(
+        self,
+        title: str,
+        body: str,
+        buttons: list[Button],
+        default: str,
+        alternates: Optional[list[Button]] = None,
+    ) -> None:
         """Show the question (a question still shown is replaced, unanswered). The keys start
-        on `default`, else the accent button, else Cancel, else the first."""
+        on `default`, else the accent button, else Cancel, else the first. `alternates` (2.13.1)
+        are its other ways, in the muted line under the buttons, answered as a button is."""
         self._title, self._body = title, body
         self._fields, self._edits = [], {}
         self._found, self._found_ok = "", True
-        self._buttons, self._alternates = list(buttons), []
+        self._buttons, self._alternates = list(buttons), list(alternates or ())
+        self._last_alt = ""
         self._busy = False
         self._hover = None
         keys = [b.key for b in self._buttons]

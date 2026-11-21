@@ -80,6 +80,11 @@ class Overlay(TooltipWidget):
     # What assistive technology calls it (an English text marked with N_, shown translated);
     # "": nothing, or a name set as it shows (a toast is named after its message).
     accessible_name = ""
+    # It has the keys while it shows (a card, a panel, a list, Settings): a painted menu that
+    # shows as it comes closes (2.13.1, ui/overlays/popup_menu.py), so that the keys always go
+    # to the topmost thing; a toast, a notice or the player's bar leave it open, and so does
+    # the mixer, the sound keys' level too (they go past an open menu, which stays over it).
+    takes_keys = False
 
     def __init__(self, parent: Optional[QWidget] = None) -> None:
         super().__init__(parent)

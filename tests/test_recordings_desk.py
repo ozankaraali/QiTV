@@ -11,14 +11,16 @@ import unittest.mock
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
-from PySide6.QtWidgets import QApplication
+from PySide6.QtWidgets import QApplication, QWidget
 
 from services import recording, recording_desk as desk, recording_schedule as rs
 from services.connection_budget import ConnectionBudget
 from services.epg_view import Programme
 from services.recordings_list import RecordingsList
+from ui.keymap import Action
 from ui.library.recordings_view import RecordingsView
-from ui.recordings_desk import RecordingsDesk
+from ui.record_timer_dialog import RECORD, RecordTimerCard
+from ui.recordings_desk import EDITED_TEXT, RecordingsDesk
 
 app = QApplication.instance() or QApplication([])
 NEWS = {"id": "7", "name": "News One", "_provider": "P"}
@@ -72,6 +74,11 @@ class RecordingsDeskTests(unittest.TestCase):
         self.cancelled = []
         self.budget = ConnectionBudget()
         self.screens = FakeScreens()
+        self.page = QWidget()  # the Library's page: the cards over it (2.13.1)
+        self.page.resize(1280, 720)
+        self.page.show()
+        self.addCleanup(self.page.deleteLater)
+        self.timers = []
         self.window = SimpleNamespace(
             recording_schedule=self.schedule,
             scheduler=None,
@@ -84,6 +91,8 @@ class RecordingsDeskTests(unittest.TestCase):
             closing=lambda: False,
             cancel_scheduled=self.cancelled.append,
             schedule_changed=lambda: None,
+            library_page=self.page,
+            schedule_timer=lambda channel, choice: self.timers.append((channel, choice)),
         )
         self.view = RecordingsView()
         self.view.resize(1280, 720)
@@ -136,11 +145,62 @@ class RecordingsDeskTests(unittest.TestCase):
         details = [("sched:x", "Late news", "News One", 0.0, 0.0, item["id"])]
         self.window.scheduler = SimpleNamespace(recording_details=lambda: details)
         self.assertTrue(self.desk.records_now(item["id"]))
-        with unittest.mock.patch("ui.recordings_desk.RecordTimerDialog") as dialog:
+        with unittest.mock.patch.object(RecordTimerCard, "ask") as ask:
             self.desk.edit(item["id"])  # the right-click's Edit… too: not while it records
-            dialog.assert_not_called()
+            ask.assert_not_called()
         details.clear()
         self.assertFalse(self.desk.records_now(item["id"]))
+
+    def record(self, card):
+        """Its Record (Save), by the keys: the buttons are under the rows."""
+        for _ in range(10):
+            card.handle(Action.NAV_DOWN)
+        self.assertEqual(card.focus(), ("button", RECORD))
+        card.handle(Action.NAV_ACTIVATE)
+
+    def test_edit_opens_the_card_filled_in_and_saves(self):  # 2.13.1: a card, no window
+        item = self.schedule.add_once(NEWS, self.programme("Late news", 120, length=90))
+        self.desk.edit(item["id"])
+        card = self.desk.card()
+        self.assertTrue(card.isVisible())
+        self.assertIs(card.parentWidget(), self.page)
+        self.assertEqual(card.channel_text(), "News One")
+        self.assertEqual(card.values()["name"], "Late news")
+        self.assertEqual(card._buttons[-1].text, "Save")
+        self.assertEqual((card.end() - card.begin()) % (24 * 60), 90)
+        self.assertTrue(self.desk.card_key(Action.NAV_RIGHT))  # its keys while it shows
+        self.record(card)
+        self.assertTrue(card.isHidden())
+        self.assertFalse(self.desk.card_key(Action.NAV_RIGHT))  # gone: the page's again
+        (edited,) = self.schedule.items()
+        self.assertEqual(edited["title"], "Late news")
+        self.assertEqual(self.screens.notes[-1], "Recording changed.")
+        self.assertEqual(EDITED_TEXT, "Recording changed.")
+
+    def test_record_at_a_time_picks_a_channel_and_schedules_it(self):
+        self.window.catalog = SimpleNamespace(
+            provider_names=lambda: ["P", "Q"], items=lambda kind, group: [NEWS, FILMS]
+        )
+        self.window.controller = SimpleNamespace(sessions=None, playing_channel=lambda: FILMS)
+        self.desk.record_at()
+        card = self.desk.card()
+        self.assertIs(card.chosen_channel(), FILMS)  # the one playing first
+        card.handle(Action.NAV_LEFT)  # the other one
+        self.record(card)
+        ((channel, choice),) = self.timers
+        self.assertIs(channel, NEWS)
+        self.assertEqual(choice.minutes, 60)
+
+    def test_its_card_goes_with_the_page(self):
+        self.window.catalog = SimpleNamespace(
+            provider_names=lambda: ["P"], items=lambda kind, group: [NEWS]
+        )
+        self.window.controller = SimpleNamespace(sessions=None, playing_channel=lambda: None)
+        self.desk.record_at()
+        self.assertTrue(self.desk.card().isVisible())
+        self.desk.hide()  # the Library left
+        self.assertTrue(self.desk.card().isHidden())
+        self.assertEqual(self.timers, [])
 
     def test_its_buttons_cancel_dismiss_play_and_delete(self):
         item = self.schedule.add_once(NEWS, self.programme("Late news", 120))

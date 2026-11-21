@@ -49,6 +49,7 @@ _THROUGH = (
 
 
 class QuestionCard(Overlay):
+    takes_keys = True  # (Overlay.takes_keys)
     answered = Signal(bool)  # True: yes (the action that costs), False: no (the safe one)
 
     def __init__(self, parent: Optional[QWidget] = None) -> None:

@@ -688,5 +688,87 @@ class CatalogShutdownTests(unittest.TestCase):
         self.assertEqual(seen, [])
 
 
+class AtHandTests(unittest.TestCase):
+    """2.13.1: whether a list shows at once (the window's start says no "Loading…" then), and
+    when a setup's worker ended (its thread says, before the GUI thread hears the result)."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.app = QApplication.instance() or QApplication([])
+
+    def ready_service(self, ptype="XTREAM", runner=None):
+        provider = {"name": "X", "type": ptype, "url": "h:1"}
+        service, providers, factory, _ = make_service(provider, runner=runner)
+        factory.results["provider_setup"] = {"result": {"name": "X"}}
+        factory.results["epg"] = {"result": {}}
+        return service, providers
+
+    def test_a_fresh_saved_list_of_a_ready_provider_is_at_hand(self):
+        service, providers = self.ready_service()
+        providers.current_provider_content["itv"] = XTREAM_PAYLOAD
+        self.assertFalse(service.at_hand("live"))  # not set up yet
+        service.select_provider()
+        self.assertTrue(service.at_hand("live"))
+        providers.stale.add("itv")  # its channels would come over the network again
+        self.assertFalse(service.at_hand("live"))
+
+    def test_a_list_not_saved_is_not_at_hand(self):
+        service, _ = self.ready_service()
+        service.select_provider()
+        self.assertFalse(service.at_hand("live"))
+
+    def test_nothing_is_at_hand_while_a_setup_runs(self):
+        runner = ManualRunner()
+        service, providers = self.ready_service(runner=runner)
+        providers.current_provider_content["itv"] = XTREAM_PAYLOAD
+        service.select_provider()
+        self.assertFalse(service.at_hand("live"))
+        self.assertIsNone(service.setup_end())
+        runner.complete(0)
+        self.assertTrue(service.at_hand("live"))
+
+    def test_a_setup_done_whose_result_waits_for_the_event_loop_is_at_hand(self):
+        # main() builds the window with no event loop: the worker is done, its result queued.
+        runner = ManualRunner()
+        service, providers = self.ready_service(runner=runner)
+        providers.current_provider_content["itv"] = XTREAM_PAYLOAD
+        service.select_provider()
+        runner.jobs[0][0].run()  # the worker ends; the catalog has not heard it yet
+        self.assertTrue(service.is_loading())
+        self.assertTrue(service.at_hand("live"))
+        service.select_provider()  # another setup waits behind it: nothing is at hand
+        self.assertFalse(service.at_hand("live"))
+
+    def test_a_setup_that_failed_has_nothing_at_hand(self):
+        runner = ManualRunner()
+        service, providers = self.ready_service(runner=runner)
+        service.factory.results["provider_setup"] = {"fail": "Timed out"}
+        providers.current_provider_content["itv"] = XTREAM_PAYLOAD
+        service.select_provider()
+        runner.jobs[0][0].run()
+        self.assertFalse(service.at_hand("live"))
+        runner.complete(0)
+        self.assertFalse(service.at_hand("live"))
+
+    def test_a_server_without_channels_has_none_to_load(self):
+        service, _ = self.ready_service(ptype="JELLYFIN")
+        service.select_provider()
+        self.assertTrue(service.at_hand("live"))
+
+    def test_the_setup_says_when_its_worker_ended_and_how(self):
+        runner = ManualRunner()
+        service, _ = self.ready_service(runner=runner)
+        service.select_provider()
+        self.assertIsNone(service.setup_end())
+        runner.complete(0)
+        outcome, at = service.setup_end()
+        self.assertEqual(outcome, "ready")
+        self.assertIsInstance(at, float)
+        failing, _ = self.ready_service()
+        failing.factory.results["provider_setup"] = {"fail": "Timed out"}
+        failing.select_provider()
+        self.assertEqual(failing.setup_end()[0], "failed")
+
+
 if __name__ == "__main__":
     unittest.main()

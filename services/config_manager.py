@@ -14,6 +14,7 @@ from services.atomic_write import atomic_write, set_aside
 from services.captions import translation_rules
 from services.captions.languages import CAPTION_LANGUAGES
 from services.captions.mt_languages import MT_LANGUAGES
+from services.captions.streaming import translate_times
 from services.config_writer import ConfigWriter
 from services.free_channels import ALL_NAME, ALL_URL
 from services.multikeydict import MultiKeyDict
@@ -640,6 +641,11 @@ class ConfigManager:
     # ({Qwen's name: MiLMMT's name, or "" for none}; services.captions.translation_rules)
     ai_captions_translations = _config_property(
         "ai_captions_translations", {}, coerce=translation_rules.clean
+    )
+    # 2.13.1, optional (older builds ignore it): the caption translator's timed medium line per
+    # thread count ({"2": seconds}): the next run's translation lead starts from it
+    ai_captions_translate_t = _config_property(
+        "ai_captions_translate_t", {}, coerce=translate_times
     )
     # Optional (older builds ignore it): AI captions were turned on (true) or off during the
     # last video file played; the next one comes on with them when nothing has to be asked,

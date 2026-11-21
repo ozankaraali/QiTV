@@ -17,7 +17,10 @@ above it), a muted sub line under its title, and a note at its right end. In a l
 column lists the rows the layer is one of, the opened one marked as the drawer marks its path;
 there only the rows that open a layer take the highlight, and a
 click on another goes back up to it. A layer (or a section) without rows says its
-`empty_text` and the keys stay on the left. Only the right column's focused row shows its
+`empty_text` and the keys stay on the left. A layer of info lines to read (`browse`: a
+screen's keys, 2.13.1) takes the keys with no highlight: → goes in, ↑/↓ scroll it a line and a
+page a page, ← (Esc, Back) comes out, and each line in sight first is said. Only the right
+column's focused row shows its
 help under it, three lines at most (four in a small window); a note cut short at its row's end
 shows there whole instead (a check's answer). Where everything goes is
 ui/overlays/settings_layout.py's.
@@ -52,7 +55,10 @@ Forward too) or a click on one opens its section or layer with that row focused 
 the row after it; a section: its first row); Backspace edits the text (`find_backspace`),
 its last letter going ends the find; Esc, ←, ✕, ‹, the fade (`back()`) and a click on the left
 column end it (`end_find`), the right column back as it was. New sections while it shows: the
-find stays, over them.
+find stays, over them. Typed inside a layer, the find lists its rows first, and a long list of
+names (Free channels' countries) is found only from inside it. A row is gone to as a match is
+from outside too (`show_row`: Settings opened at Free channels' countries, a list just added
+focused among the providers).
 
 The mouse: a click on a row focuses it. On the right column a row whose click changes it in
 place (a stepper's value, a text) only takes the focus while it has not got it, so that its
@@ -82,13 +88,14 @@ from functools import partial
 import logging
 from typing import Optional
 
-from PySide6.QtCore import QEvent, QObject, QPoint, QPointF, QRect, QRectF, Qt, Signal
-from PySide6.QtGui import QColor, QFontMetricsF, QMouseEvent, QPainter, QWheelEvent
+from PySide6.QtCore import QEvent, QObject, QPointF, QRect, QRectF, Qt, Signal
+from PySide6.QtGui import QColor, QFontMetricsF, QMouseEvent, QPainter, QPixmap, QWheelEvent
 from PySide6.QtWidgets import QWidget
 
 from services.i18n import N_, tr, translate
 from services.settings_model import DANGER, INFO, OPENS, STEP, TEXT, Row, Section
 from ui import text_edit
+from ui.brand import logo_pixmap, scaled_asset
 from ui.keymap import Action, key_hint
 from ui.overlays.base import Overlay, announce
 from ui.overlays.channel_rows import HOVER_ALPHA
@@ -205,6 +212,7 @@ def _rekeyed(key: str, renamed: Mapping[str, str]) -> str:
 
 
 class SettingsDrawer(Overlay):
+    takes_keys = True  # (Overlay.takes_keys)
     accessible_name = SETTINGS_TITLE
     # A stepper's key, and -1 (‹, ←) or +1 (›, →, Enter, a click on it focused).
     stepped = Signal(str, int)
@@ -258,11 +266,15 @@ class SettingsDrawer(Overlay):
         self._found: list[Target] = []
         self._found_rows: tuple[Row, ...] = ()
         self._before_find: Optional[tuple[str, int, int]] = None
+        self._find_here: Optional[tuple[int, tuple[int, ...]]] = None  # the layer it was typed in
         # Each line's place at y 0, by what it is laid out from (`_placed_key`): a line is
         # wrapped once for what it shows, not at each paint or mouse move. Emptied for new
         # sections, a value changed and another width (`_placed_width`: the host's).
         self._placed: dict[tuple, Box] = {}
         self._placed_width = -1
+        # Rows' pictures (Row.image: TMDB's logo in About), by name, height and pixel ratio:
+        # read once (None: the asset is missing).
+        self._images: dict[tuple[str, int, float], Optional[QPixmap]] = {}
         self._indicators = {
             side: ScrollIndicator(
                 self,
@@ -350,6 +362,8 @@ class SettingsDrawer(Overlay):
         else:
             at = next((i for i, item in enumerate(items) if item.key == old_focus), self._right)
         found = self._selectable(items, max(0, min(len(items) - 1, at)), 1) if items else None
+        if found is None and items and self._side == RIGHT and self._browse_column():
+            found = max(0, min(len(items) - 1, at))  # lines being read: as far as read
         self._right = 0 if found is None else found
         if found is None:
             self._side = LEFT
@@ -430,6 +444,9 @@ class SettingsDrawer(Overlay):
             target = self._selectable(items, max(0, min(len(items) - 1, at + delta)), delta)
             if target is not None and target != at:
                 self._set_left(target)
+        elif self._browse_column():  # lines to read (2.13.1): a line on, or back
+            self._scroll_by(RIGHT, delta)
+            self._right = self._first[RIGHT]
         else:
             items = self._items(RIGHT)
             if not items:
@@ -647,6 +664,7 @@ class SettingsDrawer(Overlay):
         if self._targets is None:
             self._targets = find_index(self._sections)
         self._before_find = (self._side, self._right, self._first[RIGHT])
+        self._find_here = (self._section, tuple(self._opened)) if self._opened else None
         self._find = TextEdit(text)
         self._side = RIGHT
         self._match(focus_key)
@@ -656,7 +674,7 @@ class SettingsDrawer(Overlay):
         the best), the right column from its top."""
         if self._find is None:
             return
-        self._found = find(self._targets or [], self._find.text)
+        self._found = find(self._targets or [], self._find.text, self._find_here)
         self._found_rows = tuple(
             Row(
                 target.row.key,
@@ -687,7 +705,7 @@ class SettingsDrawer(Overlay):
         if self._find is None:
             return
         before, self._before_find = self._before_find, None
-        self._find = None
+        self._find, self._find_here = None, None
         self._found, self._found_rows = [], ()
         self._hover = None
         if restore and before is not None:
@@ -703,9 +721,26 @@ class SettingsDrawer(Overlay):
         focused (an info line: the nearest row after it, else before it; a section found by
         its title: its first row, else the section on the left), and the find ends; Esc then
         goes up from there."""
-        if not 0 <= index < len(self._found):
-            return
-        target = self._found[index]
+        if 0 <= index < len(self._found):
+            self._go_to(self._found[index])
+
+    def show_row(self, key: str) -> bool:
+        """Row `key` of the sections focused where it is, its section and the layers on the
+        way opened, as Enter on a find's match goes there (a text being edited is kept first,
+        a find ends); Esc then goes up from there. False, the place unchanged, when no row has
+        that key."""
+        if self._edit is not None:
+            self._end_edit(keep=True)  # (a rename builds the sections again: first)
+        if self._targets is None:
+            self._targets = find_index(self._sections)
+        target = next((t for t in self._targets if t.index >= 0 and t.row.key == key), None)
+        if target is None:
+            return False
+        self._go_to(target)
+        return True
+
+    def _go_to(self, target: Target) -> None:
+        """The keys on `target`'s row, in its section and layer (the find ends)."""
         self._drop_find(restore=False)
         self._pressed = None  # a double-click's second press does not step what it reached
         self._section = target.section
@@ -772,6 +807,8 @@ class SettingsDrawer(Overlay):
                 parts.append(translate(chain[-1].empty_text))
         else:
             row = self.focused_row()
+            if row is None and self._find is None and self._browse_column():
+                return self._read_line()
             if row is None:
                 return self._find_notice() if self._find is not None else ""
             if row.kind == STEP:
@@ -782,6 +819,17 @@ class SettingsDrawer(Overlay):
                 value = row.note
             parts = [title_of(Item(row.key, row.text, row=row)), row.sub, value]
         return ", ".join(part for part in parts if part)
+
+    def _read_line(self) -> str:
+        """While lines are read (a browse layer): the one at the top of the column, its title
+        and its value ("Mute, M")."""
+        items = self._items(RIGHT)
+        if not 0 <= self._right < len(items) or items[self._right].row is None:
+            return ""
+        item = items[self._right]
+        row = item.row
+        assert row is not None
+        return ", ".join(part for part in (title_of(item), self._tail_text(row)) if part)
 
     def _tail_text(self, row: Row) -> str:
         """What the row shows at its right end: a text or an info line's value (a secret's in
@@ -834,15 +882,6 @@ class SettingsDrawer(Overlay):
     def back_rect(self) -> QRectF:
         """‹ at the start of the breadcrumb."""
         return QRectF(self._layout().back)
-
-    def row_anchor(self, key: str) -> QPoint:
-        """The global point under the right column's row `key`, at its left (where a menu it
-        opens pops up: Free channels); the overlay's corner while it is out of sight."""
-        keys = [row.key for row in self._right_rows()]
-        box = self._box(RIGHT, keys.index(key)) if key in keys else None
-        if box is None:
-            return self.mapToGlobal(QPoint(0, 0))
-        return self.mapToGlobal(box.line.bottomLeft().toPoint())
 
     # ---- state ------------------------------------------------------------------------------
 
@@ -903,11 +942,25 @@ class SettingsDrawer(Overlay):
             return False
         at = self._selectable(items, max(0, min(len(items) - 1, self._right)), 1)
         if at is None:
-            return False
+            if not self._browse_column():
+                return False
+            # Lines to read (2.13.1): in, no highlight; from the one read to (a found one)
+            self._side = RIGHT
+            self._scroll_to(RIGHT, max(0, min(len(items) - 1, self._right)))
+            self._right = self._first[RIGHT]
+            return True
         self._right = at
         self._side = RIGHT
         self._reveal(RIGHT)
         return True
+
+    def _browse_column(self) -> bool:
+        """Whether the right column is a layer of info lines to read (Section.browse, 2.13.1:
+        a screen's keys): the keys go into it with no highlight and scroll it."""
+        if self._find is not None:
+            return False
+        chain = self._chain()
+        return bool(chain) and chain[-1].browse and bool(chain[-1].rows)
 
     @staticmethod
     def _selectable(items: list[Item], at: int, delta: int) -> Optional[int]:
@@ -1003,9 +1056,10 @@ class SettingsDrawer(Overlay):
             focused = row is not None and index == focus
             # The first row with an icon of its own after rows without one: a gap above it.
             apart = not icons and index > 0 and bool(item.icon) and not items[index - 1].icon
+            image_w = self._image_width(row, un) if row is not None and row.image else 0.0
             key = self._placed_key(
                 side, item, un, area, icons, value, choices, focused, index == editing, fonts
-            ) + (apart,)
+            ) + (apart, image_w)
             box = self._placed.get(key)
             if box is None:
                 help = self._focused_help(un, area, item) if focused else []
@@ -1020,6 +1074,7 @@ class SettingsDrawer(Overlay):
                     help=help,
                     editing=index == editing,
                     apart=apart,
+                    image_w=image_w,
                 )
                 self._placed[key] = box
             boxes.append(box)
@@ -1043,6 +1098,7 @@ class SettingsDrawer(Overlay):
         row = item.row
         kind, sub, note = (row.kind, row.sub, row.note) if row is not None else ("", "", "")
         warn = row is not None and row.warn  # (its sub line's colour: painted, kept apart)
+        whole_image = (row.whole, row.image, row.image_u) if row is not None else None
         helps = self._help_parts(row) if focused and row is not None else None
         paste = translate(PASTE_TEXT) if editing else ""
         return (
@@ -1063,7 +1119,27 @@ class SettingsDrawer(Overlay):
             area.x(),
             area.width(),
             fonts,
+            whole_image,
         )
+
+    def _image(self, name: str, height: float) -> Optional[QPixmap]:
+        """A row's picture `height` logical pixels tall at this screen's pixel ratio: QiTV's
+        logo ("qitv"), else the asset of that name (None: missing); read once."""
+        ratio = self.devicePixelRatioF() or 1.0
+        key = (name, round(height), ratio)
+        if key not in self._images:
+            if name == "qitv":
+                self._images[key] = logo_pixmap(key[1], ratio)
+            else:
+                self._images[key] = scaled_asset(name, key[1], ratio)
+        return self._images[key]
+
+    def _image_width(self, row: Row, un: Units) -> float:
+        """How wide a row's picture is at its height (0 when it is missing)."""
+        pixmap = self._image(row.image, row.image_u * un.u)
+        if pixmap is None or pixmap.isNull():
+            return 0.0
+        return pixmap.width() / pixmap.devicePixelRatio()
 
     def _focused_help(self, un: Units, area: QRectF, item: Item) -> list[str]:
         """The lines under the focused row `item`: its help and its restart note, or its note
@@ -1103,6 +1179,11 @@ class SettingsDrawer(Overlay):
         heights = self._heights(side, un, area)
         if not heights:
             self._first[side] = 0
+            self._indicators[side].refit()
+            return
+        if side == RIGHT and self._browse_column():
+            # Lines to read (2.13.1): no highlight to follow; they stay as far as read
+            self._first[side] = max(0, min(self._first[side], last_first(heights, area.height())))
             self._indicators[side].refit()
             return
         index = self._right if side == RIGHT else self._left_index()
@@ -1266,6 +1347,7 @@ class SettingsDrawer(Overlay):
             return
         marked = self._left_index() if side == LEFT else self._right
         focused = self._side == side
+        reading = side == RIGHT and self._browse_column()  # lines to read: never muted
         editing = self._editing_index() if side == RIGHT else -1
         text, muted = qcolor(PALETTE.text), qcolor(PALETTE.text, PALETTE.text_muted_alpha)
         for index, box in enumerate(lay.boxes[side]):
@@ -1280,7 +1362,7 @@ class SettingsDrawer(Overlay):
             if item.icon and not box.icon.isEmpty():
                 self._paint_icon(p, item.icon, box.icon)
             row = item.row
-            tone = text if item.selectable else muted
+            tone = text if item.selectable or reading else muted
             if side == RIGHT and row is not None and row.kind == DANGER:
                 tone = qcolor(PALETTE.danger_text)  # (readable over a bright picture)
             elif row is not None and row.warn and not row.sub:
@@ -1289,6 +1371,10 @@ class SettingsDrawer(Overlay):
             self._paint_title(p, un, box, tone, qcolor(PALETTE.warn) if warned else muted)
             if side == LEFT or row is None:
                 continue
+            if not box.image.isEmpty():
+                pixmap = self._image(row.image, box.image.height())
+                if pixmap is not None and not pixmap.isNull():
+                    p.drawPixmap(box.image.topLeft(), pixmap)
             if row.kind == STEP:
                 p.setFont(un.font(VALUE_FONT_U))
                 lit, accent = self._lit(row), qcolor(PALETTE.accent)
@@ -1303,7 +1389,8 @@ class SettingsDrawer(Overlay):
             elif not box.end.isEmpty():
                 tail = self._tail_text(row)
                 p.setFont(un.font(VALUE_FONT_U))
-                p.setPen(text if row.kind == TEXT and not self._shows_placeholder(row) else muted)
+                typed = row.kind == TEXT and not self._shows_placeholder(row)
+                p.setPen(text if typed or reading else muted)
                 fm = QFontMetricsF(p.font())
                 shown = fm.elidedText(tail, Qt.TextElideMode.ElideRight, box.end.width())
                 p.drawText(

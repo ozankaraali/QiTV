@@ -386,6 +386,19 @@ class ContextTests(unittest.TestCase):
                 resolve(K.Key_D.value, CTRL, "d", context=context), (Action.FAVORITE, "")
             )
 
+    def test_the_menu_key_and_shift_f10_open_the_highlighted_rows_menu(self):  # 2.13.1
+        for context in ("drawer", "guide", "library"):
+            with self.subTest(context=context):
+                for key, mods in ((K.Key_Menu, NONE), (K.Key_F10, SHIFT)):
+                    self.assertEqual(
+                        resolve(key.value, mods, "", context=context), (Action.CONTEXT_MENU, "")
+                    )
+                self.assertIsNone(resolve(K.Key_F10.value, NONE, "", context=context))
+                self.assertIsNone(resolve(K.Key_F10.value, SHIFT | CTRL, "", context=context))
+        # The player has no highlighted row (the picture's menu is its right-click).
+        self.assertIsNone(closed(K.Key_Menu))
+        self.assertIsNone(closed(K.Key_F10, mods=SHIFT))
+
     def test_unknown_context(self):
         with self.assertRaises(ValueError):
             resolve(K.Key_Up.value, NONE, "", context="menu")

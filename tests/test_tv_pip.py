@@ -13,7 +13,6 @@ from unittest import mock
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 from PySide6.QtCore import QObject, QPoint, QRect, Qt, Signal
-from PySide6.QtWidgets import QMenu
 from timer_fixtures import pause
 
 from services.connection_budget import ConnectionBudget
@@ -43,7 +42,9 @@ from tests.test_tv_controller import (
     FakeLiveSession,
     FakeOverlay,
     FakeSession,
+    menus_of,
     play_context,
+    shown_menus,
     wait_until,
 )
 from ui.autoplay import FINISHED_TEXT
@@ -713,13 +714,10 @@ class PipTests(PipCase):
         self.start_large(0)
         self.nav.reset_to("live", "10")
         node = self.nav.children(self.nav.path[-1])[2]
-        shown = []
-        with mock.patch.object(QMenu, "popup", lambda menu, pos, *a: shown.append(menu)):
+        with shown_menus() as popup:
             self.drawer.contextRequested.emit(node, QPoint(40, 50))
-        menu = shown[0]
-        self.addCleanup(menu.deleteLater)
-        action = next(a for a in menu.actions() if a.text() == "Open in picture-in-picture")
-        action.trigger()
+        menu, _where = menus_of(popup)[0]
+        menu.entry("Open in picture-in-picture").trigger()
         self.assertEqual(self.requested()[-1], "Three")
         self.ready("http://stream/3")
         self.assertTrue(wait_until(self.sessions.pip_open))
@@ -805,11 +803,10 @@ class PipTests(PipCase):
         self.open_small(CHANNELS[1])
         self.nav.reset_to("live", "10")
         node = self.nav.children(self.nav.path[-1])[2]
-        shown = []
-        with mock.patch.object(QMenu, "popup", lambda menu, pos, *a: shown.append(menu)):
+        with shown_menus() as popup:
             self.drawer.contextRequested.emit(node, QPoint(40, 50))
-        self.addCleanup(shown[0].deleteLater)
-        next(a for a in shown[0].actions() if a.text() == "Play in VLC").trigger()
+        menu, _where = menus_of(popup)[0]
+        menu.entry("Play in VLC").trigger()
         self.ready("http://stream/3")
         self.assertFalse(self.sessions.pip_open())
 

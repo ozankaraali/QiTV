@@ -23,7 +23,9 @@ The small surface takes the shape its picture shows in, so it shows no bars: `sh
 (a channel's picture becomes known, the stream or the aspect ratio changes), and the surface
 glides to its new shape as it does for the lift. Whatever its shape it is as large as the 16:9
 box (`services.picture.box_size`), never more than half the player either way; 16:9 while its
-shape is not known, or fits any (Fill).
+shape is not known, or fits any (Fill). Which surfaces hold their picture small (`shows_small`:
+this one, and the one lent to the floating window) the window tells their players, which then
+fill them to the last pixel (services.playback, `set_box_size`).
 """
 
 from dataclasses import dataclass
@@ -204,6 +206,15 @@ class PipFrame(QObject):
             return None
         self._lent = self._large
         return self._surfaces[self._lent]
+
+    def shows_small(self, name: str) -> bool:
+        """Surface `name` holds its picture small: the picture in picture's in its corner, or
+        the one lent to the floating window (never a multiview's tile)."""
+        if self._closed:
+            return False
+        return name == self._lent or (
+            self._shown and not self._suspended and name == self._small_name
+        )
 
     def lent_shape(self) -> Optional[float]:
         """The shape the lent surface's picture shows in (None: none lent, or not known)."""

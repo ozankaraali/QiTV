@@ -5,6 +5,7 @@ from PySide6.QtCore import (
     QEvent,
     QModelIndex,
     QPoint,
+    QRect,
     QRectF,
     QSize,
     Qt,
@@ -235,6 +236,15 @@ class GenreList(QWidget):
 
     def current_id(self) -> str | None:
         return self._current
+
+    def current_rect(self) -> QRect:
+        """The highlighted genre's row, in global coordinates (2.13.1: the menu key's menu
+        opens beside it); empty while none is."""
+        row = self._rows_by_id.get(self._current, -1) if self._current is not None else -1
+        if row < 0:
+            return QRect()
+        rect = self._view.visualRect(self._model.index(row))
+        return QRect(self._view.viewport().mapToGlobal(rect.topLeft()), rect.size())
 
     def placeholder(self) -> str:
         """What the find says while empty: "Find a genre…", or the rail's own (2.9.7)."""

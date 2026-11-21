@@ -153,6 +153,7 @@ from ui.overlays.drawer import Drawer
 from ui.overlays.guide import Guide
 from ui.overlays.next_card import NextCard
 from ui.overlays.painting import fmt_duration
+from ui.overlays.popup_menu import Where
 from ui.overlays.stopped_notice import STOPPED
 from ui.overlays.toast import Toast
 from ui.overlays.transport import Transport
@@ -988,6 +989,10 @@ class TVController(QObject):
 
     def select_provider(self, name: Optional[str] = None, *, force_refresh: bool = False) -> None:
         self._flow.select_provider(name, force_refresh=force_refresh)
+
+    def set_up_early(self) -> None:
+        """The window began the start's setup as it was built: ProviderFlow.set_up_early."""
+        self._flow.set_up_early()
 
     def hold_for_file(self, on: bool) -> None:
         """A file opened in QiTV is on its way or plays (`on`): nothing opens over it (see
@@ -1880,6 +1885,7 @@ class TVController(QObject):
             Action.NAV_TEXT: lambda: drawer.type_text(payload),
             Action.NAV_BACKSPACE: lambda: drawer.backspace(),
             Action.FORGET: self._forget_highlighted,
+            Action.CONTEXT_MENU: self._context_key,  # 2.13.1: Menu, Shift+F10
         }
         return calls.get(action)
 
@@ -5839,20 +5845,27 @@ class TVController(QObject):
         else:
             self.nav.changed.emit()
 
-    def _on_context(self, node: NavNode, global_pos: QPoint) -> None:
-        """A right-click on a drawer row: its context menu."""
+    def _on_context(self, node: NavNode, global_pos: Where) -> None:
+        """A right-click on a drawer row (or the menu key on it, 2.13.1): its context menu."""
         if not self._closed:
             self._context.show(node, global_pos, self.overlays.drawer)
 
-    def _on_guide_context(self, channel: dict, global_pos: QPoint) -> None:
-        """2.9.3: a right-click on a channel of the guide: its menu, as its row's in the
-        channel list."""
+    def _context_key(self) -> None:
+        """The menu key or Shift+F10 (2.13.1): the channel list's highlighted row's menu,
+        beside the row, as its right-click opens it."""
+        drawer = self.overlays.drawer
+        if drawer.isVisible():
+            drawer.context_key()
+
+    def _on_guide_context(self, channel: dict, global_pos: Where) -> None:
+        """2.9.3: a right-click on a channel of the guide (or the menu key, 2.13.1): its menu,
+        as its row's in the channel list."""
         if not self._closed:
             guide = self.overlays.guide
             self._context.show_channel(channel, global_pos, guide, group_key=self._guide.group())
 
     def show_library_menu(
-        self, item: dict, section: str, global_pos: QPoint, parent: Optional[QObject] = None
+        self, item: dict, section: str, global_pos: Where, parent: Optional[QObject] = None
     ) -> None:
         """A right-click on a Library film ("movies") or episode ("series"): Play in VLC, Play
         in MPV or Copy stream link, as the drawer's menu offers them."""

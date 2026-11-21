@@ -6,7 +6,7 @@ from unittest import mock
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
-from PySide6.QtCore import QPoint, QPointF, Qt, qInstallMessageHandler
+from PySide6.QtCore import QPoint, QPointF, QRect, Qt, qInstallMessageHandler
 from PySide6.QtTest import QTest
 from PySide6.QtWidgets import QApplication, QWidget
 from job_fixtures import ImmediateRunner
@@ -767,7 +767,7 @@ class DrawerTests(unittest.TestCase):
         self.drawer.open_drawer(focus_side="left")  # without one: on the path's end again
         self.assertEqual(self.drawer.highlighted(), path[-1])
 
-    def test_free_channels_sits_under_add_provider_and_asks_with_a_row_anchor(self):
+    def test_free_channels_sits_under_add_provider_and_asks_for_its_countries(self):
         column = self.open_on_the_sources()
         self.assertEqual(
             [n.key for n in column.nodes[3:]],
@@ -784,11 +784,8 @@ class DrawerTests(unittest.TestCase):
         )
         self.drawer._on_row_clicked("left", 5)
         self.assertEqual(self.actions, [FREE_CHANNELS_ROW])
-        self.assertTrue(self.drawer.isVisible())  # the menu opens over it
-        # The menu opens right under the row, in the column.
-        anchor = self.drawer.row_anchor(FREE_CHANNELS_ROW)
-        rect = column.view.visualRect(column.model.index(5, 0))
-        self.assertEqual(column.view.viewport().mapFromGlobal(anchor), rect.bottomLeft())
+        # The window opens Settings at its countries (2.13.1): the list leaves that to it.
+        self.assertTrue(self.drawer.isVisible())
 
     def test_a_click_on_settings_asks_for_it(self):
         column = self.open_on_the_sources()
@@ -1063,11 +1060,31 @@ class HostedDrawerInputTests(unittest.TestCase):
         self.assertEqual(self.events, [])
         self.assertTrue(self.drawer.isVisible())
 
-    def test_a_right_click_on_a_group_asks_for_nothing(self):
+    def test_a_right_click_on_a_group_asks_for_its_menu(self):
+        # 2.13.1: a group's menu (Hide group, 2.9.1; Hide with a PIN, 2.8) was never asked for;
+        # the menu says what a group has (nothing for All or ★ Favorites).
         requests = []
         self.drawer.contextRequested.connect(lambda node, pos: requests.append(node))
-        self.right_click(self.drawer._columns["left"].view, 0)
-        self.assertEqual(requests, [])
+        left = self.drawer._columns["left"]
+        self.right_click(left.view, 0)
+        self.assertEqual(requests, [left.nodes[0]])
+        self.assertEqual(requests[0].layer, "group")
+        self.assertEqual(self.events, [])
+
+    def test_the_menu_key_asks_for_the_highlighted_rows_menu_beside_it(self):  # 2.13.1
+        requests = []
+        self.drawer.contextRequested.connect(lambda node, where: requests.append((node, where)))
+        for side in ("right", "left"):  # a channel, then its group
+            with self.subTest(side=side):
+                if side == "left":
+                    self.drawer.left()
+                node = self.drawer.highlighted()
+                self.assertEqual(node.layer, "item" if side == "right" else "group")
+                self.assertTrue(self.drawer.context_key())
+                col = self.drawer._columns[side]
+                rect = col.view.visualRect(col.model.index(col.rows[node], 0))
+                row = QRect(col.view.viewport().mapToGlobal(rect.topLeft()), rect.size())
+                self.assertEqual(requests[-1], (node, row))  # the row itself: beside it
         self.assertEqual(self.events, [])
 
     def test_a_right_click_on_recent_asks_for_its_menu(self):
@@ -1825,13 +1842,13 @@ class ChannelMenuElsewhereTests(unittest.TestCase):
         )
         self.shown = []
         patcher = mock.patch(
-            "ui.context_actions.QMenu.popup", lambda menu, pos: self.shown.append(menu)
+            "ui.overlays.popup_menu.popup", lambda menu, near, **where: self.shown.append(menu)
         )
         patcher.start()
         self.addCleanup(patcher.stop)
 
     def texts(self, menu):
-        return [a.text() for a in menu.actions() if not a.isSeparator()]
+        return menu.texts()
 
     def test_a_guides_channel_has_its_rows_entries_whatever_the_list_shows(self):
         self.nav.focus_source("Home")  # the channel list on its sources: no live section

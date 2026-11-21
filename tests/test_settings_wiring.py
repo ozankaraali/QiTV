@@ -36,7 +36,8 @@ from ui.tv_window import SAVE_FAILED_TEXT
 # the playback and window keys (play/pause, Stop, the media keys' next and previous, the volume,
 # mute, fullscreen, the mini player) and the shortcuts of every context: the quick search (it
 # leaves Settings for the Library), Ctrl/⌘+D (the channel playing's favourite) and Ctrl/⌘+P
-# (picture in picture).
+# (picture in picture). 2.13.1: the menu key (Shift+F10) too: it opens the channel list's
+# highlighted row's menu, and that list never shows under Settings, so it opens none.
 PASSED_ON = frozenset(
     {
         Action.PLAY_PAUSE,
@@ -51,6 +52,7 @@ PASSED_ON = frozenset(
         Action.SEARCH,
         Action.FAVORITE,
         Action.PIP,
+        Action.CONTEXT_MENU,
     }
 )
 
@@ -96,7 +98,7 @@ class SettingsWiringTests(base.WindowCase):
             [
                 mock.call.back_to_tv(),
                 mock.call.leave_mini_player(),
-                mock.call.open("", from_drawer=True),
+                mock.call.open("", from_drawer=True, row=""),
             ],
         )
 

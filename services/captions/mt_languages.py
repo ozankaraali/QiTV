@@ -5,6 +5,7 @@ language code to the target the setting starts at."""
 
 from __future__ import annotations
 
+import re
 from typing import Optional
 
 from services.captions import languages
@@ -57,6 +58,87 @@ MT_LANGUAGES: tuple[str, ...] = (
     "Chinese (Simplified)",
     "Chinese (Traditional)",
 )
+
+# 2.13.1: the targets whose third person says whether it is a man or a woman (he/she, or a verb
+# that agrees: Hindi's and Urdu's), which a line alone often can't tell: each line is translated
+# with the line before and its translation ("Turkish: s1 s / English: t1"; 2026-11-21: the right
+# pronoun in 16-17 of 19 TV scenes against 7 alone). Vietnamese's everyday "anh ấy"/"cô ấy" and
+# Tamil's he/she both need it; Chinese writes 他/她 but says them alike, and is left alone
+GENDERED = frozenset(
+    {
+        "Arabic",
+        "Bulgarian",
+        "Catalan",
+        "Czech",
+        "Danish",
+        "German",
+        "Greek",
+        "English",
+        "Spanish",
+        "French",
+        "Hebrew",
+        "Hindi",
+        "Croatian",
+        "Italian",
+        "Norwegian",
+        "Dutch",
+        "Polish",
+        "Portuguese",
+        "Romanian",
+        "Russian",
+        "Slovak",
+        "Slovenian",
+        "Swedish",
+        "Tamil",
+        "Urdu",
+        "Vietnamese",
+    }
+)
+# ... and the rest: one third person for both (Turkish "o", Finnish "hän", Persian "او", ...)
+NOT_GENDERED = frozenset(
+    {
+        "Azerbaijani",
+        "Bengali",
+        "Persian",
+        "Finnish",
+        "Hungarian",
+        "Indonesian",
+        "Japanese",
+        "Kazakh",
+        "Khmer",
+        "Korean",
+        "Lao",
+        "Malay",
+        "Burmese",
+        "Thai",
+        "Tagalog",
+        "Turkish",
+        "Uzbek",
+        "Cantonese",
+        "Chinese (Simplified)",
+        "Chinese (Traditional)",
+    }
+)
+
+
+def needs_context(target: str) -> bool:
+    """A line translated into `target` (MiLMMT's name) goes with the line before (`GENDERED`)."""
+    return target in GENDERED
+
+
+# scripts where a character carries about a word (Thai, Lao, Burmese, Khmer, Japanese's kana,
+# Chinese, Korean): services.captions.translate's length cap counts each as 3
+DENSE = re.compile(
+    "[\u0e00-\u0eff\u1000-\u109f\u1780-\u17ff\u3040-\u30ff\u3400-\u4dbf"
+    "\u4e00-\u9fff\uac00-\ud7af\u1100-\u11ff]"
+)
+
+
+def words_in(text: str) -> int:
+    """About how many words `text` has: by its spaces, or two characters a word of a script
+    written without them (a Japanese or Chinese clause is one "word" by its spaces)."""
+    return max(len(text.split()), len(DENSE.findall(text)) // 2)
+
 
 # QiTV's caption languages (Qwen's names) that the model names differently
 _SOURCE = {"Chinese": "Chinese (Simplified)", "Filipino": "Tagalog"}

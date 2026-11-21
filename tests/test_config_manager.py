@@ -113,6 +113,22 @@ class WindowConfigMigrationTests(unittest.TestCase):
         for key, value in saved.items():
             self.assertEqual(written[key], value)
 
+    def test_the_translators_timed_line_is_kept_per_thread_count(self):
+        # 2.13.1, optional (older builds ignore it): the next run's translation lead starts
+        # from it
+        with tempfile.TemporaryDirectory() as directory:
+            config_path = Path(directory) / "config.json"
+            config_path.write_text(json.dumps({}), encoding="utf-8")
+            with patch.object(ConfigManager, "_get_config_path", return_value=str(config_path)):
+                config = ConfigManager()
+                self.assertEqual(config.ai_captions_translate_t, {})
+                config.config["ai_captions_translate_t"] = "fast"
+                self.assertEqual(config.ai_captions_translate_t, {})
+                config.ai_captions_translate_t = {"2": 0.77, "x": 1.0}
+                self.assertEqual(config.config["ai_captions_translate_t"], {"2": 0.77})
+                config.save_config(wait=True)
+                self.assertEqual(ConfigManager().ai_captions_translate_t, {"2": 0.77})
+
     def test_translations_are_kept_per_spoken_language_and_a_2_11_1_config_has_none(self):
         # 2.11.2, the owner: translation starts Off for every language; the old single target
         # is not carried over, and both old keys stay as they were (older builds read them)

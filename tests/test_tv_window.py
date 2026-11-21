@@ -37,18 +37,21 @@ from PySide6.QtGui import (
     QKeySequence,
 )
 from PySide6.QtTest import QTest
-from PySide6.QtWidgets import QApplication, QMenu, QWidget
+from PySide6.QtWidgets import QApplication, QDialog, QMenu, QWidget
 from gc_fixtures import collect_on_the_gui_thread
 from timer_fixtures import elapse, pause, wait_until
 
 import main as qitv_main
 from services import update_checker
+from services.catalog import ALL_GROUP_ID
 from services.config_manager import ConfigManager, get_app_version
 from services.epg_manager import EpgManager
+from services.i18n import translate
 from services.image_manager import ImageManager
 from services.playback import NO_VLC_MESSAGE, PlaybackState, create_instance
 from services.provider_ids import ALL_PROVIDERS, ALL_PROVIDERS_TITLE
 from services.provider_manager import ProviderManager
+from services.settings_model import ABOUT, KEYS
 from services.thread_cleanup import has_pending_threads
 from services.vlc_profile import PlayKind
 from tests.fixtures import local_xtream
@@ -65,13 +68,13 @@ from tests.test_keymap import resolve_text
 from tests.ts_fixtures import make_stream
 from ui.brand import logo_aspect
 from ui.export_flow import MAY_HOLD_SIGN_IN
-from ui.keymap import SHORTCUTS, Action, shortcut_keys
+from ui.keymap import SHORTCUT_TITLES, SHORTCUTS, Action, shortcut_keys
 from ui.overlay_host import OverlayHost
 from ui.overlays.drawer import ERROR_TEXT, LIBRARY_ACTION
 from ui.overlays.zap_banner import BannerInfo
 from ui.page_stack import PageStack
-from ui.shortcuts_dialog import ShortcutsDialog, table_rows
-from ui.tv_menus import ISSUES_URL, AboutDialog
+from ui.settings_about import HOME_URL, NOTICES_URL
+from ui.tv_menus import ISSUES_URL
 from ui.tv_window import (
     ABANDONED_EXIT_CODE,
     CLOSE_RETRY_MS,
@@ -246,6 +249,120 @@ class WindowCase(unittest.TestCase):
 
 
 class TVWindowTests(WindowCase):
+    def test_a_rows_menu_is_painted_and_the_keys_and_the_phone_reach_it(self):  # 2.13.1
+        from services import favorites
+
+        self.show()
+        drawer = self.wait_for_drawer()
+        QTest.keyClick(self.window, Qt.Key.Key_Return)  # into the highlighted group (All)
+        self.assertTrue(wait_until(lambda: getattr(drawer.highlighted(), "layer", "") == "item"))
+        node = drawer.highlighted()
+        menu = self.window.popup_menu
+        self.assertIn(menu, self.window.host.findChildren(type(menu)))  # on the player's host
+        controller = self.window.controller
+        with mock.patch.object(controller, "pointer_may_hide", return_value=True):
+            self.assertTrue(self.window.pointer._may_hide())
+            drawer.contextRequested.emit(node, drawer.mapToGlobal(QPoint(200, 150)))
+            self.assertFalse(self.window.pointer._may_hide())  # the pointer is the menu's
+        self.assertTrue(menu.isVisible())
+        self.assertEqual(menu.menu().texts()[0], "Add to favorites")
+        QTest.keyClick(self.window, Qt.Key.Key_Down)  # the menu's, not the channel list's
+        self.assertIs(drawer.highlighted(), node)
+        self.assertEqual(menu.current().text, menu.menu().texts()[1])
+        QTest.keyClick(self.window, Qt.Key.Key_Home)
+        QTest.keyClick(self.window, Qt.Key.Key_P)  # a letter: Play in VLC, typed into nothing
+        self.assertEqual(menu.current().text, "Play in VLC")
+        self.assertEqual(drawer.find_text, "")
+        self.window.remote_key(Qt.Key.Key_Escape.value)  # the phone's Back closes the menu
+        self.assertFalse(menu.shown())
+        self.assertTrue(drawer.isVisible())  # and only it
+        drawer.contextRequested.emit(node, drawer.mapToGlobal(QPoint(200, 150)))
+        self.window.remote_key(Qt.Key.Key_Return.value)  # the phone's OK: Add to favorites
+        self.assertFalse(menu.shown())
+        self.assertTrue(favorites.is_favorite(self.config, node.payload))
+        # 2.13.1: the menu key and Shift+F10 open the highlighted row's menu beside the row;
+        # the menu key again closes it.
+        col = drawer._columns[drawer.focus_side]
+        rect = col.view.visualRect(col.model.index(col.rows[drawer.highlighted()], 0))
+        row = QRect(col.view.viewport().mapTo(self.window.host, rect.topLeft()), rect.size())
+        for key, mods in (
+            (Qt.Key.Key_Menu, Qt.KeyboardModifier.NoModifier),
+            (Qt.Key.Key_F10, Qt.KeyboardModifier.ShiftModifier),
+        ):
+            with self.subTest(key=key):
+                QTest.keyClick(self.window, key, mods)
+                self.assertTrue(menu.shown())
+                self.assertEqual(menu.menu().texts()[0], "Remove from favorites")
+                self.assertFalse(menu.panel().intersects(row))  # beside it
+                QTest.keyClick(self.window, Qt.Key.Key_Menu)
+                self.assertFalse(menu.shown())
+
+    def test_a_card_or_settings_over_a_menu_closes_it_and_has_the_keys(self):  # 2.13.1
+        from ui import window_cards
+        from ui.overlays.popup_menu import Menu
+        from ui.overlays.settings_card import OK
+
+        self.show()
+        drawer = self.wait_for_drawer()
+        QTest.keyClick(self.window, Qt.Key.Key_Return)  # into the highlighted group (All)
+        self.assertTrue(wait_until(lambda: getattr(drawer.highlighted(), "layer", "") == "item"))
+        menu = self.window.popup_menu
+        drawer.contextRequested.emit(drawer.highlighted(), drawer.mapToGlobal(QPoint(200, 150)))
+        self.assertTrue(menu.shown())
+        read: list[str] = []
+        window_cards.tell("Up to date", "QiTV is up to date.", read.append)  # (an update's)
+        self.assertTrue(self.window.window_cards.shown())
+        self.assertFalse(menu.shown())  # it closed for the card, which has the keys
+        QTest.keyClick(self.window, Qt.Key.Key_Escape)
+        self.assertEqual(read, [OK])  # the card's Back, not the menu's
+        self.assertFalse(self.window.window_cards.shown())
+        chosen: list[str] = []
+        entries = Menu()
+        entries.add("Entry", lambda: chosen.append("entry"))
+        menu.open(entries, at=self.window.host.mapToGlobal(QPoint(200, 150)))
+        self.assertTrue(menu.shown())
+        self.menu_actions()["Keyboard Shortcuts…"].trigger()  # the menu bar's, while it shows
+        self.assertFalse(menu.shown())
+        self.assertEqual(chosen, [])  # closed, not chosen
+        self.assertTrue(self.window.settings.visible())
+        self.assertEqual(self.window.settings_drawer.path(), (KEYS,))
+        QTest.keyClick(self.window, Qt.Key.Key_Menu)  # passed on by Settings: no list under it
+        self.assertFalse(menu.shown())
+        self.assertTrue(self.window.settings.visible())
+        # A menu over Settings (the picture's, beside it), then Help → About QiTV: Settings
+        # moves to About, showing already, and the menu goes
+        menu.open(entries, at=self.window.host.mapToGlobal(QPoint(200, 150)))
+        self.assertTrue(menu.shown())
+        self.menu_actions()["About QiTV"].trigger()
+        self.assertEqual(self.window.settings_drawer.path(), (ABOUT,))
+        self.assertFalse(menu.shown())
+        self.assertEqual(chosen, [])
+
+    def test_what_takes_the_keys_closes_a_menu_as_it_comes_a_toast_does_not(self):  # 2.13.1
+        from ui.overlays.popup_menu import Menu
+
+        self.show()
+        self.wait_for_drawer()
+        menu, window = self.window.popup_menu, self.window
+        entries = Menu()
+        entries.add("Entry")
+        at = window.host.mapToGlobal(QPoint(200, 150))
+        menu.open(entries, at=at)
+        window.screens.notify("A toast", "info", 2000)  # says something, takes no key
+        self.assertTrue(window.overlays.toast.isVisible())
+        self.assertTrue(menu.shown())
+        # The controller's own questions (2.6's, 2.8's, 2.9's), each as it is asked
+        for card in (window.question_card, window.quality_card, window.captions_card):
+            with self.subTest(card=card):
+                menu.open(entries, at=at)
+                self.assertTrue(menu.shown())
+                card.ask("A question?", "Yes", "No")
+                self.assertFalse(menu.shown())
+                card.withdraw()
+        menu.open(entries, at=at)
+        window.sound_panel.show()  # a panel too
+        self.assertFalse(menu.shown())
+
     def test_constructs_and_shows_with_the_overlay_host(self):
         self.show()
         window = self.window
@@ -1320,6 +1437,52 @@ class RecorderHomeWindowTests(WindowCase):  # 2.9.7: the Recordings tab's home, 
         guide.cancelSeriesRequested.emit(channel, airing)
         self.assertEqual(schedule.items(), [])
 
+    def test_record_at_a_time_is_a_card_on_the_library_page(self):  # 2.13.1: no window
+        window = self.window
+        self.show()
+        self.wait_for_drawer()
+        self.assertTrue(wait_until(lambda: window.catalog.items("live", ALL_GROUP_ID)))
+        window.record_at(window.catalog.items("live", ALL_GROUP_ID)[0])  # a channel's own
+        self.assertTrue(window.record_card.isVisible())  # over the picture, its host shown
+        self.assertIn(window.record_card, window.host.visible_overlays())
+        QTest.keyClick(window, Qt.Key.Key_Escape)
+        self.assertTrue(window.record_card.isHidden())
+        window.screens.open_recordings()
+        self.assertTrue(window.screens.library_shown())
+        desk = window.screens.recordings_desk
+        desk.record_at()  # its Record at a time…
+        card = desk.card()
+        self.assertTrue(card.isVisible())
+        self.assertIs(card.parentWidget(), window.library_page)
+        self.assertEqual(card.focus(), ("field", "channel"))
+        QTest.keyClick(window, Qt.Key.Key_Down)  # the window's keys, in the Library's context
+        self.assertEqual(card.focus(), ("field", "name"))
+        for key in (Qt.Key.Key_A, Qt.Key.Key_Space, Qt.Key.Key_1, Qt.Key.Key_Slash):
+            QTest.keyClick(window, key, Qt.KeyboardModifier.NoModifier)
+        # Letters, a space, digits and "/" (the Library's search key elsewhere) type
+        self.assertEqual(card.values()["name"], "a 1/")
+        QTest.keyClick(window, Qt.Key.Key_Escape)
+        self.assertTrue(card.isHidden())
+        self.assertTrue(window.screens.library_shown())  # Esc closed the card alone
+        desk.record_at()
+        window.screens.open_library("movies")  # Ctrl+2: the Recordings tab left, the card too
+        self.assertTrue(card.isHidden())
+        window.screens.open_recordings()
+        desk.record_at()
+        window.screens.back_to_tv()  # the Library left: the card goes with it
+        self.assertTrue(card.isHidden())
+
+    def test_record_at_a_time_from_the_mini_player_is_asked_in_the_window(self):  # 2.13.1
+        window = self.window
+        self.show()
+        self.wait_for_drawer()
+        self.assertTrue(wait_until(lambda: window.catalog.items("live", ALL_GROUP_ID)))
+        self.mini()
+        self.assertTrue(window.mini_player_active())
+        window.record_at(window.catalog.items("live", ALL_GROUP_ID)[0])  # asked: it makes way
+        self.assertFalse(window.mini_player_active())
+        self.assertTrue(window.record_card.isVisible())
+
     def test_a_timer_shows_as_a_band_on_its_channel(self):
         channel, _airing = self.channel_and_airing()
         self.window.recording_schedule.add_timer(channel, begin=21 * 60, minutes=90, days=range(7))
@@ -1474,6 +1637,16 @@ class RecorderHomeWindowTests(WindowCase):  # 2.9.7: the Recordings tab's home, 
     def test_the_guides_source_menu_lists_favorites_recent_and_all(self):
         labels = [label for label, _key in self.window.screens.guide_sources()]
         self.assertEqual(labels[:3], ["★ Favorites", "Recent", "All channels"])
+        pages = self.window.screens
+        pages._guide_source_menu(self.window.library_page.mapToGlobal(QPoint(20, 20)))
+        menu = self.window.library_menu.menu()  # 2.13.1: painted on the Library's page
+        self.assertEqual(menu.texts(), labels)
+        keys = [key for _label, key in pages.guide_sources()]
+        ticked = [entry.checked for entry in menu.entries]
+        self.assertEqual(ticked, [key == pages._guide_source for key in keys])
+        self.window.library_menu.handle(Action.NAV_HOME)
+        self.window.library_menu.handle(Action.NAV_ACTIVATE)  # ★ Favorites
+        self.assertEqual(pages._guide_source, keys[0])
 
 
 class FarChannelWindowTests(WindowCase):
@@ -2342,18 +2515,19 @@ class XtreamLibraryTests(TwoProviderCase):
         self.menu_actions()["Movies"].trigger()
         grid = self.wait_for_titles()
         item, point = grid.item(1), grid.item_rect(1).center()
-        shown = []
-        with mock.patch.object(QMenu, "popup", lambda menu, pos, *a: shown.append(menu)):
-            event = QContextMenuEvent(
-                QContextMenuEvent.Reason.Mouse, point, grid.viewport().mapToGlobal(point)
-            )
-            QApplication.sendEvent(grid.viewport(), event)
-        [menu] = shown
-        self.addCleanup(menu.deleteLater)
-        actions = {a.text(): a for a in menu.actions() if not a.isSeparator()}
-        self.assertEqual(list(actions), ["Play in VLC", "Play in MPV", "Copy stream link"])
+        event = QContextMenuEvent(
+            QContextMenuEvent.Reason.Mouse, point, grid.viewport().mapToGlobal(point)
+        )
+        QApplication.sendEvent(grid.viewport(), event)
+        shown = window.library_menu  # 2.13.1: painted on the Library's page, at the pointer
+        self.assertTrue(shown.isVisible())
+        self.assertEqual(shown.menu().texts(), ["Play in VLC", "Play in MPV", "Copy stream link"])
+        at = grid.viewport().mapTo(window.library_page, point)
+        self.assertTrue(shown.panel().adjusted(-1, -1, 1, 1).contains(at))  # a corner there
         QGuiApplication.clipboard().setText("")
-        actions["Copy stream link"].trigger()
+        QTest.keyClick(window, Qt.Key.Key_End)  # the window's keys reach it, not the Library
+        QTest.keyClick(window, Qt.Key.Key_Return)
+        self.assertFalse(shown.shown())
         clipboard = QGuiApplication.clipboard()
         self.assertTrue(wait_until(lambda: clipboard.text() == item["cmd"]), clipboard.text())
         self.assertEqual(window.library_toast.text(), "Link copied")
@@ -2852,34 +3026,66 @@ class HelpAndAboutTests(WindowCase):
                             continue
                         self.assertIsNotNone(resolve_text(key, context))
 
+    def no_window_shows(self):
+        """2.13.1: Keyboard Shortcuts and About are Settings' sections: no window of their own."""
+        shown = [
+            w for w in QApplication.topLevelWidgets() if w.isVisible() and w is not self.window
+        ]
+        self.assertEqual([w for w in shown if isinstance(w, QDialog)], [])
+
     def test_help_lists_the_table(self):
-        with mock.patch("ui.tv_menus.ShortcutsDialog") as dialog:
-            self.menu_actions()["Keyboard Shortcuts…"].trigger()
-        dialog.assert_called_once_with(self.window)
-        dialog.return_value.exec.assert_called_once_with()
-        shown = ShortcutsDialog(self.window)
-        self.addCleanup(shown.deleteLater)
-        rows = table_rows()
-        self.assertEqual(len(rows), len(SHORTCUTS) + sum(len(r) for r in SHORTCUTS.values()))
-        self.assertEqual(shown.table.rowCount(), len(rows))
-        self.assertEqual(shown.table.item(0, 0).text(), "Watching TV")
+        self.show()
+        self.menu_actions()["Keyboard Shortcuts…"].trigger()
+        settings, drawer = self.window.settings, self.window.settings_drawer
+        self.assertTrue(settings.visible())
+        self.assertEqual(drawer.path(), (KEYS,))  # Settings at Keys
+        rows = drawer._right_rows()
+        self.assertEqual([r.text for r in rows], [SHORTCUT_TITLES[c] for c in SHORTCUTS])
+        self.assertEqual(
+            sum(len(r.section.rows) for r in rows), sum(len(e) for e in SHORTCUTS.values())
+        )
+        self.assertEqual(translate(rows[0].text), "Watching TV")
+        self.no_window_shows()
+        # The keys alone read the longest screen's to its end, and go back out
+        QTest.keyClick(self.window, Qt.Key.Key_Right)
+        QTest.keyClick(self.window, Qt.Key.Key_Return)  # Watching TV
+        self.assertEqual(drawer.path(), (KEYS, rows[0].key))
+        last = len(rows[0].section.rows) - 1
+        for _ in range(last):
+            QTest.keyClick(self.window, Qt.Key.Key_Down)
+        drawer.grab()
+        self.assertFalse(drawer.row_rect("right", last).isEmpty())
+        QTest.keyClick(self.window, Qt.Key.Key_Escape)
+        self.assertEqual(drawer.path(), (KEYS,))
+        self.assertTrue(settings.visible())
 
     def test_about_names_the_version_and_the_links(self):
-        with mock.patch("ui.tv_menus.AboutDialog") as dialog:
-            self.menu_actions()["About QiTV"].trigger()
-        dialog.assert_called_once_with(self.window)
-        dialog.return_value.exec.assert_called_once_with()
-        about = AboutDialog(self.window)
-        self.addCleanup(about.deleteLater)
-        text = about.text.text()
-        self.assertIn(f"QiTV {get_app_version()}", text)
-        self.assertIn(ISSUES_URL, text)
-        # The same cropped logo as the top bar and the card, above the text, at 64 px.
-        logo = about.logo.pixmap()
-        self.assertEqual(logo.deviceIndependentSize().height(), 64)
-        self.assertAlmostEqual(logo.width() / logo.height(), logo_aspect(), delta=0.02)
-        layout = about.layout()
-        self.assertLess(layout.indexOf(about.logo), layout.indexOf(about.text))
+        self.show()
+        self.menu_actions()["About QiTV"].trigger()
+        settings, drawer = self.window.settings, self.window.settings_drawer
+        self.assertTrue(settings.visible())
+        self.assertEqual(drawer.path(), (ABOUT,))
+        self.no_window_shows()
+        rows = drawer._right_rows()
+        self.assertIn(get_app_version(), [r.note for r in rows])
+        drawer.grab()
+        # QiTV's cropped logo, above its version, 5 u tall (64 px at 1280)
+        logo = next(i for i, r in enumerate(rows) if r.image == "qitv")
+        box = drawer._box("right", logo)
+        self.assertAlmostEqual(box.image.width() / box.image.height(), logo_aspect(), delta=0.05)
+        self.assertLess(logo, next(i for i, r in enumerate(rows) if r.note == get_app_version()))
+        # The keys go to its links, each opened in the browser, the texts above them in sight
+        QTest.keyClick(self.window, Qt.Key.Key_Right)
+        opened = []
+        with mock.patch(
+            "services.system_open.QDesktopServices.openUrl",
+            side_effect=lambda url: opened.append(url.toString()) or True,
+        ):
+            for _ in range(3):
+                QTest.keyClick(self.window, Qt.Key.Key_Return)
+                QTest.keyClick(self.window, Qt.Key.Key_Down)
+        self.assertEqual(opened, [NOTICES_URL, HOME_URL, ISSUES_URL])
+        self.assertTrue(settings.visible())
 
     def test_check_for_updates_and_report_an_issue(self):
         with (

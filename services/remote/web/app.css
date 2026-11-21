@@ -467,6 +467,17 @@ body.sheet-open .remote, body.sheet-open .rows, body.sheet-open .chips { overflo
 .card .badge.live { inset-inline-end: 7px; background: var(--live); color: #fff; }
 .card .badge.quiet, .card .badge.warn { inset-inline-end: 7px; background: rgba(11, 15, 20, 0.75); color: var(--text); }
 .card.pressed { filter: brightness(1.15); }
+/* At home, QiTV's own pictures over the cards and tiles (screens.js picture()): unseen until
+   loaded, so the card or tile is the placeholder (nothing moves), gone if they fail. A poster
+   covers its card, as the TV's Library draws it, and says its own title; a logo sits whole a
+   little in from its tile's edge, as the TV draws it (on a raised tile: the page is canvas). */
+.logo, .row .poster { position: relative; overflow: hidden; }
+.pic { position: absolute; inset: 0; display: block; width: 100%; height: 100%; border-radius: inherit; opacity: 0; transition: opacity 0.2s ease-out; pointer-events: none; }
+.pic.in { opacity: 1; }
+.pic.cover { object-fit: cover; }
+.pic.contain { object-fit: contain; padding: 8%; background: var(--raised); }
+.card.pictured .card-title, .logo.pictured, .row .poster.pictured { color: transparent; text-shadow: none; }
+@media (prefers-reduced-motion: reduce) { .pic { transition: none; } }
 /* Recordings' home, as the desktop's Tonight: what records now in one banner (a compact row
    each, Watch and Stop), the next airings as rows, the latest recordings as wide cards. */
 .rows > .capt { padding-inline: 18px; }

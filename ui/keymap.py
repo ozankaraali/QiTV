@@ -69,10 +69,14 @@ class Action(str, Enum):
     # button). No key of its own: Enter does it while the pill shows.
     BACK_TO = "back_to"
     STOP = "stop"  # X, ■: every picture stops and nothing streams; Space plays it again (2.6)
+    # 2.13.1: the menu key or Shift+F10: the highlighted row's menu, as its right-click opens it
+    CONTEXT_MENU = "context_menu"
 
 
 # "subtitles": the OpenSubtitles search over the player (2.2): it types like the drawer.
 CONTEXTS = ("player", "drawer", "library", "guide", "subtitles")
+# Where the menu key opens the highlighted row's menu (the player has no highlighted row).
+_ROW_MENU_CONTEXTS = ("drawer", "library", "guide")
 
 
 _K = Qt.Key
@@ -232,6 +236,9 @@ def resolve(
     if held == _CTRL and key == _K.Key_P.value and context in ("player", "drawer"):
         # The drawer types P into its find: Ctrl/⌘+P opens the highlighted channel small.
         return Action.PIP, ""
+    menu_key = key == _K.Key_Menu.value or (key == _K.Key_F10.value and bool(mods & _SHIFT))
+    if menu_key and not held and context in _ROW_MENU_CONTEXTS:
+        return Action.CONTEXT_MENU, ""  # 2.13.1: the desktop's keys for a right-click's menu
     if context in _TYPING:
         if held == _CTRL and key in _EDIT_KEYS:
             return _EDIT_KEYS[key], ""
@@ -313,7 +320,7 @@ def _text(text: str, mods: int, *, windows: bool) -> tuple[Action, str] | None:
 # and "0…9" / "A…Z" stand for every key in between. The "menu" rows are the menu bar's own
 # shortcuts. Tests resolve every key in its context, so the table cannot drift from resolve().
 # The titles and what the keys do stay English here (the README is made from them) and are
-# shown with `translate` (ui/shortcuts_dialog.py); the keys' names are Qt's.
+# shown with `translate` (ui/settings_about.py: Settings › Keys); the keys' names are Qt's.
 SHORTCUT_TITLES = {
     "player": N_("Watching TV"),  # i18n: a heading of Help → Keyboard Shortcuts
     "drawer": N_("Channel list"),
@@ -367,6 +374,8 @@ SHORTCUTS: dict[str, list[tuple[str, str]]] = {
         ("Ctrl+D", N_("Add or remove a favorite channel")),
         ("Ctrl+P", N_("Open the channel in picture-in-picture")),
         ("Delete", N_("Remove the channel from Recents")),
+        # i18n: what the menu key (or Shift+F10) does: the menu a right-click opens (2.13.1)
+        ("Menu, Shift+F10", N_("Open the highlighted item's menu (as a right-click does)")),
         ("Ctrl+F", N_("Search")),
         ("F11, Ctrl+Meta+F", N_("Fullscreen")),
         ("Esc", N_("End the find, then close")),
@@ -378,6 +387,7 @@ SHORTCUTS: dict[str, list[tuple[str, str]]] = {
         ("0…9", N_("Jump to a channel number")),
         ("Return", N_("Watch the channel; a past programme from its start")),
         ("R", N_("Record the programme at its time, or cancel its recording")),
+        ("Menu, Shift+F10", N_("Open the highlighted item's menu (as a right-click does)")),
         ("Ctrl+F", N_("Search")),
         ("F, F11, Ctrl+Meta+F", N_("Fullscreen")),
         ("G, Esc", N_("Close the guide")),
@@ -393,6 +403,7 @@ SHORTCUTS: dict[str, list[tuple[str, str]]] = {
         ("Ctrl+D", N_("Add to or remove from My list")),
         # 2.9.7: a recording's strip on the Recordings tab; Plan 4: a Folders tab tile (P4-27)
         ("Delete", N_("Delete a recording (it asks first), or take a folder off Folders")),
+        ("Menu, Shift+F10", N_("Open the highlighted item's menu (as a right-click does)")),
         ("F11, Ctrl+Meta+F", N_("Fullscreen")),
         ("Esc", N_("Back; from the genres, back to live TV")),
     ],

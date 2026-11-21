@@ -14,7 +14,12 @@ a small file of its own, `picture.json` beside the config (`ChannelPictures`, as
 The shape the picture shows in (`shown_ratio`: the stream's own from its size and its pixels'
 aspect, `display_ratio`, or the 16:9 or 4:3 chosen) is the shape a box holding it small takes,
 so it shows no bars: the picture in picture's, in the window and floating (`box_size`: as
-large as the 16:9 box was).
+large as the 16:9 box was). A box is only as good as that shape (`same_shape`: within 1%, a
+picture that close to 16:9 gets a 16:9 box, a floating window that close is left as it is),
+and libVLC draws a picture in its exact shape, so the difference would show as a pixel or two
+of bar (the owner's 500×284 floating window showed a 16:9 picture with three rows of it). So
+while a box has its picture's shape, libVLC is given the box's own shape (`box_aspect`), in
+device pixels: the picture fills it, stretched by too little to see.
 
 Deinterlacing (`DEINTERLACING`, the config's `deinterlace`): Auto is libVLC's own: pictures the
 decoder marks interlaced are deinterlaced (VLC's `deinterlace=-1`, its "auto" setting), with the
@@ -163,6 +168,21 @@ def box_size(wide_width: float, ratio: Optional[float]) -> tuple[int, int]:
     shape = box_ratio(ratio)
     width = round(wide_width * math.sqrt(shape / WIDE_RATIO))
     return width, box_height(width, shape)
+
+
+def box_aspect(ratio: Optional[float], width: int, height: int) -> Optional[str]:
+    """libVLC's aspect ratio that has a picture shown in `ratio`'s shape fill a box `width` ×
+    `height` (device pixels) shaped for it: the box's own, "W:H". None while the box has another
+    shape (another picture's, still), the shape is not known (or is Fill's, which crops to any),
+    or the picture is a sliver kept at MIN_RATIO or MAX_RATIO (its box shows bars)."""
+    if ratio is None or width <= 0 or height <= 0 or not MIN_RATIO < ratio < MAX_RATIO:
+        return None
+    shape = width / height
+    snapped = WIDE_RATIO if same_shape(ratio, WIDE_RATIO) else ratio  # (box_ratio's)
+    if not (same_shape(shape, ratio) or same_shape(shape, snapped)):
+        return None
+    common = math.gcd(width, height)
+    return f"{width // common}:{height // common}"
 
 
 def aspect_name(aspect: str) -> str:

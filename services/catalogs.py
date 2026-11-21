@@ -83,6 +83,10 @@ class Catalogs(QObject):
         self._specs: dict[str, dict] = {}  # the provider each catalog was built for
         self._started: set[str] = set()  # ensure() has begun this catalog's setup
         self._ready: set[str] = set()
+        # 2.13.1: those whose setup failed: a guide in use signs in again for none of them (a
+        # portal counts each sign-in; the failure itself makes the lists ask for the guides
+        # again). Choosing it (select: a retry, a refresh), sign_in_again and an edit do.
+        self._failed: set[str] = set()
         # Edited in Settings while in use: set up again with the new settings (reload()); a
         # forced setup asked meanwhile is that one.
         self._renewing: set[str] = set()
@@ -189,6 +193,7 @@ class Catalogs(QObject):
             return  # reload() is setting it up again with its new settings already
         catalog = self.catalog(name)
         self._started.add(name)
+        self._failed.discard(name)
         self._ready.discard(name)  # a link asked meanwhile waits for this setup
         catalog.select_provider(force_refresh=force_refresh)
 
@@ -199,6 +204,7 @@ class Catalogs(QObject):
             return
         self._ready.discard(name)
         self._started.discard(name)
+        self._failed.discard(name)
         self.ensure(name)
 
     _frozen = False
@@ -248,6 +254,7 @@ class Catalogs(QObject):
 
     def _on_ready(self, name: str) -> None:
         self._ready.add(name)
+        self._failed.discard(name)
         self._renewing.discard(name)
         self._forget_asked(name)  # the setup dropped what was asked of it before
         self._freeze_heap()
@@ -260,7 +267,8 @@ class Catalogs(QObject):
 
     def _on_failed(self, name: str, message: str) -> None:
         self._ready.discard(name)
-        self._started.discard(name)  # the next request tries again
+        self._started.discard(name)  # the next request tries again (but a guide's: _failed)
+        self._failed.add(name)
         self._renewing.discard(name)
         self._forget_asked(name)
         held = self._waiting.pop(name, [])  # no longer held: they fail with the setup
@@ -386,7 +394,8 @@ class Catalogs(QObject):
         for name in names:
             if name not in self._by_name and name not in self.names():
                 continue
-            self.ensure(name)
+            if name not in self._failed:  # (a failed one signs in again only when asked)
+                self.ensure(name)
             catalog = self.catalog(name)
             catalog.epg_enabled = True
             if name in self._ready and not catalog.epg_ready() and not catalog.epg_loading():
@@ -452,6 +461,7 @@ class Catalogs(QObject):
         catalog = self._by_name.pop(name)
         self._specs.pop(name, None)
         self._started.discard(name)
+        self._failed.discard(name)
         self._ready.discard(name)
         self._renewing.discard(name)
         self._forget_asked(name)

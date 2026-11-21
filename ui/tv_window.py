@@ -140,7 +140,7 @@ from services.recordings_index import FILE_NAME as RECORDINGS_INDEX_FILE, Record
 from services.recordings_list import timer_text
 from services.redact import safe_message, safe_traceback
 from services.sessions import SessionManager, Slot
-from services.settings_model import PROVIDERS, REMOTE, Context, sections
+from services.settings_model import FREE_CHANNELS, FREE_RADIO, PROVIDERS, REMOTE, Context, sections
 from services.settings_values import SettingsValues
 from services.sound_sync import FILE_NAME as SOUND_SYNC_FILE, SoundSync
 from services.subtitle_picks import FILE_NAME as SUBTITLE_PICKS_FILE, SubtitlePicks
@@ -155,10 +155,7 @@ from ui.captions_controller import CaptionsController
 from ui.desktop_pip import COVERED, DESKTOP, DesktopPip, corner_rect
 from ui.export_flow import ExportFlow
 from ui.find_session import FindSession
-from ui.free_channels_menu import (
-    show_menu as show_free_channels_menu,
-    show_radio_menu as show_free_radio_menu,
-)
+from ui.free_channels_menu import FreeLists
 from ui.grid_frame import GridFrame
 from ui.keymap import Action, as_int, resolve
 from ui.library.library_screen import LibraryScreen
@@ -185,6 +182,8 @@ from ui.overlays.next_card import NextCard
 from ui.overlays.opening import OpeningOverlay
 from ui.overlays.painting import fmt_clock
 from ui.overlays.pip_label import PipLabel
+from ui.overlays.popup_menu import PopupMenu
+from ui.overlays.progress_card import ProgressCard
 from ui.overlays.question_card import QuestionCard
 from ui.overlays.rec_sign import RecSign
 from ui.overlays.remote_pair import PairOverlay
@@ -203,9 +202,10 @@ from ui.page_stack import PageStack
 from ui.pip import PipFrame
 from ui.pointer import PointerHider
 from ui.provider_cards import ProviderCards
-from ui.record_timer_dialog import RecordTimerDialog, TimerChoice
+from ui.record_timer_dialog import RecordTimerCard, TimerChoice
 from ui.recording_scheduler import RecordingScheduler
 from ui.remote_controller import RemoteController
+from ui.settings_about import AboutRows
 from ui.settings_controller import SettingsController
 from ui.settings_general import GeneralRows, hooks as general_hooks
 from ui.settings_guide import GuideRows, hooks as guide_hooks
@@ -223,6 +223,7 @@ from ui.tv_menus import TVMenus
 from ui.tv_pages import TVPages
 from ui.video_surface import VideoSurface
 from ui.visualizer import Visualizer
+from ui.window_cards import WindowCards, install as install_window_cards
 
 logger = logging.getLogger(__name__)
 
@@ -534,7 +535,10 @@ class TVWindow(QMainWindow):
         *,
         vlc_instance=None,
         catalogs: Optional[Catalogs] = None,
+        load_early: bool = False,
     ):
+        """`load_early` (main(), behind the splash): the TV page's provider begins its setup
+        now, while the rest of the window is built; the window's start takes it over."""
         super().__init__()
         self.app = app
         self.config_manager = config_manager
@@ -651,6 +655,7 @@ class TVWindow(QMainWindow):
         self.library_toast = Toast(self.library_page)  # the overlay host hides with the player
         self.library_question = QuestionCard(self.library_page)  # 2.6: stop a recording?
         self.library_rec_sign = RecSign(self.library_page, bottom=True)  # 2.6: recordings on
+        self.library_menu = PopupMenu(self.library_page)  # 2.13.1: its menus, painted
         # Both pages are always the stack's children: the player page is the whole picture, the
         # Library, or a small one in a corner over the Library while it plays on.
         self.pages = PageStack(self.player_page, self.library_page, config_manager, self)
@@ -683,6 +688,14 @@ class TVWindow(QMainWindow):
             all_key="tv_all_providers",
             parent=self,
         )
+        # 2.13.1: the channel list loads while the rest is built (the splash is a process of its
+        # own): on a fair day it is there as the window opens, with no "Loading…" over it. One
+        # provider's page only (All providers sets each up at the start, as before).
+        self._early_list: Optional[float] = None  # when that setup began (time.monotonic)
+        self._shown_at: Optional[float] = None
+        if load_early and not self.catalog.all_providers() and self.catalog.source():
+            self._early_list = time.monotonic()
+            self.catalogs.ensure(self.catalog.source())
         self.library_catalog = BrowsedCatalog(
             self.catalogs,
             config_manager,
@@ -810,6 +823,27 @@ class TVWindow(QMainWindow):
         self.subtitle_search = SubtitleSearchPage(host)
         # File → Open Link… and the channel list's Open a link (plan 4): its card over the picture
         self.open_link_card = LinkCard(host)
+        # 2.8 Record at a time (a channel's right-click, the guide's footer): 2.13.1, its card
+        self.record_card = RecordTimerCard(host)
+        # 2.13.1: QiTV's own questions and messages (an update's, its download's progress, a
+        # recording's deletion), on the page that shows (the TV's, or its twin on the Library
+        # page): no system window.
+        self.window_cards = WindowCards(
+            ProgressCard(host),
+            ProgressCard(self.library_page),
+            window=self,
+            library_shown=lambda: self.screens.library_shown(),
+            closing=lambda: self._closing,
+            before_tv=self._make_way_for_card,
+            held=self.mini_player_active,  # (what QiTV says unasked waits for the window)
+            above=lambda: (
+                self.question_card,
+                self.quality_card,
+                self.captions_card,
+                self.library_question,
+            ),
+            parent=self,
+        )
         self.corner_controls = CornerControls(host)
         # What a song (or a radio channel) shows where the black picture was: its cover, album
         # and words, lit by the cover's colours (spec §10).
@@ -832,7 +866,6 @@ class TVWindow(QMainWindow):
             os.path.join(config_manager.get_config_dir(), RECORDINGS_INDEX_FILE)
         )
         self.scheduler: Optional[RecordingScheduler] = None
-        self._timer_dialog: Optional[RecordTimerDialog] = None  # "Record at a time", last open
         self.overlays = Overlays(
             banner=ZapBanner(host),
             column=ChannelColumn(self.logos, now_provider, parent=host),
@@ -880,6 +913,9 @@ class TVWindow(QMainWindow):
         # The audio dock's "⋯": the player's controls the dock has no button for (Plan 4).
         self.more_menu = MoreMenu(self.overlays.transport, host)
         self.overlays.more_menu = self.more_menu
+        # 2.13.1: the player's right-click and button menus, painted (the corner player, in
+        # front of the Library, opens none: the page stack takes its mouse).
+        self.popup_menu = PopupMenu(host)
         # 2.8.12: the REC sign showed through the channel list, the guide and the grid's tiles.
         self.rec_sign.cover_with(
             self.overlays.drawer, self.settings_drawer, self.overlays.guide, self.grid_tiles
@@ -929,6 +965,8 @@ class TVWindow(QMainWindow):
             self.overlays.welcome,
             self.subtitle_search,
             self.open_link_card,
+            self.record_card,  # 2.13.1
+            self.window_cards.tv_card,
             self.corner_controls,
             self.sleep_notice,
             self.back_notice,
@@ -940,6 +978,7 @@ class TVWindow(QMainWindow):
             self.quality_card,
             self.captions_card,
             self.pair_overlay,
+            self.popup_menu,  # 2.13.1: a menu over everything but the toast
             self.overlays.toast,
         ):
             host.add_overlay(overlay)
@@ -986,6 +1025,10 @@ class TVWindow(QMainWindow):
         self.floating_note.hide()
         self._floating_captions: Optional[OverlayHost] = None  # AI captions over it (2.9)
         self.desktop_pip.floatingChanged.connect(self._on_picture_floating)
+        # A picture shown small fills its box: told as it shows, hides, floats or comes back
+        # (and as its surface resizes, `_report_video_size`).
+        self.desktop_pip.floatingChanged.connect(self._fit_small_pictures)
+        self.pip_frame.smallRectChanged.connect(self._fit_small_pictures)
         self.pip_frame.suspending.connect(self.desktop_pip.dock)  # the multiview lays them out
         # The host covers the page exactly: page coordinates are the host's.
         self.pip_frame.smallRectChanged.connect(self.pip_label.follow)
@@ -1047,6 +1090,8 @@ class TVWindow(QMainWindow):
         # Wired before the Library connects to the catalog: on providerReady the controller
         # settles the provider change before a Library play waiting for it runs.
         controller.wire()
+        if self._early_list is not None:
+            controller.set_up_early()  # what that setup says waits for the start (_start)
         # 2.8.13: the system's media keys (the player listed in the system's media panel gets
         # them: macOS only so): each acts as the keyboard's, and the system hears what the
         # large picture plays (after the controller hears the state: it knows what plays by
@@ -1128,6 +1173,7 @@ class TVWindow(QMainWindow):
         # it bring the player back, × stops it, the speaker mutes.
         self.pages.modeChanged.connect(self._on_page_mode)
         self.pages.modeChanged.connect(self.controller.page_changed)  # 2.6: a question goes along
+        self.pages.modeChanged.connect(self.window_cards.page_changed)  # 2.13.1: so do these
         # The Library (its corner player) lays the player out: a floating picture comes back.
         self.pages.modeChanged.connect(lambda *_: self.desktop_pip.dock())
         self.pages.cornerClicked.connect(self.screens.back_to_player)
@@ -1140,8 +1186,8 @@ class TVWindow(QMainWindow):
         # The Library's ⛶: the menu bar, with View → Fullscreen, hides in fullscreen.
         self.library_page.nav.fullscreenRequested.connect(self.toggle_fullscreen)
         self.overlays.welcome.addRequested.connect(lambda: self.add_provider())  # the Add card
-        self.overlays.welcome.freeRequested.connect(self.show_free_channels)
-        self.overlays.welcome.radioRequested.connect(self.show_free_radio)  # 2.13
+        self.overlays.welcome.freeRequested.connect(lambda: self.show_free_channels())
+        self.overlays.welcome.radioRequested.connect(lambda: self.show_free_radio())  # 2.13
         self.overlays.drawer.actionRequested.connect(self.menus.on_drawer_action)
         # Settings in the drawer (its Settings row and ⚙, Settings…): a step applies at once
         # (what takes effect beyond the config, through its hook); backing out of it from the
@@ -1178,6 +1224,9 @@ class TVWindow(QMainWindow):
             self, self.settings, self.settings_drawer, self.provider_rows
         )
         self.provider_rows.cards = self.provider_cards
+        # Its Free channels and Free radio: a layer of countries each (2.13.1), a choice adding
+        # the list as the welcome card's buttons and the channel list's rows do (they open it).
+        self.free_lists = FreeLists(self, self.settings, self.settings_drawer)
         # Settings › General, Files and Advanced: what only this QiTV knows (its languages, the
         # Files rows' status), and Files' and Advanced's own rows: the file types told on a
         # worker, the image cache cleared on one once asked.
@@ -1197,6 +1246,9 @@ class TVWindow(QMainWindow):
         # Settings › Parental controls: the PIN in a card, locked and unlocked, what is hidden
         # only while unlocked; each change through parental_changed.
         self.parental_rows = ParentalRows(self, self.settings, self.settings_drawer)
+        # Settings › Keys and About QiTV (2.13.1: the Help menu's windows before): the keymap's
+        # table to read, and About's links opened in the browser.
+        self.about_rows = AboutRows(self.settings)
         self.catalogs.providersChanged.connect(self.provider_rows.providers_changed)
         self.catalog.providerReady.connect(self.provider_rows.providers_changed)
         # File → Open Link… and the channel list's Open a link (plan 4): while its card shows it
@@ -1216,6 +1268,9 @@ class TVWindow(QMainWindow):
             parent=self,
         )
         controller.add_card(self.open_link_card)
+        controller.add_card(self.record_card)  # 2.13.1: Record at a time's, the same way
+        controller.add_card(self.window_cards.tv_card)  # over them: one asked meanwhile
+        install_window_cards(self.window_cards)  # what the update's messages show on
         # Network streams (plan 4): the links that played, kept beside the config (read on a
         # worker once the window started, written on one); a stream link plays through the
         # controller as a channel or a film, as the account whose stream it is, if one is
@@ -1263,7 +1318,11 @@ class TVWindow(QMainWindow):
         self.pointer = PointerHider(
             sources,
             self.overlays.transport,
-            lambda: not self.screens.library_shown() and controller.pointer_may_hide(),
+            lambda: (
+                not self.screens.library_shown()
+                and not self.popup_menu.shown()  # 2.13.1: the pointer is the menu's
+                and controller.pointer_may_hide()
+            ),
             parent=self,
             controls_hold=self._controls_hold_pointer,
         )
@@ -1360,23 +1419,26 @@ class TVWindow(QMainWindow):
 
     def record_at(self, channel: dict, programme: Optional[Programme] = None) -> None:
         """2.8: "Record at a time" for `channel` (its right-click, the guide's footer), on the
-        programme's time when one is given; what it is given is scheduled."""
-        dialog = RecordTimerDialog(
+        programme's time when one is given; what it is given is scheduled. 2.13.1: its card
+        over the picture (the keys its own while it shows), answering through a callback; asked
+        for, it makes way as Open Link…'s does (the TV from the Library, the window from the
+        mini player, the audio dock's ⋯ closed)."""
+        if self._closing:
+            return
+        if self.screens.library_shown():
+            self.screens.back_to_tv()
+        self._make_way_for_card()
+
+        def chosen(choice: TimerChoice, _channel: Optional[dict]) -> None:
+            if not self._closing:
+                self.schedule_timer(channel, choice)
+
+        self.record_card.ask(
             str(channel.get("name") or ""),
             start=programme.start if programme is not None else None,
             stop=programme.stop if programme is not None else None,
-            parent=self,
+            done=chosen,
         )
-        dialog.setAttribute(Qt.WidgetAttribute.WA_DeleteOnClose)
-
-        def chosen() -> None:
-            choice = dialog.choice()
-            if choice is not None:
-                self.schedule_timer(channel, choice)
-
-        dialog.accepted.connect(chosen)
-        self._timer_dialog = dialog
-        dialog.open()
 
     def schedule_timer(self, channel: dict, choice: TimerChoice) -> str:
         """Once: a programme of its own at that time; else a timer on its days. What the toast
@@ -1572,10 +1634,26 @@ class TVWindow(QMainWindow):
 
     def _report_video_size(self, surface: QObject) -> None:
         """A player's surface changed size: a picture filling the window follows its shape
-        (the Picture panel's Fill, 2.3)."""
+        (the Picture panel's Fill, 2.3), and one shown small its box."""
         for name, player in self._players():
             if self.surfaces.get(name) is surface:
                 player.set_video_size(surface.width(), surface.height())
+        self._fit_small_pictures()
+
+    def _fit_small_pictures(self, *_args: object) -> None:
+        """Each player is told the box its picture shows small in, in device pixels (the
+        picture in picture's, in the window or floating), which it fills to the last pixel
+        while the box has its shape; None in the large view (the viewer's own aspect ratio)."""
+        frame = getattr(self, "pip_frame", None)
+        if frame is None:
+            return  # (a surface laid out before the frame is made)
+        for name, player in self._players():
+            surface = self.surfaces.get(name)
+            box = None
+            if surface is not None and frame.shows_small(name):
+                pixels = surface.size() * surface.devicePixelRatioF()
+                box = (pixels.width(), pixels.height())
+            player.set_box_size(box)
 
     def _picture_shape(self, name: str) -> Optional[float]:
         """The shape (width / height) slot `name`'s picture shows in (None: not known yet, or
@@ -1603,6 +1681,12 @@ class TVWindow(QMainWindow):
     def leave_mini_player(self) -> None:
         """Back to the normal window (nothing when it is not the mini player)."""
         self._leave_mini()
+
+    def _make_way_for_card(self) -> None:
+        """A question over live TV (2.13.1, ui.window_cards): the window, not the mini player,
+        and the audio dock's ⋯ menu closed (as for Open Link…'s card)."""
+        self.leave_mini_player()
+        self.more_menu.dismiss()
 
     def _on_page_mode(self, mode: str) -> None:
         """The pages moved: in the corner only its controls stay on the host (and a song's
@@ -1656,7 +1740,10 @@ class TVWindow(QMainWindow):
     # ---- input --------------------------------------------------------------------------------
 
     def _key_context(self) -> str:
-        """The Library's page takes the keys; else the open guide or drawer, else the player."""
+        """A menu that shows takes the keys, as the drawer's (2.13.1); else the Library's page;
+        else the open guide or drawer, else the player."""
+        if self.popup_menu.shown() or self.library_menu.shown():
+            return "drawer"
         return "library" if self.screens.library_shown() else self.controller.key_context()
 
     def _resolve(self, event: QKeyEvent):
@@ -1765,10 +1852,15 @@ class TVWindow(QMainWindow):
             self._act(action, payload, key=as_int(event.key()))
 
     def _act(self, action: Action, payload: str, key: int) -> None:
+        for menu in (self.popup_menu, self.library_menu):
+            if menu.handle(action, payload):
+                return  # 2.13.1: a menu's keys (the sound's and fullscreen go on)
         if action is Action.ESCAPE and self.exports.cancel():
             return  # Esc while exporting cancels the export
         if self.controller.answer_key(action):
             return  # 2.6: QiTV asks (stop a recording?): its answers' keys, on every page
+        if self.window_cards.library_key(action, payload):
+            return  # 2.13.1: a question over the Library (live TV's is the controller's card)
         if self.screens.library_shown():
             handled = self.library_controller.handle(action, payload)
             if not handled and action is Action.FULLSCREEN:
@@ -1808,7 +1900,9 @@ class TVWindow(QMainWindow):
         self.leave_mini_player()
         self.more_menu.dismiss()
         self.link_opener.open(text)
-        for card in (self.question_card, self.quality_card, self.captions_card):
+        # (the cards added after the link's have the keys first: they stay over it)
+        cards = (self.record_card, self.window_cards.tv_card, self.question_card)
+        for card in (*cards, self.quality_card, self.captions_card):
             if card.isVisible():
                 card.raise_()  # the link's card raised itself over it
 
@@ -2600,6 +2694,7 @@ class TVWindow(QMainWindow):
         if maximized:
             self.setWindowState(Qt.WindowState.WindowMaximized)
         self._show_again()
+        self.window_cards.release()  # what QiTV said meanwhile, unasked, comes now
 
     def set_keep_on_top(self, on: bool) -> None:
         """View → Keep on Top (2.8.5): the window stays above other apps' windows. Saved; the
@@ -2851,33 +2946,42 @@ class TVWindow(QMainWindow):
     # ---- Settings ---------------------------------------------------------------------------
 
     def open_settings(
-        self, from_drawer: bool = False, keep_place: bool = False, section_key: str = ""
+        self,
+        from_drawer: bool = False,
+        keep_place: bool = False,
+        section_key: str = "",
+        row: str = "",
     ) -> None:
         """Settings in the drawer (the drawer's Settings row and ⚙, Settings…, Ctrl/⌘+,; at
         Providers, every Add provider), over live TV: from the Library it goes back to the TV
         first, and the mini player becomes the window again; the channel list, and whatever
         else would keep the keys under it, gives way to it (TVController.make_way_for_settings;
         the audio dock's ⋯ menu too). A question keeps the keys, so it stays above Settings.
-        `section_key`: the section it opens at (else the first). `from_drawer`: backing out of
-        it gives the list back, on its Settings row, or where it was with `keep_place` (its ⚙,
-        its Add provider). Asked again while it shows, it stays as it is (where it came from
-        too), but for a section asked for, which it goes to: a card over the TV that showed
-        over Settings (File → Open Link…'s) cancels then, as when Settings opens, since
-        Settings and its card come over it."""
+        `section_key`: the section it opens at (else the first), on its `row` when one is given
+        (a layer's: Free channels' countries). `from_drawer`: backing out of it gives the list
+        back, on its Settings row, or where it was with `keep_place` (its ⚙, its Add provider,
+        its Free channels and Free radio). Asked again while it shows, it stays as it is (where
+        it came from too), but for a section asked for, which it goes to: a card over the TV
+        that showed over Settings (File → Open Link…'s) cancels then, as when Settings opens,
+        since Settings and its card come over it."""
         if self._closing:
             return
         if self.settings.visible():
             if not section_key:
                 return
+            # A painted menu over Settings goes: Settings moves under it, showing already (so
+            # no Show closes it: Overlay.takes_keys), and it had the keys
+            self.popup_menu.close_menu()
+            self.library_menu.close_menu()
             self.controller.cancel_cards()  # not make_way_for_settings: it keeps its way back
-            self.settings.show_section(section_key)
+            self.settings.show_section(section_key, row)
         else:
             if self.screens.library_shown():
                 self.screens.back_to_tv()
             self.leave_mini_player()
             self.more_menu.dismiss()
             self.controller.make_way_for_settings(keep_place=keep_place)
-            self.settings.open(section_key, from_drawer=from_drawer)
+            self.settings.open(section_key, from_drawer=from_drawer, row=row)
         for card in (self.question_card, self.quality_card, self.captions_card):
             if card.isVisible():
                 card.raise_()  # Settings raised itself over it
@@ -2886,13 +2990,17 @@ class TVWindow(QMainWindow):
         """What Settings' sections show that only this QiTV knows, each section's from its
         rows: General's, Files' and Advanced's (ui.settings_general), Subtitles' and
         Time-shift's, and the Guide's, the phone remote's and parental controls' rows as they
-        are now."""
+        are now; Free channels' and Free radio's countries, then Keys' and About's."""
         context = self.subtitle_rows.context(self.general_rows.context())
         return dataclasses.replace(
             self.timeshift_rows.context(context),
             guide=self.guide_rows.rows(),
             remote=self.remote_rows.rows(),
             parental=self.parental_rows.rows(),
+            free_channels=self.free_lists.rows(FREE_CHANNELS),
+            free_radio=self.free_lists.rows(FREE_RADIO),
+            keys=self.about_rows.keys(),
+            about=self.about_rows.about(),
         )
 
     def _settings_went(self) -> None:
@@ -2987,10 +3095,11 @@ class TVWindow(QMainWindow):
         if name != self.catalog.current_provider_name():
             self.set_provider()
 
-    def show_free_channels(self, global_pos: QPoint) -> None:
-        """The Free channels… menu under `global_pos` (the welcome card's and the drawer's)."""
-        if not self._closing:
-            show_free_channels_menu(self, global_pos, self.add_free_channels)
+    def show_free_channels(self, from_drawer: bool = False, opened_settings: bool = False) -> None:
+        """Free channels…: Settings at Providers › Free channels, its countries (2.13.1: the
+        welcome card's, the channel list's row's with `from_drawer`, the menu bar's Another
+        country…, the Add card's with `opened_settings`; ui.free_channels_menu)."""
+        self.free_lists.open(FREE_CHANNELS, from_drawer, opened_settings)
 
     def add_free_channels(self, code: Optional[str]) -> None:
         """Add iptv-org's list (all countries, or `code`'s), select it and load it, as a provider
@@ -2998,10 +3107,9 @@ class TVWindow(QMainWindow):
         if not self._closing:
             self._add_free_list(free_channels.provider_entry(code), free_channels.same_list)
 
-    def show_free_radio(self, global_pos: QPoint) -> None:
-        """The Free radio… menu (2.13) under `global_pos`, as Free channels…'."""
-        if not self._closing:
-            show_free_radio_menu(self, global_pos, self.add_free_radio)
+    def show_free_radio(self, from_drawer: bool = False, opened_settings: bool = False) -> None:
+        """Free radio… (2.13): Settings at Providers › Free radio, as Free channels…'."""
+        self.free_lists.open(FREE_RADIO, from_drawer, opened_settings)
 
     def add_free_radio(self, code: Optional[str]) -> None:
         """Add radio-browser.info's list (2.13: all countries, or `code`'s) as add_free_channels
@@ -3166,6 +3274,7 @@ class TVWindow(QMainWindow):
         super().showEvent(event)
         if not self._started:
             self._started = True
+            self._shown_at = time.monotonic()
             # After the native window exists and is on screen.
             QTimer.singleShot(0, self, self._start)
 
@@ -3178,6 +3287,7 @@ class TVWindow(QMainWindow):
         self.media_keys.start(int(self.winId()))
         self.network_player.start()  # Network streams' file, read on a worker
         self.controller.start()
+        self._say_early_list()
         self.epg_refresh.start()
         if self.scheduler is not None:
             self.scheduler.start()  # what was missed meanwhile is said; then the schedule
@@ -3185,6 +3295,33 @@ class TVWindow(QMainWindow):
         if self.config_manager.save_failed():  # e.g. the defaults patched in at start
             self.screens.notify(translate(SAVE_FAILED_TEXT), "error", ERROR_MS)
             self._save_failure_said = True  # Settings going does not say it again
+
+    def _say_early_list(self) -> None:
+        """The log says whether the list that began loading as the window was built was there
+        when it showed, and how long before (its worker's own time: its result waits for the
+        event loop, which turns only once the window shows)."""
+        began, self._early_list = self._early_list, None
+        if began is None:
+            return
+        shown = self._shown_at if self._shown_at is not None else time.monotonic()
+        name = self.catalog.source()
+        catalog = self.catalogs.catalog(name) if name in self.catalogs.created() else None
+        end = catalog.setup_end() if catalog is not None else None
+        if end is None or end[1] > shown:
+            logger.info(
+                "The channel list was still loading as the window showed, %.2f s after it began.",
+                shown - began,
+            )
+        elif end[0] == "ready":
+            logger.info(
+                "The channel list was ready %.2f s before the window showed (set up in %.2f s).",
+                shown - end[1],
+                end[1] - began,
+            )
+        else:
+            logger.info(
+                "The channel list's setup failed %.2f s before the window showed.", shown - end[1]
+            )
 
     def _fit_restored(self) -> None:
         """Bring the saved geometry onto a screen: its monitor may be gone.

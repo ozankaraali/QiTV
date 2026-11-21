@@ -45,8 +45,7 @@ from datetime import datetime
 import logging
 from typing import Any, Callable, Optional
 
-from PySide6.QtCore import QObject, QPoint, Qt, Signal
-from PySide6.QtWidgets import QMenu
+from PySide6.QtCore import QObject, QPoint, QRect, Signal
 
 from services import i18n, recording_desk, recordings_library as rl
 from services.catalog import PROVIDER_LOADING_MESSAGE
@@ -82,9 +81,10 @@ from ui.library.library_screen import LibraryScreen
 from ui.library.poster_grid import poster_url
 from ui.library.search_session import DEBOUNCE_MS, SearchSession
 from ui.library.top_nav import REFRESH_TEXT
+from ui.overlays import popup_menu
 from ui.overlays.guide import day_label
+from ui.overlays.popup_menu import RIGHT, Menu, Where
 from ui.text_edit import edit_key
-from ui.tick_menu import TickMenu
 
 logger = logging.getLogger(__name__)
 
@@ -167,7 +167,7 @@ class LibraryController(QObject):
         play: Callable[[dict, str, dict], None],
         tune_live: Callable[[dict], None],
         back_to_tv: Callable[[], None],
-        context_menu: Optional[Callable[[dict, str, QPoint], None]] = None,
+        context_menu: Optional[Callable[[dict, str, Where], None]] = None,
         tmdb=None,
         cancel_scheduled: Optional[Callable[[str], None]] = None,
         parent: Optional[QObject] = None,
@@ -348,6 +348,11 @@ class LibraryController(QObject):
         if self._tmdb is None or (own and not self._screen.grid_posters.failed(own)):
             return own
         return self._tmdb.poster_url(item, kind or self._grid_kind(item)) or own
+
+    def poster_of(self, item: dict, kind: str) -> str:
+        """A title's poster as the Library shows it, for the phone remote (ui/remote_pictures.py):
+        its provider's, else TMDB's when TMDB already said (nothing is looked up for it)."""
+        return self._poster(item, poster_url(item), kind)
 
     def _on_grid_focus(self, index: int) -> None:
         item = self._screen.grid.item(index)
@@ -673,20 +678,21 @@ class LibraryController(QObject):
         if library is None or item is None:
             return
         grid = self._screen.rec_grid
-        menu = QMenu(grid)
-        menu.setAttribute(Qt.WidgetAttribute.WA_DeleteOnClose)
         entry = item.get("_desk")
         if not isinstance(entry, recording_desk.Entry):
             return
+        menu = Menu()
         for name, label, style in library.details(item).buttons:
-            action = menu.addAction(label, self._tile_action(entry, name))
-            action.setEnabled(style != "off")
+            menu.add(label, self._tile_action(entry, name), enabled=style != "off")
         self._tile_menu = menu
         if at is None:  # the keys: beside the tile
-            at = grid.viewport().mapToGlobal(grid.item_rect(index).center())
-        menu.popup(at)
+            rect = grid.item_rect(index)
+            tile = QRect(grid.viewport().mapToGlobal(rect.topLeft()), rect.size())
+            popup_menu.popup(menu, grid, beside=tile, side=RIGHT)
+        else:
+            popup_menu.popup(menu, grid, at=at)
 
-    def tile_menu(self) -> Optional[QMenu]:
+    def tile_menu(self) -> Optional[Menu]:
         """The last tile menu shown (tests)."""
         return getattr(self, "_tile_menu", None)
 
@@ -962,6 +968,9 @@ class LibraryController(QObject):
             return False
         if self._folders is not None and self._folders.answer_key(action):
             return True  # Plan 4: Clear's question has the keys while it shows
+        card_key = getattr(self._desk, "card_key", None)
+        if card_key is not None and card_key(action, payload):
+            return True  # 2.13.1: Record at a time's card has them while it shows
         if action is Action.SEARCH:
             if payload and (self._zone == "search" or self._genre_field):
                 return self.handle(Action.NAV_TEXT, payload)  # "/" types where text goes
@@ -1005,6 +1014,8 @@ class LibraryController(QObject):
         elif action is Action.FAVORITE:
             if grid.current_index() >= 0:
                 self._toggle_favorite(grid.current_index())
+        elif action is Action.CONTEXT_MENU:
+            self._context_key(grid, self._on_grid_context)
         elif action is Action.ESCAPE:
             self._focus("search" if self._mode == "search" else "genres")
         elif action in (Action.NAV_TEXT, Action.NAV_BACKSPACE, Action.PASTE):
@@ -1048,6 +1059,10 @@ class LibraryController(QObject):
                 self._focus("grid")
             else:
                 genres.activate()  # genreActivated focuses the grid
+        elif action is Action.CONTEXT_MENU:  # 2.13.1: the highlighted genre's, beside it
+            gid = genres.current_id()
+            if gid is not None:
+                self._show_genre_menu(gid, genres.current_rect())
         elif action is Action.ESCAPE:
             if not genres.escape():
                 self._go_back_to_tv()
@@ -1092,6 +1107,10 @@ class LibraryController(QObject):
             series.activate()
         elif action in (Action.ESCAPE, Action.NAV_BACKSPACE):
             series.escape()  # backRequested
+        elif action is Action.CONTEXT_MENU:  # 2.13.1: the highlighted episode's, beside it
+            episode, row = series.current_episode(), series.current_episode_rect()
+            if episode is not None and row is not None:
+                self._on_episode_context(series.current_season() or {}, episode, row)
         elif action in (Action.NAV_TEXT, Action.PASTE):
             return self._type_in_search(action, payload)  # 2.9.3: typing searches
         else:
@@ -1157,6 +1176,8 @@ class LibraryController(QObject):
                 grid.activate()
             elif action is Action.NAV_DELETE:  # its strip's Delete… (asks first)
                 self._recording_action(grid.current_index(), self.delete_recording)
+            elif action is Action.CONTEXT_MENU:
+                self._context_key(grid, self._on_recording_context)
             elif action in (Action.NAV_TEXT, Action.NAV_BACKSPACE, Action.PASTE):
                 return self._type_in_search(action, payload)
             else:
@@ -1274,50 +1295,41 @@ class LibraryController(QObject):
             self.open(self._section)
 
     def _show_source_menu(self, pos: QPoint) -> None:
-        menu = self._source_menu()
-        menu.aboutToHide.connect(menu.deleteLater)
-        menu.popup(pos)
+        popup_menu.popup(self._source_menu(), self._screen, at=pos)
 
-    def _source_menu(self) -> QMenu:
+    def _source_menu(self) -> Menu:
         """A tick for each provider the Library shows (2.8: several mix), and All providers,
         which ticks every one or, with every one ticked, none (2.8.1: to pick one). The menu
         stays open while ticks change; what is ticked shows once it closes (nothing ticked:
         what showed stays)."""
-        menu = TickMenu(self._screen)
+        menu = Menu()
         names = self._catalog.provider_names()
         shown = self._shown_providers()
-        ticks = []
-        for name in names:
-            action = menu.addAction(name)
-            action.setCheckable(True)
-            action.setChecked(name in shown)
-            ticks.append(action)
+        ticks = [menu.add(name, checked=name in shown, keep_open=True) for name in names]
         if len(names) > 1:  # with one provider there is nothing to mix
-            menu.addSeparator()
-            every = menu.addAction(translate(ALL_PROVIDERS_TITLE))
-            every.setCheckable(True)
+            menu.add_separator()
+            every = menu.add(translate(ALL_PROVIDERS_TITLE), checked=False, keep_open=True)
 
-            def tick_all(checked: bool) -> None:
-                for action in ticks:
-                    action.setChecked(checked)
+            def tick_all() -> None:
+                for tick in ticks:
+                    tick.checked = every.checked
 
             def follow() -> None:
-                every.setChecked(all(action.isChecked() for action in ticks))
+                every.checked = all(tick.checked for tick in ticks)
 
             follow()
-            every.triggered.connect(tick_all)
-            for action in ticks:
-                action.triggered.connect(follow)
+            every.act = tick_all
+            for tick in ticks:
+                tick.act = follow
 
         def apply() -> None:
-            chosen = [action.text() for action in ticks if action.isChecked()]
+            chosen = [tick.text for tick in ticks if tick.checked]
             if chosen and set(chosen) != set(shown):
                 self._mix_sources([] if len(chosen) == len(names) else chosen)
 
-        menu.aboutToHide.connect(apply)
-        menu.addSeparator()
-        refresh = menu.addAction(translate(REFRESH_TEXT))
-        refresh.triggered.connect(lambda _checked=False: self.refresh_lists())
+        menu.on_close(apply)
+        menu.add_separator()
+        menu.add(translate(REFRESH_TEXT), self.refresh_lists)
         return menu
 
     def set_hiding(
@@ -1332,13 +1344,14 @@ class LibraryController(QObject):
         self._hide_genre, self._may_hide = hide, may_hide
         self._tidy_genre = tidy
 
-    def _show_genre_menu(self, gid: str, pos: QPoint) -> None:
+    def _show_genre_menu(self, gid: str, pos: Where) -> None:
+        """A genre's menu at the pointer (a right-click), or beside its row (the menu key's:
+        `pos` is the row's global rect, 2.13.1)."""
         menu = self.genre_menu(gid)
         if menu is not None:
-            menu.aboutToHide.connect(menu.deleteLater)
-            menu.popup(pos)
+            popup_menu.popup(menu, self._screen, at=pos)
 
-    def genre_menu(self, gid: str) -> Optional[QMenu]:
+    def genre_menu(self, gid: str) -> Optional[Menu]:
         """A genre's right-click menu: Hide (parental controls); None for a pinned row (My
         list, Continue …), a genre not shown, or without a PIN."""
         hide = self._hide_genre if self._may_hide() else None
@@ -1351,15 +1364,13 @@ class LibraryController(QObject):
         name, own = split_group_id(gid)
         provider = name or self._catalog.current_provider_name()
         section = self._model.section
-        menu = QMenu(self._screen)
+        menu = Menu()
         if tidy is not None:
-            menu.addAction(translate(TIDY_GENRE_TEXT)).triggered.connect(
-                lambda _=False: tidy(section, provider, own or gid, genre.title)
+            menu.add(
+                translate(TIDY_GENRE_TEXT), lambda: tidy(section, provider, own or gid, genre.title)
             )
         if hide is not None:
-            menu.addAction(translate(HIDE_TEXT)).triggered.connect(
-                lambda _=False: hide(section, provider, own or gid, genre.title)
-            )
+            menu.add(translate(HIDE_TEXT), lambda: hide(section, provider, own or gid, genre.title))
         return menu
 
     def refresh_lists(self) -> None:
@@ -1616,7 +1627,16 @@ class LibraryController(QObject):
 
     # ---- right-click menus -------------------------------------------------------------------
 
-    def _on_grid_context(self, index: int, global_pos: QPoint) -> None:
+    @staticmethod
+    def _context_key(grid: Any, open_menu: Callable[[int, Where], None]) -> None:
+        """The menu key or Shift+F10 (2.13.1): the highlighted poster's or tile's menu, as its
+        right-click opens it, beside it."""
+        index = grid.current_index()
+        if index >= 0:
+            rect = grid.item_rect(index)
+            open_menu(index, QRect(grid.viewport().mapToGlobal(rect.topLeft()), rect.size()))
+
+    def _on_grid_context(self, index: int, global_pos: Where) -> None:
         if self._closed:
             return
         if self._grid_content == "search":
@@ -1636,11 +1656,11 @@ class LibraryController(QObject):
             section = "series" if kind == "episode" else "movies"
             self._menu(item, section, provider_of(item) or self._browse_provider(), global_pos)
 
-    def _on_episode_context(self, _season: dict, episode: dict, global_pos: QPoint) -> None:
+    def _on_episode_context(self, _season: dict, episode: dict, global_pos: Where) -> None:
         if not self._closed:
             self._menu(episode, "series", self._series_owner(), global_pos)
 
-    def _menu(self, item: dict, section: str, provider: str, global_pos: QPoint) -> None:
+    def _menu(self, item: dict, section: str, provider: str, global_pos: Where) -> None:
         """The shell's menu for `item`, when its links can be asked of the provider shown (with
         All providers, of any provider: a link goes to the title's own, and waits there for
         its setup, whichever provider sets up)."""

@@ -10,7 +10,7 @@ from unittest import mock
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
-from PySide6.QtCore import QPoint, Qt
+from PySide6.QtCore import Qt
 from PySide6.QtTest import QTest
 from PySide6.QtWidgets import QApplication, QWidget
 from timer_fixtures import elapse, wait_until
@@ -45,6 +45,7 @@ from ui.overlays.settings_card import BUSY_TEXT, CANCEL
 from ui.overlays.settings_drawer import SettingsDrawer
 from ui.overlays.settings_layout import Item, title_of, whole
 from ui.settings_controller import STEPS_SETTLE_MS, SettingsController
+from ui.settings_parental import ParentalRows
 from ui.settings_providers import (
     HTTP_ONLY_NOTE,
     NAME_TAKEN_TEXT,
@@ -133,11 +134,11 @@ class FakeWindow:
     def closing(self):
         return False
 
-    def show_free_channels(self, global_pos):
-        self.free.append(global_pos)
+    def show_free_channels(self, from_drawer=False, opened_settings=False):
+        self.free.append(opened_settings)
 
-    def show_free_radio(self, global_pos):
-        self.radio.append(global_pos)
+    def show_free_radio(self, from_drawer=False, opened_settings=False):
+        self.radio.append(opened_settings)
 
     def providers_saved(self):
         self.events.append("providers_saved")
@@ -186,6 +187,8 @@ class ProvidersTests(unittest.TestCase):
         )
         self.rows = ProviderRows(self.window, self.settings, self.drawer, cards=self.cards)
         self.window.rows = self.rows
+        # The PIN's card (2.13.1: Settings › Parental controls' own, over Settings).
+        self.window.parental_rows = ParentalRows(self.window, self.settings, self.drawer)
 
     def tearDown(self):
         elapse(QApplication.doubleClickInterval() + 80)  # no second-click guard left armed
@@ -256,9 +259,9 @@ class ProvidersTests(unittest.TestCase):
         )
         self.assertEqual(
             [title_of(Item(row.key, row.text, row=row)) for row in rows],
-            ["Lists", "Panel", "Add provider", "Free channels…", "Free radio…"],
+            ["Lists", "Panel", "Add provider", "Free channels", "Free radio"],
         )
-        self.assertEqual([row.kind for row in rows], [OPENS, OPENS, ACTION, ACTION, ACTION])
+        self.assertEqual([row.kind for row in rows], [OPENS, OPENS, ACTION, OPENS, OPENS])
         self.assertEqual([row.icon for row in rows], ["", "", "plus", "plus", "plus"])
         self.assertEqual([row.sub for row in rows[:2]], ["M3U playlist · in use", "Xtream"])
         self.assertEqual(
@@ -318,27 +321,21 @@ class ProvidersTests(unittest.TestCase):
         self.key(Action.NAV_ACTIVATE)
         self.assertEqual([title_of(Item(r.key, r.text, row=r)) for r in self.shown()], ["Movies"])
 
-    def test_free_channels_opens_the_menu_at_the_row(self):
-        self.settings.open(PROVIDERS)
-        self.key(Action.NAV_RIGHT)
-        self.move_to(FREE_CHANNELS)
-        self.key(Action.NAV_ACTIVATE)
-        index = [row.key for row in self.shown()].index(FREE_CHANNELS)
-        line = self.drawer.row_rect("right", index)
-        self.assertEqual(len(self.window.free), 1)
-        point = self.drawer.mapFromGlobal(self.window.free[0])
-        self.assertTrue(line.adjusted(0, 0, 0, 1).contains(point), (line, point))
-        self.assertEqual(self.drawer.row_anchor(FREE_CHANNELS), self.window.free[0])
-        self.assertTrue(self.settings.visible())  # the menu pops up over Settings
-
-    def test_free_radio_opens_its_menu_at_the_row(self):
-        self.settings.open(PROVIDERS)
-        self.key(Action.NAV_RIGHT)
-        self.move_to(FREE_RADIO)
-        self.key(Action.NAV_ACTIVATE)
-        self.assertEqual(self.window.free, [])
-        self.assertEqual(self.window.radio, [self.drawer.row_anchor(FREE_RADIO)])
-        self.assertTrue(self.settings.visible())
+    def test_free_channels_and_free_radio_open_their_layers(self):
+        # 2.13.1: their countries are a layer (ui.free_channels_menu's rows, none here), never
+        # a menu over Settings.
+        for key in (FREE_CHANNELS, FREE_RADIO):
+            with self.subTest(key):
+                self.settings.open(PROVIDERS)
+                self.key(Action.NAV_RIGHT)
+                self.move_to(key)
+                self.key(Action.NAV_ACTIVATE)
+                self.assertEqual(self.drawer.path(), (PROVIDERS, key))
+                self.assertEqual((self.window.free, self.window.radio), ([], []))
+                self.key(Action.ESCAPE)
+                self.assertEqual(self.drawer.path(), (PROVIDERS,))
+                self.assertEqual(self.drawer.focused_row().key, key)
+                self.settings.close()
 
     def test_address_and_login_asks_for_its_card(self):
         self.on("Panel", "login")
@@ -575,29 +572,82 @@ class ProvidersTests(unittest.TestCase):
         self.assertEqual(self.saved("@add")["max_streams"], 1)
         self.cards.add.assert_not_called()
 
+    def pin_card(self):
+        """The PIN's card, showing over Settings with the keys (2.13.1: no system window)."""
+        card = self.window.parental_rows.card
+        self.assertIsNotNone(card)
+        self.assertTrue(card.isVisible())
+        self.assertTrue(self.settings.card_shown())
+        return card
+
+    def type_pin(self, pin):
+        self.key(Action.NAV_TEXT, pin)
+        self.key(Action.NAV_ACTIVATE)  # OK, from the field
+
     def test_rename_asks_the_pin_when_locked(self):
         self.window.parental.is_locked = True
         self.on("Panel", "name")
-        with (
-            mock.patch.object(settings_parental, "_ask_pin", return_value="1111") as asked,
-            mock.patch.object(settings_parental.QMessageBox, "warning") as wrong,
-        ):
-            self.type_name("Renamed", replace=True)
-        asked.assert_called_once()
-        wrong.assert_called_once()
+        self.type_name("Renamed", replace=True)
+        card = self.pin_card()
+        self.assertEqual(card.title(), translate(settings_parental.PARENTAL_TITLE))
+        self.assertEqual([f.key for f in card._fields], [settings_parental.YOURS])
+        self.assertTrue(card._fields[0].secret)
+        self.assertEqual(self.saved(), ["Lists", "Panel"])  # not before the PIN
+        self.key(Action.NAV_TEXT, "1a1")  # digits only
+        self.assertEqual(card.values(), {settings_parental.YOURS: "11"})
+        self.type_pin("11")
+        # A wrong PIN is said in the card, which stays for another try, its field emptied.
+        self.assertTrue(card.isVisible())
+        self.assertEqual(card.found(), (translate(settings_parental.WRONG_TEXT), False))
+        self.assertEqual(card.values(), {settings_parental.YOURS: ""})
+        self.assertEqual(self.saved(), ["Lists", "Panel"])
+        self.key(Action.ESCAPE)  # cancelled: the name stays
+        self.assertFalse(self.settings.card_shown())
         self.assertEqual(self.saved(), ["Lists", "Panel"])
         self.assertEqual(self.value("Panel", "name"), "Panel")
-        with mock.patch.object(settings_parental, "_ask_pin", return_value=PIN) as asked:
-            self.type_name("Renamed", replace=True)
-            self.type_name(" again")  # once per visit
-        asked.assert_called_once()
+        self.type_name("Renamed", replace=True)
+        self.type_pin(PIN)
+        self.assertFalse(card.isVisible())
+        self.assertEqual(self.saved(), ["Lists", "Renamed"])
+        self.type_name(" again")  # once per visit
+        self.assertFalse(self.settings.card_shown())
         self.assertEqual(self.saved(), ["Lists", "Renamed again"])
         self.settings.close()  # the visit is over: asked again
-        with mock.patch.object(settings_parental, "_ask_pin", return_value=None) as asked:
-            self.on("Renamed again", "name")
-            self.type_name("Third", replace=True)
-        asked.assert_called_once()
+        self.on("Renamed again", "name")
+        self.type_name("Third", replace=True)
+        self.pin_card()
+        self.settings.close()  # Settings going cancels the card: nothing renamed
+        self.assertFalse(card.isVisible())
         self.assertEqual(self.saved(), ["Lists", "Renamed again"])
+        self.settings.open(PROVIDERS)
+        self.on("Renamed again", "name")
+        self.type_name("Third", replace=True)
+        self.pin_card()  # never granted by the cancelled card
+        self.key(Action.ESCAPE)
+
+    def test_back_in_the_pin_card_deletes_a_digit_then_cancels(self):
+        # 2.13.1: Back (Backspace, the phone's) deletes a digit while there is one; on the
+        # empty field it cancels the card (the phone may have only Back). Esc cancels at once.
+        self.window.parental.is_locked = True
+        self.on("Panel", "name")
+        self.type_name("Renamed", replace=True)
+        card = self.pin_card()
+        self.key(Action.NAV_TEXT, "246")
+        self.key(Action.NAV_BACKSPACE)
+        self.assertEqual(card.values(), {settings_parental.YOURS: "24"})
+        self.key(Action.PREVIOUS)  # the player's Back: a digit too
+        self.assertEqual(card.values(), {settings_parental.YOURS: "2"})
+        self.key(Action.NAV_BACKSPACE)
+        self.assertTrue(card.isVisible())  # emptied, still asked
+        self.key(Action.NAV_BACKSPACE)  # on the empty field: cancelled
+        self.assertTrue(card.isHidden())
+        self.assertFalse(self.settings.card_shown())
+        self.assertEqual(self.saved(), ["Lists", "Panel"])
+        self.type_name("Renamed", replace=True)
+        self.key(Action.NAV_TEXT, "24")
+        self.key(Action.ESCAPE)  # at once, digits or not
+        self.assertTrue(card.isHidden())
+        self.assertEqual(self.saved(), ["Lists", "Panel"])
 
     # ---- hidden groups -----------------------------------------------------------------------
 
@@ -757,12 +807,14 @@ class ProvidersTests(unittest.TestCase):
         self.window.parental.is_locked = True
         self.key(Action.NAV_ACTIVATE)
         self.move_to(row_key("Panel", "remove"))
-        with mock.patch.object(settings_parental, "_ask_pin", return_value=None) as asked:
-            self.key(Action.NAV_ACTIVATE)
-        asked.assert_called_once()
+        self.key(Action.NAV_ACTIVATE)
+        self.pin_card()
+        self.assertFalse(question.isVisible())  # the PIN first
+        self.key(Action.ESCAPE)
         self.assertFalse(self.settings.card_shown())  # refused: never asked
-        with mock.patch.object(settings_parental, "_ask_pin", return_value=PIN):
-            self.key(Action.NAV_ACTIVATE)
+        self.key(Action.NAV_ACTIVATE)
+        self.type_pin(PIN)
+        self.assertTrue(question.isVisible())
         self.assertEqual(question.body(), "")
         self.key(Action.ESCAPE)
         self.assertEqual(self.saved(), ["Panel"])
@@ -892,29 +944,21 @@ class ProvidersWindowTests(WindowCase):
         self.assertEqual(keys[:2], [layer_key(PROVIDER_NAME), layer_key("Aardvark")])
         self.assertEqual(drawer.focused_row().key, layer_key(PROVIDER_NAME))
 
-    def test_free_channels_row_opens_the_windows_menu(self):
+    def test_free_channels_and_free_radio_rows_open_their_countries(self):
+        # 2.13.1: All countries, then the countries, the keys on the first.
         self.open_providers()
         controller = self.window.controller
+        drawer = self.window.settings_drawer
         controller.handle(Action.NAV_RIGHT)
-        self.down_to(FREE_CHANNELS)
-        with mock.patch("ui.tv_window.show_free_channels_menu") as menu:
-            controller.handle(Action.NAV_ACTIVATE)
-        menu.assert_called_once()
-        self.assertIsInstance(menu.call_args.args[1], QPoint)
-        self.assertEqual(
-            menu.call_args.args[1], self.window.settings_drawer.row_anchor(FREE_CHANNELS)
-        )
-
-    def test_free_radio_row_opens_the_windows_menu(self):
-        self.open_providers()
-        controller = self.window.controller
-        controller.handle(Action.NAV_RIGHT)
-        self.down_to(FREE_RADIO)
-        with mock.patch("ui.tv_window.show_free_radio_menu") as menu:
-            controller.handle(Action.NAV_ACTIVATE)
-        menu.assert_called_once()
-        self.assertEqual(menu.call_args.args[1], self.window.settings_drawer.row_anchor(FREE_RADIO))
-        self.assertEqual(menu.call_args.args[2], self.window.add_free_radio)
+        for key in (FREE_CHANNELS, FREE_RADIO):
+            with self.subTest(key):
+                self.down_to(key)
+                controller.handle(Action.NAV_ACTIVATE)
+                self.assertEqual(drawer.path(), (PROVIDERS, key))
+                self.assertEqual(drawer.focused_row().key, f"{key}/@all")
+                self.assertGreater(len(drawer._right_rows()), 150)
+                controller.handle(Action.ESCAPE)
+                self.assertEqual(drawer.path(), (PROVIDERS,))
 
 
 if __name__ == "__main__":

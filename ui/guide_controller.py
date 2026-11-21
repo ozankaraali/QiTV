@@ -125,6 +125,8 @@ class GuideController(QObject):
             # 2.8: the footer's programme recorded at its time (or cancelled); with none to
             # record, R does what it does on the player.
             return bool(getattr(guide, "record_key", lambda: False)())
+        elif action is Action.CONTEXT_MENU:
+            getattr(guide, "context_key", lambda: False)()  # 2.13.1: the channel's menu
         elif action is Action.ESCAPE:
             guide.escape()
         elif action is Action.GUIDE:

@@ -426,7 +426,16 @@ def main() -> int:
     control = None
     dde = None
     try:
-        window = TVWindow(app, config_manager, provider_manager, image_manager, epg_manager)
+        window = TVWindow(
+            app,
+            config_manager,
+            provider_manager,
+            image_manager,
+            epg_manager,
+            # 2.13.1: the channel list loads as the window is built, behind the splash (it
+            # is there as the window opens); a start that opens files plays them first.
+            load_early=with_splash and not (paths + app.kept_opened()),
+        )
         if instance is not None:
             instance.activated.connect(window.come_to_front)
             window.instance = instance  # it answers no start once the window's close begins
@@ -473,7 +482,7 @@ def main() -> int:
                 app.aboutToQuit.connect(dde.close)
         if not_replaced is not None:  # where the new version is, and where the old one stayed
             old_path, new_path = not_replaced
-            QTimer.singleShot(0, window, lambda: replace_failed(old_path, new_path, window))
+            QTimer.singleShot(0, window, lambda: replace_failed(old_path, new_path))
         # 2.8.3: a developer's tools read and drive this QiTV (loopback only, token-guarded).
         from services import control as control_port
 

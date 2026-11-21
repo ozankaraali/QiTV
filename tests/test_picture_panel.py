@@ -501,6 +501,18 @@ class PictureShapeTests(unittest.TestCase):
         self.assertAlmostEqual(width * height, 320 * 180, delta=320 * 180 * 0.01)
         self.assertEqual(picture.box_size(320, 9 / 16), (180, 320))  # upright: turned
 
+    def test_a_box_shaped_for_its_picture_is_filled_in_the_boxes_own_shape(self):
+        # 2.13.1, the owner: a floating window kept at 500×284 (as good as 16:9) showed a 16:9
+        # picture with rows of bar above and below it.
+        self.assertEqual(picture.box_aspect(16 / 9, 1000, 568), "125:71")
+        self.assertEqual(picture.box_aspect(4 / 3, 554, 416), "277:208")
+        self.assertEqual(picture.box_aspect(1.765, 646, 360), "323:180")  # snapped to 16:9
+        self.assertEqual(picture.box_aspect(1.765, 700, 400), "7:4")  # as good as its own
+        self.assertIsNone(picture.box_aspect(4 / 3, 640, 360))  # another picture's box still
+        self.assertIsNone(picture.box_aspect(None, 640, 360))  # not known, or Fill's (any)
+        self.assertIsNone(picture.box_aspect(picture.MAX_RATIO, 900, 300))  # a sliver, kept
+        self.assertIsNone(picture.box_aspect(16 / 9, 0, 0))  # no size yet
+
 
 class StatsTextTests(unittest.TestCase):
     STATS = {

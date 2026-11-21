@@ -49,7 +49,7 @@ SECTION_TITLES = {"live": N_("Live TV"), "movies": N_("Movies"), "series": N_("S
 LIBRARY_SECTIONS = frozenset({"movies", "series"})  # chosen in the drawer, shown by the Library
 SETTINGS_ROW = "settings"
 ADD_PROVIDER_ROW = "add_provider"
-FREE_CHANNELS_ROW = "free_channels"  # iptv-org's free lists, in a menu at the row
+FREE_CHANNELS_ROW = "free_channels"  # iptv-org's free lists: their countries in Settings
 FREE_RADIO_ROW = "free_radio"  # 2.13: radio-browser.info's lists, likewise
 OPEN_FILE_ROW = "open_file"  # File → Open File… without the menu bar (fullscreen hides it)
 OPEN_LINK_ROW = "open_link"  # plan 4: File → Open Link…, likewise
@@ -110,8 +110,8 @@ class LinkRow:
 ACTION_ROWS = (
     NavNode("action", SETTINGS_ROW, N_("Settings")),
     NavNode("action", ADD_PROVIDER_ROW, N_("Add provider")),  # i18n: a row of the channel list
-    NavNode("action", FREE_CHANNELS_ROW, N_("Free channels…")),  # i18n: a row; opens a menu
-    # i18n: a row of the channel list (2.13); opens a menu of free internet radio lists
+    NavNode("action", FREE_CHANNELS_ROW, N_("Free channels…")),  # i18n: a row; opens a list
+    # i18n: a row of the channel list (2.13); opens a list of free internet radio lists
     NavNode("action", FREE_RADIO_ROW, N_("Free radio…")),
     NavNode("action", OPEN_FILE_ROW, N_("Open file")),  # i18n: a row of the channel list (verb)
     # i18n: a row of the channel list (plan 4): play one stream's link, as File → Open Link…

@@ -36,8 +36,28 @@ class SettingsModelTests(unittest.TestCase):
                 m.PARENTAL,
                 m.FILES,
                 m.ADVANCED,
+                m.KEYS,  # 2.13.1: Help → Keyboard Shortcuts…, a section of its own
+                m.ABOUT,  # 2.13.1: About QiTV, a section of its own
             ),
         )
+
+    def test_keys_and_about_show_the_rows_they_are_given(self):
+        # 2.13.1: their rows come from ui/settings_about.py (the keymap is Qt's), as the
+        # Guide's do from theirs; each section has its icon.
+        layer = m.Section("keys/player", "Watching TV", rows=(m.Row("k", "Mute", kind=m.INFO),))
+        keys = (m.Row("keys/player", "Watching TV", section=layer),)
+        about = (m.Row("about/qitv", "QiTV", kind=m.INFO, literal=True),)
+        by_key = {s.key: s for s in m.sections("Linux", context=m.Context(keys=keys, about=about))}
+        self.assertEqual(by_key[m.KEYS].rows, keys)
+        self.assertEqual(by_key[m.ABOUT].rows, about)
+        self.assertEqual((by_key[m.KEYS].text, by_key[m.ABOUT].text), ("Keys", "About QiTV"))
+        self.assertEqual((m.ICONS[m.KEYS], m.ICONS[m.ABOUT]), ("keyboard", "info"))
+        # Opt-ins (2.13.1): a layer of info lines to read, a title wrapped whole, a picture
+        self.assertFalse(m.Section("s", "S").browse)
+        self.assertTrue(m.Section("s", "S", browse=True).browse)
+        row = m.Row("t", "TMDB", kind=m.INFO, whole=True, image="tmdb.png", image_u=0.7)
+        self.assertEqual((row.whole, row.image, row.image_u), (True, "tmdb.png", 0.7))
+        self.assertEqual((m.Row("u", "U").whole, m.Row("u", "U").image), (False, ""))
 
     def test_step_wraps_both_ways(self):
         row = _row("live_latency")
@@ -84,10 +104,12 @@ class SettingsModelTests(unittest.TestCase):
             ["provider/A", m.ADD_PROVIDER, m.FREE_CHANNELS, m.FREE_RADIO],
         )
         add, free, radio = providers.rows[1:]
-        # As the channel list names them, each with its ＋ painted in the accent (2.12).
+        # Each with its ＋ painted in the accent (2.12), as the channel list's. Free channels
+        # and Free radio open a layer of their countries (2.13.1; ui.free_channels_menu builds
+        # their rows, given in the context): never a menu or a system dialog.
         self.assertEqual((add.text, add.kind, add.icon), ("Add provider", m.ACTION, "plus"))
-        self.assertEqual((free.text, free.kind, free.icon), ("Free channels…", m.ACTION, "plus"))
-        self.assertEqual((radio.text, radio.kind, radio.icon), ("Free radio…", m.ACTION, "plus"))
+        self.assertEqual((free.text, free.kind, free.icon), ("Free channels", m.OPENS, "plus"))
+        self.assertEqual((radio.text, radio.kind, radio.icon), ("Free radio", m.OPENS, "plus"))
         self.assertIn("radio-browser.info", radio.help)  # 2.13: the source is named
         for row in (add, free, radio):
             self.assertTrue(row.help, row.key)
@@ -96,6 +118,18 @@ class SettingsModelTests(unittest.TestCase):
             [row.key for row in m.sections("Linux")[0].rows],
             [m.ADD_PROVIDER, m.FREE_CHANNELS, m.FREE_RADIO],
         )
+        countries = (m.Row(f"{m.FREE_CHANNELS}/de", "Germany", kind=m.ACTION, literal=True),)
+        stations = (m.Row(f"{m.FREE_RADIO}/de", "Germany", kind=m.ACTION, literal=True),)
+        context = m.Context(free_channels=countries, free_radio=stations)
+        free, radio = m.sections("Linux", context=context)[0].rows[1:]
+        for row, rows, title in (
+            (free, countries, "Free channels"),
+            (radio, stations, "Free radio"),
+        ):
+            with self.subTest(title):
+                layer = row.section
+                self.assertEqual((layer.key, layer.text, layer.rows), (row.key, title, rows))
+                self.assertTrue(layer.found_inside)  # a long list: found from inside it
         # A literal choice is shown as it is given (a number, a text in the language already).
         self.assertEqual(m.Choice(3, "3", literal=True).shown(), "3")
 

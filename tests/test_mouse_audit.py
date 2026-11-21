@@ -24,11 +24,14 @@ Screens and their controls:
 - "pip_label": the small picture's "swap", "speaker" and "close";
 - "drawer": the top row's "back", "names", "search", "refresh" and "settings", the ⌕ "find" box,
   its "rows", and the rows of its sources and sections columns by title ("Settings", "Movies" …);
+  "right-click" (2.13.1): a channel's and a group's right-click asks for its menu;
 - "context": the channel list's right-click menu, by entry (a channel of a genre's, and one of
   ⟲ Recent's);
-- "guide": its header's buttons (2.9.3: the "day" and "now" too) and its "rows";
+- "guide": its header's buttons (2.9.3: the "day" and "now" too), its "rows" and a row's
+  "right-click" (its channel's menu, 2.13.1);
 - "library": the top bar's items ("live", "search", "fullscreen" …), the grid's "posters", the
-  highlighted title's strip buttons ("favorite", "play") and the A–Z "rail";
+  highlighted title's strip buttons ("favorite", "play"), the A–Z "rail" and a poster's
+  "right-click" (its menu, 2.13.1);
 - "series" (2.9.3): the series view's "back" (‹), its season "chips", its episode "rows" and a
   begun episode's "start_over" pill;
 - "folders" (Plan 4): the Library's Folders tab (always there, 2.11.1): its "tiles", a tile's
@@ -51,7 +54,8 @@ import unittest
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
-from PySide6.QtCore import QSize, Qt
+from PySide6.QtCore import QEvent, QPointF, QSize, Qt
+from PySide6.QtGui import QContextMenuEvent, QMouseEvent
 from PySide6.QtTest import QTest
 from PySide6.QtWidgets import QApplication, QWidget
 
@@ -141,6 +145,8 @@ ON_SCREEN: dict[tuple[str, str], tuple[tuple[str, str], ...]] = {
     ("drawer", "Ctrl+D"): (("context", "Add to favorites"),),
     ("drawer", "Ctrl+P"): (("context", OPEN_PIP_TEXT),),
     ("drawer", "Delete"): (("context", REMOVE_RECENT_TEXT),),  # a channel of ⟲ Recent
+    # 2.13.1: the menu key's menu is the one a right-click on the row opens.
+    ("drawer", "Menu, Shift+F10"): (("drawer", "right-click"),),
     ("drawer", "Ctrl+F"): (("drawer", "search"),),
     # Beside the list: its first click closes the list, the double-click is fullscreen.
     ("drawer", "F11, Ctrl+Meta+F"): (("picture", "double-click"),),
@@ -152,6 +158,7 @@ ON_SCREEN: dict[tuple[str, str], tuple[tuple[str, str], ...]] = {
     ("guide", "Return"): (("guide", "rows"), ("guide", "live")),  # a double-click, ▶ Watch
     # 2.8: the footer's ● Record (Cancel recording for a scheduled programme)
     ("guide", "R"): (("guide", "record"),),
+    ("guide", "Menu, Shift+F10"): (("guide", "right-click"),),  # 2.13.1
     ("guide", "Ctrl+F"): (("guide", "search"),),
     ("guide", "F, F11, Ctrl+Meta+F"): (("guide", "fullscreen"),),
     ("guide", "G, Esc"): (("guide", "close"),),
@@ -175,6 +182,8 @@ ON_SCREEN: dict[tuple[str, str], tuple[tuple[str, str], ...]] = {
     ("library", "Ctrl+D"): (("library", "favorite"),),
     # 2.9.7: a recording's strip; Plan 4: a Folders tile's × (off the shelf, no question)
     ("library", "Delete"): (("library", "delete"), ("folders", "remove")),
+    # 2.13.1: a poster's or a Recordings tile's right-click
+    ("library", "Menu, Shift+F10"): (("library", "right-click"),),
     ("library", "F11, Ctrl+Meta+F"): (("library", "fullscreen"),),
     # Back to the grid (from a series or the search): its tab, or the series' ‹ (2.9.3); to
     # live TV: Live TV.
@@ -481,6 +490,15 @@ def _drawer_and_context(host: QWidget) -> tuple[set[str], set[str]]:
             found.add(name)
     if drawer.breadcrumb_parts():
         found.add("names")
+    # 2.13.1: a right-click on a row asks for its menu (what the menu key opens): a channel's,
+    # then its group's
+    asked: list = []
+    drawer.contextRequested.connect(lambda node, where: asked.append(node.layer))
+    for side in ("right", "left"):
+        view = drawer._columns[side].view
+        drawer._on_row_context(side, view.visualRect(view.model().index(0, 0)).center())
+    if asked == ["item", "group"]:
+        found.add("right-click")
     actions = ContextActions(
         nav=nav,
         config=config,
@@ -499,7 +517,7 @@ def _drawer_and_context(host: QWidget) -> tuple[set[str], set[str]]:
         drawer.open_drawer()
         menu = actions.menu(drawer._columns["right"].nodes[0])
         if menu is not None:
-            entries.update(a.text() for a in menu.actions() if not a.isSeparator())
+            entries.update(menu.texts())
     nav.focus_source("Home")  # the sources on the left, the provider's sections on the right
     drawer.open_drawer(focus_side="left")
     for side in ("left", "right"):
@@ -526,6 +544,23 @@ def _guide(host: QWidget) -> set[str]:
     found.update(n for n, r in guide.footer_buttons().items() if not r.isEmpty())
     if guide.current_channel() is not None:
         found.add("rows")
+    asked: list = []  # 2.13.1: a row's right-click asks for its channel's menu
+    guide.contextRequested.connect(lambda channel, where: asked.append(channel["name"]))
+    row = guide._row_rect(guide._layout(), 1).center()
+    right = Qt.MouseButton.RightButton
+    press = QMouseEvent(
+        QEvent.Type.MouseButtonPress,
+        row,
+        QPointF(guide.mapToGlobal(row.toPoint())),
+        right,
+        right,
+        Qt.KeyboardModifier.NoModifier,
+    )
+    # Straight to the guide: a panel built above takes the first press elsewhere (it closes on
+    # it), and QTest's press alone would leave its button held for the tests after.
+    guide.mousePressEvent(press)
+    if asked == ["Two"]:
+        found.add("right-click")
     return found
 
 
@@ -545,6 +580,15 @@ def _library(host: QWidget) -> set[str]:
     found.update(name for name, _label in grid.button_labels())
     if grid._rail_visible():
         found.add("rail")
+    asked: list = []  # 2.13.1: a poster's right-click asks for its menu
+    grid.contextRequested.connect(lambda index, where: asked.append(index))
+    point = grid.item_rect(2).center()
+    menu_event = QContextMenuEvent(
+        QContextMenuEvent.Reason.Mouse, point, grid.viewport().mapToGlobal(point)
+    )
+    QApplication.sendEvent(grid.viewport(), menu_event)
+    if asked == [2]:
+        found.add("right-click")
     # 2.9.7: the Recordings tab's tiles: a recording's strip (Delete…, Show in Folder)
     recordings = PosterGrid(FakePosters(), host)
     recordings.setGeometry(0, nav.height(), 1280, 720 - nav.height())

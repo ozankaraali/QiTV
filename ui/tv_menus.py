@@ -1,4 +1,4 @@
-"""The TV window's menu bar, About, the update check, Keyboard Shortcuts and Report an Issue.
+"""The TV window's menu bar, the update check and Report an Issue.
 
 Single-key entries only show their key (a hint, active inside the open menu): the window's
 keyPressEvent handles those keys through ui.keymap. Modifier combinations are application
@@ -6,13 +6,16 @@ shortcuts, which the keymap leaves to the menus (a test checks that no screen cl
 The player's keys are disabled while the Library shows. The Providers menu is an exclusive
 group of the configured providers, rebuilt when a provider becomes ready or fails and after
 a provider changes in Settings, then Add provider and the free-channels and free-radio (2.13)
-menus (the welcome card that offers them shows only without providers, and the last one
-stays). Settings… opens Settings in the drawer, as the drawer's Settings row and ⚙ do (backing
-out of it from there gives the drawer back). The drawer's Add provider row opens the same Add
-card in Settings as Add provider, its Free channels and Free radio rows their menus, its Open
-file row the same file dialog, and its header's ⌕ the same search. File → Open Recordings
-Folder opens where recordings go (2.2), as Settings' Open folder does; View → Recordings (2.9.7)
-the Library's Recordings page, as the drawer's Recordings row.
+submenus: All countries, the system's region, and Another country…, which opens their
+countries in Settings (2.13.1; the welcome card that offers them shows only without providers,
+and the last one stays). Settings… opens Settings in the drawer, as the drawer's Settings row
+and ⚙ do (backing out of it from there gives the drawer back). The drawer's Add provider row
+opens the same Add card in Settings as Add provider, its Free channels and Free radio rows
+their countries there, its Open file row the same file dialog, and its header's ⌕ the same
+search. File → Open Recordings Folder opens where recordings go (2.2), as Settings' Open
+folder does; View → Recordings (2.9.7) the Library's Recordings page, as the drawer's
+Recordings row. About QiTV and Help → Keyboard Shortcuts… open Settings at About QiTV and at
+Keys (2.13.1: no windows of their own).
 """
 
 from __future__ import annotations
@@ -21,19 +24,11 @@ from functools import partial
 import logging
 from typing import Any, Callable, Optional
 
-from PySide6.QtCore import QEvent, QObject, QPointF, Qt, QTimer
-from PySide6.QtGui import (
-    QAction,
-    QActionGroup,
-    QFontMetricsF,
-    QKeySequence,
-    QPainter,
-    QPixmap,
-)
-from PySide6.QtWidgets import QDialog, QDialogButtonBox, QLabel, QMenu, QVBoxLayout, QWidget
+from PySide6.QtCore import QEvent, QObject, Qt, QTimer
+from PySide6.QtGui import QAction, QActionGroup, QKeySequence
+from PySide6.QtWidgets import QMenu
 
-from services import log_file, recording, system_open
-from services.config_manager import get_app_version
+from services import free_radio, log_file, recording, system_open
 from services.exporter import ExportKind
 from services.i18n import N_, tr, translate
 from services.navigation import (
@@ -47,67 +42,19 @@ from services.navigation import (
     SETTINGS_ROW,
 )
 from services.provider_ids import ALL_PROVIDERS, ALL_PROVIDERS_TITLE
-from ui.brand import logo_pixmap, scaled_asset
+from services.settings_model import ABOUT, KEYS
 from ui.free_channels_menu import (
+    OTHER_TEXT as OTHER_COUNTRY_TEXT,
     PICKER_TITLE as FREE_CHANNELS_TITLE,
     RADIO_TITLE as FREE_RADIO_TITLE,
-    build_menu as build_free_channels_menu,
-    build_radio_menu as build_free_radio_menu,
+    quick_choices,
 )
 from ui.keymap import Action
 from ui.overlays.drawer import LIBRARY_ACTION, REFRESH_ACTION, SEARCH_ACTION, SETTINGS_BUTTON
-from ui.shortcuts_dialog import ShortcutsDialog
+from ui.settings_about import ISSUES_URL
 from ui.update_dialogs import check_for_updates
 
 logger = logging.getLogger(__name__)
-
-HOME_URL = "https://github.com/ozankaraali/QiTV"
-ISSUES_URL = f"{HOME_URL}/issues"
-ABOUT_LOGO_PX = 64
-ABOUT_TEXT_MIN_W = 340  # wide enough for the links on one line each
-NOTICES_URL = f"{HOME_URL}/blob/main/THIRD-PARTY-NOTICES.md"
-ABOUT_TEXT = (
-    "<p><b>QiTV {version}</b></p>"
-    "<p>{tagline}</p>"
-    '<p><a href="{home}">{home}</a><br><a href="{issues}">{report}</a></p>'
-    '<p><small>{credits} <a href="{notices}">{notices_label}</a></small></p>'
-    "<p><small>{tmdb}</small></p>"
-)
-CREDITS_TEXT = N_(
-    # i18n: About QiTV's credits; the names stay as they are
-    "Plays and casts with VLC, built with Qt and Python. Subtitles come from OpenSubtitles,"
-    " free channels from iptv-org, and film and series details from TMDB. Works with Jellyfin"
-    " and Emby servers and with Chromecast; Chromecast is a trademark of Google LLC, and QiTV"
-    " is not affiliated with Jellyfin, Emby or Google."
-)
-NOTICES_LABEL = N_("Credits and licenses")  # i18n: a link in About QiTV, after its credits
-# 2.8: TMDB's terms ask for this notice (their template, with the product's name) and their
-# logo (assets/tmdb.png) in About, the logo less prominent than QiTV's own; they set no size.
-# The notice is in the credits' small text, the logo on its own line under it, flush left.
-# i18n: TMDB's terms ask for this sentence: translate it faithfully
-TMDB_NOTICE = N_(
-    "QiTV uses TMDB and the TMDB APIs but is not endorsed, certified, or otherwise approved by"
-    " TMDB."
-)
-TMDB_LOGO_FILE = "tmdb.png"
-ABOUT_TMDB_LOGO_PX = 9
-SMALL_TEXT = 0.8  # about how much smaller rich text's <small> is than the label's own
-
-
-def indented(pixmap: QPixmap, device_px: int) -> QPixmap:
-    """`pixmap` with `device_px` transparent device pixels before it (2.8.1: a picture flush
-    with letters, which start a fraction of a pixel into their line)."""
-    if device_px <= 0:
-        return pixmap
-    ratio = pixmap.devicePixelRatio()
-    out = QPixmap(pixmap.width() + device_px, pixmap.height())
-    out.setDevicePixelRatio(ratio)
-    out.fill(Qt.GlobalColor.transparent)
-    painter = QPainter(out)
-    painter.drawPixmap(QPointF(device_px / ratio, 0), pixmap)
-    painter.end()
-    return out
-
 
 NO_PROVIDERS_TEXT = N_("No providers")  # i18n: the Providers menu's only entry, when it is empty
 ADD_PROVIDER_TEXT = N_("Add provider")  # i18n: the Providers menu's entry; opens the provider form
@@ -122,62 +69,6 @@ def open_folder(path: str) -> bool:
     """`path` in the system's file manager; False when it could not be opened (a folder
     that does not exist yet). Nothing is read here: the system opens it."""
     return system_open.open_folder(path)
-
-
-def about_text() -> str:
-    """About's text: the version (pyproject.toml, as packaged), the project's links, and what
-    QiTV uses, with every credit and license a link away."""
-    return ABOUT_TEXT.format(
-        version=get_app_version(),
-        tagline=tr("A TV-first IPTV player for STB portals, Xtream and M3U playlists."),
-        home=HOME_URL,
-        issues=ISSUES_URL,
-        report=tr("Report an issue"),  # i18n: a link in About QiTV, to the project's issues
-        credits=translate(CREDITS_TEXT),
-        notices=NOTICES_URL,
-        notices_label=translate(NOTICES_LABEL),
-        tmdb=translate(TMDB_NOTICE),
-    )
-
-
-class AboutDialog(QDialog):
-    """About QiTV: the logo (the same cropped one as the Library's top bar and the welcome
-    card, at this window's pixel ratio) above the name, the version and the links."""
-
-    def __init__(self, parent: Optional[QWidget] = None) -> None:
-        super().__init__(parent)
-        self.setWindowTitle(tr("About QiTV"))
-        self.logo = QLabel(self)
-        ratio = (parent if parent is not None else self).devicePixelRatioF()
-        pixmap = logo_pixmap(ABOUT_LOGO_PX, ratio)
-        if pixmap is not None:
-            self.logo.setPixmap(pixmap)
-        else:
-            self.logo.hide()  # the asset is missing: the name says it
-        self.text = QLabel(about_text(), self)
-        self.text.setTextFormat(Qt.TextFormat.RichText)
-        self.text.setTextInteractionFlags(Qt.TextInteractionFlag.TextBrowserInteraction)
-        self.text.setOpenExternalLinks(True)
-        self.text.setMinimumWidth(ABOUT_TEXT_MIN_W)
-        self.text.setWordWrap(True)
-        # TMDB's logo under its notice (the text's last line), flush left with its letters:
-        # the notice's first letter starts its small font's left bearing right of the line (a
-        # device pixel or two), a picture at once (2.8.1: the owner saw the step).
-        self.tmdb_logo = QLabel(self)
-        tmdb_logo = scaled_asset(TMDB_LOGO_FILE, ABOUT_TMDB_LOGO_PX, ratio)
-        if tmdb_logo is not None:
-            first = translate(TMDB_NOTICE)[:1] or "Q"
-            bearing = QFontMetricsF(self.text.font()).leftBearing(first) * SMALL_TEXT
-            self.tmdb_logo.setPixmap(indented(tmdb_logo, int(bearing * ratio)))
-        else:
-            self.tmdb_logo.hide()
-        buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Ok, self)
-        buttons.accepted.connect(self.accept)
-        layout = QVBoxLayout(self)
-        layout.addWidget(self.logo)
-        layout.addWidget(self.text)
-        layout.addWidget(self.tmdb_logo, 0, Qt.AlignmentFlag.AlignLeft)
-        layout.addWidget(buttons)
 
 
 class TVMenus(QObject):
@@ -387,25 +278,51 @@ class TVMenus(QObject):
         self._add_entries(menu)
 
     def _add_entries(self, menu: QMenu) -> None:
-        """Add provider and the free-channels and free-radio menus, under the providers."""
+        """Add provider and the free-channels and free-radio submenus, under the providers."""
         window = self._window
         menu.addSeparator()
         add = menu.addAction(translate(ADD_PROVIDER_TEXT))
         add.triggered.connect(lambda _checked=False: window.add_provider())
-        if self._free_menu is not None:
-            self._free_menu.deleteLater()  # clear() leaves a submenu it held
-        free = self._free_menu = build_free_channels_menu(
-            menu, lambda code: window.add_free_channels(code), styled=False
+        for submenu in (self._free_menu, self._radio_menu):
+            if submenu is not None:
+                submenu.deleteLater()  # clear() leaves a submenu it held
+        self._free_menu = self._free_lists_menu(
+            menu,
+            FREE_CHANNELS_TITLE,
+            lambda code: window.add_free_channels(code),
+            lambda: window.show_free_channels(),
         )
-        free.setTitle(translate(FREE_CHANNELS_TITLE))
-        menu.addMenu(free)
-        if self._radio_menu is not None:
-            self._radio_menu.deleteLater()
-        radio = self._radio_menu = build_free_radio_menu(
-            menu, lambda code: window.add_free_radio(code), styled=False
+        self._radio_menu = self._free_lists_menu(
+            menu,
+            FREE_RADIO_TITLE,
+            lambda code: window.add_free_radio(code),
+            lambda: window.show_free_radio(),
+            free_radio.COUNTRY_CODES,
+            translate(free_radio.HELP_TEXT),
         )
-        radio.setTitle(translate(FREE_RADIO_TITLE))
-        menu.addMenu(radio)
+
+    @staticmethod
+    def _free_lists_menu(
+        menu: QMenu,
+        title: str,
+        add: Callable[[Optional[str]], None],
+        other: Callable[[], None],
+        codes: Optional[tuple[str, ...]] = None,
+        tooltip: str = "",
+    ) -> QMenu:
+        """A submenu (the menu bar's own look): All countries and the system's region add
+        their list at once (`add`), Another country… opens the countries (`other`)."""
+        submenu = menu.addMenu(translate(title))
+        for text, code in quick_choices(codes):
+            submenu.addAction(text).triggered.connect(lambda _checked=False, c=code: add(c))
+        submenu.addAction(translate(OTHER_COUNTRY_TEXT)).triggered.connect(
+            lambda _checked=False: other()
+        )
+        if tooltip:  # where the lists come from
+            submenu.setToolTipsVisible(True)
+            for action in submenu.actions():
+                action.setToolTip(tooltip)
+        return submenu
 
     def _choose_provider(self, source: str) -> None:
         """The exclusive group moved the check; providerReady rebuilds the menu (never here:
@@ -415,20 +332,21 @@ class TVMenus(QObject):
         if not window.closing() and source != window.catalog.source():
             window.controller.select_provider(source)
 
-    # ---- dialogs and links --------------------------------------------------------------------
+    # ---- About, Keys and links ----------------------------------------------------------------
 
     def show_about(self) -> None:
-        window = self._window
-        if not window.closing():
-            AboutDialog(window).exec()
+        """Settings at About QiTV (2.13.1: a section of Settings, not a window)."""
+        if not self._window.closing():
+            self._window.open_settings(section_key=ABOUT)
 
     def check_updates(self) -> None:
         if not self._window.closing():
             check_for_updates(self._window.config_manager, manual=True)
 
     def show_shortcuts(self) -> None:
+        """Settings at Keys: each screen's keys (2.13.1: a section of Settings, not a window)."""
         if not self._window.closing():
-            ShortcutsDialog(self._window).exec()
+            self._window.open_settings(section_key=KEYS)
 
     def report_issue(self) -> None:
         system_open.open_url(ISSUES_URL)
@@ -441,19 +359,18 @@ class TVMenus(QObject):
         """The drawer's Settings, Add provider, Free channels, Free radio, Open file, Open a link,
         Open a folder and Recordings rows, and its header's ⚙, Library, ⌕ and refresh buttons.
         Backed out of, Settings gives the list back: on its Settings row from there, where it
-        was from ⚙ and from Add provider (Settings at Providers, its Add card over it)."""
+        was from ⚙, from Add provider (Settings at Providers, its Add card over it) and from
+        Free channels and Free radio (their countries in Settings)."""
         if row == SETTINGS_ROW:
             self._window.open_settings(from_drawer=True)
         elif row == SETTINGS_BUTTON:
             self._window.open_settings(from_drawer=True, keep_place=True)
         elif row == ADD_PROVIDER_ROW:
             self._window.add_provider(from_drawer=True)
-        elif row == FREE_CHANNELS_ROW:
-            drawer = self._window.overlays.drawer
-            self._window.show_free_channels(drawer.row_anchor(row))
+        elif row == FREE_CHANNELS_ROW:  # Settings › Providers › Free channels (2.13.1)
+            self._window.show_free_channels(from_drawer=True)
         elif row == FREE_RADIO_ROW:  # 2.13
-            drawer = self._window.overlays.drawer
-            self._window.show_free_radio(drawer.row_anchor(row))
+            self._window.show_free_radio(from_drawer=True)
         elif row == OPEN_FILE_ROW:
             self._window.screens.open_file()
         elif row == OPEN_LINK_ROW:  # plan 4: File → Open Link…

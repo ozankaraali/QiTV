@@ -71,7 +71,7 @@ QiTV keeps each provider's lists for six hours and refreshes them in the backgro
 
 ### Free radio
 
-**＋ Free radio…** adds internet radio from [radio-browser.info](https://www.radio-browser.info), a free directory of stations run by its community, the way Free channels adds iptv-org's lists: **All countries** (the 2,000 most played stations in the world), your region, or **Another country…** (that country's stations). A list's first group, **All stations**, holds every station, the most played first; then come its countries (All countries) or its genres (one country: Pop, Rock, News & talk, Classical and so on, from the tags the directory gives them; a station without tags is under Other, the last group). It is in the sources column, the **Providers** menu, Settings → Providers, the Add provider card and the welcome card. A station plays live, straight from the station (no rewind or recording), on the audio screen with its logo, and with the song now playing when the station sends its name. Each list is a provider like any other: remove it in Settings → Providers. QiTV only asks the directory for its lists, as QiTV; nothing of yours is sent.
+**＋ Free radio…** adds internet radio from [radio-browser.info](https://www.radio-browser.info), a free directory of stations run by its community, the way Free channels adds iptv-org's lists: **All countries** (the 2,000 most played stations in the world), your region, or one country (its stations), from the list of countries in Settings → Providers that each of these places opens (every country from A to Z in your language; type to find one). The **Providers** menu offers All countries and your region at once, and **Another country…** opens that list. A list's first group, **All stations**, holds every station, the most played first; then come its countries (All countries) or its genres (one country: Pop, Rock, News & talk, Classical and so on, from the tags the directory gives them; a station without tags is under Other, the last group). It is in the sources column, the **Providers** menu, Settings → Providers, the Add provider card and the welcome card. A station plays live, straight from the station (no rewind or recording), on the audio screen with its logo, and with the song now playing when the station sends its name. Each list is a provider like any other: remove it in Settings → Providers. QiTV only asks the directory for its lists, as QiTV; nothing of yours is sent.
 
 ## Several providers
 
@@ -134,7 +134,7 @@ On a Mac in fullscreen, switching to another desktop or app floats the picture i
 
 ### Keys
 
-These are also in the app under Help → Keyboard Shortcuts. <kbd>Ctrl/⌘</kbd> means Ctrl on Windows and Linux and ⌘ (Command) on a Mac.
+These are also in the app under Settings › Keys (Help → Keyboard Shortcuts opens it). <kbd>Ctrl/⌘</kbd> means Ctrl on Windows and Linux and ⌘ (Command) on a Mac.
 
 <!-- keys:start -->
 **Watching TV**
@@ -181,6 +181,7 @@ These are also in the app under Help → Keyboard Shortcuts. <kbd>Ctrl/⌘</kbd>
 | <kbd>Ctrl/⌘+D</kbd> | Add or remove a favorite channel |
 | <kbd>Ctrl/⌘+P</kbd> | Open the channel in picture-in-picture |
 | <kbd>Delete (fn+⌫ on a Mac)</kbd> | Remove the channel from Recents |
+| <kbd>Menu</kbd> / <kbd>Shift+F10</kbd> | Open the highlighted item's menu (as a right-click does) |
 | <kbd>Ctrl/⌘+F</kbd> | Search |
 | <kbd>F11</kbd> / <kbd>⌃⌘F (Mac)</kbd> | Fullscreen |
 | <kbd>Esc</kbd> | End the find, then close |
@@ -195,6 +196,7 @@ These are also in the app under Help → Keyboard Shortcuts. <kbd>Ctrl/⌘</kbd>
 | <kbd>0–9</kbd> | Jump to a channel number |
 | <kbd>Enter</kbd> | Watch the channel; a past programme from its start |
 | <kbd>R</kbd> | Record the programme at its time, or cancel its recording |
+| <kbd>Menu</kbd> / <kbd>Shift+F10</kbd> | Open the highlighted item's menu (as a right-click does) |
 | <kbd>Ctrl/⌘+F</kbd> | Search |
 | <kbd>F</kbd> / <kbd>F11</kbd> / <kbd>⌃⌘F (Mac)</kbd> | Fullscreen |
 | <kbd>G</kbd> / <kbd>Esc</kbd> | Close the guide |
@@ -211,6 +213,7 @@ These are also in the app under Help → Keyboard Shortcuts. <kbd>Ctrl/⌘</kbd>
 | <kbd>/</kbd> | Search, or type it in the search |
 | <kbd>Ctrl/⌘+D</kbd> | Add to or remove from My list |
 | <kbd>Delete (fn+⌫ on a Mac)</kbd> | Delete a recording (it asks first), or take a folder off Folders |
+| <kbd>Menu</kbd> / <kbd>Shift+F10</kbd> | Open the highlighted item's menu (as a right-click does) |
 | <kbd>F11</kbd> / <kbd>⌃⌘F (Mac)</kbd> | Fullscreen |
 | <kbd>Esc</kbd> | Back; from the genres, back to live TV |
 

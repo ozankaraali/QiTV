@@ -112,7 +112,22 @@ class PhoneGuideTests(WindowCase):
         self.assertEqual((message["page"], message["pages"]), (130 // GUIDE_PAGE, 4))
         self.assertEqual([r["name"] for r in message["rows"] if r["playing"]], ["Channel 130"])
 
+    def test_a_channel_carries_its_logos_token_when_the_phone_is_given_one(self):
+        self.guide = PhoneGuide(self.window, self.sent.append, pictures=lambda channel: "L" * 22)
+        self.addCleanup(self.guide.deleteLater)
+        self.start()
+        self.assertTrue(all(row["img"] == "L" * 22 for row in self.last()["rows"]))
+        self.guide.timetable(self.last()["rows"][0]["id"])
+        self.assertEqual(self.last("timetable")["img"], "L" * 22)
+        bare = PhoneGuide(self.window, self.sent.append, bare=True, pictures=lambda channel: "")
+        self.addCleanup(bare.deleteLater)
+        bare.channels("", 0, "")
+        self.assertTrue(wait_until(lambda: self.last("channels") and self.last("channels")["rows"]))
+        self.assertFalse(any("img" in row for row in self.last("channels")["rows"]))
+
     def test_the_largest_messages_fit_a_frame_in_any_script(self):
+        self.guide = PhoneGuide(self.window, self.sent.append, pictures=lambda channel: "L" * 24)
+        self.addCleanup(self.guide.deleteLater)
         self.start()
         long = "字" * 300  # 3 bytes a letter; titles and descriptions are cut to what shows
         now = datetime.now(timezone.utc)

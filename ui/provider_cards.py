@@ -19,8 +19,8 @@ land in the address). The name is optional: the host, made unique, as its placeh
 playlist's HEAD or its file, a media server's sign-in). Only one that answered is added,
 selected and said ("Added … to your providers"). A failure says why and offers "Add anyway",
 but for Jellyfin and Emby (only their sign-in's token is kept, never the password) and for a
-playlist file QiTV can't find. "Free channels…" and "Free radio…" give way to the window's
-menus.
+playlist file QiTV can't find. "Free channels…" and "Free radio…" give way to their countries
+in Settings (2.13.1).
 
 The Address-and-login card ("<name>: address and login") is the same card, filled in from the
 provider, with "Check and save". Its link is never read as one until it changes: an older
@@ -55,7 +55,7 @@ import os
 from typing import Any, Optional
 from urllib.parse import parse_qsl, urlsplit
 
-from PySide6.QtCore import QObject, QPoint
+from PySide6.QtCore import QObject
 from PySide6.QtWidgets import QWidget
 
 from services.i18n import N_, translate
@@ -126,7 +126,7 @@ CHECK_SAVE_TEXT = N_("Check and save")  # i18n: a button: ask the provider first
 ADD_ANYWAY_TEXT = N_("Add anyway")
 M3U_FILE_TEXT = N_("M3U file…")  # i18n: the Add provider card's other way: a playlist file
 FREE_TEXT = N_("Free channels…")
-RADIO_TEXT = N_("Free radio…")  # i18n: the Add provider card's last other way (2.13); a menu
+RADIO_TEXT = N_("Free radio…")  # i18n: the Add provider card's last other way (2.13); a list
 # Under a provider's link: what QiTV found it to be.
 # i18n: under a provider's link: what it is ({kind}: "M3U playlist", "STB portal"…; {host})
 FOUND_TEXT = N_("✓ {kind} at {host}")
@@ -253,8 +253,8 @@ def _accounts(old: dict, new: dict) -> tuple[str, str]:
 class ProviderCards(QObject):
     """Settings › Providers' Add card and each provider's Address-and-login card, over the
     picture under Settings (`drawer`'s parent). `window` is the TV window (its check runner,
-    its toasts, its Free channels menu); `settings` shows the cards and gives them the keys;
-    `rows` the Providers rows, whose changes these are too (`ProviderRows.apply`)."""
+    its toasts, its Free channels and Free radio); `settings` shows the cards and gives them
+    the keys; `rows` the Providers rows, whose changes these are too (`ProviderRows.apply`)."""
 
     # What a card holds (`_reset`).
     _original: dict
@@ -616,19 +616,17 @@ class ProviderCards(QObject):
         self._render()
 
     def _free_channels(self) -> None:
-        """Free channels…: the card gives way to the window's menu, where it was."""
-        self._window.show_free_channels(self._give_way(FREE))
+        """Free channels…: the card gives way to Settings' Free channels, its countries (a
+        Settings the card opened for itself goes once one is chosen, as after the card)."""
+        alone = self._alone
+        self._close()
+        self._window.show_free_channels(opened_settings=alone)
 
     def _free_radio(self) -> None:
-        """Free radio… (2.13): likewise, its menu."""
-        self._window.show_free_radio(self._give_way(RADIO))
-
-    def _give_way(self, key: str) -> QPoint:
-        """The card closes: the global point under its alternate `key`, for a menu."""
-        rect = self.form.control_rect("alt", key)
-        at = self.form.mapToGlobal(rect.bottomLeft().toPoint())
+        """Free radio… (2.13): likewise, its countries."""
+        alone = self._alone
         self._close()
-        return at
+        self._window.show_free_radio(opened_settings=alone)
 
     # ---- checking, then keeping -------------------------------------------------------------
 

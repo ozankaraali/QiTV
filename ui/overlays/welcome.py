@@ -3,12 +3,12 @@
 The QiTV logo sits above the title. Its controls are the accent Add provider button, focused:
 a click on it, or Enter (OK on a remote, routed by the TV shell), emits `addRequested` and the
 window opens provider setup; and the plain Free channels… and Free radio… (2.13) buttons beside
-it, whose clicks emit `freeRequested` and `radioRequested` with the global point under the
-button, where the window pops up its menu (the keys reach both through the channel list's rows).
+it, whose clicks emit `freeRequested` and `radioRequested`: the window opens their countries in
+Settings (2.13.1; the keys reach both through the channel list's rows).
 1 u = 1% of the overlay host's width.
 """
 
-from PySide6.QtCore import QEvent, QObject, QPoint, QRect, QRectF, Qt, Signal
+from PySide6.QtCore import QEvent, QObject, QRect, QRectF, Qt, Signal
 from PySide6.QtGui import QFont, QFontMetrics, QMouseEvent, QPainter, QPaintEvent, QPen
 from PySide6.QtWidgets import QWidget
 
@@ -26,8 +26,8 @@ BODY_TEXT = N_(
     " to start watching."
 )
 BUTTON_TEXT = N_("Add provider")  # i18n: the welcome card's main button
-FREE_TEXT = N_("Free channels…")  # i18n: the welcome card's second button; opens a menu
-RADIO_TEXT = N_("Free radio…")  # i18n: the welcome card's third button (2.13); opens a menu
+FREE_TEXT = N_("Free channels…")  # i18n: the welcome card's second button; opens a list
+RADIO_TEXT = N_("Free radio…")  # i18n: the welcome card's third button (2.13); opens a list
 WIDTH_U = 44.0
 TITLE_U = 2.4
 BODY_U = 1.2
@@ -51,8 +51,8 @@ _TEXT_FLAGS = Qt.AlignHCenter | Qt.AlignTop | Qt.TextWordWrap
 class WelcomeCard(Overlay):
     accessible_name = N_("Welcome to QiTV")
     addRequested = Signal()
-    freeRequested = Signal(QPoint)  # the global point under the Free channels… button
-    radioRequested = Signal(QPoint)  # the global point under the Free radio… button (2.13)
+    freeRequested = Signal()  # its Free channels… button
+    radioRequested = Signal()  # its Free radio… button (2.13)
 
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
@@ -271,11 +271,9 @@ class WelcomeCard(Overlay):
         if self.button_rect().contains(event.position()):
             self.activate()
         elif self.free_button_rect().contains(event.position()):
-            below = self.free_button_rect().bottomLeft().toPoint()
-            self.freeRequested.emit(self.mapToGlobal(below))
+            self.freeRequested.emit()
         elif self.radio_button_rect().contains(event.position()):
-            below = self.radio_button_rect().bottomLeft().toPoint()
-            self.radioRequested.emit(self.mapToGlobal(below))
+            self.radioRequested.emit()
 
     def mouseReleaseEvent(self, event: QMouseEvent) -> None:
         event.accept()

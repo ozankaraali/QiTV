@@ -23,6 +23,7 @@ from PySide6.QtCore import (
     QModelIndex,
     QPoint,
     QPointF,
+    QRect,
     QRectF,
     QSize,
     Qt,
@@ -482,6 +483,14 @@ class SeriesView(TooltipWidget):
         if self._status() or not self._view.currentIndex().isValid():
             return None
         return self._model.item(self._view.currentIndex().row())
+
+    def current_episode_rect(self) -> QRect | None:
+        """The highlighted episode's row, in global coordinates (2.13.1: the menu key's menu
+        opens beside it); None while no episode is highlighted (the seasons have the keys)."""
+        if self._zone != EPISODES or self.current_episode() is None:
+            return None
+        rect = self._view.visualRect(self._view.currentIndex())
+        return QRect(self._view.viewport().mapToGlobal(rect.topLeft()), rect.size())
 
     @property
     def focus_zone(self) -> str:

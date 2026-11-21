@@ -102,21 +102,37 @@ class ScheduleWindowTests(WindowCase):
     def test_record_at_a_time_schedules_a_timer_or_one_slot(self):  # 2.8 (owner)
         from datetime import date, timedelta
 
-        from PySide6.QtCore import QTime
-
+        from ui.keymap import Action
         from ui.record_timer_dialog import DAILY, TimerChoice
 
         self.attach()
         window = self.window
         self.assertIsNotNone(window.controller.record_at)  # the channel's right-click
         window.overlays.guide.timerRequested.emit(CHANNEL, None)  # the guide's footer
-        dialog = window._timer_dialog
-        self.assertEqual(dialog.channel.text(), "Channel 2")
-        dialog.repeat.setCurrentIndex(dialog.repeat.findData(DAILY))
-        dialog.begin.setTime(QTime(21, 0))
-        dialog.end.setTime(QTime(22, 0))
+        card = window.record_card  # 2.13.1: a card over the picture, no window
+        self.assertFalse(card.isHidden())
+        self.assertEqual(card.channel_text(), "Channel 2")
+        press = window.controller.handle  # the TV's keys: the card's while it shows
+
+        def step_to(value, minutes):
+            for _ in range(400):
+                if value() == minutes:
+                    return
+                ahead = (minutes - value()) % (24 * 60)
+                press(Action.NAV_PAGE_UP if ahead >= 60 else Action.NAV_RIGHT)
+            self.fail(f"never {minutes}")
+
+        press(Action.NAV_DOWN)  # Name, then Repeat
+        press(Action.NAV_RIGHT)  # Every day
+        self.assertEqual(card.repeat(), DAILY)
+        press(Action.NAV_DOWN)  # From
+        step_to(card.begin, 21 * 60)
+        press(Action.NAV_DOWN)  # To
+        step_to(card.end, 22 * 60)
+        press(Action.NAV_DOWN)  # Record
         with mock.patch.object(window.screens, "notify") as notify:
-            dialog.schedule_button.click()
+            press(Action.NAV_ACTIVATE)
+        self.assertTrue(card.isHidden())
         timers = [i for i in window.recording_schedule.items() if i["kind"] == "timer"]
         self.assertEqual(
             [(i["begin"], i["minutes"], i["days"]) for i in timers], [(1260, 60, list(range(7)))]
@@ -143,18 +159,19 @@ class ScheduleWindowTests(WindowCase):
     def test_delete_follows_whether_the_file_is_written_now(self):  # 2.8 review
         # The shelf was read while it recorded (or before): its menu asks now.
         from PySide6.QtCore import QPoint
-        from PySide6.QtWidgets import QMenu
 
         pages = self.window.screens
         item = {"path": "/rec/a.ts", "_writing": False}
 
         def delete_enabled():
             pages._recording_menu(item, QPoint(0, 0))
-            menu = self.window.library_page.findChildren(QMenu)[-1]
-            action = next(a for a in menu.actions() if a.text() == "Delete Recording…")
-            menu.close()
-            menu.deleteLater()
-            return action.isEnabled()
+            shown = self.window.library_menu  # 2.13.1: painted on the Library's page
+            self.assertEqual(
+                shown.menu().texts(), ["Show in Folder", "Delete Recording…", "Manage Recordings…"]
+            )
+            entry = shown.menu().entry("Delete Recording…")
+            shown.close_menu()
+            return entry.enabled
 
         with mock.patch.object(self.window, "engine", mock.Mock(writing=frozenset({"/rec/a.ts"}))):
             self.assertFalse(delete_enabled())

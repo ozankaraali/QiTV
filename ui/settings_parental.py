@@ -7,27 +7,30 @@ action at once, through the window's services.parental guard as the old tab used
   then the new one twice. Remove PIN… asks the current one; Unlock for an hour…, only while
   locked, asks it too; Lock now, only while unlocked, ends the hour. The old rules and
   messages: a PIN is 4 digits or more, typed the same twice, and a wrong one is refused (said in
-  the card, which stays for another try). The fields are secret and take digits only;
+  the card, which stays for another try). The fields are secret and take digits only; Back
+  (Backspace, the player's Back) deletes a digit, and on an empty field cancels the card (the
+  phone may have only Back), Esc at once (2.13.1);
 - Hide groups whose names look adult is a switch only with a PIN, and while locked with it on
   it only says so (turning it off needs the PIN: unlocked);
 - Hidden while locked › lists what is hidden, each shown again at once with a press; while
   locked the line only says to unlock first, and nothing of it is listed.
 
 After every change TVWindow.parental_changed, which builds these rows again too (the hour
-running out while Settings shows as well). No PIN is ever logged, shown or said. Keys:
+running out while Settings shows as well). The same card asks the PIN before a change parental
+controls guard elsewhere in Settings (`ask_pin`: a provider renamed or removed), answered
+through a callback (2.13.1: no system window). No PIN is ever logged, shown or said. Keys:
 `parental/…`.
 """
 
 from __future__ import annotations
 
 import logging
-from typing import Any, Optional
+from typing import Any, Callable, Optional
 from urllib.parse import quote, unquote
 
 from PySide6.QtCore import QObject
-from PySide6.QtWidgets import QInputDialog, QLineEdit, QMessageBox, QWidget
 
-from services.i18n import N_, number, tr, translate
+from services.i18n import N_, number, translate
 from services.parental import Parental
 from services.provider_ids import provider_title
 from services.settings_model import (
@@ -40,6 +43,7 @@ from services.settings_model import (
     Section,
     step as stepped,
 )
+from ui.keymap import Action
 from ui.overlays.settings_card import CANCEL, CANCEL_TEXT, OK, OK_TEXT, Button, Field, FormCard
 from ui.settings_controller import SettingsController
 
@@ -61,7 +65,7 @@ CURRENT = "current"
 NEW = "new"
 AGAIN = "again"
 YOURS = "pin"
-_SET, _CHANGE, _REMOVE, _UNLOCK = "set", "change", "remove", "unlock"
+_SET, _CHANGE, _REMOVE, _UNLOCK, _CHECK = "set", "change", "remove", "unlock", "check"
 _COLONS = " :：  "  # after the old window's labels ("Your PIN:")
 _ELLIPSIS = "….  "  # after a row's title, as a card's ("Set PIN…" → "Set PIN")
 
@@ -96,6 +100,8 @@ SHORT_TEXT = N_("A PIN is 4 digits or more.")
 DIFFERENT_TEXT = N_("The PINs were not the same.")
 # i18n: said in the PIN card: the PIN typed is not the parental controls' PIN
 WRONG_TEXT = N_("That PIN is not right.")
+# i18n: the title of the window that asks for the parental controls' PIN
+PARENTAL_TITLE = N_("Parental controls")
 
 
 def _digits(text: str) -> str:
@@ -106,25 +112,38 @@ def _on_off(on: bool) -> str:
     return next(choice for choice in ON_OFF if choice.value is on).shown()
 
 
-def _ask_pin(parent: QWidget, label: str) -> Optional[str]:
-    # i18n: the title of the window that asks for the parental controls' PIN
-    text, ok = QInputDialog.getText(parent, tr("Parental controls"), label, QLineEdit.Password)
-    return text if ok else None
+_BACK = (Action.NAV_BACKSPACE, Action.PREVIOUS)  # Back in the PIN's card
 
 
-def pin_allows(parent: QWidget, guard: Optional[Parental]) -> bool:
+class _PinCard(FormCard):
+    """The PIN's card: Back (Backspace, the player's Back) deletes a digit while the field has
+    one, and on an empty field cancels the card; Esc cancels at once (FormCard's)."""
+
+    def handle(self, action: Action, payload: object = "") -> bool:
+        zone, key = self.focus()
+        if not self.isHidden() and zone == "field" and action in _BACK:
+            if not self.values().get(key):
+                self._cancel()
+                return True
+            action = Action.NAV_BACKSPACE  # the player's Back too: a digit
+        return super().handle(action, payload)
+
+
+def ask_pin(window: Any, guard: Optional[Parental], then: Callable[[bool], None]) -> None:
     """Whether a change parental controls guard may go ahead (Settings › Providers: a provider
-    renamed or removed, 2.8.12): no PIN set, unlocked, or the PIN typed now (asked in the
-    system's window, without unlocking; a wrong one is said)."""
+    renamed or removed, 2.8.12), answered through `then`: at once (True) with no PIN set or
+    unlocked; else once the PIN is typed in the PIN's card over Settings (`window`'s
+    parental_rows: it unlocks nothing; a wrong one is said in the card, which stays for another
+    try), False when the card goes without it (Cancel, Esc, Back, Settings going)."""
     if guard is None or not guard.locked():
-        return True
-    pin = _ask_pin(parent, translate(YOUR_PIN_TEXT))
-    if pin is None:
-        return False
-    if not guard.check(pin):
-        QMessageBox.warning(parent, tr("Parental controls"), translate(WRONG_TEXT))
-        return False
-    return True
+        then(True)
+        return
+    rows = getattr(window, "parental_rows", None)
+    if rows is None:
+        logger.warning("No card to ask the parental PIN in: the change is refused")
+        then(False)
+        return
+    rows.check_pin(guard, then)
 
 
 class ParentalRows(QObject):
@@ -138,8 +157,10 @@ class ParentalRows(QObject):
         self._settings = settings
         self._drawer = drawer
         self._card: Optional[FormCard] = None
-        self._for = ""  # what the card is for (_SET, _CHANGE, _REMOVE, _UNLOCK)
+        self._for = ""  # what the card is for (_SET, _CHANGE, _REMOVE, _UNLOCK, _CHECK)
         self._title = ""  # and its title
+        # _CHECK's: the guard the PIN is checked against, and what waits for the answer
+        self._checking: Optional[tuple[Parental, Callable[[bool], None]]] = None
         settings.register(PARENTAL_PREFIX, self)
 
     @property
@@ -310,13 +331,21 @@ class ParentalRows(QObject):
 
     # ---- the PIN's card ---------------------------------------------------------------------
 
+    def check_pin(self, guard: Parental, then: Callable[[bool], None]) -> None:
+        """The PIN asked in the card, titled Parental controls, for a change `guard` guards
+        (ask_pin): `then(True)` once the right one is typed (nothing unlocks), `then(False)`
+        once the card goes without it."""
+        self._ask(_CHECK, PARENTAL_TITLE)
+        self._checking = (guard, then)
+
     def _ask(self, purpose: str, title: str) -> None:
         """The card for `purpose`, its fields empty, the keys on the first; `title` the row's."""
         if self._card is None:
-            self._card = FormCard(self._drawer.parentWidget())
+            self._card = _PinCard(self._drawer.parentWidget())
             self._card.pressed.connect(self._on_pressed)
             self._card.changed.connect(self._on_changed)
             self._card.cancelled.connect(self._forget)
+        self._checked(False)  # a check still asked is over, unanswered
         self._for = purpose
         self._title = translate(title).rstrip(_ELLIPSIS)
         self._render({})
@@ -403,6 +432,14 @@ class ParentalRows(QObject):
             if not guard.unlock(values.get(YOURS, "")):
                 self._refuse(WRONG_TEXT, YOURS)
                 return
+        elif self._for == _CHECK and self._checking is not None:
+            if not self._checking[0].check(values.get(YOURS, "")):
+                self._refuse(WRONG_TEXT, YOURS)
+                return
+            card.hide()
+            self._for = ""
+            self._checked(True)  # nothing changed here: the change it guards goes on
+            return
         else:
             return
         card.hide()
@@ -412,3 +449,10 @@ class ParentalRows(QObject):
     def _forget(self) -> None:
         """The card went (done, or cancelled: Esc, Back, Settings going)."""
         self._for = ""
+        self._checked(False)
+
+    def _checked(self, right: bool) -> None:
+        """A check's answer, once (none while none is asked)."""
+        checking, self._checking = self._checking, None
+        if checking is not None:
+            checking[1](right)
