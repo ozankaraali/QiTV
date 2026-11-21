@@ -172,6 +172,9 @@ class FakeImages:
         self.hold = False  # downloads wait until called off
         self.cancelled: list[str] = []
         self.sessions: list = []
+        self.fixed: dict[str, bytes] = {}  # what a download brings once the file was dropped
+        self.vanish: set[str] = set()  # whose file goes (evicted) before it is read, once
+        self._urls: dict[str, str] = {}  # file → address
 
     async def cache_image_from_url(self, session, url, iconified):
         self.calls.append((url, iconified, threading.current_thread().name))
@@ -191,6 +194,10 @@ class FakeImages:
             return None
         path = self.folder / f"{abs(hash((url, iconified)))}.{'png' if iconified else 'jpg'}"
         path.write_bytes(data)
+        self._urls[str(path)] = url
+        if url in self.vanish:
+            self.vanish.discard(url)
+            path.unlink()
         return str(path)
 
     async def cache_image_from_base64(self, image_str, iconified):
@@ -198,6 +205,9 @@ class FakeImages:
 
     def discard(self, path):
         self.discarded.append(path)
+        url = self._urls.get(path, "")
+        if url in self.fixed:
+            self.files[url] = self.fixed.pop(url)
 
 
 class HubCase(unittest.TestCase):
@@ -639,6 +649,61 @@ class HomeDoorPictureTests(HubCase):
         text = "\n".join(r.getMessage() for r in records)
         self.assertNotIn("Task was destroyed", text)
         self.assertNotIn("Unclosed", text)
+
+    def get_one(self, url, kind=POSTER, scale_with=None):
+        """A phone's ask for the picture at `url` (as QiTV would scale it: `scale_with`)."""
+
+        async def go():
+            async with aiohttp.ClientSession() as s:
+                ws, sid = await self.pair(s)
+                token = self.hub.pictures.issue(sid, url, kind)
+                answer = asyncio.ensure_future(self.get(s, f"/img/{token}"))
+                if scale_with is not None:
+                    wanted = await asyncio.get_running_loop().run_in_executor(
+                        None, lambda: self.events.wait(PictureWanted)
+                    )
+                    self.hub.put_picture(wanted.source, wanted.kind, scale_with, "image/png")
+                result = await answer
+                await ws.close()
+                return result
+
+        return self.run_async(go())
+
+    def test_a_picture_cut_off_in_the_cache_is_a_miss_fetched_again(self):
+        url = "https://img.example/torn.png"
+        self.images.files[url] = png()[:-12]  # no end: half written by an older QiTV
+        self.images.fixed[url] = png()
+        status, _headers, body = self.get_one(url)
+        self.assertEqual((status, body), (200, png()))
+        self.assertEqual(len(self.images.calls), 2)
+        self.assertEqual(len(self.images.discarded), 1)
+
+    def test_an_empty_file_in_the_cache_is_a_miss_fetched_again(self):
+        url = "https://img.example/empty.jpg"
+        self.images.files[url] = b""
+        self.images.fixed[url] = JPEG
+        status, _headers, body = self.get_one(url)
+        self.assertEqual((status, body), (200, JPEG))
+
+    def test_a_picture_gone_from_the_cache_before_its_read_is_fetched_again(self):
+        url = "https://img.example/evicted.jpg"
+        self.images.files[url] = JPEG
+        self.images.vanish.add(url)
+        status, _headers, body = self.get_one(url)
+        self.assertEqual((status, body), (200, JPEG))
+        self.assertEqual(len(self.images.calls), 2)
+
+    def test_a_picture_its_host_cuts_off_goes_as_qitv_scales_it(self):
+        url = "https://img.example/short.png"
+        self.images.files[url] = png()[:-12]  # every download as short: read as far as it goes
+        status, _headers, body = self.get_one(url, scale_with=png())
+        self.assertEqual((status, body), (200, png()))
+
+    def test_a_cut_off_scaled_copy_is_refused(self):
+        url = "https://img.example/big.png"
+        self.images.files[url] = png(pad=AS_IS_MAX + 10)
+        with mock.patch.object(pictures, "SCALE_S", 0.5):
+            self.assertEqual(self.get_one(url, scale_with=png()[:-12])[0], 404)
 
     def test_nothing_is_fetched_once_the_hub_stops(self):
         self.images.fetched["https://img.example/late.jpg"] = JPEG

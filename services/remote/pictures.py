@@ -59,6 +59,7 @@ ANSWER_HEADERS = {
     "Cross-Origin-Resource-Policy": "same-origin",
 }
 _PAGES = (b"<!doctype html", b"<html", b"<head", b"<body", b"{", b"[")
+_MISS = ("miss", b"", "")  # a cached file gone or cut off: downloaded again
 _JPEG_SCAN = 64 * 1024  # how far into a JPEG its frame (and size) is looked for
 # The JPEG markers that start a frame (SOF0–SOF15 but DHT, JPG and DAC) and those without length.
 _SOF = frozenset(range(0xC0, 0xD0)) - {0xC4, 0xC8, 0xCC}
@@ -151,6 +152,21 @@ def _small(data: bytes) -> bool:
     """Whether a picture is known to be no more than MAX_SIDE pixels a side."""
     size = picture_size(data)
     return size is not None and 0 < size[0] <= MAX_SIDE and 0 < size[1] <= MAX_SIDE
+
+
+def whole(data: bytes) -> bool:
+    """Whether a picture of the web's formats ends where its format says it ends (a PNG's IEND,
+    a JPEG's EOI, a GIF's trailer, a WebP's own length): not one cut off on the way."""
+    kind = sniff(data[:_HEAD])
+    if kind == "image/png":
+        return data[-8:-4] == b"IEND"
+    if kind == "image/jpeg":
+        return b"\xff\xd9" in data[-64:]  # (some writers add a little after it)
+    if kind == "image/gif":
+        return data.rstrip(b"\x00").endswith(b";")
+    if kind == "image/webp":
+        return len(data) >= 8 + int.from_bytes(data[4:8], "little")
+    return False
 
 
 def _a_page(head: bytes) -> bool:
@@ -270,12 +286,18 @@ class _Fetcher:
         if self._limit is None:
             self._limit = asyncio.Semaphore(FETCHES)
         async with self._limit:  # FETCH_S counts from here: the wait for a turn isn't its
-            try:
-                path = await asyncio.wait_for(self._cached(picture), FETCH_S)
-            except TimeoutError:
-                logger.info("Phone remote: a picture's download took too long")
-                return None
-        return self._read(path) if path else None
+            for again in (False, True):
+                try:
+                    path = await asyncio.wait_for(self._cached(picture), FETCH_S)
+                except TimeoutError:
+                    logger.info("Phone remote: a picture's download took too long")
+                    return None
+                if not path:
+                    return None
+                read = self._read(path, last=again)
+                if read != _MISS:
+                    return read
+        return None  # (never reached: the second read is never a miss)
 
     async def _cached(self, picture: Picture) -> Optional[str]:
         iconified = picture.kind == LOGO  # as the TV's LogoCache and PosterCache keep them
@@ -306,27 +328,41 @@ class _Fetcher:
             self._sessions[verify] = session
         return session
 
-    def _read(self, path: str) -> Optional[tuple[str, bytes, str]]:
+    def _read(self, path: str, last: bool) -> Optional[tuple[str, bytes, str]]:
+        """The cached file at `path`: as it is, to be scaled, None, or a miss (_MISS: gone, or
+        cut off) to download again unless this is the `last` try."""
         try:
             size = os.path.getsize(path)
             with open(path, "rb") as file:
                 head = file.read(_HEAD)
                 kind = sniff(head)
-                if kind is not None and size <= AS_IS_MAX:
-                    data = head + file.read(AS_IS_MAX)
-                    if _small(data):  # else the phone would decode it whole: scaled
-                        return "as_is", data, kind
+                data = head + file.read(AS_IS_MAX) if kind and size <= AS_IS_MAX else b""
+        except FileNotFoundError:  # evicted meanwhile: not in the cache after all
+            return None if last else _MISS
         except OSError as error:
             logger.info(
                 "Phone remote: a cached picture couldn't be read (%s)", type(error).__name__
             )
             return None
-        if not head or _a_page(head):
-            discard = getattr(self._images, "discard", None)
-            if callable(discard):
-                discard(path)  # asked for again next time, by the TV too
+        if kind is not None and data and not whole(data) and not last:
+            self._discard(path)  # cut off (an older QiTV's write): downloaded again
+            return _MISS
+        if kind is not None and data and whole(data) and _small(data):
+            return "as_is", data, kind
+        if not head:
+            self._discard(path)
+            return None if last else _MISS
+        if _a_page(head):
+            self._discard(path)  # asked for again next time, by the TV too
             return None
-        return "scale", b"", ""  # too large, or a format the page isn't sent as it is
+        # Too large, a format the page isn't sent as it is, or cut off by its host each time
+        # (the TV reads it as far as it goes): scaled.
+        return "scale", b"", ""
+
+    def _discard(self, path: str) -> None:
+        discard = getattr(self._images, "discard", None)
+        if callable(discard):
+            discard(path)
 
     async def _drain(self) -> None:
         """On this fetcher's loop: every download called off (begun or waiting its turn), then
@@ -483,7 +519,7 @@ def _scaled_copy(data: object) -> Optional[Found]:
     if not isinstance(data, bytes) or len(data) > SCALED_MAX:
         return None
     kind = sniff(data[:_HEAD])
-    return (data, kind) if kind is not None and _small(data) else None
+    return (data, kind) if kind is not None and whole(data) and _small(data) else None
 
 
 def add_routes(app: Any, server: PictureServer) -> None:

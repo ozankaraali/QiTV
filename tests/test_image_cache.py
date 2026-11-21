@@ -6,6 +6,7 @@ import tempfile
 import threading
 from types import SimpleNamespace
 import unittest
+from unittest import mock
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
@@ -222,3 +223,112 @@ class ImageDownloadTests(unittest.TestCase):
         self.assertFalse(os.path.exists(stale))
         self.assertFalse(self.load([url])[0]["image"].isNull())
         self.assertEqual(len(self.agents), 1)
+
+
+class _CutWrites:
+    """The cache's own `open`, with its writes cut off half way (`cut`) or paused half way to
+    look at the cache folder (`seen` records whether the picture's file was there then)."""
+
+    def __init__(self, watched: str, cut: bool) -> None:
+        self.watched, self.cut = watched, cut
+        self.seen: list[bool] = []
+
+    def __call__(self, path, mode="r", *args, **kwargs):
+        file = open(path, mode, *args, **kwargs)
+        if "w" not in mode and "x" not in mode:
+            return file
+        case = self
+
+        class Half:
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *exc):
+                file.close()
+                return False
+
+            def write(self, data):
+                file.write(data[: len(data) // 2])
+                file.flush()
+                case.seen.append(os.path.exists(case.watched))
+                if case.cut:
+                    raise OSError("No space left on device")
+                return file.write(data[len(data) // 2 :])
+
+            def close(self):
+                file.close()
+
+        return Half()
+
+
+class AtomicWriteTests(unittest.TestCase):
+    """A picture lands in the cache whole or not at all (written aside, then renamed into place):
+    the TV and the phone's picture server, reading the same files from their own threads, never
+    read one half written."""
+
+    URL = "https://posters.invalid/made-up.jpg"
+
+    def setUp(self):
+        self.directory = tempfile.TemporaryDirectory()
+        self.addCleanup(self.directory.cleanup)
+        self.config = SimpleNamespace(get_config_dir=lambda: self.directory.name)
+        self.manager = ImageManager(self.config, max_cache_size=1_000_000)
+        self.path = os.path.join(
+            self.manager.cache_dir, self.manager._hash_string(self.URL + "jpg") + ".jpg"
+        )
+
+    def fetch(self, body):
+        from test_image_age import Session
+
+        return asyncio.run(self.manager.cache_image_from_url(Session(body), self.URL, False, 1))
+
+    def leftovers(self):
+        return [n for n in os.listdir(self.manager.cache_dir) if n != "index.json"]
+
+    def test_a_reader_never_sees_a_picture_half_written(self):
+        writes = _CutWrites(self.path, cut=False)
+        with mock.patch("services.image_manager.open", writes, create=True):
+            self.assertEqual(self.fetch(b"x" * 1000), self.path)
+        self.assertEqual(writes.seen, [False])  # not there while it was being written
+        with open(self.path, "rb") as f:
+            self.assertEqual(f.read(), b"x" * 1000)
+        self.assertEqual(self.leftovers(), [os.path.basename(self.path)])
+
+    def test_a_write_cut_off_half_way_leaves_nothing(self):
+        writes = _CutWrites(self.path, cut=True)
+        with mock.patch("services.image_manager.open", writes, create=True):
+            self.assertIsNone(self.fetch(b"x" * 1000))
+        self.assertFalse(os.path.exists(self.path))
+        self.assertEqual(self.leftovers(), [])  # nor a part of it aside
+        self.assertEqual(self.manager.current_cache_size, 0)
+        self.assertEqual(self.fetch(b"y" * 10), self.path)  # the next asks it again
+
+    def test_a_picture_fetched_again_stays_whole_if_that_write_is_cut_off(self):
+        from services import image_manager
+
+        url = "https://image.tmdb.org/t/p/w342/made-up.jpg"  # fetched again once old
+        path = os.path.join(self.manager.cache_dir, self.manager._hash_string(url + "jpg") + ".jpg")
+        from test_image_age import Session
+
+        asyncio.run(self.manager.cache_image_from_url(Session(b"old" * 10), url, False, 1))
+        then = os.path.getmtime(path) - image_manager.TMDB_IMAGE_MAX_AGE_S - 60
+        os.utime(path, (then, then))
+        with mock.patch("services.image_manager.open", _CutWrites(path, cut=True), create=True):
+            asyncio.run(self.manager.cache_image_from_url(Session(b"new" * 10), url, False, 1))
+        with open(path, "rb") as f:
+            self.assertEqual(f.read(), b"old" * 10)  # the whole old one, never half the new
+
+    def test_a_cut_off_inline_picture_leaves_nothing(self):
+        writes = _CutWrites("", cut=True)
+        with mock.patch("services.image_manager.open", writes, create=True):
+            stored = asyncio.run(self.manager.cache_image_from_base64(_data_url(b"z" * 100), True))
+        self.assertIsNone(stored)
+        self.assertEqual(self.leftovers(), [])
+
+    def test_parts_left_by_a_quit_go_when_the_cache_opens(self):
+        part = os.path.join(self.manager.cache_dir, os.path.basename(self.path) + ".1a2b.part")
+        with open(part, "wb") as f:
+            f.write(b"half")
+        again = ImageManager(self.config, max_cache_size=1_000_000)
+        self.assertFalse(os.path.exists(part))
+        self.assertEqual(len(again.cache), 0)

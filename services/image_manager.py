@@ -5,6 +5,7 @@ import hashlib
 import logging
 import os
 import random
+import secrets
 import threading
 import time
 from urllib.parse import urlsplit
@@ -23,6 +24,33 @@ asyncio = lazy_module("asyncio")
 # them: TMDB's terms allow six months at most. A file's time is its download's.
 TMDB_IMAGES = "https://image.tmdb.org/"
 TMDB_IMAGE_MAX_AGE_S = 30 * 24 * 60 * 60
+# A picture is written beside its place as "<its name>.<random>.part", then renamed into it.
+PART = ".part"
+
+
+def write_whole(path: str, data: bytes) -> None:
+    """`data` into the file `path` whole or not at all: written aside in its folder, then put in
+    its place at once (os.replace), so a reader on another thread (the TV's, the phone remote's
+    pictures) finds the old file, the new one, or none: never half of one. Raises OSError (the
+    part written aside gone again)."""
+    part = f"{path}.{secrets.token_hex(4)}{PART}"
+    try:
+        with open(part, "xb") as f:
+            f.write(data)
+        try:
+            os.replace(part, path)
+        except PermissionError:
+            # Windows: a reader holds the file open. It is whole (written this way), and it is
+            # this picture's: it stays.
+            if not os.path.exists(path):
+                raise
+            os.remove(part)
+    except BaseException:
+        try:
+            os.remove(part)
+        except OSError:
+            pass
+        raise
 
 
 def _too_old(url: str, path: str) -> bool:
@@ -103,8 +131,7 @@ class ImageManager:
 
                     # Persist bytes. We skip pre-scaling here to avoid GUI usage off-thread.
                     try:
-                        with open(cache_path, "wb") as f:
-                            f.write(content)
+                        write_whole(cache_path, content)
                         self._touch_cache_entry(url_hash, cache_path)
                         self._manage_cache_size(protect=url_hash)
                         return cache_path
@@ -132,8 +159,7 @@ class ImageManager:
         try:
             base64_data = image_str.split(",", 1)[1]
             image_data = base64.b64decode(base64_data)
-            with open(cache_path, "wb") as f:
-                f.write(image_data)
+            write_whole(cache_path, image_data)
             self._touch_cache_entry(image_hash, cache_path)
             self._manage_cache_size(protect=image_hash)
             return cache_path
@@ -223,6 +249,12 @@ class ImageManager:
             now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
             for filename in os.listdir(self.cache_dir):
                 image_hash, ext = os.path.splitext(filename)
+                if ext == PART:  # a picture being written when QiTV last quit: never whole
+                    try:
+                        os.remove(os.path.join(self.cache_dir, filename))
+                    except OSError:
+                        pass
+                    continue
                 if ext in (".png", ".jpg") and not self.cache.get(image_hash):
                     self.cache[image_hash] = {
                         "size": os.path.getsize(os.path.join(self.cache_dir, filename)),
