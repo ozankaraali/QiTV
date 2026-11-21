@@ -1644,9 +1644,11 @@ class LiveEngineTests(unittest.TestCase):
 
     def test_a_restart_reopens_only_sessions_whose_input_was_still_running(self):
         def stream_then_refuse(_request, count):
-            # Streams, then refuses the reconnect: an "http" failure after ready.
+            # Streams, then refuses the reconnect: an "http" failure after ready. The first
+            # answer must outlast the start hold (~20 s of content buffered before the first
+            # segment opens), so 30 s: a 6 s stream ends before the session is ever ready.
             if count == 1:
-                return 200, {}, paced_body(make_stream(6), self.stop, threading.Event())
+                return 200, {}, paced_body(make_stream(30), self.stop, threading.Event())
             return 404, {}, b""
 
         paths = {
