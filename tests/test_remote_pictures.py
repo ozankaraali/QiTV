@@ -433,6 +433,22 @@ class HomeDoorPictureTests(HubCase):
         sid = asyncio.run_coroutine_threadsafe(relayed(), self.hub._loop).result(3)
         self.assertEqual(self.hub.pictures.issue(sid, "https://img.example/a.jpg", POSTER), "")
 
+    def test_nothing_is_fetched_once_the_hub_stops(self):
+        self.images.fetched["https://img.example/late.jpg"] = JPEG
+        server = self.hub._core.pictures
+        server.stop()
+
+        async def go():
+            async with aiohttp.ClientSession() as s:
+                ws, sid = await self.pair(s)
+                token = self.hub.pictures.issue(sid, "https://img.example/late.jpg", POSTER)
+                answer = await self.get(s, f"/img/{token}")
+                await ws.close()
+                return answer[0]
+
+        self.assertEqual(self.run_async(go()), 404)
+        self.assertEqual(self.images.calls, [])
+
     def test_nothing_is_logged_with_a_link(self):
         self.images.fetched["https://img.example/p/9.jpg?user=me&pass=pw"] = b"<html>"
         records: list[logging.LogRecord] = []

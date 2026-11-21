@@ -166,14 +166,20 @@ class _Fetcher:
         self._loop: Optional[asyncio.AbstractEventLoop] = None
         self._sessions: dict[bool, Any] = {}  # aiohttp sessions, by TLS check (this loop's)
         self._limit: Optional[asyncio.Semaphore] = None
+        self._stopped = False
 
     def load(self, picture: Picture) -> concurrent.futures.Future:
         """("as_is", bytes, type), ("scale", b"", "") or None, on this fetcher's thread."""
-        return asyncio.run_coroutine_threadsafe(self._load(picture), self._started())
+        loop = self._started()
+        if loop is None:  # the hub stops: nothing more is fetched
+            done: concurrent.futures.Future = concurrent.futures.Future()
+            done.set_result(None)
+            return done
+        return asyncio.run_coroutine_threadsafe(self._load(picture), loop)
 
-    def _started(self) -> asyncio.AbstractEventLoop:
+    def _started(self) -> Optional[asyncio.AbstractEventLoop]:
         with self._lock:
-            if self._loop is None:
+            if self._loop is None and not self._stopped:
                 loop = asyncio.new_event_loop()
                 threading.Thread(
                     target=self._run, args=(loop,), name="qitv-pictures", daemon=True
@@ -245,6 +251,7 @@ class _Fetcher:
         """Its sessions close and its loop ends, without waiting (the hub's stop is short)."""
         with self._lock:
             loop, self._loop = self._loop, None
+            self._stopped = True
         if loop is None:
             return
         sessions, self._sessions = list(self._sessions.values()), {}
