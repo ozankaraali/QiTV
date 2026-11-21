@@ -47,6 +47,7 @@ class Card(NamedTuple):
     then: Callable[[str], None]
     alternates: list
     back: str
+    unasked: bool = False  # QiTV says it by itself: it waits while the mini player shows
 
 
 class Asked:
@@ -56,7 +57,9 @@ class Asked:
         self.cards: list[Card] = []
         self._patch = mock.patch.object(window_cards, "ask", side_effect=self._ask)
 
-    def _ask(self, title, body, buttons, default, then, *, alternates=(), back=CANCEL):
+    def _ask(
+        self, title, body, buttons, default, then, *, alternates=(), back=CANCEL, unasked=False
+    ):
         self.cards.append(
             Card(
                 title,
@@ -66,6 +69,7 @@ class Asked:
                 then,
                 [(b.key, b.text) for b in alternates],
                 back,
+                unasked,
             )
         )
 
@@ -746,6 +750,7 @@ class UpdateCardsTests(unittest.TestCase):
         self.assertEqual(card.default, "download")
         # An automatic check's other way: its reminders off (the old box's check box with Skip).
         self.assertEqual(card.alternates, [("mute", "Do not remind me about updates")])
+        self.assertTrue(card.unasked)  # the startup check's: it waits for the mini player
         card.then("download")
         self.start_download.assert_called_once_with(
             "https://release.invalid/qitv.zip", 1, "https://release.invalid/qitv"
@@ -877,6 +882,9 @@ class DownloadCardTests(unittest.TestCase):
             "shown": mock.patch.object(window_cards, "progress", return_value=self.handle),
             "start": mock.patch.object(update_checker, "start_download", return_value=self.cancel),
             "perform": mock.patch.object(update_checker, "perform_update"),
+            # none running, none downloaded before (this run's, module-wide)
+            "running": mock.patch.object(update_dialogs, "_running", None),
+            "downloaded": mock.patch.object(update_dialogs, "_downloaded", {}),
         }
         for name, patch in patches.items():
             setattr(self, name, patch.start())
@@ -906,7 +914,9 @@ class DownloadCardTests(unittest.TestCase):
         path = "/Users/someone/Library/Caches/QiTV/Updates/qitv.dmg"
         self.callbacks["finished"](path)
         self.handle.close.assert_called_once_with()
-        self.perform.assert_called_once_with(path, self.RELEASE, update_dialogs.DIALOGS)
+        self.perform.assert_called_once_with(
+            path, self.RELEASE, update_dialogs.DIALOGS, ask_first=False
+        )  # its card in sight to the end: as before
 
     def test_a_failed_download_says_so_a_cancelled_one_not(self):
         with Asked() as asked:
@@ -917,6 +927,114 @@ class DownloadCardTests(unittest.TestCase):
         card = asked.only()
         self.assertEqual(card.title, "Download Failed")
         self.assertEqual(card.body, "Failed to download update.\nDownload failed: timed out")
+        self.assertTrue(card.unasked)  # a download's result: it waits for the mini player
+
+    def back(self):
+        (_title, _text, _buttons, _default, then), _kwargs = self.shown.call_args
+        then("hide")  # Back: the card goes, the download goes on
+
+    def test_a_download_whose_card_went_asks_before_quitting_on_every_system(self):  # M1
+        self.back()
+        path = "C:/Users/someone/Downloads/qitv-windows.exe"
+        self.callbacks["finished"](path)
+        self.perform.assert_called_once_with(
+            path, self.RELEASE, update_dialogs.DIALOGS, ask_first=True
+        )
+
+    def test_while_one_runs_another_brings_its_card_back_never_a_second_download(self):  # I2
+        self.callbacks["progress"](5 * 1024 * 1024, 10 * 1024 * 1024)
+        update_dialogs.start_download(self.URL, 1, self.RELEASE)  # its card in sight: nothing
+        self.assertEqual(self.shown.call_count, 1)
+        self.back()
+        update_dialogs.start_download(self.URL, 1, self.RELEASE)  # Download & Install again
+        self.assertEqual(self.start.call_count, 1)  # one download
+        self.assertEqual(self.shown.call_count, 2)  # its card again, where it got to
+        self.handle.set.assert_called_with(0.5, "Downloading update... 5.0 / 10.0 MB")
+        self.back()
+        info = {"version": "9.9.9", "url": self.RELEASE, "download_url": self.URL}
+        with Asked() as asked:
+            update_dialogs.show_update_dialog(info, None, manual=True)  # Help › Check again
+        self.assertEqual(asked.cards, [])  # not offered again: its card instead
+        self.assertEqual(self.shown.call_count, 3)
+        self.assertEqual(self.start.call_count, 1)
+
+    def test_an_update_downloaded_in_this_run_is_offered_downloaded(self):  # I2
+        with tempfile.TemporaryDirectory() as folder:
+            path = os.path.join(folder, "qitv.dmg")
+            Path(path).write_bytes(b"image")
+            self.callbacks["finished"](path)  # then Not Now, say
+            self.perform.reset_mock()
+            info = {"version": "9.9.9", "url": self.RELEASE, "download_url": self.URL}
+            with Asked() as asked:
+                update_dialogs.show_update_dialog(info, None, manual=True)
+            self.assertEqual(asked.cards, [])  # no offer to download it again
+            self.perform.assert_called_once_with(
+                path, self.RELEASE, update_dialogs.DIALOGS, ask_first=True
+            )
+            self.assertEqual(self.start.call_count, 1)
+            # Once it ended, a new download may start
+            update_dialogs.start_download("https://release.invalid/other.dmg", 1, self.RELEASE)
+            self.assertEqual(self.start.call_count, 2)
+
+
+class OneDownloadTests(unittest.TestCase):
+    """2.13.1 review I2 and M1: never two downloads writing one file, and a Windows update
+    whose download went on unseen asks before QiTV quits for it."""
+
+    def test_each_download_has_a_part_file_of_its_own(self):
+        target = Path("/tmp/qitv-windows.exe")
+        first, second = update_checker.part_path(target), update_checker.part_path(target)
+        self.assertNotEqual(first, second)
+        for part in (first, second):
+            self.assertEqual(part.parent, target.parent)
+            self.assertTrue(part.name.startswith(f".{target.name}.{os.getpid()}."))
+
+    def test_a_second_download_is_refused_while_one_runs(self):
+        with (
+            mock.patch.object(update_checker, "_download_jobs", [object()]),
+            mock.patch.object(update_checker, "QThread") as thread,
+            self.assertLogs("services.update_checker", "WARNING"),
+        ):
+            cancel = update_checker.start_download(
+                "https://release.invalid/qitv.exe", 1, progress=print, finished=print, failed=print
+            )
+        thread.assert_not_called()
+        cancel()  # cancels nothing
+
+    def test_windows_asks_first_when_told_and_installs_only_on_update_now(self):
+        ui = mock.MagicMock()
+        with (
+            mock.patch.object(update_checker.platform, "system", return_value="Windows"),
+            mock.patch.object(update_checker, "_perform_windows_update") as install,
+            mock.patch.object(update_checker, "_quit_note", None),
+        ):
+            update_checker.perform_update("C:/q.exe", "https://release", ui, ask_first=True)
+            install.assert_not_called()
+            (then,), _ = ui.confirm_quit_and_install.call_args
+            then(False)  # Not Now: it waits in Downloads
+            install.assert_not_called()
+            then(True)
+            install.assert_called_once_with("C:/q.exe", "https://release", ui)
+            install.reset_mock()
+            update_checker.perform_update("C:/q.exe", "https://release", ui)  # in sight: at once
+            install.assert_called_once_with("C:/q.exe", "https://release", ui)
+        self.assertEqual(ui.confirm_quit_and_install.call_count, 1)
+
+    def test_the_windows_question_is_a_card_with_update_now_first(self):
+        answers = []
+        with Asked() as asked:
+            update_dialogs.DIALOGS.confirm_quit_and_install(answers.append)
+        card = asked.only()
+        self.assertEqual(card.title, "Update Downloaded")
+        self.assertEqual(card.body, "QiTV will close and open the update.")
+        self.assertEqual(
+            card.buttons,
+            [("not_now", "Not Now", False, False), ("update", "Update Now", True, False)],
+        )
+        self.assertEqual((card.default, card.back, card.unasked), ("update", "not_now", True))
+        card.then("not_now")
+        card.then("update")
+        self.assertEqual(answers, [False, True])
 
 
 class LayoutTests(unittest.TestCase):

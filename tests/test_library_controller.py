@@ -684,6 +684,23 @@ class LibraryControllerTests(unittest.TestCase):
         self.assertEqual(self.menus, [(episode, "series", QPoint(5, 6))])
         self.assertEqual(self.played, [])
 
+    def test_the_menu_key_opens_the_highlighted_episodes_menu_beside_it(self):  # 2.13.1
+        ctl = self.build()
+        ctl.open("series")
+        self.catalog.sectionReady.emit("series")
+        ctl.handle(Action.NAV_ACTIVATE)
+        self.catalog.season_map["77"] = SEASONS
+        self.catalog.seasonsReady.emit("77")
+        self.catalog.episode_map[("77", "1")] = episodes("1")
+        self.catalog.episodesReady.emit("77", "1")
+        ctl.handle(Action.NAV_DOWN)  # the second episode
+        series = self.screen.series
+        self.assertEqual(series.current_episode(), episodes("1")[1])
+        self.assertTrue(ctl.handle(Action.CONTEXT_MENU))
+        row = series.current_episode_rect()
+        self.assertIsInstance(row, QRect)  # its row: the menu opens beside it
+        self.assertEqual(self.menus, [(episodes("1")[1], "series", row)])  # as a right-click
+
     def test_a_continue_episode_poster_is_for_an_episode(self):
         ep = {**episodes("1")[0], "season": "1"}
         self.config.watch_history.append(
@@ -1749,6 +1766,23 @@ class GenreHideTests(unittest.TestCase):  # 2.8: parental controls hide a Librar
         shown.handle(Action.NAV_DOWN)
         shown.handle(Action.NAV_ACTIVATE)
         self.assertFalse(shown.shown())
+        self.assertEqual(self.hidden, [("movies", "P", "c", "Comedy")])
+
+    def test_the_menu_key_opens_the_highlighted_genres_menu_beside_it(self):  # 2.13.1
+        ctl = self.built()
+        ctl.set_hiding(lambda *args: self.hidden.append(args), lambda: True, lambda *a: None)
+        ctl.handle(Action.ESCAPE)  # from the posters to the genres
+        genres = self.screen.genres
+        genres.set_current("c")
+        self.assertTrue(ctl.handle(Action.CONTEXT_MENU))
+        shown = popup_for(self.screen)
+        self.assertTrue(shown.shown())
+        self.assertEqual(shown.menu().texts(), ["Hide genre", "Hide (parental controls)"])
+        row = genres.current_rect()
+        row.moveTopLeft(shown.parentWidget().mapFromGlobal(row.topLeft()))
+        self.assertFalse(shown.panel().intersects(row))  # beside its row
+        shown.handle(Action.NAV_DOWN)
+        shown.handle(Action.NAV_ACTIVATE)
         self.assertEqual(self.hidden, [("movies", "P", "c", "Comedy")])
 
 

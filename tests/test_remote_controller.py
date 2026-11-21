@@ -8,7 +8,7 @@ import threading
 import unittest
 from unittest import mock
 
-from PySide6.QtCore import QObject, Qt, QTimer, Signal
+from PySide6.QtCore import QObject, QPoint, Qt, QTimer, Signal
 from PySide6.QtTest import QTest
 from test_tv_window import WindowCase, wait_until
 from timer_fixtures import pause
@@ -83,6 +83,28 @@ class RemoteDispatchTests(WindowCase):
         self.assertTrue(wait_until(self.window.screens.library_shown))
         self.remote().fire("chdown")
         self.assertTrue(wait_until(lambda: not self.window.screens.library_shown()))
+
+    def test_an_open_menu_takes_the_buttons_and_a_screen_closes_it_first(self):  # 2.13.1
+        from ui.overlays.popup_menu import Menu
+
+        self.show()
+        self.wait_for_drawer()
+        menu, chosen = self.window.popup_menu, []
+        entries = Menu()
+        entries.add("First", lambda: chosen.append("first"))
+        entries.add("Second", lambda: chosen.append("second"))
+        menu.open(entries, at=self.window.host.mapToGlobal(QPoint(200, 150)))
+        controller = self.window.controller
+        with mock.patch.object(controller, "handle", wraps=controller.handle) as handle:
+            self.remote().fire("chdown")  # the menu's: its next entry, no zap under it
+            self.assertEqual(menu.current().text, "Second")
+            self.remote().fire("volup")  # the sound's goes on
+        handle.assert_called_once_with(Action.VOL_UP, "")
+        self.assertTrue(menu.shown())
+        self.remote().fire("movies")  # a screen: the menu goes first, nothing chosen
+        self.assertFalse(menu.shown())
+        self.assertEqual(chosen, [])
+        self.assertTrue(wait_until(self.window.screens.library_shown))
 
     def test_pip_closes_the_small_picture_whatever_the_tv_shows(self):
         self.show()

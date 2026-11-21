@@ -9,6 +9,7 @@ the app. What the user sees (the update prompt, progress and errors) is the `Upd
 caller passes: ui/update_dialogs.py's dialogs.
 """
 
+import itertools
 import logging
 import os
 from pathlib import Path
@@ -69,6 +70,9 @@ class UpdateUI(Protocol):
 
     # macOS: quit and open the disk image now? `then(yes)` once answered (2.13.1: nothing waits)
     def confirm_quit_and_open(self, then: Callable[[bool], None]) -> None: ...
+
+    # Windows, its download's card taken away: quit and install now? `then(yes)` (2.13.1)
+    def confirm_quit_and_install(self, then: Callable[[bool], None]) -> None: ...
 
     # 2.6: quit while recording? `then(quit)` once answered
     def confirm_stop_recordings(self, question: str, then: Callable[[bool], None]) -> None: ...
@@ -345,6 +349,15 @@ def download_target(folder: Path, filename: str, url: str, running: Optional[str
     return folder / f"{stem}-{found.group(0) if found else 'new'}{suffix}"
 
 
+_parts = itertools.count(1)  # each download's own part file (2.13.1: never two writers of one)
+
+
+def part_path(download_path: Path) -> Path:
+    """Where a download is written before it takes `download_path`'s name: a hidden file of
+    this run (its pid) and this download (a number) alone."""
+    return download_path.with_name(f".{download_path.name}.{os.getpid()}.{next(_parts)}.part")
+
+
 def _make_runnable(path: Path) -> None:
     """A Linux build as downloaded cannot start: it may run for whoever may read it."""
     try:
@@ -380,7 +393,7 @@ class UpdateDownloader(QObject):
             # Written under another name, then renamed: the file of that name is replaced
             # whole, never rewritten (macOS may still have an earlier update's image mounted
             # from it, and would not open this one; a copy of QiTV may be running from it).
-            part = download_path.with_name(f".{download_path.name}.{os.getpid()}.part")
+            part = part_path(download_path)
 
             # Use longer read timeout for large files
             response = requests.get(self.url, stream=True, timeout=(30, 120))
@@ -459,8 +472,13 @@ def start_download(
     """Download the update on a QThread; returns what cancels it.
 
     The callbacks run on the GUI thread: `progress(downloaded, total)`, then `finished(path)`
-    or `failed(message)` (also "Download cancelled").
+    or `failed(message)` (also "Download cancelled"). One at a time (2.13.1): while one runs,
+    another is refused (logged; its callbacks never run, and what it returns cancels nothing):
+    ui/update_dialogs.py shows the one running instead.
     """
+    if _download_jobs:
+        logger.warning("An update download runs already: another one is not started")
+        return lambda: None
     thread = QThread()
     downloader = UpdateDownloader(download_url, file_size)
     downloader.moveToThread(thread)
@@ -539,15 +557,26 @@ def _unless_kept_recording(ui: UpdateUI, go: Callable[[], None]) -> None:
     ui.confirm_stop_recordings(question, lambda stop: go() if stop else None)
 
 
-def perform_update(downloaded_path: str, release_url: str, ui: UpdateUI):
+def perform_update(
+    downloaded_path: str, release_url: str, ui: UpdateUI, *, ask_first: bool = False
+):
     """Execute platform-specific update process; each question answers through its callback
-    (2.13.1), the update going on from the answer."""
+    (2.13.1), the update going on from the answer. `ask_first`: the download went on unseen
+    (its card taken away), or came in earlier: Windows asks too before QiTV quits for it, as
+    macOS always does."""
     system = platform.system()
 
     if system == "Windows":
-        _unless_kept_recording(
-            ui, lambda: _perform_windows_update(downloaded_path, release_url, ui)
-        )
+
+        def install() -> None:
+            _unless_kept_recording(
+                ui, lambda: _perform_windows_update(downloaded_path, release_url, ui)
+            )
+
+        if ask_first:  # Or not now: the new QiTV waits in Downloads, offered at the next check
+            ui.confirm_quit_and_install(lambda now: install() if now else None)
+        else:
+            install()
     elif system == "Darwin" and is_disk_image(downloaded_path):
 
         def answered(now: bool) -> None:

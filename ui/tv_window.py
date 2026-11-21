@@ -835,6 +835,7 @@ class TVWindow(QMainWindow):
             library_shown=lambda: self.screens.library_shown(),
             closing=lambda: self._closing,
             before_tv=self._make_way_for_card,
+            held=self.mini_player_active,  # (what QiTV says unasked waits for the window)
             above=lambda: (
                 self.question_card,
                 self.quality_card,
@@ -912,10 +913,9 @@ class TVWindow(QMainWindow):
         # The audio dock's "⋯": the player's controls the dock has no button for (Plan 4).
         self.more_menu = MoreMenu(self.overlays.transport, host)
         self.overlays.more_menu = self.more_menu
-        # 2.13.1: the player's right-click and button menus, painted; while the Library is in
-        # front (the player in its corner) they open on the Library's page, beside the corner.
+        # 2.13.1: the player's right-click and button menus, painted (the corner player, in
+        # front of the Library, opens none: the page stack takes its mouse).
         self.popup_menu = PopupMenu(host)
-        self.popup_menu.defer_to(self.library_menu, lambda: self.screens.library_shown())
         # 2.8.12: the REC sign showed through the channel list, the guide and the grid's tiles.
         self.rec_sign.cover_with(
             self.overlays.drawer, self.settings_drawer, self.overlays.guide, self.grid_tiles
@@ -1420,9 +1420,14 @@ class TVWindow(QMainWindow):
     def record_at(self, channel: dict, programme: Optional[Programme] = None) -> None:
         """2.8: "Record at a time" for `channel` (its right-click, the guide's footer), on the
         programme's time when one is given; what it is given is scheduled. 2.13.1: its card
-        over the picture (the keys its own while it shows), answering through a callback."""
+        over the picture (the keys its own while it shows), answering through a callback; asked
+        for, it makes way as Open Link…'s does (the TV from the Library, the window from the
+        mini player, the audio dock's ⋯ closed)."""
         if self._closing:
             return
+        if self.screens.library_shown():
+            self.screens.back_to_tv()
+        self._make_way_for_card()
 
         def chosen(choice: TimerChoice, _channel: Optional[dict]) -> None:
             if not self._closing:
@@ -2689,6 +2694,7 @@ class TVWindow(QMainWindow):
         if maximized:
             self.setWindowState(Qt.WindowState.WindowMaximized)
         self._show_again()
+        self.window_cards.release()  # what QiTV said meanwhile, unasked, comes now
 
     def set_keep_on_top(self, on: bool) -> None:
         """View → Keep on Top (2.8.5): the window stays above other apps' windows. Saved; the
@@ -2963,6 +2969,10 @@ class TVWindow(QMainWindow):
         if self.settings.visible():
             if not section_key:
                 return
+            # A painted menu over Settings goes: Settings moves under it, showing already (so
+            # no Show closes it: Overlay.takes_keys), and it had the keys
+            self.popup_menu.close_menu()
+            self.library_menu.close_menu()
             self.controller.cancel_cards()  # not make_way_for_settings: it keeps its way back
             self.settings.show_section(section_key, row)
         else:

@@ -35,9 +35,13 @@ class _Host(QWidget):
         self.setMouseTracking(True)
         self.presses: list[QPoint] = []
         self.moves: list[QPoint] = []
+        self.wheels: list[QPoint] = []
 
     def mousePressEvent(self, event: QMouseEvent) -> None:
         self.presses.append(event.position().toPoint())
+
+    def wheelEvent(self, event: QWheelEvent) -> None:
+        self.wheels.append(event.position().toPoint())
 
     def mouseMoveEvent(self, event: QMouseEvent) -> None:
         self.moves.append(event.position().toPoint())
@@ -378,6 +382,30 @@ class MouseTests(PopupCase):
         QTest.mouseClick(host.windowHandle(), Qt.MouseButton.LeftButton, pos=QPoint(900, 600))
         self.assertEqual(host.presses, [QPoint(900, 600)])  # then clicks go on
 
+    def test_the_wheel_elsewhere_closes_it_as_a_click_does_and_does_nothing_more(self):
+        host = self.host()
+        overlay = self.open_at(self.overlay(host), self.channel_menu())
+
+        def turn() -> None:
+            at = QPointF(900, 600)
+            wheel = QWheelEvent(
+                at,
+                QPointF(host.mapToGlobal(at.toPoint())),
+                QPoint(),
+                QPoint(0, -120),
+                Qt.MouseButton.NoButton,
+                Qt.KeyboardModifier.NoModifier,
+                Qt.ScrollPhase.NoScrollPhase,
+                False,
+            )
+            QApplication.sendEvent(host, wheel)
+
+        turn()  # over the page, not the menu
+        self.assertFalse(overlay.shown())
+        self.assertEqual(host.wheels, [])  # the list under it stays where the menu was for
+        turn()
+        self.assertEqual(host.wheels, [QPoint(900, 600)])  # then the wheel goes on
+
     def test_the_second_click_of_the_double_click_that_opened_it_keeps_it(self):
         host = self.host()
         overlay = self.open_at(self.overlay(host), self.channel_menu())
@@ -603,24 +631,6 @@ class PageTests(PopupCase):
         self.assertIsInstance(made, PopupMenu)
         self.assertIs(popup_for(lone), made)
         self.assertIsNone(popup(self.channel_menu(), None, at=QPoint(10, 10)))
-
-    def test_while_another_page_is_in_front_the_menu_opens_there_beside_this_one(self):
-        host = self.host()
-        corner = QWidget(host)  # the player in the Library's corner
-        corner.setGeometry(900, 500, 380, 220)
-        corner.show()
-        library = PopupMenu(host)
-        player = PopupMenu(corner)
-        front = [True]
-        player.defer_to(library, lambda: front[0])
-        player.open(self.channel_menu(), at=corner.mapToGlobal(QPoint(10, 10)))
-        self.assertFalse(player.shown())
-        self.assertTrue(library.shown())
-        self.assertFalse(library.panel().intersects(corner.geometry()))
-        library.close_menu()
-        front[0] = False
-        player.open(self.channel_menu(), at=corner.mapToGlobal(QPoint(10, 10)))
-        self.assertTrue(player.shown())
 
 
 class SaidTests(PopupCase):

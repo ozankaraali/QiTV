@@ -3,8 +3,7 @@
 A menu is plain data (`Menu`: its entries), built where it is asked for, and shown by one
 painted overlay per page (`PopupMenu`): the player's overlay host has one, the Library's page
 another. `popup(menu, near, …)` shows it on the page of `near`, the widget that asks (a row's
-list, a button's bar); while the Library is in front, a menu the player asks for (the corner
-player's right-click) opens there, beside the corner (`defer_to`).
+list, a button's bar).
 
 - An entry has its text, and may be disabled (dimmed; the keys and the pointer pass it by),
   ticked or not (a ✓ column), a submenu (›), or a separator (a rule: none leads, ends or
@@ -22,7 +21,8 @@ player's right-click) opens there, beside the corner (`defer_to`).
   fullscreen go on; every other key is the menu's while it shows.
 - The pointer: the entry under it is highlighted; a click (pressed and released on it, either
   button) chooses it; a click anywhere else in the window closes the menu and does nothing more
-  (but the second click of the double-click that opened it); the mouse's Back closes a level.
+  (but the second click of the double-click that opened it), and so does the wheel turned
+  there; the mouse's Back closes a level.
 - It never waits: what an entry does is its callback, run once the menu closed. The menu's
   close callbacks (`Menu.on_close`) run first, once, whatever closes it: a choice, Esc, a
   click elsewhere, its page changing size or hiding, the list that opened it hiding (`opener`),
@@ -226,18 +226,12 @@ class PopupMenu(Overlay):
         self._shown = QElapsedTimer()  # since it opened: a double-click's second press
         self._filtering = False
         self._wheel = 0
-        self._defer: Optional[tuple[PopupMenu, Callable[[], bool]]] = None
         self._page_size = QSize()  # its page's, as it was laid out against
         if parent is not None:
             parent.installEventFilter(self)  # its page's size or hiding closes it
         self.hide()
 
     # ---- public API ---------------------------------------------------------------------
-
-    def defer_to(self, other: PopupMenu, when: Callable[[], bool]) -> None:
-        """While `when()`, a menu asked of this one opens on `other` (another page in front:
-        the Library, while the player sits in its corner), beside this one's page."""
-        self._defer = (other, when)
 
     def open(
         self,
@@ -255,9 +249,6 @@ class PopupMenu(Overlay):
         if isinstance(at, QRect):
             at, beside, side = None, at, RIGHT
         parent = self.parentWidget()
-        if self._defer is not None and parent is not None and self._defer[1]():
-            page = QRect(parent.mapToGlobal(QPoint(0, 0)), parent.size())
-            return self._defer[0].open(menu, beside=page, side=RIGHT, opener=opener)
         self.close_menu()
         if parent is None:
             menu.closed()
@@ -826,6 +817,9 @@ class PopupMenu(Overlay):
             elif event.button() != Qt.MouseButton.ForwardButton:
                 self.close_menu()
             return True  # it closed the menu (or a level), and does nothing more
+        elif kind == QEvent.Type.Wheel and self._outside(obj):
+            self.close_menu()  # as a click elsewhere: the list under it stays where it was
+            return True
         return False
 
     def _over_it(self, obj: QObject) -> bool:

@@ -9,8 +9,16 @@ title, words and buttons, the main action accented), answered through a callback
 waits in an exec(). Esc, Back and a click on the dimmed picture are the safe answer: Not now
 (the update is offered again at the next check; never Skip This Version), Keep recording,
 Close; on the download's progress they only take the card away.
+
+One download at a time: while it runs, a check that finds the update (or Download & Install
+again) brings its progress card back instead of starting another, and an update downloaded in
+this run is offered as downloaded (its "Update Downloaded" question again), never downloaded
+again. A download whose card was taken away asks before QiTV quits for it, on Windows too.
+What comes unasked (the startup check's offer, a download's result) waits while the mini
+player shows (ui.window_cards: `unasked`).
 """
 
+from dataclasses import dataclass
 import logging
 import os
 import sys
@@ -59,8 +67,8 @@ def _button_text(text: str) -> str:
     return text.replace("&&", "&")
 
 
-def _offer_release_page(title: str, body: str, release_url: str) -> None:
-    """A failure, with Open Release Page (the accent) and Close."""
+def _offer_release_page(title: str, body: str, release_url: str, *, unasked: bool = False) -> None:
+    """A failure, with Open Release Page (the accent) and Close (`unasked`: a download's)."""
     buttons = [
         Button(CLOSE, translate(CLOSE_TEXT)),
         # i18n: a button: opens the release's web page
@@ -71,7 +79,7 @@ def _offer_release_page(title: str, body: str, release_url: str) -> None:
         if key == RELEASE:
             system_open.open_url(release_url)
 
-    window_cards.ask(title, body, buttons, RELEASE, answered, back=CLOSE)
+    window_cards.ask(title, body, buttons, RELEASE, answered, back=CLOSE, unasked=unasked)
 
 
 class _Dialogs:
@@ -92,6 +100,24 @@ class _Dialogs:
 
     def update_available(self, info: dict, config_manager, manual: bool) -> None:
         show_update_dialog(info, config_manager, manual)
+
+    def confirm_quit_and_install(self, then: Callable[[bool], None]) -> None:
+        """Windows, the download's card taken away meanwhile: QiTV closes and installs the
+        update (Update Now, the default), or not now (Back too; the next check offers it
+        downloaded): `then(yes)`."""
+        buttons = [
+            Button(NOT_NOW, tr("Not Now")),
+            Button(UPDATE_NOW, tr("Update Now"), accent=True),
+        ]
+        window_cards.ask(
+            tr("Update Downloaded"),
+            tr("QiTV will close and open the update."),
+            buttons,
+            UPDATE_NOW,
+            lambda key: then(key == UPDATE_NOW),
+            back=NOT_NOW,
+            unasked=True,
+        )
 
     def launch_failed(self, downloaded_path: str, release_url: str) -> None:
         body = _lines(
@@ -123,6 +149,7 @@ class _Dialogs:
             UPDATE_NOW,
             lambda key: then(key == UPDATE_NOW),
             back=NOT_NOW,
+            unasked=True,  # (a download's result)
         )
 
     def confirm_stop_recordings(self, question: str, then: Callable[[bool], None]) -> None:
@@ -158,7 +185,7 @@ class _Dialogs:
         def read(_key: str) -> None:
             system_open.open_folder(folder)
 
-        window_cards.tell(tr("Update Downloaded"), body, read)
+        window_cards.tell(tr("Update Downloaded"), body, read, unasked=True)
 
 
 DIALOGS = _Dialogs()
@@ -205,7 +232,7 @@ def replace_failed(old_path: str, new_path: str) -> None:
             old=old_path,
         ),
     )
-    window_cards.tell(tr("Update Failed"), body)
+    window_cards.tell(tr("Update Failed"), body, unasked=True)  # (said at the start)
 
 
 def show_update_dialog(
@@ -237,6 +264,14 @@ def show_update_dialog(
     release_url = update_info["url"]
     download_url = update_info.get("download_url") or ""
     file_size = update_info.get("file_size", 0)
+    if _running is not None:
+        _show_progress_again(_running)  # one download at a time: its card, never an offer
+        return
+    kept = _downloaded.get(download_url) if download_url else None
+    if kept is not None and os.path.exists(kept):
+        # Downloaded in this run already ("Not Now" then): its question again, no download
+        update_checker.perform_update(kept, release_url, DIALOGS, ask_first=True)
+        return
 
     # Check if we're running as a frozen executable
     is_frozen = getattr(sys, "frozen", False)
@@ -289,21 +324,37 @@ def show_update_dialog(
         answered,
         alternates=alternates,
         back=NOT_NOW,
+        unasked=not manual,  # (the startup check's: it waits while the mini player shows)
     )
 
 
-def start_download(download_url: str, file_size: int, release_url: str):
-    """Download the update, its progress in a card (2.13.1: QiTV's own, over the page that
-    shows): the bar, how much came, and Cancel, which stops it. Back (Esc, the dimmed picture)
-    only takes the card away: the download goes on, and what comes after it shows once it is
-    done. Then launch it, or say why not."""
+@dataclass(eq=False)
+class _Download:
+    """The update's download that runs (one at a time), and where its card got to."""
+
+    url: str
     cancel: Callable[[], None] = lambda: None
+    progress: Optional[window_cards.Progress] = None
+    fraction: float = 0.0
+    text: str = ""  # (empty until its size is known)
+    hidden: bool = False  # its card was taken away (Back): it asks before QiTV quits for it
+
+
+_running: Optional[_Download] = None
+_downloaded: dict[str, str] = {}  # this run's downloads: the address → the file it is in
+
+
+def _show_progress(download: _Download) -> None:
+    """The download's card, where it got to: Cancel stops it, Back only takes the card away."""
 
     def answered(key: str) -> None:
         if key == STOP:
-            cancel()
+            download.cancel()
+        elif key == HIDE:
+            download.hidden = True
 
-    progress = window_cards.progress(
+    download.hidden = False
+    download.progress = window_cards.progress(
         tr("Downloading Update"),
         tr("Downloading update..."),
         [Button(STOP, tr("Cancel"))],
@@ -311,32 +362,63 @@ def start_download(download_url: str, file_size: int, release_url: str):
         answered,
         back=HIDE,
     )
+    if download.text:
+        download.progress.set(download.fraction, download.text)
+
+
+def _show_progress_again(download: _Download) -> None:
+    """A download runs: its card again once it was taken away (nothing while it shows)."""
+    if download.hidden:
+        _show_progress(download)
+
+
+def start_download(download_url: str, file_size: int, release_url: str):
+    """Download the update, its progress in a card (2.13.1: QiTV's own, over the page that
+    shows): the bar, how much came, and Cancel, which stops it. Back (Esc, the dimmed picture)
+    only takes the card away: the download goes on, and what comes after it shows once it is
+    done (asking first, on every system). Then launch it, or say why not. While one runs, its
+    card comes back instead: never two downloads writing the same file."""
+    global _running
+    if _running is not None:
+        _show_progress_again(_running)
+        return
+    download = _Download(download_url)
+    _show_progress(download)
+    _running = download
 
     def on_progress(downloaded: int, total: int):
         if total <= 0:
             return
         mb_downloaded = downloaded / (1024 * 1024)
         mb_total = total / (1024 * 1024)
-        progress.set(
-            downloaded / total,
-            tr(
-                # i18n: done and total are megabytes, as "12.5"
-                "Downloading update... {done} / {total} MB",
-                done=i18n.decimal(f"{mb_downloaded:.1f}"),
-                total=i18n.decimal(f"{mb_total:.1f}"),
-            ),
+        download.fraction = downloaded / total
+        download.text = tr(
+            # i18n: done and total are megabytes, as "12.5"
+            "Downloading update... {done} / {total} MB",
+            done=i18n.decimal(f"{mb_downloaded:.1f}"),
+            total=i18n.decimal(f"{mb_total:.1f}"),
         )
+        if download.progress is not None:
+            download.progress.set(download.fraction, download.text)
+
+    def ended() -> None:
+        global _running
+        if _running is download:
+            _running = None
+        if download.progress is not None:
+            download.progress.close()
 
     def on_finished(path: str):
-        progress.close()
-        update_checker.perform_update(path, release_url, DIALOGS)
+        ended()
+        _downloaded[download_url] = path
+        update_checker.perform_update(path, release_url, DIALOGS, ask_first=download.hidden)
 
     def on_failed(message: str):
-        progress.close()
+        ended()
         if "cancelled" not in message.lower():  # the English DOWNLOAD_CANCELLED: never shown
             _show_download_error(message, release_url)
 
-    cancel = update_checker.start_download(
+    download.cancel = update_checker.start_download(
         download_url, file_size, progress=on_progress, finished=on_finished, failed=on_failed
     )
 
@@ -344,4 +426,4 @@ def start_download(download_url: str, file_size: int, release_url: str):
 def _show_download_error(error_msg: str, release_url: str):
     """Show download error with option to open release page."""
     body = _lines(tr("Failed to download update."), error_msg)
-    _offer_release_page(tr("Download Failed"), body, release_url)
+    _offer_release_page(tr("Download Failed"), body, release_url, unasked=True)

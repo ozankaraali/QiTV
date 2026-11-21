@@ -329,6 +329,14 @@ class TVWindowTests(WindowCase):
         QTest.keyClick(self.window, Qt.Key.Key_Menu)  # passed on by Settings: no list under it
         self.assertFalse(menu.shown())
         self.assertTrue(self.window.settings.visible())
+        # A menu over Settings (the picture's, beside it), then Help → About QiTV: Settings
+        # moves to About, showing already, and the menu goes
+        menu.open(entries, at=self.window.host.mapToGlobal(QPoint(200, 150)))
+        self.assertTrue(menu.shown())
+        self.menu_actions()["About QiTV"].trigger()
+        self.assertEqual(self.window.settings_drawer.path(), (ABOUT,))
+        self.assertFalse(menu.shown())
+        self.assertEqual(chosen, [])
 
     def test_what_takes_the_keys_closes_a_menu_as_it_comes_a_toast_does_not(self):  # 2.13.1
         from ui.overlays.popup_menu import Menu
@@ -1449,9 +1457,10 @@ class RecorderHomeWindowTests(WindowCase):  # 2.9.7: the Recordings tab's home, 
         self.assertEqual(card.focus(), ("field", "channel"))
         QTest.keyClick(window, Qt.Key.Key_Down)  # the window's keys, in the Library's context
         self.assertEqual(card.focus(), ("field", "name"))
-        for key, text in ((Qt.Key.Key_A, "a"), (Qt.Key.Key_Space, " "), (Qt.Key.Key_1, "1")):
+        for key in (Qt.Key.Key_A, Qt.Key.Key_Space, Qt.Key.Key_1, Qt.Key.Key_Slash):
             QTest.keyClick(window, key, Qt.KeyboardModifier.NoModifier)
-        self.assertEqual(card.values()["name"], "a 1")  # letters, a space and digits type
+        # Letters, a space, digits and "/" (the Library's search key elsewhere) type
+        self.assertEqual(card.values()["name"], "a 1/")
         QTest.keyClick(window, Qt.Key.Key_Escape)
         self.assertTrue(card.isHidden())
         self.assertTrue(window.screens.library_shown())  # Esc closed the card alone
@@ -1462,6 +1471,17 @@ class RecorderHomeWindowTests(WindowCase):  # 2.9.7: the Recordings tab's home, 
         desk.record_at()
         window.screens.back_to_tv()  # the Library left: the card goes with it
         self.assertTrue(card.isHidden())
+
+    def test_record_at_a_time_from_the_mini_player_is_asked_in_the_window(self):  # 2.13.1
+        window = self.window
+        self.show()
+        self.wait_for_drawer()
+        self.assertTrue(wait_until(lambda: window.catalog.items("live", ALL_GROUP_ID)))
+        self.mini()
+        self.assertTrue(window.mini_player_active())
+        window.record_at(window.catalog.items("live", ALL_GROUP_ID)[0])  # asked: it makes way
+        self.assertFalse(window.mini_player_active())
+        self.assertTrue(window.record_card.isVisible())
 
     def test_a_timer_shows_as_a_band_on_its_channel(self):
         channel, _airing = self.channel_and_airing()

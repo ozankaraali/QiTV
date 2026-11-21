@@ -587,9 +587,14 @@ class RecordingsDesk(QObject):
 
     def card_key(self, action: Action, payload: str = "") -> bool:
         """A key of the Library's while its card shows: the card's (True), but the sound's and
-        the window's."""
+        the window's. "/" (the Library's search key) is typed into its field, as the Library's
+        own fields type it."""
         card = self._card
-        return card is not None and not card.isHidden() and card.handle(action, payload)
+        if card is None or card.isHidden():
+            return False
+        if action is Action.SEARCH and payload:
+            action = Action.NAV_TEXT
+        return card.handle(action, payload)
 
     def add_place(self) -> None:
         window = self._window

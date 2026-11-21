@@ -8,9 +8,12 @@ update's at the start), waits its turn, and comes from the event loop once the o
 answered. Over live TV the card is one of the TV's own (TVController.add_card: it has every key
 but the sound's and the window's, before Settings, the guide and the channel list, which wait
 for it, and the drawer's keys reach it, so the arrows go between its answers); the mini player
-becomes the window first and the audio dock's ⋯ menu closes. Over the Library (the player in
-its corner or not) its twin on the Library page has the keys before the Library (`library_key`).
-QiTV's own questions (2.6's, about a recording) stay above it.
+becomes the window first and the audio dock's ⋯ menu closes. What QiTV says unasked (`unasked`:
+an update found at the start, a download's result) waits while the mini player shows (`held`),
+the small window left as it is, and comes once it ends (`release`); a question asked for
+meanwhile comes first. Over the Library (the player in its corner or not) its twin on the
+Library page has the keys before the Library (`library_key`). QiTV's own questions (2.6's,
+about a recording) stay above it.
 
 Each question answers through its `then(key)`: the key of the button or the other way pressed,
 or its `back` answer for Esc, Backspace, the phone's Back, the mouse's Back and a click on the
@@ -60,6 +63,7 @@ class _Question:
     back: str
     progress: Optional[float] = None  # a progress's bar (None: a question's, none)
     closed: bool = False  # a progress whose work is done
+    unasked: bool = False  # QiTV says it by itself: it waits while the mini player shows
 
 
 class Progress:
@@ -87,7 +91,8 @@ class WindowCards(QObject):
     host's overlays and to TVController.add_card) and `library_card` (on the Library page), and
     the questions waiting for them. `library_shown()` says whether the Library is the page in
     front, `closing()` whether the window closes; `before_tv()` makes way for the TV's card
-    (the mini player, the ⋯ menu); `above()` the cards that stay over this one."""
+    (the mini player, the ⋯ menu); `held()` whether what QiTV says unasked waits (the mini
+    player shows: `release` once it ends); `above()` the cards that stay over this one."""
 
     def __init__(
         self,
@@ -98,6 +103,7 @@ class WindowCards(QObject):
         library_shown: Callable[[], bool],
         closing: Callable[[], bool],
         before_tv: Callable[[], None] = lambda: None,
+        held: Callable[[], bool] = lambda: False,
         above: Callable[[], Iterable[QWidget]] = tuple,
         parent: Optional[QObject] = None,
     ) -> None:
@@ -108,6 +114,7 @@ class WindowCards(QObject):
         self._library_shown = library_shown
         self._closing = closing
         self._before_tv = before_tv
+        self._held = held
         self._above = above
         self._waiting: deque[_Question] = deque()
         self._asked: Optional[_Question] = None  # the one shown
@@ -128,14 +135,22 @@ class WindowCards(QObject):
         *,
         alternates: Sequence[Button] = (),
         back: str = CANCEL,
+        unasked: bool = False,
     ) -> None:
-        """Ask now, or once the question before it was answered and the window shows. The
-        texts are the app's language's; the keys start on `default`."""
+        """Ask now, or once the question before it was answered and the window shows (one
+        `unasked`, that QiTV says by itself, once the mini player ends too). The texts are the
+        app's language's; the keys start on `default`."""
         if self._closing():
             return
         question = _Question(title, body, tuple(buttons), default, then, tuple(alternates), back)
+        question.unasked = unasked
         self._waiting.append(question)
         self._next()
+
+    def release(self) -> None:
+        """The mini player ended (`held` no longer): what QiTV said unasked meanwhile comes,
+        from the event loop."""
+        QTimer.singleShot(0, self, self._next)
 
     def progress(
         self,
@@ -190,7 +205,11 @@ class WindowCards(QObject):
             return
         if not self._window.isVisible():
             return  # its show asks (`eventFilter`)
-        question = self._waiting.popleft()
+        held = self._held()  # (what QiTV says unasked waits: `release` asks again)
+        question = next((q for q in self._waiting if not (held and q.unasked)), None)
+        if question is None:
+            return
+        self._waiting.remove(question)
         card = self._front()
         if card is self.tv_card:
             self._before_tv()
@@ -276,13 +295,16 @@ def ask(
     *,
     alternates: Sequence[Button] = (),
     back: str = CANCEL,
+    unasked: bool = False,
 ) -> None:
     """WindowCards.ask on the installed window's cards; with none, nothing is asked."""
     cards = installed()
     if cards is None:
         logger.info("A question with no window to ask it on: not asked (%s)", title)
         return
-    cards.ask(title, body, buttons, default, then, alternates=alternates, back=back)
+    cards.ask(
+        title, body, buttons, default, then, alternates=alternates, back=back, unasked=unasked
+    )
 
 
 def progress(
@@ -303,8 +325,8 @@ def progress(
     return cards.progress(title, text, buttons, default, then, back=back)
 
 
-def tell(title: str, body: str, then: Optional[Answer] = None) -> None:
+def tell(title: str, body: str, then: Optional[Answer] = None, *, unasked: bool = False) -> None:
     """A message with OK (the accent: its only answer, Back too) on the installed window's
     cards (through `ask`); `then` once it is read."""
     ok = Button(OK, translate(OK_TEXT), accent=True)
-    ask(title, body, [ok], OK, then or _nothing, back=OK)
+    ask(title, body, [ok], OK, then or _nothing, back=OK, unasked=unasked)

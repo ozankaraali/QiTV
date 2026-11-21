@@ -38,6 +38,7 @@ class WindowCardsTests(unittest.TestCase):
         self.library.resize(1280, 720)
         self.in_library = False
         self.closing = False
+        self.mini = False  # the mini player shows
         self.prepared: list[str] = []
         self.cards = WindowCards(
             ProgressCard(self.tv),
@@ -46,6 +47,7 @@ class WindowCardsTests(unittest.TestCase):
             library_shown=lambda: self.in_library,
             closing=lambda: self.closing,
             before_tv=lambda: self.prepared.append("tv"),
+            held=lambda: self.mini,
             parent=self.window,
         )
         self.answers: list[str] = []
@@ -90,6 +92,26 @@ class WindowCardsTests(unittest.TestCase):
         self.assertEqual(self.answers, [GO, CANCEL])
         elapse(0)
         self.assertFalse(self.cards.shown())
+
+    def test_what_qitv_says_unasked_waits_for_the_mini_player_to_end(self):  # review M2
+        self.show()
+        self.mini = True
+        self.cards.ask("Update?", "", [Button(OK, "OK")], OK, self.answers.append, unasked=True)
+        elapse(0)
+        card = self.cards.tv_card
+        self.assertTrue(card.isHidden())  # the small window is left as it is
+        self.assertEqual(self.prepared, [])
+        self.ask("Delete it?")  # one asked for makes way and comes first
+        self.assertEqual(card.title(), "Delete it?")
+        self.assertEqual(self.prepared, ["tv"])
+        card.handle(Action.ESCAPE)
+        elapse(0)
+        self.assertTrue(card.isHidden())  # the mini player still shows (a test's): it waits
+        self.mini = False
+        self.cards.release()  # the mini player ended
+        elapse(0)
+        self.assertEqual(card.title(), "Update?")
+        self.assertTrue(card.isVisible())
 
     def test_back_and_the_dimmed_picture_give_the_questions_own_back_answer(self):
         self.show()

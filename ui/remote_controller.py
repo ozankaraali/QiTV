@@ -299,6 +299,16 @@ class RemoteController(QObject):
         b = BUTTONS[button]
         window = self._window
         screens = window.screens
+        menu = self._open_menu() if b.kind != "key" else None  # (keys reach it as keys do)
+        if menu is not None:
+            # 2.13.1: a painted menu that shows has the keys first, so an action button is the
+            # menu's as its key would be (Ch▲▼ move, ⏩ chooses, ⏪ goes back, ⏯ waits); a screen
+            # button closes it first, as a click elsewhere does. The sound's and the window's
+            # buttons go on.
+            if b.kind == "screen":
+                menu.close_menu()
+            elif b.action is not None and menu.handle(b.action, b.payload):
+                return
         if b.kind == "key":
             window.remote_key(b.key, b.text)
         elif b.kind == "screen":
@@ -323,6 +333,14 @@ class RemoteController(QObject):
             if BUTTON_META[button].route == "player" and screens.library_shown():
                 screens.back_to_tv()
             window.controller.handle(b.action, b.payload)
+
+    def _open_menu(self) -> Any:
+        """The window's painted menu that shows (the player's, or the Library's), if one does."""
+        for name in ("popup_menu", "library_menu"):
+            menu = getattr(self._window, name, None)
+            if menu is not None and menu.shown():
+                return menu
+        return None
 
     def _press(self, button: str) -> None:
         try:

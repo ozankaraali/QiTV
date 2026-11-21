@@ -1054,6 +1054,10 @@ class LibraryController(QObject):
                 self._focus("grid")
             else:
                 genres.activate()  # genreActivated focuses the grid
+        elif action is Action.CONTEXT_MENU:  # 2.13.1: the highlighted genre's, beside it
+            gid = genres.current_id()
+            if gid is not None:
+                self._show_genre_menu(gid, genres.current_rect())
         elif action is Action.ESCAPE:
             if not genres.escape():
                 self._go_back_to_tv()
@@ -1098,6 +1102,10 @@ class LibraryController(QObject):
             series.activate()
         elif action in (Action.ESCAPE, Action.NAV_BACKSPACE):
             series.escape()  # backRequested
+        elif action is Action.CONTEXT_MENU:  # 2.13.1: the highlighted episode's, beside it
+            episode, row = series.current_episode(), series.current_episode_rect()
+            if episode is not None and row is not None:
+                self._on_episode_context(series.current_season() or {}, episode, row)
         elif action in (Action.NAV_TEXT, Action.PASTE):
             return self._type_in_search(action, payload)  # 2.9.3: typing searches
         else:
@@ -1331,7 +1339,9 @@ class LibraryController(QObject):
         self._hide_genre, self._may_hide = hide, may_hide
         self._tidy_genre = tidy
 
-    def _show_genre_menu(self, gid: str, pos: QPoint) -> None:
+    def _show_genre_menu(self, gid: str, pos: Where) -> None:
+        """A genre's menu at the pointer (a right-click), or beside its row (the menu key's:
+        `pos` is the row's global rect, 2.13.1)."""
         menu = self.genre_menu(gid)
         if menu is not None:
             popup_menu.popup(menu, self._screen, at=pos)
@@ -1641,7 +1651,7 @@ class LibraryController(QObject):
             section = "series" if kind == "episode" else "movies"
             self._menu(item, section, provider_of(item) or self._browse_provider(), global_pos)
 
-    def _on_episode_context(self, _season: dict, episode: dict, global_pos: QPoint) -> None:
+    def _on_episode_context(self, _season: dict, episode: dict, global_pos: Where) -> None:
         if not self._closed:
             self._menu(episode, "series", self._series_owner(), global_pos)
 
