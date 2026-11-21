@@ -1426,7 +1426,9 @@ class LiveSession(QObject):
         if raised:
             self._caption_armed = True
             self._caption_whole = whole
-            if playing and self._stay.mode is Mode.SHIFTED and self._part is None:
+            # (a lead grown mid-playback, `whole`, is not captions coming on: a time-shifted
+            # picture stays where the viewer put it)
+            if playing and not whole and self._stay.mode is Mode.SHIFTED and self._part is None:
                 lag = self._mean_lag(self._snapshot(), self._advance())
                 if lag <= seconds + _CAPTION_BACK_S:
                     self._stay.user_go_live(keep_landing=True)  # live again, where it is
@@ -1451,6 +1453,14 @@ class LiveSession(QObject):
     def caption_waiting(self) -> bool:
         """The picture waits for the AI captions' distance behind live (`_caption_wait`)."""
         return self._caption_held is not None
+
+    def reach_caption_floor(self) -> None:
+        """2.13.1: the picture waits for the whole of the AI captions' floor once more (a raise
+        of their translation lead it fell short of: a landing in stay-live's band, a picture
+        swapped in); nothing while they are off or a wait goes on."""
+        if self._caption_floor > 0 and self._caption_held is None:
+            self._caption_armed = True
+            self._caption_whole = True
 
     def caption_lag(self) -> Optional[float]:
         """2.13.1: the picture's mean lag behind the live edge (what stay-live steers by) while
@@ -4215,7 +4225,8 @@ class LiveSession(QObject):
         self._land_check = None  # a landing still measured is no longer playing
         self._held = None  # a new play is not held
         if self._caption_held is not None:
-            self._caption_armed = True  # it waits again once the new play plays
+            self._caption_armed = True  # it waits again once the new play plays ...
+            self._caption_whole = True  # ... for all of its floor, as this wait did (2.13.1)
         self._caption_held = None  # (PlaybackSession.play opens it unheld)
         self._opening = True
         try:

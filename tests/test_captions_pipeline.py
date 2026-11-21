@@ -1379,6 +1379,45 @@ class TranslationTests(unittest.TestCase):
         self.captions(4)
         self.assertEqual(self.contexts, [None, None, None])
 
+    def test_lines_written_before_a_raise_say_the_lead_they_were_written_under(self):
+        # the review: a burst written under 2.0 s, translated after the GUI raised the lead,
+        # said 3.0 s and raised it again (several waits for one slow spell)
+        go = self.held()
+
+        def answer(text, source, target, deadline):
+            if text == "Bir iki üç.":
+                go.wait(5)
+            return f"<{target}> {text}"
+
+        self.answer = answer
+        translation = self.translation("English")
+        translation.set_lead(2.0)
+        run = self.a_run(translation, "Turkish", newest=104.0)
+        self.plays(translation, 100.0)
+        run._write("qwen", "heard", "Bir iki üç.", 100.5, 101.0)  # being translated
+        for second, text in ((101.5, "Dört."), (101.6, "Beş."), (101.7, "Altı.")):
+            run._write("qwen", "heard", text, second, second + 0.1)  # 1.5 s or more: the lead's
+        translation.set_lead(3.0)  # the GUI raised it meanwhile
+        began = time.monotonic()
+        while time.monotonic() - began < 2.0:  # the picture plays past their deadlines
+            self.plays(translation, 100.0 + time.monotonic() - began)
+            time.sleep(0.05)
+        go.set()
+        self.assertTrue(self.until(lambda: len(self.sent) >= 7))
+        late = [message for message in self.sent if message[0] == "translate_late"]
+        self.assertEqual(late, [("translate_late", 1, 2.0)] * 3)
+
+    def test_an_unspaced_line_before_counts_its_words_by_its_characters(self):
+        # the review: a Japanese or Chinese clause is one "word" by its spaces
+        run = self.a_run(self.translation("English"), "Japanese")
+        run._write("qwen", "heard", "母は今日来ました。", 104.0, 105.0)  # 9 characters: words
+        run._write("qwen", "heard", "はい。", 105.5, 106.0)
+        run._write("qwen", "heard", "台所にいます。", 106.5, 107.0)  # (after "はい。": none)
+        self.captions(3)
+        self.assertEqual(
+            self.contexts, [None, ("母は今日来ました。", "<English> 母は今日来ました。"), None]
+        )
+
     def test_a_deadline_missed_on_the_second_try_is_not_the_leads(self):
         # the line before leaked into it: translated again alone, and that ran out of its time
         def answer(text, source, target, deadline):
@@ -1819,6 +1858,9 @@ class _Live:
 
     def set_caption_floor(self, seconds, *, shift=True, whole=False):
         self.floor, self.shifted, self.whole = seconds, shift, whole
+
+    def reach_caption_floor(self):
+        self.reaches = getattr(self, "reaches", 0) + 1
 
 
 class _Overlay:

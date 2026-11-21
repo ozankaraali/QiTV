@@ -142,8 +142,13 @@ _SLOW_FOR_S = 30.0
 # 2.11.2: the language they are translated into, per spoken language (translation_rules)
 _TRANSLATIONS = "ai_captions_translations"
 _LOCAL_ON = "ai_captions_local_on"  # turned on (or off) during the last video file
-# 2.13.1: the picture this close to its distance has it (LiveSession's own wait ends 0.1 s short)
-_LEAD_REACHED_S = 0.2
+# 2.13.1: the picture this close to its distance has it: LiveSession's own wait ends 0.1 s short
+# of it, and Go live lands as far as 0.25 s short (its _BELOW_TARGET_S)
+_LEAD_REACHED_S = 0.3
+# ... a raise the picture is still short of this long (not waiting) waits for the whole of it once
+# more; still short as long again, the captions process is given it anyway (within stay-live's
+# band of it: a reopen mid-wait, a landing, a picture swapped in)
+_LEAD_PENDING_S = 10.0
 # 2.13.1: the translator's timed medium line per thread count, from the last run that timed it
 _TRANSLATE_T = "ai_captions_translate_t"
 
@@ -255,6 +260,9 @@ class CaptionsController(QObject):
         self._translate_lead = TranslationLead()
         self._lead_sent: Optional[float] = None
         self._lead_waits = False
+        self._lead_raised: Optional[float] = None  # when a raise began waiting for the picture
+        self._lead_retried = False  # ... and it was waited for whole once more
+        self._clock = time.monotonic  # (tests give their own)
         self._paused = False
         self._levels_wanted = False  # the audio screen's bars read a film run's sound
         if card is not None:
@@ -996,6 +1004,7 @@ class CaptionsController(QObject):
         if live is not None and self._translation():
             if whole and sent is not None and lead > sent:
                 self._lead_waits = True
+                self._lead_raised, self._lead_retried = self._clock(), False
                 live.set_caption_floor(self._picture_lead(), shift=False, whole=True)
             else:
                 live.set_caption_floor(self._picture_lead(), shift=False)
@@ -1013,10 +1022,34 @@ class CaptionsController(QObject):
             self._lead_waits = False  # (a raise taken back at a natural point)
             return
         if sent is not None and want > sent and not self._has_distance(want):
-            return
+            if not self._lead_overdue(want):
+                return
         self._process.send("translate_lead", want)
         self._lead_sent = want
         self._lead_waits = False
+        self._lead_raised, self._lead_retried = None, False
+
+    def _lead_overdue(self, lead: float) -> bool:
+        """A raise to `lead` the picture is short of (not waiting): after _LEAD_PENDING_S it
+        waits for the whole of it once more (LiveSession.reach_caption_floor); short again as
+        long after, True: the captions process is given it anyway."""
+        if self._waiting():
+            return False  # (it waits for it)
+        now = self._clock()
+        if self._lead_raised is None:
+            self._lead_raised = now
+        if now - self._lead_raised < _LEAD_PENDING_S:
+            return False
+        self._lead_raised = now
+        reach = getattr(self._floored, "reach_caption_floor", None)
+        if not self._lead_retried and callable(reach):
+            self._lead_retried = True
+            self._lead_waits = True
+            logger.info("AI captions: short of the translation lead %.1f s: waited for", lead)
+            reach()
+            return False
+        logger.info("AI captions: translation lead %.1f s given, the picture short of it", lead)
+        return True
 
     def _has_distance(self, lead: float) -> bool:
         """The picture is the model's distance and `lead` behind what the captions read: a live
@@ -1509,6 +1542,7 @@ class CaptionsController(QObject):
         self._run_began = None
         self._routed = ""  # a film relay stays until its title ends; on again, asked again
         self._lead_sent, self._lead_waits = None, False  # (the next process is given it whole)
+        self._lead_raised, self._lead_retried = None, False
         self._drop_floor()
         self._show("")
         self.changed.emit()

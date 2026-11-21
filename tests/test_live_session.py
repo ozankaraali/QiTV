@@ -2417,6 +2417,75 @@ class StayLiveTests(LiveSessionCase):
                 self.assertAlmostEqual(self.live.caption_lag(), 11.5, delta=0.3)
                 self.assertEqual(self.playback.holds[holds:], [True, False])
 
+    def reached(self, feed, floor):
+        """The picture at the AI captions' `floor` (10.5 s), playing at 1x."""
+        self.live.set_caption_floor(floor)
+        feed.run(60.0)
+        self.assertAlmostEqual(self.live.caption_lag(), floor, delta=0.3)
+
+    def test_a_whole_raise_leaves_a_time_shifted_picture_where_it_is(self):
+        # 2.13.1 (the review): a translation lead grown mid-playback is not captions coming on:
+        # a picture paused and played on stays time-shifted, Go live showing
+        sid = self.start()
+        feed = Feed(self, sid, burst=0.0, edge=2.5).ready()
+        feed.run(30.0)
+        self.reached(feed, 10.5)
+        self.live.toggle_pause()
+        feed.run(2.0)
+        self.live.toggle_pause()
+        feed.run(1.0)
+        self.assertEqual(self.timelines[-1]["mode"], "shifted")
+        self.live.set_caption_floor(11.5, shift=False, whole=True)
+        feed.run(5.0)
+        self.assertEqual(self.timelines[-1]["mode"], "shifted")
+        self.assertFalse(self.live.caption_waiting())  # far enough back already
+        self.live.set_caption_floor(10.5, shift=False)
+        self.live.set_caption_floor(11.5)  # captions on (as before): live again there
+        feed.run(1.0)
+        self.assertEqual(self.timelines[-1]["mode"], "live")
+
+    def test_a_reopen_during_a_whole_wait_waits_for_all_of_it_again(self):
+        sid = self.start()
+        feed = Feed(self, sid, burst=0.0, edge=2.5).ready()
+        feed.run(30.0)
+        self.reached(feed, 10.5)
+        self.live.set_caption_floor(11.5, shift=False, whole=True)
+        feed.run(0.5)
+        self.assertTrue(self.live.caption_waiting())
+        self.assertTrue(self.live.reopen_player())  # (a cast begins, say) mid-wait
+        waited = 0.0
+        while waited < 10.0 and (waited < 1.0 or self.live.caption_waiting()):
+            feed.run(0.25)
+            waited += 0.25
+        self.assertFalse(self.live.caption_waiting())
+        feed.run(0.5)
+        self.assertGreaterEqual(self.live.caption_lag(), 11.5 - 0.2)
+        feed.run(60.0)
+        self.assertAlmostEqual(self.live.caption_lag(), 11.5, delta=0.3)
+
+    def test_the_whole_floor_is_waited_for_again_when_asked(self):
+        # 2.13.1 (the review): a picture left short of a raised floor (a landing in its band, a
+        # swap) waits for the whole of it once more when the captions ask
+        sid = self.start()
+        feed = Feed(self, sid, burst=0.0, edge=2.5).ready()
+        feed.run(30.0)
+        self.reached(feed, 10.5)
+        self.live.set_caption_floor(11.5)  # (a second short: within the band, no wait)
+        feed.run(30.0)
+        self.assertAlmostEqual(self.live.caption_lag(), 10.5, delta=0.3)
+        holds = len(self.playback.holds)
+        self.live.reach_caption_floor()
+        feed.run(0.5)
+        self.assertTrue(self.live.caption_waiting())
+        feed.run(5.0)
+        self.assertFalse(self.live.caption_waiting())
+        self.assertEqual(self.playback.holds[holds:], [True, False])
+        self.assertGreaterEqual(self.live.caption_lag(), 11.5 - 0.2)
+        self.live.set_caption_floor(0.0)
+        self.live.reach_caption_floor()  # captions off: nothing to reach
+        feed.run(2.0)
+        self.assertFalse(self.live.caption_waiting())
+
     def test_ai_captions_still_loading_hold_the_picture_only_to_their_distance(self):
         # 2.10.1, the owner: the wait went on past the floor while the models loaded ("then
         # suddenly we are too behind"), and stay-live kept what it left. Only the distance is

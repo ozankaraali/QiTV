@@ -620,6 +620,16 @@ class ContextTests(unittest.TestCase):
                 rest = [v for v in t.session.made if all(v is not k for k in kept)]
                 self.assertTrue(all(v.released for v in rest))
 
+    def test_an_answer_taken_from_the_question_before_is_translated_alone(self):
+        script = [99] + letters(" Yes, she's in the kitchen.") + [1]
+        script += letters(" She's in the kitchen.") + [1]
+        t = Fake(script, CharTokenizer())
+        context = ("Annen geldi mi?", "Did your mother come?")
+        with self.assertLogs(translate.logger, "DEBUG"):
+            shown = t.translate("Mutfakta.", "Turkish", "English", context=context)
+        self.assertEqual(shown, "She's in the kitchen.")
+        self.assertTrue(t.second_try)
+
     def test_nothing_usable_with_the_line_before_translates_it_alone(self):
         t = Fake([99, 7] + letters(" He came.") + [1], CharTokenizer())  # a newline at once
         self.assertEqual(
@@ -651,6 +661,32 @@ class ContextTests(unittest.TestCase):
         self.assertTrue(leaks("Ayşe aradı, she came.", "Ayşe aradı.", "Ayşe called.", "Geldi."))
         self.assertFalse(leaks("Ayşe came.", "Ayşe aradı.", "Ayşe called.", "Ayşe geldi."))
         self.assertFalse(leaks("She came.", "", "", "Geldi."))
+
+    def test_an_answer_to_the_question_before_is_a_leak(self):
+        # the 2026-11-21 report's scenes: "Yes," taken from the question before
+        before, translated = "Annen geldi mi?", "Did your mother come?"
+        self.assertTrue(leaks("Yes, she's in the kitchen.", before, translated, "Mutfakta."))
+        self.assertTrue(leaks("No, she is not here.", before, translated, "Burada değil."))
+        self.assertTrue(leaks("Yes. She came.", before, translated, "Geldi."))
+        self.assertFalse(leaks("Yes, she's in the kitchen.", before, translated, "Evet, mutfakta."))
+        self.assertFalse(leaks("She's in the kitchen.", before, translated, "Mutfakta."))
+        self.assertFalse(leaks("In the kitchen, cooking.", before, translated, "Mutfakta."))  # 2+
+        for question in ("هل جاءت أمك؟", "妈妈来了吗？", "Ήρθε η μητέρα σου;"):
+            self.assertTrue(leaks("Yes, she came.", question, translated, "Geldi."), question)
+        self.assertFalse(leaks("Yes, she came.", "Annen geldi.", "Your mother came.", "Geldi."))
+
+    def test_the_line_befores_translation_ending_it_again_is_a_leak(self):
+        # the report's FLORES case: "yavaş oldu." of the translation before, again
+        self.assertTrue(
+            leaks("yavaş oldu. Sonra durdu.", "It was slow.", "Çok yavaş oldu.", "Then it stopped.")
+        )
+        self.assertTrue(
+            leaks("Kitchen. Then she left.", "Nerede?", "In the kitchen.", "Sonra gitti.")
+        )
+        self.assertFalse(
+            leaks("Ayşe left later.", "Ayşe'yi gördüm.", "I saw Ayşe.", "Ayşe sonra gitti.")
+        )  # her name, said in this line too
+        self.assertFalse(leaks("Then she left.", "Nerede?", "In the kitchen.", "Sonra gitti."))
 
 
 class SpeedTests(unittest.TestCase):

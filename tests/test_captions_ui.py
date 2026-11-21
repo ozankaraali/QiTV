@@ -1911,6 +1911,43 @@ class TranslationTests(unittest.TestCase):
         self.zap(102.0)  # five quiet minutes: a step down
         self.assertEqual((live.floor, self.leads()[-1]), (14.0, 6.0))
 
+    def test_a_raise_the_picture_lands_short_of_is_waited_for_again_then_given(self):
+        # the review: a reopen or a landing in stay-live's band left it short of the raise for
+        # good: the lead stopped adapting
+        live = self.window.live_session
+        self.translated()
+        self.captions._on_translate_speed(0.43)
+        self.zap()
+        now = [5000.0]
+        self.captions._clock = lambda: now[0]
+        live.caption_lag = lambda: 10.5
+        self.captions._on_translate_late(self.captions._run, 2.5)  # 3.5 s, waited for whole
+        self.tick(100.25)
+        self.assertEqual(self.leads(), [5.0, 2.5])
+        live.caption_lag = lambda: 11.0  # landed half a second short, playing
+        now[0] += 9.0
+        self.tick(100.5)
+        self.assertEqual((getattr(live, "reaches", 0), self.leads()), (0, [5.0, 2.5]))
+        now[0] += 2.0  # ten seconds and more: it waits for the whole of it once more
+        self.tick(100.75)
+        self.assertEqual((live.reaches, self.leads()), (1, [5.0, 2.5]))
+        self.assertTrue(self.captions._lead_waits)
+        now[0] += 11.0  # still short: the process has it anyway (half a second off speech's)
+        self.tick(101.0)
+        self.assertEqual((live.reaches, self.leads()), (1, [5.0, 2.5, 3.5]))
+        self.assertFalse(self.captions._lead_waits)
+
+    def test_a_landing_within_stay_lives_band_has_the_distance(self):
+        live = self.window.live_session
+        self.translated()
+        self.captions._on_translate_speed(0.43)
+        self.zap()
+        live.caption_lag = lambda: 10.5
+        self.captions._on_translate_late(self.captions._run, 2.5)
+        live.caption_lag = lambda: 11.5 - 0.25  # Go live's lowest landing (_BELOW_TARGET_S)
+        self.tick(100.25)
+        self.assertEqual(self.leads(), [5.0, 2.5, 3.5])
+
     def test_the_load_gives_the_process_the_lead_it_had(self):
         self.translated()
         self.captions._load_model()

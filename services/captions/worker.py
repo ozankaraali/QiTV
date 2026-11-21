@@ -56,7 +56,7 @@ import urllib.request
 from services.captions import guards, numbers_tr, text_language
 from services.captions.growing import GrowingWriter
 from services.captions.languages import COHERE, EUROPEAN, QWEN_LANGUAGES, iso_code
-from services.captions.mt_languages import needs_context, source_for
+from services.captions.mt_languages import needs_context, source_for, words_in
 from services.captions.parts import parts_of
 from services.captions.pieces import END_PAUSE_S, MAX_PIECE_S, Cutter, Piece
 from services.captions.stream_clock import StreamClock, TsTimes
@@ -948,7 +948,8 @@ def translated_caption(message: tuple, text: str) -> tuple:
 class _Line:
     """A caption line for the translator (2.10): its run, the language the run wrote it in, what
     shows, where its sound starts, and the message that sends it as written; 2.13.1: where its
-    sound ends, and when it was written (time.monotonic())."""
+    sound ends, when it was written (time.monotonic()) and the lead it was written under (the
+    reserve the speech side gave it: `_Translation.take` stamps it)."""
 
     run: _Run
     language: str
@@ -957,6 +958,7 @@ class _Line:
     message: tuple
     end: float = 0.0
     written: float = field(default_factory=time.monotonic)
+    lead: float = 0.0
 
 
 @dataclass
@@ -1070,6 +1072,7 @@ class _Translation:
                 # (the final review's insurance: a thread gone would keep every line queued)
                 self._flush("the translator's thread is gone")
                 return False
+            line.lead = self._lead  # 2.13.1: the lead it is written under
             self._lines.append(line)
             self._lock.notify()
         return True
@@ -1223,7 +1226,7 @@ class _Translation:
             return None
         if line.start - before.end > CONTEXT_GAP_S:
             return None  # another scene
-        if len(before.shown.split()) < CONTEXT_MIN_WORDS:
+        if words_in(before.shown) < CONTEXT_MIN_WORDS:
             return None  # ("Yes.": it leaked into the next, translated again alone)
         return before.shown, before.text
 
@@ -1242,7 +1245,6 @@ class _Translation:
             return None, ""
         with self._lock:
             current = line.run is self._current
-            lead = self._lead
         if not current:
             return None, ""  # dropped
         if line.run.stopped.is_set():
@@ -1250,7 +1252,7 @@ class _Translation:
         deadline = self._deadline(line)
         began = time.monotonic()
         if began >= deadline:
-            self._late(line, deadline, lead)
+            self._late(line, deadline)
             return None, f"{began - deadline:.1f} s late for its translation"
         text: Optional[str] = translator.translate(
             line.shown, source, target, deadline, context=context
@@ -1259,16 +1261,17 @@ class _Translation:
             return text, ""
         if time.monotonic() > deadline:
             if not getattr(translator, "second_try", False):  # (the first try's time alone)
-                self._late(line, deadline, lead)
+                self._late(line, deadline)
             return None, f"not translated in the {deadline - began:.1f} s it had"
         return None, "no usable translation"
 
-    def _late(self, line: _Line, deadline: float, lead: float) -> None:
-        """2.13.1: `line` missed its deadline. One that had the lead (less a step) from being
-        written to its deadline tells the GUI the lead is short; one written later (a run's
-        first lines after a seek, the speech side behind) is not the translator's."""
-        if deadline - line.written >= lead - TRANSLATE_LEAD_STEP_S:
-            self.link.send(("translate_late", getattr(line.run, "run", 0), lead))
+    def _late(self, line: _Line, deadline: float) -> None:
+        """2.13.1: `line` missed its deadline. One that had the lead it was written under (less
+        a step) from being written to its deadline tells the GUI that lead is short (a line
+        written before a raise names the lead before it: the GUI raises once); one written later
+        (a run's first lines after a seek, the speech side behind) is not the translator's."""
+        if deadline - line.written >= line.lead - TRANSLATE_LEAD_STEP_S:
+            self.link.send(("translate_late", getattr(line.run, "run", 0), line.lead))
 
     def _deadline(self, line: _Line) -> float:
         """When `line`'s translation must be done (a time.monotonic() value): DEADLINE_MARGIN_S

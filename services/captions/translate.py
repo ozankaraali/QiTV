@@ -23,7 +23,7 @@ import time
 from typing import Any, Optional
 
 from services.captions import onnx_c, text_language
-from services.captions.mt_languages import MT_LANGUAGES
+from services.captions.mt_languages import DENSE, MT_LANGUAGES
 
 logger = logging.getLogger(__name__)
 
@@ -76,16 +76,42 @@ def _grams(words: list[str], n: int) -> set[tuple[str, ...]]:
     return {tuple(words[i : i + n]) for i in range(len(words) - n + 1)}
 
 
+# a question's last mark (Arabic's, the full-width one, Greek's semicolon and its own sign)
+_QUESTION_ENDS = ("?", "؟", "？", ";", "\u037e")
+_CLOSING_QUOTES = "\"'»”’"
+_CLAUSE_MARKS = re.compile(r"[,.!?;:…，。！？、؟\u037e]+")
+
+
+def _words(text: str) -> list[str]:
+    return [word.casefold() for word in _WORD.findall(text)]
+
+
+def _clauses(text: str) -> list[str]:
+    """`text`'s clauses: its stretches between commas and sentence marks, each with a word."""
+    return [part for part in _CLAUSE_MARKS.split(text) if _WORD.search(part)]
+
+
 def leaks(shown: str, before: str, translated: str, text: str) -> bool:
     """A translation made with the line before (`context_prompt`) holds that line: four words in
     a row of its translation (`translated`) or of the line itself (`before`), or all of a
-    shorter one, that the line heard (`text`) doesn't hold too (a name said in both)."""
-    out = [word.casefold() for word in _WORD.findall(shown)]
-    own = [word.casefold() for word in _WORD.findall(text)]
+    shorter one, that the line heard (`text`) doesn't hold too (a name said in both). 2026-11-21's
+    other two (its §5): the translation before's last one to three words again at its start
+    ("yavaş oldu."), and after a question an answer the line doesn't say: one clause more than
+    the line heard, its first of one or two words ("Annen geldi mi?" then "Mutfakta.": "Yes,
+    she's in the kitchen.")."""
+    out, own = _words(shown), _words(text)
     for earlier in (translated, before):
-        words = [word.casefold() for word in _WORD.findall(earlier)]
+        words = _words(earlier)
         n = min(4, len(words))
         if n and len(out) >= n and (_grams(out, n) & _grams(words, n)) - _grams(own, n):
+            return True
+    tail = _words(translated)
+    for k in range(1, min(3, len(tail), len(out)) + 1):
+        if out[:k] == tail[-k:] and tuple(out[:k]) not in _grams(own, k):
+            return True
+    if before.rstrip().rstrip(_CLOSING_QUOTES).endswith(_QUESTION_ENDS):
+        clauses = _clauses(shown)
+        if len(clauses) == len(_clauses(text)) + 1 and len(_WORD.findall(clauses[0])) <= 2:
             return True
     return False
 
@@ -95,20 +121,12 @@ def leaks(shown: str, before: str, translated: str, text: str) -> bool:
 SPEED_LINE = "Bu akşam eve geç geleceğim, yemeği bensiz yiyin lütfen."
 
 
-# scripts where a character carries about a word: the cap on a translation's length counts
-# each as 3 (a 10-character Chinese line translates to 50 or more English characters)
-_DENSE = re.compile(
-    "[\u0e00-\u0eff\u1000-\u109f\u1780-\u17ff\u3040-\u30ff\u3400-\u4dbf"
-    "\u4e00-\u9fff\uac00-\ud7af\u1100-\u11ff]"
-)
-
-
 def clean(source: str, output: str, target: str) -> Optional[str]:
     """What the model wrote, tidied; None when it is not a translation to show: empty, far
     longer than the source, a word said over and over, or not in the target's script (each of
     MiLMMT's targets has its own in text_language)."""
     text = _DASH.sub(", ", _EDGE_DASHES.sub("", output.split("\n", 1)[0]))
-    dense = len(_DENSE.findall(source))
+    dense = len(DENSE.findall(source))  # (a character about a word: counted as 3)
     if not text or len(text) > 3 * (len(source) + 2 * dense) + 20:
         return None
     if _REPEAT.search(text):

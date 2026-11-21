@@ -5,6 +5,7 @@ language code to the target the setting starts at."""
 
 from __future__ import annotations
 
+import re
 from typing import Optional
 
 from services.captions import languages
@@ -123,6 +124,20 @@ NOT_GENDERED = frozenset(
 def needs_context(target: str) -> bool:
     """A line translated into `target` (MiLMMT's name) goes with the line before (`GENDERED`)."""
     return target in GENDERED
+
+
+# scripts where a character carries about a word (Thai, Lao, Burmese, Khmer, Japanese's kana,
+# Chinese, Korean): services.captions.translate's length cap counts each as 3
+DENSE = re.compile(
+    "[\u0e00-\u0eff\u1000-\u109f\u1780-\u17ff\u3040-\u30ff\u3400-\u4dbf"
+    "\u4e00-\u9fff\uac00-\ud7af\u1100-\u11ff]"
+)
+
+
+def words_in(text: str) -> int:
+    """About how many words `text` has: by its spaces, or two characters a word of a script
+    written without them (a Japanese or Chinese clause is one "word" by its spaces)."""
+    return max(len(text.split()), len(DENSE.findall(text)) // 2)
 
 
 # QiTV's caption languages (Qwen's names) that the model names differently
