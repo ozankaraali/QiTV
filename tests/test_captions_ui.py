@@ -1745,6 +1745,152 @@ class TranslationTests(unittest.TestCase):
         [(text, _yes, _no)] = self.card.asked
         self.assertEqual(text, translate(STEP_DOWN_QUESTION, size="600 MB"))
 
+    # ---- 2.13.1: the translation's lead adapts -------------------------------------------
+    def leads(self):
+        """The leads the captions process was given, in order."""
+        return [message[1] for message in self.sent if message[0] == "translate_lead"]
+
+    def tick(self, position=None):
+        if position is not None:
+            self.window.live_session.position_s = position
+        self.captions._tick()
+
+    def translated(self):
+        """Translated into English, the process given the lead held (5 s, nothing measured)."""
+        self.captions.set_language("Turkish")
+        self.captions.set_translate_to("English")
+        self.tick(100.0)
+        self.assertEqual(self.leads(), [TRANSLATE_LEAD_S])
+
+    def zap(self, position=100.0):
+        """Another channel tuned (the live session's stream base changes)."""
+        live = self.window.live_session
+        number = int(live.source[0].split("/t/s", 1)[1].split("/", 1)[0]) + 1
+        live.source = (f"http://127.0.0.1:1/t/s{number}/side/3.ts", 3, 0.0)
+        self.tick(position)
+
+    def test_a_measured_lower_lead_waits_for_a_tune_never_coming_nearer_mid_play(self):
+        live = self.window.live_session
+        self.translated()
+        with self.assertLogs("ui.captions_controller", "INFO") as logs:
+            self.captions._on_translate_speed(0.43)
+        self.assertIn("translation lead 5.0 s; 2.5 s from the next tune", logs.output[-1])
+        for second in (100.25, 100.5, 100.75):
+            self.tick(second)
+        self.assertEqual((live.floor, self.leads()), (8.0 + 5.0, [5.0]))  # as it was
+        with self.assertLogs("ui.captions_controller", "INFO") as logs:
+            self.zap(101.0)
+        self.assertEqual((live.floor, live.shifted), (8.0 + 2.5, False))  # it lands there
+        self.assertEqual(self.leads(), [5.0, 2.5])  # lowered: at once
+        self.assertIn("translation lead 2.5 s (a tune)", "\n".join(logs.output))
+        self.assertEqual(self.captions._picture_lead(), 10.5)
+
+    def test_a_seek_and_play_after_a_pause_are_natural_points_too(self):
+        from types import SimpleNamespace
+
+        live = self.window.live_session
+        self.translated()
+        self.captions._on_translate_speed(0.85)  # 4.0 s
+        self.tick(100.25)
+        self.tick(160.0)  # a seek
+        self.assertEqual((live.floor, self.leads()), (8.0 + 4.0, [5.0, 4.0]))
+        live.caption_lag = lambda: 12.0
+        self.captions._on_translate_late(self.captions._run, 4.0)  # grown: 5.0 s
+        self.assertEqual(live.floor, 13.0)
+        self.tick(160.25)
+        self.assertEqual(self.leads(), [5.0, 4.0])  # the picture not there yet
+        self.window.session = SimpleNamespace(state=lambda: SimpleNamespace(value="paused"))
+        for _ in range(3):
+            self.tick(160.25)
+        self.assertEqual(live.floor, 13.0)
+        self.window.session = SimpleNamespace(state=lambda: SimpleNamespace(value="playing"))
+        self.tick(160.5)  # play after the pause: the measured lead again
+        self.assertEqual((live.floor, self.leads()), (12.0, [5.0, 4.0]))
+        self.assertFalse(self.captions._lead_waits)
+        self.assertEqual(self.captions._translate_lead.value, 4.0)
+
+    def test_the_picture_still_waiting_for_its_distance_takes_a_lower_lead_at_once(self):
+        live = self.window.live_session
+        self.translated()
+        live.caption_waiting = lambda: True  # "Starting captions…": it plays at none yet
+        self.captions._on_translate_speed(0.43)
+        self.assertEqual((live.floor, self.leads()), (8.0 + 2.5, [5.0, 2.5]))
+
+    def test_a_late_translation_grows_it_a_second_waited_for_whole_up_to_seven(self):
+        from ui.captions_texts import STARTING
+
+        live = self.window.live_session
+        self.translated()
+        self.captions._on_translate_speed(0.43)
+        self.zap()
+        run = self.captions._run
+        live.caption_lag = lambda: 10.5
+        with self.assertLogs("ui.captions_controller", "INFO") as logs:
+            self.captions._on_translate_late(run, 2.5)
+        self.assertIn("translation lead 3.5 s (a translation came late)", logs.output[-1])
+        self.assertEqual((live.floor, live.shifted, live.whole), (11.5, False, True))
+        self.captions._on_translate_late(run, 2.5)  # late under the lead it had: not again
+        self.captions._on_translate_late(run - 1, 3.5)  # another run's
+        self.assertEqual(live.floor, 11.5)
+        self.tick(100.25)
+        self.assertEqual(self.leads(), [5.0, 2.5])  # not before the picture is there
+        live.caption_waiting = lambda: True  # the picture waits that second
+        self.captions._on_caption(run, 100.0, 103.0, "Merhaba")
+        self.tick(100.5)
+        self.assertEqual(self.overlay.text, "Merhaba")  # the captions stay on
+        self.assertNotEqual(self.captions.status_text(), translate(STARTING))
+        live.caption_waiting = lambda: False
+        live.caption_lag = lambda: 11.4
+        self.tick(100.5)
+        self.assertEqual(self.leads(), [5.0, 2.5, 3.5])
+        for lead in (3.5, 4.5, 5.5, 6.5, 7.0):
+            live.caption_lag = lambda: 30.0  # (time-shifted far back: it has the distance)
+            self.captions._on_translate_late(run, lead)
+            self.tick(100.5)
+        self.assertEqual(self.leads(), [5.0, 2.5, 3.5, 4.5, 5.5, 6.5, 7.0])
+        self.assertEqual(live.floor, 8.0 + 7.0)
+        for second in (100.75, 101.0, 101.25):
+            self.tick(second)
+        self.assertEqual(live.floor, 15.0)  # never lowered mid-playback
+        self.zap(101.5)
+        self.assertEqual((live.floor, self.leads()[-1]), (10.5, 2.5))
+
+    def test_the_load_gives_the_process_the_lead_it_had(self):
+        self.translated()
+        self.captions._load_model()
+        self.assertEqual(self.loaded[-1]["translate_lead"], 5.0)
+        self.captions._on_ready()
+        self.captions._on_translate_speed(0.43)
+        self.zap()
+        self.window.live_session.caption_lag = lambda: 10.5
+        self.captions._on_translate_late(self.captions._run, 2.5)  # 3.5 s, the picture not there
+        self.captions._load_model()  # (another model, say)
+        self.assertEqual(self.loaded[-1]["translate_lead"], 2.5)  # what it can have
+        self.captions._disable()
+        self.captions._load_model()  # on again: what is held
+        self.assertEqual(self.loaded[-1]["translate_lead"], 3.5)
+
+    def test_a_films_sound_is_read_ahead_by_the_lead_lowered_at_a_seek(self):
+        from test_captions_pipeline import _Controller, _Session, _Target
+
+        from ui.captions_controller import FILM_AHEAD_S
+
+        session = _Session("file:///films/a.mkv", 120_000)
+        self.window.controller = _Controller(_Target(live=False, local=True))
+        self.window.session = session
+        self.captions.set_language("Turkish")
+        self.captions.set_translate_to("English")
+
+        def starts():
+            return [message[3] for message in self.sent if message[0] == "film"]
+
+        self.assertEqual(starts(), [120.0 + FILM_AHEAD_S + 5.0])
+        self.captions._on_translate_speed(0.43)
+        self.captions._tick()
+        session.ms = 180_000  # a seek
+        self.captions._tick()
+        self.assertEqual(starts()[-1], 180.0 + FILM_AHEAD_S + 2.5)
+
 
 class NoteRowTests(PanelCase):
     def test_a_note_and_a_chevron_widen_the_panel_and_show_whole(self):

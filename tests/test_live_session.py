@@ -2378,6 +2378,35 @@ class StayLiveTests(LiveSessionCase):
         self.assertEqual(self.timelines[-1]["mode"], "live")
         self.assertEqual(len(self.playback.plays), 1)
 
+    def test_a_caption_floor_raised_whole_is_waited_for_however_little_short(self):
+        # 2.13.1: AI captions' translation lead grown by a second: within stay-live's band (and
+        # short by no more than _CAPTION_SHORT_S) the picture never got there, and the captions
+        # process could not have the second
+        self.assertIsNone(self.live.caption_lag())  # nothing plays from the buffer
+        sid = self.start()
+        feed = Feed(self, sid, burst=0.0, edge=2.5).ready()
+        feed.run(30.0)
+        self.live.set_caption_floor(10.5)
+        feed.run(60.0)
+        self.assertAlmostEqual(self.live.caption_lag(), 10.5, delta=0.3)
+        self.assertAlmostEqual(self.live.caption_lag(), self.timelines[-1]["lag"], delta=0.05)
+        holds = len(self.playback.holds)
+        self.live.set_caption_floor(11.5)  # a second more, as before
+        feed.run(120.0)
+        self.assertEqual(self.playback.holds[holds:], [])
+        self.assertAlmostEqual(self.live.caption_lag(), 10.5, delta=0.3)  # never there
+        self.live.set_caption_floor(10.5, shift=False)
+        self.live.set_caption_floor(11.5, shift=False, whole=True)
+        feed.run(0.5)
+        self.assertTrue(self.live.caption_waiting())
+        feed.run(5.0)
+        self.assertFalse(self.live.caption_waiting())
+        self.assertEqual(self.playback.holds[holds:], [True, False])  # once
+        feed.run(120.0)
+        self.assertAlmostEqual(self.live.caption_lag(), 11.5, delta=0.3)
+        self.assertGreaterEqual(self.live.caption_lag(), 11.5 - 0.15)
+        self.assertEqual(self.playback.holds[holds:], [True, False])
+
     def test_ai_captions_still_loading_hold_the_picture_only_to_their_distance(self):
         # 2.10.1, the owner: the wait went on past the floor while the models loaded ("then
         # suddenly we are too behind"), and stay-live kept what it left. Only the distance is

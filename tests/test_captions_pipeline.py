@@ -1768,8 +1768,8 @@ class _Live:
             return ("http://127.0.0.1:1/t/s1/side/9.ts", 9, after + 0.4)
         return self.source
 
-    def set_caption_floor(self, seconds, *, shift=True):
-        self.floor, self.shifted = seconds, shift
+    def set_caption_floor(self, seconds, *, shift=True, whole=False):
+        self.floor, self.shifted, self.whole = seconds, shift, whole
 
 
 class _Overlay:

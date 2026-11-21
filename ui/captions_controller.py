@@ -35,10 +35,18 @@ list (`set_translate_to`; MiLMMT-46 1B in the captions process, services.caption
 model is downloaded once its question is answered (asked while they are on; not now: none).
 2.11.2: the language they are translated into is remembered per spoken language
 (services.captions.translation_rules); none is translated before its language is known.
-While they are translated the picture is held TRANSLATE_LEAD_S further back (a film's sound read
-that much further ahead), on every channel. On a computer too slow for the 1.7B and the
-translator both, Automatic takes the 0.6B (services.captions.tier.TRANSLATE_SMALL_BELOW) and
-Turkish is read with its best path alone while translating (the load's "slow_to_translate").
+While they are translated the picture is held the translation's lead further back (a film's sound
+read that much further ahead), on every channel. 2.13.1: the lead adapts (services.captions
+.streaming.TranslationLead): 5 s until the captions process timed its translator's warm-up
+(`_on_translate_speed`), then by that time; a second more each time a translation that had the
+lead came late (`_on_translate_late`: the picture waits that second once, the captions staying
+on); lowered only at a natural point (a zap or a tune, a seek, play after a pause, translation or
+captions turned on, the picture still waiting for its distance), never mid-playback (stay-live
+would steer the picture toward live: the viewer would see it). The captions process is given a
+raise only once the picture has its distance (`_follow_lead`). On a computer too slow for the
+1.7B and the translator both, Automatic takes the 0.6B (services.captions.tier
+.TRANSLATE_SMALL_BELOW) and Turkish is read with its best path alone while translating (the
+load's "slow_to_translate").
 
 Plan 4 (Words on the audio screen): a place that shows lines (a sink with `show_lines`: the
 audio screen's Stage) gets the line before, in its own language, the line said (as heard, part
@@ -59,7 +67,7 @@ from typing import Any, Optional
 
 from PySide6.QtCore import QObject, QTimer, Signal
 
-from services.captions.streaming import TRANSLATE_LEAD_S
+from services.captions.streaming import TranslationLead
 from services.i18n import tr, translate
 
 logger = logging.getLogger(__name__)
@@ -131,6 +139,8 @@ _SLOW_FOR_S = 30.0
 # 2.11.2: the language they are translated into, per spoken language (translation_rules)
 _TRANSLATIONS = "ai_captions_translations"
 _LOCAL_ON = "ai_captions_local_on"  # turned on (or off) during the last video file
+# 2.13.1: the picture this close to its distance has it (LiveSession's own wait ends 0.1 s short)
+_LEAD_REACHED_S = 0.2
 
 from ui.captions_texts import (  # noqa: E402  (the texts, with their translations)
     CANT_KEEP_UP,
@@ -232,6 +242,15 @@ class CaptionsController(QObject):
         self._process.ended.connect(self._on_ended)
         self._process.detected.connect(self._on_detected)
         self._process.levels.connect(self._on_levels)
+        self._process.translateSpeed.connect(self._on_translate_speed)
+        self._process.translateLate.connect(self._on_translate_late)
+        # 2.13.1: the translator's share of the picture's distance (while QiTV runs), what the
+        # captions process was last given of it, the picture waiting for a raise of it, and
+        # the viewer's pause (play after it is a natural point)
+        self._translate_lead = TranslationLead()
+        self._lead_sent: Optional[float] = None
+        self._lead_waits = False
+        self._paused = False
         self._levels_wanted = False  # the audio screen's bars read a film run's sound
         if card is not None:
             card.answered.connect(self._on_answer)
@@ -403,7 +422,7 @@ class CaptionsController(QObject):
             return translate(PREPARING)
         if self._source() is None:
             return translate(NOT_AVAILABLE)
-        if self._waiting():
+        if self._waiting() and not self._lead_waits:  # (2.13.1: not a second for the lead)
             return translate(STARTING)
         if self._behind():
             return translate(CANT_KEEP_UP)
@@ -756,6 +775,9 @@ class CaptionsController(QObject):
             self._process.send(*self._translate_message())
         if not turned:
             return  # another language: held as it is
+        self._lead_waits = False
+        if now:
+            self._lead_natural("translation on")  # (2.13.1: the picture waits for it anyway)
         if self._floored is not None:
             self._floored.set_caption_floor(self._picture_lead(), shift=False)
         if now and self._enabled and self._ready and self._session_key and not self._is_live():
@@ -871,15 +893,119 @@ class CaptionsController(QObject):
         return tier.known_score() is None and not self._unmeasured
 
     def _picture_lead(self) -> float:
-        """The picture's distance behind live: the model's, and TRANSLATE_LEAD_S more while
-        they are translated (2.10: on every channel, one in the language chosen too)."""
+        """The picture's distance behind live: the model's, and the translation's lead more
+        while they are translated (2.10: on every channel, one in the language chosen too)."""
         lead = LEAD_S.get(self._tier, 8.0)
-        return lead + TRANSLATE_LEAD_S if self._translation() else lead
+        return lead + self._translate_lead.value if self._translation() else lead
 
     def _film_ahead(self) -> float:
-        """How far past the picture a film's sound is read: FILM_AHEAD_S, and TRANSLATE_LEAD_S
-        more while they are translated."""
-        return FILM_AHEAD_S + TRANSLATE_LEAD_S if self._translation() else FILM_AHEAD_S
+        """How far past the picture a film's sound is read: FILM_AHEAD_S, and the translation's
+        lead more while they are translated."""
+        return FILM_AHEAD_S + self._translate_lead.value if self._translation() else FILM_AHEAD_S
+
+    # ---- 2.13.1: the translation's lead ----------------------------------------------------
+    def _on_translate_speed(self, seconds: float) -> None:
+        """The captions process timed its translator's medium line (as it loaded): the lead by
+        it. Higher, at once; lower, at the next natural point, or now while the picture still
+        waits for its distance (it plays at none yet)."""
+        before = self._translate_lead.value
+        if self._translate_lead.measure(float(seconds)):
+            self._lead_changed(f"a medium line translates in {seconds:.2f} s", whole=True)
+            return
+        measured = self._translate_lead.measured
+        if measured is None or measured >= before:
+            logger.info(
+                "AI captions: translation lead %.1f s (a medium line translates in %.2f s)",
+                before,
+                seconds,
+            )
+        elif self._settling():
+            self._lead_natural(f"a medium line translates in {seconds:.2f} s")
+        else:
+            logger.info(
+                "AI captions: translation lead %.1f s; %.1f s from the next tune, seek or play "
+                "(a medium line translates in %.2f s)",
+                before,
+                measured,
+                seconds,
+            )
+
+    def _on_translate_late(self, run: int, lead: float) -> None:
+        """A line of the run that had the lead (`lead`) came late for its translation: a second
+        more. One that had less (a raise the captions process isn't given yet) says nothing."""
+        if run != self._run or not self._enabled or not self._translation():
+            return
+        if lead < self._translate_lead.value - 1e-6:
+            return
+        if self._translate_lead.late():
+            self._lead_changed("a translation came late", whole=True)
+
+    def _settling(self) -> bool:
+        """The live picture waits for its distance (not for a raise of the lead): it plays at
+        none yet, and a lower one ends that wait sooner."""
+        return self._waiting() and not self._lead_waits
+
+    def _lead_natural(self, why: str) -> None:
+        """A natural point: the measured lead, when it is lower than the one held."""
+        if self._translate_lead.natural():
+            self._lead_changed(why)
+
+    def _lead_changed(self, why: str, *, whole: bool = False) -> None:
+        """The lead changed (`why`, logged): the picture's distance follows (raised `whole`: it
+        waits once for all of it), and the captions process, at once when lowered, else once
+        the picture has the distance (`_follow_lead`)."""
+        lead, sent = self._translate_lead.value, self._lead_sent
+        logger.info("AI captions: translation lead %.1f s (%s)", lead, why)
+        live = self._floored
+        if live is not None and self._translation():
+            if whole and sent is not None and lead > sent:
+                self._lead_waits = True
+                live.set_caption_floor(self._picture_lead(), shift=False, whole=True)
+            else:
+                live.set_caption_floor(self._picture_lead(), shift=False)
+        self._follow_lead()
+
+    def _follow_lead(self) -> None:
+        """The captions process is given the lead: lowered, at once; raised, once the picture
+        has that distance (the speech side would lose the time otherwise)."""
+        if not (self._enabled and self._ready and self._process.running()):
+            return
+        if not self._translation():
+            return
+        want, sent = self._translate_lead.value, self._lead_sent
+        if sent is not None and abs(want - sent) < 1e-6:
+            self._lead_waits = False  # (a raise taken back at a natural point)
+            return
+        if sent is not None and want > sent and not self._has_distance(want):
+            return
+        self._process.send("translate_lead", want)
+        self._lead_sent = want
+        self._lead_waits = False
+
+    def _has_distance(self, lead: float) -> bool:
+        """The picture is the model's distance and `lead` behind what the captions read: a live
+        one by its mean lag behind live (LiveSession.caption_lag; else the sound read), a
+        film's by how far its sound is read past it."""
+        lag: Optional[float] = None
+        if self._is_live():
+            base = LEAD_S.get(self._tier, 8.0)
+            caption_lag = getattr(self._live(), "caption_lag", None)
+            lag = caption_lag() if callable(caption_lag) else None
+        else:
+            base = FILM_AHEAD_S
+        if lag is None and self._newest is not None:
+            lag = float(self._newest) - self._position()
+        return lag is not None and lag >= base + lead - _LEAD_REACHED_S
+
+    def _viewer_paused(self) -> bool:
+        """The viewer paused the large picture (its player's state; a caption wait is no pause:
+        PlaybackSession.hold says buffering)."""
+        state = getattr(self._session(), "state", None)
+        try:
+            value = state() if callable(state) else None
+        except Exception:
+            return False
+        return str(getattr(value, "value", value)) == "paused"
 
     def _here(self, name: str) -> bool:
         """The model is installed, looked at once until a download or Settings' Delete changes
@@ -1150,6 +1276,7 @@ class CaptionsController(QObject):
         self._starting = time.monotonic()  # "Starting captions…" till their first words
         self._forget_cues()
         self._resolve_language()
+        self._lead_natural("captions on")  # 2.13.1: (the picture waits for its distance)
         self._hold_floor()
         self._route_film()  # a provider's film: through the film relay while the model loads
         if not self._process.running():
@@ -1167,6 +1294,10 @@ class CaptionsController(QObject):
         paths = models.model_paths(self._tier)
         runtime = models.runtime_dir()
         translation = self._translation()
+        lead = self._translate_lead.value
+        if self._lead_sent is not None:
+            lead = min(lead, self._lead_sent)  # (a raise it isn't given yet stays so)
+        self._lead_sent = lead
         self._loading, self._ready = True, False
         self._process.start(
             {
@@ -1192,6 +1323,9 @@ class CaptionsController(QObject):
                 "translate_to": translation or None,
                 "translation": self._translation_folder() if translation else None,
                 "slow_to_translate": self._slow_to_translate(),  # 2.10 (an older child ignores it)
+                # 2.13.1: the translation's lead: the one held, or the one it had while a raise
+                # waits for the picture's distance
+                "translate_lead": lead,
                 "threads": model_threads(),
             },
             detailed_log=bool(self._config_get("detailed_log", False)),
@@ -1337,6 +1471,7 @@ class CaptionsController(QObject):
         self._forget_run()
         self._run_began = None
         self._routed = ""  # a film relay stays until its title ends; on again, asked again
+        self._lead_sent, self._lead_waits = None, False  # (the next process is given it whole)
         self._drop_floor()
         self._show("")
         self.changed.emit()
@@ -1599,6 +1734,12 @@ class CaptionsController(QObject):
         if not self._enabled:
             return
         self._started()  # (no progress from a run that did not start: START_WAIT_S anyway)
+        paused = self._viewer_paused()
+        if paused != self._paused:
+            self._paused = paused
+            if not paused:
+                self._lead_natural("play after a pause")  # 2.13.1: a natural point
+        self._follow_lead()  # 2.13.1: a raise, once the picture has its distance
         if self._steps_down():
             self._step_down()
         if self._is_live() and self._live() is not self._floored:
@@ -1616,6 +1757,7 @@ class CaptionsController(QObject):
             self._forget_run()  # ... read from its own picture, its speed judged anew
             self._deaf_runs = 0
             self._last = None
+            self._lead_natural("a tune")  # 2.13.1: it lands at its distance
             before = self._translation()
             self._resolve_language()  # its own language too
             self._start_run()
@@ -1640,7 +1782,10 @@ class CaptionsController(QObject):
             self.changed.emit()  # the row reads "Starting captions…", then as before
         if waiting:
             self._last = None  # the picture stands still on purpose: no seek, no caption
-            self._show(translate(STARTING))
+            if self._lead_waits:  # 2.13.1: a second for the translator: the captions stay
+                self._show(*self._showing(self._position()))
+            else:
+                self._show(translate(STARTING))
             return
         position = self._position()
         now = time.monotonic()
@@ -1652,6 +1797,7 @@ class CaptionsController(QObject):
             if (moved > elapsed + SEEK_S or moved < -SEEK_S) and self._ready:
                 self._last = (position, now)
                 self._rate_from = None
+                self._lead_natural("a seek")  # 2.13.1: a natural point
                 if not self._covered(position):
                     self._start_run()
                 return
