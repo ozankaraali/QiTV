@@ -54,12 +54,13 @@ others' distributions, which may have malware.**
 ## Free radio
 
 - **Where it is.** **＋ Free radio…** sits right under **＋ Free channels…** wherever that is: the
-  channel list's sources column, the **Providers** menu, Settings → Providers, the Add provider
-  card's other ways, and the welcome card (a third button). The keys reach it as any row:
-  ↑/↓ and OK on the keyboard, the remote or the phone.
-- **The same menu as Free channels.** **All countries**, your region (from your computer's
-  settings), or **Another country…**, a list of every country in your language. The menu's
-  tooltips say where the stations come from.
+  channel list's sources column, the **Providers** menu, the Add provider card's other ways,
+  and the welcome card (a third button). In Settings → Providers it is **＋ Free radio**. The
+  keys reach it as any row: ↑/↓ and OK on the keyboard, the remote or the phone.
+- **The same countries as Free channels.** They are a list in Settings: **All countries**, your
+  region (from your computer's settings), then every country from A to Z in your language.
+  Type to find one. The **Providers** menu offers the first two and **Another country…**, which
+  opens the list; its tooltips say where the stations come from.
 - **All stations first.** A list's first group holds every station, the most played first.
 - **One country:** then its stations by genre: **News & talk**, **Classical**, **Jazz &
   blues**, **Electronic & dance**, **Rock**, **Pop**, **Folk & traditional**, **Religious**,
