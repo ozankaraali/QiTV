@@ -59,9 +59,14 @@ class PhoneLibraryTests(unittest.TestCase):
         self.cache = LibraryCache()
         self.library = self.make()
 
-    def make(self):
+    def make(self, pictures=None):
         library = PhoneLibrary(
-            self.catalog, self.config, WatchState(self.config), self.sent.append, cache=self.cache
+            self.catalog,
+            self.config,
+            WatchState(self.config),
+            self.sent.append,
+            cache=self.cache,
+            pictures=pictures,
         )
         self.addCleanup(library.deleteLater)
         return library
@@ -372,8 +377,27 @@ class PhoneLibraryTests(unittest.TestCase):
         self.assertEqual(searcher.asked, ["comedy", "dune"])
         self.assertEqual([t["title"] for t in self.last("genres")["titles"]], ["Comedy one"])
 
+    def test_a_title_carries_its_pictures_token_when_the_phone_is_given_one(self):
+        asked = []
+
+        def pictures(item, kind):
+            asked.append(kind)
+            return "T" * 22
+
+        self.library = self.make(pictures)
+        drama = self.opened()["Drama"]
+        self.library.titles("movies", drama, 0, "")
+        rows = self.last("library")["items"]
+        self.assertTrue(rows and all(row["img"] == "T" * 22 for row in rows))
+        self.assertEqual(set(asked), {"movie"})
+        self.library = self.make(lambda item, kind: "")  # none for it (through the relay)
+        self.library.titles("movies", drama, 0, "")
+        self.assertTrue(self.last("library")["items"])
+        self.assertFalse(any("img" in row for row in self.last("library")["items"]))
+
     def test_the_largest_pages_fit_a_frame_in_any_script(self):
         long = "字" * 300  # 3 bytes a letter; titles are cut to what a row shows
+        self.library = self.make(lambda item, kind: "T" * 24)  # a picture's token on every row
         titles = [movie(i, f"{long}{i}", year=long) for i in range(120)]
         genres = [(str(i), f"{long}{i}", 120) for i in range(200)]
         self.catalog.group_list["movies"] = genres

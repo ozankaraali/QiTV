@@ -48,6 +48,7 @@ from services.remote.protocol import (
     Opened,
     OpenItem,
     Paired,
+    PictureWanted,
     Position,
     Press,
     Query,
@@ -71,6 +72,7 @@ from ui.record_timer_dialog import TimerChoice
 from ui.remote_buttons import BUTTONS
 from ui.remote_guide import PhoneGuide
 from ui.remote_library import PhoneLibrary
+from ui.remote_pictures import PhonePictures
 from ui.remote_repeat import KeyRepeater
 from ui.remote_snapshots import TITLE_CHARS, Handles, results, results_of, state, tracks
 
@@ -160,6 +162,10 @@ class RemoteController(QObject):
         self._channel_lists: dict[str, PhoneGuide] = {}  # and the Remote tab's channel list
         self._devices: dict[str, str] = {}  # each phone's device id, by session
         self._relayed: set[str] = set()  # phones through the relay (no film comes that way)
+        # The pictures phones at home show (never one through the relay): their tokens, and the
+        # copies QiTV scales for the hub.
+        self.pictures = PhonePictures(window, self._at_home, self._put_picture, self)
+        self._last_picture: Optional[tuple[str, str]] = None  # what plays large's, last sent
         # Each phone's catalog for its lists (its own provider choice), by device.
         self._phone_catalogs: dict[str, BrowsedCatalog] = {}
         self._channel_finder: Optional[FindSession] = None  # the phones' finds, shared
@@ -237,7 +243,12 @@ class RemoteController(QObject):
         if self.hub is None:
             from services.remote.hub import RemoteHub, web_dir
 
-            self.hub = RemoteHub(self.bridge.post, web_dir())
+            self.hub = RemoteHub(
+                self.bridge.post,
+                web_dir(),
+                pictures=self.pictures.shelf,
+                images=getattr(self._window, "image_manager", None),
+            )
             self.hub.start(data)
         else:
             self.hub.apply(data)
@@ -390,7 +401,8 @@ class RemoteController(QObject):
             if event.door == "relay":
                 self._relayed.add(event.sid)
             self._diff.start()
-            self._send(event.sid, self._state())
+            snapshot = self._state()
+            self._send(event.sid, self._dressed(event.sid, snapshot, self._last_picture))
         elif isinstance(event, Get):
             self._answer(event)
         elif isinstance(event, Query):
@@ -434,6 +446,8 @@ class RemoteController(QObject):
             self._schedule_from_phone(event.sid, event.handle, event.do)
         elif isinstance(event, DeskAct):  # 2.9.7: the phone's Recordings
             self._desk_from_phone(event.sid, event.handle, event.do)
+        elif isinstance(event, PictureWanted):  # a picture too large to hand as it is
+            self.pictures.wanted(event.source, event.kind)
         elif isinstance(event, StoreSaved):
             self._persist(event.data)
         elif isinstance(event, Paired):
@@ -463,6 +477,7 @@ class RemoteController(QObject):
     def _state(self) -> dict:
         snapshot = state(self._window)
         self._last_state, self._last_at = snapshot, self._now()
+        self._last_picture = self._now_picture()
         return snapshot
 
     def _push_state(self) -> None:
@@ -473,10 +488,42 @@ class RemoteController(QObject):
         self._push_tracks()
         last, last_at = self._last_state, self._last_at
         snapshot = state(self._window)
-        if last is not None and not _changed(last, snapshot, self._now() - last_at):
+        picture = self._now_picture()
+        unchanged = last is not None and not _changed(last, snapshot, self._now() - last_at)
+        if unchanged and picture == self._last_picture:
             return
         self._last_state, self._last_at = snapshot, self._now()
-        self.hub.broadcast(snapshot)
+        self._last_picture = picture
+        dressed = {sid: self._dressed(sid, snapshot, picture) for sid in sorted(self._phones)}
+        if all(message is snapshot for message in dressed.values()):
+            self.hub.broadcast(snapshot)  # no phone at home has a picture for it: one for all
+            return
+        for sid, message in dressed.items():
+            self._send(sid, message)
+
+    def _now_picture(self) -> Optional[tuple[str, str]]:
+        try:
+            return self.pictures.now()
+        except Exception as error:  # a picture must never keep what's on from the phones
+            logger.error("Phone remote: the picture of what's on: %s", safe_message(error))
+            return None
+
+    def _dressed(self, sid: str, snapshot: dict, picture: Optional[tuple[str, str]]) -> dict:
+        """`snapshot` for phone `sid`: with what plays large's picture ("img" in its "now") for
+        a phone at home, as it is for every other (the snapshot itself is never changed)."""
+        now = snapshot.get("now")
+        if not picture or not isinstance(now, dict):
+            return snapshot
+        token = self.pictures.token(sid, *picture)
+        return {**snapshot, "now": {**now, "img": token}} if token else snapshot
+
+    def _at_home(self, sid: str) -> bool:
+        """Whether phone `sid` came through the home door (the relay's get no pictures)."""
+        return self.hub is not None and sid in self._phones and sid not in self._relayed
+
+    def _put_picture(self, source: str, kind: str, data: bytes, content_type: str) -> None:
+        if self.hub is not None:
+            self.hub.put_picture(source, kind, data, content_type)
 
     def _push_results(self) -> None:
         if self._phones and self.hub is not None:
@@ -540,6 +587,7 @@ class RemoteController(QObject):
                 finder=self._finder(),
                 prefer=self._prefer,
                 guides_moved=self._phone_guides,
+                pictures=lambda channel: self.pictures.channel(sid, channel),
             )
             self._guides[sid] = guide
         return guide
@@ -556,6 +604,7 @@ class RemoteController(QObject):
                 catalog=self._phone_catalog(sid),
                 finder=self._finder(),
                 prefer=self._prefer,
+                pictures=lambda channel: self.pictures.channel(sid, channel),
             )
             self._channel_lists[sid] = listed
         return listed
@@ -675,6 +724,7 @@ class RemoteController(QObject):
                 recordings=window.screens.recordings,  # the recordings' folders (2.8)
                 rec_library=window.screens.recordings_library,  # 2.9.7: the Recordings tab's
                 rec_entries=window.screens.recordings_desk.entries,
+                pictures=lambda item, kind: self.pictures.title(sid, item, kind),
             )
             window.screens.recordings_desk.refreshed.connect(library.recordings_changed)
             window.screens.recordings.changed.connect(library.recordings_changed)

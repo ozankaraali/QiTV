@@ -18,15 +18,20 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import colorsys
 from datetime import datetime
 import json
+import math
 import os
 from pathlib import Path
+import struct
 import sys
+import tempfile
 import threading
 import time
 from typing import Any, Callable, Optional
 from urllib.parse import urlsplit, urlunsplit
+import zlib
 
 ROOT = Path(__file__).resolve().parent.parent
 sys.path[:0] = [str(ROOT), str(ROOT / "tests")]
@@ -99,6 +104,97 @@ class Recorder:
             return [e for e in self.events[after:] if isinstance(e, kind)]
 
 
+def _png(
+    width: int, height: int, pixel: Callable[[int, int], tuple[int, ...]], alpha: bool
+) -> bytes:
+    """A PNG of `pixel(x, y)`'s colours (RGB, or RGBA with `alpha`), written here."""
+
+    def chunk(kind: bytes, data: bytes) -> bytes:
+        body = kind + data
+        return struct.pack(">I", len(data)) + body + struct.pack(">I", zlib.crc32(body))
+
+    rows = bytearray()
+    for y in range(height):
+        rows.append(0)
+        for x in range(width):
+            rows.extend(pixel(x, y))
+    header = struct.pack(">IIBBBBB", width, height, 8, 6 if alpha else 2, 0, 0, 0)
+    return (
+        b"\x89PNG\r\n\x1a\n"
+        + chunk(b"IHDR", header)
+        + chunk(b"IDAT", zlib.compress(bytes(rows), 6))
+        + chunk(b"IEND", b"")
+    )
+
+
+def _rgb(h: float, s: float, v: float) -> tuple[int, int, int]:
+    r, g, b = colorsys.hsv_to_rgb(h % 1.0, s, v)
+    return round(r * 255), round(g * 255), round(b * 255)
+
+
+def invented_poster(n: int) -> bytes:
+    """An invented 2:3 poster: a sky in its own hue, a sun, hills, a bar where a title goes."""
+    width, height, hue = 240, 360, (0.07 + n * 0.23) % 1.0
+    sun = (width * 0.5, height * 0.36, width * 0.2)
+
+    def pixel(x: int, y: int) -> tuple[int, ...]:
+        hill = height * (0.6 + 0.05 * math.sin(x / width * math.tau * 1.5 + n))
+        if height * 0.8 <= y <= height * 0.84 and width * 0.16 <= x <= width * 0.84:
+            return (238, 242, 246)
+        if y > hill:
+            return _rgb(hue + 0.5, 0.45, 0.22 + 0.1 * (height - y) / height)
+        if (x - sun[0]) ** 2 + (y - sun[1]) ** 2 <= sun[2] ** 2:
+            return _rgb(hue + 0.1, 0.35, 0.98)
+        return _rgb(hue, 0.6, 0.35 + 0.5 * y / height)
+
+    return _png(width, height, pixel, alpha=False)
+
+
+def invented_logo(n: int) -> bytes:
+    """An invented channel logo on a transparent ground: a disc and a wordmark's bars."""
+    width, height, hue = 160, 80, (0.55 + n * 0.29) % 1.0
+    colour = (*_rgb(hue, 0.65, 0.95), 255)
+    light = (238, 242, 246, 255)
+
+    def pixel(x: int, y: int) -> tuple[int, ...]:
+        if (x - 36) ** 2 + (y - 40) ** 2 <= 28**2:
+            return colour
+        if 76 <= x <= 150 and (18 <= y <= 34 or (44 <= y <= 56 and x <= 128)):
+            return light
+        return (0, 0, 0, 0)
+
+    return _png(width, height, pixel, alpha=True)
+
+
+class InventedImages:
+    """QiTV's image cache as the home door reads it (services/image_manager.py), for the page's
+    pictures: invented posters and logos made here, by the name an address ends in
+    (poster-<n>.png, logo-<n>.png). Nothing goes to the network."""
+
+    def __init__(self) -> None:
+        self.folder = Path(tempfile.mkdtemp(prefix="qitv-page-pictures-"))
+
+    async def cache_image_from_url(self, session: Any, url: str, iconified: bool) -> Optional[str]:
+        name = url.rsplit("/", 1)[-1]
+        path = self.folder / name
+        if not path.exists():
+            kind, _, number = name.removesuffix(".png").partition("-")
+            if not number.isdigit() or kind not in ("poster", "logo"):
+                return None
+            maker = invented_poster if kind == "poster" else invented_logo
+            path.write_bytes(maker(int(number)))
+        return str(path)
+
+    async def cache_image_from_base64(self, image_str: str, iconified: bool) -> Optional[str]:
+        return None
+
+    def discard(self, path: str) -> None:
+        pass
+
+
+PICTURES = InventedImages()
+
+
 class Rig:
     """A hub on 127.0.0.1 and a headless Chrome page (a phone-sized viewport)."""
 
@@ -116,12 +212,15 @@ class Rig:
         )
         self.page = self.context.new_page()
         self.errors: list[str] = []
+        self.allowed: list[str] = []  # console errors a scenario causes on purpose
         self.page.on("pageerror", lambda e: self.errors.append(str(e)))
         self.page.on("console", self._console)
         self.shots = shots
 
     def add_hub(self, name: str, events: Recorder) -> RemoteHub:
-        hub = RemoteHub(events, web_dir(), ports=[0], host="127.0.0.1", tv_name=name)
+        hub = RemoteHub(
+            events, web_dir(), ports=[0], host="127.0.0.1", tv_name=name, images=PICTURES
+        )
         config = {"version": 1, "enabled": True, "relay": bool(self.relay)}
         if self.relay:
             config["relay_url"] = self.relay
@@ -140,7 +239,7 @@ class Rig:
 
     def _console(self, message: Any) -> None:
         # A socket to an address that is gone is expected (hop-back-on-loss); other errors fail.
-        expected = ("WebSocket connection to", "ERR_CONNECTION_REFUSED")
+        expected = ("WebSocket connection to", "ERR_CONNECTION_REFUSED", *self.allowed)
         if message.type == "error" and not any(text in message.text for text in expected):
             self.errors.append(message.text)
 
@@ -703,6 +802,102 @@ def scenario_library_look(rig: Rig) -> None:
     assert below is not None and below["y"] >= box["y"] + box["height"], (box, below)  # no overlap
     assert title.is_visible()
     rig.shot("library-look")
+
+
+LOADED = "(s) => [...document.querySelectorAll(s)].filter((i) => i.naturalWidth > 0).length"
+
+
+def scenario_pictures(rig: Rig) -> None:
+    """At home, QiTV's pictures over its tiles and cards: the now-playing logo (kept while it
+    is drawn again), the Guide's logos, the Library's posters (2:3, as the cards were: nothing
+    moves when they land, a poster says its own title). A picture that fails leaves its card as
+    it was, and isn't asked for again."""
+    rig.allowed.append("404")  # the picture that fails, on purpose
+    sid = paired_sid(rig)
+    shelf = rig.hub.pictures
+
+    def logo(n: int) -> str:
+        return shelf.issue(sid, f"https://logos.invalid/logo-{n}.png", "logo")
+
+    def poster(n: int) -> str:
+        return shelf.issue(sid, f"https://posters.invalid/poster-{n}.png", "poster")
+
+    tile = rig.page.locator("#nowLogo")
+    rig.hub.send(sid, STATE)
+    rig.page.locator("#nowName", has_text="Harbourline News").wait_for()
+    before = tile.bounding_box()
+    rig.hub.send(sid, {**STATE, "now": {**STATE["now"], "tint": "#6a5f9e", "img": logo(1)}})
+    rig.page.wait_for_selector("#nowLogo img.pic.in")
+    assert rig.page.evaluate(LOADED, "#nowLogo img.pic") == 1
+    assert tile.bounding_box() == before, (before, tile.bounding_box())
+    shown = rig.page.evaluate("document.querySelector('#nowLogo img.pic').dataset.token")
+    rig.page.wait_for_timeout(1300)  # drawn again each second: the same picture stays
+    assert rig.page.locator("#nowLogo img.pic").count() == 1
+    assert rig.page.evaluate("document.querySelector('#nowLogo img.pic').dataset.token") == shown
+    fit = rig.page.evaluate("getComputedStyle(document.querySelector('#nowLogo img')).objectFit")
+    assert fit == "contain", fit  # a logo whole, as the TV draws it
+    rig.page.wait_for_timeout(300)  # its fade in
+    rig.shot("shot-now-playing")
+    mark = rig.events.mark()
+    rig.page.click("[data-tab=guide]")
+    rows = [{**row, "img": logo(i + 1)} for i, row in enumerate(GUIDE["rows"])]
+    ask = rig.events.wait(Get, where=lambda e: e.what == "guide", after=mark)
+    answer(rig, sid, ask, {**GUIDE, "rows": rows})
+    rig.page.wait_for_selector("#guideRows .row .logo img.pic.in >> nth=2")
+    assert rig.page.evaluate(LOADED, "#guideRows .logo img.pic") == 3
+    initials = (
+        rig.page.locator("#guideRows .logo").nth(0).evaluate("e => getComputedStyle(e).color")
+    )
+    assert initials == "rgba(0, 0, 0, 0)", initials  # its initials go with its picture
+    rig.page.wait_for_timeout(300)
+    rig.shot("shot-guide-logos")
+    mark = rig.events.mark()
+    rig.page.click("[data-tab=library]")
+    answer(rig, sid, rig.events.wait(Get, where=lambda e: e.what == "genres", after=mark), GENRES)
+    rig.page.wait_for_selector("#libraryRows .row.branch >> nth=1")
+    mark = rig.events.mark()
+    rig.page.locator("#libraryRows .row.branch", has_text="Drama").click()
+    ask = rig.events.wait(Get, where=lambda e: e.what == "library", after=mark)
+    page = titles_page(0, 6)
+    for i, item in enumerate(page["items"]):
+        item.update(img=poster(i + 1), hue=round((0.1 + i * 0.17) % 1, 3), plays=True)
+    page["items"][2]["img"] = "AAAAAAAAAAAAAAAAAAAAAA"  # a token QiTV never gave: it fails
+    answer(rig, sid, ask, page)
+    rig.page.wait_for_selector("#libraryRows .card >> nth=5")
+    cards = rig.page.locator("#libraryRows .card")
+    rig.page.wait_for_function(
+        "() => document.querySelectorAll('#libraryRows .card img.pic.in').length === 5"
+    )
+    rig.page.wait_for_function(
+        "() => { const c = document.querySelectorAll('#libraryRows .card')[2];"
+        " return c && !c.querySelector('img'); }"
+    )
+    failed, pictured = cards.nth(2), cards.nth(0)
+    assert "linear-gradient" in failed.evaluate("e => getComputedStyle(e).backgroundImage")
+    title = failed.evaluate("e => getComputedStyle(e.querySelector('.card-title')).color")
+    assert title == "rgb(255, 255, 255)", title
+    assert "pictured" not in (failed.get_attribute("class") or "")
+    assert "pictured" in (pictured.get_attribute("class") or "")
+    title = pictured.evaluate("e => getComputedStyle(e.querySelector('.card-title')).color")
+    assert title == "rgba(0, 0, 0, 0)", title
+    assert "Harbour Lights" in pictured.inner_text()  # its name, for a screen reader too
+    fit = pictured.evaluate("e => getComputedStyle(e.querySelector('img')).objectFit")
+    assert fit == "cover", fit
+    boxes = [cards.nth(i).bounding_box() for i in range(6)]
+    for box in boxes:  # 2:3 each, the failed card as large as the pictured ones
+        assert box is not None and 1.45 < box["height"] / box["width"] < 1.55, box
+        assert abs(box["width"] - boxes[0]["width"]) < 0.5, boxes
+    picture = pictured.locator("img").bounding_box()
+    assert picture is not None and boxes[0] is not None
+    assert abs(picture["height"] - boxes[0]["height"]) < 1, (picture, boxes[0])  # it fills its card
+    rig.page.wait_for_timeout(300)
+    rig.shot("shot-library-posters")
+    # Drawn again (QiTV's own resend), the failed one isn't asked for again.
+    requests: list[str] = []
+    rig.page.on("request", lambda request: requests.append(request.url))
+    rig.hub.send(sid, page)
+    rig.page.wait_for_timeout(500)
+    assert not any("AAAAAAAAAAAAAAAAAAAAAA" in url for url in requests), requests
 
 
 KNOB_SIDE = """(s) => {
@@ -2362,6 +2557,7 @@ SCENARIOS.update(
         "guide-remembers": scenario_guide_remembers,
         "search-done-tv": scenario_search_done_tv,
         "small-screens": scenario_small_screens,
+        "pictures": scenario_pictures,
     }
 )
 
