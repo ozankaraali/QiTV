@@ -327,6 +327,20 @@ class PipFrameTests(FrameCase):
         frame.take_back(surface)
         self.assertIsNone(frame.lent_shape())
 
+    def test_the_small_and_the_lent_surface_show_their_pictures_small(self):
+        frame = self.make()
+        self.assertFalse(frame.shows_small("pip"))  # no picture in picture
+        frame.show_pip()
+        self.assertEqual((frame.shows_small("pip"), frame.shows_small("main")), (True, False))
+        frame.set_large("pip")  # a swap
+        self.assertEqual((frame.shows_small("pip"), frame.shows_small("main")), (False, True))
+        surface = frame.lend_large()  # the large one floats (the desktop picture in picture)
+        self.assertTrue(frame.shows_small("pip"))
+        frame.take_back(surface)
+        self.assertFalse(frame.shows_small("pip"))
+        frame.suspend()  # the multiview's tiles
+        self.assertFalse(frame.shows_small("main"))
+
     def test_drag_to_the_top_left_quadrant_snaps_to_tl_and_saves_it(self):
         frame = self.make()
         frame.show_pip()
