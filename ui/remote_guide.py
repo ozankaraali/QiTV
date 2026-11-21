@@ -62,9 +62,12 @@ class PhoneGuide(QObject):
         finder: Any = None,
         prefer: Optional[Callable[[str], None]] = None,
         guides_moved: Optional[Callable[[], None]] = None,
+        pictures: Optional[Callable[[dict], str]] = None,
     ) -> None:
         super().__init__(parent)
         self._window = window
+        # A channel's logo's token for this phone ("" for none: through the relay, say).
+        self._pictures = pictures
         self._send = send
         self._bare = bare
         self._kinds = (
@@ -195,6 +198,9 @@ class PhoneGuide(QObject):
             "tint": tint(str(channel.get("name") or "")),  # 2.9.7
             "rows": rows,
         }
+        picture = self._picture(channel)
+        if picture:  # its logo in its tile, at home
+            message["img"] = picture
         if getattr(self._window, "scheduler", None) is not None:
             message["timer"] = True  # 2.8: Record at a time, guide or not
             # its times are this computer's clock's: how far from UTC (minutes)
@@ -470,10 +476,16 @@ class PhoneGuide(QObject):
             "tint": tint(str(channel.get("name") or "")),  # 2.9.7: its tile's, as the TV's
             "playing": playing is not None and ZapContext.same(channel, playing),
         }
+        picture = self._picture(channel)
+        if picture:  # its logo in its tile, at home
+            row["img"] = picture
         if not self._bare:
             on, upcoming = controller.now_next(channel)
             row.update(now=programme_dict(on), next=programme_dict(upcoming))
         return row
+
+    def _picture(self, channel: dict) -> str:
+        return self._pictures(channel) if self._pictures is not None else ""
 
     def _set_providers(self, providers: set[str]) -> None:
         moved = providers != self.providers

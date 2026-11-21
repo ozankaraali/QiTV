@@ -66,10 +66,13 @@ class PhoneLibrary(QObject):
         recordings: Any = None,
         rec_library: Any = None,
         rec_entries: Callable[[], list] = lambda: [],
+        pictures: Optional[Callable[[dict, str], str]] = None,
     ) -> None:
         """2.9.7: `rec_library` (services.recordings_library) and `rec_entries()` (the
-        Recordings page's rows) make the "recordings" section."""
+        Recordings page's rows) make the "recordings" section. `pictures(item, kind)`: the
+        token of a title's poster for this phone ("" for none: through the relay, say)."""
         super().__init__(parent)
+        self._pictures = pictures
         self._rec_library = rec_library
         self._rec_entries = rec_entries
         self._rec_genre = rl.ALL
@@ -245,6 +248,9 @@ class PhoneLibrary(QObject):
             "sub": str(item.get("year") or item.get("series_name") or recorded or "")[:TITLE_CHARS],
         }
         row["hue"] = round(card_hue(title_of(item)), 3)  # 2.9.7: the Library's generated card
+        picture = self._pictures(item, kind) if self._pictures is not None else ""
+        if picture:  # its poster over that card, at home
+            row["img"] = picture
         progress = model.progress(item) if kind == model.item_kind(item) else None
         if progress is not None:  # (a series found on Continue has none of its own)
             row["progress"] = round(progress, 3)

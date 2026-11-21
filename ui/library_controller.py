@@ -349,6 +349,11 @@ class LibraryController(QObject):
             return own
         return self._tmdb.poster_url(item, kind or self._grid_kind(item)) or own
 
+    def poster_of(self, item: dict, kind: str) -> str:
+        """A title's poster as the Library shows it, for the phone remote (ui/remote_pictures.py):
+        its provider's, else TMDB's when TMDB already said (nothing is looked up for it)."""
+        return self._poster(item, poster_url(item), kind)
+
     def _on_grid_focus(self, index: int) -> None:
         item = self._screen.grid.item(index)
         if item is not None and self._tmdb is not None:

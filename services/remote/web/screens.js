@@ -127,11 +127,92 @@ function share(programme, nowS = Date.now() / 1000) {
   return Math.min(1, Math.max(0, (nowS - programme.start) / (programme.stop - programme.start)));
 }
 
-function logoTile(name, className = "logo", hue = name, tint = "") {
+// `img`: QiTV's picture for it at home (a channel's logo, a title's poster), over the tile.
+function logoTile(name, className = "logo", hue = name, tint = "", img = "") {
   const tile = el("div", className, initials(name));
   // 2.9.7: the TV's own colour when it sends it; else a recording's channel's (`hue`)
   tile.style.background = tint || colour(hue);
+  picture(tile, img, className === "poster" ? "cover" : "contain");
   return tile;
+}
+
+// ---- pictures, at home -------------------------------------------------------------------
+// On a session through QiTV's own door (at home), a row may carry its picture's token ("img"):
+// the picture comes from QiTV, by that token alone (nothing here names where it comes from).
+// Through the relay rows carry none, and the page draws its cards and tiles as before. A card
+// or tile stays as it is under its picture until that loads, and is all there is if it fails.
+// One that failed is asked for again 20 s on while it shows (QiTV may have it by then: a busy
+// moment, a host slow once), then whenever it is drawn anew, waiting twice as long each time.
+
+const PICTURE_RETRY_MS = 20000;
+const PICTURE_RETRY_MAX_MS = 600000;
+let pictures = false; // this session came through QiTV's own door
+const failedPictures = new Map(); // token → { at, times }: when it last failed, how often
+
+function pictureWaits(token) {
+  const failed = failedPictures.get(token);
+  if (!failed) return false;
+  const wait = Math.min(PICTURE_RETRY_MS * 2 ** (failed.times - 1), PICTURE_RETRY_MAX_MS);
+  return Date.now() - failed.at < wait;
+}
+
+function picture(box, token, fit = "cover") {
+  if (!pictures || typeof token !== "string" || !/^[\w-]{16,64}$/.test(token)) return null;
+  box.dataset.pic = token; // what a retry looks for
+  box.dataset.fit = fit;
+  if (pictureWaits(token)) return null;
+  const img = document.createElement("img");
+  img.className = `pic ${fit}`;
+  img.alt = ""; // the card's or the row's name says what it is
+  img.loading = "lazy";
+  img.decoding = "async";
+  img.draggable = false;
+  img.dataset.token = token;
+  img.addEventListener("load", () => {
+    failedPictures.delete(token);
+    img.classList.add("in");
+    box.classList.add("pictured");
+  }, { once: true });
+  img.addEventListener("error", () => {
+    box.classList.remove("pictured");
+    img.remove();
+    pictureFailed(token);
+  }, { once: true });
+  img.src = `/img/${token}`;
+  box.prepend(img); // under the card's title, badges and line
+  return img;
+}
+
+function pictureFailed(token) {
+  const failed = failedPictures.get(token);
+  if (failed && Date.now() - failed.at < 1000) return; // the same failure, in another of its boxes
+  const times = failed ? failed.times + 1 : 1;
+  failedPictures.set(token, { at: Date.now(), times });
+  if (times > 1) return; // from now on: when it is drawn anew
+  setTimeout(() => {
+    // Once, 20 s on: every card or tile still showing it, drawn since or not, asks again.
+    for (const box of document.querySelectorAll(`[data-pic="${token}"]`)) {
+      if (!box.querySelector("img.pic")) picture(box, token, box.dataset.fit);
+    }
+  }, PICTURE_RETRY_MS + 100);
+}
+
+// A tile's initials, beside the picture that may cover them (drawn again, the picture stays).
+function tileText(tile, text) {
+  const node = Array.from(tile.childNodes).find((child) => child.nodeType === Node.TEXT_NODE);
+  if (!node) tile.prepend(text);
+  else if (node.nodeValue !== text) node.nodeValue = text;
+}
+
+// The now-playing tile's picture: kept while its token stays (it's drawn every second).
+function nowPicture(token, fit) {
+  const logo = $("nowLogo");
+  const shown = logo.querySelector("img.pic");
+  if (shown && shown.dataset.token === token && shown.classList.contains(fit)) return;
+  if (shown) shown.remove();
+  logo.classList.remove("pictured");
+  if (!token) delete logo.dataset.pic; // nothing for a retry to find here
+  picture(logo, token, fit);
 }
 
 // 2.9.7: a channel's number (or a time) as the TV's menu draws it: thin, in its own column.
@@ -293,14 +374,16 @@ function drawNow() {
     $("nowProg").style.width = "0%";
     live.hidden = true;
     const logo = $("nowLogo");
-    logo.textContent = "TV";
+    tileText(logo, "TV");
     logo.style.background = "";
+    nowPicture("", "contain");
     return;
   }
   name.textContent = now.name || "";
   const logo = $("nowLogo");
-  logo.textContent = initials(now.name) || "TV";
+  tileText(logo, initials(now.name) || "TV");
   logo.style.background = now.tint || colour(now.name); // 2.9.7: the TV's own tile colour
+  nowPicture(now.img || "", now.kind === "live" ? "contain" : "cover"); // its logo, its poster
   if (now.kind === "live") {
     $("nowNum").textContent = now.num || "";
     live.hidden = false;
@@ -353,7 +436,7 @@ function guideRow(row) {
   hit.type = "button";
   // 2.9.7: as the TV's channel menu: the thin number, the tile in the TV's colour, the
   // channel and what's on with its line (calm: no Next line)
-  hit.append(rowNum(row.num), logoTile(row.name, "logo", row.name, row.tint));
+  hit.append(rowNum(row.num), logoTile(row.name, "logo", row.name, row.tint, row.img));
   const main = el("div", "row-main");
   const top = el("div", "row-top");
   top.append(el("span", "title", row.name));
@@ -383,7 +466,7 @@ function zapRow(row) {
   const item = el("button", `row${row.playing ? " playing" : ""}`);
   item.type = "button";
   item.dataset.live = liveKey(row.num, row.name);
-  item.append(rowNum(row.num), logoTile(row.name, "logo", row.name, row.tint)); // 2.9.7
+  item.append(rowNum(row.num), logoTile(row.name, "logo", row.name, row.tint, row.img)); // 2.9.7
   const main = el("div", "row-main");
   const top = el("div", "row-top");
   top.append(el("span", "title", row.name));
@@ -555,12 +638,12 @@ function bindGuide() {
 
 let timetableLabel = ""; // the timetable's channel name, as the player's caption says it
 
-function timetableTitle(num, name, tint = "") {
+function timetableTitle(num, name, tint = "", img = "") {
   const title = $("timetableName");
   title.replaceChildren(); // 2.9.7: as the TV's banner: the thin number, the tile, the name
   timetableLabel = name || "";
   if (num) title.append(el("span", "num thin", num));
-  const tile = logoTile(name, "logo", name, tint);
+  const tile = logoTile(name, "logo", name, tint, img);
   tile.setAttribute("aria-hidden", "true"); // its initials: the name says it
   title.append(tile, el("span", "tname", name || ""));
 }
@@ -963,7 +1046,7 @@ function bindTracks() {
 
 function onTimetable(message) {
   if (message.id !== timetableFor) return;
-  timetableTitle(message.num, message.name, message.tint);
+  timetableTitle(message.num, message.name, message.tint, message.img);
   timerOffered = Boolean(message.timer);
   tvOffset = Number.isInteger(message.tz) ? message.tz : null;
   if ($("timerForm").hidden) $("timerBar").hidden = !timerOffered;
@@ -1227,6 +1310,7 @@ function libraryCard(item, wide) {
   } else {
     card.style.backgroundImage = `linear-gradient(180deg, ${colour(item.title)}, #12161c)`;
   }
+  if (!wide) picture(card, item.img, "cover"); // its poster over the card, at home
   if (item.len) card.append(el("span", "badge len", item.len));
   if (item.badge && item.badge.text) card.append(el("span", `badge ${item.badge.tone || "quiet"}`, item.badge.text));
   card.append(el("span", "card-title", item.title));
@@ -1245,7 +1329,7 @@ function libraryCard(item, wide) {
 function libraryRow(item) {
   const row = el("button", "row");
   row.type = "button";
-  row.append(logoTile(item.title, "poster", item.ch || item.title));
+  row.append(logoTile(item.title, "poster", item.ch || item.title, "", item.img));
   const main = el("div", "row-main");
   const top = el("div", "row-top");
   top.append(el("span", "title", item.title));
@@ -1753,8 +1837,9 @@ function bindHere() {
 // old one's handles, so what shows comes again (its groups' and genres' keys hold).
 let hellos = 0;
 
-function onHello() {
+function onHello(message) {
   hellos += 1;
+  pictures = !!message && message.door === "home"; // QiTV's pictures come its own way alone
   if (zapping()) zap.reopen(); // the Remote tab's list, on the first hello too
   if (hellos === 1) return; // the first: nothing else is open yet
   if (askId !== null) {

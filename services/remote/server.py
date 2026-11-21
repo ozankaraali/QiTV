@@ -2,7 +2,8 @@
 
 Runs on the remote hub's event loop (services/remote/hub.py). Only addresses of a home network
 may connect; the page's files come from one folder, never from outside it. The films phones play
-(services/remote/films.py) and the recordings (services/remote/recorded.py) are served here too.
+(services/remote/films.py), the recordings (services/remote/recorded.py) and the pictures a
+phone at home shows (services/remote/pictures.py) are served here too.
 """
 
 from __future__ import annotations
@@ -16,6 +17,7 @@ from aiohttp import web
 
 from services.remote.films import add_routes as add_film_routes
 from services.remote.net import is_private
+from services.remote.pictures import add_routes as add_picture_routes
 from services.remote.recorded import add_routes as add_recording_routes
 
 if TYPE_CHECKING:
@@ -90,6 +92,7 @@ async def start_home_door(
     app.router.add_get("/door.json", door)
     add_film_routes(app, core.films)
     add_recording_routes(app, core.films)  # 2.8: recordings, on the films' shelf
+    add_picture_routes(app, core.pictures)  # a phone at home's pictures, by their tokens
     app.router.add_get("/", page)
     app.router.add_get("/{path:.+}", page)
     # A phone's open socket must not keep QiTV from quitting (aiohttp waits 60 s by default).
