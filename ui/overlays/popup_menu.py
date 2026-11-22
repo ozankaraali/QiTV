@@ -59,7 +59,7 @@ from shiboken6 import isValid
 
 from services.i18n import N_, translate
 from ui.keymap import Action
-from ui.overlays.base import Overlay, announce
+from ui.overlays.base import Overlay, announce, host_windows
 from ui.overlays.drawer_look import ROW_H_U, TITLE_FONT_U, paint_highlight
 from ui.overlays.painting import Units, draw_icon, ui_units
 from ui.theme import PALETTE, qcolor
@@ -849,11 +849,7 @@ class PopupMenu(Overlay):
         on the menu, nor in a dialog or another window."""
         if not isinstance(obj, QWidget) or obj is self or self.isAncestorOf(obj):
             return False
-        host = self.window()
-        ours = {host}
-        outer = host.parentWidget()
-        if outer is not None:
-            ours.add(outer.window())
+        ours = host_windows(self.window())
         top = obj.window()
         owner = top.parentWidget()
         return top in ours or (owner is not None and owner.window() in ours)

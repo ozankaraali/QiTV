@@ -53,8 +53,8 @@ def _no_lock(_widget: QWidget, _shape: float, _smallest: QSize, _largest: QSize)
 
 class SmallWindow(QWidget):
     """A frameless window on top, in its picture's shape (the module docstring). A subclass
-    holds the picture and starts a resize from an edge press (`_begin_resize`), moves it on
-    (`_resize_to`) and ends it (`_end_resize`)."""
+    holds the picture and hands it a left press (`_begin_press`: True on an edge, a resize
+    begins), the moves that follow (`_resize_to`) and the release (`_end_press`)."""
 
     placed = Signal(QRect)  # moved or resized by the user: where it is now
 
