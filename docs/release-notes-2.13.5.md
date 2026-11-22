@@ -17,20 +17,24 @@ others' distributions, which may have malware.**
 - **No more jumps on channels that come in bursts.** Some channels arrive about ten seconds at a
   time for a few minutes, then steadily again. QiTV used to move how far behind live it keeps
   the picture by several seconds at each change, and then skip forward. Now, once a channel has
-  shown its bursts, QiTV keeps room for them for as long as you watch it, and skips nothing.
+  shown its bursts, QiTV keeps room for them for as long as you watch it, and no longer skips
+  when they stop or come back.
   The cost: on such a channel the picture stays a few seconds further behind live.
 - **A provider that sends a backlog is caught up gently.** After a pause, a reconnect, or right
   after you tune, some providers send what they held all at once. QiTV now plays a little
   faster (1.03x, or 1.05x for a longer one) until it is back where it should be, instead of
-  skipping. It skips only after a real freeze, or when the picture is more than half a minute
-  past where it should be, and then once.
-- **A tune shows the picture at once,** and if the provider's backlog started it far behind, it
-  moves forward once, as soon as that backlog has arrived. Then it stays.
+  skipping. On the channel you watch, it skips only after a real freeze, or when the picture is
+  more than half a minute past where it should be, and then once. (A channel that plays only at
+  normal speed, and a multiview tile without the focus, still move closer at about 8 seconds.)
+- **A tune shows the picture at once,** and if the provider's backlog started it far behind (on a
+  channel sent as a continuous stream), it moves forward once, as soon as that backlog has
+  arrived. Then it moves no more for that backlog.
 - **Fewer changes of speed.** QiTV no longer slows down for small drifts, or for a burst a second
   longer than before. Each change of speed costs a tiny moment of sound in VLC, so fewer changes
   sound smoother.
 - **A pause instead of broken sound.** When the provider stops sending, QiTV now holds the
-  picture before VLC runs out, also the first time, and keeps it held while the provider only
+  picture before VLC runs out (on a channel that comes in bursts, also the first time), and keeps
+  it held while the provider only
   trickles, until it sends at normal speed again. Before, VLC could play in fits right at the
   live edge and drop bits of sound each time.
 - **The log says what QiTV waited for:** "The source sends far faster than real time", "…at
@@ -50,8 +54,8 @@ others' distributions, which may have malware.**
   Library, Search and Settings bring the window back. Opening a file from the Finder brings it
   forward, and Quit works from it as from the window.
 - **The mouse in the mini player:** a click opens the channel list, as in the window; the wheel
-  over its picture does nothing, so a scroll can't change the channel by mistake (over its
-  controls the wheel works).
+  over its picture does nothing, so a scroll can't change the volume or the channel by mistake
+  (over its controls the wheel works). A drag moves it, and its place is remembered.
 
 ## Buttons
 
