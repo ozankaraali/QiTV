@@ -403,15 +403,23 @@ class PlexClient:
         return out
 
     def _paged(self, path: str, params: Optional[dict] = None, page: int = PAGE) -> list[dict]:
-        """Every item of a list, in pages (a server may cut one it was not asked to page)."""
+        """Every item of a list, in pages (a server may cut one it was not asked to page).
+        An answer that brings nothing new, or comes from another start than the one asked
+        (a server that ignores paging), ends it: never asked for ever (review M1)."""
         found: list[dict] = []
+        seen: set[str] = set()
         while True:
-            paging = {"X-Plex-Container-Start": str(len(found)), "X-Plex-Container-Size": str(page)}
+            start = len(found)
+            paging = {"X-Plex-Container-Start": str(start), "X-Plex-Container-Size": str(page)}
             answer = self._ask("GET", path, params, paging)
             batch = [m for m in answer.get("Metadata") or [] if isinstance(m, dict)]
-            found.extend(batch)
-            total = answer.get("totalSize")
-            if not batch or (isinstance(total, int) and len(found) >= total):
+            fresh = [m for m in batch if _key_of(m) not in seen]
+            seen.update(_key_of(m) for m in fresh)
+            found.extend(fresh)
+            total, offset = answer.get("totalSize"), answer.get("offset")
+            if not fresh or (isinstance(offset, int) and offset != start):
+                return found
+            if isinstance(total, int) and len(found) >= total:
                 return found
             if not isinstance(total, int) and len(batch) < page:
                 return found
@@ -467,6 +475,11 @@ class PlexClient:
         if duration > 0:
             params["duration"] = duration
         self._ask("POST", "/:/timeline", params, {"X-Plex-Session-Identifier": ref.play_session})
+
+
+def _key_of(raw: dict) -> str:
+    """An item's identity in a list (its ratingKey, else the item itself)."""
+    return str(raw.get("ratingKey") or id(raw))
 
 
 def _remember(base: str, item_id: str, duration: Any) -> None:

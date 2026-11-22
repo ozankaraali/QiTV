@@ -75,6 +75,20 @@ class ItemsTest(unittest.TestCase):
         self.assertEqual([(s, n) for s, n, _ in pages], [(0, 2), (2, 2)])
         self.assertEqual(pages[0][2], {"type": 1, "includeGuids": 1})
 
+    def test_a_server_that_ignores_paging_is_asked_no_further(self):  # review M1
+        films = fixture("movies_all.json")  # three, whatever the start asked, and no total
+        c, http = client({("GET", "/library/sections/1/all"): (200, films)})
+        found = c.items("1", plex.MOVIE, page=2)
+        self.assertEqual([f["ratingKey"] for f in found], ["101", "102", "103"])
+        self.assertLessEqual(len(http.asked), 2)
+
+    def test_an_answer_from_another_start_than_asked_ends_the_list(self):  # review M1
+        films = fixture("movies_all.json")
+        films["MediaContainer"].update(offset=0, totalSize=9)  # always the first page
+        c, http = client({("GET", "/library/sections/1/all"): (200, films)})
+        self.assertEqual(len(c.items("1", plex.MOVIE, page=3)), 3)
+        self.assertEqual(len(http.asked), 2)
+
     def test_an_answer_without_its_total_ends_with_a_short_page(self):
         films = fixture("movies_all.json")
         c, http = client({("GET", "/library/sections/1/all"): (200, films)})
