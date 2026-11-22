@@ -274,6 +274,37 @@ class TvConfigTests(unittest.TestCase):
         self.assertNotIn(directory.name, said)  # no paths in the log
         self.assertNotIn("Traceback", said)
 
+    def test_a_config_held_for_a_moment_at_start_is_read_once_it_is_free(self):
+        # An antivirus scanning config.json as QiTV starts holds it for milliseconds: one
+        # refused open cost the whole run its settings. It is tried again, as a save is.
+        directory = tempfile.TemporaryDirectory()
+        self.addCleanup(directory.cleanup)
+        path = Path(directory.name) / "config.json"
+        path.write_text(json.dumps({"favorites": ["Theirs"]}), encoding="utf-8")
+        real_open, refused = open, []
+
+        def held_once(file, mode="r", *args, **kwargs):
+            if os.fspath(file) == str(path) and "r" in mode and not refused:
+                refused.append(mode)
+                raise PermissionError(13, "Permission denied", str(path))
+            return real_open(file, mode, *args, **kwargs)
+
+        with (
+            patch.object(ConfigManager, "_get_config_path", return_value=str(path)),
+            patch("services.config_manager.open", side_effect=held_once, create=True),
+            patch("time.sleep") as sleep,
+        ):
+            config = ConfigManager()
+        self.assertEqual(refused, ["rb"])
+        self.assertEqual(config.favorites, ["Theirs"])  # the user's, not the defaults
+        self.assertFalse(config.save_failed())
+        self.assertEqual(sleep.call_count, 1)
+        config.favorites = ["Theirs", "New"]
+        config.save_config()
+        self.assertEqual(
+            json.loads(path.read_text(encoding="utf-8"))["favorites"], ["Theirs", "New"]
+        )
+
     def test_one_time_migration_turns_on_logos_and_epg(self):
         config, path = self._load({"channel_logos": False, "channel_epg": False})
         self.assertTrue(config.channel_logos)
