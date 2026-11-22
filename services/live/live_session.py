@@ -291,6 +291,7 @@ from services.live.stay_live import (
     LATENCIES,
     STALL_S,
     TARGETS,
+    Decision,
     LagFilter,
     Mode,
     RateHealth,
@@ -457,6 +458,11 @@ _LAND_OFFSET_MAX_S = 1.5  # ... up to this much either way
 _CACHING_S = 0.3
 _PLAYED_MAX_S = 1.0  # a longer gap between two ticks counts as this much playing
 _LOG_STEP_S = 0.5  # a learned target that moved this much since it was last said is said
+# 2.13.4: stay-live's rate in the log (its nudges at INFO, each rate VLC is set to with the
+# detailed log), at most this many lines a minute, then one note.
+_RATE_LINES = 30
+_RATE_CUT = "More of stay-live's rate lines this minute were left out."
+_BURST_STEP_S = 0.5  # the helper's burst measure said as it moves this much (as LagFilter's)
 # 2.8.5: a raw TS source that restarted within this long is steered at its restarts
 # (`StayLive.junctions`, the helper's `RepeatTrimmer.extra`), what it is asked in steps of this.
 _JUNCTION_RECENT_S = 180.0
@@ -708,6 +714,13 @@ class LiveSession(QObject):
         self._fed_at: Optional[float] = None  # the last tick fed to the learned target
         # (target, need, burst) last said at INFO
         self._said: Optional[tuple[float, float, float]] = None
+        # 2.13.4: stay-live's nudge as last said ((its peak, since when): `_say_nudge`), the
+        # burst it counts and the one the helper measures as last said (`_say_burst`), and
+        # this minute's rate lines.
+        self._nudge_said: Optional[tuple[float, float]] = None
+        self._burst_said: Optional[float] = None
+        self._measured_said: Optional[float] = None
+        self._rate_minute, self._rate_lines = -1, 0
         self._troubled_at: Optional[float] = None
         self._cushion = 0.0  # the largest lag at the live edge since the tune (or the target)
         # 2.2: the recording under way (its id at the engine) and since when (the clock's);
@@ -934,6 +947,7 @@ class LiveSession(QObject):
         if self._memory.max_height > 0:
             self._open_args["max_height"] = self._memory.max_height
         self._stay = StayLive(self._latency)
+        self._nudge_said = None  # a nudge of the tune before ended with it
         self._stay.set_background(self._background)  # a multiview tile without the focus
         self._stay.jump_lag = self._jump_lag  # where a jump to live would land
         if self._memory.rate_locked:
@@ -948,6 +962,7 @@ class LiveSession(QObject):
         self._edge_seen = None
         self._reopened_at = -math.inf
         self._filter = LagFilter()  # a new source: its burst too is known afresh
+        self._burst_said = self._measured_said = None
         self._forget_restarts()
         self._settled.reset()
         self._was_stalled = False
@@ -2050,6 +2065,7 @@ class LiveSession(QObject):
         self._snapshot_cache = {}
         self._edge_seen = None  # the reopened session starts afresh
         self._filter = LagFilter()
+        self._burst_said = self._measured_said = None
         if self._learned is not None:  # another stream from the helper: no batch, no gap
             self._learned.arrivals.reset()
         self._forget_feed()
@@ -2795,6 +2811,7 @@ class LiveSession(QObject):
             return  # it crawled at 1x: it plays directly now
         stalled = self._stalled(snapshot)
         self._observe(snapshot, stalled)
+        self._say_burst(snapshot)
         lag = max(0.0, self._mean_lag(snapshot, position))
         self._settled.update(self._clock(), lag)
         # An ended source, and a finished playlist (a clip, while it still downloads), have
@@ -2837,6 +2854,7 @@ class LiveSession(QObject):
                 self._ask_junction(0.0)
             elif not buffering and not self._was_stalled:
                 self._ask_junction(decision.junction)
+            self._say_nudge(lag, decision)
             self._set_rate(decision.rate)
             self._hold_at_edge(snapshot, position)
             if decision.reopen_live:
@@ -2853,6 +2871,7 @@ class LiveSession(QObject):
             self._land_check = None
             self._lost_since = None
             self._ask_junction(0.0)
+            self._say_nudge(lag)  # a pause ended it, say
             if not live:
                 self._release_caption_wait()  # an ended source: nothing to wait for
             if self._held is not None and not self._paused:
@@ -2860,6 +2879,87 @@ class LiveSession(QObject):
             if not live and not self._paused:
                 self._no_live_edge(snapshot, position)
         self._emit_timeline()
+
+    def _say_rate(self, level: int, text: str, *args: Any) -> None:
+        """A line about stay-live's rate (2.13.4), at most `_RATE_LINES` a minute, then one
+        note (`_RATE_CUT`)."""
+        if not _LOG.isEnabledFor(level):
+            return
+        minute = int(self._clock() // 60)
+        if minute != self._rate_minute:
+            self._rate_minute, self._rate_lines = minute, 0
+        self._rate_lines += 1
+        if self._rate_lines <= _RATE_LINES:
+            _LOG.log(level, text, *args)
+        elif self._rate_lines == _RATE_LINES + 1:
+            _LOG.info(_RATE_CUT)
+
+    def _say_nudge(self, lag: float, decision: Optional[Decision] = None) -> None:
+        """2.13.4: stay-live's nudge as it starts, turns to another rate and ends (back at
+        1x), with its rate, why, the lag and the target, at INFO, so a moment the viewer names
+        lines up with the rate VLC played at then (each rate it is set to, a ramp's steps a
+        second apart, is said with the detailed log: `_set_rate`)."""
+        stay, said = self._stay, self._nudge_said
+        peak = stay.nudge
+        if said is None and peak == 1.0 or said is not None and peak == said[0]:
+            return
+        if peak != 1.0:
+            self._say_rate(
+                logging.INFO,
+                "Stay-live%s %.2fx %.1f s behind (target %.1f s): %s.",
+                " nudges the rate to" if said is None else "'s nudge turns to",
+                peak,
+                lag,
+                stay.target,
+                stay.nudge_reason,
+            )
+            self._nudge_said = (peak, self._clock() if said is None else said[1])
+            return
+        assert said is not None
+        how = ""
+        if decision is not None and decision.reopen_live:
+            how = ", for a jump to live" if decision.jump else ", for a reopen at live"
+        self._say_rate(
+            logging.INFO,
+            "Stay-live's %.2fx nudge ends %.1f s behind (target %.1f s) after %.0f s%s.",
+            said[0],
+            lag,
+            stay.target,
+            self._clock() - said[1],
+            how,
+        )
+        self._nudge_said = None
+
+    def _say_burst(self, snapshot: Mapping[str, Any]) -> None:
+        """2.13.4: the source's burst as stay-live counts it (the lag filter's, with its
+        hysteresis), at INFO when it changes, with what the helper measures now (the target
+        it moves is said only under Auto, and only as the target); and with the detailed log
+        what the helper measures, as it moves by `_BURST_STEP_S` or more (it may come and go
+        many times a minute)."""
+        reported = _number(snapshot.get("burst_s"))
+        measured = self._measured_said
+        if measured is None:
+            self._measured_said = reported
+        elif abs(reported - measured) >= _BURST_STEP_S - 1e-9:
+            self._measured_said = reported
+            self._say_rate(
+                logging.DEBUG,
+                "The helper measures the source's burst as %.1f s now (was %.1f s).",
+                reported,
+                measured,
+            )
+        burst, said = self._filter.burst_for(reported), self._burst_said
+        self._burst_said = burst
+        if said is None or abs(burst - said) < 1e-9:
+            return  # the first is the source's at once (an HLS target duration, say)
+        self._say_rate(
+            logging.INFO,
+            "Stay-live counts the source's burst as %.1f s now (was %.1f s; the helper "
+            "measures %.1f s).",
+            burst,
+            said,
+            reported,
+        )
 
     def _forget_restarts(self) -> None:
         """A new source (2.8.5): its restarts and what its helper session was asked start
@@ -4199,6 +4299,7 @@ class LiveSession(QObject):
 
     def _set_rate(self, rate: float) -> None:
         if rate != self._rate:
+            self._say_rate(logging.DEBUG, "VLC's rate is now %gx (was %gx).", rate, self._rate)
             self._rate = rate
             self._playback.set_rate(rate)
 

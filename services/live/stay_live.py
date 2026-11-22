@@ -139,6 +139,7 @@ _GRAIN_S = 1.0  # no jump does better than the lag less this: the keyframes' gra
 _JUNCTION_MIN_S = 1.0  # behind the target by more than this: asked of the next restart
 _JUNCTION_REF_S = 300.0  # ... the highest target of this long at least (twice at most)
 _TICK_S = 0.25  # the caller's update interval (what a first sample stands for)
+_OWED = "VLC ran dry"  # the owed slow-down's reason, as the log says it
 _MAX_DT = 1.0  # a longer gap between two updates counts as this long
 
 # LagFilter: the mean lag over the source's own arrival rhythm.
@@ -487,6 +488,7 @@ class _Nudge:
     spent: bool = False  # it took its whole size (ramping out: it counts, whatever follows)
     stepped: Optional[float] = None  # when the rate last stepped
     limit: Optional[float] = None  # a start's build: seconds below 1x it has left (budget-free)
+    reason: str = ""  # why it runs at its peak, as the caller's log says it (2.13.4)
 
     @property
     def step(self) -> float:
@@ -553,6 +555,11 @@ class StayLive:
     def nudge(self) -> float:
         """The rate the current nudge ramps to (1.0: none)."""
         return self._nudge.peak if self._nudge is not None else 1.0
+
+    @property
+    def nudge_reason(self) -> str:
+        """Why the current nudge runs at its rate, for the log ("": none)."""
+        return self._nudge.reason if self._nudge is not None else ""
 
     @property
     def shortfall_accepted(self) -> bool:
@@ -859,10 +866,11 @@ class StayLive:
         self._owed = False
         self._uncharged = None  # the slow-down follows: a catch-up it cut spent nothing
         if nudge is None:
-            self._nudge = _Nudge(_SLOW, deficit, self.target)
+            self._nudge = _Nudge(_SLOW, deficit, self.target, reason=_OWED)
             self.absorb()
         else:
             nudge.peak = _SLOW  # a gentle one under way: at once to the owed rate
+            nudge.reason = _OWED
 
     def _far_move(self, lag: float, dt: float) -> str:
         """Far behind: "jump" (a clean jump lands within the band or `_JUMP_CLOSER_S` nearer,
@@ -897,6 +905,10 @@ class StayLive:
     def _short(self, lag: float) -> bool:
         """Under `_ROOM_S` left when a burst lands (a steady source: at all): VLC runs dry."""
         return lag - self.burst / 2 < _ROOM_S
+
+    def _room_reason(self) -> str:
+        """Why a slow-down for room runs, as the log says it (`_short`)."""
+        return "too little room for the source's burst" if self.burst > 0 else "at the live edge"
 
     def _watch(self, dt: float, lag: float, now: float) -> bool:
         """At 1x: count the time outside the band; start a nudge once it lasted. True: far
@@ -945,10 +957,22 @@ class StayLive:
             return False
         if start:
             self._start = 0.0  # one build per landing
-            nudge = _Nudge(_GENTLE_DOWN, abs(error), self._centre(side), limit=_START_BUILD_S)
+            nudge = _Nudge(
+                _GENTLE_DOWN,
+                abs(error),
+                self._centre(side),
+                limit=_START_BUILD_S,
+                reason="building the start's room",
+            )
         else:
             peak = _FAST if far else _SLOW if short else _GENTLE_UP if side > 0 else _GENTLE_DOWN
-            nudge = _Nudge(peak, abs(error), self._centre(side))
+            if far:
+                reason = "far behind"
+            elif short:
+                reason = self._room_reason()
+            else:
+                reason = "behind the target" if side > 0 else "short of the target"
+            nudge = _Nudge(peak, abs(error), self._centre(side), reason=reason)
         self._nudge = nudge
         self.absorb()
         self._steer(0.0, lag, now)
@@ -980,6 +1004,7 @@ class StayLive:
             return True  # a catch-up under way too, once nothing jumped for a minute
         if move == "fast" and nudge.peak == _GENTLE_UP:
             nudge.peak = _FAST  # far behind after all (a step)
+            nudge.reason = "far behind after all"
         elif (
             not nudge.ending
             and nudge.peak == _GENTLE_DOWN
@@ -987,6 +1012,7 @@ class StayLive:
             and self._short(lag)
         ):
             nudge.peak = _SLOW  # short of room after all (the burst grew)
+            nudge.reason = self._room_reason() + " after all"
         reached = sign * error <= 0.0  # at the target already (a step, say)
         # A gentle nudge ends once its size is taken: the estimate's own wander is no reason
         # to go on. An urgent one goes on to the target: it may have been sized on a lag that
