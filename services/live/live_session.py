@@ -406,15 +406,17 @@ _BREAK_NEAR_S = 2.0
 # bursts (a bursty source's wait for its next one stays as it was), VLC is paused instead,
 # reported as buffering, and plays again once the source sends and that much of stay-live's
 # target is ahead (at least _HOLD_MIN_S): a wait that builds the cushion, not one at each gap.
-# 2026-11-22: the first time too, where VLC is about to run dry with the source silent
-# _HOLD_LONG_S beyond its bursts (as it sends now, not a burst stay-live keeps) already: it had
-# room, no hiccup it would ride out. Seen live: the edge stood still 15 s with VLC 15-18 s
-# behind, VLC ran dry and dropped sound as media came again.
+# 2026-11-22: the first time too, a silence beyond its bursts (as it sends now, not a burst
+# stay-live keeps) by _HOLD_QUIET_S, that VLC had room for (_HOLD_ROOM_S, and its bursts, this
+# and a second more: no hiccup at the edge), holds it once under _HOLD_EARLY_S is ahead: the
+# source cannot plausibly send in time (raw TS). Seen live: the edge stood still 15 s on 10 s
+# bursts with VLC 15-18 s behind; VLC ran dry and dropped sound.
 _HOLD_AFTER_S = 300.0
 _HOLD_AT_S = 0.6
 _HOLD_QUIET_S = 1.0
 _HOLD_BURSTS = 1.5  # ... beyond this many of its bursts (one still measured may be short)
-_HOLD_LONG_S = 5.0
+_HOLD_ROOM_S = 5.0
+_HOLD_EARLY_S = 2.0
 _HOLD_MIN_S = 2.0
 _HOLD_SHARE = 0.7  # ... of the target (a wait no longer than it must be)
 # 2026-11-22 (the "scratched CD" sound, at last): after a stall the source trickled (0.2-0.5x
@@ -423,8 +425,11 @@ _HOLD_SHARE = 0.7  # ... of the target (a wait no longer than it must be)
 # bursts at least) a source sending under _HOLD_TRICKLE of real time is as good as quiet for a
 # hold, and a hold plays again only once the source sends at _HOLD_FLOWING of real time, or
 # _HOLD_MAX_S after it began with the cushion back (a held picture beats choppy sound, not for
-# ever: then VLC plays its cushion, and is held again at the edge).
+# ever: then VLC plays its cushion, and is held again at the edge). After such a silence, or a
+# reconnect, the source trickles until it shows real time over that window (seen live: VLC
+# played the first 18 s of a reconnect's trickle in fits while the window filled).
 _HOLD_RATE_S = 4.0
+_HOLD_PROVE_S = 1.0  # real time is proven by what came since it sent again, over this at least
 _HOLD_TRICKLE = 0.5
 _HOLD_FLOWING = 0.9
 _HOLD_MAX_S = 30.0
@@ -773,6 +778,8 @@ class LiveSession(QObject):
         self._arrived: deque[tuple[float, float]] = deque()
         self._sending_since = -math.inf
         self._quiet_before = 0.0
+        self._was_abnormal = self._unproven = self._reconnect_seen = False
+        self._room_before = 0.0
         self._rate_minute, self._rate_lines = -1, 0
         self._troubled_at: Optional[float] = None
         self._cushion = 0.0  # the largest lag at the live edge since the tune (or the target)
@@ -3549,9 +3556,12 @@ class LiveSession(QObject):
             self._seek(position + self._vlc.still * self._rate)
 
     def _starved(self, snapshot: Mapping[str, Any], position: float) -> bool:
-        """VLC met the live edge and waits there (libVLC 3 says Playing, its clock stands still)."""
+        """VLC met the live edge and waits there (libVLC 3 says Playing, its clock stands still),
+        or is held before it would (`_hold_at_edge`: as good as dry, wherever it was held)."""
         if self._caption_held is not None:
             return False  # the AI captions' wait (2.9), VLC held on purpose
+        if self._held is not None:
+            return True
         waiting = self._playback.state() is PlaybackState.BUFFERING or self._clock_frozen()
         return waiting and self._live_edge(snapshot) - position <= _EDGE_S
 
@@ -3655,13 +3665,30 @@ class LiveSession(QObject):
         reported = _number(snapshot.get("burst_s"))
         rhythm = max(self._filter.rhythm_for(reported), reported)
         beyond = quiet - _HOLD_BURSTS * rhythm
+        if quiet < _HOLD_QUIET_S:
+            self._room_before = ahead + quiet  # VLC's cushion as a silence would begin
+        # A silence past its bursts that VLC had room for (its usual gap and some): no hiccup
+        # at the edge, nor the shortfall before each burst stay-live builds away (2.0.1).
+        room = max(_HOLD_ROOM_S, rhythm + _HOLD_EARLY_S + _HOLD_QUIET_S)
+        abnormal = quiet > rhythm + _HOLD_QUIET_S and self._room_before >= room - 1e-9
+        if snapshot.get("reconnecting") is True:
+            self._reconnect_seen = True
         if quiet < self._quiet_before and self._quiet_before >= _HOLD_BURSTS * rhythm + 1.0:
-            self._sending_since = now  # the source sends again after a silence
-        self._quiet_before = quiet
+            self._sending_since = now  # the source sends again after a silence ...
+            # ... and after one VLC had room for, or a reconnect, it trickles until it proves
+            # it does not (its first seconds at the edge played in fits)
+            self._unproven = self._unproven or self._was_abnormal or self._reconnect_seen
+            self._reconnect_seen = False
+        self._quiet_before, self._was_abnormal = quiet, abnormal
         # Judged over sending time only: right after a silence the window holds the silence.
         window = max(_HOLD_RATE_S, 2 * rhythm)
-        rate = self._arrival_rate(window) if now - self._sending_since >= window else None
-        trickle = rate is not None and rate < _HOLD_TRICKLE
+        sending = now - self._sending_since
+        rate = self._arrival_rate(window) if sending >= window else None
+        # Real time proven: what came since it sent again (a burst's landing at once).
+        since = self._arrival_rate(sending) if sending >= _HOLD_PROVE_S else None
+        if since is not None and since >= _HOLD_FLOWING:
+            self._unproven = False
+        trickle = rate < _HOLD_TRICKLE if rate is not None else self._unproven
         if self._held is None:
             dry = self._starved(snapshot, position)
             if dry and not self._dry_now:
@@ -3671,13 +3698,13 @@ class LiveSession(QObject):
             # same, so it plays again from a pause, its clock started afresh. Only an earlier
             # dry run counts, not this one.
             earlier = self._dry_before if dry else self._dry_seen
+            armed = now - earlier <= _HOLD_AFTER_S
+            # (the first time too; raw TS: an HLS source's late segment stays as it was)
+            soon = abnormal and not dry and ahead <= _HOLD_EARLY_S and not snapshot.get("hls")
             if (
-                # (the first time: VLC not dry yet, the silence long already: it had room)
-                (now - earlier <= _HOLD_AFTER_S or (beyond >= _HOLD_LONG_S and not dry))
-                and self._playback.state() in (PlaybackState.PLAYING, PlaybackState.BUFFERING)
+                self._playback.state() in (PlaybackState.PLAYING, PlaybackState.BUFFERING)
                 and not self._just_opened()
-                and ahead <= _HOLD_AT_S
-                and (beyond >= _HOLD_QUIET_S or trickle)
+                and (soon or armed and ahead <= _HOLD_AT_S and (beyond >= _HOLD_QUIET_S or trickle))
             ):
                 _LOG.debug(
                     "Held at the edge: %.1f s ahead, the source quiet %.1f s%s.",
@@ -3691,7 +3718,8 @@ class LiveSession(QObject):
                 self._playback.hold(True)
             return
         cushion = ahead >= max(_HOLD_MIN_S, _HOLD_SHARE * self._stay.target)
-        flowing = rate is None or rate >= _HOLD_FLOWING or now - self._held >= _HOLD_MAX_S
+        proven = rate >= _HOLD_FLOWING if rate is not None else not self._unproven
+        flowing = proven or now - self._held >= _HOLD_MAX_S
         if quiet < _HOLD_QUIET_S and cushion and flowing:
             self._release_hold(snapshot, position)
 
