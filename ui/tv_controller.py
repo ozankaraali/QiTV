@@ -3824,7 +3824,8 @@ class TVController(QObject):
         self._tracks.refresh()  # an open panel shows the large picture's sound or subtitles
         self._picture.refresh()  # and the Picture panel and the statistics its picture
         if grid:
-            if self.overlays.drawer.isVisible():
+            drawer = self.overlays.drawer
+            if drawer.isVisible() and not self._settings_shown() and not drawer.finding():
                 self._open_drawer()  # the channel list follows the focus: that tile's place
             if large_reopen is not None and self._grid is not None:
                 # A tile beside the focus never reconnects by itself (its direct stream that
@@ -5413,13 +5414,13 @@ class TVController(QObject):
         # marks (its address first: an M3U id is a list position, another channel's once the
         # list changed). While the fast-zap column is open the user is choosing in it, so the
         # list opens at the zap's own channel and group, as before 2.1.
-        playing = self._channel
+        shown = self._current if self._current is not None and self._current.live else None
+        playing = self._channel if shown is not None else None  # (a film's: the list as it is)
         if from_column or self.overlays.column.isVisible():
             playing = None
-        shown = self._current if self._current is not None and self._current.live else None
         context = self.zap.context
-        if playing is not None:
-            if shown is not None and ZapContext.same(shown.item, playing):
+        if playing is not None and shown is not None:
+            if ZapContext.same(shown.item, playing):
                 source, group = shown.source, shown.group_key or context.group_key
             else:  # still on its way: picked from the zap's group
                 source, group = context.source, context.group_key

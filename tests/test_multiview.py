@@ -1353,6 +1353,18 @@ class BigTileTests(MultiviewCase):
         self.assertEqual(self.drawer.focus_item["name"], "One")
         self.assertEqual(self.nav.revealed()["name"], "One")
 
+    def test_the_open_list_stays_as_it_is_over_settings_and_during_a_find(self):
+        self.four_tiles()
+        self.controller.handle(Action.OPEN_DRAWER)
+        opened = len(self.drawer.named("open_drawer"))
+        self.drawer.found = True  # a find lists what it found
+        self.grid_frame.focusRequested.emit("main")
+        self.assertEqual(len(self.drawer.named("open_drawer")), opened)
+        self.drawer.found = False
+        with mock.patch.object(self.controller.settings_layer, "shown", return_value=True):
+            self.grid_frame.focusRequested.emit("pip")
+        self.assertEqual(len(self.drawer.named("open_drawer")), opened)
+
     def test_shown_again_the_tiles_keep_their_places_and_the_last_grid_fills_them(self):
         tiles = self.four_tiles()
         self.v()  # leave: tile 3 big, tile 4 small (focused before it), the others stop
@@ -2374,6 +2386,29 @@ class MultiviewWindowTests(WindowCase):
         self.assertFalse(label.isEmpty())
         QTest.mouseClick(hits, LEFT, pos=label.center().toPoint())  # the focused tile's
         self.assertTrue(wait_until(drawer.isVisible))
+
+    def test_a_double_click_makes_the_focused_tile_big_and_again_brings_the_grid_back(self):
+        self.open_first_channel()  # Channel 1 plays large: tile 1
+        window = self.window
+        drawer = window.overlays.drawer
+        self.assertTrue(wait_until(lambda: not drawer.isVisible()))
+        QTest.keyClick(window, Qt.Key.Key_V)
+        grid, view = window.controller._grid, window.grid_tiles
+        self.assertTrue(wait_until(lambda: grid.state("main") == PLAYING))
+        rects = [rect for _name, rect in window.grid_frame.tiles()]
+        label = view.pill_rect("main")
+        self.assertFalse(label.isEmpty())
+        QTest.mouseDClick(view.hits, LEFT, pos=label.center().toPoint())
+        self.assertTrue(grid.big())
+        self.assertEqual(window.surfaces["main"].geometry(), window.player_page.rect())
+        self.assertTrue(window.surfaces["main"].isVisible())
+        self.assertFalse(window.surfaces["pip"].isVisible())
+        self.assertEqual(view.tiles(), [])  # no label, ring or strip over it
+        window.controller.video_double_clicked()  # the shell's, on its picture
+        self.assertFalse(grid.big())
+        self.assertTrue(grid.shown())
+        self.assertEqual(window.surfaces["main"].geometry(), rects[0])
+        self.assertEqual(len(view.tiles()), 4)
 
     def test_a_double_click_on_the_zap_columns_row_tunes_it_and_the_grid_stays(self):
         grid, drawer = self.grid_with_the_list_open()

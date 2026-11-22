@@ -1174,6 +1174,17 @@ class LinkPipelineTests(ControllerTestCase):
         self.assertEqual(self.drawer.focus_item["name"], "Two")
         self.assertEqual(self.drawer.named("open_drawer")[-1], (item_key(CHANNELS[1]),))
 
+    def test_during_a_film_the_list_opens_as_it_is_never_at_the_channel_before_it(self):
+        self.catalog.select_provider("Backup")
+        self.play(1)
+        self.catalog.select_provider("Home")  # browsing elsewhere
+        self.controller.play_vod(VodTests.MOVIE, "movie", play_context())
+        self.ready("http://vod/heat.mkv")
+        self.assertFalse(self.controller._current.live)
+        self.controller.handle(Action.OPEN_DRAWER)
+        self.assertEqual(self.catalog.provider, "Home")  # nothing switched under the film
+        self.assertIsNone(self.nav.revealed())
+
     def test_the_list_opens_on_the_row_the_channels_play_mark_is_on(self):
         # The start's last channel is the config's dict: its M3U id (a list position) may be
         # its neighbour's in today's list; the list finds it as its ▶ does, by its address.

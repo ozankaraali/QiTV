@@ -2,7 +2,8 @@
 
 V, View → Multiview (Ctrl/⌘+4) or the grid button on the player controls shows it over live
 TV: the channel playing becomes tile 1, an open picture-in-picture tile 2 (nothing opens
-again), and the other tiles show "+". The layout chip on the controls (beside the grid
+again), and the other tiles show "+" (shown again in the same run, each tile keeps the place
+it had). The layout chip on the controls (beside the grid
 button) opens the layouts to pick from (ui/overlays/layout_row.py): 2, 4, 6 and 9 tiles,
 drawn; 6 and 9 only with hardware decoding (Settings), else dimmed, saying so. The first grid
 ever shown opens them by itself, briefly, as a hint (config `multiview_hinted`, optional).
