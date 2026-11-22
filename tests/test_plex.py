@@ -156,5 +156,49 @@ class ServersTest(unittest.TestCase):
         )
 
 
+class ReachableTest(unittest.TestCase):
+    def servers(self):
+        return plex.servers_of(fixture("resources.json"))
+
+    def test_each_server_is_reached_by_its_best_connection_that_answers(self):
+        answering = {"http://10.0.0.5:32400", "https://203-0-113-7.example.plex.direct:32400"}
+        asked = []
+
+        def probe(uri, server):
+            asked.append((uri, server.machine_id))
+            return uri in answering
+
+        found = plex.reachable(self.servers(), probe)
+        self.assertEqual(
+            [(server.name, uri) for server, uri in found],
+            [("Home Media", "http://10.0.0.5:32400")],  # its plex.direct name didn't answer
+        )
+        # Every connection of every server was tried (at once: none waits for another).
+        self.assertEqual(len(asked), 5)
+
+    def test_a_server_none_of_whose_connections_answer_is_left_out(self):
+        self.assertEqual(plex.reachable(self.servers(), lambda uri, server: False), [])
+
+    def test_a_probe_that_raises_is_a_connection_that_did_not_answer(self):
+        def probe(uri, server):
+            if "relay" in uri:
+                raise OSError("down")
+            return "relay" not in uri and "10-0-0-5" in uri
+
+        found = plex.reachable(self.servers(), probe)
+        self.assertEqual([uri for _, uri in found], ["https://10-0-0-5.example.plex.direct:32400"])
+
+    def test_identity_is_asked_with_the_servers_token_and_must_be_that_server(self):
+        base = "https://10-0-0-5.example.plex.direct:32400"
+        identity = {"MediaContainer": {"machineIdentifier": "machine-home"}}
+        http = FakeHttp(base, {("GET", "/identity"): (200, identity)})
+        server = self.servers()[0]
+        self.assertTrue(plex.answers(base, server, "client-1", "2.14.0", True, session=http))
+        self.assertEqual(http.asked[0]["headers"]["X-Plex-Token"], "server-token-home")
+        other = plex.Server("Other", "machine-other", "t")
+        self.assertFalse(plex.answers(base, other, "client-1", "2.14.0", True, session=http))
+        self.assertTrue(http.closed is False)  # a session given is the caller's
+
+
 if __name__ == "__main__":
     unittest.main()

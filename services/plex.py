@@ -19,10 +19,11 @@ answer's body. Blocking: worker threads only.
 
 from __future__ import annotations
 
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
 import logging
 import platform
-from typing import Any, Optional
+from typing import Any, Callable, Optional
 import uuid
 
 from services.lazy_import import lazy_module
@@ -154,6 +155,56 @@ def servers_of(resources: Any) -> list[Server]:
             )
         )
     return out
+
+
+def answers(
+    uri: str, server: Server, client_id: str, version: str, verify: bool, session: Any = None
+) -> bool:
+    """Whether `server` answers at `uri`: its identity, asked with its token, is its own."""
+    http = session if session is not None else requests.Session()
+    try:
+        response = http.request(
+            "GET",
+            uri + "/identity",
+            headers=client_headers(client_id, version, server.access_token),
+            timeout=PROBE_TIMEOUT_S,
+            verify=verify,
+        )
+        if response.status_code != 200 or not response.content:
+            return False
+        container = (response_json(response) or {}).get("MediaContainer") or {}
+        return bool(container.get("machineIdentifier") == server.machine_id)
+    except Exception as error:  # unreachable, a certificate refused, not Plex: not this way
+        logger.debug("A Plex connection did not answer: %s", type(error).__name__)
+        return False
+    finally:
+        if session is None:
+            http.close()
+
+
+def reachable(
+    servers: list[Server], probe: Callable[[str, Server], bool]
+) -> list[tuple[Server, str]]:
+    """Each server that answers, with the best of its connections that does (`probe(uri,
+    server)`; every connection is asked at once, so a slow one delays none of the others)."""
+    asks = [(server, c.uri) for server in servers for c in server.connections]
+    if not asks:
+        return []
+
+    def ask(job: tuple[Server, str]) -> bool:
+        try:
+            return bool(probe(job[1], job[0]))
+        except Exception:
+            return False
+
+    with ThreadPoolExecutor(max_workers=min(8, len(asks)), thread_name_prefix="plex-probe") as pool:
+        answered = dict(zip(asks, pool.map(ask, asks)))
+    found = []
+    for server in servers:
+        uri = next((c.uri for c in server.connections if answered.get((server, c.uri))), "")
+        if uri:
+            found.append((server, uri))
+    return found
 
 
 class PlexAccount:
