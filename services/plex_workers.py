@@ -107,7 +107,10 @@ class ServersJob(_AccountJob):
         return plex.answers(uri, server, self.client_id, get_app_version())
 
     def work(self, account: Any) -> dict:
-        servers = account.servers(self._token)
+        try:
+            servers = account.servers(self._token)
+        except ms.SignInNeeded:
+            return {"refused": True}  # the card asks for a new code (review M8)
         found = plex.reachable(servers, self._probe or self._answers)
         return {
             "listed": len(servers),

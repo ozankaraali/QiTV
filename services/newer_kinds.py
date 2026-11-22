@@ -57,6 +57,7 @@ def merged(older: list, newer: Any) -> list:
     provider each followed (first when it followed none), at the end when that one went.
     Damaged entries are left out."""
     providers = list(older)
+    renamed: dict[str, str] = {}  # a newer kind's provider renamed here: its old name -> new
     for entry in newer if isinstance(newer, list) else []:
         provider = entry.get("provider") if isinstance(entry, dict) else None
         if not isinstance(provider, dict) or not is_newer(provider):
@@ -68,7 +69,9 @@ def merged(older: list, newer: Any) -> list:
         name = unique_name(own, names)
         if name != own:
             provider = {**provider, "name": name}
+            renamed[own] = name
         after = str(entry.get("after") or "")
+        after = renamed.get(after, after)  # (it followed that one, renamed: review M10)
         if not after:
             at = _first_after_newer(providers)
         else:

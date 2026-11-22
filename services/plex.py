@@ -171,8 +171,8 @@ def servers_of(resources: Any) -> list[Server]:
             continue
         provides = str(raw.get("provides") or "").split(",")
         machine = str(raw.get("clientIdentifier") or "")
-        if "server" not in provides or not machine:
-            continue
+        if "server" not in provides or not machine or not raw.get("accessToken"):
+            continue  # (one without its token would only ever answer 401: review M9)
         out.append(
             Server(
                 name=str(raw.get("name") or ""),
@@ -609,10 +609,29 @@ def episode_item(raw: dict, base: str, token: str, *, server_id: str = "") -> di
 def seasons_payload(
     seasons: list[dict], episodes: list[dict], base: str, token: str, *, server_id: str = ""
 ) -> dict:
-    """A series' seasons, each with its episodes in order (as Jellyfin's come)."""
+    """A series' seasons, each with its episodes in order (as Jellyfin's come). Only seasons
+    are seasons (an "all episodes" row is not one), and an episode of no season listed has a
+    season made from its own (review M11): none is left out."""
     by_season: dict[str, list[dict]] = {}
     for raw in episodes:
         by_season.setdefault(str(raw.get("parentRatingKey") or ""), []).append(raw)
+    seasons = [
+        raw for raw in seasons if raw.get("type", "season") == "season" and raw.get("ratingKey")
+    ]
+    listed_ids = {str(raw["ratingKey"]) for raw in seasons}
+    for key, strays in by_season.items():
+        if key not in listed_ids:
+            first = strays[0]
+            seasons.append(
+                {
+                    "ratingKey": key or "episodes",
+                    "title": str(first.get("parentTitle") or ""),
+                    "index": first.get("parentIndex"),
+                }
+            )
+            if not key:
+                by_season["episodes"] = strays
+    seasons.sort(key=lambda raw: (raw.get("index") is None, raw.get("index") or 0))
     out: list[dict[str, Any]] = []
     for raw in seasons:
         season_id = str(raw.get("ratingKey") or "")

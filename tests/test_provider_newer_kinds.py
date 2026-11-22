@@ -65,6 +65,14 @@ class SplitAndMergeTest(unittest.TestCase):
         merged = newer_kinds.merged([taken], newer)
         self.assertEqual([p["name"] for p in merged], ["Home Media (2)", "home media"])
 
+    def test_one_after_a_plex_provider_renamed_meanwhile_keeps_its_place(self):  # review M10
+        home = {**PLEX, "name": "Home"}
+        other = {**PLEX_2, "name": "Other"}
+        _, newer = newer_kinds.split([PANEL, home, other])  # Other after Home (the Plex one)
+        xtream = {"type": "XTREAM", "name": "Home", "url": "http://h.test", "username": "a"}
+        merged = newer_kinds.merged([PANEL, xtream], newer)  # an older build added a "Home"
+        self.assertEqual([p["name"] for p in merged], ["Panel", "Home (2)", "Other", "Home"])
+
     def test_damaged_entries_are_left_out(self):
         whole = {"after": "Panel", "provider": PLEX}
         newer = [{"after": "x"}, "odd", {"provider": {"type": "PLEX"}}, whole]

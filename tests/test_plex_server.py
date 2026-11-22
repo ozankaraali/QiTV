@@ -175,6 +175,33 @@ class SeriesTest(unittest.TestCase):
         self.assertEqual(second["overview"], "Later.")
 
 
+class SeasonsGuardTest(unittest.TestCase):  # review M11
+    def test_only_seasons_are_seasons_and_no_episode_is_left_out(self):
+        seasons = fixture("show_children.json")["MediaContainer"]["Metadata"]
+        episodes = fixture("show_allLeaves.json")["MediaContainer"]["Metadata"]
+        everything = {"key": "/library/metadata/201/allLeaves", "type": "episode", "title": "All"}
+        stray = {
+            **episodes[2],
+            "ratingKey": "241",
+            "parentRatingKey": "214",
+            "parentIndex": 4,
+            "parentTitle": "Season 4",
+            "index": 1,
+            "title": "A Stray One",
+        }
+        payload = plex.seasons_payload([everything, *seasons], [*episodes, stray], BASE, TOKEN)
+        names = [s["name"] for s in payload["seasons"]]
+        self.assertEqual(names, ["Season 1", "Season 2", "Season 4"])
+        fourth = payload["seasons"][2]
+        self.assertEqual((fourth["id"], fourth["season_number"]), ("214", "4"))
+        self.assertEqual([e["name"] for e in fourth["episodes"]], ["A Stray One"])
+
+    def test_episodes_of_a_series_without_seasons_still_show(self):
+        episodes = fixture("show_allLeaves.json")["MediaContainer"]["Metadata"]
+        payload = plex.seasons_payload([], episodes, BASE, TOKEN)
+        self.assertEqual(sum(len(s["episodes"]) for s in payload["seasons"]), 3)
+
+
 class SeriesPagesTest(unittest.TestCase):
     def test_a_long_series_episodes_come_in_pages_too(self):
         leaves = fixture("show_allLeaves.json")["MediaContainer"]["Metadata"]

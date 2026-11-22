@@ -139,12 +139,10 @@ class ServersJobTest(unittest.TestCase):
             [{"uri": "https://home.example.plex.direct:32400", "local": True, "relay": False}],
         )
 
-    def test_an_account_token_refused_asks_for_a_new_code(self):
+    def test_an_account_token_refused_says_so_for_a_new_code(self):  # review M8
         account = FakeAccount(fail=ms.SignInNeeded("401"))
         job = pw.ServersJob("c", "t", account=lambda client_id: account, probe=None)
-        with self.assertLogs("services.plex_workers", "INFO"):
-            out = run(job)
-        self.assertEqual(out["error"], "plex.tv refused the sign-in. Try again with a new code.")
+        self.assertEqual(run(job), {"finished": {"refused": True}})
 
 
 PROVIDER = {

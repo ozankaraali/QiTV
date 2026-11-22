@@ -139,7 +139,15 @@ class PlexSignIn(QObject):
         """The card as it is now; a `code` shows large, with where to enter it."""
         cancel = Button(CANCEL, translate(CANCEL_TEXT))
         link = plex.LINK_PAGE if code else ""
-        self.card.ask(translate(title), body, [cancel, *buttons], default, code=code, link=link)
+        self.card.ask(
+            translate(title),
+            body,
+            [cancel, *buttons],
+            default,
+            code=code,
+            link=link,
+            waits=bool(code),
+        )
         self._settings.show_card(self.card)
         self._shown()
 
@@ -219,7 +227,14 @@ class PlexSignIn(QObject):
         self._run(ServersJob(self._client_id, token), self._on_servers)
 
     def _on_servers(self, answer: dict) -> None:
+        if answer.get("refused"):  # plex.tv refused the account: only a new code helps (M8)
+            from services.plex_workers import PLEX_TV_REFUSED
+
+            self._retry = self._ask_code
+            self._failed(translate(PLEX_TV_REFUSED))
+            return
         servers = [s for s in answer.get("servers") or [] if s.get("machine_id")]
+        servers.sort(key=lambda s: not s.get("owned"))  # the account's own first (review M9)
         if not servers:
             text = NONE_ANSWERED_TEXT if answer.get("listed") else NO_SERVER_TEXT
             self._failed(translate(text))  # (Try again: the servers again)
@@ -282,8 +297,8 @@ class PlexSignIn(QObject):
             # Review I2: where else to look for the server when it isn't where it was.
             "connections": list(server.get("connections") or []),
         }
-        editing = self._editing
-        if editing and self._provider(editing).get("server_id") == access["server_id"]:
+        editing = self._listed(str(server["machine_id"]))  # this server already: in place (M9)
+        if editing:
             try:
                 saved = self._rows.apply(
                     lambda: self._rows.actions.update(editing, access, refresh=True)
@@ -304,6 +319,15 @@ class PlexSignIn(QObject):
         self._reset()
         self._settings.refresh_sections()
         self._window.screens.notify(translate(ADDED_TEXT, names=added[0]))
+
+    def _listed(self, server_id: str) -> str:
+        """The provider that is already this server ("" for none): signed in again in place,
+        never listed twice (a second device at plex.tv)."""
+        changes = self._rows.actions.changes
+        for name in changes.names():
+            if self._provider(name).get("server_id") == server_id:
+                return str(name)
+        return ""
 
     def _provider(self, name: str) -> dict:
         try:

@@ -239,6 +239,7 @@ class _Card(Overlay):
         self._body = ""
         self._code = ""  # a ChoiceCard's code to type elsewhere ("": none)
         self._link = ""  # where to type it
+        self._waits = False  # a ChoiceCard that waits: OK and the dimmed picture leave it be
         self._fields: list[Field] = []
         self._edits: dict[str, TextEdit] = {}
         self._found = ""
@@ -452,6 +453,8 @@ class _Card(Overlay):
         elif zone == "paste":
             self._paste_into(key)
         elif zone in ("button", "alt"):
+            if self._waits and key == CANCEL:
+                return  # OK on a card that waits (a code being entered elsewhere) ends nothing
             self._press(key)
 
     def _press(self, key: str) -> None:
@@ -1049,7 +1052,8 @@ class _Card(Overlay):
         pos = event.position()
         hit = self._hit(pos)
         if hit is None:
-            self._cancel()  # the dimmed picture
+            if not self._waits:
+                self._cancel()  # the dimmed picture
             return
         zone, key = hit
         if zone in ("field", "label"):
@@ -1255,13 +1259,17 @@ class ChoiceCard(_Card):
         *,
         code: str = "",
         link: str = "",
+        waits: bool = False,
     ) -> None:
         """Show the question (a question still shown is replaced, unanswered). The keys start
         on `default`, else the accent button, else Cancel, else the first. `alternates` (2.13.1)
         are its other ways, in the muted line under the buttons, answered as a button is.
-        `code` (2.14) is a code to type elsewhere, shown large, and `link` where to type it."""
+        `code` (2.14) is a code to type elsewhere, shown large, and `link` where to type it.
+        `waits`: OK on its Cancel and a click on the dimmed picture end nothing (Esc, Back and
+        a click on Cancel do), so a code being entered elsewhere isn't lost by a stray press."""
         self._title, self._body = title, body
         self._code, self._link = code, link
+        self._waits = waits
         self._fields, self._edits = [], {}
         self._found, self._found_ok = "", True
         self._buttons, self._alternates = list(buttons), list(alternates or ())

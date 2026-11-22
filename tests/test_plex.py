@@ -146,6 +146,11 @@ class ServersTest(unittest.TestCase):
         self.assertEqual(plex.servers_of(resources), [])
         self.assertEqual(plex.servers_of({"not": "a list"}), [])
 
+    def test_a_server_without_an_access_token_is_left_out(self):  # review M9
+        resources = fixture("resources.json")
+        del resources[0]["accessToken"]
+        self.assertEqual([s.name for s in plex.servers_of(resources)], ["A Friend's Films"])
+
     def test_a_server_token_is_never_in_its_repr(self):
         server = plex.Server("Home", "m", "secret-token")
         self.assertNotIn("secret-token", repr(server))
