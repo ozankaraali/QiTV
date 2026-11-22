@@ -13,6 +13,7 @@ from datetime import date, datetime
 import logging
 import threading
 from typing import TYPE_CHECKING, Any, Optional, cast
+from urllib.parse import urlsplit
 
 from PySide6.QtCore import QElapsedTimer, QObject, QTimer, Signal
 
@@ -22,9 +23,10 @@ from services.find import Preferences, preferences_for
 from services.i18n import N_, translate
 from services.media_server import phone_reachable, server_resume
 from services.navigation import item_title
+from services.plex import must_verify
 from services.provider_api import xtream_hls
 from services.provider_ids import ALL_PROVIDERS, provider_of
-from services.provider_types import is_media_server
+from services.provider_types import is_media_server, is_plex
 from services.redact import safe_message
 from services.remote.films import is_matroska
 from services.remote.net import home_ipv4
@@ -815,6 +817,8 @@ class RemoteController(QObject):
                 self._recording_to(sid, str(target.item.get("path") or ""), message)
             elif not target.live and is_matroska(target.item, url):
                 self._film_to(sid, target.item, url, message)
+            elif not target.live and self._is_plex(target.item):
+                self._passed_to(sid, target.item, url, message)  # 2.14: its address has a token
             else:
                 if self.hub is not None:
                     self.hub.forget_film(self._device(sid))  # a film opening comes no more
@@ -878,6 +882,32 @@ class RemoteController(QObject):
         verify = bool(entry.get("ssl_verify", config.ssl_verify))
         headers = {"User-Agent": user_agent_for(item, str(entry.get("type") or ""))}
         self.hub.open_film(sid, self._device(sid), url, headers, verify, message)
+
+    def _is_plex(self, item: dict) -> bool:
+        catalog = self._window.catalog
+        try:
+            entry = catalog.provider_entry(provider_of(item) or catalog.current_provider_name())
+        except KeyError:
+            return False
+        return is_plex(entry.get("type"))
+
+    def _passed_to(self, sid: str, item: dict, url: str, message: dict) -> None:
+        """2.14: a Plex title goes to the phone as its file is, through QiTV's home door
+        (services/remote/films.py's PassedFilm): its address holds its server's token, which
+        never leaves this computer. The relay carries no film: a phone through it is told to
+        be on QiTV's home network, as for an MKV."""
+        if sid in self._relayed or self.hub is None:
+            self._send(sid, {"t": "play", "failed": True, "why": "relay"})
+            return
+        catalog, config = self._window.catalog, self._window.config_manager
+        try:
+            entry = catalog.provider_entry(provider_of(item) or catalog.current_provider_name())
+        except KeyError:
+            entry = {}
+        verify = must_verify(url, bool(entry.get("ssl_verify", config.ssl_verify)))
+        headers = {"User-Agent": user_agent_for(item, str(entry.get("type") or ""))}
+        name = urlsplit(url).path.rsplit("/", 1)[-1] or "film"
+        self.hub.open_passed(sid, self._device(sid), url, headers, verify, message, name)
 
     def _recording_to(self, sid: str, path: str, message: dict) -> None:
         """2.8: a recording goes to the phone as HLS from QiTV's home door, read from the disk

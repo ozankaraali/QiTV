@@ -26,7 +26,15 @@ from typing import Any, Awaitable, Callable, Iterable, Optional
 
 from services.redact import safe_exc
 from services.remote import net
-from services.remote.films import OPEN_S, PROVIDER, Film, FilmRefused, FilmShelf, HttpFetcher
+from services.remote.films import (
+    OPEN_S,
+    PROVIDER,
+    Film,
+    FilmRefused,
+    FilmShelf,
+    HttpFetcher,
+    PassedFilm,
+)
 from services.remote.page_id import page_id
 from services.remote.page_strings import page_hello
 from services.remote.pairing import RemoteStore
@@ -246,6 +254,28 @@ class HubCore:
             return
         token = self.films.put(device, film)
         self.send(sid, {**message, "url": f"{home}film/{token}/index.m3u8"})
+
+    def open_passed(
+        self,
+        sid: str,
+        device: str,
+        url: str,
+        headers: dict,
+        verify: bool,
+        message: dict,
+        name: str,
+    ) -> None:
+        """2.14: hand phone `sid` the film at `url` as it is, through the home door (its
+        address, a Plex title's with its server's token, never leaves this computer): sent
+        `message` with the home door's address of it (`name`, its file's name, at its end)."""
+        self.forget_film(device)
+        home = self.home_url()
+        if not home:
+            self.send(sid, {"t": "play", "failed": True, "why": PROVIDER})
+            return
+        token = self.films.put(device, PassedFilm(self._film_http(), url, headers, verify))
+        safe = "".join(c for c in name if c.isalnum() or c in "._-") or "film"
+        self.send(sid, {**message, "url": f"{home}pass/{token}/{safe}"})
 
     def open_recording(
         self,
@@ -706,6 +736,20 @@ class RemoteHub:
         self, sid: str, device: str, url: str, headers: dict, verify: bool, message: dict
     ) -> None:
         self._call(self._core.open_film, sid, device, url, dict(headers), verify, dict(message))
+
+    def open_passed(
+        self,
+        sid: str,
+        device: str,
+        url: str,
+        headers: dict,
+        verify: bool,
+        message: dict,
+        name: str,
+    ) -> None:
+        self._call(
+            self._core.open_passed, sid, device, url, dict(headers), verify, dict(message), name
+        )
 
     def open_recording(
         self,

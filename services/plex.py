@@ -8,7 +8,11 @@ Signing in is Plex's PIN flow: plex.tv gives a 4-character code (`PlexAccount.cr
 the viewer enters it at plex.tv/link, QiTV looks until the code is claimed (`check_pin`: the
 account's token), then lists the account's servers (`servers`), each with its own access token
 and its connections, local first, then remote, then relayed (`ordered`). The provider keeps the
-server's address, its access token and its id, never the account's token.
+server's address and connections, its access token and its id. For a server the account owns,
+that token is the account's own (plex.tv gives it as the server's): it is kept as a password is,
+only in the provider list on this computer, never logged, never handed to the phone (its titles
+go through the home door: services/remote/films.py's PassedFilm) and never put in a poster's
+address (services.plex_addresses).
 
 QiTV says only who it is: X-Plex-Product "QiTV", its version and a random client identifier
 (the provider's `device_id`), never the computer's or the viewer's name. A

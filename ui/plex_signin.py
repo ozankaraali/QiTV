@@ -13,8 +13,9 @@
    card adds one. Signed in again from a Plex provider's card, the same server (by its id)
    takes the new access in place; another server of the account is added as a new provider.
 
-The provider keeps the server's address, its own token and its id, and the client id QiTV
-signed in as (`device_id`): never the account's token. Cancel (Esc, Back, the dimmed picture)
+The provider keeps the server's address and connections, its token and its id, and the client
+id QiTV signed in as (`device_id`); for a server the account owns, that token is the account's
+own (services.plex). Cancel (Esc, Back, the dimmed picture)
 always works; nothing goes on once the card is gone, and a late answer is dropped. The keys,
 the phone's buttons and the mouse reach the card as every Settings card
 (SettingsController.show_card).
