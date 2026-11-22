@@ -436,6 +436,12 @@ _REOPEN_HOLD_S = 5.0  # no reopen at live within this of an open (and before VLC
 _SETTLE_S = 1.0
 _SETTLE_GROWTH_S = 2.0
 _SETTLE_MAX_S = 1.5
+# 2026-11-22: a backlog still arriving at network speed (the helper's hold ran out with it
+# arriving faster than twice real time, `settled_s` 0, and the edge still growing as above)
+# holds the start up to this long after ready, so it lands once, where the backlog left it:
+# started in the middle of one, the re-pick moved the picture 18 s on 11 s after it showed.
+# Waited out, the start plays and its landing is caught up (no re-pick).
+_START_FLOOD_MAX_S = 10.0
 # With nothing far enough back, a steady source starts at the oldest after this long.
 _STEADY_WAIT_S = 1.0
 # A start held longer than this says "Still loading…" (a bursty or HLS source, Stable).
@@ -717,6 +723,7 @@ class LiveSession(QObject):
         self._ready_at = 0.0  # when it was
         self._edges: list[tuple[float, float]] = []  # (when, live edge) while the start waits
         self._held_said = False  # "Still loading…" was said while the start waited
+        self._flood_said = False  # the start waited for a backlog still arriving (said once)
         self._not_live_said = 0  # 2.8.11: the answers dropped as recordings said so far
         self._reland_until = -math.inf  # a backlog step before this is part of the landing
         self._reland_edge = 0.0  # the live edge at the last tick, meanwhile
@@ -1773,7 +1780,7 @@ class LiveSession(QObject):
         if self._open_args.get("disk") and self._channel:
             self._engine.keep_session(self._sid, {"channel": self._channel})  # 2.6: whose
         self._phase = _Phase.WAITING
-        self._ready_seen = self._loading = self._held_said = False
+        self._ready_seen = self._loading = self._held_said = self._flood_said = False
         self._not_live_said = 0
         self._edges = []
         self._ready_timer.start(self._ready_timeout_ms)
@@ -1790,7 +1797,7 @@ class LiveSession(QObject):
         # 2.8: a rewound viewer plays on into the new run: it goes on after the old one.
         self._send_resume(kept.sid, join=self._back is not None)
         self._phase = _Phase.WAITING
-        self._ready_seen = self._loading = self._held_said = False
+        self._ready_seen = self._loading = self._held_said = self._flood_said = False
         self._not_live_said = 0
         self._edges = []
         self._ready_timer.start(self._ready_timeout_ms)
@@ -1803,7 +1810,7 @@ class LiveSession(QObject):
             return
         self._sid = borrowed.sid
         self._phase = _Phase.WAITING
-        self._ready_seen = self._loading = self._held_said = False
+        self._ready_seen = self._loading = self._held_said = self._flood_said = False
         self._not_live_said = 0
         self._edges = []
         self._ready_timer.start(self._ready_timeout_ms)
@@ -2311,29 +2318,49 @@ class LiveSession(QObject):
                 return  # bounded by the ready timeout
             elif not hls and not self._landed(snapshot) and held < _SETTLE_MAX_S - 1e-9:
                 return
+        # 2026-11-22: its backlog still arriving at network speed: the picture waits for it
+        # (the loading the viewer sees as ever), at most `_START_FLOOD_MAX_S` after ready.
+        arriving = (
+            not hls
+            and _number(snapshot.get("settled_s")) <= 0  # (settled: the held bytes, at once)
+            and self._grown(snapshot) > _SETTLE_GROWTH_S + 1e-9
+        )
+        if arriving and not waited:
+            if not self._flood_said:
+                self._flood_said = True
+                _LOG.debug("The start waits for the source's backlog, still arriving.")
+            if self._clock() - self._ready_at < _START_FLOOD_MAX_S - 1e-9:
+                return
         aimed = pick is not None  # chosen for the target, not the most there is
         if pick is None:
             pick = self._live_start(ahead=ahead)  # the most buffer there is
         if pick is not None:
-            self._first_open(*pick, aimed=aimed)
+            # Into a backlog still arriving (the wait ran out): its landing is caught up, never
+            # picked again (a skip after the picture showed).
+            self._first_open(*pick, aimed=aimed, repick=not arriving)
 
-    def _first_open(self, seq: int, lag: Optional[float], *, aimed: bool = False) -> None:
+    def _first_open(
+        self, seq: int, lag: Optional[float], *, aimed: bool = False, repick: bool = True
+    ) -> None:
         """Play the tune from `seq`, its lag once playing `lag` (None: a finished playlist's
-        beginning, no landing); a failed open picks again on the tick (`_Retry.FIRST`)."""
+        beginning, no landing); a failed open picks again on the tick (`_Retry.FIRST`).
+        `repick`: its start may be picked again (`REPICK`)."""
         self._ready_timer.stop()
         self._phase = _Phase.PIPELINE
         self._mode = "pipeline"
         self._edges = []
         self._tick_timer.start()
-        self._open_first(seq, lag, aimed=aimed)
+        self._open_first(seq, lag, aimed=aimed, repick=repick)
         self.modeChanged.emit(self._mode)
 
-    def _open_first(self, seq: int, lag: Optional[float], *, aimed: bool = False) -> None:
+    def _open_first(
+        self, seq: int, lag: Optional[float], *, aimed: bool = False, repick: bool = True
+    ) -> None:
         """Open the tune at `seq`. `aimed`: the start was chosen for the target, so its
         cushion counts as reached: its lag may read a little short of it once
         the source's rhythm is learned, and VLC running dry then is trouble all the same.
         A start that took less on purpose (the oldest segment, nothing further back) has
-        none."""
+        none. `repick`: the start may be picked again (`REPICK`)."""
         if not self._open_at(seq):
             self._retry = _Retry.FIRST
             return
@@ -2347,7 +2374,8 @@ class LiveSession(QObject):
             self._cushion = max(self._cushion, target)
         self._reland_until = self._clock() + _RELAND_S
         self._reland_edge = self._live_edge(snapshot)
-        self._repick_until, self._repick_step = self._clock() + _REPICK_S, None
+        self._repick_until = self._clock() + _REPICK_S if repick else -math.inf
+        self._repick_step = None
         self._repick_opened = self._clock()
         self._repick_playing = None
 
@@ -2410,13 +2438,17 @@ class LiveSession(QObject):
         provider's 20 s came as two keyframe intervals a second apart)."""
         if _number(snapshot.get("settled_s")) > 0:
             return True  # 2.8.11: the helper let the tune's bytes go once they had (`settled`)
+        return self._grown(snapshot) <= _SETTLE_GROWTH_S + 1e-9
+
+    def _grown(self, snapshot: Mapping[str, Any]) -> float:
+        """What the live edge grew over the last `_SETTLE_S` while the start waits."""
         edge, since = self._live_edge(snapshot), self._clock() - _SETTLE_S
         past = self._edges[0][1] if self._edges else edge
         for at, seen in self._edges:
             if at > since:
                 break
             past = seen
-        return edge - past <= _SETTLE_GROWTH_S + 1e-9
+        return edge - past
 
     def _on_recovery_timeout(self) -> None:
         if self._phase is not _Phase.RECOVERING:
