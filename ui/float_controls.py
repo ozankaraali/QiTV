@@ -131,14 +131,20 @@ class FloatControls(QObject):
         mirror.installEventFilter(self)
         for name in requests():
             signal = getattr(mirror, name)
-            if name in IN_PLACE:
-                signal.connect(getattr(transport, name))
+            if name in IN_PLACE or name == MUTE:
+                if name != "volumeSetRequested":  # (not each step of a drag of its bar)
+                    signal.connect(lambda *_args, name=name: self._note(name))
+                signal.connect(mute if name == MUTE else getattr(transport, name))
             elif name in WAY_BACK:
                 signal.connect(self._back)
-            elif name == MUTE:
-                signal.connect(mute)
             else:
                 signal.connect(lambda *args, name=name: self._in_the_window(name, args))
+
+    @staticmethod
+    def _note(name: str) -> None:
+        """Each click that acts in place, in the log: should the window ever come forward after
+        one, a live run says which (the focus line follows it)."""
+        logger.info("Desktop picture in picture: %s, in place", name)
 
     def floated(self) -> None:
         """The picture floats (again): the host takes the window's place once it has one."""
