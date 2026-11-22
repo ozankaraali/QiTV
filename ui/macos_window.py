@@ -236,23 +236,48 @@ class _NSSize(ctypes.Structure):
     _fields_ = [("width", ctypes.c_double), ("height", ctypes.c_double)]  # CGFloat: 64-bit
 
 
-def keep_shape(widget, shape: float) -> bool:
+def keep_shape(widget, shape: float, smallest=None, largest=None) -> bool:
     """macOS: the edges of `widget`'s window resize it in `shape` (width / height): its
     [NSWindow contentAspectRatio], which macOS keeps as the user drags them (Qt makes a frameless
-    window resizable there, NSWindowStyleMaskResizable). Told again after the window is shown: Qt
-    sets its resize increments as it makes the NSWindow, which clears it. Nothing happens
-    elsewhere (False)."""
+    window resizable there, NSWindowStyleMaskResizable), and never under `smallest` nor over
+    `largest` (QSizes: its contentMinSize and contentMaxSize, set here, not through Qt's size
+    hints, which would clear the shape). Told again after the window is shown: Qt sets its
+    resize increments as it makes the NSWindow, which clears it. Nothing happens elsewhere
+    (False)."""
     if QGuiApplication.platformName() != "cocoa" or not shape > 0:
         return False
     try:
         ns_window = _send(int(widget.winId()), b"window")
         if not ns_window:
             return False
-        size = _NSSize(float(shape) * 1000.0, 1000.0)
-        _send(ns_window, b"setContentAspectRatio:", None, (_NSSize, size))
+        for selector, size in ((b"setContentMinSize:", smallest), (b"setContentMaxSize:", largest)):
+            if size is not None and size.width() > 0 and size.height() > 0:
+                bounds = _NSSize(float(size.width()), float(size.height()))
+                _send(ns_window, selector, None, (_NSSize, bounds))
+        ratio = _NSSize(float(shape) * 1000.0, 1000.0)
+        _send(ns_window, b"setContentAspectRatio:", None, (_NSSize, ratio))
         return True
     except Exception as e:  # never let a Cocoa detail break the player
         logger.debug("Could not keep the window's shape: %s", e)
+        return False
+
+
+def let_presses_activate(widget) -> bool:
+    """macOS: a press on `widget`'s window brings QiTV forward again (no longer the
+    non-activating panel `join_all_spaces` made it: the mini player, QiTV's only window then).
+    Its desktops stay as they are. Nothing happens elsewhere (False)."""
+    if QGuiApplication.platformName() != "cocoa":
+        return False
+    try:
+        ns_window = _send(int(widget.winId()), b"window")
+        if not ns_window:
+            return False
+        mask = _send(ns_window, b"styleMask", ctypes.c_ulong)
+        if mask & _NONACTIVATING_PANEL:
+            _send(ns_window, b"setStyleMask:", None, (ctypes.c_ulong, mask & ~_NONACTIVATING_PANEL))
+        return True
+    except Exception as e:  # never let a Cocoa detail break the player
+        logger.debug("Could not let a press bring QiTV forward: %s", e)
         return False
 
 
