@@ -18,7 +18,7 @@ from timer_fixtures import elapse, wait_until  # noqa: E402
 from services import picture  # noqa: E402
 from services.playback import NullSession  # noqa: E402
 from tests.test_tv_window import WindowCase  # noqa: E402
-from ui import desktop_pip  # noqa: E402
+from ui import desktop_pip, float_controls  # noqa: E402
 from ui.desktop_pip import DesktopPip, FloatingPlayer, corner_rect  # noqa: E402
 from ui.pip import PipFrame  # noqa: E402
 
@@ -762,6 +762,69 @@ class DesktopPipWindowTests(WindowCase):
             pip.check()  # back: its controls go with it
             self.assertTrue(mirror.isHidden())
             self.assertFalse(controls.host.isVisible())
+            window.showNormal()
+            self.app.processEvents()
+
+    def test_a_click_on_the_floating_picture_opens_nothing_and_does_not_come_back(self):
+        # 2.13.5, the owner: a click on the small picture opened the guide in the window and
+        # brought the fullscreen desktop back. As in 2.13.4 a click on it does nothing, its
+        # controls up or not, beside a control too: only the controls act.
+        from tests.test_float_controls import off_a_control
+
+        shown = {"value": True}
+        window = self.window
+        with mock.patch("ui.tv_window._macos_desktops", return_value=True):
+            floating = self.float_it(shown)
+            pip = window.desktop_pip
+            controls = window.float_controls
+            mirror = controls.mirror
+            asked: list = []
+            for request in float_controls.requests():
+                getattr(window.overlays.transport, request).connect(
+                    lambda *_a, r=request: asked.append(r)
+                )
+            drawer, guide = window.overlays.drawer, window.overlays.guide
+            wait_until(drawer.isVisible, 2000)  # (the first show opens it: no channel yet)
+            drawer.close_drawer()
+            self.app.processEvents()
+            self.assertFalse(drawer.isVisible())
+            with (
+                mock.patch.object(window, "raise_") as raised,
+                mock.patch.object(window, "activateWindow") as activated,
+                mock.patch.object(pip, "_activate") as activated_app,
+                mock.patch.object(window.controller, "video_clicked") as clicked,
+                mock.patch.object(window.controller, "video_double_clicked") as doubled,
+            ):
+                middle = window.surface.rect().center()  # the picture, the controls hidden
+                mouse(window.surface, QEvent.Type.MouseButtonPress, middle)
+                mouse(
+                    window.surface,
+                    QEvent.Type.MouseButtonRelease,
+                    middle,
+                    Qt.MouseButton.NoButton,
+                )
+                elapse(QApplication.doubleClickInterval() + 50)
+                controls.hover_at(floating.geometry().center())  # the controls up
+                self.app.processEvents()
+                self.assertFalse(mirror.isHidden())
+                _name, beside = off_a_control(mirror)  # within a button's reach, off it
+                for at in (QPoint(mirror.width() // 2, 30), beside):
+                    mouse(mirror, QEvent.Type.MouseButtonPress, at)
+                    mouse(mirror, QEvent.Type.MouseButtonRelease, at, Qt.MouseButton.NoButton)
+                    elapse(QApplication.doubleClickInterval() + 50)
+                self.app.processEvents()
+            self.assertEqual(asked, [])
+            clicked.assert_not_called()
+            doubled.assert_not_called()
+            raised.assert_not_called()
+            activated.assert_not_called()
+            activated_app.assert_not_called()
+            self.assertFalse(drawer.isVisible())  # no channel list
+            self.assertFalse(guide.isVisible())
+            self.assertTrue(pip.floating())  # nor back to the fullscreen desktop
+            self.assertIs(window.surface.parentWidget(), floating)
+            mouse(window.surface, QEvent.Type.MouseButtonDblClick, middle)  # this comes back
+            self.assertFalse(pip.floating())
             window.showNormal()
             self.app.processEvents()
 
