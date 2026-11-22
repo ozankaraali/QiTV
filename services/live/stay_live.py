@@ -581,7 +581,8 @@ class StayLive:
         self._after_bound = False
         self._bound_flooded = False
         # The tune's start was picked again (`picked_again`), its one skip: within its
-        # landing's window far behind by a backlog or that landing is `_bound_off`'s.
+        # landing's window (a retry's too) far behind by a backlog or that landing, past the
+        # bound, is `_bound_off`'s.
         self._picked_again = False
         # Set by the caller: a stream opened a moment ago (Go live, a seek, a reopen), so its
         # lag is not known yet: no reopen at live until it is (never two opens in a row).
@@ -707,7 +708,6 @@ class StayLive:
         """
         self._floor = max(0.0, excess)
         self._landing = _START_S
-        self._picked_again = False  # (the re-pick says so after its landing)
         self._edge_ref = None  # a backlog counts from here (a recovery's timeline may differ)
         self._start = _START_S if build else 0.0
         self._accepting, self._tolerant = False, not build
@@ -733,9 +733,10 @@ class StayLive:
         it said where that landed, `landed()`): the tune's one skip (2026-11-22, the owner's
         call). Within that landing's window (`_START_S` of playing, longer while the source
         floods) far behind by the landing or a backlog the source sends is caught up however
-        far behind the target it is, never reopened at live, until the lag is back in the band
-        (`_bound_off`); after it a backlog past the bound reopens once as ever (40 s at 1.05x
-        is over 13 minutes). A stall and a freeze of VLC's jump as ever."""
+        far behind the target it is (past `_BACKLOG_MAX_S`: `_bound_off`, until the lag is
+        back in the band), never reopened at live; after it a backlog past the bound reopens
+        once as ever (40 s at 1.05x is over 13 minutes). A stall and a freeze of VLC's jump as
+        ever, and so does a locked rate."""
         self._picked_again = True
 
     def stop(self) -> None:
@@ -969,8 +970,8 @@ class StayLive:
         beyond the bound that goes far behind again by a backlog since (the source sent more
         than far ahead of real time, or flooded) turns those reopens off for it
         (`_bound_off`); far behind by keyframe grain or a stall does not (review I1). Within the
-        start a re-pick landed (`picked_again`, its landing's window) far behind by a backlog
-        or that landing is caught up so too."""
+        start a re-pick landed (`picked_again`, its landing's window) far behind past
+        `_BACKLOG_MAX_S` by a backlog or that landing is caught up so too."""
         behind = lag - self._centre(1)
         if self.flooding:
             self._floor = max(self._floor, behind)
@@ -978,8 +979,10 @@ class StayLive:
             self._bound_flooded = self._bound_flooded or self._after_bound
         if self._landing <= 0:
             self._picked_again = False
-        elif self._picked_again and behind > _FAR_S and self._backlog(behind, now):
-            self._bound_off = True  # the start's own: its one skip was the re-pick
+        elif self._picked_again and behind > _BACKLOG_MAX_S and self._backlog(behind, now):
+            # The start's own, where the bound would reopen (its one skip was the re-pick;
+            # a landing on keyframe grain is caught up as ever, and then the start is over).
+            self._bound_off = self._bound_off or not (self.rate_locked or self.background)
         if self._after_bound and not self.hold_reopen:
             backlog = self._bound_flooded or self._pushed(now) > _FAR_S
             if self._landing <= 0:

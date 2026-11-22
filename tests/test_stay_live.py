@@ -1635,15 +1635,23 @@ class BacklogTests(unittest.TestCase):
         # Review I1: a stall back at live 22 s behind, the bound's reopen landing on a keyframe
         # 9 s above the target (10 s keyframes), nothing sent ahead: a stall 45 s further
         # behind later reopened never (a 27 minute catch-up). Only a backlog since the reopen
-        # turns the reopens off; a re-pick's landing never does.
-        for picked in (False, True):
-            with self.subTest(picked=picked):
-                stay, clock = self.picked_again() if picked else (live(), Clock())
-                follow(stay, T, 90.0, clock=clock)
-                lag, _, jumps = follow(stay, T + 22.0, 120.0, clock=clock, landing=T + 9.0)
-                self.assertEqual(len(jumps), 1)
-                _, _, jumps = follow(stay, lag + 45.0, 5.0, clock=clock, landing=T)
-                self.assertEqual(len(jumps), 1)
+        # turns the reopens off.
+        stay, clock = live(), Clock()
+        follow(stay, T, 90.0, clock=clock)
+        lag, _, jumps = follow(stay, T + 22.0, 120.0, clock=clock, landing=T + 9.0)
+        self.assertEqual(len(jumps), 1)
+        _, _, jumps = follow(stay, lag + 45.0, 5.0, clock=clock, landing=T)
+        self.assertEqual(len(jumps), 1)
+
+    def test_a_re_pick_landing_on_keyframe_grain_leaves_a_later_backlog_its_reopen(self):
+        # Within the start only what the 30 s bound would reopen is caught up however far: a
+        # re-pick 9 s above the target (10 s keyframes) is caught up gently, and a backlog past
+        # 30 s after the start reopens once as ever.
+        stay, clock = self.picked_again(9.0)
+        lag, rates, jumps = follow(stay, T + 9.0, 90.0, clock=clock, landing=T)
+        self.assertEqual((jumps, max(rates)), ([], 1.03))
+        _, _, jumps = follow(stay, lag + 40.0, 1200.0, clock=clock, ahead=40.0, landing=T)
+        self.assertEqual(len(jumps), 1)
 
     def test_a_nudge_under_way_a_backlog_takes_over_steps_up_to_1_05(self):
         # Review M1: a 1.03x nudge under way, then a 20 s backlog: it stayed at 1.03x, 13

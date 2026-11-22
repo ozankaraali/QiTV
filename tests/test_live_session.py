@@ -7672,16 +7672,27 @@ class FloodTests(LiveSessionCase):
         said = self.lines(feed, 60.0)
         self.assertFalse(any("real time" in text for _, text in said), said)
 
-    def tune_and_dump(self):
+    def tune_and_dump(self, piece=0.25):
         """17:30:20-17:30:32: the picture at once; 4.5 s after it the new connection's old
-        buffer, 24 s in half a second, then real time. Returns the feed."""
-        sid = self.start()
+        buffer, 24 s in half a second, then real time, `piece` s at a time (the helper says
+        the edge each 0.5 s of it at least). Returns the feed."""
+        sid = self.start(channel="d%g" % piece)
         feed = Feed(self, sid, burst=0.0, edge=3.0, metered=True)
         feed.ready(backlog_after_start=False)
         self.assertEqual(len(self.playback.plays), 1)  # the picture at once
         feed.run(4.0)
-        self.flood(feed, 0.5, 48.0)
+        feed.sizes = itertools.chain([12.0, 12.0], itertools.repeat(piece))
+        feed.gaps = itertools.chain([0.25, 0.25], itertools.repeat(piece))
         return feed
+
+    def test_a_tunes_dump_is_picked_again_as_it_settles_at_the_helpers_pace_too(self):
+        feed = self.tune_and_dump(piece=0.5)
+        said = self.lines(feed, 5.0)
+        settled = [when for when, text in said if "at about real time" in text]
+        picked = [when for when, text in said if "picked again" in text]
+        self.assertEqual(len(picked), 1, said)
+        self.assertLessEqual(abs(picked[0] - settled[0]), 0.25 + 1e-6, said)
+        self.assertEqual(len(self.playback.plays), 2)
 
     def test_a_tunes_dump_is_picked_again_once_as_it_settles_then_only_caught_up(self):
         # The source sent far faster than real time at 25.8, at about real time at 28.1, and
