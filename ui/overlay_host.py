@@ -142,6 +142,27 @@ class OverlayHost(QWidget):
             self._cover = cover
             self._update_mask()
 
+    def follow_window(self, window: QWidget) -> None:
+        """The overlays show over `window` from now on: the TV window, or the floating window
+        while it holds the player page they are glued to (ui/desktop_pip.py). It is the window
+        whose moves, state and visibility they follow, and on macOS the one they are attached
+        to as a child window (on the next show: ordered out from the old one now)."""
+        if window is self._window or not isValid(window):
+            return
+        if isValid(self._window):
+            self._window.removeEventFilter(self)
+        if self._platform is not None and isValid(self._platform):
+            self._platform.removeEventFilter(self)
+        self._platform = None
+        self._window = window
+        window.installEventFilter(self)
+        self._watch_platform()
+        self._report_wait.stop()
+        self._in_dock = False
+        if self.isVisible():
+            self.hide()  # macOS drops it from its old parent window; shown again on the new one
+        self._update_visibility()
+
     def sync_geometry(self) -> None:
         rect = QRect(self._surface.mapToGlobal(QPoint(0, 0)), self._surface.size())
         resized = rect.size() != self.size()

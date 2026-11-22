@@ -83,6 +83,32 @@ class PageStackTests(StackCase):
         self.assertEqual(self.player.geometry(), stack.rect())
         self.assertFalse(self.library.isVisible())
 
+    def test_the_player_page_lent_leaves_a_stand_in_in_its_place(self):
+        # 2.13.5: the floating picture in picture holds the player page (ui/desktop_pip.py).
+        stack = self.make_stack()
+        note = QWidget(stack)
+        note.hide()
+        holder = QWidget()
+        self.addCleanup(holder.deleteLater)
+        page = stack.lend_player(note)
+        self.assertIs(page, self.player)
+        self.assertTrue(stack.player_lent())
+        page.setParent(holder)  # the floating window takes it
+        self.assertTrue(note.isVisible())
+        self.assertEqual(note.geometry(), stack.rect())
+        stack.resize(1000, 600)  # the stack lays out: the lent page is the other window's
+        self.assertIs(self.player.parentWidget(), holder)
+        self.assertEqual(note.geometry(), stack.rect())
+        self.assertIsNone(stack.lend_player(note))  # lent already
+        stack.take_back_player(page)
+        self.assertFalse(stack.player_lent())
+        self.assertIs(self.player.parentWidget(), stack)
+        self.assertEqual(self.player.geometry(), stack.rect())
+        self.assertTrue(self.player.isVisible())
+        self.assertFalse(note.isVisible())
+        stack.show_library(corner=True)
+        self.assertIsNone(stack.lend_player(note))  # the Library's: it never floats
+
     def test_corner_mode_keeps_both_pages_and_resizes_the_player(self):
         stack = self.make_stack(width=1280, height=720)
         stack.show_library(corner=True)

@@ -24,8 +24,9 @@ The small surface takes the shape its picture shows in, so it shows no bars: `sh
 glides to its new shape as it does for the lift. Whatever its shape it is as large as the 16:9
 box (`services.picture.box_size`), never more than half the player either way; 16:9 while its
 shape is not known, or fits any (Fill). Which surfaces hold their picture small (`shows_small`:
-this one, and the one lent to the floating window) the window tells their players, which then
-fill them to the last pixel (services.playback, `set_box_size`).
+this one, and the large one while the player page floats in the small window of
+ui/desktop_pip.py, `set_floating`) the window tells their players, which then fill them to the
+last pixel (services.playback, `set_box_size`).
 """
 
 from dataclasses import dataclass
@@ -127,7 +128,7 @@ class _Press:
 
 class PipFrame(QObject):
     swapRequested = Signal()  # a click on the small surface
-    suspending = Signal()  # the multiview takes the surfaces: a lent one must come back first
+    suspending = Signal()  # the multiview takes the surfaces: a floating page comes back first
     cornerChanged = Signal(str)  # a drag snapped it to another corner (saved as pip_corner)
     smallRectChanged = Signal(QRect)  # container coordinates, empty when hidden (the label)
 
@@ -159,7 +160,7 @@ class PipFrame(QObject):
         self._closed = False
         self._interactive = True  # False: the player is a thumbnail over the Library
         self._suspended = False  # True: the multiview lays the surfaces out (suspend)
-        self._lent: str | None = None  # the large surface, out in the desktop PiP's window
+        self._floating = False  # the player page is in the floating window (ui/desktop_pip.py)
         self._lift = 0  # pixels a bottom corner's PiP rises (the transport shows)
         self._lifting = QVariantAnimation(self)
         self._lifting.setDuration(LIFT_MS)
@@ -198,39 +199,33 @@ class PipFrame(QObject):
             surface.installEventFilter(self)
         self._layout()
 
-    def lend_large(self) -> QWidget | None:
-        """The large surface, for another window to hold (the desktop picture in picture,
-        ui/desktop_pip.py): it is laid out no more until `take_back`. None while the multiview
-        lays the surfaces out, or one is out already."""
-        if self._lent is not None or self._suspended or self._closed:
-            return None
-        self._lent = self._large
-        return self._surfaces[self._lent]
+    def set_floating(self, floating: bool) -> bool:
+        """The player page goes into the floating window (ui/desktop_pip.py), or comes back:
+        the large surface holds its picture small there, in the window's box. False (nothing
+        changes) while the multiview lays the surfaces out: the grid never floats."""
+        if floating and (self._suspended or self._closed):
+            return False
+        self._floating = floating
+        if not self._closed:
+            self._layout()  # (the page's size may have changed meanwhile)
+        return True
+
+    def floating(self) -> bool:
+        return self._floating
 
     def shows_small(self, name: str) -> bool:
         """Surface `name` holds its picture small: the picture in picture's in its corner, or
-        the one lent to the floating window (never a multiview's tile)."""
-        if self._closed:
+        the large one while the player page floats (never a multiview's tile)."""
+        if self._closed or self._suspended:
             return False
-        return name == self._lent or (
-            self._shown and not self._suspended and name == self._small_name
+        return (self._floating and name == self._large) or (
+            self._shown and name == self._small_name
         )
 
-    def lent_shape(self) -> Optional[float]:
-        """The shape the lent surface's picture shows in (None: none lent, or not known)."""
-        return self._ask_shape(self._lent) if self._lent is not None else None
-
-    def take_back(self, surface: QWidget) -> None:
-        """The lent surface is back: it fills the player again, as it was laid out."""
-        if self._lent is None:
-            return
-        self._lent = None
-        if not self._closed:
-            surface.setParent(self._container)
-            surface.lower()  # under the small surface, as laid out
-            if self._suspended:
-                surface.show()  # (setParent hid it) the multiview lays it out
-        self._layout()
+    def floating_shape(self) -> Optional[float]:
+        """The shape the large picture shows in while the page floats (None: it does not, or
+        the shape is not known)."""
+        return self._ask_shape(self._large) if self._floating else None
 
     def set_large(self, name: str) -> None:
         """Make surface `name` fill the player. When it was the PiP's, the one that was large
@@ -274,8 +269,6 @@ class PipFrame(QObject):
         """The small surface on its way to where it belongs now (a lift, a shape), animated."""
         if not self._shown or self._press is not None or self._closed or self._suspended:
             return  # shown, or once the drag ends, it lays out with the new lift and shape
-        if self._small_name == self._lent:
-            return  # (its place is the other window's)
         small = self._small()
         target = self._small_target()
         self._lifting.stop()  # a lift on its way the other way ends where it is
@@ -300,7 +293,7 @@ class PipFrame(QObject):
         shows again when picture in picture next opens (`show_pip`)."""
         if self._suspended:
             return
-        self.suspending.emit()  # a lent surface comes back first (the desktop PiP's)
+        self.suspending.emit()  # a floating player page comes back first (ui/desktop_pip.py)
         self._lifting.stop()
         self._shape_poll.stop()
         self._press = None
@@ -366,7 +359,7 @@ class PipFrame(QObject):
     def _follow_shape(self) -> None:
         """Every SHAPE_POLL_MS while it shows: a new shape of the small picture glides it there
         (during a press, its release lays it out)."""
-        if not self._shown or self._closed or self._suspended or self._small_name == self._lent:
+        if not self._shown or self._closed or self._suspended:
             self._shape_poll.stop()
             return
         shape = self._ask_shape(self._small_name)
@@ -393,16 +386,13 @@ class PipFrame(QObject):
         if self._press is not None:
             self._press.void = True  # its release neither swaps nor snaps
         large = self._surfaces[self._large]
-        if self._large != self._lent:  # (a lent one is the other window's to lay out)
-            large.setGeometry(self._container.rect())
-            large.show()  # it may have been the small one, hidden with PiP closed
+        large.setGeometry(self._container.rect())
+        large.show()  # it may have been the small one, hidden with PiP closed
         small = self._small()
         for name, surface in self._surfaces.items():
-            if name not in (self._large, self._small_name, self._lent):
+            if name not in (self._large, self._small_name):
                 surface.hide()  # a tile's, outside the multiview
-        if self._small_name == self._lent:
-            self._shape_poll.stop()  # (a swap while it is out: its place is the other window's)
-        elif self._shown:
+        if self._shown:
             self._shape = self._ask_shape(self._small_name)
             if self._shape_of is not None and not self._closed and not self._shape_poll.isActive():
                 self._shape_poll.start()

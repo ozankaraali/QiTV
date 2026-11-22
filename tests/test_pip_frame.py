@@ -319,26 +319,31 @@ class PipFrameTests(FrameCase):
         elapse(SHAPE_POLL_MS * 2 + 100)
         self.assertEqual(asked, [])
 
-    def test_the_lent_surface_tells_its_shape(self):
-        frame = self.make(shape_of={"main": 4 / 3}.get)
-        self.assertIsNone(frame.lent_shape())  # none lent
-        surface = frame.lend_large()
-        self.assertAlmostEqual(frame.lent_shape(), 4 / 3)
-        frame.take_back(surface)
-        self.assertIsNone(frame.lent_shape())
+    def test_the_floating_page_tells_its_large_pictures_shape(self):
+        frame = self.make(shape_of={"main": 4 / 3, "pip": 16 / 9}.get)
+        self.assertIsNone(frame.floating_shape())  # the page is in the window
+        self.assertTrue(frame.set_floating(True))
+        self.assertAlmostEqual(frame.floating_shape(), 4 / 3)
+        frame.show_pip()
+        frame.set_large("pip")  # a swap in the small window
+        self.assertAlmostEqual(frame.floating_shape(), 16 / 9)
+        frame.set_floating(False)
+        self.assertIsNone(frame.floating_shape())
 
-    def test_the_small_and_the_lent_surface_show_their_pictures_small(self):
+    def test_the_small_and_the_floating_large_surface_show_their_pictures_small(self):
         frame = self.make()
         self.assertFalse(frame.shows_small("pip"))  # no picture in picture
         frame.show_pip()
         self.assertEqual((frame.shows_small("pip"), frame.shows_small("main")), (True, False))
         frame.set_large("pip")  # a swap
         self.assertEqual((frame.shows_small("pip"), frame.shows_small("main")), (False, True))
-        surface = frame.lend_large()  # the large one floats (the desktop picture in picture)
-        self.assertTrue(frame.shows_small("pip"))
-        frame.take_back(surface)
+        frame.set_floating(True)  # the page floats (ui/desktop_pip.py): the large one too
+        self.assertEqual((frame.shows_small("pip"), frame.shows_small("main")), (True, True))
+        frame.set_floating(False)
         self.assertFalse(frame.shows_small("pip"))
         frame.suspend()  # the multiview's tiles
+        self.assertFalse(frame.shows_small("main"))
+        self.assertFalse(frame.set_floating(True))  # the grid never floats
         self.assertFalse(frame.shows_small("main"))
 
     def test_drag_to_the_top_left_quadrant_snaps_to_tl_and_saves_it(self):
