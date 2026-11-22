@@ -1958,6 +1958,38 @@ class ControllerTimingTests(unittest.TestCase):
         self.assertEqual(self.at(12.8), "")  # not on again
         self.assertEqual(self.at(13.4), "Nasılsın")
 
+    def rewind_to(self, position):
+        """The picture goes back to `position` as it plays (a seek), then plays on a tick."""
+        self.captions._last = (self.window.live_session.position_s, time.monotonic())
+        self.window.live_session.position_s = position
+        self.captions._tick()  # the seek
+        self.captions._tick()
+        return self.overlay.text
+
+    def test_a_rewind_shows_the_lines_the_run_read_again(self):
+        # 2.13.4 (bug scan #14): a line whose time on screen had ended never showed again
+        run = self.captions._run
+        self.captions._on_caption(run, 10.0, 12.0, "Merhaba")
+        self.captions._on_progress(run, 30.0, 0.3)  # read on to 30 s
+        self.assertEqual(self.at(10.5), "Merhaba")
+        self.assertEqual(self.at(20.0), "")  # its time is over
+        self.assertEqual(self.rewind_to(10.5), "Merhaba")
+        self.assertEqual(self.captions._run, run)  # read already: no new run
+
+    def test_a_rewind_before_the_run_shows_what_the_new_run_writes(self):
+        self.window.live_session.source = ("http://127.0.0.1:1/t/s1/side/3.ts", 3, 50.0)
+        self.captions._start_run()  # a run that reads from 50 s
+        run = self.captions._run
+        self.captions._on_caption(run, 60.0, 62.0, "Merhaba")
+        self.assertEqual(self.at(60.5), "Merhaba")
+        self.window.live_session.position_s = 70.0  # its time is over
+        self.assertEqual(self.at(70.0), "")
+        self.rewind_to(35.5)
+        self.assertEqual(self.captions._run, run + 1)  # read again from there
+        self.captions._on_caption(run + 1, 35.0, 37.0, "Selam")
+        self.captions._tick()
+        self.assertEqual(self.overlay.text, "Selam")
+
     def test_a_late_end_does_not_join_a_line_already_on_screen(self):
         run = self.captions._run
         first = "Uzay aracı bu yıl ilk kez Mars'ın"

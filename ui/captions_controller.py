@@ -1888,6 +1888,10 @@ class CaptionsController(QObject):
         if self._last is not None:
             moved = position - self._last[0]
             elapsed = now - self._last[1]
+            if moved < -SEEK_S:
+                # back: the lines from there show again, whether read already or anew (2.13.4,
+                # bug scan #14: those before the last that went stayed gone)
+                self._gone = float("-inf")
             # A jump either way (a pause or 1.03x is none): read again where the picture went,
             # unless the run there has read it already.
             if (moved > elapsed + SEEK_S or moved < -SEEK_S) and self._ready:
