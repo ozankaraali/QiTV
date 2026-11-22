@@ -1,0 +1,75 @@
+[
+  {
+    "name": "Home Media",
+    "product": "Plex Media Server",
+    "productVersion": "1.43.5.11079-b3b13e506",
+    "platform": "MacOSX",
+    "device": "Mac",
+    "clientIdentifier": "machine-home",
+    "provides": "server",
+    "accessToken": "server-token-home",
+    "owned": true,
+    "home": false,
+    "relay": true,
+    "presence": true,
+    "httpsRequired": false,
+    "publicAddress": "203.0.113.7",
+    "connections": [
+      {
+        "protocol": "https",
+        "address": "203.0.113.7",
+        "port": 32400,
+        "uri": "https://203-0-113-7.example.plex.direct:32400",
+        "local": false,
+        "relay": false,
+        "IPv6": false
+      },
+      {
+        "protocol": "https",
+        "address": "relay.example",
+        "port": 8443,
+        "uri": "https://relay.example.plex.direct:8443",
+        "local": false,
+        "relay": true,
+        "IPv6": false
+      },
+      {
+        "protocol": "https",
+        "address": "10.0.0.5",
+        "port": 32400,
+        "uri": "https://10-0-0-5.example.plex.direct:32400",
+        "local": true,
+        "relay": false,
+        "IPv6": false
+      }
+    ]
+  },
+  {
+    "name": "A Phone",
+    "product": "Plex for iOS",
+    "clientIdentifier": "phone-1",
+    "provides": "client,player,pubsub-player",
+    "accessToken": "phone-token",
+    "owned": true,
+    "connections": []
+  },
+  {
+    "name": "A Friend's Films",
+    "product": "Plex Media Server",
+    "clientIdentifier": "machine-friend",
+    "provides": "server",
+    "accessToken": "server-token-friend",
+    "owned": false,
+    "connections": [
+      {
+        "protocol": "https",
+        "address": "198.51.100.9",
+        "port": 32400,
+        "uri": "https://198-51-100-9.example.plex.direct:32400",
+        "local": false,
+        "relay": false,
+        "IPv6": false
+      }
+    ]
+  }
+]
