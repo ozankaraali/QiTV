@@ -781,10 +781,7 @@ class LiveSession(QObject):
         # when the source last sent again after a silence, and the last tick's quiet, for the
         # hold's trickle (`_hold_at_edge`).
         self._arrived: deque[tuple[float, float]] = deque()
-        self._sending_since = -math.inf
-        self._quiet_before = 0.0
-        self._was_abnormal = self._unproven = self._reconnect_seen = False
-        self._room_before = 0.0
+        self._forget_holds()
         self._rate_minute, self._rate_lines = -1, 0
         self._troubled_at: Optional[float] = None
         self._cushion = 0.0  # the largest lag at the live edge since the tune (or the target)
@@ -975,6 +972,7 @@ class LiveSession(QObject):
         self._resume_held, self._resume_owed = None, False
         self._dry_before = self._dry_seen = -math.inf
         self._dry_now = False
+        self._forget_holds()
         self._back = self._late = None
         self._disk_failures = 0
         self._on_disk = disk
@@ -2133,6 +2131,7 @@ class LiveSession(QObject):
         self._filter = LagFilter()
         self._burst_said = self._measured_said = None
         self._arrived.clear()
+        self._forget_holds()
         if self._learned is not None:  # another stream from the helper: no batch, no gap
             self._learned.arrivals.reset()
         self._forget_feed()
@@ -2907,9 +2906,7 @@ class LiveSession(QObject):
             self._stay.slack = self._target(snapshot) - self._stay.target
             self._stay.hold_reopen = self._just_opened()
             self._stay.burst = self._filter.burst
-            # Under Auto, a kept burst's target holds the burst's room and its own margin: a
-            # lag under it by half that burst still leaves VLC the margin (`StayLive.spare`).
-            self._stay.spare = self._filter.kept / 2 if self._learned is not None else 0.0
+            self._stay.spare = self._spare()
             self._stay.edge = self._filter.edge(self._clock())  # what a backlog pushes ahead
             self._stay.flooding = self._flooding(snapshot)
             self._stay.spread = self._filter.spread()
@@ -3017,7 +3014,9 @@ class LiveSession(QObject):
         recent = [mark for when, mark in arrived if when >= now - window]
         before = [mark for when, mark in arrived if when < now - window]
         rising = level - recent[0] > extra
-        flooding = rising and (not before or level - max(before) > extra)
+        # Raw TS: an HLS channel's batches (its start's next reload 12 s) are its rhythm.
+        hls = snapshot.get("hls") is True
+        flooding = rising and not hls and (not before or level - max(before) > extra)
         if self._stay.flooding and not flooding:
             # Settled: the flood was a step of the level, its mean is the window's of before
             # (a pick from it landed 4.5 s above the target): the filter starts afresh.
@@ -3381,6 +3380,27 @@ class LiveSession(QObject):
             segment_floor=SEGMENT_FLOOR,
         )
 
+    def _spare(self) -> float:
+        """Under Auto, a kept burst's target holds the burst's room and its own margin: a lag
+        under it by half that burst still leaves VLC the margin (`StayLive.spare`). Only the
+        part of the target in force the burst holds (review I4): not what a learned need above
+        the burst, or the AI captions' floor, set (under a 13 s floor the captions were 6 s
+        short of their lead before anything built it back)."""
+        learned, kept = self._learned, self._filter.kept
+        if learned is None or kept <= 0:
+            return 0.0
+        held = learned.target(kept) - learned.target(0.0)
+        return max(0.0, min(kept / 2, held, self._stay.target - self._caption_floor))
+
+    def _forget_holds(self) -> None:
+        """The hold's view of the source's silences starts afresh (a tune, a new helper
+        session): when it last sent again after one, the last tick's quiet, whether that was
+        one VLC had room for, a trickle to prove, a reconnect, and VLC's room as it began."""
+        self._sending_since = -math.inf
+        self._quiet_before = 0.0
+        self._was_abnormal = self._unproven = self._reconnect_seen = False
+        self._room_before = 0.0
+
     def _forget_feed(self) -> None:
         """What `_feed_learned` keeps between ticks starts afresh (a tune, a new stream)."""
         self._stall_on = self._stall_counted = self._stall_dry = False
@@ -3667,17 +3687,25 @@ class LiveSession(QObject):
         if quiet < _HOLD_QUIET_S:
             self._room_before = ahead + quiet  # VLC's cushion as a silence would begin
         # A silence past its bursts that VLC had room for (its usual gap and some): no hiccup
-        # at the edge, nor the shortfall before each burst stay-live builds away (2.0.1).
+        # at the edge, nor the shortfall before each burst stay-live builds away (2.0.1). Only
+        # for a source that showed bursts this tune: a steady one's hiccup VLC has room for
+        # (Stable, a radio station, Auto at 5 s and more) plays through as in 2.8.8.
+        bursty = max(rhythm, self._filter.kept) > 0
         room = max(_HOLD_ROOM_S, rhythm + _HOLD_EARLY_S + _HOLD_QUIET_S)
-        abnormal = quiet > rhythm + _HOLD_QUIET_S and self._room_before >= room - 1e-9
-        if snapshot.get("reconnecting") is True:
-            self._reconnect_seen = True
-        if quiet < self._quiet_before and self._quiet_before >= _HOLD_BURSTS * rhythm + 1.0:
-            self._sending_since = now  # the source sends again after a silence ...
-            # ... and after one VLC had room for, or a reconnect, it trickles until it proves
-            # it does not (its first seconds at the edge played in fits)
-            self._unproven = self._unproven or self._was_abnormal or self._reconnect_seen
-            self._reconnect_seen = False
+        abnormal = bursty and quiet > rhythm + _HOLD_QUIET_S and self._room_before >= room - 1e-9
+        reconnecting = snapshot.get("reconnecting") is True
+        if quiet < self._quiet_before:  # it sends again
+            if self._quiet_before >= _HOLD_BURSTS * rhythm + 1.0:
+                # ... after a silence: what came since counts from the level before it (the
+                # burst that ended it too: VLC was held a burst longer without it) ...
+                self._sending_since = next(
+                    (when for when, _ in reversed(self._arrived) if when < now - 1e-9), now
+                )
+                # ... and after one VLC had room for, or a reconnect, it trickles until it
+                # proves it does not (its first seconds at the edge played in fits)
+                self._unproven = self._unproven or self._was_abnormal or self._reconnect_seen
+            self._reconnect_seen = False  # a reconnect is the silence it ends, or none
+        self._reconnect_seen = self._reconnect_seen or reconnecting
         self._quiet_before, self._was_abnormal = quiet, abnormal
         # Judged over sending time only: right after a silence the window holds the silence.
         window = max(_HOLD_RATE_S, 2 * rhythm)

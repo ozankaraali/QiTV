@@ -4889,7 +4889,7 @@ class HoldTests(LiveSessionCase):
         sid = self.start()
         feed = Feed(self, sid, burst=10.0, edge=10.0, metered=True).ready()
         feed.run(120.0)  # ~10 s bursts, counted
-        self.assertEqual(self.live._filter.rhythm, 10.0)
+        self.assertEqual(self.timelines[-1]["target"], 10.0)
         starved, holds = feed.starved_s, len(self.playback.holds)
         feed.stalled = True
         self.engine._snapshots[sid]["reconnecting"] = True
@@ -4906,6 +4906,46 @@ class HoldTests(LiveSessionCase):
         feed.run(30.0)
         self.assertEqual(self.playback.holds[holds:], [True, False])  # real time: it plays
         self.assertLess(feed.starved_s - starved, 0.5)  # never dry, never in fits
+
+    def test_after_a_long_silence_the_burst_that_ends_it_plays_the_hold_again(self):
+        # Review I2: on 10 s bursts the edge stood still 15 s (no reconnect), then the bursts
+        # came on time again: VLC, held in time, played again only at the second burst after
+        # the silence, 10 s more of a still picture with a burst ahead (what came since the
+        # source sent again left the burst that ended the silence out).
+        sid = self.start()
+        feed = Feed(self, sid, burst=10.0, edge=10.0, metered=True).ready()
+        feed.run(120.0)
+        holds, began = len(self.playback.holds), self.clock.now
+        self.gap(feed, 15.0)
+        self.assertEqual(self.playback.holds[holds:], [True])  # held in time
+        released = None
+        for _ in range(4 * 30):
+            feed.run(0.25)
+            if released is None and not self.playback.held:
+                released = self.clock.now
+        self.assertIsNotNone(released)
+        self.assertLess(released - began, 25.0)  # the first burst after it came at 20 s
+
+    def test_under_stable_a_hiccup_a_steady_source_has_room_for_is_not_held(self):
+        # Review I3: Stable, steady raw TS 6 s ahead, VLC never dry: the early hold held VLC
+        # 2.75 and 3.75 s in silences of 4.5 and 5.5 s it plays through (each a starvation to
+        # the learned target). It is for a source that showed bursts this tune.
+        for silence in (3.5, 4.5, 5.5):
+            with self.subTest(silence=silence):
+                self.live = self.make()
+                sid = self.start(latency="stable", channel="s%g" % silence)
+                feed = Feed(self, sid, burst=0.0, edge=30.0, starved=PlaybackState.PLAYING)
+                feed.ready()
+                self.live.go_live()
+                feed.sync()
+                feed.run(90.0)
+                holds, starved = len(self.playback.holds), feed.starved_s
+                self.gap(feed, silence)
+                feed.run(30.0)
+                self.assertEqual(self.playback.holds[holds:], [])
+                self.assertEqual(feed.starved_s, starved)
+                self.live.stop()
+                self.engine.answer()
 
     def test_a_long_trickle_plays_its_cushion_after_30_s_held_then_holds_again(self):
         # The bound: a held picture beats choppy sound, but not for ever. After 30 s held with
@@ -7291,10 +7331,29 @@ class ComingAndGoingBurstTests(LiveSessionCase):
         feed.gaps = iter([10.0] * 9 + [0.25] * 100_000)
         feed.nominal = feed.next_arrival = self.clock.now + 2.0
         feed.run(220.0)
-        self.assertEqual(self.live._filter.kept, 10.0)
-        self.assertEqual(self.timelines[-1]["target"], 10.0)
+        self.assertEqual(self.timelines[-1]["target"], 10.0)  # the burst is kept
         self.assertEqual(self.live._snapshot()["burst_s"], 0.0)  # the helper: steady now
         return feed
+
+    def test_under_auto_only_what_the_kept_burst_holds_of_the_target_is_spare(self):
+        # Review I4: under Auto a lag half the kept burst short of the target still leaves
+        # VLC its margin (`StayLive.spare`), but only where the burst set the target: under
+        # the AI captions' 13 s floor nothing was built until 7 s (the captions 6 s short of
+        # their lead), where 2.13.4 builds from 12 s.
+        sid = self.start(latency=AUTO, channel="ch")
+        feed = Feed(self, sid, burst=0.0, edge=6.0, metered=True).ready()
+        feed.run(60.0)
+        feed.sizes = iter([10.0] * 10 + [0.25] * 100_000)
+        feed.gaps = iter([10.0] * 9 + [0.25] * 100_000)
+        feed.nominal = feed.next_arrival = self.clock.now + 2.0
+        feed.run(220.0)
+        target = self.live._stay.target
+        self.assertGreater(self.live._stay.spare, 0.0)  # the kept burst's room
+        self.assertLessEqual(self.live._stay.spare, 5.0)
+        self.live.set_caption_floor(target + 3.0)
+        feed.run(30.0)
+        self.assertAlmostEqual(self.live._stay.target, target + 3.0)
+        self.assertEqual(self.live._stay.spare, 0.0)  # the floor set it: no room to spare
 
     def test_go_live_on_a_kept_burst_lands_in_its_room(self):
         # Go live picks for the target stay-live steers to: never the steady minutes' 2.5 s
@@ -7600,6 +7659,18 @@ class FloodTests(LiveSessionCase):
         self.assertNotIn("1.10x", " ".join(texts))
         self.assertEqual(len([text for text in texts if "nudges the rate to" in text]), 1)
         self.assertAlmostEqual(self.timelines[-1]["lag"], TARGETS["normal"], delta=1.0)
+
+    def test_an_hls_tune_start_is_no_flood(self):
+        # Review M3: an HLS channel's start (its backlog landing after the start) read as a
+        # flood, a second each way: two INFO lines in every HLS tune's log. Raw TS only.
+        # (Its next reload brought 12 s two seconds after the start, as `RepickTests` has it.)
+        sid = self.start()
+        feed = Feed(self, sid, burst=7.0, edge=20.0, first=2.0, hls=True)
+        feed.sizes = iter([12.0, 6.0] + [12.0 if k % 6 == 5 else 6.0 for k in range(200)])
+        feed.gaps = iter([3.24] + [7.0] * 201)
+        feed.ready(backlog_after_start=False)
+        said = self.lines(feed, 60.0)
+        self.assertFalse(any("real time" in text for _, text in said), said)
 
     def tune_and_dump(self):
         """17:30:20-17:30:32: the picture at once; 4.5 s after it the new connection's old
