@@ -193,15 +193,41 @@ class ImageManager:
             return int(self.current_cache_size)
 
     def clear_cache(self):
+        """Every cached image removed. One that can't be (Windows keeps a file another program
+        holds open) is skipped, and stays in the index with its size: the index counts what is
+        on the disk, as the next start counts it."""
+        locked = 0
         with self._lock:
+            kept: OrderedDict = OrderedDict()
             for filename in os.listdir(self.cache_dir):
                 file_path = os.path.join(self.cache_dir, filename)
-                if os.path.isfile(file_path):
+                if file_path == self.index_file or not os.path.isfile(file_path):
+                    continue  # (the index is written again below)
+                try:
                     os.remove(file_path)
-            self.cache.clear()
-            self.current_cache_size = 0
-        # Save empty cache index
+                except FileNotFoundError:
+                    continue
+                except OSError:
+                    locked += 1
+                    image_hash, ext = os.path.splitext(filename)
+                    if ext in (".png", ".jpg"):
+                        kept[image_hash] = self._left_entry(image_hash, file_path, ext)
+            self.cache = kept
+            self.current_cache_size = sum(entry.get("size", 0) for entry in kept.values())
+        if locked:
+            logger.warning("Clearing the image cache: %d file(s) could not be removed", locked)
         self.save_index()
+
+    def _left_entry(self, image_hash: str, path: str, ext: str) -> dict:
+        """The index's entry for a cached image clearing could not remove (under the lock)."""
+        entry = dict(self.cache.get(image_hash) or {})
+        try:
+            entry["size"] = os.path.getsize(path)
+        except OSError:
+            entry.setdefault("size", 0)
+        entry["ext"] = ext.lstrip(".")
+        entry.setdefault("last_access", datetime.now().strftime("%Y-%m-%d %H:%M:%S"))
+        return entry
 
     def _entry_paths(self, key_hash, entry):
         """Files an entry may own; entries from older indexes did not record their extension."""
