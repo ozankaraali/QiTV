@@ -482,6 +482,37 @@ class SteeringTests(unittest.TestCase):
             self.assertTrue(all(0.95 <= rate <= 1.10 for rate in rates))
 
 
+class NudgeReasonTests(unittest.TestCase):
+    """2.13.4: each nudge says why it runs at its rate, for the caller's log."""
+
+    def started(self, stay, lag, seconds, clock):
+        """Drive `lag` until a nudge runs; its rate and reason."""
+        for _ in range(round(seconds / TICK)):
+            stay.update(lag, False, now=clock.tick())
+            if stay.nudge != 1.0:
+                return stay.nudge, stay.nudge_reason
+        return 1.0, stay.nudge_reason
+
+    def test_each_nudge_says_why(self):
+        cases = (
+            (live(), T + 3.5, (1.03, "behind the target")),
+            (live(6.0), 4.0, (0.97, "short of the target")),
+            (live(), T + 10.0, (1.10, "far behind")),
+            (live(10.0, burst=10.0), 5.2, (0.95, "too little room for the source's burst")),
+            (live(), 0.2, (0.95, "at the live edge")),
+        )
+        for stay, lag, said in cases:
+            with self.subTest(lag=lag, said=said):
+                self.assertEqual(self.started(stay, lag, 20.0, Clock()), said)
+        self.assertEqual(live().nudge_reason, "")  # no nudge, no reason
+
+    def test_the_owed_slow_down_says_vlc_ran_dry(self):
+        stay, clock = live(), Clock()
+        drive(stay, T, 5.0, clock=clock)
+        stay.trouble()
+        self.assertEqual(self.started(stay, T - 1.5, 5.0, clock), (0.95, "VLC ran dry"))
+
+
 class RateLockTests(unittest.TestCase):
     """2.0.2: on some channels VLC cannot play at any rate but 1x (it crawls). Once that is
     seen, stay-live keeps 1x for the channel; only a lag far beyond the target goes live."""
