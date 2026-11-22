@@ -8,7 +8,11 @@ Signing in is Plex's PIN flow: plex.tv gives a 4-character code (`PlexAccount.cr
 the viewer enters it at plex.tv/link, QiTV looks until the code is claimed (`check_pin`: the
 account's token), then lists the account's servers (`servers`), each with its own access token
 and its connections, local first, then remote, then relayed (`ordered`). The provider keeps the
-server's address, its access token and its id, never the account's token.
+server's address and connections, its access token and its id. For a server the account owns,
+that token is the account's own (plex.tv gives it as the server's): it is kept as a password is,
+only in the provider list on this computer, never logged, never handed to the phone (its titles
+go through the home door: services/remote/films.py's PassedFilm) and never put in a poster's
+address (services.plex_addresses).
 
 QiTV says only who it is: X-Plex-Product "QiTV", its version and a random client identifier
 (the provider's `device_id`), never the computer's or the viewer's name. A
@@ -27,7 +31,7 @@ from typing import Any, Callable, Optional
 from urllib.parse import parse_qs, urlencode, urlsplit
 import uuid
 
-from services import media_server as ms
+from services import media_server as ms, plex_addresses
 from services.lazy_import import lazy_module
 from services.media_server import MediaServerError, SignInNeeded, normalized_base
 from services.surrogates import response_json
@@ -130,6 +134,34 @@ def _connections(raw: Any) -> tuple[Connection, ...]:
     return tuple(unique.values())
 
 
+def connections_of(provider: dict) -> tuple[Connection, ...]:
+    """The connections a provider keeps (review I2), best first."""
+    found = []
+    for entry in provider.get("connections") or []:
+        if isinstance(entry, dict) and str(entry.get("uri") or "").startswith(("http", "https")):
+            found.append(
+                Connection(
+                    normalized_base(str(entry["uri"])),
+                    bool(entry.get("local")),
+                    bool(entry.get("relay")),
+                )
+            )
+    return tuple(ordered(found))
+
+
+def kept_connections(connections: Any) -> list[dict]:
+    """Connections as a provider keeps them: {uri, local, relay}, best first."""
+    return [{"uri": c.uri, "local": c.local, "relay": c.relay} for c in connections]
+
+
+def unreachable(error: BaseException) -> bool:
+    """Whether a request failed for want of the server at that address (no connection, a
+    time-out, a certificate refused), not for what the server answered."""
+    if isinstance(error, MediaServerError):
+        return False
+    return isinstance(error, (OSError, TimeoutError))
+
+
 def servers_of(resources: Any) -> list[Server]:
     """The Plex Media Servers among an account's resources (plex.tv's /api/v2/resources), each
     with its connections best first; players and other devices are left out."""
@@ -139,8 +171,8 @@ def servers_of(resources: Any) -> list[Server]:
             continue
         provides = str(raw.get("provides") or "").split(",")
         machine = str(raw.get("clientIdentifier") or "")
-        if "server" not in provides or not machine:
-            continue
+        if "server" not in provides or not machine or not raw.get("accessToken"):
+            continue  # (one without its token would only ever answer 401: review M9)
         out.append(
             Server(
                 name=str(raw.get("name") or ""),
@@ -153,19 +185,38 @@ def servers_of(resources: Any) -> list[Server]:
     return out
 
 
-def answers(
-    uri: str, server: Server, client_id: str, version: str, verify: bool, session: Any = None
-) -> bool:
-    """Whether `server` answers at `uri`: its identity, asked with its token, is its own."""
-    http = session if session is not None else requests.Session()
+def must_verify(url: str, verify: bool) -> bool:
+    """Whether a server's certificate is checked at `url`: always at a plex.direct address
+    (Plex's own certificates, public: what proves the server the token goes to), else as
+    the setting says."""
     try:
-        response = http.request(
+        host = (urlsplit(url).hostname or "").lower()
+    except ValueError:
+        host = ""
+    return verify or host.endswith(".plex.direct")
+
+
+def answers(uri: str, server: Server, client_id: str, version: str, session: Any = None) -> bool:
+    """Whether `server` answers at `uri`: its identity, asked without its token, is its own
+    (review I1: a stranger's machine at a private address that is home's elsewhere never
+    gets it). Only an HTTPS address whose certificate proved the server is asked again with
+    the token, when its identity wants one."""
+    http = session if session is not None else requests.Session()
+    secure = uri.startswith("https://")
+
+    def identity(token: str) -> Any:
+        return http.request(
             "GET",
             uri + "/identity",
-            headers=client_headers(client_id, version, server.access_token),
+            headers=client_headers(client_id, version, token),
             timeout=PROBE_TIMEOUT_S,
-            verify=verify,
+            verify=True,
         )
+
+    try:
+        response = identity("")
+        if response.status_code == 401 and secure and server.access_token:
+            response = identity(server.access_token)
         if response.status_code != 200 or not response.content:
             return False
         container = (response_json(response) or {}).get("MediaContainer") or {}
@@ -352,15 +403,23 @@ class PlexClient:
         return out
 
     def _paged(self, path: str, params: Optional[dict] = None, page: int = PAGE) -> list[dict]:
-        """Every item of a list, in pages (a server may cut one it was not asked to page)."""
+        """Every item of a list, in pages (a server may cut one it was not asked to page).
+        An answer that brings nothing new, or comes from another start than the one asked
+        (a server that ignores paging), ends it: never asked for ever (review M1)."""
         found: list[dict] = []
+        seen: set[str] = set()
         while True:
-            paging = {"X-Plex-Container-Start": str(len(found)), "X-Plex-Container-Size": str(page)}
+            start = len(found)
+            paging = {"X-Plex-Container-Start": str(start), "X-Plex-Container-Size": str(page)}
             answer = self._ask("GET", path, params, paging)
             batch = [m for m in answer.get("Metadata") or [] if isinstance(m, dict)]
-            found.extend(batch)
-            total = answer.get("totalSize")
-            if not batch or (isinstance(total, int) and len(found) >= total):
+            fresh = [m for m in batch if _key_of(m) not in seen]
+            seen.update(_key_of(m) for m in fresh)
+            found.extend(fresh)
+            total, offset = answer.get("totalSize"), answer.get("offset")
+            if not fresh or (isinstance(offset, int) and offset != start):
+                return found
+            if isinstance(total, int) and len(found) >= total:
                 return found
             if not isinstance(total, int) and len(batch) < page:
                 return found
@@ -418,6 +477,11 @@ class PlexClient:
         self._ask("POST", "/:/timeline", params, {"X-Plex-Session-Identifier": ref.play_session})
 
 
+def _key_of(raw: dict) -> str:
+    """An item's identity in a list (its ratingKey, else the item itself)."""
+    return str(raw.get("ratingKey") or id(raw))
+
+
 def _remember(base: str, item_id: str, duration: Any) -> None:
     if not isinstance(duration, int) or duration <= 0:
         return
@@ -430,8 +494,8 @@ def _remember(base: str, item_id: str, duration: Any) -> None:
 
 
 def image_url(base: str, path: Any, token: str) -> str:
-    """A picture of the server (a poster, a season's cover) as VLC and the image cache fetch
-    it: with the token (Plex asks for it), never resized by the server."""
+    """A picture of the server at its address, with the token (Plex asks for it): for a
+    server of no id only (a picture is a reference otherwise: `_picture`)."""
     path = str(path or "")
     if not path.startswith("/"):
         return ""
@@ -450,9 +514,17 @@ def _number(value: Any) -> str:
     return str(value) if isinstance(value, (int, float)) and not isinstance(value, bool) else ""
 
 
-def title_item(raw: dict, base: str, token: str, library_id: str) -> dict:
+def _picture(path: Any, base: str, token: str, server_id: str) -> str:
+    """A picture of the server: a reference that becomes its resizer when fetched (no token
+    kept: services.plex_addresses), or its address as it is for a server of no id."""
+    if server_id:
+        return plex_addresses.image_ref(server_id, path)
+    return image_url(base, path, token)
+
+
+def title_item(raw: dict, base: str, token: str, library_id: str, *, server_id: str = "") -> dict:
     """A film or a series of the server as a Library title (Jellyfin's and Emby's keys:
-    services.media_server.title_item)."""
+    services.media_server.title_item); its picture by reference (`server_id`: its server's)."""
     overview = ms.shortened(str(raw.get("summary") or ""))
     rating = raw.get("audienceRating")
     if not isinstance(rating, (int, float)):
@@ -460,7 +532,7 @@ def title_item(raw: dict, base: str, token: str, library_id: str) -> dict:
     item: dict[str, Any] = {
         "id": str(raw.get("ratingKey") or ""),
         "name": str(raw.get("title") or ""),
-        "logo": image_url(base, raw.get("thumb"), token),
+        "logo": _picture(raw.get("thumb"), base, token, server_id),
         "tv_genre_id": library_id,
         "cmd": "",
         "description": overview,
@@ -493,7 +565,12 @@ def title_item(raw: dict, base: str, token: str, library_id: str) -> dict:
 
 
 def section_payload(
-    libraries: list[dict], titles: dict[str, list[dict]], base: str, token: str
+    libraries: list[dict],
+    titles: dict[str, list[dict]],
+    base: str,
+    token: str,
+    *,
+    server_id: str = "",
 ) -> dict:
     """The Library's section of a server: All, Continue watching (titles started there), then
     each library (services.media_server.ordered_payload). Loaded whole each time: Plex answers
@@ -506,15 +583,15 @@ def section_payload(
             item_id = str(raw.get("ratingKey") or "")
             if item_id:
                 if item_id not in made:
-                    made[item_id] = title_item(raw, base, token, library["id"])
+                    made[item_id] = title_item(raw, base, token, library["id"], server_id=server_id)
                 listed.append(made[item_id])
     return ms.ordered_payload(libraries, ordered)
 
 
-def episode_item(raw: dict, base: str, token: str) -> dict:
+def episode_item(raw: dict, base: str, token: str, *, server_id: str = "") -> dict:
     number = _number(raw.get("index"))
     name = str(raw.get("title") or (f"Episode {number}" if number else ""))
-    item = title_item(raw, base, token, "")
+    item = title_item(raw, base, token, "", server_id=server_id)
     item.update(
         {
             "number": number,
@@ -529,17 +606,38 @@ def episode_item(raw: dict, base: str, token: str) -> dict:
     return item
 
 
-def seasons_payload(seasons: list[dict], episodes: list[dict], base: str, token: str) -> dict:
-    """A series' seasons, each with its episodes in order (as Jellyfin's come)."""
+def seasons_payload(
+    seasons: list[dict], episodes: list[dict], base: str, token: str, *, server_id: str = ""
+) -> dict:
+    """A series' seasons, each with its episodes in order (as Jellyfin's come). Only seasons
+    are seasons (an "all episodes" row is not one), and an episode of no season listed has a
+    season made from its own (review M11): none is left out."""
     by_season: dict[str, list[dict]] = {}
     for raw in episodes:
         by_season.setdefault(str(raw.get("parentRatingKey") or ""), []).append(raw)
+    seasons = [
+        raw for raw in seasons if raw.get("type", "season") == "season" and raw.get("ratingKey")
+    ]
+    listed_ids = {str(raw["ratingKey"]) for raw in seasons}
+    for key, strays in by_season.items():
+        if key not in listed_ids:
+            first = strays[0]
+            seasons.append(
+                {
+                    "ratingKey": key or "episodes",
+                    "title": str(first.get("parentTitle") or ""),
+                    "index": first.get("parentIndex"),
+                }
+            )
+            if not key:
+                by_season["episodes"] = strays
+    seasons.sort(key=lambda raw: (raw.get("index") is None, raw.get("index") or 0))
     out: list[dict[str, Any]] = []
     for raw in seasons:
         season_id = str(raw.get("ratingKey") or "")
         listed = sorted(by_season.get(season_id, []), key=lambda e: int(e.get("index") or 0))
         season_number = _number(raw.get("index"))
-        made = [episode_item(e, base, token) for e in listed]
+        made = [episode_item(e, base, token, server_id=server_id) for e in listed]
         for episode in made:  # an episode without its own season's number has its season's
             episode["season"] = episode["season"] or season_number
         out.append(
@@ -547,7 +645,7 @@ def seasons_payload(seasons: list[dict], episodes: list[dict], base: str, token:
                 "id": season_id,
                 "name": str(raw.get("title") or ""),
                 "season_number": season_number,
-                "cover": image_url(base, raw.get("thumb"), token),
+                "cover": _picture(raw.get("thumb"), base, token, server_id),
                 "overview": str(raw.get("summary") or ""),
                 "episode_count": str(len(listed)),
                 "episodes": made,

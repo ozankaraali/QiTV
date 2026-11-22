@@ -39,7 +39,7 @@ def _send_over_http(
             token=ref.token,
             client_id=str(server.get("device_id") or ""),
             version=get_app_version(),
-            verify=bool(server.get("ssl_verify", True)),
+            verify=plex.must_verify(ref.base, bool(server.get("ssl_verify", True))),
             timeout=10,
         )
         try:

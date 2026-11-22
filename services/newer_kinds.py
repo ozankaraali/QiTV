@@ -18,7 +18,7 @@ from __future__ import annotations
 
 import logging
 import os
-from typing import Any
+from typing import Any, Optional
 
 import orjson as json
 
@@ -57,6 +57,7 @@ def merged(older: list, newer: Any) -> list:
     provider each followed (first when it followed none), at the end when that one went.
     Damaged entries are left out."""
     providers = list(older)
+    renamed: dict[str, str] = {}  # a newer kind's provider renamed here: its old name -> new
     for entry in newer if isinstance(newer, list) else []:
         provider = entry.get("provider") if isinstance(entry, dict) else None
         if not isinstance(provider, dict) or not is_newer(provider):
@@ -68,7 +69,9 @@ def merged(older: list, newer: Any) -> list:
         name = unique_name(own, names)
         if name != own:
             provider = {**provider, "name": name}
+            renamed[own] = name
         after = str(entry.get("after") or "")
+        after = renamed.get(after, after)  # (it followed that one, renamed: review M10)
         if not after:
             at = _first_after_newer(providers)
         else:
@@ -134,10 +137,12 @@ class NewerKinds:
         return []
 
     def write(self, newer: list[dict]) -> None:
-        """Keep `newer` (its file removed when there is none). Raises OSError."""
+        """Keep `newer` (its file removed when there is none). Raises OSError, also when the
+        file can't be written over (a later version's, or one that couldn't be read): the
+        change is then said not saved and put back (review M2), never said added and lost."""
         if not self._writable:
             if newer:
-                logger.warning("Providers not kept: %s is a newer QiTV's", FILE_NAME)
+                raise OSError(f"{FILE_NAME} is a newer QiTV's or can't be read")
             return
         if not newer:
             if os.path.lexists(self.path):  # (none: nothing asked of the disk)
@@ -149,3 +154,26 @@ class NewerKinds:
         serialized = json.dumps({"version": VERSION, "providers": newer}, option=json.OPT_INDENT_2)
         with atomic_write(self.path) as f:
             f.write(serialized)
+
+    def held(self) -> Optional[bytes]:
+        """The file as it is now (None: there is none, or it can't be read), to put back."""
+        try:
+            with open(self.path, "rb") as f:
+                return f.read()
+        except OSError:
+            return None
+
+    def put_back(self, held: Optional[bytes]) -> None:
+        """The file as `held` was (removed when there was none): index.json couldn't be
+        written after it (review M3), so the two say the same again. Only logged if refused."""
+        if not self._writable:
+            return
+        try:
+            if held is None:
+                if os.path.lexists(self.path):
+                    os.remove(self.path)
+            else:
+                with atomic_write(self.path) as f:
+                    f.write(held)
+        except OSError as error:
+            logger.warning("Couldn't put %s back: %s", FILE_NAME, error.strerror or error)

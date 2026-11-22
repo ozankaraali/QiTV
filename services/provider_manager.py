@@ -439,12 +439,18 @@ class ProviderManager(QObject):
         # 2.14: the newer kinds' providers apart, where older builds never list them (first:
         # index.json then never names a list they are missing from).
         older, newer = newer_kinds.split(self.providers)
+        held = self._newer.held()
         self._newer.write(newer)
         serialized = json.dumps(older, option=json.OPT_INDENT_2)
         # Written whole or not at all, and (as atomic_write writes) readable by the user alone:
-        # it holds every sign-in.
-        with atomic_write(self.index_file) as f:
-            f.write(serialized)
+        # it holds every sign-in. Refused, index.more is put back as it was: the change is
+        # undone on the disk as in memory (review M3).
+        try:
+            with atomic_write(self.index_file) as f:
+                f.write(serialized)
+        except OSError:
+            self._newer.put_back(held)
+            raise
         if self._keep_unlisted_caches:
             return
         try:

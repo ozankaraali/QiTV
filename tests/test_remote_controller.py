@@ -1213,6 +1213,44 @@ class WatchHereTests(WindowCase):
         self.hub.open_film.assert_not_called()
         self.assertEqual(self.plays()[-1], {"t": "play", "failed": True, "why": "relay"})
 
+    PLEX = {"type": "PLEX", "name": "Home Media", "url": "https://h.example.plex.direct:32400"}
+    PLEX_URL = (
+        "https://h.example.plex.direct:32400/library/parts/9/17/file.mp4"
+        "?X-Plex-Token=server-token&X-Plex-Session-Identifier=7-abc"
+    )
+
+    def test_a_plex_film_never_hands_its_address_to_the_phone(self):  # review I4
+        """Its address holds the token: the phone plays it through QiTV's home door, the file
+        as it is (an MKV as HLS, as any provider's)."""
+        self.connect()
+        remote = self.window.remote
+        film = {"id": "7", "name": "Harbour Lights", "container_extension": "mov"}
+        handle = remote._library("s8").handles.issue("title", (film, "movie", None))
+        catalog = self.window.catalog
+        with mock.patch.object(catalog, "provider_entry", return_value=dict(self.PLEX)):
+            self.hand_off(self.PLEX_URL, handle=handle)
+        self.assertEqual(self.plays(), [])  # nothing with the address
+        self.hub.open_passed.assert_called_once()
+        sid, device, url, headers, verify, message, name = self.hub.open_passed.call_args.args
+        self.assertEqual((sid, device, url, name), ("s8", "s8", self.PLEX_URL, "file.mp4"))
+        self.assertIs(verify, True)
+        self.assertEqual(message["name"], "Harbour Lights")
+        for call in self.hub.send.call_args_list:
+            self.assertNotIn("server-token", repr(call))
+
+    def test_a_plex_film_for_a_phone_through_the_relay(self):
+        self.connect()
+        remote = self.window.remote
+        remote.bridge.post(Opened("s8", "d1", "relay"))
+        self.assertTrue(wait_until(lambda: "s8" in remote._relayed))
+        film = {"id": "7", "name": "Harbour Lights", "container_extension": "mov"}
+        handle = remote._library("s8").handles.issue("title", (film, "movie", None))
+        catalog = self.window.catalog
+        with mock.patch.object(catalog, "provider_entry", return_value=dict(self.PLEX)):
+            self.hand_off(self.PLEX_URL, handle=handle)
+        self.hub.open_passed.assert_not_called()
+        self.assertEqual(self.plays()[-1], {"t": "play", "failed": True, "why": "relay"})
+
     RECORDING = {
         "id": "recording:Harbour News 2026-10-26 20.00.ts",
         "name": "Harbour News",

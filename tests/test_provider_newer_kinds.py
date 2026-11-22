@@ -65,6 +65,14 @@ class SplitAndMergeTest(unittest.TestCase):
         merged = newer_kinds.merged([taken], newer)
         self.assertEqual([p["name"] for p in merged], ["Home Media (2)", "home media"])
 
+    def test_one_after_a_plex_provider_renamed_meanwhile_keeps_its_place(self):  # review M10
+        home = {**PLEX, "name": "Home"}
+        other = {**PLEX_2, "name": "Other"}
+        _, newer = newer_kinds.split([PANEL, home, other])  # Other after Home (the Plex one)
+        xtream = {"type": "XTREAM", "name": "Home", "url": "http://h.test", "username": "a"}
+        merged = newer_kinds.merged([PANEL, xtream], newer)  # an older build added a "Home"
+        self.assertEqual([p["name"] for p in merged], ["Panel", "Home (2)", "Other", "Home"])
+
     def test_damaged_entries_are_left_out(self):
         whole = {"after": "Panel", "provider": PLEX}
         newer = [{"after": "x"}, "odd", {"provider": {"type": "PLEX"}}, whole]
@@ -166,6 +174,38 @@ class ProviderManagerTest(unittest.TestCase):
             f.write(orjson.dumps({"version": 99, "providers": [{"provider": PLEX}]}))
         self.assertEqual(self.new_manager().providers, [PLAYLIST, PANEL])
         self.assertTrue(os.path.exists(self.more_file))
+
+    def test_a_plex_provider_that_cant_be_kept_is_said_never_added(self):  # review M2
+        with open(self.more_file, "wb") as f:
+            f.write(orjson.dumps({"version": 99, "providers": []}))
+        manager = self.new_manager()
+        manager.providers[:] = [dict(PLAYLIST), dict(PLEX)]
+        with self.assertRaises(OSError):
+            manager.save_providers()
+        with open(self.more_file, "rb") as f:
+            self.assertEqual(orjson.loads(f.read())["version"], 99)  # left as it was
+
+    def test_a_list_index_json_refused_leaves_index_more_as_it_was(self):  # review M3
+        self.save([PLAYLIST, PLEX, PANEL])
+        with open(self.more_file, "rb") as f:
+            before = f.read()
+        refused = mock.patch(
+            "services.provider_manager.atomic_write", side_effect=OSError("disk full")
+        )
+        with refused:
+            self.manager.providers[:] = [dict(PLAYLIST), dict(PANEL)]  # the Plex one removed
+            with self.assertRaises(OSError):
+                self.manager.save_providers()
+        with open(self.more_file, "rb") as f:
+            self.assertEqual(f.read(), before)
+        self.assertEqual(self.new_manager().providers, [PLAYLIST, PLEX, PANEL])
+        # An add refused so: no index.more of it left behind.
+        self.save([PLAYLIST])
+        with refused:
+            self.manager.providers[:] = [dict(PLAYLIST), dict(PLEX)]
+            with self.assertRaises(OSError):
+                self.manager.save_providers()
+        self.assertFalse(os.path.exists(self.more_file))
 
     def test_the_privacy_sweep_covers_it(self):
         self.save([PLAYLIST, PLEX])

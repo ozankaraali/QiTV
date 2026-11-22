@@ -72,7 +72,15 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from services import favorites, free_channels, free_radio, secure_dns, system_open, thread_cleanup
+from services import (
+    favorites,
+    free_channels,
+    free_radio,
+    plex_addresses,
+    secure_dns,
+    system_open,
+    thread_cleanup,
+)
 from services.account_check import AccountChecks
 from services.browsed_catalog import BrowsedCatalog
 from services.casting import CastDevices, LibVlcDiscovery
@@ -701,6 +709,10 @@ class TVWindow(QMainWindow):
             config_manager, provider_manager, in_use=self._providers_in_use, parent=self
         )
         self.catalogs.screen_4k = self._screen_is_4k  # 2.8: a media server's 4K versions
+        # 2.14: where each Plex server is reached, and its pictures fetched with its token
+        # (services.plex_addresses), told as the provider list changes.
+        plex_addresses.known(self._media_servers())
+        self.catalogs.providersChanged.connect(lambda: plex_addresses.known(self._media_servers()))
         # 2.8: parental controls: the browsed catalogs and the searches leave out what they hide
         self.parental = Parental(config_manager)
         self.catalogs.parental = self.parental

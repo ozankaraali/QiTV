@@ -90,7 +90,7 @@ class MediaReporterTests(unittest.TestCase):
         self.assertEqual(base, plex_base)
         self.assertEqual(
             {k: kwargs[k] for k in ("token", "client_id", "verify")},
-            {"token": "P", "client_id": "C", "verify": False},
+            {"token": "P", "client_id": "C", "verify": True},  # plex.direct: always checked
         )
         self.assertEqual(args, ("stopped", ref, 3, False))
         self.assertEqual(closed, "closed")

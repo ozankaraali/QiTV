@@ -12,6 +12,7 @@ from urllib.parse import urlsplit
 
 import orjson as json
 
+from services import plex_addresses
 from services.body_limits import LOGO_MAX, MB, TooLarge, read_capped_async
 from services.lazy_import import lazy_module
 from services.redact import redact_url, safe_exc
@@ -90,7 +91,12 @@ class ImageManager:
         Returns absolute cache file path or None.
         Safe to call from worker threads (no GUI objects created).
         """
-        if not _fetchable(url):  # a list's logo may name any address: a file, a share
+        fetched = url
+        if plex_addresses.is_image_ref(url):  # 2.14: a Plex picture, by reference
+            fetched = plex_addresses.resolve_image(url) or ""
+            if not fetched:
+                return None  # its server isn't listed (yet)
+        if not _fetchable(fetched):  # a list's logo may name any address: a file, a share
             logger.info("Not fetching an image in another scheme than http(s)")
             return None
         ext = "png" if iconified else "jpg"
@@ -108,7 +114,7 @@ class ImageManager:
         # Download and write to disk
         for attempt in range(max_retries):
             try:
-                async with session.get(url, timeout=timeout) as response:
+                async with session.get(fetched, timeout=timeout) as response:
                     try:  # a picture: up to LOGO_MAX, from whatever host a list names
                         content = await read_capped_async(response, LOGO_MAX)
                     except TooLarge:
