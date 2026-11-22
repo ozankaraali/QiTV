@@ -2,8 +2,9 @@
 stopped when something else plays or nothing does; never for another provider's stream."""
 
 import unittest
+from unittest import mock
 
-from services import media_server as ms
+from services import media_reporter, media_server as ms, plex
 from services.media_reporter import PROGRESS_S, MediaReporter
 
 BASE = "http://server.test:8096"
@@ -33,6 +34,66 @@ class MediaReporterTests(unittest.TestCase):
             ),
             clock=self.clock,
         )
+
+    def test_a_plex_servers_title_is_told_too(self):  # 2.14
+        plex_base = "https://10-0-0-5.example.plex.direct:32400"
+        server = {"type": "PLEX", "url": plex_base, "token": "P", "device_id": "C"}
+        source = {"Id": "9", "part": "/library/parts/9/17/file.mkv"}
+        sent = []
+        reporter = MediaReporter(
+            lambda: [SERVER, server],
+            send=lambda server, event, ref, position, paused: sent.append(
+                (server["type"], event, ref.item_id, ref.source_id, position)
+            ),
+            clock=self.clock,
+        )
+        reporter.playing(plex.stream_url(plex_base, source, "P", "C", "102"))
+        reporter.position(5_000)
+        self.clock.now += PROGRESS_S
+        reporter.position(12_000)
+        reporter.stopped()
+        self.assertEqual(
+            sent,
+            [
+                ("PLEX", "start", "102", "9", 0),
+                ("PLEX", "progress", "102", "9", 12_000),
+                ("PLEX", "stopped", "102", "9", 12_000),
+            ],
+        )
+        # A Plex address QiTV did not make (no play session of its own) is never told.
+        sent.clear()
+        reporter.playing(plex_base + "/library/parts/9/17/file.mkv?X-Plex-Token=P")
+        self.assertEqual(sent, [])
+
+    def test_a_plex_report_goes_through_plexs_client(self):  # 2.14
+        plex_base = "https://10-0-0-5.example.plex.direct:32400"
+        server = {"type": "PLEX", "url": plex_base, "token": "P", "device_id": "C"}
+        url = plex.stream_url(
+            plex_base, {"Id": "9", "part": "/library/parts/9/1/f.mkv"}, "P", "C", "7"
+        )
+        ref = plex.parse_stream_url(url, [plex_base])
+        made = []
+
+        class Client:
+            def __init__(self, base, **kwargs):
+                made.append((base, kwargs))
+
+            def report(self, *args):
+                made.append(args)
+
+            def close(self):
+                made.append("closed")
+
+        with mock.patch.object(plex, "PlexClient", Client):
+            media_reporter._send_over_http(dict(server, ssl_verify=False), "stopped", ref, 3, False)
+        (base, kwargs), args, closed = made
+        self.assertEqual(base, plex_base)
+        self.assertEqual(
+            {k: kwargs[k] for k in ("token", "client_id", "verify")},
+            {"token": "P", "client_id": "C", "verify": False},
+        )
+        self.assertEqual(args, ("stopped", ref, 3, False))
+        self.assertEqual(closed, "closed")
 
     def test_a_server_without_its_own_check_follows_the_settings(self):  # 2.8
         servers = []
