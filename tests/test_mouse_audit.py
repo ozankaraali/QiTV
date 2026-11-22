@@ -210,7 +210,8 @@ ON_SCREEN: dict[tuple[str, str], tuple[tuple[str, str], ...]] = {
     # Plan 4: File → Open Folder…: the Folders tab's Add folder tile (2.11.1: the tab is always
     # there, an empty one too) and the channel list's row under Open file
     ("menu", "Ctrl+Shift+O"): (("folders", "add"), ("drawer", "Open a folder")),
-    ("menu", "Ctrl+,"): (("drawer", "settings"), ("drawer", "Settings")),
+    # 2.14: the Library's ⚙ too (Settings at Providers, over the Library)
+    ("menu", "Ctrl+,"): (("drawer", "settings"), ("drawer", "Settings"), ("library", "settings")),
     ("menu", "Ctrl+R"): (("drawer", "refresh"),),
     ("menu", "Ctrl+Shift+R"): (("library", "refresh"),),  # 2.8: films and series
     # ---- Finding subtitles (the OpenSubtitles search) ----------------------------------------
@@ -277,7 +278,7 @@ AUDIO_ON_SCREEN: dict[tuple[str, str], tuple[tuple[str, str], ...]] = {
     ("menu", "Ctrl+O"): _LIBRARY,  # its Open file
     # its Live TV's channel list (Open a folder), and its Folders tab's Add folder
     ("menu", "Ctrl+Shift+O"): _LIBRARY,
-    ("menu", "Ctrl+,"): _LIBRARY,  # its Settings
+    ("menu", "Ctrl+,"): _LIBRARY,  # its ⚙ (2.14)
     ("menu", "Ctrl+R"): _LIBRARY,  # its ↻
 }
 

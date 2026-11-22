@@ -25,7 +25,7 @@ from timer_fixtures import elapse, wait_until
 from services.config_manager import ConfigManager
 from services.navigation import ADD_PROVIDER_ROW, OPEN_LINK_ROW, SETTINGS_ROW
 from services.provider_check import Outcome
-from services.settings_model import GENERAL, PROVIDERS, TEXT, Row, Section
+from services.settings_model import ADD_PROVIDER, GENERAL, PROVIDERS, TEXT, Row, Section
 from tests import test_tv_window as base
 from ui import settings_layer
 from ui.keymap import Action, resolve
@@ -83,7 +83,9 @@ def drawer_actions() -> dict:
 
 
 class SettingsWiringTests(base.WindowCase):
-    def test_opening_from_the_library_goes_back_to_the_tv(self):
+    def test_opening_from_the_library_stays_in_the_library(self):
+        # 2.14 (the owner: "instead of going back to live channels"): Settings shows over the
+        # Library, which stays; no live TV first (it tuned the last channel).
         window = self.window
         order = mock.Mock()
         with (
@@ -95,23 +97,23 @@ class SettingsWiringTests(base.WindowCase):
             window.menus.on_drawer_action(SETTINGS_ROW)
         self.assertEqual(
             order.mock_calls,
-            [
-                mock.call.back_to_tv(),
-                mock.call.leave_mini_player(),
-                mock.call.open("", from_drawer=True, row=""),
-            ],
+            [mock.call.leave_mini_player(), mock.call.open("", from_drawer=True, row="")],
         )
+        self.assertTrue(window.library_page.isAncestorOf(window.settings_drawer))
 
-    def test_the_menu_from_the_library_shows_settings_over_the_tv(self):
+    def test_the_menu_from_the_library_shows_settings_over_the_library(self):
         self.show()
         drawer = self.wait_for_drawer()
-        screens = self.window.screens
+        window = self.window
+        screens = window.screens
         screens.open_library("movies")
         self.assertTrue(screens.library_shown())
         self.menu_actions()["Settings…"].trigger()
-        self.assertFalse(screens.library_shown())
-        self.assertTrue(self.window.settings.visible())
-        self.assertFalse(drawer.isVisible())  # the drawer live TV opened on gave way
+        self.assertTrue(screens.library_shown())
+        self.assertTrue(window.settings.visible())
+        self.assertEqual(window.settings_drawer.path(), (PROVIDERS,))  # its first section
+        self.assertTrue(window.library_page.isAncestorOf(window.settings_drawer))
+        self.assertFalse(drawer.isVisible())  # the drawer live TV opened on stays closed
 
     def test_the_drawer_row_opens_settings_and_back_returns_to_it(self):
         self.show()
@@ -519,6 +521,244 @@ class SettingsWiringTests(base.WindowCase):
         self.assertTrue(self.window.settings_drawer.isHidden())  # not only behind the page
 
 
+class LibrarySettingsTests(base.WindowCase):
+    """2.14 (the owner: "in the lib, towards right side, you can put settings, so instead of
+    going back to live channels i can add plex/etc movie vendor from the library"): the
+    Library's top bar has a ⚙, which opens Settings at Providers over the Library; backing out
+    of it gives the Library back as it was. The keys, the phone's arrows and OK, the mouse and
+    Ctrl/⌘+, reach it."""
+
+    def tearDown(self):
+        elapse(QApplication.doubleClickInterval() + 80)  # no second-click guard left armed
+        super().tearDown()
+
+    def open_library(self):
+        self.show()
+        self.wait_for_drawer()
+        screens = self.window.screens
+        screens.open_library("movies")
+        self.assertTrue(screens.library_shown())
+        elapse(QApplication.doubleClickInterval() + 80)  # the page's own guard gone
+
+    def settings_point(self) -> QPoint:
+        """The ⚙'s middle, in the window."""
+        nav = self.window.library_page.nav
+        return nav.mapTo(self.window, nav._item_rects()["settings"].center().toPoint())
+
+    def click(self, point: QPoint, button=Qt.MouseButton.LeftButton):
+        QTest.mouseClick(self.window.windowHandle(), button, pos=point)
+
+    def assert_over_the_library(self):
+        window = self.window
+        drawer, page = window.settings_drawer, window.library_page
+        self.assertTrue(window.screens.library_shown())
+        self.assertTrue(window.settings.visible())
+        self.assertTrue(page.isAncestorOf(drawer))
+        self.assertEqual(drawer.mapTo(page, QPoint(0, 0)), QPoint(0, 0))
+        self.assertEqual(drawer.height(), page.height())
+        self.assertFalse(window.overlays.drawer.isVisible())  # live TV's list stays closed
+
+    def test_the_gear_opens_settings_at_providers_over_the_library(self):
+        self.open_library()
+        window = self.window
+        controller = window.library_controller
+        before = (controller.mode, controller.zone, window.library_page.nav._active)
+        self.click(self.settings_point())
+        self.assert_over_the_library()
+        self.assertEqual(window.settings_drawer.path(), (PROVIDERS,))
+        window.screens.notify("Saved")  # what QiTV says shows over it
+        children = window.library_page.children()
+        self.assertTrue(window.library_toast.isVisible())
+        self.assertGreater(
+            children.index(window.library_toast), children.index(window.library_layer)
+        )
+        QTest.keyClick(window, Qt.Key.Key_Right)  # the section's rows
+        for _ in range(2):  # rows → sections → closed
+            QTest.keyClick(window, Qt.Key.Key_Escape)
+        self.assertFalse(window.settings.visible())
+        self.assertTrue(window.screens.library_shown())  # the Library, as it was
+        self.assertEqual(
+            (controller.mode, controller.zone, window.library_page.nav._active), before
+        )
+        self.assertFalse(window.library_layer.isVisible())  # nothing left over it
+
+    def test_the_keys_and_the_phones_arrows_reach_it(self):
+        self.open_library()
+        window = self.window
+        nav = window.library_page.nav
+        controller = window.library_controller
+        for _ in range(4):  # ↑ to the top bar
+            if controller.zone == "nav":
+                break
+            window.remote_key(int(Qt.Key.Key_Up))
+        self.assertEqual(controller.zone, "nav")
+        for _ in range(10):  # → along it, past the source, to the ⚙
+            if nav.focus_item() == "settings":
+                break
+            window.remote_key(int(Qt.Key.Key_Right))
+        self.assertEqual(nav.focus_item(), "settings")
+        window.remote_key(int(Qt.Key.Key_Return))  # the phone's OK
+        self.assert_over_the_library()
+        self.assertEqual(window.settings_drawer.path(), (PROVIDERS,))
+        window.remote_key(int(Qt.Key.Key_Down))  # Settings' keys, not the Library's
+        self.assertNotEqual(window.settings_drawer.path(), (PROVIDERS,))
+        self.assertEqual((controller.zone, nav.focus_item()), ("nav", "settings"))
+        window.remote_key(int(Qt.Key.Key_Escape))
+        self.assertFalse(window.settings.visible())
+        self.assertEqual((controller.zone, nav.focus_item()), ("nav", "settings"))
+        QTest.keyClick(window, Qt.Key.Key_Return)  # the keyboard's Enter on it, again
+        self.assert_over_the_library()
+        QTest.keyClick(window, Qt.Key.Key_F, Qt.KeyboardModifier.ControlModifier)
+        self.assertFalse(window.settings.visible())  # the quick search, as over live TV
+        self.assertEqual(controller.mode, "search")
+
+    def test_a_click_beside_it_closes_it_and_reaches_nothing_under_it(self):
+        self.open_library()
+        window = self.window
+        page = window.library_page
+        self.click(self.settings_point())
+        elapse(QApplication.doubleClickInterval() + 80)  # its click's guard gone
+        self.assert_over_the_library()
+        drawer = window.settings_drawer
+        beside = page.mapTo(window, QPoint(drawer.geometry().right() + 60, page.height() // 2))
+        with mock.patch.object(window.screens, "play") as play:
+            self.click(beside)
+        self.assertFalse(window.settings.visible())
+        play.assert_not_called()
+        self.assertTrue(window.screens.library_shown())
+        # The mouse's Back over it goes back, as Esc (the sections: closed)
+        self.click(self.settings_point())
+        self.assert_over_the_library()
+        self.click(page.mapTo(window, QPoint(20, page.height() // 2)), Qt.MouseButton.BackButton)
+        self.assertFalse(window.settings.visible())
+        self.assertTrue(window.screens.library_shown())
+        self.assertFalse(window.library_layer.isVisible())  # no layer left taking the clicks
+
+    def test_a_double_clicks_second_click_on_the_gear_reaches_nothing(self):
+        # The ⚙ acts on its release: the second press would land beside Settings, and close it.
+        self.open_library()
+        window = self.window
+        QTest.mouseDClick(
+            window.windowHandle(), Qt.MouseButton.LeftButton, pos=self.settings_point()
+        )
+        self.assert_over_the_library()
+
+    def test_leaving_the_library_closes_it(self):
+        # The phone's TV button, a title played from elsewhere: Settings never waits hidden
+        # behind the page, to show again with it.
+        self.open_library()
+        window = self.window
+        window.library_page.nav.settingsRequested.emit()
+        self.assert_over_the_library()
+        window.screens.back_to_tv()
+        self.assertFalse(window.screens.library_shown())
+        self.assertTrue(window.settings_drawer.isHidden())
+        window.screens.open_library("movies")
+        self.assertFalse(window.settings.visible())
+
+    def test_settings_over_live_tv_afterwards_is_as_before(self):
+        self.show()
+        self.wait_for_drawer()
+        window = self.window
+        host, drawer = window.host, window.settings_drawer
+        others = (window.overlays.drawer, window.overlays.guide, window.overlays.toast)
+
+        def over_live_tv():
+            self.menu_actions()["Settings…"].trigger()
+            self.assertTrue(window.settings.visible())
+            self.assertIs(drawer.parentWidget(), host)
+            stack = [c for c in host.children() if c is drawer or c in others]
+            QTest.keyClick(window, Qt.Key.Key_Escape)
+            self.assertFalse(window.settings.visible())
+            return host._overlays.index(drawer), stack
+
+        before = over_live_tv()
+        window.screens.open_library("movies")
+        elapse(QApplication.doubleClickInterval() + 80)
+        window.library_page.nav.settingsRequested.emit()
+        self.assert_over_the_library()
+        QTest.keyClick(window, Qt.Key.Key_Escape)
+        window.screens.back_to_tv()
+        self.assertEqual(over_live_tv(), before)  # its place among the overlays, as before
+
+    def test_its_add_provider_card_shows_over_the_library(self):
+        self.open_library()
+        window = self.window
+        form = window.provider_cards.form
+        window.library_page.nav.settingsRequested.emit()
+        self.assert_over_the_library()
+        self.assertTrue(window.settings.show_row(ADD_PROVIDER))  # its ＋ Add provider
+        QTest.keyClick(window, Qt.Key.Key_Return)
+        self.assertTrue(form.isVisible())
+        self.assertEqual(form.title(), "Add a provider")
+        self.assertTrue(window.library_page.isAncestorOf(form))
+        self.assertEqual(form.geometry(), window.library_layer.rect())  # the Library dimmed
+        QTest.keyClick(window, Qt.Key.Key_Escape)  # its Cancel
+        self.assertFalse(form.isVisible())
+        self.assertTrue(window.settings.visible())
+        for _ in range(2):
+            QTest.keyClick(window, Qt.Key.Key_Escape)
+        self.assertFalse(window.settings.visible())
+        self.assertFalse(window.library_layer.isVisible())
+        window.screens.back_to_tv()  # live TV's Add provider: over the TV, as before
+        window.add_provider()
+        self.assertTrue(form.isVisible())
+        self.assertTrue(window.host.isAncestorOf(form))
+
+    def test_a_server_added_over_the_library_leaves_live_tv_alone(self):
+        # The owner's flow: nothing plays, the Library in front; a provider added from its ⚙
+        # is selected for live TV's list, which neither tunes nor opens meanwhile.
+        self.open_library()
+        window = self.window
+        form = window.provider_cards.form
+        window.library_page.nav.settingsRequested.emit()
+        self.assertTrue(window.settings.show_row(ADD_PROVIDER))
+        QTest.keyClick(window, Qt.Key.Key_Return)
+        self.assertTrue(form.isVisible())
+        QGuiApplication.clipboard().setText(AddProviderTests.LINK)
+        QTest.keyClick(window, Qt.Key.Key_V, Qt.KeyboardModifier.ControlModifier)
+        with mock.patch("services.provider_check.check", return_value=Outcome(True)):
+            QTest.keyClick(window, Qt.Key.Key_Return)  # Check and add
+            self.assertTrue(wait_until(lambda: not form.isVisible()))
+        self.assertEqual(self.config.selected_provider_name, "127.0.0.1")
+        toast = window.library_toast  # said over the Library, above Settings
+        self.assertTrue(toast.isVisible())
+        children = window.library_page.children()
+        self.assertGreater(children.index(toast), children.index(window.library_layer))
+        names = [e.text for e in window.library_controller._source_menu().entries]
+        self.assertIn("127.0.0.1", names)  # the Library's source menu lists it
+        elapse(600)  # its setup starts (a closed port: it fails)
+        self.assert_over_the_library()  # Settings stays, on Providers
+        self.assertIn("127.0.0.1", [row.text for row in window.provider_rows.rows()])
+        self.assertFalse(window.controller.playing())  # nothing tuned
+        self.assertEqual(window.pages.mode(), "library")
+        for _ in range(4):  # out of Settings, a layer at a time
+            if not window.settings.visible():
+                break
+            QTest.keyClick(window, Qt.Key.Key_Escape)
+        self.assertFalse(window.settings.visible())
+        elapse(300)
+        self.assertTrue(window.screens.library_shown())
+        self.assertFalse(window.overlays.drawer.isVisible())  # no list due opened
+        self.assertFalse(window.controller.playing())
+        self.assertFalse(window.library_layer.isVisible())
+
+    def test_with_something_in_the_corner_a_click_on_it_closes_settings(self):
+        self.show()
+        self.wait_for_drawer()
+        window = self.window
+        with mock.patch.object(window.controller, "playing", return_value=True):
+            window.screens.open_library("movies")  # what plays goes on in a corner
+        elapse(QApplication.doubleClickInterval() + 80)
+        self.assertEqual(window.pages.mode(), "corner")
+        window.library_page.nav.settingsRequested.emit()
+        self.assert_over_the_library()
+        window.pages.cornerClicked.emit()  # the corner player: the player page again
+        self.assertFalse(window.screens.library_shown())
+        self.assertTrue(window.settings_drawer.isHidden())
+        self.assertFalse(window.library_layer.isVisible())
+
+
 class AddProviderTests(base.WindowCase):
     """Every Add provider opens Settings at Providers with the Add card over it (plan 2)."""
 
@@ -569,7 +809,9 @@ class AddProviderTests(base.WindowCase):
             screens.open_library("movies")
             self.assertTrue(screens.library_shown())
             window.library_controller.addProviderRequested.emit()  # "… has no movies"
-            self.assertFalse(screens.library_shown())  # back to the TV first
+            # 2.14: over the Library, which stays (it went back to the TV first)
+            self.assertTrue(screens.library_shown())
+            self.assertTrue(window.library_page.isAncestorOf(form))
 
         for source in (the_drawers_row, the_menu_bar, the_welcome_card, the_library):
             with self.subTest(source=source.__name__):
@@ -586,6 +828,8 @@ class AddProviderTests(base.WindowCase):
                     self.assertTrue(drawer.isVisible())
                     self.assertEqual(drawer.highlighted().key, ADD_PROVIDER_ROW)
                     drawer.close_drawer()
+                if source is the_library:  # the Library again
+                    self.assertTrue(screens.library_shown())
         self.assertEqual(self.provider_manager.providers[0]["name"], base.PROVIDER_NAME)
         self.assertEqual(len(self.provider_manager.providers), 1)  # nothing added
 

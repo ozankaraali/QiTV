@@ -33,6 +33,10 @@ Delete takes the folder off the shelf. Its last folder gone (Remove, Clear), the
 empty: its Add folder tile and a line that says what it is for. It is no section of the
 providers': the Library's source pill hides there, as on Recordings.
 
+Settings (2.14): the top bar's ⚙ asks the shell for it (`settingsRequested`), and so does its
+Add provider (`addProviderRequested`); it shows over the Library, whose keys are its own
+meanwhile, and the Library is as it was once it goes.
+
 A right-click on a film's poster or an episode row asks the shell for its menu (Play in VLC,
 Play in MPV, Copy stream link: `context_menu(item, section, global position)`, section "movies"
 or "series"). Links are asked of the provider QiTV is on, so a title of another provider, or
@@ -152,6 +156,7 @@ def _context(**values) -> dict:
 class LibraryController(QObject):
     notice = Signal(str)  # a message for the window's toast
     addProviderRequested = Signal()  # the Add provider under "… has no movies" (or Enter)
+    settingsRequested = Signal()  # 2.14: the top bar's ⚙ (or Enter on it)
     searchChanged = Signal()  # the search's hits changed (the phone remote mirrors them)
 
     def __init__(
@@ -315,6 +320,7 @@ class LibraryController(QObject):
         nav.sourceRequested.connect(self._show_source_menu)
         genres.genreMenuRequested.connect(self._show_genre_menu)
         nav.refreshRequested.connect(self.refresh_lists)
+        nav.settingsRequested.connect(self.settingsRequested)  # 2.14
         screen.search_field.clicked.connect(lambda: self._focus("search"))
         screen.search_field.clearRequested.connect(self._clear_or_leave_search)  # 2.9.3: its ✕
         genres.fieldClicked.connect(lambda: self._focus("genres", field=True))  # 2.9.3

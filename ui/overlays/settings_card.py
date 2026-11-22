@@ -574,6 +574,11 @@ class _Card(Overlay):
         if parent is not None and self.geometry() != parent.rect():
             self.setGeometry(parent.rect())
 
+    def _moved(self) -> None:
+        """2.14: over where Settings is now (the Library's page or the picture), all of it
+        dimmed (Overlay.move_to)."""
+        self._fit()
+
     def eventFilter(self, watched: QObject, event: QEvent) -> bool:
         if (
             watched is self.parentWidget()

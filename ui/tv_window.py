@@ -169,6 +169,7 @@ from ui.free_channels_menu import FreeLists
 from ui.grid_frame import GridFrame
 from ui.keymap import Action, as_int, resolve
 from ui.library.library_screen import LibraryScreen
+from ui.library_layer import LibraryLayer
 from ui.link_lanes import Target
 from ui.live_tuner import LiveTuner, one_disk_ring, wait_for_each_other
 from ui.logos import LogoCache, PosterCache
@@ -690,6 +691,9 @@ class TVWindow(QMainWindow):
         self.logos = LogoCache(image_manager, config_manager, self)
         self.posters = PosterCache(image_manager, config_manager, self)
         self.library_page = LibraryScreen(self.posters, self.logos)
+        # 2.14: Settings and its cards over the Library while it is in front (open_settings),
+        # under what QiTV says or asks there (made after it: stacked over it)
+        self.library_layer = LibraryLayer(self.library_page)
         self.library_toast = Toast(self.library_page)  # the overlay host hides with the player
         self.library_question = QuestionCard(self.library_page)  # 2.6: stop a recording?
         self.library_rec_sign = RecSign(self.library_page, bottom=True)  # 2.6: recordings on
@@ -964,6 +968,7 @@ class TVWindow(QMainWindow):
             self.overlays.drawer, self.settings_drawer, self.overlays.guide, self.grid_tiles
         )
         self.rec_sign.follow_hud(self.overlays.transport)  # 2.9.7: up with the controls
+        self.library_rec_sign.cover_with(self.settings_drawer)  # 2.14: over the Library too
         for listing in (self.overlays.column, self.overlays.drawer, self.overlays.guide):
             listing.set_playing(playing)
         # Bottom to top. The PiP label sits over the transport, whose bottom band covers a
@@ -1280,6 +1285,11 @@ class TVWindow(QMainWindow):
         )
         controller.set_settings(self.settings)
         self.settings.hidden.connect(self._settings_went)
+        # 2.14: over the Library, a press beside Settings closes it as one on the picture does,
+        # and the mouse's Back and Forward are its own there too
+        self.library_layer.clicked.connect(controller.settings_layer.click_elsewhere)
+        self.library_layer.backPressed.connect(controller.mouse_back)
+        self.library_layer.forwardPressed.connect(controller.mouse_forward)
         # Settings › Providers: each provider's rows (`provider/…`), built from the list as it
         # is now; again whenever it changes, here or elsewhere (a drop, Free channels), and
         # when the TV moves to another provider (its "in use").
@@ -1829,11 +1839,14 @@ class TVWindow(QMainWindow):
     # ---- input --------------------------------------------------------------------------------
 
     def _key_context(self) -> str:
-        """A menu that shows takes the keys, as the drawer's (2.13.1); else the Library's page;
-        else the open guide or drawer, else the player."""
+        """A menu that shows takes the keys, as the drawer's (2.13.1); else the Library's page
+        (Settings over it: the drawer's, 2.14); else the open guide or drawer, else the
+        player."""
         if self.popup_menu.shown() or self.library_menu.shown():
             return "drawer"
-        return "library" if self.screens.library_shown() else self.controller.key_context()
+        if self.screens.library_shown():
+            return "drawer" if self.settings.visible() else "library"
+        return self.controller.key_context()
 
     def _resolve(self, event: QKeyEvent):
         return resolve(event.key(), event.modifiers(), event.text(), context=self._key_context())
@@ -1953,6 +1966,8 @@ class TVWindow(QMainWindow):
         if self.window_cards.library_key(action, payload):
             return  # 2.13.1: a question over the Library (live TV's is the controller's card)
         if self.screens.library_shown():
+            if self.settings.visible() and self._settings_over_library_key(action, payload):
+                return  # 2.14: Settings over the Library has the keys, none reach the Library
             handled = self.library_controller.handle(action, payload)
             if not handled and action is Action.FULLSCREEN:
                 self.toggle_fullscreen()  # F11, ⌃⌘F: the Library's other keys are its own
@@ -1965,6 +1980,18 @@ class TVWindow(QMainWindow):
         if action is Action.ESCAPE and self.screens.escape_to_library():
             return
         self.controller.handle(action, payload, key=key)
+
+    def _settings_over_library_key(self, action: Action, payload: str) -> bool:
+        """2.14: a key while Settings shows over the Library: Settings' own (its cards' first),
+        the channel list's it does not use reaching nothing, as over live TV. False for the
+        quick search, which leaves Settings for the Library's search as it does from live TV,
+        and for fullscreen; the player's other keys (the corner player's) reach nothing."""
+        if self.controller.settings_layer.handle(action, payload):
+            return True
+        if action is Action.SEARCH:
+            self.controller.close_settings()
+            return False
+        return action is not Action.FULLSCREEN
 
     def _on_video_clicked(self) -> None:
         if self._dragged:  # the press moved the mini player
@@ -3212,11 +3239,14 @@ class TVWindow(QMainWindow):
         section_key: str = "",
         row: str = "",
     ) -> None:
-        """Settings in the drawer (the drawer's Settings row and ⚙, Settings…, Ctrl/⌘+,; at
-        Providers, every Add provider), over live TV: from the Library it goes back to the TV
-        first, and the mini player becomes the window again; the channel list, and whatever
-        else would keep the keys under it, gives way to it (TVController.make_way_for_settings;
-        the audio dock's ⋯ menu too). A question keeps the keys, so it stays above Settings.
+        """Settings in the drawer (the drawer's Settings row and ⚙, Settings…, Ctrl/⌘+,, the
+        Library's ⚙; at Providers, every Add provider), over live TV, and the mini player
+        becomes the window again; the channel list, and whatever else would keep the keys under
+        it, gives way to it (TVController.make_way_for_settings; the audio dock's ⋯ menu too).
+        2.14 (it went back to the TV first): while the Library is in front, over the Library,
+        which stays as it is (its keys Settings' meanwhile: _act), on its layer (LibraryLayer);
+        leaving the Library closes it (TVPages._show_page). A question keeps the keys, so it
+        stays above Settings.
         `section_key`: the section it opens at (else the first), on its `row` when one is given
         (a layer's: Free channels' countries). `from_drawer`: backing out of it gives the list
         back, on its Settings row, or where it was with `keep_place` (its ⚙, its Add provider,
@@ -3236,15 +3266,25 @@ class TVWindow(QMainWindow):
             self.controller.cancel_cards()  # not make_way_for_settings: it keeps its way back
             self.settings.show_section(section_key, row)
         else:
-            if self.screens.library_shown():
-                self.screens.back_to_tv()
+            self._place_settings(over_library=self.screens.library_shown())
             self.leave_mini_player()
             self.more_menu.dismiss()
+            self.library_menu.close_menu()  # (the Library's painted menu: it had the keys)
             self.controller.make_way_for_settings(keep_place=keep_place)
             self.settings.open(section_key, from_drawer=from_drawer, row=row)
         for card in (self.question_card, self.quality_card, self.captions_card):
             if card.isVisible():
                 card.raise_()  # Settings raised itself over it
+
+    def _place_settings(self, over_library: bool) -> None:
+        """2.14: Settings on the Library's layer (lent by the overlay host), or back over the
+        picture in its place among the overlays; its cards follow it as they show
+        (SettingsController.show_card)."""
+        drawer = self.settings_drawer
+        if over_library:
+            self.host.lend_overlay(drawer, self.library_layer)
+        else:
+            self.host.take_back_overlay(drawer)
 
     def _settings_context(self) -> Context:
         """What Settings' sections show that only this QiTV knows, each section's from its

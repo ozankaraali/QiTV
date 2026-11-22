@@ -355,6 +355,60 @@ class TopNavTests(unittest.TestCase):
         self.assertEqual(refreshes, [True])
         self.assertEqual((self.tabs, self.sources, self.searches), ([], [], []))
 
+    def test_a_settings_button_before_fullscreen(self):
+        # 2.14 (the owner: "in the lib, towards right side, you can put settings"): Settings at
+        # Providers over the Library, its key (Ctrl/⌘+,) in its tooltip.
+        settings = []
+        self.nav.settingsRequested.connect(lambda: settings.append(True))
+        rects = self.nav._item_rects()
+        button = rects["settings"]
+        self.assertGreater(button.left(), rects["refresh"].right())
+        self.assertLess(button.right(), rects["fullscreen"].left())
+        self.assertEqual(button.width(), button.height())  # a square, as ↻ and ⛶
+        self.assertGreaterEqual(button.width(), 28)
+        self.assertEqual(self.nav.tooltip_at(button.center()), key_hint("Settings", "Ctrl+,"))
+        QTest.mouseClick(self.nav, Qt.LeftButton, pos=button.center().toPoint())
+        self.assertEqual(settings, [True])
+        self.assertEqual((self.tabs, self.sources, self.searches), ([], [], []))
+
+    def test_the_keys_reach_settings_after_the_source(self):
+        # 2.14: unlike ↻ and ⛶ it is in the keys' order, the bar's last: the phone remote has
+        # only its arrows and OK to reach it.
+        settings = []
+        self.nav.settingsRequested.connect(lambda: settings.append(True))
+        self.assertEqual(self.nav._order()[-2:], ["source", "settings"])
+        self.nav.move_by(20)
+        self.assertEqual(self.nav.focus_item(), "settings")
+        self.nav.set_focused(True)
+        self.assertFalse(self.nav.grab().isNull())  # its focus ring
+        self.nav.activate()
+        self.assertEqual(settings, [True])
+        self.nav.set_source_visible(False)  # Recordings and Folders: the pill hides, not it
+        self.assertEqual(self.nav._order()[-2:], ["search", "settings"])
+        self.assertEqual(self.nav.focus_item(), "settings")
+        self.assertIn("settings", self.nav._item_rects())
+
+    def test_a_quick_second_click_on_settings_asks_once(self):
+        settings = []
+        self.nav.settingsRequested.connect(lambda: settings.append(True))
+        self.double_click(self.nav._item_rects()["settings"].center().toPoint())
+        self.assertEqual(settings, [True])
+
+    def test_settings_fits_beside_the_search_at_small_widths(self):
+        for width in (1280, 960, 800):
+            h = host(width)
+            self.addCleanup(h.deleteLater)
+            self.addCleanup(h.close)
+            nav = TopNav(h)
+            nav.setGeometry(0, 0, width, nav.height())
+            nav.set_tabs(["live", "movies", "series", "recordings", "folders"])
+            nav.set_source_name("Demo provider")
+            rects = nav._item_rects()
+            with self.subTest(width=width):
+                self.assertLess(rects["folders"].right(), rects["search"].left())
+                self.assertLess(rects["search"].right(), rects["source"].left())
+                self.assertLessEqual(rects["fullscreen"].right(), width)
+
     def test_a_quick_second_click_on_fullscreen_asks_once(self):
         # 2.0.1: not into fullscreen and straight out again.
         fullscreens = []
@@ -390,7 +444,7 @@ class TopNavTests(unittest.TestCase):
         self.nav.move_by(1)
         self.nav.activate()
         self.assertEqual(self.searches, [True])
-        self.nav.move_by(5)
+        self.nav.move_by(1)
         self.nav.activate()
         self.assertEqual(len(self.sources), 1)
 
