@@ -29,6 +29,9 @@ others' distributions, which may have malware.**
 - **No sound downloads for nothing.** A channel whose sound comes as a separate track that its
   picture can't carry no longer downloads that sound for every few seconds of picture. Such a
   channel still plays without sound in time-shift, as before.
+- **The log says what stay-live does.** Each small change of speed stay-live makes to keep a
+  channel near live, and the source's bursts it counts, are now in QiTV's log with the time,
+  so a jump or a skip in the sound can be matched to what happened then.
 
 ### The guide
 - **Changing the guide's mapping in Settings keeps every other channel's guide.** Before, the
