@@ -757,6 +757,31 @@ class SourceSwitchTests(RunsOnCase):
                 self.assertEqual(joiner.offset_s, 0.0)
                 self.assertEqual(segmented(out)[1], [])
 
+    def test_a_clock_that_goes_on_after_a_rebasing_keeps_its_offset(self):
+        # After a re-basing (a jump's, 13 s back; a resumed run's, 90 s on), a discontinuity
+        # where the source's clock goes on, the sound through a 5 s gap in the pictures: judged
+        # as passed on, with the offset before it, the clock goes on, and it keeps that offset
+        # (the gap stays, the sound runs on). Taken as it came, the gap read as a step ahead,
+        # was re-based shut and the sound stepped back 5 s (2.13.5 review).
+        jumped = make_stream(30, jumps=((12.0, 13.0),), video_gaps=((20.0, 25.0),))
+        behind = (900000 - 78 * CLOCK) % WRAP
+        resumed = make_stream(18, pts_start=behind, video_gaps=((10.0, 15.0),))
+        after_kept = [*at_seconds(make_stream(12), 6.0), *at_seconds(resumed, 6.0, 12.0)]
+        cases = {
+            "a jump's": (at_seconds(jumped, *range(4, 30, 4)), (), (5,), -13.0),
+            "a resumed run's": (after_kept, (2,), (4,), 90.0),
+        }
+        for name, (segments, runs, marks, offset) in cases.items():
+            with self.subTest(name):
+                out, joiner = hls(segments, runs=runs, marks=marks, extinf=4.0)
+                self.assertAlmostEqual(joiner.offset_s, offset)
+                self.assertEqual(steps(times(out, VIDEO_PID)), {FRAME, 5 * CLOCK + FRAME})
+                audio = times(out, AUDIO_PID)
+                gaps = [pts_delta(a, b) for a, b in zip(audio, audio[1:])]
+                self.assertTrue(all(0 < gap <= AUDIO_FRAME_TICKS + FRAME for gap in gaps), gaps)
+                self.assertEqual(cc_breaks(out), 0)
+                self.assertEqual(segmented(out)[1], [])
+
 
 if __name__ == "__main__":
     unittest.main()
