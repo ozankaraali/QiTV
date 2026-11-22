@@ -104,7 +104,7 @@ others' distributions, which may have malware.**
 
 ## The channel list
 
-- **It opens on the channel you watch,** always. It could open on the channel next to it after
+- **It opens on the channel you watch.** It could open on the channel next to it after
   a playlist changed, or on the old channel during a zap. With the same channel twice in a list,
   it opens on the copy you picked.
 - **Settings from the Library.** A ⚙ at the right of the Library's top bar opens Settings over
