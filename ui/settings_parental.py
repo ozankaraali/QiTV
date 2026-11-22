@@ -341,7 +341,7 @@ class ParentalRows(QObject):
     def _ask(self, purpose: str, title: str) -> None:
         """The card for `purpose`, its fields empty, the keys on the first; `title` the row's."""
         if self._card is None:
-            self._card = _PinCard(self._drawer.parentWidget())
+            self._card = _PinCard(self._settings.card_parent())
             self._card.pressed.connect(self._on_pressed)
             self._card.changed.connect(self._on_changed)
             self._card.cancelled.connect(self._forget)

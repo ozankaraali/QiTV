@@ -313,7 +313,7 @@ class LinkRows(QObject):
 
     def _ask(self, title: str, body: str, buttons: list[Button], default: str) -> None:
         if self._question is None:
-            self._question = ChoiceCard(self._drawer.parentWidget())
+            self._question = ChoiceCard(self._settings.card_parent())
             self._question.answered.connect(self._on_answered)
         self._question.ask(title, body, buttons, default)
         self._settings.show_card(self._question)

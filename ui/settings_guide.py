@@ -516,7 +516,7 @@ class GuideRows(QObject):
         self._units = units
         self._unit = unit if unit in units else ConfigManager.DEFAULT_OPTION_EPG_EXPIRATION_UNIT
         if self._every is None:
-            self._every = FormCard(self._drawer.parentWidget())
+            self._every = FormCard(self._settings.card_parent())
             self._every.pressed.connect(self._on_every_pressed)
             self._every.changed.connect(self._on_every_changed)
         self._render_every(str(_count(config.epg_expiration_value)))
@@ -576,7 +576,7 @@ class GuideRows(QObject):
         if index is not None and not 0 <= index < len(entries):
             return  # gone meanwhile
         if self._mapping is None:
-            self._mapping = FormCard(self._drawer.parentWidget())
+            self._mapping = FormCard(self._settings.card_parent())
             self._mapping.pressed.connect(self._on_mapping_pressed)
         buttons = [
             Button(CANCEL, translate(CANCEL_TEXT)),

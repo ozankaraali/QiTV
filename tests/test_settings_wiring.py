@@ -17,7 +17,7 @@ from unittest import mock
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 from PySide6.QtCore import QPoint, Qt
-from PySide6.QtGui import QGuiApplication, QKeySequence
+from PySide6.QtGui import QGuiApplication, QKeySequence, QRegion
 from PySide6.QtTest import QTest
 from PySide6.QtWidgets import QApplication
 from timer_fixtures import elapse, wait_until
@@ -743,7 +743,9 @@ class LibrarySettingsTests(base.WindowCase):
         self.assertFalse(window.controller.playing())
         self.assertFalse(window.library_layer.isVisible())
 
-    def test_with_something_in_the_corner_a_click_on_it_closes_settings(self):
+    def open_library_playing(self):
+        """The Library with what plays in its corner (the overlay host then shows only the
+        corner's controls: OverlayHost.show_only)."""
         self.show()
         self.wait_for_drawer()
         window = self.window
@@ -751,12 +753,95 @@ class LibrarySettingsTests(base.WindowCase):
             window.screens.open_library("movies")  # what plays goes on in a corner
         elapse(QApplication.doubleClickInterval() + 80)
         self.assertEqual(window.pages.mode(), "corner")
+
+    def test_with_something_in_the_corner_a_click_on_it_closes_settings(self):
+        self.open_library_playing()
+        window = self.window
         window.library_page.nav.settingsRequested.emit()
         self.assert_over_the_library()
         window.pages.cornerClicked.emit()  # the corner player: the player page again
         self.assertFalse(window.screens.library_shown())
         self.assertTrue(window.settings_drawer.isHidden())
         self.assertFalse(window.library_layer.isVisible())
+
+    def assert_lent(self, card):
+        """`card` shows over the Library and has the keys: lent by the host, as Settings is."""
+        window = self.window
+        self.assertTrue(card.isVisible())
+        self.assertTrue(window.settings.card_shown())
+        self.assertIs(card.parentWidget(), window.library_layer)
+        self.assertNotIn(card, window.host._overlays)
+
+    def test_with_something_in_the_corner_the_add_card_shows_over_the_library(self):
+        # The host hid any of its overlays that showed while the corner's controls alone may:
+        # the Add card, shown over the Library, went at once (2.14's last review, I1).
+        self.open_library_playing()
+        window = self.window
+        form = window.provider_cards.form
+        window.library_page.nav.settingsRequested.emit()
+        self.assert_over_the_library()
+        self.assertTrue(window.settings.show_row(ADD_PROVIDER))
+        QTest.keyClick(window, Qt.Key.Key_Return)
+        self.assert_lent(form)
+        self.assertEqual(form.focus(), ("field", "url"))
+        QTest.keyClick(window, Qt.Key.Key_Escape)  # its Cancel
+        self.assertFalse(form.isVisible())
+        self.assertTrue(window.settings.visible())
+        QTest.keyClick(window, Qt.Key.Key_Escape)  # the rows → the sections
+        QTest.keyClick(window, Qt.Key.Key_Escape)  # closed
+        self.assertFalse(window.settings.visible())
+        window.pages.cornerClicked.emit()  # live TV: the Add card over it, the host's again
+        window.add_provider()
+        self.assertTrue(form.isVisible())
+        self.assertIs(form.parentWidget(), window.host)
+        self.assertIn(form, window.host._overlays)
+
+    def test_with_something_in_the_corner_plexs_code_shows_over_the_library(self):
+        self.open_library_playing()
+        window = self.window
+        signin = window.provider_cards.plex
+        window.library_page.nav.settingsRequested.emit()
+        held = []
+
+        def run_worker(worker, finished, error=None, context=None):  # never plex.tv
+            held.append((worker, finished, context))
+            return worker
+
+        with mock.patch.object(window.jobs, "run_worker", side_effect=run_worker):
+            signin.start()
+            worker, finished, context = held.pop()
+            finished(context, {"id": 7, "code": "H56G", "expires_in": 900})
+            self.assert_lent(signin.card)
+            QTest.keyClick(window, Qt.Key.Key_Escape)  # its Cancel
+            self.assertFalse(signin.card.isVisible())
+        self.assertTrue(window.settings.visible())
+
+    def test_a_card_first_made_over_the_library_shows_whole_over_live_tv(self):
+        # A card Settings makes as it is first needed, first asked over the Library, was cut
+        # off over live TV later and took the keys unseen (2.14's last review, I2).
+        self.open_library()
+        window = self.window
+        host, rows = window.host, window.general_rows
+        window.library_page.nav.settingsRequested.emit()
+        rows._ask_clear()  # Clear Image Cache…: its question, made now
+        card = rows._question
+        self.assert_lent(card)
+        QTest.keyClick(window, Qt.Key.Key_Escape)  # its Cancel
+        self.assertFalse(card.isVisible())
+        QTest.keyClick(window, Qt.Key.Key_Escape)  # out of Settings
+        self.assertFalse(window.settings.visible())
+        window.screens.back_to_tv()
+        self.menu_actions()["Settings…"].trigger()
+        rows._ask_clear()
+        self.assertTrue(card.isVisible())
+        self.assertTrue(window.settings.card_shown())
+        self.assertIs(card.parentWidget(), host)
+        self.assertIn(card, host._overlays)
+        self.assertEqual(card.geometry(), host.rect())
+        panel = card.card_rect().toAlignedRect()
+        self.assertTrue(QRegion(panel).subtracted(host.mask()).isEmpty(), panel)  # whole
+        QTest.keyClick(window, Qt.Key.Key_Escape)
+        self.assertFalse(card.isVisible())
 
 
 class AddProviderTests(base.WindowCase):

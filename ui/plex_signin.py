@@ -69,9 +69,10 @@ Clock = Callable[[], float]
 
 
 class PlexSignIn(QObject):
-    """Plex's sign-in cards over the picture under Settings (`drawer`'s parent). `window` is
-    the TV window (its job runner, its toasts, its config); `rows` the Providers rows, whose
-    changes the sign-in's are too (`ProviderRows.apply`)."""
+    """Plex's sign-in card, made over Settings' card parent (the overlay host) and shown
+    where Settings is (2.14: over the Library too). `window` is the TV window (its job runner,
+    its toasts, its config); `rows` the Providers rows, whose changes the sign-in's are too
+    (`ProviderRows.apply`)."""
 
     def __init__(
         self,
@@ -91,7 +92,7 @@ class PlexSignIn(QObject):
         self._rows = rows
         self._shown = shown
         self._clock = clock
-        self.card = ChoiceCard(drawer.parentWidget())
+        self.card = ChoiceCard(settings.card_parent())
         self.card.answered.connect(self._on_answered)
         self._timer = QTimer(self)
         self._timer.setSingleShot(True)

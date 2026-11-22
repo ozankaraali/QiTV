@@ -294,7 +294,7 @@ class GeneralRows(QObject):
     def _ask_clear(self) -> None:
         """Clear Image Cache…: asked first, Cancel the answer the keys start on."""
         if self._question is None:
-            self._question = ChoiceCard(self._drawer.parentWidget())
+            self._question = ChoiceCard(self._settings.card_parent())
             self._question.answered.connect(self._on_clear_answered)
         self._question.ask(
             translate(CLEAR_CACHE_QUESTION),

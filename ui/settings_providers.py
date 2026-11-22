@@ -600,7 +600,7 @@ class ProviderRows(QObject):
         schedule = getattr(self._window, "recording_schedule", None)
         scheduled = schedule is not None and name in schedule.providers()
         if self._question is None:
-            self._question = ChoiceCard(self._drawer.parentWidget())
+            self._question = ChoiceCard(self._settings.card_parent())
             self._question.answered.connect(self._on_remove_answered)
         self._removing = name
         self._question.ask(

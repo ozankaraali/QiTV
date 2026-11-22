@@ -175,7 +175,7 @@ class TimeshiftRows(QObject):
 
     def _ask_turn_off(self) -> None:
         if self._question is None:
-            self._question = ChoiceCard(self._drawer.parentWidget())
+            self._question = ChoiceCard(self._settings.card_parent())
             self._question.answered.connect(self._on_turn_off_answered)
         self._question.ask(
             translate(TURN_OFF_QUESTION),
@@ -199,7 +199,7 @@ class TimeshiftRows(QObject):
         if config.timeshift_enabled is not True:
             return
         if self._range is None:
-            self._range = RangeCard(self._drawer.parentWidget())
+            self._range = RangeCard(self._settings.card_parent())
             self._range.answered.connect(self._on_size_answered)
         low, high, by = DISK_CACHE_MIB
         self._range.ask(

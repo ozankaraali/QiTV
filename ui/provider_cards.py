@@ -252,10 +252,11 @@ def _accounts(old: dict, new: dict) -> tuple[str, str]:
 
 
 class ProviderCards(QObject):
-    """Settings › Providers' Add card and each provider's Address-and-login card, over the
-    picture under Settings (`drawer`'s parent). `window` is the TV window (its check runner,
-    its toasts, its Free channels and Free radio); `settings` shows the cards and gives them
-    the keys; `rows` the Providers rows, whose changes these are too (`ProviderRows.apply`)."""
+    """Settings › Providers' Add card and each provider's Address-and-login card, made over
+    Settings' card parent (the overlay host) and shown where Settings is (2.14: over the
+    Library too). `window` is the TV window (its check runner, its toasts, its Free channels
+    and Free radio); `settings` shows the cards and gives them the keys; `rows` the Providers
+    rows, whose changes these are too (`ProviderRows.apply`)."""
 
     # What a card holds (`_reset`).
     _original: dict
@@ -274,7 +275,7 @@ class ProviderCards(QObject):
         self._window = window
         self._settings = settings
         self._rows = rows
-        host = drawer.parentWidget()
+        host = settings.card_parent()  # (the overlay host: Settings lends them, 2.14)
         self.form = FormCard(host)
         self.question = ChoiceCard(host)
         self._check = ProviderCheck(runner=window.jobs, parent=self)
