@@ -2752,6 +2752,9 @@ class TVWindow(QMainWindow):
         if _macos_desktops():
             self._arm_desktop_pip()  # the page back from the floating window
             if self._closing:
+                # Shown for its last steps: Qt's quit after the last window closes follows
+                # a window that was shown.
+                self.show()
                 return
             if flags != self.windowFlags():  # Keep on Top, chosen meanwhile
                 self.setWindowFlags(flags)
@@ -2887,6 +2890,9 @@ class TVWindow(QMainWindow):
         host = self.host
         holder = self.desktop_pip.floating_window()
         if floating and holder is not None:
+            # The menus' shortcuts too (Ctrl/⌘+2, Ctrl/⌘+R…): Qt takes an application
+            # shortcut only for a widget shown, and the mini player hides the window.
+            holder.addActions(self.actions())
             host.follow_window(holder)
             macos_window.join_all_spaces(host)  # beside the floating picture on every desktop
             # Once the floating window is placed: its Show came before (2.9, the review: the

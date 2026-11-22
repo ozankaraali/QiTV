@@ -5,13 +5,14 @@ the player page is hidden. CORNER: the Library fills it and the player page, res
 corner above it, goes on playing ("we put your main screen here while you navigate").
 
 Both pages are children of the stack in every mode and only change geometry and visibility: the
-player page holds the native views libVLC draws into, and a native view is never re-parented
-(on macOS libVLC's view would lose its picture).
+player page holds the native views libVLC draws into, and the modes never re-parent them (2.1
+feared libVLC's view would lose its picture on macOS).
 
-On macOS the player page can be lent to the floating picture in picture (ui/desktop_pip.py:
-the mini player, a desktop change, a covered window): `lend_player` hands it out and a stand-in
-(the note "Playing in the small window") takes its place in the stack until `take_back_player`.
-Its native views keep theirs (measured with the large surface in 2.4: libVLC goes on drawing).
+One exception, on macOS: the player page can be lent to the floating picture in picture
+(ui/desktop_pip.py: the mini player, a desktop change, a covered window). `lend_player` hands it
+out and a stand-in (the note "Playing in the small window") takes its place in the stack until
+`take_back_player`. Its native views keep theirs: a surface moved into the floating window in
+2.4 kept its picture (measured, no reopen); the whole page moving is the owner's to see (2.13.5).
 
 In the corner a press on the player drags it and the release snaps it to the nearest corner,
 as PipFrame does for the small picture (saved as `corner_player_corner`); a press released

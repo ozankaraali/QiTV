@@ -319,6 +319,17 @@ class FloatingPlayer(QWidget):
             self._snap.start()  # (one it did not make: macOS's own, at its edges)
         super().resizeEvent(event)
 
+    def closeEvent(self, event) -> None:
+        """Asked to close while it shows (the system's Quit closes only the windows shown, and
+        the mini player hides the TV window): the TV window closes instead, its own way (its
+        shutdown, a recording's question), and puts the picture back first."""
+        keys = self._keys
+        if self.isVisible() and keys is not None and isValid(keys):
+            event.ignore()
+            keys.close()
+            return
+        super().closeEvent(event)
+
     def event(self, event: QEvent) -> bool:
         """Its keys are the TV window's (`keys`): they reach it as its own would."""
         keys = getattr(self, "_keys", None)  # (None while QWidget's own construction runs)

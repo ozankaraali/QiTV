@@ -14,6 +14,7 @@ from PySide6.QtWidgets import QApplication, QWidget  # noqa: E402
 from timer_fixtures import elapse, wait_until  # noqa: E402
 
 from services import picture  # noqa: E402
+from services.catalog import ALL_GROUP_ID  # noqa: E402
 from services.playback import NullSession  # noqa: E402
 from tests.test_tv_window import WindowCase  # noqa: E402
 from ui import desktop_pip  # noqa: E402
@@ -619,6 +620,92 @@ class OnePictureInPictureTests(WindowCase):
         window.toggle_mini_player()
         self.assertFalse(pip.floating())
         self.assertTrue(window.isVisible())
+
+    def test_quitting_from_the_mini_player_closes_the_window_its_own_way(self):
+        # The system's Quit closes only the windows shown, and Qt quits after the last window
+        # closes only for one that was shown: the window comes back for its last steps.
+        window = self.window
+        self.show()
+        self.mini()
+        self.assertFalse(window.isVisible())
+        self.app.closeAllWindows()  # the system's Quit (the Dock, logging out)
+        self.assertTrue(window.closing())
+        self.assertTrue(window.isVisible())
+        self.assertIs(window.player_page.parentWidget(), window.pages)
+        self.assertTrue(
+            wait_until(lambda: not window.isVisible() and not window.close_retry.isActive())
+        )
+
+    def test_quit_in_the_mini_player_shows_the_window_for_its_last_steps(self):
+        window = self.window
+        self.show()
+        self.mini()
+        window.quit_chosen()  # ⌘Q, its keys reaching the window
+        self.assertTrue(window.closing())
+        self.assertTrue(window.isVisible())
+        self.assertFalse(window.desktop_pip.floating())
+        self.assertTrue(
+            wait_until(lambda: not window.isVisible() and not window.close_retry.isActive())
+        )
+
+    def test_a_question_is_asked_in_the_window(self):  # as for the mini player in 2.13.1
+        window = self.window
+        self.show()
+        self.wait_for_drawer()
+        self.assertTrue(wait_until(lambda: window.catalog.items("live", ALL_GROUP_ID)))
+        self.mini()
+        self.assertTrue(window.desktop_pip.floating())
+        window.record_at(window.catalog.items("live", ALL_GROUP_ID)[0])  # asked: it makes way
+        self.assertFalse(window.mini_player_active())
+        self.assertFalse(window.desktop_pip.floating())
+        self.assertTrue(window.isVisible())
+        self.assertTrue(window.record_card.isVisible())
+
+    def test_the_library_leaves_the_mini_player_first(self):
+        window = self.window
+        self.show()
+        self.wait_for_drawer()
+        self.mini()
+        self.assertTrue(window.desktop_pip.floating())
+        floating = window.desktop_pip.floating_window()
+        # The menu's shortcut, typed in the small window (the window itself is hidden).
+        QTest.keyClick(floating, Qt.Key.Key_2, Qt.KeyboardModifier.ControlModifier)
+        self.assertTrue(window.screens.library_shown())
+        self.assertFalse(window.mini_player_active())
+        self.assertFalse(window.desktop_pip.floating())
+        self.assertTrue(window.isVisible())
+        self.assertIs(window.player_page.parentWidget(), window.pages)
+
+    def test_a_maximized_window_and_keep_on_top_come_back_as_they_were(self):
+        window = self.window
+        self.show()
+        window.showMaximized()
+        self.assertTrue(wait_until(window.isMaximized))
+        self.mini()
+        self.assertTrue(window.desktop_pip.floating())
+        self.mini()
+        self.assertTrue(wait_until(window.isMaximized))
+        window.showNormal()
+        self.app.processEvents()
+        self.mini()
+        window.menus.keep_on_top.trigger()  # chosen in the mini player: applies once it ends
+        self.mini()
+        self.assertTrue(window.isVisible())
+        self.assertTrue(window.windowFlags() & Qt.WindowType.WindowStaysOnTopHint)
+        self.assertFalse(window.windowFlags() & Qt.WindowType.FramelessWindowHint)
+
+    def test_the_first_click_after_the_mini_player_is_not_swallowed(self):
+        window = self.window
+        self.show()
+        drawer = self.wait_for_drawer()
+        QTest.keyClick(window, Qt.Key.Key_Escape)
+        self.mini()
+        mouse(window.surface, QEvent.Type.MouseButtonPress, QPoint(60, 40))
+        mouse(window.surface, QEvent.Type.MouseMove, QPoint(70, 60))
+        self.mini()  # back (the press still held)
+        drawer.close_drawer()
+        window.host.clicked.emit()  # a click on the video around an overlay
+        self.assertTrue(drawer.isVisible())
 
     def test_the_small_window_keeps_its_pictures_shape_and_its_picture_fills_it(self):
         main, small = _BoxedPlayer(16 / 9), _BoxedPlayer()
