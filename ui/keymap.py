@@ -50,7 +50,8 @@ class Action(str, Enum):
     PIP = "pip"  # picture in picture: open (the previous or highlighted channel) or close
     SWAP = "swap"  # the large and the small picture trade places
     MULTIVIEW = "multiview"  # the grid of channels, or back to one picture
-    TAB = "tab"  # the mixer's other row
+    TAB = "tab"  # the mixer's other row; in the multiview, the next tile takes the focus
+    BACK_TAB = "back_tab"  # Shift+Tab: back a row, or the previous tile (2.14)
     SOUND_EARLIER = "sound_earlier"  # J: the sound 50 ms earlier against the picture
     SOUND_LATER = "sound_later"  # K: 50 ms later (VLC's keys)
     SUBTITLES_EARLIER = "subtitles_earlier"  # Shift+J: the subtitles 50 ms earlier
@@ -110,6 +111,7 @@ _PLAYER_KEYS = {
     _K.Key_Right.value: Action.SEEK_FWD,
     _K.Key_Escape.value: Action.ESCAPE,
     _K.Key_Tab.value: Action.TAB,
+    _K.Key_Backtab.value: Action.BACK_TAB,  # Shift+Tab, as Qt names it
 }
 # Character keys: only plain or with Shift (Ctrl/Alt/Meta combinations are not ours).
 _PLAYER_CHARS = {
@@ -266,6 +268,8 @@ def resolve(
     keys, chars = (
         (_GUIDE_KEYS, _GUIDE_CHARS) if context == "guide" else (_PLAYER_KEYS, _PLAYER_CHARS)
     )
+    if key == _K.Key_Tab.value and mods & _SHIFT and context == "player":
+        return Action.BACK_TAB, ""  # (Shift+Tab where the platform keeps Tab's name)
     if key in keys:
         return keys[key], ""
     if key in _CHANNEL_KEYS:
@@ -345,6 +349,7 @@ SHORTCUTS: dict[str, list[tuple[str, str]]] = {
         ("+, -", N_("Volume up / down (the mixer)")),
         ("M", N_("Mute")),  # i18n: what a key does (verb)
         ("Tab", N_("The mixer's other row (while it shows)")),
+        ("Tab, Shift+Tab", N_("Multiview: focus the next / previous tile")),
         ("J, K", N_("Sound 50 ms earlier / later (sync with the picture)")),
         ("Shift+J, Shift+K", N_("Subtitles 50 ms earlier / later")),
         ("A", N_("Picture: aspect ratio, sleep timer; pressed again, the next ratio")),

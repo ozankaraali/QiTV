@@ -616,6 +616,7 @@
   "Multiview is off while channels play in an external player": "Moninäkymä ei ole käytössä, kun kanavia toistetaan ulkoisessa soittimessa",
   "Multiview layouts": "Moninäkymän asettelut",
   "Multiview needs more video players than this computer could open": "Moninäkymä tarvitsee enemmän videosoittimia kuin tämä tietokone pystyi avaamaan",
+  "Multiview: focus the next / previous tile": "Moninäkymä: seuraava / edellinen ruutu valituksi",
   "Multiview: several channels at once, or back to one": "Moninäkymä: useita kanavia kerralla tai takaisin yhteen",
   "Mute": "Mykistä",
   "Mute the small picture": "Mykistä pieni kuva",

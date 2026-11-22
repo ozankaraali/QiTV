@@ -13,8 +13,9 @@ banner, zapping, the channel list, rewind and Go live act on it as on the big pi
 its sound plays (the others are muted, unless the mixer made one heard). A press on a tile's
 picture focuses it (the channel list, open, follows it there); a click on the focused one
 opens the channel list, as on the big picture, and a click on the label of one without the
-focus focuses it and opens the list at once, on its channel. A "+" tile focuses and opens
-the channel list: the channel picked plays there. Tiles play through the time-shift pipeline
+focus focuses it and opens the list at once, on its channel; Tab and Shift+Tab give it to
+the next or previous tile, round the grid (`step_focus`). A "+" tile focuses and opens the
+channel list: the channel picked plays there. Tiles play through the time-shift pipeline
 as a picture-in-picture does, in memory (a channel that cannot be
 time-shifted plays directly): the focused tile's buffer is the memory per stream, the
 others' a small one (`ring_sizes`), and the focus moves them (`SessionManager.set_large`).
@@ -453,6 +454,23 @@ class GridControls(QObject):
             self.back_to_grid()
         elif self._shown:
             self.show_big(self.sessions.large().name)
+
+    def step_focus(self, delta: int) -> bool:
+        """Tab (1) or Shift+Tab (-1): the next or previous tile takes the focus, round the
+        grid ("+" and cards too, for a channel to be chosen there); while one is big, the next
+        that plays is big. False: the grid is hidden, or no tile took it."""
+        if not self._shown:
+            return False
+        names = self._names
+        large = self.sessions.large().name
+        start = names.index(large) if large in names else 0
+        for step in range(1, len(names)):
+            name = names[(start + delta * step) % len(names)]
+            if self._big and self.state(name) not in _SHOWING:
+                continue
+            self._focused_by_press = None
+            return self._focus(name)
+        return False
 
     def _hush(self) -> None:
         """While a tile is big the others are not heard (their mutes stay the session

@@ -1365,6 +1365,44 @@ class BigTileTests(MultiviewCase):
             self.grid_frame.focusRequested.emit("pip")
         self.assertEqual(len(self.drawer.named("open_drawer")), opened)
 
+    def test_tab_and_shift_tab_step_the_focus_through_the_tiles(self):
+        # 2.14, the owner's pick: tile focus by key. Round the grid, "+" tiles too.
+        tiles = self.four_tiles()  # tile 3 (t2) focused
+        self.controller.handle(Action.TAB)
+        self.assertIs(self.sessions.large(), tiles[3])
+        self.assertEqual(self.banner.info.name, "Four")  # the controls act on it now
+        self.controller.handle(Action.TAB)
+        self.assertIs(self.sessions.large(), tiles[0])  # round to tile 1
+        self.controller.handle(Action.BACK_TAB)
+        self.controller.handle(Action.BACK_TAB)
+        self.assertIs(self.sessions.large(), tiles[2])
+        self.grid.close_tile("pip")  # tile 2 shows "+": Tab takes it too
+        self.controller.handle(Action.BACK_TAB)
+        self.assertEqual(self.sessions.large().name, "pip")
+        self.controller.handle(Action.OK)  # Enter: its channel list
+        self.assertTrue(self.drawer.visible)
+
+    def test_while_a_tile_is_big_tab_makes_the_next_that_plays_big(self):
+        tiles = self.four_tiles()
+        self.grid.close_tile("t3")  # "+": skipped while one is big
+        self.grid.tile_control("t2", "big")
+        self.controller.handle(Action.TAB)
+        self.assertIs(self.sessions.large(), tiles[0])
+        self.assertTrue(self.grid.big())
+        self.assertTrue(self.surfaces["main"].isVisibleTo(self.page))
+        self.assertFalse(self.surfaces["t2"].isVisibleTo(self.page))
+
+    def test_tab_is_the_mixers_while_it_shows_and_nothing_without_the_grid(self):
+        tiles = self.four_tiles()
+        with mock.patch.object(self.controller._mixer, "handle", return_value=True):
+            self.controller.handle(Action.TAB)  # the mixer's other row
+        self.assertIs(self.sessions.large(), tiles[2])
+        self.grid.leave()  # one picture, tile 4 small
+        large, small = self.sessions.large(), self.sessions.small()
+        self.controller.handle(Action.TAB)
+        self.controller.handle(Action.BACK_TAB)
+        self.assertEqual((self.sessions.large(), self.sessions.small()), (large, small))
+
     def test_shown_again_the_tiles_keep_their_places_and_the_last_grid_fills_them(self):
         tiles = self.four_tiles()
         self.v()  # leave: tile 3 big, tile 4 small (focused before it), the others stop

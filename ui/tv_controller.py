@@ -1851,6 +1851,9 @@ class TVController(QObject):
             back = action is Action.SEEK_BACK
             if not self._live_controls.seek_live(back):
                 self._seek(-SEEK_STEP_MS if back else SEEK_STEP_MS)
+        elif action in (Action.TAB, Action.BACK_TAB):
+            if self._grid is not None and self.multiview_shown():
+                self._grid.step_focus(1 if action is Action.TAB else -1)  # 2.14: tile by key
         elif action in (Action.PIP, Action.SWAP):
             if self.multiview_shown():
                 self._toast(LEAVE_FIRST)  # the grid's tiles are the pictures meanwhile

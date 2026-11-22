@@ -611,6 +611,7 @@
   "Multiview is off while channels play in an external player": "外部プレーヤーで再生中はマルチビューを使えません",
   "Multiview layouts": "マルチビューのレイアウト",
   "Multiview needs more video players than this computer could open": "このパソコンではマルチビューに必要なプレーヤーを開けません",
+  "Multiview: focus the next / previous tile": "マルチビュー: 次 / 前のタイルを選択",
   "Multiview: several channels at once, or back to one": "マルチビュー: 複数チャンネルを同時に、または1画面に戻る",
   "Mute": "ミュート",
   "Mute the small picture": "小画面をミュート",

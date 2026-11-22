@@ -616,6 +616,7 @@
   "Multiview is off while channels play in an external player": "A többképes nézet ki van kapcsolva, amíg csatornák külső lejátszóban mennek",
   "Multiview layouts": "A többképes nézet elrendezései",
   "Multiview needs more video players than this computer could open": "A többképes nézethez több videólejátszó kell, mint amennyit ez a számítógép meg tudott nyitni",
+  "Multiview: focus the next / previous tile": "Többképes nézet: a következő / előző kép kiválasztása",
   "Multiview: several channels at once, or back to one": "Többképes nézet: több csatorna egyszerre, vagy vissza egyre",
   "Mute": "Némítás",
   "Mute the small picture": "Kis kép némítása",
