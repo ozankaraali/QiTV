@@ -136,7 +136,8 @@ class Row:
     line's title. A `whole` info line's title wraps on every line it needs (About's credits,
     a key's long description), never cut short. An `image` is a picture of the assets (its
     file's name; "qitv": QiTV's own logo) on a line of its own, `image_u` units tall, in place
-    of a title (TMDB's logo in About, under its notice). A `secret` text row (a token) shows dots in its text's place, and its last `secret_tail` characters after
+    of a title (TMDB's logo in About, under its notice). A `secret` text row (a token) shows
+    dots in its text's place, and its last `secret_tail` characters after
     them when it has that many to show (an API key's last four, as the page that gave it shows
     them); an empty one shows its `placeholder`."""
 
@@ -681,8 +682,8 @@ def _playback(system: str) -> Section:
         ),
         Row(
             "media_4k_versions",
-            # i18n: a setting (Jellyfin and Emby): when a title's 4K version plays
-            N_("4K versions (Jellyfin, Emby)"),
+            # i18n: a setting (Jellyfin, Emby and Plex): when a title's 4K version plays
+            N_("4K versions (Jellyfin, Emby, Plex)"),
             # i18n: help under the 4K versions setting
             N_("Whether a title plays its 4K version when the server has one."),
             (
@@ -769,7 +770,7 @@ def _providers(title: str, rows: tuple[Row, ...], context: Context) -> Section:
         ADD_PROVIDER,
         ADD_PROVIDER_TEXT,
         # i18n: help under Settings → Providers → Add provider
-        N_("A provider from its link: Xtream, an M3U playlist, a portal, Jellyfin or Emby."),
+        N_("A provider from its link: Xtream, an M3U playlist, a portal, Jellyfin, Emby or Plex."),
         kind=ACTION,
         icon="plus",
     )

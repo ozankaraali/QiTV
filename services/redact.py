@@ -26,7 +26,7 @@ _SECRETS = (
     # A header that carries a sign-in: its whole value (a cookie's holds the MAC).
     re.compile(
         r"(\b(?:Authorization|Proxy-Authorization|Cookie|Set-Cookie|X-Emby-Token"
-        r"|X-Emby-Authorization|X-MediaBrowser-Token|X-Api-Key)\s*[:=]\s*)[^\r\n]*",
+        r"|X-Emby-Authorization|X-MediaBrowser-Token|X-Api-Key|X-Plex-Token)\s*[:=]\s*)[^\r\n]*",
         re.IGNORECASE,
     ),
     re.compile(r"(\b(?:Bearer|Basic)\s+)[A-Za-z0-9\-._~+/=]{4,}"),
@@ -34,7 +34,7 @@ _SECRETS = (
     # A JSON (or Python) value under a credential's key: "password": "…".
     re.compile(
         r"""(["'](?:username|password|passwd|token|access_token|api_key|apikey|mac|serial"""
-        r"""|sn|device_id|device_id2|signature)["']\s*:\s*["'])[^"']*""",
+        r"""|sn|device_id|device_id2|signature|authToken|accessToken)["']\s*:\s*["'])[^"']*""",
         re.IGNORECASE,
     ),
     # A query's credential outside a query string ("api_key=…&static=true", a form body).

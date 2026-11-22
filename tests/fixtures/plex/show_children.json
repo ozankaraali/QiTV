@@ -1,0 +1,40 @@
+{
+  "MediaContainer": {
+    "size": 2,
+    "key": "201",
+    "parentTitle": "Quiet Street",
+    "viewGroup": "season",
+    "Metadata": [
+      {
+        "ratingKey": "211",
+        "key": "/library/metadata/211/children",
+        "parentRatingKey": "201",
+        "type": "season",
+        "title": "Season 1",
+        "parentTitle": "Quiet Street",
+        "summary": "",
+        "index": 1,
+        "thumb": "/library/metadata/211/thumb/1795376801",
+        "leafCount": 2,
+        "viewedLeafCount": 1,
+        "addedAt": 1795376801,
+        "updatedAt": 1795376801
+      },
+      {
+        "ratingKey": "212",
+        "key": "/library/metadata/212/children",
+        "parentRatingKey": "201",
+        "type": "season",
+        "title": "Season 2",
+        "parentTitle": "Quiet Street",
+        "summary": "Later.",
+        "index": 2,
+        "thumb": "/library/metadata/212/thumb/1795376802",
+        "leafCount": 1,
+        "viewedLeafCount": 0,
+        "addedAt": 1795376802,
+        "updatedAt": 1795376802
+      }
+    ]
+  }
+}

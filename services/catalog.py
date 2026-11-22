@@ -44,7 +44,7 @@ from services.provider_api import (
     xtream_stream_url,
 )
 from services.provider_ids import stamp
-from services.provider_types import is_media_server
+from services.provider_types import is_media_server, is_plex
 from services.redact import safe_message
 from services.stream_address import NO_STREAM_MESSAGE
 from services.workers import (
@@ -399,18 +399,31 @@ class WorkerFactory:
 
         return LinkCreatorWorker(prefer_https=True, **kwargs)
 
-    # Jellyfin and Emby (2.8): the server's address as given (it answers where it is).
+    # Jellyfin and Emby (2.8), Plex (2.14: its own workers): the server's address as given (it
+    # answers where it is).
     def media_section(self, provider, content_type, verify_ssl, saved=None) -> QObject:
+        if is_plex(provider.get("type")):
+            from services.plex_workers import PlexSectionWorker
+
+            return PlexSectionWorker(provider, content_type, verify_ssl, saved=saved)
         from services.media_workers import MediaSectionWorker
 
         return MediaSectionWorker(provider, content_type, verify_ssl, saved=saved)
 
     def media_series(self, provider, series_id, verify_ssl) -> QObject:
+        if is_plex(provider.get("type")):
+            from services.plex_workers import PlexSeriesWorker
+
+            return PlexSeriesWorker(provider, series_id, verify_ssl)
         from services.media_workers import MediaSeriesWorker
 
         return MediaSeriesWorker(provider, series_id, verify_ssl)
 
     def media_link(self, provider, item_id, verify_ssl, **choices) -> QObject:
+        if is_plex(provider.get("type")):
+            from services.plex_workers import PlexLinkWorker
+
+            return PlexLinkWorker(provider, item_id, verify_ssl, **choices)
         from services.media_workers import MediaLinkWorker
 
         return MediaLinkWorker(provider, item_id, verify_ssl, **choices)
@@ -1361,6 +1374,8 @@ class CatalogService(QObject):
                 "versions": payload["versions"],
                 "quality": payload.get("quality"),
             }
+            if payload.get("conversions") is False:  # 2.14: a Plex server's never converts
+                self._media_menus[item_id]["conversions"] = False
         url = str(payload.get("link") or "").strip()
         if url:
             self.linkReady.emit(job.data, url)
@@ -1369,8 +1384,13 @@ class CatalogService(QObject):
 
     def media_menu(self, item: dict) -> Optional[dict]:
         """What the quality menu offers for a media server's title its link was asked for:
-        {"versions": [media_server.version_of …], "quality": the Quality playing}; else None."""
-        return self._media_menus.get(str(item.get("id") or ""))
+        {"versions": [media_server.version_of …], "quality": the Quality playing, and
+        "conversions": False for a server QiTV never asks to convert (Plex)}; else None (and
+        for a title of such a server with one version: nothing to choose)."""
+        menu = self._media_menus.get(str(item.get("id") or ""))
+        if menu and menu.get("conversions") is False and len(menu.get("versions") or ()) < 2:
+            return None
+        return menu
 
     def _on_link_error(self, job: _Job, message: str) -> None:
         self._media_links.pop(job.data, None)

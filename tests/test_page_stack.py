@@ -83,6 +83,26 @@ class PageStackTests(StackCase):
         self.assertEqual(self.player.geometry(), stack.rect())
         self.assertFalse(self.library.isVisible())
 
+    def test_the_player_page_lent_is_the_other_windows_until_it_is_back(self):
+        # 2.13.5: the macOS mini player holds the player page (ui/mini_player.py).
+        stack = self.make_stack()
+        holder = QWidget()
+        self.addCleanup(holder.deleteLater)
+        page = stack.lend_player()
+        self.assertIs(page, self.player)
+        page.setParent(holder)  # the mini player's window takes it
+        page.setGeometry(0, 0, 320, 180)
+        stack.resize(1000, 600)  # the stack lays out: the lent page is the other window's
+        self.assertIs(self.player.parentWidget(), holder)
+        self.assertEqual(self.player.geometry().size().width(), 320)
+        self.assertIsNone(stack.lend_player())  # lent already
+        stack.take_back_player(page)
+        self.assertIs(self.player.parentWidget(), stack)
+        self.assertEqual(self.player.geometry(), stack.rect())
+        self.assertTrue(self.player.isVisible())
+        stack.show_library(corner=True)
+        self.assertIsNone(stack.lend_player())  # the Library's: it never floats
+
     def test_corner_mode_keeps_both_pages_and_resizes_the_player(self):
         stack = self.make_stack(width=1280, height=720)
         stack.show_library(corner=True)

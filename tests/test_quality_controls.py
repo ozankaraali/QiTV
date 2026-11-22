@@ -151,6 +151,11 @@ class QualityControlsTests(unittest.TestCase):
             ],
         )
 
+    def test_a_server_that_never_converts_offers_its_versions_only(self):  # 2.14: Plex
+        self.menu["conversions"] = False
+        self.transport.qualityRequested.emit()
+        self.assertEqual(self.rows(), [("4K · 25 Mbit/s", False), ("1080p · 8.2 Mbit/s", True)])
+
     def test_a_conversion_playing_is_ticked(self):
         self.menu["quality"] = ms.Quality("hd", 720, 4_000_000)  # of the 1080p version
         self.transport.qualityRequested.emit()

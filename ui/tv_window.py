@@ -35,6 +35,7 @@ import stat
 import sys
 import threading
 import time
+import traceback
 from typing import Any, Callable, Iterator, Optional, Sequence
 
 from PySide6.QtCore import (
@@ -155,6 +156,7 @@ from ui.captions_controller import CaptionsController
 from ui.desktop_pip import COVERED, DESKTOP, DesktopPip, corner_rect
 from ui.export_flow import ExportFlow
 from ui.find_session import FindSession
+from ui.float_controls import FloatControls
 from ui.free_channels_menu import FreeLists
 from ui.grid_frame import GridFrame
 from ui.keymap import Action, as_int, resolve
@@ -163,6 +165,7 @@ from ui.link_lanes import Target
 from ui.live_tuner import LiveTuner, one_disk_ring, wait_for_each_other
 from ui.logos import LogoCache, PosterCache
 from ui.macos_window import reclaim_first_responder
+from ui.mini_player import MiniPlayer
 from ui.network_player import NetworkPlayer
 from ui.open_link import LinkCard, OpenLink
 from ui.overlay_host import OverlayHost
@@ -287,6 +290,32 @@ def _local_now() -> datetime:
 def _macos_desktops() -> bool:
     """Only macOS has fullscreen desktops to leave (the desktop picture in picture)."""
     return QGuiApplication.platformName() == "cocoa"
+
+
+_SOURCE = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))  # QiTV's own files
+# The TV window's own frames between what asked and the log (its overrides, its events).
+_OWN_FRAMES = ("activateWindow", "raise_", "setFocus", "changeEvent", "event", "_on_focus_changed")
+
+
+def _callers(depth: int = 4) -> str:
+    """Who asked, for the log: QiTV's innermost calls on the stack (this module's logging left
+    out), the nearest first; "the system" when no call of QiTV's led there (macOS activated
+    the window by itself, or a click on it did)."""
+    frames = [
+        frame
+        for frame in traceback.extract_stack()[:-1]
+        if frame.filename.startswith(_SOURCE)
+        and f"{os.sep}.venv{os.sep}" not in frame.filename
+        and frame.name not in ("_callers", "_note_floating_focus")
+    ]
+    while frames and frames[-1].name in _OWN_FRAMES:
+        frames.pop()  # (the TV window's own override, or the event it got)
+    frames = [frame for frame in frames if os.path.basename(frame.filename) != "main.py"]
+    if not frames:  # (main()'s event loop alone)
+        return "the system (no call of QiTV's)"
+    return " <- ".join(
+        f"{os.path.relpath(f.filename, _SOURCE)}:{f.lineno} {f.name}" for f in frames[::-1][:depth]
+    )
 
 
 def _native_video_handles() -> bool:
@@ -588,8 +617,9 @@ class TVWindow(QMainWindow):
         self._fit_fallback.timeout.connect(self._fit_to_screen)
         # Each other player's surface's native window, once bound (the PiP's, the tiles').
         self._bound: dict[str, int] = {}
-        self._drag: Optional[tuple[QPoint, QPoint]] = None  # (press, window position)
-        self._dragged = False  # the last press on the video moved the mini player
+        # A press on the video in a small window: (press, the window's position, the window).
+        self._drag: Optional[tuple[QPoint, QPoint, QWidget]] = None
+        self._dragged = False  # the last press on the video moved the small window
         self._pressed = False  # the left button is down on the video
         self._click_on_release = False  # a click that came while the button was still down
         # Files opened in QiTV (open_paths): each looked at off the GUI thread, the newest plays.
@@ -836,6 +866,7 @@ class TVWindow(QMainWindow):
             closing=lambda: self._closing,
             before_tv=self._make_way_for_card,
             held=self.mini_player_active,  # (what QiTV says unasked waits for the window)
+            gives_way=self._gives_way_to_the_mini_player,
             above=lambda: (
                 self.question_card,
                 self.quality_card,
@@ -1014,10 +1045,16 @@ class TVWindow(QMainWindow):
             may_float_covered=self._may_float_covered,
             activate=macos_window.activate_app,
             shape=self.pip_frame.lent_shape,
+            lock_shape=macos_window.keep_shape,
+            hover=self._hover_over_the_floating_picture,
             parent=self,
         )
+        # Its own player controls, the mini player's (2.13.5, ui/float_controls.py): made as it
+        # first floats.
+        self.float_controls: Optional[FloatControls] = None
         # Covered: QiTV becoming the active app (a click on its Dock icon, ⌘Tab) or leaving it.
         self.app.applicationStateChanged.connect(self._on_app_state)
+        self.app.focusChanged.connect(self._on_focus_changed)  # (the log, while it floats)
         # i18n: shown on the fullscreen player while its picture floats on another desktop
         self.floating_note = QLabel(tr("Playing in the small window"), self.player_page)
         self.floating_note.setAlignment(Qt.AlignmentFlag.AlignCenter)
@@ -1025,11 +1062,27 @@ class TVWindow(QMainWindow):
         self.floating_note.hide()
         self._floating_captions: Optional[OverlayHost] = None  # AI captions over it (2.9)
         self.desktop_pip.floatingChanged.connect(self._on_picture_floating)
+        # The macOS mini player (2.13.5): the player page in a small window of its own, under
+        # the window's own controls, the window hidden meanwhile (ui/mini_player.py).
+        self.mini_player = MiniPlayer(
+            lend=self._lend_page,
+            take_back=self._take_back_page,
+            place=self._floating_rect,
+            join_all_spaces=macos_window.join_all_spaces,
+            remember=self._remember_floating_rect,
+            shape=self.pip_frame.floating_shape,
+            lock_shape=macos_window.keep_shape,
+            keys=self,
+            hover=self._hover_over_the_small_window,
+            parent=self,
+        )
+        self.mini_player.shownChanged.connect(self._on_mini_player_shown)
+        self.mini_player.shownChanged.connect(self._fit_small_pictures)
         # A picture shown small fills its box: told as it shows, hides, floats or comes back
         # (and as its surface resizes, `_report_video_size`).
         self.desktop_pip.floatingChanged.connect(self._fit_small_pictures)
         self.pip_frame.smallRectChanged.connect(self._fit_small_pictures)
-        self.pip_frame.suspending.connect(self.desktop_pip.dock)  # the multiview lays them out
+        self.pip_frame.suspending.connect(self._before_the_multiview)
         # The host covers the page exactly: page coordinates are the host's.
         self.pip_frame.smallRectChanged.connect(self.pip_label.follow)
         self.pip_frame.smallRectChanged.connect(self.mixer.avoid)
@@ -1176,7 +1229,7 @@ class TVWindow(QMainWindow):
         self.pages.modeChanged.connect(self.controller.page_changed)  # 2.6: a question goes along
         self.pages.modeChanged.connect(self.window_cards.page_changed)  # 2.13.1: so do these
         # The Library (its corner player) lays the player out: a floating picture comes back.
-        self.pages.modeChanged.connect(lambda *_: self.desktop_pip.dock())
+        self.pages.modeChanged.connect(self._page_mode_changed)
         self.pages.cornerClicked.connect(self.screens.back_to_player)
         # A song's screen stays in the corner (small): a press on it is the corner player's
         # (dragged or clicked), as on its picture, never the song's play or pause.
@@ -1683,6 +1736,29 @@ class TVWindow(QMainWindow):
         """Back to the normal window (nothing when it is not the mini player)."""
         self._leave_mini()
 
+    def _gives_way_to_the_mini_player(self) -> bool:
+        """The window is hidden for the macOS mini player (a question asked for brings it)."""
+        return self._mini_restore is not None and _macos_desktops()
+
+    def _before_the_multiview(self) -> None:
+        """The multiview lays the surfaces out: a floating picture comes back first, and the
+        mini player becomes the window again (the grid opens there)."""
+        self.desktop_pip.dock("the multiview")
+        self.mini_player.end("the multiview")
+
+    def _page_mode_changed(self, *_args: object) -> None:
+        """The Library (its corner player) lays the player out: a floating picture comes back,
+        and the mini player ends."""
+        self.desktop_pip.dock("the Library")
+        self.mini_player.end("the Library")
+
+    def _hover_over_the_small_window(self) -> None:
+        """The pointer moved over the mini player's window while QiTV is not the active app (Qt
+        says nothing then): as a move over the picture, the controls come."""
+        pointer = getattr(self, "pointer", None)
+        if pointer is not None and not self._closing:
+            pointer.moved()
+
     def _make_way_for_card(self) -> None:
         """A question over live TV (2.13.1, ui.window_cards): the window, not the mini player,
         and the audio dock's ⋯ menu closed (as for Open Link…'s card)."""
@@ -1882,8 +1958,8 @@ class TVWindow(QMainWindow):
         if self._dragged:  # the press moved the mini player
             self._dragged = False
             return
-        if self._pressed and self._mini_restore is not None:
-            # Still held: a click only if it is released without dragging the mini player.
+        if self._pressed and self._drag is not None:
+            # Still held: a click only if it is released without dragging the small window.
             self._click_on_release = True
             return
         self.controller.video_clicked()
@@ -2520,7 +2596,9 @@ class TVWindow(QMainWindow):
             return True
         if isinstance(event, QMouseEvent) and watched in self.surfaces.values():
             if event.type() in _CLICK_EVENTS:
-                reclaim_first_responder(self)  # macOS: libVLC's view took the keys
+                # macOS: libVLC's view took the keys (of the floating window, while it holds
+                # the page)
+                reclaim_first_responder(watched.window() if isinstance(watched, QWidget) else self)
             if event.type() in _MOUSE_EVENTS:
                 self._on_video_mouse(event)
         elif event.type() == QEvent.Type.Resize and watched in self.surfaces.values():
@@ -2554,26 +2632,38 @@ class TVWindow(QMainWindow):
         load_module(names[0])
         self._load_deferred(names[1:])
 
+    def _small_window(self) -> Optional[QWidget]:
+        """The mini player's window, which a drag on the picture moves: its own (macOS), or
+        the window itself, small (Windows, Linux); None in the window. (The desktop picture in
+        picture's floating window moves itself.)"""
+        if self.mini_player.shown():
+            return self.mini_player.window()
+        return self if self._mini_restore is not None else None
+
     def _on_video_mouse(self, event: QMouseEvent) -> None:
-        """Track the left button on the video; in the mini player a drag moves the window."""
+        """Track the left button on the video; in a small window a drag moves it (the floating
+        one's new place is remembered)."""
         kind, position = event.type(), event.globalPosition().toPoint()
         left = Qt.MouseButton.LeftButton
         if kind == QEvent.Type.MouseButtonPress and event.button() == left:
             self._pressed, self._dragged, self._click_on_release = True, False, False
-            if self._mini_restore is not None:
-                self._drag = (position, self.pos())
+            small = self._small_window()
+            if small is not None:
+                self._drag = (position, small.pos(), small)
         elif kind == QEvent.Type.MouseMove and self._drag is not None:
             if not event.buttons() & left:
                 self._drag = None
                 return
-            start, origin = self._drag
+            start, origin, small = self._drag
             delta = position - start
             if self._dragged or delta.manhattanLength() >= QApplication.startDragDistance():
                 self._dragged = True
                 self._click_on_release = False  # a drag, not a click
-                self.move(origin + delta)
+                small.move(origin + delta)
         elif kind == QEvent.Type.MouseButtonRelease and event.button() == left:
-            self._pressed, self._drag = False, None
+            drag, self._pressed, self._drag = self._drag, False, None
+            if drag is not None and self._dragged and drag[2] is not self:
+                self._remember_floating_rect(drag[2].geometry())  # opens there next time
             if self._click_on_release:
                 self._click_on_release = False
                 self.controller.video_clicked()
@@ -2581,6 +2671,7 @@ class TVWindow(QMainWindow):
     # ---- window actions (the controller's window_actions) -------------------------------------
 
     def toggle_fullscreen(self) -> None:
+        """Fullscreen, or back from it; the mini player goes fullscreen."""
         if self._closing:
             return
         if self._mini_restore is not None:
@@ -2641,7 +2732,10 @@ class TVWindow(QMainWindow):
             QTimer.singleShot(0, self, lambda: self._request_fullscreen(queued))
 
     def toggle_mini_player(self) -> None:
-        """Frameless and on top, a quarter of the screen wide in the bottom-right corner."""
+        """Small and on top in a corner of the screen: on macOS a small window of its own on
+        every desktop, the player page in it under the window's controls (ui/mini_player.py,
+        2.13.5), elsewhere the window itself, frameless, a quarter of the screen wide in the
+        bottom-right corner."""
         if self._closing or self._mini_waiting:
             return
         self.controller.leave_multiview()  # the mini player shows one picture
@@ -2673,6 +2767,9 @@ class TVWindow(QMainWindow):
         maximized = self.isMaximized()
         restore = self.normalGeometry() if maximized else self.geometry()
         self._mini_restore = (restore, self.windowFlags(), maximized)
+        if _macos_desktops():
+            self._float_mini()
+            return
         self.setWindowFlags(
             self.windowFlags()
             | Qt.WindowType.FramelessWindowHint
@@ -2685,6 +2782,22 @@ class TVWindow(QMainWindow):
             # macOS applies the end of the zoomed state on show, over the geometry set above.
             self.setGeometry(self._mini_rect())
 
+    def _float_mini(self) -> None:
+        """macOS (2.13.5): the mini player is the floating window, the player page in it under
+        the window's controls, as when a desktop change floats it; the window gives way to it
+        (hidden) until it ends. Nothing floats (the Library has the page): nothing changes."""
+        self.desktop_pip.arm(None)  # (nothing floats for the window meanwhile)
+        mini = self.mini_player
+        window = mini.window() if mini.start() else None
+        if window is None:
+            logger.info("The mini player waits: the player page is not free to float")
+            self._mini_restore = None
+            self._arm_desktop_pip()
+            return
+        self.hide()
+        window.activateWindow()  # its keys (QiTV is the active app: the choice was made in it)
+        self._update_menu_bar()
+
     def _leave_mini(self) -> None:
         if self._mini_restore is None:
             return
@@ -2692,11 +2805,28 @@ class TVWindow(QMainWindow):
         self._mini_restore = None
         self._drag = None
         self._dragged = self._click_on_release = False  # never swallow the next click
-        self.setWindowFlags(flags)
-        self.setGeometry(geometry)
-        if maximized:
-            self.setWindowState(Qt.WindowState.WindowMaximized)
-        self._show_again()
+        if _macos_desktops():
+            self.mini_player.end("back to the window")
+            if self._closing:
+                # Shown for its last steps: Qt's quit after the last window closes follows
+                # a window that was shown.
+                self.show()
+                return
+            if flags != self.windowFlags():  # Keep on Top, chosen meanwhile
+                self.setWindowFlags(flags)
+                self.setGeometry(geometry)
+                if maximized:
+                    self.setWindowState(Qt.WindowState.WindowMaximized)
+            self._show_again()
+            self.raise_()
+            self.activateWindow()
+            self._arm_desktop_pip()  # (the covered window's watch, with its setting)
+        else:
+            self.setWindowFlags(flags)
+            self.setGeometry(geometry)
+            if maximized:
+                self.setWindowState(Qt.WindowState.WindowMaximized)
+            self._show_again()
         self.window_cards.release()  # what QiTV said meanwhile, unasked, comes now
 
     def set_keep_on_top(self, on: bool) -> None:
@@ -2797,10 +2927,14 @@ class TVWindow(QMainWindow):
 
     def _on_picture_floating(self, floating: bool) -> None:
         note = self.floating_note
+        controls = self.float_controls
         if floating:
             note.setGeometry(self.player_page.rect())
             note.show()
             note.raise_()
+            controls = self._control_the_floating_picture()
+            if controls is not None:
+                controls.floated()
             self._caption_the_floating_picture()
             host = self._floating_captions
             if host is not None:
@@ -2809,6 +2943,37 @@ class TVWindow(QMainWindow):
                 QTimer.singleShot(0, host, host.sync_geometry)
         else:
             note.hide()
+            if controls is not None:
+                controls.docked()
+
+    def _control_the_floating_picture(self) -> Optional[FloatControls]:
+        """2.13.5: the player controls over the floating picture, the mini player's (the owner:
+        "THOSE SHOULD BE EQUAL"); made once, as it first floats (ui/float_controls.py)."""
+        player = self.desktop_pip.floating_window()
+        if player is None or self.float_controls is not None:
+            return self.float_controls
+        self.float_controls = FloatControls(
+            player,
+            self.overlays.transport,
+            come_back=lambda: self.desktop_pip.come_back("a button of its controls"),
+            mute=self._mute_the_floating_picture,
+            picture_mouse=player.picture_mouse,
+            join_all_spaces=macos_window.join_all_spaces,
+            parent=self,
+        )
+        return self.float_controls
+
+    def _hover_over_the_floating_picture(self, where: Optional[QPoint]) -> None:
+        """The pointer moved over the floating picture (or off it): its own controls' hover,
+        never the window's (nothing over the fullscreen window shows for it)."""
+        controls = self.float_controls
+        if controls is not None and not self._closing:
+            controls.hover_at(where)
+
+    def _mute_the_floating_picture(self) -> None:
+        """The floating picture's speaker: mute or unmute, as M (its mixer is the window's)."""
+        if not self._closing:
+            self.controller.handle(Action.MUTE)
 
     def _caption_the_floating_picture(self) -> None:
         """2.9: AI captions over the floating picture too (the owner: "no subs in pip"); the
@@ -2822,9 +2987,50 @@ class TVWindow(QMainWindow):
         host.setWindowFlag(Qt.WindowType.WindowTransparentForInput, True)
         overlay = CaptionsOverlay(host)
         host.add_overlay(overlay)
+        if self.float_controls is not None:
+            overlay.follow(self.float_controls.mirror)  # above its controls while they show
         macos_window.join_all_spaces(host)  # beside the floating picture on every desktop
         self._floating_captions = host
         self.captions.add_overlay(overlay)
+
+    def _lend_page(self) -> Optional[QWidget]:
+        """The player page, for the mini player's window (ui/mini_player.py). None in the
+        Library or the multiview's grid."""
+        if not self.pip_frame.set_floating(True):
+            return None
+        page = self.pages.lend_player()  # (the window is hidden meanwhile)
+        if page is None:
+            self.pip_frame.set_floating(False)
+        return page
+
+    def _take_back_page(self, page: QWidget) -> None:
+        self.pages.take_back_player(page)
+        self.pip_frame.set_floating(False)  # laid out in the page's own size again
+
+    def _on_mini_player_shown(self, shown: bool) -> None:
+        """The page is in the mini player's window, or back. The window's controls (its
+        overlay host, which holds the AI captions too) follow the page: over the small window,
+        on every desktop beside it, then over the window again. Ended by something else (the
+        Library, the multiview, a question), the mini player becomes the window again."""
+        host = self.host
+        window = self.mini_player.window()
+        if shown and window is not None:
+            # The menus' shortcuts too (Ctrl/⌘+2, Ctrl/⌘+R…): Qt takes an application
+            # shortcut only for a widget shown, and the window is hidden.
+            window.addActions(self.actions())
+            host.follow_window(window)
+            macos_window.join_all_spaces(host)  # beside the small window on every desktop
+            # QiTV's window now (none left on another desktop to bring): a press on it, or on
+            # its controls, brings QiTV forward, as the window did.
+            macos_window.let_presses_activate(window)
+            macos_window.let_presses_activate(host)
+            QTimer.singleShot(0, host, host.sync_geometry)  # (its Show came before its place)
+        else:
+            host.follow_window(self)
+            macos_window.leave_all_spaces(host)
+            if self._mini_restore is not None and _macos_desktops():
+                self._leave_mini()
+        self._update_menu_bar()
 
     def _mini_rect(self) -> QRect:
         screen = self.screen() or QGuiApplication.primaryScreen()
@@ -2856,6 +3062,8 @@ class TVWindow(QMainWindow):
         shown; a window with its setting on, whether it can be seen; else nothing."""
         if self._closing or not _macos_desktops():
             return None
+        if self._mini_restore is not None or self._mini_waiting:
+            return None  # the mini player, or on its way there: nothing floats for the window
         if self.isFullScreen():
             return DESKTOP
         if getattr(self.config_manager, "covered_pip", False):
@@ -2871,11 +3079,48 @@ class TVWindow(QMainWindow):
             self.desktop_pip.nudge()  # minimized, or back from the Dock: asked at once
 
     def _on_app_state(self, _state: Qt.ApplicationState) -> None:
-        if not self._closing and self.desktop_pip.reason() == COVERED:
+        if self._closing:
+            return
+        self.mini_player.activity_changed()  # its hover poll, while QiTV is inactive
+        self.desktop_pip.activity_changed()  # the floating picture's too
+        if self.desktop_pip.reason() == COVERED:
             self.desktop_pip.nudge()
+
+    # ---- what takes the focus while the picture floats (2.13.5: the log names it) -------------
+
+    def activateWindow(self) -> None:
+        self._note_floating_focus("is asked to activate")
+        super().activateWindow()
+
+    def raise_(self) -> None:
+        self._note_floating_focus("is asked to come to the front")
+        super().raise_()
+
+    def setFocus(self, *args: Any) -> None:
+        self._note_floating_focus("is asked for the keys")
+        super().setFocus(*args)
+
+    def _on_focus_changed(self, _old: Optional[QWidget], now: Optional[QWidget]) -> None:
+        if now is not None and now.window() is self:
+            self._note_floating_focus(f"has the keys ({type(now).__name__})")
+
+    def _note_floating_focus(self, what: str) -> None:
+        """While the picture floats on another desktop (or over a covered window), the TV window
+        taking the focus would bring that desktop back (the owner's float that docked again every
+        second or two): the log says so, and who asked (`_callers`)."""
+        pip = getattr(self, "desktop_pip", None)
+        if pip is None or not pip.floating():
+            return
+        logger.info(
+            "Desktop picture in picture: the TV window %s while the picture floats, by %s",
+            what,
+            _callers(),
+        )
 
     def changeEvent(self, event: QEvent) -> None:
         if event.type() == QEvent.Type.ActivationChange:
+            if self.isActiveWindow():
+                self._note_floating_focus("became the active window")
             self.desktop_pip.nudge()  # a desktop change takes or gives the focus
         if event.type() == QEvent.Type.WindowStateChange:
             self._update_menu_bar()
@@ -3265,6 +3510,14 @@ class TVWindow(QMainWindow):
         maximized as it was)."""
         if self._closing:
             return
+        window = self.mini_player.window()
+        if self.mini_player.shown() and window is not None:
+            # The macOS mini player is the window now (the hidden one would show, empty): the
+            # small window comes forward, as the mini player does elsewhere.
+            window.raise_()
+            macos_window.activate_app()
+            window.activateWindow()
+            return
         state = self.windowState()
         if state & Qt.WindowState.WindowMinimized:
             self.setWindowState(state & ~Qt.WindowState.WindowMinimized)
@@ -3377,7 +3630,8 @@ class TVWindow(QMainWindow):
     def _come_forward(self) -> None:
         """The window in front, not minimized, its picture back from the desktop's."""
         try:
-            self.desktop_pip.dock()
+            self.desktop_pip.dock("a question, or QiTV to the front")
+            self.mini_player.end("a question, or QiTV to the front")  # the window shows again
         except Exception as e:  # never in the way of the question
             logger.warning("Could not put the floating picture back: %s", safe_message(e))
         if self.isMinimized():
@@ -3428,6 +3682,7 @@ class TVWindow(QMainWindow):
             self._mini_waiting = False
             try:
                 self.desktop_pip.close()  # the picture back in its window first
+                self.mini_player.close()  # (the window shows for its last steps)
             except Exception as e:  # never in the way of closing
                 logger.warning("Could not put the floating picture back: %s", safe_message(e))
             self._shut_down()

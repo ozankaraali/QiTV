@@ -366,7 +366,7 @@ def _unix(date: Any) -> Optional[str]:
     return str(seconds) if seconds > 0 else None
 
 
-def _shortened(text: str) -> str:
+def shortened(text: str) -> str:
     """A description as the Library keeps it: OVERVIEW_CHARS at most (a server's 50,000
     titles stay a list of their size), cut at a word."""
     if len(text) <= OVERVIEW_CHARS:
@@ -381,7 +381,7 @@ def _image(raw: dict, base: str) -> str:
 
 def title_item(raw: dict, base: str, library_id: str) -> dict:
     """A film or a series of the server as a Library title."""
-    overview = _shortened(str(raw.get("Overview") or ""))
+    overview = shortened(str(raw.get("Overview") or ""))
     item: dict[str, Any] = {
         "id": str(raw.get("Id") or ""),
         "name": str(raw.get("Name") or ""),
@@ -425,11 +425,12 @@ def section_payload(libraries: list[dict], titles: dict[str, list[dict]], base: 
                 if item_id not in made:
                     made[item_id] = title_item(raw, base, library["id"])
                 listed.append(made[item_id])
-    return _payload(libraries, ordered)
+    return ordered_payload(libraries, ordered)
 
 
-def _payload(libraries: list[dict], ordered: dict[str, list[dict]]) -> dict:
-    """`section_payload` of Library titles already made, in each library's order."""
+def ordered_payload(libraries: list[dict], ordered: dict[str, list[dict]]) -> dict:
+    """`section_payload` of Library titles already made, in each library's order (Plex's
+    too, 2.14: services.plex)."""
     items: list[dict] = []
     sorted_channels: dict[str, list[int]] = {}
     seen: dict[str, int] = {}
@@ -506,7 +507,7 @@ def merged_payload(saved: Optional[dict], delta: dict) -> Optional[dict]:
         for library, ids in (delta.get("order") or {}).items()
     }
     libraries = list(delta.get("libraries") or [])
-    payload = _payload(libraries, ordered)
+    payload = ordered_payload(libraries, ordered)
     payload["server_since"] = delta.get("server_since")
     payload["server_full"] = saved.get("server_full")
     payload["server_libraries"] = [lib["id"] for lib in libraries]

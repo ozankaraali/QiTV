@@ -5643,7 +5643,10 @@ class TVController(QObject):
 
     def _open_mixer(self) -> None:
         """The transport's speaker: the mixer, the controls held up (the speaker lit) until it
-        closes."""
+        closes; a click while it shows closes it."""
+        if self._mixer.visible():
+            self._mixer.hide()  # closed → _on_mixer_closed lets the controls fade again
+            return
         self._mixer.open_main()
         if self._mixer.visible():
             self.overlays.transport.hold("volume")

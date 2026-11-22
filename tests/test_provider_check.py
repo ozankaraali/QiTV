@@ -221,6 +221,28 @@ class CheckTests(unittest.TestCase):
             self.assertEqual(check_kept(PANEL, False), Outcome(True))
         plain.assert_called_once_with(PANEL, False)
 
+    def test_a_plex_server_is_asked_with_its_token_never_signed_in_to(self):  # 2.14
+        from services import plex_workers
+
+        plex = {
+            "type": "PLEX",
+            "name": "Home Media",
+            "url": "https://10-0-0-5.example.plex.direct:32400",
+            "token": "server-token",
+            "device_id": "client-1",
+        }
+        with (
+            mock.patch.object(media_workers, "sign_in", side_effect=AssertionError),
+            mock.patch.object(media_workers, "check_access", side_effect=AssertionError),
+            mock.patch.object(plex_workers, "check_access", return_value=(True, "")) as asked,
+        ):
+            self.assertEqual(check_kept(plex, True), Outcome(True))
+            asked.assert_called_once_with(plex, True)
+            self.assertEqual(check({**plex, "ssl_verify": False}, True), Outcome(True))
+            self.assertEqual(asked.call_args.args[1], False)
+        with mock.patch.object(plex_workers, "check_access", return_value=(False, "Again")):
+            self.assertEqual(check(plex, True), Outcome(False, "Again"))
+
 
 class ProviderCheckTests(unittest.TestCase):
     @classmethod

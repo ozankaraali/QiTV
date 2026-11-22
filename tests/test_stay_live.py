@@ -178,11 +178,9 @@ class SteeringTests(unittest.TestCase):
         stay, clock = live(), Clock()
         lag, rates = drive(stay, T + 2.0, 200.0, clock=clock)
         self.assertEqual(rates[: round(15.0 / TICK) - 1], [1.0] * (round(15.0 / TICK) - 1))
-        # Ramped in and out in three steps a second apart: six rate changes in all (each
-        # libVLC rate change retunes its audio: few and small ones).
-        self.assertEqual(calls(rates), [1.01, 1.02, 1.03, 1.02, 1.01, 1.0])
-        first = rates.index(1.01)
-        self.assertEqual(rates[first : first + 9], [1.01] * 4 + [1.02] * 4 + [1.03])
+        # In one step and out in one (2026-11-22: each libVLC 3 rate change makes its audio
+        # output correct a drift audibly; `OneStepTests`).
+        self.assertEqual(calls(rates), [1.03, 1.0])
         self.assertEqual(changes(rates), 2)  # one nudge: to 1.03 and back
         self.assertAlmostEqual(lag, T, delta=0.1)  # sized to end at the target
         self.assertEqual(rates[-1], 1.0)
@@ -191,7 +189,7 @@ class SteeringTests(unittest.TestCase):
     def test_ahead_of_the_band_the_nudge_adds_room_at_0_97(self):
         stay, clock = live(6.0), Clock()
         lag, rates = drive(stay, 4.0, 200.0, clock=clock)
-        self.assertEqual(calls(rates), [0.99, 0.98, 0.97, 0.98, 0.99, 1.0])
+        self.assertEqual(calls(rates), [0.97, 1.0])
         self.assertAlmostEqual(lag, 6.0, delta=0.1)
 
     def test_the_nudge_rate_is_reported_while_it_ramps(self):
@@ -204,7 +202,7 @@ class SteeringTests(unittest.TestCase):
         lag, rates = drive(stay, T + 12.0, 200.0, clock=clock)
         first = next(i for i, rate in enumerate(rates) if rate != 1.0)
         self.assertLessEqual(first * TICK, 3.25)
-        self.assertEqual(calls(rates), [1.0333, 1.0667, 1.1, 1.0667, 1.0333, 1.0])
+        self.assertEqual(calls(rates), [1.1, 1.0])
         self.assertAlmostEqual(lag, T, delta=0.15)
 
     def test_one_nudge_per_five_minutes_then_the_band_widens(self):
@@ -255,14 +253,14 @@ class SteeringTests(unittest.TestCase):
                 self.assertEqual(set(before + after), {1.0})  # a step is not chased
                 _, rest = drive(stay, T, 30.0, clock=clock)  # back inside for a while
         _, rates = drive(stay, T + 2.0, 16.0, clock=clock)  # 15 s in a row: the nudge
-        self.assertIn(1.01, rates)
+        self.assertIn(1.03, rates)
 
     def test_a_nudge_ends_when_a_step_takes_the_lag_to_the_target(self):
         stay, clock = live(), Clock()
         _, rates = drive(stay, T + 3.0, 20.0, clock=clock)
         self.assertEqual(rates[-1], 1.03)
         _, rates = drive(stay, T - 0.5, 3.0, clock=clock)  # a reopen landed at the target
-        self.assertEqual(calls(rates, start=1.03), [1.02, 1.01, 1.0])
+        self.assertEqual(calls(rates, start=1.03), [1.0])
         self.assertEqual(stay.nudge, 1.0)
 
     def test_a_nudge_ramps_out_once_whatever_the_lag_does_meanwhile(self):
@@ -276,7 +274,7 @@ class SteeringTests(unittest.TestCase):
             rates.append(
                 stay.update(7.0 + (-0.05 if k % 2 else 0.05), False, now=clock.tick()).rate
             )
-        self.assertEqual(calls(rates, start=0.95), [0.9667, 0.9833, 1.0])
+        self.assertEqual(calls(rates, start=0.95), [1.0])
 
     def test_buffering_holds_a_nudge_where_it_was(self):
         stay, clock = live(), Clock()
@@ -312,7 +310,7 @@ class SteeringTests(unittest.TestCase):
         lag, rates = drive(stay, 5.2, 200.0, clock=clock)
         first = next(i for i, rate in enumerate(rates) if rate != 1.0)
         self.assertLessEqual(first * TICK, 3.25)
-        self.assertEqual(calls(rates), [0.9833, 0.9667, 0.95, 0.9667, 0.9833, 1.0])
+        self.assertEqual(calls(rates), [0.95, 1.0])
         self.assertAlmostEqual(lag, 10.0, delta=0.15)
 
     def test_with_room_enough_a_bursty_source_waits_for_its_budget(self):
@@ -348,8 +346,8 @@ class SteeringTests(unittest.TestCase):
         lag, rates = drive(stay, 1.5, 120.0, clock=clock)
         # Once VLC played a second short of the target (the first tick after a stall holds
         # one sample of the lag filter, and is no measure on its own).
-        self.assertEqual(rates[:4], [1.0, 1.0, 1.0, 0.9833])
-        self.assertEqual(calls(rates), [0.9833, 0.9667, 0.95, 0.9667, 0.9833, 1.0])
+        self.assertEqual(rates[:4], [1.0, 1.0, 1.0, 0.95])
+        self.assertEqual(calls(rates), [0.95, 1.0])
         self.assertAlmostEqual(lag, T + 1.5, delta=0.15)
 
     def test_trouble_with_room_enough_owes_nothing(self):
@@ -364,7 +362,7 @@ class SteeringTests(unittest.TestCase):
         self.assertEqual(rates[-1], 1.03)
         stay.trouble()
         lag, rates = drive(stay, 0.5, 120.0, clock=clock)  # short of the target now
-        self.assertEqual(calls(rates, start=1.03)[:3], [1.02, 1.01, 1.0])
+        self.assertEqual(calls(rates, start=1.03)[:2], [1.0, 0.95])
         self.assertEqual(min(rates), 0.95)
         self.assertAlmostEqual(lag, T, delta=0.15)
         # The cut catch-up spent no budget: a drift behind again gets its nudge.
@@ -407,7 +405,9 @@ class SteeringTests(unittest.TestCase):
         _, rates = drive(stay, T + 3.0, 20.0, clock=clock)
         self.assertEqual(rates[-1], 1.03)
         stay.trouble()
-        rates += drive(stay, T - 1.0, 1.25, clock=clock)[1]  # short long enough: it is cut
+        # Short: it is cut (in one step, at once), and the lag comes back before the
+        # slow-down is due.
+        rates += drive(stay, T - 1.0, 0.75, clock=clock)[1]
         self.assertLess(rates[-1], 1.03)
         rates += drive(stay, T + 2.0, 60.0, clock=clock)[1]  # the lag was back: no 0.95x
         self.assertEqual(min(rates), 1.0)
@@ -432,14 +432,14 @@ class SteeringTests(unittest.TestCase):
     def test_a_nudge_that_ran_its_whole_size_counts_against_the_budget(self):
         stay, clock = live(), Clock()
         lag, rates = drive(stay, T + 1.5, 16.0, clock=clock)
-        for _ in range(400):  # until it took its size and ramps out
+        for _ in range(400):  # until it took its size: back at 1x
             lag, more = drive(stay, lag, TICK, clock=clock)
             rates += more
-            if stay._nudge is not None and stay._nudge.ending:
+            if rates[-2:] == [1.03, 1.0]:
                 break
-        self.assertTrue(stay._nudge.spent)
+        self.assertAlmostEqual(lag, T, delta=0.1)  # its whole size
         stay.trouble()
-        lag, more = drive(stay, T - 1.5, 40.0, clock=clock)  # short: 0.95x after its ramp out
+        lag, more = drive(stay, T - 1.5, 40.0, clock=clock)  # short: 0.95x
         self.assertEqual(min(more), 0.95)
         _, more = drive(stay, T + 1.5, 60.0, clock=clock)  # behind again within 5 minutes
         self.assertEqual(max(more), 1.0)  # it counted: the band widens instead
@@ -719,6 +719,41 @@ class BurstClassTests(unittest.TestCase):
         _, out = self.feed(lambda t: 7.1 if int(t) % 2 else 7.0, 120.0)
         self.assertEqual(set(out), {7.0})
 
+    def test_a_burst_that_came_after_the_start_is_kept_for_the_tune(self):
+        # Seen live (2026-11-21): a raw TS channel sent ~10 s bursts for 1-3 minutes at a time,
+        # steadily between. Each burst it dropped moved the target 7 s at once (a jump to
+        # live, 8-13 s of the programme skipped), each one it took again 7 s back (minutes
+        # at 0.95x). A burst taken in after the start (it lasted two bursts and ten seconds)
+        # is the source's for the tune: none, or a smaller one, no longer counts.
+        def series(t):
+            return 10.0 if 10.0 <= t < 130.0 or 400.0 <= t < 500.0 else 0.0
+
+        flt, out = self.feed(series, 900.0)
+        on = out.index(10.0)
+        self.assertAlmostEqual(on * TICK, 30.0, delta=TICK)  # as ever
+        self.assertEqual(set(out[on:]), {10.0})  # then kept, through every steady stretch
+        self.assertEqual(flt.kept, 10.0)
+        flt.reset()  # the filter starting afresh (a step, a stall) keeps it too
+        self.assertEqual((flt.burst, flt.kept), (10.0, 10.0))
+
+    def test_a_larger_burst_still_counts_once_one_is_kept(self):
+        def series(t):
+            return 0.0 if t < 10.0 else 10.0 if t < 100.0 else 0.0 if t < 300.0 else 11.0
+
+        flt, out = self.feed(series, 400.0)
+        self.assertEqual(out[-1], 11.0)
+        self.assertEqual(min(out[out.index(10.0) :]), 10.0)
+        self.assertEqual(flt.kept, 11.0)
+
+    def test_a_first_report_is_not_kept(self):
+        # A one-off first "burst" (a backlog the helper measured at connect) still goes after
+        # half a minute without it, and so does an HLS source's first target duration.
+        flt, out = self.feed(lambda t: 6.0 if t < 60.0 else 0.0, 120.0)
+        self.assertEqual(out[-1], 0.0)
+        self.assertEqual(flt.kept, 0.0)
+        flt, _ = self.feed(lambda t: 6.0, 60.0)
+        self.assertEqual(flt.kept, 0.0)  # kept only once it came by a rise
+
 
 class SettledLagTests(unittest.TestCase):
     """The lag as shown (2.1): 2.0 printed every tick's estimate with a decimal, 90 changes a
@@ -944,14 +979,19 @@ class LandingTests(unittest.TestCase):
         _, rates = drive(stay, lag + 8.6, 10.0, clock=clock)  # 8.6 s more: far from there
         self.assertEqual(max(rates), 1.10)
 
-    def test_after_the_first_minute_a_backlog_is_caught_up_as_ever(self):
-        # The landing's allowance lasts the start window only. A reconnect's
-        # backlog 2 minutes on is drift: 1.10x after 3 s, and the reopen at 20 s beyond.
-        stay, clock = live(), Clock()
-        stay.landed(9.0)
-        lag, _ = drive(stay, T + 9.0, 120.0, clock=clock)
-        lag, rates = drive(stay, lag + 8.0, 10.0, clock=clock)
-        self.assertEqual(max(rates), 1.10)
+    def test_after_the_first_minute_a_lag_the_landing_does_not_explain_is_caught_up_as_ever(self):
+        # The landing's allowance lasts the start window only: VLC falling 9 s further behind
+        # 2 minutes on (the live edge keeping real time: no backlog) is 1.10x after 3 s, and
+        # the reopen at 20 s beyond. What the landing left and its nudge has not taken off
+        # yet (5.9 s) is still the landing's (2026-11-22): 8 s more is no further than far
+        # beyond it, caught up with the rest at 1.03x.
+        for more, rate in ((8.0, 1.03), (9.0, 1.10)):
+            with self.subTest(more=more):
+                stay, clock = live(), Clock()
+                stay.landed(9.0)
+                lag, _ = drive(stay, T + 9.0, 120.0, clock=clock)
+                lag, rates = drive(stay, lag + more, 10.0, clock=clock)
+                self.assertEqual(max(rates), rate)
         stay, clock = live(), Clock()
         stay.landed(9.0)
         drive(stay, T + 9.0, 120.0, clock=clock)
@@ -1096,7 +1136,7 @@ class LandingTests(unittest.TestCase):
     def test_a_learned_rise_within_the_band_is_drift(self):
         # A rise counts as one after the landing only beyond the band; a smaller one
         # (the learned target creeping) builds nothing by itself.
-        for rise, rates_seen in ((0.8, {1.0}), (1.2, {1.0, 0.99, 0.98, 0.97})):
+        for rise, rates_seen in ((0.8, {1.0}), (1.2, {1.0, 0.97})):
             with self.subTest(rise=rise):
                 stay, clock = live(), Clock()
                 stay.user_go_live()
@@ -1190,7 +1230,7 @@ class JunctionTests(unittest.TestCase):
         stay, clock = live(6.0), Clock()
         stay.junctions = True
         lag, rates = drive(stay, 4.0, 200.0, clock=clock)
-        self.assertEqual(calls(rates), [0.99, 0.98, 0.97, 0.98, 0.99, 1.0])
+        self.assertEqual(calls(rates), [0.97, 1.0])
 
     def test_a_catch_up_under_way_ramps_out_once_restarts_take_the_lag(self):
         stay, clock = live(), Clock()
@@ -1308,15 +1348,17 @@ class JumpTests(unittest.TestCase):
         self.assertEqual(max(rates), 1.03)
         self.assertLess(lag, T + 9.7 - 4.0)
 
-    def test_a_landing_far_above_the_target_jumps_after_its_minute_on_a_keyframe_that_helps(self):
+    def test_a_landing_far_above_the_target_is_caught_up_by_its_one_nudge_never_jumped(self):
+        # 2026-11-22: after its minute it jumped (on a keyframe that helped); a raw TS source
+        # that hands each open its own backlog landed the jump far behind again, 8 s of the
+        # programme skipped for nothing. The landing's nudge goes on to the target.
         stay, clock = live(), Clock()
         stay.landed(9.7)
         landing = keyframes(10.0, since=1003.0)
-        lag, rates, jumps = steer(stay, T + 9.7, 120.0, clock=clock, landing=landing)
-        self.assertEqual(max(rates), 1.03)  # gently while the landing's minute lasts
-        self.assertEqual(len(jumps), 1)
-        self.assertGreaterEqual(jumps[0] - 1000.0, 60.0)
-        self.assertLessEqual(jumps[0] - 1000.0, 60.0 + 3.0 + 10.25)
+        lag, rates, jumps = steer(stay, T + 9.7, 400.0, clock=clock, landing=landing)
+        self.assertEqual(jumps, [])
+        self.assertEqual(max(rates), 1.03)
+        self.assertEqual(changes(rates), 2)  # one nudge
         self.assertLessEqual(abs(lag - T), stay.band(1))
 
     def test_no_jump_while_a_stream_just_opened(self):
@@ -1446,11 +1488,11 @@ class JumpTests(unittest.TestCase):
 
     def test_a_gentle_nudge_a_jump_cut_counts_against_the_budget(self):
         stay, clock = live(), Clock()
-        stay.landed(9.7)
-        lag, rates, jumps = steer(
-            stay, T + 9.7, 80.0, clock=clock, landing=keyframes(10.0, since=1003.0)
-        )
-        self.assertEqual((len(jumps), max(rates)), (1, 1.03))  # it ran, then the jump
+        _, rates = drive(stay, T + 3.5, 20.0, clock=clock)
+        self.assertEqual(max(rates), 1.03)  # a lasting lag's gentle nudge, under way ...
+        # ... when VLC falls 10 s further behind (a freeze: the live edge kept real time)
+        lag, rates, jumps = steer(stay, T + 13.0, 20.0, clock=clock, landing=lambda *_: T)
+        self.assertEqual(len(jumps), 1)
         _, rates = drive(stay, T + 2.0, 120.0, clock=clock)  # a drift after it
         self.assertEqual(set(rates), {1.0})  # within the budget's 5 minutes: tolerated
 
@@ -1464,6 +1506,259 @@ class JumpTests(unittest.TestCase):
                 lag, rates, jumps = steer(stay, T, 20.0, clock=clock, landing=lambda *_: T)
                 lag, rates, jumps = steer(stay, T + 10.0, 30.0, clock=clock, landing=lambda *_: T)
                 self.assertEqual((jumps, max(rates)), ([], 1.10))
+
+
+def follow(stay, lag, seconds, *, clock, ahead=0.0, landing=None):
+    """`steer` with the live edge stay-live is told (`StayLive.edge`): at real time, `ahead` of
+    it by what the source sent ahead (a backlog: set it, and the lag, before calling)."""
+    rates, jumps = [], []
+    if landing is not None:
+        stay.jump_lag = lambda: landing
+    for _ in range(round(seconds / TICK)):
+        now = clock.tick()
+        stay.edge = now + ahead
+        decision = stay.update(lag, False, now=now)
+        rates.append(decision.rate)
+        if decision.reopen_live:
+            jumps.append(now)
+            lag = landing if landing is not None else T
+            stay.user_go_live()
+            stay.landed(lag - stay.target, build=False)
+            continue
+        lag -= (decision.rate - 1.0) * TICK
+    return lag, rates, jumps
+
+
+class BacklogTests(unittest.TestCase):
+    """2026-11-22, the owner's ruling: far behind by a backlog the source sent (the live edge
+    ahead of real time since the lag was last near the target), VLC playing on, is caught up
+    by one gentle nudge to the target, never a jump, which skips the programme: 1.03x, 1.05x
+    where that would take over 8 minutes, up to 30 s behind the target. A freeze or a stall
+    sends nothing ahead: they jump as ever."""
+
+    def backlog(self, more, *, seconds=900.0):
+        stay, clock = live(), Clock()
+        follow(stay, T, 30.0, clock=clock)  # at the target: where the edge was
+        return stay, follow(stay, T + more, seconds, clock=clock, ahead=more, landing=T)
+
+    def test_a_backlog_far_behind_is_one_gentle_nudge_to_the_target(self):
+        stay, (lag, rates, jumps) = self.backlog(12.0)
+        self.assertEqual(jumps, [])  # though a clean jump to the target was there
+        self.assertEqual((max(rates), changes(rates)), (1.03, 2))
+        self.assertLessEqual(abs(lag - T), stay.band(1))
+        self.assertEqual(stay.nudge_reason, "")
+
+    def test_a_backlog_that_would_take_over_eight_minutes_is_caught_up_at_1_05(self):
+        stay, (lag, rates, jumps) = self.backlog(16.0)
+        self.assertEqual(jumps, [])
+        self.assertEqual((max(rates), changes(rates)), (1.05, 2))
+        self.assertLessEqual(abs(lag - T), stay.band(1))
+
+    def test_a_backlog_past_the_20_s_bound_is_caught_up_to_30_s_then_reopened(self):
+        stay, (lag, rates, jumps) = self.backlog(25.0)
+        self.assertEqual(jumps, [])
+        self.assertEqual(max(rates), 1.05)
+        stay, (_, _, jumps) = self.backlog(31.0, seconds=5.0)
+        self.assertEqual(len(jumps), 1)
+
+    def test_a_freeze_far_behind_still_jumps(self):
+        stay, clock = live(), Clock()
+        follow(stay, T, 30.0, clock=clock)
+        _, rates, jumps = follow(stay, T + 12.0, 20.0, clock=clock, landing=T)  # edge as ever
+        self.assertEqual(len(jumps), 1)
+        self.assertEqual(set(rates), {1.0})
+
+    def test_while_the_source_floods_nothing_reopens_or_jumps(self):
+        stay, clock = live(), Clock()
+        follow(stay, T, 30.0, clock=clock)
+        stay.flooding = True
+        _, rates, jumps = follow(stay, T + 45.0, 20.0, clock=clock, landing=T)
+        self.assertEqual((jumps, set(rates)), ([], {1.0}))  # judged once it settles
+        stay.flooding = False
+        _, rates, jumps = follow(stay, T + 25.0, 900.0, clock=clock, landing=T)
+        self.assertEqual(jumps, [])  # the flood's 25 s: the landing's, caught up
+        self.assertEqual((max(rates), changes(rates)), (1.05, 2))
+
+    def test_a_reopen_that_lands_far_behind_again_is_never_followed_by_another(self):
+        stay, clock = live(), Clock()
+        follow(stay, T, 30.0, clock=clock)
+        _, _, jumps = follow(stay, T + 32.0, 1.0, clock=clock, landing=T)
+        self.assertEqual(len(jumps), 1)  # beyond 30 s: the reopen at live
+        # ... whose landing goes far behind again (the backlog still arriving, unseen)
+        lag, rates, jumps = follow(stay, T + 32.0, 900.0, clock=clock, ahead=32.0, landing=T)
+        self.assertEqual(jumps, [])
+        self.assertEqual((max(rates), changes(rates)), (1.05, 2))
+        # Back in the band the event is over: a stall far behind later reopens as ever.
+        self.assertLessEqual(abs(lag - T), stay.band(1))
+        _, _, jumps = follow(stay, T + 25.0, 5.0, clock=clock, ahead=32.0, landing=T)
+        self.assertEqual(len(jumps), 1)
+
+    def picked_again(self, excess=0.0):
+        """A tune whose start was picked again (the session's re-pick, right after the
+        landing it says, `excess` above the target)."""
+        stay, clock = live(), Clock()
+        stay.landed(excess, build=False)
+        stay.picked_again()
+        return stay, clock
+
+    def test_a_start_picked_again_catches_a_backlog_up_however_far(self):
+        # The owner's call: one skip at a tune at most, the re-pick; within the start after
+        # it even a backlog past 30 s is caught up, never reopened.
+        stay, clock = self.picked_again()
+        follow(stay, T, 10.0, clock=clock)
+        _, rates, jumps = follow(stay, T + 40.0, 1200.0, clock=clock, ahead=40.0, landing=T)
+        self.assertEqual(jumps, [])
+        self.assertEqual((max(rates), changes(rates)), (1.05, 2))
+
+    def test_a_start_picked_again_that_lands_far_behind_again_is_caught_up(self):
+        stay, clock = self.picked_again(35.0)
+        _, rates, jumps = follow(stay, T + 35.0, 1200.0, clock=clock, landing=T)
+        self.assertEqual(jumps, [])
+        self.assertEqual(max(rates), 1.05)
+
+    def test_after_the_start_a_backlog_past_30_s_reopens_once_as_ever(self):
+        # The ruling: the 30 s bound stays for a later backlog in the tune (40 s at 1.05x is
+        # over 13 minutes): one reopen, never a loop.
+        stay, clock = self.picked_again()
+        follow(stay, T, 90.0, clock=clock)  # past the landing's window: the start is over
+        _, _, jumps = follow(stay, T + 40.0, 1200.0, clock=clock, ahead=40.0, landing=T)
+        self.assertEqual(len(jumps), 1)
+
+    def test_after_the_start_was_picked_again_a_freeze_far_behind_still_jumps(self):
+        stay, clock = self.picked_again()
+        follow(stay, T, 90.0, clock=clock)
+        _, rates, jumps = follow(stay, T + 12.0, 20.0, clock=clock, landing=T)
+        self.assertEqual(len(jumps), 1)
+        self.assertEqual(set(rates), {1.0})
+
+    def test_a_reopen_landing_on_keyframe_grain_leaves_the_bound_as_it_was(self):
+        # Review I1: a stall back at live 22 s behind, the bound's reopen landing on a keyframe
+        # 9 s above the target (10 s keyframes), nothing sent ahead: a stall 45 s further
+        # behind later reopened never (a 27 minute catch-up). Only a backlog since the reopen
+        # turns the reopens off.
+        stay, clock = live(), Clock()
+        follow(stay, T, 90.0, clock=clock)
+        lag, _, jumps = follow(stay, T + 22.0, 120.0, clock=clock, landing=T + 9.0)
+        self.assertEqual(len(jumps), 1)
+        _, _, jumps = follow(stay, lag + 45.0, 5.0, clock=clock, landing=T)
+        self.assertEqual(len(jumps), 1)
+
+    def test_a_re_pick_landing_on_keyframe_grain_leaves_a_later_backlog_its_reopen(self):
+        # Within the start only what the 30 s bound would reopen is caught up however far: a
+        # re-pick 9 s above the target (10 s keyframes) is caught up gently, and a backlog past
+        # 30 s after the start reopens once as ever.
+        stay, clock = self.picked_again(9.0)
+        lag, rates, jumps = follow(stay, T + 9.0, 90.0, clock=clock, landing=T)
+        self.assertEqual((jumps, max(rates)), ([], 1.03))
+        _, _, jumps = follow(stay, lag + 40.0, 1200.0, clock=clock, ahead=40.0, landing=T)
+        self.assertEqual(len(jumps), 1)
+
+    def test_a_nudge_under_way_a_backlog_takes_over_steps_up_to_1_05(self):
+        # Review M1: a 1.03x nudge under way, then a 20 s backlog: it stayed at 1.03x, 13
+        # minutes in all.
+        stay, clock = live(), Clock()
+        follow(stay, T, 30.0, clock=clock)
+        lag, rates, _ = follow(stay, T + 3.0, 40.0, clock=clock, landing=T)
+        self.assertEqual(rates[-1], 1.03)
+        _, rates, jumps = follow(stay, lag + 20.0, 60.0, clock=clock, ahead=20.0, landing=T)
+        self.assertEqual(jumps, [])
+        self.assertEqual(max(rates), 1.05)
+
+    def test_a_locked_rate_jumps_a_backlog_as_ever(self):
+        stay, clock = live(), Clock()
+        stay.lock_rate()
+        follow(stay, T, 30.0, clock=clock)
+        _, rates, jumps = follow(stay, T + 12.0, 20.0, clock=clock, ahead=12.0, landing=T)
+        self.assertEqual(len(jumps), 1)
+        self.assertEqual(set(rates), {1.0})
+
+
+class OneStepTests(unittest.TestCase):
+    """2026-11-22, heard on a steady HLS channel: each rate step made VLC 3's audio output
+    correct a 40-100 ms drift audibly (its log: "playback too early/late", "timing screwed"),
+    and a nudge ramped in and out in 3 steps made 6 of them. In the owner's VLC log about a
+    third of the scale changes, 1% steps and larger alike, were followed by a correction; in
+    the sound itself (hel, a chirp written to a file) the 3-step ramp and one step play the
+    same at 1x's ends and nothing at the inner steps. A nudge goes in one step and out in one."""
+
+    def test_a_nudge_is_one_rate_change_in_and_one_out(self):
+        for target, lag, burst, peak in (
+            (T, T + 2.0, 0.0, 1.03),
+            (T, T + 12.0, 0.0, 1.10),
+            (6.0, 4.0, 0.0, 0.97),
+            (10.0, 5.2, 10.0, 0.95),  # too little room for the burst
+        ):
+            with self.subTest(peak=peak):
+                stay, clock = live(target, burst=burst), Clock()
+                lag, rates = drive(stay, lag, 300.0, clock=clock)
+                self.assertEqual(calls(rates), [peak, 1.0])
+                self.assertAlmostEqual(lag, target, delta=0.15)
+
+
+class CalmBandTests(unittest.TestCase):
+    """2026-11-22, the same channel (target 12 s): a 0.97x nudge came for being 1 s short of
+    the target, four times an evening, and the start's room was built for 1.1-1.3 s. On a
+    source without a kept burst (`steady`, the caller's) a gentle nudge starts only beyond
+    max(1.5 s, or the target if less, and 15% of it) behind the target, and beyond 15% of it
+    short (no less than the band; never into the AI captions' floor, `caption_floor`). Far
+    behind, too little room and VLC run dry act as ever."""
+
+    @staticmethod
+    def steady(target):
+        stay = live(target)
+        stay.steady = True
+        return stay
+
+    def test_a_steady_source_a_second_short_of_a_12_s_target_is_left_so(self):
+        stay, clock = self.steady(12.0), Clock()
+        for lag in (11.0, 10.3):
+            _, rates = drive(stay, lag, 300.0, clock=clock)
+            self.assertEqual(set(rates), {1.0})
+        lag, rates = drive(stay, 10.0, 300.0, clock=clock)  # 2 s short: beyond 1.8 s
+        self.assertEqual(min(rates), 0.97)
+        self.assertAlmostEqual(lag, 12.0, delta=0.15)
+
+    def test_the_starts_room_on_a_steady_source_is_built_only_beyond_the_band(self):
+        stay, clock = self.steady(12.0), Clock()
+        stay.landed(-1.2)
+        _, rates = drive(stay, 10.8, 120.0, clock=clock)
+        self.assertEqual(set(rates), {1.0})
+
+    def test_a_steady_source_behind_by_less_than_1_5_s_is_left_so(self):
+        stay, clock = self.steady(6.0), Clock()
+        _, rates = drive(stay, 7.3, 300.0, clock=clock)
+        self.assertEqual(set(rates), {1.0})
+        lag, rates = drive(stay, 7.7, 300.0, clock=clock)
+        self.assertEqual(max(rates), 1.03)
+        self.assertAlmostEqual(lag, 6.0, delta=0.15)
+
+    def test_low_latency_keeps_its_band(self):
+        stay, clock = self.steady(TARGETS["low"]), Clock()
+        _, rates = drive(stay, TARGETS["low"] + 1.2, 200.0, clock=clock)
+        self.assertEqual(max(rates), 1.03)
+
+    def test_short_of_the_ai_captions_floor_the_band_is_as_it_was(self):
+        stay, clock = self.steady(12.0), Clock()
+        stay.caption_floor = 12.0  # the captions' lead
+        _, rates = drive(stay, 10.8, 200.0, clock=clock)
+        self.assertEqual(min(rates), 0.97)
+
+    def test_with_a_kept_burst_the_band_is_as_it_was(self):
+        stay, clock = live(12.0), Clock()  # not `steady`
+        _, rates = drive(stay, 10.8, 200.0, clock=clock)
+        self.assertEqual(min(rates), 0.97)
+
+    def test_too_little_room_far_behind_and_trouble_act_as_ever(self):
+        stay, clock = self.steady(T), Clock()
+        lag, rates = drive(stay, 0.2, 100.0, clock=clock)  # at the live edge
+        self.assertEqual(min(rates), 0.95)
+        stay, clock = self.steady(12.0), Clock()
+        _, rates = drive(stay, 12.0 + 9.0, 60.0, clock=clock)  # far behind
+        self.assertEqual(max(rates), 1.10)
+        stay, clock = self.steady(12.0), Clock()
+        stay.trouble()  # VLC ran dry
+        _, rates = drive(stay, 10.8, 120.0, clock=clock)
+        self.assertEqual(min(rates), 0.95)
 
 
 class SteeredTargetTests(unittest.TestCase):

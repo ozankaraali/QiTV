@@ -59,7 +59,7 @@ from shiboken6 import isValid
 
 from services.i18n import N_, translate
 from ui.keymap import Action
-from ui.overlays.base import Overlay, announce
+from ui.overlays.base import Overlay, announce, host_windows
 from ui.overlays.drawer_look import ROW_H_U, TITLE_FONT_U, paint_highlight
 from ui.overlays.painting import Units, draw_icon, ui_units
 from ui.theme import PALETTE, qcolor
@@ -96,6 +96,7 @@ _LAST = (Action.NAV_END, Action.NAV_PAGE_DOWN)
 _CHOOSE = (Action.NAV_ACTIVATE, Action.OK, Action.NAV_RIGHT, Action.SEEK_FWD)
 _BACK = (Action.ESCAPE, Action.NAV_LEFT, Action.NAV_BACKSPACE, Action.PREVIOUS, Action.SEEK_BACK)
 _PRESSES = (QEvent.Type.MouseButtonPress, QEvent.Type.MouseButtonDblClick)
+_MENU_BUTTONS = ("external", "cast")  # the player controls' buttons that open a menu
 _CLICKS = (Qt.MouseButton.LeftButton, Qt.MouseButton.RightButton)
 
 
@@ -810,7 +811,11 @@ class PopupMenu(Overlay):
         elif kind == QEvent.Type.Show and self._over_it(obj):
             self.close_menu()  # what has the keys came over it (it shows on)
         elif kind in _PRESSES and isinstance(event, QMouseEvent) and self._outside(obj):
-            if kind == QEvent.Type.MouseButtonDblClick and self._just_opened():
+            if (
+                kind == QEvent.Type.MouseButtonDblClick
+                and self._just_opened()
+                and not self._on_menu_button(obj, event)
+            ):
                 return True  # the second press of the double-click that opened it
             if event.button() == Qt.MouseButton.BackButton:
                 self.back()
@@ -821,6 +826,13 @@ class PopupMenu(Overlay):
             self.close_menu()  # as a click elsewhere: the list under it stays where it was
             return True
         return False
+
+    @staticmethod
+    def _on_menu_button(obj: QObject, event: QMouseEvent) -> bool:
+        """A press on a player-controls button that opens a menu (the external player, the cast
+        button): quickly again, it is another click, which closes the menu."""
+        control_at = getattr(obj, "control_at", None)
+        return callable(control_at) and control_at(event.position()) in _MENU_BUTTONS
 
     def _over_it(self, obj: QObject) -> bool:
         """`obj` takes the keys while it shows (Overlay.takes_keys) and is in this window:
@@ -837,11 +849,7 @@ class PopupMenu(Overlay):
         on the menu, nor in a dialog or another window."""
         if not isinstance(obj, QWidget) or obj is self or self.isAncestorOf(obj):
             return False
-        host = self.window()
-        ours = {host}
-        outer = host.parentWidget()
-        if outer is not None:
-            ours.add(outer.window())
+        ours = host_windows(self.window())
         top = obj.window()
         owner = top.parentWidget()
         return top in ours or (owner is not None and owner.window() in ours)

@@ -43,7 +43,7 @@ from PySide6.QtGui import QFont, QFontMetricsF, QMouseEvent, QPainter, QPaintEve
 from PySide6.QtWidgets import QApplication, QWidget
 
 from services.i18n import N_
-from ui.overlays.base import Overlay
+from ui.overlays.base import Overlay, host_windows
 from ui.overlays.painting import LAYOUT_ICONS, Units, draw_icon, fill_round, layout_frame, ui_units
 from ui.pointer import NAV_BUTTONS
 from ui.theme import FOCUS_FILL_ALPHA, PALETTE, qcolor
@@ -393,15 +393,16 @@ class LayoutRow(Overlay):
             and event.button() not in NAV_BUTTONS  # Back/Forward: the shell's drawer layers
             and self._outside(obj)
         ):
+            control = self._control_under(obj, event)
             if (
                 kind == QEvent.Type.MouseButtonDblClick
+                and control != self._button  # its own button again, quickly: it closes
                 and self._shown.isValid()
                 and self._shown.elapsed() < QApplication.doubleClickInterval()
                 and not self._hint
             ):
                 return True  # the second press of the double-click that opened it
             hint = self._hint
-            control = self._control_under(obj, event)
             self.dismiss()
             if hint:  # a hint's: what was clicked acts (the chip opens the row for good)
                 return False
@@ -420,12 +421,7 @@ class LayoutRow(Overlay):
         row, nor in a dialog or another window."""
         if not isinstance(obj, QWidget) or obj is self or self.isAncestorOf(obj):
             return False
-        host = self.window()
-        ours = {host}
-        outer = host.parentWidget()
-        if outer is not None:
-            ours.add(outer.window())
-        return obj.window() in ours
+        return obj.window() in host_windows(self.window())
 
     def closeEvent(self, event) -> None:
         self._stop_filtering()

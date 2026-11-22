@@ -2130,6 +2130,22 @@ class LayoutRowTests(unittest.TestCase):
         self.assertEqual(self.events, [("unavailable", 9)])
         self.assertTrue(self.row.isVisible())
 
+    def test_a_quick_second_click_on_the_chip_closes_it(self):  # 2.13.5
+        self.row.set_controls(self.video, lambda pos: "layout")
+        self.open()
+        local = QPointF(20, 20)
+        event = QMouseEvent(
+            QEvent.Type.MouseButtonDblClick,
+            local,
+            QPointF(self.video.mapToGlobal(local.toPoint())),
+            LEFT,
+            LEFT,
+            Qt.KeyboardModifier.NoModifier,
+        )
+        QApplication.sendEvent(self.video, event)
+        self.assertEqual(self.events, [("closed",)])
+        self.assertFalse(self.row.isVisible())
+
     def test_a_click_elsewhere_closes_it_and_does_nothing_more(self):
         self.open()
         QTest.mouseClick(self.video, LEFT, pos=QPoint(20, 20))

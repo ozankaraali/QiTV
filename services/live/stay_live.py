@@ -7,18 +7,24 @@ alike (a public HLS channel measured in 2.1: 6 s segments every 7 s, every sixth
 not move it. The window is over the live edge only: the player's side (its rate, a frozen
 clock, a reopen) shows in the position at once. The filter also says how much its mean still
 wanders by itself (`spread`) and which burst the source has (`burst`, with hysteresis: a burst
-the helper measures for a moment is none).
+the helper measures for a moment is none; one taken in after the start is kept for the tune).
 
 `StayLive` leaves the rate at 1x while the mean lag stays within a dead band around the target:
 at least `_BAND_S`, at least `_BAND_SPREAD` times the filter's spread, and behind the target a
-quarter of a burst more (a bursty source's target already holds half a burst of room). Only a
+quarter of a burst more (a bursty source's target already holds half a burst of room); ahead
+of it, what the caller says is `spare` more (Auto's target for a kept burst: VLC still has the
+room it needs that far under it), but for too little room and trouble, built to the target. Only a
 lag outside the band for `_PERSIST_S` (counted while VLC plays: buffering, a reopen or Go live
 start the count again, so such a step is taken into the lag once and never chased) starts a
-nudge: one gentle rate (1.03x behind, 0.97x ahead), ramped in and out in `_RAMP_STEPS` steps
-`_RAMP_EVERY_S` apart (each libVLC rate change retunes its audio: few, small ones) and sized
-to end at the target, then 1x again. At most one nudge per `_BUDGET_S`; a lag outside the
-band before that only widens the band. Two cases act sooner (after `_URGENT_S`, a count that
-VLC's waits pause but do not restart) and beyond the budget: further than `_FAR_S` behind
+nudge: one gentle rate (1.03x behind, 0.97x ahead), set in one step and back in one
+(`_RAMP_STEPS`: each libVLC 3 rate change makes its audio output correct a 40-100 ms drift,
+audibly, 2026-11-22; a ramp of three steps a second apart made three of them each way) and
+sized to end at the target, then 1x again. On a source without a kept burst (`steady`) the
+band before a gentle nudge is wider: behind, at least `_CALM_S` (or the target, if less) and
+`_CALM_SHARE` of the target; short of it, that share (never into the AI captions' floor). At
+most one nudge per `_BUDGET_S`; a lag outside the band before that only widens the band. Two
+cases act sooner (after `_URGENT_S`, a count that VLC's waits pause but do not restart) and
+beyond the budget: further than `_FAR_S` behind
 (1.10x), and less room than `_ROOM_S` when a burst lands (a steady source: at all; 0.95x: VLC
 would run dry, before each burst as 2.0.1 measured, or at any hiccup). And VLC running out of
 room (`trouble()`: a starvation or a stall that ran out the cushion, when Auto raises the
@@ -36,7 +42,8 @@ the caller says so with `landed()`) lands where the source's keyframes allow. Ab
 target by up to a keyframe interval (one provider's 4K channel has one every 10 s) is no
 drift: for `_START_S` of playing, far behind and the reopen at live count from that landing
 (`_floor`, which follows the lag down as a nudge takes it off), so it gets a gentle nudge,
-not 1.10x; after that, as ever (a reconnect's backlog later is drift). Short of the target
+not 1.10x; after that, as ever (but what it left above the target and was not taken off yet
+stays its own, and a backlog later is caught up: see far behind). Short of the target
 (nothing further back was buffered, or a raw TS source's bursts were measured after the start
 and raised the target) within `_START_S` of playing, the room is built once, at
 `_GENTLE_DOWN` for at most `_START_BUILD_S` of playing, outside the budget; what is still
@@ -45,8 +52,17 @@ band, or VLC runs dry
 (`trouble()`: the owed slow-down builds all of it then).
 
 Far behind, a jump to live is better than a long catch-up (2.1: 8 s at 1.10x takes 80
-s). The caller says where one would land (`jump_lag`: the mean lag once VLC plays the clean
-start Go live would pick, a keyframe's or an intra picture's; None without one). Once far
+s), but for a backlog (2026-11-22: a jump skips the programme, and a raw TS source that hands
+a reopen its own backlog again lands it far behind anyway): far behind only by what the source
+sent ahead of real time since the lag was last near the target (the caller's mean `edge`), VLC
+playing on, and by what a landing left above it (`_floor`, as it came down), is caught up by
+one nudge to the target, at 1.03x, or 1.05x where that would take over `_BACKLOG_TAKE_S`; a
+nudge under way goes on so (`_catch_up`), up to `_BACKLOG_MAX_S` behind the target (beyond
+the 20 s reopen too), however far once the tune's start was picked again (`picked_again`:
+its one skip). A stall and a freeze of VLC's send nothing ahead: they jump as ever, and
+reopen beyond the target plus 20 s. The caller says where one would land (`jump_lag`: the
+mean lag once VLC plays the clean start Go live would pick, a keyframe's or an intra
+picture's; None without one). Once far
 behind for `_URGENT_S`, and no jump (a tune, Go live, a reopen at live: whatever `landed()`
 hears) came within `_JUMP_GAP_S`, stay-live reopens at live instead of speeding up when that
 landing is within the band or `_JUMP_CLOSER_S` nearer than the lag; if it is not, for up to
@@ -113,6 +129,11 @@ _BAND_S = 1.0  # the dead band reaches at least this far either side of the targ
 _BAND_SPREAD = 1.5  # ... at least this many times the spread of the lag estimate ...
 _BAND_BURST = 0.25  # ... and behind the target this share of a burst further
 _PERSIST_S = 15.0  # outside the band this long (counted while VLC plays) before a nudge
+# A source without a kept burst (2026-11-22, a steady HLS channel: 0.97x for 1 s short of
+# 12 s, its rate steps heard): a gentle nudge only beyond this far behind the target (or the
+# target, if less: Low stays as it was) ...
+_CALM_S = 1.5
+_CALM_SHARE = 0.15  # ... nor within this share of the target either side
 _FAR_S = 8.0  # further behind the target than this: the nudge is _FAST ...
 _ROOM_S = 0.5  # ... and with less room than this before each burst it is _SLOW ...
 _URGENT_S = 3.0  # ... both after this long outside, whatever the budget
@@ -120,7 +141,7 @@ _GENTLE_UP = 1.03  # the nudge behind the target ...
 _GENTLE_DOWN = 0.97  # ... and the one that adds room ahead of it
 _FAST = 1.10
 _SLOW = 0.95
-_RAMP_STEPS = 3  # a nudge ramps in (and out) in this many equal steps ...
+_RAMP_STEPS = 1  # a nudge ramps in (and out) in this many equal steps (one: see above) ...
 _RAMP_EVERY_S = 1.0  # ... this far apart
 _OWED_MIN_S = 0.5  # a slow-down owed after trouble is made for a deficit beyond this ...
 _OWED_HOLD_S = 1.0  # ... once it lasted this long while VLC plays (right after a stall the
@@ -135,6 +156,13 @@ _JUMP_GAP_S = 60.0  # never two jumps (a tune, Go live, a reopen at live) within
 _JUMP_CLOSER_S = 5.0  # a jump helps when it lands within the band, or at least this much nearer
 _JUMP_WAIT_S = 12.0  # far behind, waiting this long for one that helps (keyframes 10 s apart)
 _GRAIN_S = 1.0  # no jump does better than the lag less this: the keyframes' grain, no drift
+# Backlogs (2026-11-22): far behind by what the source sent ahead of real time, VLC playing on,
+# or what a landing left above the target, is caught up by one nudge to the target, at
+# _GENTLE_UP, or at this ...
+_BACKLOG_UP = 1.05
+_BACKLOG_TAKE_S = 480.0  # ... when _GENTLE_UP would take longer than this; and up to this
+_BACKLOG_MAX_S = 30.0  # far behind the target (beyond it, and _REOPEN's, the reopen at live)
+_GENTLE = (_GENTLE_UP, _GENTLE_DOWN, _BACKLOG_UP)  # the budget counts these when they ran
 # Junctions (2.8.5): a source that restarts often takes back what stay-live is behind.
 _JUNCTION_MIN_S = 1.0  # behind the target by more than this: asked of the next restart
 _JUNCTION_REF_S = 300.0  # ... the highest target of this long at least (twice at most)
@@ -247,7 +275,8 @@ class SteeredTarget:
     minute: a stall's aftermath lifts the need for a minute or so). What the source's burst
     moves in it (the lag filter's burst, which has its own hysteresis) moves it at once,
     either way (`shift`): a burst the helper measured late counts as soon as the filter
-    takes it, and a one-off first "burst" (a backlog) goes as the filter drops it.
+    takes it, and a one-off first "burst" (a backlog) goes as the filter drops it (one the
+    filter took in after the start it keeps for the tune: `LagFilter.kept`).
     """
 
     def __init__(self) -> None:
@@ -317,6 +346,22 @@ class LagFilter:
     meter, on one provider: 15 times in 5 minutes) then keeps one burst. It sets the closed
     form and the window; a change starts the window afresh.
 
+    A burst taken in that way after the first report (it lasted two bursts and ten seconds)
+    is the source's for the tune (`kept`): a smaller one, or none, no longer counts in `burst`
+    (the closed form, and the target the caller sets from it); a larger one still does. Seen
+    live: a raw TS channel sent ~10 s bursts for one to three minutes at a time, steadily
+    between, six times in 45 minutes. Each time the bursts stopped, the burst went, the target
+    fell 6-8 s at once and the mean lag rose by half a burst (the closed form no longer took
+    it off): far behind, a jump to live, 8-13 s of the programme skipped; each time they came
+    back the room was built again at 0.95x. Kept, the room stays through the steady minutes
+    (the cost: the burst's latency for the tune). A first report (an HLS target duration, a
+    raw TS backlog measured at connect) is not kept: that one-off first "burst" goes as
+    before. `rhythm` is the burst the source has now, with the same hysteresis but never kept:
+    it sets the window, the step and `settled()`. Seen live on a dev build that sized them by
+    the kept burst: the source sent steadily, then a backlog (46 s of media in 30 s), and the
+    mean took 90 s to follow it, so a slow-down built room that was there, and stay-live then
+    jumped to live.
+
     Pure logic: no clock of its own.
     """
 
@@ -328,9 +373,11 @@ class LagFilter:
         self._first: Optional[float] = None  # the first since the window started afresh
         self._level: Optional[float] = None  # the last sample's level
         self._spread = 0.0
-        self.burst = 0.0
+        self.burst = 0.0  # `rhythm`, or the larger burst kept for the tune
+        self.rhythm = 0.0  # the source's burst now (with hysteresis; never kept)
         self._burst_seen = False
-        self._pending: Optional[tuple[float, float]] = None  # (since, reported) unlike `burst`
+        self._pending: Optional[tuple[float, float]] = None  # (since, reported) unlike `rhythm`
+        self._kept = 0.0  # the largest burst a rise took in after the first report
         self.restarts = 0  # how often its window started afresh (a step, a burst, reset())
         self.steps = 0  # arrivals that moved the level more than `_STEP_S` (restarting or not)
 
@@ -349,12 +396,12 @@ class LagFilter:
         after a restart the mean still moves with the arrivals)."""
         if self._first is None:
             return False
-        return now - self._first >= min(self.window, max(_WARMUP_S, 2 * self.burst)) - 1e-9
+        return now - self._first >= min(self.window, max(_WARMUP_S, 2 * self.rhythm)) - 1e-9
 
     @property
     def window(self) -> float:
         """The seconds the mean is taken over now."""
-        return min(_WINDOW_MAX_S, max(_WINDOW_MIN_S, _WINDOW_BURSTS * self.burst))
+        return min(_WINDOW_MAX_S, max(_WINDOW_MIN_S, _WINDOW_BURSTS * self.rhythm))
 
     def add(self, now: float, edge: float, burst: float = 0.0, since: float = 0.0) -> None:
         """The live edge at `now`, the burst the source reports (0.0: steady), and the seconds
@@ -366,7 +413,7 @@ class LagFilter:
         moved = 0.0 if self._level is None else abs(level - self._level)
         if moved > _STEP_S:
             self.steps += 1  # (under a burst the rhythm may still hold it: no restart)
-        if moved > max(_STEP_S, burst):
+        if moved > max(_STEP_S, self.rhythm):
             self.reset()  # a step, not the rhythm: taken in at once
         dt = _TICK_S if self._last is None else min(max(now - self._last, 0.0), _MAX_DT)
         self._last, self._level = now, level
@@ -407,6 +454,15 @@ class LagFilter:
     def spread(self) -> float:
         return self._spread
 
+    @property
+    def kept(self) -> float:
+        """The burst kept for the tune (taken in after the first report), 0.0 without one."""
+        return self._kept
+
+    def rhythm_for(self, reported: float) -> float:
+        """As `burst_for`, the burst the source has now (`rhythm`: never the kept one)."""
+        return self.rhythm if self._burst_seen else max(0.0, reported)
+
     def burst_for(self, reported: float) -> float:
         """The burst it holds (with its hysteresis), or, before its first edge, the one the
         source reports: the first report counts at once."""
@@ -414,19 +470,22 @@ class LagFilter:
 
     def _classify(self, now: float, reported: float) -> None:
         if not self._burst_seen:
-            self._burst_seen, self.burst = True, reported
+            self._burst_seen, self.burst, self.rhythm = True, reported, reported
             return
-        if abs(reported - self.burst) < _BURST_STEP_S:
+        if abs(reported - self.rhythm) < _BURST_STEP_S:
             self._pending = None
             return
         pending = self._pending
-        rising = reported > self.burst
-        if pending is None or (pending[1] > self.burst) != rising:
+        rising = reported > self.rhythm
+        if pending is None or (pending[1] > self.rhythm) != rising:
             pending = self._pending = (now, reported)
         hold = max(_BURST_ON_S, 2 * reported) if rising else _BURST_OFF_S
         if now - pending[0] >= hold - 1e-9:
-            self.burst, self._pending = reported, None
-            self.reset()  # the closed form changed with it: the window starts afresh
+            self.rhythm, self._pending = reported, None
+            if rising:
+                self._kept = max(self._kept, reported)
+            self.burst = max(reported, self._kept)
+            self.reset()  # the window (or the closed form) changed: it starts afresh
         else:
             self._pending = (pending[0], reported)
 
@@ -489,6 +548,7 @@ class _Nudge:
     stepped: Optional[float] = None  # when the rate last stepped
     limit: Optional[float] = None  # a start's build: seconds below 1x it has left (budget-free)
     reason: str = ""  # why it runs at its peak, as the caller's log says it (2.13.4)
+    backlog: bool = False  # it catches up a backlog the source sent (`StayLive._catch_up`)
 
     @property
     def step(self) -> float:
@@ -507,6 +567,36 @@ class StayLive:
         self.burst = 0.0
         self.spread = 0.0
         self.slack = 0.0
+        # Set by the caller: the source has no burst the lag filter keeps (the calm band,
+        # `calm`), and the AI captions' floor the lag is not to fall short of (0.0: off).
+        self.steady = False
+        self.caption_floor = 0.0
+        # Set by the caller: how far under the target the lag may be while VLC still has the
+        # room it needs (Auto with a burst the lag filter keeps: the target's margin over that
+        # burst's own room). Only a lag under the target by more than this, beyond the band,
+        # is built gently; too little room (`_short`) and trouble build to the target as ever.
+        self.spare = 0.0
+        # Set by the caller each update: where the live edge is on average (the lag filter's
+        # mean edge), or None. What it ran ahead of real time since the lag was last near the
+        # target is a backlog the source sent (`_pushed`): far behind by that, VLC playing on,
+        # is caught up gently, not jumped (`_catch_up`).
+        self.edge: Optional[float] = None
+        self._edge_ref: Optional[tuple[float, float]] = None  # (when, edge) the lag was near
+        # Set by the caller: the source sends far faster than real time now (a connection's
+        # backlog arriving at network speed: a tune's, a reopen's, a reconnect's). Its lag is
+        # part of the landing until arrivals settle (`_flood`): no reopen, no jump meanwhile.
+        self.flooding = False
+        # A backlog caught up however far, never reopened at live, until the lag is back in
+        # the band (`_bound_off`): one a reopen beyond the bound landed far behind again
+        # (2026-11-22: three reopens in 23 s, the backlog still arriving), or one within the
+        # start a re-pick landed; whether the last reopen was one, and a flood came since.
+        self._bound_off = False
+        self._after_bound = False
+        self._bound_flooded = False
+        # The tune's start was picked again (`picked_again`), its one skip: within its
+        # landing's window (a retry's too) far behind by a backlog or that landing, past the
+        # bound, is `_bound_off`'s.
+        self._picked_again = False
         # Set by the caller: a stream opened a moment ago (Go live, a seek, a reopen), so its
         # lag is not known yet: no reopen at live until it is (never two opens in a row).
         self.hold_reopen = False
@@ -572,9 +662,23 @@ class StayLive:
         band = max(_BAND_S, _BAND_SPREAD * self.spread, self._wide)
         return band + (_BAND_BURST * self.burst if side > 0 else 0.0)
 
-    def _centre(self, side: float) -> float:
-        """The target on `side`: behind it, as high as the burst reported now would set it."""
-        return self.target + max(0.0, self.slack) if side > 0 else self.target
+    def calm(self, side: int) -> float:
+        """How far from the target a steady source's lag may be on `side` before a gentle
+        nudge (`_CALM_S`, `_CALM_SHARE`; 0.0: the band alone): within it the lag is at the
+        target (the caller's cushion reads it so too)."""
+        if not self.steady:
+            return 0.0
+        share = _CALM_SHARE * self.target
+        if side > 0:
+            return max(min(_CALM_S, self.target), share)
+        return min(share, max(0.0, self.target - self.caption_floor))
+
+    def _centre(self, side: float, *, urgent: bool = False) -> float:
+        """The target on `side`: behind it, as high as the burst reported now would set it;
+        ahead of it, less what is `spare` (but for a slow-down for room or after trouble)."""
+        if side > 0:
+            return self.target + max(0.0, self.slack)
+        return self.target if urgent else self.target - max(0.0, self.spare)
 
     def lock_rate(self) -> None:
         """VLC cannot play this channel at any rate but 1x (`RateHealth`): keep 1x from now.
@@ -628,6 +732,7 @@ class StayLive:
         """
         self._floor = max(0.0, excess)
         self._landing = _START_S
+        self._edge_ref = None  # a backlog counts from here (a recovery's timeline may differ)
         self._start = _START_S if build else 0.0
         self._accepting, self._tolerant = False, not build
         self._landed_at = None  # the target in force at the next update
@@ -646,6 +751,17 @@ class StayLive:
         start was held), not drift. Nothing else of the start changes."""
         if self._landing > 0:
             self._floor = max(self._floor, excess)
+
+    def picked_again(self) -> None:
+        """The tune's start was picked again (the caller's re-pick, once a tune, right after
+        it said where that landed, `landed()`): the tune's one skip (2026-11-22, the owner's
+        call). Within that landing's window (`_START_S` of playing, longer while the source
+        floods) far behind by the landing or a backlog the source sends is caught up however
+        far behind the target it is (past `_BACKLOG_MAX_S`: `_bound_off`, until the lag is
+        back in the band), never reopened at live; after it a backlog past the bound reopens
+        once as ever (40 s at 1.05x is over 13 minutes). A stall and a freeze of VLC's jump as
+        ever, and so does a locked rate."""
+        self._picked_again = True
 
     def stop(self) -> None:
         """Stay-live is no longer consulted (the input ended, or the stream turned out a
@@ -686,6 +802,7 @@ class StayLive:
         self._nudge = None
         self._owed = False  # the stream opens afresh at the target: nothing is owed
         self._uncharged = None
+        self._edge_ref = None  # where it lands is near the target: measured afresh
         if not keep_landing:
             self._floor = self._start = self._landing = 0.0  # its own landing follows
             self._accepting = self._tolerant = False
@@ -729,23 +846,26 @@ class StayLive:
         self._floor = min(self._floor, max(0.0, lag_s - self._centre(1)))
         self._start = max(0.0, self._start - dt)
         self._landing = max(0.0, self._landing - dt)
+        self._flood(lag_s, now)
         if self._owed:  # VLC ran dry: the owed slow-down builds a start's shortfall, all of it
             self._start, self._accepting, self._tolerant = 0.0, False, False
             if self._nudge is not None:
                 self._nudge.limit = None
-        if lag_s > self.target + _REOPEN + self._landed():
+        if self._beyond_bound(lag_s, now):
             if self.hold_reopen:
                 return Decision(self._rate)  # the stream just opened: its lag comes first
             self._rate, self._nudge = 1.0, None
             if self._reopened:
                 return Decision(1.0)
-            self._reopened = True
+            self._reopened = self._after_bound = True
+            self._bound_flooded = False
             return Decision(1.0, reopen_live=True)
         if self._landed_at is None:
             # The target a landing just now aimed at, once the source sent (a stalled first
             # tick has no burst classified yet: Normal's 2.5 s made an HLS 7 s target a rise).
             self._landed_at = self.target
         self._own_shortfall(lag_s, dt)
+        self._follow_edge(lag_s, now)
         if self._reopened:
             return Decision(1.0)  # asked for: the caller reopens (and calls user_go_live)
         junction = self._junction(lag_s, now)
@@ -815,7 +935,7 @@ class StayLive:
         """Reopen at live instead (`_far_move`): a catch-up it replaces ends here, and a
         gentle nudge it cut counts against the budget (it ran)."""
         nudge = self._nudge
-        if nudge is not None and nudge.peak in (_GENTLE_UP, _GENTLE_DOWN) and nudge.limit is None:
+        if nudge is not None and nudge.peak in _GENTLE and nudge.limit is None:
             self._nudged_at = now
         self._rate, self._nudge = 1.0, None
         self._reopened = True
@@ -834,6 +954,105 @@ class StayLive:
         """What far behind and the reopen at live count from: the landing above the target,
         while its window lasts (a backlog later is drift)."""
         return self._floor if self._landing > 0 else 0.0
+
+    def _follow_edge(self, lag: float, now: float) -> None:
+        """Where the live edge was when the lag was last near the target (no further behind
+        it than the band): what the source sent ahead of real time since is a backlog. Back
+        near it, a backlog a reopen beyond the bound landed far behind again is over
+        (`_bound_off`)."""
+        near = lag - self._centre(1) <= self.band(1)
+        if near:
+            self._bound_off = False
+        edge = self.edge
+        if edge is not None and (self._edge_ref is None or near):
+            self._edge_ref = (now, edge)
+
+    def _pushed(self, now: float) -> float:
+        """Seconds the live edge ran ahead of real time since the lag was last near the target:
+        a backlog the source sent. A stall adds none (the edge stood, then caught up with real
+        time), nor does VLC standing still (the edge kept real time)."""
+        if self.edge is None or self._edge_ref is None:
+            return 0.0
+        since, edge = self._edge_ref
+        return max(0.0, self.edge - edge - (now - since))
+
+    def _backlog(self, behind: float, now: float) -> str:
+        """Why far behind (`behind` the target) is a backlog to catch up, not a lag to jump
+        over: only by what the source sent ahead of real time and what the last landing left
+        above the target (a flood's too); "" when more than that (a stall, a freeze of
+        VLC's)."""
+        pushed, landed = self._pushed(now), self._floor
+        if pushed + landed <= 0 or behind - pushed - landed > _FAR_S:
+            return ""
+        return "a backlog to catch up"
+
+    def _flood(self, lag: float, now: float) -> None:
+        """While the source floods (`flooding`), what it brings is part of the landing: the
+        landing's floor follows the lag up, and its window lasts until `_START_S` after the
+        flood, when the distance is judged (2026-11-22: a reopen at live in the middle of it
+        landed the backlog still arriving, three times in 23 s). A landing after a reopen
+        beyond the bound that goes far behind again by a backlog since (the source sent more
+        than far ahead of real time, or flooded) turns those reopens off for it
+        (`_bound_off`); far behind by keyframe grain or a stall does not (review I1). Within the
+        start a re-pick landed (`picked_again`, its landing's window) far behind past
+        `_BACKLOG_MAX_S` by a backlog or that landing is caught up so too."""
+        behind = lag - self._centre(1)
+        if self.flooding:
+            self._floor = max(self._floor, behind)
+            self._landing = max(self._landing, _START_S)
+            self._bound_flooded = self._bound_flooded or self._after_bound
+        if self._landing <= 0:
+            self._picked_again = False
+        elif self._picked_again and behind > _BACKLOG_MAX_S and self._backlog(behind, now):
+            # The start's own, where the bound would reopen (its one skip was the re-pick;
+            # a landing on keyframe grain is caught up as ever, and then the start is over).
+            self._bound_off = self._bound_off or not (self.rate_locked or self.background)
+        if self._after_bound and not self.hold_reopen:
+            backlog = self._bound_flooded or self._pushed(now) > _FAR_S
+            if self._landing <= 0:
+                self._after_bound = False
+            elif behind > _FAR_S and backlog:
+                self._bound_off, self._after_bound = True, False
+
+    def _beyond_bound(self, lag: float, now: float) -> bool:
+        """Beyond the target plus `_REOPEN` (and what a landing left above it, up to
+        `_BACKLOG_MAX_S` in all): the reopen at live. Never while the source floods, nor for
+        a backlog caught up (`_caught_up`); at a locked rate (or a tile without the focus) not
+        while such a reopen's backlog lasts (`_bound_off`: its far jump, a minute apart at
+        most)."""
+        if self.flooding:
+            return False
+        if self._bound_off and (self.rate_locked or self.background):
+            return False
+        allowed = _REOPEN + min(self._landed(), _BACKLOG_MAX_S - _REOPEN)
+        return lag > self.target + allowed and not self._caught_up(lag, now)
+
+    def _caught_up(self, lag: float, now: float) -> bool:
+        """Beyond the target plus `_REOPEN`, but by a backlog (`_backlog`) no more than
+        `_BACKLOG_MAX_S` behind it (however far for `_bound_off`'s), and the rate free to
+        change: caught up, not reopened."""
+        if self.rate_locked or self.background:
+            return False
+        behind = lag - self._centre(1)
+        if behind > _BACKLOG_MAX_S and not self._bound_off:
+            return False
+        return bool(self._backlog(behind, now))
+
+    @staticmethod
+    def _up_rate(left: float) -> float:
+        """The catch-up rate for `left` seconds: `_GENTLE_UP`, or `_BACKLOG_UP` when that
+        would take longer than `_BACKLOG_TAKE_S`."""
+        return _GENTLE_UP if left / (_GENTLE_UP - 1.0) <= _BACKLOG_TAKE_S else _BACKLOG_UP
+
+    def _catch_up(self, behind: float, lag: float, now: float, why: str) -> None:
+        """Far behind by a backlog (`_backlog`), VLC playing on: one nudge to the target
+        (`_up_rate`); never a jump, which skips the programme (2026-11-22, the owner's
+        ruling). One long nudge, as each nudge's start plays a moment of old sound in VLC 3.
+        Beyond `_BACKLOG_MAX_S` the reopen at live stays (`_caught_up`)."""
+        rate = self._up_rate(behind)
+        self._nudge = _Nudge(rate, behind, self._centre(1), reason=why, backlog=True)
+        self.absorb()
+        self._steer(0.0, lag, now)
 
     def _budget_free(self, now: float) -> bool:
         return self._nudged_at is None or now - self._nudged_at >= _BUDGET_S - 1e-9
@@ -915,14 +1134,18 @@ class StayLive:
         behind, a jump to live instead (`_far_move`)."""
         behind, ahead = lag - self._centre(1), lag - self._centre(-1)
         far = behind > _FAR_S + self._landed()  # a landing above the target is no drift
-        short = ahead < -_BAND_S and self._short(lag) and not self._accepting
+        room = lag - self._centre(-1, urgent=True)  # short of room: built to the target
+        short = room < -_BAND_S and self._short(lag) and not self._accepting
         tolerated = self._accepting or self._tolerant  # a start's rest, a jump's pick
-        under = short or (ahead < -self.band(-1) and not tolerated)
-        side = 1 if far or behind > self.band(1) else -1 if under else 0
+        under = short or (ahead < -max(self.band(-1), self.calm(-1)) and not tolerated)
+        side = 1 if far or behind > max(self.band(1), self.calm(1)) else -1 if under else 0
+        if side > 0 and self.flooding:
+            self.absorb()  # a backlog still arriving: judged once arrivals settle
+            return False
         if side > 0 and self.junctions:
             self.absorb()  # the next restart takes it (`Decision.junction`): no rate, no jump
             return False
-        error = behind if side > 0 else ahead
+        error = behind if side > 0 else room if short else ahead
         if not far:
             self._waited = 0.0
         if side == 0:
@@ -937,6 +1160,10 @@ class StayLive:
         if self._outside < (_URGENT_S if urgent else _PERSIST_S) - 1e-9:
             return False
         grain = False
+        why = self._backlog(behind, now) if far else ""
+        if why:
+            self._catch_up(behind, lag, now, why)
+            return False
         if far:
             move = self._far_move(lag, dt)
             if move in ("jump", "wait"):
@@ -965,14 +1192,16 @@ class StayLive:
                 reason="building the start's room",
             )
         else:
-            peak = _FAST if far else _SLOW if short else _GENTLE_UP if side > 0 else _GENTLE_DOWN
+            up = self._up_rate(abs(error))  # a landing's excess can take long at 1.03x
+            peak = _FAST if far else _SLOW if short else up if side > 0 else _GENTLE_DOWN
             if far:
                 reason = "far behind"
             elif short:
                 reason = self._room_reason()
             else:
                 reason = "behind the target" if side > 0 else "short of the target"
-            nudge = _Nudge(peak, abs(error), self._centre(side), reason=reason)
+            centre = self._centre(side, urgent=peak in (_FAST, _SLOW))
+            nudge = _Nudge(peak, abs(error), centre, reason=reason)
         self._nudge = nudge
         self.absorb()
         self._steer(0.0, lag, now)
@@ -988,12 +1217,22 @@ class StayLive:
         nudge.left -= sign * (rate - 1.0) * dt  # what the last update's rate took
         if nudge.limit is not None and rate != 1.0:
             nudge.limit -= dt
-        centre = self._centre(sign)
+        centre = self._centre(sign, urgent=nudge.peak in (_FAST, _SLOW))
         if centre != nudge.target:  # Auto moved it, or the burst: resized to match
             nudge.left -= sign * (centre - nudge.target)
             nudge.target = centre
         error = lag - centre
         far = not nudge.ending and sign > 0 and error > _FAR_S + self._landed()
+        why = self._backlog(error, now) if far else ""
+        if why:
+            # A backlog: the catch-up under way goes on to the target, faster where it would
+            # take too long (a step between two rates, never back through 1x), never a jump.
+            far = False
+            if not nudge.backlog:
+                nudge.backlog, nudge.reason = True, why
+            up = self._up_rate(max(nudge.left, error))  # what the backlog added too
+            if nudge.peak in (_GENTLE_UP, _BACKLOG_UP) and up > nudge.peak:
+                nudge.peak = up
         if not far:
             self._waited = 0.0
         # A catch-up under way asks only once a jump could follow (where it would land is
@@ -1002,7 +1241,7 @@ class StayLive:
         move = self._far_move(lag, dt) if far and asks else ""
         if move == "jump":
             return True  # a catch-up under way too, once nothing jumped for a minute
-        if move == "fast" and nudge.peak == _GENTLE_UP:
+        if move == "fast" and nudge.peak in (_GENTLE_UP, _BACKLOG_UP):
             nudge.peak = _FAST  # far behind after all (a step)
             nudge.reason = "far behind after all"
         elif (
@@ -1014,13 +1253,18 @@ class StayLive:
             nudge.peak = _SLOW  # short of room after all (the burst grew)
             nudge.reason = self._room_reason() + " after all"
         reached = sign * error <= 0.0  # at the target already (a step, say)
+        if reached and sign > 0 and self._owed and not nudge.ending:
+            # Trouble took the lag under the target: a catch-up it cut, which counts against
+            # the budget only if no slow-down follows (in one step it ends here at once).
+            nudge.cut = nudge.cut or not nudge.spent
         # A gentle nudge ends once its size is taken: the estimate's own wander is no reason
         # to go on. An urgent one goes on to the target: it may have been sized on a lag that
         # was still settling, or the lag stepped (a backlog) or the target moved since, and
         # stopping it short would only start the next one. A start's build ends in time to
         # ramp out within its limit.
         urgent = nudge.peak in (_FAST, _SLOW)
-        spent = not urgent and nudge.left <= self._ramp_out(rate, nudge.step)
+        # (A backlog's catch-up too goes on to the target: the source may send more meanwhile.)
+        spent = not (urgent or nudge.backlog) and nudge.left <= self._ramp_out(rate, nudge.step)
         k_now = round(abs(rate - 1.0) / nudge.step)
         timed = nudge.limit is not None and nudge.limit <= k_now * _RAMP_EVERY_S + 1e-9
         nudge.spent = nudge.spent or (spent and not nudge.ending)
@@ -1042,7 +1286,7 @@ class StayLive:
         if nudge.ending and self._rate == 1.0:
             if nudge.limit is not None:  # the start's build ran (outside the budget) ...
                 self._accepting = True  # ... and the rest is accepted
-            elif nudge.peak in (_GENTLE_UP, _GENTLE_DOWN):
+            elif nudge.peak in _GENTLE or nudge.backlog:
                 if nudge.cut:
                     self._uncharged = now  # counts unless the owed slow-down follows
                 else:

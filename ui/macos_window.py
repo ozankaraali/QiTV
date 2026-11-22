@@ -1,7 +1,8 @@
 """The TV window's Cocoa details: the overlay attached as a child window, so macOS moves it with
 the player, the keys given back to the window after a click on the video, and for the desktop
 picture in picture (ui/desktop_pip.py) whether a window is on the desktop shown, whether any of
-it can be seen, and a window that shows on every desktop."""
+it can be seen, a window that shows on every desktop (and back on its own one), and a window
+macOS resizes in one shape."""
 
 import ctypes
 import ctypes.util
@@ -18,6 +19,9 @@ _CAN_JOIN_ALL_SPACES = 1 << 0
 _FULL_SCREEN_AUXILIARY = 1 << 8
 _NONACTIVATING_PANEL = 1 << 7  # NSWindowStyleMaskNonactivatingPanel
 _OCCLUSION_VISIBLE = 1 << 1  # NSWindowOcclusionStateVisible: some of the window can be seen
+# Each NSWindow `join_all_spaces` changed: its collection behavior and whether it was a
+# non-activating panel before (`leave_all_spaces` gives them back).
+_BEFORE_JOINING: dict[int, tuple[int, bool]] = {}
 
 
 @functools.cache
@@ -187,15 +191,93 @@ def join_all_spaces(widget) -> bool:
         ns_window = _send(int(widget.winId()), b"window")
         if not ns_window:
             return False
+        mask = _send(ns_window, b"styleMask", ctypes.c_ulong)
+        _BEFORE_JOINING.setdefault(
+            ns_window,
+            (
+                _send(ns_window, b"collectionBehavior", ctypes.c_ulong),
+                bool(mask & _NONACTIVATING_PANEL),
+            ),
+        )
         behavior = _CAN_JOIN_ALL_SPACES | _FULL_SCREEN_AUXILIARY
         _send(ns_window, b"setCollectionBehavior:", None, (ctypes.c_ulong, behavior))
         _send(ns_window, b"setHidesOnDeactivate:", None, (ctypes.c_bool, False))
-        mask = _send(ns_window, b"styleMask", ctypes.c_ulong)
         if not mask & _NONACTIVATING_PANEL:
             _send(ns_window, b"setStyleMask:", None, (ctypes.c_ulong, mask | _NONACTIVATING_PANEL))
         return True
     except Exception as e:  # never let a Cocoa detail break the player
         logger.debug("Could not show the window on every desktop: %s", e)
+        return False
+
+
+def leave_all_spaces(widget) -> bool:
+    """macOS: `widget`'s window as it was before `join_all_spaces` (the overlays, over the
+    floating picture for a while): its own desktop, a press on it activating QiTV again. Nothing
+    happens elsewhere, or for a window never joined (False)."""
+    if QGuiApplication.platformName() != "cocoa":
+        return False
+    try:
+        ns_window = _send(int(widget.winId()), b"window")
+        before = _BEFORE_JOINING.pop(ns_window, None) if ns_window else None
+        if before is None:
+            return False
+        behavior, nonactivating = before
+        _send(ns_window, b"setCollectionBehavior:", None, (ctypes.c_ulong, behavior))
+        mask = _send(ns_window, b"styleMask", ctypes.c_ulong)
+        if not nonactivating and mask & _NONACTIVATING_PANEL:
+            _send(ns_window, b"setStyleMask:", None, (ctypes.c_ulong, mask & ~_NONACTIVATING_PANEL))
+        return True
+    except Exception as e:  # never let a Cocoa detail break the player
+        logger.debug("Could not put the window back on its desktop: %s", e)
+        return False
+
+
+class _NSSize(ctypes.Structure):
+    _fields_ = [("width", ctypes.c_double), ("height", ctypes.c_double)]  # CGFloat: 64-bit
+
+
+def keep_shape(widget, shape: float, smallest=None, largest=None) -> bool:
+    """macOS: the edges of `widget`'s window resize it in `shape` (width / height): its
+    [NSWindow contentAspectRatio], which macOS keeps as the user drags them (Qt makes a frameless
+    window resizable there, NSWindowStyleMaskResizable), and never under `smallest` nor over
+    `largest` (QSizes: its contentMinSize and contentMaxSize, set here, not through Qt's size
+    hints, which would clear the shape). Told again after the window is shown: Qt sets its
+    resize increments as it makes the NSWindow, which clears it. Nothing happens elsewhere
+    (False)."""
+    if QGuiApplication.platformName() != "cocoa" or not shape > 0:
+        return False
+    try:
+        ns_window = _send(int(widget.winId()), b"window")
+        if not ns_window:
+            return False
+        for selector, size in ((b"setContentMinSize:", smallest), (b"setContentMaxSize:", largest)):
+            if size is not None and size.width() > 0 and size.height() > 0:
+                bounds = _NSSize(float(size.width()), float(size.height()))
+                _send(ns_window, selector, None, (_NSSize, bounds))
+        ratio = _NSSize(float(shape) * 1000.0, 1000.0)
+        _send(ns_window, b"setContentAspectRatio:", None, (_NSSize, ratio))
+        return True
+    except Exception as e:  # never let a Cocoa detail break the player
+        logger.debug("Could not keep the window's shape: %s", e)
+        return False
+
+
+def let_presses_activate(widget) -> bool:
+    """macOS: a press on `widget`'s window brings QiTV forward again (no longer the
+    non-activating panel `join_all_spaces` made it: the mini player, QiTV's only window then).
+    Its desktops stay as they are. Nothing happens elsewhere (False)."""
+    if QGuiApplication.platformName() != "cocoa":
+        return False
+    try:
+        ns_window = _send(int(widget.winId()), b"window")
+        if not ns_window:
+            return False
+        mask = _send(ns_window, b"styleMask", ctypes.c_ulong)
+        if mask & _NONACTIVATING_PANEL:
+            _send(ns_window, b"setStyleMask:", None, (ctypes.c_ulong, mask & ~_NONACTIVATING_PANEL))
+        return True
+    except Exception as e:  # never let a Cocoa detail break the player
+        logger.debug("Could not let a press bring QiTV forward: %s", e)
         return False
 
 

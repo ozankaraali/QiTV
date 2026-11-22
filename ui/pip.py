@@ -24,8 +24,9 @@ The small surface takes the shape its picture shows in, so it shows no bars: `sh
 glides to its new shape as it does for the lift. Whatever its shape it is as large as the 16:9
 box (`services.picture.box_size`), never more than half the player either way; 16:9 while its
 shape is not known, or fits any (Fill). Which surfaces hold their picture small (`shows_small`:
-this one, and the one lent to the floating window) the window tells their players, which then
-fill them to the last pixel (services.playback, `set_box_size`).
+this one, the one lent to the desktop picture in picture's floating window, and the large one
+while the whole page is in the macOS mini player's, `set_floating`) the window tells their
+players, which then fill them to the last pixel (services.playback, `set_box_size`).
 """
 
 from dataclasses import dataclass
@@ -127,7 +128,7 @@ class _Press:
 
 class PipFrame(QObject):
     swapRequested = Signal()  # a click on the small surface
-    suspending = Signal()  # the multiview takes the surfaces: a lent one must come back first
+    suspending = Signal()  # the multiview takes the surfaces: a lent one (or the page) back first
     cornerChanged = Signal(str)  # a drag snapped it to another corner (saved as pip_corner)
     smallRectChanged = Signal(QRect)  # container coordinates, empty when hidden (the label)
 
@@ -160,6 +161,7 @@ class PipFrame(QObject):
         self._interactive = True  # False: the player is a thumbnail over the Library
         self._suspended = False  # True: the multiview lays the surfaces out (suspend)
         self._lent: str | None = None  # the large surface, out in the desktop PiP's window
+        self._floating = False  # the whole page is in the mini player's window (ui/mini_player)
         self._lift = 0  # pixels a bottom corner's PiP rises (the transport shows)
         self._lifting = QVariantAnimation(self)
         self._lifting.setDuration(LIFT_MS)
@@ -208,13 +210,34 @@ class PipFrame(QObject):
         return self._surfaces[self._lent]
 
     def shows_small(self, name: str) -> bool:
-        """Surface `name` holds its picture small: the picture in picture's in its corner, or
-        the one lent to the floating window (never a multiview's tile)."""
+        """Surface `name` holds its picture small: the picture in picture's in its corner, the
+        one lent to the floating window, or the large one while the page is in the mini
+        player's window (never a multiview's tile)."""
         if self._closed:
             return False
-        return name == self._lent or (
-            self._shown and not self._suspended and name == self._small_name
+        if name == self._lent:
+            return True
+        if self._suspended:
+            return False
+        return (self._floating and name == self._large) or (
+            self._shown and name == self._small_name
         )
+
+    def set_floating(self, floating: bool) -> bool:
+        """The whole player page goes into the mini player's window (ui/mini_player.py), or
+        comes back: its large surface holds its picture small there. False (nothing changes)
+        while the multiview lays the surfaces out: the grid never floats."""
+        if floating and (self._suspended or self._closed):
+            return False
+        self._floating = floating
+        if not self._closed:
+            self._layout()  # (the page's size may have changed meanwhile)
+        return True
+
+    def floating_shape(self) -> Optional[float]:
+        """The shape the large picture shows in while the page floats (None: it does not, or
+        the shape is not known)."""
+        return self._ask_shape(self._large) if self._floating else None
 
     def lent_shape(self) -> Optional[float]:
         """The shape the lent surface's picture shows in (None: none lent, or not known)."""

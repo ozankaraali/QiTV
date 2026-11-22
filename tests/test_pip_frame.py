@@ -341,6 +341,23 @@ class PipFrameTests(FrameCase):
         frame.suspend()  # the multiview's tiles
         self.assertFalse(frame.shows_small("main"))
 
+    def test_the_page_in_the_mini_players_window_tells_its_large_pictures_shape(self):
+        # 2.13.5: the macOS mini player holds the whole page (ui/mini_player.py).
+        frame = self.make(shape_of={"main": 4 / 3, "pip": 16 / 9}.get)
+        self.assertIsNone(frame.floating_shape())  # the page is in the window
+        self.assertTrue(frame.set_floating(True))
+        self.assertAlmostEqual(frame.floating_shape(), 4 / 3)
+        self.assertTrue(frame.shows_small("main"))  # filled to the last pixel there
+        frame.show_pip()
+        frame.set_large("pip")  # a swap in the small window
+        self.assertAlmostEqual(frame.floating_shape(), 16 / 9)
+        self.assertEqual((frame.shows_small("pip"), frame.shows_small("main")), (True, True))
+        frame.set_floating(False)
+        self.assertIsNone(frame.floating_shape())
+        self.assertFalse(frame.shows_small("pip"))
+        frame.suspend()  # the multiview's tiles: the grid never floats
+        self.assertFalse(frame.set_floating(True))
+
     def test_drag_to_the_top_left_quadrant_snaps_to_tl_and_saves_it(self):
         frame = self.make()
         frame.show_pip()
