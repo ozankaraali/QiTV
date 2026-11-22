@@ -888,6 +888,41 @@ class DrawerTests(unittest.TestCase):
         model = self.drawer._columns["right"].model
         self.assertTrue(model.index(1).data(PlayingRole))  # the ▶ on the same row
 
+    def test_of_two_rows_at_one_address_the_one_picked_is_highlighted(self):
+        # The review: an M3U (and Free radio) lists one stream under two names. The row
+        # picked is the one its id names, as long as that row is the same channel.
+        self.catalog.live = {
+            "10": [
+                {"id": 1, "name": "News", "cmd": "http://tv/news"},
+                {"id": 2, "name": "Sport", "cmd": "http://tv/sport"},
+                {"id": 3, "name": "News HD", "cmd": "http://tv/news"},
+            ]
+        }
+        self.nav.changed.emit()
+        playing = self.catalog.live["10"][2]
+        self.drawer.open_drawer(item_key(playing), focus_item=playing)
+        self.assertEqual(self.drawer.highlighted().title, "News HD")
+
+    def test_the_highlight_stays_on_its_channel_as_the_list_changes_under_it(self):
+        # A playlist loaded again with a channel more at the top: the ids (list positions)
+        # move on by one, and the highlighted row's id now names the channel before it.
+        def listed(names):
+            return [
+                {"id": n, "name": name, "cmd": f"http://tv/{name}"}
+                for n, name in enumerate(names, 1)
+            ]
+
+        self.catalog.live = {"10": listed(["One", "Two", "Three"])}
+        self.nav.changed.emit()
+        self.drawer.open_drawer("2")
+        self.assertEqual(self.drawer.highlighted().title, "Two")
+        self.catalog.live = {"10": listed(["Zero", "One", "Two", "Three"])}
+        self.catalog.groupReady.emit("live", "10")
+        self.drawer.grab()  # painted: the rows around it are made
+        self.assertEqual(self.drawer.highlighted().title, "Two")
+        self.drawer.move_by(1)
+        self.assertEqual(self.drawer.highlighted().title, "Three")
+
     def test_a_channel_not_listed_falls_back_to_its_focus_key(self):
         self.drawer.open_drawer("2", focus_item={"id": 2, "name": "Gone", "cmd": "http://x/9"})
         self.assertEqual(self.drawer.highlighted().title, "Two")
