@@ -81,6 +81,9 @@ class PipCase(unittest.TestCase):
         cls.app = QApplication.instance() or QApplication([])
 
     def setUp(self):
+        settle = mock.patch.object(desktop_pip, "FLOAT_SETTLE_MS", 0)  # (its own tests: on)
+        settle.start()
+        self.addCleanup(settle.stop)
         self.window = QWidget()
         self.window.resize(1280, 720)
         self.page = QWidget(self.window)
@@ -355,6 +358,52 @@ class DesktopPipTests(PipCase):
         self.drag(QPoint(2, 90), QPoint(2, 90))  # a click on the left edge: no resize, no click
         self.assertEqual(len(remembered), 1)
         self.assertEqual(self.main.events, [])
+
+    def test_a_desktop_switch_still_running_never_docks_the_picture(self):
+        # The owner (19:06, 19:07): swiped away from fullscreen, the picture floated and came
+        # back 0.4-0.7 s later, floated again, three to five times: macOS answers "its desktop
+        # shows" once or twice while it still switches desktops. Right after it floats, that
+        # answer docks it only once it has held a moment.
+        now = {"t": 100.0}
+        self.pip._clock = lambda: now["t"]
+        with mock.patch.object(desktop_pip, "FLOAT_SETTLE_MS", 1500):
+            self.away()  # it floats
+            self.assertTrue(self.pip.floating())
+            now["t"] += 0.5
+            self.shown = True
+            self.pip.check()  # the switch's animation answers "shown"
+            self.assertTrue(self.pip.floating())
+            now["t"] += 0.3
+            self.shown = False
+            self.pip.check()  # and "away" again: the switch is over
+            self.assertTrue(self.pip.floating())
+            now["t"] += 0.4
+            self.shown = True
+            self.pip.check()
+            self.assertTrue(self.pip.floating())
+            now["t"] += desktop_pip.SHOWN_HOLD_MS / 1000  # its desktop really shows: back
+            self.pip.check()
+            self.assertFalse(self.pip.floating())
+            self.assertEqual(self.changes, [True, False])  # one float, one dock: no loop
+
+    def test_once_settled_its_own_desktop_brings_it_back_at_once(self):
+        now = {"t": 100.0}
+        self.pip._clock = lambda: now["t"]
+        with mock.patch.object(desktop_pip, "FLOAT_SETTLE_MS", 1500):
+            self.away()
+            now["t"] += 2.0  # it floated a while ago
+            self.back()
+            self.assertFalse(self.pip.floating())
+
+    def test_each_way_back_says_why_in_the_log(self):
+        self.away()
+        with self.assertLogs("ui.desktop_pip", "INFO") as logs:
+            self.back()
+        self.assertIn("back in the window: its desktop shows again", logs.output[-1])
+        self.away()
+        with self.assertLogs("ui.desktop_pip", "INFO") as logs:
+            self.pip.dock("the Library")
+        self.assertIn("back in the window: the Library", logs.output[-1])
 
     def test_after_coming_back_it_floats_again_only_once_its_desktop_showed(self):
         # Review N-1: macOS still switches desktops as the window comes back (Settings, Esc, a
@@ -636,6 +685,9 @@ class OnePictureInPictureTests(WindowCase):
         macos = mock.patch("ui.tv_window._macos_desktops", return_value=True)
         macos.start()
         self.addCleanup(macos.stop)
+        settle = mock.patch.object(desktop_pip, "FLOAT_SETTLE_MS", 0)  # (DesktopPipTests': on)
+        settle.start()
+        self.addCleanup(settle.stop)
         self.shown = True  # the fullscreen window's desktop shows
         pip = self.window.desktop_pip
         pip._on_active_space = lambda _window: self.shown
@@ -1013,6 +1065,12 @@ class OnePictureInPictureTests(WindowCase):
 
 
 class DesktopPipWindowTests(WindowCase):
+    def setUp(self):
+        super().setUp()
+        settle = mock.patch.object(desktop_pip, "FLOAT_SETTLE_MS", 0)  # (DesktopPipTests': on)
+        settle.start()
+        self.addCleanup(settle.stop)
+
     def test_the_floating_picture_opens_where_it_was_left_while_that_is_on_a_screen(self):
         window = self.window
         screen = QApplication.primaryScreen().availableGeometry()

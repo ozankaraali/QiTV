@@ -1189,7 +1189,7 @@ class TVWindow(QMainWindow):
         self.pages.modeChanged.connect(self.controller.page_changed)  # 2.6: a question goes along
         self.pages.modeChanged.connect(self.window_cards.page_changed)  # 2.13.1: so do these
         # The Library (its corner player) lays the player out: a floating picture comes back.
-        self.pages.modeChanged.connect(lambda *_: self.desktop_pip.dock())
+        self.pages.modeChanged.connect(lambda *_: self.desktop_pip.dock("the Library"))
         self.pages.cornerClicked.connect(self.screens.back_to_player)
         # A song's screen stays in the corner (small): a press on it is the corner player's
         # (dragged or clicked), as on its picture, never the song's play or pause.
@@ -1728,7 +1728,7 @@ class TVWindow(QMainWindow):
         if self._floats_for_the_window():
             self.desktop_pip.come_back()
         else:
-            self.desktop_pip.dock()
+            self.desktop_pip.dock("the multiview")
 
     def _hover_over_the_small_window(self) -> None:
         """The pointer moved over the small window while QiTV is not the active app (Qt says
@@ -3545,7 +3545,7 @@ class TVWindow(QMainWindow):
     def _come_forward(self) -> None:
         """The window in front, not minimized, its picture back from the desktop's."""
         try:
-            self.desktop_pip.dock()
+            self.desktop_pip.dock("a question, or QiTV to the front")
         except Exception as e:  # never in the way of the question
             logger.warning("Could not put the floating picture back: %s", safe_message(e))
         if self.isMinimized():

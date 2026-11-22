@@ -18,7 +18,10 @@ is lent by the window (`lend`: PageStack.lend_player) and moved into the `Floati
 page's surfaces keep their native views, and libVLC, which draws into a view of its own inside
 each, goes on drawing (measured with the large surface: no picture lost, no reopen). The
 fullscreen window stays where it was, showing "Playing in the small window" in the page's place.
-Back on that desktop, the page returns (`take_back`) and the floating window hides; a
+Back on that desktop, the page returns (`take_back`) and the floating window hides; right after
+it floated, only once "its desktop shows" has held SHOWN_HOLD_MS (macOS may answer so while it
+still switches desktops: the owner saw it float and come back several times). Each way back
+says why in the log. A
 double-click on it (or its controls' way back) brings the fullscreen desktop back
 (`come_back`), which puts the page back the same way. Leaving fullscreen or closing QiTV puts it
 back first. The floating window shows on every desktop (`join_all_spaces`), above other windows.
@@ -82,6 +85,11 @@ HOVER_MS = 150
 AWAY_CHECKS = 2  # answers "another desktop" in a row before the picture floats (the
 # fullscreen animation may answer it once)
 CONFIRM_MS = 150  # the second answer is asked this soon after the first, not a poll later
+# Right after it floats, macOS may still be switching desktops and answer "its desktop shows"
+# for a moment (the owner, 2.13.5: it floated and came back three to five times): for this
+# long after it floated, that answer docks it only once it has held SHOWN_HOLD_MS.
+FLOAT_SETTLE_MS = 1500
+SHOWN_HOLD_MS = 1000
 # A covered window: out of sight this long before the picture floats (a menu, a notification or
 # a window dragged across never floats it). Asked again a little after (a timer may be early).
 COVERED_SETTLE_MS = 500
@@ -498,6 +506,8 @@ class DesktopPip(QObject):
         # After a way back (`come_back`), nothing floats before the window was seen (covered) or
         # its desktop was shown (desktop: macOS switches desktops meanwhile, review N-1).
         self._held = False
+        self._floated_at: Optional[float] = None  # when it last floated (`clock`)
+        self._shown_since: Optional[float] = None  # "its desktop shows", answered since
         self._timer = QTimer(self)
         self._timer.setInterval(POLL_MS)
         self._timer.timeout.connect(self.check)
@@ -535,7 +545,7 @@ class DesktopPip(QObject):
             return
         self._timer.stop()
         self._away, self._since, self._held = 0, None, False
-        self.dock()
+        self.dock("what it floats for changed (fullscreen, the mini player, a setting)")
         self._reason = reason or DESKTOP
         if reason is not None:
             self._timer.start()
@@ -554,7 +564,7 @@ class DesktopPip(QObject):
             self._check_covered()
             return
         if self._shown and not self._may_stay():
-            self.dock()  # nothing to float any more (the grid, the Library, a dialog came)
+            self.dock("it may float no more (fullscreen, the setting, the grid, the Library)")
             return
         shown = self._on_active_space(self._window)
         if shown is None:
@@ -564,14 +574,32 @@ class DesktopPip(QObject):
             self._away = 0
             return
         self._away = 0 if shown else self._away + 1
+        if not shown:
+            self._shown_since = None
         if self._away >= AWAY_CHECKS and not self._shown and self._may_float():
             self._float()
         elif shown and self._shown:
-            self.dock()
+            if self._switch_may_run():
+                return  # macOS may still be switching desktops: once it has held, back
+            self.dock("its desktop shows again")
         elif self._away == 1 and not self._shown and self._timer.isActive():
             QTimer.singleShot(CONFIRM_MS, self, self.nudge)  # (the poll would take longer)
         elif self._shown:
             self._follow_shape()  # it floats on: its picture's shape may have changed
+
+    def _switch_may_run(self) -> bool:
+        """It floated a moment ago (FLOAT_SETTLE_MS) and "its desktop shows" has not held for
+        SHOWN_HOLD_MS yet: macOS may be in the middle of its switch of desktops (asked again
+        once the hold is over)."""
+        floated = self._floated_at
+        now = self._clock()
+        if floated is None or (now - floated) * 1000 >= FLOAT_SETTLE_MS:
+            return False
+        if self._shown_since is None:
+            self._shown_since = now
+            if self._timer.isActive():
+                QTimer.singleShot(SHOWN_HOLD_MS + 50, self, self.nudge)  # (not a poll later)
+        return (now - self._shown_since) * 1000 < SHOWN_HOLD_MS
 
     def _follow_shape(self) -> None:
         if self._floating is not None and self._shape is not None:
@@ -583,14 +611,14 @@ class DesktopPip(QObject):
         may_float = self._may_stay_covered if self._shown else self._may_float_covered
         if may_float is None or not may_float():
             self._since = None
-            self.dock()  # nothing to float any more (the grid, Keep on Top came)
+            self.dock("it may float no more (the setting, Keep on Top, the grid, the Library)")
             return
         unseen = self._unseen()
         if unseen is None:
             return
         if not unseen:
             self._since, self._held = None, False
-            self.dock()
+            self.dock("the window shows again, or QiTV is in front")
             return
         if self._shown:
             self._follow_shape()  # it floats on: its picture's shape may have changed
@@ -626,18 +654,19 @@ class DesktopPip(QObject):
         seen = self._seen(window) if self._seen is not None else None
         return None if seen is None else not seen
 
-    def dock(self) -> None:
-        """The picture back in the TV window (nothing when it is there). The mini player's
-        window is the TV window's to show again (`floatingChanged`)."""
+    def dock(self, why: str = "the window needs it") -> None:
+        """The picture back in the TV window (nothing when it is there), `why` in the log. The
+        mini player's window is the TV window's to show again (`floatingChanged`)."""
         if not self._shown or self._floating is None:
             return
         self._shown = False
+        self._shown_since = None
         self._hover_poll.stop()
         page = self._floating.release()
         self._floating.hide()
         if page is not None:
             self._take_back(page)
-        logger.info("Desktop picture in picture: back in the window")
+        logger.info("Desktop picture in picture: back in the window: %s", why)
         self.floatingChanged.emit(False)
 
     def _float(self) -> None:
@@ -658,6 +687,7 @@ class DesktopPip(QObject):
         self._join_all_spaces(floating)  # again: showing may set its own
         floating.relock()  # (Qt clears the shape kept as it makes the native window)
         self._shown = True
+        self._floated_at, self._shown_since = self._clock(), None
         self.activity_changed()
         if self._reason == COVERED:
             logger.info("Desktop picture in picture: floating (the window is out of sight)")
@@ -703,7 +733,7 @@ class DesktopPip(QObject):
         front of the app that covered it; nothing floats again before the window was seen
         (should macOS not bring QiTV, the picture stays). The mini player's way back is the
         TV window's (it shows itself again)."""
-        self.dock()  # back at once, while macOS brings that desktop
+        self.dock("brought back (a double-click, its controls, what needs the window)")
         window = self._window
         if self._reason == DESKTOP and self._timer.isActive():
             self._held, self._away = True, 0  # its "away" answers during the switch: no float
@@ -721,7 +751,7 @@ class DesktopPip(QObject):
         """QiTV closes: the picture back first, then the floating window goes."""
         self._timer.stop()
         self._hover_poll.stop()
-        self.dock()
+        self.dock("QiTV closes")
         if self._floating is not None:
             self._floating.close()
             self._floating.deleteLater()
