@@ -109,10 +109,14 @@ clearly longer than it steps (1.5 learned intervals plus a quarter second, at le
 no rate change, no reopen, and the filter starts afresh once the edge moves again.
 Once VLC ran dry within five minutes (2.8.8: a source restarting every minute or two, its
 repeats dropped, ran it dry at each restart, and libVLC 3 drops pictures and sound when media
-comes late), a source silent beyond its bursts holds VLC before it runs dry again
-(`PlaybackSession.hold`: paused, saying buffering; "Waiting for the channel…") until 70% of the
-target is ahead; a sound lost while the picture plays, after its track was cycled
-(`PlaybackSession.soundLost`), opens the stream again where it plays.
+comes late), a source silent beyond its bursts holds VLC before it runs dry again (the first
+time too where VLC had room and the silence lasted 5 s beyond them by the time it reaches the
+edge: 2026-11-22; its bursts as it sends now, not one stay-live keeps)
+(`PlaybackSession.hold`: paused, saying buffering; "Waiting for the channel…"), a source sending
+under half of real time as good as a quiet one, until 70% of the target is ahead and the source
+sends at about real time again (or 30 s held, the cushion back); a sound lost while the
+picture plays, after its track was cycled (`PlaybackSession.soundLost`), opens the stream
+again where it plays.
 StayLive changes the rate only for a lag outside its dead band for 15 s, by one gentle nudge
 (1.03x or 0.97x, ramped in three steps, sized to end at the target; one per 5 minutes),
 sooner and beyond that budget only far behind (1.10x), with under half a second of room when
@@ -402,12 +406,28 @@ _BREAK_NEAR_S = 2.0
 # bursts (a bursty source's wait for its next one stays as it was), VLC is paused instead,
 # reported as buffering, and plays again once the source sends and that much of stay-live's
 # target is ahead (at least _HOLD_MIN_S): a wait that builds the cushion, not one at each gap.
+# 2026-11-22: the first time too, where VLC is about to run dry with the source silent
+# _HOLD_LONG_S beyond its bursts (as it sends now, not a burst stay-live keeps) already: it had
+# room, no hiccup it would ride out. Seen live: the edge stood still 15 s with VLC 15-18 s
+# behind, VLC ran dry and dropped sound as media came again.
 _HOLD_AFTER_S = 300.0
 _HOLD_AT_S = 0.6
 _HOLD_QUIET_S = 1.0
 _HOLD_BURSTS = 1.5  # ... beyond this many of its bursts (one still measured may be short)
+_HOLD_LONG_S = 5.0
 _HOLD_MIN_S = 2.0
 _HOLD_SHARE = 0.7  # ... of the target (a wait no longer than it must be)
+# 2026-11-22 (the "scratched CD" sound, at last): after a stall the source trickled (0.2-0.5x
+# real time); the hold played again at its cushion, VLC ate it and then played in fits at the
+# edge, dropping sound at each restart (16, then 24 buffers). Over _HOLD_RATE_S (two of its
+# bursts at least) a source sending under _HOLD_TRICKLE of real time is as good as quiet for a
+# hold, and a hold plays again only once the source sends at _HOLD_FLOWING of real time, or
+# _HOLD_MAX_S after it began with the cushion back (a held picture beats choppy sound, not for
+# ever: then VLC plays its cushion, and is held again at the edge).
+_HOLD_RATE_S = 4.0
+_HOLD_TRICKLE = 0.5
+_HOLD_FLOWING = 0.9
+_HOLD_MAX_S = 30.0
 _CALM_S = 1.0  # Auto: trouble again within this is the same starvation (VLC refills, starves)
 _REOPEN_HOLD_S = 5.0  # no reopen at live within this of an open (and before VLC played it)
 # The tune's start (2.1, `_play_first`). A source other than HLS is held until the
@@ -740,8 +760,12 @@ class LiveSession(QObject):
         self._nudge_said: Optional[tuple[float, float]] = None
         self._burst_said: Optional[float] = None
         self._measured_said: Optional[float] = None
-        # The live edge's level as it arrived, (when, edge less when), for `_flooding`.
+        # The live edge's level as it arrived, (when, edge less when), for `_flooding`; and
+        # when the source last sent again after a silence, and the last tick's quiet, for the
+        # hold's trickle (`_hold_at_edge`).
         self._arrived: deque[tuple[float, float]] = deque()
+        self._sending_since = -math.inf
+        self._quiet_before = 0.0
         self._rate_minute, self._rate_lines = -1, 0
         self._troubled_at: Optional[float] = None
         self._cushion = 0.0  # the largest lag at the live edge since the tune (or the target)
@@ -3597,7 +3621,15 @@ class LiveSession(QObject):
         ahead = edge - position
         quiet = now - self._edge_moved
         reported = _number(snapshot.get("burst_s"))
-        burst = max(self._filter.burst_for(reported), reported)
+        rhythm = max(self._filter.rhythm_for(reported), reported)
+        beyond = quiet - _HOLD_BURSTS * rhythm
+        if quiet < self._quiet_before and self._quiet_before >= _HOLD_BURSTS * rhythm + 1.0:
+            self._sending_since = now  # the source sends again after a silence
+        self._quiet_before = quiet
+        # Judged over sending time only: right after a silence the window holds the silence.
+        window = max(_HOLD_RATE_S, 2 * rhythm)
+        rate = self._arrival_rate(window) if now - self._sending_since >= window else None
+        trickle = rate is not None and rate < _HOLD_TRICKLE
         if self._held is None:
             dry = self._starved(snapshot, position)
             if dry and not self._dry_now:
@@ -3608,20 +3640,40 @@ class LiveSession(QObject):
             # dry run counts, not this one.
             earlier = self._dry_before if dry else self._dry_seen
             if (
-                now - earlier <= _HOLD_AFTER_S
+                # (the first time: VLC not dry yet, the silence long already: it had room)
+                (now - earlier <= _HOLD_AFTER_S or (beyond >= _HOLD_LONG_S and not dry))
                 and self._playback.state() in (PlaybackState.PLAYING, PlaybackState.BUFFERING)
                 and not self._just_opened()
                 and ahead <= _HOLD_AT_S
-                and quiet >= _HOLD_BURSTS * burst + _HOLD_QUIET_S
+                and (beyond >= _HOLD_QUIET_S or trickle)
             ):
-                _LOG.debug("Held at the edge: %.1f s ahead, the source quiet %.1f s.", ahead, quiet)
+                _LOG.debug(
+                    "Held at the edge: %.1f s ahead, the source quiet %.1f s%s.",
+                    ahead,
+                    quiet,
+                    "" if rate is None else f", sending at {100 * rate:.0f}% of real time",
+                )
                 if not dry:
                     self._dry_before, self._dry_seen = self._dry_seen, now
                 self._held = now
                 self._playback.hold(True)
             return
-        if quiet < _HOLD_QUIET_S and ahead >= max(_HOLD_MIN_S, _HOLD_SHARE * self._stay.target):
+        cushion = ahead >= max(_HOLD_MIN_S, _HOLD_SHARE * self._stay.target)
+        flowing = rate is None or rate >= _HOLD_FLOWING or now - self._held >= _HOLD_MAX_S
+        if quiet < _HOLD_QUIET_S and cushion and flowing:
             self._release_hold(snapshot, position)
+
+    def _arrival_rate(self, seconds: float) -> Optional[float]:
+        """What the live edge advanced over the last `seconds`, against real time (1.0: as
+        it plays); None before that long was seen (`_flooding` keeps the arrivals)."""
+        arrived = self._arrived
+        if not arrived:
+            return None
+        now, level = arrived[-1]
+        then = next((mark for mark in reversed(arrived) if mark[0] <= now - seconds + 1e-9), None)
+        if then is None:
+            return None
+        return (level + now - then[1] - then[0]) / (now - then[0])
 
     def _release_hold(self, snapshot: Mapping[str, Any], position: float) -> None:
         held, self._held = self._held, None
