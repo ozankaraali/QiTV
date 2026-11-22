@@ -8,6 +8,7 @@ import unittest
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 from PySide6.QtCore import Qt
+from PySide6.QtGui import QImage, QPainter
 from PySide6.QtTest import QTest
 from PySide6.QtWidgets import QApplication, QWidget
 
@@ -305,6 +306,43 @@ class RecorderHomeReviewTests(unittest.TestCase):
             for rect in rects:
                 self.assertFalse(rect.toRect().intersects(area), (corner, rect))
             self.page.hide()
+
+    def test_the_keys_on_a_tile_the_corner_player_covers_go_to_all_recordings(self):
+        # Bug scan #3: the corner player shows over the shelf while the keys sit on a tile it
+        # leaves no room for. The highlight, Enter and ← read past the tiles shown (an
+        # IndexError in the paint and at Enter); they take All recordings, then the tiles.
+        shelf = [tile(f"/r/{k}.ts", f"Title {k}") for k in range(8)]
+        self.home.set_shelf(shelf)
+        self.home.set_focused(True)
+        self.home.move_by(0, 1)  # the guide
+        self.home.page(1)
+        self.home.page(1)  # past its rows: the shelf
+        self.assertEqual(self.home.focus_region(), "shelf")
+        self.page.show()
+        shown = len(self.home.shelf_rects())
+        for _ in range(shown - 1):
+            self.home.move_by(1, 0)
+        self.assertEqual(self.home.focused_tile(), f"/r/{shown - 1}.ts")  # the last shown
+        player = QWidget(self.page)
+        self.addCleanup(player.deleteLater)
+        player.setGeometry(1280 - 620, 760 - 240, 600, 225)  # a large one: tiles go
+        player.show()
+        self.home.avoid(player)
+        left = len(self.home.shelf_rects())
+        self.assertLess(left, shown)
+        image = QImage(self.home.size(), QImage.Format.Format_ARGB32)
+        painter = QPainter(image)
+        try:
+            self.home._paint_shelf(painter, self.home._units())  # the highlight
+        finally:
+            painter.end()
+        self.assertEqual(self.home.focused_tile(), "all")
+        heard = []
+        self.home.allRequested.connect(lambda: heard.append("all"))
+        self.home.activate()
+        self.assertEqual(heard, ["all"])
+        self.home.move_by(-1, 0)  # ← from All recordings: the last tile shown
+        self.assertEqual(self.home.focused_tile(), f"/r/{left - 1}.ts")
 
 
 if __name__ == "__main__":

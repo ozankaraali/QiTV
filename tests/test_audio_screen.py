@@ -229,6 +229,17 @@ class SwitchAndRowTests(ScreenCase):
             self.click(screen, name)
         self.assertEqual(heard, ["back", "words", "up_next"])
 
+    def test_backs_tooltip_says_where_it_goes(self):
+        # 2.13.4, the owner: a live channel's ‹ (a radio station's) is live TV's Back, the
+        # channel list; a song's goes back to the Library.
+        screen = self.make(view="cover")
+        back = QPointF(screen.controls()["back"].center())
+        self.assertEqual(screen.tooltip_at(back), "Back to the Library")
+        screen.set_live(True)
+        self.assertEqual(screen.tooltip_at(back), "Channel list")
+        screen.set_live(False)
+        self.assertEqual(screen.tooltip_at(back), "Back to the Library")
+
     def test_a_long_album_keeps_the_playing_row_in_view_and_scrolls(self):
         many = [track(i, f"Song {i + 1}", 180_000) for i in range(40)]
         screen = self.make(view="album", tracks=many, current=30)

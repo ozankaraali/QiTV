@@ -15,8 +15,9 @@ gradients in its dominant colours (services.song_facts.dominant_colours), breath
 is drawn small and scaled up (it is all soft light), only while the screen shows and plays, and
 holds still when the system asks for less motion.
 
-The top bar is the screen's: back (‹), the Words pill (the AI captions; lit: "Words · <its
-language>"), "Up next · N" (Cover, with a list) and the view switch. The bottom DOCK_FRACTION is
+The top bar is the screen's: back (‹: the Library; a live channel's is live TV's Back, the
+channel list, `set_live`), the Words pill (the AI captions; lit: "Words · <its language>"),
+"Up next · N" (Cover, with a list) and the view switch. The bottom DOCK_FRACTION is
 left for the player controls' audio dock (the transport, above this overlay); nothing of the
 screen is drawn there but its light. A radio channel keeps live TV's controls instead: the top
 bar sits below their title row, whether they show or not (it never moves from under the
@@ -385,7 +386,7 @@ class AudioScreen(Overlay):
     trackPicked = Signal(int)  # an album row was clicked: its index in set_tracks' list
     wordsRequested = Signal()  # the Words pill
     upNextRequested = Signal()  # the "Up next" pill (Cover)
-    backRequested = Signal()  # ‹ (the controller takes it to the Library)
+    backRequested = Signal()  # ‹ (the window takes it to the Library, or to the channel list)
     # Its Stage shows (True) or no longer does: the words are its own then (takes_words)
     stageShown = Signal(bool)
     # Its Stage shows and moves (it plays, its window shows, the system allows the motion), or
@@ -446,6 +447,7 @@ class AudioScreen(Overlay):
         self._band_check.setInterval(0)
         self._band_check.timeout.connect(self._follow_transport)
         self._compact = False  # the Library's corner player: the cover and the title only
+        self._live = False  # a live channel's screen: its ‹ is the channel list (set_live)
         self._inset = 0  # the top bar's top, below live TV's title row while it shows (follow)
         self._transport: Any = None
         self._captions: Any = None  # the captions over the picture, given room (leave_room_for)
@@ -500,6 +502,12 @@ class AudioScreen(Overlay):
             return
         self._tracks = list(tracks)
         self._relayout()
+
+    def set_live(self, live: bool) -> None:
+        """A live channel's screen (a radio station's, any channel's with no picture), or a
+        song's: its ‹ says where it goes, the channel list (live TV's Back, 2.13.4) or the
+        Library. The controller says it each time the screen shows (one serves both)."""
+        self._live = live
 
     def set_view(self, view: str) -> None:
         """Show `view` ("cover", "album" or "stage"). The controller's choice: no viewPicked.
@@ -1110,7 +1118,7 @@ class AudioScreen(Overlay):
     def tooltip_at(self, pos: QPointF) -> Optional[str]:
         name = self._control_at(pos)
         if name == "back":
-            return tr("Back to the Library")
+            return tr("Channel list") if self._live else tr("Back to the Library")
         if name == "words":
             return tr("AI captions")
         if name is not None and name.startswith("view_"):

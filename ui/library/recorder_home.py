@@ -431,12 +431,15 @@ class RecorderHome(TooltipWidget):
     def _shelf_order(self) -> list[Any]:
         return [item for item, _rect in self.shelf_rects()] + ["all"]
 
+    def _shelf_index(self) -> int:
+        """Where on the shelf the keys are: their tile, or All recordings, the last, while
+        the corner player or a smaller window leaves fewer tiles than that (bug scan #3: the
+        highlight and Enter read past the tiles shown). The tile comes back with its room."""
+        return min(self._tile, len(self._shelf_order()) - 1)
+
     def focused_tile(self) -> str:
-        """The shelf's tile the keys are on: its recording's path, "all", or ""."""
-        order = self._shelf_order()
-        if not 0 <= self._tile < len(order):
-            return ""
-        return _tile_key(order[self._tile])
+        """The shelf's tile the keys are on: its recording's path, or "all"."""
+        return _tile_key(self._shelf_order()[self._shelf_index()])
 
     def focused_button(self) -> str:
         order = self._hero_order()
@@ -473,10 +476,11 @@ class RecorderHome(TooltipWidget):
             self._button_chosen = True
         else:
             order = self._shelf_order()
-            if self._tile + dx < 0:
+            tile = self._shelf_index()
+            if tile + dx < 0:
                 self.leftEdge.emit()
                 return
-            self._tile = max(0, min(len(order) - 1, self._tile + dx))
+            self._tile = max(0, min(len(order) - 1, tile + dx))
             self._tile_chosen = True
         self.update()
 
@@ -511,7 +515,7 @@ class RecorderHome(TooltipWidget):
         else:
             order = self._shelf_order()
             if order:
-                choice = order[self._tile]
+                choice = order[self._shelf_index()]
                 if choice == "all":
                     self.allRequested.emit()
                 else:
@@ -790,13 +794,12 @@ class RecorderHome(TooltipWidget):
             translate(SHELF_TEXT),
         )
         all_rect = self.all_rect()
-        focused_all = (
-            self._focused and self._region == "shelf" and self._shelf_order()[self._tile] == "all"
-        )
+        order = self._shelf_order()
+        focus = order[self._shelf_index()] if self._focused and self._region == "shelf" else None
+        focused_all = focus == "all"
         p.setFont(units.font(1.0, QFont.Weight.DemiBold))
         p.setPen(qcolor(PALETTE.accent) if focused_all else qcolor(PALETTE.text, 0.8))
         p.drawText(all_rect, Qt.AlignRight | Qt.AlignVCenter, translate(ALL_TEXT))
-        order = self._shelf_order()
         for item, rect in self.shelf_rects():
             frame = self._picture(item) if self._picture is not None else None
             if frame is not None and not frame.isNull():
@@ -813,7 +816,7 @@ class RecorderHome(TooltipWidget):
             else:
                 hue = card_hue(str(item.get("_channel") or ""))  # a channel keeps its colour
                 fill_round(p, rect, _card_color(hue), RADIUS_CARD)
-            if self._focused and self._region == "shelf" and order[self._tile] is item:
+            if focus is item:
                 p.setPen(qcolor(PALETTE.accent))
                 p.setBrush(Qt.NoBrush)
                 p.drawRoundedRect(rect.adjusted(-1.5, -1.5, 1.5, 1.5), RADIUS_CARD, RADIUS_CARD)

@@ -4871,6 +4871,7 @@ class TVController(QObject):
         screen = self._screen()
         if screen is None:
             return
+        screen.set_live(self._sound_kind == "radio")  # its ‹: the channel list, or the Library
         if self._sound_kind == "radio":
             screen.set_tracks([], -1)
             screen.set_view(self._opening_view())
