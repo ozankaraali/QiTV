@@ -30,6 +30,9 @@ HOME = {
     "token": "server-token",
     "owned": True,
     "url": "https://10-0-0-5.example.plex.direct:32400",
+    "connections": [
+        {"uri": "https://10-0-0-5.example.plex.direct:32400", "local": True, "relay": False}
+    ],
 }
 FRIEND = {
     "name": "A Friend's Films",
@@ -271,6 +274,7 @@ class PlexSignInTests(unittest.TestCase):
                 "token": "server-token",
                 "server_id": "machine-home",
                 "device_id": client_id,
+                "connections": HOME["connections"],
             },
         )
         self.assertNotIn("account-token", repr(self.saved()))

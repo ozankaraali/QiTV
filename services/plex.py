@@ -27,7 +27,7 @@ from typing import Any, Callable, Optional
 from urllib.parse import parse_qs, urlencode, urlsplit
 import uuid
 
-from services import media_server as ms
+from services import media_server as ms, plex_addresses
 from services.lazy_import import lazy_module
 from services.media_server import MediaServerError, SignInNeeded, normalized_base
 from services.surrogates import response_json
@@ -128,6 +128,34 @@ def _connections(raw: Any) -> tuple[Connection, ...]:
     for connection in ordered(found):
         unique.setdefault(connection.uri, connection)
     return tuple(unique.values())
+
+
+def connections_of(provider: dict) -> tuple[Connection, ...]:
+    """The connections a provider keeps (review I2), best first."""
+    found = []
+    for entry in provider.get("connections") or []:
+        if isinstance(entry, dict) and str(entry.get("uri") or "").startswith(("http", "https")):
+            found.append(
+                Connection(
+                    normalized_base(str(entry["uri"])),
+                    bool(entry.get("local")),
+                    bool(entry.get("relay")),
+                )
+            )
+    return tuple(ordered(found))
+
+
+def kept_connections(connections: Any) -> list[dict]:
+    """Connections as a provider keeps them: {uri, local, relay}, best first."""
+    return [{"uri": c.uri, "local": c.local, "relay": c.relay} for c in connections]
+
+
+def unreachable(error: BaseException) -> bool:
+    """Whether a request failed for want of the server at that address (no connection, a
+    time-out, a certificate refused), not for what the server answered."""
+    if isinstance(error, MediaServerError):
+        return False
+    return isinstance(error, (OSError, TimeoutError))
 
 
 def servers_of(resources: Any) -> list[Server]:
@@ -449,8 +477,8 @@ def _remember(base: str, item_id: str, duration: Any) -> None:
 
 
 def image_url(base: str, path: Any, token: str) -> str:
-    """A picture of the server (a poster, a season's cover) as VLC and the image cache fetch
-    it: with the token (Plex asks for it), never resized by the server."""
+    """A picture of the server at its address, with the token (Plex asks for it): for a
+    server of no id only (a picture is a reference otherwise: `_picture`)."""
     path = str(path or "")
     if not path.startswith("/"):
         return ""
@@ -469,9 +497,17 @@ def _number(value: Any) -> str:
     return str(value) if isinstance(value, (int, float)) and not isinstance(value, bool) else ""
 
 
-def title_item(raw: dict, base: str, token: str, library_id: str) -> dict:
+def _picture(path: Any, base: str, token: str, server_id: str) -> str:
+    """A picture of the server: a reference that becomes its resizer when fetched (no token
+    kept: services.plex_addresses), or its address as it is for a server of no id."""
+    if server_id:
+        return plex_addresses.image_ref(server_id, path)
+    return image_url(base, path, token)
+
+
+def title_item(raw: dict, base: str, token: str, library_id: str, *, server_id: str = "") -> dict:
     """A film or a series of the server as a Library title (Jellyfin's and Emby's keys:
-    services.media_server.title_item)."""
+    services.media_server.title_item); its picture by reference (`server_id`: its server's)."""
     overview = ms.shortened(str(raw.get("summary") or ""))
     rating = raw.get("audienceRating")
     if not isinstance(rating, (int, float)):
@@ -479,7 +515,7 @@ def title_item(raw: dict, base: str, token: str, library_id: str) -> dict:
     item: dict[str, Any] = {
         "id": str(raw.get("ratingKey") or ""),
         "name": str(raw.get("title") or ""),
-        "logo": image_url(base, raw.get("thumb"), token),
+        "logo": _picture(raw.get("thumb"), base, token, server_id),
         "tv_genre_id": library_id,
         "cmd": "",
         "description": overview,
@@ -512,7 +548,12 @@ def title_item(raw: dict, base: str, token: str, library_id: str) -> dict:
 
 
 def section_payload(
-    libraries: list[dict], titles: dict[str, list[dict]], base: str, token: str
+    libraries: list[dict],
+    titles: dict[str, list[dict]],
+    base: str,
+    token: str,
+    *,
+    server_id: str = "",
 ) -> dict:
     """The Library's section of a server: All, Continue watching (titles started there), then
     each library (services.media_server.ordered_payload). Loaded whole each time: Plex answers
@@ -525,15 +566,15 @@ def section_payload(
             item_id = str(raw.get("ratingKey") or "")
             if item_id:
                 if item_id not in made:
-                    made[item_id] = title_item(raw, base, token, library["id"])
+                    made[item_id] = title_item(raw, base, token, library["id"], server_id=server_id)
                 listed.append(made[item_id])
     return ms.ordered_payload(libraries, ordered)
 
 
-def episode_item(raw: dict, base: str, token: str) -> dict:
+def episode_item(raw: dict, base: str, token: str, *, server_id: str = "") -> dict:
     number = _number(raw.get("index"))
     name = str(raw.get("title") or (f"Episode {number}" if number else ""))
-    item = title_item(raw, base, token, "")
+    item = title_item(raw, base, token, "", server_id=server_id)
     item.update(
         {
             "number": number,
@@ -548,7 +589,9 @@ def episode_item(raw: dict, base: str, token: str) -> dict:
     return item
 
 
-def seasons_payload(seasons: list[dict], episodes: list[dict], base: str, token: str) -> dict:
+def seasons_payload(
+    seasons: list[dict], episodes: list[dict], base: str, token: str, *, server_id: str = ""
+) -> dict:
     """A series' seasons, each with its episodes in order (as Jellyfin's come)."""
     by_season: dict[str, list[dict]] = {}
     for raw in episodes:
@@ -558,7 +601,7 @@ def seasons_payload(seasons: list[dict], episodes: list[dict], base: str, token:
         season_id = str(raw.get("ratingKey") or "")
         listed = sorted(by_season.get(season_id, []), key=lambda e: int(e.get("index") or 0))
         season_number = _number(raw.get("index"))
-        made = [episode_item(e, base, token) for e in listed]
+        made = [episode_item(e, base, token, server_id=server_id) for e in listed]
         for episode in made:  # an episode without its own season's number has its season's
             episode["season"] = episode["season"] or season_number
         out.append(
@@ -566,7 +609,7 @@ def seasons_payload(seasons: list[dict], episodes: list[dict], base: str, token:
                 "id": season_id,
                 "name": str(raw.get("title") or ""),
                 "season_number": season_number,
-                "cover": image_url(base, raw.get("thumb"), token),
+                "cover": _picture(raw.get("thumb"), base, token, server_id),
                 "overview": str(raw.get("summary") or ""),
                 "episode_count": str(len(listed)),
                 "episodes": made,

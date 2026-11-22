@@ -278,6 +278,8 @@ class PlexSignIn(QObject):
             "token": str(server["token"]),
             "server_id": str(server["machine_id"]),
             "device_id": self._client_id,
+            # Review I2: where else to look for the server when it isn't where it was.
+            "connections": list(server.get("connections") or []),
         }
         editing = self._editing
         if editing and self._provider(editing).get("server_id") == access["server_id"]:

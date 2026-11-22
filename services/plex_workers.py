@@ -17,7 +17,7 @@ from typing import Any, Callable, Optional
 
 from PySide6.QtCore import QObject, Signal
 
-from services import media_server as ms, media_workers, plex
+from services import media_server as ms, media_workers, plex, plex_addresses
 from services.config_manager import get_app_version
 from services.i18n import N_, translate
 
@@ -118,6 +118,7 @@ class ServersJob(_AccountJob):
                     "token": server.access_token,
                     "owned": server.owned,
                     "url": uri,
+                    "connections": plex.kept_connections(server.connections),
                 }
                 for server, uri in found
             ],
@@ -128,9 +129,10 @@ class ServersJob(_AccountJob):
 
 
 def client_for(provider: dict, verify: bool) -> plex.PlexClient:
-    """The client of a Plex provider: its server's address, its token, its client id (a
-    plex.direct address's certificate always checked: plex.must_verify)."""
-    url = str(provider.get("url") or "")
+    """The client of a Plex provider: its server where it was last reached
+    (services.plex_addresses), its token, its client id (a plex.direct address's certificate
+    always checked: plex.must_verify)."""
+    url = plex_addresses.base_of(provider)
     return plex.PlexClient(
         url,
         token=str(provider.get("token") or ""),
@@ -140,27 +142,98 @@ def client_for(provider: dict, verify: bool) -> plex.PlexClient:
     )
 
 
+Finder = Callable[[dict], str]  # a provider -> the best of its connections that answers, or ""
+
+
+def refind(provider: dict) -> str:
+    """Where provider `provider`'s server answers now: the best of the connections it keeps
+    (at home, remote, relayed), each asked who it is without the token (plex.answers); "" for
+    none (or none kept)."""
+    connections = plex.connections_of(provider)
+    server_id = str(provider.get("server_id") or "")
+    if not connections or not server_id:
+        return ""
+    server = plex.Server(
+        str(provider.get("name") or ""),
+        server_id,
+        str(provider.get("token") or ""),
+        connections=connections,
+    )
+    client_id, version = str(provider.get("device_id") or ""), get_app_version()
+    found = plex.reachable([server], lambda uri, s: plex.answers(uri, s, client_id, version))
+    return found[0][1] if found else ""
+
+
+def _at_best(provider: dict) -> bool:
+    connections = plex.connections_of(provider)
+    return not connections or plex_addresses.base_of(provider) == connections[0].uri
+
+
+def asked(
+    provider: dict,
+    verify: bool,
+    work: Callable[[Any], Any],
+    client: Optional[Callable] = None,
+    finder: Optional[Finder] = None,
+    best: bool = False,
+) -> Any:
+    """`work(client)` with provider `provider`'s server where it was last reached; not
+    reached there, the server is looked for among its connections and asked again where it
+    answers, from now on (review I2). `best`: looked for first when not at its best (a
+    list's load: at home again, not through the relay)."""
+    make, find = client or client_for, finder or refind
+    server_id = str(provider.get("server_id") or "")
+    if best and not _at_best(provider):
+        found = find(provider)
+        if found:
+            plex_addresses.moved(server_id, found)
+    server = make(provider, verify)
+    try:
+        try:
+            return work(server)
+        except Exception as error:
+            if not plex.unreachable(error):
+                raise
+            found = find(provider)
+            if not found or found == server.base:
+                raise
+            logger.info("A Plex server answers at another of its connections now")
+            plex_addresses.moved(server_id, found)
+            server.close()
+            server = make(provider, verify)
+            return work(server)
+    finally:
+        server.close()
+
+
 class _ServerWorker(QObject):
     finished = Signal(object)
     error = Signal(str)
+    best = False  # a list's load: its server looked for first when not at its best
 
-    def __init__(self, provider: dict, verify: bool, client: Optional[Callable] = None) -> None:
+    def __init__(
+        self,
+        provider: dict,
+        verify: bool,
+        client: Optional[Callable] = None,
+        finder: Optional[Finder] = None,
+    ) -> None:
         super().__init__()
         self.provider = dict(provider)
         self.verify = verify
-        self._client = client or client_for
+        self._client = client
+        self._finder = finder
 
     def run(self) -> None:
-        client = self._client(self.provider, self.verify)
         try:
-            self.finished.emit(self.work(client))
+            self.finished.emit(
+                asked(self.provider, self.verify, self.work, self._client, self._finder, self.best)
+            )
         except _Shown as shown:
             self.error.emit(str(shown))
         except Exception as e:
             logger.warning("A Plex server's request failed: %s", media_workers.logged(e))
             self.error.emit(media_workers.failure(e))
-        finally:
-            client.close()
 
     def work(self, client: Any) -> Any:
         raise NotImplementedError
@@ -174,6 +247,8 @@ class PlexSectionWorker(_ServerWorker):
     """The films ("vod") or series ("series") of every library that holds them, whole (a
     library comes at once: no delta, so a saved list's summary is not asked for)."""
 
+    best = True
+
     def __init__(
         self,
         provider: dict,
@@ -182,29 +257,41 @@ class PlexSectionWorker(_ServerWorker):
         client: Optional[Callable] = None,
         *,
         saved: Optional[dict] = None,
+        finder: Optional[Finder] = None,
     ) -> None:
-        super().__init__(provider, verify, client)
+        super().__init__(provider, verify, client, finder)
         self.content_type = content_type
 
     def work(self, client: Any) -> dict:
         kind = plex.SHOW if self.content_type == "series" else plex.MOVIE
         libraries = [lib for lib in client.libraries() if lib["type"] == kind]
         titles = {lib["id"]: client.items(lib["id"], kind) for lib in libraries}
-        return plex.section_payload(libraries, titles, client.base, client.token)
+        server_id = str(self.provider.get("server_id") or "")
+        return plex.section_payload(
+            libraries, titles, client.base, client.token, server_id=server_id
+        )
 
 
 class PlexSeriesWorker(_ServerWorker):
     """A series' seasons, each with its episodes."""
 
     def __init__(
-        self, provider: dict, series_id: str, verify: bool, client: Optional[Callable] = None
+        self,
+        provider: dict,
+        series_id: str,
+        verify: bool,
+        client: Optional[Callable] = None,
+        finder: Optional[Finder] = None,
     ) -> None:
-        super().__init__(provider, verify, client)
+        super().__init__(provider, verify, client, finder)
         self.series_id = series_id
 
     def work(self, client: Any) -> dict:
         seasons, episodes = client.seasons_and_episodes(self.series_id)
-        return plex.seasons_payload(seasons, episodes, client.base, client.token)
+        server_id = str(self.provider.get("server_id") or "")
+        return plex.seasons_payload(
+            seasons, episodes, client.base, client.token, server_id=server_id
+        )
 
 
 class PlexLinkWorker(_ServerWorker):
@@ -223,8 +310,9 @@ class PlexLinkWorker(_ServerWorker):
         four_k: str,
         quality: Optional[ms.Quality] = None,
         client: Optional[Callable] = None,
+        finder: Optional[Finder] = None,
     ) -> None:
-        super().__init__(provider, verify, client)
+        super().__init__(provider, verify, client, finder)
         self.item_id = item_id
         self.screen_4k = screen_4k
         self.four_k = four_k
@@ -249,18 +337,19 @@ class PlexLinkWorker(_ServerWorker):
 
 
 def check_access(
-    provider: dict, verify: bool, client: Optional[Callable] = None
+    provider: dict,
+    verify: bool,
+    client: Optional[Callable] = None,
+    finder: Optional[Finder] = None,
 ) -> tuple[bool, str]:
     """Whether a Plex server answers its kept token (Settings' Check the connection), on the
-    calling thread: (True, "") or (False, why)."""
-    server = (client or client_for)(provider, verify)
+    calling thread, looked for among its connections when not where it was: (True, "") or
+    (False, why)."""
     try:
-        server.libraries()
+        asked(provider, verify, lambda server: server.libraries(), client, finder, best=True)
         return True, ""
     except ms.SignInNeeded:
         return False, translate(ms.SIGN_IN_AGAIN)
     except Exception as e:
         logger.info("A Plex server's kept sign-in was not answered: %s", media_workers.logged(e))
         return False, media_workers.failure(e)
-    finally:
-        server.close()
