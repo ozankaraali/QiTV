@@ -359,6 +359,18 @@ def _monotonic() -> float:
     return time.monotonic()
 
 
+def _rekeyed(keys: tuple, mapping: MultiKeyDict, previous: Optional[MultiKeyDict]) -> tuple:
+    """A guide channel's keys (its id first, as _index_programs stores them) under `mapping`
+    in place of `previous`: the IDs `previous` gave its id and `mapping` doesn't are dropped,
+    the ones `mapping` gives it added; its display names stay."""
+    channel_id = keys[0]
+    now = set(mapping.get_keys(channel_id) or ())
+    gone = set(previous.get_keys(channel_id) or ()) - now if previous is not None else set()
+    others = (set(keys[1:]) - gone) | now
+    others.discard(channel_id)
+    return (channel_id, *sorted(others))
+
+
 class EpgManager:
     def __init__(self, config_manager, provider_manager):
         self.config_manager = config_manager
@@ -638,8 +650,11 @@ class EpgManager:
         finally:
             _remove_quietly(xmltv_file)  # an error removing it must not hide the parse's
 
-    def reindex_programs(self):
-        """Re-key the guide shown after the XMLTV mapping changed (Settings, GUI thread).
+    def reindex_programs(self, previous: Optional[MultiKeyDict] = None):
+        """Re-key the guide shown after the XMLTV mapping changed from `previous` (Settings,
+        GUI thread), as _index_programs keys a guide: every channel stays, under its own id
+        and display names and the IDs the mapping gives its id now; those `previous` gave it
+        and the mapping no longer does go (None: none are known, all stay).
 
         The stored values move to their new keys as they are: a PackedGuide's channels stay
         pickled, so this reads none of them. The new guide is swapped in through _publish,
@@ -652,12 +667,9 @@ class EpgManager:
         else:
             new_epg = MultiKeyDict()
             entries = list(old_epg.items())
+        mapping = self.config_manager.xmltv_channel_map
         for keys, programs in entries:
-            for key in keys:
-                new_keys = self.config_manager.xmltv_channel_map.get_keys(key)
-                if new_keys:
-                    new_epg[new_keys] = programs
-                    break
+            new_epg[_rekeyed(keys, mapping, previous)] = programs
         self._publish(self._epg_source, new_epg)
 
     def save_index(self):

@@ -20,6 +20,7 @@ from timer_fixtures import elapse, wait_until
 from services.playback import (
     _AUDIO_POLL_MS,
     _AUDIO_RESTORE_MS,
+    MUTE_ENV,
     NO_VLC_MESSAGE,
     VLC_LOG_ENV,
     NullSession,
@@ -1593,7 +1594,7 @@ class TrackMemoryTests(unittest.TestCase):
 
 class DefaultArgsTests(unittest.TestCase):
     def test_quiet_unless_a_log_file_is_named(self):
-        with mock.patch.dict(os.environ, {VLC_LOG_ENV: ""}), _on("Darwin"):
+        with mock.patch.dict(os.environ, {VLC_LOG_ENV: "", MUTE_ENV: ""}), _on("Darwin"):
             self.assertEqual(
                 default_args(hardware_decoding=True),  # decoding: tests/test_video_decoding.py
                 [
@@ -1634,7 +1635,7 @@ class DefaultArgsTests(unittest.TestCase):
     def test_windows_plays_audio_through_directsound(self):
         # mmdevice sets volume and mute on the process's audio session: main and PiP would
         # mute and level each other. DirectSound sets them on each player's own buffer.
-        with mock.patch.dict(os.environ, {VLC_LOG_ENV: ""}), _on("Windows"):
+        with mock.patch.dict(os.environ, {VLC_LOG_ENV: "", MUTE_ENV: ""}), _on("Windows"):
             quiet = default_args(hardware_decoding=True)
         self.assertEqual(
             quiet,
@@ -1647,11 +1648,22 @@ class DefaultArgsTests(unittest.TestCase):
             ],
         )
         with (
-            mock.patch.dict(os.environ, {VLC_LOG_ENV: "/tmp/smoke/libvlc.log"}),
+            mock.patch.dict(os.environ, {VLC_LOG_ENV: "/tmp/smoke/libvlc.log", MUTE_ENV: ""}),
             _on("Windows"),
             self.assertLogs("services.playback", "WARNING"),
         ):
             self.assertIn("--aout=directsound", default_args())
+
+    def test_a_muted_run_plays_to_no_audio_output(self):
+        # QITV_SMOKE_MUTE=1 muted only smoke_tv's own players: a QiTV a script launched with it
+        # (the open-file smoke, the start recorder) played its files aloud.
+        for system in ("Darwin", "Linux", "Windows"):
+            with mock.patch.dict(os.environ, {VLC_LOG_ENV: "", MUTE_ENV: "1"}), _on(system):
+                outputs = [arg for arg in default_args() if arg.startswith("--aout")]
+            self.assertEqual(outputs, ["--aout=dummy"], system)
+        for asked in ("0", ""):  # only a 1 mutes: an app run without it plays as ever
+            with mock.patch.dict(os.environ, {VLC_LOG_ENV: "", MUTE_ENV: asked}), _on("Linux"):
+                self.assertFalse([arg for arg in default_args() if arg.startswith("--aout")])
 
     def test_no_player_inherits_the_last_level_another_one_set(self):
         # VLC 3's volume-save keeps the last level set on any audio output in the
@@ -1664,7 +1676,7 @@ class DefaultArgsTests(unittest.TestCase):
 
     def test_other_platforms_keep_libvlcs_audio_output(self):
         for system in ("Darwin", "Linux"):
-            with mock.patch.dict(os.environ, {VLC_LOG_ENV: ""}), _on(system):
+            with mock.patch.dict(os.environ, {VLC_LOG_ENV: "", MUTE_ENV: ""}), _on(system):
                 self.assertFalse([arg for arg in default_args() if arg.startswith("--aout")])
 
     def test_arguments_given_to_create_instance_are_used_as_they_are(self):

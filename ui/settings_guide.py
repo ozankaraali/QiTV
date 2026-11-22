@@ -650,11 +650,12 @@ class GuideRows(QObject):
         """The map in place of the config's (never changed in place: a guide loading on its
         worker reads it), saved, and the guide shown re-keyed, as the old Save did."""
         config = self._window.config_manager
+        previous = config.xmltv_channel_map  # the IDs it gave that this map no longer does go
         config.xmltv_channel_map = mapping
         self._save()
         if config.epg_source != STB:  # the provider's own guide is no XMLTV guide
             window = self._window
-            (window.catalog.epg_manager or window.epg_manager).reindex_programs()
+            (window.catalog.epg_manager or window.epg_manager).reindex_programs(previous)
         self._settings.refresh_sections()
 
     def _import(self) -> None:

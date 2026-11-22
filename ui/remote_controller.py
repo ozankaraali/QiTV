@@ -240,6 +240,10 @@ class RemoteController(QObject):
         if data.get("enabled") is not True:
             self.shutdown()
             return
+        if not self.running():
+            # A hub whose start failed (its port taken, say) has no thread to change: it goes,
+            # and a new one tries (one closing is never in self.hub: see shutdown).
+            self.hub = None
         if self.hub is None:
             from services.remote.hub import RemoteHub, web_dir
 
@@ -252,6 +256,10 @@ class RemoteController(QObject):
             self.hub.start(data)
         else:
             self.hub.apply(data)
+
+    def running(self) -> bool:
+        """A hub is there and its thread runs: its start did not fail."""
+        return self.hub is not None and bool(self.hub.running)
 
     def turn_on(self) -> None:
         """Phone Remote… while it's off: on, as Settings would turn it (the relay as it was)."""
@@ -292,11 +300,12 @@ class RemoteController(QObject):
 
     def remove_device(self, device_id: str) -> None:
         name = self._names.get(device_id, "")
-        if self.hub is not None:
+        if self.hub is not None and self.running():
             self._removing[device_id] = name  # the toast once the hub has removed it
             self.hub.remove_device(device_id)
             return
-        data = dict(self._config())  # the remote is off: unpair it in the saved settings
+        # The remote is off, or its start failed: unpair it in the saved settings.
+        data = dict(self._config())
         devices = [d for d in data.get("devices", []) if isinstance(d, dict)]
         data["devices"] = [d for d in devices if d.get("id") != device_id]
         self._persist(data)

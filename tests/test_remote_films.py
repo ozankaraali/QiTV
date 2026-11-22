@@ -15,9 +15,11 @@ from services.remote import mkv
 from services.remote.films import (
     FORMAT,
     PROVIDER,
+    SHELF,
     SOUND,
     Film,
     FilmRefused,
+    FilmShelf,
     HttpFetcher,
     is_matroska,
 )
@@ -275,6 +277,29 @@ def made(tracks, frames=None, cues=True):
             blocks += [mb.simple_block(3, n * 21, [b"a"], True) for n in range(47)]
         clusters.append(mb.cluster(second * 1000, *blocks))
     return mb.film(tracks, clusters, 8000, cues=cues)
+
+
+class _Shelved:
+    def __init__(self) -> None:
+        self.closed = False
+
+    def close(self) -> None:
+        self.closed = True
+
+
+class ShelfTests(unittest.TestCase):
+    def test_a_full_shelf_lets_go_of_the_film_read_least_lately(self):
+        # It let go of the one put first, though its phone was reading it all along.
+        shelf = FilmShelf()
+        films = [_Shelved() for _ in range(SHELF + 1)]
+        tokens = [shelf.put(f"phone {n}", film) for n, film in enumerate(films[:SHELF])]
+        self.assertIs(shelf.get(tokens[0]), films[0])  # the first phone watches on
+        shelf.put(f"phone {SHELF}", films[SHELF])
+        self.assertFalse(films[0].closed)
+        self.assertIs(shelf.get(tokens[0]), films[0])
+        self.assertTrue(films[1].closed)  # untouched since it was put
+        self.assertIsNone(shelf.get(tokens[1]))
+        self.assertEqual(len(shelf), SHELF)
 
 
 class RefusedTests(unittest.TestCase):
