@@ -982,16 +982,20 @@ class LandingTests(unittest.TestCase):
     def test_after_the_first_minute_a_lag_the_landing_does_not_explain_is_caught_up_as_ever(self):
         # The landing's allowance lasts the start window only: VLC falling 9 s further behind
         # 2 minutes on (the live edge keeping real time: no backlog) is 1.10x after 3 s, and
-        # the reopen at 20 s beyond.
-        stay, clock = live(), Clock()
-        stay.landed(9.0)
-        lag, _ = drive(stay, T + 9.0, 120.0, clock=clock)
-        lag, rates = drive(stay, lag + 9.0, 10.0, clock=clock)
-        self.assertEqual(max(rates), 1.10)
+        # the reopen at 20 s beyond. What the landing left and its nudge has not taken off
+        # yet (5.9 s) is still the landing's (2026-11-22): 8 s more is no further than far
+        # beyond it, caught up with the rest at 1.03x.
+        for more, rate in ((8.0, 1.03), (9.0, 1.10)):
+            with self.subTest(more=more):
+                stay, clock = live(), Clock()
+                stay.landed(9.0)
+                lag, _ = drive(stay, T + 9.0, 120.0, clock=clock)
+                lag, rates = drive(stay, lag + more, 10.0, clock=clock)
+                self.assertEqual(max(rates), rate)
         stay, clock = live(), Clock()
         stay.landed(9.0)
         drive(stay, T + 9.0, 120.0, clock=clock)
-        decision = stay.update(T + 20.5 + 9.0, False, now=clock.tick())
+        decision = stay.update(T + 20.5, False, now=clock.tick())
         self.assertTrue(decision.reopen_live)
 
     def test_a_backlog_step_right_after_the_start_is_part_of_the_landing(self):
@@ -1581,9 +1585,76 @@ class BacklogTests(unittest.TestCase):
         _, _, jumps = follow(stay, T + 32.0, 1.0, clock=clock, landing=T)
         self.assertEqual(len(jumps), 1)  # beyond 30 s: the reopen at live
         # ... whose landing goes far behind again (the backlog still arriving, unseen)
-        _, rates, jumps = follow(stay, T + 32.0, 900.0, clock=clock, landing=T)
+        lag, rates, jumps = follow(stay, T + 32.0, 900.0, clock=clock, ahead=32.0, landing=T)
         self.assertEqual(jumps, [])
         self.assertEqual((max(rates), changes(rates)), (1.05, 2))
+        # Back in the band the event is over: a stall far behind later reopens as ever.
+        self.assertLessEqual(abs(lag - T), stay.band(1))
+        _, _, jumps = follow(stay, T + 25.0, 5.0, clock=clock, ahead=32.0, landing=T)
+        self.assertEqual(len(jumps), 1)
+
+    def picked_again(self, excess=0.0):
+        """A tune whose start was picked again (the session's re-pick, right after the
+        landing it says, `excess` above the target)."""
+        stay, clock = live(), Clock()
+        stay.landed(excess, build=False)
+        stay.picked_again()
+        return stay, clock
+
+    def test_a_start_picked_again_catches_a_backlog_up_however_far(self):
+        # The owner's call: one skip at a tune at most, the re-pick; within the start after
+        # it even a backlog past 30 s is caught up, never reopened.
+        stay, clock = self.picked_again()
+        follow(stay, T, 10.0, clock=clock)
+        _, rates, jumps = follow(stay, T + 40.0, 1200.0, clock=clock, ahead=40.0, landing=T)
+        self.assertEqual(jumps, [])
+        self.assertEqual((max(rates), changes(rates)), (1.05, 2))
+
+    def test_a_start_picked_again_that_lands_far_behind_again_is_caught_up(self):
+        stay, clock = self.picked_again(35.0)
+        _, rates, jumps = follow(stay, T + 35.0, 1200.0, clock=clock, landing=T)
+        self.assertEqual(jumps, [])
+        self.assertEqual(max(rates), 1.05)
+
+    def test_after_the_start_a_backlog_past_30_s_reopens_once_as_ever(self):
+        # The ruling: the 30 s bound stays for a later backlog in the tune (40 s at 1.05x is
+        # over 13 minutes): one reopen, never a loop.
+        stay, clock = self.picked_again()
+        follow(stay, T, 90.0, clock=clock)  # past the landing's window: the start is over
+        _, _, jumps = follow(stay, T + 40.0, 1200.0, clock=clock, ahead=40.0, landing=T)
+        self.assertEqual(len(jumps), 1)
+
+    def test_after_the_start_was_picked_again_a_freeze_far_behind_still_jumps(self):
+        stay, clock = self.picked_again()
+        follow(stay, T, 90.0, clock=clock)
+        _, rates, jumps = follow(stay, T + 12.0, 20.0, clock=clock, landing=T)
+        self.assertEqual(len(jumps), 1)
+        self.assertEqual(set(rates), {1.0})
+
+    def test_a_reopen_landing_on_keyframe_grain_leaves_the_bound_as_it_was(self):
+        # Review I1: a stall back at live 22 s behind, the bound's reopen landing on a keyframe
+        # 9 s above the target (10 s keyframes), nothing sent ahead: a stall 45 s further
+        # behind later reopened never (a 27 minute catch-up). Only a backlog since the reopen
+        # turns the reopens off; a re-pick's landing never does.
+        for picked in (False, True):
+            with self.subTest(picked=picked):
+                stay, clock = self.picked_again() if picked else (live(), Clock())
+                follow(stay, T, 90.0, clock=clock)
+                lag, _, jumps = follow(stay, T + 22.0, 120.0, clock=clock, landing=T + 9.0)
+                self.assertEqual(len(jumps), 1)
+                _, _, jumps = follow(stay, lag + 45.0, 5.0, clock=clock, landing=T)
+                self.assertEqual(len(jumps), 1)
+
+    def test_a_nudge_under_way_a_backlog_takes_over_steps_up_to_1_05(self):
+        # Review M1: a 1.03x nudge under way, then a 20 s backlog: it stayed at 1.03x, 13
+        # minutes in all.
+        stay, clock = live(), Clock()
+        follow(stay, T, 30.0, clock=clock)
+        lag, rates, _ = follow(stay, T + 3.0, 40.0, clock=clock, landing=T)
+        self.assertEqual(rates[-1], 1.03)
+        _, rates, jumps = follow(stay, lag + 20.0, 60.0, clock=clock, ahead=20.0, landing=T)
+        self.assertEqual(jumps, [])
+        self.assertEqual(max(rates), 1.05)
 
     def test_a_locked_rate_jumps_a_backlog_as_ever(self):
         stay, clock = live(), Clock()

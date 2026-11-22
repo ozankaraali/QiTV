@@ -1917,17 +1917,26 @@ class StartPolicyTests(LiveSessionCase):
 
     def test_a_backlog_step_right_after_the_start_is_part_of_the_landing(self):
         # Raw TS whose backlog came after the 1.5 s hold ran 1.10x for ~100 s;
-        # the start takes it in as part of the landing (a gentle nudge). With 10 s keyframes a
-        # start picked again once the source flowed on gains nothing on it (`RepickTests`).
-        sid = self.start()
-        feed = Feed(self, sid, burst=0.0, edge=13.5, gop=10.0).ready(backlog_after_start=False)
-        self.assertEqual(self.playback.plays[0][0], self.engine.stream_url(sid, 1))  # 4 s
-        feed.run(3.0)
-        feed.edge += 9.0  # the rest of the backlog
-        feed.push()
-        feed.run(45.0)  # within the landing's window (after it a backlog is drift)
-        self.assertLessEqual(max(self.playback.rates or [1.0]), 1.03)
-        self.assertEqual(len(self.playback.plays), 1)
+        # the start takes it in as part of the landing (a gentle nudge). Picked again as the
+        # arrivals settle (2026-11-22), the 10 s keyframes' next start gains 5 s on it: the
+        # tune's one skip (`RepickTests`), and gentle after it too.
+        for repick, opens in ((False, 1), (True, 2)):
+            with self.subTest(repick=repick), mock.patch.object(live_session, "REPICK", repick):
+                self.live = self.make()
+                plays = len(self.playback.plays)
+                sid = self.start(channel="r%d" % repick)
+                feed = Feed(self, sid, burst=0.0, edge=13.5, gop=10.0)
+                feed.ready(backlog_after_start=False)
+                self.assertEqual(self.playback.plays[plays][0], self.engine.stream_url(sid, 1))
+                rates = len(self.playback.rates)
+                feed.run(3.0)
+                feed.edge += 9.0  # the rest of the backlog
+                feed.push()
+                feed.run(45.0)  # within the landing's window
+                self.assertLessEqual(max(self.playback.rates[rates:] or [1.0]), 1.03)
+                self.assertEqual(len(self.playback.plays) - plays, opens)
+                self.live.stop()
+                self.engine.answer()
 
     def test_hls_that_does_not_say_what_is_to_come_waits_until_every_segment_arrived(self):
         # A sparse-PCR channel's 10 s segments (2 s keyframe intervals), 36 s fetched.
@@ -6352,8 +6361,9 @@ class RepickTests(LiveSessionCase):
                             self.unchanged(play)
 
     def test_spread_bursts_behind_a_dump_pick_nothing_again(self):
+        # (At 3-5x the flood detector says the arrivals settled a moment after a burst ends.)
         for latency in (AUTO, "normal"):
-            for rate in (7.0, 10.0):
+            for rate in (3.0, 5.0, 7.0, 10.0):
                 for seed in range(3):
                     with self.subTest(latency=latency, rate=rate, seed=seed):
 
@@ -6493,23 +6503,24 @@ class RepickTests(LiveSessionCase):
         # Raw TS: a dump, then batches 2.95 s apart (about real time over the window): the
         # edge stands still about 3 s between them, which ticks a quarter second apart read
         # as 3 s at some phases and 2.75 s at others: either way no flow (tick granularity
-        # works against qualifying).
-        for phase in (0.0, 0.05, 0.1, 0.15, 0.2):
-            with self.subTest(phase=phase):
+        # works against qualifying); the first of them before the arrivals settle too.
+        for first in (0.5, 1.0, 1.5, 2.95):
+            for phase in (0.0, 0.05, 0.1, 0.15, 0.2):
+                with self.subTest(first=first, phase=phase):
 
-                def play(phase=phase):
-                    feed = self.tune("normal", burst=0.0, edge=2.0)
-                    feed.ready(backlog_after_start=False)
-                    self.opened(feed)
-                    feed.run(0.7)
-                    feed.edge += 20.0
-                    feed.push()
-                    feed.sizes = itertools.repeat(2.95)
-                    feed.gaps = itertools.repeat(2.95)
-                    feed.nominal = feed.next_arrival = self.clock.now + 2.95 + phase
-                    return self.outcome(feed, 30.0)
+                    def play(first=first, phase=phase):
+                        feed = self.tune("normal", burst=0.0, edge=2.0)
+                        feed.ready(backlog_after_start=False)
+                        self.opened(feed)
+                        feed.run(0.7)
+                        feed.edge += 20.0
+                        feed.push()
+                        feed.sizes = itertools.repeat(2.95)
+                        feed.gaps = itertools.repeat(2.95)
+                        feed.nominal = feed.next_arrival = self.clock.now + first + phase
+                        return self.outcome(feed, 30.0)
 
-                self.unchanged(play)
+                    self.unchanged(play)
 
     def test_a_reopen_aims_at_least_at_the_measured_burst(self):
         # Auto, bursty raw TS (a dump, then 10 s bursts), VLC's clock
@@ -7588,6 +7599,61 @@ class FloodTests(LiveSessionCase):
         self.assertEqual(len(self.playback.plays), 1, texts)  # no reopen, no jump
         self.assertNotIn("1.10x", " ".join(texts))
         self.assertEqual(len([text for text in texts if "nudges the rate to" in text]), 1)
+        self.assertAlmostEqual(self.timelines[-1]["lag"], TARGETS["normal"], delta=1.0)
+
+    def tune_and_dump(self):
+        """17:30:20-17:30:32: the picture at once; 4.5 s after it the new connection's old
+        buffer, 24 s in half a second, then real time. Returns the feed."""
+        sid = self.start()
+        feed = Feed(self, sid, burst=0.0, edge=3.0, metered=True)
+        feed.ready(backlog_after_start=False)
+        self.assertEqual(len(self.playback.plays), 1)  # the picture at once
+        feed.run(4.0)
+        self.flood(feed, 0.5, 48.0)
+        return feed
+
+    def test_a_tunes_dump_is_picked_again_once_as_it_settles_then_only_caught_up(self):
+        # The source sent far faster than real time at 25.8, at about real time at 28.1, and
+        # the start was picked again 27 s behind at 32.3, a skip 11 s after the picture
+        # showed. The owner's call: the picture at once, one skip at most, as the backlog
+        # settles; then no other reopen or jump at the start: the source's next 35 s a moment
+        # later is caught up gently. A backlog past 30 s later in the tune reopens once as
+        # ever (the ruling: 40 s at 1.05x is over 13 minutes), never in a loop.
+        feed = self.tune_and_dump()
+        said = self.lines(feed, 5.0)
+        settled = [when for when, text in said if "at about real time" in text]
+        picked = [when for when, text in said if "picked again" in text]
+        self.assertEqual(len(picked), 1, said)
+        self.assertLessEqual(abs(picked[0] - settled[0]), 0.25 + 1e-6, said)  # as it settled
+        self.assertEqual(len(self.playback.plays), 2)
+        self.flood(feed, 10.0, 4.5)  # 35 s more
+        said = self.lines(feed, 900.0)
+        texts = [text for _, text in said]
+        self.assertFalse(any("reopens at live" in text for text in texts), texts)
+        self.assertFalse(any("picked again" in text for text in texts), texts)
+        self.assertEqual(len(self.playback.plays), 2)
+        self.assertLessEqual(max(self.playback.rates), 1.05)
+        self.assertAlmostEqual(self.timelines[-1]["lag"], TARGETS["normal"], delta=1.0)
+        self.flood(feed, 10.0, 5.0)  # 40 s more, the start long over
+        said = self.lines(feed, 300.0)
+        texts = [text for _, text in said]
+        self.assertEqual(len([text for text in texts if "reopens at live" in text]), 1, texts)
+        self.assertEqual(len(self.playback.plays), 3)
+        self.assertAlmostEqual(self.timelines[-1]["lag"], TARGETS["normal"], delta=1.0)
+
+    def test_after_the_re_pick_a_stall_far_behind_still_jumps(self):
+        # A stall sends nothing ahead: it jumps as ever, the re-pick or not.
+        feed = self.tune_and_dump()
+        feed.run(90.0)
+        self.assertEqual(len(self.playback.plays), 2)  # picked again, once
+        lag = self.timelines[-1]["live_edge"] - self.timelines[-1]["position"]
+        feed.stalled = True
+        feed.run(lag + 10.0)  # VLC plays out what it had, then waits 10 s
+        feed.stalled = False
+        feed.edge += lag + 10.0  # back at live: what it would have sent is gone
+        feed.push()
+        feed.run(30.0)
+        self.assertEqual(len(self.playback.plays), 3)
         self.assertAlmostEqual(self.timelines[-1]["lag"], TARGETS["normal"], delta=1.0)
 
 

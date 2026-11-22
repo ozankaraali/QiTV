@@ -471,6 +471,14 @@ _REPICK_GAP_S = 3.0
 _REPICK_PLAY_S = 3.0
 _REPICK_DEADLINE_S = 20.0
 _REPICK_GAIN_S = 1.0  # (stay-live's band) the least the new start must gain, and exceed by
+# The re-pick as the arrivals settle (2026-11-22, the owner's call: the picture at once, one
+# skip at most, the sooner the better): settled (`StayLive.flooding` off), and since the
+# arrivals' level last rose more than `_REPICK_RISE_S` (a burst's tail, a slow burst behind
+# the dump) the edge moved at about real time (`_REPICK_RATE`) for the flood detector's
+# window at least, never standing still more than `_REPICK_SMOOTH_S` (a burst stands still for
+# most of its period). A flow in chunks (2 s every 2 s) is judged by `_REPICK_FLOW_S` as ever.
+_REPICK_RISE_S = 0.5
+_REPICK_SMOOTH_S = 1.0
 _CRAWL_WINDOW_S = 8.0  # an HLS channel crawling at 1x for this long (counted) ...
 _CRAWL_WINDOWS = 2  # ... this many times in a row plays directly (one freeze is not enough)
 _FROZEN_HOLDS = 2.0  # VLC's clock still for a window and this many holds has played nothing
@@ -730,6 +738,10 @@ class LiveSession(QObject):
         self._repick_edge = 0.0  # ... the edge then ...
         self._repick_moved = 0.0  # ... and when it last moved since ...
         self._repick_seen = 0.0  # ... and the last tick it was looked at
+        # Where the arrivals' level (the edge less the clock) peaked since the step, (when,
+        # edge), and whether the edge moved at least every `_REPICK_SMOOTH_S` since.
+        self._repick_peak = (0.0, 0.0)
+        self._repick_smooth = False
         self._repick_opened = -math.inf  # the tune's first open
         self._repick_playing: Optional[float] = None  # ... and when VLC first played it
         self._rewound = False  # "Rewound past the buffer" was said; VLC has not played since
@@ -3209,26 +3221,44 @@ class LiveSession(QObject):
         if grown > _REPICK_DUMP_S and now < self._repick_until:
             # A dump, or a further piece of it: the source's own flow is judged from here.
             self._repick_step, self._repick_edge, self._repick_moved = now, edge, now
+            self._repick_peak, self._repick_smooth = (now, edge), True
             return False
         step = self._repick_step
         if step is None:
             return False
-        if grown >= _ARRIVAL_S:
-            self._repick_moved = now
-        elif now - self._repick_moved + tick >= _REPICK_GAP_S - 1e-9:
-            # It stood still (since the tick before it last moved, at the most: ticks work
-            # against qualifying): a burst, the source's rhythm.
+        still = now - self._repick_moved + tick  # since the tick before it last moved
+        if still >= _REPICK_GAP_S - 1e-9:
+            # It stood still (at the most, ticks work against qualifying; and the tick that
+            # ends it reads the same: batches 2.95 s apart were a flow at some phases): a
+            # burst, the source's rhythm.
             self._repick_step = None
             return False
+        if still > _REPICK_SMOOTH_S + 1e-9:
+            self._repick_smooth = False
+        if grown >= _ARRIVAL_S:
+            self._repick_moved = now
+        peak_at, peak_edge = self._repick_peak
+        if edge - now > peak_edge - peak_at + _REPICK_RISE_S:
+            self._repick_peak, self._repick_smooth = (now, edge), True  # still arriving fast
         flowed = now - step
-        if flowed < _REPICK_FLOW_S - 1e-9 or not played or self._just_opened():
+        if not played or self._just_opened():
             # (Within the reopen hold of another open, a reopen in software say: never two
             # opens in a row. The step stays to be judged once the hold is over.)
             return False
-        self._repick_step = None
         low, high = _REPICK_RATE
-        if not low * flowed <= edge - self._repick_edge <= high * flowed:
-            return False  # no steady flow after it
+        peak_at, peak_edge = self._repick_peak
+        after = now - peak_at
+        flowing = (  # as the arrivals settle (see `_REPICK_SMOOTH_S`)
+            not self._stay.flooding
+            and self._repick_smooth
+            and after >= _FLOOD_WINDOW_S - 1e-9
+            and low * after <= edge - peak_edge <= high * after
+        )
+        if flowed >= _REPICK_FLOW_S - 1e-9:
+            self._repick_step = None  # judged now at the latest: a steady flow after it
+            flowing = flowing or low * flowed <= edge - self._repick_edge <= high * flowed
+        if not flowing:
+            return False
         if self._stay.mode is not Mode.LIVE or self._paused:
             return False
         # The mean lag the step leaves (the edge less the position, less half a burst: the
@@ -3242,12 +3272,13 @@ class LiveSession(QObject):
         if landing is None or now_lag - landing < max(_REPICK_GAIN_S, burst / 2):
             return False
         _LOG.debug("A backlog %.1f s behind right after the start: picked again.", now_lag)
-        self._repick_until = -math.inf  # once a tune
+        self._repick_until, self._repick_step = -math.inf, None  # once a tune
         # The step is taken in at once: the pick reads the edge now, not the lag filter's
         # mean from before it (which arrived over several ticks, none a step on its own).
         self._filter.reset()
         self._go_live(unpause=False, build=False)
         self._reopened_at = self._clock()  # a Go live right after it opens nothing more
+        self._stay.picked_again()  # the tune's one skip: what comes after is caught up
         return True
 
     def _back_off(
