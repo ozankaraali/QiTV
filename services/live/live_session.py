@@ -2852,6 +2852,7 @@ class LiveSession(QObject):
             # Under Auto, a kept burst's target holds the burst's room and its own margin: a
             # lag under it by half that burst still leaves VLC the margin (`StayLive.spare`).
             self._stay.spare = self._filter.kept / 2 if self._learned is not None else 0.0
+            self._stay.edge = self._filter.edge(self._clock())  # what a backlog pushes ahead
             self._stay.spread = self._filter.spread()
             if self._reland(snapshot, lag, position):
                 self._emit_timeline()

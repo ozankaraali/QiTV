@@ -3783,10 +3783,17 @@ class SafeJumpTests(LiveSessionCase):
         self.assertIn("keyframe", debug)
 
     def far_behind(self, feed, step):
-        """`step` seconds more land at once (a backlog: drift, not the start's); then 0.25 s
-        at a time until a new open, at most 30 s. Returns when it opened (None: it did not)."""
+        """VLC `step` seconds further behind as a stall leaves it (a jump's case: a backlog is
+        caught up instead, 2026-11-22): the source sends nothing until VLC has waited `step`
+        s, then comes back at live (what it would have sent is gone; the live edge kept real
+        time); then 0.25 s at a time until a new open, at most 30 s. Returns when it opened
+        (None: it did not)."""
         plays = len(self.playback.plays)
-        feed.edge += step
+        lag = self.timelines[-1]["live_edge"] - self.timelines[-1]["position"]
+        feed.stalled = True
+        feed.run(lag + step)  # VLC plays out what it had, then waits `step`
+        feed.stalled = False
+        feed.edge += lag + step
         feed.push()
         for _ in range(120):
             feed.run(0.25)
@@ -3880,7 +3887,7 @@ class SafeJumpTests(LiveSessionCase):
         feed = Feed(self, sid, burst=0.0, edge=6.0).ready(backlog_after_start=False)
         feed.run(65.0)
         first = self.far_behind(feed, 10.0)
-        feed.run(20.0)
+        feed.run(5.0)
         self.assertIsNone(self.far_behind(feed, 14.0))  # within the minute: no open ...
         self.assertEqual(max(self.playback.rates), 1.10)  # ... but a catch-up
         for _ in range(4 * 15):
@@ -3897,21 +3904,17 @@ class SafeJumpTests(LiveSessionCase):
     def test_a_landing_a_long_keyframe_interval_above_the_target_never_gets_1_10(self):
         """One keyframe every 10 s (the 1-stream raw-TS provider's 4K
         channel), the tune 9.7 s above the target (the newer keyframe just short of the
-        floor): nudged gently for its minute, then 1.10x. Now gently, then one jump on a
-        keyframe that helps."""
+        floor): nudged gently for its minute, then 1.10x; since 2.1, gently, then one jump
+        on a keyframe that helps. Since 2026-11-22 its nudge goes on to the target: no jump
+        (on that channel each open lands with a backlog of its own again)."""
         self.live._open_s = 0.0  # VLC opens at once here: the landing is the lag picked
         sid = self.start()
         feed = Feed(self, sid, burst=0.0, edge=22.2, gop=10.0).ready(backlog_after_start=False)
         self.assertEqual(self.playback.plays, [self.stream(sid, 1)])  # 12.2 s behind
-        times = []
-        for _ in range(4 * 150):
-            feed.run(0.25)
-            if len(self.playback.plays) > len(times) + 1:
-                times.append(self.clock.now)
-        self.assertLessEqual(max(self.playback.rates), 1.03)
-        self.assertEqual(len(times), 1)
-        self.assertGreaterEqual(times[0] - 1000.0, 60.0)
-        self.assertLess(self.timelines[-1]["lag"], TARGETS["normal"] + 4.0)
+        feed.run(420.0)
+        self.assertEqual(len(self.playback.plays), 1)
+        self.assertEqual((max(self.playback.rates), changes(self.playback.rates)), (1.03, 2))
+        self.assertAlmostEqual(self.timelines[-1]["lag"], TARGETS["normal"], delta=1.0)
         self.assertEqual(feed.starved_s, 0.0)
 
     def test_go_live_right_after_stay_lives_jump_opens_nothing_more(self):
@@ -7231,25 +7234,32 @@ class ComingAndGoingBurstTests(LiveSessionCase):
         feed.run(1.0)
         self.assertTrue(self.timelines[-1]["stalled"])
 
-    def test_far_behind_on_a_kept_burst_still_jumps(self):
-        # A backlog (15 s more at once, a reconnect's, say) and a freeze of VLC's (its clock
-        # still 25 s while the source goes on) are no burst: far behind the kept target,
-        # stay-live jumps to live as ever. (The freeze's clock is taken for lost first: the
-        # stream opens again where it plays, and the jump comes a minute after that open,
-        # 1.10x meanwhile, as on a steady source.)
+    def test_on_a_kept_burst_a_backlog_is_caught_up_and_a_freeze_still_jumps(self):
+        # A backlog (15 s more at once, a reconnect's, say), VLC playing on, is caught up by
+        # one gentle nudge (2026-11-22: a jump skips the programme). A freeze of VLC's (its
+        # clock still 25 s while the source goes on) sends nothing ahead: far behind the kept
+        # target, stay-live jumps to live as ever. (The freeze's clock is taken for lost
+        # first: the stream opens again where it plays, and the jump comes a minute after
+        # that open, 1.10x meanwhile, as on a steady source.)
         for how in ("backlog", "freeze"):
             with self.subTest(how=how):
                 self.live = self.make()
                 feed = self.kept()
+                rates = len(self.playback.rates)
                 if how == "backlog":
                     feed.edge += 15.0
                     feed.push()
                 else:
                     feed.frozen_until = self.clock.now + 25.0
                 with self.assertLogs("services.live.live_session", "DEBUG") as logs:
-                    feed.run(90.0)
+                    feed.run(400.0 if how == "backlog" else 90.0)
                 jumps = [line for line in logs.output if "a jump instead of a catch-up" in line]
-                self.assertEqual(len(jumps), 1, logs.output)
+                self.assertEqual(len(jumps), 0 if how == "backlog" else 1, logs.output)
+                if how == "backlog":
+                    starts = [line for line in logs.output if "nudges the rate to" in line]
+                    self.assertEqual(len(starts), 1, logs.output)
+                    self.assertIn("the source sent a backlog", starts[0])
+                    self.assertLessEqual(max(self.playback.rates[rates:]), 1.05)
                 self.assertAlmostEqual(self.timelines[-1]["lag"], 10.0, delta=1.5)
                 self.live.stop()
                 self.engine.answer()
@@ -7337,17 +7347,46 @@ class ComingAndGoingBurstTests(LiveSessionCase):
         room = next(w for w, s in states if w > 151.0 and real(s) >= s["target"])
         self.assertTrue(ended, said)
         self.assertLessEqual(ended[0] - room, 12.0, said)
-        # A jump only where the real distance is far beyond the target (here the backlog, 18
-        # s on a lag of 6 s, left it right at the bound: 8 s beyond).
-        for when, text in lines:
-            if "reopens at live" in text:
-                state = [state for w, state in states if w < when - 0.5][-1]  # (before it)
-                self.assertGreaterEqual(real(state) - state["target"], 7.5, text)
+        # The backlog (it left the lag 8 s beyond the target): one nudge, no jump, at the
+        # target once it ends (2026-11-22: a jump skips the programme).
+        self.assertEqual([text for text in said if "reopens at live" in text], [], said)
+        after = [(when, text) for when, text in lines if when > ended[0] and "nudge" in text]
+        self.assertEqual(len(after), 2, after)  # its start and its end
+        self.assertRegex(after[0][1], r"nudges the rate to 1\.0[35]x")  # gently
+        self.assertRegex(after[1][1], r"1\.0[35]x nudge ends")
+        end = [state for when, state in states if when >= after[1][0]][0]
+        self.assertLessEqual(abs(end["lag"] - end["target"]), 1.5)
         # Through the sag and the bursts' return (counted 9.8 s then 10.5 s, a second over
         # the kept 9.4 s): no slow-down, and VLC never runs dry after the first stretch.
         later = [text for when, text in lines if when > 230.0 and "nudge" in text]
         self.assertEqual([text for text in later if "0.9" in text], [], later)
         self.assertEqual(feed.starved_s, dry)
+
+    def test_a_start_that_lands_with_a_backlog_is_caught_up_not_jumped(self):
+        """Seen live on 2026-11-22 (the same channel, case B): the tune landed 11 s above its
+        target (its keyframes 10 s apart), and the source went on sending ahead of real time
+        for two minutes (~18 s more). Stay-live nudged at 1.03x for the landing's minute, then
+        at 1.10x, and jumped to live 24.6 s behind (target 6.2 s); the jump landed 16.5 s
+        behind with a backlog of its own again, 20 s a few seconds on, and jumped again a
+        minute later: 8 s of the programme skipped each time for little. Now one nudge goes on
+        to the target, past the 20 s bound (a backlog may be 30 s behind), never 1.10x."""
+        self.live._open_s = 0.0  # VLC opens at once here: the landing is the lag picked
+        sid = self.start()
+        feed = Feed(self, sid, burst=0.0, edge=22.2, gop=10.0).ready(backlog_after_start=False)
+        self.assertEqual(self.playback.plays, [self.stream(sid, 1)])  # 12.2 s behind
+        feed.run(10.0)
+        feed.sizes = iter([0.25 * 1.15] * 480 + [0.25] * 100_000)  # 18 s ahead in 120 s
+        feed.gaps = iter([0.25] * 100_000)
+        with self.assertLogs("services.live.live_session", "DEBUG") as logs:
+            feed.run(900.0)
+        said = [record.getMessage() for record in logs.records]
+        self.assertEqual([text for text in said if "reopens at live" in text], [], said)
+        starts = [text for text in said if "nudges the rate to" in text]
+        self.assertEqual(len(starts), 1, said)
+        self.assertLessEqual(max(self.playback.rates), 1.05)
+        self.assertGreater(max(state["lag"] for state in self.timelines), 2.5 + 20.0)
+        self.assertAlmostEqual(self.timelines[-1]["lag"], TARGETS["normal"], delta=1.0)
+        self.assertEqual(feed.starved_s, 0.0)
 
     def test_a_burst_that_brings_its_media_early_never_jumps_either(self):
         # The other reading of the log (VLC never ran dry that evening): each stretch's first

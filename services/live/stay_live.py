@@ -47,8 +47,16 @@ band, or VLC runs dry
 (`trouble()`: the owed slow-down builds all of it then).
 
 Far behind, a jump to live is better than a long catch-up (2.1: 8 s at 1.10x takes 80
-s). The caller says where one would land (`jump_lag`: the mean lag once VLC plays the clean
-start Go live would pick, a keyframe's or an intra picture's; None without one). Once far
+s), but for a backlog (2026-11-22: a jump skips the programme, and a raw TS source that hands
+a reopen its own backlog again lands it far behind anyway): far behind only by what the source
+sent ahead of real time since the lag was last near the target (the caller's mean `edge`), VLC
+playing on, and by what a landing left above it (`_floor`, as it came down), is caught up by
+one nudge to the target, at 1.03x, or 1.05x where that would take over `_BACKLOG_TAKE_S`; a
+nudge under way goes on so (`_catch_up`), up to `_BACKLOG_MAX_S` behind the target (beyond
+the 20 s reopen too). A stall and a freeze of VLC's send nothing ahead: they jump as ever, and
+reopen beyond the target plus 20 s. The caller says where one would land (`jump_lag`: the
+mean lag once VLC plays the clean start Go live would pick, a keyframe's or an intra
+picture's; None without one). Once far
 behind for `_URGENT_S`, and no jump (a tune, Go live, a reopen at live: whatever `landed()`
 hears) came within `_JUMP_GAP_S`, stay-live reopens at live instead of speeding up when that
 landing is within the band or `_JUMP_CLOSER_S` nearer than the lag; if it is not, for up to
@@ -137,6 +145,13 @@ _JUMP_GAP_S = 60.0  # never two jumps (a tune, Go live, a reopen at live) within
 _JUMP_CLOSER_S = 5.0  # a jump helps when it lands within the band, or at least this much nearer
 _JUMP_WAIT_S = 12.0  # far behind, waiting this long for one that helps (keyframes 10 s apart)
 _GRAIN_S = 1.0  # no jump does better than the lag less this: the keyframes' grain, no drift
+# Backlogs (2026-11-22): far behind by what the source sent ahead of real time, VLC playing on,
+# or what a landing left above the target, is caught up by one nudge to the target, at
+# _GENTLE_UP, or at this ...
+_BACKLOG_UP = 1.05
+_BACKLOG_TAKE_S = 480.0  # ... when _GENTLE_UP would take longer than this; and up to this
+_BACKLOG_MAX_S = 30.0  # far behind the target (beyond it, and _REOPEN's, the reopen at live)
+_GENTLE = (_GENTLE_UP, _GENTLE_DOWN, _BACKLOG_UP)  # the budget counts these when they ran
 # Junctions (2.8.5): a source that restarts often takes back what stay-live is behind.
 _JUNCTION_MIN_S = 1.0  # behind the target by more than this: asked of the next restart
 _JUNCTION_REF_S = 300.0  # ... the highest target of this long at least (twice at most)
@@ -518,6 +533,7 @@ class _Nudge:
     stepped: Optional[float] = None  # when the rate last stepped
     limit: Optional[float] = None  # a start's build: seconds below 1x it has left (budget-free)
     reason: str = ""  # why it runs at its peak, as the caller's log says it (2.13.4)
+    backlog: bool = False  # it catches up a backlog the source sent (`StayLive._catch_up`)
 
     @property
     def step(self) -> float:
@@ -541,6 +557,12 @@ class StayLive:
         # burst's own room). Only a lag under the target by more than this, beyond the band,
         # is built gently; too little room (`_short`) and trouble build to the target as ever.
         self.spare = 0.0
+        # Set by the caller each update: where the live edge is on average (the lag filter's
+        # mean edge), or None. What it ran ahead of real time since the lag was last near the
+        # target is a backlog the source sent (`_pushed`): far behind by that, VLC playing on,
+        # is caught up gently, not jumped (`_catch_up`).
+        self.edge: Optional[float] = None
+        self._edge_ref: Optional[tuple[float, float]] = None  # (when, edge) the lag was near
         # Set by the caller: a stream opened a moment ago (Go live, a seek, a reopen), so its
         # lag is not known yet: no reopen at live until it is (never two opens in a row).
         self.hold_reopen = False
@@ -723,6 +745,7 @@ class StayLive:
         self._nudge = None
         self._owed = False  # the stream opens afresh at the target: nothing is owed
         self._uncharged = None
+        self._edge_ref = None  # where it lands is near the target: measured afresh
         if not keep_landing:
             self._floor = self._start = self._landing = 0.0  # its own landing follows
             self._accepting = self._tolerant = False
@@ -770,7 +793,7 @@ class StayLive:
             self._start, self._accepting, self._tolerant = 0.0, False, False
             if self._nudge is not None:
                 self._nudge.limit = None
-        if lag_s > self.target + _REOPEN + self._landed():
+        if lag_s > self.target + _REOPEN + self._landed() and not self._caught_up(lag_s, now):
             if self.hold_reopen:
                 return Decision(self._rate)  # the stream just opened: its lag comes first
             self._rate, self._nudge = 1.0, None
@@ -783,6 +806,7 @@ class StayLive:
             # tick has no burst classified yet: Normal's 2.5 s made an HLS 7 s target a rise).
             self._landed_at = self.target
         self._own_shortfall(lag_s, dt)
+        self._follow_edge(lag_s, now)
         if self._reopened:
             return Decision(1.0)  # asked for: the caller reopens (and calls user_go_live)
         junction = self._junction(lag_s, now)
@@ -852,7 +876,7 @@ class StayLive:
         """Reopen at live instead (`_far_move`): a catch-up it replaces ends here, and a
         gentle nudge it cut counts against the budget (it ran)."""
         nudge = self._nudge
-        if nudge is not None and nudge.peak in (_GENTLE_UP, _GENTLE_DOWN) and nudge.limit is None:
+        if nudge is not None and nudge.peak in _GENTLE and nudge.limit is None:
             self._nudged_at = now
         self._rate, self._nudge = 1.0, None
         self._reopened = True
@@ -871,6 +895,56 @@ class StayLive:
         """What far behind and the reopen at live count from: the landing above the target,
         while its window lasts (a backlog later is drift)."""
         return self._floor if self._landing > 0 else 0.0
+
+    def _follow_edge(self, lag: float, now: float) -> None:
+        """Where the live edge was when the lag was last near the target (no further behind
+        it than the band): what the source sent ahead of real time since is a backlog."""
+        edge = self.edge
+        if edge is not None and (self._edge_ref is None or lag - self._centre(1) <= self.band(1)):
+            self._edge_ref = (now, edge)
+
+    def _pushed(self, now: float) -> float:
+        """Seconds the live edge ran ahead of real time since the lag was last near the target:
+        a backlog the source sent. A stall adds none (the edge stood, then caught up with real
+        time), nor does VLC standing still (the edge kept real time)."""
+        if self.edge is None or self._edge_ref is None:
+            return 0.0
+        since, edge = self._edge_ref
+        return max(0.0, self.edge - edge - (now - since))
+
+    def _backlog(self, behind: float, now: float) -> str:
+        """Why far behind (`behind` the target) is a backlog to catch up, not a lag to jump
+        over: only by what the source sent ahead of real time ("the source sent a backlog")
+        and what the last landing left above the target ("the start's backlog"); "" when
+        more than that (a stall, a freeze of VLC's)."""
+        pushed, landed = self._pushed(now), self._floor
+        if pushed + landed <= 0 or behind - pushed - landed > _FAR_S:
+            return ""
+        return "the source sent a backlog" if pushed >= landed else "the start's backlog"
+
+    def _caught_up(self, lag: float, now: float) -> bool:
+        """Beyond the target plus `_REOPEN`, but by a backlog (`_backlog`) no more than
+        `_BACKLOG_MAX_S` behind it, and the rate free to change: caught up, not reopened."""
+        if self.rate_locked or self.background:
+            return False
+        behind = lag - self._centre(1)
+        return behind <= _BACKLOG_MAX_S and bool(self._backlog(behind, now))
+
+    @staticmethod
+    def _up_rate(left: float) -> float:
+        """The catch-up rate for `left` seconds: `_GENTLE_UP`, or `_BACKLOG_UP` when that
+        would take longer than `_BACKLOG_TAKE_S`."""
+        return _GENTLE_UP if left / (_GENTLE_UP - 1.0) <= _BACKLOG_TAKE_S else _BACKLOG_UP
+
+    def _catch_up(self, behind: float, lag: float, now: float, why: str) -> None:
+        """Far behind by a backlog (`_backlog`), VLC playing on: one nudge to the target
+        (`_up_rate`); never a jump, which skips the programme (2026-11-22, the owner's
+        ruling). One long nudge, as each nudge's start plays a moment of old sound in VLC 3.
+        Beyond `_BACKLOG_MAX_S` the reopen at live stays (`_caught_up`)."""
+        rate = self._up_rate(behind)
+        self._nudge = _Nudge(rate, behind, self._centre(1), reason=why, backlog=True)
+        self.absorb()
+        self._steer(0.0, lag, now)
 
     def _budget_free(self, now: float) -> bool:
         return self._nudged_at is None or now - self._nudged_at >= _BUDGET_S - 1e-9
@@ -975,6 +1049,10 @@ class StayLive:
         if self._outside < (_URGENT_S if urgent else _PERSIST_S) - 1e-9:
             return False
         grain = False
+        why = self._backlog(behind, now) if far else ""
+        if why:
+            self._catch_up(behind, lag, now, why)
+            return False
         if far:
             move = self._far_move(lag, dt)
             if move in ("jump", "wait"):
@@ -1003,7 +1081,8 @@ class StayLive:
                 reason="building the start's room",
             )
         else:
-            peak = _FAST if far else _SLOW if short else _GENTLE_UP if side > 0 else _GENTLE_DOWN
+            up = self._up_rate(abs(error))  # a landing's excess can take long at 1.03x
+            peak = _FAST if far else _SLOW if short else up if side > 0 else _GENTLE_DOWN
             if far:
                 reason = "far behind"
             elif short:
@@ -1033,6 +1112,16 @@ class StayLive:
             nudge.target = centre
         error = lag - centre
         far = not nudge.ending and sign > 0 and error > _FAR_S + self._landed()
+        why = self._backlog(error, now) if far else ""
+        if why:
+            # A backlog: the catch-up under way goes on to the target, faster where it would
+            # take too long (a step between two rates, never back through 1x), never a jump.
+            far = False
+            if not nudge.backlog:
+                nudge.backlog, nudge.reason = True, why
+            up = self._up_rate(nudge.left)
+            if nudge.peak in (_GENTLE_UP, _BACKLOG_UP) and up > nudge.peak:
+                nudge.peak = up
         if not far:
             self._waited = 0.0
         # A catch-up under way asks only once a jump could follow (where it would land is
@@ -1041,7 +1130,7 @@ class StayLive:
         move = self._far_move(lag, dt) if far and asks else ""
         if move == "jump":
             return True  # a catch-up under way too, once nothing jumped for a minute
-        if move == "fast" and nudge.peak == _GENTLE_UP:
+        if move == "fast" and nudge.peak in (_GENTLE_UP, _BACKLOG_UP):
             nudge.peak = _FAST  # far behind after all (a step)
             nudge.reason = "far behind after all"
         elif (
@@ -1059,7 +1148,8 @@ class StayLive:
         # stopping it short would only start the next one. A start's build ends in time to
         # ramp out within its limit.
         urgent = nudge.peak in (_FAST, _SLOW)
-        spent = not urgent and nudge.left <= self._ramp_out(rate, nudge.step)
+        # (A backlog's catch-up too goes on to the target: the source may send more meanwhile.)
+        spent = not (urgent or nudge.backlog) and nudge.left <= self._ramp_out(rate, nudge.step)
         k_now = round(abs(rate - 1.0) / nudge.step)
         timed = nudge.limit is not None and nudge.limit <= k_now * _RAMP_EVERY_S + 1e-9
         nudge.spent = nudge.spent or (spent and not nudge.ending)
@@ -1081,7 +1171,7 @@ class StayLive:
         if nudge.ending and self._rate == 1.0:
             if nudge.limit is not None:  # the start's build ran (outside the budget) ...
                 self._accepting = True  # ... and the rest is accepted
-            elif nudge.peak in (_GENTLE_UP, _GENTLE_DOWN):
+            elif nudge.peak in _GENTLE or nudge.backlog:
                 if nudge.cut:
                     self._uncharged = now  # counts unless the owed slow-down follows
                 else:

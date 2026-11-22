@@ -979,18 +979,19 @@ class LandingTests(unittest.TestCase):
         _, rates = drive(stay, lag + 8.6, 10.0, clock=clock)  # 8.6 s more: far from there
         self.assertEqual(max(rates), 1.10)
 
-    def test_after_the_first_minute_a_backlog_is_caught_up_as_ever(self):
-        # The landing's allowance lasts the start window only. A reconnect's
-        # backlog 2 minutes on is drift: 1.10x after 3 s, and the reopen at 20 s beyond.
+    def test_after_the_first_minute_a_lag_the_landing_does_not_explain_is_caught_up_as_ever(self):
+        # The landing's allowance lasts the start window only: VLC falling 9 s further behind
+        # 2 minutes on (the live edge keeping real time: no backlog) is 1.10x after 3 s, and
+        # the reopen at 20 s beyond.
         stay, clock = live(), Clock()
         stay.landed(9.0)
         lag, _ = drive(stay, T + 9.0, 120.0, clock=clock)
-        lag, rates = drive(stay, lag + 8.0, 10.0, clock=clock)
+        lag, rates = drive(stay, lag + 9.0, 10.0, clock=clock)
         self.assertEqual(max(rates), 1.10)
         stay, clock = live(), Clock()
         stay.landed(9.0)
         drive(stay, T + 9.0, 120.0, clock=clock)
-        decision = stay.update(T + 20.5, False, now=clock.tick())
+        decision = stay.update(T + 20.5 + 9.0, False, now=clock.tick())
         self.assertTrue(decision.reopen_live)
 
     def test_a_backlog_step_right_after_the_start_is_part_of_the_landing(self):
@@ -1343,15 +1344,17 @@ class JumpTests(unittest.TestCase):
         self.assertEqual(max(rates), 1.03)
         self.assertLess(lag, T + 9.7 - 4.0)
 
-    def test_a_landing_far_above_the_target_jumps_after_its_minute_on_a_keyframe_that_helps(self):
+    def test_a_landing_far_above_the_target_is_caught_up_by_its_one_nudge_never_jumped(self):
+        # 2026-11-22: after its minute it jumped (on a keyframe that helped); a raw TS source
+        # that hands each open its own backlog landed the jump far behind again, 8 s of the
+        # programme skipped for nothing. The landing's nudge goes on to the target.
         stay, clock = live(), Clock()
         stay.landed(9.7)
         landing = keyframes(10.0, since=1003.0)
-        lag, rates, jumps = steer(stay, T + 9.7, 120.0, clock=clock, landing=landing)
-        self.assertEqual(max(rates), 1.03)  # gently while the landing's minute lasts
-        self.assertEqual(len(jumps), 1)
-        self.assertGreaterEqual(jumps[0] - 1000.0, 60.0)
-        self.assertLessEqual(jumps[0] - 1000.0, 60.0 + 3.0 + 10.25)
+        lag, rates, jumps = steer(stay, T + 9.7, 400.0, clock=clock, landing=landing)
+        self.assertEqual(jumps, [])
+        self.assertEqual(max(rates), 1.03)
+        self.assertEqual(changes(rates), 2)  # one nudge
         self.assertLessEqual(abs(lag - T), stay.band(1))
 
     def test_no_jump_while_a_stream_just_opened(self):
@@ -1481,11 +1484,11 @@ class JumpTests(unittest.TestCase):
 
     def test_a_gentle_nudge_a_jump_cut_counts_against_the_budget(self):
         stay, clock = live(), Clock()
-        stay.landed(9.7)
-        lag, rates, jumps = steer(
-            stay, T + 9.7, 80.0, clock=clock, landing=keyframes(10.0, since=1003.0)
-        )
-        self.assertEqual((len(jumps), max(rates)), (1, 1.03))  # it ran, then the jump
+        _, rates = drive(stay, T + 3.5, 20.0, clock=clock)
+        self.assertEqual(max(rates), 1.03)  # a lasting lag's gentle nudge, under way ...
+        # ... when VLC falls 10 s further behind (a freeze: the live edge kept real time)
+        lag, rates, jumps = steer(stay, T + 13.0, 20.0, clock=clock, landing=lambda *_: T)
+        self.assertEqual(len(jumps), 1)
         _, rates = drive(stay, T + 2.0, 120.0, clock=clock)  # a drift after it
         self.assertEqual(set(rates), {1.0})  # within the budget's 5 minutes: tolerated
 
@@ -1499,6 +1502,75 @@ class JumpTests(unittest.TestCase):
                 lag, rates, jumps = steer(stay, T, 20.0, clock=clock, landing=lambda *_: T)
                 lag, rates, jumps = steer(stay, T + 10.0, 30.0, clock=clock, landing=lambda *_: T)
                 self.assertEqual((jumps, max(rates)), ([], 1.10))
+
+
+def follow(stay, lag, seconds, *, clock, ahead=0.0, landing=None):
+    """`steer` with the live edge stay-live is told (`StayLive.edge`): at real time, `ahead` of
+    it by what the source sent ahead (a backlog: set it, and the lag, before calling)."""
+    rates, jumps = [], []
+    if landing is not None:
+        stay.jump_lag = lambda: landing
+    for _ in range(round(seconds / TICK)):
+        now = clock.tick()
+        stay.edge = now + ahead
+        decision = stay.update(lag, False, now=now)
+        rates.append(decision.rate)
+        if decision.reopen_live:
+            jumps.append(now)
+            lag = landing if landing is not None else T
+            stay.user_go_live()
+            stay.landed(lag - stay.target, build=False)
+            continue
+        lag -= (decision.rate - 1.0) * TICK
+    return lag, rates, jumps
+
+
+class BacklogTests(unittest.TestCase):
+    """2026-11-22, the owner's ruling: far behind by a backlog the source sent (the live edge
+    ahead of real time since the lag was last near the target), VLC playing on, is caught up
+    by one gentle nudge to the target, never a jump, which skips the programme: 1.03x, 1.05x
+    where that would take over 8 minutes, up to 30 s behind the target. A freeze or a stall
+    sends nothing ahead: they jump as ever."""
+
+    def backlog(self, more, *, seconds=900.0):
+        stay, clock = live(), Clock()
+        follow(stay, T, 30.0, clock=clock)  # at the target: where the edge was
+        return stay, follow(stay, T + more, seconds, clock=clock, ahead=more, landing=T)
+
+    def test_a_backlog_far_behind_is_one_gentle_nudge_to_the_target(self):
+        stay, (lag, rates, jumps) = self.backlog(12.0)
+        self.assertEqual(jumps, [])  # though a clean jump to the target was there
+        self.assertEqual((max(rates), changes(rates)), (1.03, 2))
+        self.assertLessEqual(abs(lag - T), stay.band(1))
+        self.assertEqual(stay.nudge_reason, "")
+
+    def test_a_backlog_that_would_take_over_eight_minutes_is_caught_up_at_1_05(self):
+        stay, (lag, rates, jumps) = self.backlog(16.0)
+        self.assertEqual(jumps, [])
+        self.assertEqual((max(rates), changes(rates)), (1.05, 2))
+        self.assertLessEqual(abs(lag - T), stay.band(1))
+
+    def test_a_backlog_past_the_20_s_bound_is_caught_up_to_30_s_then_reopened(self):
+        stay, (lag, rates, jumps) = self.backlog(25.0)
+        self.assertEqual(jumps, [])
+        self.assertEqual(max(rates), 1.05)
+        stay, (_, _, jumps) = self.backlog(31.0, seconds=5.0)
+        self.assertEqual(len(jumps), 1)
+
+    def test_a_freeze_far_behind_still_jumps(self):
+        stay, clock = live(), Clock()
+        follow(stay, T, 30.0, clock=clock)
+        _, rates, jumps = follow(stay, T + 12.0, 20.0, clock=clock, landing=T)  # edge as ever
+        self.assertEqual(len(jumps), 1)
+        self.assertEqual(set(rates), {1.0})
+
+    def test_a_locked_rate_jumps_a_backlog_as_ever(self):
+        stay, clock = live(), Clock()
+        stay.lock_rate()
+        follow(stay, T, 30.0, clock=clock)
+        _, rates, jumps = follow(stay, T + 12.0, 20.0, clock=clock, ahead=12.0, landing=T)
+        self.assertEqual(len(jumps), 1)
+        self.assertEqual(set(rates), {1.0})
 
 
 class SteeredTargetTests(unittest.TestCase):
