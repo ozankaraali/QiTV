@@ -13,8 +13,9 @@
    card adds one. Signed in again from a Plex provider's card, the same server (by its id)
    takes the new access in place; another server of the account is added as a new provider.
 
-The provider keeps the server's address, its own token and its id, and the client id QiTV
-signed in as (`device_id`): never the account's token. Cancel (Esc, Back, the dimmed picture)
+The provider keeps the server's address and connections, its token and its id, and the client
+id QiTV signed in as (`device_id`); for a server the account owns, that token is the account's
+own (services.plex). Cancel (Esc, Back, the dimmed picture)
 always works; nothing goes on once the card is gone, and a late answer is dropped. The keys,
 the phone's buttons and the mouse reach the card as every Settings card
 (SettingsController.show_card).
@@ -138,7 +139,15 @@ class PlexSignIn(QObject):
         """The card as it is now; a `code` shows large, with where to enter it."""
         cancel = Button(CANCEL, translate(CANCEL_TEXT))
         link = plex.LINK_PAGE if code else ""
-        self.card.ask(translate(title), body, [cancel, *buttons], default, code=code, link=link)
+        self.card.ask(
+            translate(title),
+            body,
+            [cancel, *buttons],
+            default,
+            code=code,
+            link=link,
+            waits=bool(code),
+        )
         self._settings.show_card(self.card)
         self._shown()
 
@@ -215,11 +224,17 @@ class PlexSignIn(QObject):
         self._pin = {}
         self._retry = lambda: self._find_servers(token)
         self._show(SIGN_IN_TITLE, translate(FINDING_TEXT), [])
-        verify = bool(self._window.config_manager.ssl_verify)
-        self._run(ServersJob(self._client_id, token, verify), self._on_servers)
+        self._run(ServersJob(self._client_id, token), self._on_servers)
 
     def _on_servers(self, answer: dict) -> None:
+        if answer.get("refused"):  # plex.tv refused the account: only a new code helps (M8)
+            from services.plex_workers import PLEX_TV_REFUSED
+
+            self._retry = self._ask_code
+            self._failed(translate(PLEX_TV_REFUSED))
+            return
         servers = [s for s in answer.get("servers") or [] if s.get("machine_id")]
+        servers.sort(key=lambda s: not s.get("owned"))  # the account's own first (review M9)
         if not servers:
             text = NONE_ANSWERED_TEXT if answer.get("listed") else NO_SERVER_TEXT
             self._failed(translate(text))  # (Try again: the servers again)
@@ -279,9 +294,11 @@ class PlexSignIn(QObject):
             "token": str(server["token"]),
             "server_id": str(server["machine_id"]),
             "device_id": self._client_id,
+            # Review I2: where else to look for the server when it isn't where it was.
+            "connections": list(server.get("connections") or []),
         }
-        editing = self._editing
-        if editing and self._provider(editing).get("server_id") == access["server_id"]:
+        editing = self._listed(str(server["machine_id"]))  # this server already: in place (M9)
+        if editing:
             try:
                 saved = self._rows.apply(
                     lambda: self._rows.actions.update(editing, access, refresh=True)
@@ -302,6 +319,15 @@ class PlexSignIn(QObject):
         self._reset()
         self._settings.refresh_sections()
         self._window.screens.notify(translate(ADDED_TEXT, names=added[0]))
+
+    def _listed(self, server_id: str) -> str:
+        """The provider that is already this server ("" for none): signed in again in place,
+        never listed twice (a second device at plex.tv)."""
+        changes = self._rows.actions.changes
+        for name in changes.names():
+            if self._provider(name).get("server_id") == server_id:
+                return str(name)
+        return ""
 
     def _provider(self, name: str) -> dict:
         try:

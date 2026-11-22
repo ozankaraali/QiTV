@@ -12,6 +12,10 @@ such a film as an HLS playlist of fragmented MP4 instead (nothing is re-encoded)
 - `FilmShelf` keeps the films phones play (one per phone), `add_routes` serves them:
   ``/film/<token>/index.m3u8``, ``init.mp4`` and ``<n>.m4s``.
 
+A film a phone plays as its file is but whose address must stay here (2.14: a Plex title's holds
+its server's token) is handed through the home door as it is (`PassedFilm`, ``/pass/<token>/``):
+each range the phone asks is read from the provider.
+
 A film a phone cannot play this way is refused (`FilmRefused`) with a reason the page words:
 "format" (another video codec, no Cues, encryption), "sound" (DTS, TrueHD, MP3 and the like,
 with no other track), "provider" (it answered no HTTP range).
@@ -654,6 +658,24 @@ class HttpFetcher:
                 yield chunk
 
 
+class PassedFilm:
+    """A film a phone plays as its file is, through the home door (2.14: a Plex title, whose
+    address holds its server's token): the phone gets the home door's address and reads the
+    file through it in ranges, as from its provider; the provider's address never leaves this
+    computer."""
+
+    CHUNK = 256 * 1024
+
+    def __init__(self, session: Any, url: str, headers: dict, verify: bool = True) -> None:
+        self.session = session
+        self.url = url
+        self.headers = dict(headers)
+        self.ssl = None if verify else False
+
+    def close(self) -> None:
+        """(Nothing read ahead: each answer reads its own range.)"""
+
+
 class Shelved(Protocol):
     """What a phone plays from the home door: a film here, a recording (2.8,
     services/remote/recorded.py)."""
@@ -742,6 +764,40 @@ def add_routes(app: Any, shelf: FilmShelf) -> None:
             raise web.HTTPBadGateway(text="502: Bad Gateway")
         return web.Response(body=data, content_type="video/mp4", headers=headers)
 
+    async def passed(request: web.Request) -> web.StreamResponse:
+        """A film as it is (PassedFilm): the range asked, from its provider."""
+        film = shelf.get(request.match_info["token"])
+        if not isinstance(film, PassedFilm):
+            raise web.HTTPNotFound(text="404: Not Found")
+        asked = dict(film.headers)
+        if request.headers.get("Range"):
+            asked["Range"] = request.headers["Range"]
+        method = "HEAD" if request.method == "HEAD" else "GET"
+        try:
+            async with film.session.request(
+                method, film.url, headers=asked, ssl=film.ssl
+            ) as upstream:
+                if upstream.status not in (200, 206):
+                    logger.info("A film's provider answered %s to a phone's range", upstream.status)
+                    raise web.HTTPBadGateway(text="502: Bad Gateway")
+                kept = ("Content-Type", "Content-Length", "Content-Range", "Accept-Ranges")
+                answer = web.StreamResponse(
+                    status=upstream.status,
+                    headers={k: upstream.headers[k] for k in kept if k in upstream.headers},
+                )
+                await answer.prepare(request)
+                if method == "GET":
+                    async for chunk in upstream.content.iter_chunked(PassedFilm.CHUNK):
+                        await answer.write(chunk)
+                await answer.write_eof()
+                return answer
+        except web.HTTPException:
+            raise
+        except (ConnectionError, asyncio.TimeoutError) as error:  # the phone left, or the provider
+            logger.info("A film as it is stopped: %s", safe_exc(error))
+            raise web.HTTPBadGateway(text="502: Bad Gateway")
+
+    app.router.add_get("/pass/{token}/{name}", passed)
     app.router.add_get("/film/{token}/index.m3u8", index)
     app.router.add_get("/film/{token}/init.mp4", init)
     app.router.add_get(r"/film/{token}/{n:\d+}.m4s", piece)

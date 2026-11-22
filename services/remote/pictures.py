@@ -30,6 +30,7 @@ import threading
 import time
 from typing import Any, Callable, Optional
 
+from services.plex_addresses import is_image_ref
 from services.remote.protocol import PictureWanted
 
 logger = logging.getLogger(__name__)
@@ -304,7 +305,7 @@ class _Fetcher:
         source = picture.source
         if source.startswith("data:image"):
             path = await self._images.cache_image_from_base64(source, iconified)
-        elif source.lower().startswith(("http://", "https://")):
+        elif source.lower().startswith(("http://", "https://")) or is_image_ref(source):
             session = self._session(picture.verify)
             if session is None:
                 return None

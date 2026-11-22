@@ -37,7 +37,13 @@ class FakeHttp:
     def request(self, method, url, params=None, headers=None, timeout=None, verify=True, **kw):
         path = url[len(self.base) :]
         self.asked.append(
-            {"method": method, "path": path, "params": dict(params or {}), "headers": headers}
+            {
+                "method": method,
+                "path": path,
+                "params": dict(params or {}),
+                "headers": headers,
+                "verify": verify,
+            }
         )
         answer = self.answers.get((method, path), (404, None))
         return _Response(*answer)
@@ -140,6 +146,11 @@ class ServersTest(unittest.TestCase):
         self.assertEqual(plex.servers_of(resources), [])
         self.assertEqual(plex.servers_of({"not": "a list"}), [])
 
+    def test_a_server_without_an_access_token_is_left_out(self):  # review M9
+        resources = fixture("resources.json")
+        del resources[0]["accessToken"]
+        self.assertEqual([s.name for s in plex.servers_of(resources)], ["A Friend's Films"])
+
     def test_a_server_token_is_never_in_its_repr(self):
         server = plex.Server("Home", "m", "secret-token")
         self.assertNotIn("secret-token", repr(server))
@@ -191,16 +202,47 @@ class ReachableTest(unittest.TestCase):
         found = plex.reachable(self.servers(), probe)
         self.assertEqual([uri for _, uri in found], ["https://10-0-0-5.example.plex.direct:32400"])
 
-    def test_identity_is_asked_with_the_servers_token_and_must_be_that_server(self):
+    def test_identity_is_asked_without_the_token_and_must_be_that_server(self):  # review I1
         base = "https://10-0-0-5.example.plex.direct:32400"
         identity = {"MediaContainer": {"machineIdentifier": "machine-home"}}
         http = FakeHttp(base, {("GET", "/identity"): (200, identity)})
         server = self.servers()[0]
-        self.assertTrue(plex.answers(base, server, "client-1", "2.14.0", True, session=http))
-        self.assertEqual(http.asked[0]["headers"]["X-Plex-Token"], "server-token-home")
+        self.assertTrue(plex.answers(base, server, "client-1", "2.14.0", session=http))
+        self.assertNotIn("X-Plex-Token", http.asked[0]["headers"])
+        self.assertIs(http.asked[0]["verify"], True)  # its certificate always checked
         other = plex.Server("Other", "machine-other", "t")
-        self.assertFalse(plex.answers(base, other, "client-1", "2.14.0", True, session=http))
+        self.assertFalse(plex.answers(base, other, "client-1", "2.14.0", session=http))
         self.assertTrue(http.closed is False)  # a session given is the caller's
+
+    def test_the_token_goes_only_where_the_certificate_proved_the_server(self):  # review I1
+        identity = {"MediaContainer": {"machineIdentifier": "machine-home"}}
+        server = self.servers()[0]
+        secure = "https://10-0-0-5.example.plex.direct:32400"
+
+        class Asks(FakeHttp):  # an identity that wants the token
+            def request(self, method, url, params=None, headers=None, **kw):
+                answer = super().request(method, url, params=params, headers=headers, **kw)
+                if "X-Plex-Token" in (headers or {}):
+                    from tests.test_plex import _Response
+
+                    return _Response(200, identity)
+                return answer
+
+        http = Asks(secure, {("GET", "/identity"): (401, None)})
+        self.assertTrue(plex.answers(secure, server, "c", "v", session=http))
+        self.assertEqual(
+            [("X-Plex-Token" in a["headers"], a["verify"]) for a in http.asked],
+            [(False, True), (True, True)],
+        )
+        plain = "http://10.0.0.5:32400"  # a stranger's machine at a hotel, maybe
+        http = Asks(plain, {("GET", "/identity"): (401, None)})
+        self.assertFalse(plex.answers(plain, server, "c", "v", session=http))
+        self.assertEqual([("X-Plex-Token" in a["headers"]) for a in http.asked], [False])
+
+    def test_a_plex_direct_address_is_always_checked(self):
+        self.assertTrue(plex.must_verify("https://10-0-0-5.example.plex.direct:32400", False))
+        self.assertFalse(plex.must_verify("https://media.example.test:32400", False))
+        self.assertTrue(plex.must_verify("https://media.example.test:32400", True))
 
 
 if __name__ == "__main__":

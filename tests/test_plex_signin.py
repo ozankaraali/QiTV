@@ -9,6 +9,8 @@ import unittest
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
+from PySide6.QtCore import QPoint, Qt
+from PySide6.QtTest import QTest
 from PySide6.QtWidgets import QApplication, QWidget
 from timer_fixtures import elapse
 
@@ -30,6 +32,9 @@ HOME = {
     "token": "server-token",
     "owned": True,
     "url": "https://10-0-0-5.example.plex.direct:32400",
+    "connections": [
+        {"uri": "https://10-0-0-5.example.plex.direct:32400", "local": True, "relay": False}
+    ],
 }
 FRIEND = {
     "name": "A Friend's Films",
@@ -207,7 +212,40 @@ class PlexSignInTests(unittest.TestCase):
         self.assertFalse(self.signin._timer.isActive())
         servers = self.jobs.last(pw.ServersJob)
         self.assertEqual(servers.client_id, job.client_id)
-        self.assertTrue(servers.verify)
+
+    def test_ok_and_a_click_beside_the_code_card_leave_it_waiting(self):  # review M6, M7
+        self.cards.add()
+        self.press_on_add_card("PLEX")
+        self.jobs.answer({"id": 7, "code": "AB12", "expires_in": 900})
+        self.key(Action.NAV_ACTIVATE)  # a remote's OK, the phone's ⏯
+        self.key(Action.OK)
+        self.assertTrue(self.card.isVisible())
+        QTest.mouseClick(self.card, Qt.MouseButton.LeftButton, pos=QPoint(4, 4))  # the dim
+        self.assertTrue(self.card.isVisible())
+        self.assertEqual(self.card.code(), "AB12")
+        cancel = self.card.control_rect("button", CANCEL).center().toPoint()
+        QTest.mouseClick(self.card, Qt.MouseButton.LeftButton, pos=cancel)  # Cancel still is
+        self.assertTrue(self.card.isHidden())
+
+    def test_esc_still_cancels_the_code_card(self):
+        self.cards.add()
+        self.press_on_add_card("PLEX")
+        self.jobs.answer({"id": 7, "code": "AB12", "expires_in": 900})
+        self.key(Action.ESCAPE)
+        self.assertTrue(self.card.isHidden())
+
+    def test_plex_tv_refusing_the_account_asks_for_a_new_code(self):  # review M8
+        self.cards.add()
+        self.press_on_add_card("PLEX")
+        self.jobs.answer({"id": 7, "code": "AB12", "expires_in": 900})
+        self.signin._look()
+        self.jobs.answer({"token": "account-token"})
+        self.jobs.answer({"refused": True})
+        self.assertEqual(
+            self.card.body(), "plex.tv refused the sign-in. Try again with a new code."
+        )
+        self.answer(ps.RETRY)
+        self.jobs.last(pw.PinJob)  # a new code, never the refused account again
 
     def test_a_code_that_expired_offers_a_new_one(self):
         self.cards.add()
@@ -272,6 +310,7 @@ class PlexSignInTests(unittest.TestCase):
                 "token": "server-token",
                 "server_id": "machine-home",
                 "device_id": client_id,
+                "connections": HOME["connections"],
             },
         )
         self.assertNotIn("account-token", repr(self.saved()))
@@ -299,6 +338,20 @@ class PlexSignInTests(unittest.TestCase):
         self.answer("server:machine-friend")
         names = [p["name"] for p in self.saved()]
         self.assertEqual(names, ["Lists", "Panel", "A Friend's Films"])
+
+    def test_the_accounts_own_servers_come_first(self):  # review M9
+        self.signed_in([FRIEND, HOME])
+        keys = [key for key, _text in self.buttons()]
+        self.assertEqual(keys, [CANCEL, "server:machine-home", "server:machine-friend"])
+
+    def test_a_server_already_listed_is_signed_in_again_in_place(self):  # review M9
+        self.signed_in([HOME])
+        self.jobs.jobs.clear()
+        self.signed_in([{**HOME, "token": "server-token-2"}])
+        plexes = [p for p in self.saved() if p["type"] == "PLEX"]
+        self.assertEqual(
+            [(p["name"], p["token"]) for p in plexes], [("Home Media", "server-token-2")]
+        )
 
     def test_a_name_taken_is_made_unique(self):
         self.signed_in([{**HOME, "name": "panel"}])

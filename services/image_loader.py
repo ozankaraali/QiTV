@@ -5,6 +5,7 @@ from PySide6.QtCore import Qt, QThread, Signal
 from PySide6.QtGui import QImage, QImageReader
 
 from services.lazy_import import lazy_module
+from services.plex_addresses import is_image_ref
 from services.provider_api import CLIENT_HEADERS
 from services.redact import redact_url, safe_exc
 
@@ -144,7 +145,7 @@ class ImageLoader(QThread):
                         if invalidated is not None and url not in invalidated:
                             self.image_manager.remove_icon_from_cache(url)
                             invalidated.add(url)
-                        if url.startswith(("http://", "https://")):
+                        if url.startswith(("http://", "https://")) or is_image_ref(url):
                             coroutine = self.fetch_image(session, image_rank, url)
                         elif url.startswith("data:image"):
                             coroutine = self.decode_base64_image(image_rank, url)

@@ -6,7 +6,7 @@ import unittest
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
-from services import media_server as ms, plex, plex_workers as pw
+from services import media_server as ms, plex, plex_addresses as pa, plex_workers as pw
 from tests.test_plex import fixture
 
 
@@ -102,7 +102,7 @@ class ServersJobTest(unittest.TestCase):
             return server is HOME
 
         job = pw.ServersJob(
-            "client-1", "account-token", True, account=lambda client_id: account, probe=probe
+            "client-1", "account-token", account=lambda client_id: account, probe=probe
         )
         out = run(job)
         self.assertEqual(
@@ -116,6 +116,13 @@ class ServersJobTest(unittest.TestCase):
                         "token": "server-token",
                         "owned": True,
                         "url": "https://home.example.plex.direct:32400",
+                        "connections": [
+                            {
+                                "uri": "https://home.example.plex.direct:32400",
+                                "local": True,
+                                "relay": False,
+                            }
+                        ],
                     }
                 ],
             },
@@ -123,12 +130,19 @@ class ServersJobTest(unittest.TestCase):
         self.assertEqual(sorted(probed), ["machine-friend", "machine-home"])
         self.assertEqual(account.asked, ["account-token"])
 
-    def test_an_account_token_refused_asks_for_a_new_code(self):
+    def test_each_server_comes_with_its_connections_to_look_again_later(self):  # review I2
+        account = FakeAccount(servers=[HOME])
+        job = pw.ServersJob("c", "t", account=lambda client_id: account, probe=lambda u, s: True)
+        out = run(job)
+        self.assertEqual(
+            out["finished"]["servers"][0]["connections"],
+            [{"uri": "https://home.example.plex.direct:32400", "local": True, "relay": False}],
+        )
+
+    def test_an_account_token_refused_says_so_for_a_new_code(self):  # review M8
         account = FakeAccount(fail=ms.SignInNeeded("401"))
-        job = pw.ServersJob("c", "t", True, account=lambda client_id: account, probe=None)
-        with self.assertLogs("services.plex_workers", "INFO"):
-            out = run(job)
-        self.assertEqual(out["error"], "plex.tv refused the sign-in. Try again with a new code.")
+        job = pw.ServersJob("c", "t", account=lambda client_id: account, probe=None)
+        self.assertEqual(run(job), {"finished": {"refused": True}})
 
 
 PROVIDER = {
@@ -169,6 +183,7 @@ class FakeServer:
         return fixture(name)["MediaContainer"]["Metadata"]
 
     def seasons_and_episodes(self, show_id):
+        self._raise()
         self.asked.append(show_id)
         return (
             fixture("show_children.json")["MediaContainer"]["Metadata"],
@@ -283,8 +298,110 @@ class CheckAccessTest(unittest.TestCase):
         self.addCleanup(made.close)
         self.assertEqual(
             (made.base, made.token, made.client_id, made.verify),
-            (BASE, "server-token", "client-1", False),
+            (BASE, "server-token", "client-1", True),  # a plex.direct one: always checked
         )
+        other = pw.client_for({**PROVIDER, "url": "https://media.example.test:32400"}, False)
+        self.addCleanup(other.close)
+        self.assertFalse(other.verify)
+
+
+AWAY = "https://203-0-113-7.example.plex.direct:32400"
+RELAY = "https://relay.example.plex.direct:8443"
+CONNECTED = {
+    **PROVIDER,
+    "connections": [
+        {"uri": BASE, "local": True, "relay": False},
+        {"uri": AWAY, "local": False, "relay": False},
+        {"uri": RELAY, "local": False, "relay": True},
+    ],
+}
+
+
+class Unreachable(FakeServer):
+    def __init__(self, base):
+        super().__init__(fail=ConnectionError("no route"))
+        self.base = base
+
+
+class LookingAgainTest(unittest.TestCase):
+    """Review I2: a server not reached where it was is looked for among its connections
+    again, and asked where it answers; a list's load looks for a better one when it is not
+    at its best (back home: at home again, not through the relay)."""
+
+    def setUp(self):
+        pa.forget()
+        self.addCleanup(pa.forget)
+        pa.known([CONNECTED])
+        self.servers = {BASE: Unreachable(BASE), AWAY: FakeServer(), RELAY: FakeServer()}
+        self.servers[AWAY].base = AWAY
+        self.servers[RELAY].base = RELAY
+        self.found = []
+
+    def client(self, provider, verify):
+        return self.servers[pa.base_of(provider)]
+
+    def finder(self, answer):
+        def find(provider):
+            self.found.append(provider.get("server_id"))
+            return answer
+
+        return find
+
+    def test_a_title_not_reached_at_home_plays_from_where_the_server_answers(self):
+        worker = pw.PlexLinkWorker(
+            CONNECTED,
+            "102",
+            True,
+            screen_4k=False,
+            four_k=ms.FOUR_K_SCREEN,
+            client=self.client,
+            finder=self.finder(AWAY),
+        )
+        out = run(worker)
+        self.assertTrue(out["finished"]["link"].startswith(AWAY + "/library/parts/"))
+        self.assertEqual(self.found, ["machine-home"])
+        self.assertEqual(pa.base_of(CONNECTED), AWAY)  # asked there from now on
+        self.assertTrue(self.servers[BASE].closed)
+
+    def test_found_nowhere_says_the_server_could_not_be_reached(self):
+        worker = pw.PlexSeriesWorker(
+            CONNECTED, "201", True, client=self.client, finder=self.finder("")
+        )
+        with self.assertLogs("services.plex_workers", "WARNING"):
+            out = run(worker)
+        self.assertEqual(out["error"], "The server could not be reached (ConnectionError).")
+        self.assertEqual(pa.base_of(CONNECTED), BASE)
+
+    def test_a_list_loaded_away_from_its_best_looks_for_it_first(self):
+        pa.moved("machine-home", RELAY)  # signed in away, Remote Access off
+        self.servers[BASE] = FakeServer()  # home again
+        worker = pw.PlexSectionWorker(CONNECTED, "vod", True, self.client, finder=self.finder(BASE))
+        out = run(worker)
+        self.assertEqual(len(out["finished"]["contents"]), 3)
+        self.assertEqual(pa.base_of(CONNECTED), BASE)
+        self.assertEqual(self.found, ["machine-home"])
+        self.found.clear()
+        run(pw.PlexSectionWorker(CONNECTED, "vod", True, self.client, finder=self.finder(BASE)))
+        self.assertEqual(self.found, [])  # at its best: not looked for again
+
+    def test_the_connection_check_looks_again_too(self):
+        ok = pw.check_access(CONNECTED, True, self.client, finder=self.finder(AWAY))
+        self.assertEqual(ok, (True, ""))
+        self.assertEqual(pa.base_of(CONNECTED), AWAY)
+
+    def test_the_looking_asks_each_connection_without_the_token_in_order(self):
+        asked = []
+
+        def answers(uri, server, client_id, version, session=None):
+            asked.append((uri, server.machine_id, server.access_token))
+            return uri != BASE
+
+        from unittest import mock
+
+        with mock.patch.object(plex, "answers", side_effect=answers):
+            self.assertEqual(pw.refind(CONNECTED), AWAY)
+        self.assertEqual({a[0] for a in asked}, {BASE, AWAY, RELAY})
+        self.assertEqual(pw.refind(PROVIDER), "")  # none kept: nowhere else to look
 
 
 if __name__ == "__main__":

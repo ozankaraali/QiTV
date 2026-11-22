@@ -55,7 +55,7 @@ On a first start QiTV opens with a [publicly available playlist](https://github.
    - **M3U playlist:** the playlist's web address (one ending in .m3u or .m3u8, or an address with no username), or **M3U file…** for a playlist on your computer;
    - **STB portal:** a portal address with `/c/` or `/stalker_portal/` in it, or any address with **STB portal** picked under the field; then your MAC address (serial number and device ID only if your provider asks for them);
    - **Jellyfin** or **Emby:** your media server's address (for example `http://192.168.1.20:8096`) with **Jellyfin** or **Emby** picked under the field, then your username and your password. QiTV keeps the sign-in the server gives it, not your password (see [Jellyfin and Emby](#jellyfin-and-emby));
-   - **Plex:** pick **Plex** under the field. A card shows a code: enter it at [plex.tv/link](https://plex.tv/link) on any phone or computer, and QiTV adds your Plex server (with several, you pick one). Nothing is typed into QiTV, and it keeps only that server's access, never your Plex password (see [Plex](#plex)).
+   - **Plex:** pick **Plex** under the field. A card shows a code: enter it at [plex.tv/link](https://plex.tv/link) on any phone or computer, and QiTV adds your Plex server (with several, you pick one). Nothing is typed into QiTV, and your Plex password is never seen; QiTV keeps the server's access on this computer only (see [Plex](#plex)).
 
    The name is optional: by default, the server's. **Free channels…** under the field adds iptv-org's free list, and **Free radio…** a list of internet radio stations.
 
@@ -458,9 +458,12 @@ Add your Jellyfin or Emby server as a provider (see [Adding a provider](#adding-
 
 Add your Plex Media Server as a provider (see [Adding a provider](#adding-a-provider)): its films and series join the Library as a Jellyfin server's do, with **All**, **Continue watching** and each of its film and series libraries, its posters, years, ratings and stories, and a series' seasons and episodes.
 
-- **Signing in takes a code.** QiTV shows a code of four letters and digits; enter it at [plex.tv/link](https://plex.tv/link), signed in to your Plex account, on any phone or computer, and the card goes on by itself (a code lasts 15 minutes, and **New code** gives another). QiTV then finds your account's servers that answer: at home first, then over the internet, then through Plex's relay. QiTV keeps the chosen server's address and access, not your Plex password and not your account's sign-in, and tells Plex only its own name and version.
+- **Signing in takes a code.** QiTV shows a code of four letters and digits; enter it at [plex.tv/link](https://plex.tv/link), signed in to your Plex account, on any phone or computer, and the card goes on by itself (a code lasts 15 minutes, and **New code** gives another). QiTV then finds your account's servers that answer: at home first, then over the internet, then through Plex's relay. It tells Plex only its own name and version.
+- **What QiTV keeps.** The server's addresses and its access, never your Plex password. For a server you own, that access is your Plex account's own, so QiTV keeps it like a password: only on this computer, in its provider list (readable by your user alone), never in a log, and never sent to your phone. When the server isn't where it was (your laptop away from home, a new address from your router), QiTV finds it again among its addresses, at home first, without a new code.
+- **Posters** come from the server's picture resizer, at the same size as Jellyfin's.
 - **The file plays as it is, always.** QiTV never asks a Plex server to convert a title, so the **⚙** lists only its versions, each as its file is. The 4K setting picks among them as for Jellyfin and Emby.
 - **The server keeps up.** Where you stop is told to the server, so its Continue watching follows, and a title you finish is marked watched there by the server's own rule.
+- **On your phone**, **Watch on this phone** plays a Plex title through QiTV at home (as an MKV film goes), so the server's access never reaches the phone; through the relay it says to be on QiTV's home network.
 - **Signing in again:** Settings → Providers → the server → **Address and login** shows a new code. The same server takes its new access in place; another server of your account is added as a new provider.
 - Plex's live TV and DVR, music, photos and its home users are not part of QiTV.
 
