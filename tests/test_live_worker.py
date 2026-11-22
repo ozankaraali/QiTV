@@ -467,12 +467,17 @@ class LiveWorkerTests(unittest.TestCase):
         self.assert_no_credentials(helper)
 
     def test_a_timestamp_jump_left_out_of_the_timeline_is_reported(self):
-        # 2.1: the player's clock jumps by what the timeline leaves out (a reconnect
-        # after an outage, an HLS discontinuity): where on the timeline, and how much. A step
-        # under 3 s stays media and is not reported.
+        # 2.1: the player's clock jumps by what the timeline leaves out (a jump that passes as
+        # it came: one before the pictures went on 10 s): where on the timeline, and how much.
+        # A step under 3 s stays media and is not reported. A jump at a discontinuity (a source
+        # switch, a reconnect after an outage) is re-based: nothing is left out.
         helper = self.helper()
-        for name, jump, reported in (("jump", 5.0, [(4.0, 5.0)]), ("step", 2.0, [])):
-            with self.subTest(jump=jump):
+        for name, jump, reported in (
+            ("jump", 5.0, [(4.0, 5.0)]),
+            ("step", 2.0, []),
+            ("switch", 5.0, []),
+        ):
+            with self.subTest(name):
                 first = make_stream(4)
                 second = make_stream(4, pts_start=900000 + round((4 + jump) * 90000))
                 routes = {
@@ -480,6 +485,10 @@ class LiveWorkerTests(unittest.TestCase):
                     f"/user/secret/{name}-a.ts": (200, {}, first),
                     f"/user/secret/{name}-b.ts": (200, {}, second),
                 }
+                if name == "jump":  # inside one segment
+                    whole = make_stream(8, jumps=((4.0, jump),))
+                    routes[f"/user/secret/{name}.m3u8"] = (200, {}, leaf(f"{name}-a.ts"))
+                    routes[f"/user/secret/{name}-a.ts"] = (200, {}, whole)
                 source = self.source(routes)
                 sid = helper.open(source.url + f"/user/secret/{name}.m3u8")
                 helper.wait_for(lambda message, sid=sid: message == ("ended", sid))
@@ -521,15 +530,18 @@ class LiveWorkerTests(unittest.TestCase):
         self.assert_no_credentials(helper)
 
     def test_reported_jumps_stay_as_long_as_the_ring_holds_their_media(self):
-        # A flaky source whose timestamps jump at every discontinuity: 20 jumps of 5 s, 2 s
-        # of media apart. A viewer far behind must still find each break the ring still holds
-        # (a count of eight dropped them); those whose media was evicted go with it, but for
-        # those just before the ring's start (2.1: a sparse-PCR clock's 2 s step and
-        # a second more), which a player still reading evicted media may reach.
+        # A flaky source whose timestamps jump in every segment: 21 jumps of 5 s, 2 s of media
+        # apart, each a second into a 2 s segment after a discontinuity where its clock runs
+        # on (so before the pictures went on 10 s: each passes as it came). A viewer far
+        # behind must still find each break the ring still holds (a count of eight dropped
+        # them); those whose media was evicted go with it, but for those just before the
+        # ring's start (2.1: a sparse-PCR clock's 2 s step and a second more), which a player
+        # still reading evicted media may reach.
         names = [f"flaky{k}" for k in range(21)]
         routes = {"/user/secret/flaky.m3u8": (200, {}, discontinuous(*names, extinf=2))}
         for k, name in enumerate(names):
-            body = make_stream(2, pts_start=900000 + round(k * 7.0 * 90000))
+            start = 900000 + round(k * 7.0 * 90000)
+            body = make_stream(2, pts_start=start, jumps=((1.0, 5.0),))
             routes[f"/user/secret/{name}.ts"] = (200, {}, body)
         source = self.source(routes)
         helper = self.helper()
@@ -541,14 +553,41 @@ class LiveWorkerTests(unittest.TestCase):
                 breaks = snapshot["breaks"]
                 self.assertTrue(all(abs(seconds - 5.0) < 0.05 for _, seconds in breaks))
                 if name == "all held":
-                    self.assertEqual(len(breaks), 20)
-                    self.assertEqual([round(where) for where, _ in breaks], list(range(2, 42, 2)))
+                    self.assertEqual(len(breaks), 21)
+                    self.assertEqual([round(where) for where, _ in breaks], list(range(1, 42, 2)))
                 else:
-                    self.assertLess(len(breaks), 20)
+                    self.assertLess(len(breaks), 21)
                     slack = worker._BREAK_SLACK_S
                     self.assertTrue(all(where >= snapshot["start"] - slack for where, _ in breaks))
                     self.assertLess(breaks[0][0], snapshot["start"])  # one just before it
-                    self.assertEqual(round(breaks[-1][0]), 40)
+                    self.assertEqual(round(breaks[-1][0]), 41)
+
+    def test_a_source_switch_far_ahead_reaches_the_buffer_running_on(self):
+        # A channel whose ad breaks switch the source, each switch a discontinuity onto a clock
+        # of its own: one 43,267.57 s ahead passed as it came, and VLC took a new reference,
+        # dropped what it held as late, and its clock stood still 13 s. The break's next
+        # segment starts its clock over (4 s behind), then the channel's own clock comes back.
+        # What the player reads runs on by a frame, and the timeline leaves nothing out.
+        ahead = 900000 + round((4 + 43267.57) * CLOCK)
+        routes = {
+            "/user/secret/switch.m3u8": (200, {}, discontinuous("own", "ad", "again", "back")),
+            "/user/secret/own.ts": (200, {}, make_stream(4)),
+            "/user/secret/ad.ts": (200, {}, make_stream(4, pts_start=ahead)),
+            "/user/secret/again.ts": (200, {}, make_stream(4, pts_start=ahead)),
+            "/user/secret/back.ts": (200, {}, make_stream(4, pts_start=900000 + 20 * CLOCK)),
+        }
+        source = self.source(routes)
+        helper = self.helper()
+        sid = helper.open(source.url + "/user/secret/switch.m3u8")
+        helper.wait_for(lambda message: message == ("ended", sid))
+        snapshot = helper.of(sid, "state")[-1][2]
+        self.assertEqual(snapshot["breaks"], [])
+        self.assertAlmostEqual(snapshot["end"], 16.0, delta=0.1)
+        with urlopen(helper.stream_url(sid, 0), timeout=10) as response:
+            media = split_header(response.read())[1]
+        self.assertEqual(set(video_steps(media)), {3600})
+        helper.close(sid)
+        self.assert_no_credentials(helper)
 
     def test_a_finite_source_ends_after_its_last_segment(self):
         first, second = make_stream(4), make_stream(4, pts_start=900000 + 4 * 90000)
@@ -800,9 +839,10 @@ class LiveWorkerTests(unittest.TestCase):
         # 2.0.2: a CDN that packages each HLS segment on its own restarts every PID's
         # continuity counter (PAT's and PMT's too) at 0, which VLC takes as a break on every
         # PID. The served stream continues the counters, across a real discontinuity too,
-        # whose first PCR then carries the discontinuity indicator. Raw TS passes as it came.
+        # whose first PCR then carries the discontinuity indicator (its clock a second on: a
+        # gap in real time, which passes as it came). Raw TS passes as it came.
         segments = [make_stream(4, pts_start=900000 + i * 4 * 90000) for i in range(3)]
-        segments.append(make_stream(4, pts_start=9_000_000))  # after the discontinuity
+        segments.append(make_stream(4, pts_start=2_070_000))  # after the discontinuity
         playlist = "#EXTM3U\n#EXT-X-VERSION:3\n#EXT-X-TARGETDURATION:4\n"
         playlist += "#EXT-X-MEDIA-SEQUENCE:0\n"
         playlist += "".join(f"#EXTINF:4,\n{name}.ts\n" for name in "abc")
@@ -837,7 +877,7 @@ class LiveWorkerTests(unittest.TestCase):
             got[3] &= 0xF0
             was[3] &= 0xF0
             self.assertEqual(got, was, f"packet {at // 188}")
-        self.assertEqual(flagged, [9_000_000])  # the first PCR after the discontinuity
+        self.assertEqual(flagged, [2_070_000])  # the first PCR after the discontinuity
         self.assert_no_credentials(helper)
 
     def test_closing_one_session_leaves_its_sibling_streaming(self):

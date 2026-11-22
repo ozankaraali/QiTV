@@ -8,7 +8,7 @@ from typing import Callable
 import unittest
 
 from services.live import ts
-from services.live.ts import PACKET, ClockJoiner, pts_delta
+from services.live.ts import PACKET, ClockJoiner, ContinuityJoiner, pts_delta
 from tests.ts_fixtures import (
     AUDIO_FRAME_TICKS,
     AUDIO_PID,
@@ -54,7 +54,7 @@ def flags(data: bytes) -> int:
 
 
 def cc_breaks(data: bytes) -> int:
-    breaks, last = 0, {}
+    breaks, last = 0, dict[int, int]()
     for p in packets(data):
         pid, b3 = pid_of(p), p[3]
         if not b3 & 0x10:
@@ -208,16 +208,21 @@ class ClockJoinerTests(unittest.TestCase):
                 self.assert_runs_on(out.replace(junk, b""))
 
     def test_a_reconnect_ends_the_rebasing(self):
+        # The restart's offset goes: a clock a second on from the last picture (a gap in real
+        # time) passes with its own timestamps, and the counters the restart rewrote run on.
         for clock in (None, lambda: 0.0):  # (the helper's joiner looks for jumps too)
             with self.subTest(watching=clock is not None):
                 joiner = ClockJoiner(program=lambda: (VIDEO_PID, 0x1B), clock=clock)
                 old, new = make_stream(5), make_stream(5)
                 out = b"".join(joiner.feed(old)) + b"".join(joiner.feed(new, junction=True))
                 out += joiner.discontinuity()
-                after = make_stream(3, pts_start=900000 + 40 * CLOCK)  # a clock that went on
-                self.assertEqual(b"".join(joiner.feed(after)) + joiner.finish(), after)
-                self.assertEqual(joiner.offset_s, 0.0)
                 self.assertEqual(len(out), len(old) + len(new))
+                after = make_stream(3, pts_start=900000 + 11 * CLOCK)  # a second on
+                tail = b"".join(joiner.feed(after)) + joiner.finish()
+                for pid in (VIDEO_PID, AUDIO_PID):
+                    self.assertEqual(times(tail, pid), times(after, pid))
+                self.assertEqual(joiner.offset_s, 0.0)
+                self.assertEqual(cc_breaks(out + tail), 0)
 
     def test_a_reconnect_onto_a_clock_behind_follows_the_last_picture(self):
         # A new connection whose muxer started over (its clock 2.4 hours back, flagged): libVLC
@@ -250,15 +255,30 @@ class ClockJoinerTests(unittest.TestCase):
         out += b"".join(joiner.feed(after)) + joiner.finish()
         self.assert_runs_on(out)
 
-    def test_a_reconnect_onto_a_clock_ahead_passes_as_it_comes(self):
-        # Ahead (an outage the source's clock went on through): the segmenter leaves the step
-        # out of the timeline and says where, as before.
+    def test_a_reconnect_onto_a_clock_ahead_follows_the_last_picture(self):
+        # 35 s ahead (an outage the source's clock went on through), as a clock behind: VLC met
+        # such a step with media ahead and sat it out as a still (past 60 s it takes a new
+        # reference and drops what it holds as late). The picture plays straight on; what the
+        # source skipped is still missing.
+        for clock in (None, lambda: 0.0):
+            with self.subTest(watching=clock is not None):
+                joiner = ClockJoiner(program=lambda: (VIDEO_PID, 0x1B), clock=clock)
+                old, after = make_stream(5), make_stream(3, pts_start=900000 + 35 * CLOCK)
+                out = b"".join(joiner.feed(old)) + joiner.discontinuity()
+                out += b"".join(joiner.feed(after)) + joiner.finish()
+                self.assert_runs_on(out)
+                self.assertAlmostEqual(joiner.offset_s, -30.0)
+
+    def test_a_reconnect_a_little_ahead_passes_as_it_comes(self):
+        # A step of up to `JUMP_S` (a gap in real time) passes as it came, as inside a run: the
+        # segmenter keeps it on the timeline as media.
         joiner = ClockJoiner(program=lambda: (VIDEO_PID, 0x1B), clock=lambda: 0.0)
-        old, after = make_stream(5), make_stream(3, pts_start=900000 + 35 * CLOCK)
+        old, after = make_stream(5), make_stream(3, pts_start=900000 + 7 * CLOCK)
         out = b"".join(joiner.feed(old)) + joiner.discontinuity()
         out += b"".join(joiner.feed(after)) + joiner.finish()
         self.assertEqual(out, old + after)
         self.assertEqual(joiner.offset_s, 0.0)
+        self.assertEqual(segmented(out)[1], [])
 
     def test_a_junction_before_any_picture_after_a_reconnect_follows_the_last_one(self):
         # Where a loop the loop trimmer dropped across a reconnect ends: the new content is
@@ -387,9 +407,9 @@ def segmented(data: bytes) -> tuple[list[ts.Event], list[tuple[int, float | None
     return events, seg.dropped
 
 
-class ForwardJumpTests(unittest.TestCase):
-    """A clock that leaps ahead where arrival does not explain it is re-based (ClockJoiner
-    with an arrival clock for raw TS, or HLS segments that `arrive`)."""
+class RunsOnCase(unittest.TestCase):
+    """What VLC reads runs on: every timestamp by its frame, and the timeline leaves nothing
+    out (no tests of its own)."""
 
     def assert_runs_on(self, out: bytes) -> None:
         pictures = video_times(out)
@@ -406,6 +426,11 @@ class ForwardJumpTests(unittest.TestCase):
         self.assertEqual(dropped, [])  # the timeline leaves nothing out
         opened = [event for event in events if isinstance(event, ts.Opened)]
         self.assertFalse(any(event.discontinuity for event in opened[1:]))
+
+
+class ForwardJumpTests(RunsOnCase):
+    """A clock that leaps ahead where arrival does not explain it is re-based (ClockJoiner
+    with an arrival clock for raw TS, or HLS segments that `arrive`)."""
 
     def test_a_jump_inside_a_raw_ts_burst_runs_on_a_frame_after(self):
         # Every PID 13 s ahead from 12 s on, the whole stream in one burst (as a provider's
@@ -570,17 +595,19 @@ class ForwardJumpTests(unittest.TestCase):
         self.assertEqual(len(joiner.jumps), 1)
         self.assertAlmostEqual(joiner.offset_s, -13.0)
 
-    def test_a_discontinuity_onto_another_clock_passes_as_it_comes(self):
-        # After a jump, a discontinuity whose content starts on a clock of its own: from there
-        # the bytes pass as they came, as without a jump (the segmenter cuts there).
+    def test_a_discontinuity_onto_another_clock_ahead_follows_the_last_picture(self):
+        # After a jump, a discontinuity whose content starts on a clock of its own ahead: 167 s
+        # past the last picture as they came, or 30 s (inside the window, where a clock that
+        # goes on keeps the jump's offset: kept, the pictures stepped 30 s on). It follows the
+        # last picture, as a clock behind does.
         first = make_stream(20, jumps=((12.0, 13.0),))
-        other = make_stream(4, pts_start=900000 + 200 * CLOCK)  # ahead, past the window
-        segments = [*at_seconds(first, 4.0, 8.0, 12.0, 16.0), other]
-        out, joiner, _ = watched(segments, extinf=[4.0] * 6, marks=(5,))
-        self.assertTrue(out.endswith(other))
-        self.assertEqual(joiner.offset_s, 0.0)
-        self.assertEqual(len(joiner.jumps), 1)
-        self.assert_runs_on(out[: len(out) - len(other)])
+        for ahead in (167, 30):
+            with self.subTest(ahead=ahead):
+                other = make_stream(4, pts_start=900000 + (33 + ahead) * CLOCK)
+                segments = [*at_seconds(first, 4.0, 8.0, 12.0, 16.0), other]
+                out, joiner, _ = watched(segments, extinf=[4.0] * 6, marks=(5,))
+                self.assert_runs_on(out)
+                self.assertEqual(len(joiner.jumps), 1)
 
     def test_a_discontinuity_onto_a_clock_far_behind_follows_the_last_picture(self):
         # After a jump, an HLS discontinuity whose content starts on a clock far behind (an
@@ -603,6 +630,132 @@ class ForwardJumpTests(unittest.TestCase):
         out, joiner, _ = watched(segments, extinf=[4.0] * 6, marks=(5,))
         self.assert_runs_on(out)
         self.assertEqual(len(joiner.jumps), 1)
+
+
+def hls(
+    segments: list[bytes],
+    *,
+    marks: tuple[int, ...] = (),
+    runs: tuple[int, ...] = (),
+    extinf: float = 6.0,
+    chunk: int | None = 5000,
+) -> tuple[bytes, ClockJoiner]:
+    """The segments as the helper takes an HLS channel: joined as its source joins them (a
+    `ContinuityJoiner`: the counters run on, and the first PCR after a discontinuity, which
+    comes before each segment numbered in `marks`, is flagged), each arriving with its EXTINF,
+    through the clock joiner. A segment numbered in `runs` begins a resumed run: a new source
+    (its counters its own), whose first bytes the clock joiner takes as a junction. Returns
+    the output and the clock joiner."""
+    source = ContinuityJoiner()
+    joiner = ClockJoiner(program=lambda: (VIDEO_PID, 0x1B))
+    out: list[bytes] = []
+    for number, segment in enumerate(segments):
+        if number in runs:
+            source = ContinuityJoiner()
+        source.segment()
+        if number in marks:
+            source.discontinuity()
+            out.append(joiner.discontinuity())
+        joiner.arrive(extinf)
+        data = source.feed(segment) + source.end()
+        step = chunk or len(data)
+        for at in range(0, len(data), step):
+            out += joiner.feed(data[at : at + step], junction=number in runs and at == 0)
+    return b"".join(out) + joiner.finish(), joiner
+
+
+class SourceSwitchTests(RunsOnCase):
+    """A channel whose ad breaks switch the source: each switch an HLS discontinuity onto a
+    clock of its own, ahead or behind by any amount (one measured 43,267.57 s ahead; the
+    break's next segments each start its clock over). Only a clock behind was re-based: VLC 3
+    met that one ahead with its clock gap rule (past 60 s), took a new reference, dropped what
+    it held as late, and its clock stood still 13 s until QiTV opened the stream again."""
+
+    def test_a_switch_onto_a_clock_far_ahead_runs_on(self):
+        # As measured; 48,000 s ahead reads as 47,443 s behind (past half the 33-bit wrap the
+        # direction is the arithmetic's, not the source's); each also across the wrap.
+        for jump in (43267.57, 48000.0):
+            for start in (900000, WRAP - 10 * CLOCK):
+                with self.subTest(jump=jump, start=start):
+                    content = make_stream(18, pts_start=start)
+                    ad = make_stream(12, pts_start=(start + round((18 + jump) * CLOCK)) % WRAP)
+                    segments = [*at_seconds(content, 6.0, 12.0), *at_seconds(ad, 6.0)]
+                    with self.assertLogs("services.live.ts", "INFO") as logs:
+                        out, _ = hls(segments, marks=(3,))
+                    self.assert_runs_on(out)
+                    self.assertEqual(flags(out), 0)
+                    if jump < 47721:
+                        said = f"a clock {jump:.2f} s ahead after a discontinuity re-based"
+                        self.assertIn(said, "\n".join(logs.output))
+
+    def test_a_break_whose_segments_start_its_clock_over_runs_on_and_back(self):
+        # The break's first segment far ahead, each next one starting its clock over where the
+        # first began, then the channel's own clock again: where the break's 24 s of media end
+        # (the counters the break's re-basing rewrote run on), 8 s further, or 30 s back.
+        content = make_stream(12)
+        breaks = [make_stream(6, pts_start=900000 + round((12 + 43267.57) * CLOCK))] * 4
+        for back_at in (36, 44, 6):
+            with self.subTest(back_at=back_at):
+                back = make_stream(12, pts_start=900000 + back_at * CLOCK)
+                segments = [*at_seconds(content, 6.0), *breaks, *at_seconds(back, 6.0)]
+                out, _ = hls(segments, marks=(2, 3, 4, 5, 6))
+                self.assert_runs_on(out)
+                self.assertEqual(flags(out), 1 if back_at == 36 else 0)  # running on: as it came
+
+    def test_the_sound_before_the_switched_first_picture_moves_with_it(self):
+        # The new source's sound is muxed ahead of its pictures: its first frames come before
+        # its first picture, on the new clock too. They follow on with it, sound and pictures
+        # together, as aligned as the source had them.
+        content = make_stream(12)
+        ad = make_stream(12, pts_start=900000 + round((12 + 43267.57) * CLOCK), audio_ahead_s=0.5)
+        order = [pid_of(p) for p in packets(ad) if p[1] & 0x40]
+        self.assertLess(order.index(AUDIO_PID), order.index(VIDEO_PID))  # its sound first
+        out, _ = hls([*at_seconds(content, 6.0), *at_seconds(ad, 6.0)], marks=(2,))
+        self.assert_runs_on(out)
+        tail = out[len(content) :]
+        self.assertEqual(pts_delta(times(tail, VIDEO_PID)[0], times(tail, AUDIO_PID)[0]), 0)
+
+    def test_a_clock_that_goes_on_with_its_pictures_far_apart_passes_as_it_came(self):
+        # A discontinuity where the clock goes on, the first picture after it seconds past the
+        # last: a slideshow's stills 5 s apart (with sound, or none), or a gap in the pictures
+        # the sound went on through. Inside a run each stays as it came; re-based, the sound
+        # stepped back as far. Here too it stays.
+        cases = {
+            "slideshow": (make_stream(30, fps=0.2), (6.0, 12.0, 18.0, 24.0)),
+            "silent slideshow": (make_stream(30, fps=0.2, audio=False), (6.0, 12.0, 18.0, 24.0)),
+            "picture gap": (make_stream(24, video_gaps=((14.0, 18.0),)), (4.0, 8.0, 12.0, 16.0)),
+        }
+        for name, (data, cuts) in cases.items():
+            with self.subTest(name):
+                segments = at_seconds(data, *cuts)
+                marks = tuple(range(1, len(segments))) if "slideshow" in name else (4,)
+                out, joiner = hls(segments, marks=marks)
+                self.assertEqual(joiner.offset_s, 0.0)
+                for pid in (VIDEO_PID, AUDIO_PID):
+                    self.assertEqual(times(out, pid), times(data, pid))
+                audio = times(out, AUDIO_PID)
+                self.assertEqual(steps(audio), {AUDIO_FRAME_TICKS} if audio else set())
+
+    def test_counters_a_resumed_run_rewrote_run_on_across_a_switch(self):
+        # A run resumed after a kept buffer: its clock re-based 90 s on, its counters rewritten
+        # to run on from the kept buffer's. A switch that passed as it came went back to the
+        # source's own counters, and VLC saw every PID's counter break there. They run on,
+        # across a switch far ahead as across one a second ahead (a gap in real time, which
+        # passes with its own timestamps and stays on the timeline as media).
+        kept = make_stream(12)
+        resumed = make_stream(12, pts_start=(900000 - 78 * CLOCK) % WRAP)  # 90 s behind
+        for name, ahead in (("far", 43267.57), ("a second", 1.0)):
+            with self.subTest(name):
+                ad = make_stream(6, pts_start=900000 + round((24 + ahead) * CLOCK))
+                segments = [*at_seconds(kept, 6.0), *at_seconds(resumed, 6.0), ad]
+                out, joiner = hls(segments, runs=(2,), marks=(4,))
+                self.assertEqual(cc_breaks(out), 0)
+                if name == "far":
+                    self.assert_runs_on(out)
+                    continue
+                self.assertEqual(steps(times(out, VIDEO_PID)), {FRAME, CLOCK + FRAME})
+                self.assertEqual(joiner.offset_s, 0.0)
+                self.assertEqual(segmented(out)[1], [])
 
 
 if __name__ == "__main__":
