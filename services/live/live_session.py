@@ -441,12 +441,6 @@ _REOPEN_HOLD_S = 5.0  # no reopen at live within this of an open (and before VLC
 _SETTLE_S = 1.0
 _SETTLE_GROWTH_S = 2.0
 _SETTLE_MAX_S = 1.5
-# 2026-11-22: a backlog still arriving at network speed (the helper's hold ran out with it
-# arriving faster than twice real time, `settled_s` 0, and the edge still growing as above)
-# holds the start up to this long after ready, so it lands once, where the backlog left it:
-# started in the middle of one, the re-pick moved the picture 18 s on 11 s after it showed.
-# Waited out, the start plays and its landing is caught up (no re-pick).
-_START_FLOOD_MAX_S = 10.0
 # With nothing far enough back, a steady source starts at the oldest after this long.
 _STEADY_WAIT_S = 1.0
 # A start held longer than this says "Still loading…" (a bursty or HLS source, Stable).
@@ -477,6 +471,14 @@ _REPICK_GAP_S = 3.0
 _REPICK_PLAY_S = 3.0
 _REPICK_DEADLINE_S = 20.0
 _REPICK_GAIN_S = 1.0  # (stay-live's band) the least the new start must gain, and exceed by
+# The re-pick as the arrivals settle (2026-11-22, the owner's call: the picture at once, one
+# skip at most, the sooner the better): settled (`StayLive.flooding` off), and since the
+# arrivals' level last rose more than `_REPICK_RISE_S` (a burst's tail, a slow burst behind
+# the dump) the edge moved at about real time (`_REPICK_RATE`) for the flood detector's
+# window at least, never standing still more than `_REPICK_SMOOTH_S` (a burst stands still for
+# most of its period). A flow in chunks (2 s every 2 s) is judged by `_REPICK_FLOW_S` as ever.
+_REPICK_RISE_S = 0.5
+_REPICK_SMOOTH_S = 1.0
 _CRAWL_WINDOW_S = 8.0  # an HLS channel crawling at 1x for this long (counted) ...
 _CRAWL_WINDOWS = 2  # ... this many times in a row plays directly (one freeze is not enough)
 _FROZEN_HOLDS = 2.0  # VLC's clock still for a window and this many holds has played nothing
@@ -728,7 +730,6 @@ class LiveSession(QObject):
         self._ready_at = 0.0  # when it was
         self._edges: list[tuple[float, float]] = []  # (when, live edge) while the start waits
         self._held_said = False  # "Still loading…" was said while the start waited
-        self._flood_said = False  # the start waited for a backlog still arriving (said once)
         self._not_live_said = 0  # 2.8.11: the answers dropped as recordings said so far
         self._reland_until = -math.inf  # a backlog step before this is part of the landing
         self._reland_edge = 0.0  # the live edge at the last tick, meanwhile
@@ -737,6 +738,10 @@ class LiveSession(QObject):
         self._repick_edge = 0.0  # ... the edge then ...
         self._repick_moved = 0.0  # ... and when it last moved since ...
         self._repick_seen = 0.0  # ... and the last tick it was looked at
+        # Where the arrivals' level (the edge less the clock) peaked since the step, (when,
+        # edge), and whether the edge moved at least every `_REPICK_SMOOTH_S` since.
+        self._repick_peak = (0.0, 0.0)
+        self._repick_smooth = False
         self._repick_opened = -math.inf  # the tune's first open
         self._repick_playing: Optional[float] = None  # ... and when VLC first played it
         self._rewound = False  # "Rewound past the buffer" was said; VLC has not played since
@@ -776,10 +781,7 @@ class LiveSession(QObject):
         # when the source last sent again after a silence, and the last tick's quiet, for the
         # hold's trickle (`_hold_at_edge`).
         self._arrived: deque[tuple[float, float]] = deque()
-        self._sending_since = -math.inf
-        self._quiet_before = 0.0
-        self._was_abnormal = self._unproven = self._reconnect_seen = False
-        self._room_before = 0.0
+        self._forget_holds()
         self._rate_minute, self._rate_lines = -1, 0
         self._troubled_at: Optional[float] = None
         self._cushion = 0.0  # the largest lag at the live edge since the tune (or the target)
@@ -970,6 +972,7 @@ class LiveSession(QObject):
         self._resume_held, self._resume_owed = None, False
         self._dry_before = self._dry_seen = -math.inf
         self._dry_now = False
+        self._forget_holds()
         self._back = self._late = None
         self._disk_failures = 0
         self._on_disk = disk
@@ -1787,7 +1790,7 @@ class LiveSession(QObject):
         if self._open_args.get("disk") and self._channel:
             self._engine.keep_session(self._sid, {"channel": self._channel})  # 2.6: whose
         self._phase = _Phase.WAITING
-        self._ready_seen = self._loading = self._held_said = self._flood_said = False
+        self._ready_seen = self._loading = self._held_said = False
         self._not_live_said = 0
         self._edges = []
         self._ready_timer.start(self._ready_timeout_ms)
@@ -1804,7 +1807,7 @@ class LiveSession(QObject):
         # 2.8: a rewound viewer plays on into the new run: it goes on after the old one.
         self._send_resume(kept.sid, join=self._back is not None)
         self._phase = _Phase.WAITING
-        self._ready_seen = self._loading = self._held_said = self._flood_said = False
+        self._ready_seen = self._loading = self._held_said = False
         self._not_live_said = 0
         self._edges = []
         self._ready_timer.start(self._ready_timeout_ms)
@@ -1817,7 +1820,7 @@ class LiveSession(QObject):
             return
         self._sid = borrowed.sid
         self._phase = _Phase.WAITING
-        self._ready_seen = self._loading = self._held_said = self._flood_said = False
+        self._ready_seen = self._loading = self._held_said = False
         self._not_live_said = 0
         self._edges = []
         self._ready_timer.start(self._ready_timeout_ms)
@@ -2128,6 +2131,7 @@ class LiveSession(QObject):
         self._filter = LagFilter()
         self._burst_said = self._measured_said = None
         self._arrived.clear()
+        self._forget_holds()
         if self._learned is not None:  # another stream from the helper: no batch, no gap
             self._learned.arrivals.reset()
         self._forget_feed()
@@ -2325,49 +2329,29 @@ class LiveSession(QObject):
                 return  # bounded by the ready timeout
             elif not hls and not self._landed(snapshot) and held < _SETTLE_MAX_S - 1e-9:
                 return
-        # 2026-11-22: its backlog still arriving at network speed: the picture waits for it
-        # (the loading the viewer sees as ever), at most `_START_FLOOD_MAX_S` after ready.
-        arriving = (
-            not hls
-            and _number(snapshot.get("settled_s")) <= 0  # (settled: the held bytes, at once)
-            and self._grown(snapshot) > _SETTLE_GROWTH_S + 1e-9
-        )
-        if arriving and not waited:
-            if not self._flood_said:
-                self._flood_said = True
-                _LOG.debug("The start waits for the source's backlog, still arriving.")
-            if self._clock() - self._ready_at < _START_FLOOD_MAX_S - 1e-9:
-                return
         aimed = pick is not None  # chosen for the target, not the most there is
         if pick is None:
             pick = self._live_start(ahead=ahead)  # the most buffer there is
         if pick is not None:
-            # Into a backlog still arriving (the wait ran out): its landing is caught up, never
-            # picked again (a skip after the picture showed).
-            self._first_open(*pick, aimed=aimed, repick=not arriving)
+            self._first_open(*pick, aimed=aimed)
 
-    def _first_open(
-        self, seq: int, lag: Optional[float], *, aimed: bool = False, repick: bool = True
-    ) -> None:
+    def _first_open(self, seq: int, lag: Optional[float], *, aimed: bool = False) -> None:
         """Play the tune from `seq`, its lag once playing `lag` (None: a finished playlist's
-        beginning, no landing); a failed open picks again on the tick (`_Retry.FIRST`).
-        `repick`: its start may be picked again (`REPICK`)."""
+        beginning, no landing); a failed open picks again on the tick (`_Retry.FIRST`)."""
         self._ready_timer.stop()
         self._phase = _Phase.PIPELINE
         self._mode = "pipeline"
         self._edges = []
         self._tick_timer.start()
-        self._open_first(seq, lag, aimed=aimed, repick=repick)
+        self._open_first(seq, lag, aimed=aimed)
         self.modeChanged.emit(self._mode)
 
-    def _open_first(
-        self, seq: int, lag: Optional[float], *, aimed: bool = False, repick: bool = True
-    ) -> None:
+    def _open_first(self, seq: int, lag: Optional[float], *, aimed: bool = False) -> None:
         """Open the tune at `seq`. `aimed`: the start was chosen for the target, so its
         cushion counts as reached: its lag may read a little short of it once
         the source's rhythm is learned, and VLC running dry then is trouble all the same.
         A start that took less on purpose (the oldest segment, nothing further back) has
-        none. `repick`: the start may be picked again (`REPICK`)."""
+        none."""
         if not self._open_at(seq):
             self._retry = _Retry.FIRST
             return
@@ -2381,8 +2365,7 @@ class LiveSession(QObject):
             self._cushion = max(self._cushion, target)
         self._reland_until = self._clock() + _RELAND_S
         self._reland_edge = self._live_edge(snapshot)
-        self._repick_until = self._clock() + _REPICK_S if repick else -math.inf
-        self._repick_step = None
+        self._repick_until, self._repick_step = self._clock() + _REPICK_S, None
         self._repick_opened = self._clock()
         self._repick_playing = None
 
@@ -2445,17 +2428,13 @@ class LiveSession(QObject):
         provider's 20 s came as two keyframe intervals a second apart)."""
         if _number(snapshot.get("settled_s")) > 0:
             return True  # 2.8.11: the helper let the tune's bytes go once they had (`settled`)
-        return self._grown(snapshot) <= _SETTLE_GROWTH_S + 1e-9
-
-    def _grown(self, snapshot: Mapping[str, Any]) -> float:
-        """What the live edge grew over the last `_SETTLE_S` while the start waits."""
         edge, since = self._live_edge(snapshot), self._clock() - _SETTLE_S
         past = self._edges[0][1] if self._edges else edge
         for at, seen in self._edges:
             if at > since:
                 break
             past = seen
-        return edge - past
+        return edge - past <= _SETTLE_GROWTH_S + 1e-9
 
     def _on_recovery_timeout(self) -> None:
         if self._phase is not _Phase.RECOVERING:
@@ -2927,9 +2906,7 @@ class LiveSession(QObject):
             self._stay.slack = self._target(snapshot) - self._stay.target
             self._stay.hold_reopen = self._just_opened()
             self._stay.burst = self._filter.burst
-            # Under Auto, a kept burst's target holds the burst's room and its own margin: a
-            # lag under it by half that burst still leaves VLC the margin (`StayLive.spare`).
-            self._stay.spare = self._filter.kept / 2 if self._learned is not None else 0.0
+            self._stay.spare = self._spare()
             self._stay.edge = self._filter.edge(self._clock())  # what a backlog pushes ahead
             self._stay.flooding = self._flooding(snapshot)
             self._stay.spread = self._filter.spread()
@@ -3037,7 +3014,9 @@ class LiveSession(QObject):
         recent = [mark for when, mark in arrived if when >= now - window]
         before = [mark for when, mark in arrived if when < now - window]
         rising = level - recent[0] > extra
-        flooding = rising and (not before or level - max(before) > extra)
+        # Raw TS: an HLS channel's batches (its start's next reload 12 s) are its rhythm.
+        hls = snapshot.get("hls") is True
+        flooding = rising and not hls and (not before or level - max(before) > extra)
         if self._stay.flooding and not flooding:
             # Settled: the flood was a step of the level, its mean is the window's of before
             # (a pick from it landed 4.5 s above the target): the filter starts afresh.
@@ -3241,26 +3220,44 @@ class LiveSession(QObject):
         if grown > _REPICK_DUMP_S and now < self._repick_until:
             # A dump, or a further piece of it: the source's own flow is judged from here.
             self._repick_step, self._repick_edge, self._repick_moved = now, edge, now
+            self._repick_peak, self._repick_smooth = (now, edge), True
             return False
         step = self._repick_step
         if step is None:
             return False
-        if grown >= _ARRIVAL_S:
-            self._repick_moved = now
-        elif now - self._repick_moved + tick >= _REPICK_GAP_S - 1e-9:
-            # It stood still (since the tick before it last moved, at the most: ticks work
-            # against qualifying): a burst, the source's rhythm.
+        still = now - self._repick_moved + tick  # since the tick before it last moved
+        if still >= _REPICK_GAP_S - 1e-9:
+            # It stood still (at the most, ticks work against qualifying; and the tick that
+            # ends it reads the same: batches 2.95 s apart were a flow at some phases): a
+            # burst, the source's rhythm.
             self._repick_step = None
             return False
+        if still > _REPICK_SMOOTH_S + 1e-9:
+            self._repick_smooth = False
+        if grown >= _ARRIVAL_S:
+            self._repick_moved = now
+        peak_at, peak_edge = self._repick_peak
+        if edge - now > peak_edge - peak_at + _REPICK_RISE_S:
+            self._repick_peak, self._repick_smooth = (now, edge), True  # still arriving fast
         flowed = now - step
-        if flowed < _REPICK_FLOW_S - 1e-9 or not played or self._just_opened():
+        if not played or self._just_opened():
             # (Within the reopen hold of another open, a reopen in software say: never two
             # opens in a row. The step stays to be judged once the hold is over.)
             return False
-        self._repick_step = None
         low, high = _REPICK_RATE
-        if not low * flowed <= edge - self._repick_edge <= high * flowed:
-            return False  # no steady flow after it
+        peak_at, peak_edge = self._repick_peak
+        after = now - peak_at
+        flowing = (  # as the arrivals settle (see `_REPICK_SMOOTH_S`)
+            not self._stay.flooding
+            and self._repick_smooth
+            and after >= _FLOOD_WINDOW_S - 1e-9
+            and low * after <= edge - peak_edge <= high * after
+        )
+        if flowed >= _REPICK_FLOW_S - 1e-9:
+            self._repick_step = None  # judged now at the latest: a steady flow after it
+            flowing = flowing or low * flowed <= edge - self._repick_edge <= high * flowed
+        if not flowing:
+            return False
         if self._stay.mode is not Mode.LIVE or self._paused:
             return False
         # The mean lag the step leaves (the edge less the position, less half a burst: the
@@ -3274,12 +3271,13 @@ class LiveSession(QObject):
         if landing is None or now_lag - landing < max(_REPICK_GAIN_S, burst / 2):
             return False
         _LOG.debug("A backlog %.1f s behind right after the start: picked again.", now_lag)
-        self._repick_until = -math.inf  # once a tune
+        self._repick_until, self._repick_step = -math.inf, None  # once a tune
         # The step is taken in at once: the pick reads the edge now, not the lag filter's
         # mean from before it (which arrived over several ticks, none a step on its own).
         self._filter.reset()
         self._go_live(unpause=False, build=False)
         self._reopened_at = self._clock()  # a Go live right after it opens nothing more
+        self._stay.picked_again()  # the tune's one skip: what comes after is caught up
         return True
 
     def _back_off(
@@ -3381,6 +3379,27 @@ class LiveSession(QObject):
             floor=start_target(AUTO),
             segment_floor=SEGMENT_FLOOR,
         )
+
+    def _spare(self) -> float:
+        """Under Auto, a kept burst's target holds the burst's room and its own margin: a lag
+        under it by half that burst still leaves VLC the margin (`StayLive.spare`). Only the
+        part of the target in force the burst holds (review I4): not what a learned need above
+        the burst, or the AI captions' floor, set (under a 13 s floor the captions were 6 s
+        short of their lead before anything built it back)."""
+        learned, kept = self._learned, self._filter.kept
+        if learned is None or kept <= 0:
+            return 0.0
+        held = learned.target(kept) - learned.target(0.0)
+        return max(0.0, min(kept / 2, held, self._stay.target - self._caption_floor))
+
+    def _forget_holds(self) -> None:
+        """The hold's view of the source's silences starts afresh (a tune, a new helper
+        session): when it last sent again after one, the last tick's quiet, whether that was
+        one VLC had room for, a trickle to prove, a reconnect, and VLC's room as it began."""
+        self._sending_since = -math.inf
+        self._quiet_before = 0.0
+        self._was_abnormal = self._unproven = self._reconnect_seen = False
+        self._room_before = 0.0
 
     def _forget_feed(self) -> None:
         """What `_feed_learned` keeps between ticks starts afresh (a tune, a new stream)."""
@@ -3668,17 +3687,25 @@ class LiveSession(QObject):
         if quiet < _HOLD_QUIET_S:
             self._room_before = ahead + quiet  # VLC's cushion as a silence would begin
         # A silence past its bursts that VLC had room for (its usual gap and some): no hiccup
-        # at the edge, nor the shortfall before each burst stay-live builds away (2.0.1).
+        # at the edge, nor the shortfall before each burst stay-live builds away (2.0.1). Only
+        # for a source that showed bursts this tune: a steady one's hiccup VLC has room for
+        # (Stable, a radio station, Auto at 5 s and more) plays through as in 2.8.8.
+        bursty = max(rhythm, self._filter.kept) > 0
         room = max(_HOLD_ROOM_S, rhythm + _HOLD_EARLY_S + _HOLD_QUIET_S)
-        abnormal = quiet > rhythm + _HOLD_QUIET_S and self._room_before >= room - 1e-9
-        if snapshot.get("reconnecting") is True:
-            self._reconnect_seen = True
-        if quiet < self._quiet_before and self._quiet_before >= _HOLD_BURSTS * rhythm + 1.0:
-            self._sending_since = now  # the source sends again after a silence ...
-            # ... and after one VLC had room for, or a reconnect, it trickles until it proves
-            # it does not (its first seconds at the edge played in fits)
-            self._unproven = self._unproven or self._was_abnormal or self._reconnect_seen
-            self._reconnect_seen = False
+        abnormal = bursty and quiet > rhythm + _HOLD_QUIET_S and self._room_before >= room - 1e-9
+        reconnecting = snapshot.get("reconnecting") is True
+        if quiet < self._quiet_before:  # it sends again
+            if self._quiet_before >= _HOLD_BURSTS * rhythm + 1.0:
+                # ... after a silence: what came since counts from the level before it (the
+                # burst that ended it too: VLC was held a burst longer without it) ...
+                self._sending_since = next(
+                    (when for when, _ in reversed(self._arrived) if when < now - 1e-9), now
+                )
+                # ... and after one VLC had room for, or a reconnect, it trickles until it
+                # proves it does not (its first seconds at the edge played in fits)
+                self._unproven = self._unproven or self._was_abnormal or self._reconnect_seen
+            self._reconnect_seen = False  # a reconnect is the silence it ends, or none
+        self._reconnect_seen = self._reconnect_seen or reconnecting
         self._quiet_before, self._was_abnormal = quiet, abnormal
         # Judged over sending time only: right after a silence the window holds the silence.
         window = max(_HOLD_RATE_S, 2 * rhythm)
