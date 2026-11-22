@@ -563,9 +563,7 @@ class TVPages(QObject):
 
     def _enter_library(self) -> None:
         window = self._window
-        # The Library is a full window: never inside the corner, nor a small window (a picture
-        # floating for a desktop change brings its window back first).
-        window.leave_small_window()
+        window.leave_mini_player()  # the Library is a full window: never inside the corner
         if window.controller.playing():
             window.controller.enter_library_playing()  # it plays on, in a corner of the Library
             self._show_page(window.library_page, corner=True)
