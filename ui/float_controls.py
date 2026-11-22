@@ -26,8 +26,11 @@ Its clicks:
 - Every other control opens what lives in the window (Sound, Subtitles, Picture, ⚙, the guide,
   Search, the Library, the multiview, picture in picture, cast, ⋯): the fullscreen desktop comes
   back first and it opens there, as the mini player's Library and Search do.
-- A press on the shades beside a control is the picture's (`picture_mouse`): a drag moves the
-  floating window, an edge's resizes it, a double-click comes back.
+- A press anywhere else is the picture's (`picture_mouse`), as in 2.13.4: a click does nothing, a
+  drag moves the floating window, an edge's resizes it, a double-click comes back. A control
+  takes a press only on its drawn place (`REACH_PX` around it), not on the larger hit area it
+  has over the window (the owner, 2.13.5: clicks on the small picture opened the guide in the
+  window, its hit area covering most of the bottom there).
 - The wheel does nothing (a scroll drifting over it from another app never zaps), nor do the
   keys: it never takes the keyboard.
 """
@@ -72,6 +75,7 @@ MUTE = "volumeRequested"  # the speaker
 # Menus that open from their button (a global point): in the window, from the window's button.
 AT_BUTTON = {"externalRequested": "external", "castRequested": "cast", "moreRequested": "more"}
 _PICTURE_EVENTS = (QEvent.Type.MouseMove, QEvent.Type.MouseButtonRelease)
+REACH_PX = 6.0  # a press this near a control's drawn place is the control's
 
 
 def requests() -> tuple[str, ...]:
@@ -191,15 +195,33 @@ class FloatControls(QObject):
         transport.poke()
         getattr(transport, name).emit(*args)
 
+    def _on_a_control(self, pos: QPointF) -> bool:
+        """`pos` (the controls' coordinates) is on a control as drawn (REACH_PX around it; the
+        bar by its own reach, a thin line), not only within its hit area."""
+        mirror = self.mirror
+        name = mirror.control_at(pos)
+        if name is None:
+            return False
+        if name == "seek":
+            return True
+        rect = mirror.title_rects().get(name)
+        if rect is None:
+            try:
+                rect = mirror.button_rect(name)
+            except KeyError:
+                return True  # (laid out but not drawn alone: as it says)
+        return rect.adjusted(-REACH_PX, -REACH_PX, REACH_PX, REACH_PX).contains(pos)
+
     def eventFilter(self, watched: QObject, event: QEvent) -> bool:
-        """A press on the shades beside a control, and its moves and release, are the
-        picture's (a drag moves the floating window); the controls' own stay theirs."""
+        """A press beside a control (on the shades, or within a control's hit area but off the
+        control), and its moves and release, are the picture's (a click does nothing, a drag
+        moves the floating window); the controls' own stay theirs."""
         if watched is not self.mirror or not isinstance(event, QMouseEvent):
             return False
         kind = event.type()
         left = Qt.MouseButton.LeftButton
         if kind in (QEvent.Type.MouseButtonPress, QEvent.Type.MouseButtonDblClick):
-            if event.button() != left or self.mirror.control_at(event.position()) is not None:
+            if event.button() != left or self._on_a_control(event.position()):
                 return False
             self._picture_press = kind == QEvent.Type.MouseButtonPress  # (a double-click: back)
         elif not (self._picture_press and kind in _PICTURE_EVENTS):

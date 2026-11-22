@@ -22,6 +22,25 @@ from ui.overlays.transport import OWN_SETTERS, Transport  # noqa: E402
 _PREFIXES = ("set_", "show_", "update_", "end_")
 
 
+def off_a_control(mirror: Transport) -> tuple[str, QPoint]:
+    """A control, and a point within its hit area but off its drawn place (REACH_PX around)."""
+    layout = mirror._layout()
+    reach = float_controls.REACH_PX
+    for name, hit in mirror._hits(layout).items():
+        if name == "seek" or name not in layout:
+            continue
+        drawn = layout[name].adjusted(-reach, -reach, reach, reach)
+        for point in (
+            QPointF(hit.center().x(), hit.top() + 1),
+            QPointF(hit.center().x(), hit.bottom() - 1),
+            QPointF(hit.left() + 1, hit.center().y()),
+            QPointF(hit.right() - 1, hit.center().y()),
+        ):
+            if not drawn.contains(point) and mirror.control_at(point) == name:
+                return name, point.toPoint()
+    raise AssertionError("every hit area is within its control's reach")
+
+
 class MirrorTests(unittest.TestCase):
     """Transport.add_mirror: what the controls show is told; whether they show is not."""
 
@@ -251,6 +270,23 @@ class FloatControlsTests(unittest.TestCase):
         )
         self.assertEqual(self.picture, [])
         self.assertEqual(spy.count(), 1)
+
+    def test_a_press_off_a_drawn_control_is_the_pictures_even_within_its_hit_area(self):
+        # The owner (2.13.5): clicks on the small picture opened the guide in the window; a
+        # control's hit area covers most of the bottom there. Only the controls themselves act.
+        self.show_controls()
+        name, point = off_a_control(self.mirror)
+        asked = []
+        for request in float_controls.requests():
+            getattr(self.mirror, request).connect(lambda *_a, r=request: asked.append(r))
+        mouse(self.mirror, QEvent.Type.MouseButtonPress, point)
+        mouse(self.mirror, QEvent.Type.MouseButtonRelease, point, Qt.MouseButton.NoButton)
+        self.app.processEvents()
+        self.assertEqual(asked, [], name)
+        self.assertEqual(
+            self.picture, [QEvent.Type.MouseButtonPress, QEvent.Type.MouseButtonRelease]
+        )
+        self.come_back.assert_not_called()
 
     def test_back_in_the_window_it_hides_and_forgets_the_pointer(self):
         self.show_controls()

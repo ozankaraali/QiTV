@@ -293,6 +293,8 @@ def _macos_desktops() -> bool:
 
 
 _SOURCE = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))  # QiTV's own files
+# The TV window's own frames between what asked and the log (its overrides, its events).
+_OWN_FRAMES = ("activateWindow", "raise_", "setFocus", "changeEvent", "event", "_on_focus_changed")
 
 
 def _callers(depth: int = 4) -> str:
@@ -306,10 +308,8 @@ def _callers(depth: int = 4) -> str:
         and f"{os.sep}.venv{os.sep}" not in frame.filename
         and frame.name not in ("_callers", "_note_floating_focus")
     ]
-    if frames and frames[-1].name in ("activateWindow", "raise_", "setFocus", "changeEvent"):
+    while frames and frames[-1].name in _OWN_FRAMES:
         frames.pop()  # (the TV window's own override, or the event it got)
-    if frames and frames[-1].name == "_on_focus_changed":
-        frames.pop()
     frames = [frame for frame in frames if os.path.basename(frame.filename) != "main.py"]
     if not frames:  # (main()'s event loop alone)
         return "the system (no call of QiTV's)"
