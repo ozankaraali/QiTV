@@ -1643,13 +1643,24 @@ class LiveEngineTests(unittest.TestCase):
         )
 
     def test_a_restart_reopens_only_sessions_whose_input_was_still_running(self):
+        released = threading.Event()  # the session said ready: its first answer may end
+        self.addCleanup(released.set)
+
         def stream_then_refuse(_request, count):
-            # Streams, then refuses the reconnect: an "http" failure after ready. The first
-            # answer must outlast the start hold (~20 s of content buffered before the first
-            # segment opens), so 30 s: a 6 s stream ends before the session is ever ready.
-            if count == 1:
-                return 200, {}, paced_body(make_stream(30), self.stop, threading.Event())
-            return 404, {}, b""
+            # Streams until the session is ready, then ends, and the reconnect is refused: an
+            # "http" failure after ready. Ended by that, not by its length: when ready comes
+            # depends on how the tune's bytes arrive (`NotLiveGuard` holds them 1-4 s), when a
+            # paced body ends on the machine's load (a 30 s one outlasted a macOS runner's 20 s
+            # wait past ready; a 6 s one ended before hel's session was ever ready).
+            if count > 1:
+                return 404, {}, b""
+            body = paced_body(make_stream(60), released, threading.Event())
+
+            def until_released(request):
+                body(request)
+                released.wait(30)  # all of it sent before ready: the connection stays open
+
+            return 200, {}, until_released
 
         paths = {
             "live": SECRET_PATH,
@@ -1669,6 +1680,7 @@ class LiveEngineTests(unittest.TestCase):
         signals.wait_for(lambda event: event == ("available", True), timeout=60)
         sids = {name: self.open(engine, source.url + path) for name, path in paths.items()}
         signals.wait_for(lambda event: event == ("ready", sids["http"]))
+        released.set()
         signals.wait_for(lambda event: event[:3] == ("failed", sids["http"], "http"))
         signals.wait_for(lambda event: event[:3] == ("failed", sids["unsupported"], "unsupported"))
         signals.wait_for(lambda event: event == ("ended", sids["ended"]))
