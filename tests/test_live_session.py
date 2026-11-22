@@ -7655,6 +7655,9 @@ class ServerWindowFixTests(LiveSessionCase):
         self.assertIn(part, self.engine.closed)
         self.assertFalse(self.live.in_server_part())
         opens = len(self.engine.opened)
+        self.engine._answered.add(sid)
+        self.engine.sessionClosed.emit(sid)  # the old live session's close alone
+        self.assertEqual(len(self.engine.opened), opens)  # the part's still counts
         self.engine.answer()
         self.assertEqual(len(self.engine.opened), opens + 1)
         return self.engine.last_sid
