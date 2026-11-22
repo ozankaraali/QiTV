@@ -3315,8 +3315,10 @@ class LiveSession(QObject):
         built by nothing, so the lag in the band is at the target),
         or the tune started at a pick chosen for it, or stay-live accepted the start's
         shortfall (nothing further back was buffered: it never had the cushion, so running
-        dry is trouble all the same)."""
-        below = _BELOW_TARGET_S
+        dry is trouble all the same). A lag within a steady source's calm band
+        (`StayLive.calm`) is at the target too: a start that landed short inside it is never
+        built, nor its shortfall accepted (review R1)."""
+        below = max(_BELOW_TARGET_S, self._stay.calm(-1))
         if self._learned is not None:
             below = max(below, self._stay.dead_band())
         return self._cushion >= self._target(snapshot) - below or self._stay.shortfall_accepted
