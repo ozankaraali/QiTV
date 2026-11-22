@@ -526,7 +526,10 @@ class FakeDrawer(FakeOverlay):
     def finding(self):
         return self.found
 
-    def open_drawer(self, focus_key=None, focus_side="right"):
+    focus_item = None  # the channel the list opened on (its row as its ▶ tells)
+
+    def open_drawer(self, focus_key=None, focus_side="right", focus_item=None):
+        self.focus_item = focus_item
         if focus_side == "right":
             self.record("open_drawer", focus_key)
         else:
@@ -1157,6 +1160,28 @@ class LinkPipelineTests(ControllerTestCase):
         self.assertEqual(self.catalog.provider, "Backup")
         self.assertEqual(self.drawer.named("open_drawer")[-1], (item_key(CHANNELS[1]),))
 
+    def test_the_list_opens_on_the_channel_a_zap_is_on_its_way_to(self):
+        # The owner: the list highlighted the channel beside the one watched. A zap (↑/↓, the
+        # phone's, the media keys') moves the ▶ at once: the list opened on the channel before
+        # it until the new one played.
+        self.play(0)
+        self.controller._on_zap_tune(CHANNELS[1])  # its link still on its way
+        self.assertEqual(self.controller.playing_channel()["name"], "Two")
+        self.controller.handle(Action.OPEN_DRAWER)
+        self.assertEqual(self.nav.revealed()["name"], "Two")
+        self.assertEqual(self.drawer.focus_item["name"], "Two")
+        self.assertEqual(self.drawer.named("open_drawer")[-1], (item_key(CHANNELS[1]),))
+
+    def test_the_list_opens_on_the_row_the_channels_play_mark_is_on(self):
+        # The start's last channel is the config's dict: its M3U id (a list position) may be
+        # its neighbour's in today's list; the list finds it as its ▶ does, by its address.
+        kept = {**CHANNELS[1], "id": CHANNELS[2]["id"]}
+        self.controller.tune(kept, group_key="10", channels=CHANNELS)
+        self.ready("http://stream/2")
+        self.controller.handle(Action.OPEN_DRAWER)
+        self.assertIs(self.drawer.focus_item, self.controller.playing_channel())
+        self.assertEqual(self.drawer.focus_item["cmd"], CHANNELS[1]["cmd"])
+
     def stamped(self, provider="Harbor IPTV"):
         """The channels as that provider's list holds them."""
         if provider not in self.catalog.names:
@@ -1193,6 +1218,7 @@ class LinkPipelineTests(ControllerTestCase):
         self.controller._current = Target(
             CHANNELS[1], "live", "Two", group_key="10", source="Backup"
         )
+        self.controller._restore_channel()  # (as _on_large_changed: the ▶ follows it)
         self.catalog.select_provider("Home")
         self.controller.handle(Action.OPEN_DRAWER)
         self.assertEqual(self.nav.path[0].key, "Backup")

@@ -5370,29 +5370,33 @@ class TVController(QObject):
         if not self.catalog.provider_names():
             self._flow.welcome(chosen=True)  # asked for: over a film opened in QiTV too
             return
-        # Where the big picture's channel was picked (after a swap, the new large one's); while
-        # the fast-zap column is open the user is choosing in it, so the list opens at the zap's
-        # own channel and group, as before 2.1.
-        shown = self._current if self._current is not None and self._current.live else None
+        # On the channel the big picture plays (its ▶: the one tuned last, playing or on its
+        # way; after a swap, the new large one's), where it was picked: its target's group and
+        # list once it plays, else the zap's (set as it was tuned). Its row is the one its ▶
+        # marks (its address first: an M3U id is a list position, another channel's once the
+        # list changed). While the fast-zap column is open the user is choosing in it, so the
+        # list opens at the zap's own channel and group, as before 2.1.
+        playing = self._channel
         if from_column or self.overlays.column.isVisible():
-            shown = None
-        if shown is not None:
-            self.nav.reveal(
-                shown.source,
-                "live",
-                shown.group_key or self.zap.context.group_key,
-                shown.item,
-            )
+            playing = None
+        shown = self._current if self._current is not None and self._current.live else None
+        context = self.zap.context
+        if playing is not None:
+            if shown is not None and ZapContext.same(shown.item, playing):
+                source, group = shown.source, shown.group_key or context.group_key
+            else:  # still on its way: picked from the zap's group
+                source, group = context.source, context.group_key
+            self.nav.reveal(source, "live", group, playing)
         elif "live" not in self.catalog.sections():  # 2.8: a media server: its sections
             self.nav.focus_source(self.catalog.current_provider_name())
         else:
-            self.nav.reset_to("live", self.zap.context.group_key or ALL_GROUP_ID)
-        channel = shown.item if shown is not None else self._channel or self.zap.context.current()
+            self.nav.reset_to("live", context.group_key or ALL_GROUP_ID)
+        channel = self._channel or context.current()
         focus = None
         if channel:
             provider = provider_of(channel)
             focus = (provider, item_key(channel)) if provider else item_key(channel)
-        self.overlays.drawer.open_drawer(focus_key=focus)
+        self.overlays.drawer.open_drawer(focus_key=focus, focus_item=channel or None)
         self._update_guides()  # the drawer is visible now: its group's providers are in use
 
     def _open_guide(self) -> None:

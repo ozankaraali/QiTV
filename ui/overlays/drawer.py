@@ -307,6 +307,18 @@ def _is_focus_key(node: NavNode, wanted: "str | tuple[str, str]") -> bool:
     return node.key == wanted
 
 
+def _row_of_item(nodes: Sequence[NavNode], item: dict) -> NavNode | None:
+    """The first channel row that is `item` as its ▶ tells (`ZapContext.same`), else None."""
+    if isinstance(nodes, NodeSeq):
+        row = nodes.index_of_item(item)
+        return nodes[row] if row >= 0 else None
+    for node in nodes:
+        payload = node.payload
+        if node.layer == "item" and isinstance(payload, dict) and ZapContext.same(payload, item):
+            return node
+    return None
+
+
 def _has_context(node: NavNode) -> bool:
     """Whether a right-click on the row asks for a context menu."""
     return node.layer in _CONTEXT_LAYERS
@@ -823,6 +835,9 @@ class Drawer(Overlay):
         self._own: tuple[tuple, frozenset[tuple[str, str]]] = ((), frozenset())
         self._restore: _Place | None = None  # where the right column goes back to (_refresh)
         self._pending_key: str | tuple[str, str] | None = None
+        # open_drawer's channel: its row as the ▶ tells channels (its address first), the key
+        # only when no row is it (an M3U id is a list position: in a changed list, another's).
+        self._pending_item: dict | None = None
         # open_drawer's focus key for the left column (focus_side "left"): its first fill.
         self._pending_left: str | tuple[str, str] | None = None
         self._left_choice: NavNode | None = None  # the left highlight, which may lead the path
@@ -848,15 +863,21 @@ class Drawer(Overlay):
     # ---- public API -------------------------------------------------------------------------
 
     def open_drawer(
-        self, focus_key: str | tuple[str, str] | None = None, focus_side: str = "right"
+        self,
+        focus_key: str | tuple[str, str] | None = None,
+        focus_side: str = "right",
+        focus_item: dict | None = None,
     ) -> None:
         """Open on the NavModel's path, focusing the right column (or the left one). The
         focused column's highlight goes to `focus_key`'s row when it lists it (on the left: the
-        list back from Settings, on its Settings row)."""
+        list back from Settings, on its Settings row); with `focus_item` (a channel), to the
+        row that is that channel as its ▶ tells (`ZapContext.same`), the key's only when none
+        is."""
         self.focus_side = focus_side
         self._drop_find()
         self._left_choice = None  # the left highlight starts at the end of the path
         self._pending_key = focus_key
+        self._pending_item = focus_item if focus_side == "right" else None
         self._pending_left = focus_key if focus_side == "left" else None
         self._cancel_preview()
         self._second_click.disarm()  # open again: the next click is on the list
@@ -922,7 +943,7 @@ class Drawer(Overlay):
         col = self._columns[self.focus_side]
         if not col.nodes:
             return
-        self._pending_key = self._pending_left = None
+        self._pending_key = self._pending_left = self._pending_item = None
         self._find_moved = self.finding()
         row = col.rows.get(col.current, -1 if delta > 0 else len(col.nodes))
         target = self._selectable_row(col, min(len(col.nodes) - 1, max(0, row + delta)), delta)
@@ -1390,13 +1411,17 @@ class Drawer(Overlay):
             self._choose_left(col, nodes)
         else:
             matched = False
-            if self._pending_key is not None:
-                pending = self._pending_key
-                match = (
-                    nodes.find_focus(pending)
-                    if isinstance(nodes, NodeSeq)
-                    else next((n for n in nodes if _is_focus_key(n, pending)), None)
-                )
+            if self._pending_key is not None or self._pending_item is not None:
+                pending, item = self._pending_key, self._pending_item
+                match = None
+                if item is not None:
+                    match = _row_of_item(nodes, item)
+                if match is None and pending is not None:
+                    match = (
+                        nodes.find_focus(pending)
+                        if isinstance(nodes, NodeSeq)
+                        else next((n for n in nodes if _is_focus_key(n, pending)), None)
+                    )
                 if match is not None:
                     col.current = match
                     matched = True
@@ -1411,7 +1436,8 @@ class Drawer(Overlay):
             if not matched and (parent_changed or col.current not in col.rows):
                 col.current = next((n for n in nodes if _selectable(n)), None)
             if children is not None:
-                self._pending_key = None  # a stale focus key must not outlive the first fill
+                # A stale focus key must not outlive the first fill.
+                self._pending_key = self._pending_item = None
         if reveal or refilled or parent_changed or col.current != was_current:
             self._show_current(col)
 
