@@ -3028,7 +3028,10 @@ class TVWindow(QMainWindow):
             self.desktop_pip.nudge()  # minimized, or back from the Dock: asked at once
 
     def _on_app_state(self, _state: Qt.ApplicationState) -> None:
-        if not self._closing and self.desktop_pip.reason() == COVERED:
+        if self._closing:
+            return
+        self.desktop_pip.activity_changed()  # the small window's hover poll, while inactive
+        if self.desktop_pip.reason() == COVERED:
             self.desktop_pip.nudge()
 
     def changeEvent(self, event: QEvent) -> None:

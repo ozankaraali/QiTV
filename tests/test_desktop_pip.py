@@ -356,6 +356,42 @@ class DesktopPipTests(PipCase):
         self.assertEqual(len(remembered), 1)
         self.assertEqual(self.main.events, [])
 
+    def test_after_coming_back_it_floats_again_only_once_its_desktop_showed(self):
+        # Review N-1: macOS still switches desktops as the window comes back (Settings, Esc, a
+        # double-click): answers "away" meanwhile must not float the page again (a flicker).
+        self.pip.watch(True)
+        self.away()
+        with (
+            mock.patch.object(self.window, "raise_"),
+            mock.patch.object(self.window, "activateWindow"),
+        ):
+            self.pip.come_back()
+        self.assertFalse(self.pip.floating())
+        self.pip.check()  # still "another desktop" during the switch
+        self.pip.check()
+        self.pip.check()
+        self.assertFalse(self.pip.floating())
+        self.back()  # its desktop showed
+        self.away()  # a later desktop change floats it again, as ever
+        self.assertTrue(self.pip.floating())
+
+    def test_the_hover_poll_runs_only_while_qitv_is_not_the_active_app(self):  # review N-2
+        state = {"active": True}
+        self.pip._hover = lambda: None
+        self.pip._app_active = lambda: state["active"]
+        self.away()
+        self.assertFalse(self.pip._hover_poll.isActive())  # Qt's own moves arrive
+        state["active"] = False
+        self.pip.activity_changed()
+        self.assertTrue(self.pip._hover_poll.isActive())
+        state["active"] = True
+        self.pip.activity_changed()
+        self.assertFalse(self.pip._hover_poll.isActive())
+        state["active"] = False
+        self.pip.activity_changed()
+        self.back()
+        self.assertFalse(self.pip._hover_poll.isActive())
+
     def test_the_second_away_answer_is_asked_soon_not_a_poll_later(self):
         from timer_fixtures import wait_until
 
@@ -930,6 +966,7 @@ class OnePictureInPictureTests(WindowCase):
         window.pointer.realMoved.connect(lambda: moves.append(True))
         window.pointer._signalled = None
         pip._app_active = lambda: False
+        window._on_app_state(Qt.ApplicationState.ApplicationInactive)  # another app in front
         where = floating.geometry().center()
         pip._cursor_pos = lambda: where
         self.assertTrue(wait_until(lambda: bool(moves), desktop_pip.HOVER_MS * 6))
