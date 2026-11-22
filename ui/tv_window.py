@@ -3014,10 +3014,11 @@ class TVWindow(QMainWindow):
         self._save_failure_said = failed
 
     def open_phone_remote(self) -> None:
-        """The menu's Phone Remote…: turns the remote on if it is off, then the pairing QR."""
+        """The menu's Phone Remote…: turns the remote on if it is off (or tries it again if its
+        start failed), then the pairing QR."""
         if self._closing:
             return
-        if self.remote.hub is None:
+        if not self.remote.running():
             self.remote.turn_on()
             if self.remote.hub is None:  # settings of a newer QiTV: Settings says so
                 self.open_settings(section_key=REMOTE)
