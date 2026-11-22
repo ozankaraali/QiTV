@@ -42,6 +42,11 @@ others' distributions, which may have malware.**
   it held while the provider only
   trickles, until it sends at normal speed again. Before, VLC could play in fits right at the
   live edge and drop bits of sound each time.
+- **No freeze at an ad break that switches source.** On channels whose ads come from another
+  source, the picture could stand still for about 15 seconds at a switch and then open again.
+  QiTV now joins the new source's clock to the channel's at once, whichever way it jumped. A
+  skipped piece of a stream or a reconnect that lands a few seconds ahead now plays straight on,
+  instead of showing a still picture for the gap.
 - **The log says what QiTV waited for:** "The source sends far faster than real time", "…at
   about real time", and each pause and change of speed, with the time.
 
