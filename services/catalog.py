@@ -1361,6 +1361,8 @@ class CatalogService(QObject):
                 "versions": payload["versions"],
                 "quality": payload.get("quality"),
             }
+            if payload.get("conversions") is False:  # 2.14: a Plex server's never converts
+                self._media_menus[item_id]["conversions"] = False
         url = str(payload.get("link") or "").strip()
         if url:
             self.linkReady.emit(job.data, url)
@@ -1369,7 +1371,8 @@ class CatalogService(QObject):
 
     def media_menu(self, item: dict) -> Optional[dict]:
         """What the quality menu offers for a media server's title its link was asked for:
-        {"versions": [media_server.version_of …], "quality": the Quality playing}; else None."""
+        {"versions": [media_server.version_of …], "quality": the Quality playing, and
+        "conversions": False for a server QiTV never asks to convert (Plex)}; else None."""
         return self._media_menus.get(str(item.get("id") or ""))
 
     def _on_link_error(self, job: _Job, message: str) -> None:

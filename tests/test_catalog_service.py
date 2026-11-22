@@ -628,6 +628,19 @@ class MediaServerCatalogTests(unittest.TestCase):
         )
         self.assertIsNone(service.media_menu({"id": "f2"}))
 
+    def test_a_server_that_never_converts_says_so_with_its_versions(self):  # 2.14: Plex
+        service, _providers, factory, _ = make_service(dict(JELLY))
+        versions = [{"id": "p1", "height": 1080}]
+        factory.results["media_link"] = {
+            "result": {"link": "http://s.test/f.mkv", "versions": versions, "conversions": False}
+        }
+        service.request_link({"id": "f1", "cmd": ""}, section="movies")
+        QCoreApplication.processEvents()
+        self.assertEqual(
+            service.media_menu({"id": "f1"}),
+            {"versions": versions, "quality": None, "conversions": False},
+        )
+
 
 class CatalogShutdownTests(unittest.TestCase):
     """The window is closing: start no more jobs and report nothing."""
