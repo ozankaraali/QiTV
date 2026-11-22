@@ -30,12 +30,48 @@ install_icon() {
     echo "Installed icon to $ICON_DIR/qitv.png"
 }
 
+# The characters the Desktop Entry spec reserves in an Exec argument: one holding any is quoted.
+EXEC_RESERVED=$' \t\n"\'\\><~|&;$*?#()`'
+
+# One argument as the Exec key wants it: in double quotes when it holds a reserved character,
+# with " ` $ and \ escaped there; a % doubled (% starts a field code); then every \ doubled
+# again (the string's own escape) and a line break written \n. Nothing in it is read by sed
+# or the shell: a path may hold any character.
+exec_arg() {
+    local arg="$1" out="" c i quote=""
+    for (( i = 0; i < ${#arg}; i++ )); do
+        c="${arg:i:1}"
+        if [[ "$EXEC_RESERVED" == *"$c"* ]]; then
+            quote='"'
+        fi
+        case "$c" in
+            '\') out+='\\\\' ;;
+            '"' | '`' | '$') out+='\\'"$c" ;;
+            '%') out+='%%' ;;
+            $'\n') out+='\n' ;;
+            $'\r') out+='\r' ;;
+            *) out+="$c" ;;
+        esac
+    done
+    printf '%s' "$quote$out$quote"
+}
+
+# The desktop entry, its Exec= line starting the program and arguments given.
 install_desktop_entry() {
-    local exec_line="$1"
+    local exec_line="" arg line
+    for arg in "$@"; do
+        exec_line+="${exec_line:+ }$(exec_arg "$arg")"
+    done
     mkdir -p "$DESKTOP_DIR"
 
-    # Write desktop file with the correct Exec line
-    sed "s|^Exec=.*|Exec=$exec_line|" "$DESKTOP_SRC" > "$DESKTOP_DIR/qitv.desktop"
+    # The template as it is, but its Exec= line (each line written as it was read).
+    while IFS= read -r line || [ -n "$line" ]; do
+        if [[ "$line" == Exec=* ]]; then
+            printf 'Exec=%s\n' "$exec_line"
+        else
+            printf '%s\n' "$line"
+        fi
+    done < "$DESKTOP_SRC" > "$DESKTOP_DIR/qitv.desktop"
     chmod +x "$DESKTOP_DIR/qitv.desktop"
     echo "Installed desktop entry to $DESKTOP_DIR/qitv.desktop"
 
@@ -69,7 +105,7 @@ else
     [ -f "$MAIN_PY" ] || die "main.py not found at $REPO_DIR"
 
     install_icon
-    install_desktop_entry "$VENV_PYTHON $MAIN_PY"
+    install_desktop_entry "$VENV_PYTHON" "$MAIN_PY"
 fi
 
 echo ""
