@@ -90,7 +90,16 @@ early or unlike (a public HLS channel measured in 2.1: 6 s segments every 7 s, e
 one 12 s) do not move it; the position (VLC's side) is never averaged. The burst stay-live
 steers by has hysteresis (a burst the helper measures for a moment is none:
 `LagFilter.burst`); the timeline's target, the stall bound and Go live follow the helper's
-at once. Held against the instantaneous peak, the rate would change at every burst. A source
+at once. Held against the instantaneous peak, the rate would change at every burst. A burst
+the filter took in after the start is kept for the tune (`LagFilter.kept`; seen live: a raw TS
+channel sent ~10 s bursts for one to three minutes at a time, steadily between, and each time
+they stopped the target fell 6-8 s at once and stay-live jumped to live, each time they came
+back it built the room again at 0.95x): the steering target, the timeline's, Go live's, the
+stall bound and the closed form keep its room through the steady minutes too (`_burst`), at
+the cost of that burst's latency for the tune; the filter's window and its steps follow the
+burst the source has now (`LagFilter.rhythm`), and under Auto a lag short of the target by up
+to half the kept burst is VLC's room still (`StayLive.spare`): built only for too little room
+or after trouble. A source
 that sends nothing for a burst plus 2 s (a steady one: 2 s) has stalled: the timeline says
 so (`stalled`; the transport reads "Waiting for the channel…", or "Reconnecting…" once the
 helper opens a new connection: `reconnecting`), the lag is the closed form with the
@@ -2840,6 +2849,9 @@ class LiveSession(QObject):
             self._stay.slack = self._target(snapshot) - self._stay.target
             self._stay.hold_reopen = self._just_opened()
             self._stay.burst = self._filter.burst
+            # Under Auto, a kept burst's target holds the burst's room and its own margin: a
+            # lag under it by half that burst still leaves VLC the margin (`StayLive.spare`).
+            self._stay.spare = self._filter.kept / 2 if self._learned is not None else 0.0
             self._stay.spread = self._filter.spread()
             if self._reland(snapshot, lag, position):
                 self._emit_timeline()
@@ -3367,7 +3379,7 @@ class LiveSession(QObject):
             self._stall_on, self._stall_counted = True, counts
             self._stall_low, self._stall_dry = headroom, dry
             if counts:
-                learned.stalled(_number(snapshot.get("burst_s")))  # the bound's own burst
+                learned.stalled(self._burst(snapshot))  # the bound's own burst
         elif stalled:
             self._stall_low = min(self._stall_low, headroom)
             self._stall_dry = self._stall_dry or dry
@@ -3606,16 +3618,17 @@ class LiveSession(QObject):
         less half a burst; 0 for a steady source. A burst later than `STALL_S` is a stall,
         not the sawtooth: the time since the edge moved counts up to there only.
         """
-        burst = _number(snapshot.get("burst_s"))
+        burst = self._burst(snapshot)
         if burst <= 0:
             return 0.0
         return min(self._since_edge_moved(snapshot), burst + STALL_S) - burst / 2
 
     def _stalled(self, snapshot: Mapping[str, Any]) -> bool:
-        """The source sent nothing for a burst plus `STALL_S` (a steady one: `STALL_S`)."""
+        """The source sent nothing for a burst plus `STALL_S` (a steady one: `STALL_S`; one
+        whose burst the lag filter keeps: that burst's, as it may come again any moment)."""
         if self._ended:
             return False  # its input is over: nothing more is expected
-        limit = _number(snapshot.get("burst_s")) + STALL_S
+        limit = self._burst(snapshot) + STALL_S
         return self._since_edge_moved(snapshot) > limit
 
     def _clock_frozen(self) -> bool:
@@ -4030,10 +4043,17 @@ class LiveSession(QObject):
                 self._snapshot_cache = snapshot
         return self._snapshot_cache
 
+    def _burst(self, snapshot: Mapping[str, Any]) -> float:
+        """The source's burst as the timeline's target, Go live, the start, the stall bound
+        and the mean lag before the lag filter has an edge take it: the helper's at once, and
+        never under the one the filter keeps for the tune (`LagFilter.kept`: a burst that
+        came after the start and may come again, though the helper measures none now)."""
+        return max(_number(snapshot.get("burst_s")), self._filter.kept)
+
     def _target(self, snapshot: Mapping[str, Any]) -> float:
         """The latency's target, or the burst when that is larger; under Auto the learned one
         as stay-live steers by it (the timeline's, Go live's and the start's too)."""
-        burst = _number(snapshot.get("burst_s"))
+        burst = self._burst(snapshot)
         if self._learned is not None:
             return self._auto_target(burst)
         return max(TARGETS[self._latency], burst)

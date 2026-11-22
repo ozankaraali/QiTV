@@ -719,6 +719,41 @@ class BurstClassTests(unittest.TestCase):
         _, out = self.feed(lambda t: 7.1 if int(t) % 2 else 7.0, 120.0)
         self.assertEqual(set(out), {7.0})
 
+    def test_a_burst_that_came_after_the_start_is_kept_for_the_tune(self):
+        # Seen live (2026-11-21): a raw TS channel sent ~10 s bursts for 1-3 minutes at a time,
+        # steadily between. Each burst it dropped moved the target 7 s at once (a jump to
+        # live, 8-13 s of the programme skipped), each one it took again 7 s back (minutes
+        # at 0.95x). A burst taken in after the start (it lasted two bursts and ten seconds)
+        # is the source's for the tune: none, or a smaller one, no longer counts.
+        def series(t):
+            return 10.0 if 10.0 <= t < 130.0 or 400.0 <= t < 500.0 else 0.0
+
+        flt, out = self.feed(series, 900.0)
+        on = out.index(10.0)
+        self.assertAlmostEqual(on * TICK, 30.0, delta=TICK)  # as ever
+        self.assertEqual(set(out[on:]), {10.0})  # then kept, through every steady stretch
+        self.assertEqual(flt.kept, 10.0)
+        flt.reset()  # the filter starting afresh (a step, a stall) keeps it too
+        self.assertEqual((flt.burst, flt.kept), (10.0, 10.0))
+
+    def test_a_larger_burst_still_counts_once_one_is_kept(self):
+        def series(t):
+            return 0.0 if t < 10.0 else 10.0 if t < 100.0 else 0.0 if t < 300.0 else 11.0
+
+        flt, out = self.feed(series, 400.0)
+        self.assertEqual(out[-1], 11.0)
+        self.assertEqual(min(out[out.index(10.0) :]), 10.0)
+        self.assertEqual(flt.kept, 11.0)
+
+    def test_a_first_report_is_not_kept(self):
+        # A one-off first "burst" (a backlog the helper measured at connect) still goes after
+        # half a minute without it, and so does an HLS source's first target duration.
+        flt, out = self.feed(lambda t: 6.0 if t < 60.0 else 0.0, 120.0)
+        self.assertEqual(out[-1], 0.0)
+        self.assertEqual(flt.kept, 0.0)
+        flt, _ = self.feed(lambda t: 6.0, 60.0)
+        self.assertEqual(flt.kept, 0.0)  # kept only once it came by a rise
+
 
 class SettledLagTests(unittest.TestCase):
     """The lag as shown (2.1): 2.0 printed every tick's estimate with a decimal, 90 changes a
