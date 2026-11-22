@@ -14,3 +14,8 @@ MEDIA_SERVERS = (JELLYFIN, EMBY, PLEX)
 
 def is_media_server(provider_type: Any) -> bool:
     return str(provider_type or "").upper() in MEDIA_SERVERS
+
+
+def is_plex(provider_type: Any) -> bool:
+    """A Plex server (2.14): its own API (services.plex), not Jellyfin's and Emby's."""
+    return str(provider_type or "").upper() == PLEX

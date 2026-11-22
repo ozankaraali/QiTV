@@ -628,6 +628,19 @@ class MediaServerCatalogTests(unittest.TestCase):
         )
         self.assertIsNone(service.media_menu({"id": "f2"}))
 
+    def test_a_plex_providers_workers_are_plexs(self):  # 2.14
+        from services.catalog import WorkerFactory
+        from services.media_workers import MediaSectionWorker
+        from services.plex_workers import PlexLinkWorker, PlexSectionWorker, PlexSeriesWorker
+
+        factory = WorkerFactory()
+        plex = {"type": "PLEX", "url": "https://h.example.plex.direct:32400", "token": "t"}
+        self.assertIsInstance(factory.media_section(plex, "vod", True), PlexSectionWorker)
+        self.assertIsInstance(factory.media_series(plex, "201", True), PlexSeriesWorker)
+        link = factory.media_link(plex, "102", True, screen_4k=False, four_k="screen", quality=None)
+        self.assertIsInstance(link, PlexLinkWorker)
+        self.assertIsInstance(factory.media_section(dict(JELLY), "vod", True), MediaSectionWorker)
+
     def test_a_server_that_never_converts_says_so_with_its_versions(self):  # 2.14: Plex
         service, _providers, factory, _ = make_service(dict(JELLY))
         versions = [{"id": "p1", "height": 1080}]
