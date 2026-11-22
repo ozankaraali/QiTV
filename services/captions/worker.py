@@ -572,10 +572,29 @@ class _Run:
             return
         if not getattr(self.model, "moonshine", False):
             return
+        self.blocks = queue.Queue()  # its own: none of the sound of a writer before it
         self.writer = GrowingWriter(
             self._moon_reading, self.model.is_speech, self.model.is_voiced, self.viewer
         )
         threading.Thread(target=self._stream, name="qitv-captions-stream", daemon=True).start()
+
+    def set_language(self, language: str) -> None:
+        """("language", name) mid-run: the viewer's pick. Our Moonshine writes Turkish only: for
+        another language, or none known (Qwen tells it from pieces), the growing writer goes
+        and the sound is cut into pieces again; Turkish again, a writer anew (2.13.4, bug scan
+        #6: the writer stayed and read the other language's sound)."""
+        self.language = language
+        if language != TURKISH:
+            self._drop_writer()
+        self._maybe_stream()
+
+    def _drop_writer(self) -> None:
+        """The growing writer goes: the sound goes to pieces again (`_take`), and its thread
+        ends at once, writing nothing more (not even what it was reading)."""
+        if getattr(self, "writer", None) is None:
+            return
+        self.writer = None
+        self.blocks.put(None)  # (its thread waits on them)
 
     def _moon_reading(self, samples: array) -> str:
         """Our Moonshine's reading of a whole stretch of sound, what nobody said left out."""
@@ -602,7 +621,7 @@ class _Run:
         )
         self.language = ""
         self.votes = text_language.Votes()
-        self.writer = None  # pieces again (`_take`); the growing writer's thread ends
+        self._drop_writer()  # pieces again (`_take`); the growing writer's thread ends
 
     # ---- reading (its thread) --------------------------------------------------------
     def _read(self) -> None:
@@ -768,21 +787,21 @@ class _Run:
         The sound that came while the model was busy goes in at once: the writer's next reading
         has all of it. It looks at the picture when no sound comes for a moment: a line it is
         about to reach goes out then (the sound comes in bursts, a segment at a time)."""
-        writer = self.writer
+        writer, blocks = self.writer, self.blocks
         assert writer is not None
         name = self._writer_name(TURKISH)
         while not self.stopped.is_set() and self.writer is writer:
             try:
-                batch = [self.blocks.get(timeout=_IDLE_S)]
+                batch = [blocks.get(timeout=_IDLE_S)]
             except queue.Empty:
                 batch = []  # no sound for a moment: the picture may still need a line
             while batch and batch[-1] is not None:
                 try:
-                    batch.append(self.blocks.get_nowait())
+                    batch.append(blocks.get_nowait())
                 except queue.Empty:
                     break
-            if self.stopped.is_set():
-                return
+            if self.stopped.is_set() or self.writer is not writer:
+                return  # (another language: `_drop_writer`)
             sound = [block for block in batch if block is not None]
             writer.reserve = self._reserve()  # (translation turned on or off mid-run)
             started = time.perf_counter()
@@ -802,8 +821,11 @@ class _Run:
                     logger.warning(
                         "AI captions: the Turkish model failed: %s: %s", type(error).__name__, error
                     )
-                self.writer = None
+                if self.writer is writer:
+                    self.writer = None
                 return
+            if self.writer is not writer:
+                return  # it went while it read (another language): its lines go with it
             if seconds:
                 took = time.perf_counter() - started
                 self.rtf = 0.95 * self.rtf + 0.05 * (took / max(0.01, seconds))
@@ -1433,8 +1455,7 @@ def _serve(link: _Link) -> None:
         elif kind == "language":
             language = message[1]
             if run is not None:
-                run.language = language
-                run._maybe_stream()
+                run.set_language(language)
         elif kind == "translate":
             translation.set(message[1], message[2] if len(message) > 2 else None)
         elif kind == "translate_lead":  # 2.13.1: the GUI's lead for a line's translation
