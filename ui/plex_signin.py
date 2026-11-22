@@ -215,8 +215,7 @@ class PlexSignIn(QObject):
         self._pin = {}
         self._retry = lambda: self._find_servers(token)
         self._show(SIGN_IN_TITLE, translate(FINDING_TEXT), [])
-        verify = bool(self._window.config_manager.ssl_verify)
-        self._run(ServersJob(self._client_id, token, verify), self._on_servers)
+        self._run(ServersJob(self._client_id, token), self._on_servers)
 
     def _on_servers(self, answer: dict) -> None:
         servers = [s for s in answer.get("servers") or [] if s.get("machine_id")]

@@ -207,7 +207,6 @@ class PlexSignInTests(unittest.TestCase):
         self.assertFalse(self.signin._timer.isActive())
         servers = self.jobs.last(pw.ServersJob)
         self.assertEqual(servers.client_id, job.client_id)
-        self.assertTrue(servers.verify)
 
     def test_a_code_that_expired_offers_a_new_one(self):
         self.cards.add()

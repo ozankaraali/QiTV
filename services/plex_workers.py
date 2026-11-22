@@ -96,17 +96,15 @@ class ServersJob(_AccountJob):
         self,
         client_id: str,
         token: str,
-        verify: bool,
         account: Optional[Account] = None,
         probe: Optional[Callable[[str, plex.Server], bool]] = None,
     ) -> None:
         super().__init__(client_id, account)
         self._token = token
-        self.verify = verify
         self._probe = probe
 
     def _answers(self, uri: str, server: plex.Server) -> bool:
-        return plex.answers(uri, server, self.client_id, get_app_version(), self.verify)
+        return plex.answers(uri, server, self.client_id, get_app_version())
 
     def work(self, account: Any) -> dict:
         servers = account.servers(self._token)
@@ -130,13 +128,15 @@ class ServersJob(_AccountJob):
 
 
 def client_for(provider: dict, verify: bool) -> plex.PlexClient:
-    """The client of a Plex provider: its server's address, its token, its client id."""
+    """The client of a Plex provider: its server's address, its token, its client id (a
+    plex.direct address's certificate always checked: plex.must_verify)."""
+    url = str(provider.get("url") or "")
     return plex.PlexClient(
-        str(provider.get("url") or ""),
+        url,
         token=str(provider.get("token") or ""),
         client_id=str(provider.get("device_id") or ""),
         version=get_app_version(),
-        verify=verify,
+        verify=plex.must_verify(url, verify),
     )
 
 

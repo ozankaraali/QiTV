@@ -102,7 +102,7 @@ class ServersJobTest(unittest.TestCase):
             return server is HOME
 
         job = pw.ServersJob(
-            "client-1", "account-token", True, account=lambda client_id: account, probe=probe
+            "client-1", "account-token", account=lambda client_id: account, probe=probe
         )
         out = run(job)
         self.assertEqual(
@@ -125,7 +125,7 @@ class ServersJobTest(unittest.TestCase):
 
     def test_an_account_token_refused_asks_for_a_new_code(self):
         account = FakeAccount(fail=ms.SignInNeeded("401"))
-        job = pw.ServersJob("c", "t", True, account=lambda client_id: account, probe=None)
+        job = pw.ServersJob("c", "t", account=lambda client_id: account, probe=None)
         with self.assertLogs("services.plex_workers", "INFO"):
             out = run(job)
         self.assertEqual(out["error"], "plex.tv refused the sign-in. Try again with a new code.")
@@ -283,8 +283,11 @@ class CheckAccessTest(unittest.TestCase):
         self.addCleanup(made.close)
         self.assertEqual(
             (made.base, made.token, made.client_id, made.verify),
-            (BASE, "server-token", "client-1", False),
+            (BASE, "server-token", "client-1", True),  # a plex.direct one: always checked
         )
+        other = pw.client_for({**PROVIDER, "url": "https://media.example.test:32400"}, False)
+        self.addCleanup(other.close)
+        self.assertFalse(other.verify)
 
 
 if __name__ == "__main__":

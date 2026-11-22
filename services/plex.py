@@ -153,19 +153,38 @@ def servers_of(resources: Any) -> list[Server]:
     return out
 
 
-def answers(
-    uri: str, server: Server, client_id: str, version: str, verify: bool, session: Any = None
-) -> bool:
-    """Whether `server` answers at `uri`: its identity, asked with its token, is its own."""
-    http = session if session is not None else requests.Session()
+def must_verify(url: str, verify: bool) -> bool:
+    """Whether a server's certificate is checked at `url`: always at a plex.direct address
+    (Plex's own certificates, public: what proves the server the token goes to), else as
+    the setting says."""
     try:
-        response = http.request(
+        host = (urlsplit(url).hostname or "").lower()
+    except ValueError:
+        host = ""
+    return verify or host.endswith(".plex.direct")
+
+
+def answers(uri: str, server: Server, client_id: str, version: str, session: Any = None) -> bool:
+    """Whether `server` answers at `uri`: its identity, asked without its token, is its own
+    (review I1: a stranger's machine at a private address that is home's elsewhere never
+    gets it). Only an HTTPS address whose certificate proved the server is asked again with
+    the token, when its identity wants one."""
+    http = session if session is not None else requests.Session()
+    secure = uri.startswith("https://")
+
+    def identity(token: str) -> Any:
+        return http.request(
             "GET",
             uri + "/identity",
-            headers=client_headers(client_id, version, server.access_token),
+            headers=client_headers(client_id, version, token),
             timeout=PROBE_TIMEOUT_S,
-            verify=verify,
+            verify=True,
         )
+
+    try:
+        response = identity("")
+        if response.status_code == 401 and secure and server.access_token:
+            response = identity(server.access_token)
         if response.status_code != 200 or not response.content:
             return False
         container = (response_json(response) or {}).get("MediaContainer") or {}
