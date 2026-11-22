@@ -1385,8 +1385,12 @@ class CatalogService(QObject):
     def media_menu(self, item: dict) -> Optional[dict]:
         """What the quality menu offers for a media server's title its link was asked for:
         {"versions": [media_server.version_of …], "quality": the Quality playing, and
-        "conversions": False for a server QiTV never asks to convert (Plex)}; else None."""
-        return self._media_menus.get(str(item.get("id") or ""))
+        "conversions": False for a server QiTV never asks to convert (Plex)}; else None (and
+        for a title of such a server with one version: nothing to choose)."""
+        menu = self._media_menus.get(str(item.get("id") or ""))
+        if menu and menu.get("conversions") is False and len(menu.get("versions") or ()) < 2:
+            return None
+        return menu
 
     def _on_link_error(self, job: _Job, message: str) -> None:
         self._media_links.pop(job.data, None)

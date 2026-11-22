@@ -641,9 +641,22 @@ class MediaServerCatalogTests(unittest.TestCase):
         self.assertIsInstance(link, PlexLinkWorker)
         self.assertIsInstance(factory.media_section(dict(JELLY), "vod", True), MediaSectionWorker)
 
+    def test_a_server_that_never_converts_offers_no_menu_for_one_version(self):  # 2.14
+        service, _providers, factory, _ = make_service(dict(JELLY))
+        factory.results["media_link"] = {
+            "result": {
+                "link": "http://s.test/f.mkv",
+                "versions": [{"id": "p1"}],
+                "conversions": False,
+            }
+        }
+        service.request_link({"id": "f1", "cmd": ""}, section="movies")
+        QCoreApplication.processEvents()
+        self.assertIsNone(service.media_menu({"id": "f1"}))  # nothing to choose: no ⚙
+
     def test_a_server_that_never_converts_says_so_with_its_versions(self):  # 2.14: Plex
         service, _providers, factory, _ = make_service(dict(JELLY))
-        versions = [{"id": "p1", "height": 1080}]
+        versions = [{"id": "p1", "height": 1080}, {"id": "p2", "height": 2160}]
         factory.results["media_link"] = {
             "result": {"link": "http://s.test/f.mkv", "versions": versions, "conversions": False}
         }

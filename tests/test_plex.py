@@ -52,14 +52,17 @@ def account(answers):
 
 
 class ClientHeadersTest(unittest.TestCase):
-    def test_qitv_says_only_its_name_version_system_and_a_random_id(self):
+    def test_qitv_says_only_its_name_version_and_a_random_id(self):
         headers = plex.client_headers("client-1", "2.14.0")
-        self.assertEqual(headers["X-Plex-Product"], "QiTV")
-        self.assertEqual(headers["X-Plex-Version"], "2.14.0")
-        self.assertEqual(headers["X-Plex-Client-Identifier"], "client-1")
-        self.assertIn(headers["X-Plex-Platform"], ("macOS", "Windows", "Linux"))
-        self.assertTrue(headers["X-Plex-Device-Name"].startswith("QiTV ("))
-        self.assertNotIn("X-Plex-Token", headers)
+        self.assertEqual(
+            headers,
+            {
+                "Accept": "application/json",
+                "X-Plex-Product": "QiTV",
+                "X-Plex-Version": "2.14.0",
+                "X-Plex-Client-Identifier": "client-1",
+            },
+        )
         self.assertEqual(plex.client_headers("c", "v", "tok")["X-Plex-Token"], "tok")
 
     def test_a_new_client_id_is_random(self):

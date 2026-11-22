@@ -27,7 +27,7 @@ def query(url):
 
 class LibrariesTest(unittest.TestCase):
     def test_film_and_series_libraries_only_with_the_token_in_a_header(self):
-        c, http = client({("GET", "/library/sections"): (200, fixture("sections.json"))})
+        c, http = client({("GET", "/library/sections/all"): (200, fixture("sections.json"))})
         self.assertEqual(
             c.libraries(),
             [
@@ -42,10 +42,10 @@ class LibrariesTest(unittest.TestCase):
         self.assertNotIn("X-Plex-Token", asked["params"])  # never in a logged address
 
     def test_a_refused_token_asks_to_sign_in_again_and_an_error_names_its_status(self):
-        c, _ = client({("GET", "/library/sections"): (401, None)})
+        c, _ = client({("GET", "/library/sections/all"): (401, None)})
         with self.assertRaises(ms.SignInNeeded):
             c.libraries()
-        c, _ = client({("GET", "/library/sections"): (500, {"x": 1})})
+        c, _ = client({("GET", "/library/sections/all"): (500, {"x": 1})})
         with self.assertRaises(ms.MediaServerError) as caught:
             c.libraries()
         self.assertEqual(str(caught.exception), "The server answered 500")
@@ -159,6 +159,32 @@ class SeriesTest(unittest.TestCase):
         self.assertEqual(episode["ename"], "The Second Door")
         self.assertEqual([e["name"] for e in second["episodes"]], ["A New Year"])
         self.assertEqual(second["overview"], "Later.")
+
+
+class SeriesPagesTest(unittest.TestCase):
+    def test_a_long_series_episodes_come_in_pages_too(self):
+        leaves = fixture("show_allLeaves.json")["MediaContainer"]["Metadata"]
+        seasons = fixture("show_children.json")["MediaContainer"]["Metadata"]
+        asked = []
+
+        class Paged(FakeHttp):
+            def request(self, method, url, params=None, headers=None, **kw):
+                from tests.test_plex import _Response
+
+                path = url[len(BASE) :]
+                start = int(headers["X-Plex-Container-Start"])
+                size = int(headers["X-Plex-Container-Size"])
+                asked.append((path, start))
+                listed = leaves if path.endswith("allLeaves") else seasons
+                batch = listed[start : start + min(size, 2)]  # the server cuts at 2
+                container = {"size": len(batch), "totalSize": len(listed), "offset": start}
+                return _Response(200, {"MediaContainer": {**container, "Metadata": batch}})
+
+        c = plex.PlexClient(BASE, token=TOKEN, client_id="c", version="v", session=Paged(BASE, {}))
+        found_seasons, episodes = c.seasons_and_episodes("201")
+        self.assertEqual(len(found_seasons), 2)
+        self.assertEqual(sorted(e["ratingKey"] for e in episodes), ["221", "222", "231"])
+        self.assertIn(("/library/metadata/201/allLeaves", 2), asked)
 
 
 class VersionsTest(unittest.TestCase):

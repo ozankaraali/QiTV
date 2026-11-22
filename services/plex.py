@@ -10,8 +10,8 @@ account's token), then lists the account's servers (`servers`), each with its ow
 and its connections, local first, then remote, then relayed (`ordered`). The provider keeps the
 server's address, its access token and its id, never the account's token.
 
-QiTV says only who it is: X-Plex-Product "QiTV", its version, the system's kind and a random
-client identifier (the provider's `device_id`), never the computer's or the viewer's name. A
+QiTV says only who it is: X-Plex-Product "QiTV", its version and a random client identifier
+(the provider's `device_id`), never the computer's or the viewer's name. A
 token travels in a header to plex.tv and to the server's API, and in the query of the addresses
 VLC opens (a stream, a poster), as Plex documents; nothing here logs an address, a token or an
 answer's body. Blocking: worker threads only.
@@ -22,7 +22,6 @@ from __future__ import annotations
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
 import logging
-import platform
 import threading
 from typing import Any, Callable, Optional
 from urllib.parse import parse_qs, urlencode, urlsplit
@@ -49,20 +48,14 @@ def new_client_id() -> str:
     return uuid.uuid4().hex
 
 
-def _platform(system: Optional[str] = None) -> str:
-    name = system or platform.system()
-    return {"Darwin": "macOS", "Windows": "Windows"}.get(name, "Linux")
-
-
 def client_headers(client_id: str, version: str, token: str = "") -> dict[str, str]:
-    """What QiTV tells plex.tv and a server about itself (and its token, when it has one)."""
+    """What QiTV tells plex.tv and a server about itself: its name, its version and its random
+    client id, nothing else (and its token, when it has one)."""
     headers = {
         "Accept": "application/json",
         "X-Plex-Product": PRODUCT,
         "X-Plex-Version": version,
         "X-Plex-Client-Identifier": client_id,
-        "X-Plex-Platform": _platform(),
-        "X-Plex-Device-Name": f"{PRODUCT} ({_platform()})",
     }
     if token:
         headers["X-Plex-Token"] = token
@@ -352,19 +345,18 @@ class PlexClient:
     def libraries(self) -> list[dict]:
         """The server's libraries of films and of series: {id, name, type}."""
         out = []
-        for raw in self._ask("GET", "/library/sections").get("Directory") or []:
+        for raw in self._ask("GET", "/library/sections/all").get("Directory") or []:
             kind, key = str(raw.get("type") or ""), str(raw.get("key") or "")
             if kind in (MOVIE, SHOW) and key:
                 out.append({"id": key, "name": str(raw.get("title") or ""), "type": kind})
         return out
 
-    def items(self, library_id: str, kind: str, page: int = PAGE) -> list[dict]:
-        """Every film (`kind` MOVIE) or series (SHOW) of the library, in pages."""
-        params = {"type": _TYPE_NUMBERS[kind], "includeGuids": 1}
+    def _paged(self, path: str, params: Optional[dict] = None, page: int = PAGE) -> list[dict]:
+        """Every item of a list, in pages (a server may cut one it was not asked to page)."""
         found: list[dict] = []
         while True:
             paging = {"X-Plex-Container-Start": str(len(found)), "X-Plex-Container-Size": str(page)}
-            answer = self._ask("GET", f"/library/sections/{library_id}/all", params, paging)
+            answer = self._ask("GET", path, params, paging)
             batch = [m for m in answer.get("Metadata") or [] if isinstance(m, dict)]
             found.extend(batch)
             total = answer.get("totalSize")
@@ -373,11 +365,16 @@ class PlexClient:
             if not isinstance(total, int) and len(batch) < page:
                 return found
 
+    def items(self, library_id: str, kind: str, page: int = PAGE) -> list[dict]:
+        """Every film (`kind` MOVIE) or series (SHOW) of the library, in pages."""
+        params = {"type": _TYPE_NUMBERS[kind], "includeGuids": 1}
+        return self._paged(f"/library/sections/{library_id}/all", params, page)
+
     def seasons_and_episodes(self, show_id: str) -> tuple[list[dict], list[dict]]:
         """A series' seasons (its children) and every episode of it (its leaves)."""
-        seasons = self._ask("GET", f"/library/metadata/{show_id}/children").get("Metadata")
-        episodes = self._ask("GET", f"/library/metadata/{show_id}/allLeaves").get("Metadata")
-        return list(seasons or []), list(episodes or [])
+        seasons = self._paged(f"/library/metadata/{show_id}/children")
+        episodes = self._paged(f"/library/metadata/{show_id}/allLeaves", {"includeGuids": 1})
+        return seasons, episodes
 
     def media(self, item_id: str) -> list[dict]:
         """A title's versions (its Media, each with its files)."""
