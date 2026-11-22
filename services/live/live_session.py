@@ -186,9 +186,10 @@ starts there, a locked rate under any latency (for a day: then the store reads i
 so a tune tries other rates again). The burst floor (`SEGMENT_FLOOR`) is on
 unless QITV_SEGMENT_FLOOR=0 is set for the run (`segment_floor_from`).
 
-Under any latency, a backlog step within `_REPICK_S` of the tune's first open that leaves the
-mean lag more than a burst (at least `_REPICK_GAIN_S`) beyond the target picks the start
-again once the edge settled, as Go live would, once a tune, when the clean start it picks
+Under any latency, a backlog step (or a backlog streamed at network speed) within `_REPICK_S`
+of the tune's first open that leaves the mean lag more than a burst (at least
+`_REPICK_GAIN_S`) beyond the target picks the start again as the arrivals settle, as Go live
+would, once a tune (its one skip: `StayLive.picked_again`), when the clean start it picks
 gains at least that much: the 1-stream raw-TS provider sent 2 s, then 18-22 s a moment after
 the open, and a public HLS channel's next reload brought 12 s two seconds after its start, so
 the viewer sat 16-23 s behind for a minute (the jumps' cooldown counts from the tune). A
@@ -449,8 +450,10 @@ _LOADING_AFTER_S = 1.0
 # landing (raw TS whose backlog came after the hold).
 _RELAND_S = 10.0
 # The re-pick (2.1): within `_REPICK_S` of a tune's first
-# open a dump (the edge `_REPICK_DUMP_S` up in a tick), then the source flowing on at about
-# real time for `_REPICK_FLOW_S` (`_REPICK_RATE` of it, never standing still `_REPICK_GAP_S`),
+# open a dump (the edge `_REPICK_DUMP_S` up in a tick), or a backlog streamed at network speed
+# (`StayLive.flooding`, 2026-11-22: 3-6x with no tick a dump), then the source flowing on at
+# about real time for `_REPICK_FLOW_S` from where the arrivals peaked (a dump's fast tail is
+# no flow) (`_REPICK_RATE` of it, never standing still `_REPICK_GAP_S`),
 # that leaves the lag far above the target picks the start again once, as Go live would: the
 # 1-stream raw-TS provider's random channel sent 2 s, then 18-22 s a moment after the open,
 # then 2 s every 2 s, and the viewer sat 23 s behind for a minute (the jumps' cooldown counts
@@ -735,8 +738,7 @@ class LiveSession(QObject):
         self._reland_edge = 0.0  # the live edge at the last tick, meanwhile
         self._repick_until = -math.inf  # a backlog step before this re-picks the tune's start
         self._repick_step: Optional[float] = None  # when the step to re-pick for began ...
-        self._repick_edge = 0.0  # ... the edge then ...
-        self._repick_moved = 0.0  # ... and when it last moved since ...
+        self._repick_moved = 0.0  # ... and when the edge last moved since ...
         self._repick_seen = 0.0  # ... and the last tick it was looked at
         # Where the arrivals' level (the edge less the clock) peaked since the step, (when,
         # edge), and whether the edge moved at least every `_REPICK_SMOOTH_S` since.
@@ -3185,10 +3187,10 @@ class LiveSession(QObject):
         """Within `_RELAND_S` of a tune's start, a backlog step (the live edge grew by more
         than `_SETTLE_GROWTH_S` in a tick) that took the lag further above the target is part
         of the landing (`StayLive.landed_further`): raw TS whose backlog came after the hold.
-        A dump within `_REPICK_S` of the tune's open, after which the source flowed on at
-        about real time, that leaves the lag far above the target re-picks the start once, as
-        Go live would (see `REPICK`; no jump's cooldown; a Go live right after it is merged):
-        True then."""
+        A dump or a streamed backlog within `_REPICK_S` of the tune's open, after which the
+        source flowed on at about real time, that leaves the lag far above the target re-picks
+        the start once, as the arrivals settle (`_REPICK_SMOOTH_S`), as Go live would (see
+        `REPICK`; no jump's cooldown; a Go live right after it is merged): True then."""
         now = self._clock()
         if now >= self._reland_until and self._repick_step is None:
             return False
@@ -3217,13 +3219,15 @@ class LiveSession(QObject):
         if since > _REPICK_DEADLINE_S or (not played and late):
             self._repick_until, self._repick_step = -math.inf, None  # never, this tune
             return False
-        if grown > _REPICK_DUMP_S and now < self._repick_until:
-            # A dump, or a further piece of it: the source's own flow is judged from here.
-            self._repick_step, self._repick_edge, self._repick_moved = now, edge, now
+        dump = grown > _REPICK_DUMP_S
+        streamed = self._stay.flooding and self._repick_step is None
+        if (dump or streamed) and now < self._repick_until:
+            # A dump, or a further piece of it, or a backlog streamed at network speed with no
+            # tick of it a dump (review N1): the source's own flow is judged from here.
+            self._repick_step, self._repick_moved = now, now
             self._repick_peak, self._repick_smooth = (now, edge), True
             return False
-        step = self._repick_step
-        if step is None:
+        if self._repick_step is None:
             return False
         still = now - self._repick_moved + tick  # since the tick before it last moved
         if still >= _REPICK_GAP_S - 1e-9:
@@ -3239,7 +3243,6 @@ class LiveSession(QObject):
         peak_at, peak_edge = self._repick_peak
         if edge - now > peak_edge - peak_at + _REPICK_RISE_S:
             self._repick_peak, self._repick_smooth = (now, edge), True  # still arriving fast
-        flowed = now - step
         if not played or self._just_opened():
             # (Within the reopen hold of another open, a reopen in software say: never two
             # opens in a row. The step stays to be judged once the hold is over.)
@@ -3253,9 +3256,11 @@ class LiveSession(QObject):
             and after >= _FLOOD_WINDOW_S - 1e-9
             and low * after <= edge - peak_edge <= high * after
         )
-        if flowed >= _REPICK_FLOW_S - 1e-9:
-            self._repick_step = None  # judged now at the latest: a steady flow after it
-            flowing = flowing or low * flowed <= edge - self._repick_edge <= high * flowed
+        if after >= _REPICK_FLOW_S - 1e-9:
+            # Judged now at the latest, counted from the peak (a fast tail of the dump, or a
+            # backlog streamed, is no flow): a steady flow since.
+            self._repick_step = None
+            flowing = flowing or low * after <= edge - peak_edge <= high * after
         if not flowing:
             return False
         if self._stay.mode is not Mode.LIVE or self._paused:
@@ -3687,12 +3692,13 @@ class LiveSession(QObject):
         if quiet < _HOLD_QUIET_S:
             self._room_before = ahead + quiet  # VLC's cushion as a silence would begin
         # A silence past its bursts that VLC had room for (its usual gap and some): no hiccup
-        # at the edge, nor the shortfall before each burst stay-live builds away (2.0.1). Only
-        # for a source that showed bursts this tune: a steady one's hiccup VLC has room for
-        # (Stable, a radio station, Auto at 5 s and more) plays through as in 2.8.8.
+        # at the edge, nor the shortfall before each burst stay-live builds away (2.0.1). It
+        # holds VLC early only for a source that showed bursts this tune: a steady one's
+        # hiccup VLC has room for (Stable, a radio station, Auto at 5 s and more) plays
+        # through as in 2.8.8, its trickle after it still to prove.
         bursty = max(rhythm, self._filter.kept) > 0
         room = max(_HOLD_ROOM_S, rhythm + _HOLD_EARLY_S + _HOLD_QUIET_S)
-        abnormal = bursty and quiet > rhythm + _HOLD_QUIET_S and self._room_before >= room - 1e-9
+        abnormal = quiet > rhythm + _HOLD_QUIET_S and self._room_before >= room - 1e-9
         reconnecting = snapshot.get("reconnecting") is True
         if quiet < self._quiet_before:  # it sends again
             if self._quiet_before >= _HOLD_BURSTS * rhythm + 1.0:
@@ -3726,8 +3732,10 @@ class LiveSession(QObject):
             # dry run counts, not this one.
             earlier = self._dry_before if dry else self._dry_seen
             armed = now - earlier <= _HOLD_AFTER_S
-            # (the first time too; raw TS: an HLS source's late segment stays as it was)
-            soon = abnormal and not dry and ahead <= _HOLD_EARLY_S and not snapshot.get("hls")
+            # (the first time too, for a bursty source; raw TS: an HLS source's late segment
+            # stays as it was)
+            soon = bursty and abnormal and not dry and ahead <= _HOLD_EARLY_S
+            soon = soon and not snapshot.get("hls")
             if (
                 self._playback.state() in (PlaybackState.PLAYING, PlaybackState.BUFFERING)
                 and not self._just_opened()
