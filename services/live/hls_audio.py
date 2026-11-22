@@ -15,7 +15,8 @@ and descriptors) and packed ADTS AAC (raw frames after an ID3 tag whose PRIV
 com.apple.streaming.transportStreamTimestamp dates the first one; each frame becomes a PES).
 The renditions share the video's timestamps (HLS requires it), so nothing is re-timed. fMP4
 (CMAF) audio comes here remuxed to TS (`HlsSource`, `services.live.fmp4`). Anything
-unreadable leaves the video segment as it came. A capture (``QITV_CAPTURE_DIR``) keeps the
+unreadable leaves the video segment as it came; a video whose PMT has no room for the audio
+plays as it came until a break (`AudioWeaver.refused`: no audio is fetched meanwhile). A capture (``QITV_CAPTURE_DIR``) keeps the
 audio segments in a pair of their own; `weave_capture` weaves them in again, so it replays
 with sound.
 """
@@ -63,12 +64,15 @@ class AudioWeaver:
         self._tables: tuple[int, set[int]] | None = None  # the last video's (PMT PID, PIDs)
         self._last: int | None = None  # the PTS of the last unit queued
         self.woven = 0  # segments woven so far
+        # The video's PMT has no room for the audio: segments pass as they came, and the
+        # source fetches no audio for them, until a break (`reset`) brings tables anew.
+        self.refused = False
 
     def weave(self, video: bytes, audio: bytes) -> bytes:
         """`video` with all of `audio`'s sound in it; `video` as it came when either is
-        unreadable."""
+        unreadable, or its PMT cannot take the audio (`refused`)."""
         tables = _program(video)
-        if tables is None:
+        if tables is None or self.refused:
             return video
         read = self._read(audio)
         if read is None or not read[0]:
@@ -147,14 +151,17 @@ class AudioWeaver:
             self._queue.pop(0)
 
     def reset(self) -> None:
-        """Forget the queued audio (a break: the audio is found again by time)."""
+        """Forget the queued audio (a break: the audio is found again by time, and the
+        video's tables, which may take it now, are tried again)."""
         self._queue, self._last, self._next_pts = [], None, None
+        self.refused = False
 
     def weave_due(self, video: bytes, until: int) -> bytes:
         """`video` with the queued audio due before `until` (its end) in it; the rest stays
-        queued. Its PMT lists the audio once there is any, even when none is due."""
+        queued. Its PMT lists the audio once there is any, even when none is due; `video` as
+        it came once its PMT could not take the audio (`refused`)."""
         tables = _program(video) or self._tables  # a held tail has none of its own
-        if tables is None or self._stream is None:
+        if tables is None or self._stream is None or self.refused:
             return video
         due: list[Unit] = []
         while self._queue and pts_delta(self._queue[0][0], until) > 0:
@@ -191,8 +198,9 @@ class AudioWeaver:
                     clock = _pes_times(pkt, 0)[0]  # no PCR yet: the first picture's time
                 if pkt[1] & 0x40 and ((pkt[1] & 0x1F) << 8 | pkt[2]) == pmt_pid:
                     listed = self._listed(pkt, pmt_pid)
-                    if listed is None:
-                        return video  # its PMT cannot take the audio: as it came
+                    if listed is None:  # its PMT cannot take the audio: as it came
+                        self.refused, self._queue = True, []
+                        return video
                     pkt = listed
                 while clock is not None and k < len(units):
                     if pts_delta((clock + _LEAD_TICKS) % _PTS_MODULO, units[k][0]) > 0:
