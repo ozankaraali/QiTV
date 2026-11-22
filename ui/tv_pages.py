@@ -37,6 +37,7 @@ from services.recording_desk import COMING, NOW, RECORDED
 from services.recording_thumbs import FOLDER as THUMBS_FOLDER, Thumbnails
 from services.recordings_library import RecordingsLibrary
 from services.recordings_list import RecordingsList
+from services.settings_model import PROVIDERS
 from ui.keymap import Action
 from ui.library.folders_view import FoldersDesk
 from ui.library_controller import LibraryController
@@ -128,6 +129,7 @@ class TVPages(QObject):
         )
         self.library_controller.notice.connect(self.notify)
         self.library_controller.addProviderRequested.connect(self._add_provider)
+        self.library_controller.settingsRequested.connect(self._open_settings)  # 2.14: its ⚙
         # 2.8: a Library genre's right-click hides it, as the TV list's groups.
         self.library_controller.set_hiding(
             lambda *args: window.controller.hide_group(*args),
@@ -420,6 +422,8 @@ class TVPages(QObject):
             return
         if self.library_shown() and not library:
             self.library_controller.leave()  # a play waiting for its provider is dropped
+            # 2.14: Settings over it goes, never left waiting behind the page to show with it
+            window.controller.close_settings()
         self.recordings_desk.track_mark(library)  # 2.9.7: the Recordings tab's dot
         self._second_click.disarm()  # it kept a click off the page shown before
         if library:
@@ -628,13 +632,24 @@ class TVPages(QObject):
 
     def _add_provider(self) -> None:
         """The Library's Add provider (under "… has no movies"): Settings at Providers over the
-        TV, with the Add card (TVWindow.add_provider). Its button acts on the release, so a
-        double-click's second click would land on the card's dimmed picture and cancel it: it
-        reaches nothing (_guard_second_click)."""
+        Library (2.14: over the TV before), with the Add card (TVWindow.add_provider). Its
+        button acts on the release, so a double-click's second click would land on the card's
+        dimmed picture and cancel it: it reaches nothing (_guard_second_click)."""
         window = self._window
         if window.closing():
             return
         window.add_provider()
+        self._guard_second_click()
+
+    def _open_settings(self) -> None:
+        """The Library's ⚙ (2.14): Settings at Providers over the Library (TVWindow.open_settings),
+        where a Plex, Jellyfin or Emby server is added without going back to live TV. It acts on
+        the release, so a double-click's second click would land beside Settings and close it:
+        it reaches nothing (_guard_second_click)."""
+        window = self._window
+        if window.closing():
+            return
+        window.open_settings(section_key=PROVIDERS)
         self._guard_second_click()
 
     def toggle_multiview(self) -> None:

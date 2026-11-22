@@ -28,6 +28,7 @@ from PySide6.QtCore import QEvent, QObject, QTimer, Signal
 from services.settings_model import INFO, TEXT, Row, Section, choice_of, is_lit, step
 from services.settings_values import SettingsValues
 from ui.keymap import Action
+from ui.overlays.base import Overlay
 from ui.overlays.settings_drawer import SettingsDrawer
 
 logger = logging.getLogger(__name__)
@@ -244,7 +245,11 @@ class SettingsController(QObject):
     def show_card(self, card: Card) -> None:
         """`card` over Settings (filled first: FormCard.set_form and ChoiceCard.ask show
         it): while it shows, every key is its own before the rows, its Esc its Cancel. A card
-        shown over another has the keys until it goes. Settings going cancels them."""
+        shown over another has the keys until it goes. Settings going cancels them. 2.14: it
+        shows where Settings is, over the picture or over the Library (Overlay.move_to)."""
+        place = self._drawer.parentWidget()
+        if isinstance(card, Overlay) and place is not None:
+            card.move_to(place)
         if card in self._cards:
             self._cards.remove(card)
         self._cards.append(card)

@@ -112,5 +112,27 @@ class Overlay(TooltipWidget):
         if host is not None and hasattr(host, "overlay_changed"):
             host.overlay_changed()
 
+    def move_to(self, parent: QWidget) -> None:
+        """Show over `parent` from now on (2.14: Settings and its cards over the Library's page,
+        and back over the picture), its resizes followed there (an overlay that fits itself to
+        its parent watches it); shown there if it was, the old parent told it went."""
+        old = self.parentWidget()
+        if old is parent:
+            return
+        shown = not self.isHidden()
+        if old is not None:
+            old.removeEventFilter(self)
+        self.setParent(parent)  # (Qt hides it as it moves)
+        parent.installEventFilter(self)
+        self._moved()
+        if old is not None and hasattr(old, "overlay_changed"):
+            old.overlay_changed()
+        if shown:
+            self.show()
+
+    def _moved(self) -> None:
+        """It is over another parent now (`move_to`), not shown yet: what lays itself out
+        against its parent does so here."""
+
     def mask_region(self) -> QRegion:
         return QRegion(self.geometry())

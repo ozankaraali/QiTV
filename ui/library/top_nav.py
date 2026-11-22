@@ -1,6 +1,6 @@
 """The Library's top bar: the QiTV logo, Live TV / Movies / Series (then Recordings, 2.9.7, and
 Folders, Plan 4, when the Library has them), the search field, the source pill, a refresh button
-(2.8: the films and series shown load again) and a fullscreen button.
+(2.8: the films and series shown load again), a Settings button (2.14) and a fullscreen button.
 
 The search field (2.9.3, a pill before) is as wide as there is room for, up to SEARCH_MAX_U, in
 the middle of the bar: the first place to type. The bar paints its look while the Library
@@ -14,6 +14,12 @@ technology (the accessible name) and as the logo's tooltip.
 The fullscreen button (⛶) ends the bar: the Library's F11 (⌃⌘F on a Mac) for the mouse, since
 Windows and Linux hide the menu bar in fullscreen, and every key has a control on screen. The
 keys never focus it; they have F11.
+
+The Settings button (⚙, 2.14; the owner: "in the lib, towards right side, you can put settings,
+so instead of going back to live channels i can add plex/etc movie vendor from the library")
+sits before it: Settings at Providers, over the Library (Ctrl/⌘+, too, the menu's Settings…).
+Unlike ⛶ and ↻ it is in the keys' order, after the source pill: the phone remote's arrows and
+OK have no Ctrl/⌘+, to reach it.
 """
 
 import sys
@@ -63,6 +69,7 @@ LOGO_LEFT_U = 2.0
 LOGO_GAP_U = 3.0  # between the logo and the first tab
 FULLSCREEN_KEYS = "Ctrl+Meta+F" if sys.platform == "darwin" else "F11"  # macOS keeps F11
 REFRESH_KEYS = "Ctrl+Shift+R"  # 2.8: the films and series shown load again
+SETTINGS_KEYS = "Ctrl+,"  # 2.14: the menu's Settings…, as the ⚙
 HOVER_ALPHA = 0.08  # 2.9.3: a pill or button under the pointer
 # i18n: tooltip of the Library's ↻ (before its key), and its entry in the source menu
 REFRESH_TEXT = N_("Refresh films and series")
@@ -83,6 +90,7 @@ class TopNav(TooltipWidget):
     sourceRequested = Signal(QPoint)  # global position under the pill
     fullscreenRequested = Signal()
     refreshRequested = Signal()  # 2.8: ↻
+    settingsRequested = Signal()  # 2.14: ⚙
 
     def __init__(self, parent=None) -> None:
         super().__init__(parent)
@@ -200,9 +208,8 @@ class TopNav(TooltipWidget):
         self.update()
 
     def _order(self) -> list[str]:
-        return (
-            [*self._tabs, "search", "source"] if self._source_visible else [*self._tabs, "search"]
-        )
+        source = ["source"] if self._source_visible else []
+        return [*self._tabs, "search", *source, "settings"]  # (2.14: ⚙ last; ⛶ and ↻ never)
 
     def _trigger(self, item: str) -> None:
         if item in ALL_TABS:
@@ -218,6 +225,8 @@ class TopNav(TooltipWidget):
             self.fullscreenRequested.emit()
         elif item == "refresh":
             self.refreshRequested.emit()
+        elif item == "settings":
+            self.settingsRequested.emit()
 
     def _host_width(self) -> int:
         parent = self.parentWidget()
@@ -244,6 +253,8 @@ class TopNav(TooltipWidget):
         search_w = fm.horizontalAdvance(_search_label()) + _icon_room(fm) + u + 2 * pad
         x = self.width() - 2.0 * u - pill_h
         rects["fullscreen"] = QRectF(x, top, pill_h, pill_h)  # a square pill
+        x -= 1.0 * u + pill_h
+        rects["settings"] = QRectF(x, top, pill_h, pill_h)  # 2.14: ⚙, before ⛶
         x -= 1.0 * u + pill_h
         rects["refresh"] = QRectF(x, top, pill_h, pill_h)  # 2.8: ↻, after the source's pill
         if self._source_visible:
@@ -295,7 +306,7 @@ class TopNav(TooltipWidget):
             super().mousePressEvent(event)
 
     def mouseDoubleClickEvent(self, event) -> None:
-        if self._item_at(event.position()) in ("fullscreen", "refresh"):
+        if self._item_at(event.position()) in ("fullscreen", "refresh", "settings"):
             event.accept()  # a quick second click: not in and straight out again
             return
         super().mouseDoubleClickEvent(event)  # one more press
@@ -330,7 +341,7 @@ class TopNav(TooltipWidget):
         return False
 
     def tooltip_at(self, pos: QPointF) -> str:
-        """What hovering `pos` says: the logo's name, or the fullscreen button and its key."""
+        """What hovering `pos` says: the logo's name, or a square button (⛶, ⚙, ↻) and its key."""
         if self.logo_rect().contains(pos):
             return BRAND_NAME
         rects = self._item_rects()
@@ -339,6 +350,8 @@ class TopNav(TooltipWidget):
             return key_hint(tr("Fullscreen"), FULLSCREEN_KEYS)
         if rects["refresh"].contains(pos):
             return key_hint(translate(REFRESH_TEXT), REFRESH_KEYS)
+        if rects["settings"].contains(pos):
+            return key_hint(tr("Settings"), SETTINGS_KEYS)
         return ""
 
     def resizeEvent(self, event) -> None:
@@ -451,17 +464,22 @@ class TopNav(TooltipWidget):
                 p.drawText(inner, Qt.AlignLeft | Qt.AlignVCenter, text)
                 continue
             p.drawText(inner, Qt.AlignCenter, elided(p, text, inner.width()))
-        for name in ("refresh", "fullscreen"):
+        for name in ("refresh", "settings", "fullscreen"):
             rect = rects[name]
-            if self._hover == name:
-                fill_round(p, rect, qcolor(PALETTE.text, HOVER_ALPHA), 1.6 * u)
-            p.setPen(qcolor(PALETTE.text, 0.15))
-            p.setBrush(Qt.NoBrush)
-            p.drawRoundedRect(rect.adjusted(0.5, 0.5, -0.5, -0.5), 1.6 * u, 1.6 * u)
+            if self._focused and self._focus_item == name:  # 2.14: ⚙, in the keys' order
+                self._paint_focus(p, rect, 1.6 * u)
+            else:
+                if self._hover == name:
+                    fill_round(p, rect, qcolor(PALETTE.text, HOVER_ALPHA), 1.6 * u)
+                p.setPen(qcolor(PALETTE.text, 0.15))
+                p.setBrush(Qt.NoBrush)
+                p.drawRoundedRect(rect.adjusted(0.5, 0.5, -0.5, -0.5), 1.6 * u, 1.6 * u)
             icon = rect.height() * 0.5
             box = QRectF(rect.center().x() - icon / 2, rect.center().y() - icon / 2, icon, icon)
             if name == "refresh":
                 draw_refresh(p, box, qcolor(PALETTE.text, 0.85))
             else:
-                draw_icon(p, "fullscreen", box, qcolor(PALETTE.text, 0.85))
+                draw_icon(
+                    p, "gear" if name == "settings" else name, box, qcolor(PALETTE.text, 0.85)
+                )
         p.end()
