@@ -416,14 +416,14 @@ if __name__ == "__main__":
 
 
 class WorkerTest(unittest.TestCase):
-    def run_of(self, script: Script):
+    def run_of(self, script: Script, cls: Any = None):
         import queue
         import threading
 
         from services.captions.worker import TURKISH, _Run
 
         sent: list[tuple] = []
-        run = object.__new__(_Run)
+        run = object.__new__(cls or _Run)
         run.stopped, run.blocks, run.rtf, run.run = threading.Event(), queue.Queue(), 0.5, 7
         run.link = type("Link", (), {"send": staticmethod(sent.append)})()
         run._said, run.language, run.viewer = None, TURKISH, [0.0]
@@ -487,6 +487,115 @@ class WorkerTest(unittest.TestCase):
         self.assertTrue(run.blocks.empty())
         run._maybe_stream()  # ("language", "Turkish") again: no growing writer
         self.assertIsNone(run.writer)
+
+    def test_another_language_mid_run_hands_the_sound_back_to_pieces(self) -> None:
+        # 2.13.4 (bug scan #6): ("language", name) away from Turkish kept the growing writer:
+        # our Turkish Moonshine read the other language's sound (garbage, or nothing shown)
+        import queue
+        from types import SimpleNamespace
+        from unittest import mock
+
+        from services.captions import worker
+
+        made: list = []
+        pushed: list = []
+        real = worker._Run
+
+        def run(link, model, number, *rest, **kwargs):
+            made_run, _sent = self.run_of(Script(sentence("tam yirmi sekiz yıllık", 1.0)), real)
+            made_run.model, made_run.run = model, number
+            made_run.start, made_run.stop = (lambda: None), made_run.stopped.set
+            made_run.cutter = SimpleNamespace(
+                set_max=lambda seconds: None, push=lambda at, floats: pushed.append(at) or []
+            )
+            made_run.pieces, made_run.newest = queue.Queue(), 0.0
+            made_run._reserve = lambda: 0.0
+            made_run.viewer = [0.0, 1.0]
+            made.append(made_run)
+            return made_run
+
+        def model(spec):
+            return SimpleNamespace(
+                moonshine=True, is_speech=lambda window: False, is_voiced=lambda window: False
+            )
+
+        sound = array("f", bytes(4 * 1600))
+        seen: dict = {}
+
+        def started() -> None:
+            seen["started"] = made[0].writer
+            made[0]._take(0.5, sound)  # Turkish sound, for the writer
+
+        def english() -> None:
+            seen["english"] = made[0].writer
+            made[0]._take(1.0, sound)  # the English sound: to pieces, not the Turkish model
+            seen["english_blocks"] = [b[0] for b in made[0].blocks.queue if b is not None]
+
+        def turkish_again() -> None:
+            seen["turkish"] = made[0].writer
+            seen["turkish_blocks"] = made[0].blocks.qsize()  # none of the sound before it
+
+        def automatic() -> None:
+            seen["automatic"] = made[0].writer
+
+        messages = iter(
+            [
+                ("load", {}),
+                ("start", 7, "http://127.0.0.1/side", 0.0, None, worker.TURKISH),
+                started,
+                ("language", "English"),
+                english,
+                ("language", worker.TURKISH),
+                turkish_again,
+                ("language", ""),
+                automatic,
+                ("quit",),
+            ]
+        )
+
+        def recv():
+            step = next(messages)
+            while callable(step):
+                step()
+                step = next(messages)
+            return step
+
+        link = SimpleNamespace(conn=SimpleNamespace(recv=recv), send=lambda message: None)
+        with (
+            mock.patch.object(worker, "_Model", model),
+            mock.patch.object(worker, "_Run", run),
+            mock.patch.object(worker.threading, "Thread"),
+        ):
+            worker._serve(link)
+        self.assertIsInstance(seen["started"], GrowingWriter)
+        self.assertIsNone(seen["english"])  # pieces again
+        self.assertEqual(pushed, [1.0])
+        self.assertEqual(seen["english_blocks"], [0.5])  # (the Turkish sound only)
+        self.assertIsInstance(seen["turkish"], GrowingWriter)  # Turkish again: a writer anew
+        self.assertIsNot(seen["turkish"], seen["started"])
+        self.assertEqual(seen["turkish_blocks"], 0)
+        self.assertIsNone(seen["automatic"])  # none known: Qwen tells it from pieces
+
+    def test_a_writer_that_went_while_it_read_writes_nothing_more(self) -> None:
+        # 2.13.4 (bug scan #6): its thread wrote the batch it read after the writer went
+        script = Script(sentence("tam yirmi sekiz yıllık bir mücadele", 1.0))
+        run, sent = self.run_of(script)
+        writer = run.writer
+        t = 0.0
+        while t < 6.0:
+            run.blocks.put((t, array("f", (t + i / RATE for i in range(1600)))))
+            t += STEP
+        work = writer.work
+
+        def went() -> list:
+            lines = work()
+            run.writer = None  # another language while it read (as `_check_guess` does too)
+            return lines
+
+        writer.work = went
+        run.blocks.put(None)
+        run._stream()
+        self.assertEqual([m for m in sent if m[0] == "caption"], [])
 
     def test_a_reading_keeps_nothing_nobody_said(self) -> None:
         from types import SimpleNamespace
