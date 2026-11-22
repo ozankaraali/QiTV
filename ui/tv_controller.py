@@ -139,7 +139,7 @@ from ui.audio_queue import REPEAT_MODES, AudioQueue
 from ui.autoplay import FINISHED_TEXT, Autoplay
 from ui.captions_texts import NOT_AVAILABLE
 from ui.cast_controls import CastControls
-from ui.context_actions import ContextActions, Launcher, is_channel
+from ui.context_actions import OPEN_PIP_TEXT, ContextActions, Launcher, is_channel
 from ui.episode_listing import FolderListing
 from ui.grid_controls import LEAVE_FIRST, GridControls
 from ui.guide_controller import GuideController
@@ -758,6 +758,7 @@ class TVController(QObject):
                 borrow=lambda item, provider, purpose: self.lend_scheduled(item, provider, purpose),
                 owned=self._owned,
                 started=self._count_start,
+                choose=self._choose_small,
                 parent=self,
             )
             self._pip.changed.connect(self._mixer.refresh)
@@ -800,6 +801,9 @@ class TVController(QObject):
             self._grid.changed.connect(self._update_guides)
         # The links of tiles opened beside the focused one, on the side lane (one at a time).
         self._tile_links: dict[str, Target] = {}
+        # The channel list was opened for the small picture (P with no previous channel): the
+        # channel picked there opens small.
+        self._choosing_small = False
         # A restored grid's tiles waiting for their provider's setup: (tile, channel,
         # provider, group).
         self._waiting_tiles: list[tuple[str, dict, str, str]] = []
@@ -843,6 +847,7 @@ class TVController(QObject):
         self.overlays.guide.rowsMoved.connect(self._update_guides)
         self.overlays.guide.closed.connect(self._update_guides)
         self.overlays.drawer.closed.connect(self._update_guides)
+        self.overlays.drawer.closed.connect(self._end_choosing_small)
         self.nav.notice.connect(self._on_notice)
         zap.tuneRequested.connect(self._on_zap_tune)
         zap.columnRequested.connect(self._on_column_requested)
@@ -2222,6 +2227,11 @@ class TVController(QObject):
         if node.layer != "item" or self.nav.section_of(node) != "live":
             logger.debug("Not playable from the drawer: %s", node)
             return
+        if self._choosing_small and self._pip is not None:
+            self._end_choosing_small()
+            self._pip.open_node(node)  # the list was opened for the small picture
+            self.overlays.drawer.close_drawer()
+            return
         # The whole group, not just the rows the drawer's filter shows: ↑/↓ walk the group.
         nodes = self.nav.children(parent) or siblings
         channels = payloads(nodes)
@@ -2241,6 +2251,16 @@ class TVController(QObject):
                 self.overlays.drawer.close_drawer()
             return
         key, channels = self._found_group(channel, group_id)
+        if self._choosing_small and self._pip is not None:
+            self._end_choosing_small()  # the list was opened for the small picture
+            listed = channels if key is not None else self._all_live()
+            source = item_provider.pick_source(self.catalog, channel, key or ALL_GROUP_ID)
+            context = ZapContext(
+                key or ALL_GROUP_ID, listed, fallback=self._all_live(), source=source
+            )
+            self._pip.open_channel(channel, context)
+            self.overlays.drawer.close_drawer()
+            return
         if key is None:
             self.tune_live(channel)
         else:
@@ -5368,7 +5388,22 @@ class TVController(QObject):
         if banner.isVisible() and banner.info is not None and banner.info.logo is None:
             banner.show_info(self.banner_info(channel))
 
+    def _choose_small(self) -> None:
+        """P (⧉, the phone's) with no previous channel to open small: the channel list opens,
+        and the channel picked there opens small (Enter, a click, the find's); Esc closes it
+        and nothing opens."""
+        if self._closed:
+            return
+        self._open_drawer()
+        if self.overlays.drawer.isVisible():
+            self._choosing_small = True
+            self._toast(translate(OPEN_PIP_TEXT), "info")  # what the pick is for
+
+    def _end_choosing_small(self) -> None:
+        self._choosing_small = False
+
     def _open_drawer(self, from_column: bool = False) -> None:
+        self._choosing_small = False  # (the small picture's choice opens it, then says so)
         if not self.catalog.provider_names():
             self._flow.welcome(chosen=True)  # asked for: over a film opened in QiTV too
             return
