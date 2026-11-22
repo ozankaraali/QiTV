@@ -692,13 +692,29 @@ class TVPages(QObject):
             self._guard_second_click()
 
     def library_from_sound(self) -> None:
-        """The audio screen's ‹ and its dock's ⋯ Library (Ruling P4-8 a): the Library, as it was
-        left, for any song or radio channel, one opened from a folder too (no Library it came
-        from: films keep `_can_return`); the sound plays on in its corner. A double-click's
-        second click reaches nothing there, as in back_to_library."""
+        """A song's ‹ on the audio screen and its dock's ⋯ Library (Ruling P4-8 a): the Library,
+        as it was left, for any song, one opened from a folder too (no Library it came from:
+        films keep `_can_return`); the sound plays on in its corner. A double-click's second
+        click reaches nothing there, as in back_to_library. (A radio station's ‹ is live TV's
+        Back: back_from_sound.)"""
         if not self._window.closing() and not self.library_shown():
             self._enter_library()
             self._guard_second_click()
+
+    def back_from_sound(self) -> None:
+        """The audio screen's ‹. A song's: the Library (library_from_sound). A live channel's
+        (a radio station, any channel with no picture; 2.13.4, the owner) is live TV's Back,
+        the mouse's Back button: the channel list, at the channel playing. A double-click's
+        second click reaches nothing there either (the list opens under the pointer)."""
+        window = self._window
+        controller = window.controller
+        if window.closing():
+            return
+        if controller.sound_shown() and not controller.song_shown():
+            controller.mouse_back()
+            self._guard_second_click()
+        else:
+            self.library_from_sound()
 
     def _can_return(self) -> bool:
         """The title playing, on its way or failed came from the Library, and no live channel

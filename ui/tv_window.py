@@ -1163,8 +1163,9 @@ class TVWindow(QMainWindow):
         self.overlays.transport.searchRequested.connect(self.screens.open_search)
         # ‹ Library on the player controls: back to the Library a title came from, as Esc; the
         # audio dock's ⋯ Library and the audio screen's ‹: the Library for any song (P4-8 a).
+        # A radio station's ‹ is live TV's Back: the channel list (2.13.4).
         self.overlays.transport.libraryRequested.connect(self.screens.back_to_library)
-        self.audio_screen.backRequested.connect(self.screens.library_from_sound)
+        self.audio_screen.backRequested.connect(self.screens.back_from_sound)
         self.captions.changed.connect(controller.words_changed)  # the screen's Words pill
         self.overlays.transport.liveTvRequested.connect(self.screens.back_to_tv)  # 2.9.3
         self.overlays.transport.openLibraryRequested.connect(self.screens.open_last_library)

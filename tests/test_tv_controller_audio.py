@@ -22,7 +22,7 @@ import uuid
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
-from PySide6.QtCore import QObject, QPoint, Qt, Signal
+from PySide6.QtCore import QObject, QPoint, QPointF, Qt, Signal
 from PySide6.QtGui import QImage
 from PySide6.QtTest import QTest
 from test_tv_controller import ControllerTestCase, FakeOverlay, FakeSession, FakeTransport
@@ -177,6 +177,11 @@ class FakeScreen(FakeOverlay):
 
     def set_playing(self, playing):
         self.playing = playing
+
+    live = False  # set_live: its ‹ is live TV's Back (the channel list), not the Library's
+
+    def set_live(self, live):
+        self.live = live
 
 
 class FakeCaptions(QObject):
@@ -608,6 +613,19 @@ class RadioTests(AudioCase):
         self.assertEqual(self.screen.cover, (None, self.screen.cover[1]))  # no logo: drawn
         self.controller.handle(Action.MEDIA_NEXT)  # live TV's: the next channel
         self.assertEqual(self.requested()[-1], "Two")
+
+    def test_a_radio_channels_back_is_live_tvs_and_a_songs_the_librarys(self):
+        # 2.13.4, the owner: the screen's ‹ on a radio channel opened the Library. The screen
+        # is told which it is each time it shows (one screen serves a song after a channel).
+        self.tune_radio()
+        self.clock.now += NO_PICTURE_S + 0.1
+        self.controller._sound_watch()
+        self.assertTrue(self.screen.visible)
+        self.assertTrue(self.screen.live)
+        self.open(self.folder / "01 Arn.mp3", video=False)
+        self.assertTrue(wait_until(lambda: self.screen.visible))
+        self.assertTrue(self.controller.song_shown())
+        self.assertFalse(self.screen.live)
 
     def test_the_media_panel_has_a_radio_channels_name_alone(self):
         # Ruling 2 (Task 8): its stream's song or programme is no artist for the panel.
@@ -1678,6 +1696,7 @@ class ScreenApiTests(unittest.TestCase):
             "shown_view",
             "set_words",
             "set_playing",
+            "set_live",
         ):
             real = inspect.signature(getattr(AudioScreen, name))
             fake = inspect.signature(getattr(FakeScreen, name))
@@ -2025,13 +2044,75 @@ class WindowRadioTests(base.WindowCase):
             check=True,
         )
         self.station_url = station.as_uri()
+        tone = shutil.copy(station, Path(directory.name) / "tone.m4a")  # another address
+        self.tone_url = Path(tone).as_uri()
         super().setUp()
 
     def seed(self, provider):
-        seed_channels(self.provider_manager, provider, live_url=self.station_url)
+        # The fixture's two channels with a picture, the station, then the same tone as a
+        # provider's channel with no picture (no station's mark).
+        live = {"live_url": self.station_url, "live_urls": (self.tone_url,)}
+        seed_channels(self.provider_manager, provider, **live)
         content = self.provider_manager.current_provider_content["itv"]["contents"]
         content[2][free_radio.STATION_KEY] = True
         self.provider_manager.save_provider()
+
+    def test_a_stations_back_opens_the_channel_list_as_live_tvs_back_does(self):
+        # 2.13.4, the owner: "Back button on radio does not open the channel list but
+        # library". Live TV's Back is the mouse's Back button: the channel list, at the channel
+        # playing. The screen's ‹ on a station, or on any channel with no picture, is that
+        # Back now; the mouse's Back, Esc and the phone's Back stay what they are over a
+        # channel's picture (Esc closes what is open, and never opens the Library).
+        window = self.window
+        self.show()
+        self.wait_for_drawer()
+        QTest.keyClick(window, Qt.Key.Key_Escape)
+        screen, host, drawer = window.audio_screen, window.host, window.overlays.drawer
+        channels = window.catalog.items("live", "*")
+
+        def back_keys(channel, press):
+            press()
+            self.assertTrue(wait_until(drawer.isVisible), "the channel list")
+            self.assertEqual(drawer.highlighted().title, channel["name"])
+            self.assertFalse(window.screens.library_shown())
+            QTest.keyClick(window, Qt.Key.Key_Escape)  # the list closes
+            self.assertFalse(drawer.isVisible())
+            QTest.keyClick(window, Qt.Key.Key_Escape)
+            window.remote.fire("back")
+            self.assertFalse(drawer.isVisible())
+            self.assertFalse(window.screens.library_shown())
+
+        def mouse_back(point):
+            return lambda: QTest.mouseClick(
+                host.windowHandle(), Qt.MouseButton.BackButton, pos=point
+            )
+
+        window.controller.tune_live(channels[0])  # a channel with a picture
+        back_keys(channels[0], mouse_back(host.rect().center()))
+        for index in (2, 3):  # the station, a provider's channel with no picture
+            channel = channels[index]
+            with self.subTest(channel=channel["name"]):
+                self.assertEqual(free_radio.is_station(channel), index == 2)
+                window.controller.tune_live(channel)
+
+                def its_screen():
+                    shown = screen.accessibleDescription().split(" · ")[0]
+                    return screen.isVisible() and shown == channel["name"]
+
+                self.assertTrue(wait_until(its_screen, 20_000), "the channel's screen")
+                back = screen.controls()["back"].center()
+                self.assertIs(host.childAt(back), screen)
+
+                def click_back():
+                    QTest.mouseMove(host.windowHandle(), back)
+                    QTest.mouseClick(host.windowHandle(), Qt.MouseButton.LeftButton, pos=back)
+
+                back_keys(channel, click_back)
+                self.assertEqual(screen.tooltip_at(QPointF(back)), "Channel list")
+                self.assertTrue(screen.isVisible())  # it plays on, on its screen
+                self.assertEqual(window.controller.now_playing().title, channel["name"])
+                back_keys(channel, mouse_back(screen.rect().center()))  # over its cover
+        window.controller.stop()
 
     def test_a_stations_screen_takes_its_clicks_under_live_tvs_controls(self):
         # 2.13.3, the owner: on a radio station live TV's controls showed and the audio
