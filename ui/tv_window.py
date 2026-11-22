@@ -2048,6 +2048,9 @@ class TVWindow(QMainWindow):
             except KeyError:
                 continue
             hosts = {host_of(provider.get("url"))}
+            # 2.14: a Plex server at any of its addresses (found again elsewhere since).
+            kept = provider.get("connections") or []
+            hosts |= {host_of(c.get("uri")) for c in kept if isinstance(c, dict)} - {""}
             if name in loaded:
                 hosts |= catalogs.catalog(name).stream_hosts()
             yield provider, hosts
