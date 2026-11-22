@@ -197,13 +197,14 @@ class StreamQuestion(QObject):
         question.timer.start(RELEASE_WAIT_MS)
         self._on_released(question.provider)
 
-    def chosen(self, purpose: str) -> None:
-        """The player of `purpose` was given something newer that asked nothing (a tune, a
-        film, a file, an outside player, a Stop): an open still waiting there for a stopped
-        recording's stream is no longer the viewer's choice, and never runs."""
+    def chosen(self) -> None:
+        """The viewer chose something newer, in either picture, asked about or not (a tune, a
+        film, a file, an outside player, a swap, a close, Stop, the multiview): every open
+        still waiting for a stopped recording's stream is no longer their choice, and never
+        runs. QiTV's own moves never call it; nor does what waited, while it runs."""
         if self._going:
             return  # (what waited runs now: its own open)
-        for question in [q for q in self._waited if q.replaced == purpose]:
+        for question in list(self._waited):
             logger.info("A newer choice: what waited for a stream does not open")
             self._drop(question)
 
