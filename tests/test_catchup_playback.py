@@ -12,6 +12,7 @@ from unittest import mock
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
+from stream_wait_fixtures import StreamWait
 from test_tv_controller import NOW, PipelineCase
 from timer_fixtures import wait_until
 
@@ -672,3 +673,28 @@ class ProgrammeStartWithoutGuideTests(CatchupCase):
         self.controller.mouse_moved()
         self.transport.programmeStartRequested.emit()
         self.assertEqual(self.live.named("seek_to")[-1], (3000.0,))
+
+
+class GoLiveWaitTests(StreamWait, CatchupCase):
+    """2.13.4 (re-review I3): Go live from the archive is newer than a tune that waits for a
+    stopped recording's stream (another provider's, its one stream the recording's)."""
+
+    def test_go_live_from_the_archive_drops_the_tune_that_waits(self):
+        self.catalog.specs["Backup"] = {"name": "Backup", "type": "STB", "max_streams": 1}
+        two = {"id": 2, "name": "Two", "number": "2", "cmd": "ffrt http://tv/2"}
+        backup_two = {**two, "_provider": "Backup"}
+        self.hold_the_stream("Backup", {**two, "id": 3, "name": "Three", "_provider": "Backup"})
+        self.start_archived()
+        self.controller.handle(Action.SEEK_BACK)
+        self.live.released.emit()
+        self.session.stateChanged.emit("playing")
+        self.assertTrue(self.catchup.active())
+        self.controller.tune(backup_two, group_key="10", channels=[backup_two])
+        self.stop_it()
+        self.controller.handle(Action.GO_LIVE)
+        self.assertFalse(self.catchup.active())
+        links = len(self.catalog.links)
+        self.lets_go()
+        self.catalog.linkReady.emit(self.catalog.links[-1][0], ARCHIVED["cmd"])  # live's link
+        self.assertEqual(len(self.catalog.links), links)  # Two never tunes over live
+        self.assertEqual(self.controller._channel, ARCHIVED)

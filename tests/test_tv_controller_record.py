@@ -766,6 +766,33 @@ class ScheduledRecordingQuestionTests(_RecordCase):
         self.assertEqual(len(self.catalog.links), links)
         self.assertIs(self.sessions.large(), self.pip_slot)  # the film stays large
 
+    def test_the_films_next_drops_the_tune_that_waits(self):
+        # 2.13.4 (re-review I3): the film's Next went on as autoplay's own, and the tune that
+        # waited then replaced the next film
+        ferry = {**BACKUP_FILM, "id": "m8", "name": "Night Ferry", "cmd": "http://vod/ferry"}
+        films = [BACKUP_FILM, ferry]
+        self.controller.play_vod(BACKUP_FILM, "movie", play_context(genre_items=films))
+        self.ready("http://vod/heat.mkv")
+        self.stop_it_for_a_tune()
+        self.transport.nextRequested.emit()  # the film's Next
+        self.assertEqual(self.requested()[-1], "Night Ferry")
+        links = len(self.catalog.links)
+        self.scheduler_lets_go()
+        self.ready("http://vod/ferry")
+        self.assertEqual(len(self.catalog.links), links)
+        self.assertNotEqual(self.controller._channel, CHANNELS[1])  # Two never tunes
+
+    def test_a_cast_drops_what_waits_to_open_small(self):
+        # 2.13.4 (re-review I3): the small picture closing for a cast dropped nothing, and
+        # the channel opened small on the TV while it cast
+        self.start_backup_large()
+        self.stop_it_for_a_small_two()
+        self.controller._one_picture_for_cast()  # a cast starts (CastControls' one picture)
+        links = len(self.catalog.links)
+        self.scheduler_lets_go()
+        self.assertEqual(len(self.catalog.links), links)
+        self.assertFalse(self.sessions.pip_open() or self.sessions.pip_opening())
+
     def test_qitvs_own_swap_leaves_the_tune_that_waits(self):
         # 2.13.4 (re-review M3): the film failing gives Four the big picture back; the tune
         # chosen meanwhile is still the viewer's newest choice

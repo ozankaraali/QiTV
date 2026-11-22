@@ -25,7 +25,14 @@ os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 from PySide6.QtCore import QObject, QPoint, Qt, Signal
 from PySide6.QtGui import QImage
 from PySide6.QtTest import QTest
-from test_tv_controller import ControllerTestCase, FakeOverlay, FakeSession, FakeTransport
+from stream_wait_fixtures import StreamWait
+from test_tv_controller import (
+    CHANNELS,
+    ControllerTestCase,
+    FakeOverlay,
+    FakeSession,
+    FakeTransport,
+)
 from timer_fixtures import pause, wait_until
 
 from services import free_radio
@@ -2088,6 +2095,26 @@ class WindowRadioTests(base.WindowCase):
         self.assertFalse(panel.isVisible())
         self.assertEqual(screen.view(), "cover")
         window.controller.stop()
+
+
+class SongWaitTests(StreamWait, AudioCase):
+    """2.13.4 (re-review I3): a song stepped to in a list of songs is newer than a tune that
+    waits for a stopped recording's stream."""
+
+    def test_the_next_song_of_a_list_drops_the_tune_that_waits(self):
+        self.catalog.current_provider = lambda: {"name": "Home", "type": "STB", "max_streams": 1}
+        self.hold_the_stream("Home", {**CHANNELS[2], "_provider": "Home"})
+        songs = [track(self.folder, n, f"Song {n}", size=1000 + n) for n in (1, 2, 3)]
+        self.controller.hold_for_file(True)
+        self.controller.play_list("Mix", [t["path"] for t in songs], [1001, 1002, 1003])
+        self.session.stateChanged.emit("playing")
+        self.tune(1)  # Two: its stream is the recording's
+        self.stop_it()
+        self.transport.nextTrackRequested.emit()  # ⏭: the list's next song
+        self.assertEqual(self.played()[-1], Path(songs[1]["path"]))
+        links = len(self.catalog.links)
+        self.lets_go()
+        self.assertEqual(len(self.catalog.links), links)  # Two never tunes over the song
 
 
 if __name__ == "__main__":
