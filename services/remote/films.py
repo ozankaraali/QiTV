@@ -25,7 +25,6 @@ from dataclasses import dataclass
 from functools import partial
 import logging
 import secrets
-import time
 from typing import Any, AsyncIterator, Optional, Protocol, Sequence
 from urllib.parse import parse_qsl, urlsplit
 
@@ -666,12 +665,12 @@ class Shelved(Protocol):
 class _Shelved:
     film: Shelved
     device: str
-    used: float
 
 
 class FilmShelf:
     """The films (and recordings) phones play now, by token (one per phone: its next replaces
-    it)."""
+    it). Kept read least lately first: a full shelf lets go of the film no phone read for the
+    longest, never one a phone is watching because it was put first."""
 
     def __init__(self) -> None:
         self._films: OrderedDict[str, _Shelved] = OrderedDict()
@@ -679,7 +678,7 @@ class FilmShelf:
     def put(self, device: str, film: Shelved) -> str:
         self.drop(device)
         token = secrets.token_urlsafe(16)
-        self._films[token] = _Shelved(film, device, time.monotonic())
+        self._films[token] = _Shelved(film, device)
         while len(self._films) > SHELF:
             self._films.popitem(last=False)[1].film.close()
         return token
@@ -693,7 +692,7 @@ class FilmShelf:
         kept = self._films.get(token)
         if kept is None:
             return None
-        kept.used = time.monotonic()
+        self._films.move_to_end(token)  # read now: the last to go
         return kept.film
 
     def clear(self) -> None:
