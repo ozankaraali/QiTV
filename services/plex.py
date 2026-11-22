@@ -149,6 +149,14 @@ def connections_of(provider: dict) -> tuple[Connection, ...]:
     return tuple(ordered(found))
 
 
+def bases_of(provider: dict) -> list[str]:
+    """Every address provider `provider`'s server may be reached at: where it is now, the one
+    it was signed in at and each of its connections (a stream made at any of them is its)."""
+    found = [plex_addresses.base_of(provider), normalized_base(str(provider.get("url") or ""))]
+    found += [c.uri for c in connections_of(provider)]
+    return list(dict.fromkeys(base for base in found if base))
+
+
 def kept_connections(connections: Any) -> list[dict]:
     """Connections as a provider keeps them: {uri, local, relay}, best first."""
     return [{"uri": c.uri, "local": c.local, "relay": c.relay} for c in connections]

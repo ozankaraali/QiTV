@@ -87,13 +87,21 @@ class MediaReporter:
         self._told = 0.0
 
     def _server_of(self, url: str) -> Optional[tuple[dict, ms.StreamRef]]:
-        servers = [s for s in self._servers() if ms.is_media_server(s.get("type"))]
-        plexes = [str(s.get("url") or "") for s in servers if is_plex(s.get("type"))]
-        others = [str(s.get("url") or "") for s in servers if not is_plex(s.get("type"))]
-        ref = ms.parse_stream_url(url, others) or plex.parse_stream_url(url, plexes)
-        if ref is None:
+        found = None
+        for server in self._servers():
+            kind = server.get("type")
+            if is_plex(kind):  # at any of its addresses (one found again since: review N1)
+                ref = plex.parse_stream_url(url, plex.bases_of(server))
+            elif ms.is_media_server(kind):
+                ref = ms.parse_stream_url(url, [str(server.get("url") or "")])
+            else:
+                continue
+            if ref is not None:
+                found = server, ref
+                break
+        if found is None:
             return None
-        server = next(s for s in servers if ms.normalized_base(str(s.get("url") or "")) == ref.base)
+        server, ref = found
         if "ssl_verify" not in server:
             server = dict(server, ssl_verify=self._verify())  # Settings' check (2.8)
         return server, ref

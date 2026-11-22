@@ -65,6 +65,44 @@ class MediaReporterTests(unittest.TestCase):
         reporter.playing(plex_base + "/library/parts/9/17/file.mkv?X-Plex-Token=P")
         self.assertEqual(sent, [])
 
+    def test_a_plex_server_found_at_another_of_its_addresses_is_still_told(self):  # N1
+        """Signed in away on the relay, the server is found at home later: its streams come
+        from its home address, and their progress is still told."""
+        home = "https://10-0-0-5.example.plex.direct:32400"
+        relay = "https://relay.example.plex.direct:8443"
+        server = {
+            "type": "PLEX",
+            "url": relay,
+            "token": "P",
+            "device_id": "C",
+            "server_id": "machine-home",
+            "connections": [
+                {"uri": home, "local": True, "relay": False},
+                {"uri": relay, "local": False, "relay": True},
+            ],
+        }
+        sent = []
+        reporter = MediaReporter(
+            lambda: [SERVER, server],
+            send=lambda server, event, ref, position, paused: sent.append(
+                (server["server_id"], event, ref.base, position)
+            ),
+            clock=self.clock,
+        )
+        source = {"Id": "9", "part": "/library/parts/9/17/file.mkv"}
+        reporter.playing(plex.stream_url(home, source, "P", "C", "102"))
+        self.clock.now += PROGRESS_S
+        reporter.position(30_000)
+        reporter.stopped()
+        self.assertEqual(
+            sent,
+            [
+                ("machine-home", "start", home, 0),
+                ("machine-home", "progress", home, 30_000),
+                ("machine-home", "stopped", home, 30_000),
+            ],
+        )
+
     def test_a_plex_report_goes_through_plexs_client(self):  # 2.14
         plex_base = "https://10-0-0-5.example.plex.direct:32400"
         server = {"type": "PLEX", "url": plex_base, "token": "P", "device_id": "C"}
