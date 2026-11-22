@@ -2850,22 +2850,39 @@ class StayLiveTests(LiveSessionCase):
 
     def test_a_lasting_lag_above_the_band_gets_one_gentle_nudge_then_settles(self):
         # 2.1: not within a tick (2.0 did, and flapped on a public HLS channel): after 15 s outside
-        # the band, one nudge ramped to 1.03x and back, sized to end at the target.
+        # the band, one nudge to 1.03x and back (one step each way), sized to end at the target.
         sid = self.start()
         feed = Feed(self, sid, burst=0.0, edge=6.0).ready()
         feed.run(14.0)
         self.assertEqual(self.playback.rates, [])
         feed.run(200.0)
         rates = self.playback.rates
-        self.assertEqual(rates[:3], [1.01, 1.02, 1.03])
-        self.assertEqual(max(rates), 1.03)
-        self.assertEqual((changes(rates), reversals(rates)), (2, 1))
-        self.assertEqual(rates[-1], 1.0)
+        self.assertEqual(rates, [1.03, 1.0])
         nudging = [state for state in self.timelines if state["rate"] != 1.0]
         self.assertTrue(all(state["nudge"] == 1.03 for state in nudging))
         self.assertAlmostEqual(self.timelines[-1]["lag"], TARGETS["normal"], delta=0.3)
         self.assertEqual(self.timelines[-1]["shown"], 2.5)
         self.assertEqual(len(self.playback.plays), 1)
+
+    def test_a_steady_hls_channel_short_of_its_12_s_target_by_little_changes_no_rate(self):
+        # 2026-11-22 19:27 and 19:46: a steady HLS channel, its target 12 s: 0.97x for a
+        # second or so short of it, four times an evening, each rate step heard (VLC 3's
+        # audio output corrects a 40-100 ms drift at each). Within 15% of the target short
+        # (1.8 s) a source without a kept burst is left as it is; 2 s and more is built back,
+        # in one step in and one out.
+        for late, rates in ((1.3, []), (2.2, [0.97, 1.0])):
+            with self.subTest(late=late):
+                self.live = self.make()
+                sid = self.start(channel="h%g" % late)
+                feed = Feed(self, sid, burst=12.0, edge=36.0, hls=True).ready()
+                feed.run(400.0)  # (its start's backlog caught up, the budget free)
+                self.assertEqual(self.timelines[-1]["target"], 12.0)
+                seen = len(self.playback.rates)
+                feed.gaps = itertools.chain([12.0 + late], itertools.repeat(12.0))
+                feed.run(600.0)
+                self.assertEqual(self.playback.rates[seen:], rates)
+                self.live.stop()
+                self.engine.answer()
 
     def test_a_nudge_is_said_as_it_starts_and_as_it_ends(self):
         # 2.13.4: the log says each nudge as it starts (its rate, why, the lag and the target)
@@ -2890,32 +2907,25 @@ class StayLiveTests(LiveSessionCase):
         rates = [text for level, text in said if level == "DEBUG" and "VLC's rate" in text]
         self.assertEqual(
             rates,
-            [
-                "VLC's rate is now 1.01x (was 1x).",
-                "VLC's rate is now 1.02x (was 1.01x).",
-                "VLC's rate is now 1.03x (was 1.02x).",
-                "VLC's rate is now 1.02x (was 1.03x).",
-                "VLC's rate is now 1.01x (was 1.02x).",
-                "VLC's rate is now 1x (was 1.01x).",
-            ],
+            ["VLC's rate is now 1.03x (was 1x).", "VLC's rate is now 1x (was 1.03x)."],
         )
         texts = [text for _, text in said]
         self.assertLess(texts.index(starts[0]), texts.index(rates[0]))  # the start, then its rate
-        self.assertLess(texts.index(rates[2]), texts.index(ends[0]))
+        self.assertLess(texts.index(rates[0]), texts.index(ends[0]))
         self.assertLess(texts.index(ends[0]), texts.index(rates[-1]))  # it ends back at 1x
 
     def test_the_rate_lines_are_capped_each_minute(self):
-        self.patch("_RATE_LINES", 2)
+        self.patch("_RATE_LINES", 1)
         sid = self.start()
         feed = Feed(self, sid, burst=0.0, edge=6.0).ready()
         with self.assertLogs("services.live.live_session", "DEBUG") as logs:
-            feed.run(20.0)  # the nudge starts, ramping up a step a second
+            feed.run(20.0)  # the nudge starts, then its rate (one step)
         texts = [record.getMessage() for record in logs.records]
         self.assertEqual(texts.count(live_session._RATE_CUT), 1)
         cut = texts.index(live_session._RATE_CUT)
         self.assertEqual(
             [text for text in texts[:cut] if "Stay-live" in text or "VLC's rate" in text],
-            [texts[cut - 2], texts[cut - 1]],
+            [texts[cut - 1]],
         )
         self.assertFalse(any("VLC's rate" in text for text in texts[cut + 1 :]))
 
@@ -2942,8 +2952,10 @@ class StayLiveTests(LiveSessionCase):
         """Reported on a public HLS channel: every 7 s a batch of 6 s, every sixth
         12 s, so the lag saws by 6-12 s around a mean that wanders by itself. 2.0.x changed the
         rate 18 times in 5 minutes there. Now: at its target, the rate never changes; a second
-        under it, one gentle nudge; and the indicator's text barely moves."""
-        for edge, nudges in ((13.0, 0), (12.0, 1)):  # mean lags of 7.0 and 6.0 s (7 s target)
+        under it nothing either (2026-11-22: a steady source within 15% of its target, 1.05 s
+        here; further short it is built back, `CalmBandTests`); and the indicator's text
+        barely moves."""
+        for edge, nudges in ((13.0, 0), (12.0, 0)):  # mean lags of 7.0 and 6.0 s (7 s target)
             with self.subTest(edge=edge):
                 self.live = self.make()
                 # Under Normal (the 7 s target 2.0.x had): Auto's learned target moves with
@@ -2977,7 +2989,7 @@ class StayLiveTests(LiveSessionCase):
         # a burst, for minutes).
         for _ in range(25):
             self.step(0.25)
-        self.assertEqual(self.playback.rates[:3], [0.99, 0.98, 0.97])  # three steps
+        self.assertEqual(self.playback.rates[:1], [0.97])  # in one step
         self.assertEqual(self.timelines[-1]["nudge"], 0.97)
 
     def test_a_frame_more_at_a_segments_close_is_no_burst_landing(self):
@@ -3960,7 +3972,7 @@ class RateHealthTests(LiveSessionCase):
             self.wait_until(lambda: self.playback.plays)
             feed.run(10.0)
             rates = list(self.playback.rates)
-            self.assertEqual((rates[0], rates[-1], changes(rates)), (0.99, 1.0, 2))
+            self.assertEqual((rates[0], rates[-1], changes(rates)), (0.97, 1.0, 2))
             slowed = [state for state in self.timelines if state["rate"] != 1.0]
             self.assertLessEqual(len(slowed) * 0.25, 6.0 + 0.25)  # its first window
             feed.run(120.0)
@@ -3978,7 +3990,7 @@ class RateHealthTests(LiveSessionCase):
         sid = self.start()
         feed = Feed(self, sid, burst=0.0, edge=12.0, crawl=True).ready().run(10.0)
         rates = list(self.playback.rates)
-        self.assertEqual((rates[0], rates[-1], changes(rates)), (1.0333, 1.0, 2))  # far: 1.10x
+        self.assertEqual((rates[0], rates[-1], changes(rates)), (1.1, 1.0, 2))  # far: 1.10x
         self.assertGreater(self.timelines[-1]["lag"], TARGETS["normal"] + 8.0)  # far behind
         feed.run(120.0)
         self.assertEqual(self.playback.rates, rates)
@@ -4492,7 +4504,8 @@ class BackOffTests(LiveSessionCase):
 
     def test_a_channel_that_cannot_change_speed_builds_its_room_by_waiting(self):
         sid = self.start(latency=AUTO)
-        feed = Feed(self, sid, burst=0.0, edge=4.0, crawl=True).ready().run(24.0)
+        # (Behind by more than the calm band: a nudge to find the rate cannot change.)
+        feed = Feed(self, sid, burst=0.0, edge=5.0, crawl=True).ready().run(24.0)
         rates = list(self.playback.rates)
         self.assertEqual(rates[-1], 1.0)  # rate health: 1x for good
         self.assertGreater(self.dry_stall(feed, after=60.0), TARGETS["normal"] + 1.0)
@@ -4602,14 +4615,14 @@ class MemoryTests(LiveSessionCase):
         with self.assertLogs("services.live.live_session", "INFO") as logs:
             self.tune("A", edge=12.0, crawl=True).run(10.0)
             tried = list(self.playback.rates)
-            self.assertEqual((tried[0], tried[-1], changes(tried)), (1.0333, 1.0, 2))
+            self.assertEqual((tried[0], tried[-1], changes(tried)), (1.1, 1.0, 2))
             self.assertEqual(self.tuning.get("A"), Tuning(rate_locked=True))
             rates = len(self.playback.rates)
             self.tune("A", edge=12.0, crawl=True).run(30.0)
             self.assertEqual(self.playback.rates[rates:], [])  # no other rate asked for
             self.assertGreater(self.timelines[-1]["lag"], TARGETS["normal"] + 3.0)
             self.tune("B", edge=12.0).run(5.0)
-            self.assertEqual(self.playback.rates[rates], 1.0333)  # another channel: as before
+            self.assertEqual(self.playback.rates[rates], 1.1)  # another channel: as before
         # Said once for the channel, beside stay-live's own lines about its nudges (2.13.4).
         said = [line for line in logs.output if "Stay-live" not in line]
         self.assertEqual(len(said), 1, logs.output)
@@ -4700,9 +4713,13 @@ class StallTests(LiveSessionCase):
         feed = Feed(self, sid, burst=burst, edge=12.0, starved=PlaybackState.PLAYING).ready()
         feed.run(150.0)  # 3 s behind the target: one gentle nudge to it (2.1)
         self.assertEqual(self.playback.rates[-1:], [1.0] if self.playback.rates else [])
+        feed.run(round(feed.next_arrival - self.clock.now, 6) + Feed.DT)  # a burst just came
         return feed
 
     def test_a_stall_at_the_edge_reopens_nothing_and_does_not_catch_up_after(self):
+        # VLC runs dry here: its room as the silence began (the bursts' 1.5 at the target) is
+        # the early hold's threshold, which `HoldTests` has (a hold shows the wait sooner).
+        self.patch("_HOLD_ROOM_S", math.inf)
         for seconds in (15.0, 30.0, 60.0):
             with self.subTest(stall=seconds):
                 self.live = self.make()
@@ -7775,7 +7792,8 @@ class FloodTests(LiveSessionCase):
         texts = [text for _, text in said]
         self.assertEqual(len([text for text in texts if "reopens at live" in text]), 1, texts)
         self.assertEqual(len(self.playback.plays), 3)
-        self.assertAlmostEqual(self.timelines[-1]["lag"], TARGETS["normal"], delta=1.0)
+        # (where the reopen landed: within the calm band of a steady source, 1.5 s behind)
+        self.assertAlmostEqual(self.timelines[-1]["lag"], TARGETS["normal"], delta=1.6)
 
     def test_after_the_re_pick_a_stall_far_behind_still_jumps(self):
         # A stall sends nothing ahead: it jumps as ever, the re-pick or not.

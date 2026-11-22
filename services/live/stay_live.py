@@ -16,11 +16,15 @@ of it, what the caller says is `spare` more (Auto's target for a kept burst: VLC
 room it needs that far under it), but for too little room and trouble, built to the target. Only a
 lag outside the band for `_PERSIST_S` (counted while VLC plays: buffering, a reopen or Go live
 start the count again, so such a step is taken into the lag once and never chased) starts a
-nudge: one gentle rate (1.03x behind, 0.97x ahead), ramped in and out in `_RAMP_STEPS` steps
-`_RAMP_EVERY_S` apart (each libVLC rate change retunes its audio: few, small ones) and sized
-to end at the target, then 1x again. At most one nudge per `_BUDGET_S`; a lag outside the
-band before that only widens the band. Two cases act sooner (after `_URGENT_S`, a count that
-VLC's waits pause but do not restart) and beyond the budget: further than `_FAR_S` behind
+nudge: one gentle rate (1.03x behind, 0.97x ahead), set in one step and back in one
+(`_RAMP_STEPS`: each libVLC 3 rate change makes its audio output correct a 40-100 ms drift,
+audibly, 2026-11-22; a ramp of three steps a second apart made three of them each way) and
+sized to end at the target, then 1x again. On a source without a kept burst (`steady`) the
+band before a gentle nudge is wider: behind, at least `_CALM_S` (or the target, if less) and
+`_CALM_SHARE` of the target; short of it, that share (never into the AI captions' floor). At
+most one nudge per `_BUDGET_S`; a lag outside the band before that only widens the band. Two
+cases act sooner (after `_URGENT_S`, a count that VLC's waits pause but do not restart) and
+beyond the budget: further than `_FAR_S` behind
 (1.10x), and less room than `_ROOM_S` when a burst lands (a steady source: at all; 0.95x: VLC
 would run dry, before each burst as 2.0.1 measured, or at any hiccup). And VLC running out of
 room (`trouble()`: a starvation or a stall that ran out the cushion, when Auto raises the
@@ -125,6 +129,11 @@ _BAND_S = 1.0  # the dead band reaches at least this far either side of the targ
 _BAND_SPREAD = 1.5  # ... at least this many times the spread of the lag estimate ...
 _BAND_BURST = 0.25  # ... and behind the target this share of a burst further
 _PERSIST_S = 15.0  # outside the band this long (counted while VLC plays) before a nudge
+# A source without a kept burst (2026-11-22, a steady HLS channel: 0.97x for 1 s short of
+# 12 s, its rate steps heard): a gentle nudge only beyond this far behind the target (or the
+# target, if less: Low stays as it was) ...
+_CALM_S = 1.5
+_CALM_SHARE = 0.15  # ... nor within this share of the target either side
 _FAR_S = 8.0  # further behind the target than this: the nudge is _FAST ...
 _ROOM_S = 0.5  # ... and with less room than this before each burst it is _SLOW ...
 _URGENT_S = 3.0  # ... both after this long outside, whatever the budget
@@ -132,7 +141,7 @@ _GENTLE_UP = 1.03  # the nudge behind the target ...
 _GENTLE_DOWN = 0.97  # ... and the one that adds room ahead of it
 _FAST = 1.10
 _SLOW = 0.95
-_RAMP_STEPS = 3  # a nudge ramps in (and out) in this many equal steps ...
+_RAMP_STEPS = 1  # a nudge ramps in (and out) in this many equal steps (one: see above) ...
 _RAMP_EVERY_S = 1.0  # ... this far apart
 _OWED_MIN_S = 0.5  # a slow-down owed after trouble is made for a deficit beyond this ...
 _OWED_HOLD_S = 1.0  # ... once it lasted this long while VLC plays (right after a stall the
@@ -558,6 +567,10 @@ class StayLive:
         self.burst = 0.0
         self.spread = 0.0
         self.slack = 0.0
+        # Set by the caller: the source has no burst the lag filter keeps (the calm band,
+        # `_calm`), and the AI captions' floor the lag is not to fall short of (0.0: off).
+        self.steady = False
+        self.caption_floor = 0.0
         # Set by the caller: how far under the target the lag may be while VLC still has the
         # room it needs (Auto with a burst the lag filter keeps: the target's margin over that
         # burst's own room). Only a lag under the target by more than this, beyond the band,
@@ -648,6 +661,16 @@ class StayLive:
         """How far the lag may be from the target on `side` (+1 behind, -1 ahead)."""
         band = max(_BAND_S, _BAND_SPREAD * self.spread, self._wide)
         return band + (_BAND_BURST * self.burst if side > 0 else 0.0)
+
+    def _calm(self, side: int) -> float:
+        """How far from the target a steady source's lag may be on `side` before a gentle
+        nudge (`_CALM_S`, `_CALM_SHARE`; 0.0: the band alone)."""
+        if not self.steady:
+            return 0.0
+        share = _CALM_SHARE * self.target
+        if side > 0:
+            return max(min(_CALM_S, self.target), share)
+        return min(share, max(0.0, self.target - self.caption_floor))
 
     def _centre(self, side: float, *, urgent: bool = False) -> float:
         """The target on `side`: behind it, as high as the burst reported now would set it;
@@ -1113,8 +1136,8 @@ class StayLive:
         room = lag - self._centre(-1, urgent=True)  # short of room: built to the target
         short = room < -_BAND_S and self._short(lag) and not self._accepting
         tolerated = self._accepting or self._tolerant  # a start's rest, a jump's pick
-        under = short or (ahead < -self.band(-1) and not tolerated)
-        side = 1 if far or behind > self.band(1) else -1 if under else 0
+        under = short or (ahead < -max(self.band(-1), self._calm(-1)) and not tolerated)
+        side = 1 if far or behind > max(self.band(1), self._calm(1)) else -1 if under else 0
         if side > 0 and self.flooding:
             self.absorb()  # a backlog still arriving: judged once arrivals settle
             return False
@@ -1229,6 +1252,10 @@ class StayLive:
             nudge.peak = _SLOW  # short of room after all (the burst grew)
             nudge.reason = self._room_reason() + " after all"
         reached = sign * error <= 0.0  # at the target already (a step, say)
+        if reached and sign > 0 and self._owed and not nudge.ending:
+            # Trouble took the lag under the target: a catch-up it cut, which counts against
+            # the budget only if no slow-down follows (in one step it ends here at once).
+            nudge.cut = nudge.cut or not nudge.spent
         # A gentle nudge ends once its size is taken: the estimate's own wander is no reason
         # to go on. An urgent one goes on to the target: it may have been sized on a lag that
         # was still settling, or the lag stepped (a backlog) or the target moved since, and
