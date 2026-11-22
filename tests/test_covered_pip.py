@@ -16,7 +16,7 @@ from PySide6.QtWidgets import QApplication, QWidget  # noqa: E402
 from services.config_manager import ConfigManager  # noqa: E402
 from services.playback import PlaybackState  # noqa: E402
 from tests import test_config_tv  # noqa: E402
-from tests.test_desktop_pip import Config, PageLender, mouse  # noqa: E402
+from tests.test_desktop_pip import Config, mouse  # noqa: E402
 from tests.test_tv_window import WindowCase  # noqa: E402
 from ui import desktop_pip  # noqa: E402
 from ui.desktop_pip import COVERED, DESKTOP, DesktopPip  # noqa: E402
@@ -40,7 +40,6 @@ class CoveredPipTests(unittest.TestCase):
         self.page.resize(1280, 720)
         self.main, self.small = QWidget(self.page), QWidget(self.page)
         self.frame = PipFrame(self.page, self.main, self.small, Config())
-        self.lender = PageLender(self.window, self.page, self.frame)
         self.others = False  # another app's window covers the whole TV window
         self.cant_tell = False  # `seen` answers None
         self.active = False  # QiTV is the active app
@@ -57,8 +56,8 @@ class CoveredPipTests(unittest.TestCase):
         options: dict[str, Any] = dict(
             on_active_space=self.space,
             may_float=lambda: True,
-            lend=self.lender.lend,
-            take_back=self.lender.take_back,
+            lend=self.frame.lend_large,
+            take_back=self.frame.take_back,
             place=lambda: QRect(FLOATING_RECT),
             join_all_spaces=lambda _widget: None,
             seen=self.seen,
@@ -115,7 +114,7 @@ class CoveredPipTests(unittest.TestCase):
         self.pip.check()
         self.assertTrue(self.pip.floating())
         floating = self.pip.floating_window()
-        self.assertIs(self.page.parentWidget(), floating)
+        self.assertIs(self.main.parentWidget(), floating)
         self.assertEqual(floating.geometry(), FLOATING_RECT)
         self.assertEqual(self.changes, [True])
 
@@ -125,7 +124,7 @@ class CoveredPipTests(unittest.TestCase):
         self.others = False  # the other app's window moved away (or a sliver of QiTV shows)
         self.pip.check()
         self.assertFalse(self.pip.floating())
-        self.assertIs(self.page.parentWidget(), self.window)
+        self.assertIs(self.main.parentWidget(), self.page)
         self.assertEqual(self.main.geometry(), self.page.rect())
         self.assertTrue(floating.isHidden())
         self.assertEqual(self.changes, [True, False])
@@ -164,7 +163,7 @@ class CoveredPipTests(unittest.TestCase):
         self.window.setWindowState(Qt.WindowState.WindowNoState)  # back from the Dock
         self.pip.check()
         self.assertFalse(self.pip.floating())
-        self.assertIs(self.page.parentWidget(), self.window)
+        self.assertIs(self.main.parentWidget(), self.page)
 
     def test_qitv_s_own_dialogs_and_menus_never_float_it(self):
         self.active = True  # QiTV is the active app: its dialog or menu is over the window
@@ -252,10 +251,10 @@ class CoveredPipTests(unittest.TestCase):
             mouse(
                 self.main, QEvent.Type.MouseButtonRelease, QPoint(160, 90), Qt.MouseButton.NoButton
             )
-            self.assertTrue(self.pip.floating())  # a click alone does nothing here
-            self.pip.come_back()  # a double-click (the window's, 2.13.5), its controls' button
+            self.assertTrue(self.pip.floating())  # a click alone does nothing
+            mouse(self.main, QEvent.Type.MouseButtonDblClick, QPoint(160, 90))
         self.assertFalse(self.pip.floating())
-        self.assertIs(self.page.parentWidget(), self.window)
+        self.assertIs(self.main.parentWidget(), self.page)
         self.assertFalse(self.window.isMinimized())
         self.assertEqual(self.activated, 1)  # QiTV in front of the app that covered it
         raised.assert_called_once()
@@ -263,7 +262,7 @@ class CoveredPipTests(unittest.TestCase):
 
     def test_after_a_double_click_nothing_floats_before_the_window_was_seen(self):
         self.covered_for(SETTLE_S)
-        self.pip.come_back()  # a double-click
+        mouse(self.main, QEvent.Type.MouseButtonDblClick, QPoint(160, 90))
         self.assertFalse(self.pip.floating())
         for _ in range(4):  # macOS hasn't brought QiTV forward (yet): the picture stays
             self.pip.check()
@@ -285,7 +284,7 @@ class CoveredPipTests(unittest.TestCase):
         self.allowed = False
         self.pip.check()
         self.assertFalse(self.pip.floating())
-        self.assertIs(self.page.parentWidget(), self.window)
+        self.assertIs(self.main.parentWidget(), self.page)
 
     def test_the_multiview_lends_nothing(self):
         self.frame.suspend()
@@ -467,11 +466,11 @@ class CoveredPipWindowTests(WindowCase):
             pip.check()
             state.now += SETTLE_S
             pip.check()
-            self.assertIs(window.player_page.parentWidget(), pip.floating_window())
+            self.assertIsNot(window.surface.parentWidget(), window.player_page)
             self.assertTrue(window.floating_note.isVisible())
             state.seen = True
             pip.check()
-            self.assertIs(window.player_page.parentWidget(), window.pages)
+            self.assertIs(window.surface.parentWidget(), window.player_page)
             self.assertFalse(window.floating_note.isVisible())
             # Minimized: asked at once (the state change), floating once it settled.
             window.showMinimized()
@@ -479,10 +478,10 @@ class CoveredPipWindowTests(WindowCase):
             self.assertIsNotNone(pip._since)
             state.now += SETTLE_S
             pip.check()
-            self.assertIs(window.player_page.parentWidget(), pip.floating_window())
+            self.assertIsNot(window.surface.parentWidget(), window.player_page)
             window.showNormal()  # back from the Dock: back at once
             self.app.processEvents()
-            self.assertIs(window.player_page.parentWidget(), window.pages)
+            self.assertIs(window.surface.parentWidget(), window.player_page)
             self.assertEqual(pip.reason(), COVERED)
 
     def test_qitv_s_own_activation_asks_at_once(self):

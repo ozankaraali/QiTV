@@ -9,17 +9,14 @@ os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 from PySide6.QtCore import QEvent, QPoint, QPointF, QRect, QSize, Qt  # noqa: E402
 from PySide6.QtGui import QMouseEvent  # noqa: E402
-from PySide6.QtTest import QTest  # noqa: E402
 from PySide6.QtWidgets import QApplication, QWidget  # noqa: E402
 from timer_fixtures import elapse, wait_until  # noqa: E402
 
 from services import picture  # noqa: E402
-from services.catalog import ALL_GROUP_ID  # noqa: E402
 from services.playback import NullSession  # noqa: E402
 from tests.test_tv_window import WindowCase  # noqa: E402
 from ui import desktop_pip  # noqa: E402
 from ui.desktop_pip import DesktopPip, FloatingPlayer, corner_rect  # noqa: E402
-from ui.keymap import Action  # noqa: E402
 from ui.pip import PipFrame  # noqa: E402
 
 
@@ -58,54 +55,30 @@ def mouse(widget, kind, at, buttons=Qt.MouseButton.LeftButton):
     QApplication.sendEvent(widget, event)
 
 
-class PageLender:
-    """What the TV window lends the floating window: the player page (PageStack.lend_player),
-    whose large picture holds its picture small meanwhile (PipFrame.set_floating)."""
-
-    def __init__(self, window: QWidget, page: QWidget, frame: PipFrame) -> None:
-        self.window, self.page, self.frame = window, page, frame
-
-    def lend(self):
-        return self.page if self.frame.set_floating(True) else None
-
-    def take_back(self, page):
-        page.setParent(self.window)
-        page.setGeometry(self.window.rect())
-        page.show()
-        self.frame.set_floating(False)
-
-
 class PipCase(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
         cls.app = QApplication.instance() or QApplication([])
 
     def setUp(self):
-        settle = mock.patch.object(desktop_pip, "FLOAT_SETTLE_MS", 0)  # (its own tests: on)
-        settle.start()
-        self.addCleanup(settle.stop)
         self.window = QWidget()
         self.window.resize(1280, 720)
         self.page = QWidget(self.window)
         self.page.resize(1280, 720)
-        self.main, self.small = Picture(self.page), Picture(self.page)
+        self.main, self.small = QWidget(self.page), QWidget(self.page)
         self.frame = PipFrame(self.page, self.main, self.small, Config())
-        self.lender = PageLender(self.window, self.page, self.frame)
         self.shown: bool | None = True  # the window's desktop shows
         self.allowed = True
         self.joined: list[QWidget] = []
         self.changes: list[bool] = []
-        self.keys = KeyTarget()
-        self.addCleanup(self.keys.deleteLater)  # (never after the QApplication: a crash at exit)
         self.pip = DesktopPip(
             self.window,
             on_active_space=lambda _window: self.shown,
             may_float=lambda: self.allowed,
-            lend=self.lender.lend,
-            take_back=self.lender.take_back,
+            lend=self.frame.lend_large,
+            take_back=self.frame.take_back,
             place=lambda: QRect(900, 500, 320, 180),
             join_all_spaces=self.joined.append,
-            keys=self.keys,
         )
         self.pip.floatingChanged.connect(self.changes.append)
         self.addCleanup(self.pip.close)
@@ -126,54 +99,22 @@ class PipCase(unittest.TestCase):
         mouse(self.main, QEvent.Type.MouseButtonRelease, end, Qt.MouseButton.NoButton)
 
 
-class KeyTarget(QWidget):
-    """The TV window's part: the keys, and what is dropped, it is handed."""
-
-    def __init__(self):
-        super().__init__()
-        self.setAcceptDrops(True)
-        self.keys: list[int] = []
-        self.drops: list[QEvent.Type] = []
-
-    def keyPressEvent(self, event):
-        self.keys.append(event.key())
-        event.accept()
-
-    def dragEnterEvent(self, event):
-        self.drops.append(event.type())
-        event.acceptProposedAction()
-
-
-class Picture(QWidget):
-    """A surface's part: the mouse that reaches it."""
-
-    def __init__(self, parent):
-        super().__init__(parent)
-        self.events: list[QEvent.Type] = []
-
-    def event(self, event):
-        if isinstance(event, QMouseEvent):
-            self.events.append(event.type())
-        return super().event(event)
-
-
 class DesktopPipTests(PipCase):
-    def test_another_desktop_floats_the_player_page_and_its_own_puts_it_back(self):
+    def test_another_desktop_floats_the_large_picture_and_its_own_puts_it_back(self):
         self.away()
         floating = self.pip._floating
         self.assertTrue(self.pip.floating())
-        self.assertIs(self.page.parentWidget(), floating)  # the page: its PiP and all
-        self.assertIs(self.main.parentWidget(), self.page)
+        self.assertIs(self.main.parentWidget(), floating)
         self.assertEqual(floating.geometry(), QRect(900, 500, 320, 180))
-        self.assertEqual(self.page.geometry(), floating.rect())  # it fills the small window
-        self.assertEqual(self.main.geometry(), self.page.rect())
-        self.assertTrue(self.frame.shows_small("main"))  # filled to the last pixel there
+        self.assertEqual(self.main.geometry(), floating.rect())  # it fills the small window
         self.assertEqual(set(self.joined), {floating})  # on every desktop (before and after show)
+        self.page.resize(1000, 600)  # the player lays out again: the lent one is left alone
+        self.assertIs(self.main.parentWidget(), floating)
+        self.assertEqual(self.main.geometry(), floating.rect())
         self.back()
         self.assertFalse(self.pip.floating())
-        self.assertIs(self.page.parentWidget(), self.window)
+        self.assertIs(self.main.parentWidget(), self.page)
         self.assertEqual(self.main.geometry(), self.page.rect())
-        self.assertFalse(self.frame.shows_small("main"))
         self.assertTrue(floating.isHidden())
         self.assertEqual(self.changes, [True, False])
 
@@ -184,22 +125,21 @@ class DesktopPipTests(PipCase):
         self.allowed, self.shown = True, None
         self.pip.check()
         self.assertFalse(self.pip.floating())
-        self.assertIs(self.page.parentWidget(), self.window)
+        self.assertIs(self.main.parentWidget(), self.page)
 
     def test_the_multiview_lends_nothing(self):
         self.frame.suspend()  # the grid lays the surfaces out
         self.away()
         self.assertFalse(self.pip.floating())
 
-    def test_after_a_swap_the_large_one_holds_its_picture_small(self):
+    def test_after_a_swap_the_large_one_floats(self):
         self.frame.show_pip()
         self.frame.set_large("pip")  # the small surface is the large one now
         self.away()
-        self.assertIs(self.page.parentWidget(), self.pip._floating)
-        self.assertEqual(self.small.geometry(), self.page.rect())  # the large one fills it
-        self.assertTrue(self.frame.shows_small("pip"))
+        self.assertIs(self.small.parentWidget(), self.pip._floating)
+        self.assertIs(self.main.parentWidget(), self.page)  # the small picture stays
         self.back()
-        self.assertFalse(self.frame.shows_small("pip"))
+        self.assertIs(self.small.parentWidget(), self.page)
         self.assertEqual(self.small.geometry(), self.page.rect())
 
     def test_watching_stops_and_puts_the_picture_back(self):
@@ -208,40 +148,41 @@ class DesktopPipTests(PipCase):
         self.away()
         self.pip.watch(False)  # fullscreen left
         self.assertFalse(self.pip._timer.isActive())
-        self.assertIs(self.page.parentWidget(), self.window)
+        self.assertIs(self.main.parentWidget(), self.page)
 
-    def test_clicks_on_the_picture_are_the_windows_and_coming_back_brings_its_desktop(self):
-        # 2.13.5: a press, a click, a drag and a double-click on the picture reach it, as in the
-        # window (the TV window's: the channel list, a drag that moves the small window, back);
-        # never a way back by themselves.
-        main = self.main
+    def test_a_click_does_nothing_and_a_double_click_brings_the_fullscreen_desktop(self):
         self.away()
         floating = self.pip._floating
-        mouse(main, QEvent.Type.MouseButtonPress, QPoint(160, 90))
-        mouse(main, QEvent.Type.MouseMove, QPoint(200, 120))
-        mouse(main, QEvent.Type.MouseButtonRelease, QPoint(200, 120), Qt.MouseButton.NoButton)
-        mouse(main, QEvent.Type.MouseButtonDblClick, QPoint(160, 90))
-        self.assertEqual(
-            main.events,
-            [
-                QEvent.Type.MouseButtonPress,
-                QEvent.Type.MouseMove,
-                QEvent.Type.MouseButtonRelease,
-                QEvent.Type.MouseButtonDblClick,
-            ],
-        )
-        self.assertTrue(self.pip.floating())
-        self.assertEqual(floating.geometry(), QRect(900, 500, 320, 180))  # (not its move)
         with (
             mock.patch.object(self.window, "raise_") as raised,
             mock.patch.object(self.window, "activateWindow") as activated,
         ):
-            self.pip.come_back()  # its double-click, as the window has it
+            # A press to grab it, released where it was: never back to fullscreen.
+            mouse(self.main, QEvent.Type.MouseButtonPress, QPoint(160, 90))
+            mouse(
+                self.main, QEvent.Type.MouseButtonRelease, QPoint(160, 90), Qt.MouseButton.NoButton
+            )
+            activated.assert_not_called()
+            self.assertTrue(self.pip.floating())
+            mouse(self.main, QEvent.Type.MouseButtonDblClick, QPoint(160, 90))
         raised.assert_called_once()
         activated.assert_called_once()
         self.assertFalse(self.pip.floating())  # back at once, while macOS brings the desktop
-        self.assertIs(self.page.parentWidget(), self.window)
+        self.assertIs(self.main.parentWidget(), self.page)
         self.assertTrue(floating.isHidden())
+
+    def test_a_drag_moves_the_floating_picture_and_is_no_click(self):
+        self.away()
+        floating = self.pip._floating
+        start = floating.pos()
+        with mock.patch.object(self.window, "activateWindow") as activated:
+            mouse(self.main, QEvent.Type.MouseButtonPress, QPoint(10, 10))
+            mouse(self.main, QEvent.Type.MouseMove, QPoint(60, 40))
+            mouse(
+                self.main, QEvent.Type.MouseButtonRelease, QPoint(60, 40), Qt.MouseButton.NoButton
+            )
+        self.assertEqual(floating.pos(), start + QPoint(50, 30))
+        activated.assert_not_called()
 
     def test_one_away_answer_floats_nothing(self):
         self.shown = False
@@ -258,23 +199,22 @@ class DesktopPipTests(PipCase):
         self.allowed = False  # it stopped, or the Library opened
         self.pip.check()
         self.assertFalse(self.pip.floating())
-        self.assertIs(self.page.parentWidget(), self.window)
+        self.assertIs(self.main.parentWidget(), self.page)
 
     def test_the_multiview_takes_the_surfaces_only_once_the_picture_is_back(self):
         self.away()
         self.frame.suspending.connect(self.pip.dock)  # (TVWindow connects them)
         self.frame.suspend()
         self.assertFalse(self.pip.floating())
-        self.assertIs(self.page.parentWidget(), self.window)
+        self.assertIs(self.main.parentWidget(), self.page)
         self.assertFalse(self.main.isHidden())
-        self.assertFalse(self.frame.floating())
 
     def test_the_wheel_over_the_floating_picture_does_nothing(self):
         from PySide6.QtGui import QWheelEvent
 
         self.away()
         steps = []
-        self.main.wheelEvent = lambda event: steps.append(event)  # the window's (a zap)
+        self.main.wheelEvent = lambda event: steps.append(event)  # the shell's (a zap)
         event = QWheelEvent(
             QPointF(10, 10),
             QPointF(self.main.mapToGlobal(QPoint(10, 10))),
@@ -288,17 +228,14 @@ class DesktopPipTests(PipCase):
         QApplication.sendEvent(self.main, event)
         self.assertEqual(steps, [])
 
-    def test_a_swap_while_it_floats_happens_in_the_small_window(self):
+    def test_a_swap_while_it_floats_leaves_it_where_it_is(self):
         self.frame.show_pip()
         self.away()
         floating = self.pip._floating
-        self.frame.set_large("pip")  # the small one is large now, in the small window
-        self.assertEqual(self.small.geometry(), floating.rect())
-        self.assertTrue(self.frame.shows_small("pip"))
-        self.assertTrue(self.frame.shows_small("main"))  # the picture in picture's, in its corner
+        self.frame.set_large("pip")  # the small one is large now; the lent one stays out
+        self.assertEqual(self.main.geometry(), floating.rect())
         self.back()
-        self.assertIs(self.page.parentWidget(), self.window)
-        self.assertEqual(self.small.geometry(), self.page.rect())
+        self.assertIs(self.main.parentWidget(), self.page)
 
     def test_a_corner_drag_resizes_it_in_16_by_9_and_the_other_corner_stays(self):
         places = []
@@ -313,7 +250,6 @@ class DesktopPipTests(PipCase):
         self.assertEqual(geometry.topLeft(), start.topLeft())
         self.assertEqual(places, [geometry])
         self.assertEqual(self.main.geometry(), floating.rect())  # the picture fills it
-        self.assertEqual(self.main.events, [])  # the resize's, not the picture's
 
     def test_the_top_left_corner_keeps_the_bottom_right_one(self):
         self.away()
@@ -348,54 +284,15 @@ class DesktopPipTests(PipCase):
         mouse(self.main, QEvent.Type.MouseMove, QPoint(160, 90), Qt.MouseButton.NoButton)
         self.assertEqual(self.main.cursor().shape(), cursor.ArrowCursor)
 
-    def test_a_resize_is_remembered_and_a_click_on_an_edge_does_nothing(self):
+    def test_a_move_or_a_resize_is_remembered(self):
         remembered = []
         self.pip._remember = remembered.append
         self.pip.close()  # a new floating window connects to it
         self.away()
-        self.drag(QPoint(318, 90), QPoint(400, 90))
+        self.drag(QPoint(160, 90), QPoint(200, 120))
         self.assertEqual(remembered, [self.pip._floating.geometry()])
-        self.drag(QPoint(2, 90), QPoint(2, 90))  # a click on the left edge: no resize, no click
-        self.assertEqual(len(remembered), 1)
-        self.assertEqual(self.main.events, [])
 
-    def test_a_desktop_switch_still_running_never_docks_the_picture(self):
-        # The owner (19:06, 19:07): swiped away from fullscreen, the picture floated and came
-        # back 0.4-0.7 s later, floated again, three to five times: macOS answers "its desktop
-        # shows" once or twice while it still switches desktops. Right after it floats, that
-        # answer docks it only once it has held a moment.
-        now = {"t": 100.0}
-        self.pip._clock = lambda: now["t"]
-        with mock.patch.object(desktop_pip, "FLOAT_SETTLE_MS", 1500):
-            self.away()  # it floats
-            self.assertTrue(self.pip.floating())
-            now["t"] += 0.5
-            self.shown = True
-            self.pip.check()  # the switch's animation answers "shown"
-            self.assertTrue(self.pip.floating())
-            now["t"] += 0.3
-            self.shown = False
-            self.pip.check()  # and "away" again: the switch is over
-            self.assertTrue(self.pip.floating())
-            now["t"] += 0.4
-            self.shown = True
-            self.pip.check()
-            self.assertTrue(self.pip.floating())
-            now["t"] += desktop_pip.SHOWN_HOLD_MS / 1000  # its desktop really shows: back
-            self.pip.check()
-            self.assertFalse(self.pip.floating())
-            self.assertEqual(self.changes, [True, False])  # one float, one dock: no loop
-
-    def test_once_settled_its_own_desktop_brings_it_back_at_once(self):
-        now = {"t": 100.0}
-        self.pip._clock = lambda: now["t"]
-        with mock.patch.object(desktop_pip, "FLOAT_SETTLE_MS", 1500):
-            self.away()
-            now["t"] += 2.0  # it floated a while ago
-            self.back()
-            self.assertFalse(self.pip.floating())
-
-    def test_each_way_back_says_why_in_the_log(self):
+    def test_each_way_back_says_why_in_the_log(self):  # 2.13.5: the next report says
         self.away()
         with self.assertLogs("ui.desktop_pip", "INFO") as logs:
             self.back()
@@ -404,42 +301,6 @@ class DesktopPipTests(PipCase):
         with self.assertLogs("ui.desktop_pip", "INFO") as logs:
             self.pip.dock("the Library")
         self.assertIn("back in the window: the Library", logs.output[-1])
-
-    def test_after_coming_back_it_floats_again_only_once_its_desktop_showed(self):
-        # Review N-1: macOS still switches desktops as the window comes back (Settings, Esc, a
-        # double-click): answers "away" meanwhile must not float the page again (a flicker).
-        self.pip.watch(True)
-        self.away()
-        with (
-            mock.patch.object(self.window, "raise_"),
-            mock.patch.object(self.window, "activateWindow"),
-        ):
-            self.pip.come_back()
-        self.assertFalse(self.pip.floating())
-        self.pip.check()  # still "another desktop" during the switch
-        self.pip.check()
-        self.pip.check()
-        self.assertFalse(self.pip.floating())
-        self.back()  # its desktop showed
-        self.away()  # a later desktop change floats it again, as ever
-        self.assertTrue(self.pip.floating())
-
-    def test_the_hover_poll_runs_only_while_qitv_is_not_the_active_app(self):  # review N-2
-        state = {"active": True}
-        self.pip._hover = lambda: None
-        self.pip._app_active = lambda: state["active"]
-        self.away()
-        self.assertFalse(self.pip._hover_poll.isActive())  # Qt's own moves arrive
-        state["active"] = False
-        self.pip.activity_changed()
-        self.assertTrue(self.pip._hover_poll.isActive())
-        state["active"] = True
-        self.pip.activity_changed()
-        self.assertFalse(self.pip._hover_poll.isActive())
-        state["active"] = False
-        self.pip.activity_changed()
-        self.back()
-        self.assertFalse(self.pip._hover_poll.isActive())
 
     def test_the_second_away_answer_is_asked_soon_not_a_poll_later(self):
         from timer_fixtures import wait_until
@@ -461,26 +322,18 @@ class DesktopPipTests(PipCase):
     def test_closing_puts_the_picture_back_and_drops_the_window(self):
         self.away()
         self.pip.close()
-        self.assertIs(self.page.parentWidget(), self.window)
+        self.assertIs(self.main.parentWidget(), self.page)
         self.assertIsNone(self.pip._floating)
 
-    def test_the_floating_window_shows_without_the_keyboard_and_its_keys_are_the_windows(self):
-        player = FloatingPlayer()
-        flags = player.windowFlags()
+    def test_the_floating_window_never_takes_the_keyboard(self):
+        flags = FloatingPlayer().windowFlags()
         for flag in (
             Qt.WindowType.Tool,  # a panel: on macOS a press leaves QiTV inactive
             Qt.WindowType.FramelessWindowHint,
             Qt.WindowType.WindowStaysOnTopHint,
+            Qt.WindowType.WindowDoesNotAcceptFocus,
         ):
             self.assertTrue(flags & flag, flag)
-        # Shown, it takes nothing from the app in front; pressed, it takes the keys (2.13.5:
-        # the same keys as the window's, however it floated).
-        self.assertTrue(player.testAttribute(Qt.WidgetAttribute.WA_ShowWithoutActivating))
-        self.assertFalse(flags & Qt.WindowType.WindowDoesNotAcceptFocus)
-        player.deleteLater()
-        self.away()
-        QTest.keyClick(self.pip._floating, Qt.Key.Key_Up)
-        self.assertEqual(self.keys.keys, [Qt.Key.Key_Up])
 
     def test_the_corner_is_a_quarter_of_the_screen_wide_in_16_by_9(self):
         rect = corner_rect(QRect(0, 25, 1920, 1055), 1920)
@@ -504,8 +357,7 @@ class FloatingShapeTests(PipCase):
         self.away()
         geometry = self.pip._floating.geometry()
         self.assertEqual(geometry, QRect(self.place.topLeft(), QSize(277, 208)))
-        self.assertEqual(self.page.geometry(), self.pip._floating.rect())  # the picture fills it
-        self.assertEqual(self.main.geometry(), self.page.rect())
+        self.assertEqual(self.main.geometry(), self.pip._floating.rect())  # the picture fills it
 
     def test_in_the_bottom_right_corner_that_corner_stays(self):
         width, height = 320, 180
@@ -547,11 +399,11 @@ class FloatingShapeTests(PipCase):
     def test_a_shape_that_comes_during_a_press_waits_for_its_release(self):
         self.away()
         floating = self.pip._floating
-        mouse(self.main, QEvent.Type.MouseButtonPress, QPoint(275, 100))  # its right edge
+        mouse(self.main, QEvent.Type.MouseButtonPress, QPoint(100, 100))
         self.ratio = 16 / 9
         self.pip.check()
         self.assertEqual(floating.size(), QSize(277, 208))  # not under the pointer
-        mouse(self.main, QEvent.Type.MouseButtonRelease, QPoint(275, 100), Qt.MouseButton.NoButton)
+        mouse(self.main, QEvent.Type.MouseButtonRelease, QPoint(100, 100), Qt.MouseButton.NoButton)
         self.assertEqual(floating.size(), QSize(320, 180))
 
     def test_it_stays_on_its_screen(self):
@@ -571,13 +423,15 @@ class FloatingShapeTests(PipCase):
         self.assertTrue(
             wait_until(lambda: picture.same_shape(floating.width() / floating.height(), 4 / 3))
         )
+        self.assertEqual(self.main.geometry(), floating.rect())  # the picture fills it
         floating.setGeometry(QRect(self.place.topLeft(), QSize(120, 90)))  # under the smallest
         smallest = QSize(*picture.box_size(desktop_pip.MIN_WIDTH, 4 / 3))
         self.assertTrue(wait_until(lambda: floating.size() == smallest))
 
-    def test_macos_keeps_its_shape_while_it_resizes(self):
-        # Its own resize, on macOS: the window's content aspect ratio, its picture's shape (or
-        # the one it has while that is not known), told again as the shape changes.
+    def test_macos_keeps_its_shape_between_the_smallest_window_and_the_screen(self):
+        # Its own resize, on macOS: the window's content aspect ratio (its picture's shape, or
+        # the one it has while that is not known), never under the smallest window nor over
+        # the screen, told again as the shape changes.
         shapes = []
         self.pip._lock_shape = lambda widget, shape, smallest, largest: shapes.append(
             (widget, shape, smallest, largest)
@@ -586,7 +440,6 @@ class FloatingShapeTests(PipCase):
         floating = self.pip._floating
         self.assertTrue(shapes)
         self.assertEqual(shapes[-1][:2], (floating, 4 / 3))
-        # Never smaller than the smallest window, nor larger than the screen (review M-1).
         self.assertEqual(shapes[-1][2], QSize(*picture.box_size(desktop_pip.MIN_WIDTH, 4 / 3)))
         self.assertEqual(shapes[-1][3], self.screen.size())
         self.ratio = 16 / 9  # a zap to a 16:9 channel
@@ -596,7 +449,7 @@ class FloatingShapeTests(PipCase):
         self.pip.check()
         self.assertAlmostEqual(shapes[-1][1], floating.width() / floating.height(), delta=0.01)
 
-    def test_a_resize_macos_made_is_remembered_once_it_ends_in_shape(self):  # review M-2
+    def test_a_resize_macos_made_is_remembered_once_it_ends_in_shape(self):
         remembered = []
         self.pip._remember = remembered.append
         self.away()
@@ -611,7 +464,7 @@ class FloatingShapeTests(PipCase):
         elapse(desktop_pip.SNAP_MS + 100)
         self.assertEqual(len(remembered), 1)
 
-    def test_a_new_shape_waits_while_macos_resizes_it(self):  # review M-1
+    def test_a_new_shape_waits_while_macos_resizes_it(self):
         self.away()
         floating = self.pip._floating
         floating.setGeometry(QRect(self.place.topLeft(), QSize(400, 300)))  # an edge dragged
@@ -622,455 +475,14 @@ class FloatingShapeTests(PipCase):
             wait_until(lambda: picture.same_shape(floating.width() / floating.height(), 16 / 9))
         )
 
-    def test_an_edge_press_gives_the_keys_back_to_the_window(self):  # review M-6
+    def test_an_edge_press_gives_the_keys_back_to_the_window(self):
         self.away()
-        with mock.patch("ui.desktop_pip.reclaim_first_responder") as reclaimed:
-            self.drag(QPoint(318, 90), QPoint(330, 90))
+        with mock.patch("ui.small_window.reclaim_first_responder") as reclaimed:
+            self.drag(QPoint(275, 100), QPoint(290, 100))
         reclaimed.assert_called_with(self.pip._floating)
-
-    def test_it_hands_the_window_what_is_dropped_on_it(self):  # review M-4
-        from PySide6.QtCore import QMimeData
-        from PySide6.QtGui import QDragEnterEvent
-
-        self.away()
-        floating = self.pip._floating
-        self.assertTrue(floating.acceptDrops())
-        data = QMimeData()
-        data.setText("http://example.invalid/stream")
-        event = QDragEnterEvent(
-            QPoint(10, 10),
-            Qt.DropAction.CopyAction,
-            data,
-            Qt.MouseButton.NoButton,
-            Qt.KeyboardModifier.NoModifier,
-        )
-        QApplication.sendEvent(floating, event)
-        self.assertEqual(self.keys.drops, [QEvent.Type.DragEnter])
-
-    def test_while_qitv_is_not_the_active_app_the_pointer_over_it_is_its_hover(self):
-        # Review I-1: Qt drops the moves without a button while QiTV is not the active app
-        # (qnsview_mouse.mm), and a desktop change or a covered window floats it exactly then.
-        hovers, state = [], {"at": QPoint(0, 0), "active": False}
-        self.pip._hover = lambda: hovers.append(True)
-        self.pip._cursor_pos = lambda: state["at"]
-        self.pip._app_active = lambda: state["active"]
-        self.away()
-        floating = self.pip._floating
-        inside = floating.geometry().center()
-        self.pip._poll_hover()
-        self.assertEqual(hovers, [])  # the pointer elsewhere
-        state["at"] = inside
-        self.pip._poll_hover()
-        self.assertEqual(hovers, [True])
-        self.pip._poll_hover()
-        self.assertEqual(hovers, [True])  # resting: no move
-        state["at"] = inside + QPoint(5, 3)
-        self.assertTrue(wait_until(lambda: len(hovers) == 2, desktop_pip.HOVER_MS * 4))
-        state["active"] = True  # QiTV in front: Qt's own moves arrive
-        state["at"] = inside + QPoint(9, 9)
-        self.pip._poll_hover()
-        self.assertEqual(len(hovers), 2)
-        self.back()
-        self.assertFalse(self.pip._hover_poll.isActive())
-
-
-class OnePictureInPictureTests(WindowCase):
-    """2.13.5, the owner: "fullscreen switch pip and regular pip are not the same, one has hud
-    the other does not have". On macOS the mini player (Alt+P, the controls' button) and the
-    picture a desktop change floats are one window: the player page in it, under the window's
-    own controls, with the same hover and keys however it was entered."""
-
-    def setUp(self):
-        super().setUp()
-        macos = mock.patch("ui.tv_window._macos_desktops", return_value=True)
-        macos.start()
-        self.addCleanup(macos.stop)
-        settle = mock.patch.object(desktop_pip, "FLOAT_SETTLE_MS", 0)  # (DesktopPipTests': on)
-        settle.start()
-        self.addCleanup(settle.stop)
-        self.shown = True  # the fullscreen window's desktop shows
-        pip = self.window.desktop_pip
-        pip._on_active_space = lambda _window: self.shown
-        pip._may_float = lambda: True  # (no libVLC here: nothing plays)
-
-    def float_from_fullscreen(self):
-        window = self.window
-        window.showFullScreen()
-        self.app.processEvents()
-        self.shown = False
-        for _ in range(desktop_pip.AWAY_CHECKS):
-            window.desktop_pip.check()
-        self.app.processEvents()
-
-    def assert_the_small_window(self, floating):
-        """The player page in `floating` under the window's own controls: a move over the
-        picture reaches them, its keys are the window's, its button goes back."""
-        window = self.window
-        self.assertTrue(floating.isVisible())
-        self.assertTrue(floating.isAncestorOf(window.surface))
-        self.assertTrue(floating.isAncestorOf(window.pip_surface))  # the page, its PiP too
-        drawer = window.overlays.drawer
-        if not drawer.isVisible():
-            window.controller.handle(Action.OPEN_DRAWER)
-        self.assertTrue(wait_until(drawer.isVisible))
-        self.assertTrue(window.host.isVisible())
-        self.assertEqual(window.host.geometry(), floating.geometry())  # the controls over it
-        self.assertEqual(window.overlays.transport.icon("mini"), "full_window")
-        moves = []
-        window.surface.mouseMoved.connect(lambda: moves.append(True))
-        mouse(window.surface, QEvent.Type.MouseMove, QPoint(120, 60), Qt.MouseButton.NoButton)
-        self.assertEqual(moves, [True])  # the hover: the controls come
-        with mock.patch.object(window.controller, "handle") as handle:
-            QTest.keyClick(floating, Qt.Key.Key_Up)
-        handle.assert_called()
-
-    def test_both_ways_one_window_holds_the_player_under_the_windows_own_controls(self):
-        window = self.window
-        pip = window.desktop_pip
-        self.show()
-        self.float_from_fullscreen()  # a desktop change
-        floating = pip.floating_window()
-        self.assertIsNotNone(floating)
-        self.assert_the_small_window(floating)
-        self.shown = True
-        pip.check()  # back on the fullscreen desktop
-        self.app.processEvents()
-        self.assertIs(window.player_page.parentWidget(), window.pages)
-        self.assertFalse(floating.isVisible())
-        window.showNormal()
-        self.app.processEvents()
-        self.mini()  # Alt+P
-        self.app.processEvents()
-        self.assertIs(pip.floating_window(), floating)  # the same window
-        self.assertTrue(window.mini_player_active())
-        self.assertFalse(window.isVisible())  # the window gives way to it, as the mini player
-        self.assert_the_small_window(floating)
-        QTest.keyClick(floating, Qt.Key.Key_P, Qt.KeyboardModifier.AltModifier)  # back
-        self.app.processEvents()
-        self.assertFalse(window.mini_player_active())
-        self.assertTrue(window.isVisible())
-        self.assertFalse(floating.isVisible())
-        self.assertIs(window.player_page.parentWidget(), window.pages)
-        self.assertEqual(window.overlays.transport.icon("mini"), "mini_player")
-
-    def test_a_drag_on_the_picture_moves_it_and_a_double_click_brings_the_picture_back(self):
-        window = self.window
-        pip = window.desktop_pip
-        self.show()
-        self.float_from_fullscreen()
-        floating = pip.floating_window()
-        start = floating.pos()
-        with mock.patch.object(window.controller, "video_clicked") as clicked:
-            mouse(window.surface, QEvent.Type.MouseButtonPress, QPoint(160, 90))
-            mouse(window.surface, QEvent.Type.MouseMove, QPoint(220, 130))
-            mouse(
-                window.surface,
-                QEvent.Type.MouseButtonRelease,
-                QPoint(220, 130),
-                Qt.MouseButton.NoButton,
-            )
-            elapse(QApplication.doubleClickInterval() + 50)
-        clicked.assert_not_called()  # a drag, not a click (the channel list stays)
-        self.assertEqual(floating.pos(), start + QPoint(60, 40))
-        geometry = floating.geometry()
-        self.assertEqual(  # it opens there next time
-            window.config_manager.desktop_pip_rect,
-            [geometry.x(), geometry.y(), geometry.width(), geometry.height()],
-        )
-        mouse(window.surface, QEvent.Type.MouseButtonDblClick, QPoint(160, 90))
-        self.assertFalse(pip.floating())  # back on the fullscreen desktop
-        self.assertIs(window.player_page.parentWidget(), window.pages)
-        self.assertTrue(window.isFullScreen())
-
-    def test_alt_p_in_fullscreen_floats_once_fullscreen_is_left(self):
-        window = self.window
-        pip = window.desktop_pip
-        self.show()
-        window.showFullScreen()
-        self.app.processEvents()
-        self.mini()
-        self.assertIsNone(pip.reason())  # nothing floats for the desktop on the way out
-        self.assertTrue(wait_until(window.mini_player_active))
-        self.assertFalse(window.isFullScreen())
-        self.assertTrue(pip.floating())
-        self.assertEqual(pip.reason(), desktop_pip.MINI)
-        window.toggle_mini_player()
-        self.assertFalse(pip.floating())
-        self.assertTrue(window.isVisible())
-
-    def test_quitting_from_the_mini_player_closes_the_window_its_own_way(self):
-        # The system's Quit closes only the windows shown, and Qt quits after the last window
-        # closes only for one that was shown: the window comes back for its last steps.
-        window = self.window
-        self.show()
-        self.mini()
-        self.assertFalse(window.isVisible())
-        self.app.closeAllWindows()  # the system's Quit (the Dock, logging out)
-        self.assertTrue(window.closing())
-        self.assertTrue(window.isVisible())
-        self.assertIs(window.player_page.parentWidget(), window.pages)
-        self.assertTrue(
-            wait_until(lambda: not window.isVisible() and not window.close_retry.isActive())
-        )
-
-    def test_quit_in_the_mini_player_shows_the_window_for_its_last_steps(self):
-        window = self.window
-        self.show()
-        self.mini()
-        window.quit_chosen()  # ⌘Q, its keys reaching the window
-        self.assertTrue(window.closing())
-        self.assertTrue(window.isVisible())
-        self.assertFalse(window.desktop_pip.floating())
-        self.assertTrue(
-            wait_until(lambda: not window.isVisible() and not window.close_retry.isActive())
-        )
-
-    def test_a_question_is_asked_in_the_window(self):  # as for the mini player in 2.13.1
-        window = self.window
-        self.show()
-        self.wait_for_drawer()
-        self.assertTrue(wait_until(lambda: window.catalog.items("live", ALL_GROUP_ID)))
-        self.mini()
-        self.assertTrue(window.desktop_pip.floating())
-        window.record_at(window.catalog.items("live", ALL_GROUP_ID)[0])  # asked: it makes way
-        self.assertFalse(window.mini_player_active())
-        self.assertFalse(window.desktop_pip.floating())
-        self.assertTrue(window.isVisible())
-        self.assertTrue(window.record_card.isVisible())
-
-    def test_the_library_leaves_the_mini_player_first(self):
-        window = self.window
-        self.show()
-        self.wait_for_drawer()
-        self.mini()
-        self.assertTrue(window.desktop_pip.floating())
-        floating = window.desktop_pip.floating_window()
-        # The menu's shortcut, typed in the small window (the window itself is hidden).
-        QTest.keyClick(floating, Qt.Key.Key_2, Qt.KeyboardModifier.ControlModifier)
-        self.assertTrue(window.screens.library_shown())
-        self.assertFalse(window.mini_player_active())
-        self.assertFalse(window.desktop_pip.floating())
-        self.assertTrue(window.isVisible())
-        self.assertIs(window.player_page.parentWidget(), window.pages)
-
-    def test_a_maximized_window_and_keep_on_top_come_back_as_they_were(self):
-        window = self.window
-        self.show()
-        window.showMaximized()
-        self.assertTrue(wait_until(window.isMaximized))
-        self.mini()
-        self.assertTrue(window.desktop_pip.floating())
-        self.mini()
-        self.assertTrue(wait_until(window.isMaximized))
-        window.showNormal()
-        self.app.processEvents()
-        self.mini()
-        window.menus.keep_on_top.trigger()  # chosen in the mini player: applies once it ends
-        self.mini()
-        self.assertTrue(window.isVisible())
-        self.assertTrue(window.windowFlags() & Qt.WindowType.WindowStaysOnTopHint)
-        self.assertFalse(window.windowFlags() & Qt.WindowType.FramelessWindowHint)
-
-    def test_the_first_click_after_the_mini_player_is_not_swallowed(self):
-        window = self.window
-        self.show()
-        drawer = self.wait_for_drawer()
-        QTest.keyClick(window, Qt.Key.Key_Escape)
-        self.mini()
-        mouse(window.surface, QEvent.Type.MouseButtonPress, QPoint(60, 40))
-        mouse(window.surface, QEvent.Type.MouseMove, QPoint(70, 60))
-        self.mini()  # back (the press still held)
-        drawer.close_drawer()
-        window.host.clicked.emit()  # a click on the video around an overlay
-        self.assertTrue(drawer.isVisible())
-
-    def float_for_the_desktop(self):
-        self.show()
-        self.float_from_fullscreen()
-        floating = self.window.desktop_pip.floating_window()
-        self.assertTrue(self.window.desktop_pip.floating())
-        return floating
-
-    def assert_came_back(self, raised, activated):
-        """The picture back in the window, which comes forward (its desktop shows)."""
-        self.assertFalse(self.window.desktop_pip.floating())
-        self.assertIs(self.window.player_page.parentWidget(), self.window.pages)
-        raised.assert_called()
-        activated.assert_called()
-
-    def assert_asking_brings_the_window_back(self, ask):
-        # Review I-2: what opens in the window, on the desktop the viewer left, brings it back.
-        window = self.window
-        self.float_for_the_desktop()
-        with (
-            mock.patch.object(window, "raise_") as raised,
-            mock.patch.object(window, "activateWindow") as activated,
-        ):
-            ask()
-        self.assert_came_back(raised, activated)
-        self.assertTrue(window.isFullScreen())
-
-    def test_the_library_from_a_desktop_float_brings_the_window_back_first(self):
-        self.assert_asking_brings_the_window_back(
-            lambda: self.window.screens.open_library("movies")
-        )
-        self.assertTrue(self.window.screens.library_shown())
-        # (Back to live TV before the window goes: Qt's offscreen platform crashes at exit
-        # tearing down a window left in the Library after its page floated; 2.13.4 too.)
-        self.window.screens.back_to_tv()
-        self.app.processEvents()
-
-    def test_settings_from_a_desktop_float_bring_the_window_back_first(self):
-        self.assert_asking_brings_the_window_back(self.window.open_settings)
-
-    def test_open_link_from_a_desktop_float_brings_the_window_back_first(self):
-        self.assert_asking_brings_the_window_back(self.window.open_link)
-
-    def test_esc_with_nothing_open_in_a_desktop_float_brings_it_back_in_fullscreen(self):
-        window = self.window
-        self.float_for_the_desktop()
-        window.overlays.drawer.close_drawer()
-        window.overlays.banner.dismiss()
-        with (
-            mock.patch.object(window, "raise_") as raised,
-            mock.patch.object(window, "activateWindow") as activated,
-        ):
-            window.controller.handle(Action.ESCAPE)
-        self.assert_came_back(raised, activated)
-        self.assertTrue(window.isFullScreen())  # not out of fullscreen on the desktop left
-
-    def test_the_multiview_from_a_desktop_float_brings_the_window_back_first(self):
-        window = self.window
-        self.float_for_the_desktop()
-        with (
-            mock.patch.object(window, "raise_") as raised,
-            mock.patch.object(window, "activateWindow") as activated,
-        ):
-            window.pip_frame.suspend()  # the grid takes the surfaces
-        self.assert_came_back(raised, activated)
-
-    def test_a_stopped_picture_stays_afloat_until_the_window_needs_it(self):
-        # Review I-2: ■ Stop or a failed stream left the small window empty-handed: it went.
-        from services.playback import PlaybackState
-
-        window = self.window
-        pip = window.desktop_pip
-        pip._may_float = window._may_float_picture  # the window's own rule here
-        state = {"now": PlaybackState.PLAYING}
-        with mock.patch.object(window.controller.session, "state", lambda: state["now"]):
-            self.float_for_the_desktop()
-            state["now"] = PlaybackState.IDLE  # stopped ("Play again" in the small window)
-            pip.check()
-            self.assertTrue(pip.floating())
-            state["now"] = PlaybackState.ERROR  # failed ("Trying again")
-            pip.check()
-            self.assertTrue(pip.floating())
-            self.shown = True
-            pip.check()  # its desktop again
-            self.assertFalse(pip.floating())
-            self.shown = False
-            pip.check()
-            pip.check()
-            self.assertFalse(pip.floating())  # nothing plays: nothing starts floating
-
-    def test_what_qitv_says_unasked_waits_while_the_picture_floats(self):
-        from ui import window_cards
-
-        window = self.window
-        self.float_for_the_desktop()
-        window_cards.tell("Update", "A new version is out.", unasked=True)
-        self.app.processEvents()
-        self.assertFalse(window.window_cards.tv_card.isVisible())  # not in the small window
-        self.shown = True
-        window.desktop_pip.check()  # back: it comes
-        self.assertTrue(wait_until(window.window_cards.tv_card.isVisible))
-
-    def test_a_question_asked_for_in_the_mini_player_brings_the_window_back(self):  # M-3
-        from ui import window_cards
-
-        window = self.window
-        self.show()
-        self.mini()
-        window_cards.tell("Check for updates", "QiTV is up to date.")  # asked for
-        self.assertTrue(wait_until(window.window_cards.tv_card.isVisible))
-        self.assertFalse(window.mini_player_active())
-        self.assertTrue(window.isVisible())
-
-    def test_qitv_started_again_brings_the_mini_player_forward_not_a_dead_window(self):
-        # Review I-3: a file opened from Finder, or QiTV started again, during the mini player.
-        window = self.window
-        self.show()
-        self.mini()
-        floating = window.desktop_pip.floating_window()
-        with mock.patch.object(floating, "activateWindow") as activated:
-            window.come_to_front()
-        activated.assert_called_once()
-        self.assertFalse(window.isVisible())
-        self.assertTrue(window.mini_player_active())
-        self.assertTrue(floating.isVisible())
-
-    def test_while_qitv_is_inactive_the_pointer_over_the_small_window_shows_the_controls(self):
-        # Review I-1: the window's own hover, fed from the pointer's place.
-        window = self.window
-        pip = window.desktop_pip
-        floating = self.float_for_the_desktop()
-        moves = []
-        window.pointer.realMoved.connect(lambda: moves.append(True))
-        window.pointer._signalled = None
-        pip._app_active = lambda: False
-        window._on_app_state(Qt.ApplicationState.ApplicationInactive)  # another app in front
-        where = floating.geometry().center()
-        pip._cursor_pos = lambda: where
-        self.assertTrue(wait_until(lambda: bool(moves), desktop_pip.HOVER_MS * 6))
-
-    def test_presses_activate_qitv_in_the_mini_player_only(self):  # review M-5
-        window = self.window
-        with mock.patch("ui.tv_window.macos_window.let_presses_activate") as activating:
-            self.float_for_the_desktop()
-            activating.assert_not_called()  # a press there must not bring its desktop
-            self.shown = True
-            window.desktop_pip.check()
-            window.showNormal()
-            self.app.processEvents()
-            self.mini()
-        floating = window.desktop_pip.floating_window()
-        targets = {call.args[0] for call in activating.call_args_list}
-        self.assertEqual(targets, {floating, window.host})
-
-    def test_the_small_window_keeps_its_pictures_shape_and_its_picture_fills_it(self):
-        main, small = _BoxedPlayer(16 / 9), _BoxedPlayer()
-        players = [("main", main), ("pip", small)]
-        with mock.patch.object(self.window, "_players", return_value=players):
-            window = self.window
-            self.show()
-            self.mini()
-            self.app.processEvents()
-            floating = window.desktop_pip.floating_window()
-            self.assertIsNotNone(floating)
-            # macOS's own edge resize (Qt makes the frameless window resizable): no press of
-            # QiTV's, at a size the picture would show black bars in.
-            floating.setGeometry(QRect(floating.pos(), QSize(546, 330)))
-
-            def in_shape():
-                return picture.same_shape(floating.width() / floating.height(), 16 / 9)
-
-            self.assertTrue(wait_until(in_shape))
-            self.app.processEvents()
-            box = main.box()
-            self.assertIsNotNone(box)  # told its box: the picture fills it to the last pixel
-            self.assertIsNotNone(picture.box_aspect(16 / 9, *box))
-            window.toggle_mini_player()
-            self.app.processEvents()
-            self.assertIsNone(main.box())  # the large view again: the viewer's own shape
 
 
 class DesktopPipWindowTests(WindowCase):
-    def setUp(self):
-        super().setUp()
-        settle = mock.patch.object(desktop_pip, "FLOAT_SETTLE_MS", 0)  # (DesktopPipTests': on)
-        settle.start()
-        self.addCleanup(settle.stop)
-
     def test_the_floating_picture_opens_where_it_was_left_while_that_is_on_a_screen(self):
         window = self.window
         screen = QApplication.primaryScreen().availableGeometry()
@@ -1081,7 +493,7 @@ class DesktopPipWindowTests(WindowCase):
         rect = window._floating_rect()
         self.assertTrue(screen.contains(rect.center()))
 
-    """The TV window floats its player page and shows a note in its place meanwhile."""
+    """The TV window floats its large picture and shows a note in its place meanwhile."""
 
     def test_fullscreen_watches_the_desktop_and_the_picture_floats_and_returns(self):
         shown = {"value": True}
@@ -1097,21 +509,18 @@ class DesktopPipWindowTests(WindowCase):
             shown["value"] = False
             pip.check()
             pip.check()
-            self.assertIs(window.player_page.parentWidget(), pip.floating_window())
-            self.assertIs(window.surface.parentWidget(), window.player_page)
+            self.assertIsNot(window.surface.parentWidget(), window.player_page)
             self.assertTrue(window.floating_note.isVisible())
-            self.assertEqual(window.floating_note.geometry(), window.pages.rect())
             shown["value"] = True
             pip.check()
-            self.assertIs(window.player_page.parentWidget(), window.pages)
-            self.assertEqual(window.player_page.geometry(), window.pages.rect())
+            self.assertIs(window.surface.parentWidget(), window.player_page)
             self.assertFalse(window.floating_note.isVisible())
             shown["value"] = False
             pip.check()
             pip.check()
             window.showNormal()  # leaving fullscreen puts it back
             self.app.processEvents()
-            self.assertIs(window.player_page.parentWidget(), window.pages)
+            self.assertIs(window.surface.parentWidget(), window.player_page)
             self.assertFalse(pip._timer.isActive())
 
     def test_ai_captions_show_over_the_floating_picture_too(self):
@@ -1128,20 +537,26 @@ class DesktopPipWindowTests(WindowCase):
             shown["value"] = False
             pip.check()
             pip.check()
-            # 2.13.5: the window's own captions, in its controls' host, which follows the
-            # player page over the floating window (no second set of them).
-            floating, host, overlay = pip.floating_window(), window.host, window.captions_overlay
+            host = window._floating_captions
+            self.assertIsNotNone(host)
+            self.assertIs(host.parentWidget(), pip.floating_window())
+            # The mouse goes through to the floating picture (dragged, double-clicked there).
+            self.assertTrue(host.windowFlags() & Qt.WindowType.WindowTransparentForInput)
+            [overlay] = host._overlays
             window.captions._show("Merhaba")
             self.app.processEvents()
             self.assertEqual(overlay.text(), "Merhaba")
             self.assertTrue(overlay.isVisibleTo(host))
             self.assertTrue(host.isVisible())
-            self.assertEqual(host.geometry(), floating.geometry())
+            self.assertEqual(window.captions_overlay.text(), "Merhaba")  # the window's too
             shown["value"] = True
-            pip.check()  # back: over the fullscreen window again
+            pip.check()  # back: the floating window and its captions hide
             self.app.processEvents()
-            page = window.player_page
-            self.assertEqual(host.geometry(), QRect(page.mapToGlobal(QPoint(0, 0)), page.size()))
+            self.assertFalse(host.isVisible())
+            shown["value"] = False
+            pip.check()
+            pip.check()
+            self.assertIs(window._floating_captions, host)  # made once
             window.captions._show("")
             self.assertEqual(overlay.text(), "")
             window.showNormal()
@@ -1190,6 +605,69 @@ class DesktopPipWindowTests(WindowCase):
             window.pip_frame.hide_pip()
             self.app.processEvents()
             self.assertIsNone(small.box())
+
+    def test_a_desktop_float_holds_the_picture_alone_as_in_2_13_4(self):
+        # 2.13.5, the owner: "keep it as before": the large surface alone, no controls over
+        # it, no keys (the mini player is the one with the window's controls).
+        shown = {"value": True}
+        with mock.patch("ui.tv_window._macos_desktops", return_value=True):
+            window = self.window
+            pip = window.desktop_pip
+            pip._on_active_space = lambda _w: shown["value"]
+            pip._may_float = lambda: True
+            window.show()
+            window.showFullScreen()
+            self.app.processEvents()
+            shown["value"] = False
+            pip.check()
+            pip.check()
+            floating = pip.floating_window()
+            self.assertIs(window.surface.parentWidget(), floating)
+            self.assertIs(window.player_page.parentWidget(), window.pages)  # the page stays
+            self.assertIs(window.host._window, window)  # the controls stay with the window
+            flags = floating.windowFlags()
+            self.assertTrue(flags & Qt.WindowType.WindowDoesNotAcceptFocus)
+            self.assertFalse(window.mini_player.shown())
+            shown["value"] = True
+            pip.check()
+            window.showNormal()
+            self.app.processEvents()
+
+    def test_after_an_odd_resize_the_floating_picture_keeps_its_shape_and_fills_it(self):
+        shown = {"value": True}
+        main, small = _BoxedPlayer(16 / 9), _BoxedPlayer()
+        players = [("main", main), ("pip", small)]
+        with (
+            mock.patch("ui.tv_window._macos_desktops", return_value=True),
+            mock.patch.object(self.window, "_players", return_value=players),
+        ):
+            window = self.window
+            pip = window.desktop_pip
+            pip._on_active_space = lambda _w: shown["value"]
+            pip._may_float = lambda: True
+            window.show()
+            window.showFullScreen()
+            self.app.processEvents()
+            shown["value"] = False
+            pip.check()
+            pip.check()
+            floating = pip.floating_window()
+            # macOS's own edge resize (Qt makes the frameless window resizable): no press of
+            # QiTV's, at a size the picture would show black bars in.
+            floating.setGeometry(QRect(floating.pos(), QSize(546, 330)))
+
+            def in_shape():
+                return picture.same_shape(floating.width() / floating.height(), 16 / 9)
+
+            self.assertTrue(wait_until(in_shape))
+            self.app.processEvents()
+            box = main.box()
+            self.assertIsNotNone(box)  # told its box: the picture fills it to the last pixel
+            self.assertIsNotNone(picture.box_aspect(16 / 9, *box))
+            shown["value"] = True
+            pip.check()
+            window.showNormal()
+            self.app.processEvents()
 
     def test_without_a_playing_picture_or_with_the_setting_off_nothing_floats(self):
         window = self.window

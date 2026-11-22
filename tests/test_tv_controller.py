@@ -964,9 +964,6 @@ class FakeWindow:
     def toggle_mini_player(self):
         self.calls.append("toggle_mini_player")
 
-    def escape_small_window(self):
-        return False  # (no small window here: Esc goes on)
-
 
 class FakeWatch:
     def __init__(self):

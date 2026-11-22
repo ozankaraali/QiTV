@@ -5486,7 +5486,7 @@ class TVController(QObject):
             overlays.banner.dismiss()
         elif self.multiview_shown():
             self.leave_multiview()  # before fullscreen: the grid is what Esc closes first
-        elif not self.window_actions.escape_small_window():  # (a floating picture: back)
+        else:
             self.window_actions.leave_fullscreen()
 
     def _info(self) -> None:
