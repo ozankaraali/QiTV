@@ -7,7 +7,7 @@ alike (a public HLS channel measured in 2.1: 6 s segments every 7 s, every sixth
 not move it. The window is over the live edge only: the player's side (its rate, a frozen
 clock, a reopen) shows in the position at once. The filter also says how much its mean still
 wanders by itself (`spread`) and which burst the source has (`burst`, with hysteresis: a burst
-the helper measures for a moment is none).
+the helper measures for a moment is none; one taken in after the start is kept for the tune).
 
 `StayLive` leaves the rate at 1x while the mean lag stays within a dead band around the target:
 at least `_BAND_S`, at least `_BAND_SPREAD` times the filter's spread, and behind the target a
@@ -247,7 +247,8 @@ class SteeredTarget:
     minute: a stall's aftermath lifts the need for a minute or so). What the source's burst
     moves in it (the lag filter's burst, which has its own hysteresis) moves it at once,
     either way (`shift`): a burst the helper measured late counts as soon as the filter
-    takes it, and a one-off first "burst" (a backlog) goes as the filter drops it.
+    takes it, and a one-off first "burst" (a backlog) goes as the filter drops it (one the
+    filter took in after the start it keeps for the tune: `LagFilter.kept`).
     """
 
     def __init__(self) -> None:
@@ -317,6 +318,17 @@ class LagFilter:
     meter, on one provider: 15 times in 5 minutes) then keeps one burst. It sets the closed
     form and the window; a change starts the window afresh.
 
+    A burst taken in that way after the first report (it lasted two bursts and ten seconds)
+    is the source's for the tune (`kept`): a smaller one, or none, no longer counts; a larger
+    one still does. Seen live: a raw TS channel sent ~10 s bursts for one to three minutes at
+    a time, steadily between, six times in 45 minutes. Each time the bursts stopped, the
+    burst went, the target fell 6-8 s at once and the mean lag rose by half a burst (the
+    closed form no longer took it off): far behind, a jump to live, 8-13 s of the programme
+    skipped; each time they came back the room was built again at 0.95x. Kept, the room
+    stays through the steady minutes (the cost: the burst's latency for the tune). A first
+    report (an HLS target duration, a raw TS backlog measured at connect) is not kept: that
+    one-off first "burst" goes as before.
+
     Pure logic: no clock of its own.
     """
 
@@ -331,6 +343,7 @@ class LagFilter:
         self.burst = 0.0
         self._burst_seen = False
         self._pending: Optional[tuple[float, float]] = None  # (since, reported) unlike `burst`
+        self._kept = False  # `burst` came after the first report: the source's for the tune
         self.restarts = 0  # how often its window started afresh (a step, a burst, reset())
         self.steps = 0  # arrivals that moved the level more than `_STEP_S` (restarting or not)
 
@@ -407,6 +420,11 @@ class LagFilter:
     def spread(self) -> float:
         return self._spread
 
+    @property
+    def kept(self) -> float:
+        """The burst kept for the tune (taken in after the first report), 0.0 without one."""
+        return self.burst if self._kept else 0.0
+
     def burst_for(self, reported: float) -> float:
         """The burst it holds (with its hysteresis), or, before its first edge, the one the
         source reports: the first report counts at once."""
@@ -419,13 +437,17 @@ class LagFilter:
         if abs(reported - self.burst) < _BURST_STEP_S:
             self._pending = None
             return
-        pending = self._pending
         rising = reported > self.burst
+        if self._kept and not rising:
+            self._pending = None  # a burst that came after the start does not go again
+            return
+        pending = self._pending
         if pending is None or (pending[1] > self.burst) != rising:
             pending = self._pending = (now, reported)
         hold = max(_BURST_ON_S, 2 * reported) if rising else _BURST_OFF_S
         if now - pending[0] >= hold - 1e-9:
             self.burst, self._pending = reported, None
+            self._kept = self._kept or rising
             self.reset()  # the closed form changed with it: the window starts afresh
         else:
             self._pending = (pending[0], reported)
