@@ -7647,6 +7647,64 @@ class ServerWindowFixTests(LiveSessionCase):
         self.live.seek_relative(-10.0)
         self.assertAlmostEqual(self.timelines[-1]["position"], 18.0)  # the segment holding 20
 
+    # ---- 2.13.4: a start afresh lets the server part go too ------------------------------
+    def assert_fresh_after_the_part(self, sid, part):
+        """The old live session and the part are closed, and the fresh session opens only
+        once both closes are answered."""
+        self.assertIn(sid, self.engine.closed)
+        self.assertIn(part, self.engine.closed)
+        self.assertFalse(self.live.in_server_part())
+        opens = len(self.engine.opened)
+        self.engine.answer()
+        self.assertEqual(len(self.engine.opened), opens + 1)
+        return self.engine.last_sid
+
+    def test_a_start_afresh_after_a_part_closes_the_part_it_kept(self):
+        # One stream: the part ran into the buffer (kept: what came plays again locally) and
+        # the live upstream was asked back; the helper died meanwhile (the buffer went) and
+        # the reopened channel failed for good: nothing is left to play, the channel starts
+        # afresh, and the part's session goes with the old one.
+        sid, part = self.in_part(-300.0, one_stream=True)
+        self.engine.sessionEnded.emit(part)
+        self.playback.ended.emit()  # VLC read it to its end: on in the buffer
+        self.assertNotIn(part, self.engine.closed)
+        self.assertEqual([resume[0] for resume in self.engine.resumes], [sid])
+        self.engine.reset(sid)  # the helper died: its buffer went
+        self.engine.sessionFailed.emit(sid, "internal", "The live buffer stopped unexpectedly.")
+        self.engine.sessionFailed.emit(sid, "network", "The channel did not answer.")
+        self.assert_fresh_after_the_part(sid, part)
+
+    def test_a_start_afresh_never_opens_beside_a_reopened_part(self):
+        # One stream: back into the buffer the live upstream was asked back, and a step back
+        # before its first segment came parked it again for a new part. The helper died: the
+        # part was reopened (an upstream of its own), the parked memory buffer was not (it
+        # went). The fresh session never opens beside the part's upstream, and nothing of
+        # the part stays: a recording of the fresh session is not refused as a parked one's.
+        sid, part = self.in_part(-300.0, one_stream=True)
+        self.live.seek_to(30.0)  # into the buffer: the part goes
+        self.engine.answer()  # its connection let go: the live upstream is asked back
+        self.assertEqual([resume[0] for resume in self.engine.resumes], [sid])
+        self.live.seek_to(-300.0)  # ← before the new run came: parked again for a part
+        self.engine.sessionParked.emit(sid)
+        second = self.engine.last_sid
+        self.assertNotIn(second, (sid, part))
+        own = [Span(0, 0.0, 6.0, False, media_seq=40), Span(1, 6.0, 12.0, False, media_seq=41)]
+        self.engine.buffer(second, own, hls=True, part_wall=10_000.0 - 300.0)
+        self.engine.sessionReady.emit(second)
+        self.assertTrue(self.live.in_server_part())
+        # The helper died: the part is reopened under its sid, the parked buffer is gone.
+        self.engine.sessionFailed.emit(second, "internal", "The live buffer stopped unexpectedly.")
+        self.engine.reset(sid)
+        self.engine.sessionFailed.emit(sid, "crashed", "The live buffer stopped unexpectedly.")
+        fresh = self.assert_fresh_after_the_part(sid, second)
+        self.engine.buffer(fresh, segments(0, 10))
+        self.engine.sessionReady.emit(fresh)
+        self.step(2.0)
+        self.playback.set_state(PlaybackState.PLAYING)
+        self.assertTrue(self.live.start_recording("/tmp/qitv-test.ts"))
+        self.assertEqual(self.engine.recordings[-1][1], fresh)
+        self.assertNotIn(PART_NOT_RECORDED, self.notices)
+
 
 class SizeCapTests(LiveSessionCase):
     """2.8, the live ⚙: an HLS channel's picture sizes reach the timeline, and the user's cap

@@ -1869,10 +1869,14 @@ class LiveSession(QObject):
         self.backOffered.emit(position, wall)
 
     def _start_afresh(self) -> None:
-        """Let the kept buffer go and open the channel anew, once it closed (2.6)."""
+        """Let the kept buffer go and open the channel anew, once it closed (2.6); a server
+        part goes with it (2.13.4: its connection closed first, never beside the new one)."""
         if self._borrowed is not None:
             self._lose_borrowed(LENT_ENDED)  # 2.9.7: another's is never opened anew
             return
+        self._close_part(resume=False)  # `_begin` waits for its close too (`_unclosed`)
+        self._live_parked = self._part_resuming = self._resume_owed = False
+        self._resume_held = None  # nothing parked is asked back: the new session is live
         sid, self._sid = self._sid, None
         self._stop_timers()
         self._playback.stop()
