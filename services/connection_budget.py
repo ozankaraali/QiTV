@@ -26,6 +26,8 @@ Design notes:
   while a recording holds one): ``learn`` lowers it, never raises it; ``limit_for`` and
   ``request`` apply it (``cap``), so every caller sees it. ``free`` says whether a purpose
   could take a stream beside the others now, and ``released`` tells each held slot given back.
+* ``hold`` takes a slot at once whatever the limit, for a stream that plays anyway (the
+  main player's direct play): it counts, so the others see it taken.
 """
 
 from __future__ import annotations
@@ -129,6 +131,16 @@ class ConnectionBudget(QObject):
         waiting = self._waiting.setdefault(provider_name, [])
         waiting[:] = [w for w in waiting if w.purpose != purpose]
         waiting.append(_Waiter(ticket, purpose, limit))
+        return ticket
+
+    def hold(self, provider_name: str, *, purpose: str) -> int:
+        """A ticket held at once, whatever the limit (a learned one too), never queued: for a
+        stream that plays anyway (the main player's direct play, whose own release gate
+        orders its streams), so the others see its slot taken. `granted` follows as for
+        `request`."""
+        ticket = self._next
+        self._next += 1
+        self._take(ticket, provider_name, purpose)
         return ticket
 
     def release(self, ticket: int) -> None:

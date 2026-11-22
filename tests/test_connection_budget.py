@@ -227,6 +227,18 @@ class LearnedLimitTests(unittest.TestCase):
         self.b.learn("P", 3)
         self.assertEqual(self.b.cap("P", None), 1)
 
+    def test_a_hold_is_taken_at_once_over_a_learned_limit(self):
+        self.b.learn("P", 1)
+        self.b.request("P", None, purpose="rec")
+        ticket = self.b.hold("P", purpose="main")
+        self.assertEqual(self.b.entry(ticket), ("P", "main"))
+        self.assertEqual(self.b.in_use("P"), 2)
+        self.assertEqual(self.b._waiting, {})
+        queued = self.b.request("P", None, purpose="pip")  # over the limit: it waits
+        self.b.release(ticket)
+        self.assertIsNone(self.b.entry(queued))  # one still held: the limit is full
+        self.assertEqual(self.b.holders("P"), ["rec"])
+
     def test_a_release_is_told(self):
         released = []
         self.b.released.connect(released.append)

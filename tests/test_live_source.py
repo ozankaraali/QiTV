@@ -841,6 +841,63 @@ video.m3u8
         video = ts_fixtures.make_stream(4, audio=False)
         self.assertGreaterEqual(len(first), len(video))  # all of v0, its tail silent
 
+    @staticmethod
+    def full_pmt_video(pts_start=900000):
+        """4 s of video only whose PMT fills its packet (a private descriptor of 160 bytes):
+        no room for one more stream."""
+        info = bytes([0xF0, 160]) + b"\x00" * 160
+        video = (0xE000 | ts_fixtures.VIDEO_PID).to_bytes(2, "big")
+        body = video + (0xF000 | len(info)).to_bytes(2, "big") + info
+        body += bytes([0x1B]) + video + b"\xf0\x00"
+        head = bytes([0x02]) + (0xB000 | (5 + len(body) + 4)).to_bytes(2, "big")
+        section = head + (1).to_bytes(2, "big") + bytes([0xC1, 0, 0]) + body
+        data = ts_fixtures.make_stream(4, audio=False, pts_start=pts_start)
+        out = []
+        for at in range(0, len(data), 188):
+            packet = data[at : at + 188]
+            if ((packet[1] & 0x1F) << 8 | packet[2]) == ts_fixtures.PMT_PID:
+                packet = ts_fixtures._psi_packet(ts_fixtures.PMT_PID, section, packet[3] & 0x0F)
+            out.append(packet)
+        return b"".join(out)
+
+    def test_audio_its_pmt_cannot_take_is_not_fetched_again_for_each_segment(self):
+        # The video's PMT has no room for the separate audio: the video plays as it came, and
+        # its audio is not fetched (and thrown away) for every segment of the session.
+        master = b"""#EXTM3U
+#EXT-X-MEDIA:TYPE=AUDIO,GROUP-ID="a",NAME="English",DEFAULT=YES,URI="audio.m3u8"
+#EXT-X-STREAM-INF:BANDWIDTH=100000,AUDIO="a"
+video.m3u8
+"""
+        videos = [self.full_pmt_video(900000 + k * 4 * 90000) for k in range(4)]
+        routes = {
+            "/master.m3u8": (200, {}, master),
+            "/video.m3u8": (200, {}, hls(0, [f"v{k}.ts" for k in range(4)], target=4, ended=True)),
+            "/audio.m3u8": (200, {}, hls(0, [f"a{k}.ts" for k in range(4)], target=4, ended=True)),
+        }
+        for k in range(4):
+            routes[f"/v{k}.ts"] = (200, {}, videos[k])
+            audio = ts_fixtures.audio_only(4, pts_start=900000 + k * 4 * 90000)
+            routes[f"/a{k}.ts"] = (200, {}, audio)
+        server = self.server(routes)
+        with self.assertLogs("services.live.hls_audio", "INFO") as logs:
+            parts = media(server.url + "/master.m3u8")
+        self.assertEqual(parts, joined(*videos))  # as they came
+        self.assertEqual(sum(server.counts[f"/a{k}.ts"] for k in range(4)), 1)
+        self.assertEqual(sum("cannot take its audio" in line for line in logs.output), 1)
+
+    def test_a_tail_held_for_audio_its_pmt_cannot_take_goes_on_as_it_came(self):
+        # The audio covered the video's first 2 s: its head, PMT and all, could not take it,
+        # and the tail held for the rest goes on as it came, no audio fetched for it.
+        def video_playlist(_request, count):
+            return 200, {}, hls(0, ["v0.ts"], target=4, ended=count > 1)
+
+        routes = self.held_tail_routes(video_playlist)
+        video = self.full_pmt_video()
+        routes["/v0.ts"] = (200, {}, video)
+        server = self.server(routes)
+        self.assertEqual(media(server.url + "/master.m3u8"), joined(video))
+        self.assertEqual((server.counts["/a0.ts"], server.counts["/a1.ts"]), (1, 0))
+
     def test_live_leaf_reloads_real_redirect_url_and_tolerates_segment_gap(self):
         def playlist(_request, count):
             if count == 1:
