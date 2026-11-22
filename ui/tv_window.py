@@ -1838,11 +1838,13 @@ class TVWindow(QMainWindow):
         if (
             event.type() == QEvent.Type.KeyPress
             and isinstance(event, QKeyEvent)
-            and event.key() == Qt.Key.Key_Tab
+            and event.key() in (Qt.Key.Key_Tab, Qt.Key.Key_Backtab)
             and not self._closing
             and self._resolve(event) is not None
         ):
-            self.keyPressEvent(event)  # Tab moves the focus otherwise: the mixer's rows
+            # Tab and Shift+Tab move the focus otherwise: the mixer's rows, the multiview's
+            # tiles.
+            self.keyPressEvent(event)
             return True
         return super().event(event)
 

@@ -162,6 +162,8 @@ class MixerControls(QObject):
             self.change(-VOLUME_STEP)
         elif action in _OTHER_ROW and len(self._slots()) > 1:
             self._show((self._row + 1) % len(self._slots()))
+        elif action is Action.BACK_TAB and len(self._slots()) > 1:
+            self._show((self._row - 1) % len(self._slots()))  # (2.14: Shift+Tab, back a row)
         elif action is Action.MUTE:
             self.mute()
         elif action is Action.ESCAPE:

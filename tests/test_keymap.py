@@ -127,6 +127,12 @@ class ClosedKeymapTests(unittest.TestCase):
     def test_tab_switches_the_mixers_rows(self):
         self.assertEqual(closed(K.Key_Tab, "\t"), (Action.TAB, ""))
 
+    def test_shift_tab_steps_back(self):
+        # 2.14: the multiview's previous tile (the mixer's other row too). Qt names it Backtab.
+        self.assertEqual(closed(K.Key_Backtab, "", SHIFT), (Action.BACK_TAB, ""))
+        self.assertEqual(closed(K.Key_Tab, "", SHIFT), (Action.BACK_TAB, ""))
+        self.assertIsNone(opened(K.Key_Backtab, "", SHIFT))  # the channel list's own keys
+
     def test_j_and_k_move_the_sound_and_with_shift_the_subtitles(self):
         # 2.2, VLC's J and K; its G and H are the subtitles' there, but G is the guide here.
         self.assertEqual(closed(K.Key_J, "j"), (Action.SOUND_EARLIER, ""))

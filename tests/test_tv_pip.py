@@ -31,6 +31,7 @@ from services.network_streams import NetworkStreams, stream_id
 from services.provider_ids import NETWORK_PROVIDER, with_provider
 from services.sessions import PIP_FAILED, SessionManager, Slot
 from services.vlc_profile import STB_USER_AGENT, PlayKind
+from services.zapping import ZapContext
 from tests.test_tv_controller import (
     CHANNELS,
     HARBOR_ONE,
@@ -48,6 +49,7 @@ from tests.test_tv_controller import (
     wait_until,
 )
 from ui.autoplay import FINISHED_TEXT
+from ui.context_actions import OPEN_PIP_TEXT
 from ui.keymap import Action
 from ui.live_tuner import LiveTuner, one_disk_ring, wait_for_each_other
 from ui.network_player import NetworkPlayer
@@ -363,8 +365,71 @@ class PipTests(PipCase):
         self.assertEqual(self.pip_live.calls, [])
         self.assertFalse(self.sessions.pip_open())
 
-    def test_p_without_a_previous_channel_says_so(self):
+    def test_after_a_swap_the_list_opens_on_the_channel_now_large(self):
         self.start_large(0)
+        self.open_small(CHANNELS[1])
+        self.controller.handle(Action.SWAP)
+        self.controller.handle(Action.OPEN_DRAWER)
+        self.assertEqual(self.drawer.focus_item["name"], "Two")
+        self.assertEqual(self.nav.revealed()["name"], "Two")
+
+    def test_a_hidden_previous_channel_counts_as_none(self):
+        self.start_large(0)
+        self.start_large(1)  # One is the previous channel
+        self.controller._pip._hidden = lambda channel: channel["name"] == "One"  # locked
+        self.controller.handle(Action.PIP)
+        self.assertTrue(self.drawer.visible)
+        self.assertEqual(self.requested(), ["One", "Two"])  # never asked for
+
+    def test_p_without_a_previous_channel_opens_the_list_and_esc_opens_nothing(self):
+        # The owner: with no channel before it, the second channel could be chosen (it said
+        # there was none). With one, it opens at once (the test above).
+        self.start_large(0)
+        for opens in (
+            lambda: self.controller.handle(Action.PIP),
+            self.transport.pipRequested.emit,  # ⧉ (the phone's is P)
+        ):
+            with self.subTest(opens=opens):
+                opens()
+                self.assertTrue(self.drawer.visible)
+                self.assertEqual(self.toast.messages()[-1], (OPEN_PIP_TEXT, "info"))
+                self.assertEqual(self.drawer.focus_item["name"], "One")  # on the big one's
+                self.controller.handle(Action.ESCAPE)
+                self.drawer.closed.emit()  # (as the list says once it closes)
+                self.assertFalse(self.drawer.visible)
+                self.assertEqual(self.requested(), ["One"])  # nothing asked for
+                self.assertFalse(self.sessions.pip_open())
+
+    def test_the_channel_picked_in_that_list_opens_small(self):
+        self.start_large(0)
+        self.controller.handle(Action.PIP)
+        group = self.nav.path[-1]
+        nodes = self.nav.children(group)
+        self.drawer.playRequested.emit(nodes[2], nodes, group)  # Enter, or a click
+        self.assertEqual(self.requested()[-1], "Three")
+        self.assertFalse(self.drawer.visible)
+        self.ready("http://stream/3")
+        self.assertTrue(wait_until(self.sessions.pip_open))
+        self.assertIs(self.sessions.large(), self.main_slot)  # One plays on, large
+        self.assertTrue(ZapContext.same(self.sessions.small().channel, CHANNELS[2]))
+        self.controller.handle(Action.OPEN_DRAWER)  # the list again: for the big picture
+        self.drawer.playRequested.emit(nodes[3], nodes, group)
+        self.assertEqual(self.requested()[-1], "Four")
+        self.ready("http://stream/4")
+        self.assertTrue(ZapContext.same(self.sessions.small().channel, CHANNELS[2]))
+
+    def test_a_channel_found_in_that_list_opens_small(self):
+        self.start_large(0)
+        self.controller.handle(Action.PIP)
+        self.drawer.channelFound.emit(CHANNELS[1], "10")
+        self.assertEqual(self.requested()[-1], "Two")
+        self.ready("http://stream/2")
+        self.assertTrue(wait_until(self.sessions.pip_open))
+        self.assertIs(self.sessions.large(), self.main_slot)
+
+    def test_without_a_choice_p_without_a_previous_channel_says_so(self):
+        self.start_large(0)
+        self.controller._pip._choose = None
         self.controller.handle(Action.PIP)
         self.assertEqual(self.toast.messages()[-1], (NO_PREVIOUS, "info"))
         self.assertEqual(self.requested(), ["One"])

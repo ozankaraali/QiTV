@@ -156,6 +156,7 @@ These are also in the app under Settings › Keys (Help → Keyboard Shortcuts o
 | <kbd>+</kbd> / <kbd>-</kbd> | Volume up / down (the mixer) |
 | <kbd>M</kbd> | Mute |
 | <kbd>Tab</kbd> | The mixer's other row (while it shows) |
+| <kbd>Tab</kbd> / <kbd>Shift+Tab</kbd> | Multiview: focus the next / previous tile |
 | <kbd>J</kbd> / <kbd>K</kbd> | Sound 50 ms earlier / later (sync with the picture) |
 | <kbd>Shift+J</kbd> / <kbd>Shift+K</kbd> | Subtitles 50 ms earlier / later |
 | <kbd>A</kbd> | Picture: aspect ratio, sleep timer; pressed again, the next ratio |
@@ -331,7 +332,7 @@ QiTV gently speeds playback up or down to stay there, only when the distance has
 
 Watch a second channel in a small picture in the bottom-right corner:
 
-- <kbd>P</kbd> (or the player controls' second-channel button) opens the channel you watched before, small; press <kbd>P</kbd> again to close it;
+- <kbd>P</kbd> (or the player controls' second-channel button) opens the channel you watched before, small; with none before it, the channel list opens and the channel you pick there opens small; press <kbd>P</kbd> again to close it;
 - in the channel list, right-click a channel and choose **Open in picture-in-picture**, or highlight it and press <kbd>Ctrl/⌘+P</kbd>; the channel can come from any of your providers;
 - click the small picture or its **⇄**, or press <kbd>S</kbd>, to swap the two: the small one becomes big;
 - the sound follows the big picture. The speaker on the small picture turns its sound on or off. <kbd>+</kbd> and <kbd>-</kbd> (or the speaker in the player controls, beside ♫) show the mixer, which sets each picture's volume (<kbd>Tab</kbd> moves to the other row) and hides after a few seconds; without picture-in-picture it shows only the main volume;
@@ -345,13 +346,14 @@ Picture-in-picture is for live TV, and it needs two streams: a provider that all
 
 Watch several live channels side by side: press <kbd>V</kbd>, choose **View → Multiview** (<kbd>Ctrl/⌘+4</kbd>) or click the grid button on the player controls. The channel you are watching becomes the first tile and an open picture-in-picture the second; the others show **+**.
 
-- Click a tile to give it the focus: its sound plays, and the player controls, the channel list, zapping and the banner act on it. Click **+** to choose a channel for that tile, or drag a channel from the channel list onto any tile.
-- Point at a tile for its own controls, which act on that tile without moving the focus: pause or play, its speaker, **LIVE** or how far behind live it plays (click to go live), the big picture (back to one picture with this tile big) and **✕**, which closes the tile and gives its stream back to your provider. Small tiles keep the speaker and ✕.
+- Click a tile's picture, or press <kbd>Tab</kbd> / <kbd>Shift+Tab</kbd>, to give it the focus: its sound plays, and the player controls, the channel list, zapping and the banner act on it. Click a tile's name to choose another channel for it (its channel list opens on its channel), click **+** to choose one for an empty tile, or drag a channel from the channel list onto any tile.
+- Point at a tile for its own controls, which act on that tile without moving the focus: pause or play, its speaker, **LIVE** or how far behind live it plays (click to go live), the big picture (this tile fills the screen) and **✕**, which closes the tile and gives its stream back to your provider. Small tiles keep the speaker and ✕.
+- Double-click a tile (or use its big picture control) to watch it big: the grid stays behind it, the other tiles play on silently and keep their streams. <kbd>Esc</kbd>, <kbd>V</kbd>, the grid button or another double-click brings the grid back as it was.
 - The layout chip beside the grid button (the grid's picture, **2×2** and ⌄) shows the layouts to pick from: 1×2, 2×2, 3×2 and 3×3. 3×2 and 3×3 need hardware decoding (Settings → Playback → **Hardware video decoding**, after a restart); without it they are dimmed.
 - The sound follows the focused tile until you mix it: change the level or the speaker of a tile without the focus (in the mixer, or on the tile) and your mix stays as you move the focus. The mixer says which it is; **Follow focus** there goes back. Leaving the grid ends the mix: the big picture is heard.
 - The grid you leave is kept: next time, the **Last grid** chip (or **View → Restore Last Multiview**) brings its channels back.
 - Each tile asks your provider for a stream of its own. When a provider has no stream to spare, the tile says so and keeps the channel: click it to try again. QiTV never retries by itself.
-- <kbd>V</kbd>, <kbd>Esc</kbd>, a double-click on a tile or the grid button (one picture, while the grid shows) goes back to one picture: the focused tile becomes the big picture and the tile you had before it stays as picture-in-picture. Picture-in-picture itself waits until you leave the grid.
+- <kbd>V</kbd>, <kbd>Esc</kbd> or the grid button (one picture, while the grid shows) goes back to one picture: the focused tile becomes the big picture and the tile you had before it stays as picture-in-picture; the other tiles stop. Picture-in-picture itself waits until you leave the grid.
 
 Each tile's label shows LIVE, or how far behind live it plays (−00:42). Tiles without the focus play at normal speed and only jump back to live when they fall far behind (never while paused); each can be paused from its own controls, and rewound like the big picture once it has the focus. Its time-shift buffer is in memory: the focused tile gets the memory per stream (Settings → Time-shift & recordings), the others a short one of 64 MiB (`"multiview_tile_ram_mib"` in `config.json` changes it; at least 48, enough for a 4K channel). A tile you paused or rewound keeps what it plays until it is back at live.
 

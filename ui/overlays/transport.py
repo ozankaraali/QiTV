@@ -585,6 +585,7 @@ class Transport(Overlay):
         self._grid_layout = ""  # the grid's layout, as its chip names it ("2×2")
         self._grid_cells = 0  # its tiles: the chip's picture (painting's "layout_4")
         self._grid_restorable = False  # the last grid can come back: its chip shows
+        self._grid_big = False  # a tile is big: the grid's button brings the grid back
         self._pip_rect = QRect()  # the small picture: the shades leave it alone
         # 2.13.3: the audio screen's own controls under it, a radio channel's (leave_to_screen)
         self._screen_controls = QRegion()
@@ -842,17 +843,19 @@ class Transport(Overlay):
         layout: str = "",
         restorable: bool = False,
         cells: int = 0,
+        big: bool = False,
     ) -> None:
         """The multiview's button: shown on live TV when `available`; while its grid shows it
-        shows the way back (one picture), with the layout chip beside it: the picture of
-        `cells` tiles and `layout`'s name ("2×2"); and while the last grid's channels can
-        come back (`restorable`), a "Last grid" chip."""
+        shows the way back (one picture; while a tile is big, `big`, the grid), with the layout
+        chip beside it: the picture of `cells` tiles and `layout`'s name ("2×2"); and while
+        the last grid's channels can come back (`restorable`), a "Last grid" chip."""
         state = (
             available,
             shown,
             layout if shown else "",
             restorable and shown,
             cells if shown else 0,
+            big and shown,
         )
         current = (
             self._grid_available,
@@ -860,6 +863,7 @@ class Transport(Overlay):
             self._grid_layout,
             self._grid_restorable,
             self._grid_cells,
+            self._grid_big,
         )
         if state != current:
             (
@@ -868,6 +872,7 @@ class Transport(Overlay):
                 self._grid_layout,
                 self._grid_restorable,
                 self._grid_cells,
+                self._grid_big,
             ) = state
             self.update()
             self._controls_changed()
@@ -904,8 +909,8 @@ class Transport(Overlay):
             return "full_window"
         if name == "fullscreen" and self._fullscreen:
             return "exit_fullscreen"
-        if name == "grid" and self._grid_shown:
-            return "single"  # the way back, as fullscreen's
+        if name == "grid" and self._grid_shown and not self._grid_big:
+            return "single"  # the way back, as fullscreen's (a big tile's: the grid)
         if name == "repeat" and self._repeat == "one":
             return "repeat_one"
         if name in ("prev_track", "next_track"):
@@ -1087,7 +1092,7 @@ class Transport(Overlay):
         if name == "pip" and self._grid_shown:
             return translate(PIP_IN_GRID)
         if name == "grid":
-            if self._grid_shown:
+            if self._grid_shown and not self._grid_big:
                 what = tr("Back to one picture")  # i18n: tooltip: leave the multiview's grid
             else:
                 what = tr("Multiview")  # i18n: tooltip: several channels at once, in a grid

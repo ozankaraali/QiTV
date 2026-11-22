@@ -7,6 +7,9 @@ centred. A tile whose player shows nothing (an empty "+" tile, a "No stream to s
 hides its surface: the tiles overlay (ui/overlays/grid_tiles.py) draws it and takes its
 clicks. The PiP frame stands aside meanwhile (`PipFrame.suspend`).
 
+One tile can be big (`set_big`): the focused tile's surface fills the page, as the big picture's
+does, and the others are hidden while their players play on; the grid comes back as it was.
+
 The mouse, while the grid shows:
 - a left press on a tile that is not focused asks for its focus (`focusRequested`) and goes
   no further: the shell's click would open the channel list. The focused tile's press goes
@@ -14,7 +17,7 @@ The mouse, while the grid shows:
   leaves the grid);
 - the overlay's presses ask for the focus too; its clicks (after the double-click interval)
   come as `tileClicked` (a "+" tile opens the channel list, a card tries again) and its
-  double-clicks as `leaveRequested`.
+  double-clicks as `bigRequested` (the tile big, or the grid again).
 """
 
 from __future__ import annotations
@@ -67,7 +70,7 @@ def grid_rects(size: QSize, cells: int) -> list[QRect]:
 class GridFrame(QObject):
     focusRequested = Signal(str)  # a left press on a tile that is not focused
     tileClicked = Signal(str)  # a click on what the overlay draws ("+", a card, a label)
-    leaveRequested = Signal(str)  # a double-click on what the overlay draws
+    bigRequested = Signal(str)  # a double-click on what the overlay draws: the tile big
     tilesChanged = Signal()  # laid out anew (shown, resized, tiles or focus changed)
 
     def __init__(self, container: QWidget, surfaces: Mapping[str, QWidget], overlay=None) -> None:
@@ -80,6 +83,7 @@ class GridFrame(QObject):
         self._focused = ""
         self._playing: set[str] = set()  # the tiles whose surface shows
         self._shown = False
+        self._big = False  # the focused tile fills the page (`set_big`)
         self._closed = False
         container.installEventFilter(self)
         for name, surface in surfaces.items():
@@ -87,7 +91,7 @@ class GridFrame(QObject):
         if overlay is not None:
             overlay.tilePressed.connect(self._on_overlay_pressed)
             overlay.tileClicked.connect(self.tileClicked)
-            overlay.leaveRequested.connect(self.leaveRequested)
+            overlay.bigRequested.connect(self.bigRequested)
 
     # ---- public API ---------------------------------------------------------------------
 
@@ -116,9 +120,19 @@ class GridFrame(QObject):
         self._names, self._focused, self._playing = list(names), focused, set(playing)
         self._layout()
 
+    def set_big(self, big: bool) -> None:
+        """The focused tile fills the page, the others hidden (their players play on); or the
+        grid again. Laid out at once while shown."""
+        if big != self._big:
+            self._big = big
+            self._layout()
+
+    def big(self) -> bool:
+        return self._shown and self._big
+
     def hide_grid(self) -> None:
         """Stop laying the surfaces out; the PiP frame takes them back."""
-        self._shown = False
+        self._shown = self._big = False
         self._names, self._focused, self._playing = [], "", set()
 
     def shown(self) -> bool:
@@ -139,9 +153,12 @@ class GridFrame(QObject):
         return self._container.mapFromGlobal(point)
 
     def tiles(self) -> list[tuple[str, QRect]]:
-        """Each tile's name and rect (container coordinates), in order; none while hidden."""
+        """Each tile's name and rect (container coordinates), in order; none while hidden.
+        While one is big, that one alone, over the whole page."""
         if not self._shown:
             return []
+        if self._big and self._focused in self._names:
+            return [(self._focused, self._container.rect())]
         return list(zip(self._names, grid_rects(self._container.size(), len(self._names))))
 
     def rect_of(self, name: str) -> QRect:
@@ -169,14 +186,16 @@ class GridFrame(QObject):
     def _layout(self) -> None:
         if not self._shown or self._closed:
             return
-        for name, rect in self.tiles():
+        laid = self.tiles()
+        for name, rect in laid:
             surface = self._surfaces.get(name)
             if surface is None:
                 continue  # no player yet: the overlay draws its "+"
             surface.setGeometry(rect)
             surface.setVisible(name in self._playing)
+        shown = {name for name, _rect in laid}
         for name, surface in self._surfaces.items():
-            if name not in self._names:
+            if name not in shown:  # not a tile, or one beside the big one (it plays on)
                 surface.hide()
         self.tilesChanged.emit()
 

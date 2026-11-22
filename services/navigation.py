@@ -41,6 +41,7 @@ from services.provider_ids import (
     split_group_id,
     with_provider,
 )
+from services.zapping import ZapContext
 
 logger = logging.getLogger(__name__)
 
@@ -211,6 +212,7 @@ class NodeSeq(Sequence):
         self._absent: set[NavNode] = set()  # nodes looked for here and not found
         self._digits: Optional[int] = None
         self._numbered: Optional[bool] = None
+        self._identity: Optional[ZapContext] = None  # index_of_item's, made once
 
     def __len__(self) -> int:
         return len(self.items)
@@ -237,13 +239,26 @@ class NodeSeq(Sequence):
         row = self._rows.get(node)
         if row is not None or node.layer != "item" or node in self._absent:
             return row
-        # A node from an older list: find it by its id and provider, and keep it as made.
-        provider = provider_of(node.payload) if isinstance(node.payload, dict) else ""
+        # A node from an older list: find it as the ▶ tells channels (its address first: an
+        # M3U id is a list position, another channel's in a changed list), else by its id and
+        # provider, and keep it as made.
+        payload = node.payload
+        at = self.index_of_item(payload) if isinstance(payload, dict) else -1
+        if at >= 0:
+            return self._rows.setdefault(self[at], at)
+        provider = provider_of(payload) if isinstance(payload, dict) else ""
         for at, item in enumerate(self.items):
             if item_key(item) == node.key and provider_of(item) == provider:
                 return self._rows.setdefault(self[at], at)
         self._absent.add(node)
         return None
+
+    def index_of_item(self, item: dict) -> int:
+        """The first row that is `item` as the ▶ tells channels (`ZapContext.same`: the address
+        first, M3U ids being list positions), -1 when none is; an index made once per list."""
+        if self._identity is None:
+            self._identity = ZapContext(channels=self.items)
+        return self._identity.index_of(item)
 
     def find_focus(self, wanted: "str | tuple[str, str]") -> Optional[NavNode]:
         """The first row an id, or a (provider, id) pair, names (without making every node)."""
@@ -978,6 +993,13 @@ class NavModel(QObject):
         with its key, of its provider (a row or an item without one may be any's)."""
         nodes = self.children(self._path[-1])
         if nodes is None:
+            return True
+        # As the ▶ tells channels first (an M3U id is a list position: in a changed list
+        # another channel's), then by its key.
+        if isinstance(nodes, NodeSeq):
+            if nodes.index_of_item(item) >= 0:
+                return True
+        elif any(isinstance(n.payload, dict) and ZapContext.same(n.payload, item) for n in nodes):
             return True
         provider, key = provider_of(item), item_key(item)
 

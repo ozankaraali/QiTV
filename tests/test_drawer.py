@@ -37,7 +37,7 @@ from ui.find_session import DEBOUNCE_MS, FindSession
 from ui.keymap import key_hint
 from ui.overlay_host import OverlayHost
 from ui.overlays import channel_rows as channel_rows_module, drawer as drawer_module
-from ui.overlays.channel_rows import ChannelRowsModel, NumberRole
+from ui.overlays.channel_rows import ChannelRowsModel, NumberRole, PlayingRole
 from ui.overlays.drawer import (
     EMPTY_TEXT,
     FIND_LIBRARY_TEXT,
@@ -866,6 +866,30 @@ class DrawerTests(unittest.TestCase):
         self.assertEqual(self.drawer.message_for("right"), "Loading…")
         self.catalog.live = {"10": [{"id": 1, "name": "One"}, {"id": 2, "name": "Two"}]}
         self.catalog.groupReady.emit("live", "10")
+        self.assertEqual(self.drawer.highlighted().title, "Two")
+
+    def test_the_channel_opened_on_is_highlighted_though_its_id_names_another_row(self):
+        # The owner: watching one channel, the list opened on the one beside it. An M3U id is
+        # a list position: the dict of a channel kept from before its playlist changed (the
+        # start's last channel, a saved tile) has the id its neighbour has now. Its row is the
+        # one its ▶ marks (by its address).
+        self.catalog.live = {
+            "10": [
+                {"id": 1, "name": "One", "cmd": "http://tv/one"},
+                {"id": 2, "name": "Two", "cmd": "http://tv/two"},
+                {"id": 3, "name": "Three", "cmd": "http://tv/three"},
+            ]
+        }
+        self.nav.changed.emit()
+        playing = {"id": 3, "name": "Two", "cmd": "http://tv/two"}  # from before the change
+        self.drawer.set_playing(lambda: playing)
+        self.drawer.open_drawer(item_key(playing), focus_item=playing)
+        self.assertEqual(self.drawer.highlighted().title, "Two")
+        model = self.drawer._columns["right"].model
+        self.assertTrue(model.index(1).data(PlayingRole))  # the ▶ on the same row
+
+    def test_a_channel_not_listed_falls_back_to_its_focus_key(self):
+        self.drawer.open_drawer("2", focus_item={"id": 2, "name": "Gone", "cmd": "http://x/9"})
         self.assertEqual(self.drawer.highlighted().title, "Two")
 
     def test_unknown_focus_key_falls_back_to_first_row(self):

@@ -139,7 +139,7 @@ from ui.audio_queue import REPEAT_MODES, AudioQueue
 from ui.autoplay import FINISHED_TEXT, Autoplay
 from ui.captions_texts import NOT_AVAILABLE
 from ui.cast_controls import CastControls
-from ui.context_actions import ContextActions, Launcher, is_channel
+from ui.context_actions import OPEN_PIP_TEXT, ContextActions, Launcher, is_channel
 from ui.episode_listing import FolderListing
 from ui.grid_controls import LEAVE_FIRST, GridControls
 from ui.guide_controller import GuideController
@@ -758,6 +758,8 @@ class TVController(QObject):
                 borrow=lambda item, provider, purpose: self.lend_scheduled(item, provider, purpose),
                 owned=self._owned,
                 started=self._count_start,
+                choose=self._choose_small,
+                hidden=self._hidden_now,
                 parent=self,
             )
             self._pip.changed.connect(self._mixer.refresh)
@@ -800,6 +802,9 @@ class TVController(QObject):
             self._grid.changed.connect(self._update_guides)
         # The links of tiles opened beside the focused one, on the side lane (one at a time).
         self._tile_links: dict[str, Target] = {}
+        # The channel list was opened for the small picture (P with no previous channel): the
+        # channel picked there opens small.
+        self._choosing_small = False
         # A restored grid's tiles waiting for their provider's setup: (tile, channel,
         # provider, group).
         self._waiting_tiles: list[tuple[str, dict, str, str]] = []
@@ -843,6 +848,7 @@ class TVController(QObject):
         self.overlays.guide.rowsMoved.connect(self._update_guides)
         self.overlays.guide.closed.connect(self._update_guides)
         self.overlays.drawer.closed.connect(self._update_guides)
+        self.overlays.drawer.closed.connect(self._end_choosing_small)
         self.nav.notice.connect(self._on_notice)
         zap.tuneRequested.connect(self._on_zap_tune)
         zap.columnRequested.connect(self._on_column_requested)
@@ -1845,6 +1851,9 @@ class TVController(QObject):
             back = action is Action.SEEK_BACK
             if not self._live_controls.seek_live(back):
                 self._seek(-SEEK_STEP_MS if back else SEEK_STEP_MS)
+        elif action in (Action.TAB, Action.BACK_TAB):
+            if self._grid is not None and self.multiview_shown():
+                self._grid.step_focus(1 if action is Action.TAB else -1)  # 2.14: tile by key
         elif action in (Action.PIP, Action.SWAP):
             if self.multiview_shown():
                 self._toast(LEAVE_FIRST)  # the grid's tiles are the pictures meanwhile
@@ -1999,10 +2008,10 @@ class TVController(QObject):
         self._context.show_playing(target, global_pos, self.overlays.transport)
 
     def video_double_clicked(self) -> None:
-        """Fullscreen; on the multiview's grid, back to one picture (its first click focused
-        the tile, which becomes the big picture)."""
-        if self.multiview_shown():
-            self.leave_multiview()
+        """Fullscreen; on the multiview's grid, the focused tile big (its first click focused
+        it), or the grid again."""
+        if self._grid is not None and self.multiview_shown():
+            self._grid.toggle_big()
         else:
             self.window_actions.toggle_fullscreen()
 
@@ -2222,6 +2231,11 @@ class TVController(QObject):
         if node.layer != "item" or self.nav.section_of(node) != "live":
             logger.debug("Not playable from the drawer: %s", node)
             return
+        if self._choosing_small and self._pip is not None:
+            self._end_choosing_small()
+            self._pip.open_node(node)  # the list was opened for the small picture
+            self.overlays.drawer.close_drawer()
+            return
         # The whole group, not just the rows the drawer's filter shows: ↑/↓ walk the group.
         nodes = self.nav.children(parent) or siblings
         channels = payloads(nodes)
@@ -2241,6 +2255,16 @@ class TVController(QObject):
                 self.overlays.drawer.close_drawer()
             return
         key, channels = self._found_group(channel, group_id)
+        if self._choosing_small and self._pip is not None:
+            self._end_choosing_small()  # the list was opened for the small picture
+            listed = channels if key is not None else self._all_live()
+            source = item_provider.pick_source(self.catalog, channel, key or ALL_GROUP_ID)
+            context = ZapContext(
+                key or ALL_GROUP_ID, listed, fallback=self._all_live(), source=source
+            )
+            self._pip.open_channel(channel, context)
+            self.overlays.drawer.close_drawer()
+            return
         if key is None:
             self.tune_live(channel)
         else:
@@ -3804,6 +3828,9 @@ class TVController(QObject):
         self._tracks.refresh()  # an open panel shows the large picture's sound or subtitles
         self._picture.refresh()  # and the Picture panel and the statistics its picture
         if grid:
+            drawer = self.overlays.drawer
+            if drawer.isVisible() and not self._settings_shown() and not drawer.finding():
+                self._open_drawer()  # the channel list follows the focus: that tile's place
             if large_reopen is not None and self._grid is not None:
                 # A tile beside the focus never reconnects by itself (its direct stream that
                 # ends fails): one the focus left during its back-off says its stream ended.
@@ -5366,33 +5393,52 @@ class TVController(QObject):
         if banner.isVisible() and banner.info is not None and banner.info.logo is None:
             banner.show_info(self.banner_info(channel))
 
+    def _choose_small(self) -> None:
+        """P (⧉, the phone's) with no previous channel to open small: the channel list opens,
+        and the channel picked there opens small (Enter, a click, the find's); Esc closes it
+        and nothing opens."""
+        if self._closed:
+            return
+        self._open_drawer()
+        if self.overlays.drawer.isVisible():
+            self._choosing_small = True
+            self._toast(translate(OPEN_PIP_TEXT), "info")  # what the pick is for
+
+    def _end_choosing_small(self) -> None:
+        self._choosing_small = False
+
     def _open_drawer(self, from_column: bool = False) -> None:
+        self._choosing_small = False  # (the small picture's choice opens it, then says so)
         if not self.catalog.provider_names():
             self._flow.welcome(chosen=True)  # asked for: over a film opened in QiTV too
             return
-        # Where the big picture's channel was picked (after a swap, the new large one's); while
-        # the fast-zap column is open the user is choosing in it, so the list opens at the zap's
-        # own channel and group, as before 2.1.
+        # On the channel the big picture plays (its ▶: the one tuned last, playing or on its
+        # way; after a swap, the new large one's), where it was picked: its target's group and
+        # list once it plays, else the zap's (set as it was tuned). Its row is the one its ▶
+        # marks (its address first: an M3U id is a list position, another channel's once the
+        # list changed). While the fast-zap column is open the user is choosing in it, so the
+        # list opens at the zap's own channel and group, as before 2.1.
         shown = self._current if self._current is not None and self._current.live else None
+        playing = self._channel if shown is not None else None  # (a film's: the list as it is)
         if from_column or self.overlays.column.isVisible():
-            shown = None
-        if shown is not None:
-            self.nav.reveal(
-                shown.source,
-                "live",
-                shown.group_key or self.zap.context.group_key,
-                shown.item,
-            )
+            playing = None
+        context = self.zap.context
+        if playing is not None and shown is not None:
+            if ZapContext.same(shown.item, playing):
+                source, group = shown.source, shown.group_key or context.group_key
+            else:  # still on its way: picked from the zap's group
+                source, group = context.source, context.group_key
+            self.nav.reveal(source, "live", group, playing)
         elif "live" not in self.catalog.sections():  # 2.8: a media server: its sections
             self.nav.focus_source(self.catalog.current_provider_name())
         else:
-            self.nav.reset_to("live", self.zap.context.group_key or ALL_GROUP_ID)
-        channel = shown.item if shown is not None else self._channel or self.zap.context.current()
+            self.nav.reset_to("live", context.group_key or ALL_GROUP_ID)
+        channel = self._channel or context.current()
         focus = None
         if channel:
             provider = provider_of(channel)
             focus = (provider, item_key(channel)) if provider else item_key(channel)
-        self.overlays.drawer.open_drawer(focus_key=focus)
+        self.overlays.drawer.open_drawer(focus_key=focus, focus_item=channel or None)
         self._update_guides()  # the drawer is visible now: its group's providers are in use
 
     def _open_guide(self) -> None:
@@ -5484,6 +5530,8 @@ class TVController(QObject):
             pass  # 2.13.3: the Resume pill closes (Esc, the phone's Back), its offer gone
         elif overlays.banner.isVisible():
             overlays.banner.dismiss()
+        elif self._grid is not None and self._grid.big():
+            self._grid.back_to_grid()  # a big tile: the grid again
         elif self.multiview_shown():
             self.leave_multiview()  # before fullscreen: the grid is what Esc closes first
         else:
