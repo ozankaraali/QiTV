@@ -3210,7 +3210,10 @@ class StayLiveTests(LiveSessionCase):
         self.assertTrue(self.timelines[-1]["reconnecting"])  # "Reconnecting…"
         self.engine._snapshots[sid]["reconnecting"] = False
         feed.stalled = False
-        feed.run(0.25)  # the source sends again
+        # The source sends again: after a reconnect, VLC (run dry) is held until what came
+        # shows real time and its cushion (2 s at least) is back (2026-11-22: a reconnect's
+        # trickle played in fits).
+        feed.run(2.5)
         self.assertFalse(self.timelines[-1]["stalled"])
         timelines = len(self.timelines)
         feed.run(40.0)
@@ -4867,6 +4870,33 @@ class HoldTests(LiveSessionCase):
         feed.run(20.0)
         self.assertEqual(self.playback.holds, [True, False])  # it flows: it plays again
         self.assertLess(feed.starved_s - starved, 0.5)  # never in fits at the edge
+
+    def test_a_silence_past_its_bursts_holds_vlc_in_time_and_a_reconnects_trickle_too(self):
+        # Seen live on 2026-11-22 (17:45:30-17:46:12): on ~10 s bursts the edge stood still
+        # 15 s (the connection broke off), VLC 15 s behind ran dry the first time (not held:
+        # it waited for 1.5 bursts and 5 s of silence), then played the reconnect's first
+        # trickle in fits for 18 s (pictures and sound dropped) until a hold came. Held in
+        # time now, and through the trickle until the source shows real time.
+        sid = self.start()
+        feed = Feed(self, sid, burst=10.0, edge=10.0, metered=True).ready()
+        feed.run(120.0)  # ~10 s bursts, counted
+        self.assertEqual(self.live._filter.rhythm, 10.0)
+        starved, holds = feed.starved_s, len(self.playback.holds)
+        feed.stalled = True
+        self.engine._snapshots[sid]["reconnecting"] = True
+        feed.run(15.0)  # the next burst does not come: the connection broke off
+        self.assertEqual(self.playback.holds[holds:], [True])  # held before VLC ran dry
+        feed.stalled = False
+        self.engine._snapshots[sid]["reconnecting"] = False
+        trickle = [0.25 * 0.4] * round(15.0 / 0.25)  # the reconnect: 15 s at 0.4x ...
+        backlog = [0.25 * 6.0] * round(5.0 / 0.25)  # ... then its backlog at 6x
+        feed.sizes = itertools.chain(trickle, backlog, itertools.repeat(0.25))
+        feed.gaps = itertools.repeat(0.25)
+        feed.run(15.0)
+        self.assertEqual(self.playback.holds[holds:], [True])  # held all through the trickle
+        feed.run(30.0)
+        self.assertEqual(self.playback.holds[holds:], [True, False])  # real time: it plays
+        self.assertLess(feed.starved_s - starved, 0.5)  # never dry, never in fits
 
     def test_a_long_trickle_plays_its_cushion_after_30_s_held_then_holds_again(self):
         # The bound: a held picture beats choppy sound, but not for ever. After 30 s held with
@@ -7228,13 +7258,13 @@ class ComingAndGoingBurstTests(LiveSessionCase):
         self.assertEqual(counted, ["10.0", "11.0"], lines)
 
     def test_the_evening_never_jumps_for_the_burst_and_builds_its_room_once(self):
-        # As the report reads the log: one 0.95x build for the burst's room (VLC runs dry
-        # once in the first stretch, its first burst a burst after the steady data), and the
-        # room is kept: no 0.95x again, VLC never dry again.
+        # As the report reads the log: the burst's room built once (its first burst a burst
+        # after the steady data: VLC held before it runs dry, or one 0.95x), and the room is
+        # kept: no 0.95x again, VLC never dry again.
         lines, feed, dry = self.evening(self.STRETCHES[1][0])
         self.assert_kept(lines)
         nudges = [line for line in lines if "nudges the rate" in line or "nudge turns" in line]
-        self.assertEqual(len([line for line in nudges if " 0.95x " in line]), 1, nudges)
+        self.assertLessEqual(len([line for line in nudges if " 0.95x " in line]), 1, nudges)
         self.assertLessEqual(changes(self.playback.rates), 8, nudges)
         self.assertEqual(feed.starved_s, dry)
         self.assertEqual(len(self.playback.plays), 1)
@@ -7272,13 +7302,14 @@ class ComingAndGoingBurstTests(LiveSessionCase):
         self.assertGreaterEqual(min(self.playback.rates[rates:] or [1.0]), 0.97)
 
     def test_a_kept_burst_takes_its_bound_to_stall(self):
-        # The source may send its next burst after as long: only beyond that is it a stall.
+        # The source may send its next burst after as long: only beyond that is it a stall
+        # (VLC may be held before then, if its room runs out first: shown as waiting).
         feed = self.kept()
         feed.stalled = True
         feed.run(11.5)
-        self.assertFalse(self.timelines[-1]["stalled"])
+        self.assertFalse(self.live._stalled(self.live._snapshot()))
         feed.run(1.0)
-        self.assertTrue(self.timelines[-1]["stalled"])
+        self.assertTrue(self.live._stalled(self.live._snapshot()))
 
     def test_on_a_kept_burst_a_backlog_is_caught_up_and_a_freeze_still_jumps(self):
         # A backlog (15 s more at once, a reconnect's, say), VLC playing on, is caught up by
@@ -7405,7 +7436,7 @@ class ComingAndGoingBurstTests(LiveSessionCase):
         # Through the sag and the bursts' return (counted 9.8 s then 10.5 s, a second over
         # the kept 9.4 s): no slow-down, and VLC never runs dry after the first stretch.
         later = [text for when, text in lines if when > 230.0 and "nudge" in text]
-        self.assertEqual([text for text in later if "0.9" in text], [], later)
+        self.assertEqual([text for text in later if re.search(r" 0\.9\d?x", text)], [], later)
         self.assertEqual(feed.starved_s, dry)
 
     def test_a_start_that_lands_with_a_backlog_is_caught_up_not_jumped(self):
