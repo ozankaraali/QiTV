@@ -557,6 +557,78 @@ class BrowsedCatalogTests(unittest.TestCase):
         self.catalogs.catalog("Harbor IPTV").epgReady.emit()
         self.assertEqual(spy.count(), 1)
 
+    def autoplay_on(self, view):
+        """Autoplay over this page (as the TV's), its card, toasts and hints noted."""
+        from unittest import mock
+
+        from test_autoplay_local import FakeCard
+
+        from ui.autoplay import Autoplay
+
+        self.card, self.toasts, self.hints = FakeCard(), [], []
+        return Autoplay(
+            catalog=view,
+            config=mock.Mock(auto_play_episodes=True),
+            card=self.card,
+            play=mock.Mock(),
+            is_current=lambda target: True,
+            external_mode=lambda: False,
+            notify=lambda text, kind: self.toasts.append(text),
+            set_hint=self.hints.append,
+            show_transport=mock.Mock(),
+        )
+
+    def last_episode(self, provider):
+        """The last episode of a series of `provider` whose next season isn't loaded yet."""
+        from ui.link_lanes import Target
+
+        series = with_provider({"id": "S1", "name": "Show"}, provider)
+        seasons = [{"id": "1", "name": "Season 1"}, {"id": "2", "name": "Season 2"}]
+        self.loaded = {"1": [with_provider({"id": "e1", "season_id": "1"}, provider)]}
+        if provider in self.catalogs.names():
+            catalog = self.catalogs.catalog(provider)
+            catalog.seasons = lambda series: seasons
+            catalog.episodes = lambda series, season: self.loaded.get(str(season["id"]))
+            catalog.request_episodes = lambda series, season: None  # (its answer comes later)
+        context = {"series": series, "season": seasons[0], "episodes": self.loaded["1"]}
+        return Target(self.loaded["1"][0], "series", "Show", context=context)
+
+    def test_the_next_season_of_another_providers_series_ends_its_wait(self):
+        # 2.13.4 (bug scan #16): a Library episode of another provider than the TV page's:
+        # its next season's answer never reached the page, "Loading next season…" for good
+        view = self.view("Demo TV")
+        autoplay = self.autoplay_on(view)
+        self.assertTrue(autoplay.on_ended(self.last_episode("Harbor IPTV")))
+        self.assertTrue(autoplay.waiting())
+        self.loaded["2"] = [with_provider({"id": "e2", "season_id": "2"}, "Harbor IPTV")]
+        self.catalogs.catalog("Harbor IPTV").episodesReady.emit("S1", "2")
+        self.assertFalse(autoplay.waiting())
+        self.assertIsNone(self.hints[-1])
+        self.assertEqual(self.card.show_next.call_count, 1)
+
+    def test_another_providers_season_that_fails_to_load_says_so(self):
+        view = self.view("Demo TV")
+        autoplay = self.autoplay_on(view)
+        self.assertTrue(autoplay.on_ended(self.last_episode("Harbor IPTV")))
+        self.catalogs.catalog("Harbor IPTV").episodesFailed.emit("S1", "2", "boom")
+        self.assertFalse(autoplay.waiting())
+        self.assertEqual(self.toasts, ["Couldn't load the next season"])
+
+    def test_the_pages_own_providers_season_is_followed_once(self):
+        view = self.view("Harbor IPTV")
+        autoplay = self.autoplay_on(view)
+        self.assertTrue(autoplay.on_ended(self.last_episode("Harbor IPTV")))
+        self.loaded["2"] = [with_provider({"id": "e2", "season_id": "2"}, "Harbor IPTV")]
+        self.catalogs.catalog("Harbor IPTV").episodesReady.emit("S1", "2")
+        self.assertEqual(self.card.show_next.call_count, 1)
+
+    def test_a_season_of_a_provider_that_is_gone_says_it_could_not_load(self):
+        view = self.view("Demo TV")
+        autoplay = self.autoplay_on(view)
+        self.assertTrue(autoplay.on_ended(self.last_episode("Gone")))
+        self.assertFalse(autoplay.waiting())
+        self.assertEqual(self.toasts, ["Couldn't load the next season"])
+
 
 COVE = {"type": "M3UPLAYLIST", "name": "Cove TV", "url": "http://127.0.0.1:9/cove.m3u"}
 
