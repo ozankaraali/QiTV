@@ -201,11 +201,15 @@ and no translation of it leaves your computer.
 - **Emby** (<https://emby.media>) is a product of Emby LLC. QiTV talks to your own Emby server
   over its HTTP API; no Emby code or logo is part of QiTV, and QiTV is not affiliated with or
   endorsed by Emby. "Emby" is a trademark of its owner.
+- **Plex** (<https://www.plex.tv>) is a product of Plex, Inc. QiTV signs in at plex.tv with
+  Plex's documented PIN sign-in and talks to your own Plex Media Server over its documented API
+  (<https://developer.plex.tv/pms/>); no Plex code or logo is part of QiTV, and QiTV is not
+  affiliated with or endorsed by Plex. "Plex" is a trademark of Plex, Inc.
 
 ## Trademarks
 
 Chromecast, Chromecast built-in and Google Cast are trademarks of Google LLC. QiTV casts through
 VLC's own Chromecast support (see VLC above) and is not affiliated with or endorsed by Google.
-Emby is a trademark of its owner; Jellyfin is the name of the Jellyfin project; TMDB is The
-Movie Database's. Each is named only to say what QiTV works with. X Window System is a trademark
-of The Open Group (the X11 libraries above).
+Emby is a trademark of its owner; Plex is a trademark of Plex, Inc.; Jellyfin is the name of the
+Jellyfin project; TMDB is The Movie Database's. Each is named only to say what QiTV works with.
+X Window System is a trademark of The Open Group (the X11 libraries above).

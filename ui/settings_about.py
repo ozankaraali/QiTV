@@ -38,9 +38,9 @@ TAGLINE = N_("A TV-first IPTV player for STB portals, Xtream and M3U playlists."
 CREDITS_TEXT = N_(
     # i18n: About QiTV's credits; the names stay as they are
     "Plays and casts with VLC, built with Qt and Python. Subtitles come from OpenSubtitles,"
-    " free channels from iptv-org, and film and series details from TMDB. Works with Jellyfin"
-    " and Emby servers and with Chromecast; Chromecast is a trademark of Google LLC, and QiTV"
-    " is not affiliated with Jellyfin, Emby or Google."
+    " free channels from iptv-org, and film and series details from TMDB. Works with Jellyfin,"
+    " Emby and Plex servers and with Chromecast; Chromecast is a trademark of Google LLC, and"
+    " QiTV is not affiliated with Jellyfin, Emby, Plex or Google."
 )
 # i18n: a link in About QiTV, after its credits: THIRD-PARTY-NOTICES.md, in the browser
 NOTICES_LABEL = N_("Credits and licenses")
