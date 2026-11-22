@@ -260,8 +260,7 @@ class ConfigManager:
 
     def load_config(self):
         try:
-            with open(self.config_path, "rb") as f:
-                self.config = json.loads(f.read())
+            self.config = json.loads(self._read_config())
         except FileNotFoundError:
             self.config = self.default_config()
             self._save_at_start()
@@ -279,6 +278,21 @@ class ConfigManager:
             self.xmltv_channel_map = MultiKeyDict.deserialize(self.xmltv_channel_map)
 
         self.update_patcher()
+
+    def _read_config(self) -> bytes:
+        """config.json's bytes. One held open for a moment (Windows' antivirus or indexer, as
+        QiTV starts) is tried again, as a save is: _REPLACE_RETRIES times, _REPLACE_RETRY_DELAY_S
+        apart."""
+        attempt = 0
+        while True:
+            try:
+                with open(self.config_path, "rb") as f:
+                    return f.read()
+            except PermissionError:
+                if attempt == _REPLACE_RETRIES:
+                    raise  # still held: the defaults this run (_keep_unread_config)
+                attempt += 1
+                time.sleep(_REPLACE_RETRY_DELAY_S)
 
     def _keep_unread_config(self, error: OSError) -> None:
         """The defaults this run, and the user's config.json kept as it is: nothing is saved
