@@ -4845,6 +4845,52 @@ class HoldTests(LiveSessionCase):
         feed.run(1.0)
         self.assertEqual(self.playback.current, PlaybackState.PLAYING)
 
+    def test_after_a_stall_a_trickle_keeps_vlc_held_until_the_source_flows(self):
+        # Seen live on 2026-11-22 (17:05-17:07): the connection broke off, VLC was held, the
+        # reconnect then sent 0.2-0.5x real time; the hold played again at its cushion, and
+        # VLC played in fits at the edge, dropping sound at each restart (16, then 24
+        # buffers). Held through the trickle, it plays again once the source flows.
+        feed = self.live_feed()
+        self.gap(feed, 6.0)  # VLC runs dry once: a hold may come
+        feed.run(60.0)
+        starved = feed.starved_s
+        feed.stalled = True
+        feed.run(8.0)  # the connection broke off
+        feed.stalled = False
+        self.assertEqual(self.playback.holds, [True])  # held before it ran dry
+        trickle = [0.25 * 0.3] * round(20.0 / 0.25)  # 20 s at 0.3x ...
+        flood = [0.25 * 6.0] * round(5.0 / 0.25)  # ... then the backlog at 6x
+        feed.sizes = itertools.chain(trickle, flood, itertools.repeat(0.25))
+        feed.gaps = itertools.repeat(0.25)
+        feed.run(20.0)
+        self.assertEqual(self.playback.holds, [True])  # held all through the trickle
+        feed.run(20.0)
+        self.assertEqual(self.playback.holds, [True, False])  # it flows: it plays again
+        self.assertLess(feed.starved_s - starved, 0.5)  # never in fits at the edge
+
+    def test_a_long_trickle_plays_its_cushion_after_30_s_held_then_holds_again(self):
+        # The bound: a held picture beats choppy sound, but not for ever. After 30 s held with
+        # the cushion back VLC plays it, and is held again at the edge: never in fits.
+        feed = self.live_feed()
+        self.gap(feed, 6.0)
+        feed.run(60.0)
+        starved = feed.starved_s
+        feed.stalled = True
+        feed.run(8.0)
+        feed.stalled = False
+        held = self.clock.now
+        feed.sizes = itertools.repeat(0.25 * 0.3)  # 0.3x for good
+        feed.gaps = itertools.repeat(0.25)
+        released = None
+        for _ in range(4 * 60):
+            feed.run(0.25)
+            if released is None and not self.playback.held:
+                released = self.clock.now
+        self.assertIsNotNone(released)
+        self.assertAlmostEqual(released - held, 30.0, delta=8.5)  # (it held from the gap)
+        self.assertEqual(self.playback.holds[:3], [True, False, True])  # held again
+        self.assertLess(feed.starved_s - starved, 0.5)
+
     def test_a_bursty_sources_wait_for_its_next_burst_is_not_held(self):
         # A start this short comes only after the ready timeout (2.1).
         self.live = self.make(ready_timeout_ms=50)
@@ -7387,6 +7433,36 @@ class ComingAndGoingBurstTests(LiveSessionCase):
         self.assertGreater(max(state["lag"] for state in self.timelines), 2.5 + 20.0)
         self.assertAlmostEqual(self.timelines[-1]["lag"], TARGETS["normal"], delta=1.0)
         self.assertEqual(feed.starved_s, 0.0)
+
+    def test_a_long_silence_holds_vlc_before_it_runs_dry_the_first_time_too(self):
+        # Seen live on 2026-11-22 (16:38, 16:55): the edge stood still 15 s and more with VLC
+        # 15-18 s behind on a kept burst; VLC ran dry (not held: it had not run dry within
+        # five minutes, and the kept burst asked for 1.5 of its bursts of silence first) and
+        # dropped sound as media came again (7 and 13 buffers). Held instead, VLC drops none.
+        feed = self.kept()
+        holds, dry = len(self.playback.holds), feed.starved_s
+        feed.stalled = True
+        feed.run(20.0)
+        self.assertEqual(self.playback.holds[holds:], [True])
+        feed.stalled = False
+        feed.edge += 20.0  # it comes back at live
+        feed.push()
+        feed.run(10.0)
+        self.assertEqual(self.playback.holds[holds:], [True, False])
+        self.assertEqual(feed.starved_s, dry)  # never dry
+
+    def test_a_short_hiccup_the_first_time_is_not_held(self):
+        # 2.8.8, as before: VLC at the live edge, the source silent 3 s once (no dry run within
+        # five minutes): VLC rides it out as it would (a hold waits longer).
+        sid = self.start()
+        feed = Feed(self, sid, burst=0.0, edge=3.0).ready()
+        feed.run(30.0)
+        feed.stalled = True
+        feed.run(3.0)
+        feed.stalled = False
+        feed.run(10.0)
+        self.assertEqual(self.playback.holds, [])
+        self.assertGreater(feed.starved_s, 0.0)
 
     def test_a_burst_that_brings_its_media_early_never_jumps_either(self):
         # The other reading of the log (VLC never ran dry that evening): each stretch's first
