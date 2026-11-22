@@ -265,8 +265,8 @@ class ProvidersTests(unittest.TestCase):
         self.assertEqual([row.icon for row in rows], ["", "", "plus", "plus", "plus"])
         self.assertEqual([row.sub for row in rows[:2]], ["M3U playlist · in use", "Xtream"])
         self.assertEqual(
-            [kind_text(kind) for kind in ("STB", "JELLYFIN", "EMBY", "M3USTREAM", "ODD")],
-            ["STB portal", "Jellyfin", "Emby", "M3U Stream", "ODD"],
+            [kind_text(kind) for kind in ("STB", "JELLYFIN", "EMBY", "PLEX", "M3USTREAM", "ODD")],
+            ["STB portal", "Jellyfin", "Emby", "Plex", "M3U Stream", "ODD"],
         )
         # The TV moved to another one (the menu bar, a provider ready): its row says so.
         self.config.selected_provider_name = "Panel"
