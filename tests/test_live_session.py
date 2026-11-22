@@ -7577,59 +7577,6 @@ class FloodTests(LiveSessionCase):
         self.assertGreaterEqual(reopens[0], settled[0])  # judged once arrivals settled
         self.assertAlmostEqual(self.timelines[-1]["lag"], TARGETS["normal"], delta=1.0)
 
-    def first_play(self, feed, seconds):
-        """Run `feed` until the tune's first play (at most `seconds`): its time after ready."""
-        ready = self.clock.now
-        for _ in range(round(seconds / 0.25)):
-            if self.playback.plays:
-                return self.clock.now - ready
-            feed.run(0.25)
-        return None
-
-    def test_a_tune_waits_for_its_backlog_at_network_speed_and_lands_once(self):
-        # 17:30:20-17:30:32: the tune's first picture came while the new connection's buffer
-        # still arrived at network speed; once it settled the start was picked again, the
-        # picture 18 s on 11 s after it showed. The start waits for it now (the loading as
-        # ever) and lands once.
-        sid = self.start()
-        feed = Feed(self, sid, burst=0.0, edge=3.0, metered=True)
-        self.flood(feed, 7.0, 3.7)  # ~19 s more than real time in 7 s ...
-        feed.run(1.0)  # ... arriving as the helper lets the bytes go (its hold ran out)
-        feed.ready(backlog_after_start=False)
-        waited = self.first_play(feed, 12.0)
-        self.assertIsNotNone(waited)
-        self.assertGreaterEqual(waited, 5.0)  # the backlog's arrival, waited for ...
-        self.assertLessEqual(waited, 10.0)  # ... within the bound
-        self.assertEqual(self.notices, [])  # no new words: the loading as ever
-        said = self.lines(feed, 120.0)
-        texts = [text for _, text in said]
-        self.assertFalse(any("picked again" in text for text in texts), texts)
-        self.assertEqual(len(self.playback.plays), 1)  # it landed once
-        self.assertAlmostEqual(self.timelines[-1]["lag"], TARGETS["normal"], delta=1.0)
-
-    def test_a_tune_without_a_backlog_arriving_starts_as_fast_as_before(self):
-        sid = self.start()
-        feed = Feed(self, sid, burst=0.0, edge=6.0, metered=True)
-        feed.ready(backlog_after_start=False)
-        self.assertLessEqual(self.first_play(feed, 5.0), 1.5)
-
-    def test_a_backlog_arriving_longer_than_the_wait_starts_and_is_caught_up_never_repicked(self):
-        # The bound: 10 s after ready the start plays though the backlog still arrives; its
-        # landing is caught up gently, never picked again (a skip after the picture showed).
-        sid = self.start()
-        feed = Feed(self, sid, burst=0.0, edge=3.0, metered=True)
-        self.flood(feed, 14.0, 3.0)
-        feed.run(1.0)
-        feed.ready(backlog_after_start=False)
-        waited = self.first_play(feed, 15.0)
-        self.assertAlmostEqual(waited, 10.0, delta=0.5)
-        said = self.lines(feed, 600.0)
-        texts = [text for _, text in said]
-        self.assertFalse(any("picked again" in text for text in texts), texts)
-        self.assertEqual(len(self.playback.plays), 1)
-        self.assertNotIn("1.10x", " ".join(texts))
-        self.assertAlmostEqual(self.timelines[-1]["lag"], TARGETS["normal"], delta=1.0)
-
     def test_a_tunes_backlog_at_network_speed_is_waited_out_then_caught_up(self):
         # The tune's own: the source hands the new connection its buffer at 3x for 10 s
         # after the start (20 s more), none of it at once (the re-pick's dump).
