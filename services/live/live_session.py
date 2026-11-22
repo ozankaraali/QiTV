@@ -2909,6 +2909,8 @@ class LiveSession(QObject):
             self._stay.hold_reopen = self._just_opened()
             self._stay.burst = self._filter.burst
             self._stay.spare = self._spare()
+            self._stay.steady = self._filter.kept <= 0  # no kept burst: the calm band
+            self._stay.caption_floor = self._caption_floor
             self._stay.edge = self._filter.edge(self._clock())  # what a backlog pushes ahead
             self._stay.flooding = self._flooding(snapshot)
             self._stay.spread = self._filter.spread()
