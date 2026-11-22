@@ -11,7 +11,9 @@ the helper measures for a moment is none; one taken in after the start is kept f
 
 `StayLive` leaves the rate at 1x while the mean lag stays within a dead band around the target:
 at least `_BAND_S`, at least `_BAND_SPREAD` times the filter's spread, and behind the target a
-quarter of a burst more (a bursty source's target already holds half a burst of room). Only a
+quarter of a burst more (a bursty source's target already holds half a burst of room); ahead
+of it, what the caller says is `spare` more (Auto's target for a kept burst: VLC still has the
+room it needs that far under it), but for too little room and trouble, built to the target. Only a
 lag outside the band for `_PERSIST_S` (counted while VLC plays: buffering, a reopen or Go live
 start the count again, so such a step is taken into the lag once and never chased) starts a
 nudge: one gentle rate (1.03x behind, 0.97x ahead), ramped in and out in `_RAMP_STEPS` steps
@@ -319,15 +321,20 @@ class LagFilter:
     form and the window; a change starts the window afresh.
 
     A burst taken in that way after the first report (it lasted two bursts and ten seconds)
-    is the source's for the tune (`kept`): a smaller one, or none, no longer counts; a larger
-    one still does. Seen live: a raw TS channel sent ~10 s bursts for one to three minutes at
-    a time, steadily between, six times in 45 minutes. Each time the bursts stopped, the
-    burst went, the target fell 6-8 s at once and the mean lag rose by half a burst (the
-    closed form no longer took it off): far behind, a jump to live, 8-13 s of the programme
-    skipped; each time they came back the room was built again at 0.95x. Kept, the room
-    stays through the steady minutes (the cost: the burst's latency for the tune). A first
-    report (an HLS target duration, a raw TS backlog measured at connect) is not kept: that
-    one-off first "burst" goes as before.
+    is the source's for the tune (`kept`): a smaller one, or none, no longer counts in `burst`
+    (the closed form, and the target the caller sets from it); a larger one still does. Seen
+    live: a raw TS channel sent ~10 s bursts for one to three minutes at a time, steadily
+    between, six times in 45 minutes. Each time the bursts stopped, the burst went, the target
+    fell 6-8 s at once and the mean lag rose by half a burst (the closed form no longer took
+    it off): far behind, a jump to live, 8-13 s of the programme skipped; each time they came
+    back the room was built again at 0.95x. Kept, the room stays through the steady minutes
+    (the cost: the burst's latency for the tune). A first report (an HLS target duration, a
+    raw TS backlog measured at connect) is not kept: that one-off first "burst" goes as
+    before. `rhythm` is the burst the source has now, with the same hysteresis but never kept:
+    it sets the window, the step and `settled()`. Seen live on a dev build that sized them by
+    the kept burst: the source sent steadily, then a backlog (46 s of media in 30 s), and the
+    mean took 90 s to follow it, so a slow-down built room that was there, and stay-live then
+    jumped to live.
 
     Pure logic: no clock of its own.
     """
@@ -340,10 +347,11 @@ class LagFilter:
         self._first: Optional[float] = None  # the first since the window started afresh
         self._level: Optional[float] = None  # the last sample's level
         self._spread = 0.0
-        self.burst = 0.0
+        self.burst = 0.0  # `rhythm`, or the larger burst kept for the tune
+        self.rhythm = 0.0  # the source's burst now (with hysteresis; never kept)
         self._burst_seen = False
-        self._pending: Optional[tuple[float, float]] = None  # (since, reported) unlike `burst`
-        self._kept = False  # `burst` came after the first report: the source's for the tune
+        self._pending: Optional[tuple[float, float]] = None  # (since, reported) unlike `rhythm`
+        self._kept = 0.0  # the largest burst a rise took in after the first report
         self.restarts = 0  # how often its window started afresh (a step, a burst, reset())
         self.steps = 0  # arrivals that moved the level more than `_STEP_S` (restarting or not)
 
@@ -362,12 +370,12 @@ class LagFilter:
         after a restart the mean still moves with the arrivals)."""
         if self._first is None:
             return False
-        return now - self._first >= min(self.window, max(_WARMUP_S, 2 * self.burst)) - 1e-9
+        return now - self._first >= min(self.window, max(_WARMUP_S, 2 * self.rhythm)) - 1e-9
 
     @property
     def window(self) -> float:
         """The seconds the mean is taken over now."""
-        return min(_WINDOW_MAX_S, max(_WINDOW_MIN_S, _WINDOW_BURSTS * self.burst))
+        return min(_WINDOW_MAX_S, max(_WINDOW_MIN_S, _WINDOW_BURSTS * self.rhythm))
 
     def add(self, now: float, edge: float, burst: float = 0.0, since: float = 0.0) -> None:
         """The live edge at `now`, the burst the source reports (0.0: steady), and the seconds
@@ -379,7 +387,7 @@ class LagFilter:
         moved = 0.0 if self._level is None else abs(level - self._level)
         if moved > _STEP_S:
             self.steps += 1  # (under a burst the rhythm may still hold it: no restart)
-        if moved > max(_STEP_S, burst):
+        if moved > max(_STEP_S, self.rhythm):
             self.reset()  # a step, not the rhythm: taken in at once
         dt = _TICK_S if self._last is None else min(max(now - self._last, 0.0), _MAX_DT)
         self._last, self._level = now, level
@@ -423,7 +431,7 @@ class LagFilter:
     @property
     def kept(self) -> float:
         """The burst kept for the tune (taken in after the first report), 0.0 without one."""
-        return self.burst if self._kept else 0.0
+        return self._kept
 
     def burst_for(self, reported: float) -> float:
         """The burst it holds (with its hysteresis), or, before its first edge, the one the
@@ -432,23 +440,22 @@ class LagFilter:
 
     def _classify(self, now: float, reported: float) -> None:
         if not self._burst_seen:
-            self._burst_seen, self.burst = True, reported
+            self._burst_seen, self.burst, self.rhythm = True, reported, reported
             return
-        if abs(reported - self.burst) < _BURST_STEP_S:
+        if abs(reported - self.rhythm) < _BURST_STEP_S:
             self._pending = None
             return
-        rising = reported > self.burst
-        if self._kept and not rising:
-            self._pending = None  # a burst that came after the start does not go again
-            return
         pending = self._pending
-        if pending is None or (pending[1] > self.burst) != rising:
+        rising = reported > self.rhythm
+        if pending is None or (pending[1] > self.rhythm) != rising:
             pending = self._pending = (now, reported)
         hold = max(_BURST_ON_S, 2 * reported) if rising else _BURST_OFF_S
         if now - pending[0] >= hold - 1e-9:
-            self.burst, self._pending = reported, None
-            self._kept = self._kept or rising
-            self.reset()  # the closed form changed with it: the window starts afresh
+            self.rhythm, self._pending = reported, None
+            if rising:
+                self._kept = max(self._kept, reported)
+            self.burst = max(reported, self._kept)
+            self.reset()  # the window (or the closed form) changed: it starts afresh
         else:
             self._pending = (pending[0], reported)
 
@@ -529,6 +536,11 @@ class StayLive:
         self.burst = 0.0
         self.spread = 0.0
         self.slack = 0.0
+        # Set by the caller: how far under the target the lag may be while VLC still has the
+        # room it needs (Auto with a burst the lag filter keeps: the target's margin over that
+        # burst's own room). Only a lag under the target by more than this, beyond the band,
+        # is built gently; too little room (`_short`) and trouble build to the target as ever.
+        self.spare = 0.0
         # Set by the caller: a stream opened a moment ago (Go live, a seek, a reopen), so its
         # lag is not known yet: no reopen at live until it is (never two opens in a row).
         self.hold_reopen = False
@@ -594,9 +606,12 @@ class StayLive:
         band = max(_BAND_S, _BAND_SPREAD * self.spread, self._wide)
         return band + (_BAND_BURST * self.burst if side > 0 else 0.0)
 
-    def _centre(self, side: float) -> float:
-        """The target on `side`: behind it, as high as the burst reported now would set it."""
-        return self.target + max(0.0, self.slack) if side > 0 else self.target
+    def _centre(self, side: float, *, urgent: bool = False) -> float:
+        """The target on `side`: behind it, as high as the burst reported now would set it;
+        ahead of it, less what is `spare` (but for a slow-down for room or after trouble)."""
+        if side > 0:
+            return self.target + max(0.0, self.slack)
+        return self.target if urgent else self.target - max(0.0, self.spare)
 
     def lock_rate(self) -> None:
         """VLC cannot play this channel at any rate but 1x (`RateHealth`): keep 1x from now.
@@ -937,14 +952,15 @@ class StayLive:
         behind, a jump to live instead (`_far_move`)."""
         behind, ahead = lag - self._centre(1), lag - self._centre(-1)
         far = behind > _FAR_S + self._landed()  # a landing above the target is no drift
-        short = ahead < -_BAND_S and self._short(lag) and not self._accepting
+        room = lag - self._centre(-1, urgent=True)  # short of room: built to the target
+        short = room < -_BAND_S and self._short(lag) and not self._accepting
         tolerated = self._accepting or self._tolerant  # a start's rest, a jump's pick
         under = short or (ahead < -self.band(-1) and not tolerated)
         side = 1 if far or behind > self.band(1) else -1 if under else 0
         if side > 0 and self.junctions:
             self.absorb()  # the next restart takes it (`Decision.junction`): no rate, no jump
             return False
-        error = behind if side > 0 else ahead
+        error = behind if side > 0 else room if short else ahead
         if not far:
             self._waited = 0.0
         if side == 0:
@@ -994,7 +1010,8 @@ class StayLive:
                 reason = self._room_reason()
             else:
                 reason = "behind the target" if side > 0 else "short of the target"
-            nudge = _Nudge(peak, abs(error), self._centre(side), reason=reason)
+            centre = self._centre(side, urgent=peak in (_FAST, _SLOW))
+            nudge = _Nudge(peak, abs(error), centre, reason=reason)
         self._nudge = nudge
         self.absorb()
         self._steer(0.0, lag, now)
@@ -1010,7 +1027,7 @@ class StayLive:
         nudge.left -= sign * (rate - 1.0) * dt  # what the last update's rate took
         if nudge.limit is not None and rate != 1.0:
             nudge.limit -= dt
-        centre = self._centre(sign)
+        centre = self._centre(sign, urgent=nudge.peak in (_FAST, _SLOW))
         if centre != nudge.target:  # Auto moved it, or the burst: resized to match
             nudge.left -= sign * (centre - nudge.target)
             nudge.target = centre

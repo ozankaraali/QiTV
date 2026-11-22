@@ -96,7 +96,10 @@ channel sent ~10 s bursts for one to three minutes at a time, steadily between, 
 they stopped the target fell 6-8 s at once and stay-live jumped to live, each time they came
 back it built the room again at 0.95x): the steering target, the timeline's, Go live's, the
 stall bound and the closed form keep its room through the steady minutes too (`_burst`), at
-the cost of that burst's latency for the tune. A source
+the cost of that burst's latency for the tune; the filter's window and its steps follow the
+burst the source has now (`LagFilter.rhythm`), and under Auto a lag short of the target by up
+to half the kept burst is VLC's room still (`StayLive.spare`): built only for too little room
+or after trouble. A source
 that sends nothing for a burst plus 2 s (a steady one: 2 s) has stalled: the timeline says
 so (`stalled`; the transport reads "Waiting for the channel…", or "Reconnecting…" once the
 helper opens a new connection: `reconnecting`), the lag is the closed form with the
@@ -2846,6 +2849,9 @@ class LiveSession(QObject):
             self._stay.slack = self._target(snapshot) - self._stay.target
             self._stay.hold_reopen = self._just_opened()
             self._stay.burst = self._filter.burst
+            # Under Auto, a kept burst's target holds the burst's room and its own margin: a
+            # lag under it by half that burst still leaves VLC the margin (`StayLive.spare`).
+            self._stay.spare = self._filter.kept / 2 if self._learned is not None else 0.0
             self._stay.spread = self._filter.spread()
             if self._reland(snapshot, lag, position):
                 self._emit_timeline()

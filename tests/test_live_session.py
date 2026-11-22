@@ -1,4 +1,5 @@
 import itertools
+import logging
 import math
 import os
 import random
@@ -7252,6 +7253,101 @@ class ComingAndGoingBurstTests(LiveSessionCase):
                 self.assertAlmostEqual(self.timelines[-1]["lag"], 10.0, delta=1.5)
                 self.live.stop()
                 self.engine.answer()
+
+    def afternoon(self):
+        """Seen live on 2026-11-22 (a dev build of the kept burst, the same channel): VLC ran
+        dry at the tune's first bursts, and a slow-down built the room at 0.95x; ~9.4 s
+        bursts for 40 s were kept; the source then sent steadily, and 50 s later a backlog,
+        46 s of media in 30 s and 2.3 s more in the next 15. Stay-live's lag followed it at
+        a fifth of a second a second (the window was the kept burst's 90 s): the 0.95x went
+        on 40 s after the room was there, and 40 s later stay-live jumped to live 19.9 s
+        behind (target 11.4 s). Then the edge sagged 5 s in two minutes, and a 0.97x "short
+        of the target" started with VLC 11 s behind, room for the kept burst and more; bursts
+        of 9.8 then 10.5 s came, the kept burst was counted 10.5 s, and that nudge turned
+        0.95x. Seconds after the tune: (when,
+        media per arrival, seconds to the next arrival) at each change of the source's way;
+        the lines said and the timelines, by seconds since the tune."""
+        self.tuning.remember("ch", Tuning(learned=Learned(need=3.0)))
+        self.start(latency=AUTO, channel="ch")
+        self.engine.answer()
+        feed = Feed(self, self.engine.last_sid, burst=0.0, edge=3.0, metered=True)
+        pairs = []
+
+        def steady(until, *, pace=1.0):  # a quarter second of media at `pace` x real time
+            t = pairs[-1][2] if pairs else 0.0
+            while t + 0.25 / pace <= until:
+                pairs.append((0.25, 0.25 / pace, t + 0.25 / pace))
+                t += 0.25 / pace
+
+        def bursts(sizes):  # each lands its own length after the one before (no lead)
+            t = pairs[-1][2]
+            pairs[-1] = (pairs[-1][0], sizes[0], t + sizes[0])
+            t += sizes[0]
+            for size, after in zip(sizes, sizes[1:] + [0.25]):
+                pairs.append((size, after, t + after))
+                t += after
+
+        steady(60.0)
+        bursts([9.4] * 5)  # 16:00:20-16:01:07: counted (and kept) at 16:01:00
+        steady(151.0, pace=0.86)  # VLC about 6 s behind when the backlog began (lag 2.2 s)
+        steady(181.0, pace=45.8 / 30.0)  # 16:01:51-16:02:21: the backlog
+        steady(196.0, pace=17.3 / 15.0)  # and 2.3 s more by 16:02:36
+        steady(210.0)
+        steady(330.0, pace=120.0 / 125.0)  # 16:04:50-16:06:50: 5 s sagged
+        steady(395.0)
+        bursts([9.8, 9.8, 10.5, 10.5, 10.5, 10.5, 10.5])  # 16:06:15 9.8 s, 16:06:26 10.5 s
+        steady(560.0)
+        feed.sizes = iter(media for media, _, _ in pairs)
+        feed.gaps = iter(gap for _, gap, _ in pairs)
+        feed.ready(backlog_after_start=False)
+        start, lines, states = self.clock.now, [], []
+        clock = self.clock
+
+        class Said(logging.Handler):
+            def emit(self, record):
+                lines.append((clock.now - start, record.getMessage()))
+
+        log = logging.getLogger("services.live.live_session")
+        handler = Said(logging.DEBUG)
+        log.addHandler(handler)
+        self.addCleanup(log.removeHandler, handler)
+        self.addCleanup(log.setLevel, log.level)
+        log.setLevel(logging.DEBUG)  # (setLevel clears the logger's cache of levels)
+        dry = None
+        while self.clock.now - start < 540.0:
+            feed.run(1.0)
+            states.append((self.clock.now - start, dict(self.timelines[-1])))
+            if dry is None and self.clock.now - start >= 150.0:
+                dry = feed.starved_s  # the first stretch's
+        return lines, states, feed, dry
+
+    def test_a_backlog_and_a_sag_on_a_kept_burst_build_only_for_room(self):
+        lines, states, feed, dry = self.afternoon()
+        said = [text for _, text in lines]
+
+        def real(state):  # the lag from the real distance, the source steady, 9.4 s kept
+            return state["live_edge"] - state["position"] - 9.4 / 2
+
+        # The lag follows the backlog within seconds (the window is the steady source's).
+        for when, state in states:
+            if 184.0 <= when <= 194.0:
+                self.assertAlmostEqual(state["lag"], real(state), delta=2.5, msg=when)
+        # The slow-down building the burst's room ends once the backlog brought the room.
+        ended = [when for when, text in lines if "0.95x nudge ends" in text and when > 151.0]
+        room = next(w for w, s in states if w > 151.0 and real(s) >= s["target"])
+        self.assertTrue(ended, said)
+        self.assertLessEqual(ended[0] - room, 12.0, said)
+        # A jump only where the real distance is far beyond the target (here the backlog, 18
+        # s on a lag of 6 s, left it right at the bound: 8 s beyond).
+        for when, text in lines:
+            if "reopens at live" in text:
+                state = [state for w, state in states if w < when - 0.5][-1]  # (before it)
+                self.assertGreaterEqual(real(state) - state["target"], 7.5, text)
+        # Through the sag and the bursts' return (counted 9.8 s then 10.5 s, a second over
+        # the kept 9.4 s): no slow-down, and VLC never runs dry after the first stretch.
+        later = [text for when, text in lines if when > 230.0 and "nudge" in text]
+        self.assertEqual([text for text in later if "0.9" in text], [], later)
+        self.assertEqual(feed.starved_s, dry)
 
     def test_a_burst_that_brings_its_media_early_never_jumps_either(self):
         # The other reading of the log (VLC never ran dry that evening): each stretch's first
