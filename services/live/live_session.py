@@ -2040,6 +2040,9 @@ class LiveSession(QObject):
         # 2.8: the helper reopens it afresh (its buffer went with the helper): nothing of a
         # kept buffer's take-back is pending, and its failures are any session's again.
         self._from_kept = self._resuming = self._kept_only = self._live_after_resume = False
+        # 2.13.4: nor a live upstream's asked back after a server part (the reopen answers
+        # ready, never resumed): a refusal then is not taken for that resume's.
+        self._part_resuming = False
         self._late = None
         self._tick_timer.stop()
         self._after_update = self._retry = self._failing_since = None
