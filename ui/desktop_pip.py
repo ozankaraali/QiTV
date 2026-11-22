@@ -495,7 +495,9 @@ class DesktopPip(QObject):
         self._reason = DESKTOP  # what `check` asks about (the timer runs while it is armed)
         self._away = 0  # "another desktop" answers in a row
         self._since: Optional[float] = None  # covered: out of sight since (`clock`)
-        self._held = False  # covered: after a double-click, nothing floats before it was seen
+        # After a way back (`come_back`), nothing floats before the window was seen (covered) or
+        # its desktop was shown (desktop: macOS switches desktops meanwhile, review N-1).
+        self._held = False
         self._timer = QTimer(self)
         self._timer.setInterval(POLL_MS)
         self._timer.timeout.connect(self.check)
@@ -556,6 +558,10 @@ class DesktopPip(QObject):
             return
         shown = self._on_active_space(self._window)
         if shown is None:
+            return
+        if self._held:  # come back (`come_back`): macOS may still be switching desktops
+            self._held = not shown
+            self._away = 0
             return
         self._away = 0 if shown else self._away + 1
         if self._away >= AWAY_CHECKS and not self._shown and self._may_float():
@@ -652,9 +658,7 @@ class DesktopPip(QObject):
         self._join_all_spaces(floating)  # again: showing may set its own
         floating.relock()  # (Qt clears the shape kept as it makes the native window)
         self._shown = True
-        if self._hover is not None:
-            self._last_pos = self._cursor_pos()  # (resting there: no hover until it moves)
-            self._hover_poll.start()
+        self.activity_changed()
         if self._reason == COVERED:
             logger.info("Desktop picture in picture: floating (the window is out of sight)")
         elif self._reason == MINI:
@@ -667,19 +671,29 @@ class DesktopPip(QObject):
         if self._lock_shape is not None:
             self._lock_shape(widget, shape, smallest, largest)
 
-    def _poll_hover(self) -> None:
-        """Every HOVER_MS while it floats: while QiTV is not the active app (a desktop change,
-        a covered window, a click on another app), a move of the pointer over the floating
-        window is its hover (`hover`: the controls come), as Qt's own moves are once QiTV is
-        active."""
-        floating = self._floating
-        if not self._shown or floating is None or self._hover is None:
+    def activity_changed(self) -> None:
+        """QiTV became the active app, or another did (and as it floats): while it floats and
+        QiTV is not active, the pointer's place is asked every HOVER_MS (`_poll_hover`); while
+        QiTV is active Qt's own moves arrive, and nothing is asked (review N-2)."""
+        if self._shown and self._hover is not None and not self._app_active():
+            if not self._hover_poll.isActive():
+                self._last_pos = self._cursor_pos()  # (resting there: no hover until it moves)
+                self._hover_poll.start()
+        else:
             self._hover_poll.stop()
+
+    def _poll_hover(self) -> None:
+        """Every HOVER_MS while it floats and QiTV is not the active app (a desktop change, a
+        covered window, a click on another app): a move of the pointer over the floating window
+        is its hover (`hover`: the controls come), as Qt's own moves are once QiTV is active."""
+        floating = self._floating
+        if not self._shown or floating is None or self._hover is None or self._app_active():
+            self._hover_poll.stop()  # (QiTV active: started again as it goes inactive)
             return
         where = self._cursor_pos()
         moved = where != self._last_pos
         self._last_pos = where
-        if moved and not self._app_active() and floating.frameGeometry().contains(where):
+        if moved and floating.frameGeometry().contains(where):
             self._hover()
 
     def come_back(self) -> None:
@@ -691,6 +705,8 @@ class DesktopPip(QObject):
         TV window's (it shows itself again)."""
         self.dock()  # back at once, while macOS brings that desktop
         window = self._window
+        if self._reason == DESKTOP and self._timer.isActive():
+            self._held, self._away = True, 0  # its "away" answers during the switch: no float
         if self._reason == COVERED and self._timer.isActive():
             self._held, self._since = True, None
             if window.isMinimized():
