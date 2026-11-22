@@ -69,6 +69,7 @@ class _Question:
     replaced: str  # the purpose whose stream the open takes over (none to wait for)
     ask_on: Optional[str] = None
     waiting: set[str] = field(default_factory=set)  # purposes whose streams must go back
+    timer: Any = None  # answered: its wait for them (RELEASE_WAIT_MS)
 
 
 class StreamQuestion(QObject):
@@ -100,13 +101,13 @@ class StreamQuestion(QObject):
         self._stop = stop
         self._closed = closed
         self._question: Optional[_Question] = None
-        self._waited: Optional[_Question] = None
+        # answered, waiting for their streams: each runs once its own are back, or at the end of
+        # its own wait (2.13.4, bug scan #13: a second answer took the first one's place)
+        self._waited: list[_Question] = []
         self._shown: Any = None  # the card that asks now
         self._cards: list[Any] = []  # the cards whose answers are followed
         self._words = ("", "", "")  # the question shown and its answers' words
         self._going = False  # what was asked runs: it asks nothing again
-        self._wait = QTimer(self, singleShot=True)
-        self._wait.timeout.connect(self._go_on)
         budget.released.connect(self._on_released)
 
     def needs(
@@ -188,8 +189,12 @@ class StreamQuestion(QObject):
             if not replaced and question.provider:
                 question.waiting.add(_purpose(slot))
             self._stop(slot, replaced)
-        self._waited = question
-        self._wait.start(RELEASE_WAIT_MS)
+        for older in [q for q in self._waited if _same_player(q, question)]:
+            self._drop(older)  # the viewer chose again for that player: the newer open stands
+        self._waited.append(question)
+        question.timer = QTimer(self, singleShot=True)
+        question.timer.timeout.connect(partial(self._go_on, question))
+        question.timer.start(RELEASE_WAIT_MS)
         self._on_released(question.provider)
 
     def follow_page(self) -> None:
@@ -250,23 +255,31 @@ class StreamQuestion(QObject):
             self.answer(yes)
 
     def _on_released(self, provider: str) -> None:
-        question = self._waited
-        if question is None or provider != question.provider:
-            return
-        holders = set(self._budget.holders(provider))
-        if not question.waiting & holders:
-            self._go_on()
+        for question in [q for q in self._waited if q.provider == provider]:
+            if not any(q is question for q in self._waited):
+                continue  # (gone on meanwhile: an open that ran let a stream go)
+            if not question.waiting & set(self._budget.holders(provider)):
+                self._go_on(question)
 
-    def _go_on(self) -> None:
-        question, self._waited = self._waited, None
-        self._wait.stop()
-        if question is None or self._closed():
+    def _drop(self, question: _Question) -> bool:
+        """`question` no longer waits: True when it did."""
+        if not any(q is question for q in self._waited):
+            return False
+        self._waited = [q for q in self._waited if q is not question]
+        timer, question.timer = question.timer, None
+        if timer is not None:
+            timer.stop()
+            timer.deleteLater()
+        return True
+
+    def _go_on(self, question: _Question) -> None:
+        if not self._drop(question) or self._closed():
             return
-        self._going = True
+        going, self._going = self._going, True
         try:
             question.then()
         finally:
-            self._going = False
+            self._going = going
 
 
 def quit_text(recording: list[Recording]) -> str:
@@ -279,6 +292,12 @@ def quit_text(recording: list[Recording]) -> str:
         "{n} channels are recording. Quit and stop the recordings?",
         len(recording),
     )
+
+
+def _same_player(older: _Question, newer: _Question) -> bool:
+    """Two opens for the same player (a stream's purpose), each asked for a stream: the newer
+    is the viewer's choice now."""
+    return bool(older.provider and newer.provider) and older.replaced == newer.replaced
 
 
 def _purpose(slot: Recording) -> str:
