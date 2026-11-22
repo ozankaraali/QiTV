@@ -424,6 +424,10 @@ class MatchingTests(MatchingCase):
             self.key(Action.NAV_TEXT, "sport.example")
             self.key(Action.NAV_ACTIVATE)
             self.assertEqual(reindex.call_count, 2)
+            previous = reindex.call_args.args[1]  # the map changed from: the IDs it gave may go
+            self.assertEqual(
+                [keys for keys, _ in previous.items()], [("news1.example", "news1.hd")]
+            )
             self.key(Action.NAV_UP)
             self.key(Action.NAV_UP)
             self.assertEqual(self.drawer.focused_row().key, guide.MAP_PREFIX + "0")
