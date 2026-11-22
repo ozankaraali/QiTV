@@ -1564,6 +1564,27 @@ class BacklogTests(unittest.TestCase):
         self.assertEqual(len(jumps), 1)
         self.assertEqual(set(rates), {1.0})
 
+    def test_while_the_source_floods_nothing_reopens_or_jumps(self):
+        stay, clock = live(), Clock()
+        follow(stay, T, 30.0, clock=clock)
+        stay.flooding = True
+        _, rates, jumps = follow(stay, T + 45.0, 20.0, clock=clock, landing=T)
+        self.assertEqual((jumps, set(rates)), ([], {1.0}))  # judged once it settles
+        stay.flooding = False
+        _, rates, jumps = follow(stay, T + 25.0, 900.0, clock=clock, landing=T)
+        self.assertEqual(jumps, [])  # the flood's 25 s: the landing's, caught up
+        self.assertEqual((max(rates), changes(rates)), (1.05, 2))
+
+    def test_a_reopen_that_lands_far_behind_again_is_never_followed_by_another(self):
+        stay, clock = live(), Clock()
+        follow(stay, T, 30.0, clock=clock)
+        _, _, jumps = follow(stay, T + 32.0, 1.0, clock=clock, landing=T)
+        self.assertEqual(len(jumps), 1)  # beyond 30 s: the reopen at live
+        # ... whose landing goes far behind again (the backlog still arriving, unseen)
+        _, rates, jumps = follow(stay, T + 32.0, 900.0, clock=clock, landing=T)
+        self.assertEqual(jumps, [])
+        self.assertEqual((max(rates), changes(rates)), (1.05, 2))
+
     def test_a_locked_rate_jumps_a_backlog_as_ever(self):
         stay, clock = live(), Clock()
         stay.lock_rate()

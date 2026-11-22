@@ -270,6 +270,7 @@ fails (`LENT_ENDED`): played directly it would be the second stream it avoids.
 
 from __future__ import annotations
 
+from collections import deque
 from collections.abc import Callable, Mapping, Sequence
 import dataclasses
 from dataclasses import dataclass, field
@@ -472,6 +473,16 @@ _LOG_STEP_S = 0.5  # a learned target that moved this much since it was last sai
 _RATE_LINES = 30
 _RATE_CUT = "More of stay-live's rate lines this minute were left out."
 _BURST_STEP_S = 0.5  # the helper's burst measure said as it moves this much (as LagFilter's)
+# 2026-11-22: the live edge, less real time (its level), still rising over the last
+# _FLOOD_WINDOW_S by more than _FLOOD_EXTRA_S (a burst at least: 2.5x real time and more), and
+# that far above the highest it was in the _FLOOD_HISTORY_S before, is a connection's backlog
+# still arriving (one provider hands each new connection its old buffer at network speed, 3-6x
+# real time). A backlog that came at once has arrived; a source back from a stall (at live, or
+# with all it owed) is only back where it was. Stay-live judges the distance once arrivals
+# settle (`StayLive.flooding`).
+_FLOOD_WINDOW_S = 2.0
+_FLOOD_EXTRA_S = 3.0
+_FLOOD_HISTORY_S = 60.0
 # 2.8.5: a raw TS source that restarted within this long is steered at its restarts
 # (`StayLive.junctions`, the helper's `RepeatTrimmer.extra`), what it is asked in steps of this.
 _JUNCTION_RECENT_S = 180.0
@@ -729,6 +740,8 @@ class LiveSession(QObject):
         self._nudge_said: Optional[tuple[float, float]] = None
         self._burst_said: Optional[float] = None
         self._measured_said: Optional[float] = None
+        # The live edge's level as it arrived, (when, edge less when), for `_flooding`.
+        self._arrived: deque[tuple[float, float]] = deque()
         self._rate_minute, self._rate_lines = -1, 0
         self._troubled_at: Optional[float] = None
         self._cushion = 0.0  # the largest lag at the live edge since the tune (or the target)
@@ -972,6 +985,7 @@ class LiveSession(QObject):
         self._reopened_at = -math.inf
         self._filter = LagFilter()  # a new source: its burst too is known afresh
         self._burst_said = self._measured_said = None
+        self._arrived.clear()
         self._forget_restarts()
         self._settled.reset()
         self._was_stalled = False
@@ -2075,6 +2089,7 @@ class LiveSession(QObject):
         self._edge_seen = None  # the reopened session starts afresh
         self._filter = LagFilter()
         self._burst_said = self._measured_said = None
+        self._arrived.clear()
         if self._learned is not None:  # another stream from the helper: no batch, no gap
             self._learned.arrivals.reset()
         self._forget_feed()
@@ -2853,6 +2868,7 @@ class LiveSession(QObject):
             # lag under it by half that burst still leaves VLC the margin (`StayLive.spare`).
             self._stay.spare = self._filter.kept / 2 if self._learned is not None else 0.0
             self._stay.edge = self._filter.edge(self._clock())  # what a backlog pushes ahead
+            self._stay.flooding = self._flooding(snapshot)
             self._stay.spread = self._filter.spread()
             if self._reland(snapshot, lag, position):
                 self._emit_timeline()
@@ -2942,6 +2958,35 @@ class LiveSession(QObject):
             how,
         )
         self._nudge_said = None
+
+    def _flooding(self, snapshot: Mapping[str, Any]) -> bool:
+        """The live edge still running ahead of real time, above where it was (see
+        `_FLOOD_WINDOW_S`): a connection's backlog still arriving at network speed (a tune's,
+        a reopen's, a reconnect's). Said as it starts and ends."""
+        now = self._clock()
+        level = self._live_edge(snapshot) - now
+        rhythm = self._filter.rhythm_for(_number(snapshot.get("burst_s")))
+        window, extra = _FLOOD_WINDOW_S, max(_FLOOD_EXTRA_S, rhythm)
+        arrived = self._arrived
+        arrived.append((now, level))
+        while arrived[0][0] < now - window - _FLOOD_HISTORY_S:
+            arrived.popleft()
+        recent = [mark for when, mark in arrived if when >= now - window]
+        before = [mark for when, mark in arrived if when < now - window]
+        rising = level - recent[0] > extra
+        flooding = rising and (not before or level - max(before) > extra)
+        if self._stay.flooding and not flooding:
+            # Settled: the flood was a step of the level, its mean is the window's of before
+            # (a pick from it landed 4.5 s above the target): the filter starts afresh.
+            self._filter.reset()
+        if flooding != self._stay.flooding:
+            self._say_rate(
+                logging.INFO,
+                "The source sends %s real time%s.",
+                "far faster than" if flooding else "at about",
+                ": stay-live waits for its backlog before judging the lag" if flooding else "",
+            )
+        return flooding
 
     def _say_burst(self, snapshot: Mapping[str, Any]) -> None:
         """2.13.4: the source's burst as stay-live counts it (the lag filter's, with its
