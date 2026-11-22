@@ -1,16 +1,37 @@
-# QiTV 2.13.5
+# QiTV 2.14.0
 
-QiTV 2.13.5 keeps live TV steady on channels that arrive in bursts or whose provider pauses: no
-more jumps every few minutes, fewer changes of speed, and a clean pause instead of broken sound.
-Picture in picture keeps the picture's shape when you resize it, the Mac's mini player gets the
-player's controls, and a button's second click closes what it opened. 2.13.5 also brings 2.13.4,
-2.13.3, 2.13.2, 2.13.1 and 2.13.0: a round of fixes, a station's view to choose, translated
-captions sooner, nothing in a system window any more, the phone's pictures at home, and free
-internet radio.
+QiTV 2.14.0 adds Plex: sign in with a code, and your server's films and series are in the
+Library, played as they are. Live TV stays steady on channels that come in bursts or whose
+provider pauses, and an ad break that switches source no longer freezes the picture. Both small
+windows of picture in picture have the player's controls, the multiview keeps its grid when you
+watch one tile big, and the channel list always opens on the channel you watch. 2.14.0 also
+brings 2.13.4, 2.13.3, 2.13.2, 2.13.1 and 2.13.0: a round of fixes, a station's view to choose,
+translated captions sooner, nothing in a system window any more, the phone's pictures at home,
+and free internet radio.
 
 **Download QiTV from [qitv.app](https://qitv.app), which picks the right build for your
 computer, or from [Releases](https://github.com/ozankaraali/QiTV/releases). Please don't use
 others' distributions, which may have malware.**
+
+## Plex
+
+- **Add your Plex server.** In Settings → Providers → Add provider (or the Library's new ⚙),
+  choose **Plex**. QiTV shows a code in large letters; enter it at **plex.tv/link** on any phone
+  or computer. QiTV then adds your server, or lets you choose when your account has several.
+- **The Library:** your server's films and series, with their seasons and episodes, posters,
+  where you stopped, Continue watching and the next episode, as for Jellyfin and Emby.
+- **Played as they are.** QiTV plays the server's own file and never asks it to convert. The
+  ⚙ menu offers the title's versions.
+- **Your place is kept on the server.** QiTV tells your server how far you watched; a title
+  watched to the end is marked watched by the server.
+- **At home and away.** QiTV keeps every address your server has and finds it again when one
+  stops answering: at home it uses the home address, away the remote one.
+- **Your sign-in stays here.** For a server you own, the access Plex gives QiTV is your account's
+  own, so QiTV keeps it like a password: only on this computer, never in the log, and only sent
+  to your server once that server has proved who it is. Your phone never receives it: a Plex
+  title plays on the phone through QiTV on this computer. QiTV tells Plex only that it is QiTV,
+  its version and a random id.
+- **Posters** come in at the size QiTV shows them, so a large library loads quickly.
 
 ## Live TV that stays steady
 
@@ -52,20 +73,46 @@ others' distributions, which may have malware.**
 
 ## Picture in picture
 
-- **The floating picture keeps the picture's shape.** When you drag the edges of the window that
-  floats while you're on another desktop (or the covered window's), it keeps the picture's
-  shape, also with macOS's own edge resize, between the smallest size and the screen. No black
-  lines are left around the picture, and its size is remembered. It works as in 2.13.4
-  otherwise.
-- **On a Mac, the mini player has the player's controls.** Alt+P (or its button) makes the
-  picture a small window on every desktop, while the full window steps aside. The player's
-  controls come on hover, even with another app in front, and the keys work as in the window.
-  Its edges keep the picture's shape. A double-click goes fullscreen; its button, Alt+P, the
-  Library, Search and Settings bring the window back. Opening a file from the Finder brings it
-  forward, and Quit works from it as from the window.
-- **The mouse in the mini player:** a click opens the channel list, as in the window; the wheel
-  over its picture does nothing, so a scroll can't change the volume or the channel by mistake
-  (over its controls the wheel works). A drag moves it, and its place is remembered.
+- **Both small windows have the player's controls.** The picture that floats when you leave a
+  fullscreen QiTV for another desktop or app now shows the same controls as the mini player:
+  they come on hover, even with another app in front. Its buttons act right there (play and
+  pause, the jumps, live, mute, ★, record); the ones that open a panel (sound, subtitles, ⚙,
+  the guide, search) bring the fullscreen window back first and open there. A click on its
+  picture does nothing, a drag moves it, a double-click brings you back. It never takes the
+  keyboard from the app in front.
+- **On a Mac, the mini player** (Alt+P, or its button) is a small window on every desktop while
+  the full window steps aside, with the player's controls on hover and the keys working as in
+  the window. A double-click goes fullscreen; its button, Alt+P, the Library, Search and
+  Settings bring the window back. Opening a file from the Finder brings it forward, and Quit
+  works from it as from the window. A click opens the channel list, as in the window, and a
+  click on its picture closes a panel that's open.
+- **Both keep the picture's shape.** Dragging their edges keeps the picture's shape, also with
+  macOS's own edge resize, between the smallest size and the screen. No black lines are left
+  around the picture, and the size is remembered. The wheel over their picture does nothing,
+  so a scroll can't change the volume or the channel by mistake.
+- **⧉ with no channel before it** opens the channel list, to choose the small picture's channel.
+
+## Multiview
+
+- **Watch a tile big, and the grid waits.** A double-click on a tile (or its big-picture button)
+  makes it fill the player while the other tiles play on, muted, behind it. Esc, V, the grid
+  button or another double-click bring the grid back exactly as it was. Before, the other tiles
+  were stopped and forgot their channels.
+- **Choosing a tile's channel:** one click on a tile's name opens its list on its own channel
+  and group. An open list follows when you move to another tile.
+- **Tab and Shift+Tab** move between the tiles; Enter opens the tile's list.
+
+## The channel list
+
+- **It opens on the channel you watch,** always. It could open on the channel next to it after
+  a playlist changed, or on the old channel during a zap. With the same channel twice in a list,
+  it opens on the copy you picked.
+- **Settings from the Library.** A ⚙ at the right of the Library's top bar opens Settings over
+  the Library at Providers, to add Plex, Jellyfin or Emby without going back to live TV. Ctrl/⌘+,
+  from the Library does the same.
+- **Cards no longer cut off.** The Add provider card, the parental PIN and other cards opened from
+  Settings could be cut off at the edge of the Settings panel on a wide window. They show whole
+  now, in every language.
 
 ## Buttons
 
