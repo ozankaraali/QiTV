@@ -126,8 +126,9 @@ _JUMP_WAIT_TICKS = 2 * _CLOCK
 #   shown after it; sound muxed in blocks of 7 s that crossed 2.3 s after the pictures), and
 #   then the new offset alone.
 _JUMP_SETTLE_TICKS = 10 * _CLOCK
-# A longer step is a clock of its own, which VLC 3 takes by itself (its clock gap limit) as the
-# segmenter's timeline does: it passes as it came.
+# A longer step inside a run is a clock of its own, which VLC 3 takes by itself (its clock gap
+# limit: a new reference) as the segmenter's timeline does: it passes as it came. (At a
+# discontinuity one is re-based: `ClockJoiner._decide`.)
 _JUMP_MAX_TICKS = 60 * _CLOCK
 _PCR, _PTS, _DTS = 0, 1, 2  # a timestamp's kind: each PID's PCRs, PTSs and DTSs run on apart
 _PASS, _LEAP, _JUMP, _REWRITE = 0, 1, 2, 3  # what `ClockJoiner._watched` makes of a packet
@@ -2849,15 +2850,23 @@ class ClockJoiner:
     restarts: what follows passes on as it comes, as before, but for a junction that comes
     before the new connection passed a picture (where a loop `LoopTrimmer` dropped across the
     reconnect ends): that is re-based onto the last picture before the reconnect. What jumps
-    added stays when the first picture after it is within `_REJOIN_WINDOW_TICKS` of the last
-    before it as they came (one clock: the bytes in between wait for that picture), so a
-    source that goes on with its clock does not leap ahead again there. A first picture behind
-    the last one passed on (a new connection's muxer started over, a break's own timestamps)
-    is re-based onto it as a junction is, in the piece the discontinuity began: libVLC 3 reads
+    added stays when the first picture after it is at most `JUMP_S` past the last before it
+    as they came (one clock: the bytes in between wait for that picture), so a source that
+    goes on with its clock does not leap ahead again there. A first picture behind the last
+    one passed on (a new connection's muxer started over, a break's own timestamps) is
+    re-based onto it as a junction is, in the piece the discontinuity began: libVLC 3 reads
     the time of a stream whose clock went back below where it opened as 0 until the clock is
     there again (measured: hours, while the picture played on), and drops pictures whose time
-    it has just played as late. One ahead passes on as it comes. Pure logic: the program's
-    video PID is the caller's, and the clock is injected.
+    it has just played as late. So is one more than `JUMP_S` ahead (2.13.5: a channel whose
+    ad breaks switch the source, each switch onto a clock of its own, one 43,268 s ahead,
+    which VLC 3 took past its 60 s clock gap limit as a new reference: it dropped what it held
+    as late, and its clock stood still 13 s; which way that far lies is the 33-bit wrap's
+    arithmetic, not the source's; a step under 60 s ahead VLC sits out as a still). One whose
+    clock goes on, as inside a run (a step of at most `JUMP_S`, a gap in real time; the
+    pictures' own spacing, a slideshow's; sound that went on through the gap: `_goes_on`),
+    passes on as it comes, as does one that runs on; where re-basing had rewritten the
+    counters, they run on across it. Pure logic: the program's video PID is the caller's, and
+    the clock is injected.
     """
 
     def __init__(
@@ -2880,6 +2889,11 @@ class ClockJoiner:
         # (`_top`, `_last_dts`, `_last_pts`) before a reconnect, until a picture passed after it
         self._before: tuple[int, int | None, int | None] | None = None
         self._frame = _CLOCK // 25  # the shortest forward PTS step seen: a frame
+        # The pictures' latest forward step passed on, and the shorter of their latest two (a
+        # step their own, not a one-off jump), kept across discontinuities: a slideshow's
+        # stills seconds apart go on so (`_goes_on`).
+        self._step: int | None = None
+        self._spacing: int | None = None
         self._counters: dict[int, int] = {}  # each PID's last counter passed on, until active
         self._joiner: ContinuityJoiner | None = None  # once active: the counters run on
         self._pending: list[bytes] | None = None  # a junction's packets until its first picture
@@ -2907,6 +2921,8 @@ class ClockJoiner:
         # clock before it as it came).
         self._marked: tuple[int, int] | None = None
         self._rejoin = False  # after a discontinuity, until its first picture (`_decide`)
+        self._rewritten = False  # ... the counters passed on before it were rewritten (a joiner)
+        self._prior: _Watch | None = None  # ... the watch before it: each PID's last timestamps
         # (step it came with, of it what arrival did not explain), in seconds, per jump
         self.jumps: deque[tuple[float, float]] = deque(maxlen=_TRIMS_KEPT)
 
@@ -3012,10 +3028,12 @@ class ClockJoiner:
         the re-basing of restarts ends. A junction that comes before the next connection passed
         a picture (where a loop `LoopTrimmer` dropped across the reconnect ends) is re-based
         onto the last picture before the reconnect, as if that had been a pause. What jumps
-        added goes on if the clock does, and a clock behind the last picture follows it (see
-        the class docstring): what follows waits for its first picture."""
+        added goes on if the clock does, and a clock behind the last picture or more than
+        `JUMP_S` ahead of it follows it (see the class docstring): what follows waits for its
+        first picture."""
         marked = self._marked  # a discontinuity before, whose first picture never came
         out = self._end()
+        self._rewritten = self._joiner is not None
         if self._joiner is not None:
             self._counters = self._joiner.counters  # what passed on: the next joiner's start
         if self._top is not None:
@@ -3027,6 +3045,7 @@ class ClockJoiner:
         self._last_pts = self._top = self._last_dts = None
         self._settle = None
         self._jumped = 0
+        self._prior = self._watch  # (what tells a clock that goes on across it: `_goes_on`)
         self._watch = _Watch()  # the step across it is no jump; the arrival goes on
         if marked is not None:
             self._marked = marked
@@ -3059,8 +3078,10 @@ class ClockJoiner:
 
     def _decide(self, out: list[bytes | None]) -> None:
         """The junction's first picture came: re-base from the junction on (or leave it be).
-        After a discontinuity (`_rejoin`) only a clock behind the last picture is re-based, in
-        the piece the discontinuity began."""
+        After a discontinuity (`_rejoin`) a clock behind the last picture, or more than
+        `JUMP_S` ahead of it, is re-based, in the piece the discontinuity began; one that runs
+        on or goes on ahead (`_goes_on`) passes as it came, its counters run on where they had
+        been rewritten."""
         pending = self._pending
         assert pending is not None
         self._pending = None
@@ -3080,8 +3101,13 @@ class ClockJoiner:
         by_dts = (last_dts + self._frame - (pts if dts is None else dts)) % _PTS_MODULO
         offset = by_pts if pts_delta(by_dts, by_pts) >= 0 else by_dts
         moved = pts_delta(self._offset, offset)
-        # The clock runs on already (no junction to hide), or a discontinuity's went on ahead.
-        if abs(moved) <= 2 * self._frame or (rejoin and moved < 0):
+        # The clock runs on already (no junction to hide), or a discontinuity's goes on ahead.
+        ahead = self._frame - moved  # (the first picture's step past the last, when ahead)
+        goes_on = rejoin and moved < 0 and self._goes_on(pending, ahead)
+        if abs(moved) <= 2 * self._frame or goes_on:
+            if rejoin and self._rewritten:  # the timestamps pass as they came, the counters on
+                self._joiner = ContinuityJoiner(self._counters)
+                self._active = True
             self._pass_pending(pending, out)
             return
         step = pts_delta(self._last_pts, pts) if self._last_pts is not None else 0
@@ -3097,7 +3123,10 @@ class ClockJoiner:
         self._unflagged = set()
         self._unflag_left = _CLOCK_PENDING_PACKETS
         if rejoin:
-            logger.info("a clock %.2f s behind after a discontinuity re-based", moved / _CLOCK)
+            way = "behind" if moved > 0 else "ahead"
+            logger.info(
+                "a clock %.2f s %s after a discontinuity re-based", abs(moved) / _CLOCK, way
+            )
         else:
             self.junctions.append((step / _CLOCK, (step + moved) / _CLOCK))
             logger.debug("a restart's clock re-based by %.2f s", moved / _CLOCK)
@@ -3107,10 +3136,10 @@ class ClockJoiner:
 
     def _resume(self, out: list[bytes | None]) -> None:
         """The first picture after a discontinuity came while jumps had moved the clock: ahead of
-        the last picture before it (as both came) and within `_REJOIN_WINDOW_TICKS`, the
-        source's clock goes on and so does what the jumps added; else what follows passes on as
-        it comes, or, behind it, follows it (2.8: kept, the jumps' offset stepped the pictures
-        back by as much as the clock was behind)."""
+        the last picture before it (as both came) by at most `JUMP_S`, the source's clock goes
+        on and so does what the jumps added; else it is another clock, which `_decide` takes as
+        after any discontinuity (2.8: behind, kept, the jumps' offset stepped the pictures back
+        by as much as the clock was behind; 2.13.5: further ahead, they stepped on as far)."""
         pending, marked = self._pending, self._marked
         assert pending is not None and marked is not None
         self._marked = None
@@ -3118,8 +3147,8 @@ class ClockJoiner:
         pts, dts = _pes_times(pending[-1], 0)
         now = pts if dts is None else dts
         ahead = None if now is None else pts_delta(before, now)
-        if ahead is None or ahead <= 0 or ahead > _REJOIN_WINDOW_TICKS:
-            self._rejoin = self._before is not None  # another clock: behind, it follows on
+        if ahead is None or ahead <= 0 or ahead > _JUMP_TICKS:
+            self._rejoin = self._before is not None  # another clock: it follows on
             self._decide(out)
             return
         self._pending = None
@@ -3174,7 +3203,34 @@ class ClockJoiner:
         self._before = None
         if self._top is None or pts_delta(self._top, shifted) > 0:
             self._top = shifted
-        self._last_dts = shifted if dts is None else dts
+        last_dts = shifted if dts is None else dts
+        if self._last_dts is not None and pts_delta(self._last_dts, last_dts) > 0:
+            step, self._step = self._step, pts_delta(self._last_dts, last_dts)
+            self._spacing = self._step if step is None else min(step, self._step)
+        self._last_dts = last_dts
+
+    def _goes_on(self, pending: list[bytes], step: int) -> bool:
+        """After a discontinuity, whether its first picture's forward `step` past the last one
+        is the clock going on (it passes as it came), as inside a run: a step of at most
+        `JUMP_S` (a gap in real time), within twice the pictures' spacing (a slideshow's stills
+        seconds apart), or one the other timestamps went on through: past the last picture
+        before the discontinuity (sound through a gap in the pictures), or after it, before
+        its first picture, each from its own last by at most `JUMP_S`. A source switch's clock,
+        every PID's on it, shows none of these. (Without a watch only the first two tell.)"""
+        if step <= _JUMP_TICKS or (self._spacing is not None and step <= 2 * self._spacing):
+            return True
+        prior = self._prior
+        if prior is None:
+            return False
+        if step - prior.covered <= _JUMP_TICKS:
+            return True
+        for pkt in pending[:-1]:  # (the last is the first picture)
+            pid = ((pkt[1] & 0x1F) << 8) | pkt[2]
+            for kind, _, value in _stamps(pkt, 0):
+                last = prior.stamps.get((pid, kind))
+                if last is not None and -_REORDER_TICKS <= pts_delta(last[0], value) <= _JUMP_TICKS:
+                    return True
+        return False
 
     # -- forward jumps -----------------------------------------------------------------------
 
