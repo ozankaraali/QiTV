@@ -248,6 +248,9 @@ def decoder_args(hardware: bool) -> list[str]:
 _HEADLESS_PLATFORMS = ("offscreen", "minimal")
 # Set to "1" for the smoke test (main.SMOKE_ENV; CI's packaged smoke and scripts/smoke_tv.py).
 SMOKE_ENV = "QITV_SMOKE"
+# "1": nothing is heard (libVLC's dummy audio output), for a QiTV a script starts on real streams
+# or fixtures (scripts/smoke_open_file.py, scripts/record_start.py; AGENTS.md's mute rule).
+MUTE_ENV = "QITV_SMOKE_MUTE"
 
 
 def display_exists() -> bool:
@@ -292,8 +295,9 @@ def subtitle_args(font: str = "") -> list[str]:
 
 
 def default_args(hardware_decoding: bool = False, subtitle_font: str = "") -> list[str]:
-    """The app's libVLC arguments: quiet, or a verbose log file when VLC_LOG_ENV names one.
-    `subtitle_font`: the family the subtitles libVLC draws are in (subtitle_args)."""
+    """The app's libVLC arguments: quiet, or a verbose log file when VLC_LOG_ENV names one;
+    no audio output when MUTE_ENV is "1". `subtitle_font`: the family the subtitles libVLC
+    draws are in (subtitle_args)."""
     # VLC 3's volume-save keeps the last level set on any audio output in the process's
     # config, and every output opened later starts there: the PiP player's 30 became the
     # large picture's. Each player is given its own level instead (SessionManager).
@@ -304,7 +308,9 @@ def default_args(hardware_decoding: bool = False, subtitle_font: str = "") -> li
         *decoder_args(hardware_decoding),
         *subtitle_args(subtitle_font),
     ]
-    if platform.system() == "Windows":
+    if os.environ.get(MUTE_ENV) == "1":  # a muted run: no output at all (only a 1 mutes)
+        args.append("--aout=dummy")
+    elif platform.system() == "Windows":
         # VLC 3's default Windows output, mmdevice, sets volume and mute on the process's
         # audio session (ISimpleAudioVolume), which every player's stream joins: the main
         # and PiP players would mute and level each other. DirectSound sets them on each
