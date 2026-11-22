@@ -170,6 +170,19 @@ class PictureCase(unittest.TestCase):
 
 
 class PanelTests(PictureCase):
+    def test_the_button_again_closes_it_even_as_a_quick_second_click(self):  # 2.13.5
+        self.open()
+        self.open()
+        self.assertFalse(self.panel.isVisible())
+        self.assertEqual(self.transport.held(), "")
+        point = self.transport.mapTo(
+            self.host, self.transport.button_rect("picture").center().toPoint()
+        )
+        QTest.qWait(QApplication.doubleClickInterval() + 20)
+        self.transport.poke()  # the controls faded meanwhile
+        QTest.mouseDClick(self.host.windowHandle(), Qt.MouseButton.LeftButton, pos=point)
+        self.assertFalse(self.panel.isVisible())
+
     def test_the_button_opens_it_above_itself_and_the_controls_stay_up(self):
         self.open()
         self.assertTrue(self.panel.isVisible())

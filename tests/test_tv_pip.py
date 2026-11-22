@@ -1957,6 +1957,17 @@ class MixerTests(PipCase):
         self.mixer.dismiss()
         self.assertEqual(self.transport.held(), "")  # the controls fade again
 
+    def test_the_speaker_again_closes_the_mixer_and_lets_the_controls_fade(self):  # 2.13.5
+        self.start_large(0)
+        self.transport.volumeRequested.emit()
+        self.assertTrue(self.mixer.isVisible())
+        self.assertEqual(self.transport.held(), "volume")
+        self.transport.volumeRequested.emit()
+        self.assertFalse(self.mixer.isVisible())
+        self.assertEqual(self.transport.held(), "")
+        self.transport.volumeRequested.emit()  # and once more it opens
+        self.assertTrue(self.mixer.isVisible())
+
     def test_the_transports_speaker_shows_whether_the_large_picture_is_heard(self):
         self.start_large(0)
         self.open_small(CHANNELS[1])

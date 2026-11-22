@@ -786,13 +786,14 @@ class TrackPanel(Overlay):
             and event.button() not in NAV_BUTTONS  # Back/Forward: the shell's drawer layers
             and self._outside(obj)
         ):
+            control = self._control_under(obj, event)
             if (
                 kind == QEvent.Type.MouseButtonDblClick
+                and control != self._button  # its own button again, quickly: it closes
                 and self._shown.isValid()
                 and self._shown.elapsed() < QApplication.doubleClickInterval()
             ):
                 return True  # the second press of the double-click that opened it
-            control = self._control_under(obj, event)
             self.dismiss()
             # Another of the player controls' buttons acts; its own button only closes it.
             return control is None or control == self._button

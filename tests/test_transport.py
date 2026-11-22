@@ -876,14 +876,28 @@ class OnScreenKeysTests(unittest.TestCase):
             ("favorite", t.favoriteRequested, t.title_rects()["favorite"]),
             ("previous", t.previousRequested, t.button_rect("previous")),
             ("fullscreen", t.fullscreenRequested, t.button_rect("fullscreen")),
-            ("pip", t.pipRequested, t.button_rect("pip")),
-            ("audio", t.audioRequested, t.button_rect("audio")),  # 2.2: they open panels
-            ("subtitles", t.subtitleRequested, t.button_rect("subtitles")),
         ):
             with self.subTest(name=name):
                 spy = QSignalSpy(signal)
                 self.double_click(t, rect.center())
                 self.assertEqual(spy.count(), 1)
+
+    def test_a_quick_second_click_on_a_button_that_opens_something_is_another_click(self):
+        # 2.13.5: it closes what the first opened (and is never the video's fullscreen toggle).
+        t = self.make()
+        t.set_pip_state(True, False)
+        t.show_live("One", "")
+        for name, signal in (
+            ("pip", t.pipRequested),
+            ("audio", t.audioRequested),
+            ("subtitles", t.subtitleRequested),
+            ("picture", t.pictureRequested),
+            ("volume", t.volumeRequested),
+        ):
+            with self.subTest(name=name):
+                spy = QSignalSpy(signal)
+                self.double_click(t, t.button_rect(name).center())
+                self.assertEqual(spy.count(), 2)
 
     def test_a_quick_second_click_repeats_a_step(self):
         t = self.make()
