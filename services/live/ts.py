@@ -2862,11 +2862,12 @@ class ClockJoiner:
     which VLC 3 took past its 60 s clock gap limit as a new reference: it dropped what it held
     as late, and its clock stood still 13 s; which way that far lies is the 33-bit wrap's
     arithmetic, not the source's; a step under 60 s ahead VLC sits out as a still). One whose
-    clock goes on, as inside a run (a step of at most `JUMP_S`, a gap in real time; the
-    pictures' own spacing, a slideshow's; sound that went on through the gap: `_goes_on`),
-    passes on as it comes, as does one that runs on; where re-basing had rewritten the
-    counters, they run on across it. Pure logic: the program's video PID is the caller's, and
-    the clock is injected.
+    clock goes on, as inside a run (it runs on; a step of at most `JUMP_S`, a gap in real
+    time; the pictures' own spacing, a slideshow's; sound that went on through the gap:
+    `_goes_on`), is not: judged as it passed on before the discontinuity, it keeps the offset
+    in force then (`_keep`), else, judged as it comes, it passes on as it comes, the counters
+    running on where re-basing had rewritten them. Pure logic: the program's video PID is the
+    caller's, and the clock is injected.
     """
 
     def __init__(
@@ -2922,7 +2923,9 @@ class ClockJoiner:
         self._marked: tuple[int, int] | None = None
         self._rejoin = False  # after a discontinuity, until its first picture (`_decide`)
         self._rewritten = False  # ... the counters passed on before it were rewritten (a joiner)
-        self._prior: _Watch | None = None  # ... the watch before it: each PID's last timestamps
+        # ... the watch before it (each PID's last timestamps), the offset and what jumps added
+        self._prior: _Watch | None = None
+        self._prior_offset = self._prior_jumped = 0
         # (step it came with, of it what arrival did not explain), in seconds, per jump
         self.jumps: deque[tuple[float, float]] = deque(maxlen=_TRIMS_KEPT)
 
@@ -3038,6 +3041,9 @@ class ClockJoiner:
             self._counters = self._joiner.counters  # what passed on: the next joiner's start
         if self._top is not None:
             self._before = (self._top, self._last_dts, self._last_pts)
+            # What passed on up to it, as it passed (`_decide`: a clock that goes on keeps it).
+            self._prior, self._prior_offset = self._watch, self._offset
+            self._prior_jumped = self._jumped
         if marked is None and self._jumped and self._last_dts is not None:
             marked = (self._jumped, (self._last_dts - self._offset) % _PTS_MODULO)
         self._active, self._offset, self._joiner = False, 0, None
@@ -3045,7 +3051,6 @@ class ClockJoiner:
         self._last_pts = self._top = self._last_dts = None
         self._settle = None
         self._jumped = 0
-        self._prior = self._watch  # (what tells a clock that goes on across it: `_goes_on`)
         self._watch = _Watch()  # the step across it is no jump; the arrival goes on
         if marked is not None:
             self._marked = marked
@@ -3078,10 +3083,11 @@ class ClockJoiner:
 
     def _decide(self, out: list[bytes | None]) -> None:
         """The junction's first picture came: re-base from the junction on (or leave it be).
-        After a discontinuity (`_rejoin`) a clock behind the last picture, or more than
-        `JUMP_S` ahead of it, is re-based, in the piece the discontinuity began; one that runs
-        on or goes on ahead (`_goes_on`) passes as it came, its counters run on where they had
-        been rewritten."""
+        After a discontinuity (`_rejoin`) a clock that goes on (`_goes_on`) as it passed on
+        before it keeps the offset in force then (`_keep`); one that goes on as it comes passes
+        as it came, its counters run on where they had been rewritten; any other (behind the
+        last picture, or more than `JUMP_S` ahead of it) is re-based, in the piece the
+        discontinuity began."""
         pending = self._pending
         assert pending is not None
         self._pending = None
@@ -3101,10 +3107,13 @@ class ClockJoiner:
         by_dts = (last_dts + self._frame - (pts if dts is None else dts)) % _PTS_MODULO
         offset = by_pts if pts_delta(by_dts, by_pts) >= 0 else by_dts
         moved = pts_delta(self._offset, offset)
-        # The clock runs on already (no junction to hide), or a discontinuity's goes on ahead.
-        ahead = self._frame - moved  # (the first picture's step past the last, when ahead)
-        goes_on = rejoin and moved < 0 and self._goes_on(pending, ahead)
-        if abs(moved) <= 2 * self._frame or goes_on:
+        kept = self._prior_offset
+        on = pts_delta(kept, offset)  # (`moved`, were the offset before it kept)
+        if rejoin and kept != self._offset and self._goes_on(pending, on, kept):
+            self._keep(pending, out)  # the source's clock goes on as it passed on
+            return
+        # The clock runs on already (no junction to hide), or a discontinuity's goes on.
+        if abs(moved) <= 2 * self._frame or (rejoin and self._goes_on(pending, moved, 0)):
             if rejoin and self._rewritten:  # the timestamps pass as they came, the counters on
                 self._joiner = ContinuityJoiner(self._counters)
                 self._active = True
@@ -3209,14 +3218,20 @@ class ClockJoiner:
             self._spacing = self._step if step is None else min(step, self._step)
         self._last_dts = last_dts
 
-    def _goes_on(self, pending: list[bytes], step: int) -> bool:
-        """After a discontinuity, whether its first picture's forward `step` past the last one
-        is the clock going on (it passes as it came), as inside a run: a step of at most
+    def _goes_on(self, pending: list[bytes], moved: int, offset: int) -> bool:
+        """After a discontinuity, whether the clock goes on with `offset` added (its first
+        picture then `moved` from following the last by a frame; everything judged as passed
+        on), as inside a run: it runs on (two frames), or it is ahead by a step of at most
         `JUMP_S` (a gap in real time), within twice the pictures' spacing (a slideshow's stills
         seconds apart), or one the other timestamps went on through: past the last picture
-        before the discontinuity (sound through a gap in the pictures), or after it, before
-        its first picture, each from its own last by at most `JUMP_S`. A source switch's clock,
-        every PID's on it, shows none of these. (Without a watch only the first two tell.)"""
+        before the discontinuity (sound through a gap in the pictures), or after it, before its
+        first picture, each from its own last by at most `JUMP_S`. A source switch's clock,
+        every PID's on it, shows none of these. (Without a watch only the first three tell.)"""
+        if abs(moved) <= 2 * self._frame:
+            return True
+        step = self._frame - moved  # the first picture's step past the last
+        if moved > 0:  # behind
+            return False
         if step <= _JUMP_TICKS or (self._spacing is not None and step <= 2 * self._spacing):
             return True
         prior = self._prior
@@ -3228,9 +3243,27 @@ class ClockJoiner:
             pid = ((pkt[1] & 0x1F) << 8) | pkt[2]
             for kind, _, value in _stamps(pkt, 0):
                 last = prior.stamps.get((pid, kind))
-                if last is not None and -_REORDER_TICKS <= pts_delta(last[0], value) <= _JUMP_TICKS:
+                if last is None:
+                    continue
+                if -_REORDER_TICKS <= pts_delta(last[0], value + offset) <= _JUMP_TICKS:
                     return True
         return False
+
+    def _keep(self, pending: list[bytes], out: list[bytes | None]) -> None:
+        """After a discontinuity, the source's clock goes on as it passed on before it (a
+        re-based jump's, a junction's or a switch's offset in force): that offset stays, and
+        what jumps added, the counters run on and each PID's first flag goes, as nothing
+        changed for the player (2.13.5 review: taken as it came, a gap in the pictures that the
+        sound went on through was re-based shut, and the sound stepped back as far)."""
+        self._offset, self._jumped = self._prior_offset, self._prior_jumped
+        self._joiner = ContinuityJoiner(self._counters)
+        self._active = True
+        self._unflagged = set()
+        self._unflag_left = _CLOCK_PENDING_PACKETS
+        logger.debug("a clock goes on across a discontinuity, re-based by %.2f s", self.offset_s)
+        for pkt in pending:
+            self._place(pkt, out)
+            self._note_packet(pkt)
 
     # -- forward jumps -----------------------------------------------------------------------
 
