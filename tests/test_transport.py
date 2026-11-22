@@ -876,6 +876,7 @@ class OnScreenKeysTests(unittest.TestCase):
             ("favorite", t.favoriteRequested, t.title_rects()["favorite"]),
             ("previous", t.previousRequested, t.button_rect("previous")),
             ("fullscreen", t.fullscreenRequested, t.button_rect("fullscreen")),
+            ("pip", t.pipRequested, t.button_rect("pip")),  # a stream opens and drops again
         ):
             with self.subTest(name=name):
                 spy = QSignalSpy(signal)
@@ -888,7 +889,6 @@ class OnScreenKeysTests(unittest.TestCase):
         t.set_pip_state(True, False)
         t.show_live("One", "")
         for name, signal in (
-            ("pip", t.pipRequested),
             ("audio", t.audioRequested),
             ("subtitles", t.subtitleRequested),
             ("picture", t.pictureRequested),

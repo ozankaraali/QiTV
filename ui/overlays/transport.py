@@ -263,8 +263,6 @@ _AGAIN = (
     "picture",
     "quality",
     "volume",
-    "pip",
-    "grid",
     "layout",
     "external",
     "cast",
