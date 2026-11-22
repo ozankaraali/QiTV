@@ -55,12 +55,13 @@ import math
 import time
 from typing import Callable, Optional
 
-from PySide6.QtCore import QEvent, QObject, QPoint, QRect, Qt, QTimer, Signal
-from PySide6.QtGui import QColor, QGuiApplication, QMouseEvent, QPalette
+from PySide6.QtCore import QEvent, QObject, QPoint, QRect, QSize, Qt, QTimer, Signal
+from PySide6.QtGui import QColor, QCursor, QGuiApplication, QMouseEvent, QPalette
 from PySide6.QtWidgets import QApplication, QWidget
 from shiboken6 import isValid
 
 from services.picture import box_height, box_ratio, box_size, same_shape
+from ui.macos_window import reclaim_first_responder
 
 logger = logging.getLogger(__name__)
 
@@ -75,6 +76,9 @@ MARGIN = 24  # from the screen's corner
 EDGE_PX = 10  # a press this near an edge (or two: a corner) resizes the floating window
 MIN_WIDTH = 240  # the smallest it gets in 16:9 (another shape: as large as that)
 SNAP_MS = 150  # a resize it did not make (macOS's own) ends in its picture's shape this soon
+# While QiTV is not the active app Qt drops the moves without a button (qnsview_mouse.mm): the
+# pointer's place is asked this often meanwhile, and a move over the small window is its hover.
+HOVER_MS = 150
 AWAY_CHECKS = 2  # answers "another desktop" in a row before the picture floats (the
 # fullscreen animation may answer it once)
 CONFIRM_MS = 150  # the second answer is asked this soon after the first, not a poll later
@@ -88,7 +92,16 @@ _MOUSE_EVENTS = (
     QEvent.Type.MouseButtonDblClick,
     QEvent.Type.MouseMove,
 )
-_KEY_EVENTS = (QEvent.Type.ShortcutOverride, QEvent.Type.KeyPress, QEvent.Type.KeyRelease)
+# What it hands the TV window as the window's own: its keys, and what is dropped on it.
+_WINDOW_EVENTS = (
+    QEvent.Type.ShortcutOverride,
+    QEvent.Type.KeyPress,
+    QEvent.Type.KeyRelease,
+    QEvent.Type.DragEnter,
+    QEvent.Type.DragMove,
+    QEvent.Type.DragLeave,
+    QEvent.Type.Drop,
+)
 
 
 def corner_rect(available: QRect, screen_width: int) -> QRect:
@@ -100,7 +113,7 @@ def corner_rect(available: QRect, screen_width: int) -> QRect:
     return QRect(x, y, width, height)
 
 
-def _no_lock(_widget: QWidget, _shape: float) -> None:
+def _no_lock(_widget: QWidget, _shape: float, _smallest: QSize, _largest: QSize) -> None:
     return None
 
 
@@ -111,22 +124,22 @@ class FloatingPlayer(QWidget):
     Its own: a drag of an edge or a corner resizes it in its picture's shape (`set_ratio`; the
     pointer says so near them), the wheel over the picture does nothing (a scroll drifting over
     it would zap), and a resize it did not make (macOS's own, at its very edges) ends in that
-    shape, `SNAP_MS` after it stops; macOS keeps the shape while the edges are dragged
-    (`lock_shape`, told again by `relock` once it shows). Where the user resized it is told
-    (`placed`).
+    shape, `SNAP_MS` after it stops; macOS keeps the shape while the edges are dragged, between
+    the smallest window and the screen (`lock_shape`, told again by `relock` once it shows).
+    Where the user resized it (from its edges, or macOS's own) is told (`placed`).
 
     It shows without taking the focus, and on macOS it is a non-activating panel
     (join_all_spaces): a press on it leaves QiTV inactive and the desktop shown, so it can be
     dragged there. The press gives it the keys all the same; they go to `keys` (the TV window),
-    as the window's own would."""
+    as the window's own would, and so does what is dropped on it."""
 
-    placed = Signal(QRect)  # resized by the user from its edges: where it is now
+    placed = Signal(QRect)  # resized by the user: where it is now
 
     def __init__(
         self,
         *,
         keys: Optional[QWidget] = None,
-        lock_shape: Callable[[QWidget, float], object] = _no_lock,
+        lock_shape: Callable[[QWidget, float, QSize, QSize], object] = _no_lock,
     ) -> None:
         super().__init__(
             None,
@@ -140,6 +153,7 @@ class FloatingPlayer(QWidget):
         palette.setColor(QPalette.ColorRole.Window, QColor("black"))
         self.setPalette(palette)
         self.setAutoFillBackground(True)
+        self.setAcceptDrops(True)  # (handed to the TV window)
         self._keys = keys
         self._lock_shape = lock_shape
         self._held: Optional[QWidget] = None
@@ -151,9 +165,15 @@ class FloatingPlayer(QWidget):
         self._start = QRect()  # the window's geometry when a resize began
         self._ratio: Optional[float] = None  # its picture's shape (None: it keeps its own)
         self._reshape_due = False  # a new shape came during a press: once it ends
-        self._locked: Optional[float] = None  # the shape macOS was told to keep
+        self._locked: Optional[tuple[float, QSize]] = None  # what macOS was told to keep
+        self._expected = QRect()  # where QiTV put it last (else the user resized it)
         self._snap = QTimer(self, singleShot=True, interval=SNAP_MS)
         self._snap.timeout.connect(self._settle)
+
+    def put(self, rect: QRect) -> None:
+        """Where it goes, QiTV's choice (not the user's: never told as `placed`)."""
+        self._expected = QRect(rect)
+        self.setGeometry(rect)
 
     def held(self) -> Optional[QWidget]:
         return self._held
@@ -190,8 +210,8 @@ class FloatingPlayer(QWidget):
         staying where it is, inside the screen. During a press, once the press ends. macOS
         keeps the shape it has then as its edges are dragged."""
         self._ratio = ratio
-        if self._press is not None:
-            self._reshape_due = True
+        if self._press is not None or self._snap.isActive():
+            self._reshape_due = True  # (macOS resizes it now: once that stops, `_settle`)
         else:
             self._reshape()
         self._lock()
@@ -202,9 +222,11 @@ class FloatingPlayer(QWidget):
 
     def _lock(self, again: bool = False) -> None:
         shape = self._shape()
-        if again or shape != self._locked:
-            self._locked = shape
-            self._lock_shape(self, shape)
+        available = self._available(self.geometry())
+        largest = available.size() if available is not None else QSize(4096, 4096)
+        if again or (shape, largest) != self._locked:
+            self._locked = (shape, largest)
+            self._lock_shape(self, shape, QSize(*box_size(MIN_WIDTH, shape)), largest)
 
     def _reshape(self) -> None:
         """In its shape (`_shape`) and never under the smallest window, as large as it was."""
@@ -227,12 +249,19 @@ class FloatingPlayer(QWidget):
         if available is not None:
             x = max(available.x(), min(x, available.x() + available.width() - width))
             y = max(available.y(), min(y, available.y() + available.height() - height))
-        self.setGeometry(QRect(x, y, width, height))
+        self.put(QRect(x, y, width, height))
 
     def _settle(self) -> None:
-        """A resize it did not make stopped (macOS's own, at its edges): in its shape now."""
-        if self._press is None:
-            self._reshape()
+        """A resize stopped. One it did not make (macOS's own, at its edges) ends in its shape,
+        and is the user's: told (`placed`), as one from its own edges is."""
+        if self._press is not None:
+            return
+        users = self.geometry() != self._expected
+        self._reshape()
+        if users:
+            self._expected = self.geometry()
+            self.placed.emit(self.geometry())
+        self._lock()
 
     def _available(self, rect: QRect) -> Optional[QRect]:
         """The available area of the screen under `rect` (None: no screen there)."""
@@ -315,8 +344,8 @@ class FloatingPlayer(QWidget):
     def resizeEvent(self, event) -> None:
         if self._held is not None:
             self._held.setGeometry(self.rect())
-        if self._press is None:
-            self._snap.start()  # (one it did not make: macOS's own, at its edges)
+        if self._press is None and self.geometry() != self._expected:
+            self._snap.start()  # one it did not make (macOS's own, at its edges): once it stops
         super().resizeEvent(event)
 
     def closeEvent(self, event) -> None:
@@ -331,9 +360,10 @@ class FloatingPlayer(QWidget):
         super().closeEvent(event)
 
     def event(self, event: QEvent) -> bool:
-        """Its keys are the TV window's (`keys`): they reach it as its own would."""
+        """Its keys, and what is dropped on it, are the TV window's (`keys`): they reach it as
+        its own would."""
         keys = getattr(self, "_keys", None)  # (None while QWidget's own construction runs)
-        if event.type() in _KEY_EVENTS and keys is not None and isValid(keys):
+        if event.type() in _WINDOW_EVENTS and keys is not None and isValid(keys):
             QApplication.sendEvent(keys, event)
             return event.isAccepted()
         return super().event(event)
@@ -353,7 +383,7 @@ class FloatingPlayer(QWidget):
                 moved = where - self._press
                 if self._dragged or moved.manhattanLength() >= QApplication.startDragDistance():
                     self._dragged = True
-                    self.setGeometry(self._resized(moved))
+                    self.put(self._resized(moved))
             elif kind == QEvent.Type.MouseMove or (
                 kind == QEvent.Type.MouseButtonRelease and event.button() == left
             ):
@@ -365,6 +395,7 @@ class FloatingPlayer(QWidget):
                 return False  # the window's (a click, a drag that moves it, its menu)
             self._press, self._dragged, self._edges = where, False, edges
             self._start = self.geometry()
+            reclaim_first_responder(self)  # macOS: libVLC's view took the keys (a beep)
             return True
         if kind == QEvent.Type.MouseMove and isinstance(watched, QWidget):
             self._point_at(watched, self._cursor_for(self._edges_at(self.mapFromGlobal(where))))
@@ -409,8 +440,12 @@ class DesktopPip(QObject):
         activate: Optional[Callable[[], object]] = None,
         clock: Callable[[], float] = time.monotonic,
         shape: Optional[Callable[[], Optional[float]]] = None,
-        lock_shape: Optional[Callable[[QWidget, float], object]] = None,
+        lock_shape: Optional[Callable[[QWidget, float, QSize, QSize], object]] = None,
         keys: Optional[QWidget] = None,
+        may_stay: Optional[Callable[[], bool]] = None,
+        may_stay_covered: Optional[Callable[[], bool]] = None,
+        hover: Optional[Callable[[], None]] = None,
+        cursor_pos: Callable[[], QPoint] = QCursor.pos,
         parent: Optional[QObject] = None,
     ) -> None:
         """`on_active_space(window)`: whether the window is on the desktop shown (None: can't
@@ -419,8 +454,12 @@ class DesktopPip(QObject):
         (screen coordinates); `join_all_spaces(widget)`: show it on every desktop;
         `remember(rect)`: where the user moved or resized it (`place` gives it back next time);
         `shape()`: the shape the large picture shows in (None: not known; it keeps its own);
-        `lock_shape(widget, shape)`: the floating window's edges resize it in `shape` (macOS);
-        `keys`: the widget its keys go to (the TV window).
+        `lock_shape(widget, shape, smallest, largest)`: the floating window's edges resize it in
+        `shape`, between those sizes (macOS); `keys`: the widget its keys go to (the TV window);
+        `may_stay()` / `may_stay_covered()`: whether a picture afloat stays so (default: as
+        `may_float()`; a stopped picture stays in its small window, with its way to play again);
+        `hover()`: the pointer moved over the floating window while QiTV is not the active app
+        (Qt drops those moves; `cursor_pos()`, asked every HOVER_MS meanwhile, says where it is).
 
         The covered reason (without `seen` and `may_float_covered` it is never asked about):
         `seen(window)`: whether any of the window can be seen (None: can't tell);
@@ -444,6 +483,13 @@ class DesktopPip(QObject):
         self._shape = shape
         self._lock_shape = lock_shape
         self._keys = keys
+        self._may_stay = may_stay or may_float
+        self._may_stay_covered = may_stay_covered or may_float_covered
+        self._hover = hover
+        self._cursor_pos = cursor_pos
+        self._last_pos: Optional[QPoint] = None  # the pointer's, at the last poll
+        self._hover_poll = QTimer(self, interval=HOVER_MS)
+        self._hover_poll.timeout.connect(self._poll_hover)
         self._floating: Optional[FloatingPlayer] = None
         self._shown = False
         self._reason = DESKTOP  # what `check` asks about (the timer runs while it is armed)
@@ -505,8 +551,8 @@ class DesktopPip(QObject):
         if self._reason == COVERED:
             self._check_covered()
             return
-        if self._shown and not self._may_float():
-            self.dock()  # nothing to float any more (it stopped, the grid or the Library came)
+        if self._shown and not self._may_stay():
+            self.dock()  # nothing to float any more (the grid, the Library, a dialog came)
             return
         shown = self._on_active_space(self._window)
         if shown is None:
@@ -528,10 +574,10 @@ class DesktopPip(QObject):
     def _check_covered(self) -> None:
         """The window out of sight for COVERED_SETTLE_MS floats the picture; any of it seen
         puts it back at once."""
-        may_float = self._may_float_covered
+        may_float = self._may_stay_covered if self._shown else self._may_float_covered
         if may_float is None or not may_float():
             self._since = None
-            self.dock()  # nothing to float any more (it stopped, the grid, Keep on Top came)
+            self.dock()  # nothing to float any more (the grid, Keep on Top came)
             return
         unseen = self._unseen()
         if unseen is None:
@@ -580,6 +626,7 @@ class DesktopPip(QObject):
         if not self._shown or self._floating is None:
             return
         self._shown = False
+        self._hover_poll.stop()
         page = self._floating.release()
         self._floating.hide()
         if page is not None:
@@ -596,7 +643,7 @@ class DesktopPip(QObject):
             floating = self._floating = FloatingPlayer(keys=self._keys, lock_shape=self._locks)
             if self._remember is not None:
                 floating.placed.connect(self._remember)
-        floating.setGeometry(self._place())
+        floating.put(self._place())
         floating.winId()  # its native window first: the page's native views move into it
         self._follow_shape()  # in its picture's shape, before it shows
         floating.hold(page)
@@ -605,6 +652,9 @@ class DesktopPip(QObject):
         self._join_all_spaces(floating)  # again: showing may set its own
         floating.relock()  # (Qt clears the shape kept as it makes the native window)
         self._shown = True
+        if self._hover is not None:
+            self._last_pos = self._cursor_pos()  # (resting there: no hover until it moves)
+            self._hover_poll.start()
         if self._reason == COVERED:
             logger.info("Desktop picture in picture: floating (the window is out of sight)")
         elif self._reason == MINI:
@@ -613,9 +663,24 @@ class DesktopPip(QObject):
             logger.info("Desktop picture in picture: floating")
         self.floatingChanged.emit(True)
 
-    def _locks(self, widget: QWidget, shape: float) -> None:
+    def _locks(self, widget: QWidget, shape: float, smallest: QSize, largest: QSize) -> None:
         if self._lock_shape is not None:
-            self._lock_shape(widget, shape)
+            self._lock_shape(widget, shape, smallest, largest)
+
+    def _poll_hover(self) -> None:
+        """Every HOVER_MS while it floats: while QiTV is not the active app (a desktop change,
+        a covered window, a click on another app), a move of the pointer over the floating
+        window is its hover (`hover`: the controls come), as Qt's own moves are once QiTV is
+        active."""
+        floating = self._floating
+        if not self._shown or floating is None or self._hover is None:
+            self._hover_poll.stop()
+            return
+        where = self._cursor_pos()
+        moved = where != self._last_pos
+        self._last_pos = where
+        if moved and not self._app_active() and floating.frameGeometry().contains(where):
+            self._hover()
 
     def come_back(self) -> None:
         """A double-click on the floating window, or its controls' way back (DESKTOP, COVERED):
@@ -639,6 +704,7 @@ class DesktopPip(QObject):
     def close(self) -> None:
         """QiTV closes: the picture back first, then the floating window goes."""
         self._timer.stop()
+        self._hover_poll.stop()
         self.dock()
         if self._floating is not None:
             self._floating.close()

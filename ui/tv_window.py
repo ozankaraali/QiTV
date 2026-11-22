@@ -836,7 +836,10 @@ class TVWindow(QMainWindow):
             library_shown=lambda: self.screens.library_shown(),
             closing=lambda: self._closing,
             before_tv=self._make_way_for_card,
-            held=self.mini_player_active,  # (what QiTV says unasked waits for the window)
+            # What QiTV says unasked waits for the window: the mini player, or the picture
+            # floating (it never pulls QiTV to the front of the desktop it was left on).
+            held=self._small_window_holds_the_controls,
+            gives_way=self._gives_way_to_the_mini_player,
             above=lambda: (
                 self.question_card,
                 self.quality_card,
@@ -1019,6 +1022,9 @@ class TVWindow(QMainWindow):
             shape=self.pip_frame.floating_shape,
             lock_shape=macos_window.keep_shape,
             keys=self,
+            may_stay=self._may_keep_floating,
+            may_stay_covered=self._may_keep_covered_float,
+            hover=self._hover_over_the_small_window,
             parent=self,
         )
         # Covered: QiTV becoming the active app (a click on its Dock icon, ⌘Tab) or leaving it.
@@ -1036,7 +1042,7 @@ class TVWindow(QMainWindow):
         # (and as its surface resizes, `_report_video_size`).
         self.desktop_pip.floatingChanged.connect(self._fit_small_pictures)
         self.pip_frame.smallRectChanged.connect(self._fit_small_pictures)
-        self.pip_frame.suspending.connect(self.desktop_pip.dock)  # the multiview lays them out
+        self.pip_frame.suspending.connect(self._multiview_takes_the_page)
         # The host covers the page exactly: page coordinates are the host's.
         self.pip_frame.smallRectChanged.connect(self.pip_label.follow)
         self.pip_frame.smallRectChanged.connect(self.mixer.avoid)
@@ -1690,10 +1696,52 @@ class TVWindow(QMainWindow):
         """Back to the normal window (nothing when it is not the mini player)."""
         self._leave_mini()
 
-    def _make_way_for_card(self) -> None:
-        """A question over live TV (2.13.1, ui.window_cards): the window, not the mini player,
-        and the audio dock's ⋯ menu closed (as for Open Link…'s card)."""
+    def leave_small_window(self) -> None:
+        """The full window, where the viewer asked for it (the Library, Search, Settings, Open
+        Link, Record at a time, a question asked for): the mini player becomes the window
+        again, and a picture floating for a desktop change or a covered window comes back (its
+        desktop, QiTV in front), as a double-click on it does. Never for what QiTV says unasked
+        (it waits: `_small_window_holds_the_controls`)."""
+        if self._floats_for_the_window():
+            self.desktop_pip.come_back()
         self.leave_mini_player()
+
+    def escape_small_window(self) -> bool:
+        """Esc with nothing open: from a picture floating for a desktop change or a covered
+        window, back where it was (True); else nothing here (Esc leaves fullscreen)."""
+        if self._closing or not self._floats_for_the_window():
+            return False
+        self.desktop_pip.come_back()
+        return True
+
+    def _small_window_holds_the_controls(self) -> bool:
+        pip = getattr(self, "desktop_pip", None)
+        return self.mini_player_active() or (pip is not None and pip.floating())
+
+    def _gives_way_to_the_mini_player(self) -> bool:
+        """The window is hidden for the macOS mini player (a question asked for brings it)."""
+        return self._mini_restore is not None and _macos_desktops()
+
+    def _multiview_takes_the_page(self) -> None:
+        """The multiview lays the surfaces out: a floating page comes back first, and for a
+        desktop change or a covered window the window with it (the grid opens there)."""
+        if self._floats_for_the_window():
+            self.desktop_pip.come_back()
+        else:
+            self.desktop_pip.dock()
+
+    def _hover_over_the_small_window(self) -> None:
+        """The pointer moved over the small window while QiTV is not the active app (Qt says
+        nothing then): as a move over the picture, the controls come."""
+        pointer = getattr(self, "pointer", None)
+        if pointer is not None and not self._closing:
+            pointer.moved()
+
+    def _make_way_for_card(self) -> None:
+        """A question over live TV (2.13.1, ui.window_cards): the window, not the small one,
+        and the audio dock's ⋯ menu closed (as for Open Link…'s card). Unasked ones wait while
+        the small window shows, so only what the viewer asked for brings the window."""
+        self.leave_small_window()
         self.more_menu.dismiss()
 
     def _on_page_mode(self, mode: str) -> None:
@@ -1905,7 +1953,7 @@ class TVWindow(QMainWindow):
             return
         if self.screens.library_shown():
             self.screens.back_to_tv()
-        self.leave_mini_player()
+        self.leave_small_window()
         self.more_menu.dismiss()
         self.link_opener.open(text)
         # (the cards added after the link's have the keys first: they stay over it)
@@ -2735,6 +2783,7 @@ class TVWindow(QMainWindow):
         pip.arm(MINI)
         floating = pip.floating_window()
         if not pip.floating() or floating is None:
+            logger.info("The mini player waits: the player page is not free to float")
             self._mini_restore = None
             self._arm_desktop_pip()
             return
@@ -2816,16 +2865,27 @@ class TVWindow(QMainWindow):
     def _may_float_picture(self) -> bool:
         """The large picture may float on another desktop now: fullscreen, the setting on, one
         picture (no multiview grid) on the player page, and something playing in it."""
+        return self._may_keep_floating() and self._one_picture_plays()
+
+    def _may_keep_floating(self) -> bool:
+        """A picture afloat for a desktop change stays so: fullscreen, the setting on, one
+        picture (no multiview grid, no Library, no dialog). Stopped or failed, it stays in the
+        small window with its way to play again, as in the mini player (the review of 2.13.5:
+        it vanished, its "Play again" on the desktop left)."""
         if self._closing or not self.isFullScreen():
             return False
         if not getattr(self.config_manager, "desktop_pip", True):
             return False
-        return self._one_picture_plays()
+        return self._one_picture_may_float()
 
     def _may_float_covered(self) -> bool:
         """The large picture may float while the window is out of sight: a window shown (not
         fullscreen, nor on its way there or back, nor the mini player, on top anyway), its
         setting on, Keep on Top off, and one picture playing on the player page."""
+        return self._may_keep_covered_float() and self._one_picture_plays()
+
+    def _may_keep_covered_float(self) -> bool:
+        """As `_may_float_covered`, playing or not (a stopped picture stays afloat)."""
         if self._closing or not self.isVisible() or self.isFullScreen():
             return False
         if self._fs_target is not None or self._mini_restore is not None or self._mini_waiting:
@@ -2834,13 +2894,17 @@ class TVWindow(QMainWindow):
             return False
         if getattr(self.config_manager, "keep_on_top", False):
             return False  # it stays above other apps' windows: never floats
-        return self._one_picture_plays()
+        return self._one_picture_may_float()
+
+    def _one_picture_may_float(self) -> bool:
+        """One picture (no multiview grid, no dialog) on the player page."""
+        if QApplication.activeModalWidget() is not None:
+            return False  # a dialog would block the small window's clicks
+        return not (self.controller.multiview_shown() or self.screens.library_shown())
 
     def _one_picture_plays(self) -> bool:
         """One picture (no multiview grid, no dialog) on the player page, playing or paused."""
-        if QApplication.activeModalWidget() is not None:
-            return False  # a dialog would block the small window's clicks
-        if self.controller.multiview_shown() or self.screens.library_shown():
+        if not self._one_picture_may_float():
             return False
         playing = (PlaybackState.OPENING, PlaybackState.BUFFERING, PlaybackState.PLAYING)
         state = self.controller.session.state()
@@ -2895,6 +2959,11 @@ class TVWindow(QMainWindow):
             holder.addActions(self.actions())
             host.follow_window(holder)
             macos_window.join_all_spaces(host)  # beside the floating picture on every desktop
+            if self.desktop_pip.reason() == MINI:
+                # The mini player is QiTV's window (none left on another desktop to bring): a
+                # press on it, or on its controls, brings QiTV forward, as the window did.
+                macos_window.let_presses_activate(holder)
+                macos_window.let_presses_activate(host)
             # Once the floating window is placed: its Show came before (2.9, the review: the
             # captions sat where it floated last time for a moment).
             QTimer.singleShot(0, host, host.sync_geometry)
@@ -2903,6 +2972,7 @@ class TVWindow(QMainWindow):
             macos_window.leave_all_spaces(host)
             if self._mini_restore is not None and _macos_desktops():
                 self._leave_mini()
+            self.window_cards.release()  # what QiTV said meanwhile, unasked, comes now
         self._update_menu_bar()
 
     def _mini_rect(self) -> QRect:
@@ -3068,7 +3138,7 @@ class TVWindow(QMainWindow):
         else:
             if self.screens.library_shown():
                 self.screens.back_to_tv()
-            self.leave_mini_player()
+            self.leave_small_window()
             self.more_menu.dismiss()
             self.controller.make_way_for_settings(keep_place=keep_place)
             self.settings.open(section_key, from_drawer=from_drawer, row=row)
@@ -3351,6 +3421,14 @@ class TVWindow(QMainWindow):
         this window shows in front instead, restored when it was minimized (fullscreen or
         maximized as it was)."""
         if self._closing:
+            return
+        floating = self.desktop_pip.floating_window()
+        if self.desktop_pip.reason() == MINI and self.desktop_pip.floating() and floating:
+            # The macOS mini player is the window now (review I-3: the hidden one showed,
+            # empty): the small window comes forward, as the mini player does elsewhere.
+            floating.raise_()
+            macos_window.activate_app()
+            floating.activateWindow()
             return
         state = self.windowState()
         if state & Qt.WindowState.WindowMinimized:
