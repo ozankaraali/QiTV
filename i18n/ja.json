@@ -329,6 +329,7 @@
   "End of the programme": "番組の終了時",
   "End the find, then close": "検索を終えてから閉じる",
   "Ends the next day.": "翌日に終了します。",
+  "Enter it at plex.tv/link, on any phone or computer. This card waits for it.": "任意のスマートフォンかパソコンでplex.tv/linkに入力してください。このカードは入力を待っています。",
   "Episode {n}": "第{n}話",
   "Episodes": "エピソード",
   "Equatorial Guinea": "赤道ギニア",
@@ -1363,7 +1364,6 @@
   "Your account allows {n} stream; {active} are in use": {
     "other": "アカウントの同時ストリームは{n}本で、{active}本が使用中です"
   },
-  "Your code: {code}\nEnter it at plex.tv/link, on any phone or computer. This card waits for it.": "コード: {code}\n任意のスマートフォンかパソコンでplex.tv/linkに入力してください。このカードは入力を待っています。",
   "Your current PIN:": "現在のPIN:",
   "Your mix stays": "ミックスを保持",
   "Your own TMDB API Read Access Token, if you have one.": "お持ちのTMDB API Read Access Token。",

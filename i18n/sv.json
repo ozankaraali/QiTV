@@ -332,6 +332,7 @@
   "End of the programme": "Programmets slut",
   "End the find, then close": "Avsluta sökningen och stäng sedan",
   "Ends the next day.": "Slutar nästa dag.",
+  "Enter it at plex.tv/link, on any phone or computer. This card waits for it.": "Ange den på plex.tv/link, på valfri telefon eller dator. Det här kortet väntar på den.",
   "Episode {n}": "Avsnitt {n}",
   "Episodes": "Avsnitt",
   "Equatorial Guinea": "Ekvatorialguinea",
@@ -1378,7 +1379,6 @@
     "one": "Ditt konto tillåter {n} ström; {active} används",
     "other": "Ditt konto tillåter {n} strömmar; {active} används"
   },
-  "Your code: {code}\nEnter it at plex.tv/link, on any phone or computer. This card waits for it.": "Din kod: {code}\nAnge den på plex.tv/link, på valfri telefon eller dator. Det här kortet väntar på den.",
   "Your current PIN:": "Din nuvarande PIN-kod:",
   "Your mix stays": "Din mix behålls",
   "Your own TMDB API Read Access Token, if you have one.": "Din egen TMDB API Read Access Token, om du har en.",

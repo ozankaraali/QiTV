@@ -332,6 +332,7 @@
   "End of the programme": "प्रोग्राम खत्म होने पर",
   "End the find, then close": "खोज खत्म करें, फिर बंद करें",
   "Ends the next day.": "अगले दिन खत्म होगा।",
+  "Enter it at plex.tv/link, on any phone or computer. This card waits for it.": "इसे किसी भी फ़ोन या कंप्यूटर पर plex.tv/link पर डालें। यह कार्ड इसका इंतज़ार कर रहा है।",
   "Episode {n}": "एपिसोड {n}",
   "Episodes": "एपिसोड",
   "Equatorial Guinea": "इक्वेटोरियल गिनी",
@@ -1378,7 +1379,6 @@
     "one": "आपका अकाउंट {n} स्ट्रीम की अनुमति देता है; {active} इस्तेमाल में हैं",
     "other": "आपका अकाउंट {n} स्ट्रीम की अनुमति देता है; {active} इस्तेमाल में हैं"
   },
-  "Your code: {code}\nEnter it at plex.tv/link, on any phone or computer. This card waits for it.": "आपका कोड: {code}\nइसे किसी भी फ़ोन या कंप्यूटर पर plex.tv/link पर डालें। यह कार्ड इसका इंतज़ार कर रहा है।",
   "Your current PIN:": "आपका मौजूदा PIN:",
   "Your mix stays": "आपका मिक्स बना रहेगा",
   "Your own TMDB API Read Access Token, if you have one.": "आपका अपना TMDB API Read Access Token, अगर हो।",

@@ -329,6 +329,7 @@
   "End of the programme": "Akhir acara",
   "End the find, then close": "Akhiri pencarian, lalu tutup",
   "Ends the next day.": "Berakhir keesokan harinya.",
+  "Enter it at plex.tv/link, on any phone or computer. This card waits for it.": "Masukkan di plex.tv/link, dari ponsel atau komputer mana pun. Kartu ini menunggunya.",
   "Episode {n}": "Episode {n}",
   "Episodes": "Episode",
   "Equatorial Guinea": "Guinea Ekuatorial",
@@ -1363,7 +1364,6 @@
   "Your account allows {n} stream; {active} are in use": {
     "other": "Akun Anda mengizinkan {n} stream; {active} sedang dipakai"
   },
-  "Your code: {code}\nEnter it at plex.tv/link, on any phone or computer. This card waits for it.": "Kode Anda: {code}\nMasukkan di plex.tv/link, dari ponsel atau komputer mana pun. Kartu ini menunggunya.",
   "Your current PIN:": "PIN Anda saat ini:",
   "Your mix stays": "Campuran Anda tetap",
   "Your own TMDB API Read Access Token, if you have one.": "Token Akses Baca API TMDB milik Anda, jika ada.",

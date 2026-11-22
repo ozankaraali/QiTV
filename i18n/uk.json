@@ -338,6 +338,7 @@
   "End of the programme": "Кінець передачі",
   "End the find, then close": "Завершити пошук, потім закрити",
   "Ends the next day.": "Закінчиться наступного дня.",
+  "Enter it at plex.tv/link, on any phone or computer. This card waits for it.": "Введіть його на plex.tv/link з будь-якого телефона чи комп’ютера. Ця картка чекає на нього.",
   "Episode {n}": "Серія {n}",
   "Episodes": "Серії",
   "Equatorial Guinea": "Екваторіальна Гвінея",
@@ -1408,7 +1409,6 @@
     "one": "Ваш обліковий запис дозволяє {n} потік; зайнято {active}",
     "other": "Ваш обліковий запис дозволяє {n} потоку; зайнято {active}"
   },
-  "Your code: {code}\nEnter it at plex.tv/link, on any phone or computer. This card waits for it.": "Ваш код: {code}\nВведіть його на plex.tv/link з будь-якого телефона чи комп’ютера. Ця картка чекає на нього.",
   "Your current PIN:": "Ваш поточний PIN-код:",
   "Your mix stays": "Мікс зберігається",
   "Your own TMDB API Read Access Token, if you have one.": "Ваш власний TMDB API Read Access Token, якщо він є.",

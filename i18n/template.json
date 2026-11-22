@@ -977,7 +977,6 @@
     "Your TMDB Read Access Token": "the TMDB token row's hint (muted, empty) in a build without one of its own",
     "Your account allows {n} stream; all {n} are in use": "n (the streams the account allows) is 3 or more here",
     "Your account allows {n} stream; {active} are in use": "n (the streams the account allows) is 3 or more; active (in use) 2 or more",
-    "Your code: {code}\nEnter it at plex.tv/link, on any phone or computer. This card waits for it.": "Plex's sign-in card: {code} is 4 letters and digits; plex.tv/link stays as it is",
     "Your current PIN:": "asking for the PIN",
     "Your mix stays": "the volume mixer, multiview: the levels and mutes the user set stay as the focus moves",
     "Your own TMDB API Read Access Token, if you have one.": "help under the TMDB token (an API Read Access Token), edited in place",
@@ -1488,6 +1487,7 @@
   "End of the programme": "",
   "End the find, then close": "",
   "Ends the next day.": "",
+  "Enter it at plex.tv/link, on any phone or computer. This card waits for it.": "",
   "Episode {n}": "",
   "Episodes": "",
   "Equatorial Guinea": "",
@@ -2534,7 +2534,6 @@
     "one": "",
     "other": ""
   },
-  "Your code: {code}\nEnter it at plex.tv/link, on any phone or computer. This card waits for it.": "",
   "Your current PIN:": "",
   "Your mix stays": "",
   "Your own TMDB API Read Access Token, if you have one.": "",

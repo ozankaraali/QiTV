@@ -332,6 +332,7 @@
   "End of the programme": "Край на предаването",
   "End the find, then close": "Приключи търсенето, после затвори",
   "Ends the next day.": "Завършва на следващия ден.",
+  "Enter it at plex.tv/link, on any phone or computer. This card waits for it.": "Въведете го на plex.tv/link от телефон или компютър. Тази карта ще го изчака.",
   "Episode {n}": "Епизод {n}",
   "Episodes": "Епизоди",
   "Equatorial Guinea": "Екваториална Гвинея",
@@ -1378,7 +1379,6 @@
     "one": "Акаунтът ви позволява {n} поток; {active} се използват",
     "other": "Акаунтът ви позволява {n} потока; {active} се използват"
   },
-  "Your code: {code}\nEnter it at plex.tv/link, on any phone or computer. This card waits for it.": "Вашият код: {code}\nВъведете го на plex.tv/link от телефон или компютър. Тази карта ще го изчака.",
   "Your current PIN:": "Текущият ви PIN:",
   "Your mix stays": "Вашият микс остава",
   "Your own TMDB API Read Access Token, if you have one.": "Вашият собствен TMDB API Read Access Token, ако имате.",

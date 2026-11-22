@@ -335,6 +335,7 @@
   "End of the programme": "Koniec relácie",
   "End the find, then close": "Ukončiť hľadanie, potom zavrieť",
   "Ends the next day.": "Končí sa nasledujúci deň.",
+  "Enter it at plex.tv/link, on any phone or computer. This card waits for it.": "Zadajte ho na plex.tv/link na ľubovoľnom telefóne alebo počítači. Táto karta naň počká.",
   "Episode {n}": "Epizóda {n}",
   "Episodes": "Epizódy",
   "Equatorial Guinea": "Rovníková Guinea",
@@ -1393,7 +1394,6 @@
     "one": "Váš účet povoľuje {n} stream; v používaní: {active}",
     "other": "Váš účet povoľuje {n} streamov; v používaní: {active}"
   },
-  "Your code: {code}\nEnter it at plex.tv/link, on any phone or computer. This card waits for it.": "Váš kód: {code}\nZadajte ho na plex.tv/link na ľubovoľnom telefóne alebo počítači. Táto karta naň počká.",
   "Your current PIN:": "Váš aktuálny PIN:",
   "Your mix stays": "Váš mix zostáva",
   "Your own TMDB API Read Access Token, if you have one.": "Váš vlastný TMDB API Read Access Token, ak ho máte.",

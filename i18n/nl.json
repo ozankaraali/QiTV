@@ -332,6 +332,7 @@
   "End of the programme": "Einde van het programma",
   "End the find, then close": "Zoeken beëindigen, dan sluiten",
   "Ends the next day.": "Eindigt de volgende dag.",
+  "Enter it at plex.tv/link, on any phone or computer. This card waits for it.": "Voer hem in op plex.tv/link, op elke telefoon of computer. Deze kaart wacht erop.",
   "Episode {n}": "Aflevering {n}",
   "Episodes": "Afleveringen",
   "Equatorial Guinea": "Equatoriaal-Guinea",
@@ -1378,7 +1379,6 @@
     "one": "Je account staat {n} stream toe; {active} zijn in gebruik",
     "other": "Je account staat {n} streams toe; {active} zijn in gebruik"
   },
-  "Your code: {code}\nEnter it at plex.tv/link, on any phone or computer. This card waits for it.": "Je code: {code}\nVoer hem in op plex.tv/link, op elke telefoon of computer. Deze kaart wacht erop.",
   "Your current PIN:": "Je huidige pincode:",
   "Your mix stays": "Je mix blijft",
   "Your own TMDB API Read Access Token, if you have one.": "Je eigen TMDB API Read Access Token, als je er een hebt.",

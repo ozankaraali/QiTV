@@ -332,6 +332,7 @@
   "End of the programme": "Veriliş bitəndə",
   "End the find, then close": "Axtarışı bitir, sonra bağla",
   "Ends the next day.": "Növbəti gün bitir.",
+  "Enter it at plex.tv/link, on any phone or computer. This card waits for it.": "Onu istənilən telefon və ya kompüterdən plex.tv/link ünvanında daxil edin. Bu kart onu gözləyir.",
   "Episode {n}": "Seriya {n}",
   "Episodes": "Seriyalar",
   "Equatorial Guinea": "Ekvatorial Qvineya",
@@ -1378,7 +1379,6 @@
     "one": "Hesabınız {n} yayıma icazə verir; {active} yayım istifadədədir",
     "other": "Hesabınız {n} yayıma icazə verir; {active} yayım istifadədədir"
   },
-  "Your code: {code}\nEnter it at plex.tv/link, on any phone or computer. This card waits for it.": "Kodunuz: {code}\nOnu istənilən telefon və ya kompüterdən plex.tv/link ünvanında daxil edin. Bu kart onu gözləyir.",
   "Your current PIN:": "Hazırkı PIN-iniz:",
   "Your mix stays": "Səs ayarlarınız qalır",
   "Your own TMDB API Read Access Token, if you have one.": "Öz TMDB API Read Access Token-iniz, əgər varsa.",

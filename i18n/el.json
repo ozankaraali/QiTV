@@ -332,6 +332,7 @@
   "End of the programme": "Τέλος της εκπομπής",
   "End the find, then close": "Τέλος αναζήτησης, μετά κλείσιμο",
   "Ends the next day.": "Λήγει την επόμενη ημέρα.",
+  "Enter it at plex.tv/link, on any phone or computer. This card waits for it.": "Εισαγάγετέ τον στο plex.tv/link, από οποιοδήποτε τηλέφωνο ή υπολογιστή. Αυτή η κάρτα τον περιμένει.",
   "Episode {n}": "Επεισόδιο {n}",
   "Episodes": "Επεισόδια",
   "Equatorial Guinea": "Ισημερινή Γουινέα",
@@ -1378,7 +1379,6 @@
     "one": "Ο λογαριασμός σας επιτρέπει {n} ροή· χρησιμοποιούνται {active}",
     "other": "Ο λογαριασμός σας επιτρέπει {n} ροές· χρησιμοποιούνται {active}"
   },
-  "Your code: {code}\nEnter it at plex.tv/link, on any phone or computer. This card waits for it.": "Ο κωδικός σας: {code}\nΕισαγάγετέ τον στο plex.tv/link, από οποιοδήποτε τηλέφωνο ή υπολογιστή. Αυτή η κάρτα τον περιμένει.",
   "Your current PIN:": "Το τρέχον PIN σας:",
   "Your mix stays": "Η μίξη σας μένει",
   "Your own TMDB API Read Access Token, if you have one.": "Το δικό σας TMDB API Read Access Token, αν έχετε.",

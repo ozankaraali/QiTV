@@ -329,6 +329,7 @@
   "End of the programme": "Hết chương trình",
   "End the find, then close": "Kết thúc tìm kiếm, rồi đóng",
   "Ends the next day.": "Kết thúc vào ngày hôm sau.",
+  "Enter it at plex.tv/link, on any phone or computer. This card waits for it.": "Nhập mã tại plex.tv/link trên bất kỳ điện thoại hoặc máy tính nào. Thẻ này đang chờ mã.",
   "Episode {n}": "Tập {n}",
   "Episodes": "Các tập",
   "Equatorial Guinea": "Guinea Xích Đạo",
@@ -1363,7 +1364,6 @@
   "Your account allows {n} stream; {active} are in use": {
     "other": "Tài khoản của bạn cho phép {n} luồng; {active} luồng đang được dùng"
   },
-  "Your code: {code}\nEnter it at plex.tv/link, on any phone or computer. This card waits for it.": "Mã của bạn: {code}\nNhập mã tại plex.tv/link trên bất kỳ điện thoại hoặc máy tính nào. Thẻ này đang chờ mã.",
   "Your current PIN:": "Mã PIN hiện tại:",
   "Your mix stays": "Giữ mức âm của bạn",
   "Your own TMDB API Read Access Token, if you have one.": "API Read Access Token TMDB của riêng bạn, nếu có.",

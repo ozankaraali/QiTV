@@ -344,6 +344,7 @@
   "End of the programme": "نهاية البرنامج",
   "End the find, then close": "إنهاء البحث ثم الإغلاق",
   "Ends the next day.": "ينتهي في اليوم التالي.",
+  "Enter it at plex.tv/link, on any phone or computer. This card waits for it.": "أدخله في plex.tv/link من أي هاتف أو كمبيوتر. تنتظره هذه البطاقة.",
   "Episode {n}": "الحلقة {n}",
   "Episodes": "الحلقات",
   "Equatorial Guinea": "غينيا الاستوائية",
@@ -1438,7 +1439,6 @@
     "two": "يسمح حسابك ببثّين؛ {active} قيد الاستخدام",
     "zero": "يسمح حسابك بـ{n} عملية بث؛ {active} منها قيد الاستخدام"
   },
-  "Your code: {code}\nEnter it at plex.tv/link, on any phone or computer. This card waits for it.": "رمزك: {code}\nأدخله في plex.tv/link من أي هاتف أو كمبيوتر. تنتظره هذه البطاقة.",
   "Your current PIN:": "رمز PIN الحالي:",
   "Your mix stays": "يبقى مزيجك كما هو",
   "Your own TMDB API Read Access Token, if you have one.": "رمز TMDB API Read Access Token الخاص بك، إن كان لديك.",

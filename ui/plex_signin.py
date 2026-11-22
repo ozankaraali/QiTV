@@ -2,9 +2,10 @@
 
 "Plex" among the Add card's other ways (and Address and login on a Plex provider) opens it:
 
-1. "Sign in to Plex" asks plex.tv for a code, then shows it with where to enter it
-   (plex.tv/link, on any phone or computer). The card looks every LOOK_MS whether it was
-   entered, one look at a time on a worker; a code that expired offers a new one.
+1. "Sign in to Plex" asks plex.tv for a code, then shows it large and spaced, with where to
+   enter it (plex.tv/link, on any phone or computer) under it, readable from the couch. The
+   card looks every LOOK_MS whether it was entered, one look at a time on a worker; a code
+   that expired offers a new one.
 2. Once entered, the account's servers that answer are found (services.plex_workers), each by
    the best of its connections (at home, then remote, then relayed). One is taken at once;
    several are a choice, a button each.
@@ -43,11 +44,9 @@ _SERVER = "server:"  # a server's button: its id after it
 
 SIGN_IN_TITLE = N_("Sign in to Plex")  # i18n: the title of the card that signs in to Plex
 ASKING_TEXT = N_("Asking plex.tv for a code…")  # i18n: Plex's sign-in card, before the code
-# i18n: Plex's sign-in card: {code} is 4 letters and digits; plex.tv/link stays as it is
-CODE_TEXT = N_(
-    "Your code: {code}\nEnter it at plex.tv/link, on any phone or computer. This card waits"
-    " for it."
-)
+# i18n: Plex's sign-in card, under its code (4 letters and digits, shown large above) and
+# plex.tv/link (shown large too); plex.tv/link stays as it is
+ENTER_TEXT = N_("Enter it at plex.tv/link, on any phone or computer. This card waits for it.")
 EXPIRED_TEXT = N_("The code expired before it was entered.")  # i18n: Plex's sign-in card
 NEW_CODE_TEXT = N_("New code")  # i18n: a button on Plex's sign-in card once a code expired
 # i18n: Plex's sign-in card, once the code was entered
@@ -133,9 +132,13 @@ class PlexSignIn(QObject):
         if not self.card.isHidden():
             self.card.hide()
 
-    def _show(self, title: str, body: str, buttons: list[Button], default: str = "") -> None:
+    def _show(
+        self, title: str, body: str, buttons: list[Button], default: str = "", code: str = ""
+    ) -> None:
+        """The card as it is now; a `code` shows large, with where to enter it."""
         cancel = Button(CANCEL, translate(CANCEL_TEXT))
-        self.card.ask(translate(title), body, [cancel, *buttons], default)
+        link = plex.LINK_PAGE if code else ""
+        self.card.ask(translate(title), body, [cancel, *buttons], default, code=code, link=link)
         self._settings.show_card(self.card)
         self._shown()
 
@@ -173,7 +176,7 @@ class PlexSignIn(QObject):
         self._pin = dict(pin)
         self._ends = self._clock() + max(1, int(pin.get("expires_in") or plex.PIN_LIFETIME_S))
         code = str(pin.get("code") or "")
-        self._show(SIGN_IN_TITLE, translate(CODE_TEXT, code=code), [], CANCEL)
+        self._show(SIGN_IN_TITLE, translate(ENTER_TEXT), [], CANCEL, code=code)
         self._timer.start()
 
     def _look(self) -> None:

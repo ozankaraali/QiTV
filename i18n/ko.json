@@ -329,6 +329,7 @@
   "End of the programme": "프로그램 종료 시",
   "End the find, then close": "검색 종료 후 닫기",
   "Ends the next day.": "다음 날 끝나요.",
+  "Enter it at plex.tv/link, on any phone or computer. This card waits for it.": "아무 휴대폰이나 컴퓨터에서 plex.tv/link에 입력하세요. 이 카드가 입력을 기다려요.",
   "Episode {n}": "{n}화",
   "Episodes": "에피소드",
   "Equatorial Guinea": "적도 기니",
@@ -1363,7 +1364,6 @@
   "Your account allows {n} stream; {active} are in use": {
     "other": "계정에서 스트림 {n}개를 허용하며 {active}개가 사용 중이에요"
   },
-  "Your code: {code}\nEnter it at plex.tv/link, on any phone or computer. This card waits for it.": "코드: {code}\n아무 휴대폰이나 컴퓨터에서 plex.tv/link에 입력하세요. 이 카드가 입력을 기다려요.",
   "Your current PIN:": "현재 PIN:",
   "Your mix stays": "믹스 유지",
   "Your own TMDB API Read Access Token, if you have one.": "가지고 있다면 본인의 TMDB API Read Access Token이에요.",

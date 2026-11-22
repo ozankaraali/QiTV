@@ -332,6 +332,7 @@
   "End of the programme": "Pagtatapos ng palabas",
   "End the find, then close": "Tapusin ang paghahanap, saka isara",
   "Ends the next day.": "Matatapos kinabukasan.",
+  "Enter it at plex.tv/link, on any phone or computer. This card waits for it.": "Ilagay ito sa plex.tv/link, sa kahit anong phone o computer. Hinihintay ito ng card na ito.",
   "Episode {n}": "Episode {n}",
   "Episodes": "Mga Episode",
   "Equatorial Guinea": "Equatorial Guinea",
@@ -1378,7 +1379,6 @@
     "one": "{n} stream ang pinapayagan ng account mo; {active} ang ginagamit",
     "other": "{n} na stream ang pinapayagan ng account mo; {active} ang ginagamit"
   },
-  "Your code: {code}\nEnter it at plex.tv/link, on any phone or computer. This card waits for it.": "Ang code mo: {code}\nIlagay ito sa plex.tv/link, sa kahit anong phone o computer. Hinihintay ito ng card na ito.",
   "Your current PIN:": "Ang kasalukuyang PIN mo:",
   "Your mix stays": "Mananatili ang mix mo",
   "Your own TMDB API Read Access Token, if you have one.": "Ang sarili mong TMDB API Read Access Token, kung mayroon ka.",

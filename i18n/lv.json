@@ -335,6 +335,7 @@
   "End of the programme": "Raidījuma beigas",
   "End the find, then close": "Beigt meklēšanu, tad aizvērt",
   "Ends the next day.": "Beidzas nākamajā dienā.",
+  "Enter it at plex.tv/link, on any phone or computer. This card waits for it.": "Ievadiet to vietnē plex.tv/link jebkurā tālrunī vai datorā. Šī kartīte to gaida.",
   "Episode {n}": "{n}. sērija",
   "Episodes": "Sērijas",
   "Equatorial Guinea": "Ekvatoriālā Gvineja",
@@ -1393,7 +1394,6 @@
     "other": "Jūsu konts atļauj {n} straumes; izmantotas: {active}",
     "zero": "Jūsu konts atļauj {n} straumes; izmantotas: {active}"
   },
-  "Your code: {code}\nEnter it at plex.tv/link, on any phone or computer. This card waits for it.": "Jūsu kods: {code}\nIevadiet to vietnē plex.tv/link jebkurā tālrunī vai datorā. Šī kartīte to gaida.",
   "Your current PIN:": "Pašreizējais PIN:",
   "Your mix stays": "Jūsu miksējums paliek",
   "Your own TMDB API Read Access Token, if you have one.": "Jūsu pašu TMDB API Read Access Token, ja tāds ir.",

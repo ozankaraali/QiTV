@@ -332,6 +332,7 @@
   "End of the programme": "Ohjelman loppu",
   "End the find, then close": "Lopeta haku ja sulje sitten",
   "Ends the next day.": "Päättyy seuraavana päivänä.",
+  "Enter it at plex.tv/link, on any phone or computer. This card waits for it.": "Syötä se osoitteessa plex.tv/link millä tahansa puhelimella tai tietokoneella. Tämä kortti odottaa sitä.",
   "Episode {n}": "Jakso {n}",
   "Episodes": "Jaksot",
   "Equatorial Guinea": "Päiväntasaajan Guinea",
@@ -1378,7 +1379,6 @@
     "one": "Tilisi sallii {n} striimin; {active} on käytössä",
     "other": "Tilisi sallii {n} striimiä; {active} on käytössä"
   },
-  "Your code: {code}\nEnter it at plex.tv/link, on any phone or computer. This card waits for it.": "Koodisi: {code}\nSyötä se osoitteessa plex.tv/link millä tahansa puhelimella tai tietokoneella. Tämä kortti odottaa sitä.",
   "Your current PIN:": "Nykyinen PIN-koodisi:",
   "Your mix stays": "Miksauksesi säilyy",
   "Your own TMDB API Read Access Token, if you have one.": "Oma TMDB API Read Access Token, jos sinulla on sellainen.",

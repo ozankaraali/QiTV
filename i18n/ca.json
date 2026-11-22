@@ -332,6 +332,7 @@
   "End of the programme": "Final del programa",
   "End the find, then close": "Acaba la cerca i després tanca",
   "Ends the next day.": "Acaba l'endemà.",
+  "Enter it at plex.tv/link, on any phone or computer. This card waits for it.": "Introdueix-lo a plex.tv/link des de qualsevol telèfon o ordinador. Aquesta targeta l'espera.",
   "Episode {n}": "Episodi {n}",
   "Episodes": "Episodis",
   "Equatorial Guinea": "Guinea Equatorial",
@@ -1378,7 +1379,6 @@
     "one": "El teu compte permet {n} flux; {active} estan en ús",
     "other": "El teu compte permet {n} fluxos; {active} estan en ús"
   },
-  "Your code: {code}\nEnter it at plex.tv/link, on any phone or computer. This card waits for it.": "El teu codi: {code}\nIntrodueix-lo a plex.tv/link des de qualsevol telèfon o ordinador. Aquesta targeta l'espera.",
   "Your current PIN:": "El teu PIN actual:",
   "Your mix stays": "La teva mescla es manté",
   "Your own TMDB API Read Access Token, if you have one.": "El teu propi TMDB API Read Access Token, si en tens.",

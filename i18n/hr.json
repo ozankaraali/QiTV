@@ -335,6 +335,7 @@
   "End of the programme": "Kraj emisije",
   "End the find, then close": "Završi pretraživanje, zatim zatvori",
   "Ends the next day.": "Završava sljedeći dan.",
+  "Enter it at plex.tv/link, on any phone or computer. This card waits for it.": "Unesite ga na plex.tv/link, na bilo kojem telefonu ili računalu. Ova kartica ga čeka.",
   "Episode {n}": "Epizoda {n}",
   "Episodes": "Epizode",
   "Equatorial Guinea": "Ekvatorska Gvineja",
@@ -1393,7 +1394,6 @@
     "one": "Vaš račun dopušta {n} stream; u upotrebi: {active}",
     "other": "Vaš račun dopušta {n} streamova; u upotrebi: {active}"
   },
-  "Your code: {code}\nEnter it at plex.tv/link, on any phone or computer. This card waits for it.": "Vaš kôd: {code}\nUnesite ga na plex.tv/link, na bilo kojem telefonu ili računalu. Ova kartica ga čeka.",
   "Your current PIN:": "Vaš trenutačni PIN:",
   "Your mix stays": "Vaš miks ostaje",
   "Your own TMDB API Read Access Token, if you have one.": "Vaš vlastiti TMDB API Read Access Token, ako ga imate.",

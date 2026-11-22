@@ -332,6 +332,7 @@
   "End of the programme": "Saate lõpus",
   "End the find, then close": "Lõpeta otsing, siis sulge",
   "Ends the next day.": "Lõpeb järgmisel päeval.",
+  "Enter it at plex.tv/link, on any phone or computer. This card waits for it.": "Sisesta see aadressil plex.tv/link mis tahes telefonis või arvutis. See kaart ootab seda.",
   "Episode {n}": "Osa {n}",
   "Episodes": "Osad",
   "Equatorial Guinea": "Ekvatoriaal-Guinea",
@@ -1378,7 +1379,6 @@
     "one": "Teie konto lubab {n} voo; {active} on kasutusel",
     "other": "Teie konto lubab {n} voogu; {active} on kasutusel"
   },
-  "Your code: {code}\nEnter it at plex.tv/link, on any phone or computer. This card waits for it.": "Sinu kood: {code}\nSisesta see aadressil plex.tv/link mis tahes telefonis või arvutis. See kaart ootab seda.",
   "Your current PIN:": "Teie praegune PIN-kood:",
   "Your mix stays": "Teie helisegu jääb",
   "Your own TMDB API Read Access Token, if you have one.": "Teie enda TMDB API Read Access Token, kui teil on.",

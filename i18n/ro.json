@@ -335,6 +335,7 @@
   "End of the programme": "Sfârșitul emisiunii",
   "End the find, then close": "Încheiați căutarea, apoi închideți",
   "Ends the next day.": "Se termină a doua zi.",
+  "Enter it at plex.tv/link, on any phone or computer. This card waits for it.": "Introduceți-l la plex.tv/link, pe orice telefon sau computer. Acest card îl așteaptă.",
   "Episode {n}": "Episodul {n}",
   "Episodes": "Episoade",
   "Equatorial Guinea": "Guineea Ecuatorială",
@@ -1393,7 +1394,6 @@
     "one": "Contul dvs. permite {n} flux; {active} sunt folosite",
     "other": "Contul dvs. permite {n} de fluxuri; {active} sunt folosite"
   },
-  "Your code: {code}\nEnter it at plex.tv/link, on any phone or computer. This card waits for it.": "Codul dvs.: {code}\nIntroduceți-l la plex.tv/link, pe orice telefon sau computer. Acest card îl așteaptă.",
   "Your current PIN:": "PIN-ul dvs. actual:",
   "Your mix stays": "Mixajul dvs. rămâne",
   "Your own TMDB API Read Access Token, if you have one.": "Propriul dvs. TMDB API Read Access Token, dacă aveți unul.",

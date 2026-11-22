@@ -329,6 +329,7 @@
   "End of the programme": "จบรายการ",
   "End the find, then close": "จบการค้นหา แล้วปิด",
   "Ends the next day.": "สิ้นสุดในวันถัดไป",
+  "Enter it at plex.tv/link, on any phone or computer. This card waits for it.": "ป้อนรหัสนี้ที่ plex.tv/link บนโทรศัพท์หรือคอมพิวเตอร์เครื่องใดก็ได้ การ์ดนี้จะรอรหัสอยู่",
   "Episode {n}": "ตอนที่ {n}",
   "Episodes": "ตอน",
   "Equatorial Guinea": "อิเควทอเรียลกินี",
@@ -1363,7 +1364,6 @@
   "Your account allows {n} stream; {active} are in use": {
     "other": "บัญชีของคุณอนุญาต {n} สตรีม ใช้อยู่ {active}"
   },
-  "Your code: {code}\nEnter it at plex.tv/link, on any phone or computer. This card waits for it.": "รหัสของคุณ: {code}\nป้อนรหัสนี้ที่ plex.tv/link บนโทรศัพท์หรือคอมพิวเตอร์เครื่องใดก็ได้ การ์ดนี้จะรอรหัสอยู่",
   "Your current PIN:": "PIN ปัจจุบันของคุณ:",
   "Your mix stays": "คงค่ามิกซ์ไว้",
   "Your own TMDB API Read Access Token, if you have one.": "โทเคน TMDB API Read Access ของคุณเอง ถ้ามี",

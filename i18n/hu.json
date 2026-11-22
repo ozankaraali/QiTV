@@ -332,6 +332,7 @@
   "End of the programme": "A műsor végén",
   "End the find, then close": "Keresés befejezése, majd bezárás",
   "Ends the next day.": "Másnap ér véget.",
+  "Enter it at plex.tv/link, on any phone or computer. This card waits for it.": "Add meg a plex.tv/link oldalon, bármilyen telefonon vagy számítógépen. Ez a kártya megvárja.",
   "Episode {n}": "{n}. epizód",
   "Episodes": "Epizódok",
   "Equatorial Guinea": "Egyenlítői-Guinea",
@@ -1378,7 +1379,6 @@
     "one": "A fiókod {n} streamet enged; {active} használatban van",
     "other": "A fiókod {n} streamet enged; {active} használatban van"
   },
-  "Your code: {code}\nEnter it at plex.tv/link, on any phone or computer. This card waits for it.": "A kódod: {code}\nAdd meg a plex.tv/link oldalon, bármilyen telefonon vagy számítógépen. Ez a kártya megvárja.",
   "Your current PIN:": "Jelenlegi PIN-kódod:",
   "Your mix stays": "A keverés megmarad",
   "Your own TMDB API Read Access Token, if you have one.": "A saját TMDB API Read Access Tokened, ha van.",

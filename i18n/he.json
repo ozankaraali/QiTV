@@ -335,6 +335,7 @@
   "End of the programme": "סוף התוכנית",
   "End the find, then close": "סיום החיפוש, ואז סגירה",
   "Ends the next day.": "מסתיים למחרת.",
+  "Enter it at plex.tv/link, on any phone or computer. This card waits for it.": "יש להזין אותו ב-plex.tv/link, בכל טלפון או מחשב. הכרטיס הזה ממתין לו.",
   "Episode {n}": "פרק {n}",
   "Episodes": "פרקים",
   "Equatorial Guinea": "גינאה המשוונית",
@@ -1393,7 +1394,6 @@
     "other": "החשבון מתיר {n} זרמים; {active} בשימוש",
     "two": "החשבון מתיר שני זרמים; {active} בשימוש"
   },
-  "Your code: {code}\nEnter it at plex.tv/link, on any phone or computer. This card waits for it.": "הקוד שלך: {code}\nיש להזין אותו ב-plex.tv/link, בכל טלפון או מחשב. הכרטיס הזה ממתין לו.",
   "Your current PIN:": "קוד ה-PIN הנוכחי:",
   "Your mix stays": "המיקס שלך נשמר",
   "Your own TMDB API Read Access Token, if you have one.": "TMDB API Read Access Token משלכם, אם יש לכם.",

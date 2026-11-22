@@ -332,6 +332,7 @@
   "End of the programme": "Fundi i programit",
   "End the find, then close": "Përfundo kërkimin, pastaj mbyll",
   "Ends the next day.": "Mbaron ditën tjetër.",
+  "Enter it at plex.tv/link, on any phone or computer. This card waits for it.": "Futeni te plex.tv/link, nga çdo telefon ose kompjuter. Kjo kartë e pret.",
   "Episode {n}": "Episodi {n}",
   "Episodes": "Episodet",
   "Equatorial Guinea": "Guinea Ekuatoriale",
@@ -1378,7 +1379,6 @@
     "one": "Llogaria juaj lejon {n} transmetim; {active} janë në përdorim",
     "other": "Llogaria juaj lejon {n} transmetime; {active} janë në përdorim"
   },
-  "Your code: {code}\nEnter it at plex.tv/link, on any phone or computer. This card waits for it.": "Kodi juaj: {code}\nFuteni te plex.tv/link, nga çdo telefon ose kompjuter. Kjo kartë e pret.",
   "Your current PIN:": "PIN-i juaj aktual:",
   "Your mix stays": "Përzierja juaj mbetet",
   "Your own TMDB API Read Access Token, if you have one.": "TMDB API Read Access Token juaj, nëse keni një.",

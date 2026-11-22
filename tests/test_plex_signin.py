@@ -178,9 +178,16 @@ class PlexSignInTests(unittest.TestCase):
         job = self.jobs.last(pw.PinJob)
         self.assertEqual(len(job.client_id), 32)  # QiTV's own, random
         self.jobs.answer({"id": 7, "code": "AB12", "expires_in": 900})
-        self.assertIn("AB12", self.card.body())
-        self.assertIn("plex.tv/link", self.card.body())
+        self.assertEqual((self.card.code(), self.card.link()), ("AB12", "plex.tv/link"))
+        self.assertEqual(
+            self.card.body(),
+            "Enter it at plex.tv/link, on any phone or computer. This card waits for it.",
+        )
         self.assertEqual(self.buttons(), [(CANCEL, "Cancel")])
+        # Large, spaced and over the words: read from across the room.
+        code, link, body = (self.card.control_rect(zone) for zone in ("code", "link", "body"))
+        self.assertTrue(code.bottom() <= link.top() and link.bottom() <= body.top())
+        self.assertGreater(code.height(), 2 * link.height())
         self.assertTrue(self.signin._timer.isActive())
         self.assertEqual(self.signin._timer.interval(), ps.LOOK_MS)
         self.signin._look()  # (the timer's)
@@ -192,10 +199,11 @@ class PlexSignInTests(unittest.TestCase):
         self.signin._look()
         self.jobs.fail("plex.tv could not be reached (ConnectionError).")  # a moment off
         self.assertTrue(self.signin._timer.isActive())  # it looks on
-        self.assertIn("AB12", self.card.body())
+        self.assertEqual(self.card.code(), "AB12")
         self.signin._look()
         self.jobs.answer({"token": "account-token"})
         self.assertEqual(self.card.body(), "Signed in. Looking for your Plex servers…")
+        self.assertEqual(self.card.code(), "")  # the code went with its step
         self.assertFalse(self.signin._timer.isActive())
         servers = self.jobs.last(pw.ServersJob)
         self.assertEqual(servers.client_id, job.client_id)
@@ -213,7 +221,7 @@ class PlexSignInTests(unittest.TestCase):
         self.answer(ps.NEW_CODE)
         self.jobs.last(pw.PinJob)
         self.jobs.answer({"id": 8, "code": "CD34", "expires_in": 900})
-        self.assertIn("CD34", self.card.body())
+        self.assertEqual(self.card.code(), "CD34")
         # plex.tv saying it expired is the same.
         self.signin._look()
         self.jobs.answer({"token": "", "expired": True})

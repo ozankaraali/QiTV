@@ -332,6 +332,7 @@
   "End of the programme": "Mwisho wa kipindi",
   "End the find, then close": "Maliza utafutaji, kisha funga",
   "Ends the next day.": "Inaisha siku inayofuata.",
+  "Enter it at plex.tv/link, on any phone or computer. This card waits for it.": "Uweke kwenye plex.tv/link, kwenye simu au kompyuta yoyote. Kadi hii inausubiri.",
   "Episode {n}": "Sehemu {n}",
   "Episodes": "Sehemu",
   "Equatorial Guinea": "Ginekweta",
@@ -1378,7 +1379,6 @@
     "one": "Akaunti yako inaruhusu mtiririko {n}; {active} inatumika",
     "other": "Akaunti yako inaruhusu mitiririko {n}; {active} inatumika"
   },
-  "Your code: {code}\nEnter it at plex.tv/link, on any phone or computer. This card waits for it.": "Msimbo wako: {code}\nUweke kwenye plex.tv/link, kwenye simu au kompyuta yoyote. Kadi hii inausubiri.",
   "Your current PIN:": "PIN yako ya sasa:",
   "Your mix stays": "Mchanganyiko wako unabaki",
   "Your own TMDB API Read Access Token, if you have one.": "Tokeni yako mwenyewe ya TMDB API Read Access, ikiwa unayo.",

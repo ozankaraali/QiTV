@@ -335,6 +335,7 @@
   "End of the programme": "Laidos pabaiga",
   "End the find, then close": "Baigti paiešką, tada uždaryti",
   "Ends the next day.": "Baigiasi kitą dieną.",
+  "Enter it at plex.tv/link, on any phone or computer. This card waits for it.": "Įveskite jį adresu plex.tv/link bet kuriame telefone ar kompiuteryje. Ši kortelė jo laukia.",
   "Episode {n}": "{n} serija",
   "Episodes": "Serijos",
   "Equatorial Guinea": "Pusiaujo Gvinėja",
@@ -1393,7 +1394,6 @@
     "one": "Jūsų paskyra leidžia {n} srautą; naudojama: {active}",
     "other": "Jūsų paskyra leidžia {n} srautų; naudojama: {active}"
   },
-  "Your code: {code}\nEnter it at plex.tv/link, on any phone or computer. This card waits for it.": "Jūsų kodas: {code}\nĮveskite jį adresu plex.tv/link bet kuriame telefone ar kompiuteryje. Ši kortelė jo laukia.",
   "Your current PIN:": "Dabartinis PIN:",
   "Your mix stays": "Jūsų miksas išlieka",
   "Your own TMDB API Read Access Token, if you have one.": "Jūsų pačių TMDB API Read Access Token, jei jį turite.",

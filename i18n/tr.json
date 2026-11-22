@@ -329,6 +329,7 @@
   "End of the programme": "Program bitince",
   "End the find, then close": "Aramayı bitir, sonra kapat",
   "Ends the next day.": "Ertesi gün biter.",
+  "Enter it at plex.tv/link, on any phone or computer. This card waits for it.": "Kodu herhangi bir telefon ya da bilgisayardan plex.tv/link adresine girin. Bu kart kodu bekliyor.",
   "Episode {n}": "Bölüm {n}",
   "Episodes": "Bölümler",
   "Equatorial Guinea": "Ekvator Ginesi",
@@ -1363,7 +1364,6 @@
   "Your account allows {n} stream; {active} are in use": {
     "other": "Hesabınız {n} yayına izin veriyor; {active} yayın kullanımda"
   },
-  "Your code: {code}\nEnter it at plex.tv/link, on any phone or computer. This card waits for it.": "Kodunuz: {code}\nHerhangi bir telefon ya da bilgisayardan plex.tv/link adresine girin. Bu kart kodu bekliyor.",
   "Your current PIN:": "Şu anki PIN'iniz:",
   "Your mix stays": "Ses ayarınız korunuyor",
   "Your own TMDB API Read Access Token, if you have one.": "Varsa kendi TMDB anahtarınız (TMDB sitesindeki adı: API Read Access Token).",

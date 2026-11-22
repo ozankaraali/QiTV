@@ -329,6 +329,7 @@
   "End of the programme": "節目結束時",
   "End the find, then close": "結束尋找，然後關閉",
   "Ends the next day.": "隔天結束。",
+  "Enter it at plex.tv/link, on any phone or computer. This card waits for it.": "在任何手機或電腦上前往 plex.tv/link 輸入。這張卡片會等候輸入。",
   "Episode {n}": "第 {n} 集",
   "Episodes": "選集",
   "Equatorial Guinea": "赤道幾內亞",
@@ -1363,7 +1364,6 @@
   "Your account allows {n} stream; {active} are in use": {
     "other": "你的帳號允許 {n} 個串流；{active} 個在使用中"
   },
-  "Your code: {code}\nEnter it at plex.tv/link, on any phone or computer. This card waits for it.": "你的代碼：{code}\n在任何手機或電腦上前往 plex.tv/link 輸入。這張卡片會等候輸入。",
   "Your current PIN:": "你目前的 PIN：",
   "Your mix stays": "混音維持不變",
   "Your own TMDB API Read Access Token, if you have one.": "你自己的 TMDB API 讀取存取權杖（如果有）。",
