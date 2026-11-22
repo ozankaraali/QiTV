@@ -35,6 +35,7 @@ import stat
 import sys
 import threading
 import time
+import traceback
 from typing import Any, Callable, Iterator, Optional, Sequence
 
 from PySide6.QtCore import (
@@ -155,6 +156,7 @@ from ui.captions_controller import CaptionsController
 from ui.desktop_pip import COVERED, DESKTOP, DesktopPip, corner_rect
 from ui.export_flow import ExportFlow
 from ui.find_session import FindSession
+from ui.float_controls import FloatControls
 from ui.free_channels_menu import FreeLists
 from ui.grid_frame import GridFrame
 from ui.keymap import Action, as_int, resolve
@@ -288,6 +290,32 @@ def _local_now() -> datetime:
 def _macos_desktops() -> bool:
     """Only macOS has fullscreen desktops to leave (the desktop picture in picture)."""
     return QGuiApplication.platformName() == "cocoa"
+
+
+_SOURCE = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))  # QiTV's own files
+
+
+def _callers(depth: int = 4) -> str:
+    """Who asked, for the log: QiTV's innermost calls on the stack (this module's logging left
+    out), the nearest first; "the system" when no call of QiTV's led there (macOS activated
+    the window by itself, or a click on it did)."""
+    frames = [
+        frame
+        for frame in traceback.extract_stack()[:-1]
+        if frame.filename.startswith(_SOURCE)
+        and f"{os.sep}.venv{os.sep}" not in frame.filename
+        and frame.name not in ("_callers", "_note_floating_focus")
+    ]
+    if frames and frames[-1].name in ("activateWindow", "raise_", "setFocus", "changeEvent"):
+        frames.pop()  # (the TV window's own override, or the event it got)
+    if frames and frames[-1].name == "_on_focus_changed":
+        frames.pop()
+    frames = [frame for frame in frames if os.path.basename(frame.filename) != "main.py"]
+    if not frames:  # (main()'s event loop alone)
+        return "the system (no call of QiTV's)"
+    return " <- ".join(
+        f"{os.path.relpath(f.filename, _SOURCE)}:{f.lineno} {f.name}" for f in frames[::-1][:depth]
+    )
 
 
 def _native_video_handles() -> bool:
@@ -1018,10 +1046,15 @@ class TVWindow(QMainWindow):
             activate=macos_window.activate_app,
             shape=self.pip_frame.lent_shape,
             lock_shape=macos_window.keep_shape,
+            hover=self._hover_over_the_floating_picture,
             parent=self,
         )
+        # Its own player controls, the mini player's (2.13.5, ui/float_controls.py): made as it
+        # first floats.
+        self.float_controls: Optional[FloatControls] = None
         # Covered: QiTV becoming the active app (a click on its Dock icon, ⌘Tab) or leaving it.
         self.app.applicationStateChanged.connect(self._on_app_state)
+        self.app.focusChanged.connect(self._on_focus_changed)  # (the log, while it floats)
         # i18n: shown on the fullscreen player while its picture floats on another desktop
         self.floating_note = QLabel(tr("Playing in the small window"), self.player_page)
         self.floating_note.setAlignment(Qt.AlignmentFlag.AlignCenter)
@@ -2892,10 +2925,14 @@ class TVWindow(QMainWindow):
 
     def _on_picture_floating(self, floating: bool) -> None:
         note = self.floating_note
+        controls = self.float_controls
         if floating:
             note.setGeometry(self.player_page.rect())
             note.show()
             note.raise_()
+            controls = self._control_the_floating_picture()
+            if controls is not None:
+                controls.floated()
             self._caption_the_floating_picture()
             host = self._floating_captions
             if host is not None:
@@ -2904,6 +2941,37 @@ class TVWindow(QMainWindow):
                 QTimer.singleShot(0, host, host.sync_geometry)
         else:
             note.hide()
+            if controls is not None:
+                controls.docked()
+
+    def _control_the_floating_picture(self) -> Optional[FloatControls]:
+        """2.13.5: the player controls over the floating picture, the mini player's (the owner:
+        "THOSE SHOULD BE EQUAL"); made once, as it first floats (ui/float_controls.py)."""
+        player = self.desktop_pip.floating_window()
+        if player is None or self.float_controls is not None:
+            return self.float_controls
+        self.float_controls = FloatControls(
+            player,
+            self.overlays.transport,
+            come_back=lambda: self.desktop_pip.come_back("a button of its controls"),
+            mute=self._mute_the_floating_picture,
+            picture_mouse=player.picture_mouse,
+            join_all_spaces=macos_window.join_all_spaces,
+            parent=self,
+        )
+        return self.float_controls
+
+    def _hover_over_the_floating_picture(self, where: Optional[QPoint]) -> None:
+        """The pointer moved over the floating picture (or off it): its own controls' hover,
+        never the window's (nothing over the fullscreen window shows for it)."""
+        controls = self.float_controls
+        if controls is not None and not self._closing:
+            controls.hover_at(where)
+
+    def _mute_the_floating_picture(self) -> None:
+        """The floating picture's speaker: mute or unmute, as M (its mixer is the window's)."""
+        if not self._closing:
+            self.controller.handle(Action.MUTE)
 
     def _caption_the_floating_picture(self) -> None:
         """2.9: AI captions over the floating picture too (the owner: "no subs in pip"); the
@@ -2917,6 +2985,8 @@ class TVWindow(QMainWindow):
         host.setWindowFlag(Qt.WindowType.WindowTransparentForInput, True)
         overlay = CaptionsOverlay(host)
         host.add_overlay(overlay)
+        if self.float_controls is not None:
+            overlay.follow(self.float_controls.mirror)  # above its controls while they show
         macos_window.join_all_spaces(host)  # beside the floating picture on every desktop
         self._floating_captions = host
         self.captions.add_overlay(overlay)
@@ -3010,11 +3080,45 @@ class TVWindow(QMainWindow):
         if self._closing:
             return
         self.mini_player.activity_changed()  # its hover poll, while QiTV is inactive
+        self.desktop_pip.activity_changed()  # the floating picture's too
         if self.desktop_pip.reason() == COVERED:
             self.desktop_pip.nudge()
 
+    # ---- what takes the focus while the picture floats (2.13.5: the log names it) -------------
+
+    def activateWindow(self) -> None:
+        self._note_floating_focus("is asked to activate")
+        super().activateWindow()
+
+    def raise_(self) -> None:
+        self._note_floating_focus("is asked to come to the front")
+        super().raise_()
+
+    def setFocus(self, *args: Any) -> None:
+        self._note_floating_focus("is asked for the keys")
+        super().setFocus(*args)
+
+    def _on_focus_changed(self, _old: Optional[QWidget], now: Optional[QWidget]) -> None:
+        if now is not None and now.window() is self:
+            self._note_floating_focus(f"has the keys ({type(now).__name__})")
+
+    def _note_floating_focus(self, what: str) -> None:
+        """While the picture floats on another desktop (or over a covered window), the TV window
+        taking the focus would bring that desktop back (the owner's float that docked again every
+        second or two): the log says so, and who asked (`_callers`)."""
+        pip = getattr(self, "desktop_pip", None)
+        if pip is None or not pip.floating():
+            return
+        logger.info(
+            "Desktop picture in picture: the TV window %s while the picture floats, by %s",
+            what,
+            _callers(),
+        )
+
     def changeEvent(self, event: QEvent) -> None:
         if event.type() == QEvent.Type.ActivationChange:
+            if self.isActiveWindow():
+                self._note_floating_focus("became the active window")
             self.desktop_pip.nudge()  # a desktop change takes or gives the focus
         if event.type() == QEvent.Type.WindowStateChange:
             self._update_menu_bar()

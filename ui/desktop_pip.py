@@ -32,6 +32,12 @@ its edges resize it in that shape, and macOS's own edge resize keeps it too, 2.1
 player fills it to the last pixel (the TV window tells it the window's size).
 
 Each way back says why in the log (2.13.5).
+
+Its controls (2.13.5, the owner: "THIS IS ALSO PIP AND THOSE SHOULD BE EQUAL"): the mini player's,
+in a window of their own over it (ui/float_controls.py), as the pointer moves over it. Qt tells
+those moves while QiTV is the active app (`hovered`), and while it is not, as it nearly always
+is here, the pointer's place is asked (`HoverPoll`): each is told (`hover`). The floating window
+stays as it was: the surface alone, a panel that never takes the focus.
 """
 
 from __future__ import annotations
@@ -41,18 +47,21 @@ import time
 from typing import Callable, Optional
 
 from PySide6.QtCore import QEvent, QObject, QPoint, QRect, Qt, QTimer, Signal
-from PySide6.QtGui import QGuiApplication, QMouseEvent
+from PySide6.QtGui import QCursor, QMouseEvent
 from PySide6.QtWidgets import QWidget
 
 from ui.small_window import (  # noqa: F401  (re-exported: the floating window's sizes)
     EDGE_PX,
+    HOVER_MS,
     MARGIN,
     MIN_WIDTH,
     SNAP_MS,
     WIDTH_FRACTION,
+    HoverPoll,
     LockShape,
     SmallWindow,
     _no_lock,
+    _qitv_active,
     corner_rect,
 )
 
@@ -70,6 +79,10 @@ CONFIRM_MS = 150  # the second answer is asked this soon after the first, not a 
 # a window dragged across never floats it). Asked again a little after (a timer may be early).
 COVERED_SETTLE_MS = 500
 COVERED_CONFIRM_MS = COVERED_SETTLE_MS + 60
+# Asked to come back (`come_back`: a double-click, its controls): nothing floats again before the
+# fullscreen desktop has shown, while macOS switches desktops, or this long at most (should macOS
+# not switch, the picture floats again).
+BACK_HOLD_S = 1.5
 _MOUSE_EVENTS = (
     QEvent.Type.MouseButtonPress,
     QEvent.Type.MouseButtonRelease,
@@ -85,9 +98,11 @@ class FloatingPlayer(SmallWindow):
     a press to grab it never does), a drag moves it, a drag of an edge or a corner resizes it
     in its picture's shape (ui/small_window.py); where it ended up is told (`placed`). A panel
     that takes no focus (on macOS a non-activating one): a press on it leaves QiTV inactive and
-    the desktop shown, so it can be dragged there."""
+    the desktop shown, so it can be dragged there. A move over its picture without a button, as
+    Qt tells it, is told too (`hovered`: its controls' hover), and so is the pointer leaving."""
 
     returnRequested = Signal()
+    hovered = Signal(object)  # the pointer moved over the picture (a global QPoint), or left (None)
 
     def __init__(self, lock_shape: LockShape = _no_lock) -> None:
         super().__init__(Qt.WindowType.WindowDoesNotAcceptFocus, lock_shape)
@@ -122,10 +137,24 @@ class FloatingPlayer(SmallWindow):
         super().resizeEvent(event)
 
     def eventFilter(self, watched: QObject, event: QEvent) -> bool:
-        if watched is not self._surface or event.type() not in _MOUSE_EVENTS:
+        if watched is not self._surface:
+            return False
+        if event.type() == QEvent.Type.Leave:
+            self.hovered.emit(None)
+            return False
+        if event.type() not in _MOUSE_EVENTS:
             return False
         if not isinstance(event, QMouseEvent):
             return True  # the wheel
+        self.picture_mouse(event, watched if isinstance(watched, QWidget) else None)
+        return True  # the shell's clicks on the picture are for the fullscreen window
+
+    def picture_mouse(self, event: QMouseEvent, pointed: Optional[QWidget] = None) -> None:
+        """A mouse event on its picture: on its surface, or on its controls' shades beside a
+        control (ui/float_controls.py). A double-click asks for the fullscreen desktop again,
+        a press and its moves drag it (an edge's resize it), and a move without a button over
+        `pointed` (the widget under it) shows the resize pointer near an edge and is told
+        (`hovered`)."""
         left = Qt.MouseButton.LeftButton
         where = event.globalPosition().toPoint()
         kind = event.type()
@@ -136,19 +165,18 @@ class FloatingPlayer(SmallWindow):
             self._origin = self.pos()
             self._begin_press(where)
         elif kind == QEvent.Type.MouseMove and self._press is not None:
-            if any(self._edges):
+            if not event.buttons() & left:
+                self._end_press()  # (its release was lost: the window hid under it)
+            elif any(self._edges):
                 self._resize_to(where)
             elif self._drag_far_enough(where):
                 self.move(self._origin + (where - self._press))
-        elif kind == QEvent.Type.MouseMove and isinstance(watched, QWidget):
-            self._point_at(watched, where)
+        elif kind == QEvent.Type.MouseMove:
+            if pointed is not None:
+                self._point_at(pointed, where)
+            self.hovered.emit(where)
         elif kind == QEvent.Type.MouseButtonRelease and event.button() == left:
             self._end_press()
-        return True  # the shell's clicks on the picture are for the fullscreen window
-
-
-def _qitv_active() -> bool:
-    return QGuiApplication.applicationState() == Qt.ApplicationState.ApplicationActive
 
 
 class DesktopPip(QObject):
@@ -175,6 +203,8 @@ class DesktopPip(QObject):
         clock: Callable[[], float] = time.monotonic,
         shape: Optional[Callable[[], Optional[float]]] = None,
         lock_shape: Optional[LockShape] = None,
+        hover: Optional[Callable[[Optional[QPoint]], None]] = None,
+        cursor_pos: Callable[[], QPoint] = QCursor.pos,
         parent: Optional[QObject] = None,
     ) -> None:
         """`on_active_space(window)`: whether the window is on the desktop shown (None: can't
@@ -190,7 +220,11 @@ class DesktopPip(QObject):
         `seen(window)`: whether any of the window can be seen (None: can't tell);
         `may_float_covered()`: whether a picture may float for it now; `app_active()`: whether
         QiTV is the active app; `activate()`: QiTV to the front as an app (a double-click on
-        the floating window); `clock()`: seconds, for how long the window was out of sight."""
+        the floating window); `clock()`: seconds, for how long the window was out of sight.
+
+        `hover(where)`: the pointer moved over the floating window (global; None: off it), as
+        Qt tells it while QiTV is the active app, and as `cursor_pos()` says while it is not
+        (`hover_poll`): its controls' hover (ui/float_controls.py)."""
         super().__init__(parent)
         self._window = window
         self._on_active_space = on_active_space
@@ -207,15 +241,28 @@ class DesktopPip(QObject):
         self._clock = clock
         self._shape = shape
         self._lock_shape = lock_shape
+        self._hover = hover
+        self._cursor_pos = cursor_pos
         self._floating: Optional[FloatingPlayer] = None
         self._shown = False
         self._reason = DESKTOP  # what `check` asks about (the timer runs while it is armed)
         self._away = 0  # "another desktop" answers in a row
         self._since: Optional[float] = None  # covered: out of sight since (`clock`)
         self._held = False  # covered: after a double-click, nothing floats before it was seen
+        self._back_until: Optional[float] = None  # desktop: after one, see BACK_HOLD_S
         self._timer = QTimer(self)
         self._timer.setInterval(POLL_MS)
         self._timer.timeout.connect(self.check)
+        # The pointer over it while QiTV is not the active app: asked as it floats and as QiTV's
+        # state changes (`activity_changed`); never while it is docked.
+        self.hover_poll = HoverPoll(
+            lambda: self._floating if self._shown and self._hover is not None else None,
+            self._hovered,
+            app_active=lambda: self._app_active(),
+            cursor_pos=lambda: self._cursor_pos(),
+            parent=self,
+        )
+        self.floatingChanged.connect(lambda _floating: self.hover_poll.update())
 
     def floating(self) -> bool:
         return self._shown
@@ -223,6 +270,24 @@ class DesktopPip(QObject):
     def floating_window(self) -> Optional[FloatingPlayer]:
         """The floating window, once the picture has floated (None before)."""
         return self._floating
+
+    def activity_changed(self) -> None:
+        """QiTV became the active app, or another did: the pointer's place is asked while it
+        floats and QiTV is not active (Qt's own moves arrive while it is)."""
+        self.hover_poll.update()
+
+    def _hovered(self, where: Optional[QPoint]) -> None:
+        if self._shown and self._hover is not None:
+            self._hover(where)
+
+    def come_back(self, why: str = "a double-click on it") -> None:
+        """The fullscreen desktop again (covered: the window, QiTV in front): a double-click on
+        the floating window, its controls' way back, and the way to what opens in the window
+        (ui/float_controls.py). Nothing floats again while macOS switches desktops
+        (BACK_HOLD_S)."""
+        if self._reason == DESKTOP and self._timer.isActive():
+            self._back_until = self._clock() + BACK_HOLD_S
+        self._return(why)
 
     def nudge(self) -> None:
         """Something suggests the desktop changed (the window lost or got the focus): ask
@@ -250,6 +315,7 @@ class DesktopPip(QObject):
             return
         self._timer.stop()
         self._away, self._since, self._held = 0, None, False
+        self._back_until = None
         self.dock("what it floats for changed (fullscreen, a setting)")
         self._reason = reason or DESKTOP
         if reason is not None:
@@ -267,6 +333,10 @@ class DesktopPip(QObject):
         shown = self._on_active_space(self._window)
         if shown is None:
             return
+        if self._back_until is not None and not self._shown:  # asked to come back
+            if not shown and self._clock() < self._back_until:
+                return  # (macOS may still be switching desktops: no float meanwhile)
+            self._back_until = None
         self._away = 0 if shown else self._away + 1
         if self._away >= AWAY_CHECKS and not self._shown and self._may_float():
             self._float()
@@ -350,7 +420,8 @@ class DesktopPip(QObject):
         floating = self._floating
         if floating is None:
             floating = self._floating = FloatingPlayer(self._locks)
-            floating.returnRequested.connect(self._return)
+            floating.returnRequested.connect(lambda: self.come_back())
+            floating.hovered.connect(self._hovered)
             if self._remember is not None:
                 floating.placed.connect(self._remember)
         floating.put(self._place())
@@ -372,12 +443,12 @@ class DesktopPip(QObject):
         if self._lock_shape is not None:
             self._lock_shape(widget, shape, smallest, largest)
 
-    def _return(self) -> None:
+    def _return(self, why: str = "a double-click on it") -> None:
         """A click on the floating window: the fullscreen window's desktop again (macOS shows
         it as the window is activated); the next check puts the picture back. Covered: the
         window back from the Dock and QiTV in front of the app that covered it; nothing floats
         again before the window was seen (should macOS not bring QiTV, the picture stays)."""
-        self.dock("a double-click on it")  # back at once, while macOS brings that desktop
+        self.dock(why)  # back at once, while macOS brings that desktop
         window = self._window
         if self._reason == COVERED and self._timer.isActive():
             self._held, self._since = True, None
