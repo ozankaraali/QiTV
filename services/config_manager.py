@@ -31,11 +31,17 @@ _REPLACE_RETRY_DELAY_S = 0.05
 # locked must not stall every save (a settled zap's among them) by the whole retry wait.
 SAVE_BACKOFF_S = 30.0
 QUIT_SAVE_WAIT_S = 5.0  # quitting waits this long at most for config.json to be written
+_UNREAD_TEXT = "config.json couldn't be read when QiTV started: it is left as it is"
 # A new config's keys that update_patcher does not add to a loaded one: its providers (a loaded
 # config has its own), its windows (added one by one) and what the one-time steps set.
 _SET_ELSEWHERE = frozenset(
     "selected_provider_name data window_positions channel_epg tv_defaults_version".split()
 )
+
+
+class ConfigUnreadable(PermissionError):
+    """A save refused: config.json was there but could not be read at start (an antivirus or
+    another program holding it, its permissions), so this run never writes over it."""
 
 
 def _one_of(choices, default):
@@ -197,6 +203,7 @@ class ConfigManager:
         self.config = {}
         self._save_failed_at: float | None = None  # monotonic time of the last failed save
         self._writer: ConfigWriter | None = None  # write_in_background()'s
+        self._unread = False  # config.json there but unreadable: never saved over (this run)
         self.config_path = self._get_config_path()
         os.makedirs(os.path.dirname(self.config_path) or ".", exist_ok=True)
         self.load_config()
@@ -260,6 +267,8 @@ class ConfigManager:
             self._save_at_start()
         except json.JSONDecodeError:  # cut short, or damaged
             self._replace_unreadable_config()
+        except OSError as e:  # there, but it can't be opened or read: not damaged
+            self._keep_unread_config(e)
         else:
             if self.config is None:
                 self.config = self.default_config()
@@ -270,6 +279,20 @@ class ConfigManager:
             self.xmltv_channel_map = MultiKeyDict.deserialize(self.xmltv_channel_map)
 
         self.update_patcher()
+
+    def _keep_unread_config(self, error: OSError) -> None:
+        """The defaults this run, and the user's config.json kept as it is: nothing is saved
+        over it (its settings are only out of reach, maybe for a moment). save_failed() tells
+        the window to say the settings aren't saved."""
+        self.config = self.default_config()
+        self._unread = True
+        self._save_failed_at = time.monotonic()
+        logger.warning(
+            "The settings can't be read (%s: %s): the defaults are used this time, and "
+            "config.json is left as it is",
+            type(error).__name__,
+            error.strerror or "",  # (its text names the path)
+        )
 
     def _replace_unreadable_config(self) -> None:
         """Start from the defaults; the config.json that cannot be read is kept beside the
@@ -789,6 +812,11 @@ class ConfigManager:
         raises its failure, as a save did before (TVWindow.save_config, after a change to the
         providers, says so).
         """
+        if self._unread:  # a failed save, as one that couldn't write
+            self._save_failed_at = time.monotonic()
+            if self._writer is None or wait:
+                raise ConfigUnreadable(_UNREAD_TEXT)
+            return
         retries = _REPLACE_RETRIES if retry and not self._save_failed_recently() else 0
         writer = self._writer
         if writer is not None:
@@ -855,6 +883,8 @@ class ConfigManager:
 
     def _write_config(self, retries: int, serialized: bytes | None = None) -> None:
         """config.json written whole (`serialized`: a snapshot taken before; now if None)."""
+        if self._unread:
+            raise ConfigUnreadable(_UNREAD_TEXT)
         serialized_config = self._serialized_config() if serialized is None else serialized
         with atomic_write(
             self.config_path, lambda temporary, path: self._replace_config(temporary, retries)

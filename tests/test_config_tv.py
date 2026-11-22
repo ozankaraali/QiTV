@@ -232,6 +232,48 @@ class TvConfigTests(unittest.TestCase):
         self.assertNotIn(directory.name, "\n".join(logs.output))  # no paths in the log
         self.assertNotIn("Traceback", "\n".join(logs.output))
 
+    def test_an_unreadable_config_starts_on_the_defaults_and_is_never_written_over(self):
+        # A config.json that can't be opened (an antivirus holding it, its permissions) is no
+        # damaged one: QiTV failed to start. It starts on the defaults now, and nothing it
+        # saves replaces the user's file.
+        directory = tempfile.TemporaryDirectory()
+        self.addCleanup(directory.cleanup)
+        path = Path(directory.name) / "config.json"
+        kept = json.dumps({"favorites": ["Theirs"], "selected_provider_name": "Mine"}).encode()
+        path.write_bytes(kept)
+        real_open = open
+
+        def locked_open(file, mode="r", *args, **kwargs):
+            if os.fspath(file) == str(path) and "r" in mode:
+                raise PermissionError(13, "Permission denied", str(path))
+            return real_open(file, mode, *args, **kwargs)
+
+        with (
+            patch.object(ConfigManager, "_get_config_path", return_value=str(path)),
+            patch("services.config_manager.open", side_effect=locked_open, create=True),
+            self.assertLogs("services.config_manager", "WARNING") as logs,
+        ):
+            config = ConfigManager()
+            self.assertEqual(config.favorites, [])  # the defaults
+            self.assertTrue(config.save_failed())  # the window says so once it shows
+            self.assertEqual(path.read_bytes(), kept)
+            config.favorites = ["Lost"]
+            with self.assertRaises(OSError):
+                config.save_config()
+            self.assertEqual(path.read_bytes(), kept)
+            config.write_in_background()  # as QiTV saves
+            config.save_config()
+            self.assertTrue(config.flush_saves(5))
+            with self.assertRaises(OSError):
+                config.save_config(wait=True)
+            self.assertTrue(config.save_failed())
+        self.assertEqual(path.read_bytes(), kept)
+        self.assertEqual(sorted(p.name for p in path.parent.iterdir()), ["config.json"])
+        said = "\n".join(logs.output)
+        self.assertIn("PermissionError", said)
+        self.assertNotIn(directory.name, said)  # no paths in the log
+        self.assertNotIn("Traceback", said)
+
     def test_one_time_migration_turns_on_logos_and_epg(self):
         config, path = self._load({"channel_logos": False, "channel_epg": False})
         self.assertTrue(config.channel_logos)
