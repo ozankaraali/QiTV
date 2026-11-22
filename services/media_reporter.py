@@ -1,5 +1,6 @@
-"""Telling a Jellyfin or Emby server where its title plays (2.8), so its own "continue
-watching" and watched marks follow what is watched in QiTV.
+"""Telling a Jellyfin or Emby server where its title plays (2.8), and a Plex server (2.14,
+through its timeline: services.plex), so its own "continue watching" and watched marks follow
+what is watched in QiTV.
 
 The shell says what plays (`playing(url)`: any stream; only a server's own is told), where it is
 (`position`) and when it stops (`stopped`, or another stream playing). The server hears of a
@@ -18,8 +19,9 @@ import threading
 import time
 from typing import Callable, Optional
 
-from services import media_server as ms
+from services import media_server as ms, plex
 from services.config_manager import get_app_version
+from services.provider_types import is_plex
 
 logger = logging.getLogger(__name__)
 
@@ -31,6 +33,20 @@ Send = Callable[[dict, str, ms.StreamRef, int, bool], None]
 def _send_over_http(
     server: dict, event: str, ref: ms.StreamRef, position: int, paused: bool
 ) -> None:
+    if is_plex(server.get("type")):
+        told = plex.PlexClient(
+            ref.base,
+            token=ref.token,
+            client_id=str(server.get("device_id") or ""),
+            version=get_app_version(),
+            verify=bool(server.get("ssl_verify", True)),
+            timeout=10,
+        )
+        try:
+            told.report(event, ref, position, paused)
+        finally:
+            told.close()
+        return
     client = ms.MediaServerClient(
         ref.base,
         str(server.get("type") or ms.JELLYFIN),
@@ -72,7 +88,9 @@ class MediaReporter:
 
     def _server_of(self, url: str) -> Optional[tuple[dict, ms.StreamRef]]:
         servers = [s for s in self._servers() if ms.is_media_server(s.get("type"))]
-        ref = ms.parse_stream_url(url, [str(s.get("url") or "") for s in servers])
+        plexes = [str(s.get("url") or "") for s in servers if is_plex(s.get("type"))]
+        others = [str(s.get("url") or "") for s in servers if not is_plex(s.get("type"))]
+        ref = ms.parse_stream_url(url, others) or plex.parse_stream_url(url, plexes)
         if ref is None:
             return None
         server = next(s for s in servers if ms.normalized_base(str(s.get("url") or "")) == ref.base)

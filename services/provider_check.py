@@ -6,7 +6,7 @@ on this computer; a Jellyfin or Emby server is signed in to. Each is asked over 
 one that answered only over HTTP says so (2.7.1). A media server's sign-in hands back its access
 (a token, the user's id and the device's id) to keep in place of the password, which is used
 here only; `check_kept` asks one already added (its token kept, no password) with its token
-instead.
+instead. A Plex server (2.14) is always asked with its token, which its sign-in by a code gave.
 
 `check` runs on a worker thread (ui.provider_check runs it for Settings) and answers an
 `Outcome`, plain data. Nothing here logs a URL or a credential: the failure's type and host.
@@ -28,7 +28,7 @@ from services.provider_api import (
     known_http_only,
     remember_http_only,
 )
-from services.provider_types import is_media_server
+from services.provider_types import is_media_server, is_plex
 from services.redact import safe_exc
 
 logger = logging.getLogger(__name__)
@@ -72,6 +72,8 @@ def check(provider: dict, ssl_verify: bool, password: str = "") -> Outcome:
                 why = found.text  # why it failed, or (DATED) the warning
         elif kind in PLAYLIST_TYPES:
             ok = verify_url(str(provider.get("url") or ""), verify_ssl=verify)
+        elif is_plex(kind):  # 2.14: its token, from its sign-in by a code (never a password)
+            ok, why = _plex_access(provider, verify)
         elif is_media_server(kind):
             ok, why, access = _sign_in(provider, verify)
         http_only = ok and not is_media_server(kind) and answered_only_over_http(provider, verify)
@@ -98,6 +100,13 @@ def _sign_in(provider: dict, verify: bool) -> tuple[bool, str, dict[str, Any]]:
     return True, "", {key: value[key] for key in ACCESS_KEYS if key in value}
 
 
+def _plex_access(provider: dict, verify: bool) -> tuple[bool, str]:
+    """A Plex server asked with its kept token (2.14): (it answered, why not)."""
+    from services import plex_workers
+
+    return plex_workers.check_access(provider, verify)
+
+
 def check_kept(provider: dict, ssl_verify: bool) -> Outcome:
     """`check` for a provider as it is kept (Settings' Check the connection, blocking): a
     Jellyfin or Emby server, which keeps no password, is asked with its kept token instead of
@@ -106,6 +115,8 @@ def check_kept(provider: dict, ssl_verify: bool) -> Outcome:
     kind = str(provider.get("type") or "")
     if not is_media_server(kind) or not provider.get("token") or provider.get("password"):
         return check(provider, ssl_verify)
+    if is_plex(kind):
+        return check(provider, ssl_verify)  # (Plex's is always its kept token)
     from services import media_workers
 
     try:

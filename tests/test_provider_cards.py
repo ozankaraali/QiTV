@@ -181,7 +181,7 @@ class CardsTests(unittest.TestCase):
         self.assertEqual(self.form.found(), ("", True))
         self.assertEqual(
             [b.key for b in self.form._alternates],
-            [pc.FILE, "STB", "JELLYFIN", "EMBY", pc.FREE, pc.RADIO],
+            [pc.FILE, "STB", "JELLYFIN", "EMBY", "PLEX", pc.FREE, pc.RADIO],
         )
         # An Xtream link: its login goes to its own fields, out of the link's (not secret).
         self.paste(XTREAM_LINK)

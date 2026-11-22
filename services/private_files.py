@@ -44,8 +44,12 @@ def _private(path: Path) -> bool:
 
 def _provider_files(provider_dir: Path) -> Iterable[Path]:
     try:  # index.json and the caches: "<hash>.v2.jsonl" (2.12), an older build's "<hash>.json"
-        names = os.listdir(provider_dir)
-        return [provider_dir / name for name in names if name.endswith((".json", ".jsonl"))]
+        names = os.listdir(provider_dir)  # (and index.more, 2.14: the newer kinds' sign-ins)
+        return [
+            provider_dir / name
+            for name in names
+            if name.endswith((".json", ".jsonl")) or name == "index.more"
+        ]
     except OSError:
         return []
 

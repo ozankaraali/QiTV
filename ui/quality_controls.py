@@ -1,6 +1,7 @@
 """The ⚙ quality menu (2.8): a Jellyfin or Emby title's versions, each as its file is, and the
-server's conversions below the version playing; a channel's picture sizes, when its stream
-comes in several (Auto, its best, first).
+server's conversions below the version playing (a Plex title's versions only, 2.14: QiTV never
+asks Plex to convert); a channel's picture sizes, when its stream comes in several (Auto, its
+best, first).
 
 The transport's ⚙ (shown while such a title plays: TVController sets it) opens the panel above
 it, as the Picture panel opens (ui/overlays/track_panel.py). A row plays the title again in
@@ -193,7 +194,9 @@ class QualityControls(QObject):
         ]
         base = next((v for v in versions if v.get("id") == playing.source), None)
         top = int(base.get("height") or 0) if base else 0
-        for quality in ms.CONVERSIONS:
+        # 2.14: a Plex server is never asked to convert: its versions only.
+        conversions = ms.CONVERSIONS if data.get("conversions") is not False else ()
+        for quality in conversions:
             if top and quality.height >= top:
                 continue  # never "converted" up to the version's own size or more
             rows.append(

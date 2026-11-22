@@ -13,7 +13,7 @@ from PySide6.QtCore import QObject, Signal
 import orjson as json
 import tzlocal
 
-from services import free_channels, free_radio, provider_cache
+from services import free_channels, free_radio, newer_kinds, provider_cache
 from services.atomic_write import atomic_write, set_aside
 from services.catchup import mark_stb_archives
 from services.lazy_import import lazy_module
@@ -109,6 +109,8 @@ class ProviderManager(QObject):
         self.provider_dir = os.path.join(config_manager.get_config_dir(), "cache", "provider")
         os.makedirs(self.provider_dir, exist_ok=True)
         self.index_file = os.path.join(self.provider_dir, "index.json")
+        # 2.14: the providers of kinds older builds don't know (Plex), kept beside index.json.
+        self._newer = newer_kinds.NewerKinds(self.provider_dir)
         self.providers = []
         self.current_provider: dict[str, Any] = {}
         self.current_provider_content: dict[str, Any] = {}
@@ -282,25 +284,31 @@ class ProviderManager(QObject):
         return metadata
 
     def _load_providers(self):
+        """index.json's list, with the providers of newer kinds back in their places (2.14:
+        services.newer_kinds)."""
+        newer = self._newer.read()
         try:
             with open(self.index_file, "rb") as f:
                 self.providers = json.loads(f.read())
         except FileNotFoundError:
-            self.providers = self.default_providers()
+            self.providers = newer_kinds.merged(self.default_providers(), newer)
             self.save_providers()
         except json.JSONDecodeError:  # cut short (an older build crashed mid-save), or damaged
-            self._replace_unreadable_index()
+            self._replace_unreadable_index(newer)
         else:
             if self.providers is None:
-                self.providers = self.default_providers()
+                self.providers = newer_kinds.merged(self.default_providers(), newer)
             elif not isinstance(self.providers, list):
-                self._replace_unreadable_index()
+                self._replace_unreadable_index(newer)
+            else:
+                self.providers = newer_kinds.merged(self.providers, newer)
 
-    def _replace_unreadable_index(self):
+    def _replace_unreadable_index(self, newer=()):
         """Start from the free list. The index.json that cannot be read holds every provider
         and its sign-in: it is kept beside the new one (index.json.broken-<time>) and so are
-        the providers' caches, so putting that file back brings everything back."""
-        self.providers = self.default_providers()
+        the providers' caches, so putting that file back brings everything back. The newer
+        kinds' providers (`newer`, kept apart) stay."""
+        self.providers = newer_kinds.merged(self.default_providers(), list(newer))
         self._keep_unlisted_caches = True  # no save this session prunes a cache
         aside = set_aside(self.index_file)  # where it cannot be moved, nor can it be replaced
         if aside is not None:
@@ -428,7 +436,11 @@ class ProviderManager(QObject):
         return results
 
     def save_providers(self):
-        serialized = json.dumps(self.providers, option=json.OPT_INDENT_2)
+        # 2.14: the newer kinds' providers apart, where older builds never list them (first:
+        # index.json then never names a list they are missing from).
+        older, newer = newer_kinds.split(self.providers)
+        self._newer.write(newer)
+        serialized = json.dumps(older, option=json.OPT_INDENT_2)
         # Written whole or not at all, and (as atomic_write writes) readable by the user alone:
         # it holds every sign-in.
         with atomic_write(self.index_file) as f:

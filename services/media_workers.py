@@ -42,7 +42,7 @@ def client_for(provider: dict, verify: bool) -> ms.MediaServerClient:
     )
 
 
-def _logged(error: Exception) -> str:
+def logged(error: Exception) -> str:
     """An error for the log: its type and, for a server's, its fixed text (2.8.2: which answer,
     such as "The server answered 500"); never an address, which may carry the token."""
     if isinstance(error, ms.MediaServerError) and str(error):
@@ -50,7 +50,7 @@ def _logged(error: Exception) -> str:
     return type(error).__name__
 
 
-def _failure(error: Exception) -> str:
+def failure(error: Exception) -> str:
     if isinstance(error, ms.SignInNeeded):
         return ms.SIGN_IN_AGAIN  # a catalog message: English, shown in the active language
     reason = str(error) if isinstance(error, ms.MediaServerError) else type(error).__name__
@@ -72,8 +72,8 @@ class _ServerWorker(QObject):
         try:
             self.finished.emit(self.work(client))
         except Exception as e:
-            logger.warning("A media server's request failed: %s", _logged(e))
-            self.error.emit(_failure(e))
+            logger.warning("A media server's request failed: %s", logged(e))
+            self.error.emit(failure(e))
         finally:
             client.close()
 
@@ -241,8 +241,8 @@ class MediaLinkWorker(_ServerWorker):
         except _Shown as shown:
             self.error.emit(str(shown))
         except Exception as e:
-            logger.warning("A media server's stream failed: %s", _logged(e))
-            self.error.emit(_failure(e))
+            logger.warning("A media server's stream failed: %s", logged(e))
+            self.error.emit(failure(e))
         finally:
             client.close()
 
@@ -304,8 +304,8 @@ def check_access(
     except ms.SignInNeeded:
         return False, translate(ms.SIGN_IN_AGAIN)
     except Exception as e:
-        logger.info("A media server's kept sign-in was not answered: %s", _logged(e))
-        return False, _failure(e)
+        logger.info("A media server's kept sign-in was not answered: %s", logged(e))
+        return False, failure(e)
     finally:
         server.close()
 
@@ -333,6 +333,6 @@ def sign_in(
         return False, translate(N_("The user name or the password is not right."))
     except Exception as e:
         logger.info("A media server's sign-in failed: %s", type(e).__name__)
-        return False, _failure(e)
+        return False, failure(e)
     finally:
         client.close()

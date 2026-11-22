@@ -1,0 +1,87 @@
+{
+  "MediaContainer": {
+    "size": 3,
+    "allowSync": false,
+    "title1": "Plex Library",
+    "Directory": [
+      {
+        "allowSync": true,
+        "filters": true,
+        "refreshing": false,
+        "key": "1",
+        "type": "movie",
+        "title": "Films",
+        "agent": "tv.plex.agents.movie",
+        "scanner": "Plex Movie",
+        "language": "en-US",
+        "metadataAgentProviderGroupId": 1,
+        "uuid": "00000000-0000-4000-8000-000000000001",
+        "updatedAt": 1795376700,
+        "createdAt": 1795376700,
+        "scannedAt": 1795376714,
+        "content": true,
+        "directory": true,
+        "contentChangedAt": 30,
+        "hidden": 0,
+        "Location": [
+          {
+            "id": 1,
+            "path": "/media/films"
+          }
+        ]
+      },
+      {
+        "allowSync": true,
+        "filters": true,
+        "refreshing": false,
+        "key": "2",
+        "type": "show",
+        "title": "Series",
+        "agent": "tv.plex.agents.series",
+        "scanner": "Plex TV Series",
+        "language": "en-US",
+        "metadataAgentProviderGroupId": 1,
+        "uuid": "00000000-0000-4000-8000-000000000002",
+        "updatedAt": 1795376700,
+        "createdAt": 1795376700,
+        "scannedAt": 1795376714,
+        "content": true,
+        "directory": true,
+        "contentChangedAt": 30,
+        "hidden": 0,
+        "Location": [
+          {
+            "id": 2,
+            "path": "/media/series"
+          }
+        ]
+      },
+      {
+        "allowSync": true,
+        "filters": true,
+        "refreshing": false,
+        "key": "3",
+        "type": "artist",
+        "title": "Music",
+        "agent": "tv.plex.agents.music",
+        "scanner": "Plex Music",
+        "language": "en-US",
+        "metadataAgentProviderGroupId": 1,
+        "uuid": "00000000-0000-4000-8000-000000000003",
+        "updatedAt": 1795376700,
+        "createdAt": 1795376700,
+        "scannedAt": 1795376714,
+        "content": true,
+        "directory": true,
+        "contentChangedAt": 30,
+        "hidden": 0,
+        "Location": [
+          {
+            "id": 3,
+            "path": "/media/music"
+          }
+        ]
+      }
+    ]
+  }
+}

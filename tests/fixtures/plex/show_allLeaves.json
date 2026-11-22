@@ -1,0 +1,124 @@
+{
+  "MediaContainer": {
+    "size": 3,
+    "key": "201",
+    "viewGroup": "episode",
+    "Metadata": [
+      {
+        "ratingKey": "222",
+        "key": "/library/metadata/222",
+        "parentRatingKey": "211",
+        "grandparentRatingKey": "201",
+        "type": "episode",
+        "title": "The Second Door",
+        "grandparentTitle": "Quiet Street",
+        "parentTitle": "Season 1",
+        "summary": "The Second Door.",
+        "index": 2,
+        "parentIndex": 1,
+        "year": 2024,
+        "thumb": "/library/metadata/222/thumb/1795376810",
+        "duration": 1500000,
+        "addedAt": 1795376810,
+        "updatedAt": 1795376810,
+        "Media": [
+          {
+            "id": 222,
+            "duration": 1500000,
+            "bitrate": 4000,
+            "width": 1920,
+            "height": 1080,
+            "container": "mkv",
+            "videoResolution": "1080",
+            "Part": [
+              {
+                "id": 222,
+                "key": "/library/parts/222/1795376810/file.mkv",
+                "duration": 1500000,
+                "file": "/media/series/The Second Door.mkv",
+                "container": "mkv"
+              }
+            ]
+          }
+        ],
+        "viewOffset": 600000
+      },
+      {
+        "ratingKey": "221",
+        "key": "/library/metadata/221",
+        "parentRatingKey": "211",
+        "grandparentRatingKey": "201",
+        "type": "episode",
+        "title": "The First Door",
+        "grandparentTitle": "Quiet Street",
+        "parentTitle": "Season 1",
+        "summary": "The First Door.",
+        "index": 1,
+        "parentIndex": 1,
+        "year": 2024,
+        "thumb": "/library/metadata/221/thumb/1795376810",
+        "duration": 1500000,
+        "addedAt": 1795376810,
+        "updatedAt": 1795376810,
+        "Media": [
+          {
+            "id": 221,
+            "duration": 1500000,
+            "bitrate": 4000,
+            "width": 1920,
+            "height": 1080,
+            "container": "mkv",
+            "videoResolution": "1080",
+            "Part": [
+              {
+                "id": 221,
+                "key": "/library/parts/221/1795376810/file.mkv",
+                "duration": 1500000,
+                "file": "/media/series/The First Door.mkv",
+                "container": "mkv"
+              }
+            ]
+          }
+        ]
+      },
+      {
+        "ratingKey": "231",
+        "key": "/library/metadata/231",
+        "parentRatingKey": "212",
+        "grandparentRatingKey": "201",
+        "type": "episode",
+        "title": "A New Year",
+        "grandparentTitle": "Quiet Street",
+        "parentTitle": "Season 2",
+        "summary": "A New Year.",
+        "index": 1,
+        "parentIndex": 2,
+        "year": 2024,
+        "thumb": "/library/metadata/231/thumb/1795376810",
+        "duration": 1500000,
+        "addedAt": 1795376810,
+        "updatedAt": 1795376810,
+        "Media": [
+          {
+            "id": 231,
+            "duration": 1500000,
+            "bitrate": 4000,
+            "width": 1920,
+            "height": 1080,
+            "container": "mkv",
+            "videoResolution": "1080",
+            "Part": [
+              {
+                "id": 231,
+                "key": "/library/parts/231/1795376810/file.mkv",
+                "duration": 1500000,
+                "file": "/media/series/A New Year.mkv",
+                "container": "mkv"
+              }
+            ]
+          }
+        ]
+      }
+    ]
+  }
+}

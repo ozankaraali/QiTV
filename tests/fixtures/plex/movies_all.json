@@ -1,0 +1,192 @@
+{
+  "MediaContainer": {
+    "size": 3,
+    "allowSync": true,
+    "art": "/:/resources/movie-fanart.jpg",
+    "identifier": "com.plexapp.plugins.library",
+    "librarySectionID": 1,
+    "librarySectionTitle": "Films",
+    "mediaTagPrefix": "/system/bundle/media/flags/",
+    "mediaTagVersion": 1792752125,
+    "thumb": "/:/resources/movie.png",
+    "title1": "Films",
+    "title2": "All Movies",
+    "viewGroup": "movie",
+    "viewMode": 65592,
+    "Metadata": [
+      {
+        "ratingKey": "101",
+        "key": "/library/metadata/101",
+        "guid": "plex://movie/000000000000000000000065",
+        "type": "movie",
+        "title": "Salt Roads",
+        "summary": "A long road by the sea, and the people on it. A long road by the sea, and the people on it. A long road by the sea, and the people on it. A long road by the sea, and the people on it. A long road by the sea, and the people on it. A long road by the sea, and the people on it. A long road by the sea, and the people on it. A long road by the sea, and the people on it. A long road by the sea, and the people on it. A long road by the sea, and the people on it. A long road by the sea, and the people on it. A long road by the sea, and the people on it. ",
+        "audienceRating": 7.9,
+        "year": 2021,
+        "thumb": "/library/metadata/101/thumb/1795376703",
+        "art": "/library/metadata/101/art/1795376703",
+        "duration": 103733,
+        "addedAt": 1732399531,
+        "updatedAt": 1795376703,
+        "Media": [
+          {
+            "id": 1,
+            "duration": 103733,
+            "bitrate": 23063,
+            "width": 1080,
+            "height": 1920,
+            "aspectRatio": 1.33,
+            "audioChannels": 2,
+            "audioCodec": "pcm",
+            "videoCodec": "h264",
+            "videoResolution": "1080",
+            "container": "mov",
+            "videoFrameRate": "NTSC",
+            "optimizedForStreaming": 0,
+            "audioProfile": "pcm_s24le",
+            "has64bitOffsets": false,
+            "videoProfile": "high",
+            "Part": [
+              {
+                "id": 1,
+                "key": "/library/parts/1/1732399531/file.mov",
+                "duration": 103733,
+                "file": "/media/films/Salt Roads.mov",
+                "size": 299043939,
+                "audioProfile": "pcm_s24le",
+                "container": "mov",
+                "has64bitOffsets": false,
+                "optimizedForStreaming": false,
+                "videoProfile": "high"
+              }
+            ]
+          }
+        ],
+        "Guid": [
+          {
+            "id": "other://tt0000101"
+          },
+          {
+            "id": "tmdb://90101"
+          },
+          {
+            "id": "another://101"
+          }
+        ],
+        "Genre": [
+          {
+            "tag": "Drama"
+          },
+          {
+            "tag": "Road"
+          }
+        ],
+        "viewOffset": 40000
+      },
+      {
+        "ratingKey": "102",
+        "key": "/library/metadata/102",
+        "guid": "plex://movie/000000000000000000000066",
+        "type": "movie",
+        "title": "The Paper Lantern",
+        "summary": "A lantern maker's last order.",
+        "rating": 9.2,
+        "year": 2019,
+        "thumb": "/library/metadata/102/thumb/1795376704",
+        "art": "/library/metadata/102/art/1795376704",
+        "duration": 46699,
+        "addedAt": 1792861808,
+        "updatedAt": 1795376704,
+        "Media": [
+          {
+            "id": 2,
+            "duration": 46699,
+            "bitrate": 30425,
+            "width": 2160,
+            "height": 3840,
+            "aspectRatio": 1.33,
+            "audioChannels": 2,
+            "audioCodec": "aac",
+            "videoCodec": "h264",
+            "videoResolution": "4k",
+            "container": "mov",
+            "videoFrameRate": "NTSC",
+            "optimizedForStreaming": 0,
+            "has64bitOffsets": false,
+            "videoProfile": "high",
+            "Part": [
+              {
+                "id": 2,
+                "key": "/library/parts/2/1792861808/file.mov",
+                "duration": 46699,
+                "file": "/media/films/The Paper Lantern.mov",
+                "size": 177597998,
+                "container": "mov",
+                "has64bitOffsets": false,
+                "optimizedForStreaming": false,
+                "videoProfile": "high"
+              }
+            ]
+          }
+        ],
+        "Genre": [
+          {
+            "tag": "Drama"
+          },
+          {
+            "tag": "Road"
+          }
+        ]
+      },
+      {
+        "ratingKey": "103",
+        "key": "/library/metadata/103",
+        "guid": "plex://movie/000000000000000000000067",
+        "type": "movie",
+        "title": "Harbour Lights",
+        "summary": "Night at the harbour.",
+        "thumb": "/library/metadata/103/thumb/1795376708",
+        "art": "/library/metadata/103/art/1795376708",
+        "duration": 17594,
+        "addedAt": 1794354702,
+        "updatedAt": 1795376708,
+        "Media": [
+          {
+            "id": 3,
+            "duration": 17594,
+            "bitrate": 1279,
+            "width": 1280,
+            "height": 720,
+            "aspectRatio": 1.78,
+            "videoCodec": "h264",
+            "videoResolution": "720",
+            "container": "mpegts",
+            "videoFrameRate": "PAL",
+            "videoProfile": "high",
+            "Part": [
+              {
+                "id": 3,
+                "key": "/library/parts/3/1794354702/file.ts",
+                "duration": 17594,
+                "file": "/media/films/Harbour Lights.mpegts",
+                "size": 2812292,
+                "container": "mpegts",
+                "packetLength": 188,
+                "videoProfile": "high"
+              }
+            ]
+          }
+        ],
+        "Genre": [
+          {
+            "tag": "Drama"
+          },
+          {
+            "tag": "Road"
+          }
+        ],
+        "viewCount": 1
+      }
+    ]
+  }
+}

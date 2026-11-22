@@ -105,7 +105,7 @@ def _no_section_text(source: str, section: str) -> str:
 
 
 # i18n: under "{source} has no movies" in the Library, beside an Add provider button
-WHERE_FILMS_TEXT = N_("Films and series come from Xtream, STB, Jellyfin and Emby providers.")
+WHERE_FILMS_TEXT = N_("Films and series come from Xtream, STB, Jellyfin, Emby and Plex providers.")
 ADD_PROVIDER_TEXT = N_("Add provider")
 
 
