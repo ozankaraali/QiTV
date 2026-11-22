@@ -307,6 +307,12 @@ def _is_focus_key(node: NavNode, wanted: "str | tuple[str, str]") -> bool:
     return node.key == wanted
 
 
+def _is_item(node: NavNode | None, item: dict) -> bool:
+    """Whether `node` is a row of the channel `item` (as its ▶ tells: `ZapContext.same`)."""
+    payload = node.payload if node is not None else None
+    return isinstance(payload, dict) and ZapContext.same(payload, item)
+
+
 def _row_of_item(nodes: Sequence[NavNode], item: dict) -> NavNode | None:
     """The first channel row that is `item` as its ▶ tells (`ZapContext.same`), else None."""
     if isinstance(nodes, NodeSeq):
@@ -737,12 +743,27 @@ class _RowIndex:
 
     def __init__(self, nodes) -> None:
         self._seq = nodes if isinstance(nodes, NodeSeq) else None
+        self._nodes = nodes
         self._map = None if self._seq is not None else {n: i for i, n in enumerate(nodes)}
 
     def get(self, node, default=None):
         if node is None:
             return default
-        row = self._seq.row_of(node) if self._seq is not None else self._map.get(node)
+        if self._seq is not None:
+            row = self._seq.row_of(node)
+        else:
+            row = self._map.get(node)
+            payload = node.payload
+            if node.layer == "item" and isinstance(payload, dict):
+                # A row of an older list (its channel's old dict): its id's row while that is
+                # the same channel, else the row at its address (see NodeSeq.row_of).
+                if row is not None and self._nodes[row] is not node:
+                    if not _is_item(self._nodes[row], payload):
+                        found = _row_of_item(self._nodes, payload)
+                        row = self._map.get(found) if found is not None else row
+                elif row is None:
+                    found = _row_of_item(self._nodes, payload)
+                    row = self._map.get(found) if found is not None else None
         return default if row is None else row
 
     def __contains__(self, node) -> bool:
@@ -1414,14 +1435,15 @@ class Drawer(Overlay):
             if self._pending_key is not None or self._pending_item is not None:
                 pending, item = self._pending_key, self._pending_item
                 match = None
-                if item is not None:
-                    match = _row_of_item(nodes, item)
-                if match is None and pending is not None:
+                if pending is not None:
                     match = (
                         nodes.find_focus(pending)
                         if isinstance(nodes, NodeSeq)
                         else next((n for n in nodes if _is_focus_key(n, pending)), None)
                     )
+                if item is not None and not _is_item(match, item):
+                    # Its id names another channel now: the row at its address (else its id's).
+                    match = _row_of_item(nodes, item) or match
                 if match is not None:
                     col.current = match
                     matched = True
@@ -1435,6 +1457,10 @@ class Drawer(Overlay):
                 matched = True
             if not matched and (parent_changed or col.current not in col.rows):
                 col.current = next((n for n in nodes if _selectable(n)), None)
+            if refilled and col.current is not None and col.current in col.rows:
+                # The list came again (new dicts): the highlight is the new list's own row of
+                # its channel, never the row its old id names now.
+                col.current = nodes[col.rows[col.current]]
             if children is not None:
                 # A stale focus key must not outlive the first fill.
                 self._pending_key = self._pending_item = None

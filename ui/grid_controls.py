@@ -65,10 +65,10 @@ a "Last grid" chip (and View → Restore Last Multiview) that brings its channel
 their tiles, each once its provider is ready, and its focus; shown again in the same run, the
 tiles keep their places. A channel dragged from the channel list onto a tile plays there
 (`drag_over`, `tile_at`). The Library, films, files, the mini player and external players
-leave the grid first (the shell calls `leave`). A smaller layout, and leaving, stop every player but the big picture and the
-PiP, and nothing still on its way for a tile that went opens there; such a tile comes back
-"+", its old channel forgotten (the controls, the banner and the channel list never take it
-up again when it takes the focus).
+leave the grid first (the shell calls `leave`). A smaller layout, and leaving, stop every
+player but the big picture and the PiP, and nothing still on its way for a tile that went
+opens there; such a tile comes back "+", its old channel forgotten (the controls, the banner
+and the channel list never take it up again when it takes the focus).
 """
 
 from __future__ import annotations
@@ -425,6 +425,7 @@ class GridControls(QObject):
             return False
         if not self._focus(name):
             return False
+        self._focused_by_press = None  # (a double-click's press focused it: no click follows)
         if self._layouts is not None:
             self._layouts.dismiss()
         self._big = True

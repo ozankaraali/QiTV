@@ -2,8 +2,9 @@
 
 P (or the transport's Second channel, or the phone's) opens the channel tuned before the
 current one small, or closes the small picture; with no channel before it (or that one plays
-large, or is hidden while locked) the channel list opens instead, and the channel picked there opens small (`choose`);
-the drawer's context menu and Ctrl/⌘+P open the drawer's channel. S (or a click on the small picture) swaps; one that has to wait for the large
+large, or is hidden while locked) the channel list opens instead, and the channel picked
+there opens small (`choose`); the drawer's context menu and Ctrl/⌘+P open the drawer's
+channel. S (or a click on the small picture) swaps; one that has to wait for the large
 picture's channel to open says "Switching…". Its link is asked for on LinkLanes' side lane,
 one at a time: a choice made while one is on its way waits, replacing an older one that
 waits, and a link that lands after the PiP was closed, or after the large picture took its

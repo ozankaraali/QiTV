@@ -115,6 +115,24 @@ class LongGroupTests(unittest.TestCase):
         self.assertIsNot(fresh, seq)
         self.assertIs(fresh.items[0], catalog.live["10"][0])
 
+    def test_an_older_lists_node_finds_its_own_row_by_its_id_then_its_address(self):
+        items = [
+            {"id": 1, "name": "News", "cmd": "http://tv/news"},
+            {"id": 2, "name": "Sport", "cmd": "http://tv/sport"},
+            {"id": 3, "name": "News HD", "cmd": "http://tv/news"},
+        ]
+        old = NodeSeq([dict(i) for i in items])
+        self.assertEqual(NodeSeq(items).row_of(old[2]), 2)  # the copy it was, not the first
+        # The list changed: a channel more at the top, each id one on. The old "Sport" node's
+        # id (2) names "News" now; its address finds it, also once that row's node is made.
+        moved = NodeSeq(
+            [{"id": 1, "name": "New", "cmd": "http://tv/new"}]
+            + [{**item, "id": item["id"] + 1} for item in items]
+        )
+        moved[1]  # (painted)
+        self.assertEqual(moved.row_of(old[1]), 2)
+        self.assertEqual(moved.row_of(moved[1]), 1)  # its own nodes as ever
+
     def test_same_rows_are_the_same_dicts_in_the_same_order(self):
         items = channels(5)
         seq = NodeSeq(items)

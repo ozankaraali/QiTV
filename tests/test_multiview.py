@@ -1365,6 +1365,23 @@ class BigTileTests(MultiviewCase):
             self.grid_frame.focusRequested.emit("pip")
         self.assertEqual(len(self.drawer.named("open_drawer")), opened)
 
+    def test_from_a_big_tile_v_starts_nothing_a_waiting_open_counts(self):
+        self.four_tiles()
+        self.grid.tile_control("t2", "big")
+        with mock.patch.object(self.controller._question, "started") as started:
+            self.v()  # the grid again: no picture changes
+            self.assertFalse(self.grid.big())
+            started.assert_not_called()
+            self.v()  # leaving changes the pictures
+            started.assert_called()
+
+    def test_a_double_click_on_a_label_leaves_no_click_waiting(self):
+        self.four_tiles()
+        self.grid_frame.focusRequested.emit("pip")  # its press
+        self.grid_frame.bigRequested.emit("pip")  # the double-click: no click follows
+        self.assertTrue(self.grid.big())
+        self.assertIsNone(self.grid._focused_by_press)
+
     def test_tab_and_shift_tab_step_the_focus_through_the_tiles(self):
         # 2.14, the owner's pick: tile focus by key. Round the grid, "+" tiles too.
         tiles = self.four_tiles()  # tile 3 (t2) focused

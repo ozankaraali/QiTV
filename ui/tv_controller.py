@@ -3069,7 +3069,8 @@ class TVController(QObject):
         """V, View → Multiview, the grid button: the grid, or back to one picture."""
         if self._grid is None or self._closed:
             return
-        self._count_start()  # the grid, or one picture again
+        if not self._grid.big():
+            self._count_start()  # the grid, or one picture again (a big tile's grid: neither)
         if self._cast is not None and self._cast.casting() and not self._grid.shown():
             self._toast(MULTIVIEW_WHILE_CASTING)  # 2.8: one picture goes to the device
             return
