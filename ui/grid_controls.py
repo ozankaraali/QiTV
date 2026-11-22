@@ -9,10 +9,12 @@ ever shown opens them by itself, briefly, as a hint (config `multiview_hinted`, 
 
 One tile has the focus: it is the session manager's large slot, so the player controls, the
 banner, zapping, the channel list, rewind and Go live act on it as on the big picture, and
-its sound plays (the others are muted, unless the mixer made one heard). A press on a tile
-focuses it; a click on the focused one opens the channel list, as on the big picture. A "+"
-tile focuses and opens the channel list: the channel picked plays there. Tiles play through
-the time-shift pipeline as a picture-in-picture does, in memory (a channel that cannot be
+its sound plays (the others are muted, unless the mixer made one heard). A press on a tile's
+picture focuses it (the channel list, open, follows it there); a click on the focused one
+opens the channel list, as on the big picture, and a click on the label of one without the
+focus focuses it and opens the list at once, on its channel. A "+" tile focuses and opens
+the channel list: the channel picked plays there. Tiles play through the time-shift pipeline
+as a picture-in-picture does, in memory (a channel that cannot be
 time-shifted plays directly): the focused tile's buffer is the memory per stream, the
 others' a small one (`ring_sizes`), and the focus moves them (`SessionManager.set_large`).
 
@@ -41,20 +43,27 @@ The tile under the pointer shows its own controls (the overlay's strip: `pointer
 acting on that tile and never moving the focus: play/pause (its time-shift keeps buffering,
 as the big picture's does), its speaker (the shell's: a tile's mute, which mixes the grid's
 sound once a tile without the focus changes: `SessionManager.mixed`), LIVE or "−MM:SS" (a
-click goes live), the big picture (leave the grid with this tile big, as a double-click
-does) and ✕: the tile's stream stops and gives its provider's stream back, and it shows "+"
-(the focused tile's is the shell's to stop; it keeps the focus).
+click goes live), the big picture (this tile big, as a double-click makes it: below) and ✕:
+the tile's stream stops and gives its provider's stream back, and it shows "+" (the focused
+tile's is the shell's to stop; it keeps the focus).
 
-Esc (with nothing else open), V or a double-click leaves: the focused tile is the big
-picture, the tile focused before it stays as the picture-in-picture if it plays, and the
-other tiles stop. A focused tile that plays nothing ("+" or a card) gives the big picture to
+A double-click on a tile (or its strip's big picture) makes it big: it fills the page, the
+grid stays behind it, and nothing stops or opens (the other tiles play on out of sight, never
+heard, their streams kept: a provider can count a closed one for minutes). Esc, V, the grid
+button and a double-click again bring the grid back as it was; zapping onto a channel another
+tile shows makes that one big. Leaving the grid (or a layout chosen) from there leaves as
+from the grid.
+
+Esc (with nothing else open) or V leaves the grid: the focused tile is the big picture, the
+tile focused before it stays as the picture-in-picture if it plays, and the other tiles
+stop. A focused tile that plays nothing ("+" or a card) gives the big picture to
 that one instead (never a channel small beside an empty big picture, as a swap). Leaving
 keeps the grid (config `multiview`, versioned; older builds ignore it): the next grid offers
 a "Last grid" chip (and View → Restore Last Multiview) that brings its channels back into
-their tiles, each once its provider is ready, and its focus. A channel dragged from the
-channel list onto a tile plays there (`drag_over`, `tile_at`). The
-Library, films, files, the mini player and external players leave the grid first (the shell
-calls `leave`). A smaller layout, and leaving, stop every player but the big picture and the
+their tiles, each once its provider is ready, and its focus; shown again in the same run, the
+tiles keep their places. A channel dragged from the channel list onto a tile plays there
+(`drag_over`, `tile_at`). The Library, films, files, the mini player and external players
+leave the grid first (the shell calls `leave`). A smaller layout, and leaving, stop every player but the big picture and the
 PiP, and nothing still on its way for a tile that went opens there; such a tile comes back
 "+", its old channel forgotten (the controls, the banner and the channel list never take it
 up again when it takes the focus).
@@ -232,6 +241,8 @@ class GridControls(QObject):
         self._confirm = confirm
         self._restored = False  # the last grid came back since the grid showed
         self._shown = False
+        self._big = False  # the focused tile fills the page, the grid behind it
+        self._last_names: list[str] = []  # the tiles' places when the grid was left
         self._cells = DEFAULT_CELLS
         self._names: list[str] = []  # the tiles, in order
         self._previous: Optional[str] = None  # the tile focused before the focused one
@@ -263,7 +274,7 @@ class GridControls(QObject):
         frame = self.frame
         frame.focusRequested.connect(self._on_focus_requested)
         frame.tileClicked.connect(self._on_tile_clicked)
-        frame.leaveRequested.connect(self._on_leave_requested)
+        frame.bigRequested.connect(self._on_big_requested)
         frame.tilesChanged.connect(self._paint)
         transport = self._transport
         layouts = self._layouts
@@ -352,8 +363,8 @@ class GridControls(QObject):
         large = self.sessions.large().name
         rows: list[tuple[str, str, str]] = []
         for number, name in enumerate(self._names, 1):
-            if name != large and self.state(name) not in _SHOWING:
-                continue
+            if name != large and (self._big or self.state(name) not in _SHOWING):
+                continue  # (one big: the others are out of sight, and never heard)
             row = (name, translate(TILE_TITLE, number=number), self._title(name))
             if name == large:
                 rows.insert(0, row)
@@ -392,11 +403,70 @@ class GridControls(QObject):
     # ---- showing and leaving ------------------------------------------------------------
 
     def toggle(self) -> None:
-        """V, View → Multiview, the grid button: the grid, or back to one picture."""
-        if self._shown:
+        """V, View → Multiview, the grid button: the grid (from a big tile, the grid again), or
+        back to one picture."""
+        if self.big():
+            self.back_to_grid()
+        elif self._shown:
             self.leave()
         else:
             self.show()
+
+    def big(self) -> bool:
+        """The focused tile fills the page, the grid behind it."""
+        return self._shown and self._big
+
+    def show_big(self, name: str) -> bool:
+        """Tile `name` big (focused first): it fills the page; the others play on out of sight,
+        never heard, their streams kept. False: it shows nothing, or could not take the focus."""
+        if not self._shown or name not in self._names or self.state(name) not in _SHOWING:
+            return False
+        if not self._focus(name):
+            return False
+        if self._layouts is not None:
+            self._layouts.dismiss()
+        self._big = True
+        self.frame.set_big(True)
+        self._hush()
+        logger.info("Multiview: a tile is big")
+        self._update_transport()
+        self._refresh(force=True)
+        self.changed.emit()
+        return True
+
+    def back_to_grid(self) -> None:
+        """From a big tile: the grid as it was (each tile heard as before)."""
+        if not self.big():
+            return
+        self._big = False
+        self.frame.set_big(False)
+        self._unhush()
+        logger.info("Multiview: back to the grid")
+        self._update_transport()
+        self._refresh(force=True)
+        self.changed.emit()
+
+    def toggle_big(self) -> None:
+        """A double-click on the focused tile's picture: it is big, or the grid comes back."""
+        if self.big():
+            self.back_to_grid()
+        elif self._shown:
+            self.show_big(self.sessions.large().name)
+
+    def _hush(self) -> None:
+        """While a tile is big the others are not heard (their mutes stay the session
+        manager's: they come back with the grid)."""
+        large = self.sessions.large().name
+        for name in self._names:
+            slot = self._slot(name)
+            if slot is not None:
+                slot.playback.set_muted(True if name != large else self.sessions.muted(name))
+
+    def _unhush(self) -> None:
+        for name in self._names:
+            slot = self._slot(name)
+            if slot is not None:
+                slot.playback.set_muted(self.sessions.muted(name))
 
     def show(self, cells: Optional[int] = None) -> bool:
         """Show the grid over live TV (False, said why, when it cannot)."""
@@ -417,6 +487,8 @@ class GridControls(QObject):
         small = sessions.small()
         if small is not None:
             order.append(small.name)
+        if len(self._last_names) == cells and all(name in self._last_names for name in order):
+            order = list(self._last_names)  # shown again: the tiles keep their places
         names = self._fill(order, cells)
         self._cells, self._names = cells, names
         self._previous = small.name if small is not None else None
@@ -448,8 +520,12 @@ class GridControls(QObject):
         if not self._shown:
             return
         sessions = self.sessions
+        if self._big:  # left from a big tile: as from the grid
+            self._big = False
+            self._unhush()
         large = sessions.large().name
         self._save()  # the grid as it is now, for "Last grid" next time
+        self._last_names = list(self._names)
         if self._layouts is not None:
             self._layouts.dismiss()
         sessions.end_mix()  # before the tiles stop: the big picture is heard (normal rule)
@@ -501,6 +577,7 @@ class GridControls(QObject):
         """Another layout: tiles beyond it stop (the focused one moves into it)."""
         if not self._shown or cells not in self.choices() or cells == len(self._names):
             return
+        self.back_to_grid()
         large = self.sessions.large().name
         if cells > len(self._names):
             names = self._fill(self._names, cells)
@@ -643,7 +720,7 @@ class GridControls(QObject):
         if not self._shown or name not in self._names:
             return
         if control == "big":
-            self._on_leave_requested(name)  # as a double-click: this tile big
+            self._on_big_requested(name)  # as a double-click: this tile big
         elif control == "close":
             self.close_tile(name)
         elif control == "live" and not self._behind(name):
@@ -827,13 +904,23 @@ class GridControls(QObject):
             self._open_drawer()
         elif state in (DENIED, FAILED):
             self.retry(name)
-        elif just != name:
+        elif just == name:
+            self._open_drawer()  # its press focused it: its channel list, at once
+        else:
             self._activate()  # a click on the focused tile: as on the big picture
 
-    def _on_leave_requested(self, name: str) -> None:
-        if self._shown and name in self._names:
-            self._focus(name)
-            self.leave()
+    def _on_big_requested(self, name: str) -> None:
+        """A double-click on a tile (or its strip's big picture): that tile big, or the grid
+        again; on "+" or a card, as its click."""
+        if not self._shown or name not in self._names:
+            return
+        if self.big():
+            self.back_to_grid()
+        elif self.state(name) in _SHOWING:
+            self.show_big(name)
+        else:
+            self._focused_by_press = None
+            self._on_tile_clicked(name)
 
     def _focus(self, name: str) -> bool:
         large = self.sessions.large().name
@@ -848,6 +935,8 @@ class GridControls(QObject):
 
     def _on_large_changed(self, *_args: Any) -> None:
         if self._shown:
+            if self._big:
+                self._hush()  # the focus moved (a zap onto another tile's channel): it is big
             self._refresh(force=True)
             self.changed.emit()
 
@@ -997,6 +1086,10 @@ class GridControls(QObject):
 
     def _on_player_state(self, name: str, state: str) -> None:
         self._states[name] = state
+        if self.big() and state == "playing" and name != self.sessions.large().name:
+            slot = self._slot(name)
+            if slot is not None:
+                slot.playback.set_muted(True)  # one out of sight that opened again: unheard
         if state == "playing":
             channel = self._tile_channel(name)
             if channel is not None:
@@ -1141,6 +1234,8 @@ class GridControls(QObject):
         large = self.sessions.large().name
         tiles = []
         for name, rect in self.frame.tiles():
+            if self._big and self.state(name) in _SHOWING:
+                continue  # a big tile is the big picture's: no label, ring or strip
             title, detail = self.label(name)
             paused, muted, level, position = self._strip_state(name)
             tiles.append(
@@ -1201,7 +1296,7 @@ class GridControls(QObject):
             cells = len(self._names) if self._shown else 0
             layout = LAYOUT_NAMES.get(cells, "")
             self._transport.set_grid_state(
-                True, self._shown, layout, self.restorable(), cells=cells
+                True, self._shown, layout, self.restorable(), cells=cells, big=self.big()
             )
 
     # ---- the last grid ------------------------------------------------------------------
@@ -1254,6 +1349,7 @@ class GridControls(QObject):
         saved = self.saved()
         if not self._shown or saved is None or self._restore is None:
             return
+        self.back_to_grid()
         self._restored = True
         offered = [cells for cells in self.choices() if cells <= saved["cells"]]
         cells = max(offered[-1] if offered else self.choices()[0], len(self._names))

@@ -625,9 +625,11 @@ class FakeTransport(FakeOverlay):
     def set_pip_state(self, available, open_):
         self.record("set_pip_state", available, open_)
 
-    def set_grid_state(self, available, shown, layout="", restorable=False, cells=0):
+    big = False  # a multiview tile is big
+
+    def set_grid_state(self, available, shown, layout="", restorable=False, cells=0, big=False):
         self.record("set_grid_state", available, shown, layout)
-        self.restorable = restorable
+        self.restorable, self.big = restorable, big
 
     def follow_pip(self, rect):
         self.record("follow_pip", rect)

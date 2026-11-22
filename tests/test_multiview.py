@@ -231,7 +231,7 @@ class GridTilesTests(FrameCase):
         self.events = []
         self.view.tilePressed.connect(lambda n: self.events.append(("pressed", n)))
         self.view.tileClicked.connect(lambda n: self.events.append(("clicked", n)))
-        self.view.leaveRequested.connect(lambda n: self.events.append(("leave", n)))
+        self.view.bigRequested.connect(lambda n: self.events.append(("leave", n)))
         rects = grid_rects(PAGE, 4)
         self.rects = rects
         self.view.set_tiles(
@@ -308,7 +308,7 @@ class TileStripTests(FrameCase):
         self.view.show()
         self.events = []
         self.view.tilePressed.connect(lambda n: self.events.append(("pressed", n)))
-        self.view.leaveRequested.connect(lambda n: self.events.append(("leave", n)))
+        self.view.bigRequested.connect(lambda n: self.events.append(("leave", n)))
         self.view.tileAction.connect(lambda n, c: self.events.append((c, n)))
         self.rects = grid_rects(PAGE, 4)
         self.show(4)
@@ -760,7 +760,7 @@ class MultiviewTests(MultiviewCase):
         self.assertEqual(len(self.catalog.links), links)  # never a second stream of it
         self.assertEqual(self.pip_session.stops, 0)
 
-    def test_esc_with_nothing_open_and_a_double_click_leave_the_grid(self):
+    def test_esc_with_nothing_open_leaves_the_grid_and_a_double_click_makes_the_tile_big(self):
         self.start_large(0)
         self.banner.visible = False
         self.v()
@@ -768,8 +768,11 @@ class MultiviewTests(MultiviewCase):
         self.assertFalse(self.grid.shown())
         self.assertNotIn("leave_fullscreen", self.window.calls)
         self.v()
+        self.controller.video_double_clicked()  # (2.14: it left the grid, stopping the others)
+        self.assertTrue(self.grid.big())
         self.controller.video_double_clicked()
-        self.assertFalse(self.grid.shown())
+        self.assertTrue(self.grid.shown())
+        self.assertFalse(self.grid.big())
         self.assertNotIn("toggle_fullscreen", self.window.calls)
 
     def test_the_library_films_files_and_external_players_leave_the_grid_first(self):
@@ -1196,8 +1199,8 @@ class MultiviewTests(MultiviewCase):
         self.pick_in("t3", CHANNELS[3], "http://stream/4")
         self.grid_frame.focusRequested.emit("main")
         self.v()  # t2 stops; t3 plays on as the small picture
-        self.v()  # the grid again: t2 is "+"
-        self.assertEqual(self.grid.names(), ["main", "t3", "pip", "t2"])
+        self.v()  # the grid again, each tile in its place: t2 is "+"
+        self.assertEqual(self.grid.names(), ["main", "pip", "t2", "t3"])
         self.assert_takes_the_focus_as_plus("t2")
 
     def test_a_tile_a_smaller_layout_stopped_comes_back_as_plus(self):
@@ -1209,6 +1212,158 @@ class MultiviewTests(MultiviewCase):
         self.grid.set_cells(2)  # t3 stops
         self.grid.set_cells(4)
         self.assert_takes_the_focus_as_plus("t3")
+
+
+class BigTileTests(MultiviewCase):
+    """The owner: a tile watched big closed two of the four, and their channel lists came
+    back on another tile's channel. A tile big keeps the grid behind it."""
+
+    def setUp(self):
+        super().setUp()
+        self.catalog.current_provider = lambda: {"name": "Home", "type": "STB", "max_streams": 4}
+        self.catalog.catalogs.ready = {"Home"}
+
+    def quiet(self):
+        """Nothing over the grid: Esc is the grid's."""
+        self.drawer.visible = self.banner.visible = False
+
+    def four_tiles(self):
+        """Four tiles playing One to Four, tile 3 (t2) focused."""
+        self.start_large(0)
+        self.session.stateChanged.emit("playing")
+        self.v()
+        tiles = [self.main_slot]
+        for name, index in (("pip", 1), ("t2", 2), ("t3", 3)):
+            slot = self.pick_in(name, CHANNELS[index], f"http://stream/{index + 1}")
+            slot.playback.stateChanged.emit("playing")
+            tiles.append(slot)
+        self.grid_frame.focusRequested.emit("t2")
+        self.quiet()
+        return tiles
+
+    def held(self):
+        """What each tile's live session was asked, and the provider's streams held."""
+        lives = [len(slot.live.calls) for slot in self.sessions.slots()]
+        return lives, sorted(self.budget.holders("Home"))
+
+    def test_a_double_click_makes_a_tile_big_and_the_others_play_on_out_of_sight(self):
+        tiles = self.four_tiles()
+        before = self.held()
+        self.assertEqual(len(before[1]), 4)
+        self.grid_frame.bigRequested.emit("t2")  # the overlay's double-click on its label
+        self.assertTrue(self.grid.shown())
+        self.assertTrue(self.grid.big())
+        self.assertIs(self.sessions.large(), tiles[2])
+        self.assertEqual(self.held(), before)  # nothing stopped, nothing opened
+        self.assertEqual(self.surfaces["t2"].geometry(), self.page.rect())
+        self.assertTrue(self.surfaces["t2"].isVisibleTo(self.page))
+        for name in ("main", "pip", "t3"):
+            self.assertFalse(self.surfaces[name].isVisibleTo(self.page), name)
+        self.assertTrue(self.transport.big)  # the grid button brings the grid back
+        self.assertEqual(self.controller._mixer_tiles(), [("t2", "Tile 3", "Three")])
+
+    def test_esc_v_and_a_double_click_bring_the_grid_back_as_it_was(self):
+        tiles = self.four_tiles()
+        before = self.held()
+        rects = grid_rects(PAGE, 4)
+        for back in (
+            lambda: self.controller.handle(Action.ESCAPE),
+            self.v,
+            self.controller.video_double_clicked,
+            lambda: self.grid_frame.bigRequested.emit("t2"),
+        ):
+            with self.subTest(back=back):
+                self.grid.tile_control("t2", "big")  # the strip's big picture
+                self.assertTrue(self.grid.big())
+                self.quiet()
+                back()
+                self.assertTrue(self.grid.shown())
+                self.assertFalse(self.grid.big())
+                self.assertEqual(self.grid.names(), ["main", "pip", "t2", "t3"])
+                self.assertIs(self.sessions.large(), tiles[2])
+                for name, rect in zip(self.grid.names(), rects):
+                    self.assertEqual(self.surfaces[name].geometry(), rect)
+                    self.assertTrue(self.surfaces[name].isVisibleTo(self.page), name)
+                for slot, channel in zip(tiles, CHANNELS):
+                    self.assertTrue(ZapContext.same(slot.channel, channel), slot.name)
+                self.assertEqual(self.held(), before)
+                self.assertFalse(self.transport.big)
+
+    def test_each_tiles_channel_list_opens_on_its_own_channel_after_the_big_one(self):
+        self.four_tiles()
+        self.grid_frame.bigRequested.emit("t2")
+        self.controller.handle(Action.OPEN_DRAWER)  # while big: the big one's
+        self.assertEqual(self.drawer.focus_item["name"], "Three")
+        self.controller.handle(Action.ESCAPE)  # the list closes
+        self.quiet()
+        self.controller.handle(Action.ESCAPE)  # the grid again
+        self.assertFalse(self.grid.big())
+        for name, channel in zip(self.grid.names(), CHANNELS):
+            with self.subTest(name=name):
+                self.grid_frame.focusRequested.emit(name)
+                self.controller.handle(Action.OPEN_DRAWER)
+                self.assertEqual(self.drawer.focus_item["name"], channel["name"])
+                self.assertEqual(self.nav.revealed()["name"], channel["name"])
+                self.controller.handle(Action.ESCAPE)
+
+    def test_tiles_out_of_sight_are_never_heard_and_the_mix_comes_back(self):
+        tiles = self.four_tiles()
+        self.sessions.set_muted("t3", False)  # the mixer: tile 4 heard beside the focus
+        self.assertTrue(self.sessions.mixed())
+        self.grid.tile_control("t2", "big")
+        self.assertTrue(tiles[3].playback.muted)
+        self.assertFalse(tiles[2].playback.muted)  # the big one's sound
+        self.v()
+        self.assertFalse(tiles[3].playback.muted)
+        self.assertFalse(self.sessions.muted("t3"))
+
+    def test_a_zap_onto_another_tiles_channel_makes_that_one_big(self):
+        tiles = self.four_tiles()
+        self.grid.tile_control("t2", "big")
+        self.controller.tune(CHANNELS[3], group_key="10", channels=CHANNELS)
+        self.assertIs(self.sessions.large(), tiles[3])
+        self.assertTrue(self.grid.big())
+        self.assertTrue(self.surfaces["t3"].isVisibleTo(self.page))
+        self.assertFalse(self.surfaces["t2"].isVisibleTo(self.page))
+        self.assertTrue(tiles[2].playback.muted)
+
+    def test_leaving_from_a_big_tile_leaves_as_from_the_grid(self):
+        tiles = self.four_tiles()
+        self.grid.tile_control("t2", "big")
+        self.grid.leave()  # the Library, a film, Stop: as from the grid
+        self.assertFalse(self.grid.shown())
+        self.assertFalse(self.grid.big())
+        self.assertIs(self.sessions.large(), tiles[2])
+        self.assertIs(self.sessions.small(), tiles[3])  # the one focused before it
+
+    def test_one_click_on_a_tiles_label_focuses_it_and_opens_its_list(self):
+        tiles = self.four_tiles()
+        self.grid_frame.focusRequested.emit("pip")  # the press on its label
+        self.grid_frame.tileClicked.emit("pip")  # its click (2.14: it only focused)
+        self.assertIs(self.sessions.large(), tiles[1])
+        self.assertTrue(self.drawer.visible)
+        self.assertEqual(self.drawer.focus_item["name"], "Two")
+
+    def test_the_open_list_follows_a_press_on_another_tiles_picture(self):
+        self.four_tiles()
+        self.controller.handle(Action.OPEN_DRAWER)
+        self.assertEqual(self.drawer.focus_item["name"], "Three")
+        self.grid_frame.focusRequested.emit("main")  # a press on tile 1's picture
+        self.assertTrue(self.drawer.visible)
+        self.assertEqual(self.drawer.focus_item["name"], "One")
+        self.assertEqual(self.nav.revealed()["name"], "One")
+
+    def test_shown_again_the_tiles_keep_their_places_and_the_last_grid_fills_them(self):
+        tiles = self.four_tiles()
+        self.v()  # leave: tile 3 big, tile 4 small (focused before it), the others stop
+        for slot in (tiles[0], tiles[1]):
+            slot.live.released.emit()
+        self.v()
+        self.assertEqual(self.grid.names(), ["main", "pip", "t2", "t3"])
+        self.assertIs(self.sessions.large(), tiles[2])
+        self.grid.restore_last()
+        self.assertEqual(self.grid.label("main")[0], "One")
+        self.assertEqual(self.grid.label("pip")[0], "Two")
 
 
 class OneStreamMultiviewTests(MultiviewCase):
@@ -2080,12 +2235,13 @@ class TileControlTests(TileControlCase):
         self.assertIs(self.sessions.large(), self.main_slot)
         self.assertIsNone(self.controller._current)
 
-    def test_the_big_picture_leaves_the_grid_with_that_tile_big(self):
+    def test_the_big_picture_makes_that_tile_big_with_the_grid_behind_it(self):
         self.two_pictures()
-        self.grid.tile_control("pip", "big")
-        self.assertFalse(self.grid.shown())
+        before = self.counts()
+        self.grid.tile_control("pip", "big")  # (2.14: it left the grid)
+        self.assertTrue(self.grid.big())
         self.assertIs(self.sessions.large(), self.pip_slot)
-        self.assertIs(self.sessions.small(), self.main_slot)
+        self.assertEqual(self.counts(), before)
 
 
 class GridMixShellTests(TileControlCase):

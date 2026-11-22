@@ -1999,10 +1999,10 @@ class TVController(QObject):
         self._context.show_playing(target, global_pos, self.overlays.transport)
 
     def video_double_clicked(self) -> None:
-        """Fullscreen; on the multiview's grid, back to one picture (its first click focused
-        the tile, which becomes the big picture)."""
-        if self.multiview_shown():
-            self.leave_multiview()
+        """Fullscreen; on the multiview's grid, the focused tile big (its first click focused
+        it), or the grid again."""
+        if self._grid is not None and self.multiview_shown():
+            self._grid.toggle_big()
         else:
             self.window_actions.toggle_fullscreen()
 
@@ -3804,6 +3804,8 @@ class TVController(QObject):
         self._tracks.refresh()  # an open panel shows the large picture's sound or subtitles
         self._picture.refresh()  # and the Picture panel and the statistics its picture
         if grid:
+            if self.overlays.drawer.isVisible():
+                self._open_drawer()  # the channel list follows the focus: that tile's place
             if large_reopen is not None and self._grid is not None:
                 # A tile beside the focus never reconnects by itself (its direct stream that
                 # ends fails): one the focus left during its back-off says its stream ended.
@@ -5488,6 +5490,8 @@ class TVController(QObject):
             pass  # 2.13.3: the Resume pill closes (Esc, the phone's Back), its offer gone
         elif overlays.banner.isVisible():
             overlays.banner.dismiss()
+        elif self._grid is not None and self._grid.big():
+            self._grid.back_to_grid()  # a big tile: the grid again
         elif self.multiview_shown():
             self.leave_multiview()  # before fullscreen: the grid is what Esc closes first
         else:
