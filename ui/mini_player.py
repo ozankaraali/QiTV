@@ -14,8 +14,9 @@ goes to the TV window, and so does a close (the system's Quit reaches only the w
 `MiniPlayer` lends the page into it (`lend`: PageStack.lend_player; `take_back`), places it
 where the floating picture was left (`place`, `remember`), follows its picture's shape every
 POLL_MS (`shape`), and, while QiTV is not the active app (another app clicked meanwhile), asks
-the pointer's place every HOVER_MS: Qt drops the moves without a button then (qnsview_mouse.mm),
-and a move over the small window is its hover (`hover`: the controls come).
+the pointer's place (ui/small_window.py's HoverPoll, the desktop picture in picture's too): Qt
+drops the moves without a button then (qnsview_mouse.mm), and a move over the small window is
+its hover (`hover`: the controls come).
 """
 
 from __future__ import annotations
@@ -24,16 +25,22 @@ import logging
 from typing import Callable, Optional
 
 from PySide6.QtCore import QEvent, QObject, QPoint, QRect, Qt, QTimer, Signal
-from PySide6.QtGui import QCursor, QGuiApplication, QMouseEvent
+from PySide6.QtGui import QCursor, QMouseEvent
 from PySide6.QtWidgets import QApplication, QWidget
 from shiboken6 import isValid
 
-from ui.small_window import LockShape, SmallWindow, _no_lock
+from ui.small_window import (  # noqa: F401  (HOVER_MS re-exported)
+    HOVER_MS,
+    HoverPoll,
+    LockShape,
+    SmallWindow,
+    _no_lock,
+    _qitv_active,
+)
 
 logger = logging.getLogger(__name__)
 
 POLL_MS = 400  # how often its picture's shape is asked
-HOVER_MS = 150  # how often the pointer's place is asked while QiTV is not the active app
 # What it hands the TV window as the window's own: its keys, and what is dropped on it.
 _WINDOW_EVENTS = (
     QEvent.Type.ShortcutOverride,
@@ -50,10 +57,6 @@ _MOUSE_EVENTS = (
     QEvent.Type.MouseButtonDblClick,
     QEvent.Type.MouseMove,
 )
-
-
-def _qitv_active() -> bool:
-    return QGuiApplication.applicationState() == Qt.ApplicationState.ApplicationActive
 
 
 class MiniWindow(SmallWindow):
@@ -190,11 +193,15 @@ class MiniPlayer(QObject):
         self._cursor_pos = cursor_pos
         self._window: Optional[MiniWindow] = None
         self._shown = False
-        self._last_pos: Optional[QPoint] = None  # the pointer's, at the last poll
         self._shape_poll = QTimer(self, interval=POLL_MS)
         self._shape_poll.timeout.connect(self._follow_shape)
-        self._hover_poll = QTimer(self, interval=HOVER_MS)
-        self._hover_poll.timeout.connect(self._poll_hover)
+        self.hover_poll = HoverPoll(
+            lambda: self._window if self._shown and self._hover is not None else None,
+            self._hovered,
+            app_active=lambda: self._app_active(),
+            cursor_pos=lambda: self._cursor_pos(),
+            parent=self,
+        )
 
     def shown(self) -> bool:
         return self._shown
@@ -237,7 +244,7 @@ class MiniPlayer(QObject):
             return
         self._shown = False
         self._shape_poll.stop()
-        self._hover_poll.stop()
+        self.hover_poll.stop()
         page = self._window.release()
         self._window.hide()
         if page is not None:
@@ -255,25 +262,13 @@ class MiniPlayer(QObject):
 
     def activity_changed(self) -> None:
         """QiTV became the active app, or another did: while it shows and QiTV is not active,
-        the pointer's place is asked every HOVER_MS (`_poll_hover`); while QiTV is active Qt's
+        the pointer's place is asked every HOVER_MS (`hover_poll`); while QiTV is active Qt's
         own moves arrive, and nothing is asked."""
-        if self._shown and self._hover is not None and not self._app_active():
-            if not self._hover_poll.isActive():
-                self._last_pos = self._cursor_pos()  # (resting there: no hover until it moves)
-                self._hover_poll.start()
-        else:
-            self._hover_poll.stop()
+        self.hover_poll.update()
 
-    def _poll_hover(self) -> None:
-        window = self._window
-        if not self._shown or window is None or self._hover is None or self._app_active():
-            self._hover_poll.stop()  # (QiTV active: started again as it goes inactive)
-            return
-        where = self._cursor_pos()
-        moved = where != self._last_pos
-        self._last_pos = where
-        if moved and window.frameGeometry().contains(where):
-            self._hover()
+    def _hovered(self, where: Optional[QPoint]) -> None:
+        if where is not None and self._hover is not None:
+            self._hover()  # a move over it (one off it says nothing: the controls fade)
 
     def _follow_shape(self) -> None:
         if self._window is not None and self._shape is not None:

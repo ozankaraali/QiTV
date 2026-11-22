@@ -197,27 +197,32 @@ class MiniPlayerTests(MiniCase):
     def test_the_hover_poll_runs_only_while_qitv_is_not_the_active_app(self):
         self.mini.start()
         window = self.mini.window()
-        self.assertFalse(self.mini._hover_poll.isActive())  # QiTV active: Qt's moves arrive
+        poll = self.mini.hover_poll  # (ui/small_window.py's: the desktop float's too)
+        self.assertIsInstance(poll, small_window.HoverPoll)
+        self.assertFalse(poll.active())  # QiTV active: Qt's moves arrive
         self.active = False
         self.mini.activity_changed()
-        self.assertTrue(self.mini._hover_poll.isActive())
+        self.assertTrue(poll.active())
         inside = window.geometry().center()
-        self.mini._poll_hover()
+        poll.poll()
         self.assertEqual(self.hovers, [])  # resting elsewhere
         self.at = inside
-        self.mini._poll_hover()
+        poll.poll()
         self.assertEqual(self.hovers, [True])  # a move over it: its hover
-        self.mini._poll_hover()
+        poll.poll()
         self.assertEqual(self.hovers, [True])  # resting: no move
         self.at = inside + QPoint(4, 2)
         self.assertTrue(wait_until(lambda: len(self.hovers) == 2, mini_player.HOVER_MS * 4))
+        self.at = QPoint(-5000, -5000)
+        poll.poll()
+        self.assertEqual(self.hovers, [True, True])  # off it: no hover
         self.active = True
         self.mini.activity_changed()
-        self.assertFalse(self.mini._hover_poll.isActive())
+        self.assertFalse(poll.active())
         self.active = False
         self.mini.activity_changed()
         self.mini.end("back to the window")
-        self.assertFalse(self.mini._hover_poll.isActive())
+        self.assertFalse(poll.active())
 
     def test_its_window_is_the_small_window_kind(self):
         self.mini.start()

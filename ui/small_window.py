@@ -14,6 +14,11 @@ screen (`lock_shape`: its contentAspectRatio, contentMinSize and contentMaxSize,
 stops. A window as good as its picture's shape already (within 1%) is left as it is, and its
 player fills it to the last pixel (the TV window tells it the box, services.picture.box_aspect).
 Where the user resized it is told (`placed`).
+
+Both show the player controls over them as the pointer moves over them, and while QiTV is not
+the active app (another app clicked, a desktop change) Qt says nothing of the pointer (qtbase's
+qnsview_mouse.mm drops the moves without a button then): `HoverPoll` asks its place instead,
+every HOVER_MS, and tells a move over the small window as its hover (2.13.5).
 """
 
 from __future__ import annotations
@@ -21,8 +26,8 @@ from __future__ import annotations
 import math
 from typing import Callable, Optional
 
-from PySide6.QtCore import QPoint, QRect, QSize, Qt, QTimer, Signal
-from PySide6.QtGui import QColor, QGuiApplication, QPalette
+from PySide6.QtCore import QObject, QPoint, QRect, QSize, Qt, QTimer, Signal
+from PySide6.QtGui import QColor, QCursor, QGuiApplication, QPalette
 from PySide6.QtWidgets import QApplication, QWidget
 from shiboken6 import isValid
 
@@ -34,6 +39,7 @@ MARGIN = 24  # from the screen's corner
 EDGE_PX = 10  # a press this near an edge (or two: a corner) resizes the small window
 MIN_WIDTH = 240  # the smallest it gets in 16:9 (another shape: as large as that)
 SNAP_MS = 150  # a resize it did not make (macOS's own) ends in its picture's shape this soon
+HOVER_MS = 150  # how often the pointer's place is asked while QiTV is not the active app
 
 LockShape = Callable[[QWidget, float, QSize, QSize], object]
 
@@ -49,6 +55,72 @@ def corner_rect(available: QRect, screen_width: int) -> QRect:
 
 def _no_lock(_widget: QWidget, _shape: float, _smallest: QSize, _largest: QSize) -> None:
     return None
+
+
+def _qitv_active() -> bool:
+    return QGuiApplication.applicationState() == Qt.ApplicationState.ApplicationActive
+
+
+class HoverPoll(QObject):
+    """The pointer over a small window while QiTV is not the active app (the module docstring):
+    while `window()` shows (None: none does) and QiTV is inactive, the pointer's place
+    (`cursor_pos()`, global) is asked every HOVER_MS; a move over the window is told
+    (`moved(where)`), and the first one off it (`moved(None)`). It only reads where the
+    pointer is: nothing is focused, activated or raised. Asked to `update` as the window shows
+    and as QiTV becomes the active app or another does; with QiTV active Qt's own moves
+    arrive, and nothing is asked."""
+
+    def __init__(
+        self,
+        window: Callable[[], Optional[QWidget]],
+        moved: Callable[[Optional[QPoint]], None],
+        *,
+        app_active: Callable[[], bool] = _qitv_active,
+        cursor_pos: Callable[[], QPoint] = QCursor.pos,
+        parent: Optional[QObject] = None,
+    ) -> None:
+        super().__init__(parent)
+        self._window = window
+        self._moved = moved
+        self._app_active = app_active
+        self._cursor_pos = cursor_pos
+        self._last: Optional[QPoint] = None  # the pointer's place at the last ask
+        self._over = False  # it was over the window then
+        self._timer = QTimer(self, interval=HOVER_MS)
+        self._timer.timeout.connect(self.poll)
+
+    def active(self) -> bool:
+        return self._timer.isActive()
+
+    def update(self) -> None:
+        """Ask from now on while the window shows and QiTV is inactive; else not."""
+        window = self._window()
+        if window is not None and window.isVisible() and not self._app_active():
+            if not self._timer.isActive():
+                self._last = self._cursor_pos()  # (resting there: no hover until it moves)
+                self._over = False
+                self._timer.start()
+        else:
+            self._timer.stop()
+
+    def stop(self) -> None:
+        self._timer.stop()
+
+    def poll(self) -> None:
+        window = self._window()
+        if window is None or not window.isVisible() or self._app_active():
+            self._timer.stop()  # (QiTV active: asked again as it goes inactive)
+            return
+        where = self._cursor_pos()
+        if where == self._last:
+            return
+        self._last = where
+        if window.frameGeometry().contains(where):
+            self._over = True
+            self._moved(where)
+        elif self._over:
+            self._over = False
+            self._moved(None)
 
 
 class SmallWindow(QWidget):
