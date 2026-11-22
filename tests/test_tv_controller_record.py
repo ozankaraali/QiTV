@@ -608,6 +608,7 @@ class RewindBesideRecordingTests(_RecordCase):
 
 SCHEDULED = "sched:a@1"  # a scheduled recording's REC sign name, its stream's budget purpose
 SCHEDULED_CHANNEL = {**CHANNELS[2], "_provider": "Home"}
+BACKUP_FOUR = {**CHANNELS[3], "_provider": "Backup"}  # another provider's (none records there)
 
 
 class ScheduledRecordingQuestionTests(_RecordCase):
@@ -684,6 +685,52 @@ class ScheduledRecordingQuestionTests(_RecordCase):
         links = len(self.catalog.links)
         self.scheduler_lets_go()
         self.assertEqual(len(self.catalog.links), links)
+
+    def start_backup_large(self):
+        """Another provider's Four plays large (Home's stream stays the recording's)."""
+        live = self.controller.live
+        count = len(live.named("start"))
+        self.controller.tune(BACKUP_FOUR, group_key="10", channels=[BACKUP_FOUR])
+        self.ready("http://backup/4")
+        self.assertTrue(wait_until(lambda: len(live.named("start")) == count + 1))
+        live.play_pipeline()
+
+    def test_the_channel_playing_chosen_again_drops_the_tune_that_waits(self):
+        # 2.13.4 (final review M1): the stay path returned before anything dropped it
+        self.start_backup_large()
+        self.stop_it_for_a_tune()
+        self.controller.tune(BACKUP_FOUR, group_key="10", channels=[BACKUP_FOUR])  # it stays
+        links = len(self.catalog.links)
+        self.scheduler_lets_go()
+        self.assertEqual(len(self.catalog.links), links)
+        self.assertEqual(self.controller._channel.get("_provider"), "Backup")
+
+    def test_the_small_pictures_channel_swapped_in_drops_the_tune_that_waits(self):
+        # 2.13.4 (final review M1): a swap returned before anything dropped it
+        self.catalog.current_provider = lambda: {"name": "Home", "type": "STB", "max_streams": 2}
+        self.start_backup_large()
+        self.open_small(CHANNELS[0])
+        self.stop_it_for_a_tune()  # the small picture's and the recording's: none free
+        self.tune(0)  # One, small: swapped in
+        self.assertEqual(self.controller._channel, CHANNELS[0])
+        links = len(self.catalog.links)
+        self.scheduler_lets_go()
+        self.assertEqual(len(self.catalog.links), links)
+        self.assertEqual(self.controller._channel, CHANNELS[0])
+
+    def test_a_stop_drops_the_small_picture_that_waits(self):
+        # 2.13.4 (final review M1): it opened once the stream was back, after Stop
+        self.start_backup_large()
+        self.controller.open_pip(CHANNELS[1], group_key="10", channels=CHANNELS)
+        self.assertTrue(self.question.isVisibleTo(self.host))
+        self.controller.handle(Action.SEEK_FWD)  # to Stop recording
+        self.controller.handle(Action.OK)
+        self.assertEqual(self.stopped, [SCHEDULED])
+        self.controller.stop()
+        links = len(self.catalog.links)
+        self.scheduler_lets_go()
+        self.assertEqual(len(self.catalog.links), links)
+        self.assertFalse(self.sessions.pip_open() or self.sessions.pip_opening())
 
     def test_keep_recording_tunes_nothing(self):
         links = len(self.catalog.links)
