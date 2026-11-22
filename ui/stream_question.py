@@ -197,6 +197,16 @@ class StreamQuestion(QObject):
         question.timer.start(RELEASE_WAIT_MS)
         self._on_released(question.provider)
 
+    def chosen(self, purpose: str) -> None:
+        """The player of `purpose` was given something newer that asked nothing (a tune, a
+        film, a file, an outside player, a Stop): an open still waiting there for a stopped
+        recording's stream is no longer the viewer's choice, and never runs."""
+        if self._going:
+            return  # (what waited runs now: its own open)
+        for question in [q for q in self._waited if q.replaced == purpose]:
+            logger.info("A newer choice: what waited for a stream does not open")
+            self._drop(question)
+
     def follow_page(self) -> None:
         """The page that shows changed: a question on the other page's card moves to this
         page's (Stage C review: else it waited unseen, taking the keys)."""

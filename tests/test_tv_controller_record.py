@@ -653,6 +653,38 @@ class ScheduledRecordingQuestionTests(_RecordCase):
         self.scheduler_lets_go()
         self.assertEqual(self.requested()[-1], "Two")
 
+    def stop_it_for_a_tune(self):
+        """Tune Two, Stop recording: the tune waits for the recording's stream."""
+        self.tune(1)
+        self.controller.handle(Action.SEEK_FWD)  # to Stop recording
+        self.controller.handle(Action.OK)
+        self.assertEqual(self.stopped, [SCHEDULED])
+
+    def test_a_newer_choice_asking_nothing_drops_the_tune_that_waits(self):
+        # 2.13.4: the waiting tune ran once the stream was back, over what was chosen since
+        self.stop_it_for_a_tune()
+        self.controller.tune(BACKUP_TWO, group_key="10", channels=[BACKUP_TWO])  # asks nothing
+        self.assertTrue(self.question.isHidden())
+        links = len(self.catalog.links)
+        self.scheduler_lets_go()
+        self.ready("http://backup/2")
+        self.assertEqual(len(self.catalog.links), links)  # the older tune never runs
+        self.assertEqual(self.controller._channel.get("_provider"), "Backup")
+
+    def test_a_file_opened_since_drops_the_tune_that_waits(self):
+        self.stop_it_for_a_tune()
+        self.controller.play_file("/videos/clip.mp4")
+        links = len(self.catalog.links)
+        self.scheduler_lets_go()
+        self.assertEqual(len(self.catalog.links), links)
+
+    def test_a_stop_drops_the_tune_that_waits(self):
+        self.stop_it_for_a_tune()
+        self.controller.stop()
+        links = len(self.catalog.links)
+        self.scheduler_lets_go()
+        self.assertEqual(len(self.catalog.links), links)
+
     def test_keep_recording_tunes_nothing(self):
         links = len(self.catalog.links)
         self.tune(1)

@@ -1105,6 +1105,7 @@ class TVController(QObject):
         stopped = self._current
         self._cancel_external()
         self._lanes.supersede()  # an external play waiting for its link no longer plays
+        self._question.chosen(self._tuner.purpose)  # nor an open waiting for a stream
         self._lanes.drop_tune()  # a link on its way never opens
         self._autoplay.drop()  # the Next card, and a wait for the next season
         self._guide.close()
@@ -1544,6 +1545,7 @@ class TVController(QObject):
         target = Target({**(item or {}), "name": title, "cmd": url}, "movies", title, local=True)
         self._before_new_target(target)
         self._forget_stopped()  # 2.6: a newer choice than what Stop stopped
+        self._question.chosen(self._tuner.purpose)  # and than an open waiting for a stream
         self.leave_multiview(keep_pip=False)  # the multiview is for live TV
         self._close_pip()  # picture in picture is for live TV
         self._set_recording_aside()  # 2.6: it records on in the background
@@ -1907,9 +1909,10 @@ class TVController(QObject):
         and "Stopped" shows with Play again (only "Stopped" when nothing could play again,
         e.g. an empty grid). A recording goes on in the background (its own
         Stop ends it); a channel's buffer is kept, as when it is left. Nothing when nothing
-        plays."""
+        plays (but an open waiting for a stopped recording's stream: it never opens)."""
         if self._closed:
             return
+        self._question.chosen(self._tuner.purpose)
         if self._media is not None:
             self._media.stopped()  # 2.8: a server's title stopped where it was
         sessions = self.sessions
@@ -2504,6 +2507,8 @@ class TVController(QObject):
         if chosen_now and not target.local:
             self._file_gives_way()  # a file still looked at is older than this choice
         self._forget_stopped()  # 2.6: a newer choice than what Stop stopped
+        if chosen_now:
+            self._question.chosen(self._tuner.purpose)  # and than an open waiting for a stream
         self._give_back_later = False  # the large picture has a newer choice
         self._cancel_external()
         self._flow.drop_autotune()  # a choice made before the live section loaded comes first
@@ -5963,6 +5968,7 @@ class TVController(QObject):
             return  # 2.6: no stream is free while a recording holds one: asked
         self._before_new_target(None)  # an outside player (a phone's too) takes it
         self._forget_stopped()
+        self._question.chosen(self._tuner.purpose)  # an open waiting for a stream: older
         self._cancel_external()
         self.leave_multiview(keep_pip=False)  # an external player is outside the budget
         self._close_pip()  # an external player is outside the budget: the PiP gives way
