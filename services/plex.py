@@ -281,8 +281,6 @@ class PlexAccount:
 MOVIE, SHOW = "movie", "show"  # the libraries QiTV lists (music and photos are not)
 _TYPE_NUMBERS = {MOVIE: 1, SHOW: 2}  # Plex's metadata types
 PAGE = 2_000  # titles a request (a library of 50,000 comes in 25)
-LIBRARY_PROVIDER = "com.plexapp.plugins.library"  # the server's own library (a scrobble's)
-WATCHED_RATIO = 0.90  # stopped this far in: watched (as QiTV's own resume points end)
 _TIMELINE_STATES = {"start": "playing", "progress": "playing", "stopped": "stopped"}
 _DURATIONS: dict[tuple[str, str], int] = {}  # (server, title) -> its length, for the timeline
 _DURATIONS_KEPT = 64
@@ -406,8 +404,9 @@ class PlexClient:
 
     def report(self, event: str, ref: ms.StreamRef, position_ms: int, paused: bool = False) -> None:
         """Tell the server a play started ("start"), where it is ("progress"), or that it
-        stopped ("stopped"), through its timeline; a stop near the end (WATCHED_RATIO) marks
-        the title watched."""
+        stopped ("stopped"), through its timeline, with the title's length: a stop near its
+        end is marked watched by the server itself, by its own setting (no scrobble of QiTV's:
+        checked on a 1.43 server)."""
         state = "paused" if paused and event == "progress" else _TIMELINE_STATES[event]
         position = max(0, int(position_ms))
         duration = self._duration(ref.item_id)
@@ -419,11 +418,7 @@ class PlexClient:
         }
         if duration > 0:
             params["duration"] = duration
-        session = {"X-Plex-Session-Identifier": ref.play_session}
-        self._ask("POST", "/:/timeline", params, session)
-        if event == "stopped" and duration > 0 and position >= WATCHED_RATIO * duration:
-            scrobble = {"identifier": LIBRARY_PROVIDER, "key": ref.item_id}
-            self._ask("PUT", "/:/scrobble", scrobble, session)
+        self._ask("POST", "/:/timeline", params, {"X-Plex-Session-Identifier": ref.play_session})
 
 
 def _remember(base: str, item_id: str, duration: Any) -> None:

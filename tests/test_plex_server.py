@@ -1,6 +1,7 @@
 """Plex (2.14): a server's libraries, films and series as Library titles, a title's versions
 (never converted, no 4K unless the setting allows it), its stream's address and where it plays
-told back. The fixtures are a local server's answers with made-up titles (its series library
+told back (a stop near the end is marked watched by the server itself, as a 1.43 server was
+seen to). The fixtures are a local server's answers with made-up titles (its series library
 made up in the shapes Plex documents)."""
 
 import unittest
@@ -219,7 +220,6 @@ class ReportTest(unittest.TestCase):
             {
                 ("GET", "/library/metadata/102"): (200, meta),
                 ("POST", "/:/timeline"): (200, None),
-                ("PUT", "/:/scrobble"): (200, None),
             }
         )
         source = plex.sources(self.c.media("102"))[0]
@@ -246,7 +246,6 @@ class ReportTest(unittest.TestCase):
         self.assertEqual(first["headers"]["X-Plex-Session-Identifier"], self.ref.play_session)
         # The title's length was asked once (the start's), then remembered.
         self.assertEqual([a["path"] for a in self.http.asked].count("/library/metadata/102"), 1)
-        self.assertFalse(any(a["path"] == "/:/scrobble" for a in self.http.asked))
 
     def test_the_length_the_links_ask_learnt_is_not_asked_again(self):
         self.c.media("102")
@@ -255,20 +254,18 @@ class ReportTest(unittest.TestCase):
         self.assertEqual([a["path"] for a in self.http.asked], ["/:/timeline"])
         self.assertEqual(self.timelines()[0]["params"]["duration"], 46_699)
 
-    def test_a_stop_near_the_end_marks_it_watched(self):
+    def test_a_stop_near_the_end_is_only_a_stop_the_server_marks_watched_itself(self):
         self.c.report("stopped", self.ref, 45_000)
-        scrobbles = [a for a in self.http.asked if a["path"] == "/:/scrobble"]
-        self.assertEqual(len(scrobbles), 1)
-        self.assertEqual(scrobbles[0]["method"], "PUT")
         self.assertEqual(
-            scrobbles[0]["params"], {"identifier": "com.plexapp.plugins.library", "key": "102"}
+            [a["path"] for a in self.http.asked], ["/library/metadata/102", "/:/timeline"]
         )
+        self.assertEqual(self.timelines()[0]["params"]["duration"], 46_699)
 
-    def test_a_length_unknown_is_left_out_and_never_marks_it_watched(self):
+    def test_a_length_unknown_is_left_out(self):
         self.http.answers[("GET", "/library/metadata/102")] = (500, None)
-        self.c.report("stopped", self.ref, 45_000)
+        with self.assertLogs("services.plex", "INFO"):
+            self.c.report("stopped", self.ref, 45_000)
         self.assertNotIn("duration", self.timelines()[0]["params"])
-        self.assertFalse(any(a["path"] == "/:/scrobble" for a in self.http.asked))
 
 
 if __name__ == "__main__":
