@@ -314,7 +314,7 @@ class RemoteRows(QObject):
     def _card(self) -> ChoiceCard:
         """The one card both questions are asked in (an answer is its own question's)."""
         if self._question is None:
-            self._question = ChoiceCard(self._drawer.parentWidget())
+            self._question = ChoiceCard(self._settings.card_parent())
             self._question.answered.connect(self._on_answered)
         return self._question
 
