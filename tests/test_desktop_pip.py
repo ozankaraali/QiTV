@@ -1,6 +1,8 @@
 """Desktop picture in picture (ui/desktop_pip.py): the large picture's surface floats while the
 fullscreen window's desktop is not shown, and comes back."""
 
+import contextlib
+import logging
 import os
 import unittest
 from unittest import mock
@@ -9,6 +11,7 @@ os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 from PySide6.QtCore import QEvent, QPoint, QPointF, QRect, QSize, Qt  # noqa: E402
 from PySide6.QtGui import QMouseEvent  # noqa: E402
+from PySide6.QtTest import QTest  # noqa: E402
 from PySide6.QtWidgets import QApplication, QWidget  # noqa: E402
 from timer_fixtures import elapse, wait_until  # noqa: E402
 
@@ -183,6 +186,60 @@ class DesktopPipTests(PipCase):
             )
         self.assertEqual(floating.pos(), start + QPoint(50, 30))
         activated.assert_not_called()
+
+    def test_its_hover_is_told_and_asked_for_only_while_qitv_is_inactive(self):
+        # 2.13.5: its controls come on a hover; Qt says nothing of the pointer while QiTV is
+        # not the active app (as nearly always while it floats), so its place is asked then.
+        hovers: list = []
+        state = {"active": True, "at": QPoint(-5000, -5000)}
+        self.pip._hover = hovers.append
+        self.pip._app_active = lambda: state["active"]
+        self.pip._cursor_pos = lambda: state["at"]
+        poll = self.pip.hover_poll
+        self.away()
+        floating = self.pip._floating
+        self.assertFalse(poll.active())  # QiTV active: Qt's own moves arrive
+        mouse(self.main, QEvent.Type.MouseMove, QPoint(40, 30), Qt.MouseButton.NoButton)
+        self.assertEqual(hovers, [self.main.mapToGlobal(QPoint(40, 30))])
+        hovers.clear()
+        state["active"] = False
+        self.pip.activity_changed()
+        self.assertTrue(poll.active())
+        state["at"] = floating.geometry().center()
+        poll.poll()
+        self.assertEqual(hovers, [floating.geometry().center()])
+        state["at"] = QPoint(-5000, -5000)
+        poll.poll()
+        self.assertEqual(hovers[-1], None)  # off it
+        self.back()
+        self.assertFalse(poll.active())  # back in the window: nothing is asked
+        state["at"] = QPoint(0, 0)
+        self.away()
+        self.assertTrue(poll.active())
+
+    def test_coming_back_floats_nothing_while_macos_switches_desktops(self):
+        now = {"value": 100.0}
+        self.pip._clock = lambda: now["value"]
+        self.pip.watch(True)
+        self.away()
+        with (
+            mock.patch.object(self.window, "raise_") as raised,
+            mock.patch.object(self.window, "activateWindow") as activated,
+        ):
+            self.pip.come_back("a button of its controls")  # as a double-click does
+        raised.assert_called_once()
+        activated.assert_called_once()
+        self.assertFalse(self.pip.floating())
+        self.assertIs(self.main.parentWidget(), self.page)
+        self.away()  # its desktop not shown yet: macOS still switches
+        self.assertFalse(self.pip.floating())
+        now["value"] += desktop_pip.BACK_HOLD_S  # it never switched: the picture floats again
+        self.away()
+        self.assertTrue(self.pip.floating())
+        self.pip.come_back()
+        self.back()  # the desktop showed: from then on as ever
+        self.away()
+        self.assertTrue(self.pip.floating())
 
     def test_one_away_answer_floats_nothing(self):
         self.shown = False
@@ -606,9 +663,176 @@ class DesktopPipWindowTests(WindowCase):
             self.app.processEvents()
             self.assertIsNone(small.box())
 
+    def float_it(self, shown: dict) -> FloatingPlayer:
+        """Fullscreen, then another desktop: the picture floats (in a 640×360 window)."""
+        window = self.window
+        pip = window.desktop_pip
+        pip._on_active_space = lambda _w: shown["value"]
+        pip._may_float = lambda: True  # (no libVLC here: nothing plays)
+        pip._place = lambda: QRect(100, 100, 640, 360)
+        window.show()
+        window.showFullScreen()
+        self.app.processEvents()
+        shown["value"] = False
+        pip.check()
+        pip.check()
+        floating = pip.floating_window()
+        self.assertIsNotNone(floating)
+        self.assertTrue(pip.floating())
+        self.app.processEvents()
+        return floating
+
+    def test_its_own_controls_come_on_a_hover_and_never_touch_a_window(self):
+        # 2.13.5, the owner: "THIS IS ALSO PIP AND THOSE SHOULD BE EQUAL": the mini player's
+        # controls over the floating picture. And it stays as steady as in 2.13.4 (the page's
+        # move made it dock again every second or two): no hover, show, fade or click of them
+        # focuses, activates, raises or shows the TV window or the floating window, nor moves
+        # the page.
+        shown = {"value": True}
+        window = self.window
+        transport = window.overlays.transport
+        transport._idle.setInterval(150)  # (they fade after the window's own wait)
+        with (
+            mock.patch("ui.tv_window._macos_desktops", return_value=True),
+            mock.patch("ui.overlay_host.attach_child_window", return_value=True),  # as on macOS
+        ):
+            floating = self.float_it(shown)
+            pip = window.desktop_pip
+            controls = window.float_controls
+            self.assertIsNotNone(controls)
+            mirror = controls.mirror
+            self.assertIs(controls.host.parentWidget(), floating)
+            self.assertTrue(mirror.isHidden())  # until a hover
+            self.assertEqual(mirror.icon("mini"), "full_window")  # the mini player's look
+            self.assertEqual(mirror.texts(), transport.texts())  # what the window's say
+            transport.set_favorite(True)
+            transport.show_live("1 · News", "At nine", None)  # and each change after
+            self.assertEqual((mirror.texts(), mirror._title), (transport.texts(), "1 · News"))
+            self.assertTrue(mirror._favorite)
+            mirror.dismiss()
+            at = {"value": QPoint(-5000, -5000)}
+            pip._app_active = lambda: False  # another app in front, as after a desktop change
+            pip._cursor_pos = lambda: at["value"]
+            pip.activity_changed()
+            touched = mock.Mock()
+            moves: list = []
+            window.pointer.realMoved.connect(lambda: moves.append(True))
+            played: list = []
+            transport.playPauseRequested.connect(lambda: played.append(True))
+            with contextlib.ExitStack() as stack:
+                for label, target in (("window", window), ("floating", floating)):
+                    for name in ("activateWindow", "raise_", "show", "setFocus", "showNormal"):
+                        stack.enter_context(
+                            mock.patch.object(target, name, getattr(touched, f"{label}_{name}"))
+                        )
+                stack.enter_context(mock.patch.object(pip, "_activate", touched.activate_app))
+                stack.enter_context(
+                    mock.patch(
+                        "ui.tv_window.macos_window.let_presses_activate",
+                        touched.let_presses_activate,
+                    )
+                )
+                poked = stack.enter_context(
+                    mock.patch.object(transport, "poke", wraps=transport.poke)
+                )
+                at["value"] = floating.geometry().center()  # the pointer moves over it
+                self.assertTrue(wait_until(lambda: not mirror.isHidden()))
+                self.assertTrue(controls.host.isVisible())
+                self.assertEqual(controls.host.geometry(), floating.geometry())
+                poked.assert_not_called()  # the window's own controls stay as they were
+                self.assertEqual(moves, [])  # nor is it a move over the window's picture
+                self.assertTrue(wait_until(mirror.isHidden))  # it fades, as over the window
+                self.assertFalse(controls.host.isVisible())
+                at["value"] = floating.geometry().center() + QPoint(30, 10)
+                self.assertTrue(wait_until(lambda: not mirror.isHidden()))
+                QTest.mouseClick(
+                    mirror,
+                    Qt.MouseButton.LeftButton,
+                    Qt.KeyboardModifier.NoModifier,
+                    mirror.button_rect("play").center().toPoint(),
+                )
+                self.app.processEvents()
+                self.assertEqual(played, [True])  # play/pause acts on the player
+                self.assertTrue(pip.floating())
+            self.assertEqual(touched.mock_calls, [])
+            self.assertIs(window.surface.parentWidget(), floating)
+            self.assertIs(window.player_page.parentWidget(), window.pages)  # the page stays
+            self.assertIs(window.host.followed(), window)
+            shown["value"] = True
+            pip.check()  # back: its controls go with it
+            self.assertTrue(mirror.isHidden())
+            self.assertFalse(controls.host.isVisible())
+            window.showNormal()
+            self.app.processEvents()
+
+    def test_what_opens_in_the_window_brings_the_fullscreen_desktop_back_first(self):
+        shown = {"value": True}
+        window = self.window
+        with mock.patch("ui.tv_window._macos_desktops", return_value=True):
+            floating = self.float_it(shown)
+            mirror = window.float_controls.mirror
+            transport = window.overlays.transport
+            pip = window.desktop_pip
+            sound: list = []
+            transport.audioRequested.connect(lambda: sound.append(pip.floating()))
+            with (
+                mock.patch.object(window, "raise_") as raised,
+                mock.patch.object(window, "activateWindow") as activated,
+            ):
+                mirror.audioRequested.emit()  # ♫: the Sound panel lives in the window
+                self.app.processEvents()
+                # macOS still switches desktops: the window's checks float nothing meanwhile.
+                for _ in range(desktop_pip.AWAY_CHECKS + 1):
+                    pip.check()
+                self.assertFalse(pip.floating())
+            raised.assert_called_once()
+            activated.assert_called_once()
+            self.assertEqual(sound, [False])  # asked there, the picture back in the window
+            self.assertTrue(floating.isHidden())
+            self.assertTrue(window.isFullScreen())
+            shown["value"] = True  # the fullscreen desktop shows
+            pip.check()
+            shown["value"] = False  # and is left again
+            pip.check()
+            pip.check()
+            self.assertTrue(pip.floating())
+            toggled: list = []
+            transport.fullscreenRequested.connect(lambda: toggled.append(True))
+            with (
+                mock.patch.object(window, "raise_") as raised,
+                mock.patch.object(window, "activateWindow") as activated,
+            ):
+                mirror.fullscreenRequested.emit()  # its way back: the fullscreen desktop
+                self.app.processEvents()
+            activated.assert_called_once()
+            self.assertEqual(toggled, [])  # never out of fullscreen
+            self.assertTrue(window.fullscreen_heading())
+            window.showNormal()
+            self.app.processEvents()
+
+    def test_the_tv_window_taking_the_focus_while_it_floats_is_logged_with_who_asked(self):
+        shown = {"value": True}
+        window = self.window
+        with mock.patch("ui.tv_window._macos_desktops", return_value=True):
+            self.float_it(shown)
+            with self.assertLogs("ui.tv_window", "INFO") as logs:
+                window.activateWindow()
+            lines = [line for line in logs.output if "while the picture floats" in line]
+            asked = [line for line in lines if "is asked to activate" in line]
+            self.assertEqual(len(asked), 1, lines)
+            self.assertIn("test_the_tv_window_taking_the_focus_while_it_floats", asked[0])
+            shown["value"] = True
+            window.desktop_pip.check()  # back in the window: nothing to say
+            with self.assertLogs("ui.tv_window", "INFO") as logs:
+                logging.getLogger("ui.tv_window").info("(a line)")
+                window.activateWindow()
+            self.assertFalse([line for line in logs.output if "while the picture floats" in line])
+            window.showNormal()
+            self.app.processEvents()
+
     def test_a_desktop_float_holds_the_picture_alone_as_in_2_13_4(self):
-        # 2.13.5, the owner: "keep it as before": the large surface alone, no controls over
-        # it, no keys (the mini player is the one with the window's controls).
+        # 2.13.5, the owner: "keep it as before": the large surface alone, no keys (the mini
+        # player is the one that holds the page); its controls are its own (the test above).
         shown = {"value": True}
         with mock.patch("ui.tv_window._macos_desktops", return_value=True):
             window = self.window
