@@ -142,11 +142,16 @@ class OverlayHost(QWidget):
             self._cover = cover
             self._update_mask()
 
+    def followed(self) -> QWidget:
+        """The window the overlays show over now (`follow_window`)."""
+        return self._window
+
     def follow_window(self, window: QWidget) -> None:
-        """The overlays show over `window` from now on: the TV window, or the floating window
-        while it holds the player page they are glued to (ui/desktop_pip.py). It is the window
-        whose moves, state and visibility they follow, and on macOS the one they are attached
-        to as a child window (on the next show: ordered out from the old one now)."""
+        """The overlays show over `window` from now on: the TV window, or the macOS mini
+        player's small window while it holds the player page they are glued to
+        (ui/mini_player.py). It is the window whose moves, state and visibility they follow,
+        and on macOS the one they are attached to as a child window (on the next show: ordered
+        out from the old one now)."""
         if window is self._window or not isValid(window):
             return
         if isValid(self._window):

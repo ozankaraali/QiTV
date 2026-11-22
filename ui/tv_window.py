@@ -2926,7 +2926,7 @@ class TVWindow(QMainWindow):
         Library or the multiview's grid."""
         if not self.pip_frame.set_floating(True):
             return None
-        page = self.pages.lend_player()  # (the window is hidden meanwhile: nothing in its place)
+        page = self.pages.lend_player()  # (the window is hidden meanwhile)
         if page is None:
             self.pip_frame.set_floating(False)
         return page

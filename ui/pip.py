@@ -234,9 +234,6 @@ class PipFrame(QObject):
             self._layout()  # (the page's size may have changed meanwhile)
         return True
 
-    def floating(self) -> bool:
-        return self._floating
-
     def floating_shape(self) -> Optional[float]:
         """The shape the large picture shows in while the page floats (None: it does not, or
         the shape is not known)."""

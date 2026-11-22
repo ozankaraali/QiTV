@@ -21,6 +21,21 @@ from PySide6.QtWidgets import QToolTip, QWidget
 from services.i18n import translate
 
 
+def host_windows(host: QWidget) -> set[QWidget]:
+    """The windows a press counts as on the host's page in (a panel closes on one beside it):
+    the host's own, its parent's (the TV window), and the one it follows meanwhile (the macOS
+    mini player's small window, which holds the player page: OverlayHost.followed)."""
+    ours = {host}
+    outer = host.parentWidget()
+    if outer is not None:
+        ours.add(outer.window())
+    followed = getattr(host, "followed", None)
+    window = followed() if callable(followed) else None
+    if isinstance(window, QWidget):
+        ours.add(window.window())
+    return ours
+
+
 def announce(widget: QWidget, text: str, assertive: bool = False, *, speak: bool = True) -> None:
     """`widget` is named `text` for assistive technology, which says it now (a screen reader
     reads it out): politely, after what it is saying, or at once (`assertive`: an error).

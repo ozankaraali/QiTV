@@ -117,10 +117,14 @@ class MiniPlayerTests(MiniCase):
         self.assertIs(self.page.parentWidget(), window)  # the page: its PiP and all
         self.assertEqual(self.page.geometry(), window.rect())
         self.assertTrue(self.frame.shows_small("main"))  # filled to the last pixel there
+        self.assertTrue(self.main.hasMouseTracking())  # (its edges' pointer)
         self.mini.end("back to the window")
         self.assertIs(self.page.parentWidget(), self.window)
         self.assertFalse(self.frame.shows_small("main"))
         self.assertTrue(window.isHidden())
+        # Back in the window, each widget tracks the mouse as it did before (review M4).
+        self.assertFalse(self.page.hasMouseTracking())
+        self.assertFalse(self.main.hasMouseTracking())
 
     def test_the_multiview_lends_nothing(self):
         self.frame.suspend()
@@ -270,6 +274,32 @@ class MiniPlayerWindowTests(WindowCase):
         self.assertIs(window.player_page.parentWidget(), window.pages)
         self.assertIs(window.host._window, window)
         self.assertEqual(window.overlays.transport.icon("mini"), "mini_player")
+
+    def test_a_click_on_the_picture_closes_an_open_panel_and_does_nothing_else(self):
+        # The final review (I1): Sound, Subtitles, Picture, ⚙ close on a press beside them, as
+        # in the window; the press is not also the picture's click (the channel list, a pause).
+        from ui.overlays.track_panel import PanelModel, PanelRow
+
+        window = self.window
+        self.show()
+        self.wait_for_drawer().close_drawer()
+        self.mini()
+        panel = window.sound_panel
+        panel.show_panel(PanelModel("Sound", (PanelRow("a", "Track 1", checked=True),)))
+        self.assertTrue(panel.isVisible())
+        with mock.patch.object(window.controller, "video_clicked") as clicked:
+            mouse(window.surface, QEvent.Type.MouseButtonPress, QPoint(40, 40))
+            mouse(
+                window.surface,
+                QEvent.Type.MouseButtonRelease,
+                QPoint(40, 40),
+                Qt.MouseButton.NoButton,
+            )
+            elapse(QApplication.doubleClickInterval() + 50)
+        self.assertFalse(panel.isVisible())
+        clicked.assert_not_called()
+        window.toggle_mini_player()  # (back before the window goes: see the Library's test)
+        self.app.processEvents()
 
     def test_a_drag_on_the_picture_moves_it_and_is_remembered(self):
         window = self.window

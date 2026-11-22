@@ -43,7 +43,7 @@ from PySide6.QtWidgets import QApplication, QWidget
 from services.i18n import N_
 from ui.keymap import Action
 from ui.overlays.audio_screen import screen_units
-from ui.overlays.base import Overlay
+from ui.overlays.base import Overlay, host_windows
 from ui.overlays.painting import Units, draw_icon, fill_round
 from ui.overlays.transport import MENU_CONTROLS, Transport
 from ui.pointer import NAV_BUTTONS
@@ -387,12 +387,7 @@ class MoreMenu(Overlay):
         menu, nor in a dialog or another window."""
         if not isinstance(obj, QWidget) or obj is self or self.isAncestorOf(obj):
             return False
-        host = self.window()
-        ours = {host}
-        outer = host.parentWidget()
-        if outer is not None:
-            ours.add(outer.window())
-        return obj.window() in ours
+        return obj.window() in host_windows(self.window())
 
     def closeEvent(self, event) -> None:
         self._stop_filtering()

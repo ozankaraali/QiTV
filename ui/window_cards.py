@@ -92,7 +92,7 @@ class WindowCards(QObject):
     the questions waiting for them. `library_shown()` says whether the Library is the page in
     front, `closing()` whether the window closes; `before_tv()` makes way for the TV's card
     (the mini player, the ⋯ menu); `held()` whether what QiTV says unasked waits (the mini
-    player or a floating picture shows: `release` once it ends); `gives_way()` whether the
+    player shows: `release` once it ends); `gives_way()` whether the
     window is hidden for the small window (the macOS mini player: a question asked for brings
     it back through `before_tv`); `above()` the cards that stay over this one."""
 

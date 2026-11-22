@@ -52,6 +52,7 @@ from ui.small_window import (  # noqa: F401  (re-exported: the floating window's
     WIDTH_FRACTION,
     LockShape,
     SmallWindow,
+    _no_lock,
     corner_rect,
 )
 
@@ -76,10 +77,6 @@ _MOUSE_EVENTS = (
     QEvent.Type.MouseMove,
     QEvent.Type.Wheel,  # never the shell's: a scroll drifting over it would zap
 )
-
-
-def _no_lock(_widget: QWidget, _shape: float, _smallest, _largest) -> None:
-    return None
 
 
 class FloatingPlayer(SmallWindow):

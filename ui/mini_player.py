@@ -66,7 +66,8 @@ class MiniWindow(SmallWindow):
         self.setAcceptDrops(True)  # (handed to the TV window)
         self._keys = keys
         self._held: Optional[QWidget] = None
-        self._watched: list[QWidget] = []  # the page and its children (their mouse)
+        # The page and its children (their mouse), each with the tracking it had before.
+        self._watched: dict[QWidget, bool] = {}
 
     def held(self) -> Optional[QWidget]:
         return self._held
@@ -77,7 +78,7 @@ class MiniWindow(SmallWindow):
         widget.setParent(self)
         widget.setGeometry(self.rect())
         widget.show()
-        self._watched = [widget, *widget.findChildren(QWidget)]
+        self._watched = {w: w.hasMouseTracking() for w in (widget, *widget.findChildren(QWidget))}
         for watched in self._watched:
             watched.setMouseTracking(True)  # moves without a button: the edges' pointer
             watched.installEventFilter(self)
@@ -85,10 +86,11 @@ class MiniWindow(SmallWindow):
     def release(self) -> Optional[QWidget]:
         """The page held, for the TV window to take back (None: none)."""
         held, self._held = self._held, None
-        for watched in self._watched:
+        for watched, tracking in self._watched.items():
             if isValid(watched):
                 watched.removeEventFilter(self)
-        self._watched = []
+                watched.setMouseTracking(tracking)  # as it was in the window
+        self._watched = {}
         self._forget_pointer()
         self._press, self._dragged = None, False
         self._reshape_due = False

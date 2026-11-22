@@ -83,31 +83,25 @@ class PageStackTests(StackCase):
         self.assertEqual(self.player.geometry(), stack.rect())
         self.assertFalse(self.library.isVisible())
 
-    def test_the_player_page_lent_leaves_a_stand_in_in_its_place(self):
-        # 2.13.5: the floating picture in picture holds the player page (ui/desktop_pip.py).
+    def test_the_player_page_lent_is_the_other_windows_until_it_is_back(self):
+        # 2.13.5: the macOS mini player holds the player page (ui/mini_player.py).
         stack = self.make_stack()
-        note = QWidget(stack)
-        note.hide()
         holder = QWidget()
         self.addCleanup(holder.deleteLater)
-        page = stack.lend_player(note)
+        page = stack.lend_player()
         self.assertIs(page, self.player)
-        self.assertTrue(stack.player_lent())
-        page.setParent(holder)  # the floating window takes it
-        self.assertTrue(note.isVisible())
-        self.assertEqual(note.geometry(), stack.rect())
+        page.setParent(holder)  # the mini player's window takes it
+        page.setGeometry(0, 0, 320, 180)
         stack.resize(1000, 600)  # the stack lays out: the lent page is the other window's
         self.assertIs(self.player.parentWidget(), holder)
-        self.assertEqual(note.geometry(), stack.rect())
-        self.assertIsNone(stack.lend_player(note))  # lent already
+        self.assertEqual(self.player.geometry().size().width(), 320)
+        self.assertIsNone(stack.lend_player())  # lent already
         stack.take_back_player(page)
-        self.assertFalse(stack.player_lent())
         self.assertIs(self.player.parentWidget(), stack)
         self.assertEqual(self.player.geometry(), stack.rect())
         self.assertTrue(self.player.isVisible())
-        self.assertFalse(note.isVisible())
         stack.show_library(corner=True)
-        self.assertIsNone(stack.lend_player(note))  # the Library's: it never floats
+        self.assertIsNone(stack.lend_player())  # the Library's: it never floats
 
     def test_corner_mode_keeps_both_pages_and_resizes_the_player(self):
         stack = self.make_stack(width=1280, height=720)
