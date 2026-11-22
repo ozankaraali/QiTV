@@ -23,9 +23,12 @@ from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
 import logging
 import platform
+import threading
 from typing import Any, Callable, Optional
+from urllib.parse import parse_qs, urlencode, urlsplit
 import uuid
 
+from services import media_server as ms
 from services.lazy_import import lazy_module
 from services.media_server import MediaServerError, SignInNeeded, normalized_base
 from services.surrogates import response_json
@@ -271,3 +274,364 @@ class PlexAccount:
             params={"includeHttps": 1, "includeRelay": 1, "includeIPv6": 1},
         )
         return servers_of(answer)
+
+
+# ---- the server -----------------------------------------------------------------------------
+
+MOVIE, SHOW = "movie", "show"  # the libraries QiTV lists (music and photos are not)
+_TYPE_NUMBERS = {MOVIE: 1, SHOW: 2}  # Plex's metadata types
+PAGE = 2_000  # titles a request (a library of 50,000 comes in 25)
+LIBRARY_PROVIDER = "com.plexapp.plugins.library"  # the server's own library (a scrobble's)
+WATCHED_RATIO = 0.90  # stopped this far in: watched (as QiTV's own resume points end)
+_TIMELINE_STATES = {"start": "playing", "progress": "playing", "stopped": "stopped"}
+_DURATIONS: dict[tuple[str, str], int] = {}  # (server, title) -> its length, for the timeline
+_DURATIONS_KEPT = 64
+_DURATIONS_LOCK = threading.Lock()
+
+
+def forget_durations() -> None:
+    """The titles' lengths the reports remembered (tests)."""
+    with _DURATIONS_LOCK:
+        _DURATIONS.clear()
+
+
+class PlexClient:
+    """One server, as signed in: its address, its own token for this account, and the client
+    id QiTV signed in as. Blocking: worker threads only."""
+
+    def __init__(
+        self,
+        base_url: str,
+        *,
+        token: str,
+        client_id: str,
+        version: str,
+        verify: bool = True,
+        session: Any = None,
+        timeout: float = TIMEOUT_S,
+    ) -> None:
+        self.base = normalized_base(base_url)
+        self.token = token
+        self.client_id = client_id
+        self.version = version
+        self.verify = verify
+        self.timeout = timeout
+        self._http = session if session is not None else requests.Session()
+
+    def close(self) -> None:
+        self._http.close()
+
+    def _ask(
+        self,
+        method: str,
+        path: str,
+        params: Optional[dict] = None,
+        headers: Optional[dict] = None,
+    ) -> dict:
+        """The answer's MediaContainer ({} for none); 401 raises SignInNeeded. The token goes
+        in a header, never in the address (an error's text never names either)."""
+        response = self._http.request(
+            method,
+            self.base + path,
+            params=params,
+            headers={**client_headers(self.client_id, self.version, self.token), **(headers or {})},
+            timeout=self.timeout,
+            verify=self.verify,
+        )
+        if response.status_code == 401:
+            raise SignInNeeded("401")
+        if response.status_code >= 400:
+            raise MediaServerError(f"The server answered {response.status_code}")
+        if not response.content:
+            return {}
+        answer = response_json(response)
+        container = answer.get("MediaContainer") if isinstance(answer, dict) else None
+        return container if isinstance(container, dict) else {}
+
+    def identity(self) -> dict:
+        return self._ask("GET", "/identity")
+
+    def libraries(self) -> list[dict]:
+        """The server's libraries of films and of series: {id, name, type}."""
+        out = []
+        for raw in self._ask("GET", "/library/sections").get("Directory") or []:
+            kind, key = str(raw.get("type") or ""), str(raw.get("key") or "")
+            if kind in (MOVIE, SHOW) and key:
+                out.append({"id": key, "name": str(raw.get("title") or ""), "type": kind})
+        return out
+
+    def items(self, library_id: str, kind: str, page: int = PAGE) -> list[dict]:
+        """Every film (`kind` MOVIE) or series (SHOW) of the library, in pages."""
+        params = {"type": _TYPE_NUMBERS[kind], "includeGuids": 1}
+        found: list[dict] = []
+        while True:
+            paging = {"X-Plex-Container-Start": str(len(found)), "X-Plex-Container-Size": str(page)}
+            answer = self._ask("GET", f"/library/sections/{library_id}/all", params, paging)
+            batch = [m for m in answer.get("Metadata") or [] if isinstance(m, dict)]
+            found.extend(batch)
+            total = answer.get("totalSize")
+            if not batch or (isinstance(total, int) and len(found) >= total):
+                return found
+            if not isinstance(total, int) and len(batch) < page:
+                return found
+
+    def seasons_and_episodes(self, show_id: str) -> tuple[list[dict], list[dict]]:
+        """A series' seasons (its children) and every episode of it (its leaves)."""
+        seasons = self._ask("GET", f"/library/metadata/{show_id}/children").get("Metadata")
+        episodes = self._ask("GET", f"/library/metadata/{show_id}/allLeaves").get("Metadata")
+        return list(seasons or []), list(episodes or [])
+
+    def media(self, item_id: str) -> list[dict]:
+        """A title's versions (its Media, each with its files)."""
+        found = self._ask("GET", f"/library/metadata/{item_id}").get("Metadata") or [{}]
+        first = found[0] if isinstance(found[0], dict) else {}
+        with _DURATIONS_LOCK:
+            _remember(self.base, str(item_id), first.get("duration"))
+        return [m for m in first.get("Media") or [] if isinstance(m, dict)]
+
+    # ---- where the user is ------------------------------------------------------------------
+
+    def _duration(self, item_id: str) -> int:
+        with _DURATIONS_LOCK:
+            known = _DURATIONS.get((self.base, item_id))
+        if known is None:
+            try:
+                self.media(item_id)
+            except Exception as error:  # unknown: told without it
+                logger.info("A Plex title's length is unknown: %s", type(error).__name__)
+                return 0
+            with _DURATIONS_LOCK:
+                known = _DURATIONS.get((self.base, item_id))
+        return int(known or 0)
+
+    def report(self, event: str, ref: ms.StreamRef, position_ms: int, paused: bool = False) -> None:
+        """Tell the server a play started ("start"), where it is ("progress"), or that it
+        stopped ("stopped"), through its timeline; a stop near the end (WATCHED_RATIO) marks
+        the title watched."""
+        state = "paused" if paused and event == "progress" else _TIMELINE_STATES[event]
+        position = max(0, int(position_ms))
+        duration = self._duration(ref.item_id)
+        params: dict[str, Any] = {
+            "key": f"/library/metadata/{ref.item_id}",
+            "ratingKey": ref.item_id,
+            "state": state,
+            "time": position,
+        }
+        if duration > 0:
+            params["duration"] = duration
+        session = {"X-Plex-Session-Identifier": ref.play_session}
+        self._ask("POST", "/:/timeline", params, session)
+        if event == "stopped" and duration > 0 and position >= WATCHED_RATIO * duration:
+            scrobble = {"identifier": LIBRARY_PROVIDER, "key": ref.item_id}
+            self._ask("PUT", "/:/scrobble", scrobble, session)
+
+
+def _remember(base: str, item_id: str, duration: Any) -> None:
+    if not isinstance(duration, int) or duration <= 0:
+        return
+    _DURATIONS[(base, item_id)] = duration
+    while len(_DURATIONS) > _DURATIONS_KEPT:
+        _DURATIONS.pop(next(iter(_DURATIONS)))
+
+
+# ---- titles ---------------------------------------------------------------------------------
+
+
+def image_url(base: str, path: Any, token: str) -> str:
+    """A picture of the server (a poster, a season's cover) as VLC and the image cache fetch
+    it: with the token (Plex asks for it), never resized by the server."""
+    path = str(path or "")
+    if not path.startswith("/"):
+        return ""
+    return f"{base}{path}?{urlencode({'X-Plex-Token': token})}"
+
+
+def _tmdb(raw: dict) -> str:
+    for guid in raw.get("Guid") or []:
+        value = str(guid.get("id") or "") if isinstance(guid, dict) else ""
+        if value.startswith("tmdb://") and value[7:].isdigit():
+            return value[7:]
+    return ""
+
+
+def _number(value: Any) -> str:
+    return str(value) if isinstance(value, (int, float)) and not isinstance(value, bool) else ""
+
+
+def title_item(raw: dict, base: str, token: str, library_id: str) -> dict:
+    """A film or a series of the server as a Library title (Jellyfin's and Emby's keys:
+    services.media_server.title_item)."""
+    overview = ms.shortened(str(raw.get("summary") or ""))
+    rating = raw.get("audienceRating")
+    if not isinstance(rating, (int, float)):
+        rating = raw.get("rating")
+    item: dict[str, Any] = {
+        "id": str(raw.get("ratingKey") or ""),
+        "name": str(raw.get("title") or ""),
+        "logo": image_url(base, raw.get("thumb"), token),
+        "tv_genre_id": library_id,
+        "cmd": "",
+        "description": overview,
+        "plot": overview,
+        "year": _number(raw.get("year")),
+        "rating": _number(rating),
+        "genre": ", ".join(
+            str(g.get("tag"))
+            for g in raw.get("Genre") or []
+            if isinstance(g, dict) and g.get("tag")
+        ),
+    }
+    duration = raw.get("duration")
+    if isinstance(duration, int) and duration > 0:
+        item["duration_secs"] = duration // 1000
+    tmdb = _tmdb(raw)
+    if tmdb:
+        item["tmdb"] = tmdb
+    added = raw.get("addedAt")
+    if isinstance(added, int) and added > 0:
+        item["added"] = str(added)
+    position = raw.get("viewOffset")
+    if isinstance(position, int) and position > 0:
+        item["server_position_ms"] = position
+    media = next((m for m in raw.get("Media") or [] if isinstance(m, dict)), {})
+    container = str(media.get("container") or "").split(",")[0]
+    if container:
+        item["container_extension"] = container
+    return item
+
+
+def section_payload(
+    libraries: list[dict], titles: dict[str, list[dict]], base: str, token: str
+) -> dict:
+    """The Library's section of a server: All, Continue watching (titles started there), then
+    each library (services.media_server.ordered_payload). Loaded whole each time: Plex answers
+    a library at once."""
+    ordered: dict[str, list[dict]] = {}
+    made: dict[str, dict] = {}
+    for library in libraries:
+        listed = ordered.setdefault(library["id"], [])
+        for raw in titles.get(library["id"]) or []:
+            item_id = str(raw.get("ratingKey") or "")
+            if item_id:
+                if item_id not in made:
+                    made[item_id] = title_item(raw, base, token, library["id"])
+                listed.append(made[item_id])
+    return ms.ordered_payload(libraries, ordered)
+
+
+def episode_item(raw: dict, base: str, token: str) -> dict:
+    number = _number(raw.get("index"))
+    name = str(raw.get("title") or (f"Episode {number}" if number else ""))
+    item = title_item(raw, base, token, "")
+    item.update(
+        {
+            "number": number,
+            "episode_num": number,
+            "ename": name,
+            "name": name,
+            "season": _number(raw.get("parentIndex")),
+            "series_id": str(raw.get("grandparentRatingKey") or ""),
+            "season_id": str(raw.get("parentRatingKey") or ""),
+        }
+    )
+    return item
+
+
+def seasons_payload(seasons: list[dict], episodes: list[dict], base: str, token: str) -> dict:
+    """A series' seasons, each with its episodes in order (as Jellyfin's come)."""
+    by_season: dict[str, list[dict]] = {}
+    for raw in episodes:
+        by_season.setdefault(str(raw.get("parentRatingKey") or ""), []).append(raw)
+    out: list[dict[str, Any]] = []
+    for raw in seasons:
+        season_id = str(raw.get("ratingKey") or "")
+        listed = sorted(by_season.get(season_id, []), key=lambda e: int(e.get("index") or 0))
+        season_number = _number(raw.get("index"))
+        made = [episode_item(e, base, token) for e in listed]
+        for episode in made:  # an episode without its own season's number has its season's
+            episode["season"] = episode["season"] or season_number
+        out.append(
+            {
+                "id": season_id,
+                "name": str(raw.get("title") or ""),
+                "season_number": season_number,
+                "cover": image_url(base, raw.get("thumb"), token),
+                "overview": str(raw.get("summary") or ""),
+                "episode_count": str(len(listed)),
+                "episodes": made,
+            }
+        )
+    return {"seasons": out}
+
+
+# ---- versions and streams -------------------------------------------------------------------
+
+
+def sources(media: list[dict]) -> list[dict]:
+    """A title's versions in the shape services.media_server's rules read (`choose_source`,
+    `version_of`, `within`): each version's id, its picture's size, its rate (bits a second)
+    and its first file (`part`, the address it plays from)."""
+    out = []
+    for raw in media:
+        part = next(
+            (p for p in raw.get("Part") or [] if isinstance(p, dict) and p.get("key")), None
+        )
+        if part is None or raw.get("id") is None:
+            continue
+        rate = raw.get("bitrate")
+        out.append(
+            {
+                "Id": str(raw["id"]),
+                "Bitrate": int(rate) * 1000 if isinstance(rate, int) else 0,
+                "Container": str(part.get("container") or raw.get("container") or ""),
+                "MediaStreams": [
+                    {
+                        "Type": "Video",
+                        "Width": int(raw.get("width") or 0),
+                        "Height": int(raw.get("height") or 0),
+                    }
+                ],
+                "part": str(part["key"]),
+            }
+        )
+    return out
+
+
+def stream_url(base: str, source: dict, token: str, client_id: str, item_id: str) -> str:
+    """A version's file itself, as it is (Plex's direct play: never /transcode). The address
+    names QiTV and a play session of its own, `<title>-<random>`, which tells the reporter
+    which title plays (a file's address names only the file)."""
+    query = urlencode(
+        {
+            "X-Plex-Token": token,
+            "X-Plex-Client-Identifier": client_id,
+            "X-Plex-Product": PRODUCT,
+            "X-Plex-Session-Identifier": f"{item_id}-{uuid.uuid4().hex}",
+        }
+    )
+    return f"{base}{source['part']}?{query}"
+
+
+def parse_stream_url(url: str, bases: Any) -> Optional[ms.StreamRef]:
+    """What a stream address of one of `bases` (the Plex servers' addresses) plays, else None
+    (an address QiTV did not make: no play session of its own)."""
+    for base in bases:
+        base = normalized_base(str(base or ""))
+        if not base or not url.startswith(base + "/library/parts/"):
+            continue
+        parts = urlsplit(url)
+        segments = parts.path[len(urlsplit(base).path) :].strip("/").split("/")
+        query = parse_qs(parts.query)
+        session = (query.get("X-Plex-Session-Identifier") or [""])[0]
+        item_id = session.split("-", 1)[0]
+        if len(segments) < 3 or not item_id.isdigit():
+            return None
+        return ms.StreamRef(
+            base=base,
+            item_id=item_id,
+            source_id=segments[2],
+            token=(query.get("X-Plex-Token") or [""])[0],
+            play_session=session,
+            converted=False,
+        )
+    return None
