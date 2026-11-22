@@ -23,25 +23,25 @@ others' distributions, which may have malware.**
 - **No new start on a provider that just said no.** After the helper came back, QiTV could
   take the provider's refusal for the channel picking up again, and start the channel afresh
   on that provider at once. It now treats the refusal as one.
-- **Playing directly holds its connection at once.** A channel that plays without time-shift
-  now counts its connection the moment it starts, so another stream of QiTV's can't take it
-  while it starts.
+- **Playing directly holds its connection at once.** On a provider QiTV found keeps fewer
+  streams than it says, a channel, film or episode that plays without time-shift now counts its
+  connection the moment it starts, so another stream of QiTV's can't take it while it starts.
 - **No sound downloads for nothing.** A channel whose sound comes as a separate track that its
   picture can't carry no longer downloads that sound for every few seconds of picture. Such a
   channel still plays without sound in time-shift, as before.
 
 ### The guide
-- **Changing the guide's mapping in Settings keeps every other channel's guide,** and the
-  names you gave channels. Before, the channels you didn't map lost theirs until the next
-  guide refresh.
+- **Changing the guide's mapping in Settings keeps every other channel's guide.** Before, the
+  channels you didn't map lost their guide until the next guide refresh, and the mapped ones
+  lost the other names the guide knows them by.
 
 ### AI captions
 - **After a rewind, the captions come back.** Going back more than 2 seconds could leave that
   stretch without captions.
 - **Choosing a subtitle track takes down the question about downloading the captions model,**
   on the TV and on the phone.
-- **Another language mid-film** stops the Turkish model's reading at once, where it could go on
-  writing captions in Turkish for a moment.
+- **Another language mid-film** stops the Turkish model at once. It could go on reading the new
+  language as Turkish for the rest of the film, with wrong captions or none.
 
 ### Watching while recording
 - **A channel waiting for a recording's connection** is no longer lost when another question
@@ -55,9 +55,10 @@ others' distributions, which may have malware.**
   provider is no longer in your list, QiTV says it couldn't load the next season at once.
 
 ### Settings
-- **A settings file QiTV can't read** (another program holds it, or it is damaged) is never
-  written over: QiTV starts with its defaults, says it can't save, and leaves your file as it
-  was for the next start.
+- **A settings file QiTV can't open** (another program holds it, or its permissions) is never
+  written over. QiTV tries again for a moment; if it still can't, it starts with its defaults,
+  says it can't save, and leaves your file as it was for the next start. A damaged file is
+  still set aside beside the new one, as before.
 
 ### The phone remote
 - **A phone remote that couldn't start** (its port taken, say) now tries again when you change
@@ -66,8 +67,8 @@ others' distributions, which may have malware.**
   first one opened.
 
 ### Recordings
-- **The keys on All recordings no longer crash the shelf** when the corner player covers some
-  of its tiles.
+- **The keys on the Recordings shelf no longer crash it** when the corner player, or a smaller
+  window, leaves room for fewer tiles.
 
 ### Windows and Linux
 - **Windows: clearing the image cache with a picture in use** skips that one file instead of
