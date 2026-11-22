@@ -4352,6 +4352,32 @@ class StartCushionTests(LiveSessionCase):
         feed.run(30.0)
         self.assertEqual(min(self.playback.rates), 0.95)  # the owed slow-down
 
+    def test_a_start_short_within_the_calm_band_has_its_cushion(self):
+        # Review R1: an unaimed start (nothing further back) landed 1.3 s short of Auto's
+        # 10 s target on a steady source: inside the calm band, so its room is never built
+        # (nor its shortfall accepted), and VLC running dry later was no trouble: no owed
+        # slow-down, nothing learned. The lag in that band is at the target, as for stay-live.
+        tuning = LiveTuning(None)
+        tuning.remember("ch", Tuning(learned=Learned(need=10.0)))
+        self.live = self.make(tuning=tuning)
+        sid = self.start(latency=AUTO, channel="ch")
+        feed = Feed(self, sid, burst=0.0, edge=7.7, starved=PlaybackState.PLAYING)
+        feed.ready(backlog_after_start=False)
+        feed.run(30.0)
+        target, lag = self.timelines[-1]["target"], self.timelines[-1]["lag"]
+        self.assertGreater(target - lag, 1.0)  # beyond the band as wide as its wander ...
+        self.assertLess(target - lag, 0.15 * target)  # ... inside the calm band
+        self.assertEqual(self.playback.rates, [])  # left as it is
+        with self.assertLogs("services.live.live_session", "INFO") as logs:
+            feed.stalled = True
+            feed.run(lag + 3.0)  # VLC runs dry
+            feed.stalled = False
+            feed.run(10.0)
+        self.assertGreater(feed.starved_s, 1.0)
+        said = [record.getMessage() for record in logs.records]
+        nudges = [text for text in said if text.startswith("Stay-live nudges the rate")]
+        self.assertTrue(nudges and nudges[0].endswith(": VLC ran dry."), said)  # trouble
+
     def test_a_timeout_start_that_took_less_has_no_cushion(self):
         # Nothing as far back as the 7 s target came within the ready timeout: from the
         # oldest, 0 s behind once playing; VLC runs dry before the next batch.
@@ -4748,6 +4774,30 @@ class StallTests(LiveSessionCase):
                 self.assertLess(feed.starved_s - starved, 0.5)  # no underrun at every burst
                 reported = [state["lag"] for state in self.timelines[timelines + 4 * 7 :]]
                 self.assertLess(max(reported), 7.0)  # not "59 s behind source" at the edge
+
+    def test_a_long_stall_on_a_bursty_source_is_held_before_vlc_runs_dry(self):
+        # Review R3: the case above with the early hold on (VLC had room for more than its
+        # usual gap): held before it runs dry, never dry, no reopen, nothing caught up after.
+        for seconds in (15.0, 30.0, 60.0):
+            with self.subTest(stall=seconds):
+                self.live = self.make()
+                feed = self.settle()
+                plays, timelines = len(self.playback.plays), len(self.timelines)
+                holds, starved = len(self.playback.holds), feed.starved_s
+                feed.stalled = True
+                feed.run(seconds)
+                during = self.timelines[timelines:]
+                self.assertEqual(self.playback.holds[holds:], [True])  # held, not dry
+                feed.stalled = False
+                rates, timelines = len(self.playback.rates), len(self.timelines)
+                feed.run(36.5)
+                self.assertEqual(self.playback.holds[holds:], [True, False])
+                self.assertEqual(feed.starved_s, starved)  # never dry
+                self.assertEqual(len(self.playback.plays), plays)  # no reopen
+                after = self.playback.rates[rates:]
+                self.assertTrue(all(rate <= 1.0 for rate in after), after)  # no catch-up
+                self.assertLess(max(state["lag"] for state in during), 7.0)
+                self.assertLess(max(state["lag"] for state in self.timelines[timelines:]), 7.0)
 
     def test_a_raw_ts_stall_is_shown_without_nudging_or_reopening(self):
         sid = self.start()

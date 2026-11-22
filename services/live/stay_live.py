@@ -568,7 +568,7 @@ class StayLive:
         self.spread = 0.0
         self.slack = 0.0
         # Set by the caller: the source has no burst the lag filter keeps (the calm band,
-        # `_calm`), and the AI captions' floor the lag is not to fall short of (0.0: off).
+        # `calm`), and the AI captions' floor the lag is not to fall short of (0.0: off).
         self.steady = False
         self.caption_floor = 0.0
         # Set by the caller: how far under the target the lag may be while VLC still has the
@@ -662,9 +662,10 @@ class StayLive:
         band = max(_BAND_S, _BAND_SPREAD * self.spread, self._wide)
         return band + (_BAND_BURST * self.burst if side > 0 else 0.0)
 
-    def _calm(self, side: int) -> float:
+    def calm(self, side: int) -> float:
         """How far from the target a steady source's lag may be on `side` before a gentle
-        nudge (`_CALM_S`, `_CALM_SHARE`; 0.0: the band alone)."""
+        nudge (`_CALM_S`, `_CALM_SHARE`; 0.0: the band alone): within it the lag is at the
+        target (the caller's cushion reads it so too)."""
         if not self.steady:
             return 0.0
         share = _CALM_SHARE * self.target
@@ -1136,8 +1137,8 @@ class StayLive:
         room = lag - self._centre(-1, urgent=True)  # short of room: built to the target
         short = room < -_BAND_S and self._short(lag) and not self._accepting
         tolerated = self._accepting or self._tolerant  # a start's rest, a jump's pick
-        under = short or (ahead < -max(self.band(-1), self._calm(-1)) and not tolerated)
-        side = 1 if far or behind > max(self.band(1), self._calm(1)) else -1 if under else 0
+        under = short or (ahead < -max(self.band(-1), self.calm(-1)) and not tolerated)
+        side = 1 if far or behind > max(self.band(1), self.calm(1)) else -1 if under else 0
         if side > 0 and self.flooding:
             self.absorb()  # a backlog still arriving: judged once arrivals settle
             return False
