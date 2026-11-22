@@ -365,6 +365,22 @@ class PipTests(PipCase):
         self.assertEqual(self.pip_live.calls, [])
         self.assertFalse(self.sessions.pip_open())
 
+    def test_after_a_swap_the_list_opens_on_the_channel_now_large(self):
+        self.start_large(0)
+        self.open_small(CHANNELS[1])
+        self.controller.handle(Action.SWAP)
+        self.controller.handle(Action.OPEN_DRAWER)
+        self.assertEqual(self.drawer.focus_item["name"], "Two")
+        self.assertEqual(self.nav.revealed()["name"], "Two")
+
+    def test_a_hidden_previous_channel_counts_as_none(self):
+        self.start_large(0)
+        self.start_large(1)  # One is the previous channel
+        self.controller._pip._hidden = lambda channel: channel["name"] == "One"  # locked
+        self.controller.handle(Action.PIP)
+        self.assertTrue(self.drawer.visible)
+        self.assertEqual(self.requested(), ["One", "Two"])  # never asked for
+
     def test_p_without_a_previous_channel_opens_the_list_and_esc_opens_nothing(self):
         # The owner: with no channel before it, the second channel could be chosen (it said
         # there was none). With one, it opens at once (the test above).

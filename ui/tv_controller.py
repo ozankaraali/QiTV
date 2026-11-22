@@ -759,6 +759,7 @@ class TVController(QObject):
                 owned=self._owned,
                 started=self._count_start,
                 choose=self._choose_small,
+                hidden=self._hidden_now,
                 parent=self,
             )
             self._pip.changed.connect(self._mixer.refresh)

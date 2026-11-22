@@ -2,7 +2,7 @@
 
 P (or the transport's Second channel, or the phone's) opens the channel tuned before the
 current one small, or closes the small picture; with no channel before it (or that one plays
-large) the channel list opens instead, and the channel picked there opens small (`choose`);
+large, or is hidden while locked) the channel list opens instead, and the channel picked there opens small (`choose`);
 the drawer's context menu and Ctrl/⌘+P open the drawer's channel. S (or a click on the small picture) swaps; one that has to wait for the large
 picture's channel to open says "Switching…". Its link is asked for on LinkLanes' side lane,
 one at a time: a choice made while one is on its way waits, replacing an older one that
@@ -151,6 +151,7 @@ class PipControls(QObject):
         owned: Callable[[dict], dict] = lambda item: item,
         started: Callable[[], None] = lambda: None,
         choose: Optional[Callable[[], None]] = None,
+        hidden: Callable[[dict], bool] = lambda item: False,
         parent: Optional[QObject] = None,
     ) -> None:
         """`frame` is the PipFrame and `label` the PipLabel (None in tests without them).
@@ -169,7 +170,8 @@ class PipControls(QObject):
         (StreamQuestion.started: what waits for a stopped recording's stream runs only when
         nothing did meanwhile, 2.13.4). `choose()` opens the channel list for the small
         picture (P with no previous channel): what is picked there opens small (None: P
-        says there is no previous channel).
+        says there is no previous channel). `hidden(channel)`: parental controls hide it now
+        (a previous channel hidden counts as none).
         """
         super().__init__(parent)
         self.sessions = sessions
@@ -199,6 +201,7 @@ class PipControls(QObject):
         self._owned = owned
         self._started = started
         self._choose = choose
+        self._hidden = hidden
         self._views: dict[str, SlotView] = {}
         self._wanted: Optional[tuple[Target, ZapContext]] = None  # its link is on its way
         self._link: Optional[Target] = None  # the one link request in flight
@@ -399,7 +402,11 @@ class PipControls(QObject):
         if self._refused():
             return
         previous, context = self._previous_channel()
-        if previous is None or ZapContext.same(previous, self._large_channel()):
+        if (
+            previous is None
+            or ZapContext.same(previous, self._large_channel())
+            or self._hidden(previous)
+        ):
             if self._choose is not None:
                 self._choose()  # none to open: the channel list, for the small picture
             else:
