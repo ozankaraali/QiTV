@@ -898,6 +898,34 @@ video.m3u8
         self.assertEqual(media(server.url + "/master.m3u8"), joined(video))
         self.assertEqual((server.counts["/a0.ts"], server.counts["/a1.ts"]), (1, 0))
 
+    def test_a_break_tries_the_tables_again_without_a_picture_time_too(self):
+        # A PMT without room refused the audio; after a break, a first segment without a
+        # picture's time (its audio taken by its number) has tables that take it.
+        master = b"""#EXTM3U
+#EXT-X-MEDIA:TYPE=AUDIO,GROUP-ID="a",NAME="English",DEFAULT=YES,URI="audio.m3u8"
+#EXT-X-STREAM-INF:BANDWIDTH=100000,AUDIO="a"
+video.m3u8
+"""
+        text = hls(0, ["v0.ts"], target=4).decode()
+        text += "#EXT-X-DISCONTINUITY\n#EXTINF:4,\nv1.ts\n#EXT-X-ENDLIST\n"
+        tables = ts_fixtures.pat() + ts_fixtures.pmt(audio_pids=())  # no picture: no time
+        server = self.server(
+            {
+                "/master.m3u8": (200, {}, master),
+                "/video.m3u8": (200, {}, text.encode()),
+                "/audio.m3u8": (200, {}, hls(0, ["a0.ts", "a1.ts"], target=4, ended=True)),
+                "/v0.ts": (200, {}, self.full_pmt_video()),
+                "/v1.ts": (200, {}, tables),
+                "/a0.ts": (200, {}, ts_fixtures.audio_only(4)),
+                "/a1.ts": (200, {}, ts_fixtures.audio_only(4, pts_start=90000)),
+            }
+        )
+        first, marker, second = media(server.url + "/master.m3u8")
+        self.assertIsInstance(marker, Discontinuity)
+        self.assertFalse(ts_fixtures_has_audio(first))  # as it came
+        self.assertTrue(ts_fixtures_has_audio(second))  # the new tables took it
+        self.assertEqual(server.counts["/a1.ts"], 1)
+
     def test_live_leaf_reloads_real_redirect_url_and_tolerates_segment_gap(self):
         def playlist(_request, count):
             if count == 1:

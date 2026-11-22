@@ -29,6 +29,9 @@ others' distributions, which may have malware.**
 - **No sound downloads for nothing.** A channel whose sound comes as a separate track that its
   picture can't carry no longer downloads that sound for every few seconds of picture. Such a
   channel still plays without sound in time-shift, as before.
+- **The log says what stay-live does.** Each small change of speed stay-live makes to keep a
+  channel near live, and the source's bursts it counts, are now in QiTV's log with the time,
+  so a jump or a skip in the sound can be matched to what happened then.
 
 ### The guide
 - **Changing the guide's mapping in Settings keeps every other channel's guide.** Before, the
@@ -44,11 +47,10 @@ others' distributions, which may have malware.**
   language as Turkish for the rest of the film, with wrong captions or none.
 
 ### Watching while recording
-- **A channel waiting for a recording's connection** is no longer lost when another question
-  is answered meanwhile.
-- **And it never jumps in late.** If you play something else while it waits (another channel,
-  a film, a file) or press Stop, the waiting channel is dropped instead of opening a few
-  seconds later over what you chose.
+- **A channel waiting for a recording's connection never jumps in late.** When you answer that
+  the recording may stop, the channel waits a few seconds for its connection. If you play
+  something else meanwhile, in either picture (another channel, a film, a song, a file, a cast),
+  or press Stop, the waiting channel is dropped instead of opening over what you chose.
 
 ### Series
 - **The next season from another provider** no longer stays at "Loading next season…". If that

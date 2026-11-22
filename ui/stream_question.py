@@ -70,6 +70,7 @@ class _Question:
     ask_on: Optional[str] = None
     waiting: set[str] = field(default_factory=set)  # purposes whose streams must go back
     timer: Any = None  # answered: its wait for them (RELEASE_WAIT_MS)
+    mark: int = 0  # answered: how many starts and stops there had been (`started`)
 
 
 class StreamQuestion(QObject):
@@ -108,6 +109,10 @@ class StreamQuestion(QObject):
         self._cards: list[Any] = []  # the cards whose answers are followed
         self._words = ("", "", "")  # the question shown and its answers' words
         self._going = False  # what was asked runs: it asks nothing again
+        # Starts and stops of either picture (`started`): what waits runs only if none came
+        # since it was answered (2.13.4, the reviews: dropping it at each newer choice always
+        # missed one more of them)
+        self._starts = 0
         budget.released.connect(self._on_released)
 
     def needs(
@@ -191,21 +196,20 @@ class StreamQuestion(QObject):
             self._stop(slot, replaced)
         for older in [q for q in self._waited if _same_player(q, question)]:
             self._drop(older)  # the viewer chose again for that player: the newer open stands
+        question.mark = self._starts  # (after the stops it asked for: they are its own)
         self._waited.append(question)
         question.timer = QTimer(self, singleShot=True)
         question.timer.timeout.connect(partial(self._go_on, question))
         question.timer.start(RELEASE_WAIT_MS)
         self._on_released(question.provider)
 
-    def chosen(self, purpose: str) -> None:
-        """The player of `purpose` was given something newer that asked nothing (a tune, a
-        film, a file, an outside player, a Stop): an open still waiting there for a stopped
-        recording's stream is no longer the viewer's choice, and never runs."""
-        if self._going:
-            return  # (what waited runs now: its own open)
-        for question in [q for q in self._waited if q.replaced == purpose]:
-            logger.info("A newer choice: what waited for a stream does not open")
-            self._drop(question)
+    def started(self) -> None:
+        """Something starts or stops in a picture, or the pictures change (a channel, a film,
+        a file, an outside player, a close, Stop, a swap or the multiview of the viewer's):
+        an open waiting for a stopped recording's stream runs only if nothing did since it was
+        answered. Not counted while what waited runs (its own open)."""
+        if not self._going:
+            self._starts += 1
 
     def follow_page(self) -> None:
         """The page that shows changed: a question on the other page's card moves to this
@@ -284,6 +288,9 @@ class StreamQuestion(QObject):
 
     def _go_on(self, question: _Question) -> None:
         if not self._drop(question) or self._closed():
+            return
+        if question.mark != self._starts:
+            logger.info("Something newer plays or stopped: what waited for a stream does not open")
             return
         going, self._going = self._going, True
         try:
