@@ -448,6 +448,10 @@ class LagFilter:
         """The burst kept for the tune (taken in after the first report), 0.0 without one."""
         return self._kept
 
+    def rhythm_for(self, reported: float) -> float:
+        """As `burst_for`, the burst the source has now (`rhythm`: never the kept one)."""
+        return self.rhythm if self._burst_seen else max(0.0, reported)
+
     def burst_for(self, reported: float) -> float:
         """The burst it holds (with its hysteresis), or, before its first edge, the one the
         source reports: the first report counts at once."""
@@ -563,6 +567,15 @@ class StayLive:
         # is caught up gently, not jumped (`_catch_up`).
         self.edge: Optional[float] = None
         self._edge_ref: Optional[tuple[float, float]] = None  # (when, edge) the lag was near
+        # Set by the caller: the source sends far faster than real time now (a connection's
+        # backlog arriving at network speed: a tune's, a reopen's, a reconnect's). Its lag is
+        # part of the landing until arrivals settle (`_flood`): no reopen, no jump meanwhile.
+        self.flooding = False
+        # A reopen at live beyond the bound whose landing went far behind again (the backlog
+        # still arriving, 2026-11-22: three reopens in 23 s): none more this tune (`_bound_off`;
+        # far behind is caught up, never jumped), and whether the last reopen was one.
+        self._bound_off = False
+        self._after_bound = False
         # Set by the caller: a stream opened a moment ago (Go live, a seek, a reopen), so its
         # lag is not known yet: no reopen at live until it is (never two opens in a row).
         self.hold_reopen = False
@@ -789,17 +802,18 @@ class StayLive:
         self._floor = min(self._floor, max(0.0, lag_s - self._centre(1)))
         self._start = max(0.0, self._start - dt)
         self._landing = max(0.0, self._landing - dt)
+        self._flood(lag_s)
         if self._owed:  # VLC ran dry: the owed slow-down builds a start's shortfall, all of it
             self._start, self._accepting, self._tolerant = 0.0, False, False
             if self._nudge is not None:
                 self._nudge.limit = None
-        if lag_s > self.target + _REOPEN + self._landed() and not self._caught_up(lag_s, now):
+        if self._beyond_bound(lag_s, now):
             if self.hold_reopen:
                 return Decision(self._rate)  # the stream just opened: its lag comes first
             self._rate, self._nudge = 1.0, None
             if self._reopened:
                 return Decision(1.0)
-            self._reopened = True
+            self._reopened = self._after_bound = True
             return Decision(1.0, reopen_live=True)
         if self._landed_at is None:
             # The target a landing just now aimed at, once the source sent (a stalled first
@@ -914,13 +928,41 @@ class StayLive:
 
     def _backlog(self, behind: float, now: float) -> str:
         """Why far behind (`behind` the target) is a backlog to catch up, not a lag to jump
-        over: only by what the source sent ahead of real time ("the source sent a backlog")
-        and what the last landing left above the target ("the start's backlog"); "" when
-        more than that (a stall, a freeze of VLC's)."""
+        over: only by what the source sent ahead of real time and what the last landing left
+        above the target (a flood's too); "" when more than that (a stall, a freeze of
+        VLC's)."""
+        if self._bound_off:
+            return "a reopen here lands far behind"  # no jump this tune: caught up
         pushed, landed = self._pushed(now), self._floor
         if pushed + landed <= 0 or behind - pushed - landed > _FAR_S:
             return ""
-        return "the source sent a backlog" if pushed >= landed else "the start's backlog"
+        return "a backlog to catch up"
+
+    def _flood(self, lag: float) -> None:
+        """While the source floods (`flooding`), what it brings is part of the landing: the
+        landing's floor follows the lag up, and its window lasts until `_START_S` after the
+        flood, when the distance is judged (2026-11-22: a reopen at live in the middle of it
+        landed the backlog still arriving, three times in 23 s). A landing after a reopen
+        beyond the bound that goes far behind again turns those reopens off for the tune."""
+        behind = lag - self._centre(1)
+        if self.flooding:
+            self._floor = max(self._floor, behind)
+            self._landing = max(self._landing, _START_S)
+        if self._after_bound and not self.hold_reopen:
+            if self._landing <= 0:
+                self._after_bound = False
+            elif behind > _FAR_S:
+                self._bound_off, self._after_bound = True, False
+
+    def _beyond_bound(self, lag: float, now: float) -> bool:
+        """Beyond the target plus `_REOPEN` (and what a landing left above it, up to
+        `_BACKLOG_MAX_S` in all): the reopen at live. Never while the source floods, nor once
+        such a reopen landed far behind again (`_bound_off`), nor for a backlog caught up
+        (`_caught_up`)."""
+        if self.flooding or self._bound_off:
+            return False
+        allowed = _REOPEN + min(self._landed(), _BACKLOG_MAX_S - _REOPEN)
+        return lag > self.target + allowed and not self._caught_up(lag, now)
 
     def _caught_up(self, lag: float, now: float) -> bool:
         """Beyond the target plus `_REOPEN`, but by a backlog (`_backlog`) no more than
@@ -1031,6 +1073,9 @@ class StayLive:
         tolerated = self._accepting or self._tolerant  # a start's rest, a jump's pick
         under = short or (ahead < -self.band(-1) and not tolerated)
         side = 1 if far or behind > self.band(1) else -1 if under else 0
+        if side > 0 and self.flooding:
+            self.absorb()  # a backlog still arriving: judged once arrivals settle
+            return False
         if side > 0 and self.junctions:
             self.absorb()  # the next restart takes it (`Decision.junction`): no rate, no jump
             return False

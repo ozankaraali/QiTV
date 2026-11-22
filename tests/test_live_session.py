@@ -7252,13 +7252,13 @@ class ComingAndGoingBurstTests(LiveSessionCase):
                 else:
                     feed.frozen_until = self.clock.now + 25.0
                 with self.assertLogs("services.live.live_session", "DEBUG") as logs:
-                    feed.run(400.0 if how == "backlog" else 90.0)
+                    feed.run(600.0 if how == "backlog" else 90.0)
                 jumps = [line for line in logs.output if "a jump instead of a catch-up" in line]
                 self.assertEqual(len(jumps), 0 if how == "backlog" else 1, logs.output)
                 if how == "backlog":
                     starts = [line for line in logs.output if "nudges the rate to" in line]
                     self.assertEqual(len(starts), 1, logs.output)
-                    self.assertIn("the source sent a backlog", starts[0])
+                    self.assertIn("a backlog to catch up", starts[0])
                     self.assertLessEqual(max(self.playback.rates[rates:]), 1.05)
                 self.assertAlmostEqual(self.timelines[-1]["lag"], 10.0, delta=1.5)
                 self.live.stop()
@@ -7396,6 +7396,92 @@ class ComingAndGoingBurstTests(LiveSessionCase):
         self.assert_kept(lines)
         self.assertEqual(feed.starved_s, 0.0)
         self.assertEqual(len(self.playback.plays), 1)
+
+
+class FloodTests(LiveSessionCase):
+    """Seen live on 2026-11-22 (a dev build, the raw TS channel of the bursts): the provider
+    hands each new connection its old buffer at network speed, so for a while the live edge
+    races ahead (3-6x real time) and the lag reads 40-87 s. Stay-live reopened at live in the
+    middle of it, landing the backlog still arriving: three reopens in 23 s; after a reconnect
+    it reopened mid-backlog, then caught up at 1.10x and jumped. While a connection's backlog
+    arrives (`StayLive.flooding`) its lag is part of the landing: judged once arrivals settle,
+    caught up gently, and beyond 30 s one reopen; a reopen that lands far behind again is
+    never followed by another."""
+
+    def lines(self, feed, seconds):
+        """Run `feed` `seconds`; stay-live's lines, by when (the clock's)."""
+        said, clock = [], self.clock
+
+        class Said(logging.Handler):
+            def emit(self, record):
+                said.append((clock.now, record.getMessage()))
+
+        log = logging.getLogger("services.live.live_session")
+        handler = Said(logging.DEBUG)
+        log.addHandler(handler)
+        self.addCleanup(log.removeHandler, handler)
+        self.addCleanup(log.setLevel, log.level)
+        log.setLevel(logging.DEBUG)
+        feed.run(seconds)
+        log.removeHandler(handler)
+        return said
+
+    def flood(self, feed, seconds, pace):
+        """The source sends at `pace` x real time for `seconds` (a quarter second's arrivals),
+        then at real time."""
+        feed.sizes = itertools.chain([0.25 * pace] * round(seconds / 0.25), itertools.repeat(0.25))
+        feed.gaps = itertools.repeat(0.25)
+
+    def test_a_reconnects_backlog_is_waited_out_then_caught_up_never_reopened_or_jumped(self):
+        # 17:05:41-17:07:58: the connection broke off, VLC ran dry, the reconnect sent its
+        # backlog at 6x: a reopen 39.6 s behind (target 11.7 s) while it arrived, then 1.10x
+        # 26 s behind, and a jump after a minute.
+        sid = self.start()
+        feed = Feed(self, sid, burst=0.0, edge=3.0).ready()
+        feed.run(60.0)
+        plays = len(self.playback.plays)
+        feed.stalled = True
+        feed.run(15.0)  # the connection broke off: nothing for 15 s
+        feed.stalled = False
+        self.flood(feed, 4.0, 6.0)  # the reconnect: 20 s more than real time in 4 s
+        said = self.lines(feed, 600.0)
+        texts = [text for _, text in said]
+        self.assertEqual(len(self.playback.plays), plays, texts)  # no reopen, no jump
+        self.assertTrue(any("far faster than real time" in text for text in texts))
+        self.assertLessEqual(max(self.playback.rates[-200:] or [1.0]), 1.05)
+        starts = [text for text in texts if "nudges the rate to" in text]
+        self.assertEqual(len(starts), 1, texts)
+        self.assertNotIn("1.10x", " ".join(texts))
+        self.assertAlmostEqual(self.timelines[-1]["lag"], TARGETS["normal"], delta=1.0)
+
+    def test_a_backlog_arriving_at_network_speed_is_reopened_once_after_it_settles(self):
+        # 17:00:28-17:01:28: the edge raced at 3.7x for 50 s (130 s of an old buffer): three
+        # reopens at live in 23 s, each landing the backlog still arriving.
+        sid = self.start()
+        feed = Feed(self, sid, burst=0.0, edge=3.0).ready()
+        feed.run(60.0)
+        plays = len(self.playback.plays)
+        self.flood(feed, 50.0, 3.7)
+        said = self.lines(feed, 120.0)
+        reopens = [when for when, text in said if "reopens at live" in text]
+        settled = [when for when, text in said if "at about real time" in text]
+        self.assertEqual(len(reopens), 1, said)
+        self.assertEqual(len(self.playback.plays), plays + 1)
+        self.assertGreaterEqual(reopens[0], settled[0])  # judged once arrivals settled
+        self.assertAlmostEqual(self.timelines[-1]["lag"], TARGETS["normal"], delta=1.0)
+
+    def test_a_tunes_backlog_at_network_speed_is_waited_out_then_caught_up(self):
+        # The tune's own: the source hands the new connection its buffer at 3x for 10 s
+        # after the start (20 s more), none of it at once (the re-pick's dump).
+        sid = self.start()
+        feed = Feed(self, sid, burst=0.0, edge=3.0).ready()
+        self.flood(feed, 10.0, 3.0)
+        said = self.lines(feed, 600.0)
+        texts = [text for _, text in said]
+        self.assertEqual(len(self.playback.plays), 1, texts)  # no reopen, no jump
+        self.assertNotIn("1.10x", " ".join(texts))
+        self.assertEqual(len([text for text in texts if "nudges the rate to" in text]), 1)
+        self.assertAlmostEqual(self.timelines[-1]["lag"], TARGETS["normal"], delta=1.0)
 
 
 class ServerWindowTests(LiveSessionCase):
