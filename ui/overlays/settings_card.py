@@ -47,7 +47,8 @@ Ctrl/⌘+V in the field types it at the caret, as any text field does. While a F
 its fields keep the text being checked; Cancel still works. A secret field's text is never
 shown, copied, announced, given as a tooltip or put in a repr. 1 u = 1% of the overlay host's
 width (ui_units); in a window too small for the card, its gaps shrink, then the middle is cut
-so that the title and the buttons stay.
+so that the title and the buttons stay. A card made over the TV window's overlay host joins its
+overlays (OverlayHost.add_overlay), so the host's mask, which shows only them, never cuts it.
 """
 
 from __future__ import annotations
@@ -253,6 +254,11 @@ class _Card(Overlay):
         self._second_click = SecondClickGuard(self)
         if parent is not None:
             parent.installEventFilter(self)
+            if hasattr(parent, "add_overlay"):
+                # The TV window's overlay host shows only its overlays (its mask): a card
+                # made over it as it is first needed (Settings' cards) is one of them, or it
+                # was cut off at the drawer's edge (2.14, a 1920-wide window).
+                parent.add_overlay(self)
         self.hide()
 
     # ---- what the subclasses decide ---------------------------------------------------------

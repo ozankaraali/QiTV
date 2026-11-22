@@ -83,13 +83,16 @@ class OverlayHost(QWidget):
 
         Raised here too: one built with the host as its parent already (the PiP label) would
         otherwise stay under every overlay added later, and the full-size transport took the
-        clicks on its buttons."""
-        self._overlays.append(widget)
-        widget.setParent(self)
+        clicks on its buttons. One added again (a card that joined as it was made, 2.14) is
+        only raised and hidden again."""
+        if widget not in self._overlays:
+            self._overlays.append(widget)
+            widget.installEventFilter(self)
+            widget.destroyed.connect(lambda _=None, w=widget: self._forget(w))
+        if widget.parentWidget() is not self:
+            widget.setParent(self)
         widget.raise_()
         widget.hide()
-        widget.installEventFilter(self)
-        widget.destroyed.connect(lambda _=None, w=widget: self._forget(w))
         self._raise_on_top()
 
     def remove_overlay(self, widget: QWidget) -> None:
