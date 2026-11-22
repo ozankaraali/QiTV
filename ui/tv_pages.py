@@ -494,6 +494,14 @@ class TVPages(QObject):
             self._show_page(self._window.player_page)
             self._guard_second_click()
 
+    def leave_library_to_play(self) -> None:
+        """2.14: what plays next plays on the player page, never unseen behind the Library: a
+        Network streams link played from Settings over the Library (Settings goes with it,
+        _show_page). Nothing tunes here; elsewhere than the Library, nothing changes."""
+        if not self._window.closing() and self.library_shown():
+            self._show_page(self._window.player_page)
+            self._set_return_to_library(False)
+
     def stop_corner(self) -> None:
         """× on the corner player: what plays stops (today's stop for the Library) and the
         Library stays, full size. A double-click's second click would land on the Library

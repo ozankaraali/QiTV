@@ -632,6 +632,7 @@ class LibrarySettingsTests(base.WindowCase):
         self.click(page.mapTo(window, QPoint(20, page.height() // 2)), Qt.MouseButton.BackButton)
         self.assertFalse(window.settings.visible())
         self.assertTrue(window.screens.library_shown())
+        self.assertFalse(window.library_layer.isVisible())  # no layer left taking the clicks
 
     def test_a_double_clicks_second_click_on_the_gear_reaches_nothing(self):
         # The ⚙ acts on its release: the second press would land beside Settings, and close it.
@@ -698,10 +699,64 @@ class LibrarySettingsTests(base.WindowCase):
         for _ in range(2):
             QTest.keyClick(window, Qt.Key.Key_Escape)
         self.assertFalse(window.settings.visible())
+        self.assertFalse(window.library_layer.isVisible())
         window.screens.back_to_tv()  # live TV's Add provider: over the TV, as before
         window.add_provider()
         self.assertTrue(form.isVisible())
         self.assertTrue(window.host.isAncestorOf(form))
+
+    def test_a_server_added_over_the_library_leaves_live_tv_alone(self):
+        # The owner's flow: nothing plays, the Library in front; a provider added from its ⚙
+        # is selected for live TV's list, which neither tunes nor opens meanwhile.
+        self.open_library()
+        window = self.window
+        form = window.provider_cards.form
+        window.library_page.nav.settingsRequested.emit()
+        self.assertTrue(window.settings.show_row(ADD_PROVIDER))
+        QTest.keyClick(window, Qt.Key.Key_Return)
+        self.assertTrue(form.isVisible())
+        QGuiApplication.clipboard().setText(AddProviderTests.LINK)
+        QTest.keyClick(window, Qt.Key.Key_V, Qt.KeyboardModifier.ControlModifier)
+        with mock.patch("services.provider_check.check", return_value=Outcome(True)):
+            QTest.keyClick(window, Qt.Key.Key_Return)  # Check and add
+            self.assertTrue(wait_until(lambda: not form.isVisible()))
+        self.assertEqual(self.config.selected_provider_name, "127.0.0.1")
+        toast = window.library_toast  # said over the Library, above Settings
+        self.assertTrue(toast.isVisible())
+        children = window.library_page.children()
+        self.assertGreater(children.index(toast), children.index(window.library_layer))
+        names = [e.text for e in window.library_controller._source_menu().entries]
+        self.assertIn("127.0.0.1", names)  # the Library's source menu lists it
+        elapse(600)  # its setup starts (a closed port: it fails)
+        self.assert_over_the_library()  # Settings stays, on Providers
+        self.assertIn("127.0.0.1", [row.text for row in window.provider_rows.rows()])
+        self.assertFalse(window.controller.playing())  # nothing tuned
+        self.assertEqual(window.pages.mode(), "library")
+        for _ in range(4):  # out of Settings, a layer at a time
+            if not window.settings.visible():
+                break
+            QTest.keyClick(window, Qt.Key.Key_Escape)
+        self.assertFalse(window.settings.visible())
+        elapse(300)
+        self.assertTrue(window.screens.library_shown())
+        self.assertFalse(window.overlays.drawer.isVisible())  # no list due opened
+        self.assertFalse(window.controller.playing())
+        self.assertFalse(window.library_layer.isVisible())
+
+    def test_with_something_in_the_corner_a_click_on_it_closes_settings(self):
+        self.show()
+        self.wait_for_drawer()
+        window = self.window
+        with mock.patch.object(window.controller, "playing", return_value=True):
+            window.screens.open_library("movies")  # what plays goes on in a corner
+        elapse(QApplication.doubleClickInterval() + 80)
+        self.assertEqual(window.pages.mode(), "corner")
+        window.library_page.nav.settingsRequested.emit()
+        self.assert_over_the_library()
+        window.pages.cornerClicked.emit()  # the corner player: the player page again
+        self.assertFalse(window.screens.library_shown())
+        self.assertTrue(window.settings_drawer.isHidden())
+        self.assertFalse(window.library_layer.isVisible())
 
 
 class AddProviderTests(base.WindowCase):
