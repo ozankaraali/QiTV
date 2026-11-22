@@ -1959,7 +1959,9 @@ class HlsSource:
         if self._pending and self._held:  # a break: what was held goes on first, as it is
             before = self._flush_held()
         held, self._held = self._held, b""
-        if weaver.refused and not self._pending:
+        if self._pending:
+            weaver.reset()  # a break: found by time, its new tables tried (`refused` goes)
+        elif weaver.refused:
             return before, held + video  # its PMT cannot take the audio: none is fetched
         start = video_start(video)
         if start is None:  # no picture's time to match: the audio of the same number
