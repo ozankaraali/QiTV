@@ -29,9 +29,14 @@ others' distributions, which may have malware.**
 - **A tune shows the picture at once,** and if the provider's backlog started it far behind (on a
   channel sent as a continuous stream), it moves forward once, as soon as that backlog has
   arrived. Then it moves no more for that backlog.
-- **Fewer changes of speed.** QiTV no longer slows down for small drifts, or for a burst a second
-  longer than before. Each change of speed costs a tiny moment of sound in VLC, so fewer changes
-  sound smoother.
+- **Far fewer changes of speed.** Each change makes VLC's sound jump a moment (what you may
+  have heard as a skip or a scratch), so QiTV now changes speed much less:
+  - it leaves small drifts alone: on a steady channel, being a second or so off where it should
+    be (up to 15% of that distance, at least 1.5 s) no longer starts a change;
+  - on a channel that comes in bursts, it no longer slows down for a burst a second longer than
+    before;
+  - a change goes in one step and comes back in one step, instead of three each way.
+  On a day like the one this was found on, that is about a quarter of the changes.
 - **A pause instead of broken sound.** When the provider stops sending, QiTV now holds the
   picture before VLC runs out (on a channel that comes in bursts, also the first time), and keeps
   it held while the provider only
