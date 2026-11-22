@@ -255,6 +255,21 @@ _LABELS = ("live", "indicator", "times")  # shown, not clicked: over the PiP, cl
 # A quick second click (a double-click) repeats these steps; on any other control it counts
 # once: a toggle (★, ⛶, ▶) would undo itself, a jump (⟲, Next) go one further. The audio dock's
 # previous and next tracks count twice (Plan 4): restart, then the song before; two songs on.
+# A quick second press on these is another click, never a fullscreen toggle: they open or close
+# something, and a second press closes what the first opened.
+_AGAIN = (
+    "audio",
+    "subtitles",
+    "picture",
+    "quality",
+    "volume",
+    "pip",
+    "grid",
+    "layout",
+    "external",
+    "cast",
+    "more",
+)
 _REPEATS = ("back10", "fwd10", "fwd60", "slower", "faster", "prev_track", "next_track")
 # The audio dock's (Plan 4): its buttons take clicks past their icons as the icon buttons do.
 _DOCK_BUTTONS = ("shuffle", "prev_track", "next_track", "repeat", "more", "level")
@@ -2490,9 +2505,11 @@ class Transport(Overlay):
             self.update()
 
     def mouseDoubleClickEvent(self, event: QMouseEvent) -> None:
-        """The second press of a quick double-click: a step again, else nothing more."""
+        """The second press of a quick double-click: a step again, or a button that opens or closes
+        something pressed again, else nothing more."""
         if event.button() == Qt.LeftButton and self._control_at(event.position()) not in (
             *_REPEATS,
+            *_AGAIN,
             "seek",
             "level",
         ):

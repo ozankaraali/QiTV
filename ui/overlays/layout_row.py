@@ -393,15 +393,16 @@ class LayoutRow(Overlay):
             and event.button() not in NAV_BUTTONS  # Back/Forward: the shell's drawer layers
             and self._outside(obj)
         ):
+            control = self._control_under(obj, event)
             if (
                 kind == QEvent.Type.MouseButtonDblClick
+                and control != self._button  # its own button again, quickly: it closes
                 and self._shown.isValid()
                 and self._shown.elapsed() < QApplication.doubleClickInterval()
                 and not self._hint
             ):
                 return True  # the second press of the double-click that opened it
             hint = self._hint
-            control = self._control_under(obj, event)
             self.dismiss()
             if hint:  # a hint's: what was clicked acts (the chip opens the row for good)
                 return False
