@@ -2624,6 +2624,35 @@ class StepDownTests(unittest.TestCase):
         self.captions.answer(True)
         self.assertIs(self.config.get("ai_captions_language_models"), True)
 
+    def test_a_subtitle_track_chosen_while_the_download_is_asked_takes_the_question_down(self):
+        # 2.13.4 (bug scan #15): the question stayed, and its Download turned captions on over
+        # the track just chosen
+        from unittest import mock
+
+        self.captions._enabled = False
+        self.captions._process.running = lambda: False
+        self.captions._speed_unknown = lambda: False
+        self.captions._choose_tier = lambda: "small"
+        with (
+            mock.patch("services.captions.models.installed", return_value=False),
+            mock.patch("services.captions.models.download_size", return_value=893_000_000),
+            mock.patch("services.captions.models.full_size", return_value=3_330_000_000),
+        ):
+            self.captions.toggle()
+        self.assertTrue(self.captions.asking())
+        changed = []
+        self.captions.changed.connect(lambda: changed.append(True))
+        self.captions.give_way()  # a subtitle track chosen
+        self.assertFalse(self.captions.asking())
+        self.assertEqual(self.card.withdrawn, 1)
+        self.assertTrue(changed)  # (a phone's question closes too)
+        started = []
+        self.captions._start_download = lambda: started.append(True)
+        self.captions.answer(True)  # a phone's late answer
+        self.assertEqual(started, [])
+        self.assertIsNone(self.config.get("ai_captions_language_models"))
+        self.assertFalse(self.captions.enabled())
+
     def test_a_model_that_is_here_is_not_asked_for_and_one_not_here_is_not_given(self):
         from unittest import mock
 
