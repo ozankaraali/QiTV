@@ -471,8 +471,16 @@ class CaptionsController(QObject):
         self._auto_on = False
         self._auto_pending = None
         self._toggle_waits = False
+        asked = self._asking
+        if asked:  # a download's question for them goes too (2.13.4, bug scan #15: its
+            # Download turned them on over the track just chosen)
+            self._asking = self._asking_step = self._first_question = False
+            if self._card is not None:
+                self._card.withdraw()
         if self._enabled or self._download is not None:
             self._disable()
+        elif asked:
+            self.changed.emit()  # (a phone's question closes too)
 
     def _toggle(self) -> None:
         """On or off, as the viewer's toggle, for QiTV's own turning them on again (another
@@ -1888,6 +1896,10 @@ class CaptionsController(QObject):
         if self._last is not None:
             moved = position - self._last[0]
             elapsed = now - self._last[1]
+            if moved < -SEEK_S:
+                # back: the lines from there show again, whether read already or anew (2.13.4,
+                # bug scan #14: those before the last that went stayed gone)
+                self._gone = float("-inf")
             # A jump either way (a pause or 1.03x is none): read again where the picture went,
             # unless the run there has read it already.
             if (moved > elapsed + SEEK_S or moved < -SEEK_S) and self._ready:

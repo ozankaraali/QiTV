@@ -506,6 +506,55 @@ class SavedGuideTests(_GuideCase):
         self.assertIsNot(manager.epg, old)
         self.assertEqual(manager._epg_source, source)
 
+    def reindexed(self, mapping, previous=None):
+        """A saved guide shown (still packed), then re-keyed for `mapping` (Settings' change
+        from `previous`)."""
+        self.load(self.manager())
+        manager = self.manager()
+        manager.set_current_epg()
+        self.config.xmltv_channel_map = mapping
+        if previous is None:
+            manager.reindex_programs()
+        else:
+            manager.reindex_programs(previous)
+        return manager
+
+    def found(self, manager, **channel):
+        return [p["title"] for p in manager.get_programs_for_channel(channel)]
+
+    def test_a_channel_no_mapping_names_keeps_its_guide_after_a_mapping_change(self):
+        # Re-keying kept only the channels a mapping named: every other one had no guide until
+        # the next refresh.
+        mapping = MultiKeyDict()
+        mapping[("other.id", "alias.id")] = None
+        manager = self.reindexed(mapping)
+        self.assertEqual(self.titles(manager), ["Old"])
+        self.assertEqual(self.found(manager, name="News"), ["Old"])  # its display name too
+
+    def test_a_mapped_channel_keeps_its_display_names(self):
+        # Its keys became the mapping's alone, as a fresh index has them plus the names.
+        mapping = MultiKeyDict()
+        mapping[("news.test", "extra.id")] = None
+        manager = self.reindexed(mapping)
+        self.assertEqual(self.found(manager, xmltv_id="extra.id", name="Other"), ["Old"])
+        self.assertEqual(self.found(manager, name="News"), ["Old"])
+        self.assertEqual(self.found(manager, name="news"), ["Old"])
+        self.assertEqual(self.titles(manager), ["Old"])
+
+    def test_a_removed_mapping_takes_only_its_own_keys_away(self):
+        previous = MultiKeyDict()
+        previous[("news.test", "extra.id")] = None
+        self.config.xmltv_channel_map = previous
+        manager = self.reindexed(MultiKeyDict(), previous)  # the mapping deleted
+        self.assertEqual(self.titles(manager), ["Old"])
+        self.assertEqual(self.found(manager, name="News"), ["Old"])
+        self.assertEqual(self.found(manager, xmltv_id="extra.id", name="Other"), [])
+        moved = MultiKeyDict()  # an ID moved to another channel's mapping
+        moved[("sport.test", "extra.id")] = None
+        manager = self.reindexed(moved, previous)
+        self.assertEqual(self.found(manager, xmltv_id="extra.id", name="Other"), [])
+        self.assertEqual(self.titles(manager), ["Old"])
+
     def test_a_1x_pickled_guide_is_ignored_and_the_guide_is_fetched(self):
         # Only 1.x saved the guide as <key>.pkl; every 2.x saves <key>.guide.
         guide = MultiKeyDict()

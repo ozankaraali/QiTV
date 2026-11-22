@@ -1958,6 +1958,38 @@ class ControllerTimingTests(unittest.TestCase):
         self.assertEqual(self.at(12.8), "")  # not on again
         self.assertEqual(self.at(13.4), "Nasılsın")
 
+    def rewind_to(self, position):
+        """The picture goes back to `position` as it plays (a seek), then plays on a tick."""
+        self.captions._last = (self.window.live_session.position_s, time.monotonic())
+        self.window.live_session.position_s = position
+        self.captions._tick()  # the seek
+        self.captions._tick()
+        return self.overlay.text
+
+    def test_a_rewind_shows_the_lines_the_run_read_again(self):
+        # 2.13.4 (bug scan #14): a line whose time on screen had ended never showed again
+        run = self.captions._run
+        self.captions._on_caption(run, 10.0, 12.0, "Merhaba")
+        self.captions._on_progress(run, 30.0, 0.3)  # read on to 30 s
+        self.assertEqual(self.at(10.5), "Merhaba")
+        self.assertEqual(self.at(20.0), "")  # its time is over
+        self.assertEqual(self.rewind_to(10.5), "Merhaba")
+        self.assertEqual(self.captions._run, run)  # read already: no new run
+
+    def test_a_rewind_before_the_run_shows_what_the_new_run_writes(self):
+        self.window.live_session.source = ("http://127.0.0.1:1/t/s1/side/3.ts", 3, 50.0)
+        self.captions._start_run()  # a run that reads from 50 s
+        run = self.captions._run
+        self.captions._on_caption(run, 60.0, 62.0, "Merhaba")
+        self.assertEqual(self.at(60.5), "Merhaba")
+        self.window.live_session.position_s = 70.0  # its time is over
+        self.assertEqual(self.at(70.0), "")
+        self.rewind_to(35.5)
+        self.assertEqual(self.captions._run, run + 1)  # read again from there
+        self.captions._on_caption(run + 1, 35.0, 37.0, "Selam")
+        self.captions._tick()
+        self.assertEqual(self.overlay.text, "Selam")
+
     def test_a_late_end_does_not_join_a_line_already_on_screen(self):
         run = self.captions._run
         first = "Uzay aracı bu yıl ilk kez Mars'ın"
@@ -2591,6 +2623,35 @@ class StepDownTests(unittest.TestCase):
         self.captions._start_download = lambda: None
         self.captions.answer(True)
         self.assertIs(self.config.get("ai_captions_language_models"), True)
+
+    def test_a_subtitle_track_chosen_while_the_download_is_asked_takes_the_question_down(self):
+        # 2.13.4 (bug scan #15): the question stayed, and its Download turned captions on over
+        # the track just chosen
+        from unittest import mock
+
+        self.captions._enabled = False
+        self.captions._process.running = lambda: False
+        self.captions._speed_unknown = lambda: False
+        self.captions._choose_tier = lambda: "small"
+        with (
+            mock.patch("services.captions.models.installed", return_value=False),
+            mock.patch("services.captions.models.download_size", return_value=893_000_000),
+            mock.patch("services.captions.models.full_size", return_value=3_330_000_000),
+        ):
+            self.captions.toggle()
+        self.assertTrue(self.captions.asking())
+        changed = []
+        self.captions.changed.connect(lambda: changed.append(True))
+        self.captions.give_way()  # a subtitle track chosen
+        self.assertFalse(self.captions.asking())
+        self.assertEqual(self.card.withdrawn, 1)
+        self.assertTrue(changed)  # (a phone's question closes too)
+        started = []
+        self.captions._start_download = lambda: started.append(True)
+        self.captions.answer(True)  # a phone's late answer
+        self.assertEqual(started, [])
+        self.assertIsNone(self.config.get("ai_captions_language_models"))
+        self.assertFalse(self.captions.enabled())
 
     def test_a_model_that_is_here_is_not_asked_for_and_one_not_here_is_not_given(self):
         from unittest import mock

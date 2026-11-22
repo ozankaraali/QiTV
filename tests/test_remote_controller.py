@@ -341,6 +341,54 @@ if __name__ == "__main__":
     unittest.main()
 
 
+class FailedStartTests(WindowCase):
+    """A remote whose start failed (its port taken, say): its hub was kept, so every change
+    went to a hub with no thread and was lost."""
+
+    DEVICE = {"id": "d1", "name": "Phone A", "paired_at": 1.0, "last_used": 2.0, "keys": []}
+
+    def failed_hub(self):
+        remote, config = self.window.remote, self.window.config_manager
+        config.remote = {"version": 1, "enabled": True, "relay": False, "devices": [self.DEVICE]}
+        self.addCleanup(setattr, remote, "hub", None)
+        taken = OSError(98, "Address already in use")
+        with mock.patch("services.remote.server.start_home_door", side_effect=taken):
+            remote.apply_config()
+            hub = remote.hub
+            self.assertTrue(hub.ready.wait(5))
+            self.assertTrue(wait_until(lambda: not hub.running))
+        return hub
+
+    def test_a_change_after_a_failed_start_starts_the_remote_again(self):
+        failed = self.failed_hub()
+        remote = self.window.remote
+        self.window.config_manager.remote = {**self.window.config_manager.remote, "relay": True}
+        with mock.patch("services.remote.hub.RemoteHub") as hub:
+            remote.apply_config()  # Settings' relay switch
+        self.assertIsNot(remote.hub, failed)
+        hub.return_value.start.assert_called_once()
+        self.assertIs(hub.return_value.start.call_args.args[0]["relay"], True)
+
+    def test_a_phone_removed_after_a_failed_start_goes_from_the_settings(self):
+        self.failed_hub()
+        remote = self.window.remote
+        remote._names_from(self.window.config_manager.remote)
+        remote.remove_device("d1")
+        self.assertEqual(self.window.config_manager.remote["devices"], [])
+        self.assertIn(("Phone A can no longer control QiTV", "info"), self.toasts)
+
+    def test_phone_remote_in_the_menu_tries_a_failed_remote_again(self):
+        failed = self.failed_hub()
+        with (
+            mock.patch("services.remote.hub.RemoteHub") as hub,
+            mock.patch.object(self.window.pair_overlay, "open") as pairing,
+        ):
+            self.window.open_phone_remote()
+        self.assertIsNot(self.window.remote.hub, failed)
+        hub.return_value.start.assert_called_once()
+        pairing.assert_called_once()
+
+
 class PhoneQuestionTests(WindowCase):
     """2.6: the phone's Watch with no stream free asks on that phone (QiTV's words); its
     answer reaches the TV, a stale or a gone phone's answers keep the recording."""

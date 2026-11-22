@@ -608,6 +608,9 @@ class RewindBesideRecordingTests(_RecordCase):
 
 SCHEDULED = "sched:a@1"  # a scheduled recording's REC sign name, its stream's budget purpose
 SCHEDULED_CHANNEL = {**CHANNELS[2], "_provider": "Home"}
+BACKUP_FOUR = {**CHANNELS[3], "_provider": "Backup"}  # another provider's (none records there)
+BACKUP_ONE = {**CHANNELS[0], "_provider": "Backup"}
+BACKUP_FILM = {**MOVIE, "_provider": "Backup"}  # a second stream there beside a channel
 
 
 class ScheduledRecordingQuestionTests(_RecordCase):
@@ -650,6 +653,154 @@ class ScheduledRecordingQuestionTests(_RecordCase):
         self.controller.handle(Action.OK)
         self.assertEqual(self.stopped, [SCHEDULED])
         self.assertEqual(len(self.catalog.links), links)  # its stream is not back yet
+        self.scheduler_lets_go()
+        self.assertEqual(self.requested()[-1], "Two")
+
+    def stop_it_for_a_tune(self):
+        """Tune Two, Stop recording: the tune waits for the recording's stream."""
+        self.tune(1)
+        self.controller.handle(Action.SEEK_FWD)  # to Stop recording
+        self.controller.handle(Action.OK)
+        self.assertEqual(self.stopped, [SCHEDULED])
+
+    def test_a_newer_choice_asking_nothing_drops_the_tune_that_waits(self):
+        # 2.13.4: the waiting tune ran once the stream was back, over what was chosen since
+        self.stop_it_for_a_tune()
+        self.controller.tune(BACKUP_TWO, group_key="10", channels=[BACKUP_TWO])  # asks nothing
+        self.assertTrue(self.question.isHidden())
+        links = len(self.catalog.links)
+        self.scheduler_lets_go()
+        self.ready("http://backup/2")
+        self.assertEqual(len(self.catalog.links), links)  # the older tune never runs
+        self.assertEqual(self.controller._channel.get("_provider"), "Backup")
+
+    def test_a_file_opened_since_drops_the_tune_that_waits(self):
+        self.stop_it_for_a_tune()
+        self.controller.play_file("/videos/clip.mp4")
+        links = len(self.catalog.links)
+        self.scheduler_lets_go()
+        self.assertEqual(len(self.catalog.links), links)
+
+    def test_a_stop_drops_the_tune_that_waits(self):
+        self.stop_it_for_a_tune()
+        self.controller.stop()
+        links = len(self.catalog.links)
+        self.scheduler_lets_go()
+        self.assertEqual(len(self.catalog.links), links)
+
+    def start_backup_large(self):
+        """Another provider's Four plays large (Home's stream stays the recording's)."""
+        live = self.controller.live
+        count = len(live.named("start"))
+        self.controller.tune(BACKUP_FOUR, group_key="10", channels=[BACKUP_FOUR])
+        self.ready("http://backup/4")
+        self.assertTrue(wait_until(lambda: len(live.named("start")) == count + 1))
+        live.play_pipeline()
+
+    def test_the_channel_playing_chosen_again_drops_the_tune_that_waits(self):
+        # 2.13.4 (final review M1): the stay path returned before anything dropped it
+        self.start_backup_large()
+        self.stop_it_for_a_tune()
+        self.controller.tune(BACKUP_FOUR, group_key="10", channels=[BACKUP_FOUR])  # it stays
+        links = len(self.catalog.links)
+        self.scheduler_lets_go()
+        self.assertEqual(len(self.catalog.links), links)
+        self.assertEqual(self.controller._channel.get("_provider"), "Backup")
+
+    def test_the_small_pictures_channel_swapped_in_drops_the_tune_that_waits(self):
+        # 2.13.4 (final review M1): a swap returned before anything dropped it
+        self.catalog.current_provider = lambda: {"name": "Home", "type": "STB", "max_streams": 2}
+        self.start_backup_large()
+        self.open_small(CHANNELS[0])
+        self.stop_it_for_a_tune()  # the small picture's and the recording's: none free
+        self.tune(0)  # One, small: swapped in
+        self.assertEqual(self.controller._channel, CHANNELS[0])
+        links = len(self.catalog.links)
+        self.scheduler_lets_go()
+        self.assertEqual(len(self.catalog.links), links)
+        self.assertEqual(self.controller._channel, CHANNELS[0])
+
+    def stop_it_for_a_small_two(self):
+        """Open Two small, Stop recording: it waits for the recording's stream."""
+        self.controller.open_pip(CHANNELS[1], group_key="10", channels=CHANNELS)
+        self.assertTrue(self.question.isVisibleTo(self.host))
+        self.controller.handle(Action.SEEK_FWD)  # to Stop recording
+        self.controller.handle(Action.OK)
+        self.assertEqual(self.stopped, [SCHEDULED])
+
+    def test_a_stop_drops_the_small_picture_that_waits(self):
+        # 2.13.4 (final review M1): it opened once the stream was back, after Stop
+        self.start_backup_large()
+        self.stop_it_for_a_small_two()
+        self.controller.stop()
+        links = len(self.catalog.links)
+        self.scheduler_lets_go()
+        self.assertEqual(len(self.catalog.links), links)
+        self.assertFalse(self.sessions.pip_open() or self.sessions.pip_opening())
+
+    def test_the_small_pictures_close_drops_what_waits_to_open_there(self):
+        # 2.13.4 (re-review I1): its ✕ left the open waiting; it opened a new small picture
+        self.start_backup_large()
+        self.open_small(BACKUP_ONE)
+        self.stop_it_for_a_small_two()
+        self.label.closeRequested.emit()  # the small picture's ✕
+        self.assertFalse(self.sessions.pip_open())
+        links = len(self.catalog.links)
+        self.scheduler_lets_go()
+        self.assertEqual(len(self.catalog.links), links)
+        self.assertFalse(self.sessions.pip_open() or self.sessions.pip_opening())
+
+    def play_backup_film_from_the_library(self):
+        """Four plays large; a film of its provider from the Library: Four goes small."""
+        self.controller.play_vod(BACKUP_FILM, "movie", play_context(), from_library=True)
+        self.ready("http://vod/heat.mkv")
+        self.assertIs(self.sessions.large(), self.pip_slot)  # the film large, Four small
+
+    def test_a_film_from_the_library_drops_the_tune_that_waits(self):
+        # 2.13.4 (re-review I2): the drop came after Four went small, for the film's picture
+        self.start_backup_large()
+        self.stop_it_for_a_tune()
+        self.play_backup_film_from_the_library()
+        links = len(self.catalog.links)
+        self.scheduler_lets_go()
+        self.assertEqual(len(self.catalog.links), links)
+        self.assertIs(self.sessions.large(), self.pip_slot)  # the film stays large
+
+    def test_the_films_next_drops_the_tune_that_waits(self):
+        # 2.13.4 (re-review I3): the film's Next went on as autoplay's own, and the tune that
+        # waited then replaced the next film
+        ferry = {**BACKUP_FILM, "id": "m8", "name": "Night Ferry", "cmd": "http://vod/ferry"}
+        films = [BACKUP_FILM, ferry]
+        self.controller.play_vod(BACKUP_FILM, "movie", play_context(genre_items=films))
+        self.ready("http://vod/heat.mkv")
+        self.stop_it_for_a_tune()
+        self.transport.nextRequested.emit()  # the film's Next
+        self.assertEqual(self.requested()[-1], "Night Ferry")
+        links = len(self.catalog.links)
+        self.scheduler_lets_go()
+        self.ready("http://vod/ferry")
+        self.assertEqual(len(self.catalog.links), links)
+        self.assertNotEqual(self.controller._channel, CHANNELS[1])  # Two never tunes
+
+    def test_a_cast_drops_what_waits_to_open_small(self):
+        # 2.13.4 (re-review I3): the small picture closing for a cast dropped nothing, and
+        # the channel opened small on the TV while it cast
+        self.start_backup_large()
+        self.stop_it_for_a_small_two()
+        self.controller._one_picture_for_cast()  # a cast starts (CastControls' one picture)
+        links = len(self.catalog.links)
+        self.scheduler_lets_go()
+        self.assertEqual(len(self.catalog.links), links)
+        self.assertFalse(self.sessions.pip_open() or self.sessions.pip_opening())
+
+    def test_qitvs_own_swap_leaves_the_tune_that_waits(self):
+        # 2.13.4 (re-review M3): the film failing gives Four the big picture back; the tune
+        # chosen meanwhile is still the viewer's newest choice
+        self.start_backup_large()
+        self.play_backup_film_from_the_library()
+        self.stop_it_for_a_tune()
+        self.pip_session.errorOccurred.emit("The stream could not be opened")  # the film
+        self.assertIs(self.sessions.large(), self.main_slot)  # Four large again
         self.scheduler_lets_go()
         self.assertEqual(self.requested()[-1], "Two")
 

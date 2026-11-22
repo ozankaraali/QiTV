@@ -15,7 +15,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 import logging
-from typing import Callable, Optional
+from typing import Any, Callable, Optional
 
 from PySide6.QtCore import QObject
 
@@ -90,6 +90,9 @@ class Autoplay(QObject):
         self._declined = declined
         self._next: Optional[tuple[dict, str, dict]] = None  # what the card offers
         self._awaiting: Optional[_Awaiting] = None
+        # the catalog of the awaited season's own provider, heard while it is awaited (the
+        # page's forwards only the provider it shows)
+        self._own: Any = None
         self._closed = False
         card.playNow.connect(self._on_play_now)
         card.cancelled.connect(self._on_cancelled)
@@ -191,7 +194,14 @@ class Autoplay(QObject):
                 logger.info("Season %s has no episodes after loading them", season_id)
                 self._notify(translate(NEXT_SEASON_FAILED_TEXT), "error")
                 return
+            try:
+                own = self._own_catalog(series)
+            except KeyError:  # its provider is no longer in the list: nothing would answer
+                logger.info("Season %s: its provider is gone", season_id)
+                self._notify(translate(NEXT_SEASON_FAILED_TEXT), "error")
+                return
             self._awaiting = _Awaiting(target, play_now, str(series.get("id")), season_id)
+            self._hear(own)
             self._set_hint(translate(LOADING_NEXT_SEASON_TEXT))
             self.catalog.request_episodes(series, result.season)
             return
@@ -216,7 +226,43 @@ class Autoplay(QObject):
             subtitle = genre_title(result.item, groups)
         self.card.show_next(item_title(result.item, episode=episode), subtitle, kind=kind)
 
+    def _own_catalog(self, series: dict) -> Any:
+        """The catalog of the series' own provider, behind a page that shows one provider's
+        lists (BrowsedCatalog.catalog_for: KeyError when that provider is gone); None when the
+        shell's catalog is that catalog itself. 2.13.4 (bug scan #16): a Library episode of
+        another provider than the TV page's waited for good, its season's answer never
+        forwarded."""
+        catalog_for = getattr(self.catalog, "catalog_for", None)
+        if not callable(catalog_for):
+            return None
+        own = catalog_for(series)
+        return own if own is not self.catalog else None
+
+    def _hear(self, own: Any) -> None:
+        """Hear `own`'s answers while a season is awaited (the page's, when it forwards them
+        too, are the same answer: the first one ends the wait)."""
+        self._unhear()
+        if own is None:
+            return
+        own.episodesReady.connect(self._on_episodes_ready)
+        own.episodesFailed.connect(self._on_episodes_failed)
+        self._own = own
+
+    def _unhear(self) -> None:
+        own, self._own = self._own, None
+        if own is None:
+            return
+        for signal, slot in (
+            (own.episodesReady, self._on_episodes_ready),
+            (own.episodesFailed, self._on_episodes_failed),
+        ):
+            try:
+                signal.disconnect(slot)
+            except RuntimeError, TypeError:
+                pass  # (a catalog the hub rebuilt and let go)
+
     def _stop_waiting(self) -> None:
+        self._unhear()
         if self._awaiting is not None:
             self._awaiting = None
             self._set_hint(None)

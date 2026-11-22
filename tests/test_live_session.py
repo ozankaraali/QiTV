@@ -2857,6 +2857,77 @@ class StayLiveTests(LiveSessionCase):
         self.assertEqual(self.timelines[-1]["shown"], 2.5)
         self.assertEqual(len(self.playback.plays), 1)
 
+    def test_a_nudge_is_said_as_it_starts_and_as_it_ends(self):
+        # 2.13.4: the log says each nudge as it starts (its rate, why, the lag and the target)
+        # and as it ends, at INFO, and with the detailed log each rate VLC is set to, so a
+        # moment the viewer names lines up with the rate it played at.
+        sid = self.start()
+        feed = Feed(self, sid, burst=0.0, edge=6.0).ready()
+        with self.assertLogs("services.live.live_session", "DEBUG") as logs:
+            feed.run(214.0)
+        said = [(record.levelname, record.getMessage()) for record in logs.records]
+        info = [text for level, text in said if level == "INFO"]
+        starts = [text for text in info if text.startswith("Stay-live nudges the rate")]
+        ends = [text for text in info if text.startswith("Stay-live's 1.03x nudge ends")]
+        self.assertEqual(len(starts), 1)
+        self.assertRegex(
+            starts[0],
+            r"^Stay-live nudges the rate to 1\.03x \d+\.\d s behind \(target 2\.5 s\): "
+            r"behind the target\.$",
+        )
+        self.assertEqual(len(ends), 1)
+        self.assertRegex(ends[0], r" ends \d+\.\d s behind \(target 2\.5 s\) after \d+ s\.$")
+        rates = [text for level, text in said if level == "DEBUG" and "VLC's rate" in text]
+        self.assertEqual(
+            rates,
+            [
+                "VLC's rate is now 1.01x (was 1x).",
+                "VLC's rate is now 1.02x (was 1.01x).",
+                "VLC's rate is now 1.03x (was 1.02x).",
+                "VLC's rate is now 1.02x (was 1.03x).",
+                "VLC's rate is now 1.01x (was 1.02x).",
+                "VLC's rate is now 1x (was 1.01x).",
+            ],
+        )
+        texts = [text for _, text in said]
+        self.assertLess(texts.index(starts[0]), texts.index(rates[0]))  # the start, then its rate
+        self.assertLess(texts.index(rates[2]), texts.index(ends[0]))
+        self.assertLess(texts.index(ends[0]), texts.index(rates[-1]))  # it ends back at 1x
+
+    def test_the_rate_lines_are_capped_each_minute(self):
+        self.patch("_RATE_LINES", 2)
+        sid = self.start()
+        feed = Feed(self, sid, burst=0.0, edge=6.0).ready()
+        with self.assertLogs("services.live.live_session", "DEBUG") as logs:
+            feed.run(20.0)  # the nudge starts, ramping up a step a second
+        texts = [record.getMessage() for record in logs.records]
+        self.assertEqual(texts.count(live_session._RATE_CUT), 1)
+        cut = texts.index(live_session._RATE_CUT)
+        self.assertEqual(
+            [text for text in texts[:cut] if "Stay-live" in text or "VLC's rate" in text],
+            [texts[cut - 2], texts[cut - 1]],
+        )
+        self.assertFalse(any("VLC's rate" in text for text in texts[cut + 1 :]))
+
+    def test_a_burst_stay_live_takes_in_is_said(self):
+        # 2.13.4: the source's burst as stay-live counts it (with its hysteresis), as it
+        # changes, with what the helper measures then.
+        sid = self.start()
+        feed = Feed(self, sid, burst=10.0, edge=12.0, metered=True).ready()
+        with self.assertLogs("services.live.live_session", "DEBUG") as logs:
+            feed.run(60.0)
+        said = [record.getMessage() for record in logs.records if "burst as" in record.getMessage()]
+        self.assertEqual(
+            said,
+            [
+                # With the detailed log, what the helper measures as it changes ...
+                "The helper measures the source's burst as 10.0 s now (was 0.0 s).",
+                # ... and once its hysteresis took it in, what stay-live counts.
+                "Stay-live counts the source's burst as 10.0 s now (was 0.0 s; the helper "
+                "measures 10.0 s).",
+            ],
+        )
+
     def test_segmented_hls_arrivals_change_the_rate_once_at_most(self):
         """Reported on a public HLS channel: every 7 s a batch of 6 s, every sixth
         12 s, so the lag saws by 6-12 s around a mean that wanders by itself. 2.0.x changed the
@@ -3880,9 +3951,12 @@ class RateHealthTests(LiveSessionCase):
         self.assertEqual(self.playback.rates, rates)  # never changed again
         self.assertEqual(len(self.playback.plays), 1)  # and no jump to live
         self.assertEqual(self.timelines[-1]["rate"], 1.0)
-        self.assertEqual(len(logs.records), 1, logs.output)  # said once (shown when not)
-        self.assertNotIn("provider.example", logs.output[0])
-        self.assertNotIn("://", logs.output[0])
+        # Said once (shown when not), beside stay-live's own lines about its nudge (2.13.4).
+        said = [line for line in logs.output if "Stay-live" not in line]
+        self.assertEqual(len(said), 1, logs.output)
+        for line in logs.output:
+            self.assertNotIn("provider.example", line)
+            self.assertNotIn("://", line)
 
     def test_a_steady_channel_that_cannot_catch_up_plays_at_normal_speed(self):
         sid = self.start()
@@ -4520,7 +4594,9 @@ class MemoryTests(LiveSessionCase):
             self.assertGreater(self.timelines[-1]["lag"], TARGETS["normal"] + 3.0)
             self.tune("B", edge=12.0).run(5.0)
             self.assertEqual(self.playback.rates[rates], 1.0333)  # another channel: as before
-        self.assertEqual(len(logs.records), 1)  # said once for the channel
+        # Said once for the channel, beside stay-live's own lines about its nudges (2.13.4).
+        said = [line for line in logs.output if "Stay-live" not in line]
+        self.assertEqual(len(said), 1, logs.output)
 
     def test_a_channel_that_could_not_change_speed_is_tried_again_after_a_day(self):
         now = [1_000_000.0]
@@ -7646,6 +7722,99 @@ class ServerWindowFixTests(LiveSessionCase):
         self.assertAlmostEqual(self.timelines[-1]["position"], 30.0)
         self.live.seek_relative(-10.0)
         self.assertAlmostEqual(self.timelines[-1]["position"], 18.0)  # the segment holding 20
+
+    # ---- 2.13.4: a start afresh lets the server part go too ------------------------------
+    def assert_fresh_after_the_part(self, sid, part):
+        """The old live session and the part are closed, and the fresh session opens only
+        once both closes are answered."""
+        self.assertIn(sid, self.engine.closed)
+        self.assertIn(part, self.engine.closed)
+        self.assertFalse(self.live.in_server_part())
+        opens = len(self.engine.opened)
+        self.engine._answered.add(sid)
+        self.engine.sessionClosed.emit(sid)  # the old live session's close alone
+        self.assertEqual(len(self.engine.opened), opens)  # the part's still counts
+        self.engine.answer()
+        self.assertEqual(len(self.engine.opened), opens + 1)
+        return self.engine.last_sid
+
+    def test_a_recovered_sessions_failure_after_a_part_closes_the_part_it_kept(self):
+        # One stream: the part ran into the buffer (kept: what came plays again locally) and
+        # the live upstream was asked back; the helper died meanwhile (the buffer went) and
+        # the reopened channel failed for good. As any recovered session's failure (no part
+        # resume is pending after a recovery), it plays directly once the old session and
+        # the part's both closed.
+        sid, part = self.in_part(-300.0, one_stream=True)
+        self.engine.sessionEnded.emit(part)
+        self.playback.ended.emit()  # VLC read it to its end: on in the buffer
+        self.assertNotIn(part, self.engine.closed)
+        self.assertEqual([resume[0] for resume in self.engine.resumes], [sid])
+        self.engine.reset(sid)  # the helper died: its buffer went
+        self.engine.sessionFailed.emit(sid, "internal", "The live buffer stopped unexpectedly.")
+        self.engine.sessionFailed.emit(sid, "network", "The channel did not answer.")
+        self.assertEqual((sid in self.engine.closed, part in self.engine.closed), (True, True))
+        plays = len(self.playback.plays)
+        self.engine._answered.add(sid)
+        self.engine.sessionClosed.emit(sid)  # the old live session's close alone
+        self.assertEqual(len(self.playback.plays), plays)  # the part's still counts
+        self.engine.answer()
+        self.assertEqual(self.playback.plays[-1], DIRECT)
+        self.assertEqual(len(self.engine.opened), 2)  # never a session afresh
+        self.assertNotIn(KEPT_ONLY, self.notices)
+
+    def test_a_start_afresh_never_opens_beside_a_reopened_part(self):
+        # One stream: back into the buffer the live upstream was asked back, and a step back
+        # before its first segment came parked it again for a new part. The helper died: the
+        # part was reopened (an upstream of its own), the parked memory buffer was not (it
+        # went). The fresh session never opens beside the part's upstream, and nothing of
+        # the part stays: a recording of the fresh session is not refused as a parked one's.
+        sid, part = self.in_part(-300.0, one_stream=True)
+        self.live.seek_to(30.0)  # into the buffer: the part goes
+        self.engine.answer()  # its connection let go: the live upstream is asked back
+        self.assertEqual([resume[0] for resume in self.engine.resumes], [sid])
+        self.live.seek_to(-300.0)  # ← before the new run came: parked again for a part
+        self.engine.sessionParked.emit(sid)
+        second = self.engine.last_sid
+        self.assertNotIn(second, (sid, part))
+        own = [Span(0, 0.0, 6.0, False, media_seq=40), Span(1, 6.0, 12.0, False, media_seq=41)]
+        self.engine.buffer(second, own, hls=True, part_wall=10_000.0 - 300.0)
+        self.engine.sessionReady.emit(second)
+        self.assertTrue(self.live.in_server_part())
+        # The helper died: the part is reopened under its sid, the parked buffer is gone.
+        self.engine.sessionFailed.emit(second, "internal", "The live buffer stopped unexpectedly.")
+        self.engine.reset(sid)
+        self.engine.sessionFailed.emit(sid, "crashed", "The live buffer stopped unexpectedly.")
+        fresh = self.assert_fresh_after_the_part(sid, second)
+        self.engine.buffer(fresh, segments(0, 10))
+        self.engine.sessionReady.emit(fresh)
+        self.step(2.0)
+        self.playback.set_state(PlaybackState.PLAYING)
+        self.assertTrue(self.live.start_recording("/tmp/qitv-test.ts"))
+        self.assertEqual(self.engine.recordings[-1][1], fresh)
+        self.assertNotIn(PART_NOT_RECORDED, self.notices)
+
+    def test_a_recovered_session_is_no_part_resume_any_more(self):
+        # One stream: back from a part the live upstream was asked back, and the helper died
+        # before the new run came: the engine reopened the session (it answers ready, never
+        # resumed). Its refusal then is any session's: nothing plays, never a resume asked
+        # again of a live session, nor a start afresh on a provider that refused.
+        self.live._part_retry_ms = 0
+        sid, _part = self.in_part(-300.0, one_stream=True)
+        self.live.seek_to(30.0)  # into the buffer: the part goes
+        self.engine.answer()  # its connection let go: the live upstream is asked back
+        self.assertEqual([resume[0] for resume in self.engine.resumes], [sid])
+        self.engine.reset(sid)  # the helper died: its buffer went
+        self.engine.sessionFailed.emit(sid, "internal", "The live buffer stopped unexpectedly.")
+        self.engine.buffer(sid, self.SPANS[:10], hls=True, window=86400.0)  # the reopened one
+        self.engine.sessionReady.emit(sid)
+        opens = len(self.engine.opened)
+        for _ in range(2):
+            self.engine.sessionFailed.emit(sid, "http", STREAM_LIMIT)
+            pause(20)
+        self.assertEqual(len(self.engine.resumes), 1)
+        self.assertNotIn(KEPT_ONLY, self.notices)
+        self.assertEqual(len(self.engine.opened), opens)
+        self.assertTrue(self.failures)  # refused: nothing plays
 
 
 class SizeCapTests(LiveSessionCase):

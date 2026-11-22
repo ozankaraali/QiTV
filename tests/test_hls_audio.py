@@ -163,6 +163,37 @@ class AudioWeaverTests(unittest.TestCase):
         out = AudioWeaver().weave(self.video, audio_ts(4, 0x102))
         self.assert_woven(out, 0x102, 900000, int(4 * CLOCK) // AUDIO_TICKS)
 
+    def test_a_pmt_without_room_for_the_audio_refuses_it_until_a_break(self):
+        # A PMT section that fills its packet: the video goes on as it came (it would not play
+        # the audio unlisted), and the weaver says so once; a break tries the tables again.
+        def full(p: bytes) -> bytes:
+            if pid_of(p) != PMT_PID or not p[1] & 0x40:
+                return p
+            section = ts._section_at(p, 0)
+            assert section is not None
+            info = bytes([0xF0, 160]) + b"\x00" * 160  # a private descriptor
+            body = section[8:10] + (0xF000 | len(info)).to_bytes(2, "big") + info
+            body += section[12 : len(section) - 4]
+            head = bytes([0x02]) + (0xB000 | (5 + len(body) + 4)).to_bytes(2, "big")
+            section = head + section[3:8] + body
+            section += crc32_mpeg(section).to_bytes(4, "big")
+            return p[:4] + b"\x00" + section + b"\xff" * (183 - len(section))
+
+        self.video = b"".join(full(p) for p in packets(self.video))
+        weaver = AudioWeaver()
+        weaver.add(audio_ts(8, 0x102))
+        with self.assertLogs("services.live.hls_audio", "INFO") as logs:
+            self.assertEqual(weaver.weave_due(self.video, 900000 + 4 * CLOCK), self.video)
+        self.assertEqual(len(logs.output), 1)
+        self.assertTrue(weaver.refused)
+        self.assertEqual(weaver._queue, [])  # nothing kept for a video that cannot take it
+        self.assertEqual(weaver.weave(self.video, audio_ts(4, 0x102)), self.video)
+        weaver.reset()  # a break
+        self.assertFalse(weaver.refused)
+        weaver.add(audio_ts(4, 0x102))
+        out = weaver.weave_due(make_stream(4, audio=False), 900000 + 4 * CLOCK)
+        self.assertIn((0x0F, 0x102), pmt_streams(out))  # tables with room take it again
+
     def test_unreadable_audio_leaves_the_video_as_it_came(self):
         for audio in (b"", b"\x00" * 1000, packed(1, None), b"\x47" + b"\x00" * 1000):
             with self.subTest(audio=audio[:4]):

@@ -203,9 +203,10 @@ class HeldSlot:
         self.ticket: Optional[int] = None
 
     def take(self, provider: str) -> None:
-        """Hold a ticket for `provider` in place of any held one; never queued."""
+        """Hold a ticket for `provider` in place of any held one, at once whatever the limit
+        (a learned one too); never queued."""
         self.give_back()
-        self.ticket = self.budget.request(provider, None, purpose=self.purpose)
+        self.ticket = self.budget.hold(provider, purpose=self.purpose)
 
     def try_take(self, provider: str, limit: Optional[int]) -> bool:
         """Hold a ticket for `provider` in place of any held one when its `limit` leaves one

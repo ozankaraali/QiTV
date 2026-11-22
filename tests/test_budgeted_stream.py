@@ -163,6 +163,19 @@ class PurposeTests(_Fixture):
         held.give_back()
         self.assertEqual(self.budget.holders(P), [])
 
+    def test_a_held_slot_is_taken_at_once_under_a_learned_limit(self):
+        # A limit learned for the run (a recording's stream dropped) never queues the main
+        # player's direct play: it plays, so it counts, and peers see the slot taken.
+        self.budget.learn(P, 1)
+        self.budget.request(P, None, purpose="rec")
+        held = HeldSlot(self.budget, "main")
+        held.take(P)
+        self.assertEqual(self.budget.provider_of(held.ticket), P)
+        self.assertEqual(sorted(self.budget.holders(P)), ["main", "rec"])
+        self.assertEqual(self.budget._waiting, {})
+        held.give_back()
+        self.assertEqual(self.budget.holders(P), ["rec"])
+
 
 class TryTakeTests(_Fixture):
     """A multiview tile's direct play takes a slot only within the provider's limit."""

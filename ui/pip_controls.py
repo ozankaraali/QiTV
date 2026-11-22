@@ -148,6 +148,7 @@ class PipControls(QObject):
         needs_stream: Callable[[dict, str, Callable[[], None]], bool] = lambda *_: False,
         borrow: Callable[[dict, str, str], Any] = lambda item, provider, purpose: None,
         owned: Callable[[dict], dict] = lambda item: item,
+        started: Callable[[], None] = lambda: None,
         parent: Optional[QObject] = None,
     ) -> None:
         """`frame` is the PipFrame and `label` the PipLabel (None in tests without them).
@@ -162,6 +163,9 @@ class PipControls(QObject):
         `needs_stream(channel, purpose, then)` asks before a recording is stopped for the
         stream a channel opening over `purpose`'s needs (2.6): True, asked (`then` follows).
         `owned(channel)` is a link stamped with whose stream it is now (the controller's).
+        `started()` says the small picture starts or stops something, or the viewer swaps
+        (StreamQuestion.started: what waits for a stopped recording's stream runs only when
+        nothing did meanwhile, 2.13.4).
         """
         super().__init__(parent)
         self.sessions = sessions
@@ -189,6 +193,7 @@ class PipControls(QObject):
         self._needs_stream = needs_stream
         self._borrow = borrow  # 2.9.7: a scheduled recording's session, to watch small
         self._owned = owned
+        self._started = started
         self._views: dict[str, SlotView] = {}
         self._wanted: Optional[tuple[Target, ZapContext]] = None  # its link is on its way
         self._link: Optional[Target] = None  # the one link request in flight
@@ -233,7 +238,7 @@ class PipControls(QObject):
             self._frame.swapRequested.connect(self.user_swap)
         label = self._label
         if label is not None:
-            label.closeRequested.connect(self.close)
+            label.closeRequested.connect(self.close_chosen)
             label.muteRequested.connect(self._toggle_mute)
             label.swapRequested.connect(self.user_swap)
 
@@ -343,6 +348,7 @@ class PipControls(QObject):
 
     def user_swap(self) -> bool:
         """S, a click on the PiP or its ⇄: a swap that has to wait says so."""
+        self._started()  # the viewer's swap (QiTV's own call the shell's swap)
         swapped = self._swap()
         if not swapped and self.sessions.pip_open():
             self._toast(translate(SWITCHING), "info", SWITCHING_MS)
@@ -382,7 +388,7 @@ class PipControls(QObject):
         if self._closed():
             return
         if self.busy():
-            self.close()
+            self.close_chosen()
             return
         if self._refused():
             return
@@ -399,6 +405,7 @@ class PipControls(QObject):
         channel = self._owned(channel)  # a link: whose stream it is now (its limit)
         if self._refused():
             return
+        self._started()  # the small picture starts something, however it opens
         if ZapContext.same(channel, self._large_channel()):
             self._toast(translate(ALREADY_LARGE))
             return
@@ -569,6 +576,12 @@ class PipControls(QObject):
             return False
         self._toast(limit_message(limit), "error", ERROR_MS)
         return True
+
+    def close_chosen(self) -> None:
+        """The viewer closes the small picture (its ✕, P): a stop that counts (`started`;
+        `close` alone is QiTV's own too: a failed small picture, a failed film beside it)."""
+        self._started()
+        self.close()
 
     def close(self, *, keep_recording: bool = True) -> None:
         """Close the small picture, or forget the one waiting to open. 2.6: a small picture

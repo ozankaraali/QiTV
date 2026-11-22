@@ -27,7 +27,7 @@ class DrawerLookTest(unittest.TestCase):
         cls.app = QApplication.instance() or QApplication([])
 
     def test_the_drawer_uses_the_shared_metrics(self) -> None:
-        self.assertIs(drawer.LEFT_U, drawer_look.LEFT_U)
+        self.assertIs(drawer.column_widths, drawer_look.column_widths)  # LEFT_U, RIGHT_U
         self.assertEqual(drawer_look.RIGHT_U, 58.0)
         # The header's metrics live in the shared look too (the drawer still offers them).
         for name in ("FILTER_H_U", "GEAR_U", "GEAR_GAP_U", "MIN_HIT_PX", "SEPARATOR"):

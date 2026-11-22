@@ -38,6 +38,33 @@ class ImageCacheTests(unittest.TestCase):
         manager.clear_cache()
         self.assertEqual(manager.cache_size(), 0)
 
+    def test_clearing_skips_a_locked_image_and_the_index_stays_true(self):
+        # Windows keeps a file an antivirus or another program holds: its os.remove raised,
+        # the clearing stopped there, and the index went on counting the images it had
+        # already removed (this start's and the next's).
+        manager = ImageManager(self.config, max_cache_size=10_000)
+        locked = self._store(manager, b"a" * 100, True)
+        removed = [self._store(manager, b"b" * 200, False), self._store(manager, b"c" * 300, True)]
+        real_remove = os.remove
+
+        def remove(path, *args, **kwargs):
+            if os.path.abspath(path) == os.path.abspath(locked):
+                raise PermissionError(13, "The process cannot access the file", path)
+            return real_remove(path, *args, **kwargs)
+
+        with mock.patch("services.image_manager.os.remove", side_effect=remove):
+            manager.clear_cache()
+        self.assertTrue(os.path.exists(locked))
+        self.assertFalse([path for path in removed if os.path.exists(path)])
+        self.assertEqual(manager.cache_size(), 100)  # the locked one, still there
+        key = os.path.splitext(os.path.basename(locked))[0]
+        self.assertEqual(list(manager.cache), [key])
+        with open(os.path.join(self.cache_dir, "index.json"), encoding="utf-8") as f:
+            self.assertEqual(list(json.load(f)), [key])
+        again = ImageManager(self.config, max_cache_size=10_000)  # the next start agrees
+        self.assertEqual(again.cache_size(), 100)
+        self.assertEqual(list(again.cache), [key])
+
     def test_touching_an_existing_image_does_not_double_count(self):
         manager = ImageManager(self.config, max_cache_size=10_000)
         self._store(manager, b"a" * 100, True)

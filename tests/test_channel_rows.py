@@ -710,6 +710,19 @@ class FarRowRestTests(unittest.TestCase):
         self.assertEqual(top_row(self.view), self.top)
         self.assertTrue(placed(self.view, FAR))
 
+    def test_the_list_set_again_while_it_comes_back_still_comes_back(self):
+        # Bug scan #17 (refuted, 2.13.4) proposed forgetting the place a list comes back to
+        # at each reset: a new size, then the catalog's refresh before the rows reach the
+        # place, would leave the list at the first batch's end (2.3.0's rows around 995). A
+        # new list opens where the drawer and the column put their highlight (scrollTo).
+        self.view.units_width = 1600
+        self.view.doItemsLayout()
+        self.model.set_channels(items(MANY))  # before the come-back reached its row
+        self.assertTrue(wait_until(self.laid_out, 5000))
+        elapse(20)
+        self.assertEqual(top_row(self.view), self.top)
+        self.assertTrue(shown(self.view, FAR))
+
     def test_a_wheel_turn_before_the_list_comes_back_keeps_the_users_scroll(self):
         self.model.set_channels(items(MANY))
         self.view.executeDelayedItemsLayout()  # the first batch: the rows near the top
