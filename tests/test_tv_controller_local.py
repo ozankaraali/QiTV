@@ -196,7 +196,7 @@ class FolderEpisodeTests(FolderCase):
             self.controller, "play_file", wraps=self.controller.play_file
         ) as play_file:
             self.next_card.activate()  # Play now
-        play_file.assert_called_once_with(str(second), 12)
+        play_file.assert_called_once_with(str(second), 12, chosen=False)  # (autoplay's own)
         self.assertEqual(self.session.plays[-1][0], second.absolute().as_uri())
 
     def test_each_file_gets_a_fresh_context(self):
