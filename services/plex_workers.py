@@ -337,15 +337,14 @@ class PlexLinkWorker(_ServerWorker):
             if link:  # the conversion, of the version it converts (the ⚙ offers those below)
                 playing = ms.Quality(source["Id"], wanted.height, wanted.bitrate)
             refused = not link
-        if not link:
-            link = plex.stream_url(
-                client.base, source, client.token, client.client_id, self.item_id
-            )
+        file = plex.stream_url(client.base, source, client.token, client.client_id, self.item_id)
         answer = {
-            "link": link,
+            "link": link or file,
             "versions": [ms.version_of(s) for s in sources],
             "quality": playing,
         }
+        if link:
+            answer["file"] = file  # the history keeps it (review M5: the session's ends)
         if refused:
             answer["refused"] = True  # the conversion asked for: the TV says the server didn't
         return answer

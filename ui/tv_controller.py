@@ -381,6 +381,8 @@ class TVController(QObject):
         # 2.8: a media server's conversion chosen in the quality menu, by provider: its titles
         # play converted until QiTV closes (a version as it is ends it).
         self._media_quality: dict[str, Any] = {}
+        # 2.14: the title (provider, id) a refused conversion was said for, once (review M1).
+        self._refusal_said: Optional[tuple[str, str]] = None
         self._guides_applied: Optional[set[str]] = None  # what the hub was last told
         self._phone_guides: set[str] = set()  # the providers the phone remote lists
         # Plan 4: a link of Network streams' address as it plays now (`set_links`; None: an
@@ -761,6 +763,7 @@ class TVController(QObject):
                 started=self._count_start,
                 choose=self._choose_small,
                 hidden=self._hidden_now,
+                title_gone=self._small_title_gone,
                 parent=self,
             )
             self._pip.changed.connect(self._mixer.refresh)
@@ -842,6 +845,7 @@ class TVController(QObject):
         self._lanes.tuneReady.connect(self._on_tune_ready)
         self._lanes.tuneFailed.connect(self._on_tune_failed)
         self._lanes.tuneDropped.connect(self._on_tune_dropped)
+        self._lanes.linkDropped.connect(self._link_dropped)
         self._lanes.sideFailed.connect(self._on_side_failed)
         catalog.epgReady.connect(self._on_epg_ready)
         catalog.providerReady.connect(lambda *_: self._update_guides())
@@ -2390,16 +2394,22 @@ class TVController(QObject):
             return target
         if not is_plex(item_provider.provider_type(self.catalog, target.item)):
             return target
-        return replace(target, quality=Quality(source=quality.source))
+        # The version the conversion converts, when its server said (review M2: a ⚙ row's
+        # conversion names none), else the one chosen, else the settings' pick.
+        playing = (self._media_menu(target.item) or {}).get("quality")
+        source = str(getattr(playing, "source", "") or quality.source or "")
+        return replace(target, quality=Quality(source=source))
 
     def _conversion_refused(self, target: Target) -> None:
         """2.14: the server didn't make the conversion the ⚙ asked for (its owner allows none,
         say): the title plays as its file is, the viewer is told, and the conversion goes on
         to none of that server's next titles (choosing one again asks the server again)."""
-        self._media_quality.pop(
-            provider_of(target.item) or self.catalog.current_provider_name(), None
-        )
-        self._toast(translate(CONVERSION_REFUSED))
+        provider = provider_of(target.item) or self.catalog.current_provider_name()
+        self._media_quality.pop(provider, None)
+        said = (provider, str(target.item.get("id") or ""))
+        if said != self._refusal_said:  # once for the title (review M1: not at each reopen)
+            self._refusal_said = said
+            self._toast(translate(CONVERSION_REFUSED))
 
     def change_quality(self, quality: Any) -> None:
         """The quality menu's choice (2.8): the film or episode playing opens again in that
@@ -2410,6 +2420,7 @@ class TVController(QObject):
         if self._closed or target is None or target.live or target.local:
             return
         provider = provider_of(target.item) or self.catalog.current_provider_name()
+        self._refusal_said = None  # a new choice: a refusal of it is said again
         if getattr(quality, "converted", False):
             self._media_quality[provider] = quality
         else:
@@ -2598,6 +2609,7 @@ class TVController(QObject):
             self._lanes.queued = None
             target = queued  # chosen again meanwhile: this link serves the newest choice
         elif self._follow_queue(target):
+            self._link_dropped(url)  # 2.14 review I2
             return
         self._play_link(target, url)
 
@@ -2873,6 +2885,19 @@ class TVController(QObject):
         if self._current is target:  # else opening it failed at once (see _guarded)
             self._delivered(target, url)
 
+    def _small_title_gone(self, url: str) -> None:
+        """2.14 review I1: the film swapped small closed or ended there: its server hears it
+        stop (a Plex conversion's session ends with it), unless it heard another start since
+        (a phone's Watch, another title)."""
+        if self._media is not None and url and self._media.active_url() == url:
+            self._media.stopped()
+
+    def _link_dropped(self, url: str) -> None:
+        """2.14 review I2: a link made that will not play: a Plex conversion's session the
+        server started for it is stopped there (off this thread: the reporter's)."""
+        if self._media is not None:
+            self._media.abandoned(url)
+
     def _plays_small(self, url: str) -> bool:
         """Whether the small picture plays the movie or episode at `url` (swapped small)."""
         sessions, pip = self.sessions, self._pip
@@ -2987,12 +3012,15 @@ class TVController(QObject):
         guard = self.parental
         if guard is not None and self._protects_play(guard, target):
             return  # 2.8: what parental controls hide never enters the history (nor Recent)
+        # 2.14 review M5: a Plex conversion's session ends with its play: its file is kept.
+        menu = None if target.live or target.local else self._media_menu(target.item)
+        link = str((menu or {}).get("file") or url)
         try:
             self.watch.record_play(
                 item_provider.provider_name(self.catalog, target.item),
                 target.item,
                 item_type=target.item_type,
-                link=url,
+                link=link,
                 group_id=target.group_key if target.live else None,
                 # A link is never the channel QiTV starts on (its token may be gone by then):
                 # the provider's channel watched before it stays (final review M2).

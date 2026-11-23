@@ -284,6 +284,7 @@ class LinkWorkerTest(unittest.TestCase):
         answer = self.link(quality=ms.Quality(source="2"))["finished"]
         self.assertTrue(answer["link"].startswith(BASE + "/library/parts/2/"))
         self.assertEqual(answer["quality"], ms.Quality(source="2"))
+        self.assertNotIn("file", answer)  # its link is the file
 
     def test_a_conversion_is_the_servers_of_the_version_it_converts(self):  # 2.14
         server = FakeServer()
@@ -298,6 +299,8 @@ class LinkWorkerTest(unittest.TestCase):
         self.assertTrue(answer["link"].startswith(BASE + plex.TRANSCODE + "/session/"))
         self.assertEqual(answer["quality"], ms.Quality("902", 720, 4_000_000))  # of 1080p
         self.assertNotIn("refused", answer)
+        # The version's own file, for the history (review M5: never the session's address).
+        self.assertTrue(answer["file"].startswith(BASE + "/library/parts/902/"))
         self.assertEqual([v["id"] for v in answer["versions"]], ["2", "902"])
         server = FakeServer()  # the 4K version chosen before: that one converted
         self.link(server, quality=ms.Quality("2", 1080, 8_000_000), screen_4k=True)

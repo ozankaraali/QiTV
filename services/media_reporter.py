@@ -31,6 +31,7 @@ from services.provider_types import is_plex
 logger = logging.getLogger(__name__)
 
 PROGRESS_S = 10.0
+CLOSE_WAIT_S = 1.0  # QiTV closing waits at most this for the last requests (review M3)
 
 Send = Callable[[dict, str, ms.StreamRef, int, bool], None]
 
@@ -48,6 +49,9 @@ def _send_over_http(
             timeout=10,
         )
         try:
+            if event == "abandoned":  # a conversion that never played: its session ends
+                told.stop_conversion(ref.transcode)
+                return
             try:
                 told.report(event, ref, position, paused)
             finally:  # told or not, the server's conversion ends with its play
@@ -156,11 +160,24 @@ class MediaReporter:
         self._active = None
         self._send(server, "stopped", ref, self._position, self._paused)
 
+    def abandoned(self, url: str) -> None:
+        """2.14 review I2: QiTV made the link `url` but will not play it (a newer choice came
+        before it opened, or Stop): a Plex conversion's session the server started for it is
+        stopped there. Another link is nothing to its server (it was never told)."""
+        if not url or (self._active is not None and url == self._url):
+            return
+        found = self._server_of(url)
+        if found is not None and found[1].transcode:
+            self._send(found[0], "abandoned", found[1], 0, False)
+
     def shutdown(self) -> None:
-        """QiTV closes: the stop is told (the thread finishes what it has, then ends)."""
+        """QiTV closes: the stop is told, and QiTV waits for it CLOSE_WAIT_S at most (2.14
+        review M3: a Plex conversion's session ends with it; the thread finishes what it
+        has, then ends)."""
         self.stopped()
         if self._thread is not None:
             self._queue.put(None)
+            self._thread.join(CLOSE_WAIT_S)
 
     def _send(self, server: dict, event: str, ref: ms.StreamRef, position: int, paused: bool):
         if self._send_now is not None:

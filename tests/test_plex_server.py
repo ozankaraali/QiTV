@@ -310,6 +310,9 @@ class ConversionTest(unittest.TestCase):
         )
         self.http.answers[("GET", DECISION)] = (200, CONVERTS)
         self.http.answers[("GET", START)] = (200, started(self.params["session"]))
+        self.playlist = f"{plex.TRANSCODE}/session/{self.params['session']}/base/index.m3u8"
+        self.http.answers[("GET", self.playlist)] = (200, "#EXTM3U\n")  # asked without the token
+        self.http.answers[("GET", STOP)] = (200, None)
 
     def test_the_conversion_asked_of_plexs_transcoder(self):
         p = self.params
@@ -352,13 +355,16 @@ class ConversionTest(unittest.TestCase):
 
     def test_the_server_decides_then_starts_and_the_player_opens_the_sessions_playlist(self):
         url = self.c.convert(self.params)
-        self.assertEqual([a["path"] for a in self.http.asked], [DECISION, START])
-        decision, start = self.http.asked
+        self.assertEqual([a["path"] for a in self.http.asked], [DECISION, START, self.playlist])
+        decision, start, playlist = self.http.asked
         self.assertEqual(decision["params"], self.params)  # the start is what was decided
         self.assertEqual(start["params"], self.params)
-        for asked in self.http.asked:
+        for asked in (decision, start):
             self.assertEqual(asked["headers"]["X-Plex-Token"], TOKEN)  # a header's
             self.assertNotIn("X-Plex-Token", asked["params"])
+        # Its playlist, asked as the player asks its pieces: without the token (review I3).
+        self.assertNotIn("X-Plex-Token", playlist["headers"] or {})
+        self.assertEqual(playlist["params"], {})
         self.assertEqual(decision["headers"]["Accept"], "application/json")
         self.assertNotEqual(start["headers"]["Accept"], "application/json")  # a playlist
         session = self.params["session"]
@@ -394,6 +400,20 @@ class ConversionTest(unittest.TestCase):
             with self.assertLogs("services.plex", "INFO") as logs:
                 self.assertEqual(self.c.convert(self.params), "")
             self.assertNotIn("elsewhere", "".join(logs.output))
+
+    def test_a_session_whose_pieces_want_the_token_is_stopped_and_plays_nothing(self):  # I3
+        # Away from home (plex.direct, the relay) a server might refuse the pieces the player
+        # asks without the token: the session is stopped, and the title plays as its file is.
+        for status in (401, 403):
+            self.http.asked.clear()
+            self.http.answers[("GET", self.playlist)] = (status, None)
+            with self.assertLogs("services.plex", "INFO") as logs:
+                self.assertEqual(self.c.convert(self.params), "")
+            stop = self.http.asked[-1]
+            self.assertEqual(
+                (stop["path"], stop["params"]), (STOP, {"session": self.params["session"]})
+            )
+            self.assertNotIn(TOKEN, "".join(logs.output))
 
     def test_the_reporter_reads_a_conversion_back_from_its_address(self):
         url = self.c.convert(self.params)

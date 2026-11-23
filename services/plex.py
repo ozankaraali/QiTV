@@ -521,8 +521,10 @@ class PlexClient:
         (`conversion_params`), or "" when the server would not make it. Its transcoder is
         asked for its decision first (it starts no conversion it has not decided: a 1.43
         server refused one so), then to start it, which names the session's playlist; the
-        encoding begins when the player asks for that playlist. The address holds the token,
-        as a file's does (`stream_url`); the playlist's pieces are asked without it."""
+        encoding begins when that playlist is asked. It is asked here once without the token,
+        as the player asks its pieces: a server that wants the token for them (2.14 review I3:
+        never seen at home) has the session stopped, and the title plays as its file is. The
+        address holds the token, as a file's does (`stream_url`)."""
         decided = self._ask("GET", TRANSCODE + "/decision", params)
         code = decided.get("generalDecisionCode")
         if code not in _CONVERTS:
@@ -536,6 +538,16 @@ class PlexClient:
         if not playlist.startswith(self.base + TRANSCODE + "/session/"):
             logger.info("A Plex server's conversion named no playlist of its own")
             return ""
+        session = playlist[len(self.base + TRANSCODE + "/session/") :].split("/", 1)[0]
+        try:
+            opens = self._opens_without_token(playlist)
+        except Exception:
+            self._stop_quietly(session)
+            raise
+        if not opens:  # (review I3: away from home, a server may want the token for them)
+            logger.info("A Plex server's conversion would not give its pieces without the token")
+            self._stop_quietly(session)
+            return ""
         query = urlencode(
             {
                 "X-Plex-Token": self.token,
@@ -545,6 +557,20 @@ class PlexClient:
             }
         )
         return f"{playlist}?{query}"
+
+    def _opens_without_token(self, playlist: str) -> bool:
+        """Whether the session's playlist answers without the token, as the player asks it
+        and its pieces (libVLC carries no address's query over to the pieces it names)."""
+        response = self._http.request(
+            "GET", playlist, headers={"Accept": "*/*"}, timeout=self.timeout, verify=self.verify
+        )
+        return bool(response.status_code < 400)
+
+    def _stop_quietly(self, session: str) -> None:
+        try:
+            self.stop_conversion(session)
+        except Exception as error:  # the server ends a session nobody asks for, in time
+            logger.info("A Plex server's conversion was not stopped: %s", type(error).__name__)
 
     def stop_conversion(self, session: str) -> None:
         """End the server's conversion `session` (its encoding stops); one the server ended

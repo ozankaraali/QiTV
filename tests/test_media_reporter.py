@@ -2,6 +2,8 @@
 stopped when something else plays or nothing does; never for another provider's stream. A Plex
 server too (2.14), whose conversion of a title is stopped there with its play."""
 
+import threading
+import time
 import unittest
 from unittest import mock
 
@@ -211,6 +213,72 @@ class MediaReporterTests(unittest.TestCase):
             with self.assertRaises(OSError):
                 media_reporter._send_over_http(self.PLEX, "stopped", ref, 3, False)
         self.assertEqual(made, [("made", "P"), ("stop", "s1"), "closed"])
+
+    def test_a_conversion_never_played_has_its_session_stopped(self):  # 2.14 review I2
+        sent = []
+        reporter = MediaReporter(
+            lambda: [SERVER, self.PLEX],
+            send=lambda server, event, ref, position, paused: sent.append((event, ref.transcode)),
+            clock=self.clock,
+        )
+        reporter.abandoned(self.CONVERTED)
+        self.assertEqual(sent, [("abandoned", "s1")])  # never told started: only its session
+        sent.clear()
+        reporter.playing(self.CONVERTED)
+        reporter.abandoned(self.CONVERTED)  # (the one playing: never)
+        source = {"Id": "9", "part": "/library/parts/9/17/file.mkv"}
+        reporter.abandoned(plex.stream_url(self.PLEX_BASE, source, "P", "C", "102"))  # a file
+        reporter.abandoned(url())  # Jellyfin's: its server ends its own
+        reporter.abandoned("http://elsewhere.test/live.ts")
+        self.assertEqual(sent, [("start", "s1")])
+
+    def test_an_abandoned_conversion_is_only_stopped_on_the_server(self):  # 2.14 review I2
+        ref = plex.parse_stream_url(self.CONVERTED, [self.PLEX_BASE])
+        made = []
+
+        class Client:
+            def __init__(self, base, **kwargs):
+                pass
+
+            def report(self, event, *args):
+                made.append(("report", event))
+
+            def stop_conversion(self, session):
+                made.append(("stop", session))
+
+            def close(self):
+                made.append("closed")
+
+        with mock.patch.object(plex, "PlexClient", Client):
+            media_reporter._send_over_http(self.PLEX, "abandoned", ref, 0, False)
+        self.assertEqual(made, [("stop", "s1"), "closed"])
+
+    def test_qitv_closing_waits_a_moment_for_the_stop_to_go_out(self):  # 2.14 review M3
+        sent = []
+
+        def slow(server, event, ref, position, paused):
+            time.sleep(0.2)
+            sent.append(event)
+
+        reporter = MediaReporter(lambda: [self.PLEX])
+        with mock.patch.object(media_reporter, "_send_over_http", slow):
+            reporter.playing(self.CONVERTED)
+            reporter.shutdown()
+            self.assertEqual(sent, ["start", "stopped"])  # out before QiTV goes
+        release = threading.Event()  # a server that doesn't answer: QiTV closes all the same
+
+        def stuck(*args):
+            release.wait(5)
+
+        late = MediaReporter(lambda: [self.PLEX])
+        with mock.patch.object(media_reporter, "_send_over_http", stuck):
+            late.playing(self.CONVERTED)
+            began = time.monotonic()
+            late.shutdown()
+            waited = time.monotonic() - began
+            release.set()
+            late._thread.join(5)
+        self.assertLess(waited, media_reporter.CLOSE_WAIT_S + 0.5)
 
     def test_a_failed_stop_is_one_log_line_without_the_address_or_the_token(self):  # 2.14
         reporter = MediaReporter(lambda: [self.PLEX], clock=self.clock)

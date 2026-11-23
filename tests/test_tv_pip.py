@@ -1335,33 +1335,64 @@ class LibraryPlayTests(PipCase):
         reporter.playing.assert_called_with("http://vod/heat.mkv")
         reporter.position.assert_called_with(61_000, url="http://vod/heat.mkv")
 
-    def swapped_small_then(self, closed: bool):
-        """A film swapped small, closed there or not, then a zap of the large picture: what
-        its server's reporter heard of the zap."""
+    @staticmethod
+    def film_reporter():
         reporter = mock.Mock()
         reporter.active_url.return_value = "http://vod/heat.mkv"  # the film's play
-        with mock.patch.object(self.controller, "_media", reporter):
-            self.start_large(0)
-            self.play_from_library()
-            self.controller.handle(Action.SWAP)  # the channel large, the film small
-            if closed:
-                self.label.closeRequested.emit()  # the × on the small picture: the film
-            reporter.reset_mock()
-            self.controller.handle(Action.CH_NEXT)
-            self.ready("http://stream/2")
         return reporter
+
+    def film_swapped_small(self, reporter):
+        self.start_large(0)
+        self.play_from_library()
+        self.controller.handle(Action.SWAP)  # the channel large, the film small
+        reporter.reset_mock()
 
     def test_a_film_swapped_small_plays_on_when_the_large_picture_zaps(self):  # 2.14
         # Its server's play goes on (a Plex conversion's session with it): the channel tuned
         # large replaces nothing the server plays.
-        reporter = self.swapped_small_then(closed=False)
+        reporter = self.film_reporter()
+        with mock.patch.object(self.controller, "_media", reporter):
+            self.film_swapped_small(reporter)
+            self.controller.handle(Action.CH_NEXT)
+            self.ready("http://stream/2")
         self.assertTrue(self.sessions.pip_open())
         reporter.playing.assert_not_called()
         reporter.stopped.assert_not_called()
 
-    def test_a_film_closed_small_is_told_stopped_at_the_next_tune(self):  # 2.14
-        reporter = self.swapped_small_then(closed=True)
-        reporter.playing.assert_called_once_with("http://stream/2")  # (its play stops)
+    def told_when_gone(self, gone):
+        """A film swapped small goes there (`gone`): how often its server heard it stop at
+        once, and the reporter after the large picture's next zap."""
+        reporter = self.film_reporter()
+        with mock.patch.object(self.controller, "_media", reporter):
+            self.film_swapped_small(reporter)
+            gone()
+            stopped = reporter.stopped.call_count
+            self.controller.handle(Action.CH_NEXT)
+            self.ready("http://stream/2")
+        return stopped, reporter
+
+    def test_a_film_closed_small_by_its_x_is_told_stopped_at_once(self):  # 2.14 review I1
+        stopped, reporter = self.told_when_gone(self.label.closeRequested.emit)
+        self.assertEqual(stopped, 1)  # its session on the server ends with it
+        reporter.playing.assert_called_once_with("http://stream/2")
+
+    def test_a_film_closed_small_by_the_phone_is_told_stopped_at_once(self):  # review I1
+        stopped, _reporter = self.told_when_gone(self.controller.close_pip)
+        self.assertEqual(stopped, 1)
+
+    def test_a_film_that_ends_small_is_told_stopped_at_once(self):  # review I1
+        stopped, _reporter = self.told_when_gone(
+            lambda: self.pip_session.stateChanged.emit("ended")
+        )
+        self.assertEqual(stopped, 1)
+
+    def test_a_small_film_another_play_replaced_on_its_server_is_not_stopped_again(self):
+        reporter = self.film_reporter()
+        with mock.patch.object(self.controller, "_media", reporter):
+            self.film_swapped_small(reporter)
+            reporter.active_url.return_value = "http://other/title.mkv"  # e.g. a phone's Watch
+            self.label.closeRequested.emit()
+        reporter.stopped.assert_not_called()
 
     def test_a_movie_swapped_small_shows_its_title_without_live_wording(self):
         # Polish: the label used live wording ("Connecting…") for the film playing small.

@@ -2164,6 +2164,14 @@ class VodTests(ControllerTestCase):
             self.controller.video_context(QPoint(3, 4))
         self.assertEqual(shown[0].quality, ms.Quality(source=""))
         self.assertTrue(self.controller._current.quality.converted)  # it plays on so
+        # The version the conversion converts, when the server said (review M2): the 4K one
+        # chosen, then converted, goes out as the 4K file, not the settings' pick.
+        self.catalog.menus["m7"] = {"versions": [], "quality": ms.Quality("uhd", 720, 4_000_000)}
+        with mock.patch.object(
+            self.controller._context, "show_playing", lambda *a: shown.append(a[0])
+        ):
+            self.controller.video_context(QPoint(3, 4))
+        self.assertEqual(shown[-1].quality, ms.Quality(source="uhd"))
 
     def test_an_outside_player_set_in_settings_gets_a_plex_title_as_its_file_is(self):  # 2.14
         self.converted_plex_title()
@@ -2197,6 +2205,40 @@ class VodTests(ControllerTestCase):
                     {"id": "m8", "name": "Ronin", "cmd": "x"}, "movie", play_context()
                 )
                 self.assertIsNone(self.catalog.qualities[-1])  # its next titles as they are
+
+    def test_a_refusal_is_said_once_for_the_title_not_at_each_reopen(self):  # review M1
+        said = ("The server didn't convert it: the file plays as it is", "info")
+        self.catalog.ptype = "PLEX"
+        self.catalog.menus["m7"] = {
+            "versions": [{"id": "hd"}],
+            "quality": ms.Quality("hd"),
+            "refused": True,
+        }
+        self.play_movie()
+        self.catalog.linkReady.emit(1, "http://vod/heat.mkv")
+        self.controller.change_quality(ms.Quality(height=720, bitrate=4_000_000))
+        self.catalog.linkReady.emit(2, "http://vod/heat.mkv")
+        self.assertEqual(self.toast.messages().count(said), 1)
+        self.controller.stop_live()
+        self.controller.resume_stopped()  # the same title again, its conversion asked again
+        self.catalog.linkReady.emit(3, "http://vod/heat.mkv")
+        self.assertEqual(self.toast.messages().count(said), 1)  # said once for it
+        self.controller.change_quality(ms.Quality(height=480, bitrate=2_000_000))  # chosen anew
+        self.catalog.linkReady.emit(4, "http://vod/heat.mkv")
+        self.assertEqual(self.toast.messages().count(said), 2)
+
+    def test_the_history_keeps_a_plex_conversions_file_not_its_session(self):  # review M5
+        self.catalog.ptype = "PLEX"
+        session = "http://plex/video/:/transcode/universal/session/s1/base/index.m3u8?t=1"
+        self.catalog.menus["m7"] = {
+            "versions": [{"id": "hd"}],
+            "quality": ms.Quality("hd", 720, 4_000_000),
+            "file": "http://plex/library/parts/9/1/file.mkv?t=1",
+        }
+        self.play_movie()
+        self.catalog.linkReady.emit(1, session)
+        self.assertEqual(self.watch.plays[-1][3], "http://plex/library/parts/9/1/file.mkv?t=1")
+        self.assertEqual(self.session.plays[-1][0], session)  # it plays converted
 
     def test_a_title_its_file_already_fits_says_nothing(self):  # 2.14: not a refusal
         self.catalog.menus["m7"] = {"versions": [{"id": "sd"}], "quality": ms.Quality("sd")}
@@ -2337,6 +2379,7 @@ class MediaServerReportTests(ControllerTestCase):
             stopped=lambda: told(("stopped",)),
             shutdown=lambda: None,
             active_url=lambda: "",
+            abandoned=lambda url: told(("abandoned", url)),
         )
         return super().make_controller(column, media_reporter=reporter, **extra)
 
@@ -2368,6 +2411,22 @@ class MediaServerReportTests(ControllerTestCase):
         self.assertEqual(
             self.reported, [("stopped",), ("playing", self.HEAT), ("position", 61_000, self.HEAT)]
         )
+
+    def test_a_link_superseded_before_it_opens_is_abandoned(self):  # 2.14 review I2
+        # (A Plex conversion's session the server started for it is stopped there.)
+        self.controller.play_vod({"id": "m8", "name": "Ronin", "cmd": "x"}, "movie", play_context())
+        self.controller.play_vod({"id": "m9", "name": "Tron", "cmd": "y"}, "movie", play_context())
+        self.ready(self.RONIN)  # Ronin's link: Tron was chosen since
+        self.assertIn(("abandoned", self.RONIN), self.reported)
+        self.assertNotIn(("playing", self.RONIN), self.reported)
+
+    def test_a_link_that_comes_after_its_play_was_stopped_is_abandoned(self):  # review I2
+        self.controller.play_vod({"id": "m8", "name": "Ronin", "cmd": "x"}, "movie", play_context())
+        asked = self.catalog.links[-1][0]
+        self.controller.stop_for_library()  # the corner's ×: a link on its way never opens
+        self.catalog.linkReady.emit(asked, self.RONIN)
+        self.assertIn(("abandoned", self.RONIN), self.reported)
+        self.assertNotIn(("playing", self.RONIN), self.reported)
 
     def test_the_sleep_timer_tells_the_stop(self):
         self.controller.stop_for_sleep()
