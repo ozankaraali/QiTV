@@ -358,7 +358,7 @@ class PlexLinkWorker(_ServerWorker):
             return str(client.convert(params) or "")
         except ms.SignInNeeded:
             raise
-        except ms.MediaServerError as error:  # never the address: it may carry the token
+        except Exception as error:  # never the address: it may carry the token (review N1)
             logger.info("A Plex server did not convert the title: %s", media_workers.logged(error))
             return ""
 

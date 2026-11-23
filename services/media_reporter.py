@@ -52,11 +52,13 @@ def _send_over_http(
             if event == "abandoned":  # a conversion that never played: its session ends
                 told.stop_conversion(ref.transcode)
                 return
-            try:
-                told.report(event, ref, position, paused)
-            finally:  # told or not, the server's conversion ends with its play
-                if event == "stopped" and ref.transcode:
+            if event == "stopped" and ref.transcode:
+                try:  # the conversion's session first (review N2: QiTV's close waits 1 s)
                     told.stop_conversion(ref.transcode)
+                finally:  # stopped or not, where it stopped is told
+                    told.report(event, ref, position, paused)
+            else:
+                told.report(event, ref, position, paused)
         finally:
             told.close()
         return

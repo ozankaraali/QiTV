@@ -200,7 +200,9 @@ class MediaReporterTests(unittest.TestCase):
             self.assertNotIn(("stop", "s1"), made)
             made.clear()
             media_reporter._send_over_http(self.PLEX, "stopped", ref, 3, False)
-            self.assertEqual(made, [("made", "P"), ("report", "stopped"), ("stop", "s1"), "closed"])
+            # The session first (review N2: QiTV's close waits a second at most), then where
+            # it stopped.
+            self.assertEqual(made, [("made", "P"), ("stop", "s1"), ("report", "stopped"), "closed"])
             made.clear()
             source = {"Id": "9", "part": "/library/parts/9/1/f.mkv"}
             file = plex.parse_stream_url(
@@ -213,6 +215,16 @@ class MediaReporterTests(unittest.TestCase):
             with self.assertRaises(OSError):
                 media_reporter._send_over_http(self.PLEX, "stopped", ref, 3, False)
         self.assertEqual(made, [("made", "P"), ("stop", "s1"), "closed"])
+
+        class Unstopped(Client):  # its session was not stopped: where it stopped is told
+            def stop_conversion(self, session):
+                raise OSError("unreachable")
+
+        made.clear()
+        with mock.patch.object(plex, "PlexClient", Unstopped):
+            with self.assertRaises(OSError):
+                media_reporter._send_over_http(self.PLEX, "stopped", ref, 3, False)
+        self.assertEqual(made, [("made", "P"), ("report", "stopped"), "closed"])
 
     def test_a_conversion_never_played_has_its_session_stopped(self):  # 2.14 review I2
         sent = []

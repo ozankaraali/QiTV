@@ -339,6 +339,19 @@ class LinkWorkerTest(unittest.TestCase):
             self.assertNotIn("server-token", text)
             self.assertNotIn("plex.direct", text)
 
+    def test_a_conversion_that_fails_on_its_way_plays_the_file(self):  # review N1
+        # A connection lost or a time-out while the server is asked to convert never escapes
+        # the worker as such: the file plays as it is, and the TV says the server didn't.
+        for error in (ConnectionError("x"), TimeoutError("y"), ValueError("not JSON")):
+            with self.subTest(error=type(error).__name__):
+                server = FakeServer(converts=error)
+                with self.assertLogs("services.plex_workers", "INFO") as logs:
+                    out = self.link(server, quality=ms.Quality(height=720, bitrate=4_000_000))
+                answer = out["finished"]
+                self.assertTrue(answer["link"].startswith(BASE + "/library/parts/902/"))
+                self.assertIs(answer["refused"], True)
+                self.assertNotIn("server-token", "".join(logs.output))
+
     def test_a_refused_token_while_converting_asks_to_sign_in_again(self):
         server = FakeServer(converts=ms.SignInNeeded("401"))
         with self.assertLogs("services.plex_workers", "WARNING"):
