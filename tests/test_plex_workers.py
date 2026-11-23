@@ -159,10 +159,13 @@ BASE = PROVIDER["url"]
 class FakeServer:
     """A PlexClient answering from the fixtures."""
 
-    def __init__(self, fail=None, media=None):
+    def __init__(self, fail=None, media=None, converts=None):
         self.base, self.token, self.client_id = BASE, "server-token", "client-1"
+        self.version = "2.14.0"
         self.fail = fail
         self._media = media
+        self.converts = converts  # what `convert` answers (None: the session's playlist)
+        self.conversions = []
         self.closed = False
         self.asked = []
 
@@ -196,6 +199,18 @@ class FakeServer:
         if self._media is not None:
             return self._media
         return fixture("movie_metadata.json")["MediaContainer"]["Metadata"][0]["Media"]
+
+    def convert(self, params):
+        self._raise()
+        self.conversions.append(params)
+        if isinstance(self.converts, Exception):
+            raise self.converts
+        if self.converts is not None:
+            return self.converts
+        return (
+            f"{BASE}{plex.TRANSCODE}/session/{params['session']}/base/index.m3u8"
+            f"?X-Plex-Session-Identifier={params['X-Plex-Session-Identifier']}"
+        )
 
     def close(self):
         self.closed = True
@@ -254,23 +269,74 @@ class LinkWorkerTest(unittest.TestCase):
             )
         )
 
-    def test_the_settings_pick_never_a_conversion(self):
-        answer = self.link()["finished"]
+    def test_the_settings_pick_as_its_file_is(self):
+        server = FakeServer()
+        answer = self.link(server)["finished"]
         self.assertTrue(answer["link"].startswith(BASE + "/library/parts/902/"))
         self.assertEqual(answer["quality"], ms.Quality(source="902"))
         self.assertEqual([v["id"] for v in answer["versions"]], ["2", "902"])
-        self.assertIs(answer["conversions"], False)
+        self.assertNotIn("conversions", answer)  # 2.14: the ⚙ offers the server's conversions
+        self.assertEqual(server.conversions, [])
         on_4k = self.link(screen_4k=True)["finished"]
         self.assertTrue(on_4k["link"].startswith(BASE + "/library/parts/2/"))
 
-    def test_the_menus_version_and_no_conversion_even_when_one_is_asked(self):
+    def test_the_menus_version_as_its_file_is(self):
         answer = self.link(quality=ms.Quality(source="2"))["finished"]
         self.assertTrue(answer["link"].startswith(BASE + "/library/parts/2/"))
-        carried = ms.Quality(height=720, bitrate=4_000_000)  # a Jellyfin title's, carried on
-        answer = self.link(quality=carried)["finished"]
+        self.assertEqual(answer["quality"], ms.Quality(source="2"))
+
+    def test_a_conversion_is_the_servers_of_the_version_it_converts(self):  # 2.14
+        server = FakeServer()
+        answer = self.link(server, quality=ms.Quality(height=720, bitrate=4_000_000))["finished"]
+        (params,) = server.conversions
+        self.assertEqual(
+            (params["path"], params["mediaIndex"], params["videoResolution"]),
+            ("/library/metadata/102", 1, "1280x720"),  # the settings' pick: 1080p, second
+        )
+        self.assertEqual((params["maxVideoBitrate"], params["X-Plex-Version"]), (4000, "2.14.0"))
+        self.assertEqual(params["X-Plex-Client-Identifier"], "client-1")
+        self.assertTrue(answer["link"].startswith(BASE + plex.TRANSCODE + "/session/"))
+        self.assertEqual(answer["quality"], ms.Quality("902", 720, 4_000_000))  # of 1080p
+        self.assertEqual([v["id"] for v in answer["versions"]], ["2", "902"])
+        server = FakeServer()  # the 4K version chosen before: that one converted
+        self.link(server, quality=ms.Quality("2", 1080, 8_000_000), screen_4k=True)
+        self.assertEqual(server.conversions[0]["mediaIndex"], 0)
+
+    def test_a_version_already_as_small_plays_as_its_file_is(self):
+        small = [
+            {
+                "id": 7,
+                "bitrate": 1500,
+                "width": 1280,
+                "height": 720,
+                "Part": [{"key": "/library/parts/7/1/file.mp4", "container": "mp4"}],
+            }
+        ]
+        server = FakeServer(media=small)
+        answer = self.link(server, quality=ms.Quality(height=720, bitrate=4_000_000))["finished"]
+        self.assertEqual(server.conversions, [])  # the server's processor for nothing
+        self.assertTrue(answer["link"].startswith(BASE + "/library/parts/7/"))
+        self.assertEqual(answer["quality"], ms.Quality(source="7"))
+
+    def test_a_conversion_the_server_refuses_plays_the_file_as_it_is(self):
+        converted = ms.Quality(height=720, bitrate=4_000_000)
+        answer = self.link(FakeServer(converts=""), quality=converted)["finished"]
         self.assertTrue(answer["link"].startswith(BASE + "/library/parts/902/"))
-        self.assertNotIn("transcode", answer["link"])
+        self.assertEqual(answer["quality"], ms.Quality(source="902"))  # the ⚙ ticks the file
+        refused = ms.MediaServerError("The server answered 400")
+        with self.assertLogs("services.plex_workers", "INFO") as logs:
+            answer = self.link(FakeServer(converts=refused), quality=converted)["finished"]
         self.assertEqual(answer["quality"], ms.Quality(source="902"))
+        self.assertIn("The server answered 400", logs.output[0])
+        for text in logs.output:  # never the address or the token
+            self.assertNotIn("server-token", text)
+            self.assertNotIn("plex.direct", text)
+
+    def test_a_refused_token_while_converting_asks_to_sign_in_again(self):
+        server = FakeServer(converts=ms.SignInNeeded("401"))
+        with self.assertLogs("services.plex_workers", "WARNING"):
+            out = self.link(server, quality=ms.Quality(height=720, bitrate=4_000_000))
+        self.assertEqual(out["error"], ms.SIGN_IN_AGAIN)
 
     def test_only_4k_with_never_or_no_file_says_so(self):
         meta = fixture("movie_metadata.json")["MediaContainer"]["Metadata"][0]["Media"][:1]

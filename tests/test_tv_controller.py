@@ -2127,6 +2127,25 @@ class VodTests(ControllerTestCase):
         self.controller.play_vod({"id": "m9", "name": "Tron", "cmd": "y"}, "movie", play_context())
         self.assertIsNone(self.catalog.qualities[-1])
 
+    def watch_on_the_phone_while_converted(self, ptype):
+        self.catalog.ptype = ptype
+        self.play_movie()
+        self.catalog.linkReady.emit(1, "http://vod/heat.mkv")
+        self.controller.change_quality(ms.Quality(height=720, bitrate=4_000_000))
+        self.catalog.linkReady.emit(2, "http://vod/heat.m3u8")
+        self.assertTrue(self.controller.play_elsewhere(lambda target, url: (True, "")))
+        self.assertEqual(len(self.catalog.links), 3)
+        return self.catalog.qualities[-1]
+
+    def test_a_phone_plays_a_plex_title_converted_here_as_its_file_is(self):  # 2.14
+        # The phone gets a Plex title through QiTV's home door, which passes files: never the
+        # server's conversion (its playlist names its pieces on the server).
+        self.assertEqual(self.watch_on_the_phone_while_converted("PLEX"), ms.Quality(source=""))
+
+    def test_a_phone_plays_a_jellyfin_title_converted_here_converted(self):  # 2.8, as it was
+        asked = self.watch_on_the_phone_while_converted("JELLYFIN")
+        self.assertEqual(asked, ms.Quality(height=720, bitrate=4_000_000))
+
     def test_the_quality_button_shows_for_a_title_its_server_offers_choices_for(self):
         self.catalog.menus["m7"] = {"versions": [{"id": "hd"}], "quality": ms.Quality("hd")}
         self.play_movie()

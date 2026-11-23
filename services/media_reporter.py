@@ -9,6 +9,11 @@ stopped near its end is marked watched by the server). The same title opened aga
 stream (its quality changed: another play session, converted or not) is the old play's stop and
 the new one's start. The requests go out on a thread of their own, one after another; a failure
 is only logged.
+
+A Plex server's conversion of a title (2.14, the ⚙'s) is ended on the server with its play's
+stop, as a Jellyfin server ends its own when told the play stopped: so a conversion replaced (a
+new quality, another title) or ended (Stop, the Library, the sleep timer, QiTV closing) stops
+using the server's processor at once.
 """
 
 from __future__ import annotations
@@ -43,7 +48,11 @@ def _send_over_http(
             timeout=10,
         )
         try:
-            told.report(event, ref, position, paused)
+            try:
+                told.report(event, ref, position, paused)
+            finally:  # told or not, the server's conversion ends with its play
+                if event == "stopped" and ref.transcode:
+                    told.stop_conversion(ref.transcode)
         finally:
             told.close()
         return

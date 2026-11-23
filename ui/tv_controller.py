@@ -102,6 +102,7 @@ from services.live.live_session import LiveSession
 from services.live.tuning import channel_key
 from services.local_episodes import next_in_folder, parse_episode
 from services.media_reporter import MediaReporter
+from services.media_server import Quality
 from services.navigation import (
     FAVORITES_GROUP,
     LINK_LAYER,
@@ -125,7 +126,7 @@ from services.provider_ids import (
     split_group_id,
     with_provider,
 )
-from services.provider_types import is_media_server
+from services.provider_types import is_media_server, is_plex
 from services.redact import safe_traceback, scrub
 from services.sessions import SessionManager, Slot, records
 from services.song_facts import BRAND_COLOURS
@@ -5996,6 +5997,12 @@ class TVController(QObject):
         if self._closed or target is None:
             return False
         target = self._owned_target(target)  # a link: whose stream it is now
+        if getattr(target.quality, "converted", False) and is_plex(
+            item_provider.provider_type(self.catalog, target.item)
+        ):
+            # 2.14: a phone gets a Plex title through QiTV's home door, which passes its file
+            # (the server's conversion is a playlist of pieces on the server): as it is.
+            target = replace(target, quality=Quality(source=target.quality.source))
         chosen = target
         if target.local:
             path = str(target.item.get("path") or "")

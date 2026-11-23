@@ -174,7 +174,7 @@
     "Continue": "Library shelf (genre column): titles to continue watching",
     "Continue watching": "a Library genre of a Jellyfin or Emby server: the titles you started watching there",
     "Convert": "the answer that converts",
-    "Converting uses the server's processor. On a server someone else runs, its owner may not want that.": "asked before the first conversion on a Jellyfin or Emby server",
+    "Converting uses the server's processor. On a server someone else runs, its owner may not want that.": "asked before the first conversion on a Jellyfin, Emby or Plex server",
     "Copy stream link": "a menu entry",
     "Couldn't change it. See the log.": "a hint under the button: telling the system failed (QiTV's log says why)",
     "Couldn't connect": "under a provider's name in the channel list: its setup failed",

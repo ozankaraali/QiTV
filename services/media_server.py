@@ -740,6 +740,7 @@ class StreamRef:
     token: str
     play_session: str
     converted: bool
+    transcode: str = ""  # 2.14: a Plex conversion's session, which ends with its play
 
 
 def parse_stream_url(url: str, bases: Iterable[str]) -> Optional[StreamRef]:

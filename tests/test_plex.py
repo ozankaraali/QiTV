@@ -17,7 +17,11 @@ class _Response:
     def __init__(self, status, body=None, headers=None):
         self.status_code = status
         self._body = body
-        self.content = b"" if body is None else json.dumps(body).encode()
+        if isinstance(body, str):  # a playlist (Plex's conversion), not JSON
+            self.content = body.encode()
+        else:
+            self.content = b"" if body is None else json.dumps(body).encode()
+        self.text = self.content.decode()
         self.headers = headers or {}
 
     def json(self):

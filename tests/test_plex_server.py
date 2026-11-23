@@ -1,8 +1,10 @@
 """Plex (2.14): a server's libraries, films and series as Library titles, a title's versions
-(never converted, no 4K unless the setting allows it), its stream's address and where it plays
+(each as its file is, no 4K unless the setting allows it), its stream's address, the ⚙'s
+conversion on the server (its decision, its session's playlist, its stop) and where it plays
 told back (a stop near the end is marked watched by the server itself, as a 1.43 server was
 seen to). The fixtures are a local server's answers with made-up titles (its series library
-made up in the shapes Plex documents)."""
+made up in the shapes Plex documents); the conversion's answers are made up in the shapes a
+1.43 server gave."""
 
 import unittest
 from urllib.parse import parse_qs, urlsplit
@@ -277,6 +279,149 @@ class VersionsTest(unittest.TestCase):
         self.assertIsNone(plex.parse_stream_url(BASE + "/library/parts/2/1/file.mov", [BASE]))
         jellyfin = "http://server.test:8096/Videos/f1/stream.mkv?api_key=t"
         self.assertIsNone(plex.parse_stream_url(jellyfin, ["http://server.test:8096"]))
+
+
+DECISION = plex.TRANSCODE + "/decision"
+START = plex.TRANSCODE + "/start.m3u8"
+STOP = plex.TRANSCODE + "/stop"
+CONVERTS = {"MediaContainer": {"generalDecisionCode": 1001, "generalDecisionText": "OK"}}
+
+
+def started(session):
+    """A start's answer: its session's playlist, by a relative address."""
+    return (
+        "#EXTM3U\n"
+        "#EXT-X-STREAM-INF:PROGRAM-ID=1,BANDWIDTH=915000,RESOLUTION=1280x720\n"
+        f"session/{session}/base/index.m3u8\n"
+    )
+
+
+class ConversionTest(unittest.TestCase):
+    """The ⚙'s conversion on a Plex server: its transcoder's decision, then its session's
+    start, whose playlist the player opens; the session stopped by its id."""
+
+    def setUp(self):
+        meta = fixture("movie_metadata.json")
+        self.c, self.http = client({("GET", "/library/metadata/102"): (200, meta)})
+        self.sources = plex.sources(self.c.media("102"))
+        self.http.asked.clear()
+        self.params = plex.conversion_params(
+            "102", self.sources[1], ms.Quality("902", 720, 4_000_000), "client-1", "2.14.0"
+        )
+        self.http.answers[("GET", DECISION)] = (200, CONVERTS)
+        self.http.answers[("GET", START)] = (200, started(self.params["session"]))
+
+    def test_the_conversion_asked_of_plexs_transcoder(self):
+        p = self.params
+        self.assertEqual(
+            {k: v for k, v in p.items() if k not in ("session", "X-Plex-Session-Identifier")},
+            {
+                "path": "/library/metadata/102",
+                "mediaIndex": 1,  # the 1080p version, second of the title's
+                "partIndex": 0,
+                "protocol": "hls",
+                "directPlay": 0,
+                "directStream": 1,
+                "fastSeek": 1,
+                "subtitles": "none",
+                "offset": 0,  # from the start: the player's own seek takes it on from there
+                "videoResolution": "1280x720",
+                "maxVideoBitrate": 4000,
+                "X-Plex-Product": "QiTV",
+                "X-Plex-Version": "2.14.0",
+                "X-Plex-Platform": "Generic",
+                "X-Plex-Client-Identifier": "client-1",
+                "X-Plex-Client-Profile-Extra": plex.PROFILE_EXTRA,
+            },
+        )
+        for part in ("protocol=hls", "container=mpegts", "videoCodec=h264", "audioCodec=aac"):
+            self.assertIn(part, plex.PROFILE_EXTRA)
+        self.assertEqual(p["X-Plex-Session-Identifier"], "102-" + p["session"])
+        again = plex.conversion_params("102", self.sources[1], ms.CONVERSIONS[1], "client-1", "v")
+        self.assertNotEqual(again["session"], p["session"])  # each play its own session
+        sizes = [
+            plex.conversion_params("102", self.sources[0], q, "c", "v")["videoResolution"]
+            for q in ms.CONVERSIONS
+        ]
+        self.assertEqual(sizes, ["1920x1080", "1280x720", "854x480"])
+
+    def test_a_version_is_named_by_its_place_among_the_titles_media(self):
+        media = fixture("movie_metadata.json")["MediaContainer"]["Metadata"][0]["Media"]
+        sources = plex.sources([{"id": 1, "Part": []}, *media])  # one with no file first
+        self.assertEqual([(s["Id"], s["index"]) for s in sources], [("2", 1), ("902", 2)])
+
+    def test_the_server_decides_then_starts_and_the_player_opens_the_sessions_playlist(self):
+        url = self.c.convert(self.params)
+        self.assertEqual([a["path"] for a in self.http.asked], [DECISION, START])
+        decision, start = self.http.asked
+        self.assertEqual(decision["params"], self.params)  # the start is what was decided
+        self.assertEqual(start["params"], self.params)
+        for asked in self.http.asked:
+            self.assertEqual(asked["headers"]["X-Plex-Token"], TOKEN)  # a header's
+            self.assertNotIn("X-Plex-Token", asked["params"])
+        self.assertEqual(decision["headers"]["Accept"], "application/json")
+        self.assertNotEqual(start["headers"]["Accept"], "application/json")  # a playlist
+        session = self.params["session"]
+        playlist = f"{BASE}/video/:/transcode/universal/session/{session}/base/index.m3u8"
+        self.assertEqual(url.split("?")[0], playlist)
+        self.assertEqual(
+            query(url),
+            {
+                "X-Plex-Token": TOKEN,
+                "X-Plex-Client-Identifier": "client-1",
+                "X-Plex-Product": "QiTV",
+                "X-Plex-Session-Identifier": self.params["X-Plex-Session-Identifier"],
+            },
+        )
+
+    def test_a_conversion_the_server_refuses_starts_nothing(self):
+        self.http.answers[("GET", DECISION)] = (
+            200,
+            {"MediaContainer": {"generalDecisionCode": 2000}},
+        )
+        with self.assertLogs("services.plex", "INFO") as logs:
+            self.assertEqual(self.c.convert(self.params), "")
+        self.assertEqual([a["path"] for a in self.http.asked], [DECISION])
+        self.assertIn("2000", logs.output[0])
+        self.http.answers[("GET", DECISION)] = (400, None)  # (a server without the profile)
+        with self.assertRaises(ms.MediaServerError) as caught:
+            self.c.convert(self.params)
+        self.assertEqual(str(caught.exception), "The server answered 400")
+
+    def test_a_start_that_names_no_session_of_the_server_plays_nothing(self):
+        for answer in ("#EXTM3U\n", "#EXTM3U\nhttp://elsewhere.test/session/x/index.m3u8\n"):
+            self.http.answers[("GET", START)] = (200, answer)
+            with self.assertLogs("services.plex", "INFO") as logs:
+                self.assertEqual(self.c.convert(self.params), "")
+            self.assertNotIn("elsewhere", "".join(logs.output))
+
+    def test_the_reporter_reads_a_conversion_back_from_its_address(self):
+        url = self.c.convert(self.params)
+        ref = plex.parse_stream_url(url, ["http://other.test:32400", BASE + "/"])
+        self.assertEqual(
+            (ref.base, ref.item_id, ref.token, ref.converted, ref.transcode),
+            (BASE, "102", TOKEN, True, self.params["session"]),
+        )
+        self.assertEqual(ref.play_session, self.params["X-Plex-Session-Identifier"])
+        self.assertIsNone(plex.parse_stream_url(url, ["http://other.test:32400"]))
+        mine_not = url.split("?")[0] + "?X-Plex-Token=" + TOKEN  # no play session of QiTV's
+        self.assertIsNone(plex.parse_stream_url(mine_not, [BASE]))
+        file = plex.parse_stream_url(
+            plex.stream_url(BASE, self.sources[1], TOKEN, "c", "102"), [BASE]
+        )
+        self.assertEqual((file.converted, file.transcode), (False, ""))
+
+    def test_a_conversion_is_stopped_by_its_session(self):
+        self.http.answers[("GET", STOP)] = (200, None)
+        self.c.stop_conversion("s1")
+        stop = self.http.asked[-1]
+        self.assertEqual((stop["path"], stop["params"]), (STOP, {"session": "s1"}))
+        self.assertEqual(stop["headers"]["X-Plex-Token"], TOKEN)
+        self.http.answers[("GET", STOP)] = (404, None)
+        self.c.stop_conversion("s1")  # the server ended it already: nothing to stop
+        self.http.answers[("GET", STOP)] = (500, None)
+        with self.assertRaises(ms.MediaServerError):
+            self.c.stop_conversion("s1")
 
 
 class ReportTest(unittest.TestCase):
