@@ -1,0 +1,44 @@
+{
+  "MediaContainer": {
+    "size": 1,
+    "allowSync": true,
+    "identifier": "com.plexapp.plugins.library",
+    "librarySectionID": 2,
+    "librarySectionTitle": "Series",
+    "viewGroup": "show",
+    "Metadata": [
+      {
+        "ratingKey": "201",
+        "key": "/library/metadata/201/children",
+        "guid": "plex://show/0000000000000000000000c9",
+        "type": "show",
+        "title": "Quiet Street",
+        "summary": "Quiet Street: a made-up series.",
+        "index": 1,
+        "audienceRating": 8.1,
+        "year": 2024,
+        "thumb": "/library/metadata/201/thumb/1795376800",
+        "art": "/library/metadata/201/art/1795376800",
+        "duration": 1800000,
+        "addedAt": 1795376800,
+        "updatedAt": 1795376800,
+        "leafCount": 3,
+        "viewedLeafCount": 1,
+        "childCount": 2,
+        "Genre": [
+          {
+            "tag": "Comedy"
+          }
+        ],
+        "Guid": [
+          {
+            "id": "tmdb://8201"
+          },
+          {
+            "id": "another://7201"
+          }
+        ]
+      }
+    ]
+  }
+}

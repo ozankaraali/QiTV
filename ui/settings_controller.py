@@ -24,10 +24,12 @@ import logging
 from typing import Any, Optional, Protocol
 
 from PySide6.QtCore import QEvent, QObject, QTimer, Signal
+from PySide6.QtWidgets import QWidget
 
 from services.settings_model import INFO, TEXT, Row, Section, choice_of, is_lit, step
 from services.settings_values import SettingsValues
 from ui.keymap import Action
+from ui.overlays.base import Overlay
 from ui.overlays.settings_drawer import SettingsDrawer
 
 logger = logging.getLogger(__name__)
@@ -140,6 +142,10 @@ class SettingsController(QObject):
     ) -> None:
         super().__init__(drawer)
         self._drawer = drawer
+        # Where the cards are made, and Settings is at home: the TV window's overlay host. It
+        # lends Settings and its cards to the Library's layer while the Library is in front
+        # (2.14: lend_overlay, take_back_overlay).
+        self._home = drawer.parentWidget()
         self._values = values
         self._make_sections = sections  # the sections as they are now
         self._reopen_drawer = reopen_drawer
@@ -241,10 +247,35 @@ class SettingsController(QObject):
 
     # ---- cards over the picture -------------------------------------------------------------
 
+    def card_parent(self) -> Optional[QWidget]:
+        """What a card over Settings is made over: Settings' home (the TV window's overlay
+        host, whose overlays a card made over it joins), wherever Settings shows now; it shows
+        where Settings is (show_card)."""
+        return self._home
+
+    def _place(self, card: Card) -> None:
+        """2.14: `card` where Settings is. Settings lent to the Library's layer, its home lends
+        the card there too, out of its overlays (none of what the host hides or masks reaches
+        it: the corner player's show_only); Settings at home, the card is taken back to its
+        place among them. A home that lends nothing (a plain widget) moves the card."""
+        home, place = self._home, self._drawer.parentWidget()
+        if not isinstance(card, Overlay) or home is None or place is None:
+            return
+        if place is not home and hasattr(home, "lend_overlay"):
+            home.lend_overlay(card, place)
+        elif place is home and hasattr(home, "take_back_overlay"):
+            home.take_back_overlay(card)
+        if card.parentWidget() is not place:  # (one never the home's overlay, or no host)
+            card.move_to(place)
+
     def show_card(self, card: Card) -> None:
         """`card` over Settings (filled first: FormCard.set_form and ChoiceCard.ask show
         it): while it shows, every key is its own before the rows, its Esc its Cancel. A card
-        shown over another has the keys until it goes. Settings going cancels them."""
+        shown over another has the keys until it goes. Settings going cancels them. 2.14: it
+        shows where Settings is, over the picture or over the Library (_place); the fill's
+        show, over a host that hid it meanwhile (the corner player's show_only), is made good
+        here, once it is placed."""
+        self._place(card)
         if card in self._cards:
             self._cards.remove(card)
         self._cards.append(card)

@@ -460,13 +460,30 @@ class SettingsControllerTests(unittest.TestCase):
         self.controller.handle(Action.ESCAPE)  # now the rows': a layer up
         self.assertEqual(self.drawer.focus_side(), "left")
 
+    def test_a_card_shows_where_settings_is(self):
+        # 2.14: Settings over the Library's page: a card made over the picture shows there too.
+        page = QWidget(self.host)
+        page.resize(self.host.size())
+        page.show()
+        self.drawer.move_to(page)
+        self.controller.open(PLAYBACK)
+        card = FakeCard(self.host)
+        self.controller.show_card(card)
+        self.assertIs(card.parentWidget(), page)
+        self.assertTrue(card.isVisible())
+        self.assertTrue(self.controller.card_shown())
+
     def test_only_a_card_in_sight_takes_the_keys(self):
         # A card whose page is out of sight (it is not hidden itself) has no keys: they reach
-        # what shows, and the card has them again once it shows.
-        self.controller.open(PLAYBACK)
+        # what shows, and the card has them again once it shows. (2.14: its page is Settings',
+        # which a card shows on.)
         page = QWidget(self.host)
-        page.hide()
+        page.resize(self.host.size())
+        page.show()
+        self.drawer.move_to(page)
+        self.controller.open(PLAYBACK)
         card = FakeCard(page)
+        page.hide()
         self.controller.show_card(card)
         self.assertFalse(card.isHidden())
         self.assertFalse(card.isVisible())

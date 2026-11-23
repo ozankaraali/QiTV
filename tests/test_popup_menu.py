@@ -412,6 +412,34 @@ class MouseTests(PopupCase):
         self.send(overlay, QEvent.Type.MouseButtonDblClick, QPoint(900, 600))
         self.assertTrue(overlay.shown())
 
+    def test_the_second_click_on_the_button_that_opened_it_closes_it(self):  # 2.13.5
+        class Controls(_Host):
+            def control_at(self, pos):
+                return "cast" if pos.x() >= 800 else "play"
+
+        host = Controls()
+        host.resize(1280, 720)
+        host.show()
+        self.addCleanup(host.close)
+        overlay = self.open_at(self.overlay(host), self.channel_menu())
+        QApplication.sendEvent(host, self.mouse(host, QEvent.Type.MouseButtonDblClick, 900, 600))
+        self.assertFalse(overlay.shown())  # a menu's own button, quickly again
+        overlay = self.open_at(self.overlay(host), self.channel_menu())
+        QApplication.sendEvent(host, self.mouse(host, QEvent.Type.MouseButtonDblClick, 100, 600))
+        self.assertTrue(overlay.shown())  # another's: still the double-click that opened it
+
+    @staticmethod
+    def mouse(widget, kind, x, y):
+        local = QPointF(x, y)
+        return QMouseEvent(
+            kind,
+            local,
+            QPointF(widget.mapToGlobal(local.toPoint())),
+            Qt.MouseButton.LeftButton,
+            Qt.MouseButton.LeftButton,
+            Qt.KeyboardModifier.NoModifier,
+        )
+
     def test_the_mouses_back_button_closes_one_level(self):
         overlay = self.open_at(self.overlay(), self.channel_menu())
         self.click(overlay, "Clear Recents")

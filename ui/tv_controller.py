@@ -85,7 +85,7 @@ from PySide6.QtCore import QEvent, QObject, QPoint, Qt, QTimer, QUrl, Signal
 from PySide6.QtGui import QPixmap, QWheelEvent
 from PySide6.QtWidgets import QAbstractScrollArea
 
-from services import external_players, favorites, recording, recording_schedule
+from services import external_players, favorites, free_radio, recording, recording_schedule
 from services.album_listing import unread_track
 from services.budgeted_stream import HeldSlot
 from services.casting import CastDevices
@@ -102,6 +102,7 @@ from services.live.live_session import LiveSession
 from services.live.tuning import channel_key
 from services.local_episodes import next_in_folder, parse_episode
 from services.media_reporter import MediaReporter
+from services.media_server import Quality
 from services.navigation import (
     FAVORITES_GROUP,
     LINK_LAYER,
@@ -125,7 +126,7 @@ from services.provider_ids import (
     split_group_id,
     with_provider,
 )
-from services.provider_types import is_media_server
+from services.provider_types import is_media_server, is_plex
 from services.redact import safe_traceback, scrub
 from services.sessions import SessionManager, Slot, records
 from services.song_facts import BRAND_COLOURS
@@ -139,7 +140,7 @@ from ui.audio_queue import REPEAT_MODES, AudioQueue
 from ui.autoplay import FINISHED_TEXT, Autoplay
 from ui.captions_texts import NOT_AVAILABLE
 from ui.cast_controls import CastControls
-from ui.context_actions import ContextActions, Launcher, is_channel
+from ui.context_actions import OPEN_PIP_TEXT, ContextActions, Launcher, is_channel
 from ui.episode_listing import FolderListing
 from ui.grid_controls import LEAVE_FIRST, GridControls
 from ui.guide_controller import GuideController
@@ -164,7 +165,7 @@ from ui.pip_controls import PipControls
 from ui.player_keys import PlayerKeys
 from ui.pointer import PointerInput
 from ui.provider_flow import ProviderFlow
-from ui.quality_controls import SIZE_WHILE_RECORDING, QualityControls
+from ui.quality_controls import CONVERSION_REFUSED, SIZE_WHILE_RECORDING, QualityControls
 from ui.song_jobs import AlbumJob, CoverJob, cover_colours
 
 # i18n: a toast: the multiview cannot open while a picture is cast to a TV
@@ -380,6 +381,8 @@ class TVController(QObject):
         # 2.8: a media server's conversion chosen in the quality menu, by provider: its titles
         # play converted until QiTV closes (a version as it is ends it).
         self._media_quality: dict[str, Any] = {}
+        # 2.14: the title (provider, id) a refused conversion was said for, once (review M1).
+        self._refusal_said: Optional[tuple[str, str]] = None
         self._guides_applied: Optional[set[str]] = None  # what the hub was last told
         self._phone_guides: set[str] = set()  # the providers the phone remote lists
         # Plan 4: a link of Network streams' address as it plays now (`set_links`; None: an
@@ -758,6 +761,9 @@ class TVController(QObject):
                 borrow=lambda item, provider, purpose: self.lend_scheduled(item, provider, purpose),
                 owned=self._owned,
                 started=self._count_start,
+                choose=self._choose_small,
+                hidden=self._hidden_now,
+                title_gone=self._small_title_gone,
                 parent=self,
             )
             self._pip.changed.connect(self._mixer.refresh)
@@ -800,6 +806,9 @@ class TVController(QObject):
             self._grid.changed.connect(self._update_guides)
         # The links of tiles opened beside the focused one, on the side lane (one at a time).
         self._tile_links: dict[str, Target] = {}
+        # The channel list was opened for the small picture (P with no previous channel): the
+        # channel picked there opens small.
+        self._choosing_small = False
         # A restored grid's tiles waiting for their provider's setup: (tile, channel,
         # provider, group).
         self._waiting_tiles: list[tuple[str, dict, str, str]] = []
@@ -836,6 +845,7 @@ class TVController(QObject):
         self._lanes.tuneReady.connect(self._on_tune_ready)
         self._lanes.tuneFailed.connect(self._on_tune_failed)
         self._lanes.tuneDropped.connect(self._on_tune_dropped)
+        self._lanes.linkDropped.connect(self._link_dropped)
         self._lanes.sideFailed.connect(self._on_side_failed)
         catalog.epgReady.connect(self._on_epg_ready)
         catalog.providerReady.connect(lambda *_: self._update_guides())
@@ -843,6 +853,7 @@ class TVController(QObject):
         self.overlays.guide.rowsMoved.connect(self._update_guides)
         self.overlays.guide.closed.connect(self._update_guides)
         self.overlays.drawer.closed.connect(self._update_guides)
+        self.overlays.drawer.closed.connect(self._end_choosing_small)
         self.nav.notice.connect(self._on_notice)
         zap.tuneRequested.connect(self._on_zap_tune)
         zap.columnRequested.connect(self._on_column_requested)
@@ -1845,6 +1856,9 @@ class TVController(QObject):
             back = action is Action.SEEK_BACK
             if not self._live_controls.seek_live(back):
                 self._seek(-SEEK_STEP_MS if back else SEEK_STEP_MS)
+        elif action in (Action.TAB, Action.BACK_TAB):
+            if self._grid is not None and self.multiview_shown():
+                self._grid.step_focus(1 if action is Action.TAB else -1)  # 2.14: tile by key
         elif action in (Action.PIP, Action.SWAP):
             if self.multiview_shown():
                 self._toast(LEAVE_FIRST)  # the grid's tiles are the pictures meanwhile
@@ -1996,13 +2010,14 @@ class TVController(QObject):
         target = self._current
         if self._closed or target is None or self.multiview_shown():
             return
-        self._context.show_playing(target, global_pos, self.overlays.transport)
+        # Its players and its link go outside QiTV: a Plex title's file (2.14: _as_its_file).
+        self._context.show_playing(self._as_its_file(target), global_pos, self.overlays.transport)
 
     def video_double_clicked(self) -> None:
-        """Fullscreen; on the multiview's grid, back to one picture (its first click focused
-        the tile, which becomes the big picture)."""
-        if self.multiview_shown():
-            self.leave_multiview()
+        """Fullscreen; on the multiview's grid, the focused tile big (its first click focused
+        it), or the grid again."""
+        if self._grid is not None and self.multiview_shown():
+            self._grid.toggle_big()
         else:
             self.window_actions.toggle_fullscreen()
 
@@ -2222,6 +2237,11 @@ class TVController(QObject):
         if node.layer != "item" or self.nav.section_of(node) != "live":
             logger.debug("Not playable from the drawer: %s", node)
             return
+        if self._choosing_small and self._pip is not None:
+            self._end_choosing_small()
+            self._pip.open_node(node)  # the list was opened for the small picture
+            self.overlays.drawer.close_drawer()
+            return
         # The whole group, not just the rows the drawer's filter shows: ↑/↓ walk the group.
         nodes = self.nav.children(parent) or siblings
         channels = payloads(nodes)
@@ -2241,6 +2261,16 @@ class TVController(QObject):
                 self.overlays.drawer.close_drawer()
             return
         key, channels = self._found_group(channel, group_id)
+        if self._choosing_small and self._pip is not None:
+            self._end_choosing_small()  # the list was opened for the small picture
+            listed = channels if key is not None else self._all_live()
+            source = item_provider.pick_source(self.catalog, channel, key or ALL_GROUP_ID)
+            context = ZapContext(
+                key or ALL_GROUP_ID, listed, fallback=self._all_live(), source=source
+            )
+            self._pip.open_channel(channel, context)
+            self.overlays.drawer.close_drawer()
+            return
         if key is None:
             self.tune_live(channel)
         else:
@@ -2331,6 +2361,8 @@ class TVController(QObject):
         )
         if converted is not None:  # 2.8: the server's conversion chosen goes on for its titles
             target = replace(target, quality=converted)
+            if self._external_launcher() is not None:
+                target = self._as_its_file(target)  # 2.14: Settings' outside player takes it
         title = target.title
         beside = self._title_beside_channel()  # what plays large is a title, a channel small
         if self._pip is not None:
@@ -2352,6 +2384,33 @@ class TVController(QObject):
         menu = getattr(self.catalog, "media_menu", None)
         return menu(item) if callable(menu) else None
 
+    def _as_its_file(self, target: Target) -> Target:
+        """`target` as anything outside QiTV's own player gets it (2.14: a phone, Settings'
+        outside player, the picture's menu: its players and Copy stream link): a Plex title
+        as its file is, never the server's conversion, a session of the server's that only
+        QiTV's own play stops (services.media_reporter)."""
+        quality = target.quality
+        if target.live or target.local or not getattr(quality, "converted", False):
+            return target
+        if not is_plex(item_provider.provider_type(self.catalog, target.item)):
+            return target
+        # The version the conversion converts, when its server said (review M2: a ⚙ row's
+        # conversion names none), else the one chosen, else the settings' pick.
+        playing = (self._media_menu(target.item) or {}).get("quality")
+        source = str(getattr(playing, "source", "") or quality.source or "")
+        return replace(target, quality=Quality(source=source))
+
+    def _conversion_refused(self, target: Target) -> None:
+        """2.14: the server didn't make the conversion the ⚙ asked for (its owner allows none,
+        say): the title plays as its file is, the viewer is told, and the conversion goes on
+        to none of that server's next titles (choosing one again asks the server again)."""
+        provider = provider_of(target.item) or self.catalog.current_provider_name()
+        self._media_quality.pop(provider, None)
+        said = (provider, str(target.item.get("id") or ""))
+        if said != self._refusal_said:  # once for the title (review M1: not at each reopen)
+            self._refusal_said = said
+            self._toast(translate(CONVERSION_REFUSED))
+
     def change_quality(self, quality: Any) -> None:
         """The quality menu's choice (2.8): the film or episode playing opens again in that
         quality (a media server's version as it is, or its conversion), on from where it is.
@@ -2361,15 +2420,16 @@ class TVController(QObject):
         if self._closed or target is None or target.live or target.local:
             return
         provider = provider_of(target.item) or self.catalog.current_provider_name()
+        self._refusal_said = None  # a new choice: a refusal of it is said again
         if getattr(quality, "converted", False):
             self._media_quality[provider] = quality
         else:
             self._media_quality.pop(provider, None)
         start = max(0, int(self.session.time_ms() or 0)) if self._has_media() else None
-        self._request(
-            replace(target, quality=quality, start_ms=start, start_over=False, zapped=False),
-            chosen_now=True,
-        )
+        again = replace(target, quality=quality, start_ms=start, start_over=False, zapped=False)
+        if self._external_launcher() is not None:
+            again = self._as_its_file(again)  # 2.14: Settings' outside player takes it
+        self._request(again, chosen_now=True)
 
     # ---- AI captions on a provider's film (2.9) ----------------------------------------------
     def film_relay_wanted(self) -> bool:
@@ -2549,6 +2609,7 @@ class TVController(QObject):
             self._lanes.queued = None
             target = queued  # chosen again meanwhile: this link serves the newest choice
         elif self._follow_queue(target):
+            self._link_dropped(url)  # 2.14 review I2
             return
         self._play_link(target, url)
 
@@ -2698,7 +2759,10 @@ class TVController(QObject):
         if self._media is not None and launcher is None and not multiview:
             # 2.8: a server's title starts (another's stops); one handed to an outside player
             # is told stopped as it goes (_launch), nothing after: QiTV can't see it play.
-            self._media.playing(url)
+            # 2.14: a channel tuned large replaces no title swapped small: it plays on (a
+            # Plex conversion's session too); the next tune after it closed tells its stop.
+            if not (target.live and self._plays_small(self._media.active_url())):
+                self._media.playing(url)
         self._freed_for = None  # it came: the large picture is the title's
         if target is self._room_for and self._pip is not None:
             self._room_for = None
@@ -2821,6 +2885,27 @@ class TVController(QObject):
         if self._current is target:  # else opening it failed at once (see _guarded)
             self._delivered(target, url)
 
+    def _small_title_gone(self, url: str) -> None:
+        """2.14 review I1: the film swapped small closed or ended there: its server hears it
+        stop (a Plex conversion's session ends with it), unless it heard another start since
+        (a phone's Watch, another title)."""
+        if self._media is not None and url and self._media.active_url() == url:
+            self._media.stopped()
+
+    def _link_dropped(self, url: str) -> None:
+        """2.14 review I2: a link made that will not play: a Plex conversion's session the
+        server started for it is stopped there (off this thread: the reporter's)."""
+        if self._media is not None:
+            self._media.abandoned(url)
+
+    def _plays_small(self, url: str) -> bool:
+        """Whether the small picture plays the movie or episode at `url` (swapped small)."""
+        sessions, pip = self.sessions, self._pip
+        small = sessions.small() if sessions is not None else None
+        if not url or small is None or pip is None or pip.small_title(small.name) is None:
+            return False
+        return pip.view(small.name).url == url
+
     def _guarded(self, target: Target, open_: Callable[[], None]) -> Callable[[], None]:
         """`open_` as an open once the old stream is released: now, or from a signal later."""
 
@@ -2907,7 +2992,10 @@ class TVController(QObject):
         if target.live:
             offered = self.live_menu() is not None
         else:
-            offered = not target.local and bool(self._media_menu(target.item))
+            menu = None if target.local else self._media_menu(target.item)
+            offered = bool(menu)
+            if menu and menu.get("refused") and getattr(target.quality, "converted", False):
+                self._conversion_refused(target)
         self.overlays.transport.set_quality_available(offered)
         if self._quality is not None:
             self._quality.drop_question()  # one asked about what played before
@@ -2924,12 +3012,15 @@ class TVController(QObject):
         guard = self.parental
         if guard is not None and self._protects_play(guard, target):
             return  # 2.8: what parental controls hide never enters the history (nor Recent)
+        # 2.14 review M5: a Plex conversion's session ends with its play: its file is kept.
+        menu = None if target.live or target.local else self._media_menu(target.item)
+        link = str((menu or {}).get("file") or url)
         try:
             self.watch.record_play(
                 item_provider.provider_name(self.catalog, target.item),
                 target.item,
                 item_type=target.item_type,
-                link=url,
+                link=link,
                 group_id=target.group_key if target.live else None,
                 # A link is never the channel QiTV starts on (its token may be gone by then):
                 # the provider's channel watched before it stays (final review M2).
@@ -3045,7 +3136,8 @@ class TVController(QObject):
         """V, View → Multiview, the grid button: the grid, or back to one picture."""
         if self._grid is None or self._closed:
             return
-        self._count_start()  # the grid, or one picture again
+        if not self._grid.big():
+            self._count_start()  # the grid, or one picture again (a big tile's grid: neither)
         if self._cast is not None and self._cast.casting() and not self._grid.shown():
             self._toast(MULTIVIEW_WHILE_CASTING)  # 2.8: one picture goes to the device
             return
@@ -3804,6 +3896,9 @@ class TVController(QObject):
         self._tracks.refresh()  # an open panel shows the large picture's sound or subtitles
         self._picture.refresh()  # and the Picture panel and the statistics its picture
         if grid:
+            drawer = self.overlays.drawer
+            if drawer.isVisible() and not self._settings_shown() and not drawer.finding():
+                self._open_drawer()  # the channel list follows the focus: that tile's place
             if large_reopen is not None and self._grid is not None:
                 # A tile beside the focus never reconnects by itself (its direct stream that
                 # ends fails): one the focus left during its back-off says its stream ended.
@@ -4943,11 +5038,16 @@ class TVController(QObject):
         screen.show_song(title, artist, album, year=year)
 
     def _refresh_radio(self, target: Target) -> None:
-        """A radio channel's name, then the song its stream names (else the programme on)."""
+        """A radio channel's name, then the song its stream names (else the programme on):
+        VLC's, or through the time-shift buffer a station's as the helper read it where it
+        plays (2.14: VLC never sees the station's own metadata there)."""
         screen = self._screen()
         if screen is None:
             return
         playing = str(self._tags().get("now_playing") or "")
+        live = self.live
+        if not playing and live is not None and self._live_controls.pipeline_live():
+            playing = live.stream_title(free_radio.codepage(target.item))
         if not playing:
             on_now = self.now_title(target.item)
             playing = on_now[0] if on_now else ""
@@ -5366,33 +5466,52 @@ class TVController(QObject):
         if banner.isVisible() and banner.info is not None and banner.info.logo is None:
             banner.show_info(self.banner_info(channel))
 
+    def _choose_small(self) -> None:
+        """P (⧉, the phone's) with no previous channel to open small: the channel list opens,
+        and the channel picked there opens small (Enter, a click, the find's); Esc closes it
+        and nothing opens."""
+        if self._closed:
+            return
+        self._open_drawer()
+        if self.overlays.drawer.isVisible():
+            self._choosing_small = True
+            self._toast(translate(OPEN_PIP_TEXT), "info")  # what the pick is for
+
+    def _end_choosing_small(self) -> None:
+        self._choosing_small = False
+
     def _open_drawer(self, from_column: bool = False) -> None:
+        self._choosing_small = False  # (the small picture's choice opens it, then says so)
         if not self.catalog.provider_names():
             self._flow.welcome(chosen=True)  # asked for: over a film opened in QiTV too
             return
-        # Where the big picture's channel was picked (after a swap, the new large one's); while
-        # the fast-zap column is open the user is choosing in it, so the list opens at the zap's
-        # own channel and group, as before 2.1.
+        # On the channel the big picture plays (its ▶: the one tuned last, playing or on its
+        # way; after a swap, the new large one's), where it was picked: its target's group and
+        # list once it plays, else the zap's (set as it was tuned). Its row is the one its ▶
+        # marks (its address first: an M3U id is a list position, another channel's once the
+        # list changed). While the fast-zap column is open the user is choosing in it, so the
+        # list opens at the zap's own channel and group, as before 2.1.
         shown = self._current if self._current is not None and self._current.live else None
+        playing = self._channel if shown is not None else None  # (a film's: the list as it is)
         if from_column or self.overlays.column.isVisible():
-            shown = None
-        if shown is not None:
-            self.nav.reveal(
-                shown.source,
-                "live",
-                shown.group_key or self.zap.context.group_key,
-                shown.item,
-            )
+            playing = None
+        context = self.zap.context
+        if playing is not None and shown is not None:
+            if ZapContext.same(shown.item, playing):
+                source, group = shown.source, shown.group_key or context.group_key
+            else:  # still on its way: picked from the zap's group
+                source, group = context.source, context.group_key
+            self.nav.reveal(source, "live", group, playing)
         elif "live" not in self.catalog.sections():  # 2.8: a media server: its sections
             self.nav.focus_source(self.catalog.current_provider_name())
         else:
-            self.nav.reset_to("live", self.zap.context.group_key or ALL_GROUP_ID)
-        channel = shown.item if shown is not None else self._channel or self.zap.context.current()
+            self.nav.reset_to("live", context.group_key or ALL_GROUP_ID)
+        channel = self._channel or context.current()
         focus = None
         if channel:
             provider = provider_of(channel)
             focus = (provider, item_key(channel)) if provider else item_key(channel)
-        self.overlays.drawer.open_drawer(focus_key=focus)
+        self.overlays.drawer.open_drawer(focus_key=focus, focus_item=channel or None)
         self._update_guides()  # the drawer is visible now: its group's providers are in use
 
     def _open_guide(self) -> None:
@@ -5484,6 +5603,8 @@ class TVController(QObject):
             pass  # 2.13.3: the Resume pill closes (Esc, the phone's Back), its offer gone
         elif overlays.banner.isVisible():
             overlays.banner.dismiss()
+        elif self._grid is not None and self._grid.big():
+            self._grid.back_to_grid()  # a big tile: the grid again
         elif self.multiview_shown():
             self.leave_multiview()  # before fullscreen: the grid is what Esc closes first
         else:
@@ -5595,7 +5716,10 @@ class TVController(QObject):
 
     def _open_mixer(self) -> None:
         """The transport's speaker: the mixer, the controls held up (the speaker lit) until it
-        closes."""
+        closes; a click while it shows closes it."""
+        if self._mixer.visible():
+            self._mixer.hide()  # closed → _on_mixer_closed lets the controls fade again
+            return
         self._mixer.open_main()
         if self._mixer.visible():
             self.overlays.transport.hold("volume")
@@ -5943,7 +6067,9 @@ class TVController(QObject):
         target = target or self._current
         if self._closed or target is None:
             return False
-        target = self._owned_target(target)  # a link: whose stream it is now
+        # 2.14: a phone gets a Plex title through QiTV's home door, which passes its file (the
+        # server's conversion is a playlist of pieces on the server): as it is.
+        target = self._as_its_file(self._owned_target(target))  # a link: whose stream it is now
         chosen = target
         if target.local:
             path = str(target.item.get("path") or "")

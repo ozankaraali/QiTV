@@ -20,7 +20,8 @@ playlist's HEAD or its file, a media server's sign-in). Only one that answered i
 selected and said ("Added … to your providers"). A failure says why and offers "Add anyway",
 but for Jellyfin and Emby (only their sign-in's token is kept, never the password) and for a
 playlist file QiTV can't find. "Free channels…" and "Free radio…" give way to their countries
-in Settings (2.13.1).
+in Settings (2.13.1), "Plex" to Plex's sign-in by a code (2.14: ui.plex_signin; Address and login
+on a Plex provider signs in again so).
 
 The Address-and-login card ("<name>: address and login") is the same card, filled in from the
 provider, with "Check and save". Its link is never read as one until it changes: an older
@@ -70,7 +71,7 @@ from services.provider_link import (
     parse_provider_link,
     xtream_address,
 )
-from services.provider_types import EMBY, JELLYFIN, is_media_server
+from services.provider_types import EMBY, JELLYFIN, PLEX, is_media_server
 from ui.overlays.settings_card import (
     CANCEL,
     CANCEL_TEXT,
@@ -80,9 +81,11 @@ from ui.overlays.settings_card import (
     FormCard,
     pick_file,
 )
+from ui.plex_signin import PlexSignIn
 from ui.provider_check import ProviderCheck
 from ui.settings_controller import SettingsController
 from ui.settings_providers import (
+    ADDED_TEXT,
     SAVE_FAILED_TEXT,
     ProviderRows,
     answer_text,
@@ -103,7 +106,7 @@ URL, USERNAME, PASSWORD, MAC, SERIAL, DEVICE, NAME = (
     "name",
 )
 CHECK, ANYWAY = "check", "anyway"  # the buttons (and CANCEL)
-# The other ways; a kind's is its type (STB, JELLYFIN, EMBY).
+# The other ways; a kind's is its type (STB, JELLYFIN, EMBY; PLEX, its sign-in's).
 FILE, FREE, RADIO = "file", "free", "radio"
 KINDS = (STB, JELLYFIN, EMBY)
 ADD_NEW, REPLACE = "new", "replace"  # the guard's answers (and CANCEL)
@@ -183,8 +186,6 @@ ADD_NEW_TEXT = N_("Add as new")  # i18n: a button: add the edited address as a n
 REPLACE_ADDRESS_TEXT = N_("Replace {name}'s address")
 # i18n: a button: the provider edited takes the new login ({name}: the provider)
 REPLACE_LOGIN_TEXT = N_("Replace {name}'s login")
-# i18n: a toast; {names} is one or more provider names, joined with ", "
-ADDED_TEXT = N_("Added {names} to your providers")
 # The fields' labels (the old window's, without their colons).
 _LABELS = {
     URL: LINK_TEXT,
@@ -251,10 +252,11 @@ def _accounts(old: dict, new: dict) -> tuple[str, str]:
 
 
 class ProviderCards(QObject):
-    """Settings › Providers' Add card and each provider's Address-and-login card, over the
-    picture under Settings (`drawer`'s parent). `window` is the TV window (its check runner,
-    its toasts, its Free channels and Free radio); `settings` shows the cards and gives them
-    the keys; `rows` the Providers rows, whose changes these are too (`ProviderRows.apply`)."""
+    """Settings › Providers' Add card and each provider's Address-and-login card, made over
+    Settings' card parent (the overlay host) and shown where Settings is (2.14: over the
+    Library too). `window` is the TV window (its check runner, its toasts, its Free channels
+    and Free radio); `settings` shows the cards and gives them the keys; `rows` the Providers
+    rows, whose changes these are too (`ProviderRows.apply`)."""
 
     # What a card holds (`_reset`).
     _original: dict
@@ -273,7 +275,7 @@ class ProviderCards(QObject):
         self._window = window
         self._settings = settings
         self._rows = rows
-        host = drawer.parentWidget()
+        host = settings.card_parent()  # (the overlay host: Settings lends them, 2.14)
         self.form = FormCard(host)
         self.question = ChoiceCard(host)
         self._check = ProviderCheck(runner=window.jobs, parent=self)
@@ -283,6 +285,8 @@ class ProviderCards(QObject):
         self.question.answered.connect(self._on_guard)
         self._check.answered.connect(self._on_answered)
         settings.hidden.connect(self._close)  # (its cards cancelled already)
+        # 2.14: Plex signs in with a code on a card of its own (ui.plex_signin).
+        self.plex = PlexSignIn(window, settings, drawer, rows, shown=self._raise_over)
         self._reset()
 
     # ---- opening ------------------------------------------------------------------------------
@@ -322,6 +326,9 @@ class ProviderCards(QObject):
         except KeyError:
             return  # gone meanwhile
         self._close()
+        if str(provider.get("type") or "").upper() == PLEX:
+            self.plex.start(editing=name)  # 2.14: its sign-in again, by a code
+            return
         self._editing, self._original = name, provider
         kind = self._stored_kind()
 
@@ -500,6 +507,14 @@ class ProviderCards(QObject):
             if card is not None and card.isVisible():
                 card.raise_()
 
+    def _raise_over(self) -> None:
+        """The window's cards that stay over Settings' (a question it asks meanwhile, File →
+        Open Link…'s card) over the Plex sign-in's too."""
+        for name in _OVER_CARDS:
+            card = getattr(self._window, name, None)
+            if card is not None and card.isVisible():
+                card.raise_()
+
     def _fields(self, kind: str) -> list[Field]:
         def field(key: str, **kwargs: Any) -> Field:
             return Field(key, _label(key), self._values.get(key, ""), **kwargs)
@@ -545,7 +560,7 @@ class ProviderCards(QObject):
         file = Button(FILE, translate(M3U_FILE_TEXT))
         if self._editing:
             return [file] if self._stored_kind() in _PLAYLISTS else []
-        kinds = [Button(kind, kind_text(kind)) for kind in KINDS]
+        kinds = [Button(kind, kind_text(kind)) for kind in (*KINDS, PLEX)]
         free = [Button(FREE, translate(FREE_TEXT)), Button(RADIO, translate(RADIO_TEXT))]
         return [file, *kinds, *free]
 
@@ -600,6 +615,8 @@ class ProviderCards(QObject):
             self._free_channels()
         elif key == RADIO:
             self._free_radio()
+        elif key == PLEX:
+            self._plex()
         elif key in KINDS:
             self._chosen = "" if self._chosen == key else key
             self._line, self._failed = None, False
@@ -621,6 +638,13 @@ class ProviderCards(QObject):
         alone = self._alone
         self._close()
         self._window.show_free_channels(opened_settings=alone)
+
+    def _plex(self) -> None:
+        """Plex (2.14): the card gives way to Plex's sign-in, a code to enter at plex.tv/link
+        (a Settings the card opened for itself closes with its Cancel, as with the card's)."""
+        alone = self._alone
+        self._close()
+        self.plex.start(opened_settings=alone)
 
     def _free_radio(self) -> None:
         """Free radio… (2.13): likewise, its countries."""

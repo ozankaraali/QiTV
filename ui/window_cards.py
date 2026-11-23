@@ -92,7 +92,9 @@ class WindowCards(QObject):
     the questions waiting for them. `library_shown()` says whether the Library is the page in
     front, `closing()` whether the window closes; `before_tv()` makes way for the TV's card
     (the mini player, the ⋯ menu); `held()` whether what QiTV says unasked waits (the mini
-    player shows: `release` once it ends); `above()` the cards that stay over this one."""
+    player shows: `release` once it ends); `gives_way()` whether the
+    window is hidden for the small window (the macOS mini player: a question asked for brings
+    it back through `before_tv`); `above()` the cards that stay over this one."""
 
     def __init__(
         self,
@@ -104,6 +106,7 @@ class WindowCards(QObject):
         closing: Callable[[], bool],
         before_tv: Callable[[], None] = lambda: None,
         held: Callable[[], bool] = lambda: False,
+        gives_way: Callable[[], bool] = lambda: False,
         above: Callable[[], Iterable[QWidget]] = tuple,
         parent: Optional[QObject] = None,
     ) -> None:
@@ -115,6 +118,7 @@ class WindowCards(QObject):
         self._closing = closing
         self._before_tv = before_tv
         self._held = held
+        self._gives_way = gives_way
         self._above = above
         self._waiting: deque[_Question] = deque()
         self._asked: Optional[_Question] = None  # the one shown
@@ -203,12 +207,16 @@ class WindowCards(QObject):
         if self._closing():
             self._waiting.clear()
             return
-        if not self._window.isVisible():
+        if not self._window.isVisible() and not self._gives_way():
             return  # its show asks (`eventFilter`)
         held = self._held()  # (what QiTV says unasked waits: `release` asks again)
         question = next((q for q in self._waiting if not (held and q.unasked)), None)
         if question is None:
             return
+        if not self._window.isVisible():
+            self._before_tv()  # hidden for the macOS mini player: asked for, the window comes
+            if not self._window.isVisible():
+                return
         self._waiting.remove(question)
         card = self._front()
         if card is self.tv_card:

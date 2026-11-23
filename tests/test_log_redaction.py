@@ -79,6 +79,10 @@ class MaskTests(unittest.TestCase):
         "X-Emby-Token: TOKEN123": "X-Emby-Token: …",
         'MediaBrowser Client="QiTV", Token="TOKEN123"': 'MediaBrowser Client="QiTV", Token=…',
         "api_key=TOKEN123&static=true": "api_key=…&static=true",
+        "X-Plex-Token: TOKEN123": "X-Plex-Token: …",  # 2.14: Plex's
+        "file.mkv?X-Plex-Token=TOKEN123&X-Plex-Session-Identifier=5": "…",
+        "X-Plex-Token=TOKEN123&download=0": "X-Plex-Token=…",
+        '{"authToken": "TOKEN123", "accessToken": "TOKEN123"}': '{"authToken": "…',
     }
 
     def test_every_sample_is_masked(self):

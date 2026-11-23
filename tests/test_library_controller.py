@@ -1601,7 +1601,8 @@ class LibraryControllerTests(unittest.TestCase):
         self.assertNotIn(("section", "movies"), self.catalog.requests)
         self.assertEqual(
             self.screen.grid._message,
-            "P has no movies\nFilms and series come from Xtream, STB, Jellyfin and Emby providers.",
+            "P has no movies\nFilms and series come from Xtream, STB, Jellyfin, Emby and Plex"
+            " providers.",
         )
         self.assertEqual(self.screen.genres.rows(), [])
         # Where films come from, and the way there: Add provider (a click, or Enter).

@@ -9,7 +9,7 @@ Link…'s card over Settings. A link opens a layer of its own:
 
 - Play: it plays as its row in the channel list plays it (as it was kept, as the stream of
   whoever's it is), and Settings closes. With no provider the channel list never opens: its
-  links play from here;
+  links play from here. From Settings over the Library (2.14), on the player page;
 - Name, edited in place (blank: one made of its address);
 - Address, edited in place and shown as kept. Its stream with a fresh token is kept at once,
   under the same id (its name, resume point and ⟲ Recent's row follow); another stream is
@@ -263,6 +263,7 @@ class LinkRows(QObject):
             return
         entry, field = found
         if field == PLAY:
+            self._window.screens.leave_library_to_play()  # 2.14: never unseen behind it
             if self._player.play_kept(entry.id):
                 self._settings.close()
         elif field == REMOVE:
@@ -312,7 +313,7 @@ class LinkRows(QObject):
 
     def _ask(self, title: str, body: str, buttons: list[Button], default: str) -> None:
         if self._question is None:
-            self._question = ChoiceCard(self._drawer.parentWidget())
+            self._question = ChoiceCard(self._settings.card_parent())
             self._question.answered.connect(self._on_answered)
         self._question.ask(title, body, buttons, default)
         self._settings.show_card(self._question)

@@ -487,6 +487,38 @@ class HomeDoorFilmTests(unittest.TestCase):
         self.assertEqual(self.get(base + "/2.m4s")[0], 404)
         self.assertEqual(self.get(base.rsplit("/", 1)[0] + "/nope/index.m3u8")[0], 404)
 
+    def test_a_film_as_it_is_comes_through_the_home_door_in_ranges(self):  # 2.14: Plex
+        """The phone gets the home door's address, never the provider's (it holds the token),
+        and reads the file through it in ranges, as from its provider."""
+        message = {"t": "play", "name": "Harbour Lights"}
+        self.hub.open_passed(
+            "s8", "d1", self.provider.url("smoke.mp4"), {}, True, message, "file.mp4"
+        )
+        end = time.monotonic() + 5
+        while not self.sent and time.monotonic() < end:
+            time.sleep(0.02)
+        sid, sent = self.sent[-1]
+        self.assertEqual((sid, sent["name"]), ("s8", "Harbour Lights"))
+        self.assertRegex(
+            sent["url"], rf"^http://127\.0\.0\.1:{self.hub.port}/pass/[\w-]+/file\.mp4$"
+        )
+        self.assertNotIn(self.provider.url(""), sent["url"])
+        whole = (FILMS.parent / "smoke.mp4").read_bytes()
+
+        async def ranged():
+            async with aiohttp.ClientSession() as session:
+                async with session.get(sent["url"], headers={"Range": "bytes=4-11"}) as response:
+                    return response.status, response.headers, await response.read()
+
+        status, headers, body = asyncio.run(ranged())
+        self.assertEqual((status, body), (206, whole[4:12]))
+        self.assertEqual(headers["Content-Range"], f"bytes 4-11/{len(whole)}")
+        self.hub.forget_film("d1")
+        end = time.monotonic() + 3
+        while self.get(sent["url"])[0] != 404 and time.monotonic() < end:
+            time.sleep(0.02)
+        self.assertEqual(self.get(sent["url"])[0], 404)  # gone with the phone's next choice
+
     def test_the_tv_playing_again_ends_the_films(self):
         _sid, message = self.open_film("h264_aac.mkv")
         self.hub.drop_films()

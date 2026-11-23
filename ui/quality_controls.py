@@ -1,6 +1,6 @@
-"""The ⚙ quality menu (2.8): a Jellyfin or Emby title's versions, each as its file is, and the
-server's conversions below the version playing; a channel's picture sizes, when its stream
-comes in several (Auto, its best, first).
+"""The ⚙ quality menu (2.8): a Jellyfin, Emby or Plex (2.14) title's versions, each as its file
+is, and the server's conversions below the version playing; a channel's picture sizes, when its
+stream comes in several (Auto, its best, first).
 
 The transport's ⚙ (shown while such a title plays: TVController sets it) opens the panel above
 it, as the Picture panel opens (ui/overlays/track_panel.py). A row plays the title again in
@@ -33,11 +33,13 @@ QUALITY = "quality"  # the transport's button, and the panel it holds
 QUALITY_TITLE = N_("Quality")  # i18n: the ⚙ panel's title: a title's versions and conversions
 # i18n: a ⚙ panel row: the server converts the title to this size and rate ("720p · 4 Mbit/s")
 CONVERTED_ROW = N_("{quality}, converted")
-# i18n: asked before the first conversion on a Jellyfin or Emby server
+# i18n: asked before the first conversion on a Jellyfin, Emby or Plex server
 CONVERT_QUESTION = N_(
     "Converting uses the server's processor. On a server someone else runs, its owner may not"
     " want that."
 )
+# i18n: a toast: the media server didn't convert the title as the ⚙ asked; it plays as it is
+CONVERSION_REFUSED = N_("The server didn't convert it: the file plays as it is")
 CONVERT_YES = N_("Convert")  # i18n: the answer that converts
 CONVERT_NO = N_("Keep the original")  # i18n: the answer that plays the file as it is
 # i18n: the ⚙ panel's first row on a channel: its best picture size, as its stream offers

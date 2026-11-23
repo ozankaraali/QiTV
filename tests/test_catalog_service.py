@@ -628,6 +628,66 @@ class MediaServerCatalogTests(unittest.TestCase):
         )
         self.assertIsNone(service.media_menu({"id": "f2"}))
 
+    def test_a_plex_providers_workers_are_plexs(self):  # 2.14
+        from services.catalog import WorkerFactory
+        from services.media_workers import MediaSectionWorker
+        from services.plex_workers import PlexLinkWorker, PlexSectionWorker, PlexSeriesWorker
+
+        factory = WorkerFactory()
+        plex = {"type": "PLEX", "url": "https://h.example.plex.direct:32400", "token": "t"}
+        self.assertIsInstance(factory.media_section(plex, "vod", True), PlexSectionWorker)
+        self.assertIsInstance(factory.media_series(plex, "201", True), PlexSeriesWorker)
+        link = factory.media_link(plex, "102", True, screen_4k=False, four_k="screen", quality=None)
+        self.assertIsInstance(link, PlexLinkWorker)
+        self.assertIsInstance(factory.media_section(dict(JELLY), "vod", True), MediaSectionWorker)
+
+    def test_a_title_of_one_version_has_its_menu_for_the_conversions(self):  # 2.14: Plex too
+        service, _providers, factory, _ = make_service(dict(JELLY))
+        playing = ms.Quality(source="p1")
+        factory.results["media_link"] = {
+            "result": {
+                "link": "http://s.test/f.mkv",
+                "versions": [{"id": "p1"}],
+                "quality": playing,
+            }
+        }
+        service.request_link({"id": "f1", "cmd": ""}, section="movies")
+        QCoreApplication.processEvents()
+        self.assertEqual(
+            service.media_menu({"id": "f1"}), {"versions": [{"id": "p1"}], "quality": playing}
+        )
+
+    def test_a_refused_conversion_is_kept_with_the_menu(self):  # 2.14: the TV says so
+        service, _providers, factory, _ = make_service(dict(JELLY))
+        playing = ms.Quality(source="p1")
+        factory.results["media_link"] = {
+            "result": {
+                "link": "http://s.test/f.mkv",
+                "versions": [{"id": "p1"}],
+                "quality": playing,
+                "refused": True,
+            }
+        }
+        service.request_link({"id": "f1", "cmd": ""}, section="movies")
+        QCoreApplication.processEvents()
+        self.assertIs(service.media_menu({"id": "f1"})["refused"], True)
+
+    def test_a_conversions_file_is_kept_with_the_menu(self):  # 2.14 review M5: the history's
+        service, _providers, factory, _ = make_service(dict(JELLY))
+        factory.results["media_link"] = {
+            "result": {
+                "link": "http://s.test/session/s1/base/index.m3u8",
+                "versions": [{"id": "p1"}],
+                "quality": ms.Quality("p1", 720, 4_000_000),
+                "file": "http://s.test/library/parts/1/f.mkv",
+            }
+        }
+        service.request_link({"id": "f1", "cmd": ""}, section="movies")
+        QCoreApplication.processEvents()
+        self.assertEqual(
+            service.media_menu({"id": "f1"})["file"], "http://s.test/library/parts/1/f.mkv"
+        )
+
 
 class CatalogShutdownTests(unittest.TestCase):
     """The window is closing: start no more jobs and report nothing."""

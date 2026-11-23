@@ -275,6 +275,13 @@ class SoundPanelTests(PanelCase):
         self.click_button("audio")
         self.assertFalse(self.panel.isVisible())
 
+    def test_a_quick_second_click_on_its_button_closes_it(self):  # 2.13.5
+        point = self.transport.mapTo(
+            self.host, self.transport.button_rect("audio").center().toPoint()
+        )
+        QTest.mouseDClick(self.host.windowHandle(), Qt.MouseButton.LeftButton, pos=point)
+        self.assertFalse(self.panel.isVisible())
+
     def test_a_click_in_another_window_leaves_it_open(self):
         # A dialog (the subtitles' file dialog, a message box) is not "elsewhere".
         self.click_button("audio")

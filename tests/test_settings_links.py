@@ -634,6 +634,24 @@ class PlayRowTests(WindowCase):
         self.assertTrue(wait_until(lambda: window.controller.now_playing() is not None))
         self.assertEqual(window.controller.now_playing().item["id"], LIVE_ID)
 
+    def test_play_from_settings_over_the_library_plays_on_the_player_page(self):
+        # 2.14: Settings shows over the Library; a link never plays unseen behind it.
+        self.start()
+        window = self.window
+        window.screens.open_library("movies")
+        elapse(QApplication.doubleClickInterval() + 80)
+        self.to_play()
+        self.assertTrue(window.screens.library_shown())  # Settings over the Library
+        with mock.patch.object(
+            window.controller, "play_link", wraps=window.controller.play_link
+        ) as play:
+            self.press(Qt.Key.Key_Return)
+        play.assert_called_once()
+        self.assertFalse(window.settings.visible())
+        self.assertFalse(window.screens.library_shown())  # the player page, where it plays
+        self.assertTrue(wait_until(lambda: window.controller.now_playing() is not None))
+        self.assertEqual(window.controller.now_playing().item["id"], LIVE_ID)
+
     def test_a_double_click_on_play_plays_once_and_never_reaches_the_video(self):
         # Settings closes on the first press: the second would land on what is under it (the
         # video, where a double-click is fullscreen; the welcome card's Add provider).

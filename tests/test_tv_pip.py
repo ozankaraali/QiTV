@@ -31,6 +31,7 @@ from services.network_streams import NetworkStreams, stream_id
 from services.provider_ids import NETWORK_PROVIDER, with_provider
 from services.sessions import PIP_FAILED, SessionManager, Slot
 from services.vlc_profile import STB_USER_AGENT, PlayKind
+from services.zapping import ZapContext
 from tests.test_tv_controller import (
     CHANNELS,
     HARBOR_ONE,
@@ -48,6 +49,7 @@ from tests.test_tv_controller import (
     wait_until,
 )
 from ui.autoplay import FINISHED_TEXT
+from ui.context_actions import OPEN_PIP_TEXT
 from ui.keymap import Action
 from ui.live_tuner import LiveTuner, one_disk_ring, wait_for_each_other
 from ui.network_player import NetworkPlayer
@@ -363,8 +365,71 @@ class PipTests(PipCase):
         self.assertEqual(self.pip_live.calls, [])
         self.assertFalse(self.sessions.pip_open())
 
-    def test_p_without_a_previous_channel_says_so(self):
+    def test_after_a_swap_the_list_opens_on_the_channel_now_large(self):
         self.start_large(0)
+        self.open_small(CHANNELS[1])
+        self.controller.handle(Action.SWAP)
+        self.controller.handle(Action.OPEN_DRAWER)
+        self.assertEqual(self.drawer.focus_item["name"], "Two")
+        self.assertEqual(self.nav.revealed()["name"], "Two")
+
+    def test_a_hidden_previous_channel_counts_as_none(self):
+        self.start_large(0)
+        self.start_large(1)  # One is the previous channel
+        self.controller._pip._hidden = lambda channel: channel["name"] == "One"  # locked
+        self.controller.handle(Action.PIP)
+        self.assertTrue(self.drawer.visible)
+        self.assertEqual(self.requested(), ["One", "Two"])  # never asked for
+
+    def test_p_without_a_previous_channel_opens_the_list_and_esc_opens_nothing(self):
+        # The owner: with no channel before it, the second channel could be chosen (it said
+        # there was none). With one, it opens at once (the test above).
+        self.start_large(0)
+        for opens in (
+            lambda: self.controller.handle(Action.PIP),
+            self.transport.pipRequested.emit,  # ⧉ (the phone's is P)
+        ):
+            with self.subTest(opens=opens):
+                opens()
+                self.assertTrue(self.drawer.visible)
+                self.assertEqual(self.toast.messages()[-1], (OPEN_PIP_TEXT, "info"))
+                self.assertEqual(self.drawer.focus_item["name"], "One")  # on the big one's
+                self.controller.handle(Action.ESCAPE)
+                self.drawer.closed.emit()  # (as the list says once it closes)
+                self.assertFalse(self.drawer.visible)
+                self.assertEqual(self.requested(), ["One"])  # nothing asked for
+                self.assertFalse(self.sessions.pip_open())
+
+    def test_the_channel_picked_in_that_list_opens_small(self):
+        self.start_large(0)
+        self.controller.handle(Action.PIP)
+        group = self.nav.path[-1]
+        nodes = self.nav.children(group)
+        self.drawer.playRequested.emit(nodes[2], nodes, group)  # Enter, or a click
+        self.assertEqual(self.requested()[-1], "Three")
+        self.assertFalse(self.drawer.visible)
+        self.ready("http://stream/3")
+        self.assertTrue(wait_until(self.sessions.pip_open))
+        self.assertIs(self.sessions.large(), self.main_slot)  # One plays on, large
+        self.assertTrue(ZapContext.same(self.sessions.small().channel, CHANNELS[2]))
+        self.controller.handle(Action.OPEN_DRAWER)  # the list again: for the big picture
+        self.drawer.playRequested.emit(nodes[3], nodes, group)
+        self.assertEqual(self.requested()[-1], "Four")
+        self.ready("http://stream/4")
+        self.assertTrue(ZapContext.same(self.sessions.small().channel, CHANNELS[2]))
+
+    def test_a_channel_found_in_that_list_opens_small(self):
+        self.start_large(0)
+        self.controller.handle(Action.PIP)
+        self.drawer.channelFound.emit(CHANNELS[1], "10")
+        self.assertEqual(self.requested()[-1], "Two")
+        self.ready("http://stream/2")
+        self.assertTrue(wait_until(self.sessions.pip_open))
+        self.assertIs(self.sessions.large(), self.main_slot)
+
+    def test_without_a_choice_p_without_a_previous_channel_says_so(self):
+        self.start_large(0)
+        self.controller._pip._choose = None
         self.controller.handle(Action.PIP)
         self.assertEqual(self.toast.messages()[-1], (NO_PREVIOUS, "info"))
         self.assertEqual(self.requested(), ["One"])
@@ -1270,6 +1335,65 @@ class LibraryPlayTests(PipCase):
         reporter.playing.assert_called_with("http://vod/heat.mkv")
         reporter.position.assert_called_with(61_000, url="http://vod/heat.mkv")
 
+    @staticmethod
+    def film_reporter():
+        reporter = mock.Mock()
+        reporter.active_url.return_value = "http://vod/heat.mkv"  # the film's play
+        return reporter
+
+    def film_swapped_small(self, reporter):
+        self.start_large(0)
+        self.play_from_library()
+        self.controller.handle(Action.SWAP)  # the channel large, the film small
+        reporter.reset_mock()
+
+    def test_a_film_swapped_small_plays_on_when_the_large_picture_zaps(self):  # 2.14
+        # Its server's play goes on (a Plex conversion's session with it): the channel tuned
+        # large replaces nothing the server plays.
+        reporter = self.film_reporter()
+        with mock.patch.object(self.controller, "_media", reporter):
+            self.film_swapped_small(reporter)
+            self.controller.handle(Action.CH_NEXT)
+            self.ready("http://stream/2")
+        self.assertTrue(self.sessions.pip_open())
+        reporter.playing.assert_not_called()
+        reporter.stopped.assert_not_called()
+
+    def told_when_gone(self, gone):
+        """A film swapped small goes there (`gone`): how often its server heard it stop at
+        once, and the reporter after the large picture's next zap."""
+        reporter = self.film_reporter()
+        with mock.patch.object(self.controller, "_media", reporter):
+            self.film_swapped_small(reporter)
+            gone()
+            stopped = reporter.stopped.call_count
+            self.controller.handle(Action.CH_NEXT)
+            self.ready("http://stream/2")
+        return stopped, reporter
+
+    def test_a_film_closed_small_by_its_x_is_told_stopped_at_once(self):  # 2.14 review I1
+        stopped, reporter = self.told_when_gone(self.label.closeRequested.emit)
+        self.assertEqual(stopped, 1)  # its session on the server ends with it
+        reporter.playing.assert_called_once_with("http://stream/2")
+
+    def test_a_film_closed_small_by_the_phone_is_told_stopped_at_once(self):  # review I1
+        stopped, _reporter = self.told_when_gone(self.controller.close_pip)
+        self.assertEqual(stopped, 1)
+
+    def test_a_film_that_ends_small_is_told_stopped_at_once(self):  # review I1
+        stopped, _reporter = self.told_when_gone(
+            lambda: self.pip_session.stateChanged.emit("ended")
+        )
+        self.assertEqual(stopped, 1)
+
+    def test_a_small_film_another_play_replaced_on_its_server_is_not_stopped_again(self):
+        reporter = self.film_reporter()
+        with mock.patch.object(self.controller, "_media", reporter):
+            self.film_swapped_small(reporter)
+            reporter.active_url.return_value = "http://other/title.mkv"  # e.g. a phone's Watch
+            self.label.closeRequested.emit()
+        reporter.stopped.assert_not_called()
+
     def test_a_movie_swapped_small_shows_its_title_without_live_wording(self):
         # Polish: the label used live wording ("Connecting…") for the film playing small.
         self.start_large(0)
@@ -1956,6 +2080,17 @@ class MixerTests(PipCase):
         self.assertEqual(self.transport.held(), "volume")  # the pointer on the mixer: no hiding
         self.mixer.dismiss()
         self.assertEqual(self.transport.held(), "")  # the controls fade again
+
+    def test_the_speaker_again_closes_the_mixer_and_lets_the_controls_fade(self):  # 2.13.5
+        self.start_large(0)
+        self.transport.volumeRequested.emit()
+        self.assertTrue(self.mixer.isVisible())
+        self.assertEqual(self.transport.held(), "volume")
+        self.transport.volumeRequested.emit()
+        self.assertFalse(self.mixer.isVisible())
+        self.assertEqual(self.transport.held(), "")
+        self.transport.volumeRequested.emit()  # and once more it opens
+        self.assertTrue(self.mixer.isVisible())
 
     def test_the_transports_speaker_shows_whether_the_large_picture_is_heard(self):
         self.start_large(0)

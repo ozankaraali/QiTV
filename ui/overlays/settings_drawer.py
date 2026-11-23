@@ -314,6 +314,11 @@ class SettingsDrawer(Overlay):
         self.raise_()
         self._say(opening=True)
 
+    def _moved(self) -> None:
+        """2.14: over the Library's page while the Library is in front, or the picture again
+        (Overlay.move_to): laid out for it at once."""
+        self._relayout()
+
     def set_sections(
         self, sections: Sequence[Section], renamed: Optional[Mapping[str, str]] = None
     ) -> None:

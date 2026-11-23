@@ -8,6 +8,7 @@ from PySide6.QtWidgets import QWidget
 from shiboken6 import isValid
 
 from ui.macos_window import animates_restore, attach_child_window
+from ui.overlays.base import Overlay
 from ui.pointer import PointerInput
 
 logger = logging.getLogger(__name__)
@@ -51,6 +52,8 @@ class OverlayHost(QWidget):
         self._window = window
         self._surface = surface
         self._overlays: list[QWidget] = []
+        # 2.14: overlays lent to another page (lend_overlay), each with the one over it then
+        self._lent: dict[QWidget, QWidget | None] = {}
         self._hole = QRect()  # the PiP (see set_hole)
         self._cover = False  # the hole is the multiview's grid (see set_hole)
         self._only: QWidget | None = None  # see show_only
@@ -83,19 +86,55 @@ class OverlayHost(QWidget):
 
         Raised here too: one built with the host as its parent already (the PiP label) would
         otherwise stay under every overlay added later, and the full-size transport took the
-        clicks on its buttons."""
-        self._overlays.append(widget)
-        widget.setParent(self)
+        clicks on its buttons. One added again (a card that joined as it was made, 2.14) is
+        only raised and hidden again."""
+        if widget not in self._overlays:
+            self._overlays.append(widget)
+            widget.installEventFilter(self)
+            widget.destroyed.connect(lambda _=None, w=widget: self._forget(w))
+        if widget.parentWidget() is not self:
+            widget.setParent(self)
         widget.raise_()
         widget.hide()
-        widget.installEventFilter(self)
-        widget.destroyed.connect(lambda _=None, w=widget: self._forget(w))
         self._raise_on_top()
 
     def remove_overlay(self, widget: QWidget) -> None:
         self._forget(widget)
         if isValid(widget):
             widget.removeEventFilter(self)
+        self.overlay_changed()
+
+    def lend_overlay(self, widget: Overlay, parent: QWidget) -> None:
+        """`widget` shows over `parent` for a while (2.14: Settings over the Library's page): no
+        overlay of the host meanwhile (its visibility, the mask, show_only are not the host's),
+        its place among them kept for `take_back_overlay`."""
+        if widget not in self._overlays:
+            return
+        index = self._overlays.index(widget)
+        above = self._overlays[index + 1] if index + 1 < len(self._overlays) else None
+        self._lent[widget] = above
+        self._forget(widget)
+        widget.removeEventFilter(self)
+        widget.move_to(parent)
+        self.overlay_changed()
+
+    def take_back_overlay(self, widget: Overlay) -> None:
+        """A lent overlay is the host's again, in its place: under the one that was over it
+        (when that is still an overlay), else on top."""
+        if widget not in self._lent:
+            return
+        above = self._lent.pop(widget)
+        widget.move_to(self)
+        if above is not None and above in self._overlays:
+            self._overlays.insert(self._overlays.index(above), widget)
+            widget.stackUnder(above)
+        else:
+            self._overlays.append(widget)
+            widget.raise_()
+            self._raise_on_top()
+        widget.installEventFilter(self)
+        if not widget.isHidden() and self._not_shown_now(widget):
+            widget.hide()
         self.overlay_changed()
 
     def _forget(self, widget) -> None:
@@ -141,6 +180,32 @@ class OverlayHost(QWidget):
             self._hole = QRect(rect)
             self._cover = cover
             self._update_mask()
+
+    def followed(self) -> QWidget:
+        """The window the overlays show over now (`follow_window`)."""
+        return self._window
+
+    def follow_window(self, window: QWidget) -> None:
+        """The overlays show over `window` from now on: the TV window, or the macOS mini
+        player's small window while it holds the player page they are glued to
+        (ui/mini_player.py). It is the window whose moves, state and visibility they follow,
+        and on macOS the one they are attached to as a child window (on the next show: ordered
+        out from the old one now)."""
+        if window is self._window or not isValid(window):
+            return
+        if isValid(self._window):
+            self._window.removeEventFilter(self)
+        if self._platform is not None and isValid(self._platform):
+            self._platform.removeEventFilter(self)
+        self._platform = None
+        self._window = window
+        window.installEventFilter(self)
+        self._watch_platform()
+        self._report_wait.stop()
+        self._in_dock = False
+        if self.isVisible():
+            self.hide()  # macOS drops it from its old parent window; shown again on the new one
+        self._update_visibility()
 
     def sync_geometry(self) -> None:
         rect = QRect(self._surface.mapToGlobal(QPoint(0, 0)), self._surface.size())

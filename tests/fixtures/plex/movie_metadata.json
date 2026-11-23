@@ -1,0 +1,190 @@
+{
+  "MediaContainer": {
+    "size": 1,
+    "allowSync": true,
+    "identifier": "com.plexapp.plugins.library",
+    "librarySectionID": 1,
+    "librarySectionTitle": "Films",
+    "mediaTagPrefix": "/system/bundle/media/flags/",
+    "mediaTagVersion": 1792752125,
+    "Metadata": [
+      {
+        "ratingKey": "102",
+        "key": "/library/metadata/102",
+        "guid": "plex://movie/000000000000000000000066",
+        "type": "movie",
+        "title": "The Paper Lantern",
+        "librarySectionTitle": "Films",
+        "librarySectionID": 1,
+        "librarySectionKey": "/library/sections/1",
+        "summary": "A lantern maker's last order.",
+        "rating": 9.2,
+        "year": 2019,
+        "thumb": "/library/metadata/102/thumb/1795376704",
+        "art": "/library/metadata/102/art/1795376704",
+        "duration": 46699,
+        "addedAt": 1792861808,
+        "updatedAt": 1795376704,
+        "Media": [
+          {
+            "id": 2,
+            "duration": 46699,
+            "bitrate": 30425,
+            "width": 3840,
+            "height": 2160,
+            "aspectRatio": 1.33,
+            "audioChannels": 2,
+            "audioCodec": "aac",
+            "videoCodec": "h264",
+            "videoResolution": "4k",
+            "container": "mov",
+            "videoFrameRate": "NTSC",
+            "optimizedForStreaming": 0,
+            "has64bitOffsets": false,
+            "videoProfile": "high",
+            "Part": [
+              {
+                "id": 2,
+                "key": "/library/parts/2/1792861808/file.mov",
+                "duration": 46699,
+                "file": "/media/films/The Paper Lantern.mov",
+                "size": 177597998,
+                "container": "mov",
+                "has64bitOffsets": false,
+                "optimizedForStreaming": false,
+                "videoProfile": "high",
+                "Stream": [
+                  {
+                    "id": 3,
+                    "streamType": 1,
+                    "default": true,
+                    "codec": "h264",
+                    "index": 0,
+                    "bitrate": 30142,
+                    "bitDepth": 8,
+                    "chromaLocation": "left",
+                    "chromaSubsampling": "4:2:0",
+                    "codedHeight": 3840,
+                    "codedWidth": 2160,
+                    "colorPrimaries": "bt709",
+                    "colorRange": "tv",
+                    "colorSpace": "bt709",
+                    "colorTrc": "bt709",
+                    "frameRate": 30.0,
+                    "hasScalingMatrix": false,
+                    "height": 2160,
+                    "level": 51,
+                    "profile": "high",
+                    "refFrames": 2,
+                    "scanType": "progressive",
+                    "width": 3840,
+                    "displayTitle": "4K",
+                    "extendedDisplayTitle": "4K (H.264)"
+                  },
+                  {
+                    "id": 4,
+                    "streamType": 2,
+                    "selected": true,
+                    "default": true,
+                    "codec": "aac",
+                    "index": 1,
+                    "channels": 2,
+                    "bitrate": 320,
+                    "samplingRate": 48000,
+                    "displayTitle": "Unknown (AAC Stereo)",
+                    "extendedDisplayTitle": "Unknown (AAC Stereo)"
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "id": 902,
+            "duration": 46699,
+            "bitrate": 8200,
+            "width": 1920,
+            "height": 1080,
+            "aspectRatio": 1.33,
+            "audioChannels": 2,
+            "audioCodec": "aac",
+            "videoCodec": "h264",
+            "videoResolution": "1080",
+            "container": "mkv",
+            "videoFrameRate": "NTSC",
+            "optimizedForStreaming": 0,
+            "has64bitOffsets": false,
+            "videoProfile": "high",
+            "Part": [
+              {
+                "id": 902,
+                "key": "/library/parts/902/1792861808/file.mkv",
+                "duration": 46699,
+                "file": "/media/films/The Paper Lantern 1080p.mkv",
+                "size": 48000000,
+                "container": "mkv",
+                "has64bitOffsets": false,
+                "optimizedForStreaming": false,
+                "videoProfile": "high",
+                "Stream": [
+                  {
+                    "id": 3,
+                    "streamType": 1,
+                    "default": true,
+                    "codec": "h264",
+                    "index": 0,
+                    "bitrate": 30142,
+                    "bitDepth": 8,
+                    "chromaLocation": "left",
+                    "chromaSubsampling": "4:2:0",
+                    "codedHeight": 3840,
+                    "codedWidth": 2160,
+                    "colorPrimaries": "bt709",
+                    "colorRange": "tv",
+                    "colorSpace": "bt709",
+                    "colorTrc": "bt709",
+                    "frameRate": 30.0,
+                    "hasScalingMatrix": false,
+                    "height": 1080,
+                    "level": 51,
+                    "profile": "high",
+                    "refFrames": 2,
+                    "scanType": "progressive",
+                    "width": 1920,
+                    "displayTitle": "4K",
+                    "extendedDisplayTitle": "4K (H.264)"
+                  },
+                  {
+                    "id": 4,
+                    "streamType": 2,
+                    "selected": true,
+                    "default": true,
+                    "codec": "aac",
+                    "index": 1,
+                    "channels": 2,
+                    "bitrate": 320,
+                    "samplingRate": 48000,
+                    "displayTitle": "Unknown (AAC Stereo)",
+                    "extendedDisplayTitle": "Unknown (AAC Stereo)"
+                  }
+                ]
+              }
+            ]
+          }
+        ],
+        "Genre": [
+          {
+            "tag": "Drama"
+          },
+          {
+            "tag": "Road"
+          }
+        ],
+        "Guid": [
+          {
+            "id": "tmdb://90102"
+          }
+        ]
+      }
+    ]
+  }
+}

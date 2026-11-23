@@ -2137,6 +2137,9 @@ class LivePipelineWindowTests(WindowCase):
         self.assertFalse(mixer.geometry().intersects(small))
         QTest.keyClick(self.window, Qt.Key.Key_Tab)  # the PiP's row
         self.assertEqual(mixer.selected(), 1)
+        QTest.keyClick(self.window, Qt.Key.Key_Backtab, Qt.KeyboardModifier.ShiftModifier)
+        self.assertEqual(mixer.selected(), 0)  # 2.14: Shift+Tab, back a row (not Qt's focus)
+        QTest.keyClick(self.window, Qt.Key.Key_Tab)
         QTest.keyClick(self.window, Qt.Key.Key_Escape)
         self.assertFalse(mixer.isVisible())
         self.assertTrue(wait_until(lambda: frame.small_rect() == small))

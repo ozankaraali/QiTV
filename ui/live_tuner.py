@@ -73,6 +73,8 @@ class LiveStart:
     revive: bool = True
     # Plan 4: a link opened with Open Link, tried again once at most (LiveSession's `once`).
     once: bool = False
+    # 2.14: a radio list's station: the helper reads its sound and its songs (`radio`).
+    radio: bool = False
 
 
 def start_kwargs(start: LiveStart, config: Any, *, disk: Optional[bool] = None) -> dict[str, Any]:
@@ -84,8 +86,8 @@ def start_kwargs(start: LiveStart, config: Any, *, disk: Optional[bool] = None) 
     M3U names a referrer passes that (`referrer`, and its `Referer` header for the helper).
     A start asked over HTTPS first has the helper try that first (`https_first`, 2.7.1).
     A size cap chosen in the ⚙ goes with it (`max_height`, 2.8; 0: the best again), and so
-    does a start whose direct play the caller brings back itself (`revive=False`), and a
-    link's, tried again once at most (`once`, plan 4).
+    does a start whose direct play the caller brings back itself (`revive=False`), a
+    link's, tried again once at most (`once`, plan 4), and a radio station's (`radio`, 2.14).
     """
     consent = bool(config.timeshift_enabled)
     disk = consent if disk is None else disk and consent
@@ -117,6 +119,8 @@ def start_kwargs(start: LiveStart, config: Any, *, disk: Optional[bool] = None) 
         kwargs["revive"] = False
     if start.once:
         kwargs["once"] = True
+    if start.radio:
+        kwargs["radio"] = True
     return kwargs
 
 

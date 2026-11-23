@@ -251,6 +251,37 @@ class OverlayHostTests(HostCase):
         self.assertTrue(wait_until(self.host.isVisible))
         self.assertEqual(self.host.geometry(), surface_rect(self.surface))
 
+    def test_a_lent_overlay_shows_elsewhere_and_comes_back_in_its_place(self):
+        # 2.14: Settings over the Library's page, then over the picture again, under what was
+        # over it before (the guide), over what was under it.
+        later, top = Overlay(), Overlay()
+        self.host.add_overlay(later)
+        self.host.add_overlay(top)
+        elsewhere = QWidget()
+        elsewhere.resize(300, 200)
+        self.addCleanup(elsewhere.deleteLater)
+        self.host.show_only(top)  # (the corner player's: it hid any other overlay that showed)
+        self.host.lend_overlay(later, elsewhere)
+        self.assertIs(later.parentWidget(), elsewhere)
+        self.assertNotIn(later, self.host._overlays)
+        later.show()
+        self.assertFalse(later.isHidden())  # the host's show_only no longer reaches it
+        self.host.show_only(None)
+        later.hide()
+        self.host.take_back_overlay(later)
+        self.assertIs(later.parentWidget(), self.host)
+        self.assertEqual(self.host._overlays, [self.panel, later, top])
+        stack = [c for c in self.host.children() if c in (self.panel, later, top)]
+        self.assertEqual(stack, [self.panel, later, top])
+        for overlay in (self.panel, later, top):
+            overlay.setGeometry(0, 0, 200, 100)
+        later.show()
+        pause(20)
+        self.assertTrue(self.host.isVisible())  # in the mask again
+        self.assertTrue(self.host.mask().contains(QPoint(50, 50)))
+        self.host.take_back_overlay(later)  # not lent: nothing changes
+        self.assertEqual(self.host._overlays, [self.panel, later, top])
+
     def test_video_surface_is_native(self):
         self.assertGreater(self.surface.native_handle(), 0)
 

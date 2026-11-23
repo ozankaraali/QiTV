@@ -526,7 +526,10 @@ class FakeDrawer(FakeOverlay):
     def finding(self):
         return self.found
 
-    def open_drawer(self, focus_key=None, focus_side="right"):
+    focus_item = None  # the channel the list opened on (its row as its ▶ tells)
+
+    def open_drawer(self, focus_key=None, focus_side="right", focus_item=None):
+        self.focus_item = focus_item
         if focus_side == "right":
             self.record("open_drawer", focus_key)
         else:
@@ -622,9 +625,11 @@ class FakeTransport(FakeOverlay):
     def set_pip_state(self, available, open_):
         self.record("set_pip_state", available, open_)
 
-    def set_grid_state(self, available, shown, layout="", restorable=False, cells=0):
+    big = False  # a multiview tile is big
+
+    def set_grid_state(self, available, shown, layout="", restorable=False, cells=0, big=False):
         self.record("set_grid_state", available, shown, layout)
-        self.restorable = restorable
+        self.restorable, self.big = restorable, big
 
     def follow_pip(self, rect):
         self.record("follow_pip", rect)
@@ -895,6 +900,9 @@ class FakeLiveSession(QObject):
     def is_pipeline(self):
         return self.mode == "pipeline"
 
+    def stream_title(self, codepage="cp1252"):  # 2.14: a station's song, as the helper read it
+        return ""
+
     def start(self, url, **kwargs):
         self.calls.append(("start", url, kwargs))
         self.running, self.mode = True, ""
@@ -1157,6 +1165,39 @@ class LinkPipelineTests(ControllerTestCase):
         self.assertEqual(self.catalog.provider, "Backup")
         self.assertEqual(self.drawer.named("open_drawer")[-1], (item_key(CHANNELS[1]),))
 
+    def test_the_list_opens_on_the_channel_a_zap_is_on_its_way_to(self):
+        # The owner: the list highlighted the channel beside the one watched. A zap (↑/↓, the
+        # phone's, the media keys') moves the ▶ at once: the list opened on the channel before
+        # it until the new one played.
+        self.play(0)
+        self.controller._on_zap_tune(CHANNELS[1])  # its link still on its way
+        self.assertEqual(self.controller.playing_channel()["name"], "Two")
+        self.controller.handle(Action.OPEN_DRAWER)
+        self.assertEqual(self.nav.revealed()["name"], "Two")
+        self.assertEqual(self.drawer.focus_item["name"], "Two")
+        self.assertEqual(self.drawer.named("open_drawer")[-1], (item_key(CHANNELS[1]),))
+
+    def test_during_a_film_the_list_opens_as_it_is_never_at_the_channel_before_it(self):
+        self.catalog.select_provider("Backup")
+        self.play(1)
+        self.catalog.select_provider("Home")  # browsing elsewhere
+        self.controller.play_vod(VodTests.MOVIE, "movie", play_context())
+        self.ready("http://vod/heat.mkv")
+        self.assertFalse(self.controller._current.live)
+        self.controller.handle(Action.OPEN_DRAWER)
+        self.assertEqual(self.catalog.provider, "Home")  # nothing switched under the film
+        self.assertIsNone(self.nav.revealed())
+
+    def test_the_list_opens_on_the_row_the_channels_play_mark_is_on(self):
+        # The start's last channel is the config's dict: its M3U id (a list position) may be
+        # its neighbour's in today's list; the list finds it as its ▶ does, by its address.
+        kept = {**CHANNELS[1], "id": CHANNELS[2]["id"]}
+        self.controller.tune(kept, group_key="10", channels=CHANNELS)
+        self.ready("http://stream/2")
+        self.controller.handle(Action.OPEN_DRAWER)
+        self.assertIs(self.drawer.focus_item, self.controller.playing_channel())
+        self.assertEqual(self.drawer.focus_item["cmd"], CHANNELS[1]["cmd"])
+
     def stamped(self, provider="Harbor IPTV"):
         """The channels as that provider's list holds them."""
         if provider not in self.catalog.names:
@@ -1193,6 +1234,7 @@ class LinkPipelineTests(ControllerTestCase):
         self.controller._current = Target(
             CHANNELS[1], "live", "Two", group_key="10", source="Backup"
         )
+        self.controller._restore_channel()  # (as _on_large_changed: the ▶ follows it)
         self.catalog.select_provider("Home")
         self.controller.handle(Action.OPEN_DRAWER)
         self.assertEqual(self.nav.path[0].key, "Backup")
@@ -2088,6 +2130,127 @@ class VodTests(ControllerTestCase):
         self.controller.play_vod({"id": "m9", "name": "Tron", "cmd": "y"}, "movie", play_context())
         self.assertIsNone(self.catalog.qualities[-1])
 
+    def watch_on_the_phone_while_converted(self, ptype):
+        self.catalog.ptype = ptype
+        self.play_movie()
+        self.catalog.linkReady.emit(1, "http://vod/heat.mkv")
+        self.controller.change_quality(ms.Quality(height=720, bitrate=4_000_000))
+        self.catalog.linkReady.emit(2, "http://vod/heat.m3u8")
+        self.assertTrue(self.controller.play_elsewhere(lambda target, url: (True, "")))
+        self.assertEqual(len(self.catalog.links), 3)
+        return self.catalog.qualities[-1]
+
+    def test_a_phone_plays_a_plex_title_converted_here_as_its_file_is(self):  # 2.14
+        # The phone gets a Plex title through QiTV's home door, which passes files: never the
+        # server's conversion (its playlist names its pieces on the server).
+        self.assertEqual(self.watch_on_the_phone_while_converted("PLEX"), ms.Quality(source=""))
+
+    def test_a_phone_plays_a_jellyfin_title_converted_here_converted(self):  # 2.8, as it was
+        asked = self.watch_on_the_phone_while_converted("JELLYFIN")
+        self.assertEqual(asked, ms.Quality(height=720, bitrate=4_000_000))
+
+    def converted_plex_title(self):
+        self.catalog.ptype = "PLEX"
+        self.play_movie()
+        self.catalog.linkReady.emit(1, "http://vod/heat.mkv")
+        self.controller.change_quality(ms.Quality(height=720, bitrate=4_000_000))
+        self.catalog.linkReady.emit(2, "http://vod/heat.m3u8")
+
+    def test_the_pictures_menu_gives_a_plex_title_its_file_never_a_conversion(self):  # 2.14
+        # Copy stream link and Play in VLC/mpv hand the address outside QiTV, which never
+        # stops a conversion session there: a Plex title goes as its file is.
+        self.converted_plex_title()
+        shown = []
+        with mock.patch.object(
+            self.controller._context, "show_playing", lambda *a: shown.append(a[0])
+        ):
+            self.controller.video_context(QPoint(3, 4))
+        self.assertEqual(shown[0].quality, ms.Quality(source=""))
+        self.assertTrue(self.controller._current.quality.converted)  # it plays on so
+        # The version the conversion converts, when the server said (review M2): the 4K one
+        # chosen, then converted, goes out as the 4K file, not the settings' pick.
+        self.catalog.menus["m7"] = {"versions": [], "quality": ms.Quality("uhd", 720, 4_000_000)}
+        with mock.patch.object(
+            self.controller._context, "show_playing", lambda *a: shown.append(a[0])
+        ):
+            self.controller.video_context(QPoint(3, 4))
+        self.assertEqual(shown[-1].quality, ms.Quality(source="uhd"))
+
+    def test_an_outside_player_set_in_settings_gets_a_plex_title_as_its_file_is(self):  # 2.14
+        self.converted_plex_title()
+        self.config.play_in_vlc = True
+        self.controller.play_vod({"id": "m8", "name": "Ronin", "cmd": "x"}, "movie", play_context())
+        self.assertEqual(self.catalog.qualities[-1], ms.Quality(source=""))  # carried: not here
+        self.catalog.linkReady.emit(3, "http://vod/ronin.mkv")  # VLC plays the file
+        self.assertEqual(self.external.calls[-1], ("vlc", "http://vod/ronin.mkv"))
+        self.config.play_in_vlc = False
+        self.controller.play_vod({"id": "m9", "name": "Tron", "cmd": "y"}, "movie", play_context())
+        self.assertEqual(self.catalog.qualities[-1], ms.Quality(height=720, bitrate=4_000_000))
+
+    def test_a_conversion_the_server_refused_is_said_and_carried_no_further(self):  # 2.14
+        for ptype in ("PLEX", "JELLYFIN"):
+            with self.subTest(ptype=ptype):
+                self.catalog.ptype = ptype
+                self.catalog.menus["m7"] = {
+                    "versions": [{"id": "hd"}],
+                    "quality": ms.Quality("hd"),  # the file plays, not the conversion asked
+                    "refused": True,
+                }
+                said = ("The server didn't convert it: the file plays as it is", "info")
+                before = self.toast.messages().count(said)
+                self.play_movie()
+                self.catalog.linkReady.emit(len(self.catalog.links), "http://vod/heat.mkv")
+                self.assertEqual(self.toast.messages().count(said), before)  # none was asked
+                self.controller.change_quality(ms.Quality(height=720, bitrate=4_000_000))
+                self.catalog.linkReady.emit(len(self.catalog.links), "http://vod/heat.mkv")
+                self.assertEqual(self.toast.messages().count(said), before + 1)
+                self.controller.play_vod(
+                    {"id": "m8", "name": "Ronin", "cmd": "x"}, "movie", play_context()
+                )
+                self.assertIsNone(self.catalog.qualities[-1])  # its next titles as they are
+
+    def test_a_refusal_is_said_once_for_the_title_not_at_each_reopen(self):  # review M1
+        said = ("The server didn't convert it: the file plays as it is", "info")
+        self.catalog.ptype = "PLEX"
+        self.catalog.menus["m7"] = {
+            "versions": [{"id": "hd"}],
+            "quality": ms.Quality("hd"),
+            "refused": True,
+        }
+        self.play_movie()
+        self.catalog.linkReady.emit(1, "http://vod/heat.mkv")
+        self.controller.change_quality(ms.Quality(height=720, bitrate=4_000_000))
+        self.catalog.linkReady.emit(2, "http://vod/heat.mkv")
+        self.assertEqual(self.toast.messages().count(said), 1)
+        self.controller.stop_live()
+        self.controller.resume_stopped()  # the same title again, its conversion asked again
+        self.catalog.linkReady.emit(3, "http://vod/heat.mkv")
+        self.assertEqual(self.toast.messages().count(said), 1)  # said once for it
+        self.controller.change_quality(ms.Quality(height=480, bitrate=2_000_000))  # chosen anew
+        self.catalog.linkReady.emit(4, "http://vod/heat.mkv")
+        self.assertEqual(self.toast.messages().count(said), 2)
+
+    def test_the_history_keeps_a_plex_conversions_file_not_its_session(self):  # review M5
+        self.catalog.ptype = "PLEX"
+        session = "http://plex/video/:/transcode/universal/session/s1/base/index.m3u8?t=1"
+        self.catalog.menus["m7"] = {
+            "versions": [{"id": "hd"}],
+            "quality": ms.Quality("hd", 720, 4_000_000),
+            "file": "http://plex/library/parts/9/1/file.mkv?t=1",
+        }
+        self.play_movie()
+        self.catalog.linkReady.emit(1, session)
+        self.assertEqual(self.watch.plays[-1][3], "http://plex/library/parts/9/1/file.mkv?t=1")
+        self.assertEqual(self.session.plays[-1][0], session)  # it plays converted
+
+    def test_a_title_its_file_already_fits_says_nothing(self):  # 2.14: not a refusal
+        self.catalog.menus["m7"] = {"versions": [{"id": "sd"}], "quality": ms.Quality("sd")}
+        self.play_movie()
+        self.catalog.linkReady.emit(1, "http://vod/heat.mkv")
+        self.controller.change_quality(ms.Quality(height=720, bitrate=4_000_000))
+        self.catalog.linkReady.emit(2, "http://vod/heat.mkv")
+        self.assertEqual([m for m in self.toast.messages() if "convert" in m[0]], [])
+
     def test_the_quality_button_shows_for_a_title_its_server_offers_choices_for(self):
         self.catalog.menus["m7"] = {"versions": [{"id": "hd"}], "quality": ms.Quality("hd")}
         self.play_movie()
@@ -2218,6 +2381,8 @@ class MediaServerReportTests(ControllerTestCase):
             position=lambda ms, paused=False, url=None: told(("position", ms, url)),
             stopped=lambda: told(("stopped",)),
             shutdown=lambda: None,
+            active_url=lambda: "",
+            abandoned=lambda url: told(("abandoned", url)),
         )
         return super().make_controller(column, media_reporter=reporter, **extra)
 
@@ -2249,6 +2414,22 @@ class MediaServerReportTests(ControllerTestCase):
         self.assertEqual(
             self.reported, [("stopped",), ("playing", self.HEAT), ("position", 61_000, self.HEAT)]
         )
+
+    def test_a_link_superseded_before_it_opens_is_abandoned(self):  # 2.14 review I2
+        # (A Plex conversion's session the server started for it is stopped there.)
+        self.controller.play_vod({"id": "m8", "name": "Ronin", "cmd": "x"}, "movie", play_context())
+        self.controller.play_vod({"id": "m9", "name": "Tron", "cmd": "y"}, "movie", play_context())
+        self.ready(self.RONIN)  # Ronin's link: Tron was chosen since
+        self.assertIn(("abandoned", self.RONIN), self.reported)
+        self.assertNotIn(("playing", self.RONIN), self.reported)
+
+    def test_a_link_that_comes_after_its_play_was_stopped_is_abandoned(self):  # review I2
+        self.controller.play_vod({"id": "m8", "name": "Ronin", "cmd": "x"}, "movie", play_context())
+        asked = self.catalog.links[-1][0]
+        self.controller.stop_for_library()  # the corner's ×: a link on its way never opens
+        self.catalog.linkReady.emit(asked, self.RONIN)
+        self.assertIn(("abandoned", self.RONIN), self.reported)
+        self.assertNotIn(("playing", self.RONIN), self.reported)
 
     def test_the_sleep_timer_tells_the_stop(self):
         self.controller.stop_for_sleep()
@@ -3644,14 +3825,15 @@ class PipelineTuneTests(PipelineCase):
         self.assertEqual(len(self.starts()), 1)
         self.assertEqual(self.budget.holders("Home"), ["main"])  # the direct play's own
 
-    def test_a_radio_station_plays_directly_from_the_start(self):
-        # Free radio (2.13): a radio list's station never opens a time-shift session (no
-        # second connection, nothing to say); it books its one stream as a direct play does.
+    def test_a_radio_station_plays_directly_only_when_its_sound_cannot_be_read(self):
+        # Free radio (2.13): a station whose sound the time-shift helper cannot read never
+        # opens a session (no second connection, nothing to say); it books its one stream as
+        # a direct play does.
         self.catalog.ptype = "M3UPLAYLIST"
-        station = {**CHANNELS[1], free_radio.STATION_KEY: True}
+        station = {**CHANNELS[1], free_radio.STATION_KEY: True, free_radio.CODEC_KEY: "OGG"}
         self.controller.tune(station, group_key="10", channels=[station])
-        self.ready("http://radio.test/live.mp3")
-        self.assertEqual(self.session.plays[-1][0], "http://radio.test/live.mp3")
+        self.ready("http://radio.test/live.ogg")
+        self.assertEqual(self.session.plays[-1][0], "http://radio.test/live.ogg")
         self.assertEqual(self.live.calls, [])  # no time-shift session at all
         self.assertEqual(self.toast.messages(), [])
         self.assertEqual(self.budget.holders("Home"), ["main"])
@@ -3661,6 +3843,32 @@ class PipelineTuneTests(PipelineCase):
         self.assertTrue(wait_until(lambda: len(self.starts()) == 1))
         self.assertEqual(self.starts()[0][0], "http://stream/1")
         self.assertEqual(self.budget.holders("Home"), ["main"])
+
+    def test_a_radio_station_plays_from_its_buffer(self):
+        # 2.14, the owner: "you just treat radios also with timeshift engine". A station
+        # plays through the time-shift buffer, so it pauses, rewinds and has AI captions: its
+        # sound read as a station's (`radio`), asked as given (VLC asks it so: no HTTPS
+        # first), one stream booked. A station of a list 2.13 made names no codec: tried too.
+        self.catalog.ptype = "M3UPLAYLIST"
+        for codec in ("MP3", None):
+            with self.subTest(codec=codec):
+                station = {**CHANNELS[1], free_radio.STATION_KEY: True}
+                if codec is not None:
+                    station[free_radio.CODEC_KEY] = codec
+                count = len(self.starts())
+                self.controller.tune(station, group_key="10", channels=[station])
+                self.ready("http://radio.test/live.mp3")
+                self.assertTrue(wait_until(lambda: len(self.starts()) == count + 1))
+                url, kwargs = self.starts()[-1]
+                self.assertEqual(url, "http://radio.test/live.mp3")
+                self.assertTrue(kwargs["radio"])
+                self.assertNotIn("https_first", kwargs)
+                self.assertEqual(self.budget.holders("Home"), ["main"])
+                self.tune(0)  # a channel's: as ever
+                self.ready("http://stream/1")
+                self.assertTrue(wait_until(lambda: len(self.starts()) == count + 2))
+                self.assertNotIn("radio", self.starts()[-1][1])
+                self.assertTrue(self.starts()[-1][1]["https_first"])
 
     def test_a_channel_from_another_provider_holds_that_providers_slot(self):
         self.controller.tune(HARBOR_ONE, group_key="10", channels=[HARBOR_ONE])
@@ -4955,14 +5163,20 @@ class ContextMenuTests(ControllerTestCase):
         self.choose(menu, "Record at a time…")
         self.assertEqual(asked, ["One"])
 
-    def test_a_radio_station_is_never_recorded_at_a_time(self):  # 2.13
-        # It plays directly: the helper a scheduled recording opens can't read it.
+    def test_a_radio_station_is_recorded_at_a_time_when_its_sound_can_be_read(self):
+        # 2.14: the helper a scheduled recording opens reads a station's sound; one in a format
+        # it cannot read plays directly, and is never recorded at a time (2.13: no station).
         self.controller.record_at = lambda channel: None  # QiTV can record at a time
         node = self.channels[0]
-        station = {**node.payload, free_radio.STATION_KEY: True}
-        texts = self.texts(self.menu_for(NavNode(node.layer, node.key, node.title, station)))
-        self.assertNotIn("Record at a time…", texts)
-        self.assertEqual(texts[0], "Add to favorites")
+        for codec, offered in (("OGG", False), ("MP3", True), (None, True)):
+            with self.subTest(codec=codec):
+                station = {**node.payload, free_radio.STATION_KEY: True}
+                if codec is not None:
+                    station[free_radio.CODEC_KEY] = codec
+                station_node = NavNode(node.layer, node.key, node.title, station)
+                texts = self.texts(self.menu_for(station_node))
+                self.assertEqual("Record at a time…" in texts, offered)
+                self.assertEqual(texts[0], "Add to favorites")
         self.assertIn("Record at a time…", self.texts(self.menu_for(node)))  # a channel: as ever
 
     def guarded(self):

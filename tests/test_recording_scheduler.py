@@ -153,6 +153,7 @@ class SchedulerTests(unittest.TestCase):
         sid, url, kwargs = self.engine.opened[0]
         self.assertEqual(url, CHANNEL["cmd"])
         self.assertFalse(kwargs["disk"])
+        self.assertFalse(kwargs["radio"])  # 2.14: a channel's sound is no station's
         # Its stream's purpose is its REC sign name: the stream question counts it (audit).
         self.assertEqual(self.budget.holders("P"), [rs_name(self.scheduler, "The News")])
         self.engine.sessionReady.emit(sid)
@@ -163,11 +164,24 @@ class SchedulerTests(unittest.TestCase):
         self.assertEqual(max_s, 24 * 3600)  # the scheduler stops it at its window's end
         self.assertTrue(any("The News" in text for text, _ in self.toasts))
 
-    def test_a_radio_station_is_refused_once_and_never_tried(self):  # 2.13
-        # A radio list's station plays directly: the helper can't read it. Scheduled anyway
-        # (an older build, the guide), it is said failed once, at its time: no stream, no
-        # link, no session, no retry every minute.
+    def test_a_station_the_helper_reads_is_recorded_from_its_sound(self):  # 2.14
         station = {**CHANNEL, "id": "a1b2", "name": "Wexlo FM", "radio_station": True}
+        station["radio_codec"] = "MP3"
+        self.schedule.add_once(station, programme("Morning Mix", 30))
+        self.scheduler.tick()
+        self.catalogs.linkReady.emit(1, "http://radio.test/wexlo")
+        self.pump()
+        _sid, url, kwargs = self.engine.opened[0]
+        self.assertEqual(url, "http://radio.test/wexlo")
+        self.assertTrue(kwargs["radio"])  # its sound read, its songs named
+        self.assertFalse(kwargs["https_first"])  # asked as given, as VLC asks it
+
+    def test_a_radio_station_is_refused_once_and_never_tried(self):  # 2.13
+        # A radio list's station whose sound the helper cannot read (2.14; 2.13: every
+        # station) plays directly. Scheduled anyway (an older build, the guide), it is said
+        # failed once, at its time: no stream, no link, no session, no retry every minute.
+        station = {**CHANNEL, "id": "a1b2", "name": "Wexlo FM", "radio_station": True}
+        station["radio_codec"] = "OGG"
         self.schedule.add_once(station, programme("Morning Mix", 30))
         self.scheduler.tick()
         self.assertEqual(

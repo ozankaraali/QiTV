@@ -690,6 +690,21 @@ class MoreMenuTests(AudioCase):
                 for other, spy in spies.items():
                     self.assertEqual(spy.count(), 1 if other == name else 0, (name, other))
 
+    def test_a_quick_second_click_on_its_button_closes_it(self):  # 2.13.5
+        host, t, menu = self.menu()
+        self.open(t, menu)
+        local = QPointF(t._layout()["more"].center())
+        event = QMouseEvent(
+            QEvent.Type.MouseButtonDblClick,
+            local,
+            QPointF(t.mapToGlobal(local.toPoint())),
+            Qt.LeftButton,
+            Qt.LeftButton,
+            Qt.NoModifier,
+        )
+        QApplication.sendEvent(t, event)
+        self.assertFalse(menu.isVisible())
+
     def test_it_opens_above_its_button_and_names_its_items_as_the_buttons_do(self):
         host, t, menu = self.menu()
         self.open(t, menu)

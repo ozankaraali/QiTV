@@ -14,7 +14,7 @@ click elsewhere reaches the tile's video below. The clicks on what it draws are 
 the controls stay drawn over the cards and the labels, and a label the controls' title row
 would cover hides while they show. A press asks for the tile's focus at once (`tilePressed`);
 the click follows after the double-click interval (`tileClicked`), or a double-click asks to
-leave the grid (`leaveRequested`).
+make the tile big (`bigRequested`: it fills the page, the grid behind it).
 
 While a channel is dragged from the channel list (`set_drop`), the tile under the pointer is
 lit as where it would play, and the channel's name follows the pointer.
@@ -22,10 +22,10 @@ lit as where it would play, and the channel's name follows the pointer.
 The tile under the pointer (`hover_at`) shows its controls on a slim strip at its bottom, as
 the player controls are drawn (units, painted icons, the focus fill under the pointer):
 play/pause, its speaker (muted or not), LIVE or "−MM:SS" behind live (a click goes live),
-the big picture (leave the grid with this tile big) and ✕ (close the tile). Each acts on that
-tile (`tileAction`), never giving it the focus. A tile too narrow for them all keeps its
-speaker and ✕; a card keeps ✕ (back to "+"), in its top corner; "+" has none. The strip
-hides when the pointer leaves the tile, and after the player controls' idle time
+the big picture (this tile fills the page, the grid behind it) and ✕ (close the tile). Each
+acts on that tile (`tileAction`), never giving it the focus. A tile too narrow for them all
+keeps its speaker and ✕; a card keeps ✕ (back to "+"), in its top corner; "+" has none. The
+strip hides when the pointer leaves the tile, and after the player controls' idle time
 (`set_idle_ms`). While the player controls show it sits just above their bottom row (their
 bar too), else under the tile's label, else in the label's place (the label waits
 meanwhile). A press on it never focuses the tile, and a quick second click on its buttons
@@ -178,7 +178,7 @@ class GridTiles(Overlay):
     accessible_name = N_("Multiview")
     tilePressed = Signal(str)  # a left press on what a tile draws: its focus, at once
     tileClicked = Signal(str)  # that press's click, unless a double-click followed
-    leaveRequested = Signal(str)  # a double-click: leave the grid with this tile large
+    bigRequested = Signal(str)  # a double-click: this tile big, the grid behind it
     tileAction = Signal(str, str)  # a tile's strip: its name and the control (CONTROLS)
 
     def __init__(self, parent: QWidget | None = None) -> None:
@@ -798,7 +798,7 @@ class GridTiles(Overlay):
             return
         self._click.stop()
         self._pressed = ""
-        self.leaveRequested.emit(name)
+        self.bigRequested.emit(name)
 
     def _clicked(self) -> None:
         name, self._pressed = self._pressed, ""

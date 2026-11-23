@@ -5,8 +5,14 @@ the player page is hidden. CORNER: the Library fills it and the player page, res
 corner above it, goes on playing ("we put your main screen here while you navigate").
 
 Both pages are children of the stack in every mode and only change geometry and visibility: the
-player page holds the native views libVLC draws into, and a native view is never re-parented
-(on macOS libVLC's view would lose its picture).
+player page holds the native views libVLC draws into, and the modes never re-parent them (2.1
+feared libVLC's view would lose its picture on macOS).
+
+One exception, on macOS: the player page can be lent to the mini player's small window
+(ui/mini_player.py). `lend_player` hands it out (nothing takes its place: the TV window is
+hidden meanwhile) until `take_back_player`. Its native views keep theirs: a surface moved into
+the floating window in 2.4 kept its picture (measured, no reopen); the whole page moving is
+the owner's to see (2.13.5).
 
 In the corner a press on the player drags it and the release snaps it to the nearest corner,
 as PipFrame does for the small picture (saved as `corner_player_corner`); a press released
@@ -68,6 +74,7 @@ class PageStack(QWidget):
         self._corner = self._saved_corner()
         self._press: Optional[tuple[QPoint, QPoint]] = None  # (global press, player position)
         self._dragging = False
+        self._lent = False  # the player page is the mini player's (ui/mini_player.py)
         for page in (player, library):
             page.setParent(self)
         # The player page and its native views: their mouse events are the stack's in the corner.
@@ -94,6 +101,25 @@ class PageStack(QWidget):
 
     def corner(self) -> str:
         return self._corner
+
+    def lend_player(self) -> Optional[QWidget]:
+        """The player page, for another window to hold (the mini player's): it is laid out no
+        more until `take_back_player`. None in the Library (the page belongs to it), or while
+        lent already."""
+        if self._lent or self._mode != self.PLAYER:
+            return None
+        self._lent = True
+        self._layout()
+        return self._player
+
+    def take_back_player(self, page: QWidget) -> None:
+        """The lent player page is back: it fills the stack again."""
+        if not self._lent or page is not self._player:
+            return
+        self._lent = False
+        page.setParent(self)
+        page.lower()  # under the Library, as when it was built
+        self._layout()
 
     def corner_rect(self) -> QRect:
         """The corner player's rect in stack coordinates: a third of the width, 16:9."""
@@ -134,19 +160,24 @@ class PageStack(QWidget):
 
     def _layout(self) -> None:
         area = self.rect()
+        if self._lent:  # the other window's to lay out (the Library hides, or fills the stack)
+            self._library.setGeometry(area)
+            self._library.setVisible(self._mode != self.PLAYER)
+            return
+        page = self._player
         if self._mode == self.PLAYER:
-            self._player.setGeometry(area)
-            self._player.show()
+            page.setGeometry(area)
+            page.show()
             self._library.hide()
             return
         self._library.setGeometry(area)
         self._library.show()
         if self._mode == self.LIBRARY:
-            self._player.hide()
+            page.hide()
             return
-        self._player.setGeometry(self.corner_rect())
-        self._player.show()
-        self._player.raise_()  # above the Library (the views too: macOS stacks natives itself)
+        page.setGeometry(self.corner_rect())
+        page.show()
+        page.raise_()  # above the Library (the views too: macOS stacks natives itself)
 
     def resizeEvent(self, event) -> None:
         super().resizeEvent(event)

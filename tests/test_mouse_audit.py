@@ -22,6 +22,8 @@ Screens and their controls:
   "field", "clear" (✕), "get_key", "paste" and "save", the search's "field", "clear", "paste" and
   "search", its "languages" and "files" rows, and "close" (×);
 - "pip_label": the small picture's "swap", "speaker" and "close";
+- "grid" (2.14): the multiview's "tiles": a press on a tile (its picture or its label) gives it
+  the focus;
 - "drawer": the top row's "back", "names", "search", "refresh" and "settings", the ⌕ "find" box,
   its "rows", and the rows of its sources and sections columns by title ("Settings", "Movies" …);
   "right-click" (2.13.1): a channel's and a group's right-click asks for its menu;
@@ -64,6 +66,7 @@ from services.opensubtitles import SubtitleFile
 from tests.test_navigation import FakeCatalog
 from tests.test_poster_grid import FakePosters, details, titles
 from ui.context_actions import OPEN_PIP_TEXT, REMOVE_RECENT_TEXT, ContextActions
+from ui.grid_frame import GridFrame
 from ui.keymap import SHORTCUTS
 from ui.library.folders_view import FoldersView, Tile
 from ui.library.poster_grid import PosterGrid
@@ -72,6 +75,7 @@ from ui.library.top_nav import ALL_TABS, TopNav
 from ui.overlay_host import OverlayHost
 from ui.overlays.audio_screen import VIEWS as AUDIO_VIEWS, AudioScreen
 from ui.overlays.drawer import Drawer
+from ui.overlays.grid_tiles import PLAYING, GridTiles, TileView
 from ui.overlays.guide import Guide
 from ui.overlays.mixer import Mixer, MixerRow
 from ui.overlays.more_menu import MoreMenu
@@ -108,6 +112,8 @@ ON_SCREEN: dict[tuple[str, str], tuple[tuple[str, str], ...]] = {
     ("player", "+, -"): (("transport", "volume"), ("mixer", "slider")),
     ("player", "M"): (("transport", "volume"), ("mixer", "speaker"), ("pip_label", "speaker")),
     ("player", "Tab"): (("mixer", "row"),),
+    # 2.14: the multiview's tiles take the focus at a press (the mixer's rows at a click too).
+    ("player", "Tab, Shift+Tab"): (("grid", "tiles"), ("mixer", "row")),
     # ♫ opens the Sound panel: its − and + are J and K.
     ("player", "J, K"): (("transport", "audio"), ("sound", "earlier"), ("sound", "later")),
     ("player", "Shift+J, Shift+K"): (
@@ -204,7 +210,8 @@ ON_SCREEN: dict[tuple[str, str], tuple[tuple[str, str], ...]] = {
     # Plan 4: File → Open Folder…: the Folders tab's Add folder tile (2.11.1: the tab is always
     # there, an empty one too) and the channel list's row under Open file
     ("menu", "Ctrl+Shift+O"): (("folders", "add"), ("drawer", "Open a folder")),
-    ("menu", "Ctrl+,"): (("drawer", "settings"), ("drawer", "Settings")),
+    # 2.14: the Library's ⚙ too (Settings at Providers, over the Library)
+    ("menu", "Ctrl+,"): (("drawer", "settings"), ("drawer", "Settings"), ("library", "settings")),
     ("menu", "Ctrl+R"): (("drawer", "refresh"),),
     ("menu", "Ctrl+Shift+R"): (("library", "refresh"),),  # 2.8: films and series
     # ---- Finding subtitles (the OpenSubtitles search) ----------------------------------------
@@ -271,7 +278,7 @@ AUDIO_ON_SCREEN: dict[tuple[str, str], tuple[tuple[str, str], ...]] = {
     ("menu", "Ctrl+O"): _LIBRARY,  # its Open file
     # its Live TV's channel list (Open a folder), and its Folders tab's Add folder
     ("menu", "Ctrl+Shift+O"): _LIBRARY,
-    ("menu", "Ctrl+,"): _LIBRARY,  # its Settings
+    ("menu", "Ctrl+,"): _LIBRARY,  # its ⚙ (2.14)
     ("menu", "Ctrl+R"): _LIBRARY,  # its ↻
 }
 
@@ -289,6 +296,7 @@ AUDIO_EXEMPT: dict[tuple[str, str], str] = {
     ("player", "P, Ctrl+P"): _LIVE + " (picture in picture with the previous channel)",
     ("player", "S"): _LIVE + " (swaps the second channel's small picture)",
     ("player", "V"): _LIVE + " (the multiview)",
+    ("player", "Tab, Shift+Tab"): _LIVE + " (the multiview's tiles)",
     ("menu", "Ctrl+4"): _LIVE + " (the multiview)",
     ("menu", "Ctrl+Q"): EXEMPT[("menu", "Ctrl+Q")],
 }
@@ -379,6 +387,35 @@ def _picture() -> set[str]:
         for gesture, signal in signals.items()
         if hasattr(VideoSurface, signal) and hasattr(OverlayHost, signal)
     }
+
+
+def _grid(host: QWidget) -> set[str]:
+    """The multiview's grid (2.14): a press on a tile's picture, or on its label, asks for
+    its focus."""
+    surfaces = {name: QWidget(host) for name in ("main", "pip")}
+    tiles = GridTiles(host)
+    tiles.setGeometry(host.rect())
+    frame = GridFrame(host, surfaces, tiles)
+    frame.show_grid(["main", "pip"], "main", {"main", "pip"})
+    tiles.set_tiles(
+        [TileView(name, rect, PLAYING, name, "", name == "main") for name, rect in frame.tiles()]
+    )
+    tiles.show()
+    focused: list[str] = []
+    frame.focusRequested.connect(focused.append)
+
+    def press(point: QPointF) -> QMouseEvent:
+        left, none = Qt.MouseButton.LeftButton, Qt.KeyboardModifier.NoModifier
+        return QMouseEvent(QEvent.Type.MouseButtonPress, point, point, left, left, none)
+
+    # Handed to them as the platform would (a panel another screen left open here filters
+    # the application's presses).
+    frame.eventFilter(surfaces["pip"], press(QPointF(5, 5)))  # its picture
+    label = tiles.pill_rect("pip")
+    if not label.isEmpty():
+        tiles.pressed(press(label.center()))  # its label
+    frame.close()
+    return {"tiles"} if focused == ["pip", "pip"] else set()
 
 
 def _mixer(host: QWidget) -> set[str]:
@@ -648,6 +685,7 @@ class MouseOnlyAuditTests(unittest.TestCase):
             "picture_panel": _picture_panel(_child(host)),
             "subtitle_search": _subtitle_search(_child(host)),
             "pip_label": _pip_label(_child(host)),
+            "grid": _grid(_child(host)),
             "drawer": drawer,
             "context": context,
             "guide": _guide(_child(host)),

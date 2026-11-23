@@ -1,7 +1,9 @@
 """Picture in picture in the TV shell (spec §7): a second channel, small.
 
-P (or the transport's Second channel) opens the channel tuned before the current one small,
-or closes the small picture; the drawer's context menu and Ctrl/⌘+P open the drawer's
+P (or the transport's Second channel, or the phone's) opens the channel tuned before the
+current one small, or closes the small picture; with no channel before it (or that one plays
+large, or is hidden while locked) the channel list opens instead, and the channel picked
+there opens small (`choose`); the drawer's context menu and Ctrl/⌘+P open the drawer's
 channel. S (or a click on the small picture) swaps; one that has to wait for the large
 picture's channel to open says "Switching…". Its link is asked for on LinkLanes' side lane,
 one at a time: a choice made while one is on its way waits, replacing an older one that
@@ -149,6 +151,9 @@ class PipControls(QObject):
         borrow: Callable[[dict, str, str], Any] = lambda item, provider, purpose: None,
         owned: Callable[[dict], dict] = lambda item: item,
         started: Callable[[], None] = lambda: None,
+        choose: Optional[Callable[[], None]] = None,
+        hidden: Callable[[dict], bool] = lambda item: False,
+        title_gone: Callable[[str], None] = lambda url: None,
         parent: Optional[QObject] = None,
     ) -> None:
         """`frame` is the PipFrame and `label` the PipLabel (None in tests without them).
@@ -165,7 +170,10 @@ class PipControls(QObject):
         `owned(channel)` is a link stamped with whose stream it is now (the controller's).
         `started()` says the small picture starts or stops something, or the viewer swaps
         (StreamQuestion.started: what waits for a stopped recording's stream runs only when
-        nothing did meanwhile, 2.13.4).
+        nothing did meanwhile, 2.13.4). `choose()` opens the channel list for the small
+        picture (P with no previous channel): what is picked there opens small (None: P
+        says there is no previous channel). `hidden(channel)`: parental controls hide it now
+        (a previous channel hidden counts as none).
         """
         super().__init__(parent)
         self.sessions = sessions
@@ -194,6 +202,10 @@ class PipControls(QObject):
         self._borrow = borrow  # 2.9.7: a scheduled recording's session, to watch small
         self._owned = owned
         self._started = started
+        self._choose = choose
+        self._hidden = hidden
+        # 2.14: the movie or episode playing small closed or ended there (its address)
+        self._title_gone = title_gone
         self._views: dict[str, SlotView] = {}
         self._wanted: Optional[tuple[Target, ZapContext]] = None  # its link is on its way
         self._link: Optional[Target] = None  # the one link request in flight
@@ -384,7 +396,8 @@ class PipControls(QObject):
     # ---- opening and closing ------------------------------------------------------------------
 
     def toggle_previous(self) -> None:
-        """P: close the small picture, else open the previous channel small."""
+        """P: close the small picture, else open the previous channel small (none: choose
+        one in the channel list)."""
         if self._closed():
             return
         if self.busy():
@@ -393,8 +406,15 @@ class PipControls(QObject):
         if self._refused():
             return
         previous, context = self._previous_channel()
-        if previous is None:
-            self._toast(translate(NO_PREVIOUS))
+        if (
+            previous is None
+            or ZapContext.same(previous, self._large_channel())
+            or self._hidden(previous)
+        ):
+            if self._choose is not None:
+                self._choose()  # none to open: the channel list, for the small picture
+            else:
+                self._toast(translate(NO_PREVIOUS))
             return
         self.open_channel(previous, context)
 
@@ -593,10 +613,14 @@ class PipControls(QObject):
         self._cancel_reopen()
         self._cancel_relink()
         sessions = self.sessions
+        small = sessions.small()
+        gone = self.view(small.name).url if small and self.small_title(small.name) else ""
         if keep_recording:
             self._set_small_aside()
         if sessions.pip_open() or sessions.pip_opening():
             sessions.close_pip()
+        if gone:
+            self._title_gone(gone)  # 2.14: its server hears it stop (review I1)
 
     # ---- 2.6: recordings in the background ----------------------------------------------------
 
@@ -841,6 +865,9 @@ class PipControls(QObject):
             self._tick_label()
         elif state == "ended":
             self._reconnect_small(name)
+            small = self.sessions.small()
+            if small is not None and small.name == name and self.small_title(name):
+                self._title_gone(self.view(name).url)  # 2.14: it ended small (review I1)
         ended = state == "ended"
         if ended == (name in self._ended):
             return

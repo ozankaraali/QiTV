@@ -1,9 +1,13 @@
 """Telling a Jellyfin or Emby server where its title plays (2.8): start, progress every 10 s,
-stopped when something else plays or nothing does; never for another provider's stream."""
+stopped when something else plays or nothing does; never for another provider's stream. A Plex
+server too (2.14), whose conversion of a title is stopped there with its play."""
 
+import threading
+import time
 import unittest
+from unittest import mock
 
-from services import media_server as ms
+from services import media_reporter, media_server as ms, plex
 from services.media_reporter import PROGRESS_S, MediaReporter
 
 BASE = "http://server.test:8096"
@@ -33,6 +37,276 @@ class MediaReporterTests(unittest.TestCase):
             ),
             clock=self.clock,
         )
+
+    def test_a_plex_servers_title_is_told_too(self):  # 2.14
+        plex_base = "https://10-0-0-5.example.plex.direct:32400"
+        server = {"type": "PLEX", "url": plex_base, "token": "P", "device_id": "C"}
+        source = {"Id": "9", "part": "/library/parts/9/17/file.mkv"}
+        sent = []
+        reporter = MediaReporter(
+            lambda: [SERVER, server],
+            send=lambda server, event, ref, position, paused: sent.append(
+                (server["type"], event, ref.item_id, ref.source_id, position)
+            ),
+            clock=self.clock,
+        )
+        reporter.playing(plex.stream_url(plex_base, source, "P", "C", "102"))
+        reporter.position(5_000)
+        self.clock.now += PROGRESS_S
+        reporter.position(12_000)
+        reporter.stopped()
+        self.assertEqual(
+            sent,
+            [
+                ("PLEX", "start", "102", "9", 0),
+                ("PLEX", "progress", "102", "9", 12_000),
+                ("PLEX", "stopped", "102", "9", 12_000),
+            ],
+        )
+        # A Plex address QiTV did not make (no play session of its own) is never told.
+        sent.clear()
+        reporter.playing(plex_base + "/library/parts/9/17/file.mkv?X-Plex-Token=P")
+        self.assertEqual(sent, [])
+
+    def test_a_plex_server_found_at_another_of_its_addresses_is_still_told(self):  # N1
+        """Signed in away on the relay, the server is found at home later: its streams come
+        from its home address, and their progress is still told."""
+        home = "https://10-0-0-5.example.plex.direct:32400"
+        relay = "https://relay.example.plex.direct:8443"
+        server = {
+            "type": "PLEX",
+            "url": relay,
+            "token": "P",
+            "device_id": "C",
+            "server_id": "machine-home",
+            "connections": [
+                {"uri": home, "local": True, "relay": False},
+                {"uri": relay, "local": False, "relay": True},
+            ],
+        }
+        sent = []
+        reporter = MediaReporter(
+            lambda: [SERVER, server],
+            send=lambda server, event, ref, position, paused: sent.append(
+                (server["server_id"], event, ref.base, position)
+            ),
+            clock=self.clock,
+        )
+        source = {"Id": "9", "part": "/library/parts/9/17/file.mkv"}
+        reporter.playing(plex.stream_url(home, source, "P", "C", "102"))
+        self.clock.now += PROGRESS_S
+        reporter.position(30_000)
+        reporter.stopped()
+        self.assertEqual(
+            sent,
+            [
+                ("machine-home", "start", home, 0),
+                ("machine-home", "progress", home, 30_000),
+                ("machine-home", "stopped", home, 30_000),
+            ],
+        )
+
+    def test_a_plex_report_goes_through_plexs_client(self):  # 2.14
+        plex_base = "https://10-0-0-5.example.plex.direct:32400"
+        server = {"type": "PLEX", "url": plex_base, "token": "P", "device_id": "C"}
+        url = plex.stream_url(
+            plex_base, {"Id": "9", "part": "/library/parts/9/1/f.mkv"}, "P", "C", "7"
+        )
+        ref = plex.parse_stream_url(url, [plex_base])
+        made = []
+
+        class Client:
+            def __init__(self, base, **kwargs):
+                made.append((base, kwargs))
+
+            def report(self, *args):
+                made.append(args)
+
+            def close(self):
+                made.append("closed")
+
+        with mock.patch.object(plex, "PlexClient", Client):
+            media_reporter._send_over_http(dict(server, ssl_verify=False), "stopped", ref, 3, False)
+        (base, kwargs), args, closed = made
+        self.assertEqual(base, plex_base)
+        self.assertEqual(
+            {k: kwargs[k] for k in ("token", "client_id", "verify")},
+            {"token": "P", "client_id": "C", "verify": True},  # plex.direct: always checked
+        )
+        self.assertEqual(args, ("stopped", ref, 3, False))
+        self.assertEqual(closed, "closed")
+
+    PLEX_BASE = "https://10-0-0-5.example.plex.direct:32400"
+    PLEX = {"type": "PLEX", "url": PLEX_BASE, "token": "P", "device_id": "C"}
+    CONVERTED = (
+        PLEX_BASE + "/video/:/transcode/universal/session/s1/base/index.m3u8"
+        "?X-Plex-Token=P&X-Plex-Client-Identifier=C&X-Plex-Product=QiTV"
+        "&X-Plex-Session-Identifier=102-s1"
+    )
+
+    def test_a_plex_conversion_is_told_as_a_play_of_its_own(self):  # 2.14
+        sent = []
+        reporter = MediaReporter(
+            lambda: [SERVER, self.PLEX],
+            send=lambda server, event, ref, position, paused: sent.append(
+                (event, ref.item_id, ref.converted, ref.transcode)
+            ),
+            clock=self.clock,
+        )
+        reporter.playing(self.CONVERTED)
+        reporter.playing(self.CONVERTED)  # opened again (a cast begins): the same play
+        source = {"Id": "9", "part": "/library/parts/9/17/file.mkv"}
+        reporter.playing(plex.stream_url(self.PLEX_BASE, source, "P", "C", "102"))  # as it is
+        self.assertEqual(
+            sent,
+            [
+                ("start", "102", True, "s1"),
+                ("stopped", "102", True, "s1"),  # the conversion's play stops (and with it,
+                ("start", "102", False, ""),  # its session on the server: _send_over_http)
+            ],
+        )
+
+    def test_the_play_the_server_heard_start_is_known_by_its_address(self):  # 2.14
+        self.assertEqual(self.reporter.active_url(), "")
+        self.reporter.playing(url())
+        self.assertEqual(self.reporter.active_url(), url())
+        self.reporter.playing("http://elsewhere.test/live.ts")  # another provider's: it stops
+        self.assertEqual(self.reporter.active_url(), "")
+
+    def test_a_plex_conversion_ends_on_the_server_with_its_play(self):  # 2.14
+        ref = plex.parse_stream_url(self.CONVERTED, [self.PLEX_BASE])
+        made = []
+
+        class Client:
+            def __init__(self, base, **kwargs):
+                made.append(("made", kwargs["token"]))
+
+            def report(self, event, *args):
+                made.append(("report", event))
+
+            def stop_conversion(self, session):
+                made.append(("stop", session))
+
+            def close(self):
+                made.append("closed")
+
+        class Untold(Client):  # the timeline did not take it: the session ends all the same
+            def report(self, event, *args):
+                raise OSError("unreachable")
+
+        with mock.patch.object(plex, "PlexClient", Client):
+            for event in ("start", "progress"):
+                media_reporter._send_over_http(self.PLEX, event, ref, 3, False)
+            self.assertNotIn(("stop", "s1"), made)
+            made.clear()
+            media_reporter._send_over_http(self.PLEX, "stopped", ref, 3, False)
+            # The session first (review N2: QiTV's close waits a second at most), then where
+            # it stopped.
+            self.assertEqual(made, [("made", "P"), ("stop", "s1"), ("report", "stopped"), "closed"])
+            made.clear()
+            source = {"Id": "9", "part": "/library/parts/9/1/f.mkv"}
+            file = plex.parse_stream_url(
+                plex.stream_url(self.PLEX_BASE, source, "P", "C", "7"), [self.PLEX_BASE]
+            )
+            media_reporter._send_over_http(self.PLEX, "stopped", file, 3, False)
+            self.assertEqual(made, [("made", "P"), ("report", "stopped"), "closed"])  # no session
+        made.clear()
+        with mock.patch.object(plex, "PlexClient", Untold):
+            with self.assertRaises(OSError):
+                media_reporter._send_over_http(self.PLEX, "stopped", ref, 3, False)
+        self.assertEqual(made, [("made", "P"), ("stop", "s1"), "closed"])
+
+        class Unstopped(Client):  # its session was not stopped: where it stopped is told
+            def stop_conversion(self, session):
+                raise OSError("unreachable")
+
+        made.clear()
+        with mock.patch.object(plex, "PlexClient", Unstopped):
+            with self.assertRaises(OSError):
+                media_reporter._send_over_http(self.PLEX, "stopped", ref, 3, False)
+        self.assertEqual(made, [("made", "P"), ("report", "stopped"), "closed"])
+
+    def test_a_conversion_never_played_has_its_session_stopped(self):  # 2.14 review I2
+        sent = []
+        reporter = MediaReporter(
+            lambda: [SERVER, self.PLEX],
+            send=lambda server, event, ref, position, paused: sent.append((event, ref.transcode)),
+            clock=self.clock,
+        )
+        reporter.abandoned(self.CONVERTED)
+        self.assertEqual(sent, [("abandoned", "s1")])  # never told started: only its session
+        sent.clear()
+        reporter.playing(self.CONVERTED)
+        reporter.abandoned(self.CONVERTED)  # (the one playing: never)
+        source = {"Id": "9", "part": "/library/parts/9/17/file.mkv"}
+        reporter.abandoned(plex.stream_url(self.PLEX_BASE, source, "P", "C", "102"))  # a file
+        reporter.abandoned(url())  # Jellyfin's: its server ends its own
+        reporter.abandoned("http://elsewhere.test/live.ts")
+        self.assertEqual(sent, [("start", "s1")])
+
+    def test_an_abandoned_conversion_is_only_stopped_on_the_server(self):  # 2.14 review I2
+        ref = plex.parse_stream_url(self.CONVERTED, [self.PLEX_BASE])
+        made = []
+
+        class Client:
+            def __init__(self, base, **kwargs):
+                pass
+
+            def report(self, event, *args):
+                made.append(("report", event))
+
+            def stop_conversion(self, session):
+                made.append(("stop", session))
+
+            def close(self):
+                made.append("closed")
+
+        with mock.patch.object(plex, "PlexClient", Client):
+            media_reporter._send_over_http(self.PLEX, "abandoned", ref, 0, False)
+        self.assertEqual(made, [("stop", "s1"), "closed"])
+
+    def test_qitv_closing_waits_a_moment_for_the_stop_to_go_out(self):  # 2.14 review M3
+        sent = []
+
+        def slow(server, event, ref, position, paused):
+            time.sleep(0.2)
+            sent.append(event)
+
+        reporter = MediaReporter(lambda: [self.PLEX])
+        with mock.patch.object(media_reporter, "_send_over_http", slow):
+            reporter.playing(self.CONVERTED)
+            reporter.shutdown()
+            self.assertEqual(sent, ["start", "stopped"])  # out before QiTV goes
+        release = threading.Event()  # a server that doesn't answer: QiTV closes all the same
+
+        def stuck(*args):
+            release.wait(5)
+
+        late = MediaReporter(lambda: [self.PLEX])
+        with mock.patch.object(media_reporter, "_send_over_http", stuck):
+            late.playing(self.CONVERTED)
+            began = time.monotonic()
+            late.shutdown()
+            waited = time.monotonic() - began
+            release.set()
+            late._thread.join(5)
+        self.assertLess(waited, media_reporter.CLOSE_WAIT_S + 0.5)
+
+    def test_a_failed_stop_is_one_log_line_without_the_address_or_the_token(self):  # 2.14
+        reporter = MediaReporter(lambda: [self.PLEX], clock=self.clock)
+
+        def fails(*args):
+            raise ms.MediaServerError("The server answered 500")
+
+        with mock.patch.object(media_reporter, "_send_over_http", fails):
+            with self.assertLogs("services.media_reporter", "INFO") as logs:
+                reporter.playing(self.CONVERTED)
+                reporter.shutdown()
+                reporter._thread.join(5)
+        self.assertEqual(len(logs.output), 2)  # the start's, the stop's
+        for text in logs.output:
+            self.assertNotIn("X-Plex-Token", text)
+            self.assertNotIn("plex.direct", text)
 
     def test_a_server_without_its_own_check_follows_the_settings(self):  # 2.8
         servers = []

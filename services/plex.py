@@ -1,0 +1,896 @@
+"""Plex Media Server as a provider (2.14): the account's sign-in at plex.tv and the server's API.
+
+A Plex server is a media server provider (services.provider_types.PLEX) beside Jellyfin and
+Emby, with an API of its own (developer.plex.tv/pms). Its films and series come as theirs do,
+in the same Library payloads (services.media_server), so everything above them is the same.
+
+Signing in is Plex's PIN flow: plex.tv gives a 4-character code (`PlexAccount.create_pin`),
+the viewer enters it at plex.tv/link, QiTV looks until the code is claimed (`check_pin`: the
+account's token), then lists the account's servers (`servers`), each with its own access token
+and its connections, local first, then remote, then relayed (`ordered`). The provider keeps the
+server's address and connections, its access token and its id. For a server the account owns,
+that token is the account's own (plex.tv gives it as the server's): it is kept as a password is,
+only in the provider list on this computer, never logged, never handed to the phone (its titles
+go through the home door: services/remote/films.py's PassedFilm) and never put in a poster's
+address (services.plex_addresses).
+
+A title plays as its file is (`stream_url`, Plex's direct play), unless the ⚙ asks the server
+to convert it (`conversion_params`, `PlexClient.convert`): its universal transcoder, in HLS, as a
+Jellyfin server converts. The conversion is asked for its decision, then started; the player
+opens the playlist of its session, and the reporter stops the session when the play stops
+(`PlexClient.stop_conversion`, services.media_reporter).
+
+QiTV says only who it is: X-Plex-Product "QiTV", its version and a random client identifier
+(the provider's `device_id`), never the computer's or the viewer's name (a conversion names
+Plex's generic client profile too: `PLATFORM`). A token travels in a header to plex.tv and to
+the server's API, and in the query of the addresses VLC opens (a stream, a conversion's
+playlist, a poster), as Plex documents; nothing here logs an address, a token or an answer's
+body. Blocking: worker threads only.
+"""
+
+from __future__ import annotations
+
+from concurrent.futures import ThreadPoolExecutor
+from dataclasses import dataclass, field
+import logging
+import threading
+from typing import Any, Callable, Optional
+from urllib.parse import parse_qs, urlencode, urljoin, urlsplit
+import uuid
+
+from services import media_server as ms, plex_addresses
+from services.lazy_import import lazy_module
+from services.media_server import MediaServerError, SignInNeeded, normalized_base
+from services.surrogates import response_json
+
+logger = logging.getLogger(__name__)
+requests = lazy_module("requests")  # the window shows before the network libraries load
+
+PRODUCT = "QiTV"
+PLEX_TV = "https://plex.tv"
+LINK_PAGE = "plex.tv/link"  # where the viewer enters the code (shown as it is)
+LINK_URL = "https://plex.tv/link"  # LINK_PAGE in the browser (a click on it, 2.14)
+TIMEOUT_S = 30
+PROBE_TIMEOUT_S = 4  # a connection that answers its identity in this is the one used
+PIN_LIFETIME_S = 900  # plex.tv's 4-character codes last 15 minutes (it says so in each)
+
+
+def new_client_id() -> str:
+    """A client identifier of QiTV's own for one sign-in (random: never the computer's)."""
+    return uuid.uuid4().hex
+
+
+def client_headers(client_id: str, version: str, token: str = "") -> dict[str, str]:
+    """What QiTV tells plex.tv and a server about itself: its name, its version and its random
+    client id, nothing else (and its token, when it has one)."""
+    headers = {
+        "Accept": "application/json",
+        "X-Plex-Product": PRODUCT,
+        "X-Plex-Version": version,
+        "X-Plex-Client-Identifier": client_id,
+    }
+    if token:
+        headers["X-Plex-Token"] = token
+    return headers
+
+
+# ---- the account at plex.tv -----------------------------------------------------------------
+
+
+@dataclass(frozen=True)
+class Pin:
+    """A sign-in code: its id at plex.tv, the code the viewer enters, how long it lasts."""
+
+    id: int
+    code: str
+    expires_in: int = PIN_LIFETIME_S
+
+
+@dataclass(frozen=True)
+class Connection:
+    """One way to reach a server: its address (`uri`), whether it is at home (`local`) or
+    through Plex's relay (`relay`)."""
+
+    uri: str
+    local: bool = False
+    relay: bool = False
+
+
+@dataclass(frozen=True)
+class Server:
+    """A server of the account: its name, its id (`machine_id`, Plex's clientIdentifier), the
+    token it takes from this account (`access_token`) and its connections, best first."""
+
+    name: str
+    machine_id: str
+    access_token: str = field(repr=False)
+    owned: bool = False
+    connections: tuple[Connection, ...] = ()
+
+
+def ordered(connections: list[Connection]) -> list[Connection]:
+    """A server's connections as QiTV tries them: at home first, then remote, then relayed
+    (slow: Plex limits its speed); HTTPS before HTTP within each."""
+
+    def rank(connection: Connection) -> tuple[int, int]:
+        where = 2 if connection.relay else (0 if connection.local else 1)
+        return where, 0 if connection.uri.startswith("https://") else 1
+
+    return sorted(connections, key=rank)
+
+
+def _connections(raw: Any) -> tuple[Connection, ...]:
+    found: list[Connection] = []
+    for entry in raw if isinstance(raw, list) else []:
+        if not isinstance(entry, dict):
+            continue
+        uri = normalized_base(str(entry.get("uri") or ""))
+        if not uri.startswith(("http://", "https://")):
+            continue
+        local, relay = bool(entry.get("local")), bool(entry.get("relay"))
+        found.append(Connection(uri, local, relay))
+        # A home address by its IP over HTTP too, after its plex.direct one: a router that
+        # refuses plex.direct's names (DNS rebinding protection) still lets QiTV in.
+        address, port = str(entry.get("address") or ""), entry.get("port")
+        protocol = str(entry.get("protocol") or "")
+        if local and not relay and address and port and protocol == "https":
+            host = f"[{address}]" if ":" in address else address
+            found.append(Connection(f"http://{host}:{int(port)}", True, False))
+    unique: dict[str, Connection] = {}
+    for connection in ordered(found):
+        unique.setdefault(connection.uri, connection)
+    return tuple(unique.values())
+
+
+def connections_of(provider: dict) -> tuple[Connection, ...]:
+    """The connections a provider keeps (review I2), best first."""
+    found = []
+    for entry in provider.get("connections") or []:
+        if isinstance(entry, dict) and str(entry.get("uri") or "").startswith(("http", "https")):
+            found.append(
+                Connection(
+                    normalized_base(str(entry["uri"])),
+                    bool(entry.get("local")),
+                    bool(entry.get("relay")),
+                )
+            )
+    return tuple(ordered(found))
+
+
+def bases_of(provider: dict) -> list[str]:
+    """Every address provider `provider`'s server may be reached at: where it is now, the one
+    it was signed in at and each of its connections (a stream made at any of them is its)."""
+    found = [plex_addresses.base_of(provider), normalized_base(str(provider.get("url") or ""))]
+    found += [c.uri for c in connections_of(provider)]
+    return list(dict.fromkeys(base for base in found if base))
+
+
+def kept_connections(connections: Any) -> list[dict]:
+    """Connections as a provider keeps them: {uri, local, relay}, best first."""
+    return [{"uri": c.uri, "local": c.local, "relay": c.relay} for c in connections]
+
+
+def unreachable(error: BaseException) -> bool:
+    """Whether a request failed for want of the server at that address (no connection, a
+    time-out, a certificate refused), not for what the server answered."""
+    if isinstance(error, MediaServerError):
+        return False
+    return isinstance(error, (OSError, TimeoutError))
+
+
+def servers_of(resources: Any) -> list[Server]:
+    """The Plex Media Servers among an account's resources (plex.tv's /api/v2/resources), each
+    with its connections best first; players and other devices are left out."""
+    out: list[Server] = []
+    for raw in resources if isinstance(resources, list) else []:
+        if not isinstance(raw, dict):
+            continue
+        provides = str(raw.get("provides") or "").split(",")
+        machine = str(raw.get("clientIdentifier") or "")
+        if "server" not in provides or not machine or not raw.get("accessToken"):
+            continue  # (one without its token would only ever answer 401: review M9)
+        out.append(
+            Server(
+                name=str(raw.get("name") or ""),
+                machine_id=machine,
+                access_token=str(raw.get("accessToken") or ""),
+                owned=bool(raw.get("owned")),
+                connections=_connections(raw.get("connections")),
+            )
+        )
+    return out
+
+
+def must_verify(url: str, verify: bool) -> bool:
+    """Whether a server's certificate is checked at `url`: always at a plex.direct address
+    (Plex's own certificates, public: what proves the server the token goes to), else as
+    the setting says."""
+    try:
+        host = (urlsplit(url).hostname or "").lower()
+    except ValueError:
+        host = ""
+    return verify or host.endswith(".plex.direct")
+
+
+def answers(uri: str, server: Server, client_id: str, version: str, session: Any = None) -> bool:
+    """Whether `server` answers at `uri`: its identity, asked without its token, is its own
+    (review I1: a stranger's machine at a private address that is home's elsewhere never
+    gets it). Only an HTTPS address whose certificate proved the server is asked again with
+    the token, when its identity wants one."""
+    http = session if session is not None else requests.Session()
+    secure = uri.startswith("https://")
+
+    def identity(token: str) -> Any:
+        return http.request(
+            "GET",
+            uri + "/identity",
+            headers=client_headers(client_id, version, token),
+            timeout=PROBE_TIMEOUT_S,
+            verify=True,
+        )
+
+    try:
+        response = identity("")
+        if response.status_code == 401 and secure and server.access_token:
+            response = identity(server.access_token)
+        if response.status_code != 200 or not response.content:
+            return False
+        container = (response_json(response) or {}).get("MediaContainer") or {}
+        return bool(container.get("machineIdentifier") == server.machine_id)
+    except Exception as error:  # unreachable, a certificate refused, not Plex: not this way
+        logger.debug("A Plex connection did not answer: %s", type(error).__name__)
+        return False
+    finally:
+        if session is None:
+            http.close()
+
+
+def reachable(
+    servers: list[Server], probe: Callable[[str, Server], bool]
+) -> list[tuple[Server, str]]:
+    """Each server that answers, with the best of its connections that does (`probe(uri,
+    server)`; every connection is asked at once, so a slow one delays none of the others)."""
+    asks = [(server, c.uri) for server in servers for c in server.connections]
+    if not asks:
+        return []
+
+    def ask(job: tuple[Server, str]) -> bool:
+        try:
+            return bool(probe(job[1], job[0]))
+        except Exception:
+            return False
+
+    with ThreadPoolExecutor(max_workers=min(8, len(asks)), thread_name_prefix="plex-probe") as pool:
+        answered = dict(zip(asks, pool.map(ask, asks)))
+    found = []
+    for server in servers:
+        uri = next((c.uri for c in server.connections if answered.get((server, c.uri))), "")
+        if uri:
+            found.append((server, uri))
+    return found
+
+
+class PlexAccount:
+    """plex.tv for one sign-in: the code, the token it gives, the account's servers."""
+
+    def __init__(
+        self,
+        client_id: str,
+        version: str,
+        *,
+        session: Any = None,
+        timeout: float = TIMEOUT_S,
+        base: str = PLEX_TV,
+    ) -> None:
+        self.client_id = client_id
+        self.version = version
+        self.timeout = timeout
+        self.base = base.rstrip("/")
+        self._http = session if session is not None else requests.Session()
+
+    def close(self) -> None:
+        self._http.close()
+
+    def _ask(self, method: str, path: str, token: str = "", params: Optional[dict] = None) -> Any:
+        response = self._http.request(
+            method,
+            self.base + path,
+            params=params,
+            headers=client_headers(self.client_id, self.version, token),
+            timeout=self.timeout,
+        )
+        if response.status_code == 401:
+            raise SignInNeeded("401")
+        if response.status_code >= 400:  # never the address or the body
+            raise MediaServerError(f"plex.tv answered {response.status_code}")
+        return response_json(response) if response.content else None
+
+    def create_pin(self) -> Pin:
+        """A new 4-character code (the viewer enters it at plex.tv/link)."""
+        answer = self._ask("POST", "/api/v2/pins") or {}
+        pin_id, code = answer.get("id"), str(answer.get("code") or "")
+        if not isinstance(pin_id, int) or not code:
+            raise MediaServerError("plex.tv gave no code")
+        lasts = answer.get("expiresIn")
+        return Pin(pin_id, code, int(lasts) if isinstance(lasts, int) and lasts > 0 else 900)
+
+    def check_pin(self, pin_id: int) -> str:
+        """The account's token once the code was entered, else "" (not yet). A code gone
+        (expired) raises SignInNeeded."""
+        try:
+            answer = self._ask("GET", f"/api/v2/pins/{int(pin_id)}") or {}
+        except MediaServerError as error:
+            if str(error).endswith(" 404"):
+                raise SignInNeeded("404") from None  # the code expired
+            raise
+        return str(answer.get("authToken") or "")
+
+    def servers(self, token: str) -> list[Server]:
+        """The account's servers (its own and those shared with it)."""
+        answer = self._ask(
+            "GET",
+            "/api/v2/resources",
+            token,
+            params={"includeHttps": 1, "includeRelay": 1, "includeIPv6": 1},
+        )
+        return servers_of(answer)
+
+
+# ---- the server -----------------------------------------------------------------------------
+
+MOVIE, SHOW = "movie", "show"  # the libraries QiTV lists (music and photos are not)
+_TYPE_NUMBERS = {MOVIE: 1, SHOW: 2}  # Plex's metadata types
+PAGE = 2_000  # titles a request (a library of 50,000 comes in 25)
+_TIMELINE_STATES = {"start": "playing", "progress": "playing", "stopped": "stopped"}
+# 2.14: the ⚙'s conversions, by the server's universal transcoder (`PlexClient.convert`).
+TRANSCODE = "/video/:/transcode/universal"
+# A 1.43 server converts for no client that names no platform (400), nor in HLS for its generic
+# profile as it is: Plex's own generic profile, with H.264 and AAC in HLS added (what libVLC
+# plays). "Generic" names no system.
+PLATFORM = "Generic"
+PROFILE_EXTRA = (
+    "add-transcode-target(type=videoProfile&context=streaming&protocol=hls&container=mpegts"
+    "&videoCodec=h264&audioCodec=aac)"
+)
+_CONVERTS = (1000, 1001)  # the decision's codes of a conversion the server makes
+_DURATIONS: dict[tuple[str, str], int] = {}  # (server, title) -> its length, for the timeline
+_DURATIONS_KEPT = 64
+_DURATIONS_LOCK = threading.Lock()
+
+
+def forget_durations() -> None:
+    """The titles' lengths the reports remembered (tests)."""
+    with _DURATIONS_LOCK:
+        _DURATIONS.clear()
+
+
+class PlexClient:
+    """One server, as signed in: its address, its own token for this account, and the client
+    id QiTV signed in as. Blocking: worker threads only."""
+
+    def __init__(
+        self,
+        base_url: str,
+        *,
+        token: str,
+        client_id: str,
+        version: str,
+        verify: bool = True,
+        session: Any = None,
+        timeout: float = TIMEOUT_S,
+    ) -> None:
+        self.base = normalized_base(base_url)
+        self.token = token
+        self.client_id = client_id
+        self.version = version
+        self.verify = verify
+        self.timeout = timeout
+        self._http = session if session is not None else requests.Session()
+
+    def close(self) -> None:
+        self._http.close()
+
+    def _send(
+        self,
+        method: str,
+        path: str,
+        params: Optional[dict] = None,
+        headers: Optional[dict] = None,
+    ) -> Any:
+        """The server's answer; 401 raises SignInNeeded, another error MediaServerError. The
+        token goes in a header, never in the address (an error's text never names either)."""
+        response = self._http.request(
+            method,
+            self.base + path,
+            params=params,
+            headers={**client_headers(self.client_id, self.version, self.token), **(headers or {})},
+            timeout=self.timeout,
+            verify=self.verify,
+        )
+        if response.status_code == 401:
+            raise SignInNeeded("401")
+        if response.status_code >= 400:
+            raise MediaServerError(f"The server answered {response.status_code}")
+        return response
+
+    def _ask(
+        self,
+        method: str,
+        path: str,
+        params: Optional[dict] = None,
+        headers: Optional[dict] = None,
+    ) -> dict:
+        """The answer's MediaContainer ({} for none), asked as `_send` asks."""
+        response = self._send(method, path, params, headers)
+        if not response.content:
+            return {}
+        answer = response_json(response)
+        container = answer.get("MediaContainer") if isinstance(answer, dict) else None
+        return container if isinstance(container, dict) else {}
+
+    def identity(self) -> dict:
+        return self._ask("GET", "/identity")
+
+    def libraries(self) -> list[dict]:
+        """The server's libraries of films and of series: {id, name, type}."""
+        out = []
+        for raw in self._ask("GET", "/library/sections/all").get("Directory") or []:
+            kind, key = str(raw.get("type") or ""), str(raw.get("key") or "")
+            if kind in (MOVIE, SHOW) and key:
+                out.append({"id": key, "name": str(raw.get("title") or ""), "type": kind})
+        return out
+
+    def _paged(self, path: str, params: Optional[dict] = None, page: int = PAGE) -> list[dict]:
+        """Every item of a list, in pages (a server may cut one it was not asked to page).
+        An answer that brings nothing new, or comes from another start than the one asked
+        (a server that ignores paging), ends it: never asked for ever (review M1)."""
+        found: list[dict] = []
+        seen: set[str] = set()
+        while True:
+            start = len(found)
+            paging = {"X-Plex-Container-Start": str(start), "X-Plex-Container-Size": str(page)}
+            answer = self._ask("GET", path, params, paging)
+            batch = [m for m in answer.get("Metadata") or [] if isinstance(m, dict)]
+            fresh = [m for m in batch if _key_of(m) not in seen]
+            seen.update(_key_of(m) for m in fresh)
+            found.extend(fresh)
+            total, offset = answer.get("totalSize"), answer.get("offset")
+            if not fresh or (isinstance(offset, int) and offset != start):
+                return found
+            if isinstance(total, int) and len(found) >= total:
+                return found
+            if not isinstance(total, int) and len(batch) < page:
+                return found
+
+    def items(self, library_id: str, kind: str, page: int = PAGE) -> list[dict]:
+        """Every film (`kind` MOVIE) or series (SHOW) of the library, in pages."""
+        params = {"type": _TYPE_NUMBERS[kind], "includeGuids": 1}
+        return self._paged(f"/library/sections/{library_id}/all", params, page)
+
+    def seasons_and_episodes(self, show_id: str) -> tuple[list[dict], list[dict]]:
+        """A series' seasons (its children) and every episode of it (its leaves)."""
+        seasons = self._paged(f"/library/metadata/{show_id}/children")
+        episodes = self._paged(f"/library/metadata/{show_id}/allLeaves", {"includeGuids": 1})
+        return seasons, episodes
+
+    def media(self, item_id: str) -> list[dict]:
+        """A title's versions (its Media, each with its files)."""
+        found = self._ask("GET", f"/library/metadata/{item_id}").get("Metadata") or [{}]
+        first = found[0] if isinstance(found[0], dict) else {}
+        with _DURATIONS_LOCK:
+            _remember(self.base, str(item_id), first.get("duration"))
+        return [m for m in first.get("Media") or [] if isinstance(m, dict)]
+
+    # ---- where the user is ------------------------------------------------------------------
+
+    def _duration(self, item_id: str) -> int:
+        with _DURATIONS_LOCK:
+            known = _DURATIONS.get((self.base, item_id))
+        if known is None:
+            try:
+                self.media(item_id)
+            except Exception as error:  # unknown: told without it
+                logger.info("A Plex title's length is unknown: %s", type(error).__name__)
+                return 0
+            with _DURATIONS_LOCK:
+                known = _DURATIONS.get((self.base, item_id))
+        return int(known or 0)
+
+    def report(self, event: str, ref: ms.StreamRef, position_ms: int, paused: bool = False) -> None:
+        """Tell the server a play started ("start"), where it is ("progress"), or that it
+        stopped ("stopped"), through its timeline, with the title's length: a stop near its
+        end is marked watched by the server itself, by its own setting (no scrobble of QiTV's:
+        checked on a 1.43 server)."""
+        state = "paused" if paused and event == "progress" else _TIMELINE_STATES[event]
+        position = max(0, int(position_ms))
+        duration = self._duration(ref.item_id)
+        params: dict[str, Any] = {
+            "key": f"/library/metadata/{ref.item_id}",
+            "ratingKey": ref.item_id,
+            "state": state,
+            "time": position,
+        }
+        if duration > 0:
+            params["duration"] = duration
+        self._ask("POST", "/:/timeline", params, {"X-Plex-Session-Identifier": ref.play_session})
+
+    # ---- the server's conversion (2.14: the ⚙'s) ----------------------------------------------
+
+    def convert(self, params: dict) -> str:
+        """The address the player opens for the conversion `params` asks for
+        (`conversion_params`), or "" when the server would not make it. Its transcoder is
+        asked for its decision first (it starts no conversion it has not decided: a 1.43
+        server refused one so), then to start it, which names the session's playlist; the
+        encoding begins when that playlist is asked. It is checked here as libVLC will ask it
+        (`_pieces_refused`): a server that wants the token for the pieces (2.14 review I3 and
+        N1: never seen at home) has the session stopped, and the title plays as its file is.
+        The address holds the token, as a file's does (`stream_url`)."""
+        decided = self._ask("GET", TRANSCODE + "/decision", params)
+        code = decided.get("generalDecisionCode")
+        if code not in _CONVERTS:
+            logger.info("A Plex server would not convert the title (its decision: %s)", code)
+            return ""
+        started = self._send("GET", TRANSCODE + "/start.m3u8", params, {"Accept": "*/*"})
+        lines = [line.strip() for line in str(started.text or "").splitlines()]
+        variants = [line for line in lines if line and not line.startswith("#")]
+        playlist = urljoin(self.base + TRANSCODE + "/start.m3u8", variants[0]) if variants else ""
+        playlist = playlist.split("?", 1)[0]
+        if not playlist.startswith(self.base + TRANSCODE + "/session/"):
+            logger.info("A Plex server's conversion named no playlist of its own")
+            return ""
+        session = playlist[len(self.base + TRANSCODE + "/session/") :].split("/", 1)[0]
+        query = urlencode(
+            {
+                "X-Plex-Token": self.token,
+                "X-Plex-Client-Identifier": self.client_id,
+                "X-Plex-Product": PRODUCT,
+                "X-Plex-Session-Identifier": params["X-Plex-Session-Identifier"],
+            }
+        )
+        address = f"{playlist}?{query}"
+        if self._pieces_refused(address):  # (review N1: away from home, a server may want it)
+            logger.info("A Plex server's conversion would not give its pieces without the token")
+            self._stop_quietly(session)
+            return ""
+        return address
+
+    def _pieces_refused(self, address: str) -> bool:
+        """Whether the server refuses the conversion as libVLC will ask it: its playlist by
+        `address` (the token and the client id in its query), then the first piece it names
+        without them (libVLC carries no query over to the pieces), its status alone read.
+        Only a 401 or a 403 refuses; a check that cannot tell (a time-out, a server's error,
+        a lost connection, no piece named) refuses nothing."""
+        ask = {"headers": {"Accept": "*/*"}, "timeout": self.timeout, "verify": self.verify}
+        try:
+            listed = self._http.request("GET", address, **ask)
+            if listed.status_code >= 400:
+                return bool(listed.status_code in (401, 403))
+            names = [line.strip() for line in str(listed.text or "").splitlines()]
+            pieces = [name for name in names if name and not name.startswith("#")]
+            piece = urljoin(address.split("?", 1)[0], pieces[0]).split("?", 1)[0] if pieces else ""
+            if not piece.startswith(self.base + TRANSCODE + "/session/"):
+                return False
+            answer = self._http.request("GET", piece, stream=True, **ask)
+            try:
+                return bool(answer.status_code in (401, 403))
+            finally:
+                answer.close()  # its status is all that was wanted: no body is read
+        except Exception as error:  # never the address
+            logger.info("A Plex conversion's pieces could not be checked: %s", type(error).__name__)
+            return False
+
+    def _stop_quietly(self, session: str) -> None:
+        try:
+            self.stop_conversion(session)
+        except Exception as error:  # the server ends a session nobody asks for, in time
+            logger.info("A Plex server's conversion was not stopped: %s", type(error).__name__)
+
+    def stop_conversion(self, session: str) -> None:
+        """End the server's conversion `session` (its encoding stops); one the server ended
+        already (404) is no failure."""
+        try:
+            self._send("GET", TRANSCODE + "/stop", {"session": session})
+        except MediaServerError as error:
+            if not str(error).endswith(" 404"):  # (SignInNeeded's is "401")
+                raise
+
+
+def _key_of(raw: dict) -> str:
+    """An item's identity in a list (its ratingKey, else the item itself)."""
+    return str(raw.get("ratingKey") or id(raw))
+
+
+def _remember(base: str, item_id: str, duration: Any) -> None:
+    if not isinstance(duration, int) or duration <= 0:
+        return
+    _DURATIONS[(base, item_id)] = duration
+    while len(_DURATIONS) > _DURATIONS_KEPT:
+        _DURATIONS.pop(next(iter(_DURATIONS)))
+
+
+# ---- titles ---------------------------------------------------------------------------------
+
+
+def image_url(base: str, path: Any, token: str) -> str:
+    """A picture of the server at its address, with the token (Plex asks for it): for a
+    server of no id only (a picture is a reference otherwise: `_picture`)."""
+    path = str(path or "")
+    if not path.startswith("/"):
+        return ""
+    return f"{base}{path}?{urlencode({'X-Plex-Token': token})}"
+
+
+def _tmdb(raw: dict) -> str:
+    for guid in raw.get("Guid") or []:
+        value = str(guid.get("id") or "") if isinstance(guid, dict) else ""
+        if value.startswith("tmdb://") and value[7:].isdigit():
+            return value[7:]
+    return ""
+
+
+def _number(value: Any) -> str:
+    return str(value) if isinstance(value, (int, float)) and not isinstance(value, bool) else ""
+
+
+def _picture(path: Any, base: str, token: str, server_id: str) -> str:
+    """A picture of the server: a reference that becomes its resizer when fetched (no token
+    kept: services.plex_addresses), or its address as it is for a server of no id."""
+    if server_id:
+        return plex_addresses.image_ref(server_id, path)
+    return image_url(base, path, token)
+
+
+def title_item(raw: dict, base: str, token: str, library_id: str, *, server_id: str = "") -> dict:
+    """A film or a series of the server as a Library title (Jellyfin's and Emby's keys:
+    services.media_server.title_item); its picture by reference (`server_id`: its server's)."""
+    overview = ms.shortened(str(raw.get("summary") or ""))
+    rating = raw.get("audienceRating")
+    if not isinstance(rating, (int, float)):
+        rating = raw.get("rating")
+    item: dict[str, Any] = {
+        "id": str(raw.get("ratingKey") or ""),
+        "name": str(raw.get("title") or ""),
+        "logo": _picture(raw.get("thumb"), base, token, server_id),
+        "tv_genre_id": library_id,
+        "cmd": "",
+        "description": overview,
+        "plot": overview,
+        "year": _number(raw.get("year")),
+        "rating": _number(rating),
+        "genre": ", ".join(
+            str(g.get("tag"))
+            for g in raw.get("Genre") or []
+            if isinstance(g, dict) and g.get("tag")
+        ),
+    }
+    duration = raw.get("duration")
+    if isinstance(duration, int) and duration > 0:
+        item["duration_secs"] = duration // 1000
+    tmdb = _tmdb(raw)
+    if tmdb:
+        item["tmdb"] = tmdb
+    added = raw.get("addedAt")
+    if isinstance(added, int) and added > 0:
+        item["added"] = str(added)
+    position = raw.get("viewOffset")
+    if isinstance(position, int) and position > 0:
+        item["server_position_ms"] = position
+    media = next((m for m in raw.get("Media") or [] if isinstance(m, dict)), {})
+    container = str(media.get("container") or "").split(",")[0]
+    if container:
+        item["container_extension"] = container
+    return item
+
+
+def section_payload(
+    libraries: list[dict],
+    titles: dict[str, list[dict]],
+    base: str,
+    token: str,
+    *,
+    server_id: str = "",
+) -> dict:
+    """The Library's section of a server: All, Continue watching (titles started there), then
+    each library (services.media_server.ordered_payload). Loaded whole each time: Plex answers
+    a library at once."""
+    ordered: dict[str, list[dict]] = {}
+    made: dict[str, dict] = {}
+    for library in libraries:
+        listed = ordered.setdefault(library["id"], [])
+        for raw in titles.get(library["id"]) or []:
+            item_id = str(raw.get("ratingKey") or "")
+            if item_id:
+                if item_id not in made:
+                    made[item_id] = title_item(raw, base, token, library["id"], server_id=server_id)
+                listed.append(made[item_id])
+    return ms.ordered_payload(libraries, ordered)
+
+
+def episode_item(raw: dict, base: str, token: str, *, server_id: str = "") -> dict:
+    number = _number(raw.get("index"))
+    name = str(raw.get("title") or (f"Episode {number}" if number else ""))
+    item = title_item(raw, base, token, "", server_id=server_id)
+    item.update(
+        {
+            "number": number,
+            "episode_num": number,
+            "ename": name,
+            "name": name,
+            "season": _number(raw.get("parentIndex")),
+            "series_id": str(raw.get("grandparentRatingKey") or ""),
+            "season_id": str(raw.get("parentRatingKey") or ""),
+        }
+    )
+    return item
+
+
+def seasons_payload(
+    seasons: list[dict], episodes: list[dict], base: str, token: str, *, server_id: str = ""
+) -> dict:
+    """A series' seasons, each with its episodes in order (as Jellyfin's come). Only seasons
+    are seasons (an "all episodes" row is not one), and an episode of no season listed has a
+    season made from its own (review M11): none is left out."""
+    by_season: dict[str, list[dict]] = {}
+    for raw in episodes:
+        by_season.setdefault(str(raw.get("parentRatingKey") or ""), []).append(raw)
+    seasons = [
+        raw for raw in seasons if raw.get("type", "season") == "season" and raw.get("ratingKey")
+    ]
+    listed_ids = {str(raw["ratingKey"]) for raw in seasons}
+    for key, strays in by_season.items():
+        if key not in listed_ids:
+            first = strays[0]
+            seasons.append(
+                {
+                    "ratingKey": key or "episodes",
+                    "title": str(first.get("parentTitle") or ""),
+                    "index": first.get("parentIndex"),
+                }
+            )
+            if not key:
+                by_season["episodes"] = strays
+    seasons.sort(key=lambda raw: (raw.get("index") is None, raw.get("index") or 0))
+    out: list[dict[str, Any]] = []
+    for raw in seasons:
+        season_id = str(raw.get("ratingKey") or "")
+        listed = sorted(by_season.get(season_id, []), key=lambda e: int(e.get("index") or 0))
+        season_number = _number(raw.get("index"))
+        made = [episode_item(e, base, token, server_id=server_id) for e in listed]
+        for episode in made:  # an episode without its own season's number has its season's
+            episode["season"] = episode["season"] or season_number
+        out.append(
+            {
+                "id": season_id,
+                "name": str(raw.get("title") or ""),
+                "season_number": season_number,
+                "cover": _picture(raw.get("thumb"), base, token, server_id),
+                "overview": str(raw.get("summary") or ""),
+                "episode_count": str(len(listed)),
+                "episodes": made,
+            }
+        )
+    return {"seasons": out}
+
+
+# ---- versions and streams -------------------------------------------------------------------
+
+
+def sources(media: list[dict]) -> list[dict]:
+    """A title's versions in the shape services.media_server's rules read (`choose_source`,
+    `version_of`, `within`): each version's id, its picture's size, its rate (bits a second),
+    its first file (`part`, the address it plays from) and its place among the title's
+    versions as the server lists them (`index`: a conversion names the version by it)."""
+    out = []
+    for index, raw in enumerate(media):
+        part = next(
+            (p for p in raw.get("Part") or [] if isinstance(p, dict) and p.get("key")), None
+        )
+        if part is None or raw.get("id") is None:
+            continue
+        rate = raw.get("bitrate")
+        out.append(
+            {
+                "Id": str(raw["id"]),
+                "Bitrate": int(rate) * 1000 if isinstance(rate, int) else 0,
+                "Container": str(part.get("container") or raw.get("container") or ""),
+                "MediaStreams": [
+                    {
+                        "Type": "Video",
+                        "Width": int(raw.get("width") or 0),
+                        "Height": int(raw.get("height") or 0),
+                    }
+                ],
+                "part": str(part["key"]),
+                "index": index,
+            }
+        )
+    return out
+
+
+def stream_url(base: str, source: dict, token: str, client_id: str, item_id: str) -> str:
+    """A version's file itself, as it is (Plex's direct play). The address names QiTV and a
+    play session of its own, `<title>-<random>`, which tells the reporter which title plays
+    (a file's address names only the file)."""
+    query = urlencode(
+        {
+            "X-Plex-Token": token,
+            "X-Plex-Client-Identifier": client_id,
+            "X-Plex-Product": PRODUCT,
+            "X-Plex-Session-Identifier": f"{item_id}-{uuid.uuid4().hex}",
+        }
+    )
+    return f"{base}{source['part']}?{query}"
+
+
+def parse_stream_url(url: str, bases: Any) -> Optional[ms.StreamRef]:
+    """What a stream address of one of `bases` (the Plex servers' addresses) plays, a file or
+    a conversion's playlist (2.14: its session, which the reporter stops), else None (an
+    address QiTV did not make: no play session of its own)."""
+    for base in bases:
+        base = normalized_base(str(base or ""))
+        if not base:
+            continue
+        converted = url.startswith(base + TRANSCODE + "/session/")
+        if not converted and not url.startswith(base + "/library/parts/"):
+            continue
+        parts = urlsplit(url)
+        segments = parts.path[len(urlsplit(base).path) :].strip("/").split("/")
+        query = parse_qs(parts.query)
+        session = (query.get("X-Plex-Session-Identifier") or [""])[0]
+        item_id = session.split("-", 1)[0]
+        # /library/parts/<part>/…, or /video/:/transcode/universal/session/<session>/…
+        at = 5 if converted else 2
+        if len(segments) <= at or not segments[at] or not item_id.isdigit():
+            return None
+        return ms.StreamRef(
+            base=base,
+            item_id=item_id,
+            source_id="" if converted else segments[at],
+            token=(query.get("X-Plex-Token") or [""])[0],
+            play_session=session,
+            converted=converted,
+            transcode=segments[at] if converted else "",
+        )
+    return None
+
+
+# ---- the server's conversion (2.14) -------------------------------------------------------
+
+
+def conversion_params(
+    item_id: str, source: dict, quality: ms.Quality, client_id: str, version: str
+) -> dict:
+    """What a Plex server's transcoder is asked for the ⚙'s conversion `quality` of version
+    `source` (`sources`) of title `item_id`: HLS, at most the conversion's lines (16:9) and
+    rate, from the title's start (libVLC asks a playlist's first piece whatever its
+    EXT-X-START says; the player's own seek takes the title on from where it was, as for
+    Jellyfin), no subtitles burnt into the picture, and a session of its own (its play
+    session is `<title>-<session>`, as a file's names its title). Never the token."""
+    session = uuid.uuid4().hex
+    params: dict[str, Any] = {
+        "path": f"/library/metadata/{item_id}",
+        "mediaIndex": int(source.get("index") or 0),
+        "partIndex": 0,
+        "protocol": "hls",
+        "directPlay": 0,
+        "directStream": 1,
+        "fastSeek": 1,
+        "subtitles": "none",
+        "offset": 0,
+    }
+    if quality.height > 0:
+        params["videoResolution"] = f"{(quality.height * 16 + 8) // 9}x{quality.height}"
+    if quality.bitrate > 0:
+        params["maxVideoBitrate"] = quality.bitrate // 1000  # kbit/s
+    params.update(
+        {
+            "session": session,
+            "X-Plex-Product": PRODUCT,
+            "X-Plex-Version": version,
+            "X-Plex-Platform": PLATFORM,
+            "X-Plex-Client-Identifier": client_id,
+            "X-Plex-Session-Identifier": f"{item_id}-{session}",
+            "X-Plex-Client-Profile-Extra": PROFILE_EXTRA,
+        }
+    )
+    return params

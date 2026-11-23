@@ -151,6 +151,30 @@ class QualityControlsTests(unittest.TestCase):
             ],
         )
 
+    def test_a_plex_title_of_one_version_offers_the_servers_conversions_too(self):  # 2.14
+        self.target = SimpleNamespace(item={"id": "102", "_provider": "Plex at home"}, live=False)
+        self.menu = {"versions": [VERSIONS[1]], "quality": ms.Quality(source="hd")}
+        self.transport.qualityRequested.emit()
+        self.assertEqual(
+            self.rows(),
+            [
+                ("1080p · 8.2 Mbit/s", True),  # as its file is: what plays first
+                ("720p · 4 Mbit/s, converted", False),
+                ("480p · 2 Mbit/s, converted", False),
+            ],
+        )
+        self.panel.rowChosen.emit(ms.CONVERSIONS[1])
+        self.assertEqual(self.chosen, [])  # asked first, on the conversion question card
+        ((question, yes, no),) = self.card.asked
+        self.assertIn("server's processor", question)
+        self.assertEqual((yes, no), ("Convert", "Keep the original"))
+        self.card.answered.emit(False)  # Keep the original: it plays on as it is
+        self.assertEqual(self.chosen, [])
+        self.transport.qualityRequested.emit()
+        self.panel.rowChosen.emit(ms.CONVERSIONS[1])
+        self.card.answered.emit(True)
+        self.assertEqual(self.chosen, [ms.CONVERSIONS[1]])
+
     def test_a_conversion_playing_is_ticked(self):
         self.menu["quality"] = ms.Quality("hd", 720, 4_000_000)  # of the 1080p version
         self.transport.qualityRequested.emit()

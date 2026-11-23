@@ -148,6 +148,19 @@ class NavModelTests(unittest.TestCase):
         self.nav.reset_to("live")
         self.assertIsNone(self.nav.revealed())
 
+    def test_reveal_keeps_the_group_that_lists_the_channel_under_another_id(self):
+        # An M3U id is a list position: the dict of a channel kept from before its playlist
+        # changed (the start's last channel, a saved tile) has another id now. Its group
+        # still lists it, by its address.
+        self.catalog.live = {
+            "10": [
+                {"id": 1, "name": "One", "cmd": "http://tv/one"},
+                {"id": 2, "name": "Two", "cmd": "http://tv/two"},
+            ]
+        }
+        self.nav.reveal("Home", "live", "10", {"id": 7, "name": "Two", "cmd": "http://tv/two"})
+        self.assertEqual([n.key for n in self.nav.path], ["Home", "live", "10"])
+
     def test_root_is_sources_then_the_settings_rows(self):
         rows = self.nav.children(None)
         self.assertEqual(

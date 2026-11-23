@@ -11,7 +11,10 @@ dark card 48 u wide with a title, then
   it), the line that says what was found under the first one (green when good, else in the
   warning colour), the buttons at the right with the accent one filled, and the other ways to
   go on in a muted line below ("Or: M3U file…  STB portal");
-- a ChoiceCard's words and its buttons (and its other ways in the muted line, 2.13.1);
+- a ChoiceCard's words and its buttons (and its other ways in the muted line, 2.13.1); a code to
+  type elsewhere (2.14: Plex's sign-in) shows large and spaced in a tile under the title, with
+  where to type it (its address, in the accent colour) under the tile, both readable from the
+  couch, in the pairing screen's sizes (ui/overlays/remote_pair.py);
 - a RangeCard's value, a track with a thumb under it (a muted line, an accent thumb), a note
   that follows the value (the estimated rewind of a cache size), and Cancel and OK. ←/→ step,
   PgUp/PgDn move ten steps, Home/End go to the ends, Enter keeps, Esc and Back cancel
@@ -44,7 +47,8 @@ Ctrl/⌘+V in the field types it at the caret, as any text field does. While a F
 its fields keep the text being checked; Cancel still works. A secret field's text is never
 shown, copied, announced, given as a tooltip or put in a repr. 1 u = 1% of the overlay host's
 width (ui_units); in a window too small for the card, its gaps shrink, then the middle is cut
-so that the title and the buttons stay.
+so that the title and the buttons stay. A card made over the TV window's overlay host joins its
+overlays (OverlayHost.add_overlay), so the host's mask, which shows only them, never cuts it.
 """
 
 from __future__ import annotations
@@ -67,6 +71,7 @@ from PySide6.QtGui import (
 )
 from PySide6.QtWidgets import QApplication, QFileDialog, QWidget
 
+from services import system_open
 from services.i18n import N_, translate
 from ui.keymap import Action, key_hint
 from ui.overlays.base import Overlay, announce
@@ -126,16 +131,23 @@ _TRACK_H_U = 0.35  # the line
 _TRACK_ROW_U = 3.0  # the track's row (what a press takes)
 _THUMB_U = 0.95  # the thumb's radius
 _TRACK_ALPHA = 0.22
+_CODE_U = 4.2  # a code's letters (the pairing screen's title is 2.6 u)
+_CODE_SPACING = 0.32  # between a code's letters, of their size
+_CODE_PAD_U = 0.9  # above and below a code, in its tile
+_LINK_U = 1.8  # where to type a code (the pairing screen's hint size)
 _PAGE_STEPS = 10
 
 # Where things are, by (zone, key): one rect per field, button and alternate.
 _Rects = dict[tuple[str, str], QRectF]
 PANEL, TITLE, BODY, MIDDLE = ("panel", ""), ("title", ""), ("body", ""), ("middle", "")
+CODE, LINK = ("code", ""), ("link", "")  # a ChoiceCard's code to type elsewhere, and where
 FOUND, BUSY, RULE, LEAD = ("found", ""), ("busy", ""), ("rule", ""), ("lead", "")
 _FOOTER = frozenset({"button", "busy", "rule", "lead", "alt"})  # stays in a small window
 # cut in a small window
-_MIDDLE = frozenset({"body", "label", "field", "paste", "found", "value", "track", "note"})
-_HITS = ("paste", "field", "label", "button", "alt", "track")
+_MIDDLE = frozenset(
+    {"body", "code", "link", "label", "field", "paste", "found", "value", "track", "note"}
+)
+_HITS = ("paste", "field", "label", "button", "alt", "track", "link")
 # Words that wrap (the question's, the found line's), from the top left.
 _WRAP = int(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignTop | Qt.TextFlag.TextWordWrap)
 
@@ -203,6 +215,12 @@ def _advance(font: QFont, text: str) -> float:
     return QFontMetricsF(font).horizontalAdvance(text)
 
 
+def _spaced(font: QFont, share: float) -> QFont:
+    """`font` with `share` of its size between its letters (a code read from afar)."""
+    font.setLetterSpacing(QFont.SpacingType.AbsoluteSpacing, share * font.pixelSize())
+    return font
+
+
 def _elided(font: QFont, text: str, width: float) -> str:
     return QFontMetricsF(font).elidedText(text, Qt.TextElideMode.ElideRight, max(0.0, width))
 
@@ -220,6 +238,10 @@ class _Card(Overlay):
         self.setMouseTracking(True)
         self._title = ""
         self._body = ""
+        self._code = ""  # a ChoiceCard's code to type elsewhere ("": none)
+        self._link = ""  # where to type it
+        self._link_url = ""  # the page a click on `_link` opens in the browser ("": none)
+        self._waits = False  # a ChoiceCard that waits: OK and the dimmed picture leave it be
         self._fields: list[Field] = []
         self._edits: dict[str, TextEdit] = {}
         self._found = ""
@@ -235,6 +257,11 @@ class _Card(Overlay):
         self._second_click = SecondClickGuard(self)
         if parent is not None:
             parent.installEventFilter(self)
+            if hasattr(parent, "add_overlay"):
+                # The TV window's overlay host shows only its overlays (its mask): a card
+                # made over it as it is first needed (Settings' cards) is one of them, or it
+                # was cut off at the drawer's edge (2.14, a 1920-wide window).
+                parent.add_overlay(self)
         self.hide()
 
     # ---- what the subclasses decide ---------------------------------------------------------
@@ -257,6 +284,13 @@ class _Card(Overlay):
         """A ChoiceCard's words under its title ("" for none)."""
         return self._body
 
+    def code(self) -> str:
+        """A ChoiceCard's code to type elsewhere ("" for none), and `link`, where."""
+        return self._code
+
+    def link(self) -> str:
+        return self._link
+
     def focus(self) -> tuple[str, str]:
         """("field" | "paste" | "button" | "alt", its key): what the keys are on."""
         return self._focus
@@ -269,8 +303,8 @@ class _Card(Overlay):
 
     def control_rect(self, zone: str, key: str = "") -> QRectF:
         """Where a "field", "label", "paste", "button" or "alt" (by key), or the "title",
-        "body", "found" line or "busy" text is; empty when there is none (or it is cut off in
-        a small window)."""
+        "body", "code", "link", "found" line or "busy" text is; empty when there is none (or it
+        is cut off in a small window)."""
         rects = self._layout()
         rect = rects.get((zone, key))
         if rect is None:
@@ -421,6 +455,8 @@ class _Card(Overlay):
         elif zone == "paste":
             self._paste_into(key)
         elif zone in ("button", "alt"):
+            if self._waits and key == CANCEL:
+                return  # OK on a card that waits (a code being entered elsewhere) ends nothing
             self._press(key)
 
     def _press(self, key: str) -> None:
@@ -540,6 +576,11 @@ class _Card(Overlay):
         if parent is not None and self.geometry() != parent.rect():
             self.setGeometry(parent.rect())
 
+    def _moved(self) -> None:
+        """2.14: over where Settings is now (the Library's page or the picture), all of it
+        dimmed (Overlay.move_to)."""
+        self._fit()
+
     def eventFilter(self, watched: QObject, event: QEvent) -> bool:
         if (
             watched is self.parentWidget()
@@ -567,6 +608,8 @@ class _Card(Overlay):
             "button": un.font(1.1),
             "accent": un.font(1.1, QFont.Weight.DemiBold),
             "alt": un.font(1.05),
+            "code": _spaced(un.font(_CODE_U, QFont.Weight.DemiBold), _CODE_SPACING),
+            "link": un.font(_LINK_U, QFont.Weight.DemiBold),
         }
 
     def _layout(self) -> _Rects:
@@ -617,6 +660,18 @@ class _Card(Overlay):
         rects[TITLE] = QRectF(left, y, inner, title_h)
         y += title_h
         middle_top = y
+        if self._code:
+            y += gap(_TITLE_GAP_U)
+            code_h = _line_h(fonts["code"]) + 2 * un.px(_CODE_PAD_U)
+            rects[CODE] = QRectF(left, y, inner, code_h)
+            y += code_h
+            if self._link:
+                y += gap(_ROW_GAP_U)
+                # As wide as its words, centred: a click beside them opens nothing.
+                link_w = min(inner, _advance(fonts["link"], self._link) + un.px(_ROW_GAP_U))
+                link_h = _line_h(fonts["link"])
+                rects[LINK] = QRectF(left + (inner - link_w) / 2, y, link_w, link_h)
+                y += rects[LINK].height()
         if self._body or self._fields or self._found:
             y += gap(_TITLE_GAP_U)
         if self._body:
@@ -786,6 +841,19 @@ class _Card(Overlay):
 
     def _paint_middle(self, p: QPainter, un: Units, fonts: dict[str, QFont], rects: _Rects) -> None:
         left = Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter
+        if CODE in rects:  # large and spaced, in a tile as a field's
+            tile = rects[CODE]
+            fill_round(p, tile, qcolor(PALETTE.text, 0.08), un.u * _RADIUS_U)
+            p.setFont(fonts["code"])
+            p.setPen(qcolor(PALETTE.text))
+            after = fonts["code"].letterSpacing()  # (also after the last letter: centred so)
+            p.drawText(tile.translated(after / 2, 0), Qt.AlignmentFlag.AlignCenter, self._code)
+        if LINK in rects:
+            font = QFont(fonts["link"])
+            font.setUnderline(self._hover == LINK)  # a page the click opens
+            p.setFont(font)
+            p.setPen(qcolor(PALETTE.accent))
+            p.drawText(rects[LINK], Qt.AlignmentFlag.AlignCenter, self._link)
         if BODY in rects:
             p.setFont(fonts["body"])
             p.setPen(qcolor(PALETTE.text, 0.8))
@@ -996,7 +1064,8 @@ class _Card(Overlay):
         pos = event.position()
         hit = self._hit(pos)
         if hit is None:
-            self._cancel()  # the dimmed picture
+            if not self._waits:
+                self._cancel()  # the dimmed picture
             return
         zone, key = hit
         if zone in ("field", "label"):
@@ -1010,6 +1079,8 @@ class _Card(Overlay):
         elif zone in ("button", "alt") and self._enabled(zone, key):
             self._set_focus((zone, key))
             self._press(key)
+        elif zone == "link" and self._link_url:
+            system_open.open_url(self._link_url)  # the card waits on, for the code
 
     def mouseDoubleClickEvent(self, event: QMouseEvent) -> None:
         event.accept()
@@ -1033,14 +1104,21 @@ class _Card(Overlay):
             self.update()  # a drag in a field selects
         hit = self._hit(event.position())
         hover = hit if hit is not None and hit[0] in ("paste", "button", "alt") else None
+        if hit == LINK and self._link_url:
+            hover = LINK
         if hover != self._hover:
             self._hover = hover
+            if hover == LINK:
+                self.setCursor(Qt.CursorShape.PointingHandCursor)
+            else:
+                self.unsetCursor()
             self.update()
         event.accept()
 
     def leaveEvent(self, event: QEvent) -> None:
         if self._hover is not None:
             self._hover = None
+            self.unsetCursor()
             self.update()
         super().leaveEvent(event)
 
@@ -1199,17 +1277,29 @@ class ChoiceCard(_Card):
         buttons: list[Button],
         default: str,
         alternates: Optional[list[Button]] = None,
+        *,
+        code: str = "",
+        link: str = "",
+        link_url: str = "",
+        waits: bool = False,
     ) -> None:
         """Show the question (a question still shown is replaced, unanswered). The keys start
         on `default`, else the accent button, else Cancel, else the first. `alternates` (2.13.1)
-        are its other ways, in the muted line under the buttons, answered as a button is."""
+        are its other ways, in the muted line under the buttons, answered as a button is.
+        `code` (2.14) is a code to type elsewhere, shown large, and `link` where to type it;
+        a click on `link` opens `link_url` in the browser, when there is one.
+        `waits`: OK on its Cancel and a click on the dimmed picture end nothing (Esc, Back and
+        a click on Cancel do), so a code being entered elsewhere isn't lost by a stray press."""
         self._title, self._body = title, body
+        self._code, self._link, self._link_url = code, link, link_url
+        self._waits = waits
         self._fields, self._edits = [], {}
         self._found, self._found_ok = "", True
         self._buttons, self._alternates = list(buttons), list(alternates or ())
         self._last_alt = ""
         self._busy = False
         self._hover = None
+        self.unsetCursor()  # (a hand over the last question's link)
         keys = [b.key for b in self._buttons]
         accent = next((b.key for b in self._buttons if b.accent), None)
         if default in keys:
@@ -1223,7 +1313,8 @@ class ChoiceCard(_Card):
         self._focus = ("button", key)
         self._last_button = key
         self._open()
-        announce(self, "\n".join(part for part in (title, body) if part), assertive=True)
+        said = (title, code, link, body)
+        announce(self, "\n".join(part for part in said if part), assertive=True)
 
     def _answer(self, key: str) -> None:
         if self.isHidden():

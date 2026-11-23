@@ -114,6 +114,9 @@ class LinkLanes(QObject):
     tuneFailed = Signal(object, str)  # Target, message
     tuneDropped = Signal(object)  # Target: overtaken by a side play, its result is dropped
     sideFailed = Signal(object, str)  # Target, message (scrub before showing)
+    # 2.14 review I2: a link answered that will not play (stale, overtaken, superseded): a
+    # Plex conversion's session the server started for it is stopped (the shell's reporter).
+    linkDropped = Signal(str)
 
     def __init__(self, catalog, parent: Optional[QObject] = None) -> None:
         super().__init__(parent)
@@ -359,6 +362,8 @@ class LinkLanes(QObject):
         target = self._take_tune(request_id)
         if target is not None:
             self.tuneReady.emit(target, url)
+        else:
+            self.linkDropped.emit(url)
 
     def _on_failed(self, request_id: int, message: str) -> None:
         job = self._take_side(request_id)
@@ -379,6 +384,7 @@ class LinkLanes(QObject):
         try:
             if self._superseded(job):
                 logger.debug("Dropping the link for %s: a newer choice plays", job.target.title)
+                self.linkDropped.emit(url)
                 return
             job.then(url)
         except Exception as e:

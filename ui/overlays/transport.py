@@ -80,14 +80,21 @@ mode ends it, and `end_audio` ends it and hides it. A radio channel keeps live T
 over the audio screen (no dock): there they leave the screen's own controls (its top bar, below
 the title row) their clicks with a widget mask, and shade only the title row's band, lighter,
 above them (`leave_to_screen`, 2.13.3: they took every click on the screen).
+A second Transport can show what this one does over another window (`add_mirror`, 2.13.5: the
+desktop picture in picture's own controls, ui/float_controls.py): each state setter
+(`_mirrored`: the modes, the timeline, the buttons' states) tells it too, and one added later
+takes the last call of each, in the order they came. Whether it shows is its own (its hover,
+`hover_at`), and so is what belongs to one window (`OWN_SETTERS`).
 """
 
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
+import functools
+import itertools
 import math
 import re
 import time
-from typing import Callable, Optional
+from typing import Any, Callable, Optional, TypeVar, cast
 
 from PySide6.QtCore import (
     QDate,
@@ -120,6 +127,7 @@ from PySide6.QtGui import (
     QShowEvent,
 )
 from PySide6.QtWidgets import QWidget
+from shiboken6 import isValid
 
 from services import i18n
 from services.i18n import N_, tr, translate
@@ -255,6 +263,19 @@ _LABELS = ("live", "indicator", "times")  # shown, not clicked: over the PiP, cl
 # A quick second click (a double-click) repeats these steps; on any other control it counts
 # once: a toggle (★, ⛶, ▶) would undo itself, a jump (⟲, Next) go one further. The audio dock's
 # previous and next tracks count twice (Plan 4): restart, then the song before; two songs on.
+# A quick second press on these is another click, never a fullscreen toggle: they open or close
+# something, and a second press closes what the first opened.
+_AGAIN = (
+    "audio",
+    "subtitles",
+    "picture",
+    "quality",
+    "volume",
+    "layout",
+    "external",
+    "cast",
+    "more",
+)
 _REPEATS = ("back10", "fwd10", "fwd60", "slower", "faster", "prev_track", "next_track")
 # The audio dock's (Plan 4): its buttons take clicks past their icons as the icon buttons do.
 _DOCK_BUTTONS = ("shuffle", "prev_track", "next_track", "repeat", "more", "level")
@@ -342,6 +363,33 @@ def _local_now() -> datetime:
 
 def _optional(value: object) -> Optional[float]:
     return float(value) if isinstance(value, (int, float)) else None
+
+
+# What a mirror (`Transport.add_mirror`) is not told: what belongs to the window it shows over
+# (its small picture, a radio's screen under it, the window's mode: its own way back) and whether
+# it shows (`poke`, `hold`, `dismiss`: its own hover).
+OWN_SETTERS = ("set_pip_rect", "follow_pip", "leave_to_screen", "set_window_mode")
+_ORDER = itertools.count()  # the order the mirrored setters were called in
+_Setter = TypeVar("_Setter", bound=Callable[..., None])
+
+
+def _mirrored(setter: _Setter) -> _Setter:
+    """What the controls show, not whether they show: each mirror (`Transport.add_mirror`) is
+    told each call too, and one added later the last call of each, in the order they came."""
+    name = setter.__name__
+
+    @functools.wraps(setter)
+    def tell(self: "Transport", *args: Any, **kwargs: Any) -> None:
+        setter(self, *args, **kwargs)
+        self._told[name] = (next(_ORDER), args, kwargs)
+        for mirror in tuple(self._mirrors):
+            if isValid(mirror):
+                getattr(mirror, name)(*args, **kwargs)
+            else:
+                self._mirrors.remove(mirror)  # (its window went)
+
+    tell.mirrored = True
+    return cast(_Setter, tell)
 
 
 class _BarMap:
@@ -503,6 +551,8 @@ class Transport(Overlay):
     ) -> None:
         """`clock`: what a recording's start (`set_recording`) is measured on."""
         super().__init__(parent)
+        self._mirrors: list[Transport] = []  # what shows what this one does (`add_mirror`)
+        self._told: dict[str, tuple[int, tuple, dict]] = {}  # each mirrored setter's last call
         self.setMouseTracking(True)
         self.setAttribute(Qt.WA_NoSystemBackground, True)
         self._now = now
@@ -535,6 +585,7 @@ class Transport(Overlay):
         self._grid_layout = ""  # the grid's layout, as its chip names it ("2×2")
         self._grid_cells = 0  # its tiles: the chip's picture (painting's "layout_4")
         self._grid_restorable = False  # the last grid can come back: its chip shows
+        self._grid_big = False  # a tile is big: the grid's button brings the grid back
         self._pip_rect = QRect()  # the small picture: the shades leave it alone
         # 2.13.3: the audio screen's own controls under it, a radio channel's (leave_to_screen)
         self._screen_controls = QRegion()
@@ -587,17 +638,21 @@ class Transport(Overlay):
 
     # ---- public API ---------------------------------------------------------------------------
 
+    @_mirrored
     def show_vod(self, title: str, subtitle: str) -> None:
         self._set_mode(False, title, subtitle)
 
+    @_mirrored
     def show_live(self, title: str, subtitle: str, logo: QPixmap | None = None) -> None:
         """Live channels show a badge before the name: the logo, else the name's initials."""
         self._set_mode(True, title, subtitle, logo=logo)
 
+    @_mirrored
     def show_timeshift(self, title: str, subtitle: str, logo: QPixmap | None = None) -> None:
         """Show a pipeline live channel. A different title (a zap) forgets the old timeline."""
         self._set_mode(True, title, subtitle, timeshift=True, logo=logo)
 
+    @_mirrored
     def show_failed(self, title: str, subtitle: str, logo: QPixmap | None = None) -> None:
         """A live channel that failed to open (2.8.12): live TV's controls, so a mouse reaches
         the guide, the previous channel and Search; play (▶) tries it again, the LIVE badge
@@ -612,11 +667,13 @@ class Transport(Overlay):
         """It shows a channel that failed to open (`show_failed`)."""
         return self._failed
 
+    @_mirrored
     def show_audio(self, title: str, subtitle: str) -> None:
         """Be the audio screen's dock for a song (`title`, `subtitle`: what plays; the screen
         shows them, the dock draws none). It stays up until another mode or end_audio()."""
         self._set_mode(False, title, subtitle, audio=True)
 
+    @_mirrored
     def set_audio_state(
         self,
         shuffle: bool,
@@ -646,6 +703,7 @@ class Transport(Overlay):
         """It is the audio screen's dock (show_audio)."""
         return self._audio
 
+    @_mirrored
     def end_audio(self) -> None:
         """The song's screen went (a stop, a picture showed): the dock ends and hides. The next
         show_vod/show_live/… shows that mode's controls; poke() alone shows a film's."""
@@ -675,6 +733,7 @@ class Transport(Overlay):
         the "⋯" menu names its items with it."""
         return self._tooltip(name)
 
+    @_mirrored
     def set_logo(self, logo: QPixmap | None) -> None:
         """The channel's logo arrived after the channel was shown."""
         self._logo = logo
@@ -689,6 +748,7 @@ class Transport(Overlay):
         y = un.px(2.4) + (un.px(2.6) - size) / 2
         return QRectF(un.px(3), y, size, size)
 
+    @_mirrored
     def update_timeline(self, state: dict, ticks: list[tuple[float, str]]) -> None:
         """Take a `LiveSession.timelineChanged` state; never changes visibility.
 
@@ -721,20 +781,24 @@ class Transport(Overlay):
             self._repaint_tick()
         self._controls_changed()
 
+    @_mirrored
     def update_position(self, position_ms: int, length_ms: int) -> None:
         self._position = max(0, position_ms)
         self._length = max(0, length_ms)
         if self.isVisible():
             self._repaint_tick()
 
+    @_mirrored
     def set_paused(self, paused: bool) -> None:
         self._paused = paused
         self.update()
 
+    @_mirrored
     def set_speed(self, rate: float) -> None:
         self._speed = rate
         self.update()
 
+    @_mirrored
     def set_next_available(self, available: bool) -> None:
         self._next_available = available
         self.update()
@@ -755,6 +819,7 @@ class Transport(Overlay):
         closing) is dropped instead of reaching a deleted object."""
         self.set_pip_rect(rect.translated(-self.pos()))
 
+    @_mirrored
     def set_cast_state(self, available: bool, casting: bool) -> None:
         """The cast button (2.8): shown when QiTV can cast, lit while it casts."""
         if (available, casting) != (self._cast_available, self._casting):
@@ -762,6 +827,7 @@ class Transport(Overlay):
             self.update()
             self._controls_changed()
 
+    @_mirrored
     def set_pip_state(self, available: bool, open_: bool) -> None:
         """The second channel's button: shown on live TV when `available`; lit while open."""
         if (available, open_) != (self._pip_available, self._pip_open):
@@ -769,6 +835,7 @@ class Transport(Overlay):
             self.update()
             self._controls_changed()
 
+    @_mirrored
     def set_grid_state(
         self,
         available: bool,
@@ -776,17 +843,19 @@ class Transport(Overlay):
         layout: str = "",
         restorable: bool = False,
         cells: int = 0,
+        big: bool = False,
     ) -> None:
         """The multiview's button: shown on live TV when `available`; while its grid shows it
-        shows the way back (one picture), with the layout chip beside it: the picture of
-        `cells` tiles and `layout`'s name ("2×2"); and while the last grid's channels can
-        come back (`restorable`), a "Last grid" chip."""
+        shows the way back (one picture; while a tile is big, `big`, the grid), with the layout
+        chip beside it: the picture of `cells` tiles and `layout`'s name ("2×2"); and while
+        the last grid's channels can come back (`restorable`), a "Last grid" chip."""
         state = (
             available,
             shown,
             layout if shown else "",
             restorable and shown,
             cells if shown else 0,
+            big and shown,
         )
         current = (
             self._grid_available,
@@ -794,6 +863,7 @@ class Transport(Overlay):
             self._grid_layout,
             self._grid_restorable,
             self._grid_cells,
+            self._grid_big,
         )
         if state != current:
             (
@@ -802,6 +872,7 @@ class Transport(Overlay):
                 self._grid_layout,
                 self._grid_restorable,
                 self._grid_cells,
+                self._grid_big,
             ) = state
             self.update()
             self._controls_changed()
@@ -810,12 +881,14 @@ class Transport(Overlay):
         """How long it stays up after the last touch (the multiview's tile controls too)."""
         return self._idle.interval()
 
+    @_mirrored
     def set_muted(self, muted: bool) -> None:
         """Whether the large picture is muted: its speaker shows it."""
         if muted != self._muted:
             self._muted = muted
             self.update()
 
+    @_mirrored
     def set_level(self, level: int) -> None:
         """The large picture's volume (0-100): its speaker's waves show it."""
         if level != self._level:
@@ -836,14 +909,15 @@ class Transport(Overlay):
             return "full_window"
         if name == "fullscreen" and self._fullscreen:
             return "exit_fullscreen"
-        if name == "grid" and self._grid_shown:
-            return "single"  # the way back, as fullscreen's
+        if name == "grid" and self._grid_shown and not self._grid_big:
+            return "single"  # the way back, as fullscreen's (a big tile's: the grid)
         if name == "repeat" and self._repeat == "one":
             return "repeat_one"
         if name in ("prev_track", "next_track"):
             return name[: -len("_track")]
         return _ICONS.get(name, name)
 
+    @_mirrored
     def set_library_available(self, available: bool) -> None:
         """The "‹ Library" button: shown during a movie or an episode when `available` (it was
         played from the Library); never on live TV."""
@@ -852,6 +926,7 @@ class Transport(Overlay):
             self.update()
             self._controls_changed()
 
+    @_mirrored
     def set_quality_available(self, available: bool) -> None:
         """The ⚙ quality menu's button (2.8): shown during a film or an episode whose server
         offers versions or conversions, and on a channel whose stream comes in several picture
@@ -861,6 +936,7 @@ class Transport(Overlay):
             self.update()
             self._controls_changed()
 
+    @_mirrored
     def set_recording(self, since: Optional[float]) -> None:
         """The channel records since `since` (the clock's): the record button is lit and the
         "● REC 01:23" chip shows; None: it does not."""
@@ -883,6 +959,7 @@ class Transport(Overlay):
             return ""
         return elapsed_text(self._rec_clock() - self._rec_since)
 
+    @_mirrored
     def set_favorite(self, favorite: bool) -> None:
         """Whether the live channel is a favorite: its star is lit."""
         if favorite != self._favorite:
@@ -1015,7 +1092,7 @@ class Transport(Overlay):
         if name == "pip" and self._grid_shown:
             return translate(PIP_IN_GRID)
         if name == "grid":
-            if self._grid_shown:
+            if self._grid_shown and not self._grid_big:
                 what = tr("Back to one picture")  # i18n: tooltip: leave the multiview's grid
             else:
                 what = tr("Multiview")  # i18n: tooltip: several channels at once, in a grid
@@ -1063,6 +1140,37 @@ class Transport(Overlay):
     def held(self) -> str:
         """The button whose panel is open ("": none)."""
         return self._held
+
+    def add_mirror(self, mirror: "Transport") -> None:
+        """`mirror` (the player controls over another window: the desktop picture in picture's,
+        ui/float_controls.py) shows what this one does from now on: what was said so far (each
+        mirrored setter's last call, in the order they came), then each change. Whether it
+        shows stays its own (its hover), and so does OWN_SETTERS' part."""
+        if mirror is self or mirror in self._mirrors:
+            return
+        for _order, name, args, kwargs in sorted(
+            (order, name, args, kwargs) for name, (order, args, kwargs) in self._told.items()
+        ):
+            getattr(mirror, name)(*args, **kwargs)
+        self._mirrors.append(mirror)
+
+    def hover_at(self, pos: Optional[QPointF]) -> None:
+        """The pointer at `pos` over it (this widget's coordinates; None: it left), told by
+        what asks the pointer's place while Qt says nothing (QiTV is not the active app: the
+        desktop picture in picture's controls): as a move over it, it shows past the jitter,
+        and resting on its controls keeps it up (`_on_idle`)."""
+        if pos is None:
+            self._pointer = None
+            return
+        self._pointer = QPointF(pos)
+        self._poke_past_jitter(self._pointer)
+
+    def _poke_past_jitter(self, pos: QPointF) -> None:
+        # 2.8.12: a pointer trembling by a pixel or two keeps nothing up (as PointerHider).
+        poked = self._poked_at
+        if poked is None or (pos - poked).manhattanLength() >= PointerHider.JITTER_PX:
+            self._poked_at = QPointF(pos)
+            self.poke()
 
     def _fade_later(self) -> None:
         if not self._held and not self._audio:
@@ -2490,9 +2598,11 @@ class Transport(Overlay):
             self.update()
 
     def mouseDoubleClickEvent(self, event: QMouseEvent) -> None:
-        """The second press of a quick double-click: a step again, else nothing more."""
+        """The second press of a quick double-click: a step again, or a button that opens or closes
+        something pressed again, else nothing more."""
         if event.button() == Qt.LeftButton and self._control_at(event.position()) not in (
             *_REPEATS,
+            *_AGAIN,
             "seek",
             "level",
         ):
@@ -2551,11 +2661,7 @@ class Transport(Overlay):
         self._pointer = QPointF(pos)
         if pos != self._last_move:  # ignore synthetic moves from layout changes
             self._last_move = pos
-            # 2.8.12: a pointer trembling by a pixel or two keeps nothing up (as PointerHider).
-            poked = self._poked_at
-            if poked is None or (pos - poked).manhattanLength() >= PointerHider.JITTER_PX:
-                self._poked_at = QPointF(pos)
-                self.poke()
+            self._poke_past_jitter(pos)
             self._point_at(pos)
         if self._level_drag:
             if not event.buttons() & Qt.LeftButton:

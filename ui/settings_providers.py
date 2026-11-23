@@ -52,7 +52,7 @@ from services.i18n import N_, number, tr, translate
 from services.provider_changes import NameTaken
 from services.provider_check import Outcome
 from services.provider_link import ProviderLink
-from services.provider_types import EMBY, JELLYFIN
+from services.provider_types import EMBY, JELLYFIN, PLEX
 from services.settings_model import (
     ACTION,
     ADD_PROVIDER,
@@ -102,6 +102,7 @@ _KINDS = {
     "M3USTREAM": N_("M3U Stream"),  # i18n: a provider's kind (one stream, from older QiTVs)
     JELLYFIN: "Jellyfin",
     EMBY: "Emby",
+    PLEX: "Plex",
 }
 # Under a provider's name in Settings → Providers: its kind ("Xtream"), and that the TV shows it.
 # i18n: under a provider's name in Settings: its kind ("Xtream") and that the TV shows it now
@@ -111,6 +112,8 @@ AUTOMATIC_TEXT = N_("Automatic")
 _STREAM_CHOICES = (Choice(0, AUTOMATIC_TEXT),) + tuple(
     Choice(n, str(n), literal=True) for n in range(1, STREAMS_MOST + 1)
 )
+# i18n: a toast; {names} is one or more provider names, joined with ", "
+ADDED_TEXT = N_("Added {names} to your providers")
 SHOW_AGAIN_TEXT = N_("Show again")  # i18n: Settings → Providers → Hidden groups: a group's action
 # A toast: the provider list could not be written (a full disk, a read-only folder).
 # i18n: a toast: the provider list could not be written, so the change in Settings didn't happen
@@ -597,7 +600,7 @@ class ProviderRows(QObject):
         schedule = getattr(self._window, "recording_schedule", None)
         scheduled = schedule is not None and name in schedule.providers()
         if self._question is None:
-            self._question = ChoiceCard(self._drawer.parentWidget())
+            self._question = ChoiceCard(self._settings.card_parent())
             self._question.answered.connect(self._on_remove_answered)
         self._removing = name
         self._question.ask(
