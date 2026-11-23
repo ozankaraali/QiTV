@@ -89,6 +89,8 @@ class Station:
         self.open_now = 0
         self.most_open = 0
         self.asked_icy: list[bool] = []
+        self.down_until = 0.0  # an outage (`outage`) lasts until then
+        self.refused = 0
         lock = threading.Lock()
         station = self
 
@@ -100,6 +102,10 @@ class Station:
 
             def do_GET(self) -> None:
                 icy = self.headers.get("Icy-MetaData") == "1"
+                if time.monotonic() < station.down_until:  # an outage: no stream for now
+                    station.refused += 1
+                    self.send_error(503)
+                    return
                 with lock:
                     station.connections += 1
                     first = station.connections == 1
@@ -145,6 +151,8 @@ class Station:
         while lasts is None or time.monotonic() - connected < lasts:
             while index >= min(due(), self.on_air()):
                 time.sleep(0.02)
+            if time.monotonic() < self.down_until:
+                return  # the outage breaks the connection
             frame = self.frames[index % len(self.frames)].data
             song = f"Smoke - Song {1 + int(index * self.frame_s // self.SONG_S)}"
             index += 1
@@ -161,6 +169,11 @@ class Station:
                     text = f"StreamTitle='{song}';".encode()
                     text += b"\x00" * (-len(text) % 16)
                     out.write(bytes([len(text) // 16]) + text)
+
+    def outage(self, seconds: float) -> None:
+        """The station goes off the air for `seconds`: its connection breaks, and it answers
+        503 meanwhile (its own clock goes on: what it sent then is missed)."""
+        self.down_until = time.monotonic() + seconds
 
     def close(self) -> None:
         self.server.shutdown()
@@ -203,6 +216,8 @@ def main() -> int:
     parser.add_argument("--seconds", type=float, default=45.0)
     parser.add_argument("--backlog", type=float, default=4.0, help="the local station's, s")
     parser.add_argument("--over", type=float, default=0.0, help="the backlog sent over, s")
+    parser.add_argument("--outage", type=float, default=0.0, help="the local station off, s")
+    parser.add_argument("--trace", action="store_true", help="log what plays each second")
     args = parser.parse_args()
     out = Path(args.out)
     out.mkdir(parents=True, exist_ok=True)
@@ -234,11 +249,33 @@ def main() -> int:
     started = time.monotonic()
 
     positions: list[tuple[float, float]] = []  # (wall, position) while it plays
+    traced = [0.0]
+
+    def trace() -> None:
+        """--trace: each second, what plays and how (VLC's state, the timeline's)."""
+        if not args.trace or time.monotonic() - traced[0] < 1.0:
+            return
+        traced[0] = time.monotonic()
+        state = states[-1] if states else {}
+        logger.info(
+            "trace: vlc %s at %.2f s, position %.2f, edge %.2f, lag %.2f, stalled %s, held %s,"
+            " reconnecting %s, rate %s",
+            session.state().value,
+            session.time_ms() / 1000.0,
+            live.position(),
+            float(state.get("live_edge", math.nan)),
+            float(state.get("lag", math.nan)),
+            state.get("stalled"),
+            getattr(session, "_held", None),  # PlaybackSession.hold's (2.8.8)
+            state.get("reconnecting"),
+            state.get("rate"),
+        )
 
     def run(seconds: float, until: Any = None) -> bool:
         deadline = time.monotonic() + seconds
         while time.monotonic() < deadline:
             app.processEvents()
+            trace()
             if live.mode == "pipeline":
                 positions.append((time.monotonic(), live.position()))
             if until is not None and until():
@@ -370,6 +407,26 @@ def main() -> int:
             )
             breaks = engine.snapshot(live._sid).get("breaks") if live._sid else None
             report.check("no break in the timeline", not breaks, breaks)
+            if args.outage > 0:
+                # Off the air for a while: the buffer plays on, VLC waits at its edge, and once
+                # the station is back it plays on at about 1x (its sound's clock ran on with
+                # no gap: what the station sent meanwhile is missed, not sped through).
+                before = station.connections
+                station.outage(args.outage)
+                back = run(args.outage + 90, lambda: station.connections > before)
+                report.check(
+                    "the station comes back after its outage",
+                    back and live.mode == "pipeline",
+                    {"refused": station.refused, "mode": live.mode},
+                )
+                run(4)
+                returned = time.monotonic()
+                after = speed_over(10)
+                report.check(
+                    "it plays on at about 1x after the outage",
+                    0.85 <= after <= 1.15 and not jumps(returned, time.monotonic()),
+                    {"speed": round(after, 3), "jumps": jumps(returned, time.monotonic())},
+                )
             # A kept buffer (2.6): parked, taken back, live in the new run; then back across
             # the junction, the old run's sound and on into the new run's.
             kept = live.park()
