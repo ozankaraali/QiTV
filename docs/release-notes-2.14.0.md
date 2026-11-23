@@ -4,10 +4,10 @@ QiTV 2.14.0 adds Plex: sign in with a code, and your server's films and series a
 Library, played as they are. Live TV stays steady on channels that come in bursts or whose
 provider pauses, and an ad break that switches source no longer freezes the picture. Both small
 windows of picture in picture have the player's controls, the multiview keeps its grid when you
-watch one tile big, and the channel list always opens on the channel you watch. 2.14.0 also
-brings 2.13.4, 2.13.3, 2.13.2, 2.13.1 and 2.13.0: a round of fixes, a station's view to choose,
-translated captions sooner, nothing in a system window any more, the phone's pictures at home,
-and free internet radio.
+watch one tile big, the channel list always opens on the channel you watch, and radio pauses,
+rewinds and has AI captions. 2.14.0 also brings 2.13.4, 2.13.3, 2.13.2, 2.13.1 and 2.13.0: a
+round of fixes, a station's view to choose, translated captions sooner, nothing in a system
+window any more, the phone's pictures at home, and free internet radio.
 
 **Download QiTV from [qitv.app](https://qitv.app), which picks the right build for your
 computer, or from [Releases](https://github.com/ozankaraali/QiTV/releases). Please don't use
@@ -113,6 +113,13 @@ others' distributions, which may have malware.**
 - **Cards no longer cut off.** The Add provider card, the parental PIN and other cards opened from
   Settings could be cut off at the edge of the Settings panel on a wide window. They show whole
   now, in every language.
+
+## Radio
+
+- **Radio pauses, rewinds and has AI captions,** as channels do. A station now plays through
+  QiTV's time-shift buffer: pause it, go back, record it, or turn on Words. The song now playing
+  still shows under its name. A station in a format the buffer can't read (Ogg, FLAC and a few
+  others) plays directly, as before.
 
 ## Buttons
 
@@ -319,10 +326,9 @@ others' distributions, which may have malware.**
   provider (two of them, or a radio list beside your provider, give you All providers), it is
   refreshed like the others, and you remove it in Settings → Providers. Its **Check the
   connection** works too.
-- **Live, straight from the station.** VLC plays a station directly, without QiTV's
-  time-shift buffer: it opens one connection, and there is no rewind or recording, as for any
-  channel that plays directly (Record at a time… isn't offered for a station). AI captions
-  don't read radio stations either: they listen through the time-shift buffer.
+- **Live, straight from the station.** In 2.13 VLC plays a station directly, without QiTV's
+  time-shift buffer: it opens one connection, and there is no rewind, recording or AI captions.
+  2.14 plays it through the buffer (Radio, above).
 - **On the audio screen.** A station has no picture, so it plays on the audio screen with its
   logo, as a radio channel in your provider's list does: the station's name, and under it the
   song now playing when the station sends it. Live TV's controls stay: ↑/↓ go to the next

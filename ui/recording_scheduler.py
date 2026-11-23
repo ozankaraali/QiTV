@@ -321,9 +321,9 @@ class RecordingScheduler(QObject):
             if earlier is not None and now < earlier.at:
                 continue
             busy.add(job.key)
-            if free_radio.is_station(job.channel):
-                # 2.13: a radio list's station plays directly; the helper can't read it. Said
-                # once, at its time: no stream, no link, no try every minute.
+            if free_radio.plays_directly(job.channel):
+                # A radio list's station whose sound the helper cannot read (2.14; 2.13: any
+                # station). Said once, at its time: no stream, no link, no try every minute.
                 self.schedule.started(job)
                 self._said(job, rs.FAILED, "unsupported")
                 continue
@@ -840,6 +840,8 @@ class RecordingScheduler(QObject):
             headers["Referer"] = str(channel["referrer"])
         xtream = str(entry.get("type") or "").upper() == "XTREAM"
         plain = xtream or portal_http_only(entry)  # its sign-in found no HTTPS (2.8.1)
+        # 2.14: a radio list's station is asked as given (as VLC asks it), its sound read.
+        station = free_radio.is_station(channel)
         https = url.startswith("http://") and not known_http_only(url) and not plain
         run.sid = self._engine.open_session(
             url,
@@ -847,7 +849,8 @@ class RecordingScheduler(QObject):
             verify_ssl=bool(entry.get("ssl_verify", getattr(self._config, "ssl_verify", True))),
             disk=False,
             max_bytes=RAM_BYTES,
-            https_first=https,
+            https_first=https and not station,
+            radio=station,
         )
 
     def _on_ready(self, sid: str) -> None:

@@ -1,8 +1,10 @@
-"""Network input for the live pipeline: raw MPEG-TS over HTTP(S), and HLS of TS or fragmented
-MP4 segments.
+"""Network input for the live pipeline: raw MPEG-TS over HTTP(S), HLS of TS or fragmented
+MP4 segments, and (2.14) a radio station's raw sound.
 
 A source yields the stream's bytes untouched plus ``Discontinuity`` markers; only fragmented
-MP4 (CMAF) segments are remuxed, to TS (`services.live.fmp4`). HLS segments are fetched in
+MP4 (CMAF) segments are remuxed, to TS (`services.live.fmp4`), and a station's sound
+(`SoundSource`, `services.live.raw_audio`: MPEG audio or ADTS AAC, an HLS station's packed
+segments too), which also yields its songs (`Title`). HLS segments are fetched in
 media-sequence order, AES-128 is decrypted as a stream, and media playlists are reloaded live.
 Variant choice, redirect handling and error texts are ported from main's
 ``services/timeshift_source.py``; that version handed media to FFmpeg, which this pipeline
@@ -33,6 +35,7 @@ from collections import deque
 from collections.abc import Callable, Iterator, Mapping, Sequence
 from dataclasses import dataclass
 import http.client
+import itertools
 import logging
 import math
 import os
@@ -50,11 +53,12 @@ import m3u8
 import requests
 from urllib3.exceptions import NameResolutionError, ReadTimeoutError
 
-from services.live import interruptible_http
+from services.live import interruptible_http, raw_audio
 from services.live.capture import _Capture
 from services.live.fmp4 import Fmp4Error, Fmp4Remuxer
 from services.live.hls_audio import _LEAD_TICKS, AudioWeaver, video_start
 from services.live.interruptible_http import _Closed, _Interrupter, _InterruptibleAdapter
+from services.live.raw_audio import AudioFramer, AudioMuxer, IcyReader, RepeatCut, metaint
 from services.live.refusals import REFUSALS, STREAM_LIMIT, STREAM_REFUSED  # noqa: F401 (and here)
 from services.live.ts import ContinuityJoiner, program_has_audio, pts_delta
 from services.revive import REVIVE_S
@@ -74,6 +78,8 @@ _TS_STALL_TIMEOUT = 20.0
 _MANIFEST_LIMIT = 2 * 1024 * 1024
 _READ_SIZE = 64 * 1024
 _SNIFF_SIZE = 10
+_PACKED_LIMIT = 8 * 1024 * 1024  # 2.14: a packed sound segment (10 s at 320 kbit/s: 400 KB)
+_SOUND_SNIFF_LIMIT = 256 * 1024  # 2.14: a station's first bytes read to tell its sound (`sniff`)
 _PLAYLIST_TYPES = (
     "application/vnd.apple.mpegurl",
     "application/x-mpegurl",
@@ -179,6 +185,7 @@ _ENCRYPTION = "The HLS channel uses an unsupported encryption method."
 _UNDECRYPTABLE = "The HLS channel could not be decrypted."
 _NOT_TS = "The HLS channel's segments are not MPEG-TS."
 _FROZEN = "The channel's HLS playlist stopped advancing."
+_NOT_SOUND = "The station's stream is in a format the time-shift buffer cannot read."
 
 _DEFAULT_MESSAGES = {
     "unsupported": _OPEN_FAILED,
@@ -228,7 +235,15 @@ class CaughtUp:
     the next one) and that the backlog fetched at the start has landed."""
 
 
-Chunk = bytes | Discontinuity | CaughtUp | Reconnecting
+@dataclass(frozen=True)
+class Title:
+    """A radio station's sound only (2.14, `SoundSource`): the song it names from here on, as
+    its inline metadata names it ("": none); the bytes before it are of the song before."""
+
+    text: str
+
+
+Chunk = bytes | Discontinuity | CaughtUp | Reconnecting | Title
 
 
 class Source(Protocol):
@@ -451,8 +466,17 @@ class _Backoff:
 class _Http:
     """One Session per source, interruptible from any thread by ``close()`` or ``stop``."""
 
-    def __init__(self, headers: Mapping[str, str], verify_ssl: bool, stop: threading.Event) -> None:
+    def __init__(
+        self,
+        headers: Mapping[str, str],
+        verify_ssl: bool,
+        stop: threading.Event,
+        *,
+        station: bool = False,
+    ) -> None:
         self._interrupter = _Interrupter()
+        # 2.14: a radio list's station's (`open_source(radio=True)`): its sound is read
+        self.station = station
         self._lock = threading.Lock()
         self._closed_event = threading.Event()
         self._response: Any = None
@@ -480,6 +504,8 @@ class _Http:
         self.session.headers["User-Agent"] = self.user_agent
         if referer:  # an M3U channel's http-referrer (2.1): every request, as VLC sends it
             self.session.headers["Referer"] = referer
+        if station:  # 2.14: the song it plays, inline (`SoundSource`), as VLC asks it
+            self.session.headers["Icy-MetaData"] = "1"
         threading.Thread(target=self._watch, name="qitv-live-source-stop", daemon=True).start()
 
     def reconnect(self) -> None:
@@ -927,7 +953,12 @@ class TsSource:
             response = http.retry(lambda: http.get(self._url), backoff, patient=patient)
             if capture is not None:
                 capture.mark("reconnect")
+            self._connected(response)
             connected, received, reconnected = time.monotonic(), 0, True
+
+    def _connected(self, response: Any) -> None:
+        """A reconnect's answer came, before any of its bytes (`SoundSource` reads its
+        headers)."""
 
     def _read(self, response: Any) -> bytes:
         """The next block, once `hold` lets it be read (2.7: an archive's pacing)."""
@@ -966,6 +997,137 @@ class LocalTsSource(TsSource):
 
     def wait_closed(self, timeout: float) -> bool:
         return True  # no connection: close() is immediate
+
+
+class SoundSource(TsSource):
+    """A radio station's raw sound over HTTP(S) (2.14: MPEG audio or ADTS AAC, as Icecast and
+    SHOUTcast servers send it) as one program's MPEG-TS, read as `TsSource` reads raw TS (its
+    reconnects and their patience) and remuxed as it comes (`services.live.raw_audio`).
+
+    Each answer's inline metadata (`icy-metaint`, asked with `Icy-MetaData: 1`) is taken out of
+    its sound, and the song it names comes as a `Title` before the sound that follows it. The
+    frames are found in each connection anew, the burst a reconnect's answer starts with is
+    left out where it repeats the frames already sent, and the TS runs on across reconnects
+    (its clock and counters): a reconnect yields `Reconnecting`, never a `Discontinuity`. A
+    stream that stops being sound QiTV reads (no whole frame in `raw_audio._LOST_LIMIT`)
+    fails as "unsupported". A capture (``QITV_CAPTURE_DIR``) keeps the TS, which the replay
+    tool reads. A resumed run's sound starts at `first_pts` (where the old run's ended), never
+    back onto timestamps the player had: libVLC 3 drops such sound as late, and the clock
+    joiner re-bases no run without pictures.
+    """
+
+    sound = True  # the worker's raw TS stages (its guard and trimmers) are not for it
+
+    def __init__(
+        self,
+        http: _Http,
+        url: str,
+        response: Any,
+        reader: IcyReader,
+        pieces: list[bytes | str],
+        *,
+        capture: _Capture | None = None,
+        first_pts: int | None = None,
+    ) -> None:
+        super().__init__(http, url, response, b"")
+        self._reader = reader
+        self._next_reader = reader
+        self._pieces = pieces  # what the open read of the first answer, metadata taken out
+        self._framer = AudioFramer()
+        self._cut = RepeatCut()
+        self._muxer = AudioMuxer() if first_pts is None else AudioMuxer(first_pts)
+        self._title: str | None = None
+        self._ts_capture = capture
+
+    @property
+    def next_pts(self) -> int:
+        """Where the sound written so far ends (a resumed run's goes on from here)."""
+        return self._muxer.next_pts
+
+    def chunks(self) -> Iterator[Chunk]:
+        return _guarded(self._http, self._remux(), self._ts_capture)
+
+    def close(self) -> None:
+        super().close()
+        if self._ts_capture is not None:
+            self._ts_capture.flush()
+
+    def wait_closed(self, timeout: float) -> bool:
+        if self._ts_capture is not None:
+            self._ts_capture.flush()
+        return super().wait_closed(timeout)
+
+    def _connected(self, response: Any) -> None:
+        self._next_reader = IcyReader(metaint(response.headers))
+
+    def _remux(self) -> Iterator[Chunk]:
+        pieces, self._pieces = self._pieces, []
+        yield from self._sound(pieces)
+        for item in self._run():
+            if isinstance(item, bytes):
+                yield from self._sound(self._reader.feed(item))
+            elif isinstance(item, Discontinuity):
+                # A new connection: its own metadata blocks, its frames found anew, and its
+                # burst's repeat of what was sent left out; the sound runs on.
+                self._reader = self._next_reader
+                self._framer.reset()
+                self._cut.reconnect()
+            else:
+                yield item
+
+    def _sound(self, pieces: list[bytes | str]) -> Iterator[Chunk]:
+        for piece in pieces:
+            if isinstance(piece, str):
+                if piece != self._title:
+                    self._title = piece
+                    yield Title(piece)
+                continue
+            frames = self._cut.feed(self._framer.feed(piece))
+            if frames:
+                ts = self._muxer.mux(frames)
+                if self._ts_capture is not None:
+                    self._ts_capture.write(ts)
+                yield ts
+            elif self._framer.unreadable:
+                log.info("The station's stream stopped being sound QiTV reads.")
+                raise SourceError("unsupported", _NOT_SOUND)
+
+
+def _open_sound(
+    http: _Http,
+    url: str,
+    response: Any,
+    prefix: bytes,
+    capture: _Capture | None,
+    first_pts: int | None = None,
+) -> Source:
+    """A station's first answer that is no TS (2.14): its sound (`SoundSource`) once its
+    first bytes, the metadata taken out, show frames QiTV reads (`raw_audio.sniff`, reading on
+    up to `_SOUND_SNIFF_LIMIT`); else "unsupported" at once (Ogg, FLAC, a page...: the station
+    plays directly, with this one connection spent)."""
+    reader = IcyReader(metaint(response.headers))
+    pieces = reader.feed(prefix)
+    sound = b"".join(piece for piece in pieces if isinstance(piece, bytes))
+    read = len(prefix)
+    try:
+        verdict = raw_audio.sniff(sound)
+        while verdict == raw_audio.MORE and read < _SOUND_SNIFF_LIMIT:
+            block = http.read(response)
+            if not block:
+                break
+            read += len(block)
+            more = reader.feed(block)
+            pieces.extend(more)
+            sound += b"".join(piece for piece in more if isinstance(piece, bytes))
+            verdict = raw_audio.sniff(sound)
+    except BaseException:
+        http.release(response)
+        raise
+    if verdict != raw_audio.SOUND:
+        http.release(response)
+        log.info("The station's stream is in a format the time-shift buffer cannot read.")
+        raise SourceError("unsupported", _NOT_SOUND)
+    return SoundSource(http, url, response, reader, pieces, capture=capture, first_pts=first_pts)
 
 
 def _video_compatible(variant):
@@ -1009,15 +1171,27 @@ def _within(candidates: list[Any], max_height: int) -> list[Any]:
     return [item for item in sized if _height(item) == smallest]
 
 
-def _select_manifest(content, url, max_height: int = 0) -> tuple[Any, tuple[int, ...]]:
+def _sound_only(variant: Any) -> bool:
+    """A variant whose CODECS name sound alone, of a kind the remuxers read (2.14)."""
+    codecs = str(variant.stream_info.codecs or "")
+    kinds = [codec.strip().split(".", 1)[0].lower() for codec in codecs.split(",")]
+    return bool(codecs) and all(kind in ("mp4a", "mp3", "ac-3", "ec-3") for kind in kinds)
+
+
+def _select_manifest(
+    content, url, max_height: int = 0, sound: bool = False
+) -> tuple[Any, tuple[int, ...]]:
     """The playlist with only the variant to play left in a master (the best within
     `max_height` lines, `_within`), and the master's picture sizes (its playable variants'
-    heights, largest first; none for a media playlist)."""
+    heights, largest first; none for a media playlist). A radio station's master (`sound`,
+    2.14) with no video variant plays its best variant of sound alone (`_sound_only`)."""
     try:
         playlist = m3u8.loads(content.decode("utf-8-sig"), uri=url)
         if not playlist.is_variant:
             return _whole_segments(playlist), ()
         candidates = [item for item in playlist.playlists if _video_compatible(item)]
+        if not candidates and sound:
+            candidates = [item for item in playlist.playlists if _sound_only(item)]
         if not candidates:
             raise SourceError("unsupported", _NO_VIDEO)
         heights = tuple(sorted({_height(item) for item in candidates} - {0}, reverse=True))
@@ -1183,7 +1357,7 @@ def _media_playlist(http: _Http, content: bytes, url: str, max_height: int = 0) 
     heights: tuple[int, ...] = ()
     height = 0
     for _hop in range(_PLAYLIST_HOPS):
-        playlist, sizes = _select_manifest(content, url, max_height)
+        playlist, sizes = _select_manifest(content, url, max_height, http.station)
         if not playlist.is_variant:
             _check_media(playlist, url)
             return _Media(playlist, url, separate, heights, height)
@@ -1396,6 +1570,7 @@ class HlsSource:
         # Fragmented MP4 remuxed to TS: the variant's, and the separate audio's (no PCR: its
         # PES are woven into the video's TS), each with the URI of the init it read last.
         self._remuxer = Fmp4Remuxer()
+        self._sound_muxer: AudioMuxer | None = None  # 2.14: a station's packed sound
         self._init: str | None = None
         self._audio_remuxer = Fmp4Remuxer(pcr=False)
         self._audio_init: str | None = None
@@ -1854,6 +2029,8 @@ class HlsSource:
         try:
             if fragmented:
                 blocks = iter([self._remuxed(response, decryptor)])
+            elif self._http.station:  # 2.14: a station's TS, or its packed sound as TS
+                blocks = self._station_ts(self._blocks(response, decryptor, self._capture))
             else:
                 blocks = _checked_ts(self._blocks(response, decryptor, self._capture))
             if self._audio_unknown or self._weaver is not None:
@@ -1885,6 +2062,33 @@ class HlsSource:
             self._whole_seq = sequence
         else:
             self._skip(failure, content)
+
+    def _station_ts(self, blocks: Iterator[bytes]) -> Iterator[bytes]:
+        """A radio station's segment (2.14): TS as it came (`_checked_ts`), or packed sound
+        (ADTS AAC or MPEG audio after ID3 tags, the PRIV timestamp dating its first frame;
+        without one it follows on from the segment before) whole as one program's TS
+        (`raw_audio.AudioMuxer`), its counters running on from segment to segment."""
+        head = b""
+        for block in blocks:
+            head += block
+            if len(head) > _PACKET:
+                break
+        if head[:1] == b"\x47":
+            yield from _checked_ts(itertools.chain([head], blocks))
+            return
+        whole = bytearray(head)
+        for block in blocks:
+            whole += block
+            if len(whole) > _PACKED_LIMIT:  # no segment: a list's endless stream, say
+                raise _BadSegment(_NOT_TS)
+        data = bytes(whole)
+        pts, start = raw_audio.packed_start(data)
+        frames = AudioFramer().feed(data[start:])
+        if not frames:
+            raise _BadSegment(_NOT_TS)
+        if self._sound_muxer is None:
+            self._sound_muxer = AudioMuxer()
+        yield self._sound_muxer.mux(frames, pts=pts)
 
     def _remuxed(self, response: Any, decryptor: _Decryptor | None) -> bytes:
         """A whole fMP4 segment as TS (`Fmp4Remuxer`); captured as that TS, which the
@@ -2336,8 +2540,13 @@ def _open_http(
     max_height: int = 0,
     after_seq: int | None = None,
     once: bool = False,
+    radio: bool = False,
+    sound_from: int | None = None,
 ) -> Source:
     response, prefix, content = _first_answer(http, url, on_answer)
+    if content is None and radio and prefix[:1] != b"\x47" and window is None:
+        # 2.14: a station's sound
+        return _open_sound(http, url, response, prefix, capture, sound_from)
     if content is None:
         archive = window is not None and _archive_window(window)
         if window is not None and not archive:  # 2.7: a server part is an HLS playlist's
@@ -2389,6 +2598,8 @@ def open_source(
     max_height: int = 0,
     after_seq: int | None = None,
     once: bool = False,
+    radio: bool = False,
+    sound_from: int | None = None,
 ) -> Source:
     """Open ``url``, sniff it, and return a TS or HLS source (``window``: a server part of
     the HLS playlist, 2.7, `HlsSource`; raw TS then is unsupported, but for a provider
@@ -2435,7 +2646,11 @@ def open_source(
     ``after_seq`` (2.8): a live HLS playlist's run starts after that media sequence, the last
     of the run it joins, when it lists what follows (`HlsSource._start`). ``once`` (plan 4): a
     link of Network streams no provider owns: its raw-TS reconnect, refused or answered with a
-    recording, is never asked again (`TsSource`).
+    recording, is never asked again (`TsSource`). ``radio`` (2.14): a radio list's station:
+    every request asks for the song it plays (`Icy-MetaData: 1`), and an answer that is no TS
+    nor playlist is read as its sound (`SoundSource`), or refused at once when it is in a
+    format QiTV cannot read (`_open_sound`); ``sound_from``, a resumed run's: its sound's first
+    PTS (where the old run's ended).
     """
     try:
         scheme = _scheme(url)
@@ -2460,6 +2675,8 @@ def open_source(
         max_height=max_height,
         after_seq=after_seq,
         once=once,
+        radio=radio,
+        sound_from=sound_from,
     )
     host = _host_key(url)
     if https_first and scheme == "http" and host not in _HTTPS_FAILED:
@@ -2529,9 +2746,11 @@ def _open_url(
     after_seq: int | None = None,
     connect_timeout: float = _TIMEOUT,
     once: bool = False,
+    radio: bool = False,
+    sound_from: int | None = None,
 ) -> Source:
     """`open_source`'s open of one address (its connect timeout `connect_timeout`)."""
-    http = _Http(headers, verify_ssl, stop)
+    http = _Http(headers, verify_ssl, stop, station=radio)
     http.connect_timeout = connect_timeout
     capture = _Capture.from_environment(url)
     try:
@@ -2548,6 +2767,8 @@ def _open_url(
             max_height,
             after_seq,
             once,
+            radio,
+            sound_from,
         )
     except Exception as error:
         failure = SourceError("network", _STOPPED) if http.closed else _translate(error)

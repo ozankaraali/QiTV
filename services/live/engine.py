@@ -868,6 +868,7 @@ class LiveEngine(QObject):
         https_first: bool = False,
         max_height: int = 0,
         once: bool = False,
+        radio: bool = False,
     ) -> str:
         """`ram_bytes`: a disk session's memory if its disk fails (_RAM_BYTES when None).
         `target` and `extra`: the target the session steers to and what it adds to it (Auto's
@@ -877,7 +878,9 @@ class LiveEngine(QObject):
         never reopened after a helper's death. `https_first` (2.7.1): an http:// address is
         asked over HTTPS first (`open_source`). `max_height` (2.8, the live ⚙): an HLS master
         plays its best variant of at most that many lines (0: its best). `once` (plan 4): a
-        link of Network streams, whose refused reconnect is final (`open_source`)."""
+        link of Network streams, whose refused reconnect is final (`open_source`). `radio`
+        (2.14): a radio list's station, whose sound is read and its songs named in the state
+        (`titles`; `open_source`)."""
         sid = secrets.token_hex(8)
         if self._shut:
             return sid
@@ -907,6 +910,8 @@ class LiveEngine(QObject):
             start["max_height"] = int(max_height)
         if once:
             start["once"] = True
+        if radio:
+            start["radio"] = True
         if start:
             command = (*command, start)
         self._commands.put(command)
@@ -941,6 +946,7 @@ class LiveEngine(QObject):
         max_height: int = 0,
         join: bool = False,
         once: bool = False,
+        radio: bool = False,
     ) -> None:
         """A new upstream for a parked session (2.6): `sessionResumed` once its first
         segment came, else `sessionFailed` (it stays parked). The arguments as for
@@ -961,6 +967,8 @@ class LiveEngine(QObject):
             start["join"] = True
         if once:
             start["once"] = True
+        if radio:
+            start["radio"] = True
         if start:
             command = (*command, start)
         self._commands.put(command)

@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import _socket
 from collections.abc import Callable
+import http.client
 import logging
 import socket
 import ssl
@@ -215,6 +216,24 @@ def _sliced_tls_socket(interrupter: _Interrupter) -> type[ssl.SSLSocket]:
     return cast("type[ssl.SSLSocket]", type("SSLSocket", (ssl.SSLSocket,), namespace))
 
 
+class _IcyResponse(http.client.HTTPResponse):
+    """An answer whose status line an old SHOUTcast server writes "ICY 200 OK" (2.14: a radio
+    station's) is read as HTTP/1.0's (its body runs until the connection closes); any other as
+    http.client reads it, which refuses that line."""
+
+    def _read_status(self) -> tuple[str, int, str]:
+        if self.fp.peek(4)[:4] != b"ICY ":
+            read: Callable[[], tuple[str, int, str]] = getattr(super(), "_read_status")
+            return read()
+        line = str(self.fp.readline(65537), "iso-8859-1")
+        parts = line.split(None, 2)
+        try:
+            status = int(parts[1])
+        except IndexError, ValueError:
+            raise http.client.BadStatusLine(line) from None
+        return "HTTP/1.0", status, parts[2].strip() if len(parts) > 2 else ""
+
+
 def _interruptible_pools(interrupter: _Interrupter) -> dict[str, type[HTTPConnectionPool]]:
     tls_socket = _sliced_tls_socket(interrupter)
 
@@ -256,6 +275,7 @@ def _interruptible_pools(interrupter: _Interrupter) -> dict[str, type[HTTPConnec
             "close": close,
             "connect": connect,
             "getresponse": getresponse,
+            "response_class": _IcyResponse,
         }
         return cast("type[HTTPConnection]", type(base.__name__, (base,), namespace))
 

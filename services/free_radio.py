@@ -4,11 +4,15 @@ menu's and Settings → Providers' "Free radio…").
 
 A list is an ordinary M3U provider whose address is the directory's station JSON: the M3U loader
 reads it (services.m3u.stations_in, parse_stations) and makes each station a channel as an M3U
-line would, marked a station (`is_station`: it plays directly in VLC, never through the
-time-shift helper). Its first group, All stations (the list's "All", renamed), holds every
-station, the most played first; then one country's stations are grouped by genre (`genre_of`,
-from their tags), the list of all countries' (the 2,000 most played worldwide) by country.
-Older 2.x builds read the entry as any M3U playlist and say its answer is no playlist.
+line would, marked a station (`is_station`), with the directory's name for its sound
+(`CODEC_KEY`). Since 2.14 a station plays through the time-shift helper, which reads its sound
+(`services.live.source.SoundSource`): pause, rewind, recordings and AI captions, as a
+channel's; one whose sound the helper cannot read (Ogg, FLAC, WMA...: `plays_directly`) plays
+directly in VLC, as every station did in 2.13. Its first group, All stations (the list's
+"All", renamed), holds every station, the most played first; then one country's stations are
+grouped by genre (`genre_of`, from their tags), the list of all countries' (the 2,000 most
+played worldwide) by country. Older 2.x builds read the entry as any M3U playlist and say its
+answer is no playlist (and a cached list's codec field is one they do not read).
 
 The directory is asked with QiTV's own name (it asks apps for one), and only for its lists: no
 "click" is reported and nothing of the user's is sent. Data only, no widgets.
@@ -39,6 +43,12 @@ ALL_NAME = "Radio: all countries"  # saved in English, as Free channels' names a
 _NAME_PREFIX = "Radio: "
 RADIO_KEY = "radio"  # in a list made from the directory's stations (its groups: `retitle`)
 STATION_KEY = "radio_station"  # in each of its stations (`is_station`)
+CODEC_KEY = "radio_codec"  # 2.14: the directory's name for a station's sound ("MP3", "OGG"...)
+# What the directory calls the sound the time-shift helper reads (HLS stations' pictures too);
+# a station whose list was made by 2.13 names none, and is tried (it falls back as it fails).
+_READABLE_CODECS = frozenset(
+    ("", "UNKNOWN", "MP3", "MPEG", "MP2", "AAC", "AAC+", "H.264", "H.265", "HEVC")
+)
 # i18n: a radio list's first group: every station, most played first
 ALL_STATIONS = N_("All stations")
 
@@ -159,9 +169,20 @@ def retitle(payload: Any) -> Any:
 
 
 def is_station(item: Any) -> bool:
-    """Whether a channel is a station of a radio list: VLC plays it directly (it is a sound
-    stream; the time-shift helper would only fail to read most of them)."""
+    """Whether a channel is a station of a radio list (its sound is read as a station's:
+    2.14, `services.live.source.SoundSource`)."""
     return isinstance(item, dict) and item.get(STATION_KEY) is True
+
+
+def plays_directly(item: Any) -> bool:
+    """Whether a radio list's station plays directly in VLC, never through the time-shift
+    helper (2.14): the directory names its sound one the helper cannot read (Ogg Vorbis or
+    Opus, FLAC, WMA...). One it names none of (a 2.13 list's), or "UNKNOWN", is tried, and
+    plays directly once the helper finds it cannot read it."""
+    if not is_station(item):
+        return False
+    codec = str(item.get(CODEC_KEY) or "").upper()
+    return any(part.strip() not in _READABLE_CODECS for part in codec.split(","))
 
 
 def iso_code(code: str) -> str:

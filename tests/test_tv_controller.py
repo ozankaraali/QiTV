@@ -900,6 +900,9 @@ class FakeLiveSession(QObject):
     def is_pipeline(self):
         return self.mode == "pipeline"
 
+    def stream_title(self):  # 2.14: a station's song as the helper read it
+        return ""
+
     def start(self, url, **kwargs):
         self.calls.append(("start", url, kwargs))
         self.running, self.mode = True, ""
@@ -3683,14 +3686,15 @@ class PipelineTuneTests(PipelineCase):
         self.assertEqual(len(self.starts()), 1)
         self.assertEqual(self.budget.holders("Home"), ["main"])  # the direct play's own
 
-    def test_a_radio_station_plays_directly_from_the_start(self):
-        # Free radio (2.13): a radio list's station never opens a time-shift session (no
-        # second connection, nothing to say); it books its one stream as a direct play does.
+    def test_a_radio_station_plays_directly_only_when_its_sound_cannot_be_read(self):
+        # Free radio (2.13): a station whose sound the time-shift helper cannot read never
+        # opens a session (no second connection, nothing to say); it books its one stream as
+        # a direct play does.
         self.catalog.ptype = "M3UPLAYLIST"
-        station = {**CHANNELS[1], free_radio.STATION_KEY: True}
+        station = {**CHANNELS[1], free_radio.STATION_KEY: True, free_radio.CODEC_KEY: "OGG"}
         self.controller.tune(station, group_key="10", channels=[station])
-        self.ready("http://radio.test/live.mp3")
-        self.assertEqual(self.session.plays[-1][0], "http://radio.test/live.mp3")
+        self.ready("http://radio.test/live.ogg")
+        self.assertEqual(self.session.plays[-1][0], "http://radio.test/live.ogg")
         self.assertEqual(self.live.calls, [])  # no time-shift session at all
         self.assertEqual(self.toast.messages(), [])
         self.assertEqual(self.budget.holders("Home"), ["main"])
@@ -3700,6 +3704,32 @@ class PipelineTuneTests(PipelineCase):
         self.assertTrue(wait_until(lambda: len(self.starts()) == 1))
         self.assertEqual(self.starts()[0][0], "http://stream/1")
         self.assertEqual(self.budget.holders("Home"), ["main"])
+
+    def test_a_radio_station_plays_from_its_buffer(self):
+        # 2.14, the owner: "you just treat radios also with timeshift engine". A station
+        # plays through the time-shift buffer, so it pauses, rewinds and has AI captions: its
+        # sound read as a station's (`radio`), asked as given (VLC asks it so: no HTTPS
+        # first), one stream booked. A station of a list 2.13 made names no codec: tried too.
+        self.catalog.ptype = "M3UPLAYLIST"
+        for codec in ("MP3", None):
+            with self.subTest(codec=codec):
+                station = {**CHANNELS[1], free_radio.STATION_KEY: True}
+                if codec is not None:
+                    station[free_radio.CODEC_KEY] = codec
+                count = len(self.starts())
+                self.controller.tune(station, group_key="10", channels=[station])
+                self.ready("http://radio.test/live.mp3")
+                self.assertTrue(wait_until(lambda: len(self.starts()) == count + 1))
+                url, kwargs = self.starts()[-1]
+                self.assertEqual(url, "http://radio.test/live.mp3")
+                self.assertTrue(kwargs["radio"])
+                self.assertNotIn("https_first", kwargs)
+                self.assertEqual(self.budget.holders("Home"), ["main"])
+                self.tune(0)  # a channel's: as ever
+                self.ready("http://stream/1")
+                self.assertTrue(wait_until(lambda: len(self.starts()) == count + 2))
+                self.assertNotIn("radio", self.starts()[-1][1])
+                self.assertTrue(self.starts()[-1][1]["https_first"])
 
     def test_a_channel_from_another_provider_holds_that_providers_slot(self):
         self.controller.tune(HARBOR_ONE, group_key="10", channels=[HARBOR_ONE])
@@ -4994,14 +5024,20 @@ class ContextMenuTests(ControllerTestCase):
         self.choose(menu, "Record at a time…")
         self.assertEqual(asked, ["One"])
 
-    def test_a_radio_station_is_never_recorded_at_a_time(self):  # 2.13
-        # It plays directly: the helper a scheduled recording opens can't read it.
+    def test_a_radio_station_is_recorded_at_a_time_when_its_sound_can_be_read(self):
+        # 2.14: the helper a scheduled recording opens reads a station's sound; one in a format
+        # it cannot read plays directly, and is never recorded at a time (2.13: no station).
         self.controller.record_at = lambda channel: None  # QiTV can record at a time
         node = self.channels[0]
-        station = {**node.payload, free_radio.STATION_KEY: True}
-        texts = self.texts(self.menu_for(NavNode(node.layer, node.key, node.title, station)))
-        self.assertNotIn("Record at a time…", texts)
-        self.assertEqual(texts[0], "Add to favorites")
+        for codec, offered in (("OGG", False), ("MP3", True), (None, True)):
+            with self.subTest(codec=codec):
+                station = {**node.payload, free_radio.STATION_KEY: True}
+                if codec is not None:
+                    station[free_radio.CODEC_KEY] = codec
+                station_node = NavNode(node.layer, node.key, node.title, station)
+                texts = self.texts(self.menu_for(station_node))
+                self.assertEqual("Record at a time…" in texts, offered)
+                self.assertEqual(texts[0], "Add to favorites")
         self.assertIn("Record at a time…", self.texts(self.menu_for(node)))  # a channel: as ever
 
     def guarded(self):

@@ -199,7 +199,8 @@ class StationsTests(unittest.TestCase):
                 "logo": "https://logo.test/w.png",
                 "user_agent": None,
                 "cmd": "http://stream.test/wexlo",
-                "radio_station": True,  # played directly, never time-shifted
+                "radio_station": True,  # its sound read as a station's (2.14)
+                "radio_codec": "MP3",  # the directory's name for it (free_radio.plays_directly)
                 "tv_genre_id": "Pop",
                 "number": "1",
             },
@@ -290,6 +291,30 @@ class StationsTests(unittest.TestCase):
             playlist = parse_stations(stations)
         self.assertEqual([c["name"] for c in playlist["contents"]], ["live.mp3", "Kept Test"])
         self.assertNotIn("s.test", " ".join(logged.output))  # never a link in the log
+
+    def test_a_station_plays_directly_only_in_a_sound_the_helper_cannot_read(self):  # 2.14
+        station = {"cmd": "http://stream.test/a", fr.STATION_KEY: True}
+        for codec, direct in (
+            ("MP3", False),
+            ("AAC+", False),
+            ("aac", False),
+            ("MP3,H.264", False),  # an HLS station's picture and sound
+            ("UNKNOWN", False),  # tried: it falls back once the helper cannot read it
+            ("", False),
+            (None, False),  # a list 2.13 made names none
+            ("OGG", True),
+            ("FLAC", True),
+            ("OPUS", True),
+            ("WMA", True),
+            ("AAC,VP9", True),
+        ):
+            with self.subTest(codec=codec):
+                item = dict(station) if codec is None else {**station, fr.CODEC_KEY: codec}
+                self.assertEqual(fr.plays_directly(item), direct)
+        self.assertFalse(fr.plays_directly({"cmd": "x", fr.CODEC_KEY: "OGG"}))  # no station
+        self.assertFalse(fr.plays_directly(None))
+        codecs = [c[fr.CODEC_KEY] for c in parse_stations(STATIONS)["contents"]]
+        self.assertEqual(set(codecs), {"MP3"})
 
     def test_no_station_is_an_empty_list(self):
         playlist = parse_stations([])

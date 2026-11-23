@@ -26,7 +26,9 @@ Commands (parent to helper):
   and what follows, its ring never evicts); a provider archive's, `{"until_s", "ahead_s"}`,
   raw TS or HLS from its start, ends its input once its media reaches `until_s` (where the
   live buffer begins, by time of day); 2.8 adds `"max_height": lines`, the user's cap for an
-  HLS master's variants (the best within it plays, `open_source`), which a "resume" takes too;
+  HLS master's variants (the best within it plays, `open_source`), which a "resume" takes too,
+  as it takes 2.14's `"radio": true` (a radio list's station: its sound is read and its songs
+  come in the state's `titles`, `services.live.source.SoundSource`);
   a "resume" may add `"join": true` (2.8, a rewound viewer's): an HLS run goes on after the
   last segment the session's earlier run brought whole, when its playlist lists what follows
   (`HlsSource._start`), so nothing plays twice where the runs join;
@@ -215,6 +217,12 @@ _BREAKS_KEPT = 64
 # playing evicted media it read before may reach it yet (a sparse-PCR clock's 2 s step and a
 # second more).
 _BREAK_SLACK_S = 3.0
+# 2.14, a radio station's songs as its stream names them, in the state while the ring holds
+# them (the one playing at its start too), at most this many
+_TITLES_KEPT = 32
+# ... and a station's sound resumed after a kept buffer was taken back starts this far past
+# the newest segment's last PTS: past the longest frame (1152 samples at 8 kHz: 0.144 s)
+_SOUND_RESUME_TICKS = 13_500
 
 # BurstMeter (see its docstring):
 _BURST_GAP_S = 1.0  # this long without a byte ends a burst
@@ -600,6 +608,9 @@ class _Session:
         self._media_next: int | None = None  # 2.7: an HLS segment began: the next opened
         # (timeline position, seconds left out) of the latest PTS jumps the segmenter dropped
         self._breaks: deque[tuple[float, float]] = deque(maxlen=_BREAKS_KEPT)
+        # 2.14, a station's sound: (timeline position, its song from there; "": none)
+        self._titles: deque[tuple[float, str]] = deque(maxlen=_TITLES_KEPT)
+        self._sound_from: int | None = None  # 2.14: a resumed station's first PTS
         self._last_notify = 0.0
         self._heard_edge = 0.0  # the live edge the latest state reported
         # 2.6, kept buffers: a park asked (the run ends quietly), done (readers end at the
@@ -898,6 +909,13 @@ class _Session:
         # 2.8: the earlier run's last whole HLS segment, for a run that joins it ("join").
         whole = getattr(earlier, "whole_seq", None)
         self._join_after = whole if start.get("join") is True and type(whole) is int else None
+        # 2.14: a station's sound goes on where the earlier run's ended; taken back from a
+        # helper that went down, past the newest segment's last frame.
+        ended = getattr(earlier, "next_pts", None)
+        latest = self._segmenter.latest_pts
+        if type(ended) is not int and latest is not None:
+            ended = (latest + _SOUND_RESUME_TICKS) % (1 << 33)
+        self._sound_from = ended if type(ended) is int else None
         ring = self._ring
         if ring is not None:
             ring.clear_failure()  # its disk is tried anew
@@ -938,6 +956,8 @@ class _Session:
                 max_height=_lines(self._start.get("max_height")),
                 once=self._start.get("once") is True,  # plan 4: a link of no provider's
                 after_seq=self._join_after,
+                radio=self._start.get("radio") is True,  # 2.14: a radio list's station
+                sound_from=self._sound_from,
             )
         except SourceError as error:
             if not self._parking:  # a park interrupted the open: nothing to say
@@ -970,7 +990,10 @@ class _Session:
 
         trimmer = rejoiner = None
         self._guard = None
-        if not source.hls:  # HLS has its own discontinuities and no such restarts
+        # HLS has its own discontinuities and no such restarts; a station's sound remuxed
+        # (2.14, `SoundSource`) runs on by its own clock across reconnects, and its connect
+        # burst of a light stream is no recording.
+        if not source.hls and getattr(source, "sound", False) is not True:
             if not isinstance(window, dict):  # a provider archive is a recording (2.7)
                 # 2.8.10: a connection answered with a recording, not the channel, is
                 # dropped; 2.8.11: the tune's as each reconnect's.
@@ -1255,12 +1278,18 @@ class _Session:
         rejoiner: ReconnectTrimmer | None,
     ) -> None:
         """One item of the source down the pipeline: bytes, or a marker."""
-        from services.live.source import CaughtUp, Discontinuity, Reconnecting
+        from services.live.source import CaughtUp, Discontinuity, Reconnecting, Title
 
         self._raise_tick_failure()
         self._check()
         if isinstance(item, Reconnecting):
             self._reconnecting = True
+            self._notify(force=True)
+            return
+        if isinstance(item, Title):
+            # 2.14: a station's song from here on, where the sound before it ends: its live
+            # edge, now that the bytes before it went down the pipeline.
+            self._titles.append((self._live_edge(), item.text))
             self._notify(force=True)
             return
         self._reconnecting = False
@@ -1604,7 +1633,10 @@ class _Session:
         edge = self._live_edge()
         while breaks and breaks[0][0] < timeline.start - _BREAK_SLACK_S:
             breaks.popleft()  # its media went a while ago: no player can reach it any more
-        snapshot = {
+        titles = list(self._titles)  # (appended by the session thread meanwhile)
+        while len(titles) > 1 and titles[1][0] <= timeline.start:
+            del titles[0]  # the song after it plays from the buffer's start on
+        snapshot: dict[str, Any] = {
             "oldest": oldest,
             "newest": ring.newest_seq if ring is not None else None,
             "open": ring.open_seq if ring is not None else None,
@@ -1660,6 +1692,8 @@ class _Session:
             "restarts": trimmer.restarts if trimmer is not None else 0,
             "steered": trimmer.steered if trimmer is not None else 0,
         }
+        if titles:  # 2.14, a station's: [timeline position, its song from there] each
+            snapshot["titles"] = [[at, text] for at, text in titles]
         if source is not None:
             snapshot["secure"] = bool(getattr(source, "secure", False))  # 2.7.1: over HTTPS
         heights = getattr(source, "heights", ())

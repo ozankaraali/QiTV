@@ -9030,6 +9030,80 @@ class HttpsFirstTests(LiveSessionCase):
                 self.assertTrue(said[0].endswith(words + "."), said[0])
 
 
+class RadioTests(LiveSessionCase):
+    """2.14: a radio list's station: every stream the session opens has the helper read its
+    sound (`radio`), and its songs, as the helper read them, show where it plays."""
+
+    playing = ServerWindowTests.playing
+    SPANS = ServerWindowTests.SPANS
+
+    def test_every_stream_of_the_session_reads_a_stations_sound(self):
+        self.live._wall = lambda: 10_600.0
+        self.live.start(
+            URL,
+            headers={},
+            verify_ssl=True,
+            latency="normal",
+            user_agent="QiTV-Test",
+            disk=False,
+            max_bytes=128 * MiB,
+            one_stream=True,
+            radio=True,
+        )
+        sid = self.engine.last_sid
+        self.assertIs(self.engine.opened[-1][2]["radio"], True)
+        self.engine.buffer(sid, self.SPANS, hls=True, window=86400.0, parts=[[0, 0.0, 10_000.0]])
+        self.engine.sessionReady.emit(sid)
+        self.live.seek_to(-300.0)  # a server part: the live upstream parks first
+        self.engine.sessionParked.emit(sid)
+        self.live.go_live()  # the parked upstream resumes
+        self.engine.answer()
+        self.assertIs(self.engine.resumes[-1][2]["radio"], True)
+
+    def test_a_channels_session_reads_no_station(self):
+        self.start()
+        self.assertNotIn("radio", self.engine.opened[-1][2])
+
+    def test_ai_captions_read_a_stations_sound_from_the_buffer(self):
+        # The owner (2.14): "radio subtitles, cannot be used in this stream". Played from the
+        # buffer, a station's sound has the captions' side output, as a channel's.
+        self.live.start(
+            URL,
+            headers={},
+            verify_ssl=True,
+            latency="normal",
+            user_agent="QiTV-Test",
+            disk=False,
+            max_bytes=128 * MiB,
+            radio=True,
+        )
+        sid = self.engine.last_sid
+        self.engine.buffer(sid, self.SPANS, hls=True)
+        self.engine.sessionReady.emit(sid)
+        source = self.live.caption_source()
+        self.assertIsNotNone(source)
+        self.assertIn(f"/{sid}/side/", source[0])
+
+    def test_the_song_is_the_one_named_where_it_plays(self):
+        sid = self.playing(None)
+        self.assertEqual(self.live.stream_title(), "")  # the stream names none
+        snapshot = self.engine._snapshots[sid]
+        snapshot["titles"] = [[100.0, "First - Song"], [300.0, ""], [400.0, "Third - Song"]]
+        self.engine.sessionUpdated.emit(sid, dict(snapshot))
+        for position, song in (
+            (50.0, ""),  # before the first one named: none known
+            (100.0, "First - Song"),
+            (250.0, "First - Song"),
+            (350.0, ""),  # the station named none from 300 s
+            (590.0, "Third - Song"),
+        ):
+            with self.subTest(position=position):
+                self.live.position = lambda at=position: at
+                self.assertEqual(self.live.stream_title(), song)
+        self.live.stop()
+        self.assertEqual(self.live.stream_title(), "")  # nothing plays from the buffer
+
+
 class BorrowedTests(LiveSessionCase):
     """2.9.7: a scheduled recording's session played as it is: no second stream."""
 

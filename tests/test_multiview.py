@@ -1014,16 +1014,30 @@ class MultiviewTests(MultiviewCase):
         self.assertEqual(t2.playback.stops, 1)
         self.assertEqual(self.budget.holders("Home"), ["main"])
 
-    def test_a_radio_station_in_the_focused_tile_plays_directly(self):
-        # Free radio (2.13): no time-shift session for a station, in a tile too.
+    def test_a_radio_station_in_the_focused_tile_plays_from_its_buffer(self):
+        # Free radio (2.14): a station's sound is time-shifted in a tile too, its sound read
+        # (`radio`) and asked as given; one in a format the helper cannot read plays directly.
         self.start_large(0)
         self.v()
         self.grid_frame.tileClicked.emit("t2")
-        station = {**CHANNELS[2], free_radio.STATION_KEY: True}
+        station = {**CHANNELS[2], free_radio.STATION_KEY: True, free_radio.CODEC_KEY: "MP3"}
         self.controller.tune(station, group_key="10", channels=[station])
-        self.ready("http://radio.test/live.aac")
+        self.ready("http://radio.test/live.mp3")
         t2 = self.sessions.slot("t2")
-        self.assertEqual(t2.playback.plays[-1][0], "http://radio.test/live.aac")
+        self.assertTrue(wait_until(lambda: t2.live.running))
+        _url, kwargs = t2.live.named("start")[-1]
+        self.assertTrue(kwargs["radio"])
+        self.assertNotIn("https_first", kwargs)
+
+    def test_a_radio_station_the_helper_cannot_read_plays_directly_in_a_tile(self):
+        self.start_large(0)
+        self.v()
+        self.grid_frame.tileClicked.emit("t2")
+        station = {**CHANNELS[2], free_radio.STATION_KEY: True, free_radio.CODEC_KEY: "OGG"}
+        self.controller.tune(station, group_key="10", channels=[station])
+        self.ready("http://radio.test/live.ogg")
+        t2 = self.sessions.slot("t2")
+        self.assertEqual(t2.playback.plays[-1][0], "http://radio.test/live.ogg")
         self.assertEqual(t2.live.calls, [])
 
     def test_the_focused_tiles_buffer_is_the_full_one_and_the_others_small(self):

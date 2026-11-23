@@ -634,6 +634,26 @@ class RadioTests(AudioCase):
         self.assertTrue(self.controller.song_shown())
         self.assertFalse(self.screen.live)
 
+    def test_a_stations_song_through_the_buffer_is_the_one_the_helper_read(self):
+        # 2.14: through the time-shift buffer VLC never sees a station's own metadata; the
+        # screen shows the song the helper read where it plays (VLC's, should it have one,
+        # first; else the programme on, as before).
+        self.tune_radio()
+        live = self.controller.live = SimpleNamespace()  # the large picture's LiveSession
+        pipeline = mock.patch.object(self.controller._live_controls, "pipeline_live")
+        pipeline.start().return_value = True
+        live.stream_title = lambda: "Wexlo Tide - Pell"
+        self.clock.now += NO_PICTURE_S + 0.1
+        self.controller._sound_watch()
+        self.assertTrue(self.screen.visible)
+        self.assertEqual(self.screen.song[:2], ("One", "Wexlo Tide - Pell"))
+        live.stream_title = lambda: "Mira Sol - Ferries"  # the next song, where it plays
+        self.controller._sound_watch()
+        self.assertEqual(self.screen.song[1], "Mira Sol - Ferries")
+        self.session.meta = {"now_playing": "Its own - Name"}
+        self.controller._sound_watch()
+        self.assertEqual(self.screen.song[1], "Its own - Name")
+
     def test_the_media_panel_has_a_radio_channels_name_alone(self):
         # Ruling 2 (Task 8): its stream's song or programme is no artist for the panel.
         self.session.meta = {"now_playing": "Wexlo Tide - Pell"}
