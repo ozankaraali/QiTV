@@ -17,7 +17,8 @@ others' distributions, which may have malware.**
 
 - **Add your Plex server.** In Settings → Providers → Add provider (or the Library's new ⚙),
   choose **Plex**. QiTV shows a code in large letters; enter it at **plex.tv/link** on any phone
-  or computer. QiTV then adds your server, or lets you choose when your account has several.
+  or computer (a click on it opens it in your browser). QiTV then adds your server, or lets you
+  choose when your account has several.
 - **The Library:** your server's films and series, with their seasons and episodes, posters,
   where you stopped, Continue watching and the next episode, as for Jellyfin and Emby.
 - **Played as they are.** QiTV plays the server's own file. The ⚙ menu offers the title's
