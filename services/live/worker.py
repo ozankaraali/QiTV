@@ -217,9 +217,10 @@ _BREAKS_KEPT = 64
 # playing evicted media it read before may reach it yet (a sparse-PCR clock's 2 s step and a
 # second more).
 _BREAK_SLACK_S = 3.0
-# 2.14, a radio station's songs as its stream names them, in the state while the ring holds
-# them (the one playing at its start too), at most this many
-_TITLES_KEPT = 32
+# 2.14, a radio station's songs as its stream names them, kept while the ring holds them (the
+# one playing at its start too; at most this many, a memory bound) and sent with the first state
+# after they changed (the engine keeps them)
+_TITLES_KEPT = 4096
 # ... and a station's sound resumed after a kept buffer was taken back starts this far past
 # the newest segment's last PTS: past the longest frame (1152 samples at 8 kHz: 0.144 s)
 _SOUND_RESUME_TICKS = 13_500
@@ -370,6 +371,8 @@ def _merge(older: tuple[Any, ...], newer: tuple[Any, ...]) -> tuple[Any, ...]:
     seq kept twice keeps its newer span, so a merged message is bounded by the ring.
     """
     _, sid, snapshot, first, additions = newer
+    if "titles" in older[2] and "titles" not in snapshot:  # 2.14: sent only as they change
+        snapshot = {**snapshot, "titles": older[2]["titles"]}
     kept: dict[int, _Addition] = {}
     if first is not None:
         for item in (*older[4], *additions):
@@ -609,7 +612,8 @@ class _Session:
         # (timeline position, seconds left out) of the latest PTS jumps the segmenter dropped
         self._breaks: deque[tuple[float, float]] = deque(maxlen=_BREAKS_KEPT)
         # 2.14, a station's sound: (timeline position, its song from there; "": none)
-        self._titles: deque[tuple[float, str]] = deque(maxlen=_TITLES_KEPT)
+        self._titles: deque[tuple[float, str, bool]] = deque(maxlen=_TITLES_KEPT)
+        self._titles_sent: tuple[Any, ...] | None = None  # what the last state's titles were
         self._sound_from: int | None = None  # 2.14: a resumed station's first PTS
         self._last_notify = 0.0
         self._heard_edge = 0.0  # the live edge the latest state reported
@@ -915,7 +919,8 @@ class _Session:
         latest = self._segmenter.latest_pts
         if type(ended) is not int and latest is not None:
             ended = (latest + _SOUND_RESUME_TICKS) % (1 << 33)
-        self._sound_from = ended if type(ended) is int else None
+        radio = start.get("radio") is True
+        self._sound_from = ended if radio and type(ended) is int else None
         ring = self._ring
         if ring is not None:
             ring.clear_failure()  # its disk is tried anew
@@ -1289,7 +1294,11 @@ class _Session:
         if isinstance(item, Title):
             # 2.14: a station's song from here on, where the sound before it ends: its live
             # edge, now that the bytes before it went down the pipeline.
-            self._titles.append((self._live_edge(), item.text))
+            titles = self._titles
+            titles.append((self._live_edge(), item.text, item.legacy))
+            start = self._timeline.start
+            while len(titles) > 1 and titles[1][0] <= start:
+                titles.popleft()  # the song after it plays from the buffer's start on
             self._notify(force=True)
             return
         self._reconnecting = False
@@ -1636,6 +1645,7 @@ class _Session:
         titles = list(self._titles)  # (appended by the session thread meanwhile)
         while len(titles) > 1 and titles[1][0] <= timeline.start:
             del titles[0]  # the song after it plays from the buffer's start on
+        said = (len(titles), titles[0], titles[-1]) if titles else None
         snapshot: dict[str, Any] = {
             "oldest": oldest,
             "newest": ring.newest_seq if ring is not None else None,
@@ -1692,8 +1702,13 @@ class _Session:
             "restarts": trimmer.restarts if trimmer is not None else 0,
             "steered": trimmer.steered if trimmer is not None else 0,
         }
-        if titles:  # 2.14, a station's: [timeline position, its song from there] each
-            snapshot["titles"] = [[at, text] for at, text in titles]
+        if said != self._titles_sent:
+            # 2.14, a station's, when they changed: [timeline position, its song from there]
+            # each, and True third for text that is no UTF-8, as its bytes (`raw_audio.Song`)
+            snapshot["titles"] = [
+                [at, text, True] if old else [at, text] for at, text, old in titles
+            ]
+            self._titles_sent = said
         if source is not None:
             snapshot["secure"] = bool(getattr(source, "secure", False))  # 2.7.1: over HTTPS
         heights = getattr(source, "heights", ())

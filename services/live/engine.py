@@ -162,6 +162,7 @@ class _View:
     snapshot: dict[str, Any] = field(default_factory=dict)
     closing: bool = False
     status: int | None = None  # 2.8.12: the HTTP status its input failed with, if any
+    titles: list[Any] = field(default_factory=list)  # 2.14: a station's songs, as last sent
 
 
 def _helper_args(child: Any, root: Path) -> tuple[Any, str, bool, bool]:
@@ -1183,11 +1184,16 @@ class LiveEngine(QObject):
                 while spans and spans[0].seq < first:
                     spans.popleft()
                 spans.extend(Span(*item) for item in additions if item[0] >= first)
+            if "titles" in snapshot:  # 2.14: a station's songs, sent as they change
+                view.titles = list(snapshot["titles"])
             view.snapshot = dict(snapshot)
-            self.sessionUpdated.emit(sid, dict(snapshot))
+            if view.titles:
+                view.snapshot["titles"] = view.titles
+            self.sessionUpdated.emit(sid, dict(view.snapshot))
         elif name == "reset":  # the helper holding this buffer died
             view.spans.clear()
             view.snapshot = {}
+            view.titles = []
         elif name == "ready":
             self.sessionReady.emit(sid)
         elif name == "parked":

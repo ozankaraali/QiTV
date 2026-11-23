@@ -12,6 +12,7 @@ from radio_fixtures import (
     metadata_block,
     mp3_frame,
     mp3_stream,
+    mpeg_frame,
     packets,
     payload_of,
     pcr_of,
@@ -29,6 +30,8 @@ from services.live.raw_audio import (
     AudioMuxer,
     IcyReader,
     RepeatCut,
+    Song,
+    decoded,
     sniff,
     stream_title,
 )
@@ -86,6 +89,50 @@ class FramerTests(unittest.TestCase):
         stream = id3_tag(20) + mp3_stream(10) + id3_tag(5000) + mp3_stream(10, 10)
         self.assertEqual(framed(stream), [mp3_frame(k) for k in range(20)])
 
+    def test_padded_frames_and_every_rate_and_layer(self):
+        # A real encoder pads every few frames to keep its bitrate: 417 and 418 bytes mixed.
+        padded = [mpeg_frame(k, padding=k % 3 == 1) for k in range(30)]
+        self.assertEqual(framed(b"".join(padded)), padded)
+        self.assertEqual({len(f) for f in padded}, {417, 418})
+        cases = (
+            # (version, layer, bitrate index, rate index): length, samples, rate, stream type
+            ((3, 1, 9, 1), 384, 1152, 48000, 0x03),  # MPEG-1 L3 128k 48 kHz
+            ((3, 1, 9, 2), 576, 1152, 32000, 0x03),  # 32 kHz
+            ((3, 2, 10, 1), 576, 1152, 48000, 0x03),  # MPEG-1 Layer II 192k
+            ((3, 3, 4, 1), 128, 384, 48000, 0x03),  # Layer I 128k
+            ((2, 1, 8, 1), 192, 576, 24000, 0x04),  # MPEG-2 L3 64k 24 kHz
+            ((2, 1, 8, 2), 288, 576, 16000, 0x04),  # 16 kHz
+            ((0, 1, 4, 0), 208, 576, 11025, 0x04),  # MPEG-2.5 L3 32k 11.025 kHz
+            ((0, 1, 4, 2), 288, 576, 8000, 0x04),  # 8 kHz
+        )
+        for (version, layer, bitrate, rate), length, samples, hz, kind in cases:
+            with self.subTest(version=version, layer=layer, rate=hz):
+                stream = b"".join(
+                    mpeg_frame(k, version=version, layer=layer, bitrate=bitrate, rate=rate)
+                    for k in range(5)
+                )
+                frames = AudioFramer().feed(stream)
+                self.assertEqual(len(frames), 5)
+                frame = frames[0]
+                self.assertEqual((len(frame.data), frame.samples), (length, samples))
+                self.assertEqual((frame.rate, frame.stream_type), (hz, kind))
+        for rate, hz in ((3, 48000), (5, 32000), (6, 24000), (8, 16000), (11, 8000)):
+            with self.subTest(adts=hz):
+                frames = AudioFramer().feed(b"".join(adts_frame(k, rate=rate) for k in range(4)))
+                self.assertEqual([(f.rate, f.samples) for f in frames], [(hz, 1024)] * 4)
+
+    def test_a_large_id3_tag_between_frames_is_no_loss(self):
+        # A station may send a tag with a picture between songs: over the 64 KiB a stream
+        # may go without a frame, and no sign of a stream gone bad.
+        framer = AudioFramer()
+        stream = mp3_stream(10) + id3_tag(200_000) + mp3_stream(10, 10)
+        out = [f.data for piece in cut(stream, (4096, 65536)) for f in framer.feed(piece)]
+        self.assertEqual(out, [mp3_frame(k) for k in range(20)])
+        framer = AudioFramer()
+        for piece in cut(mp3_stream(10) + id3_tag(200_000), (4096, 65536)):
+            framer.feed(piece)
+            self.assertFalse(framer.unreadable)
+
     def test_damage_loses_one_frame_and_the_sync_comes_back(self):
         stream = bytearray(mp3_stream(20))
         stream[417 * 5 + 1] = 0x00  # frame 5's header is no header
@@ -136,12 +183,12 @@ class IcyTests(unittest.TestCase):
                 audio = b"".join(p for p in out if isinstance(p, bytes))
                 self.assertEqual(audio, sound)
                 self.assertEqual(
-                    [p for p in out if isinstance(p, str)], ["First - Song", "Second - Song"]
+                    [p.text for p in out if isinstance(p, Song)], ["First - Song", "Second - Song"]
                 )
                 # Each song comes where its block was: after that many bytes of sound.
                 before, seen = 0, []
                 for piece in out:
-                    if isinstance(piece, str):
+                    if isinstance(piece, Song):
                         seen.append(before)
                     else:
                         before += len(piece)
@@ -161,7 +208,6 @@ class IcyTests(unittest.TestCase):
         cases = {
             b"StreamTitle='Artist - Don't Stop';StreamUrl='http://x';": "Artist - Don't Stop",
             "StreamTitle='Mira Sol - Dönüş Yolu';".encode(): "Mira Sol - Dönüş Yolu",
-            b"StreamTitle='Wexlo Tide - Caf\xe9';\x00\x00\x00": "Wexlo Tide - Café",  # Latin-1
             b"StreamTitle='';": "",
             b"StreamTitle='  A\x01B  ';": "A B",
             b"StreamUrl='x';": None,
@@ -169,8 +215,21 @@ class IcyTests(unittest.TestCase):
         }
         for meta, expected in cases.items():
             with self.subTest(meta=meta):
-                self.assertEqual(stream_title(meta), expected)
+                song = stream_title(meta)
+                self.assertEqual(song, None if expected is None else Song(expected))
         self.assertEqual(len(metadata_block("x")) % 16, 1)
+
+    def test_a_song_in_no_utf_8_reads_in_the_stations_code_page(self):
+        # The owner's stations are mostly Turkish: an older one sends its songs in cp1254.
+        title = "Mira Sol - Gökyüzü Şarkısı"
+        song = stream_title(f"StreamTitle='{title}';".encode("cp1254") + b"\x00\x00")
+        self.assertTrue(song.legacy)  # no UTF-8: its bytes, for the place it shows
+        self.assertEqual(decoded(song.text, song.legacy, "cp1254"), title)
+        self.assertNotEqual(decoded(song.text, song.legacy, "cp1252"), title)
+        latin = stream_title(b"StreamTitle='Wexlo Tide - Caf\xe9 \x01';")
+        self.assertEqual(decoded(latin.text, latin.legacy, "cp1252"), "Wexlo Tide - Café")
+        self.assertEqual(decoded("Dönüş", False, "cp1251"), "Dönüş")  # UTF-8: as it came
+        self.assertEqual(decoded(song.text, True, "no-such-page"), song.text)  # unknown: as is
 
 
 class RepeatCutTests(unittest.TestCase):
@@ -193,6 +252,46 @@ class RepeatCutTests(unittest.TestCase):
         self.assertEqual(len(cut_.feed(self.frames(70, 30))), 30)
         # Disarmed: the same frames later are the station's own (a jingle twice).
         self.assertEqual(len(cut_.feed(self.frames(70, 5))), 5)
+
+    def test_a_burst_that_starts_in_silence_is_aligned_by_its_run(self):
+        # Digital silence: frames alike byte for byte. The burst starts at a short silence
+        # (10-12) while the sound sent ends in another (50-54): its first frame alone would
+        # match the latest silence, and the whole burst would play twice.
+        silent = mp3_frame(999_999)
+        sent = [mp3_frame(k) if not (10 <= k <= 12 or k >= 50) else silent for k in range(55)]
+        burst = sent[10:] + [mp3_frame(k) for k in range(55, 70)]
+        cut_ = RepeatCut()
+        framer = AudioFramer()
+        cut_.feed(framer.feed(b"".join(sent)))
+        cut_.reconnect()
+        out = cut_.feed(AudioFramer().feed(b"".join(burst)))
+        out += cut_.flush()
+        self.assertEqual([f.data for f in out], [mp3_frame(k) for k in range(55, 70)])
+
+    def test_after_a_long_outage_the_same_sound_again_is_the_stations_own(self):
+        # A burst repeats at most the station's last minute: a station that plays a looped
+        # programme again after an outage of minutes sends sound the listener has not missed
+        # (dropping it would leave the buffer without sound for as long).
+        now = [0.0]
+        cut_ = RepeatCut(clock=lambda: now[0])
+        cut_.feed(self.frames(0, 100))
+        now[0] = 61.0
+        cut_.reconnect()
+        out = cut_.feed(self.frames(60, 80)) + cut_.flush()
+        self.assertEqual(len(out), 80)
+        now[0] = 62.0  # a quick reconnect: its burst's repeat goes
+        cut_.reconnect()
+        out = cut_.feed(self.frames(130, 20)) + cut_.flush()
+        self.assertEqual([f.data for f in out], [mp3_frame(k) for k in range(140, 150)])
+
+    def test_a_connection_that_ends_inside_the_run_passes_what_it_held(self):
+        cut_ = RepeatCut()
+        cut_.feed(self.frames(0, 20))
+        cut_.reconnect()
+        self.assertEqual(cut_.feed(self.frames(40, 3)), [])  # held for the run
+        held = cut_.reconnect()  # the next connection: what was held goes on
+        self.assertEqual([f.data for f in held], [mp3_frame(k) for k in range(40, 43)])
+        self.assertEqual(cut_.flush(), [])
 
     def test_without_a_reconnect_nothing_is_left_out(self):
         cut_ = RepeatCut()
@@ -276,6 +375,23 @@ class MuxerTests(unittest.TestCase):
         ts = muxer.mux(AudioFramer().feed(data[at:]), pts=pts)
         self.assertEqual(pes_units(ts, AUDIO_PID)[0][0], 900_000)
         self.assertEqual(muxer.next_pts, round(900_000 + 5 * ADTS_TICKS))
+
+    def test_the_clock_wraps_at_33_bits_and_starts_near_zero(self):
+        for first in ((1 << 33) - 5000, 10):
+            with self.subTest(first=first):
+                muxer, framer = AudioMuxer(first), AudioFramer()
+                ts = muxer.mux(framer.feed(mp3_stream(41)))
+                units = pes_units(ts, AUDIO_PID)
+                expected = [round(first + k * MP3_TICKS) % (1 << 33) for k in range(41)]
+                self.assertEqual([pts for pts, _ in units], expected)
+                pcrs = [pcr_of(p) for p in packets(ts) if pid_of(p) == AUDIO_PID and p[1] & 0x40]
+                self.assertEqual(pcrs, [(pts - 63000) % (1 << 33) for pts in expected])
+                self.assertEqual(muxer.next_pts, round(first + 41 * MP3_TICKS) % (1 << 33))
+                segmenter = Segmenter(clock=lambda: 0.0)
+                events = segmenter.feed(ts + muxer.mux(framer.feed(mp3_stream(200, 41))))
+                opened = [e for e in events if isinstance(e, Opened)]
+                self.assertFalse(any(e.discontinuity for e in opened[1:]))
+                self.assertEqual(segmenter.dropped, [])
 
     def test_a_new_codec_after_a_reconnect_gets_a_new_program_map(self):
         muxer = AudioMuxer()

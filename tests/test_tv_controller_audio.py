@@ -642,12 +642,18 @@ class RadioTests(AudioCase):
         live = self.controller.live = SimpleNamespace()  # the large picture's LiveSession
         pipeline = mock.patch.object(self.controller._live_controls, "pipeline_live")
         pipeline.start().return_value = True
-        live.stream_title = lambda: "Wexlo Tide - Pell"
+        pages = []
+        live.stream_title = lambda page: pages.append(page) or "Wexlo Tide - Pell"
         self.clock.now += NO_PICTURE_S + 0.1
         self.controller._sound_watch()
         self.assertTrue(self.screen.visible)
         self.assertEqual(self.screen.song[:2], ("One", "Wexlo Tide - Pell"))
-        live.stream_title = lambda: "Mira Sol - Ferries"  # the next song, where it plays
+        self.assertEqual(pages[-1], "cp1252")  # a channel of no radio list: Western
+        live.stream_title = lambda page: pages.append(page) or "Mira Sol - Ferries"
+        with mock.patch.object(free_radio, "codepage", return_value="cp1254") as page_of:
+            self.controller._sound_watch()  # a Turkish station's songs read in cp1254
+        self.assertEqual(page_of.call_args.args[0], self.controller._current.item)
+        self.assertEqual(pages[-1], "cp1254")
         self.controller._sound_watch()
         self.assertEqual(self.screen.song[1], "Mira Sol - Ferries")
         self.session.meta = {"now_playing": "Its own - Name"}

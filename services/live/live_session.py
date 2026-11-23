@@ -292,6 +292,7 @@ from services.i18n import N_
 from services.live import parts as live_parts
 from services.live.kept import KeptRing, Where, where_dict
 from services.live.learned_target import LearnedTarget, learned_target
+from services.live.raw_audio import decoded
 from services.live.recorder import MAX_SECONDS, MIN_FREE_BYTES
 from services.live.refusals import REFUSALS, STREAM_LIMIT
 from services.live.server_part import (
@@ -1639,25 +1640,26 @@ class LiveSession(QObject):
             return self._advance()
         return self._base + self._elapsed
 
-    def stream_title(self) -> str:
+    def stream_title(self, codepage: str = "cp1252") -> str:
         """The song a radio station's stream names where it plays (2.14: the helper reads the
         station's own metadata, which VLC never sees through the buffer: the helper state's
         `titles`, each from its place on the timeline); "" when it names none, or the stream
-        does not play from the buffer."""
+        does not play from the buffer. Text that is no UTF-8 reads in `codepage` (the
+        station's language's, `services.free_radio.codepage`)."""
         if self._phase is not _Phase.PIPELINE or self._sid is None:
             return ""
         titles = self._snapshot().get("titles")
         if not isinstance(titles, list):
             return ""
-        position, playing = self.position(), ""
+        position, playing, legacy = self.position(), "", False
         for entry in titles:
-            if not isinstance(entry, (list, tuple)) or len(entry) != 2:
+            if not isinstance(entry, (list, tuple)) or len(entry) not in (2, 3):
                 continue
-            at, text = entry
+            at, text = entry[0], entry[1]
             if isinstance(at, (int, float)) and at > position:
                 break
-            playing = str(text)
-        return playing
+            playing, legacy = str(text), len(entry) == 3 and entry[2] is True
+        return decoded(playing, legacy, codepage)
 
     # ---- recording (2.2) ---------------------------------------------------------------
     def recordable(self) -> bool:

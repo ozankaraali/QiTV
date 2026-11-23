@@ -18,14 +18,43 @@ def mp3_frame(index: int, *, mpeg1: bool = True) -> bytes:
     return head + body
 
 
-def adts_frame(index: int, length: int = 371) -> bytes:
-    """One ADTS AAC-LC frame (44.1 kHz, stereo, no CRC) of `length` bytes, numbered by
-    `index`."""
+def mpeg_frame(
+    index: int, *, version: int = 3, layer: int = 1, bitrate: int = 9, rate: int = 0, padding=0
+) -> bytes:
+    """One MPEG audio frame of any kind: `version` 3 MPEG-1, 2 MPEG-2, 0 MPEG-2.5; `layer` 3
+    Layer I, 2 Layer II, 1 Layer III; `bitrate` and `rate` their header indexes; its body
+    numbered by `index`. Its length as the standard reckons it."""
+    kbps_tables = {
+        (True, 3): (32, 64, 96, 128, 160, 192, 224, 256, 288, 320, 352, 384, 416, 448),
+        (True, 2): (32, 48, 56, 64, 80, 96, 112, 128, 160, 192, 224, 256, 320, 384),
+        (True, 1): (32, 40, 48, 56, 64, 80, 96, 112, 128, 160, 192, 224, 256, 320),
+        (False, 3): (32, 48, 56, 64, 80, 96, 112, 128, 144, 160, 176, 192, 224, 256),
+        (False, 2): (8, 16, 24, 32, 40, 48, 56, 64, 80, 96, 112, 128, 144, 160),
+        (False, 1): (8, 16, 24, 32, 40, 48, 56, 64, 80, 96, 112, 128, 144, 160),
+    }
+    rates = {3: (44100, 48000, 32000), 2: (22050, 24000, 16000), 0: (11025, 12000, 8000)}
+    mpeg1 = version == 3
+    kbps, hz = kbps_tables[(mpeg1, layer)][bitrate - 1], rates[version][rate]
+    if layer == 3:
+        length = (12000 * kbps // hz + padding) * 4
+    elif layer == 2 or mpeg1:
+        length = 144000 * kbps // hz + padding
+    else:
+        length = 72000 * kbps // hz + padding
+    head = bytes(
+        [0xFF, 0xE0 | version << 3 | layer << 1 | 1, bitrate << 4 | rate << 2 | padding << 1, 0x64]
+    )
+    return head + index.to_bytes(4, "big") + bytes(length - 8)
+
+
+def adts_frame(index: int, length: int = 371, rate: int = 4) -> bytes:
+    """One ADTS AAC-LC frame (stereo, no CRC; `rate` its rate index: 4 is 44.1 kHz) of `length`
+    bytes, numbered by `index`."""
     head = bytes(
         [
             0xFF,
             0xF1,
-            0x50,
+            0x40 | rate << 2,
             0x80 | (length >> 11) & 0x03,
             (length >> 3) & 0xFF,
             (length & 0x07) << 5 | 0x1F,

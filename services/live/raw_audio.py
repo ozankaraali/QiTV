@@ -9,15 +9,16 @@ the captions' side output take it as any radio channel's TS:
 
 - `IcyReader` takes the station's inline metadata out of the sound (`icy-metaint`: every so
   many bytes, a length byte times 16 and that much text), and reads the song it names
-  (`stream_title`: its StreamTitle, UTF-8, else Latin-1, as VLC reads it).
+  (`stream_title`: its StreamTitle as UTF-8; text that is no UTF-8 is kept as its bytes, a
+  `Song` marked `legacy`, which `decoded` reads in the station's code page where it shows).
 - `sniff` tells, from the first bytes, sound QiTV reads (a chain of `_CHAIN` frames, after an
   ID3 tag), more to read, or a format it cannot (Ogg, FLAC, ASF/WMA, MP4, a page or a list).
 - `AudioFramer` cuts the sound into whole frames, finding its sync anew where a connection
   starts mid-frame, the data is damaged, or an ID3 tag comes between frames.
 - `RepeatCut` leaves out, after a reconnect, the frames the station's burst at connect sends
-  again (Icecast starts each listener a few seconds back): their bytes are the same, so each
-  frame's digest is looked up in those sent last, and the run that repeats them is dropped
-  until one is new.
+  again (Icecast starts each listener a few seconds back): their bytes are the same, so the
+  first `_REPEAT_RUN` frames' digests are looked up, as a run, in those sent last (a run, not
+  one frame: digital silence repeats itself), and what repeats is dropped until one is new.
 - `AudioMuxer` writes the frames as TS (`services.live.ts_mux`): PAT and PMT every
   `_TABLES_TICKS` of sound, each frame one PES on `AUDIO_PID` (stream type 0x03 MPEG-1 audio,
   0x04 MPEG-2 audio, 0x0F ADTS AAC), its PTS run on by the frames' own durations, and a PCR
@@ -32,8 +33,9 @@ Free-format MP3 and Layer I-III's reserved values are not read. Pure logic: no I
 from __future__ import annotations
 
 from collections import deque
-from collections.abc import Iterable
+from collections.abc import Callable, Iterable
 import re
+import time
 from typing import NamedTuple, cast
 
 from services.live.ts_mux import (
@@ -56,6 +58,11 @@ _CHAIN = 3  # this many frames, each right after the one before, prove the sync
 _SNIFF_LIMIT = 16 * 1024  # sound whose sync is not found this far in is not read
 _LOST_LIMIT = 64 * 1024  # this much without a frame: the stream is no sound QiTV reads
 _REPEAT_FRAMES = 2048  # the frames whose digests a reconnect's burst is looked up in (~50 s)
+_REPEAT_RUN = 8  # a reconnect's first this many frames are looked up as one run ...
+# ... among those that came within this long before it: a burst at connect repeats at most the
+# station's last this-many seconds (after a longer outage it repeats nothing: the same sound
+# again then is the station's own, a looped programme, say)
+_BURST_MAX_S = 60.0
 _TIMESTAMP_OWNER = b"com.apple.streaming.transportStreamTimestamp\x00"
 _MPEG_RATES = {3: (44100, 48000, 32000), 2: (22050, 24000, 16000), 0: (11025, 12000, 8000)}
 # kbit/s by bitrate index (1-14), for (MPEG-1, layer bits: 3 = I, 2 = II, 1 = III)
@@ -71,7 +78,7 @@ _KBPS = {
 # What no frame of sound starts with: Ogg (Vorbis, Opus), FLAC, ASF (WMA), RIFF (WAV), a PLS
 # list; an MP4's "ftyp" sits 4 bytes in.
 _UNREADABLE = (b"OggS", b"fLaC", b"\x30\x26\xb2\x75\x8e\x66\xcf\x11", b"RIFF", b"[playlist]")
-_TITLE = re.compile(r"StreamTitle='(.*?)';(?=\s*[A-Za-z]+=|\s*$)", re.DOTALL)
+_TITLE = re.compile(rb"StreamTitle='(.*?)';(?=\s*[A-Za-z]+=|\s*$)", re.DOTALL)
 _CONTROL = re.compile(r"[\x00-\x1f\x7f]+")
 
 SOUND, MORE, UNREADABLE = "sound", "more", "unreadable"
@@ -164,22 +171,29 @@ def find_sync(data: bytes | bytearray, start: int = 0) -> tuple[int, bool]:
     """Where frames begin at or after `start`: (that position, True); else (where to look again
     once more data came, False), past the data's end when an ID3 tag goes on beyond it. ID3
     tags are stepped over."""
-    pos, end = start, len(data)
+    pos, found, _tags = _find_sync(data, start)
+    return pos, found
+
+
+def _find_sync(data: bytes | bytearray, start: int) -> tuple[int, bool, int]:
+    """`find_sync`, and how many bytes of the data were ID3 tags it stepped over."""
+    pos, end, tags = start, len(data), 0
     while pos < end:
         tag = _id3_size(data, pos)
         if tag is not None:
+            tags += min(tag, end - pos)
             pos += tag
             continue
         if data[pos] == 0xFF:
             chained = _chain(data, pos)
             if chained:
-                return pos, True
+                return pos, True, tags
             if chained is None:
-                return pos, False
+                return pos, False, tags
         elif data[pos : pos + 3] == b"ID3"[: end - pos]:
-            return pos, False  # perhaps a tag, its header not all here yet
+            return pos, False, tags  # perhaps a tag, its header not all here yet
         pos += 1
-    return pos, False
+    return pos, False, tags
 
 
 def sniff(data: bytes) -> str:
@@ -207,7 +221,7 @@ class AudioFramer:
         self._buf = bytearray()
         self._form: tuple[int, int, int] | None = None  # None: out of sync
         self._skip = 0  # an ID3 tag's bytes still to come and be left out
-        self.lost = 0  # bytes since the last whole frame (held or left out)
+        self.lost = 0  # bytes since the last whole frame (held or left out), ID3 tags' not
 
     def reset(self) -> None:
         """A new connection: a frame cut short is left out, and the sync is found anew."""
@@ -224,9 +238,11 @@ class AudioFramer:
         total = len(buf)
         frames: list[Frame] = []
         pos, last_end = 0, None
+        tags = 0  # bytes of ID3 tags stepped over since the last frame (none lost)
         while True:
             if self._form is None:
-                pos, found = find_sync(buf, pos)
+                pos, found, stepped = _find_sync(buf, pos)
+                tags += stepped
                 if not found:
                     break
                 self._form = cast(_Header, _header(buf, pos)).form
@@ -234,6 +250,7 @@ class AudioFramer:
             if header is None or header.form != self._form:
                 tag = _id3_size(buf, pos)
                 if tag is not None:  # a tag between frames: stepped over, in sync
+                    tags += min(tag, len(buf) - pos)
                     pos += tag
                     continue
                 if pos + 7 > len(buf):
@@ -248,14 +265,15 @@ class AudioFramer:
                 Frame(bytes(buf[pos:end]), header.samples, header.rate, header.stream_type)
             )
             pos = last_end = end
+            tags = 0
         if pos > len(buf):  # inside an ID3 tag that goes on: the rest of it is left out too
             self._skip = pos - len(buf)
             pos = len(buf)
         del buf[:pos]
         if last_end is not None:  # what came after the last one, held or left out
-            self.lost = total - last_end
+            self.lost = max(0, total - last_end - tags)
         else:
-            self.lost += len(data)
+            self.lost += max(0, len(data) - tags)
         if self._form is None and len(buf) > _LOST_LIMIT:
             del buf[:-8]  # no sync this far: only a header's worth is kept
         return frames
@@ -266,24 +284,47 @@ class AudioFramer:
         return self.lost > _LOST_LIMIT
 
 
-def stream_title(meta: bytes) -> str | None:
-    """The song a metadata block names (its StreamTitle, "" for none), None when it names
-    nothing; UTF-8, else Latin-1."""
-    raw = meta.rstrip(b"\x00")
-    try:
-        text = raw.decode("utf-8")
-    except UnicodeDecodeError:
-        text = raw.decode("latin-1")
-    found = _TITLE.search(text)
+class Song(NamedTuple):
+    """The song a station names: its text (UTF-8; "" for none), or, `legacy`, text that is no
+    UTF-8 as its bytes read one to one (Latin-1), for `decoded` to read in a code page."""
+
+    text: str
+    legacy: bool = False
+
+
+def clean(text: str) -> str:
+    """A song's text as shown: control characters as spaces, none at its ends."""
+    return _CONTROL.sub(" ", text).strip()
+
+
+def stream_title(meta: bytes) -> Song | None:
+    """The song a metadata block names (its StreamTitle), None when it names nothing."""
+    found = _TITLE.search(meta.rstrip(b"\x00"))
     if found is None:
         return None
-    return _CONTROL.sub(" ", found.group(1)).strip()
+    title = found.group(1)
+    try:
+        return Song(clean(title.decode("utf-8")))
+    except UnicodeDecodeError:
+        return Song(title.decode("latin-1"), legacy=True)
+
+
+def decoded(text: str, legacy: bool, codepage: str) -> str:
+    """A song's text to show: as it is, or a `legacy` one's bytes in `codepage` (the
+    station's language's code page, `services.free_radio.codepage`; cp1252 when unknown)."""
+    if not legacy:
+        return text
+    try:
+        return clean(text.encode("latin-1").decode(codepage or "cp1252", errors="replace"))
+    except LookupError, UnicodeEncodeError:
+        return clean(text)
 
 
 class IcyReader:
     """A station's body without its inline metadata (`icy-metaint` bytes of sound, then a
     length byte times 16 and that much metadata, again and again; 0: none comes): `feed`
-    returns the sound and, where a block names one, the song (`stream_title`) in order."""
+    returns the sound and, where a block names one, the song (`stream_title`, a `Song`) in
+    order."""
 
     def __init__(self, every: int) -> None:
         self._every = every
@@ -292,10 +333,10 @@ class IcyReader:
         self._meta_left = 0  # metadata bytes still to come (0: in the sound)
         self._length = False  # the next byte is a length byte
 
-    def feed(self, data: bytes) -> list[bytes | str]:
+    def feed(self, data: bytes) -> list[bytes | Song]:
         if self._every <= 0:
             return [data] if data else []
-        out: list[bytes | str] = []
+        out: list[bytes | Song] = []
         pos, end = 0, len(data)
         while pos < end:
             if self._length:
@@ -341,43 +382,86 @@ def metaint(headers: object) -> int:
 class RepeatCut:
     """After a reconnect, the frames the station sends again (see the module)."""
 
-    def __init__(self, keep: int = _REPEAT_FRAMES) -> None:
-        self._sent: deque[int] = deque(maxlen=keep)  # the digests of the frames passed on
-        self._armed = False
+    def __init__(
+        self,
+        keep: int = _REPEAT_FRAMES,
+        run: int = _REPEAT_RUN,
+        clock: Callable[[], float] = time.monotonic,
+    ) -> None:
+        self._sent: deque[int] = deque(maxlen=keep)  # the digests of the frames passed on ...
+        self._at_times: deque[float] = deque(maxlen=keep)  # ... and when each came
+        self._clock = clock
+        self._run = run
+        # A reconnect's first frames (digest, frame), held until a run of them is looked up.
+        self._pending: list[tuple[int, Frame]] | None = None
         self._at: int | None = None  # where in `_sent` the repeat has got to
         self.dropped = 0  # frames left out so far
 
-    def reconnect(self) -> None:
-        self._armed, self._at = True, None
+    def reconnect(self) -> list[Frame]:
+        """A new connection: its first frames are looked up as a run. What the last one's
+        are still held for goes on now (a connection that brought fewer)."""
+        held = self._settle()
+        self._pending, self._at = [], None
+        return held
+
+    def flush(self) -> list[Frame]:
+        """The input ends: what a reconnect's run still holds goes on."""
+        return self._settle()
 
     def feed(self, frames: Iterable[Frame]) -> list[Frame]:
         out: list[Frame] = []
         sent = self._sent
         for frame in frames:
             digest = hash(frame.data)
-            if self._armed:
-                if self._at is None:
-                    self._at = self._last(digest)
-                    if self._at is not None:
-                        self._at += 1
-                        self.dropped += 1
-                        continue
-                elif self._at < len(sent) and sent[self._at] == digest:
+            if self._pending is not None:
+                self._pending.append((digest, frame))
+                if len(self._pending) >= self._run:
+                    out.extend(self._settle())
+                continue
+            if self._at is not None:
+                if self._at < len(sent) and sent[self._at] == digest:
                     self._at += 1
                     self.dropped += 1
                     continue
-                self._armed = False  # new sound: from here on as it comes
-            sent.append(digest)
+                self._at = None  # new sound: from here on as it comes
+            self._pass(digest)
             out.append(frame)
         return out
 
-    def _last(self, digest: int) -> int | None:
-        """The latest place of `digest` among the frames sent."""
-        sent = self._sent
-        for index in range(len(sent) - 1, -1, -1):
-            if sent[index] == digest:
-                return index
-        return None
+    def _pass(self, digest: int) -> None:
+        self._sent.append(digest)
+        self._at_times.append(self._clock())
+
+    def _settle(self) -> list[Frame]:
+        """The frames held after a reconnect, less those that repeat what was sent: the run is
+        aligned at the earliest place in `_sent` where all of it that `_sent` reaches matches
+        (a run of silence matches anywhere in a silence: the run's later frames decide)."""
+        pending, self._pending = self._pending, None
+        if not pending:
+            return []
+        sent, digests = self._sent, [digest for digest, _frame in pending]
+        since = self._clock() - _BURST_MAX_S
+        first = next((k for k, at in enumerate(self._at_times) if at >= since), len(sent))
+        start = next(
+            (
+                index
+                for index in range(first, len(sent))
+                if all(
+                    sent[index + k] == digests[k]
+                    for k in range(min(len(digests), len(sent) - index))
+                )
+            ),
+            None,
+        )
+        matched = 0 if start is None else min(len(digests), len(sent) - start)
+        self.dropped += matched
+        if start is not None and start + matched < len(sent):
+            self._at = start + matched  # the repeat goes on past the run
+        out = []
+        for digest, frame in pending[matched:]:
+            self._pass(digest)
+            out.append(frame)
+        return out
 
 
 def packed_start(data: bytes) -> tuple[int | None, int]:
@@ -400,8 +484,10 @@ def packed_start(data: bytes) -> tuple[int | None, int]:
 class AudioMuxer:
     """Frames of sound as one program's MPEG-TS (see the module)."""
 
-    def __init__(self, first_pts: int = _FIRST_PTS) -> None:
-        self._next = float(first_pts)  # the next frame's PTS (not wrapped)
+    def __init__(self, first_pts: int | None = None) -> None:
+        # The next frame's PTS (not wrapped); `started` once given or a frame is written.
+        self._next = float(_FIRST_PTS if first_pts is None else first_pts)
+        self.started = first_pts is not None
         self._counters = Counters()
         self._stream_type: int | None = None
         self._version = 0
@@ -433,6 +519,7 @@ class AudioMuxer:
             pes = audio_pes(0xC0, at, frame.data)
             out.extend(pes_packets(self._counters, AUDIO_PID, pes, pcr=at - PCR_LEAD))
             self._next += frame.samples * _CLOCK / frame.rate
+            self.started = True
         return b"".join(out)
 
     def _pat(self) -> bytes:

@@ -58,7 +58,7 @@ from services.live.capture import _Capture
 from services.live.fmp4 import Fmp4Error, Fmp4Remuxer
 from services.live.hls_audio import _LEAD_TICKS, AudioWeaver, video_start
 from services.live.interruptible_http import _Closed, _Interrupter, _InterruptibleAdapter
-from services.live.raw_audio import AudioFramer, AudioMuxer, IcyReader, RepeatCut, metaint
+from services.live.raw_audio import AudioFramer, AudioMuxer, IcyReader, RepeatCut, Song, metaint
 from services.live.refusals import REFUSALS, STREAM_LIMIT, STREAM_REFUSED  # noqa: F401 (and here)
 from services.live.ts import ContinuityJoiner, program_has_audio, pts_delta
 from services.revive import REVIVE_S
@@ -80,6 +80,8 @@ _READ_SIZE = 64 * 1024
 _SNIFF_SIZE = 10
 _PACKED_LIMIT = 8 * 1024 * 1024  # 2.14: a packed sound segment (10 s at 320 kbit/s: 400 KB)
 _SOUND_SNIFF_LIMIT = 256 * 1024  # 2.14: a station's first bytes read to tell its sound (`sniff`)
+_SOUND_SNIFF_S = 10.0  # ... for at most this long (a slow station's noise)
+_PACKED_SLOW_S = 15.0  # 2.14: a packed sound segment read longer (and 3 EXTINF) is no segment
 _PLAYLIST_TYPES = (
     "application/vnd.apple.mpegurl",
     "application/x-mpegurl",
@@ -237,10 +239,12 @@ class CaughtUp:
 
 @dataclass(frozen=True)
 class Title:
-    """A radio station's sound only (2.14, `SoundSource`): the song it names from here on, as
-    its inline metadata names it ("": none); the bytes before it are of the song before."""
+    """A radio station's only (2.14, `SoundSource`, `IcyTsSource`): the song it names from here
+    on, as its inline metadata names it ("": none); the bytes before it are of the song
+    before. `legacy`: text that is no UTF-8, as its bytes (`raw_audio.Song`)."""
 
     text: str
+    legacy: bool = False
 
 
 Chunk = bytes | Discontinuity | CaughtUp | Reconnecting | Title
@@ -999,24 +1003,11 @@ class LocalTsSource(TsSource):
         return True  # no connection: close() is immediate
 
 
-class SoundSource(TsSource):
-    """A radio station's raw sound over HTTP(S) (2.14: MPEG audio or ADTS AAC, as Icecast and
-    SHOUTcast servers send it) as one program's MPEG-TS, read as `TsSource` reads raw TS (its
-    reconnects and their patience) and remuxed as it comes (`services.live.raw_audio`).
-
-    Each answer's inline metadata (`icy-metaint`, asked with `Icy-MetaData: 1`) is taken out of
-    its sound, and the song it names comes as a `Title` before the sound that follows it. The
-    frames are found in each connection anew, the burst a reconnect's answer starts with is
-    left out where it repeats the frames already sent, and the TS runs on across reconnects
-    (its clock and counters): a reconnect yields `Reconnecting`, never a `Discontinuity`. A
-    stream that stops being sound QiTV reads (no whole frame in `raw_audio._LOST_LIMIT`)
-    fails as "unsupported". A capture (``QITV_CAPTURE_DIR``) keeps the TS, which the replay
-    tool reads. A resumed run's sound starts at `first_pts` (where the old run's ended), never
-    back onto timestamps the player had: libVLC 3 drops such sound as late, and the clock
-    joiner re-bases no run without pictures.
-    """
-
-    sound = True  # the worker's raw TS stages (its guard and trimmers) are not for it
+class _IcyStream(TsSource):
+    """A radio station's answers, read as `TsSource` reads raw TS (its reconnects and their
+    patience), each one's inline metadata (`icy-metaint`, asked with `Icy-MetaData: 1`) taken
+    out, and the song it names coming as a `Title` before what follows it (2.14). What is left
+    goes to `_bytes`; a capture (``QITV_CAPTURE_DIR``) keeps what is yielded."""
 
     def __init__(
         self,
@@ -1024,28 +1015,19 @@ class SoundSource(TsSource):
         url: str,
         response: Any,
         reader: IcyReader,
-        pieces: list[bytes | str],
+        pieces: list[bytes | Song],
         *,
         capture: _Capture | None = None,
-        first_pts: int | None = None,
     ) -> None:
         super().__init__(http, url, response, b"")
         self._reader = reader
         self._next_reader = reader
         self._pieces = pieces  # what the open read of the first answer, metadata taken out
-        self._framer = AudioFramer()
-        self._cut = RepeatCut()
-        self._muxer = AudioMuxer() if first_pts is None else AudioMuxer(first_pts)
-        self._title: str | None = None
+        self._title: Song | None = None
         self._ts_capture = capture
 
-    @property
-    def next_pts(self) -> int:
-        """Where the sound written so far ends (a resumed run's goes on from here)."""
-        return self._muxer.next_pts
-
     def chunks(self) -> Iterator[Chunk]:
-        return _guarded(self._http, self._remux(), self._ts_capture)
+        return _guarded(self._http, self._stream(), self._ts_capture)
 
     def close(self) -> None:
         super().close()
@@ -1060,40 +1042,121 @@ class SoundSource(TsSource):
     def _connected(self, response: Any) -> None:
         self._next_reader = IcyReader(metaint(response.headers))
 
-    def _remux(self) -> Iterator[Chunk]:
+    def _stream(self) -> Iterator[Chunk]:
         pieces, self._pieces = self._pieces, []
-        yield from self._sound(pieces)
+        yield from self._take(pieces)
         for item in self._run():
             if isinstance(item, bytes):
-                yield from self._sound(self._reader.feed(item))
+                yield from self._take(self._reader.feed(item))
             elif isinstance(item, Discontinuity):
-                # A new connection: its own metadata blocks, its frames found anew, and its
-                # burst's repeat of what was sent left out; the sound runs on.
-                self._reader = self._next_reader
-                self._framer.reset()
-                self._cut.reconnect()
+                self._reader = self._next_reader  # a new connection: its own metadata blocks
+                yield from self._reconnected(item)
             else:
                 yield item
+        yield from self._ended()
 
-    def _sound(self, pieces: list[bytes | str]) -> Iterator[Chunk]:
+    def _take(self, pieces: list[bytes | Song]) -> Iterator[Chunk]:
         for piece in pieces:
-            if isinstance(piece, str):
+            if isinstance(piece, Song):
                 if piece != self._title:
                     self._title = piece
-                    yield Title(piece)
-                continue
-            frames = self._cut.feed(self._framer.feed(piece))
-            if frames:
-                ts = self._muxer.mux(frames)
-                if self._ts_capture is not None:
-                    self._ts_capture.write(ts)
-                yield ts
-            elif self._framer.unreadable:
-                log.info("The station's stream stopped being sound QiTV reads.")
-                raise SourceError("unsupported", _NOT_SOUND)
+                    yield Title(piece.text, piece.legacy)
+            elif piece:
+                yield from self._bytes(piece)
+
+    def _yield(self, data: bytes) -> Iterator[Chunk]:
+        if self._ts_capture is not None:
+            self._ts_capture.write(data)
+        yield data
+
+    def _bytes(self, data: bytes) -> Iterator[Chunk]:
+        yield from self._yield(data)
+
+    def _reconnected(self, marker: Discontinuity) -> Iterator[Chunk]:
+        yield marker
+
+    def _ended(self) -> Iterator[Chunk]:
+        return iter(())
 
 
-def _open_sound(
+class IcyTsSource(_IcyStream):
+    """A radio station that sends MPEG-TS (2.14): its TS as it came, its inline metadata (if
+    its answers interleave any) taken out and its songs named (`_IcyStream`); the worker reads
+    it as any raw TS."""
+
+
+class SoundSource(_IcyStream):
+    """A radio station's raw sound over HTTP(S) (2.14: MPEG audio or ADTS AAC, as Icecast and
+    SHOUTcast servers send it) as one program's MPEG-TS, remuxed as it comes
+    (`services.live.raw_audio`), its metadata taken out and its songs named (`_IcyStream`).
+
+    The frames are found in each connection anew, the burst a reconnect's answer starts with is
+    left out where it repeats the frames already sent, and the TS runs on across reconnects
+    (its clock and counters): a reconnect yields `Reconnecting`, never a `Discontinuity`. A
+    stream that stops being sound QiTV reads (no whole frame in `raw_audio._LOST_LIMIT`)
+    fails as "unsupported". A capture keeps the TS, which the replay tool reads. A resumed
+    run's sound starts at `first_pts` (where the old run's ended), never back onto timestamps
+    the player had: libVLC 3 drops such sound as late, and the clock joiner re-bases no run
+    without pictures.
+    """
+
+    sound = True  # the worker's raw TS stages (its guard and trimmers) are not for it
+
+    def __init__(
+        self,
+        http: _Http,
+        url: str,
+        response: Any,
+        reader: IcyReader,
+        pieces: list[bytes | Song],
+        *,
+        capture: _Capture | None = None,
+        first_pts: int | None = None,
+    ) -> None:
+        super().__init__(http, url, response, reader, pieces, capture=capture)
+        self._framer = AudioFramer()
+        self._cut = RepeatCut()
+        self._muxer = AudioMuxer(first_pts)
+
+    @property
+    def next_pts(self) -> int:
+        """Where the sound written so far ends (a resumed run's goes on from here)."""
+        return self._muxer.next_pts
+
+    def _bytes(self, data: bytes) -> Iterator[Chunk]:
+        frames = self._cut.feed(self._framer.feed(data))
+        if frames:
+            yield from self._yield(self._muxer.mux(frames))
+        elif self._framer.unreadable:
+            log.info("The station's stream stopped being sound QiTV reads.")
+            raise SourceError("unsupported", _NOT_SOUND)
+
+    def _reconnected(self, marker: Discontinuity) -> Iterator[Chunk]:
+        # Its frames found anew, and its burst's repeat of what was sent left out (what the
+        # last connection's run still held goes first); the sound runs on: no marker.
+        self._framer.reset()
+        held = self._cut.reconnect()
+        if held:
+            yield from self._yield(self._muxer.mux(held))
+
+    def _ended(self) -> Iterator[Chunk]:
+        held = self._cut.flush()
+        if held:
+            yield from self._yield(self._muxer.mux(held))
+
+
+def _station_kind(data: bytes) -> str:
+    """What a station's first bytes are (2.14): "ts" (sync bytes 188 apart, three of them),
+    else `raw_audio.sniff`'s answer."""
+    if data[:1] == b"\x47":
+        if len(data) <= 2 * _PACKET:
+            return raw_audio.MORE
+        if data[_PACKET] == 0x47 and data[2 * _PACKET] == 0x47:
+            return "ts"
+    return raw_audio.sniff(data)
+
+
+def _open_station(
     http: _Http,
     url: str,
     response: Any,
@@ -1101,28 +1164,33 @@ def _open_sound(
     capture: _Capture | None,
     first_pts: int | None = None,
 ) -> Source:
-    """A station's first answer that is no TS (2.14): its sound (`SoundSource`) once its
-    first bytes, the metadata taken out, show frames QiTV reads (`raw_audio.sniff`, reading on
-    up to `_SOUND_SNIFF_LIMIT`); else "unsupported" at once (Ogg, FLAC, a page...: the station
-    plays directly, with this one connection spent)."""
+    """A station's first answer that is no playlist (2.14): its TS (`IcyTsSource`), or its
+    sound (`SoundSource`) once its first bytes, the metadata taken out, show frames QiTV reads
+    (`raw_audio.sniff`, reading on up to `_SOUND_SNIFF_LIMIT` and `_SOUND_SNIFF_S`); else
+    "unsupported" at once (Ogg, FLAC, a page...: the station plays directly, with this one
+    connection spent)."""
     reader = IcyReader(metaint(response.headers))
     pieces = reader.feed(prefix)
-    sound = b"".join(piece for piece in pieces if isinstance(piece, bytes))
-    read = len(prefix)
+    data = b"".join(piece for piece in pieces if isinstance(piece, bytes))
+    read, deadline = len(prefix), time.monotonic() + _SOUND_SNIFF_S
     try:
-        verdict = raw_audio.sniff(sound)
+        verdict = _station_kind(data)
         while verdict == raw_audio.MORE and read < _SOUND_SNIFF_LIMIT:
+            if time.monotonic() > deadline:
+                break
             block = http.read(response)
             if not block:
                 break
             read += len(block)
             more = reader.feed(block)
             pieces.extend(more)
-            sound += b"".join(piece for piece in more if isinstance(piece, bytes))
-            verdict = raw_audio.sniff(sound)
+            data += b"".join(piece for piece in more if isinstance(piece, bytes))
+            verdict = _station_kind(data)
     except BaseException:
         http.release(response)
         raise
+    if verdict == "ts":
+        return IcyTsSource(http, url, response, reader, pieces, capture=capture)
     if verdict != raw_audio.SOUND:
         http.release(response)
         log.info("The station's stream is in a format the time-shift buffer cannot read.")
@@ -1517,8 +1585,11 @@ class HlsSource:
         after_seq: int | None = None,
         copy: bytes | None = None,
         origin: str | None = None,
+        sound_from: int | None = None,
     ) -> None:
-        """`origin` (2.9): the channel's own address when a master led to `url`, its variant:
+        """`sound_from` (2.14, a resumed station's): its packed sound's first PTS (where the
+        old run's ended; `_station_ts`). `origin` (2.9): the channel's own address when a
+        master led to `url`, its variant:
         asked again once the variant's playlist is gone (`_reload`). `window` (2.7): a server
         part, `{"back_s": seconds, "until_seq": sequence}`: it starts that far back from the
         playlist's end and its input ends before that media
@@ -1570,7 +1641,8 @@ class HlsSource:
         # Fragmented MP4 remuxed to TS: the variant's, and the separate audio's (no PCR: its
         # PES are woven into the video's TS), each with the URI of the init it read last.
         self._remuxer = Fmp4Remuxer()
-        self._sound_muxer: AudioMuxer | None = None  # 2.14: a station's packed sound
+        self._sound_muxer: AudioMuxer | None = None  # 2.14: a station's packed sound ...
+        self._sound_from = sound_from  # ... and where a resumed run's goes on
         self._init: str | None = None
         self._audio_remuxer = Fmp4Remuxer(pcr=False)
         self._audio_init: str | None = None
@@ -2030,7 +2102,8 @@ class HlsSource:
             if fragmented:
                 blocks = iter([self._remuxed(response, decryptor)])
             elif self._http.station:  # 2.14: a station's TS, or its packed sound as TS
-                blocks = self._station_ts(self._blocks(response, decryptor, self._capture))
+                read = self._blocks(response, decryptor, self._capture)
+                blocks = self._station_ts(read, float(segment.duration or 0))
             else:
                 blocks = _checked_ts(self._blocks(response, decryptor, self._capture))
             if self._audio_unknown or self._weaver is not None:
@@ -2063,11 +2136,22 @@ class HlsSource:
         else:
             self._skip(failure, content)
 
-    def _station_ts(self, blocks: Iterator[bytes]) -> Iterator[bytes]:
+    @property
+    def next_pts(self) -> int | None:
+        """A station's packed sound (2.14): where what it wrote ends (a resumed run's goes on
+        from here); None without any."""
+        muxer = self._sound_muxer
+        return muxer.next_pts if muxer is not None and muxer.started else None
+
+    def _station_ts(self, blocks: Iterator[bytes], duration: float) -> Iterator[bytes]:
         """A radio station's segment (2.14): TS as it came (`_checked_ts`), or packed sound
-        (ADTS AAC or MPEG audio after ID3 tags, the PRIV timestamp dating its first frame;
-        without one it follows on from the segment before) whole as one program's TS
-        (`raw_audio.AudioMuxer`), its counters running on from segment to segment."""
+        (ADTS AAC or MPEG audio after ID3 tags, the PRIV timestamp dating its first frame)
+        whole as one program's TS (`raw_audio.AudioMuxer`), its counters running on from
+        segment to segment. Its clock never steps back: undated, or dated behind the sound
+        written (a discontinuity's own clock, a resumed run's), it follows on from that sound
+        (a sound-only stream has no picture the clock joiner would re-base it onto). A segment
+        that goes on past `_PACKED_LIMIT`, or reads longer than `_PACKED_SLOW_S` and three
+        times its EXTINF, is no segment (a list's endless stream)."""
         head = b""
         for block in blocks:
             head += block
@@ -2076,19 +2160,23 @@ class HlsSource:
         if head[:1] == b"\x47":
             yield from _checked_ts(itertools.chain([head], blocks))
             return
-        whole = bytearray(head)
+        whole, began = bytearray(head), time.monotonic()
+        slow = max(_PACKED_SLOW_S, 3 * duration)
         for block in blocks:
             whole += block
-            if len(whole) > _PACKED_LIMIT:  # no segment: a list's endless stream, say
-                raise _BadSegment(_NOT_TS)
+            if len(whole) > _PACKED_LIMIT or time.monotonic() - began > slow:
+                raise _BadSegment(_NOT_TS)  # no segment: a list's endless stream, say
         data = bytes(whole)
         pts, start = raw_audio.packed_start(data)
         frames = AudioFramer().feed(data[start:])
         if not frames:
             raise _BadSegment(_NOT_TS)
-        if self._sound_muxer is None:
-            self._sound_muxer = AudioMuxer()
-        yield self._sound_muxer.mux(frames, pts=pts)
+        muxer = self._sound_muxer
+        if muxer is None:
+            muxer = self._sound_muxer = AudioMuxer(self._sound_from)
+        if pts is not None and muxer.started and pts_delta(muxer.next_pts, pts) < 0:
+            pts = None  # behind the sound written: it follows on from there
+        yield muxer.mux(frames, pts=pts)
 
     def _remuxed(self, response: Any, decryptor: _Decryptor | None) -> bytes:
         """A whole fMP4 segment as TS (`Fmp4Remuxer`); captured as that TS, which the
@@ -2544,9 +2632,9 @@ def _open_http(
     sound_from: int | None = None,
 ) -> Source:
     response, prefix, content = _first_answer(http, url, on_answer)
-    if content is None and radio and prefix[:1] != b"\x47" and window is None:
-        # 2.14: a station's sound
-        return _open_sound(http, url, response, prefix, capture, sound_from)
+    if content is None and radio and window is None:
+        # 2.14: a station's sound, or its TS
+        return _open_station(http, url, response, prefix, capture, sound_from)
     if content is None:
         archive = window is not None and _archive_window(window)
         if window is not None and not archive:  # 2.7: a server part is an HLS playlist's
@@ -2578,6 +2666,7 @@ def _open_http(
         after_seq=after_seq,
         copy=content if media.url == final else None,
         origin=final,
+        sound_from=sound_from,
     )
 
 
@@ -2649,8 +2738,8 @@ def open_source(
     recording, is never asked again (`TsSource`). ``radio`` (2.14): a radio list's station:
     every request asks for the song it plays (`Icy-MetaData: 1`), and an answer that is no TS
     nor playlist is read as its sound (`SoundSource`), or refused at once when it is in a
-    format QiTV cannot read (`_open_sound`); ``sound_from``, a resumed run's: its sound's first
-    PTS (where the old run's ended).
+    format QiTV cannot read (`_open_station`); ``sound_from``, a resumed run's: its sound's
+    first PTS (where the old run's ended; an HLS station's packed sound's too).
     """
     try:
         scheme = _scheme(url)

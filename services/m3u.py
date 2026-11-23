@@ -260,6 +260,7 @@ def parse_stations(stations: List[Any]) -> Dict:
                 "cmd": link,
                 free_radio.STATION_KEY: True,  # its sound read as a station's (2.14)
                 free_radio.CODEC_KEY: str(station.get("codec") or "").strip().upper(),
+                free_radio.CODEPAGE_KEY: free_radio.codepage_of(station),
             }
         )
     if left_out:

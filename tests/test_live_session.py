@@ -9060,6 +9060,17 @@ class RadioTests(LiveSessionCase):
         self.engine.answer()
         self.assertIs(self.engine.resumes[-1][2]["radio"], True)
 
+    def test_a_song_in_no_utf_8_reads_in_the_code_page_asked(self):
+        sid = self.playing(None)
+        title = "Mira Sol - Gökyüzü Şarkısı"
+        raw = title.encode("cp1254").decode("latin-1")  # as the helper keeps it
+        snapshot = self.engine._snapshots[sid]
+        snapshot["titles"] = [[0.0, raw, True]]
+        self.engine.sessionUpdated.emit(sid, dict(snapshot))
+        self.live.position = lambda: 10.0
+        self.assertEqual(self.live.stream_title("cp1254"), title)
+        self.assertEqual(self.live.stream_title(), raw.encode("latin-1").decode("cp1252"))
+
     def test_a_channels_session_reads_no_station(self):
         self.start()
         self.assertNotIn("radio", self.engine.opened[-1][2])

@@ -900,7 +900,7 @@ class FakeLiveSession(QObject):
     def is_pipeline(self):
         return self.mode == "pipeline"
 
-    def stream_title(self):  # 2.14: a station's song as the helper read it
+    def stream_title(self, codepage="cp1252"):  # 2.14: a station's song, as the helper read it
         return ""
 
     def start(self, url, **kwargs):

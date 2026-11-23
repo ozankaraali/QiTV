@@ -6,7 +6,12 @@ helper's sessions carry the songs in their state, and a station's light connect 
 recording. Every server is local; the sound is synthetic (tests/radio_fixtures.py)."""
 
 from contextlib import contextmanager
+import math
+from pathlib import Path
+import shutil
 import socket
+import struct
+import subprocess
 import tempfile
 import threading
 import time
@@ -19,6 +24,7 @@ from radio_fixtures import (
     adts_frame,
     adts_stream,
     id3_tag,
+    metadata_block,
     mp3_frame,
     mp3_stream,
     pes_units,
@@ -32,6 +38,7 @@ from services.live import source as source_module
 from services.live.raw_audio import AUDIO_PID, PMT_PID
 from services.live.source import (
     Discontinuity,
+    IcyTsSource,
     Reconnecting,
     SoundSource,
     SourceError,
@@ -184,8 +191,53 @@ class StationSourceTests(unittest.TestCase):
         body = ts_fixtures.make_stream(2)
         routes = {PATH: lambda _r, n: (200, {}, body) if n == 1 else (404, {}, b"")}
         source = self.open(self.server(routes))
-        self.assertIs(type(source), TsSource)
+        self.assertIs(type(source), IcyTsSource)  # the worker reads it as any raw TS
+        self.assertFalse(getattr(source, "sound", False))
         self.assertEqual(sound_of(collect(source)), body)
+
+    def test_a_ts_stations_inline_metadata_is_taken_out(self):
+        # An Icecast server can send TS and interleave its metadata blocks into it.
+        body = ts_fixtures.make_stream(2)
+        sent = with_icy(body, 8000, {0: "Mira Sol - Ferries"})
+        routes = {
+            PATH: lambda _r, n: (200, {"icy-metaint": "8000"}, sent) if n == 1 else (404, {}, b"")
+        }
+        items = collect(self.open(self.server(routes)))
+        self.assertEqual(sound_of(items), body)
+        self.assertIn(Title("Mira Sol - Ferries"), items)
+
+    def test_sound_whose_first_byte_is_a_ts_sync_byte_is_sound(self):
+        # Joined mid-frame, an ADTS stream's first byte can be 0x47: one byte is no TS.
+        body = b"\x47" + adts_stream(60)[1:]
+        routes = {PATH: lambda _r, n: (200, {}, body) if n == 1 else (404, {}, b"")}
+        source = self.open(self.server(routes))
+        self.assertIsInstance(source, SoundSource)
+        units = pes_units(sound_of(collect(source)), AUDIO_PID)
+        self.assertEqual([b for _, b in units], [adts_frame(k) for k in range(1, 60)])
+
+    def test_metadata_cut_by_a_reconnect_leaves_no_bytes_in_the_sound(self):
+        # The first connection breaks inside a metadata block: the next answer's blocks are
+        # counted afresh, and nothing of the cut block reaches the sound.
+        songs = {0: "Wexlo Tide - Pell", 1: "Mira Sol - Ferries"}
+        first = with_icy(mp3_stream(60), 8000, songs)
+        second_block = 8000 + len(metadata_block(songs[0])) + 8000
+        broken = first[: second_block + 1 + 10]  # its length byte and 10 bytes of its text
+        again = with_icy(mp3_stream(40, 40)[300:], 6000, {0: "Mira Sol - Ferries"})
+
+        def station(_request, count):
+            if count == 1:
+                return 200, {"icy-metaint": "8000"}, paced(broken)
+            if count == 2:
+                return 200, {"icy-metaint": "6000"}, paced(again)
+            return 404, {}, b""
+
+        items = collect(self.open(self.server({PATH: station})))
+        bodies = [b for _, b in pes_units(sound_of(items), AUDIO_PID)]
+        expected = [mp3_frame(k) for k in range(16000 // 417)]  # the first's whole frames
+        expected += [mp3_frame(k) for k in range(41, 80)]  # the second's, from mid-frame 40
+        self.assertEqual(bodies, expected)
+        titles = [item.text for item in items if isinstance(item, Title)]
+        self.assertEqual(titles, ["Wexlo Tide - Pell", "Mira Sol - Ferries"])
 
     def test_an_old_shoutcast_status_line_is_read(self):
         # "ICY 200 OK": http.client refuses that line; the station's answer is HTTP/1.0's.
@@ -305,6 +357,57 @@ class StationHlsTests(unittest.TestCase):
         with self.assertRaises(SourceError) as raised:
             list(source.chunks())
         self.assertEqual(raised.exception.kind, "unsupported")
+
+    def test_an_endless_segment_is_given_up_in_time_not_read_for_minutes(self):
+        # At a station's real time, its 8 MiB bound would take minutes: a time bound ends it.
+        def endless(request):
+            while True:
+                request.wfile.write(mp3_stream(4))
+                request.wfile.flush()
+                time.sleep(0.1)
+
+        routes = {"/list.m3u": (200, {}, b"#EXTM3U\n#EXTINF:-1,Wexlo FM\n/stream\n")}
+        routes["/stream"] = (200, {}, endless)
+        server = LocalSource(routes)
+        self.addCleanup(server.close)
+        with patch.object(source_module, "_PACKED_SLOW_S", 1.0):
+            source = open_source(
+                server.url + "/list.m3u",
+                headers={},
+                verify_ssl=True,
+                stop=threading.Event(),
+                radio=True,
+            )
+            started = time.monotonic()
+            with self.assertRaises(SourceError) as raised:
+                list(source.chunks())
+        self.assertEqual(raised.exception.kind, "unsupported")
+        self.assertLess(time.monotonic() - started, 5.0)
+
+    def test_its_clock_goes_on_across_a_discontinuity_that_starts_one_behind(self):
+        # A sound-only stream has no picture the clock joiner would re-base a new clock onto:
+        # a discontinuity whose ID3 time goes back follows on from the sound written.
+        ticks = 43 * 1024 * 90000 / 44100
+        stamps = (900_000, 900_000 + round(ticks), 90_000)
+
+        def segment(n):
+            return id3_tag(timestamp=stamps[n]) + adts_stream(43, 43 * n)
+
+        routes = {"/master.m3u8": (200, {}, self.MASTER)}
+        text = "#EXTM3U\n#EXT-X-TARGETDURATION:1\n#EXT-X-MEDIA-SEQUENCE:0\n"
+        text += "#EXTINF:1,\ns0.aac\n#EXTINF:1,\ns1.aac\n#EXT-X-DISCONTINUITY\n"
+        text += "#EXTINF:1,\ns2.aac\n#EXT-X-ENDLIST\n"
+        routes["/audio.m3u8"] = (200, {}, text.encode())
+        for n in range(3):
+            routes[f"/s{n}.aac"] = (200, {}, segment(n))
+        server = LocalSource(routes)
+        self.addCleanup(server.close)
+        items = collect(self.open(server, radio=True))
+        self.assertIn(Discontinuity(), items)
+        units = pes_units(sound_of(items), AUDIO_PID)
+        self.assertEqual(len(units), 129)
+        steps = {b[0] - a[0] for a, b in zip(units, units[1:])}
+        self.assertEqual(steps, {2089, 2090})  # never back
 
     def test_a_channels_master_of_sound_alone_is_refused_as_before(self):
         server = self.serve(lambda n: adts_stream(43, 43 * n))
@@ -443,7 +546,110 @@ class StationResumeTests(unittest.TestCase):
         units = pes_units(body[: len(body) // 188 * 188], AUDIO_PID)
         self.assertIn(mp3_frame(500), [unit for _, unit in units])
         steps = [b[0] - a[0] for a, b in zip(units, units[1:])]
-        self.assertTrue(all(0 < step <= 13_500 for step in steps), sorted(set(steps)))
+        # Each frame's own step, and once, at the junction, the newest segment's last frame's
+        # start plus 0.15 s (past the longest frame).
+        self.assertEqual(sorted(set(steps)), [2351, 2352, 13_500])
+        self.assertEqual(steps.count(13_500), 1)
+
+    def test_an_hls_stations_undated_sound_follows_the_old_runs_after_a_resume(self):
+        first = LocalSource(
+            {
+                "/a.m3u8": (200, {}, leaf("s0.aac", "s1.aac")),
+                "/s0.aac": (200, {}, adts_stream(43)),
+                "/s1.aac": (200, {}, adts_stream(43, 43)),
+            }
+        )
+        second = LocalSource(
+            {
+                "/a.m3u8": (200, {}, leaf("t0.aac", "t1.aac")),
+                "/t0.aac": (200, {}, adts_stream(43, 500)),
+                "/t1.aac": (200, {}, adts_stream(43, 543)),
+            }
+        )
+        self.addCleanup(first.close)
+        self.addCleanup(second.close)
+        helper = InProcessHelper(self)
+        radio = {"radio": True}
+        helper.parent.send(("open", "h", first.url + "/a.m3u8", {}, True, RAM, 6.0, radio))
+        helper.wait_for(lambda m: m == ("ended", "h"), timeout=15)
+        helper.parent.send(("park", "h"))
+        helper.wait_for(lambda m: m == ("parked", "h"))
+        states = [m for m in helper.messages if m[:2] == ("state", "h")]
+        last = max(addition[0] for m in states for addition in m[4])
+        helper.parent.send(("resume", "h", second.url + "/a.m3u8", {}, True, 6.0, radio))
+        helper.wait_for(lambda m: m == ("resumed", "h"), timeout=15)
+        helper.wait_for(lambda m: m == ("ended", "h"), timeout=15)
+        with urlopen(f"{helper.base_url}/h/stream/{last}.ts", timeout=5) as answer:
+            body = answer.read()
+        units = pes_units(body[: len(body) // 188 * 188], AUDIO_PID)
+        self.assertIn(adts_frame(500), [unit for _, unit in units])
+        steps = {b[0] - a[0] for a, b in zip(units, units[1:])}
+        self.assertEqual(steps, {2089, 2090})  # the new run's sound right after the old's
+
+
+FFMPEG = shutil.which("ffmpeg")
+
+
+@unittest.skipUnless(FFMPEG, "ffmpeg makes the station's sound")
+class StationFmp4Tests(unittest.TestCase):
+    """An HLS station of sound alone in fragmented MP4 (CMAF AAC, CODECS mp4a only): played
+    from the buffer, and the AI captions' decoder reads its sound off the side output."""
+
+    MASTER = b'#EXTM3U\n#EXT-X-STREAM-INF:BANDWIDTH=96000,CODECS="mp4a.40.2"\naudio.m3u8\n'
+
+    def test_a_sound_only_fmp4_station_plays_and_its_captions_read_its_sound(self):
+        directory = Path(self.enterContext(tempfile.TemporaryDirectory(prefix="qitv-fmp4-")))
+        subprocess.run(
+            [FFMPEG, "-y", "-loglevel", "error", "-f", "lavfi", "-i"]
+            + ["aevalsrc=0.4*sin(2*PI*(300+15*t)*t):s=44100:d=12", "-c:a", "aac", "-b:a", "96k"]
+            + ["-f", "hls", "-hls_time", "4", "-hls_segment_type", "fmp4"]
+            + ["-hls_playlist_type", "vod", "-hls_fmp4_init_filename", "init.mp4"]
+            + [
+                "-hls_segment_filename",
+                str(directory / "seg%d.m4s"),
+                str(directory / "audio.m3u8"),
+            ],
+            check=True,
+        )
+        self.assertIn(b"#EXT-X-MAP", (directory / "audio.m3u8").read_bytes())
+        routes = {f"/{f.name}": (200, {}, f.read_bytes()) for f in directory.iterdir()}
+        routes["/master.m3u8"] = (200, {}, self.MASTER)
+        upstream = LocalSource(routes)
+        self.addCleanup(upstream.close)
+        helper = InProcessHelper(self)
+        url = upstream.url + "/master.m3u8"
+        helper.parent.send(("open", "f", url, {}, True, RAM, 60.0, {"radio": True}))
+        helper.wait_for(lambda m: m == ("ended", "f"), timeout=30)
+        states = [m for m in helper.messages if m[:2] == ("state", "f")]
+        first = min(addition[0] for m in states for addition in m[4])
+        self.assertTrue(states[-1][2]["fmp4"])
+        self.assertFalse(states[-1][2]["video"])
+        with urlopen(f"{helper.base_url}/f/side/{first}.ts", timeout=10) as answer:
+            body = answer.read()
+        body = body[: len(body) // 188 * 188]
+        self.assertEqual(stream_types(body, 0x1000), [0x0F])
+        from services.vlc_bundle import use_bundled_vlc
+
+        use_bundled_vlc()
+        from services.captions.decoder import RATE, AudioDecoder
+
+        blocks: list[bytes] = []
+        decoder = AudioDecoder(lambda _us, pcm: blocks.append(bytes(pcm)))
+        decoder.start()
+        try:
+            for at in range(0, len(body), 64 * 1024):
+                decoder.feed(body[at : at + 64 * 1024])
+            decoder.end()
+            deadline = time.monotonic() + 20
+            while not decoder.finished() and time.monotonic() < deadline:
+                time.sleep(0.05)
+        finally:
+            decoder.stop()
+        pcm = b"".join(blocks)
+        samples = struct.unpack(f"<{len(pcm) // 2}h", pcm[: len(pcm) // 2 * 2])
+        self.assertGreater(len(samples), 10 * RATE)  # most of its 12 s
+        rms = math.sqrt(sum(v * v for v in samples) / len(samples))
+        self.assertGreater(rms, 1000)  # the tone, not silence
 
 
 class BurstTests(unittest.TestCase):

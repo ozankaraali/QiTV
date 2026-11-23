@@ -201,6 +201,7 @@ class StationsTests(unittest.TestCase):
                 "cmd": "http://stream.test/wexlo",
                 "radio_station": True,  # its sound read as a station's (2.14)
                 "radio_codec": "MP3",  # the directory's name for it (free_radio.plays_directly)
+                "radio_codepage": "cp1254",  # its song names', when no UTF-8 (its country TR)
                 "tv_genre_id": "Pop",
                 "number": "1",
             },
@@ -315,6 +316,32 @@ class StationsTests(unittest.TestCase):
         self.assertFalse(fr.plays_directly(None))
         codecs = [c[fr.CODEC_KEY] for c in parse_stations(STATIONS)["contents"]]
         self.assertEqual(set(codecs), {"MP3"})
+
+    def test_a_stations_song_names_code_page_is_its_languages(self):  # 2.14
+        for fields, page in (
+            ({"languagecodes": "tr", "countrycode": "DE"}, "cp1254"),  # a Turkish station abroad
+            ({"language": "turkish", "countrycode": "NL"}, "cp1254"),
+            ({"countrycode": "TR"}, "cp1254"),
+            ({"languagecodes": "en,ru", "countrycode": "GB"}, "cp1251"),  # the first that has one
+            ({"languagecodes": "uk"}, "cp1251"),
+            ({"countrycode": "BG"}, "cp1251"),
+            ({"languagecodes": "el"}, "cp1253"),
+            ({"languagecodes": "he"}, "cp1255"),
+            ({"languagecodes": "ar"}, "cp1256"),
+            ({"language": "persian"}, "cp1256"),
+            ({"countrycode": "LT"}, "cp1257"),
+            ({"languagecodes": "pl"}, "cp1250"),
+            ({"countrycode": "CZ"}, "cp1250"),
+            ({"languagecodes": "fr", "countrycode": "FR"}, "cp1252"),
+            ({}, "cp1252"),
+        ):
+            with self.subTest(fields=fields):
+                self.assertEqual(fr.codepage_of(fields), page)
+        turkish = {**STATIONS[0], "languagecodes": "tr"}
+        self.assertEqual(parse_stations([turkish])["contents"][0][fr.CODEPAGE_KEY], "cp1254")
+        self.assertEqual(fr.codepage({"cmd": "x"}), "cp1252")  # a list 2.13 made names none
+        self.assertEqual(fr.codepage({fr.CODEPAGE_KEY: "cp1254"}), "cp1254")
+        self.assertEqual(fr.codepage(None), "cp1252")
 
     def test_no_station_is_an_empty_list(self):
         playlist = parse_stations([])
