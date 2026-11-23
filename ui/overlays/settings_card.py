@@ -71,6 +71,7 @@ from PySide6.QtGui import (
 )
 from PySide6.QtWidgets import QApplication, QFileDialog, QWidget
 
+from services import system_open
 from services.i18n import N_, translate
 from ui.keymap import Action, key_hint
 from ui.overlays.base import Overlay, announce
@@ -146,7 +147,7 @@ _FOOTER = frozenset({"button", "busy", "rule", "lead", "alt"})  # stays in a sma
 _MIDDLE = frozenset(
     {"body", "code", "link", "label", "field", "paste", "found", "value", "track", "note"}
 )
-_HITS = ("paste", "field", "label", "button", "alt", "track")
+_HITS = ("paste", "field", "label", "button", "alt", "track", "link")
 # Words that wrap (the question's, the found line's), from the top left.
 _WRAP = int(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignTop | Qt.TextFlag.TextWordWrap)
 
@@ -239,6 +240,7 @@ class _Card(Overlay):
         self._body = ""
         self._code = ""  # a ChoiceCard's code to type elsewhere ("": none)
         self._link = ""  # where to type it
+        self._link_url = ""  # the page a click on `_link` opens in the browser ("": none)
         self._waits = False  # a ChoiceCard that waits: OK and the dimmed picture leave it be
         self._fields: list[Field] = []
         self._edits: dict[str, TextEdit] = {}
@@ -665,7 +667,10 @@ class _Card(Overlay):
             y += code_h
             if self._link:
                 y += gap(_ROW_GAP_U)
-                rects[LINK] = QRectF(left, y, inner, _line_h(fonts["link"]))
+                # As wide as its words, centred: a click beside them opens nothing.
+                link_w = min(inner, _advance(fonts["link"], self._link) + un.px(_ROW_GAP_U))
+                link_h = _line_h(fonts["link"])
+                rects[LINK] = QRectF(left + (inner - link_w) / 2, y, link_w, link_h)
                 y += rects[LINK].height()
         if self._body or self._fields or self._found:
             y += gap(_TITLE_GAP_U)
@@ -844,7 +849,9 @@ class _Card(Overlay):
             after = fonts["code"].letterSpacing()  # (also after the last letter: centred so)
             p.drawText(tile.translated(after / 2, 0), Qt.AlignmentFlag.AlignCenter, self._code)
         if LINK in rects:
-            p.setFont(fonts["link"])
+            font = QFont(fonts["link"])
+            font.setUnderline(self._hover == LINK)  # a page the click opens
+            p.setFont(font)
             p.setPen(qcolor(PALETTE.accent))
             p.drawText(rects[LINK], Qt.AlignmentFlag.AlignCenter, self._link)
         if BODY in rects:
@@ -1072,6 +1079,8 @@ class _Card(Overlay):
         elif zone in ("button", "alt") and self._enabled(zone, key):
             self._set_focus((zone, key))
             self._press(key)
+        elif zone == "link" and self._link_url:
+            system_open.open_url(self._link_url)  # the card waits on, for the code
 
     def mouseDoubleClickEvent(self, event: QMouseEvent) -> None:
         event.accept()
@@ -1095,14 +1104,21 @@ class _Card(Overlay):
             self.update()  # a drag in a field selects
         hit = self._hit(event.position())
         hover = hit if hit is not None and hit[0] in ("paste", "button", "alt") else None
+        if hit == LINK and self._link_url:
+            hover = LINK
         if hover != self._hover:
             self._hover = hover
+            if hover == LINK:
+                self.setCursor(Qt.CursorShape.PointingHandCursor)
+            else:
+                self.unsetCursor()
             self.update()
         event.accept()
 
     def leaveEvent(self, event: QEvent) -> None:
         if self._hover is not None:
             self._hover = None
+            self.unsetCursor()
             self.update()
         super().leaveEvent(event)
 
@@ -1264,16 +1280,18 @@ class ChoiceCard(_Card):
         *,
         code: str = "",
         link: str = "",
+        link_url: str = "",
         waits: bool = False,
     ) -> None:
         """Show the question (a question still shown is replaced, unanswered). The keys start
         on `default`, else the accent button, else Cancel, else the first. `alternates` (2.13.1)
         are its other ways, in the muted line under the buttons, answered as a button is.
-        `code` (2.14) is a code to type elsewhere, shown large, and `link` where to type it.
+        `code` (2.14) is a code to type elsewhere, shown large, and `link` where to type it;
+        a click on `link` opens `link_url` in the browser, when there is one.
         `waits`: OK on its Cancel and a click on the dimmed picture end nothing (Esc, Back and
         a click on Cancel do), so a code being entered elsewhere isn't lost by a stray press."""
         self._title, self._body = title, body
-        self._code, self._link = code, link
+        self._code, self._link, self._link_url = code, link, link_url
         self._waits = waits
         self._fields, self._edits = [], {}
         self._found, self._found_ok = "", True
@@ -1281,6 +1299,7 @@ class ChoiceCard(_Card):
         self._last_alt = ""
         self._busy = False
         self._hover = None
+        self.unsetCursor()  # (a hand over the last question's link)
         keys = [b.key for b in self._buttons]
         accent = next((b.key for b in self._buttons if b.accent), None)
         if default in keys:

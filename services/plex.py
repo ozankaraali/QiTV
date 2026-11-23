@@ -42,6 +42,7 @@ requests = lazy_module("requests")  # the window shows before the network librar
 PRODUCT = "QiTV"
 PLEX_TV = "https://plex.tv"
 LINK_PAGE = "plex.tv/link"  # where the viewer enters the code (shown as it is)
+LINK_URL = "https://plex.tv/link"  # LINK_PAGE in the browser (a click on it, 2.14)
 TIMEOUT_S = 30
 PROBE_TIMEOUT_S = 4  # a connection that answers its identity in this is the one used
 PIN_LIFETIME_S = 900  # plex.tv's 4-character codes last 15 minutes (it says so in each)

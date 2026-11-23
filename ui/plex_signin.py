@@ -140,6 +140,7 @@ class PlexSignIn(QObject):
         """The card as it is now; a `code` shows large, with where to enter it."""
         cancel = Button(CANCEL, translate(CANCEL_TEXT))
         link = plex.LINK_PAGE if code else ""
+        url = plex.LINK_URL if code else ""
         self.card.ask(
             translate(title),
             body,
@@ -147,6 +148,7 @@ class PlexSignIn(QObject):
             default,
             code=code,
             link=link,
+            link_url=url,
             waits=bool(code),
         )
         self._settings.show_card(self.card)

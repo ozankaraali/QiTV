@@ -6,6 +6,7 @@ job is held, and answered by the test (none reaches plex.tv). Fictional names an
 
 import os
 import unittest
+from unittest import mock
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
@@ -226,6 +227,22 @@ class PlexSignInTests(unittest.TestCase):
         cancel = self.card.control_rect("button", CANCEL).center().toPoint()
         QTest.mouseClick(self.card, Qt.MouseButton.LeftButton, pos=cancel)  # Cancel still is
         self.assertTrue(self.card.isHidden())
+
+    def test_a_click_on_plex_tv_link_opens_it_in_the_browser_and_the_card_waits_on(self):
+        self.cards.add()
+        self.press_on_add_card("PLEX")
+        self.jobs.answer({"id": 7, "code": "AB12", "expires_in": 900})
+        link = self.card.control_rect("link")
+        with mock.patch("ui.overlays.settings_card.system_open.open_url") as open_url:
+            beside = QPoint(int(link.left()) - 8, int(link.center().y()))
+            QTest.mouseClick(self.card, Qt.MouseButton.LeftButton, pos=beside)
+            open_url.assert_not_called()  # only its words are the link
+            QTest.mouseMove(self.card, link.center().toPoint())
+            self.assertEqual(self.card.cursor().shape(), Qt.CursorShape.PointingHandCursor)
+            QTest.mouseClick(self.card, Qt.MouseButton.LeftButton, pos=link.center().toPoint())
+            open_url.assert_called_once_with("https://plex.tv/link")
+        self.assertTrue(self.card.isVisible())  # still waiting for the code
+        self.assertEqual(self.card.code(), "AB12")
 
     def test_esc_still_cancels_the_code_card(self):
         self.cards.add()
