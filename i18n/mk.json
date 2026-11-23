@@ -1186,6 +1186,7 @@
   "The same PIN again:": "Истиот PIN повторно:",
   "The server asks to sign in again: Settings → Providers → this server → Address and login.": "Серверот бара повторна најава: Поставки → Провајдери → овој сервер → Адреса и најава.",
   "The server could not be reached ({reason}).": "Серверот не е достапен ({reason}).",
+  "The server didn't convert it: the file plays as it is": "Серверот не го конвертираше: датотеката се пушта таква каква што е",
   "The server has nothing at this address (404)": "Серверот нема ништо на оваа адреса (404)",
   "The server refused QiTV (403)": "Серверот го одби QiTV (403)",
   "The space AI captions' speech models take on this computer.": "Просторот што го зафаќаат говорните модели на AI титловите на овој компјутер.",

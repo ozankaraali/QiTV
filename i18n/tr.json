@@ -1176,6 +1176,7 @@
   "The same PIN again:": "Aynı PIN'i tekrar girin:",
   "The server asks to sign in again: Settings → Providers → this server → Address and login.": "Sunucu yeniden oturum açmanızı istiyor: Ayarlar → Sağlayıcılar → bu sunucu → Adres ve oturum açma.",
   "The server could not be reached ({reason}).": "Sunucuya ulaşılamadı ({reason}).",
+  "The server didn't convert it: the file plays as it is": "Sunucu dönüştürmedi: dosya olduğu gibi oynatılıyor",
   "The server has nothing at this address (404)": "Sunucuda bu adreste bir şey yok (404)",
   "The server refused QiTV (403)": "Sunucu QiTV'yi reddetti (403)",
   "The space AI captions' speech models take on this computer.": "Yapay zekâ altyazılarının konuşma modellerinin bu bilgisayarda kapladığı alan.",

@@ -133,6 +133,28 @@ class RouteTests(unittest.TestCase):
         self.assertEqual(http.asked[0][2]["ParentId"], "L1")
 
 
+class ConversionAllowedTests(unittest.TestCase):  # 2.14: a refused conversion is said
+    def test_the_users_policy_says_whether_the_server_converts_for_it(self):
+        refused = {"Id": "u1", "Policy": {"EnableVideoPlaybackTranscoding": False}}
+        for kind in (ms.JELLYFIN, ms.EMBY):
+            c, http = client({("GET", "/Users/u1"): (200, refused)}, kind=kind)
+            self.assertFalse(c.may_convert())
+            self.assertEqual([a[1] for a in http.asked], ["/Users/u1"])
+        allowed = {"Policy": {"EnableVideoPlaybackTranscoding": True}}
+        self.assertTrue(client({("GET", "/Users/u1"): (200, allowed)})[0].may_convert())
+        unsaid = {"Id": "u1"}
+        self.assertTrue(client({("GET", "/Users/u1"): (200, unsaid)})[0].may_convert())
+
+    def test_a_policy_not_answered_lets_the_conversion_be_tried(self):
+        c, _ = client({("GET", "/Users/u1"): (500, None)})
+        with self.assertLogs("services.media_server", "INFO") as logs:
+            self.assertTrue(c.may_convert())
+        self.assertNotIn("tok", "".join(logs.output))
+        c, _ = client({("GET", "/Users/u1"): (401, None)})
+        with self.assertRaises(ms.SignInNeeded):
+            c.may_convert()
+
+
 class DeviceIdTests(unittest.TestCase):
     def test_a_server_without_a_device_id_gets_one_that_stays(self):  # 2.8
         # A server saved without Verify: each request was a new device on the server.

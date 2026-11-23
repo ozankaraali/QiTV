@@ -1186,6 +1186,7 @@
   "The same PIN again:": "Dezelfde pincode nog een keer:",
   "The server asks to sign in again: Settings → Providers → this server → Address and login.": "De server vraagt opnieuw in te loggen: Instellingen → Providers → deze server → Adres en login.",
   "The server could not be reached ({reason}).": "De server was niet bereikbaar ({reason}).",
+  "The server didn't convert it: the file plays as it is": "De server heeft het niet geconverteerd: het bestand speelt zoals het is",
   "The server has nothing at this address (404)": "De server heeft niets op dit adres (404)",
   "The server refused QiTV (403)": "De server weigerde QiTV (403)",
   "The space AI captions' speech models take on this computer.": "De ruimte die de spraakmodellen van AI-ondertitels op deze computer innemen.",

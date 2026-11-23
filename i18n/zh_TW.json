@@ -1176,6 +1176,7 @@
   "The same PIN again:": "再次輸入相同的 PIN：",
   "The server asks to sign in again: Settings → Providers → this server → Address and login.": "伺服器要求重新登入：設定 → 供應商 → 此伺服器 → 位址和登入。",
   "The server could not be reached ({reason}).": "無法連線到伺服器（{reason}）。",
+  "The server didn't convert it: the file plays as it is": "伺服器沒有轉換：按原檔案播放",
   "The server has nothing at this address (404)": "伺服器在此網址沒有內容（404）",
   "The server refused QiTV (403)": "伺服器拒絕了 QiTV（403）",
   "The space AI captions' speech models take on this computer.": "AI 字幕的語音模型在此電腦上佔用的空間。",

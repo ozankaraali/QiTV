@@ -1186,6 +1186,7 @@
   "The same PIN again:": "El mateix PIN una altra vegada:",
   "The server asks to sign in again: Settings → Providers → this server → Address and login.": "El servidor demana tornar a iniciar la sessió: Configuració → Proveïdors → aquest servidor → Adreça i inici de sessió.",
   "The server could not be reached ({reason}).": "No s'ha pogut connectar amb el servidor ({reason}).",
+  "The server didn't convert it: the file plays as it is": "El servidor no l'ha convertit: el fitxer es reprodueix tal com és",
   "The server has nothing at this address (404)": "El servidor no té res en aquesta adreça (404)",
   "The server refused QiTV (403)": "El servidor ha rebutjat QiTV (403)",
   "The space AI captions' speech models take on this computer.": "L'espai que ocupen en aquest ordinador els models de veu dels subtítols amb IA.",

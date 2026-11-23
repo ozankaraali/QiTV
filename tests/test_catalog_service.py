@@ -657,6 +657,21 @@ class MediaServerCatalogTests(unittest.TestCase):
             service.media_menu({"id": "f1"}), {"versions": [{"id": "p1"}], "quality": playing}
         )
 
+    def test_a_refused_conversion_is_kept_with_the_menu(self):  # 2.14: the TV says so
+        service, _providers, factory, _ = make_service(dict(JELLY))
+        playing = ms.Quality(source="p1")
+        factory.results["media_link"] = {
+            "result": {
+                "link": "http://s.test/f.mkv",
+                "versions": [{"id": "p1"}],
+                "quality": playing,
+                "refused": True,
+            }
+        }
+        service.request_link({"id": "f1", "cmd": ""}, section="movies")
+        QCoreApplication.processEvents()
+        self.assertIs(service.media_menu({"id": "f1"})["refused"], True)
+
 
 class CatalogShutdownTests(unittest.TestCase):
     """The window is closing: start no more jobs and report nothing."""

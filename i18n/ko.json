@@ -1176,6 +1176,7 @@
   "The same PIN again:": "같은 PIN을 한 번 더:",
   "The server asks to sign in again: Settings → Providers → this server → Address and login.": "서버가 다시 로그인하라고 해요: 설정 → 제공자 → 이 서버 → 주소 및 로그인.",
   "The server could not be reached ({reason}).": "서버에 연결하지 못했어요 ({reason}).",
+  "The server didn't convert it: the file plays as it is": "서버가 변환하지 않았어요: 파일을 그대로 재생해요",
   "The server has nothing at this address (404)": "이 주소에 아무것도 없어요 (404)",
   "The server refused QiTV (403)": "서버가 QiTV를 거부했어요 (403)",
   "The space AI captions' speech models take on this computer.": "AI 자막의 음성 모델이 이 컴퓨터에서 차지하는 공간이에요.",

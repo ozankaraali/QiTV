@@ -1196,6 +1196,7 @@
   "The same PIN again:": "Tas pats PIN vēlreiz:",
   "The server asks to sign in again: Settings → Providers → this server → Address and login.": "Serveris prasa pieteikties vēlreiz: Iestatījumi → Nodrošinātāji → šis serveris → Adrese un pieteikšanās.",
   "The server could not be reached ({reason}).": "Serveri neizdevās sasniegt ({reason}).",
+  "The server didn't convert it: the file plays as it is": "Serveris to nekonvertēja: fails tiek atskaņots tāds, kāds ir",
   "The server has nothing at this address (404)": "Serverim šajā adresē nekā nav (404)",
   "The server refused QiTV (403)": "Serveris noraidīja QiTV (403)",
   "The space AI captions' speech models take on this computer.": "Vieta, ko AI subtitru runas modeļi aizņem šajā datorā.",

@@ -1176,6 +1176,7 @@
   "The same PIN again:": "PIN yang sama sekali lagi:",
   "The server asks to sign in again: Settings → Providers → this server → Address and login.": "Pelayan meminta log masuk semula: Tetapan → Pembekal → pelayan ini → Alamat dan log masuk.",
   "The server could not be reached ({reason}).": "Pelayan tidak dapat dicapai ({reason}).",
+  "The server didn't convert it: the file plays as it is": "Pelayan tidak menukarnya: fail dimainkan seperti asal",
   "The server has nothing at this address (404)": "Pelayan tiada apa-apa di alamat ini (404)",
   "The server refused QiTV (403)": "Pelayan menolak QiTV (403)",
   "The space AI captions' speech models take on this computer.": "Ruang yang diambil oleh model pertuturan sari kata AI pada komputer ini.",

@@ -1196,6 +1196,7 @@
   "The same PIN again:": "Același PIN din nou:",
   "The server asks to sign in again: Settings → Providers → this server → Address and login.": "Serverul cere autentificare din nou: Setări → Furnizori → acest server → Adresă și autentificare.",
   "The server could not be reached ({reason}).": "Serverul nu a putut fi contactat ({reason}).",
+  "The server didn't convert it: the file plays as it is": "Serverul nu l-a convertit: fișierul se redă așa cum este",
   "The server has nothing at this address (404)": "Serverul nu are nimic la această adresă (404)",
   "The server refused QiTV (403)": "Serverul a refuzat QiTV (403)",
   "The space AI captions' speech models take on this computer.": "Spațiul ocupat pe acest computer de modelele vocale ale subtitrărilor AI.",

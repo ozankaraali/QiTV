@@ -1186,6 +1186,7 @@
   "The same PIN again:": "Ξανά το ίδιο PIN:",
   "The server asks to sign in again: Settings → Providers → this server → Address and login.": "Ο διακομιστής ζητά ξανά σύνδεση: Ρυθμίσεις → Πάροχοι → αυτός ο διακομιστής → Διεύθυνση και σύνδεση.",
   "The server could not be reached ({reason}).": "Δεν ήταν δυνατή η σύνδεση με τον διακομιστή ({reason}).",
+  "The server didn't convert it: the file plays as it is": "Ο διακομιστής δεν έκανε μετατροπή: το αρχείο παίζει όπως είναι",
   "The server has nothing at this address (404)": "Ο διακομιστής δεν έχει τίποτα σε αυτή τη διεύθυνση (404)",
   "The server refused QiTV (403)": "Ο διακομιστής αρνήθηκε το QiTV (403)",
   "The space AI captions' speech models take on this computer.": "Ο χώρος που πιάνουν στον υπολογιστή τα μοντέλα ομιλίας των υποτίτλων AI.",

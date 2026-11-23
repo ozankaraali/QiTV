@@ -1176,6 +1176,7 @@
   "The same PIN again:": "PIN เดิมอีกครั้ง:",
   "The server asks to sign in again: Settings → Providers → this server → Address and login.": "เซิร์ฟเวอร์ขอให้เข้าสู่ระบบอีกครั้ง: การตั้งค่า → ผู้ให้บริการ → เซิร์ฟเวอร์นี้ → ที่อยู่และการเข้าสู่ระบบ",
   "The server could not be reached ({reason}).": "เชื่อมต่อเซิร์ฟเวอร์ไม่ได้ ({reason})",
+  "The server didn't convert it: the file plays as it is": "เซิร์ฟเวอร์ไม่ได้แปลง: เล่นไฟล์ตามต้นฉบับ",
   "The server has nothing at this address (404)": "เซิร์ฟเวอร์ไม่มีอะไรที่ที่อยู่นี้ (404)",
   "The server refused QiTV (403)": "เซิร์ฟเวอร์ปฏิเสธ QiTV (403)",
   "The space AI captions' speech models take on this computer.": "พื้นที่ที่โมเดลเสียงของคำบรรยาย AI ใช้บนคอมพิวเตอร์เครื่องนี้",

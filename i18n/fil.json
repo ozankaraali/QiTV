@@ -1186,6 +1186,7 @@
   "The same PIN again:": "Parehong PIN ulit:",
   "The server asks to sign in again: Settings → Providers → this server → Address and login.": "Humihingi ang server na mag-sign in ulit: Mga Setting → Mga Provider → server na ito → Address at login.",
   "The server could not be reached ({reason}).": "Hindi maabot ang server ({reason}).",
+  "The server didn't convert it: the file plays as it is": "Hindi ito na-convert ng server: ipe-play ang file kung ano ito",
   "The server has nothing at this address (404)": "Walang laman ang server sa address na ito (404)",
   "The server refused QiTV (403)": "Tinanggihan ng server ang QiTV (403)",
   "The space AI captions' speech models take on this computer.": "Ang espasyong kinukuha ng mga speech model ng AI caption sa computer na ito.",

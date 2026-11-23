@@ -2146,6 +2146,66 @@ class VodTests(ControllerTestCase):
         asked = self.watch_on_the_phone_while_converted("JELLYFIN")
         self.assertEqual(asked, ms.Quality(height=720, bitrate=4_000_000))
 
+    def converted_plex_title(self):
+        self.catalog.ptype = "PLEX"
+        self.play_movie()
+        self.catalog.linkReady.emit(1, "http://vod/heat.mkv")
+        self.controller.change_quality(ms.Quality(height=720, bitrate=4_000_000))
+        self.catalog.linkReady.emit(2, "http://vod/heat.m3u8")
+
+    def test_the_pictures_menu_gives_a_plex_title_its_file_never_a_conversion(self):  # 2.14
+        # Copy stream link and Play in VLC/mpv hand the address outside QiTV, which never
+        # stops a conversion session there: a Plex title goes as its file is.
+        self.converted_plex_title()
+        shown = []
+        with mock.patch.object(
+            self.controller._context, "show_playing", lambda *a: shown.append(a[0])
+        ):
+            self.controller.video_context(QPoint(3, 4))
+        self.assertEqual(shown[0].quality, ms.Quality(source=""))
+        self.assertTrue(self.controller._current.quality.converted)  # it plays on so
+
+    def test_an_outside_player_set_in_settings_gets_a_plex_title_as_its_file_is(self):  # 2.14
+        self.converted_plex_title()
+        self.config.play_in_vlc = True
+        self.controller.play_vod({"id": "m8", "name": "Ronin", "cmd": "x"}, "movie", play_context())
+        self.assertEqual(self.catalog.qualities[-1], ms.Quality(source=""))  # carried: not here
+        self.catalog.linkReady.emit(3, "http://vod/ronin.mkv")  # VLC plays the file
+        self.assertEqual(self.external.calls[-1], ("vlc", "http://vod/ronin.mkv"))
+        self.config.play_in_vlc = False
+        self.controller.play_vod({"id": "m9", "name": "Tron", "cmd": "y"}, "movie", play_context())
+        self.assertEqual(self.catalog.qualities[-1], ms.Quality(height=720, bitrate=4_000_000))
+
+    def test_a_conversion_the_server_refused_is_said_and_carried_no_further(self):  # 2.14
+        for ptype in ("PLEX", "JELLYFIN"):
+            with self.subTest(ptype=ptype):
+                self.catalog.ptype = ptype
+                self.catalog.menus["m7"] = {
+                    "versions": [{"id": "hd"}],
+                    "quality": ms.Quality("hd"),  # the file plays, not the conversion asked
+                    "refused": True,
+                }
+                said = ("The server didn't convert it: the file plays as it is", "info")
+                before = self.toast.messages().count(said)
+                self.play_movie()
+                self.catalog.linkReady.emit(len(self.catalog.links), "http://vod/heat.mkv")
+                self.assertEqual(self.toast.messages().count(said), before)  # none was asked
+                self.controller.change_quality(ms.Quality(height=720, bitrate=4_000_000))
+                self.catalog.linkReady.emit(len(self.catalog.links), "http://vod/heat.mkv")
+                self.assertEqual(self.toast.messages().count(said), before + 1)
+                self.controller.play_vod(
+                    {"id": "m8", "name": "Ronin", "cmd": "x"}, "movie", play_context()
+                )
+                self.assertIsNone(self.catalog.qualities[-1])  # its next titles as they are
+
+    def test_a_title_its_file_already_fits_says_nothing(self):  # 2.14: not a refusal
+        self.catalog.menus["m7"] = {"versions": [{"id": "sd"}], "quality": ms.Quality("sd")}
+        self.play_movie()
+        self.catalog.linkReady.emit(1, "http://vod/heat.mkv")
+        self.controller.change_quality(ms.Quality(height=720, bitrate=4_000_000))
+        self.catalog.linkReady.emit(2, "http://vod/heat.mkv")
+        self.assertEqual([m for m in self.toast.messages() if "convert" in m[0]], [])
+
     def test_the_quality_button_shows_for_a_title_its_server_offers_choices_for(self):
         self.catalog.menus["m7"] = {"versions": [{"id": "hd"}], "quality": ms.Quality("hd")}
         self.play_movie()

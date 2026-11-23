@@ -297,6 +297,7 @@ class LinkWorkerTest(unittest.TestCase):
         self.assertEqual(params["X-Plex-Client-Identifier"], "client-1")
         self.assertTrue(answer["link"].startswith(BASE + plex.TRANSCODE + "/session/"))
         self.assertEqual(answer["quality"], ms.Quality("902", 720, 4_000_000))  # of 1080p
+        self.assertNotIn("refused", answer)
         self.assertEqual([v["id"] for v in answer["versions"]], ["2", "902"])
         server = FakeServer()  # the 4K version chosen before: that one converted
         self.link(server, quality=ms.Quality("2", 1080, 8_000_000), screen_4k=True)
@@ -315,6 +316,7 @@ class LinkWorkerTest(unittest.TestCase):
         server = FakeServer(media=small)
         answer = self.link(server, quality=ms.Quality(height=720, bitrate=4_000_000))["finished"]
         self.assertEqual(server.conversions, [])  # the server's processor for nothing
+        self.assertNotIn("refused", self.link(server, quality=ms.CONVERSIONS[1])["finished"])
         self.assertTrue(answer["link"].startswith(BASE + "/library/parts/7/"))
         self.assertEqual(answer["quality"], ms.Quality(source="7"))
 
@@ -323,10 +325,12 @@ class LinkWorkerTest(unittest.TestCase):
         answer = self.link(FakeServer(converts=""), quality=converted)["finished"]
         self.assertTrue(answer["link"].startswith(BASE + "/library/parts/902/"))
         self.assertEqual(answer["quality"], ms.Quality(source="902"))  # the ⚙ ticks the file
+        self.assertIs(answer["refused"], True)  # the TV says so
         refused = ms.MediaServerError("The server answered 400")
         with self.assertLogs("services.plex_workers", "INFO") as logs:
             answer = self.link(FakeServer(converts=refused), quality=converted)["finished"]
         self.assertEqual(answer["quality"], ms.Quality(source="902"))
+        self.assertIs(answer["refused"], True)
         self.assertIn("The server answered 400", logs.output[0])
         for text in logs.output:  # never the address or the token
             self.assertNotIn("server-token", text)

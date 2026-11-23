@@ -165,7 +165,7 @@ from ui.pip_controls import PipControls
 from ui.player_keys import PlayerKeys
 from ui.pointer import PointerInput
 from ui.provider_flow import ProviderFlow
-from ui.quality_controls import SIZE_WHILE_RECORDING, QualityControls
+from ui.quality_controls import CONVERSION_REFUSED, SIZE_WHILE_RECORDING, QualityControls
 from ui.song_jobs import AlbumJob, CoverJob, cover_colours
 
 # i18n: a toast: the multiview cannot open while a picture is cast to a TV
@@ -2006,7 +2006,8 @@ class TVController(QObject):
         target = self._current
         if self._closed or target is None or self.multiview_shown():
             return
-        self._context.show_playing(target, global_pos, self.overlays.transport)
+        # Its players and its link go outside QiTV: a Plex title's file (2.14: _as_its_file).
+        self._context.show_playing(self._as_its_file(target), global_pos, self.overlays.transport)
 
     def video_double_clicked(self) -> None:
         """Fullscreen; on the multiview's grid, the focused tile big (its first click focused
@@ -2356,6 +2357,8 @@ class TVController(QObject):
         )
         if converted is not None:  # 2.8: the server's conversion chosen goes on for its titles
             target = replace(target, quality=converted)
+            if self._external_launcher() is not None:
+                target = self._as_its_file(target)  # 2.14: Settings' outside player takes it
         title = target.title
         beside = self._title_beside_channel()  # what plays large is a title, a channel small
         if self._pip is not None:
@@ -2377,6 +2380,27 @@ class TVController(QObject):
         menu = getattr(self.catalog, "media_menu", None)
         return menu(item) if callable(menu) else None
 
+    def _as_its_file(self, target: Target) -> Target:
+        """`target` as anything outside QiTV's own player gets it (2.14: a phone, Settings'
+        outside player, the picture's menu: its players and Copy stream link): a Plex title
+        as its file is, never the server's conversion, a session of the server's that only
+        QiTV's own play stops (services.media_reporter)."""
+        quality = target.quality
+        if target.live or target.local or not getattr(quality, "converted", False):
+            return target
+        if not is_plex(item_provider.provider_type(self.catalog, target.item)):
+            return target
+        return replace(target, quality=Quality(source=quality.source))
+
+    def _conversion_refused(self, target: Target) -> None:
+        """2.14: the server didn't make the conversion the ⚙ asked for (its owner allows none,
+        say): the title plays as its file is, the viewer is told, and the conversion goes on
+        to none of that server's next titles (choosing one again asks the server again)."""
+        self._media_quality.pop(
+            provider_of(target.item) or self.catalog.current_provider_name(), None
+        )
+        self._toast(translate(CONVERSION_REFUSED))
+
     def change_quality(self, quality: Any) -> None:
         """The quality menu's choice (2.8): the film or episode playing opens again in that
         quality (a media server's version as it is, or its conversion), on from where it is.
@@ -2391,10 +2415,10 @@ class TVController(QObject):
         else:
             self._media_quality.pop(provider, None)
         start = max(0, int(self.session.time_ms() or 0)) if self._has_media() else None
-        self._request(
-            replace(target, quality=quality, start_ms=start, start_over=False, zapped=False),
-            chosen_now=True,
-        )
+        again = replace(target, quality=quality, start_ms=start, start_over=False, zapped=False)
+        if self._external_launcher() is not None:
+            again = self._as_its_file(again)  # 2.14: Settings' outside player takes it
+        self._request(again, chosen_now=True)
 
     # ---- AI captions on a provider's film (2.9) ----------------------------------------------
     def film_relay_wanted(self) -> bool:
@@ -2943,7 +2967,10 @@ class TVController(QObject):
         if target.live:
             offered = self.live_menu() is not None
         else:
-            offered = not target.local and bool(self._media_menu(target.item))
+            menu = None if target.local else self._media_menu(target.item)
+            offered = bool(menu)
+            if menu and menu.get("refused") and getattr(target.quality, "converted", False):
+                self._conversion_refused(target)
         self.overlays.transport.set_quality_available(offered)
         if self._quality is not None:
             self._quality.drop_question()  # one asked about what played before
@@ -6007,13 +6034,9 @@ class TVController(QObject):
         target = target or self._current
         if self._closed or target is None:
             return False
-        target = self._owned_target(target)  # a link: whose stream it is now
-        if getattr(target.quality, "converted", False) and is_plex(
-            item_provider.provider_type(self.catalog, target.item)
-        ):
-            # 2.14: a phone gets a Plex title through QiTV's home door, which passes its file
-            # (the server's conversion is a playlist of pieces on the server): as it is.
-            target = replace(target, quality=Quality(source=target.quality.source))
+        # 2.14: a phone gets a Plex title through QiTV's home door, which passes its file (the
+        # server's conversion is a playlist of pieces on the server): as it is.
+        target = self._as_its_file(self._owned_target(target))  # a link: whose stream it is now
         chosen = target
         if target.local:
             path = str(target.item.get("path") or "")

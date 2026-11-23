@@ -1186,6 +1186,7 @@
   "The same PIN again:": "Dieselbe PIN noch einmal:",
   "The server asks to sign in again: Settings → Providers → this server → Address and login.": "Der Server verlangt eine neue Anmeldung: Einstellungen → Anbieter → dieser Server → Adresse und Anmeldedaten.",
   "The server could not be reached ({reason}).": "Der Server war nicht erreichbar ({reason}).",
+  "The server didn't convert it: the file plays as it is": "Der Server hat den Titel nicht umgewandelt: Die Datei läuft so, wie sie ist",
   "The server has nothing at this address (404)": "Unter dieser Adresse gibt es auf dem Server nichts (404)",
   "The server refused QiTV (403)": "Der Server hat QiTV abgewiesen (403)",
   "The space AI captions' speech models take on this computer.": "Der Platz, den die Sprachmodelle der KI-Untertitel auf diesem Computer belegen.",

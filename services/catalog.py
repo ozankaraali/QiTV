@@ -1374,6 +1374,8 @@ class CatalogService(QObject):
                 "versions": payload["versions"],
                 "quality": payload.get("quality"),
             }
+            if payload.get("refused"):  # 2.14: the conversion asked for, which it didn't make
+                self._media_menus[item_id]["refused"] = True
         url = str(payload.get("link") or "").strip()
         if url:
             self.linkReady.emit(job.data, url)
@@ -1383,7 +1385,8 @@ class CatalogService(QObject):
     def media_menu(self, item: dict) -> Optional[dict]:
         """What the quality menu offers for a media server's title its link was asked for
         (Jellyfin's, Emby's, Plex's: 2.14): {"versions": [media_server.version_of …],
-        "quality": the Quality playing}; else None."""
+        "quality": the Quality playing, and "refused": True when the server didn't make the
+        conversion asked for}; else None."""
         return self._media_menus.get(str(item.get("id") or ""))
 
     def _on_link_error(self, job: _Job, message: str) -> None:

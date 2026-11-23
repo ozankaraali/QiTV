@@ -1196,6 +1196,7 @@
   "The same PIN again:": "Ten istý PIN znova:",
   "The server asks to sign in again: Settings → Providers → this server → Address and login.": "Server žiada nové prihlásenie: Nastavenia → Poskytovatelia → tento server → Adresa a prihlásenie.",
   "The server could not be reached ({reason}).": "Server sa nepodarilo dosiahnuť ({reason}).",
+  "The server didn't convert it: the file plays as it is": "Server ho neprekonvertoval: súbor sa prehráva tak, ako je",
   "The server has nothing at this address (404)": "Server na tejto adrese nič nemá (404)",
   "The server refused QiTV (403)": "Server odmietol QiTV (403)",
   "The space AI captions' speech models take on this computer.": "Miesto, ktoré rečové modely AI titulkov zaberajú na tomto počítači.",

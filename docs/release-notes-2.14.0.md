@@ -24,7 +24,9 @@ others' distributions, which may have malware.**
   versions.
 - **Converted when you ask.** The ⚙ also offers your server's conversions (1080p, 720p, 480p),
   as for Jellyfin and Emby, for a slow connection. The first one asks first, since it uses the
-  server's processor, and QiTV stops the conversion as soon as the title stops.
+  server's processor, and QiTV stops the conversion as soon as the title stops. A Plex,
+  Jellyfin or Emby server that doesn't allow you conversions plays the file as it is, and QiTV
+  says so.
 - **Your place is kept on the server.** QiTV tells your server how far you watched; a title
   watched to the end is marked watched by the server.
 - **At home and away.** QiTV keeps every address your server has and finds it again when one
