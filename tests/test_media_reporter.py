@@ -164,6 +164,13 @@ class MediaReporterTests(unittest.TestCase):
             ],
         )
 
+    def test_the_play_the_server_heard_start_is_known_by_its_address(self):  # 2.14
+        self.assertEqual(self.reporter.active_url(), "")
+        self.reporter.playing(url())
+        self.assertEqual(self.reporter.active_url(), url())
+        self.reporter.playing("http://elsewhere.test/live.ts")  # another provider's: it stops
+        self.assertEqual(self.reporter.active_url(), "")
+
     def test_a_plex_conversion_ends_on_the_server_with_its_play(self):  # 2.14
         ref = plex.parse_stream_url(self.CONVERTED, [self.PLEX_BASE])
         made = []

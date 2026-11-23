@@ -1335,6 +1335,34 @@ class LibraryPlayTests(PipCase):
         reporter.playing.assert_called_with("http://vod/heat.mkv")
         reporter.position.assert_called_with(61_000, url="http://vod/heat.mkv")
 
+    def swapped_small_then(self, closed: bool):
+        """A film swapped small, closed there or not, then a zap of the large picture: what
+        its server's reporter heard of the zap."""
+        reporter = mock.Mock()
+        reporter.active_url.return_value = "http://vod/heat.mkv"  # the film's play
+        with mock.patch.object(self.controller, "_media", reporter):
+            self.start_large(0)
+            self.play_from_library()
+            self.controller.handle(Action.SWAP)  # the channel large, the film small
+            if closed:
+                self.label.closeRequested.emit()  # the × on the small picture: the film
+            reporter.reset_mock()
+            self.controller.handle(Action.CH_NEXT)
+            self.ready("http://stream/2")
+        return reporter
+
+    def test_a_film_swapped_small_plays_on_when_the_large_picture_zaps(self):  # 2.14
+        # Its server's play goes on (a Plex conversion's session with it): the channel tuned
+        # large replaces nothing the server plays.
+        reporter = self.swapped_small_then(closed=False)
+        self.assertTrue(self.sessions.pip_open())
+        reporter.playing.assert_not_called()
+        reporter.stopped.assert_not_called()
+
+    def test_a_film_closed_small_is_told_stopped_at_the_next_tune(self):  # 2.14
+        reporter = self.swapped_small_then(closed=True)
+        reporter.playing.assert_called_once_with("http://stream/2")  # (its play stops)
+
     def test_a_movie_swapped_small_shows_its_title_without_live_wording(self):
         # Polish: the label used live wording ("Connecting…") for the film playing small.
         self.start_large(0)

@@ -2723,7 +2723,10 @@ class TVController(QObject):
         if self._media is not None and launcher is None and not multiview:
             # 2.8: a server's title starts (another's stops); one handed to an outside player
             # is told stopped as it goes (_launch), nothing after: QiTV can't see it play.
-            self._media.playing(url)
+            # 2.14: a channel tuned large replaces no title swapped small: it plays on (a
+            # Plex conversion's session too); the next tune after it closed tells its stop.
+            if not (target.live and self._plays_small(self._media.active_url())):
+                self._media.playing(url)
         self._freed_for = None  # it came: the large picture is the title's
         if target is self._room_for and self._pip is not None:
             self._room_for = None
@@ -2845,6 +2848,14 @@ class TVController(QObject):
             self.overlays.transport.show_vod(target.title, target.subtitle)
         if self._current is target:  # else opening it failed at once (see _guarded)
             self._delivered(target, url)
+
+    def _plays_small(self, url: str) -> bool:
+        """Whether the small picture plays the movie or episode at `url` (swapped small)."""
+        sessions, pip = self.sessions, self._pip
+        small = sessions.small() if sessions is not None else None
+        if not url or small is None or pip is None or pip.small_title(small.name) is None:
+            return False
+        return pip.view(small.name).url == url
 
     def _guarded(self, target: Target, open_: Callable[[], None]) -> Callable[[], None]:
         """`open_` as an open once the old stream is released: now, or from a signal later."""

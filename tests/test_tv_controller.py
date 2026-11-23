@@ -2276,6 +2276,7 @@ class MediaServerReportTests(ControllerTestCase):
             position=lambda ms, paused=False, url=None: told(("position", ms, url)),
             stopped=lambda: told(("stopped",)),
             shutdown=lambda: None,
+            active_url=lambda: "",
         )
         return super().make_controller(column, media_reporter=reporter, **extra)
 

@@ -135,6 +135,10 @@ class MediaReporter:
         self._told = self._clock()
         self._send(found[0], "start", found[1], 0, False)
 
+    def active_url(self) -> str:
+        """The address of the play the server heard start ("" for none)."""
+        return self._url if self._active is not None else ""
+
     def position(self, position_ms: int, paused: bool = False, url: Optional[str] = None) -> None:
         """Where the title plays; `url`: only while that stream is the one the server heard
         start (a title swapped small, a phone's Watch: the large picture may play another)."""
