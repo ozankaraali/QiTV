@@ -1186,6 +1186,7 @@
   "The same PIN again:": "Sama PIN-kood uuesti:",
   "The server asks to sign in again: Settings → Providers → this server → Address and login.": "Server palub uuesti sisse logida: Seaded → Pakkujad → see server → Aadress ja sisselogimine.",
   "The server could not be reached ({reason}).": "Serveriga ei saanud ühendust ({reason}).",
+  "The server didn't convert it: the file plays as it is": "Server ei teisendanud seda: fail esitatakse nii, nagu see on",
   "The server has nothing at this address (404)": "Serveris pole sellel aadressil midagi (404)",
   "The server refused QiTV (403)": "Server keeldus QiTV-st (403)",
   "The space AI captions' speech models take on this computer.": "Ruum, mille AI-subtiitrite kõnemudelid sellel arvutil võtavad.",

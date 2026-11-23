@@ -1206,6 +1206,7 @@
   "The same PIN again:": "Той самий PIN-код ще раз:",
   "The server asks to sign in again: Settings → Providers → this server → Address and login.": "Сервер просить увійти знову: Налаштування → Провайдери → цей сервер → Адреса й вхід.",
   "The server could not be reached ({reason}).": "Сервер недоступний ({reason}).",
+  "The server didn't convert it: the file plays as it is": "Сервер не конвертував відео: файл відтворюється як є",
   "The server has nothing at this address (404)": "На сервері нічого немає за цією адресою (404)",
   "The server refused QiTV (403)": "Сервер відмовив QiTV у доступі (403)",
   "The space AI captions' speech models take on this computer.": "Місце, яке мовні моделі ШІ-субтитрів займають на цьому комп’ютері.",

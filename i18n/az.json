@@ -1186,6 +1186,7 @@
   "The same PIN again:": "Eyni PIN yenidən:",
   "The server asks to sign in again: Settings → Providers → this server → Address and login.": "Server yenidən daxil olmağı istəyir: Ayarlar → Provayderlər → bu server → Ünvan və giriş.",
   "The server could not be reached ({reason}).": "Serverlə əlaqə alınmadı ({reason}).",
+  "The server didn't convert it: the file plays as it is": "Server onu çevirmədi: fayl olduğu kimi oynadılır",
   "The server has nothing at this address (404)": "Serverdə bu ünvanda heç nə yoxdur (404)",
   "The server refused QiTV (403)": "Server QiTV-ni rədd etdi (403)",
   "The space AI captions' speech models take on this computer.": "AI altyazılarının nitq modellərinin bu kompüterdə tutduğu yer.",

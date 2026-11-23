@@ -299,9 +299,10 @@ class PlexSeriesWorker(_ServerWorker):
 
 class PlexLinkWorker(_ServerWorker):
     """A title's stream: the version the quality menu chose, else the settings' pick, as its
-    file is. Plex is never asked to convert: a conversion asked for (one carried from another
-    server's title) plays the settings' pick as it is, and the answer says there are none
-    (`conversions`: the ⚙ menu lists the versions only)."""
+    file is, or the server's conversion of it when the menu chose one (2.14, as Jellyfin's:
+    services.media_workers.MediaLinkWorker). A conversion the server would not make plays
+    the version as it is, and the answer says so (`refused`; its `quality`: the ⚙ ticks the
+    file)."""
 
     def __init__(
         self,
@@ -323,20 +324,43 @@ class PlexLinkWorker(_ServerWorker):
 
     def work(self, client: Any) -> dict:
         sources = plex.sources(client.media(self.item_id))
-        wanted = self.quality.source if not self.quality.converted else ""
-        source = next((s for s in sources if wanted and s["Id"] == wanted), None)
-        if source is None:
+        wanted = self.quality
+        source = next((s for s in sources if wanted.source and s["Id"] == wanted.source), None)
+        if source is None:  # the settings' pick (a version chosen before may be gone)
             source, why = ms.choose_source(sources, screen_4k=self.screen_4k, setting=self.four_k)
             if source is None:
                 text = ms.ONLY_4K_TEXT if why == ms.ONLY_4K else media_workers.NO_VERSION_TEXT
                 raise _Shown(translate(text))
-        link = plex.stream_url(client.base, source, client.token, client.client_id, self.item_id)
-        return {
-            "link": link,
+        link, playing, refused = "", ms.Quality(source=source["Id"]), False
+        if wanted.converted and not ms.within(source, wanted):
+            link = self._converted(client, source, wanted)
+            if link:  # the conversion, of the version it converts (the ⚙ offers those below)
+                playing = ms.Quality(source["Id"], wanted.height, wanted.bitrate)
+            refused = not link
+        file = plex.stream_url(client.base, source, client.token, client.client_id, self.item_id)
+        answer = {
+            "link": link or file,
             "versions": [ms.version_of(s) for s in sources],
-            "quality": ms.Quality(source=source["Id"]),
-            "conversions": False,
+            "quality": playing,
         }
+        if link:
+            answer["file"] = file  # the history keeps it (review M5: the session's ends)
+        if refused:
+            answer["refused"] = True  # the conversion asked for: the TV says the server didn't
+        return answer
+
+    def _converted(self, client: Any, source: dict, wanted: ms.Quality) -> str:
+        """The server's conversion's address, or "" (it would not: the file plays as it is)."""
+        params = plex.conversion_params(
+            self.item_id, source, wanted, client.client_id, client.version
+        )
+        try:
+            return str(client.convert(params) or "")
+        except ms.SignInNeeded:
+            raise
+        except Exception as error:  # never the address: it may carry the token (review N1)
+            logger.info("A Plex server did not convert the title: %s", media_workers.logged(error))
+            return ""
 
 
 def check_access(

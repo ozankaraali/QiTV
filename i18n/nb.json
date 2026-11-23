@@ -1186,6 +1186,7 @@
   "The same PIN again:": "Samme PIN-kode igjen:",
   "The server asks to sign in again: Settings → Providers → this server → Address and login.": "Serveren ber om ny pålogging: Innstillinger → Leverandører → denne serveren → Adresse og pålogging.",
   "The server could not be reached ({reason}).": "Fikk ikke kontakt med serveren ({reason}).",
+  "The server didn't convert it: the file plays as it is": "Serveren konverterte den ikke: filen spilles av som den er",
   "The server has nothing at this address (404)": "Serveren har ingenting på denne adressen (404)",
   "The server refused QiTV (403)": "Serveren avviste QiTV (403)",
   "The space AI captions' speech models take on this computer.": "Plassen talemodellene til AI-tekstene tar på denne datamaskinen.",

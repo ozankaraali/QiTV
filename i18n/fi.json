@@ -1186,6 +1186,7 @@
   "The same PIN again:": "Sama PIN-koodi uudelleen:",
   "The server asks to sign in again: Settings → Providers → this server → Address and login.": "Palvelin pyytää kirjautumaan uudelleen: Asetukset → Palveluntarjoajat → tämä palvelin → Osoite ja kirjautuminen.",
   "The server could not be reached ({reason}).": "Palvelimeen ei saatu yhteyttä ({reason}).",
+  "The server didn't convert it: the file plays as it is": "Palvelin ei muuntanut sitä: tiedosto toistetaan sellaisenaan",
   "The server has nothing at this address (404)": "Palvelimella ei ole mitään tässä osoitteessa (404)",
   "The server refused QiTV (403)": "Palvelin torjui QiTV:n (403)",
   "The space AI captions' speech models take on this computer.": "Tila, jonka tekoälytekstityksen puhemallit vievät tällä tietokoneella.",

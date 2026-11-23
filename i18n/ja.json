@@ -1176,6 +1176,7 @@
   "The same PIN again:": "もう一度同じPINを入力:",
   "The server asks to sign in again: Settings → Providers → this server → Address and login.": "サーバーが再ログインを求めています: 設定 → プロバイダー → このサーバー → アドレスとログイン。",
   "The server could not be reached ({reason}).": "サーバーに接続できませんでした（{reason}）。",
+  "The server didn't convert it: the file plays as it is": "サーバーは変換しませんでした: ファイルをそのまま再生します",
   "The server has nothing at this address (404)": "このアドレスには何もありません（404）",
   "The server refused QiTV (403)": "サーバーがQiTVを拒否しました（403）",
   "The space AI captions' speech models take on this computer.": "AI字幕の音声モデルがこのコンピューターで使う容量。",

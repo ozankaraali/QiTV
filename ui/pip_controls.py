@@ -153,6 +153,7 @@ class PipControls(QObject):
         started: Callable[[], None] = lambda: None,
         choose: Optional[Callable[[], None]] = None,
         hidden: Callable[[dict], bool] = lambda item: False,
+        title_gone: Callable[[str], None] = lambda url: None,
         parent: Optional[QObject] = None,
     ) -> None:
         """`frame` is the PipFrame and `label` the PipLabel (None in tests without them).
@@ -203,6 +204,8 @@ class PipControls(QObject):
         self._started = started
         self._choose = choose
         self._hidden = hidden
+        # 2.14: the movie or episode playing small closed or ended there (its address)
+        self._title_gone = title_gone
         self._views: dict[str, SlotView] = {}
         self._wanted: Optional[tuple[Target, ZapContext]] = None  # its link is on its way
         self._link: Optional[Target] = None  # the one link request in flight
@@ -610,10 +613,14 @@ class PipControls(QObject):
         self._cancel_reopen()
         self._cancel_relink()
         sessions = self.sessions
+        small = sessions.small()
+        gone = self.view(small.name).url if small and self.small_title(small.name) else ""
         if keep_recording:
             self._set_small_aside()
         if sessions.pip_open() or sessions.pip_opening():
             sessions.close_pip()
+        if gone:
+            self._title_gone(gone)  # 2.14: its server hears it stop (review I1)
 
     # ---- 2.6: recordings in the background ----------------------------------------------------
 
@@ -858,6 +865,9 @@ class PipControls(QObject):
             self._tick_label()
         elif state == "ended":
             self._reconnect_small(name)
+            small = self.sessions.small()
+            if small is not None and small.name == name and self.small_title(name):
+                self._title_gone(self.view(name).url)  # 2.14: it ended small (review I1)
         ended = state == "ended"
         if ended == (name in self._ended):
             return

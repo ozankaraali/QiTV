@@ -14,11 +14,18 @@ only in the provider list on this computer, never logged, never handed to the ph
 go through the home door: services/remote/films.py's PassedFilm) and never put in a poster's
 address (services.plex_addresses).
 
+A title plays as its file is (`stream_url`, Plex's direct play), unless the ⚙ asks the server
+to convert it (`conversion_params`, `PlexClient.convert`): its universal transcoder, in HLS, as a
+Jellyfin server converts. The conversion is asked for its decision, then started; the player
+opens the playlist of its session, and the reporter stops the session when the play stops
+(`PlexClient.stop_conversion`, services.media_reporter).
+
 QiTV says only who it is: X-Plex-Product "QiTV", its version and a random client identifier
-(the provider's `device_id`), never the computer's or the viewer's name. A
-token travels in a header to plex.tv and to the server's API, and in the query of the addresses
-VLC opens (a stream, a poster), as Plex documents; nothing here logs an address, a token or an
-answer's body. Blocking: worker threads only.
+(the provider's `device_id`), never the computer's or the viewer's name (a conversion names
+Plex's generic client profile too: `PLATFORM`). A token travels in a header to plex.tv and to
+the server's API, and in the query of the addresses VLC opens (a stream, a conversion's
+playlist, a poster), as Plex documents; nothing here logs an address, a token or an answer's
+body. Blocking: worker threads only.
 """
 
 from __future__ import annotations
@@ -28,7 +35,7 @@ from dataclasses import dataclass, field
 import logging
 import threading
 from typing import Any, Callable, Optional
-from urllib.parse import parse_qs, urlencode, urlsplit
+from urllib.parse import parse_qs, urlencode, urljoin, urlsplit
 import uuid
 
 from services import media_server as ms, plex_addresses
@@ -335,6 +342,17 @@ MOVIE, SHOW = "movie", "show"  # the libraries QiTV lists (music and photos are 
 _TYPE_NUMBERS = {MOVIE: 1, SHOW: 2}  # Plex's metadata types
 PAGE = 2_000  # titles a request (a library of 50,000 comes in 25)
 _TIMELINE_STATES = {"start": "playing", "progress": "playing", "stopped": "stopped"}
+# 2.14: the ⚙'s conversions, by the server's universal transcoder (`PlexClient.convert`).
+TRANSCODE = "/video/:/transcode/universal"
+# A 1.43 server converts for no client that names no platform (400), nor in HLS for its generic
+# profile as it is: Plex's own generic profile, with H.264 and AAC in HLS added (what libVLC
+# plays). "Generic" names no system.
+PLATFORM = "Generic"
+PROFILE_EXTRA = (
+    "add-transcode-target(type=videoProfile&context=streaming&protocol=hls&container=mpegts"
+    "&videoCodec=h264&audioCodec=aac)"
+)
+_CONVERTS = (1000, 1001)  # the decision's codes of a conversion the server makes
 _DURATIONS: dict[tuple[str, str], int] = {}  # (server, title) -> its length, for the timeline
 _DURATIONS_KEPT = 64
 _DURATIONS_LOCK = threading.Lock()
@@ -372,15 +390,15 @@ class PlexClient:
     def close(self) -> None:
         self._http.close()
 
-    def _ask(
+    def _send(
         self,
         method: str,
         path: str,
         params: Optional[dict] = None,
         headers: Optional[dict] = None,
-    ) -> dict:
-        """The answer's MediaContainer ({} for none); 401 raises SignInNeeded. The token goes
-        in a header, never in the address (an error's text never names either)."""
+    ) -> Any:
+        """The server's answer; 401 raises SignInNeeded, another error MediaServerError. The
+        token goes in a header, never in the address (an error's text never names either)."""
         response = self._http.request(
             method,
             self.base + path,
@@ -393,6 +411,17 @@ class PlexClient:
             raise SignInNeeded("401")
         if response.status_code >= 400:
             raise MediaServerError(f"The server answered {response.status_code}")
+        return response
+
+    def _ask(
+        self,
+        method: str,
+        path: str,
+        params: Optional[dict] = None,
+        headers: Optional[dict] = None,
+    ) -> dict:
+        """The answer's MediaContainer ({} for none), asked as `_send` asks."""
+        response = self._send(method, path, params, headers)
         if not response.content:
             return {}
         answer = response_json(response)
@@ -484,6 +513,86 @@ class PlexClient:
         if duration > 0:
             params["duration"] = duration
         self._ask("POST", "/:/timeline", params, {"X-Plex-Session-Identifier": ref.play_session})
+
+    # ---- the server's conversion (2.14: the ⚙'s) ----------------------------------------------
+
+    def convert(self, params: dict) -> str:
+        """The address the player opens for the conversion `params` asks for
+        (`conversion_params`), or "" when the server would not make it. Its transcoder is
+        asked for its decision first (it starts no conversion it has not decided: a 1.43
+        server refused one so), then to start it, which names the session's playlist; the
+        encoding begins when that playlist is asked. It is checked here as libVLC will ask it
+        (`_pieces_refused`): a server that wants the token for the pieces (2.14 review I3 and
+        N1: never seen at home) has the session stopped, and the title plays as its file is.
+        The address holds the token, as a file's does (`stream_url`)."""
+        decided = self._ask("GET", TRANSCODE + "/decision", params)
+        code = decided.get("generalDecisionCode")
+        if code not in _CONVERTS:
+            logger.info("A Plex server would not convert the title (its decision: %s)", code)
+            return ""
+        started = self._send("GET", TRANSCODE + "/start.m3u8", params, {"Accept": "*/*"})
+        lines = [line.strip() for line in str(started.text or "").splitlines()]
+        variants = [line for line in lines if line and not line.startswith("#")]
+        playlist = urljoin(self.base + TRANSCODE + "/start.m3u8", variants[0]) if variants else ""
+        playlist = playlist.split("?", 1)[0]
+        if not playlist.startswith(self.base + TRANSCODE + "/session/"):
+            logger.info("A Plex server's conversion named no playlist of its own")
+            return ""
+        session = playlist[len(self.base + TRANSCODE + "/session/") :].split("/", 1)[0]
+        query = urlencode(
+            {
+                "X-Plex-Token": self.token,
+                "X-Plex-Client-Identifier": self.client_id,
+                "X-Plex-Product": PRODUCT,
+                "X-Plex-Session-Identifier": params["X-Plex-Session-Identifier"],
+            }
+        )
+        address = f"{playlist}?{query}"
+        if self._pieces_refused(address):  # (review N1: away from home, a server may want it)
+            logger.info("A Plex server's conversion would not give its pieces without the token")
+            self._stop_quietly(session)
+            return ""
+        return address
+
+    def _pieces_refused(self, address: str) -> bool:
+        """Whether the server refuses the conversion as libVLC will ask it: its playlist by
+        `address` (the token and the client id in its query), then the first piece it names
+        without them (libVLC carries no query over to the pieces), its status alone read.
+        Only a 401 or a 403 refuses; a check that cannot tell (a time-out, a server's error,
+        a lost connection, no piece named) refuses nothing."""
+        ask = {"headers": {"Accept": "*/*"}, "timeout": self.timeout, "verify": self.verify}
+        try:
+            listed = self._http.request("GET", address, **ask)
+            if listed.status_code >= 400:
+                return bool(listed.status_code in (401, 403))
+            names = [line.strip() for line in str(listed.text or "").splitlines()]
+            pieces = [name for name in names if name and not name.startswith("#")]
+            piece = urljoin(address.split("?", 1)[0], pieces[0]).split("?", 1)[0] if pieces else ""
+            if not piece.startswith(self.base + TRANSCODE + "/session/"):
+                return False
+            answer = self._http.request("GET", piece, stream=True, **ask)
+            try:
+                return bool(answer.status_code in (401, 403))
+            finally:
+                answer.close()  # its status is all that was wanted: no body is read
+        except Exception as error:  # never the address
+            logger.info("A Plex conversion's pieces could not be checked: %s", type(error).__name__)
+            return False
+
+    def _stop_quietly(self, session: str) -> None:
+        try:
+            self.stop_conversion(session)
+        except Exception as error:  # the server ends a session nobody asks for, in time
+            logger.info("A Plex server's conversion was not stopped: %s", type(error).__name__)
+
+    def stop_conversion(self, session: str) -> None:
+        """End the server's conversion `session` (its encoding stops); one the server ended
+        already (404) is no failure."""
+        try:
+            self._send("GET", TRANSCODE + "/stop", {"session": session})
+        except MediaServerError as error:
+            if not str(error).endswith(" 404"):  # (SignInNeeded's is "401")
+                raise
 
 
 def _key_of(raw: dict) -> str:
@@ -668,10 +777,11 @@ def seasons_payload(
 
 def sources(media: list[dict]) -> list[dict]:
     """A title's versions in the shape services.media_server's rules read (`choose_source`,
-    `version_of`, `within`): each version's id, its picture's size, its rate (bits a second)
-    and its first file (`part`, the address it plays from)."""
+    `version_of`, `within`): each version's id, its picture's size, its rate (bits a second),
+    its first file (`part`, the address it plays from) and its place among the title's
+    versions as the server lists them (`index`: a conversion names the version by it)."""
     out = []
-    for raw in media:
+    for index, raw in enumerate(media):
         part = next(
             (p for p in raw.get("Part") or [] if isinstance(p, dict) and p.get("key")), None
         )
@@ -691,15 +801,16 @@ def sources(media: list[dict]) -> list[dict]:
                     }
                 ],
                 "part": str(part["key"]),
+                "index": index,
             }
         )
     return out
 
 
 def stream_url(base: str, source: dict, token: str, client_id: str, item_id: str) -> str:
-    """A version's file itself, as it is (Plex's direct play: never /transcode). The address
-    names QiTV and a play session of its own, `<title>-<random>`, which tells the reporter
-    which title plays (a file's address names only the file)."""
+    """A version's file itself, as it is (Plex's direct play). The address names QiTV and a
+    play session of its own, `<title>-<random>`, which tells the reporter which title plays
+    (a file's address names only the file)."""
     query = urlencode(
         {
             "X-Plex-Token": token,
@@ -712,25 +823,74 @@ def stream_url(base: str, source: dict, token: str, client_id: str, item_id: str
 
 
 def parse_stream_url(url: str, bases: Any) -> Optional[ms.StreamRef]:
-    """What a stream address of one of `bases` (the Plex servers' addresses) plays, else None
-    (an address QiTV did not make: no play session of its own)."""
+    """What a stream address of one of `bases` (the Plex servers' addresses) plays, a file or
+    a conversion's playlist (2.14: its session, which the reporter stops), else None (an
+    address QiTV did not make: no play session of its own)."""
     for base in bases:
         base = normalized_base(str(base or ""))
-        if not base or not url.startswith(base + "/library/parts/"):
+        if not base:
+            continue
+        converted = url.startswith(base + TRANSCODE + "/session/")
+        if not converted and not url.startswith(base + "/library/parts/"):
             continue
         parts = urlsplit(url)
         segments = parts.path[len(urlsplit(base).path) :].strip("/").split("/")
         query = parse_qs(parts.query)
         session = (query.get("X-Plex-Session-Identifier") or [""])[0]
         item_id = session.split("-", 1)[0]
-        if len(segments) < 3 or not item_id.isdigit():
+        # /library/parts/<part>/…, or /video/:/transcode/universal/session/<session>/…
+        at = 5 if converted else 2
+        if len(segments) <= at or not segments[at] or not item_id.isdigit():
             return None
         return ms.StreamRef(
             base=base,
             item_id=item_id,
-            source_id=segments[2],
+            source_id="" if converted else segments[at],
             token=(query.get("X-Plex-Token") or [""])[0],
             play_session=session,
-            converted=False,
+            converted=converted,
+            transcode=segments[at] if converted else "",
         )
     return None
+
+
+# ---- the server's conversion (2.14) -------------------------------------------------------
+
+
+def conversion_params(
+    item_id: str, source: dict, quality: ms.Quality, client_id: str, version: str
+) -> dict:
+    """What a Plex server's transcoder is asked for the ⚙'s conversion `quality` of version
+    `source` (`sources`) of title `item_id`: HLS, at most the conversion's lines (16:9) and
+    rate, from the title's start (libVLC asks a playlist's first piece whatever its
+    EXT-X-START says; the player's own seek takes the title on from where it was, as for
+    Jellyfin), no subtitles burnt into the picture, and a session of its own (its play
+    session is `<title>-<session>`, as a file's names its title). Never the token."""
+    session = uuid.uuid4().hex
+    params: dict[str, Any] = {
+        "path": f"/library/metadata/{item_id}",
+        "mediaIndex": int(source.get("index") or 0),
+        "partIndex": 0,
+        "protocol": "hls",
+        "directPlay": 0,
+        "directStream": 1,
+        "fastSeek": 1,
+        "subtitles": "none",
+        "offset": 0,
+    }
+    if quality.height > 0:
+        params["videoResolution"] = f"{(quality.height * 16 + 8) // 9}x{quality.height}"
+    if quality.bitrate > 0:
+        params["maxVideoBitrate"] = quality.bitrate // 1000  # kbit/s
+    params.update(
+        {
+            "session": session,
+            "X-Plex-Product": PRODUCT,
+            "X-Plex-Version": version,
+            "X-Plex-Platform": PLATFORM,
+            "X-Plex-Client-Identifier": client_id,
+            "X-Plex-Session-Identifier": f"{item_id}-{session}",
+            "X-Plex-Client-Profile-Extra": PROFILE_EXTRA,
+        }
+    )
+    return params

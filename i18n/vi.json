@@ -1176,6 +1176,7 @@
   "The same PIN again:": "Nhập lại mã PIN:",
   "The server asks to sign in again: Settings → Providers → this server → Address and login.": "Máy chủ yêu cầu đăng nhập lại: Cài đặt → Nhà cung cấp → máy chủ này → Địa chỉ và đăng nhập.",
   "The server could not be reached ({reason}).": "Không kết nối được máy chủ ({reason}).",
+  "The server didn't convert it: the file plays as it is": "Máy chủ không chuyển đổi: tệp được phát nguyên bản",
   "The server has nothing at this address (404)": "Máy chủ không có gì ở địa chỉ này (404)",
   "The server refused QiTV (403)": "Máy chủ từ chối QiTV (403)",
   "The space AI captions' speech models take on this computer.": "Dung lượng mà các mô hình giọng nói của phụ đề AI chiếm trên máy tính này.",

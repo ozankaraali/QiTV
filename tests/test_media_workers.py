@@ -16,8 +16,9 @@ PROVIDER = {"type": "JELLYFIN", "url": BASE, "token": "T", "user_id": "U", "devi
 
 
 class FakeClient:
-    def __init__(self, libraries=(), items=None, sources=(), fail=None):
+    def __init__(self, libraries=(), items=None, sources=(), fail=None, converts=True):
         self.base, self.token, self.device_id = BASE, "T", "D"
+        self.converts = converts  # whether the server converts for this user (its policy)
         self._libraries, self._items, self._sources, self._fail = (
             libraries,
             items or {},
@@ -60,6 +61,10 @@ class FakeClient:
         if self._fail:
             raise self._fail
         return list(self._sources)
+
+    def may_convert(self):
+        self.asked.append("may_convert")
+        return self.converts
 
     def sign_in(self, username, password):
         if self._fail:
@@ -244,8 +249,8 @@ class SectionWorkerTests(unittest.TestCase):
 
 
 class LinkWorkerTests(unittest.TestCase):
-    def link(self, sources, **choices):
-        client = FakeClient(sources=sources)
+    def link(self, sources, converts=True, **choices):
+        client = FakeClient(sources=sources, converts=converts)
         settings = {"screen_4k": False, "four_k": ms.FOUR_K_SCREEN}
         settings.update(choices)
         return outcome(
@@ -307,6 +312,17 @@ class LinkWorkerTests(unittest.TestCase):
         self.assertIn("MaxHeight=720", payload["link"])
         self.assertIn("MediaSourceId=hd", payload["link"])
         self.assertEqual(payload["quality"], ms.Quality("hd", 720, 4_000_000))  # of "hd"
+
+    def test_a_conversion_the_server_does_not_allow_plays_the_file_and_says_so(self):  # 2.14
+        chosen = ms.Quality(height=720, bitrate=4_000_000)
+        kind, payload = self.link([source("hd", 1920, 1080, 20_000_000)], quality=chosen)
+        self.assertNotIn("refused", payload)
+        kind, payload = self.link(
+            [source("hd", 1920, 1080, 20_000_000)], converts=False, quality=chosen
+        )
+        self.assertIn("/stream.mkv?static=true&MediaSourceId=hd", payload["link"])
+        self.assertEqual(payload["quality"], ms.Quality(source="hd"))  # the ⚙ ticks the file
+        self.assertIs(payload["refused"], True)  # the TV says so
 
     def test_a_conversion_a_file_already_fits_plays_it_as_it_is(self):  # review M9
         # A conversion carried to a server's next titles: a 480p file within 720p and 4 Mbit/s

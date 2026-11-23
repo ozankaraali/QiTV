@@ -20,8 +20,13 @@ others' distributions, which may have malware.**
   or computer. QiTV then adds your server, or lets you choose when your account has several.
 - **The Library:** your server's films and series, with their seasons and episodes, posters,
   where you stopped, Continue watching and the next episode, as for Jellyfin and Emby.
-- **Played as they are.** QiTV plays the server's own file and never asks it to convert. The
-  ⚙ menu offers the title's versions.
+- **Played as they are.** QiTV plays the server's own file. The ⚙ menu offers the title's
+  versions.
+- **Converted when you ask.** The ⚙ also offers your server's conversions (1080p, 720p, 480p),
+  as for Jellyfin and Emby, for a slow connection. The first one asks first, since it uses the
+  server's processor, and QiTV stops the conversion as soon as the title stops. A Plex,
+  Jellyfin or Emby server that doesn't allow you conversions plays the file as it is, and QiTV
+  says so.
 - **Your place is kept on the server.** QiTV tells your server how far you watched; a title
   watched to the end is marked watched by the server.
 - **At home and away.** QiTV keeps every address your server has and finds it again when one

@@ -1186,6 +1186,7 @@
   "The same PIN again:": "وہی PIN دوبارہ:",
   "The server asks to sign in again: Settings → Providers → this server → Address and login.": "سرور دوبارہ سائن اِن کرنے کو کہتا ہے: ترتیبات ← فراہم کنندگان ← یہ سرور ← ایڈریس اور لاگ اِن۔",
   "The server could not be reached ({reason}).": "سرور تک رسائی نہیں ہو سکی ({reason})۔",
+  "The server didn't convert it: the file plays as it is": "سرور نے اسے تبدیل نہیں کیا: فائل جیسی ہے ویسی ہی چل رہی ہے",
   "The server has nothing at this address (404)": "اس ایڈریس پر سرور کے پاس کچھ نہیں (404)",
   "The server refused QiTV (403)": "سرور نے QiTV کو مسترد کر دیا (403)",
   "The space AI captions' speech models take on this computer.": "AI کیپشنز کے اسپیچ ماڈلز اس کمپیوٹر پر جتنی جگہ لیتے ہیں۔",

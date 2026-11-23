@@ -319,6 +319,22 @@ class MediaServerClient:
         episodes = self._request("GET", [f"/Shows/{series_id}/Episodes"], params=params) or {}
         return list(seasons.get("Items") or []), list(episodes.get("Items") or [])
 
+    def may_convert(self) -> bool:
+        """Whether the server converts titles for this user (2.14: its policy's
+        EnableVideoPlaybackTranscoding, which the server's owner may turn off); not said, or
+        not answered: yes (the conversion is tried, as before)."""
+        try:
+            answer = self._request("GET", [f"/Users/{self.user_id}"]) or {}
+        except SignInNeeded:
+            raise
+        except (MediaServerError, ValueError) as error:  # never the address
+            logger.info("A media server did not say whether it converts: %s", type(error).__name__)
+            return True
+        policy = answer.get("Policy") if isinstance(answer, dict) else None
+        if not isinstance(policy, dict):
+            return True
+        return policy.get("EnableVideoPlaybackTranscoding") is not False
+
     def media_sources(self, item_id: str) -> list[dict]:
         params = {"UserId": self.user_id}
         answer = self._request("GET", [f"/Items/{item_id}/PlaybackInfo"], params=params) or {}
@@ -740,6 +756,7 @@ class StreamRef:
     token: str
     play_session: str
     converted: bool
+    transcode: str = ""  # 2.14: a Plex conversion's session, which ends with its play
 
 
 def parse_stream_url(url: str, bases: Iterable[str]) -> Optional[StreamRef]:

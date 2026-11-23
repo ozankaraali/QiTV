@@ -1186,6 +1186,7 @@
   "The same PIN again:": "Ugyanaz a PIN-kód még egyszer:",
   "The server asks to sign in again: Settings → Providers → this server → Address and login.": "A szerver újabb bejelentkezést kér: Beállítások → Szolgáltatók → ez a szerver → Cím és bejelentkezés.",
   "The server could not be reached ({reason}).": "A szerver nem érhető el ({reason}).",
+  "The server didn't convert it: the file plays as it is": "A szerver nem alakította át: a fájl változatlanul játszódik le",
   "The server has nothing at this address (404)": "A szerveren nincs semmi ezen a címen (404)",
   "The server refused QiTV (403)": "A szerver elutasította a QiTV-t (403)",
   "The space AI captions' speech models take on this computer.": "Az MI-feliratok beszédmodelljei ennyi helyet foglalnak ezen a számítógépen.",

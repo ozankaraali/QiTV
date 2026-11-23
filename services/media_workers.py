@@ -215,7 +215,10 @@ class MediaLinkWorker(_ServerWorker):
                 text = ms.ONLY_4K_TEXT if why == ms.ONLY_4K else NO_VERSION_TEXT
                 raise _Shown(translate(text))
         session = uuid.uuid4().hex
-        if wanted.converted and not ms.within(source, wanted):
+        convert = wanted.converted and not ms.within(source, wanted)
+        # 2.14: a server whose owner lets this user convert nothing plays the file, and says so.
+        refused = convert and not client.may_convert()
+        if convert and not refused:
             link = ms.converted_url(
                 client.base,
                 self.item_id,
@@ -232,7 +235,10 @@ class MediaLinkWorker(_ServerWorker):
             link = ms.stream_url(client.base, self.item_id, source, client.token, session)
             playing = ms.Quality(source=str(source.get("Id") or ""))
         versions = [ms.version_of(s) for s in sources if s.get("Id")]
-        return {"link": link, "versions": versions, "quality": playing}
+        answer = {"link": link, "versions": versions, "quality": playing}
+        if refused:
+            answer["refused"] = True  # the conversion asked for: the TV says the server didn't
+        return answer
 
     def run(self) -> None:
         client = self._client(self.provider, self.verify)

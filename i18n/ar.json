@@ -1226,6 +1226,7 @@
   "The same PIN again:": "رمز PIN نفسه مجددًا:",
   "The server asks to sign in again: Settings → Providers → this server → Address and login.": "يطلب الخادم تسجيل الدخول من جديد: الإعدادات ← المزوّدون ← هذا الخادم ← العنوان وتسجيل الدخول.",
   "The server could not be reached ({reason}).": "تعذّر الوصول إلى الخادم ({reason}).",
+  "The server didn't convert it: the file plays as it is": "لم يحوّل الخادم العنوان: يُشغَّل الملف كما هو",
   "The server has nothing at this address (404)": "لا يوجد شيء على هذا العنوان في الخادم (404)",
   "The server refused QiTV (403)": "رفض الخادم QiTV ‏(403)",
   "The space AI captions' speech models take on this computer.": "المساحة التي تشغلها نماذج الكلام الخاصة بترجمة الذكاء الاصطناعي على هذا الكمبيوتر.",

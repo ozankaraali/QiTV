@@ -3,6 +3,7 @@
 import json
 from pathlib import Path
 import unittest
+from urllib.parse import parse_qsl
 
 from services import media_server as ms, plex
 
@@ -17,11 +18,19 @@ class _Response:
     def __init__(self, status, body=None, headers=None):
         self.status_code = status
         self._body = body
-        self.content = b"" if body is None else json.dumps(body).encode()
+        if isinstance(body, str):  # a playlist (Plex's conversion), not JSON
+            self.content = body.encode()
+        else:
+            self.content = b"" if body is None else json.dumps(body).encode()
+        self.text = self.content.decode()
         self.headers = headers or {}
+        self.closed = False
 
     def json(self):
         return self._body
+
+    def close(self):
+        self.closed = True
 
 
 class FakeHttp:
@@ -29,24 +38,31 @@ class FakeHttp:
 
     def __init__(self, base, answers):
         self.base = base
-        self.answers = answers  # (method, path) -> (status, body[, headers])
+        self.answers = answers  # (method, path) -> (status, body[, headers]) or an error
         self.asked = []
+        self.responses = []
         self.headers = {}
         self.closed = False
 
     def request(self, method, url, params=None, headers=None, timeout=None, verify=True, **kw):
-        path = url[len(self.base) :]
+        path, _, query = url[len(self.base) :].partition("?")  # an address's own query apart
         self.asked.append(
             {
                 "method": method,
                 "path": path,
                 "params": dict(params or {}),
+                "query": dict(parse_qsl(query)),
                 "headers": headers,
                 "verify": verify,
+                "stream": bool(kw.get("stream")),
             }
         )
         answer = self.answers.get((method, path), (404, None))
-        return _Response(*answer)
+        if isinstance(answer, BaseException):  # (a request that fails: a time-out, say)
+            raise answer
+        response = _Response(*answer)
+        self.responses.append(response)
+        return response
 
     def close(self):
         self.closed = True

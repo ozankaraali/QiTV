@@ -108,6 +108,26 @@ class LinkLanesTests(unittest.TestCase):
         self.catalog.linkReady.emit(1, "u1")
         self.assertEqual((dropped, self.ready), (["One"], []))
 
+    def test_a_link_answered_but_never_played_is_said_dropped(self):  # 2.14 review I2
+        # (A Plex conversion's session the server started for it is stopped then.)
+        dropped = []
+        self.lanes.linkDropped.connect(dropped.append)
+        self.lanes.request(target("One"))
+        self.lanes.request_side(target("Two"), lambda url: None, play=True)
+        self.catalog.linkFailed.emit(2, "no")
+        self.catalog.linkReady.emit(1, "u1")  # overtaken by a side play
+        self.lanes.request(target("Three"))
+        self.lanes.drop_tune()  # Stop
+        self.catalog.linkReady.emit(3, "u3")
+        got = []
+        self.lanes.request_side(target("Four"), got.append, play=True)
+        self.lanes.supersede()  # a newer choice
+        self.catalog.linkReady.emit(4, "u4")
+        self.lanes.request(target("Five"))
+        self.catalog.linkReady.emit(5, "u5")  # played: not dropped
+        self.assertEqual(dropped, ["u1", "u3", "u4"])
+        self.assertEqual((got, self.ready[-1]), ([], ("Five", "u5")))
+
     def test_a_side_follow_up_that_raises_is_reported_and_the_queue_goes_on(self):
         def broken(url):
             raise RuntimeError("bad")

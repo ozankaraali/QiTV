@@ -1196,6 +1196,7 @@
   "The same PIN again:": "Ponovite isti PIN:",
   "The server asks to sign in again: Settings → Providers → this server → Address and login.": "Poslužitelj traži ponovnu prijavu: Postavke → Pružatelji → ovaj poslužitelj → Adresa i prijava.",
   "The server could not be reached ({reason}).": "Poslužitelj nije dostupan ({reason}).",
+  "The server didn't convert it: the file plays as it is": "Poslužitelj ga nije pretvorio: datoteka se reproducira kakva jest",
   "The server has nothing at this address (404)": "Na ovoj adresi poslužitelj nema ničega (404)",
   "The server refused QiTV (403)": "Poslužitelj je odbio QiTV (403)",
   "The space AI captions' speech models take on this computer.": "Prostor koji govorni modeli AI titlova zauzimaju na ovom računalu.",

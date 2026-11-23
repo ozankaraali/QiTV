@@ -1186,6 +1186,7 @@
   "The same PIN again:": "I njëjti PIN sërish:",
   "The server asks to sign in again: Settings → Providers → this server → Address and login.": "Serveri kërkon identifikim sërish: Cilësimet → Ofruesit → ky server → Adresa dhe hyrja.",
   "The server could not be reached ({reason}).": "Serveri nuk u arrit ({reason}).",
+  "The server didn't convert it: the file plays as it is": "Serveri nuk e konvertoi: skedari luhet ashtu siç është",
   "The server has nothing at this address (404)": "Serveri s'ka asgjë në këtë adresë (404)",
   "The server refused QiTV (403)": "Serveri e refuzoi QiTV (403)",
   "The space AI captions' speech models take on this computer.": "Hapësira që zënë në këtë kompjuter modelet e të folurit të titrave AI.",

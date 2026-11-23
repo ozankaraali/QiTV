@@ -1206,6 +1206,7 @@
   "The same PIN again:": "Isti PIN še enkrat:",
   "The server asks to sign in again: Settings → Providers → this server → Address and login.": "Strežnik zahteva ponovno prijavo: Nastavitve → Ponudniki → ta strežnik → Naslov in prijava.",
   "The server could not be reached ({reason}).": "Strežnik ni dosegljiv ({reason}).",
+  "The server didn't convert it: the file plays as it is": "Strežnik ga ni pretvoril: datoteka se predvaja takšna, kot je",
   "The server has nothing at this address (404)": "Strežnik na tem naslovu nima ničesar (404)",
   "The server refused QiTV (403)": "Strežnik je zavrnil QiTV (403)",
   "The space AI captions' speech models take on this computer.": "Prostor, ki ga govorni modeli AI podnapisov zavzemajo na tem računalniku.",

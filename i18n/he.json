@@ -1196,6 +1196,7 @@
   "The same PIN again:": "שוב את אותו קוד PIN:",
   "The server asks to sign in again: Settings → Providers → this server → Address and login.": "השרת מבקש להתחבר שוב: הגדרות ← ספקים ← השרת הזה ← כתובת והתחברות.",
   "The server could not be reached ({reason}).": "אין גישה לשרת ({reason}).",
+  "The server didn't convert it: the file plays as it is": "השרת לא המיר אותו: הקובץ מתנגן כמו שהוא",
   "The server has nothing at this address (404)": "אין בשרת כלום בכתובת הזו (404)",
   "The server refused QiTV (403)": "השרת דחה את QiTV ‏(403)",
   "The space AI captions' speech models take on this computer.": "המקום שמודלי הדיבור של כתוביות AI תופסים במחשב הזה.",
