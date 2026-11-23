@@ -223,7 +223,8 @@ def stations_in(raw: Union[bytes, str], directory: bool = False) -> Optional[Lis
 def parse_stations(stations: List[Any]) -> Dict:
     """The directory's stations as a categorized playlist (parse_m3u's, categorize=True): each
     a channel as an M3U line makes it (its name, its stream `url_resolved`, else its `url`, its
-    `favicon` for a logo, marked a station: free_radio.is_station), in the directory's order (the
+    `favicon` for a logo, marked a station: free_radio.is_station, with its `codec`: 2.14,
+    free_radio.plays_directly), in the directory's order (the
     most played first). The list's "All" is All stations; then one country's are grouped by
     genre (free_radio.genre_of), stations of more than one country by country; the groups' ids
     are English and their titles in the active language, in its alphabet (a cached list's are
@@ -257,7 +258,9 @@ def parse_stations(stations: List[Any]) -> Dict:
                 "logo": str(station.get("favicon") or "").strip() or None,
                 "user_agent": None,
                 "cmd": link,
-                free_radio.STATION_KEY: True,  # played directly (free_radio.is_station)
+                free_radio.STATION_KEY: True,  # its sound read as a station's (2.14)
+                free_radio.CODEC_KEY: str(station.get("codec") or "").strip().upper(),
+                free_radio.CODEPAGE_KEY: free_radio.codepage_of(station),
             }
         )
     if left_out:

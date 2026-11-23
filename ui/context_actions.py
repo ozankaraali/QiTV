@@ -239,8 +239,8 @@ class ContextActions(QObject):
         """A channel's own entries: favorites, picture-in-picture (with `pip`), Record at a
         time…, Remove from Recents (with `recent`, on a row of ⟲ Recent) and Hide. A link
         has no favorites (★ lists a provider's channels) nor Record at a time… (a scheduled
-        recording asks its provider for the link), and a radio list's station (2.13) no Record
-        at a time… either (it plays directly: the helper that records can't read it)."""
+        recording asks its provider for the link), and a radio list's station whose sound the
+        helper that records cannot read (2.14, free_radio.plays_directly) none either."""
         item: dict = node.payload
         link = self._link(item)
         if not link:
@@ -250,7 +250,7 @@ class ContextActions(QObject):
         open_pip = self._open_pip if pip else None
         if open_pip is not None:
             menu.add(translate(OPEN_PIP_TEXT), lambda: open_pip(node))
-        recordable = not link and not free_radio.is_station(item)
+        recordable = not link and not free_radio.plays_directly(item)
         record_at = self._record_at() if self._record_at is not None and recordable else None
         if record_at is not None:
             menu.add(translate(RECORD_AT_TEXT), lambda: record_at(item))

@@ -54,7 +54,8 @@ _CHANNEL_KEYS = (
     "user_agent",
     "referrer",
     "logo",  # 2.9.7: the Recordings tab shows it (older builds ignore it)
-    "radio_station",  # 2.13: a radio list's station, never recorded (older builds ignore it)
+    "radio_station",  # 2.13: a radio list's station (older builds ignore it) ...
+    "radio_codec",  # ... and 2.14: its sound, which tells whether the helper records it
 )
 
 

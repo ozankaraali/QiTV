@@ -28,7 +28,14 @@ import logging
 import struct
 from typing import NamedTuple
 
-from services.live.ts import PACKET, SYNC, _crc32
+from services.live.ts_mux import (
+    PCR_LEAD as _PCR_LEAD,
+    Counters,
+    pes_packets,
+    psi_packet,
+    section as _section,
+    stamp as _stamp,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -39,11 +46,9 @@ NO_INIT = "The HLS channel's fragmented MP4 has no init segment."
 
 _CLOCK = 90000
 _PTS_MODULO = 1 << 33
-_PCR_LEAD = 63000  # the PCR runs 0.7 s before the DTS it comes with (ffmpeg's mux delay)
 _PMT_PID = 0x1000
 _VIDEO_PID = 0x100
 _AUDIO_PID = 0x101
-_PAYLOAD = PACKET - 4
 
 _VIDEO_ENTRIES = {b"avc1": "h264", b"avc3": "h264", b"hvc1": "hevc", b"hev1": "hevc"}
 _AUDIO_ENTRIES = {b"mp4a": "mp4a", b"ac-3": "ac3", b"ec-3": "eac3", b".mp3": "mp3"}
@@ -603,20 +608,6 @@ def _ticks(value: int, scale: int) -> int:
     return (value * _CLOCK + scale // 2) // scale
 
 
-def _stamp(prefix: int, value: int) -> bytes:
-    """A PES timestamp field: `prefix` (2: PTS alone, 3: PTS before a DTS, 1: DTS)."""
-    value %= _PTS_MODULO
-    return bytes(
-        [
-            prefix << 4 | (value >> 29) & 0x0E | 1,
-            (value >> 22) & 0xFF,
-            (value >> 14) & 0xFE | 1,
-            (value >> 7) & 0xFF,
-            (value << 1) & 0xFE | 1,
-        ]
-    )
-
-
 def annex_b(track: Track, data: memoryview, key: bool) -> bytes:
     """A video sample as Annex B: an access unit delimiter first (the sample's own, else one
     added), then the init's parameter sets when it is a keyframe without its own, then its
@@ -669,14 +660,6 @@ def _adts(track: Track, data: memoryview) -> bytes:
     return head + data
 
 
-def _section(table: int, number: int, version: int, body: bytes) -> bytes:
-    """A PSI section (PAT or PMT) with its CRC."""
-    length = 5 + len(body) + 4
-    head = bytes([table, 0xB0 | length >> 8, length & 0xFF]) + number.to_bytes(2, "big")
-    section = head + bytes([0xC1 | version << 1, 0, 0]) + body
-    return section + _crc32(section).to_bytes(4, "big")
-
-
 class Fmp4Remuxer:
     """An HLS stream's fMP4 segments as MPEG-TS, one segment at a time (see the module): its
     continuity counters, PMT version and each track's end run on from segment to segment."""
@@ -687,7 +670,7 @@ class Fmp4Remuxer:
         self._pids: dict[int, int] = {}
         self._pcr_pid = 0x1FFF
         self._version = 0
-        self._counters: dict[int, int] = {}
+        self._counters = Counters()
         self._ends: dict[int, int] = {}
         # Each track's DTS shift (PTS never before its DTS), set by its first segment and kept:
         # DTS and the PCR never step back. A later frame that needs more has its DTS clamped.
@@ -788,15 +771,8 @@ class Fmp4Remuxer:
             body += (0xF000 | len(info)).to_bytes(2, "big") + info
         return _section(0x02, 1, self._version, bytes(body))
 
-    def _psi(self, pid: int, section: bytes) -> bytes:
-        """A section in one packet after its pointer field, the rest filled with 0xFF."""
-        payload = b"\x00" + section
-        return self._head(pid, True, 0x10) + payload + b"\xff" * (_PAYLOAD - len(payload))
-
-    def _head(self, pid: int, start: bool, control: int) -> bytes:
-        counter = self._counters.get(pid, 0)
-        self._counters[pid] = (counter + 1) & 0x0F
-        return bytes([SYNC, (0x40 if start else 0) | pid >> 8, pid & 0xFF, control | counter])
+    def _psi(self, pid: int, data: bytes) -> bytes:
+        return psi_packet(self._counters, pid, data)
 
     def _pes(self, sample: Sample, dts: int) -> list[bytes]:
         track = sample.track
@@ -829,29 +805,4 @@ class Fmp4Remuxer:
         return self._packets(pid, pes + header + payload, pcr, sample.key and video)
 
     def _packets(self, pid: int, pes: bytes, pcr: int | None, key: bool) -> list[bytes]:
-        """A PES in TS packets on `pid`: the first with the PCR and the random access
-        indicator in its adaptation field, the last stuffed by its own."""
-        packets: list[bytes] = []
-        flags = b""
-        if pcr is not None or key:
-            flags = bytes([(0x40 if key else 0) | (0x10 if pcr is not None else 0)])
-            if pcr is not None:
-                flags += (pcr << 15 | 0x7E00).to_bytes(6, "big")
-        at, total = 0, len(pes)
-        while at < total:
-            room = _PAYLOAD - (1 + len(flags) if flags else 0)
-            chunk = pes[at : at + room]
-            start = at == 0
-            at += len(chunk)
-            if flags or len(chunk) < _PAYLOAD:
-                fill = _PAYLOAD - 1 - len(chunk)  # the adaptation field's length
-                if fill:
-                    field = bytes([fill]) + (flags or b"\x00")
-                    field += b"\xff" * (fill + 1 - len(field))
-                else:
-                    field = b"\x00"
-                packets.append(self._head(pid, start, 0x30) + field + chunk)
-            else:
-                packets.append(self._head(pid, start, 0x10) + chunk)
-            flags = b""
-        return packets
+        return pes_packets(self._counters, pid, pes, pcr, key)

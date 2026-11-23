@@ -4,11 +4,17 @@ menu's and Settings → Providers' "Free radio…").
 
 A list is an ordinary M3U provider whose address is the directory's station JSON: the M3U loader
 reads it (services.m3u.stations_in, parse_stations) and makes each station a channel as an M3U
-line would, marked a station (`is_station`: it plays directly in VLC, never through the
-time-shift helper). Its first group, All stations (the list's "All", renamed), holds every
-station, the most played first; then one country's stations are grouped by genre (`genre_of`,
-from their tags), the list of all countries' (the 2,000 most played worldwide) by country.
-Older 2.x builds read the entry as any M3U playlist and say its answer is no playlist.
+line would, marked a station (`is_station`), with the directory's name for its sound
+(`CODEC_KEY`) and the code page its song names are in when they are no UTF-8 (`CODEPAGE_KEY`,
+from its language or country: `codepage_of`). Since 2.14 a station plays through the
+time-shift helper, which reads its sound (`services.live.source.SoundSource`): pause, rewind,
+recordings and AI captions, as a channel's; one whose sound the helper cannot read (Ogg, FLAC,
+WMA...: `plays_directly`) plays directly in VLC, as every station did in 2.13. Its first
+group, All stations (the list's "All", renamed), holds every station, the most played first;
+then one country's stations are grouped by genre (`genre_of`, from their tags), the list of
+all countries' (the 2,000 most played worldwide) by country. Older 2.x builds read the entry
+as any M3U playlist and say its answer is no playlist (and a cached list's codec and code page
+are fields they do not read).
 
 The directory is asked with QiTV's own name (it asks apps for one), and only for its lists: no
 "click" is reported and nothing of the user's is sent. Data only, no widgets.
@@ -39,6 +45,68 @@ ALL_NAME = "Radio: all countries"  # saved in English, as Free channels' names a
 _NAME_PREFIX = "Radio: "
 RADIO_KEY = "radio"  # in a list made from the directory's stations (its groups: `retitle`)
 STATION_KEY = "radio_station"  # in each of its stations (`is_station`)
+CODEC_KEY = "radio_codec"  # 2.14: the directory's name for a station's sound ("MP3", "OGG"...)
+# 2.14: the code page a station's song names are in when they are no UTF-8 (`codepage_of`)
+CODEPAGE_KEY = "radio_codepage"
+_DEFAULT_CODEPAGE = "cp1252"
+# Each code page's languages (ISO 639-1, as the directory's `languagecodes` name them) ...
+_CODEPAGE_LANGUAGES = {
+    "cp1254": ("tr", "az"),
+    "cp1251": ("ru", "uk", "be", "bg", "sr", "mk", "kk", "ky", "tg", "mn", "ba", "tt"),
+    "cp1253": ("el",),
+    "cp1255": ("he", "yi"),
+    "cp1256": ("ar", "fa", "ur", "ps"),
+    "cp1257": ("lt", "lv", "et"),
+    "cp1250": ("pl", "cs", "sk", "hu", "sl", "hr", "ro", "bs", "sq"),
+}
+# ... the same by the names in its `language` (English, lower case) ...
+_LANGUAGE_NAMES = {
+    "turkish": "tr",
+    "azerbaijani": "az",
+    "russian": "ru",
+    "ukrainian": "uk",
+    "belarusian": "be",
+    "bulgarian": "bg",
+    "serbian": "sr",
+    "macedonian": "mk",
+    "kazakh": "kk",
+    "greek": "el",
+    "hebrew": "he",
+    "arabic": "ar",
+    "persian": "fa",
+    "farsi": "fa",
+    "urdu": "ur",
+    "lithuanian": "lt",
+    "latvian": "lv",
+    "estonian": "et",
+    "polish": "pl",
+    "czech": "cs",
+    "slovak": "sk",
+    "hungarian": "hu",
+    "slovenian": "sl",
+    "croatian": "hr",
+    "romanian": "ro",
+    "bosnian": "bs",
+    "albanian": "sq",
+}
+# ... and, for a station that names no language, by its country (ISO 3166)
+_CODEPAGE_COUNTRIES = {
+    "cp1254": ("TR", "AZ"),
+    "cp1251": ("RU", "UA", "BY", "BG", "RS", "MK", "KZ", "KG", "TJ", "MN"),
+    "cp1253": ("GR",),
+    "cp1255": ("IL",),
+    "cp1256": ("SA", "AE", "EG", "IQ", "IR", "JO", "KW", "LB", "LY", "MA", "DZ", "TN")
+    + ("OM", "QA", "SY", "YE", "BH", "SD", "PK", "AF", "PS"),
+    "cp1257": ("LT", "LV", "EE"),
+    "cp1250": ("PL", "CZ", "SK", "HU", "SI", "HR", "RO", "BA", "AL", "ME"),
+}
+_BY_LANGUAGE = {code: page for page, codes in _CODEPAGE_LANGUAGES.items() for code in codes}
+_BY_COUNTRY = {code: page for page, codes in _CODEPAGE_COUNTRIES.items() for code in codes}
+# What the directory calls the sound the time-shift helper reads (HLS stations' pictures too);
+# a station whose list was made by 2.13 names none, and is tried (it falls back as it fails).
+_READABLE_CODECS = frozenset(
+    ("", "UNKNOWN", "MP3", "MPEG", "MP2", "AAC", "AAC+", "H.264", "H.265", "HEVC")
+)
 # i18n: a radio list's first group: every station, most played first
 ALL_STATIONS = N_("All stations")
 
@@ -159,9 +227,40 @@ def retitle(payload: Any) -> Any:
 
 
 def is_station(item: Any) -> bool:
-    """Whether a channel is a station of a radio list: VLC plays it directly (it is a sound
-    stream; the time-shift helper would only fail to read most of them)."""
+    """Whether a channel is a station of a radio list (its sound is read as a station's:
+    2.14, `services.live.source.SoundSource`)."""
     return isinstance(item, dict) and item.get(STATION_KEY) is True
+
+
+def codepage_of(station: dict) -> str:
+    """The code page a directory's station's song names are in when they are no UTF-8 (2.14,
+    older stations' are): its language's legacy Windows code page (the first of its
+    `languagecodes`, else of its `language` names, that has one), else its country's, else
+    cp1252 (Western)."""
+    codes = [code.strip().lower() for code in str(station.get("languagecodes") or "").split(",")]
+    names = [name.strip().lower() for name in str(station.get("language") or "").split(",")]
+    for code in codes + [_LANGUAGE_NAMES.get(name, "") for name in names]:
+        if code in _BY_LANGUAGE:
+            return _BY_LANGUAGE[code]
+    country = str(station.get("countrycode") or "").strip().upper()
+    return _BY_COUNTRY.get(country, _DEFAULT_CODEPAGE)
+
+
+def codepage(item: Any) -> str:
+    """A station's song names' code page (`CODEPAGE_KEY`; cp1252 for one a 2.13 list made)."""
+    page = item.get(CODEPAGE_KEY) if isinstance(item, dict) else None
+    return page if isinstance(page, str) and page else _DEFAULT_CODEPAGE
+
+
+def plays_directly(item: Any) -> bool:
+    """Whether a radio list's station plays directly in VLC, never through the time-shift
+    helper (2.14): the directory names its sound one the helper cannot read (Ogg Vorbis or
+    Opus, FLAC, WMA...). One it names none of (a 2.13 list's), or "UNKNOWN", is tried, and
+    plays directly once the helper finds it cannot read it."""
+    if not is_station(item):
+        return False
+    codec = str(item.get(CODEC_KEY) or "").upper()
+    return any(part.strip() not in _READABLE_CODECS for part in codec.split(","))
 
 
 def iso_code(code: str) -> str:

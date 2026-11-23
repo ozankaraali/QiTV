@@ -26,6 +26,7 @@ from __future__ import annotations
 from collections.abc import Iterable, Mapping
 import logging
 
+from services.live.raw_audio import adts_header, packed_start
 from services.live.ts import (
     PACKET,
     SYNC,
@@ -35,14 +36,13 @@ from services.live.ts import (
     _section_at,
     pts_delta,
 )
+from services.live.ts_mux import Counters, audio_pes, pes_packets
 
 logger = logging.getLogger(__name__)
 
 _LEAD_TICKS = 90000  # audio is woven in up to a second before the video's clock reaches it
 _AUDIO_TYPES = (0x03, 0x04, 0x0F, 0x11, 0x81, 0x87)  # MPEG audio, AAC, LATM, AC-3, E-AC-3
 _DVB_AUDIO = (0x6A, 0x7A, 0x7C)  # private PES (0x06) with an AC-3, E-AC-3 or AAC descriptor
-_ADTS_RATES = (96000, 88200, 64000, 48000, 44100, 32000, 24000, 22050, 16000, 12000, 11025, 8000)
-_TIMESTAMP_OWNER = b"com.apple.streaming.transportStreamTimestamp\x00"
 _PTS_MODULO = 1 << 33
 _TIMELINE_TICKS = 60 * 90000  # audio this far back from the queue's is a new timeline
 
@@ -57,7 +57,7 @@ class AudioWeaver:
         self._type = 0  # its stream type ...
         self._info = b""  # ... and ES descriptors in the PMT
         self._stream: tuple[int, bytes, int] | None = None  # (type, descriptors, PID) as read
-        self._cc = 0  # the counter of the packets built from packed audio
+        self._counters = Counters()  # the packets built from packed audio (on PID 0)
         self._woven_cc = 0  # the next counter on the audio's PID in the woven TS
         self._next_pts: int | None = None  # packed audio: where its last segment ended
         self._queue: list[Unit] = []  # audio added and not woven yet, in PTS order
@@ -99,11 +99,11 @@ class AudioWeaver:
     def peek(self, audio: bytes) -> tuple[int, int] | None:
         """(first PTS, last PTS) of an audio segment, without queueing it; None when it is
         unreadable."""
-        kept = self._cc, self._next_pts
+        kept = dict(self._counters.values), self._next_pts
         try:
             read = self._read(audio)
         finally:
-            self._cc, self._next_pts = kept
+            self._counters.values, self._next_pts = kept
         if read is None or not read[0]:
             return None
         return read[0][0][0], read[0][-1][0]
@@ -260,33 +260,20 @@ class AudioWeaver:
 
     def _packed(self, data: bytes) -> tuple[list[Unit], int, bytes, int] | None:
         """Packed ADTS audio as PES units (one per frame), on a PID this weaver numbers."""
-        pos, pts = 0, None
-        while data[pos : pos + 3] == b"ID3" and pos + 10 <= len(data):
-            size = (
-                (data[pos + 6] << 21) | (data[pos + 7] << 14) | (data[pos + 8] << 7) | data[pos + 9]
-            )
-            tag = data[pos + 10 : pos + 10 + size]
-            at = tag.find(_TIMESTAMP_OWNER)
-            if at >= 0 and at + len(_TIMESTAMP_OWNER) + 8 <= len(tag):
-                raw = tag[at + len(_TIMESTAMP_OWNER) : at + len(_TIMESTAMP_OWNER) + 8]
-                pts = int.from_bytes(raw, "big") % _PTS_MODULO
-            pos += 10 + size + (10 if data[pos + 5] & 0x10 else 0)
+        pts, pos = packed_start(data)
         if pts is None:
             pts = self._next_pts
         if pts is None:
             return None  # undated, and nothing before it to follow on from
         units: list[Unit] = []
         elapsed = 0.0
-        while pos + 7 <= len(data):
-            if data[pos] != 0xFF or data[pos + 1] & 0xF6 != 0xF0:
-                break  # not ADTS (or damaged): what came before it is kept
-            length = ((data[pos + 3] & 0x03) << 11) | (data[pos + 4] << 3) | (data[pos + 5] >> 5)
-            rate_index = (data[pos + 2] >> 2) & 0x0F
-            if length < 7 or rate_index >= len(_ADTS_RATES) or pos + length > len(data):
-                break
+        while (header := adts_header(data, pos)) is not None:
+            length, samples, rate = header
+            if pos + length > len(data):
+                break  # cut short: what came before it is kept
             at = (pts + round(elapsed)) % _PTS_MODULO
             units.append((at, self._pes(data[pos : pos + length], at)))
-            elapsed += 1024 * 90000 / _ADTS_RATES[rate_index]
+            elapsed += samples * 90000 / rate
             pos += length
         self._next_pts = (pts + round(elapsed)) % _PTS_MODULO
         return units, 0x0F, b"", 0
@@ -294,29 +281,7 @@ class AudioWeaver:
     def _pes(self, frame: bytes, pts: int) -> list[bytes]:
         """One audio frame as a PES (stream 0xC0, its PTS) in TS packets on PID 0 (`_on_pid`
         moves them); the last packet stuffed by its adaptation field."""
-        stamp = bytes(
-            [
-                0x21 | ((pts >> 29) & 0x0E),
-                (pts >> 22) & 0xFF,
-                ((pts >> 14) & 0xFE) | 1,
-                (pts >> 7) & 0xFF,
-                ((pts << 1) & 0xFE) | 1,
-            ]
-        )
-        length = 3 + 5 + len(frame)
-        pes = b"\x00\x00\x01\xc0" + length.to_bytes(2, "big") + b"\x80\x80\x05" + stamp + frame
-        packets = []
-        for at in range(0, len(pes), 184):
-            chunk = pes[at : at + 184]
-            head = bytes([SYNC, 0x40 if at == 0 else 0x00, 0x00])
-            if len(chunk) < 184:  # stuffing: an adaptation field fills the rest
-                room = 184 - len(chunk)
-                field = bytes([room - 1]) + (b"\x00" + b"\xff" * (room - 2) if room > 1 else b"")
-                packets.append(head + bytes([0x30 | self._cc]) + field + chunk)
-            else:
-                packets.append(head + bytes([0x10 | self._cc]) + chunk)
-            self._cc = (self._cc + 1) & 0x0F
-        return packets
+        return pes_packets(self._counters, 0, audio_pes(0xC0, pts, frame, aligned=False))
 
 
 def video_start(data: bytes) -> int | None:

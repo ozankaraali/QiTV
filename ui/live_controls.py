@@ -541,9 +541,10 @@ class LiveControls(QObject):
         """Whether a live link plays through the time-shift pipeline.
 
         Its source reads http(s) only; container files listed as channels (M3U) play as files,
-        and a radio list's stations (2.13: `item`'s, free_radio.is_station) directly in VLC.
+        and a radio list's station whose sound it cannot read (2.14: `item`'s,
+        free_radio.plays_directly; 2.13: every station) directly in VLC.
         """
-        if self.live is None or kind is PlayKind.VOD_FILE or free_radio.is_station(item):
+        if self.live is None or kind is PlayKind.VOD_FILE or free_radio.plays_directly(item):
             return False
         return urlsplit(url).scheme.lower() in _PIPELINE_SCHEMES
 
@@ -619,7 +620,8 @@ class LiveControls(QObject):
         unless its host answered only over HTTP this run, or it is the HTTP address of an
         Xtream panel, or of an STB portal that answered only over HTTP (2.8.1): their sign-in
         found no HTTPS); and the channel's key for what it taught stay-live (Auto's target, a
-        locked rate)."""
+        locked rate). A radio list's station (2.14) is asked as given, as VLC asks it, and
+        the helper reads its sound (`radio`)."""
         provider = item_provider.provider_dict(self.catalog, target.item)
         user_agent = item_provider.user_agent(self.catalog, target.item)
         verify_ssl = bool(provider.get("ssl_verify", self.config.ssl_verify))
@@ -627,7 +629,9 @@ class LiveControls(QObject):
         referrer = str(target.item.get("referrer") or "")
         kind = item_provider.provider_type(self.catalog, target.item)
         plain = kind == "XTREAM" or portal_http_only(provider)  # its sign-in found no HTTPS
+        station = free_radio.is_station(target.item)
         https = not known_http_only(url) and not (plain and url.startswith("http://"))
+        https = https and not station
         # An STB portal's channel that fails gets a fresh link (`relink`), never the old again;
         # a link of Network streams is tried again once, by the player's own retry. One no
         # configured provider owns (`once`) has nothing counted anywhere to wait out; one of
@@ -645,6 +649,7 @@ class LiveControls(QObject):
             target.max_height,
             revive,
             once=once,
+            radio=station,
         )
 
     def pipeline_live(self) -> bool:

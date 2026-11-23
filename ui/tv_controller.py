@@ -85,7 +85,7 @@ from PySide6.QtCore import QEvent, QObject, QPoint, Qt, QTimer, QUrl, Signal
 from PySide6.QtGui import QPixmap, QWheelEvent
 from PySide6.QtWidgets import QAbstractScrollArea
 
-from services import external_players, favorites, recording, recording_schedule
+from services import external_players, favorites, free_radio, recording, recording_schedule
 from services.album_listing import unread_track
 from services.budgeted_stream import HeldSlot
 from services.casting import CastDevices
@@ -5038,11 +5038,16 @@ class TVController(QObject):
         screen.show_song(title, artist, album, year=year)
 
     def _refresh_radio(self, target: Target) -> None:
-        """A radio channel's name, then the song its stream names (else the programme on)."""
+        """A radio channel's name, then the song its stream names (else the programme on):
+        VLC's, or through the time-shift buffer a station's as the helper read it where it
+        plays (2.14: VLC never sees the station's own metadata there)."""
         screen = self._screen()
         if screen is None:
             return
         playing = str(self._tags().get("now_playing") or "")
+        live = self.live
+        if not playing and live is not None and self._live_controls.pipeline_live():
+            playing = live.stream_title(free_radio.codepage(target.item))
         if not playing:
             on_now = self.now_title(target.item)
             playing = on_now[0] if on_now else ""

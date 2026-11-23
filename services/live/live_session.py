@@ -292,6 +292,7 @@ from services.i18n import N_
 from services.live import parts as live_parts
 from services.live.kept import KeptRing, Where, where_dict
 from services.live.learned_target import LearnedTarget, learned_target
+from services.live.raw_audio import decoded
 from services.live.recorder import MAX_SECONDS, MIN_FREE_BYTES
 from services.live.refusals import REFUSALS, STREAM_LIMIT
 from services.live.server_part import (
@@ -939,6 +940,7 @@ class LiveSession(QObject):
         borrowed: Optional[Borrowed] = None,
         revive: bool = True,
         once: bool = False,
+        radio: bool = False,
     ) -> None:
         """`ram_bytes`: the memory a disk buffer that fails goes on in (the helper's default
         when None). `channel`: the channel's key in the tuning store ("": nothing kept).
@@ -959,7 +961,8 @@ class LiveSession(QObject):
         is made again instead). `once` (plan 4, a link of Network streams that no configured
         provider owns): its direct play after its buffer is tried once, never again after a
         quick failure, and its source asks a refused reconnect no more: no closed connection
-        of a provider is waited out there."""
+        of a provider is waited out there. `radio` (2.14): a radio list's station: every
+        stream the helper opens for it reads its sound and names its songs (`stream_title`)."""
         self.stop()
         self._played, self._revive_on, self._once = False, revive, once
         self._failure = ("", None)
@@ -1009,6 +1012,8 @@ class LiveSession(QObject):
             self._open_args["https_first"] = True
         if once:
             self._open_args["once"] = True  # its source asks a refused reconnect no more
+        if radio:
+            self._open_args["radio"] = True  # 2.14: a station's sound, and its songs
         if self._memory.max_height > 0:
             self._open_args["max_height"] = self._memory.max_height
         self._stay = StayLive(self._latency)
@@ -1635,6 +1640,27 @@ class LiveSession(QObject):
             return self._advance()
         return self._base + self._elapsed
 
+    def stream_title(self, codepage: str = "cp1252") -> str:
+        """The song a radio station's stream names where it plays (2.14: the helper reads the
+        station's own metadata, which VLC never sees through the buffer: the helper state's
+        `titles`, each from its place on the timeline); "" when it names none, or the stream
+        does not play from the buffer. Text that is no UTF-8 reads in `codepage` (the
+        station's language's, `services.free_radio.codepage`)."""
+        if self._phase is not _Phase.PIPELINE or self._sid is None:
+            return ""
+        titles = self._snapshot().get("titles")
+        if not isinstance(titles, list):
+            return ""
+        position, playing, legacy = self.position(), "", False
+        for entry in titles:
+            if not isinstance(entry, (list, tuple)) or len(entry) not in (2, 3):
+                continue
+            at, text = entry[0], entry[1]
+            if isinstance(at, (int, float)) and at > position:
+                break
+            playing, legacy = str(text), len(entry) == 3 and entry[2] is True
+        return decoded(playing, legacy, codepage)
+
     # ---- recording (2.2) ---------------------------------------------------------------
     def recordable(self) -> bool:
         """It plays from the time-shift buffer: a recording can start (2.9.7: not on a
@@ -1910,6 +1936,7 @@ class LiveSession(QObject):
             max_height=int(self._open_args.get("max_height", 0)),
             **({"join": True} if join else {}),
             **({"once": True} if self._open_args.get("once") else {}),
+            **({"radio": True} if self._open_args.get("radio") else {}),
         )
 
     def _on_resumed(self, sid: str) -> None:
