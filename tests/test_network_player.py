@@ -1011,19 +1011,30 @@ class SiteTests(PlayerCase):
         self.assertNotIn("after_seq", kwargs)
         self.assertEqual(len(self.starts()), starts)  # the same player, no new helper run
 
-    def test_a_direct_play_with_a_stale_ad_flag_still_reopens(self):
-        # The session's ad break is a pipeline's (Task 4 owns it): a direct play whose flag
-        # was left set (a fall-back during a break) must reopen when it drops.
+    def test_a_direct_play_whose_session_says_no_break_reopens(self):
         self.enterContext(mock.patch("ui.live_controls.RECONNECT_MS", (50, 50)))
         self.answers = [MASTER, MASTER_FRESH]
         self.link(KICK_PAGE)
         self.live.play_direct()
         self.plays_now()
-        self.live.in_ad_break = lambda: False  # (the phase gate: DIRECT is never in a break)
+        self.live.in_ad_break = lambda: False  # (LiveSession's: a pipeline's break only)
         plays = len(self.session.plays)
         self.session.ended.emit()
         self.assertTrue(wait_until(lambda: len(self.session.plays) == plays + 1))
         self.assertEqual(self.session.plays[-1][0], MASTER_FRESH)
+
+    def test_a_reopen_is_skipped_while_the_session_skips_an_ad_break(self):
+        self.enterContext(mock.patch("ui.live_controls.RECONNECT_MS", (50, 50)))
+        self.answers = [MASTER, MASTER_FRESH]
+        self.link(KICK_PAGE)
+        self.live.play_direct()
+        self.plays_now()
+        self.live.in_ad_break = lambda: True
+        plays = len(self.session.plays)
+        self.session.ended.emit()
+        pause(400)
+        self.assertEqual(len(self.session.plays), plays)
+        self.assertEqual(len(self.asked), 1)  # the site was not asked again
 
     def pipeline_fails(self, message=STREAM_REFUSED):
         """The page plays through the buffer, shows its picture, and the buffer fails."""
@@ -1050,6 +1061,27 @@ class SiteTests(PlayerCase):
         self.assertEqual(
             self.store.get(stream_id(KICK_PAGE)).failed, "examplechannel isn't live now"
         )
+
+    def test_a_zap_in_flight_is_not_lost_to_a_site_buffer_failure(self):
+        late = threading.Event()
+
+        def slow(stop):
+            late.wait(5)
+            return MASTER_OTHER
+
+        self.answers = [MASTER, slow]
+        self.link(KICK_PAGE)
+        self.live.play_pipeline()
+        self.plays_now()
+        starts = len(self.starts())
+        self.player.play(TWITCH_PAGE, LIVE)  # the zap: its site is slow to answer
+        self.assertTrue(wait_until(lambda: len(self.asked) == 2))
+        self.live.failed.emit(STREAM_REFUSED)  # the old channel's buffer fails meanwhile
+        self.assertEqual(len(self.asked), 2)  # the old site was not asked again
+        self.opens(late.set)
+        self.assertEqual(self.starts()[-1][0], MASTER_OTHER)
+        self.assertEqual(self.controller.now_playing().item["cmd"], TWITCH_PAGE)
+        self.assertGreater(len(self.starts()), starts)
 
     def test_a_site_link_asks_again_once_only(self):
         self.answers = [MASTER, MASTER_FRESH]

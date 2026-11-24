@@ -7419,6 +7419,19 @@ class AdBreakTests(LiveSessionCase):
         feed.push()
         feed.stalled = False
 
+    def test_the_ad_break_is_a_pipelines_only(self):
+        # The UI asks `in_ad_break()` before it opens a stream again: true in a break of the
+        # buffer, false once the session plays directly, whatever flag a fall-back left.
+        feed = self.tune(edge=8.0, starved=PlaybackState.PLAYING)
+        feed.run(30.0)
+        self.assertFalse(self.live.in_ad_break())
+        self.begin(feed)
+        feed.run(10.0)
+        self.assertTrue(self.live.in_ad_break())
+        self.live._phase = live_session._Phase.DIRECT  # fell back during the break
+        self.assertTrue(self.live._ad_break)  # (its flag is still set)
+        self.assertFalse(self.live.in_ad_break())
+
     def test_an_ad_break_counts_no_starvation(self):
         # 90 s of a break under Auto: neither the starvation prior, nor a near-miss, nor a
         # stall hears of it, during it or as VLC fills up again after it; the margin is as

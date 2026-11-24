@@ -1142,6 +1142,7 @@ class LiveControls(QObject):
             or not (current.played or self._played)
             or self._site_page(current.item) is None
             or self._reask is None
+            or self._lanes.busy()  # a newer choice is on its way: it is not lost to this
             or not self._link_may_try(current)
         ):
             return False
