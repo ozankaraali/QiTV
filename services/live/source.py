@@ -1318,6 +1318,33 @@ def _within(candidates: list[Any], max_height: int) -> list[Any]:
     return [item for item in sized if _height(item) == smallest]
 
 
+def _codec_rank(variant: Any) -> int:
+    """How good a variant's video codec is, by its CODECS: AV1 3, HEVC 2, H.264 1, else 0."""
+    best = 0
+    for codec in str(variant.stream_info.codecs or "").lower().split(","):
+        name = codec.strip().split(".", 1)[0]
+        if name == "av01":
+            best = max(best, 3)
+        elif name in ("hvc1", "hev1", "hevc"):
+            best = max(best, 2)
+        elif name in ("avc1", "avc3", "h264"):
+            best = max(best, 1)
+    return best
+
+
+def _variant_rank(variant: Any) -> tuple[int, float, int, int]:
+    """What orders a master's variants, best last: picture height, frame rate, codec, then
+    bandwidth. What a master does not name counts as 0, so one that names none (many IPTV ones)
+    keeps the bandwidth order."""
+    info = variant.stream_info
+    return (
+        _height(variant),
+        float(info.frame_rate or 0),
+        _codec_rank(variant),
+        info.bandwidth or 0,
+    )
+
+
 def _sound_only(variant: Any) -> bool:
     """A variant whose CODECS name sound alone, of a kind the remuxers read (2.14)."""
     codecs = str(variant.stream_info.codecs or "")
@@ -1343,9 +1370,7 @@ def _select_manifest(
         if not candidates:
             raise SourceError("unsupported", _NO_VIDEO)
         heights = tuple(sorted({_height(item) for item in candidates} - {0}, reverse=True))
-        selected = max(
-            _within(candidates, max_height), key=lambda item: item.stream_info.bandwidth or 0
-        )
+        selected = max(_within(candidates, max_height), key=_variant_rank)
         groups = {
             "AUDIO": selected.stream_info.audio,
             "SUBTITLES": selected.stream_info.subtitles,

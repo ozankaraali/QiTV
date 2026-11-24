@@ -605,6 +605,58 @@ unsupported.m3u8
                 asked = [name for name in playlists if server.counts[f"/{name}.m3u8"]]
                 self.assertEqual(asked, [chosen])
 
+    def _picked(self, master, max_height=0):
+        playlist, _heights = source_module._select_manifest(
+            master.encode(), "http://x/m.m3u8", max_height
+        )
+        return playlist.playlists[0].uri
+
+    def test_a_taller_variant_wins_over_more_bandwidth(self):
+        master = (
+            "#EXTM3U\n"
+            '#EXT-X-STREAM-INF:BANDWIDTH=8000000,RESOLUTION=1920x1080,FRAME-RATE=60,CODECS="avc1.640028"\nfull.m3u8\n'
+            '#EXT-X-STREAM-INF:BANDWIDTH=6000000,RESOLUTION=2560x1440,FRAME-RATE=60,CODECS="hvc1.1.6.L150"\nwide.m3u8\n'
+        )
+        self.assertEqual(self._picked(master), "wide.m3u8")
+
+    def test_same_height_prefers_the_better_codec(self):
+        master = (
+            "#EXTM3U\n"
+            '#EXT-X-STREAM-INF:BANDWIDTH=8000000,RESOLUTION=1920x1080,FRAME-RATE=60,CODECS="avc1.640028"\nh264.m3u8\n'
+            '#EXT-X-STREAM-INF:BANDWIDTH=5000000,RESOLUTION=1920x1080,FRAME-RATE=60,CODECS="hvc1.1.6.L120"\nhevc.m3u8\n'
+            '#EXT-X-STREAM-INF:BANDWIDTH=9000000,RESOLUTION=1920x1080,FRAME-RATE=30,CODECS="hvc1.1.6.L120"\nslow.m3u8\n'
+        )
+        self.assertEqual(self._picked(master), "hevc.m3u8")
+
+    def test_av1_only_when_carried(self):
+        # The spike (.superpowers/docs/sites/av1-spike.md): VLC 3's TS demuxer cannot read AV1,
+        # so an AV1 variant is passed over and the best H.264 one plays.
+        master = (
+            "#EXTM3U\n"
+            '#EXT-X-STREAM-INF:BANDWIDTH=5000000,RESOLUTION=2560x1440,FRAME-RATE=60,CODECS="av01.0.12M.08"\nav1.m3u8\n'
+            '#EXT-X-STREAM-INF:BANDWIDTH=8000000,RESOLUTION=1920x1080,FRAME-RATE=60,CODECS="avc1.640028"\nh264.m3u8\n'
+        )
+        self.assertEqual(self._picked(master), "h264.m3u8")
+
+    def test_the_live_cap_still_bounds_the_height(self):
+        master = (
+            "#EXTM3U\n"
+            '#EXT-X-STREAM-INF:BANDWIDTH=6000000,RESOLUTION=2560x1440,FRAME-RATE=60,CODECS="hvc1.1.6.L150"\nwide.m3u8\n'
+            '#EXT-X-STREAM-INF:BANDWIDTH=8000000,RESOLUTION=1920x1080,FRAME-RATE=60,CODECS="avc1.640028"\nh264.m3u8\n'
+            '#EXT-X-STREAM-INF:BANDWIDTH=5000000,RESOLUTION=1920x1080,FRAME-RATE=60,CODECS="hvc1.1.6.L120"\nhevc.m3u8\n'
+            '#EXT-X-STREAM-INF:BANDWIDTH=2000000,RESOLUTION=1280x720,FRAME-RATE=60,CODECS="avc1.64001f"\nmid.m3u8\n'
+        )
+        self.assertEqual(self._picked(master, 1080), "hevc.m3u8")
+        self.assertEqual(self._picked(master, 720), "mid.m3u8")
+
+    def test_a_master_naming_no_size_or_rate_keeps_the_bandwidth_order(self):
+        master = (
+            "#EXTM3U\n#EXT-X-STREAM-INF:BANDWIDTH=100000\nlow.m3u8\n"
+            "#EXT-X-STREAM-INF:BANDWIDTH=300000\ntop.m3u8\n"
+            "#EXT-X-STREAM-INF:BANDWIDTH=200000\nmid.m3u8\n"
+        )
+        self.assertEqual(self._picked(master), "top.m3u8")
+
     def test_a_cap_is_moot_without_sizes(self):
         # A master that names no RESOLUTION (many IPTV ones) plays its best as before; a
         # variant without one is left out under a cap while others name theirs; a media
@@ -621,7 +673,7 @@ unsupported.m3u8
         cases = (
             ("/bare.m3u8", 360, "high", (), 0),
             ("/mixed.m3u8", 720, "high", (720, 360), 720),
-            ("/mixed.m3u8", 0, "unknown", (720, 360), 0),
+            ("/mixed.m3u8", 0, "high", (720, 360), 720),  # a named size outranks bandwidth
             ("/high.m3u8", 360, "high", (), 0),
         )
         for path, cap, chosen, heights, height in cases:
