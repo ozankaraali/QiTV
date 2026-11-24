@@ -7504,6 +7504,37 @@ class AdBreakTests(LiveSessionCase):
                 self.assertEqual(len(self.playback.plays), plays + 1)
                 self.assertEqual(self.playback.software[-1], froze)
 
+    def test_a_seek_in_a_break_settles_the_verdicts_owed(self):
+        # Final review (Task 4 M4): the stream a seek opened mid-break is a new one, so the
+        # watches' verdicts owed for the old one are dropped: the break's end opens nothing.
+        feed = self.tune(edge=8.0, starved=PlaybackState.PLAYING)
+        feed.run(30.0)
+        self.begin(feed)
+        feed.run(10.0)
+        self.playback.soundLost.emit()
+        self.playback.pictureFroze.emit()
+        plays = len(self.playback.plays)
+        self.live.seek_to(10.0)
+        self.assertEqual(len(self.playback.plays), plays + 1)  # the seek's own open
+        feed.run(10.0)
+        self.end(feed)
+        feed.run(10.0)
+        self.assertEqual(len(self.playback.plays), plays + 1)  # no second one
+
+    def test_a_break_that_ends_after_a_fall_back_owes_nothing(self):
+        # Its owed verdicts go with the break whatever plays as it ends: none is acted on at a
+        # later break's end.
+        feed = self.tune(edge=8.0, starved=PlaybackState.PLAYING)
+        feed.run(30.0)
+        self.begin(feed)
+        feed.run(10.0)
+        self.playback.soundLost.emit()
+        self.playback.pictureFroze.emit()
+        self.assertTrue(self.live._froze_owed and self.live._sound_owed)
+        self.live._phase = live_session._Phase.DIRECT  # fell back during the break
+        self.end(feed)
+        self.assertEqual((self.live._froze_owed, self.live._sound_owed), (False, False))
+
     def test_a_break_that_never_ends_is_a_silence_after_a_while(self):
         # A break the helper says goes on beyond any (`_AD_MAX_S`, here 30 s: a channel gone off
         # mid-break, a stuck edge) is waited for as any silence of the channel from then: the

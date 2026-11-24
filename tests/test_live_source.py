@@ -693,6 +693,63 @@ unsupported.m3u8
         self.assertEqual(self._picked(master, 1080), "hevc.m3u8")
         self.assertEqual(self._picked(master, 720), "mid.m3u8")
 
+    def test_a_site_master_with_live_subtitles_plays_its_best_variant_alone(self):
+        # Spec E.5: a Kick-shaped master (an IVS one, its names made up) carries subtitles in
+        # 7 languages: the chosen variant keeps its SUBTITLES group in its media list, and
+        # nothing fetches them or another variant; its pieces play.
+        languages = ("en", "tr", "de", "es", "fr", "pt", "ar")
+        master = "#EXTM3U\n#EXT-X-INDEPENDENT-SEGMENTS\n"
+        master += "".join(
+            f'#EXT-X-MEDIA:TYPE=SUBTITLES,GROUP-ID="subs",NAME="{lang}",LANGUAGE="{lang}",'
+            f'AUTOSELECT=YES,DEFAULT=NO,FORCED=NO,URI="subs/{lang}.m3u8"\n'
+            for lang in languages
+        )
+        variants = (  # (name, bandwidth, resolution, frame rate)
+            ("chunked", 13000000, "1920x1080", 60.0),
+            ("720p60", 6000000, "1280x720", 60.0),
+            ("480p30", 2500000, "852x480", 30.0),
+            ("160p30", 400000, "284x160", 30.0),
+        )
+        for name, bandwidth, resolution, rate in variants:
+            master += (
+                f'#EXT-X-MEDIA:TYPE=VIDEO,GROUP-ID="{name}",NAME="{name}",AUTOSELECT=YES,'
+                "DEFAULT=YES\n"
+                f"#EXT-X-STREAM-INF:BANDWIDTH={bandwidth},RESOLUTION={resolution},"
+                f'CODECS="avc1.64002A,mp4a.40.2",VIDEO="{name}",FRAME-RATE={rate:.3f},'
+                f'SUBTITLES="subs"\n{name}/index.m3u8\n'
+            )
+        routes = {"/master.m3u8": (200, {}, master.encode()), "/video.ts": (200, {}, self.video)}
+        for name, *_ in variants:
+            routes[f"/{name}/index.m3u8"] = (200, {}, leaf("../video.ts"))
+        routes.update({f"/subs/{lang}.m3u8": (200, {}, leaf("cue.vtt")) for lang in languages})
+        server = self.server(routes)
+        playlist, heights = source_module._select_manifest(
+            master.encode(), server.url + "/master.m3u8"
+        )
+        (selected,) = playlist.playlists
+        self.assertEqual((selected.uri, heights), ("chunked/index.m3u8", (1080, 720, 480, 160)))
+        kept = [(item.type, item.language) for item in playlist.media]
+        self.assertEqual([lang for kind, lang in kept if kind == "SUBTITLES"], list(languages))
+        self.assertEqual(media(server.url + "/master.m3u8"), [self.video])
+        asked = {path for path, count in server.counts.items() if count}
+        self.assertEqual(asked, {"/master.m3u8", "/chunked/index.m3u8", "/video.ts"})
+
+    def test_height_ranks_first_only_when_every_variant_names_one(self):
+        # Ruling R17: an IPTV master listing its source without RESOLUTION (6 Mbit/s) beside a
+        # sized 720p (2 Mbit/s) plays the source, as before; named everywhere, height wins.
+        sized = (
+            "#EXTM3U\n"
+            "#EXT-X-STREAM-INF:BANDWIDTH=6000000,RESOLUTION=1280x720\nwide.m3u8\n"
+            "#EXT-X-STREAM-INF:BANDWIDTH=2000000,RESOLUTION=1920x1080\ntall.m3u8\n"
+        )
+        self.assertEqual(self._picked(sized), "tall.m3u8")
+        mixed = (
+            "#EXTM3U\n#EXT-X-STREAM-INF:BANDWIDTH=6000000\nsource.m3u8\n"
+            "#EXT-X-STREAM-INF:BANDWIDTH=2000000,RESOLUTION=1280x720,FRAME-RATE=60\nmid.m3u8\n"
+        )
+        self.assertEqual(self._picked(mixed), "source.m3u8")
+        self.assertEqual(self._picked(mixed, 720), "mid.m3u8")  # a cap leaves the sized ones
+
     def test_a_master_naming_no_size_or_rate_keeps_the_bandwidth_order(self):
         master = (
             "#EXTM3U\n#EXT-X-STREAM-INF:BANDWIDTH=100000\nlow.m3u8\n"
@@ -717,7 +774,7 @@ unsupported.m3u8
         cases = (
             ("/bare.m3u8", 360, "high", (), 0),
             ("/mixed.m3u8", 720, "high", (720, 360), 720),
-            ("/mixed.m3u8", 0, "high", (720, 360), 720),  # a named size outranks bandwidth
+            ("/mixed.m3u8", 0, "unknown", (720, 360), 0),  # one names none: bandwidth
             ("/high.m3u8", 360, "high", (), 0),
         )
         for path, cap, chosen, heights, height in cases:
@@ -4283,6 +4340,57 @@ video.m3u8
         server = self.copies([text], ["s0.ts", "p1.ts", "p2.ts"])
         parts = self.run_for(server, 0.5, live_delay=100.0)
         self.assertEqual(parts, joined(self.video, Discontinuity(), self.video, self.video))
+
+    def test_twitch_pieces_being_made_after_a_cut_from_the_channel_are_an_ad_breaks(self):
+        # Final review I2: a Twitch copy lists the channel's pieces, a discontinuity, and two
+        # pieces still being made before any range dates them (their dates are only reckoned):
+        # the break's first pieces. Never asked for, and the break is said once, not twice.
+        # Once the break's pieces are listed finished, the pieces made after its end play.
+        AdBreak = source_module.AdBreak
+        ads = {"p3.ts", "p4.ts"}
+        finished = ["s0.ts", "s1.ts", "s2.ts"]
+        copies = [
+            dated(0, finished, ads=ads, prefetch=sorted(ads)),  # no range yet
+            dated(
+                1,
+                finished[1:] + sorted(ads),
+                ads=ads,
+                ranges={"p3.ts": ad_range(3, 2)},
+                prefetch=["p5.ts", "p6.ts"],  # after a cut back to the channel: theirs
+            ),
+        ]
+        url = "https://cdn.example.test/live/media.m3u8"
+        first = source_module._select_manifest(copies[0], url)[0]
+        self.assertEqual([piece.discontinuity for piece in first.segments][-2:], [True, False])
+        server = self.copies(copies, finished + sorted(ads) + ["p5.ts", "p6.ts"])
+        items = self.until(server, "p6.ts", live_delay=100.0)
+        self.assertEqual(requested_segments(server), finished + ["p5.ts", "p6.ts"])
+        self.assertEqual(self.markers(items), [AdBreak(True), AdBreak(False), Discontinuity()])
+
+    def test_another_sites_pieces_being_made_after_a_cut_play(self):
+        # Without Twitch's own tags (Kick's prefetch lines, a low-latency server's), a cut
+        # before the pieces being made is the stream's own: they play, marked.
+        copy = prefetching(0, ["s0.ts", "s1.ts"], [], target=1).decode()
+        copy += "#EXT-X-DISCONTINUITY\n#EXT-X-PREFETCH:p2.ts\n#EXT-X-PREFETCH:p3.ts\n"
+        server = self.copies([copy.encode()], ["s0.ts", "s1.ts", "p2.ts", "p3.ts"])
+        parts = self.run_for(server, 0.5, live_delay=100.0)
+        self.assertEqual(requested_segments(server), ["s0.ts", "s1.ts", "p2.ts", "p3.ts"])
+        self.assertEqual(self.markers(parts), [Discontinuity()])
+
+    def test_a_twitch_discontinuity_between_two_of_the_channels_pieces_is_none(self):
+        # Final review M3: Twitch writes some between its own live pieces, where the stream
+        # has no break; around its ad breaks, and in any other playlist, each is one.
+        body = (
+            "#EXTM3U\n#EXT-X-TARGETDURATION:1\n#EXT-X-MEDIA-SEQUENCE:0\n{tag}"
+            "#EXTINF:1.000,live\ns0.ts\n#EXT-X-DISCONTINUITY\n#EXTINF:1.000,live\ns1.ts\n"
+            "#EXTINF:1.000,live\ns2.ts\n"
+        )
+        for tag, marked in (("#EXT-X-TWITCH-ELAPSED-SECS:0.000\n", False), ("", True)):
+            with self.subTest(twitch=not marked):
+                server = self.copies([body.format(tag=tag).encode()], ["s0.ts", "s1.ts", "s2.ts"])
+                parts = self.run_for(server, 0.5, live_delay=100.0)
+                self.assertEqual(requested_segments(server), ["s0.ts", "s1.ts", "s2.ts"])
+                self.assertEqual(self.markers(parts), [Discontinuity()] if marked else [])
 
 
 class FragmentedMp4Tests(SourceTestCase):

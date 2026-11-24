@@ -2264,10 +2264,10 @@ class LiveSession(QObject):
         """The ad break is over (or outlasted `_AD_MAX_S`): while the pipeline plays VLC fills
         up again first (`_sits_out`), and the watches' verdicts owed are acted on."""
         self._ad_break = False
+        froze, sound = self._froze_owed, self._sound_owed
+        self._froze_owed = self._sound_owed = False  # they go with the break, whatever plays
         if self._phase is _Phase.PIPELINE:
             self._ad_over = self._clock()
-            froze, sound = self._froze_owed, self._sound_owed
-            self._froze_owed = self._sound_owed = False
             if froze:
                 self._on_picture_froze()  # (its stream opens again: the sound's too)
             elif sound:
@@ -4756,6 +4756,7 @@ class LiveSession(QObject):
         self._retry = None
         self._land_check = None  # a landing still measured is no longer playing
         self._held, self._ad_held = None, False  # a new play is not held
+        self._froze_owed = self._sound_owed = False  # a new stream: the old one's verdicts go
         if self._caption_held is not None:
             self._caption_armed = True  # it waits again once the new play plays ...
             self._caption_whole = True  # ... for all of its floor, as this wait did (2.13.1)

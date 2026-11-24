@@ -170,6 +170,9 @@ _AD_CLASS = "twitch-stitched-ad"
 _AD_ID = "stitched-ad-"
 _AD_TITLE = "Amazon"
 _AD_RANGES_KEPT = 16
+# A Twitch piece still being made after a cut from the channel's pieces: an ad break's,
+# whatever date it is reckoned (`HlsSource._read_twitch`); kept in its parser values.
+_CUT_AD = "cut_ad"
 _ATTRIBUTE = re.compile(r'([A-Z0-9-]+)=("[^"]*"|[^,]*)')
 _HOLD_POLL_S = 0.25  # 2.7: how often a held source asks again
 # 2.7.1 ("Prefer HTTPS"): an http:// address is asked over HTTPS first, connecting within this;
@@ -1454,9 +1457,8 @@ def _codec_rank(variant: Any) -> int:
 
 
 def _variant_rank(variant: Any) -> tuple[int, float, int, int]:
-    """What orders a master's variants, best last: picture height, frame rate, codec, then
-    bandwidth. What a master does not name counts as 0, so one that names none (many IPTV ones)
-    keeps the bandwidth order."""
+    """What orders a master's variants that all name their height, best last: picture height,
+    frame rate, codec, then bandwidth (what a master does not name counts as 0)."""
     info = variant.stream_info
     return (
         _height(variant),
@@ -1464,6 +1466,15 @@ def _variant_rank(variant: Any) -> tuple[int, float, int, int]:
         _codec_rank(variant),
         info.bandwidth or 0,
     )
+
+
+def _best_variant(candidates: list[Any]) -> Any:
+    """The variant to play of `candidates`: by `_variant_rank` when each names its height;
+    else by bandwidth alone, as before 2.15 (an IPTV master may list its source without a
+    RESOLUTION beside sized smaller ones: the source plays, not the tallest it names)."""
+    if all(_height(item) > 0 for item in candidates):
+        return max(candidates, key=_variant_rank)
+    return max(candidates, key=lambda item: item.stream_info.bandwidth or 0)
 
 
 def _sound_only(variant: Any) -> bool:
@@ -1491,7 +1502,7 @@ def _select_manifest(
         if not candidates:
             raise SourceError("unsupported", _NO_VIDEO)
         heights = tuple(sorted({_height(item) for item in candidates} - {0}, reverse=True))
-        selected = max(_within(candidates, max_height), key=_variant_rank)
+        selected = _best_variant(_within(candidates, max_height))
         groups = {
             "AUDIO": selected.stream_info.audio,
             "SUBTITLES": selected.stream_info.subtitles,
@@ -2001,10 +2012,37 @@ class HlsSource:
         while len(known) > _AD_RANGES_KEPT:
             del known[next(iter(known))]
         self._ranges = list(known.values()) + [m for m in listed.values() if m[1] is None]
+        if self._site:
+            self._read_twitch(playlist.segments)
+
+    def _read_twitch(self, segments: Sequence[Any]) -> None:
+        """What a Twitch copy's tags leave unsaid. Its pieces still being made from a cut on,
+        after a finished piece of the channel's, are a break's first pieces (`_CUT_AD`): their
+        dates are only reckoned, and the break's range may come in a later copy (a cut after
+        a finished ad piece is the channel's return: its pieces are judged as ever). And a
+        discontinuity between two of the channel's own pieces is none (Twitch writes some
+        wrongly): nothing is marked there. A copy's first piece keeps its own."""
+        finished = _finished(segments)
+        if 0 < finished < len(segments) and not self._ad(segments[finished - 1]):
+            cut = False
+            for segment in segments[finished:]:
+                cut = cut or bool(segment.discontinuity)
+                if cut:
+                    segment.custom_parser_values[_CUT_AD] = True
+        before: bool | None = None  # whether the piece before is an ad's (None: none)
+        for segment in segments:
+            ad = self._ad(segment)
+            if segment.discontinuity and before is False and not ad:
+                segment.discontinuity = False
+            before = ad
 
     def _ad(self, segment: Any) -> bool:
-        """A piece of the copy read last is an ad break's (`_is_ad`)."""
-        return _is_ad(segment, self._ranges, self._site)
+        """A piece of the copy read last is an ad break's (`_is_ad`, or a Twitch piece being
+        made after a cut from the channel: `_read_twitch`)."""
+        if _is_ad(segment, self._ranges, self._site):
+            return True
+        values = getattr(segment, "custom_parser_values", None)
+        return self._site and isinstance(values, dict) and values.get(_CUT_AD) is True
 
     @property
     def segment_sequence(self) -> int | None:
