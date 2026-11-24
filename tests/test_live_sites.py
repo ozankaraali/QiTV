@@ -1,4 +1,5 @@
 import json
+import logging
 import os
 import threading
 import unittest
@@ -17,6 +18,7 @@ from services.live_sites import (
     resolve,
     site_page,
 )
+from services.log_file import _Masked
 
 JSON = {"Content-Type": "application/json"}
 TOKEN = '{"channel":"examplechannel","expires":1}'
@@ -240,7 +242,9 @@ class PrivacyTests(unittest.TestCase):
                     twitch_gql=source.url + "/gql",
                     twitch_usher=source.url + "/hls",
                 )
-        text = "\n".join(record.getMessage() for record in logs.records)
+        # Each record as the app writes it (the log handlers format through _Masked).
+        masked = _Masked(logging.BASIC_FORMAT.replace("%(levelname)s:%(name)s:", ""))
+        text = "\n".join(masked.format(record) for record in logs.records)
         self.assertIn("examplechannel is live", text)
         for secret in (SIGNATURE, "examplechannel\\\"", "token=", "SECRETJWT", "expires", "m3u8"):
             self.assertNotIn(secret, text)

@@ -18,15 +18,6 @@ import requests
 log = logging.getLogger(__name__)
 
 
-class _NoAddresses(logging.Filter):
-    """urllib3 logs each request line at DEBUG, and the usher address carries the token."""
-
-    def filter(self, record: logging.LogRecord) -> bool:
-        return "token=" not in record.getMessage()
-
-
-logging.getLogger("urllib3.connectionpool").addFilter(_NoAddresses())
-
 KICK, TWITCH = "kick", "twitch"
 SITE_NAMES = {KICK: "Kick", TWITCH: "Twitch"}
 
