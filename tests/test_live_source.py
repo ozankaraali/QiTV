@@ -694,7 +694,7 @@ unsupported.m3u8
         self.assertEqual(self._picked(master, 720), "mid.m3u8")
 
     def test_a_site_master_with_live_subtitles_plays_its_best_variant_alone(self):
-        # Spec E.5: a Kick-shaped master (an IVS one, its names made up) carries subtitles in
+        # Spec E.5: a Kick-shaped master (its names made up) carries subtitles in
         # 7 languages: the chosen variant keeps its SUBTITLES group in its media list, and
         # nothing fetches them or another variant; its pieces play.
         languages = ("en", "tr", "de", "es", "fr", "pt", "ar")
