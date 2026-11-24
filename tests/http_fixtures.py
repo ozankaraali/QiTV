@@ -91,6 +91,7 @@ class LocalSource:
     def __init__(self, routes, tls=None, keep_alive=False):
         self.routes = routes
         self.requests = []
+        self.bodies = []
         self.counts = Counter()
         self.connections = 0
         self.keep_alive = keep_alive
@@ -131,6 +132,13 @@ class LocalSource:
                         self.wfile.write(body)
                 except ConnectionError, ssl.SSLError:
                     pass
+
+            def do_POST(self):
+                # The body is read first (the client may not hang up on an unread one) and
+                # kept on the handler and in ``owner.bodies`` for a route to look at.
+                self.body = self.rfile.read(int(self.headers.get("Content-Length") or 0))
+                owner.bodies.append(self.body)
+                self.do_GET()
 
         self.server = _QuietServer(("127.0.0.1", 0), Handler)
         self.server.daemon_threads = True
