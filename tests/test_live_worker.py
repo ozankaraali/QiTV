@@ -70,6 +70,7 @@ STATE_KEYS = {
     "settled_s",  # 2.8.11
     "retry_at",  # the channel's stream down: when its next try is due
     "prefetching",  # HLS: its playlist's prefetch pieces are read as they are made
+    "ad_break",  # HLS: a live site's ad break is skipped now
 }
 DISK_LIMIT = "The disk buffer limit cannot fit one keyframe interval or an active read."
 # The owner hands a copy of its pipe end to a holder process that outlives it, so the
@@ -612,6 +613,40 @@ class LiveWorkerTests(unittest.TestCase):
         self.assertIs(snapshot["hls"], True)
         self.assertIs(snapshot["caught_up"], True)  # before the prefetch piece came
         self.assertEqual(source.counts["/user/secret/a.ts"], 0)  # it starts at that piece
+        helper.close(sid)
+        self.assert_no_credentials(helper)
+
+    def test_an_ad_break_is_said_while_it_is_skipped(self):
+        # A live site's ad pieces are skipped (`AdBreak`): the state says so from the first
+        # skipped piece until the channel's next piece comes (a reload later), so the parent
+        # counts no starvation meanwhile. Its pieces are never asked for.
+        head = "#EXTM3U\n#EXT-X-TARGETDURATION:4\n#EXT-X-TWITCH-ELAPSED-SECS:0.000\n"
+        ad = "#EXT-X-DISCONTINUITY\n#EXTINF:4,Amazon|1\nad.ts\n"
+        copies = [
+            head + "#EXT-X-MEDIA-SEQUENCE:0\n#EXTINF:4,live\na.ts\n" + ad,
+            head + "#EXT-X-MEDIA-SEQUENCE:1\n" + ad + "#EXT-X-DISCONTINUITY\n"
+            "#EXTINF:4,live\nb.ts\n#EXT-X-ENDLIST\n",
+        ]
+
+        def playlist(_request, count):
+            return 200, {}, copies[min(count, len(copies)) - 1].encode()
+
+        source = self.source(
+            {
+                "/user/secret/channel.m3u8": playlist,
+                "/user/secret/a.ts": (200, {}, make_stream(4)),
+                "/user/secret/ad.ts": (200, {}, make_stream(4)),
+                "/user/secret/b.ts": (200, {}, make_stream(4, pts_start=900000 + 4 * 90000)),
+            }
+        )
+        helper = self.helper()
+        sid = helper.open(source.url + "/user/secret/channel.m3u8")
+        helper.wait_for(lambda message: message == ("ended", sid))
+        said = [state[2].get("ad_break") for state in helper.of(sid, "state")]
+        self.assertIn(True, said)
+        self.assertIs(said[-1], False)
+        self.assertIn(False, said[said.index(True) :])
+        self.assertEqual(source.counts["/user/secret/ad.ts"], 0)
         helper.close(sid)
         self.assert_no_credentials(helper)
 

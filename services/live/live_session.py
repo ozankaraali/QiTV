@@ -365,6 +365,11 @@ _GONE_STATUS = (404, 410)  # 2.8.12: a helper failure with these is not tried ag
 LOADING = N_("Still loading…")  # i18n: toast: a channel takes long to start
 # i18n: toast: the provider answered with a recording (its connection limit, say), not live TV
 NOT_LIVE = N_("The provider sent a recording, not the channel. Trying again…")
+# i18n: a live channel's ad break is skipped; the picture waits for the stream
+AD_BREAK = N_("Ad break skipped")
+# After a live site's ad break (the helper skips its pieces) VLC, held or dry at the edge,
+# fills up again for at most this long before it counts as any wait for the channel.
+_AD_AFTER_S = 10.0
 _CLOSE_CAP_MS = 2000  # a close not confirmed by then counts as done
 _RECOVERY_MS = 10_000  # a helper restart must bring the session back by then
 _EXPIRED_S = 0.5  # a position this far before the oldest buffered point is gone
@@ -716,6 +721,12 @@ class LiveSession(QObject):
         self._failing_since: Optional[float] = None  # first interruption since VLC played
         self._opening = False  # inside playback.play(): its errors are retried on a tick
         self._held: Optional[float] = None  # VLC held at the edge since (`_hold_at_edge`)
+        # A live site's ad break (the helper's `ad_break`): it goes on, when it ended while VLC
+        # fills up again after it (None: none), and whether the hold is the break's.
+        self._ad_break = False
+        self._ad_over: Optional[float] = None
+        self._ad_held = False
+        self._froze_owed = self._sound_owed = False  # the watches' verdicts in it, owed
         # When VLC's last two dry runs at the edge began (a hold counts as one), and whether
         # it is dry now.
         self._dry_before = self._dry_seen = -math.inf
@@ -1148,7 +1159,7 @@ class LiveSession(QObject):
         playing = self._phase is _Phase.PIPELINE
         if not playing and self._phase not in _BEFORE_PLAY:
             return
-        self._held = None  # the viewer's pause or play from here
+        self._held, self._ad_held = None, False  # the viewer's pause or play from here
         self._caption_held = None  # (the AI captions' wait too: PlaybackSession's pause is it)
         if not self._paused:
             # From any mode, a catch-up included: paused at 1x, time-shifted. Before ready
@@ -2212,6 +2223,28 @@ class LiveSession(QObject):
             self.notice.emit(NOT_LIVE)
         self._not_live_said = count
 
+    def _follow_ad_break(self, snapshot: Mapping[str, Any]) -> None:
+        """A live site's ad break, its pieces skipped by the helper (`ad_break`): said once as
+        it begins. As it ends while the pipeline plays, VLC fills up again before anything of
+        it counts (`_sits_out`)."""
+        on = snapshot.get("ad_break") is True
+        if on == self._ad_break:
+            return
+        self._ad_break = on
+        if on:
+            self._ad_over = None
+            _LOG.info("An ad break: the channel's ad pieces are skipped; the picture waits.")
+            self.notice.emit(AD_BREAK)
+        elif self._phase is _Phase.PIPELINE:
+            self._ad_over = self._clock()
+            _LOG.info("The ad break is over: the channel's pieces come again.")
+            froze, sound = self._froze_owed, self._sound_owed
+            self._froze_owed = self._sound_owed = False
+            if froze:
+                self._on_picture_froze()  # (its stream opens again: the sound's too)
+            elif sound:
+                self._on_sound_lost()
+
     def _on_ready(self, sid: str) -> None:
         if self._part is not None and sid == self._part.sid:
             self._part_ready = True
@@ -2242,6 +2275,7 @@ class LiveSession(QObject):
             return
         self._say_scheme(snapshot)
         self._say_not_live(snapshot)
+        self._follow_ad_break(snapshot)
         self._keep_heights(snapshot)
         self._follow_prefetch(snapshot)
         self._follow_retry(snapshot)
@@ -2270,6 +2304,10 @@ class LiveSession(QObject):
             # 2.8.11: the channel answered with a recording (`NOT_LIVE`) and the helper asks
             # again; played directly, it would answer the same. It plays once an answer is
             # live, or the helper gives up (`STREAM_LIMIT`).
+            self._ready_timer.start(self._ready_timeout_ms)
+        elif not self._ready_seen and self._ad_break:
+            # A tune into a live site's ad break (its pieces skipped: nothing arrives): played
+            # directly, it would show the ads. It plays once the channel's first piece comes.
             self._ready_timer.start(self._ready_timeout_ms)
         elif not self._ready_seen and not self._loading and self._receiving():
             # Bytes flow but nothing is playable yet (an on-demand restream starting up,
@@ -2800,6 +2838,11 @@ class LiveSession(QObject):
         (a direct play opened itself again)."""
         if self._phase not in (_Phase.PIPELINE, _Phase.DIRECT):
             return  # nothing of this tune plays yet
+        if self._phase is _Phase.PIPELINE and self._ad_break:
+            # (Held in one, VLC shows no picture: this came as it played out its cushion.)
+            _LOG.info("The picture stood still as an ad break began: acted on after it.")
+            self._froze_owed = True
+            return
         self._software = True
         self._learn(software=True)
         if self._phase is _Phase.DIRECT:
@@ -2815,6 +2858,10 @@ class LiveSession(QObject):
         """VLC played no sound while the picture played, even after its audio track was
         cycled (2.8.8, `services.sound_watch`): the time-shift stream opens again where it
         plays."""
+        if self._phase is _Phase.PIPELINE and self._ad_break:
+            _LOG.info("The sound stopped as an ad break began: acted on after it.")
+            self._sound_owed = True
+            return
         if self._phase is _Phase.PIPELINE and self._retry is None and self._deferred is None:
             self._reopen_at_position()
 
@@ -2827,6 +2874,12 @@ class LiveSession(QObject):
         _LOG.debug("VLC's time-shift stream stopped (%s).", why)
         if self._opening:
             self._retry = _Retry.RESUME  # failed inside play(): handled on the next tick
+            return
+        if self._ad_break:
+            # Nothing comes in a live site's ad break: opened again (and given up on) only
+            # once the channel's pieces come again (played directly it would show the ads).
+            _LOG.info("VLC's time-shift stream stopped in an ad break; opened after it.")
+            self._retry = _Retry.RESUME
             return
         self._resume()
         if self._phase is _Phase.PIPELINE and self._ended:
@@ -2872,6 +2925,9 @@ class LiveSession(QObject):
         if self._phase is not _Phase.PIPELINE:
             return
         if self._retry is not None:
+            if self._retry is _Retry.RESUME and self._ad_break:
+                self._emit_timeline()
+                return  # VLC's stream stopped in an ad break: opened again after it
             if self._retry is _Retry.RESUME:
                 self._resume()
             elif self._retry is _Retry.FIRST:
@@ -2928,8 +2984,14 @@ class LiveSession(QObject):
             self._cushion = max(self._cushion, lag)  # the largest lag at the edge so far
         # Whether trouble now runs out a cushion, judged before it raises the target.
         cushioned = self._ran_out(snapshot)
-        self._steer_learned(snapshot, position, stalled, cushioned)
+        breaking = self._sits_out(snapshot, position)
+        if not breaking:
+            self._steer_learned(snapshot, position, stalled, cushioned)
         if live and not self._paused:
+            if breaking:
+                self._sit_out_break(snapshot, position)
+                self._emit_timeline()
+                return  # nothing steers, reopens or counts trouble in an ad break
             if self._clock_lost(snapshot, position, stalled):
                 self._open_again(position)
                 if self._phase is _Phase.PIPELINE:
@@ -3456,11 +3518,14 @@ class LiveSession(QObject):
     def _forget_holds(self) -> None:
         """The hold's view of the source's silences starts afresh (a tune, a new helper
         session): when it last sent again after one, the last tick's quiet, whether that was
-        one VLC had room for, a trickle to prove, a reconnect, and VLC's room as it began."""
+        one VLC had room for, a trickle to prove, a reconnect, and VLC's room as it began; and
+        no ad break is known (the new session's state says if one goes on)."""
         self._sending_since = -math.inf
         self._quiet_before = 0.0
         self._was_abnormal = self._unproven = self._reconnect_seen = False
         self._room_before = 0.0
+        self._ad_break, self._ad_over, self._ad_held = False, None, False
+        self._froze_owed = self._sound_owed = False  # the watches' verdicts in a break
 
     def _forget_feed(self) -> None:
         """What `_feed_learned` keeps between ticks starts afresh (a tune, a new stream)."""
@@ -3814,6 +3879,57 @@ class LiveSession(QObject):
         if quiet < _HOLD_QUIET_S and cushion and flowing:
             self._release_hold(snapshot, position)
 
+    def _sits_out(self, snapshot: Mapping[str, Any], position: float) -> bool:
+        """A live site's ad break goes on (the helper skips its pieces: `ad_break`), or VLC
+        waits for the channel's first bytes after it, or, held or dry at the edge, fills up
+        again with them: none of it is the channel's rhythm or trouble. Nothing tells the
+        learned target (no starvation, near-miss, stall or time played), stay-live steers
+        nothing, and nothing opens the stream again. Once VLC plays with media ahead again
+        (or `_AD_AFTER_S` after the break), the source's rhythm is measured afresh, as after
+        a stall: its standing edge was no gap, its first arrival after it no batch."""
+        if self._ad_break:
+            return True
+        over = self._ad_over
+        if over is None:
+            return False
+        held = self._held is not None and self._ad_held
+        # (Until the channel's first bytes after it came, VLC may run dry any moment.)
+        waiting = held or self._edge_moved <= over or self._starved(snapshot, position)
+        if waiting and self._clock() - over < _AD_AFTER_S:
+            return True
+        self._ad_over, self._ad_held = None, False
+        if self._learned is not None:
+            self._learned.arrivals.reset()
+        self._forget_feed()
+        self._filter.reset()
+        self._stay.source_stepped()
+        return False
+
+    def _sit_out_break(self, snapshot: Mapping[str, Any], position: float) -> None:
+        """In a live site's ad break VLC is held at the edge before it runs dry (its last
+        picture stays; run dry, libVLC 3 drops pictures and sound when media comes again), a
+        hold made before the break waits for its end too; once it ended, VLC plays again as
+        soon as the channel's pieces gave it a cushion (as `_hold_at_edge`'s does)."""
+        self._lost_since = self._land_check = None  # (the break's still clock is neither)
+        now, ahead = self._clock(), self._live_edge(snapshot) - position
+        if self._held is not None:
+            if self._ad_break:
+                self._ad_held = True
+            elif self._ad_held:
+                cushion = ahead >= max(_HOLD_MIN_S, _HOLD_SHARE * self._stay.target)
+                if now - self._edge_moved < _HOLD_QUIET_S and cushion:
+                    self._release_hold(snapshot, position)
+            return
+        if (
+            self._ad_break
+            and self._playback.state() in (PlaybackState.PLAYING, PlaybackState.BUFFERING)
+            and not self._just_opened()
+            and ahead <= _HOLD_AT_S
+        ):
+            _LOG.debug("Held at the edge for an ad break: %.1f s ahead.", ahead)
+            self._held, self._ad_held = now, True
+            self._playback.hold(True)
+
     def _arrival_rate(self, seconds: float) -> Optional[float]:
         """What the live edge advanced over the last `seconds`, against real time (1.0: as
         it plays); None before that long was seen (`_flooding` keeps the arrivals)."""
@@ -3828,6 +3944,7 @@ class LiveSession(QObject):
 
     def _release_hold(self, snapshot: Mapping[str, Any], position: float) -> None:
         held, self._held = self._held, None
+        self._ad_held = False
         if held is None:
             return
         _LOG.info(
@@ -3956,6 +4073,8 @@ class LiveSession(QObject):
             "stalled": self._stalled(snapshot) or self._held is not None,
             # 2.9: it waits to get the AI captions' distance behind live.
             "captions_wait": self._caption_held is not None,
+            # A live site's ad break: its pieces are skipped, the picture waits for the channel.
+            "ad_break": self._ad_break,
             # The helper is opening a new connection (raw TS), not waiting on this one.
             "reconnecting": bool(snapshot.get("reconnecting", False)),
             "auto": learned is not None,
@@ -4600,7 +4719,7 @@ class LiveSession(QObject):
         self._crawl.reset()
         self._retry = None
         self._land_check = None  # a landing still measured is no longer playing
-        self._held = None  # a new play is not held
+        self._held, self._ad_held = None, False  # a new play is not held
         if self._caption_held is not None:
             self._caption_armed = True  # it waits again once the new play plays ...
             self._caption_whole = True  # ... for all of its floor, as this wait did (2.13.1)

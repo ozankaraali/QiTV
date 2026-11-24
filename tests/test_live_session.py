@@ -47,6 +47,7 @@ LOADING = "Still loading…"
 RECONNECTING = "Reconnecting…"
 NO_STREAM = "This item has no stream address"
 NOT_LIVE = "The provider sent a recording, not the channel. Trying again…"
+AD_BREAK = "Ad break skipped"
 KEPT_ONLY = "This channel can't open right now. Playing what was kept."
 KEPT_END = "That's all that was kept. The channel can't open right now."
 KEPT_DISK = "The disk buffer failed. Playing what was kept; Go live plays the channel again."
@@ -208,6 +209,7 @@ class FakeEngine(QObject):
         steered=None,
         settled=None,
         prefetching=None,
+        ad_break=None,
     ):
         """Closed `spans` plus an optional open segment, as the helper's state reports them;
         `breaks`: (timeline position, seconds) of timestamp jumps it left out. `caught_up`
@@ -216,7 +218,8 @@ class FakeEngine(QObject):
         has still to deliver, is left out when None; `finite`: a finished (ENDLIST) playlist;
         `open_quality`: how cleanly the open segment starts; `video`: whether the stream has
         a video PID (left out when None, as an older helper does); `prefetching`: an HLS
-        source reads its playlist's prefetch pieces as they are made (left out when None)."""
+        source reads its playlist's prefetch pieces as they are made, `ad_break`: it skips a
+        live site's ad break now (each left out when None)."""
         end = spans[-1].end if spans else (end or 0.0)
         oldest = spans[0].seq if spans else open_seq
         self._spans[sid] = list(spans)
@@ -240,6 +243,8 @@ class FakeEngine(QObject):
             self._snapshots[sid]["backlog_s"] = backlog
         if prefetching is not None:  # a live site's prefetch pieces, read as they are made
             self._snapshots[sid]["prefetching"] = prefetching
+        if ad_break is not None:  # a live site's ad break, its pieces skipped
+            self._snapshots[sid]["ad_break"] = ad_break
         if video is not None:
             self._snapshots[sid]["video"] = video
         if parts is not None:  # 2.6: [first_seq, start, wall] of each part
@@ -483,6 +488,7 @@ class Feed:
         self.starved_s = 0.0  # how long VLC had nothing to play
         self.before = []  # the lag right before each arrival
         self.restarts = self.steered = None  # 2.8.5: the helper's restart counts, if any
+        self.ad_break = None  # the helper skips a live site's ad break (None: not said)
         self.push()
 
     def push(self):
@@ -502,6 +508,7 @@ class Feed:
             breaks=self.reported,
             restarts=self.restarts,
             steered=self.steered,
+            ad_break=self.ad_break,
         )
 
     def ready(self, backlog_after_start=True):
@@ -7378,6 +7385,127 @@ class LearnedTargetTests(LiveSessionCase):
         self.assertLess(targets[-1], raised - 1.0)
         self.assertTrue(all(a >= b - 1e-9 for a, b in zip(targets, targets[1:])))  # never up
         self.assertNotIn(1.10, self.playback.rates)
+
+
+class AdBreakTests(LiveSessionCase):
+    """A live site's ad break, its pieces skipped by the helper (`ad_break` in its state): VLC
+    is held at the edge (its last picture stays), the learned target hears nothing of the
+    break, and nothing steers, watches or opens the stream again until the channel comes
+    back; the break is said once."""
+
+    def setUp(self):
+        self.tuning = LiveTuning(None)
+        super().setUp()
+
+    def make(self, **kwargs):
+        kwargs.setdefault("tuning", self.tuning)
+        return super().make(**kwargs)
+
+    spy = LearnedTargetTests.spy
+    tune = LearnedTargetTests.tune
+
+    @staticmethod
+    def begin(feed):
+        """The helper skips an ad break from now: it says so, and sends nothing meanwhile."""
+        feed.ad_break = True
+        feed.push()
+        feed.stalled = True
+
+    @staticmethod
+    def end(feed):
+        """The break is over: the helper says so, and the channel's pieces come again (its
+        timeline goes on where it stood: the break's media is no part of it)."""
+        feed.ad_break = False
+        feed.push()
+        feed.stalled = False
+
+    def test_an_ad_break_counts_no_starvation(self):
+        # 90 s of a break under Auto: neither the starvation prior, nor a near-miss, nor a
+        # stall hears of it, during it or as VLC fills up again after it; the margin is as
+        # it was.
+        starved = self.spy(LearnedTarget, "starved")
+        stalled = self.spy(LearnedTarget, "stalled")
+        near = self.spy(LearnedTarget, "near_miss")
+        feed = self.tune(edge=8.0, starved=PlaybackState.PLAYING)  # libVLC 3: Playing, dry
+        feed.run(60.0)
+        learned = self.live._learned
+        margin, target = learned.prior.margin(), self.timelines[-1]["target"]
+        counts, nears = (starved.call_count, stalled.call_count), near.call_count
+        holds, dry = len(self.playback.holds), feed.starved_s
+        self.begin(feed)
+        feed.run(90.0)
+        self.assertTrue(self.playback.held)  # its last picture stays
+        self.end(feed)
+        feed.run(30.0)  # the channel again, well past VLC's refill
+        self.assertEqual((starved.call_count, stalled.call_count), counts)
+        close = [c for c in near.call_args_list[nears:] if c.args[1] < learned_target.NEAR_S]
+        self.assertEqual(close, [])
+        self.assertEqual(learned.prior.margin(), margin)
+        self.assertLessEqual(self.timelines[-1]["target"], target + 1e-9)
+        self.assertEqual(self.playback.holds[holds:], [True, False])
+        self.assertEqual(feed.starved_s, dry)  # held before it ran dry, played on after
+        self.assertEqual(self.notices.count(AD_BREAK), 1)
+
+    def test_an_ad_break_triggers_no_watch_and_no_reopen(self):
+        # During the break the picture watch's fallback (software decoding) and the sound
+        # watch's reopen do nothing, and VLC's stream that ended is opened again only once
+        # the channel comes back. The watches' verdicts (they came as VLC played out its
+        # cushion) are acted on then: one reopen, in software.
+        feed = self.tune(edge=8.0, starved=PlaybackState.PLAYING)
+        feed.run(30.0)
+        plays = len(self.playback.plays)
+        self.begin(feed)
+        feed.run(10.0)
+        self.assertTrue(self.playback.held)
+        self.playback.pictureFroze.emit()
+        self.playback.soundLost.emit()
+        self.playback.ended.emit()
+        feed.run(80.0)
+        self.assertEqual(len(self.playback.plays), plays)
+        self.assertEqual(self.modes[-1], "pipeline")
+        self.assertFalse(self.tuning.get("ch").software)  # nor learned meanwhile
+        self.end(feed)
+        feed.run(10.0)
+        self.assertEqual(len(self.playback.plays), plays + 1)  # once, for all three
+        self.assertEqual(self.playback.software[-1], True)
+        self.assertTrue(self.tuning.get("ch").software)
+        self.assertEqual(self.notices.count(AD_BREAK), 1)
+
+    def test_a_watchs_verdict_in_a_break_opens_the_stream_after_it(self):
+        # Without a stream that ended: the sound watch's reopen, owed, is made once the
+        # break is over (the picture watch's in software, as above).
+        for froze in (False, True):
+            with self.subTest(froze=froze):
+                feed = self.tune(edge=8.0, starved=PlaybackState.PLAYING)
+                feed.run(30.0)
+                plays = len(self.playback.plays)
+                self.begin(feed)
+                feed.run(10.0)
+                self.playback.soundLost.emit()
+                if froze:
+                    self.playback.pictureFroze.emit()
+                feed.run(20.0)
+                self.assertEqual(len(self.playback.plays), plays)
+                self.end(feed)
+                feed.run(5.0)
+                self.assertEqual(len(self.playback.plays), plays + 1)
+                self.assertEqual(self.playback.software[-1], froze)
+
+    def test_a_pre_roll_at_tune_in_waits_for_the_channel(self):
+        # A tune into an ad break: nothing arrives for as long as it lasts, and the session
+        # waits (played directly, the channel would show the ads) and plays the channel's
+        # first piece once it comes. Said once.
+        sid = self.start()
+        self.engine.answered(sid, hls=True)
+        self.engine.sessionUpdated.emit(sid, dict(self.engine._snapshots[sid], ad_break=True))
+        for _ in range(20):  # two minutes of ads: the ready timer's 6 s (a QTimer in the app)
+            self.live._on_ready_timeout()
+        self.assertEqual((self.engine.closed, self.playback.plays), ([], []))
+        self.assertNotIn("direct", self.modes)
+        self.engine.buffer(sid, [], open_seq=0, live_edge=2.0, ad_break=False)
+        self.engine.sessionReady.emit(sid)
+        self.assertEqual(self.playback.plays, [self.stream(sid, 0)])
+        self.assertEqual(self.notices, [AD_BREAK])
 
 
 if __name__ == "__main__":

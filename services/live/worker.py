@@ -591,6 +591,7 @@ class _Session:
         self._received = 0  # bytes from the source, those before the first keyframe too
         self._answered = False  # the source's response headers came (bytes may not have yet)
         self._caught_up = False  # HLS: every segment its playlist listed was delivered once
+        self._ad_break = False  # HLS: a live site's ad break is skipped now (`AdBreak`)
         self._reconnecting = False  # raw TS: the connection broke, a new one is being opened
         # The channel's stream is down past the quick reconnects: the time of day its next try
         # is due (`services.live.source`'s long waits; None: none waits).
@@ -928,7 +929,7 @@ class _Session:
         self._kept_history = self._resuming = True
         self._new_part = self._open_junction = self._junction_next = True
         self._received, self._answered, self._caught_up = 0, False, False
-        self._reconnecting = self._skipping = False
+        self._reconnecting = self._skipping = self._ad_break = False
         self._retry_at = None
         self._not_live, self._settled = 0, 0.0
         self._segment, self._measured = (0, 0.0), (0.0, 0.0)
@@ -1283,7 +1284,7 @@ class _Session:
         rejoiner: ReconnectTrimmer | None,
     ) -> None:
         """One item of the source down the pipeline: bytes, or a marker."""
-        from services.live.source import CaughtUp, Discontinuity, Reconnecting, Title
+        from services.live.source import AdBreak, CaughtUp, Discontinuity, Reconnecting, Title
 
         self._raise_tick_failure()
         self._check()
@@ -1299,6 +1300,12 @@ class _Session:
             start = self._timeline.start
             while len(titles) > 1 and titles[1][0] <= start:
                 titles.popleft()  # the song after it plays from the buffer's start on
+            self._notify(force=True)
+            return
+        if isinstance(item, AdBreak):
+            # A live site's ad break, its pieces skipped: nothing comes meanwhile, and the
+            # parent holds its player and counts no starvation until the channel comes again.
+            self._ad_break = item.on
             self._notify(force=True)
             return
         self._reconnecting = False
@@ -1418,6 +1425,7 @@ class _Session:
             self._end_input(kind, message, status)
 
     def _end_input(self, kind: str, message: str, status: int | None) -> None:
+        self._ad_break = False  # its input is over: no break goes on
         if self._ring is not None:
             self._drain()
             if self._resuming:
@@ -1668,6 +1676,9 @@ class _Session:
             # HLS: its playlist lists prefetch pieces (a live site's newest), read as they are
             # made: the parent starts it as a steady source.
             "prefetching": prefetching,
+            # HLS: a live site's ad break is skipped now (its pieces never fetched): no media
+            # comes until the channel's next piece, and no starvation is counted meanwhile.
+            "ad_break": self._ad_break,
             # Before ready: bytes arrived, though nothing is playable yet (no keyframe).
             "received": self._received,
             # An HLS source: the parent keeps its player at 1x (VLC crawls once its rate

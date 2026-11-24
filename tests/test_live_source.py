@@ -6,6 +6,7 @@ synthetic (tests/ts_fixtures.py) and every server is local.
 """
 
 from contextlib import contextmanager
+from datetime import datetime, timedelta, timezone
 import gzip
 import logging
 import ntpath
@@ -81,6 +82,48 @@ def prefetching(sequence, names, prefetch, *, target=1, ended=False, tag="#EXT-X
     text += "".join(f"#EXTINF:{target},live\n{name}\n" for name in names)
     text += "".join(f"{tag}{name}\n" for name in prefetch)
     return (text + ("#EXT-X-ENDLIST\n" if ended else "")).encode()
+
+
+DAY = datetime(2026, 11, 24, 10, 0, tzinfo=timezone.utc)  # when a dated playlist's piece 0 began
+
+
+def stamp(seconds):
+    """A date `seconds` after `DAY`, as a live site writes it."""
+    return (DAY + timedelta(seconds=seconds)).strftime("%Y-%m-%dT%H:%M:%S.%f")[:-3] + "Z"
+
+
+def ad_range(start, duration, *, ident="stitched-ad-1700000000-30", kind="twitch-stitched-ad"):
+    """A live site's ad break as its playlist marks it (Twitch's attributes): a date
+    range of that class from `start` seconds after `DAY`, `duration` seconds long."""
+    return (
+        f'#EXT-X-DATERANGE:ID="{ident}",CLASS="{kind}",START-DATE="{stamp(start)}",'
+        f'DURATION={duration:.3f},X-TV-TWITCH-AD-POD-FILLED-DURATION="{duration:g}"\n'
+    )
+
+
+def dated(sequence, names, *, ads=(), ranges=None, prefetch=(), titles=None, target=1):
+    """A live site's media playlist: each piece `target` seconds and dated by its media
+    sequence (piece k began k × `target` seconds after `DAY`); the pieces in `ads` are an ad
+    break's, a discontinuity before its first and before the first after it. `ranges` puts
+    lines (`ad_range`) before the piece of that name, None's after the finished ones;
+    `titles`: a piece's EXTINF title ("live" else); `prefetch`: pieces still being made. It
+    carries one of the site's own tags (the time it has been live)."""
+    ranges, titles = ranges or {}, titles or {}
+    text = f"#EXTM3U\n#EXT-X-TARGETDURATION:{target}\n#EXT-X-MEDIA-SEQUENCE:{sequence}\n"
+    text += f"#EXT-X-TWITCH-ELAPSED-SECS:{sequence * target:.3f}\n"
+    ad = False
+    for k, name in enumerate(names):
+        if (name in ads) != ad:
+            text, ad = text + "#EXT-X-DISCONTINUITY\n", name in ads
+        text += ranges.get(name, "")
+        text += f"#EXT-X-PROGRAM-DATE-TIME:{stamp((sequence + k) * target)}\n"
+        text += f"#EXTINF:{target:.3f},{titles.get(name, 'live')}\n{name}\n"
+    text += ranges.get(None, "")
+    for name in prefetch:
+        if (name in ads) != ad:
+            text, ad = text + "#EXT-X-DISCONTINUITY\n", name in ads
+        text += f"#EXT-X-PREFETCH:{name}\n"
+    return text.encode()
 
 
 def drain(source, *, caught_up=False, reconnecting=False):
@@ -3932,6 +3975,245 @@ video.m3u8
         self.assertEqual((piece.duration, piece.program_date_time), (6.0, None))
         ended = prefetching(0, ["a.ts"], ["b.ts"], target=2, ended=True)
         self.assertEqual(len(source_module._select_manifest(ended, url)[0].segments), 1)
+
+    def until(self, server, last, seconds=15.0, **options):
+        """A live source on the server's playlist, read until the piece named `last` brings
+        bytes (at most `seconds`): its items but `CaughtUp`."""
+        stop = threading.Event()
+        timer = threading.Timer(seconds, stop.set)
+        timer.start()
+        source = open_source(
+            server.url + "/live.m3u8", headers={}, verify_ssl=True, stop=stop, **options
+        )
+        items = []
+        try:
+            for item in source.chunks():
+                if isinstance(item, CaughtUp):
+                    continue
+                items.append(item)
+                if isinstance(item, bytes) and last in requested_segments(server):
+                    break
+        finally:
+            source.close()
+            timer.cancel()
+        return items
+
+    @staticmethod
+    def markers(items):
+        return [item for item in items if not isinstance(item, bytes)]
+
+    def test_what_marks_a_piece_as_an_ad(self):
+        # A date inside a range of the ad class or whose id says so (the end is not in it); a
+        # range of another kind is none; a date or range without a zone is UTC's. A title
+        # naming the ad server only in a playlist that carries the site's own tags: an IPTV
+        # provider's piece may be titled anything.
+        ranges = [
+            ad_range(1, 2),
+            ad_range(4, 1, ident="stitched-ad-2", kind="other"),
+            ad_range(6, 1, ident="playlist-session-1", kind="twitch-session"),
+            f'#EXT-X-DATERANGE:ID="stitched-ad-3",START-DATE="{stamp(7)[:-1]}",'
+            f'END-DATE="{stamp(8)}"\n',
+        ]
+        pieces = [
+            f"#EXT-X-PROGRAM-DATE-TIME:{stamp(k)[:-1] if k == 7 else stamp(k)}\n"
+            f"#EXTINF:1.000,{'Amazon|1' if k == 9 else 'live'}\nk{k}.ts\n"
+            for k in range(10)
+        ]
+        url = "https://cdn.example.test/live/media.m3u8"
+        for tag, titled in (("#EXT-X-TWITCH-ELAPSED-SECS:0.000\n", True), ("", False)):
+            with self.subTest(site=titled):
+                text = "#EXTM3U\n#EXT-X-TARGETDURATION:1\n" + tag + "".join(ranges + pieces)
+                playlist = source_module._select_manifest(text.encode(), url)[0]
+                self.assertIs(source_module._from_site(playlist), titled)
+                marked = source_module._ad_ranges(playlist).values()
+                found = [source_module._is_ad(piece, marked, titled) for piece in playlist.segments]
+                expected = [False, True, True, False, True, False, False, True, False, titled]
+                self.assertEqual(found, expected)
+
+    def test_marked_ad_pieces_are_skipped_with_a_marker(self):
+        # Three pieces of an ad break between live ones: never asked for, one discontinuity
+        # where the channel goes on, and the break said as it begins and as it ends. Marked by
+        # a date range of the ad class (the last of them dated in it only after the range
+        # left the playlist), or by their titles.
+        AdBreak = source_module.AdBreak
+        ads = {"a2.ts", "a3.ts", "a4.ts"}
+        marked = {"a2.ts": ad_range(2, 3)}
+        amazon = {name: "Amazon|720239851" for name in ads}
+        first = ["s0.ts", "s1.ts", "a2.ts", "a3.ts"]
+        for how, ranges, titles in (("date range", marked, None), ("title", None, amazon)):
+            with self.subTest(how):
+                copies = [
+                    dated(0, first, ads=ads, ranges=ranges, titles=titles),
+                    dated(3, ["a3.ts", "a4.ts"], ads=ads, titles=titles),
+                    dated(4, ["a4.ts", "s5.ts", "s6.ts"], ads=ads, titles=titles),
+                ]
+                server = self.copies(copies, ["s0.ts", "s1.ts", "s5.ts", "s6.ts"] + sorted(ads))
+                with source_logs() as logs:
+                    items = self.until(server, "s6.ts", live_delay=100.0)
+                self.assertEqual(requested_segments(server), ["s0.ts", "s1.ts", "s5.ts", "s6.ts"])
+                self.assertEqual(
+                    self.markers(items), [AdBreak(True), AdBreak(False), Discontinuity()]
+                )
+                self.assertEqual([line for line in logs if "another encoding" in line], [])
+
+    def test_a_providers_piece_titled_like_an_ad_plays(self):
+        # Without a live site's own tags a title is no ad marker: every piece is fetched.
+        text = "#EXTM3U\n#EXT-X-TARGETDURATION:4\n#EXTINF:4,live\na.ts\n"
+        text += "#EXTINF:4,Amazon|1\nb.ts\n#EXTINF:4,live\nc.ts\n#EXT-X-ENDLIST\n"
+        server = self.copies([text.encode()], ["a.ts", "b.ts", "c.ts"])
+        parts = media(server.url + "/live.m3u8")
+        self.assertEqual(requested_segments(server), ["a.ts", "b.ts", "c.ts"])
+        self.assertEqual(self.markers(parts), [])
+
+    def test_prefetch_pieces_inside_a_break_are_skipped(self):
+        # Pieces still being made, dated (from the last finished piece's date on) inside an ad
+        # break's range, are never asked for: neither as they are made nor once finished. The
+        # range is listed after the finished pieces, before the prefetch lines.
+        AdBreak = source_module.AdBreak
+        ads = {"p3.ts", "p4.ts"}
+        finished = ["s0.ts", "s1.ts", "s2.ts"]
+        copies = [
+            dated(0, finished, ads=ads, ranges={None: ad_range(3, 2)}, prefetch=sorted(ads)),
+            dated(
+                1,
+                finished[1:] + sorted(ads),
+                ads=ads,
+                ranges={"p3.ts": ad_range(3, 2)},
+                prefetch=["p5.ts", "p6.ts"],
+            ),
+        ]
+        server = self.copies(copies, finished + sorted(ads) + ["p5.ts", "p6.ts"])
+        items = self.until(server, "p6.ts", live_delay=100.0)
+        self.assertEqual(requested_segments(server), finished + ["p5.ts", "p6.ts"])
+        self.assertEqual(self.markers(items), [AdBreak(True), AdBreak(False), Discontinuity()])
+
+    def test_a_pre_roll_at_tune_in_waits(self):
+        # A tune into an ad break: the playlist lists only its pieces, the same copy for longer
+        # than a frozen playlist is given (60 s; here 1 s), and the source waits for the
+        # channel without failing; its first piece plays once it comes (no marker before the
+        # first bytes: nothing played before them).
+        AdBreak = source_module.AdBreak
+        ads = {"a0.ts", "a1.ts", "a2.ts"}
+        pre = dated(0, sorted(ads), ads=ads, ranges={"a0.ts": ad_range(0, 3)})
+        copies = [
+            pre,
+            pre,
+            pre,
+            dated(1, ["a1.ts", "a2.ts", "s3.ts"], ads=ads),
+            dated(2, ["a2.ts", "s3.ts", "s4.ts"], ads=ads),
+        ]
+        server = self.copies(copies, sorted(ads) + ["s3.ts", "s4.ts"])
+        with patch.object(source_module, "_FROZEN_TIMEOUT", 1.0):
+            items = self.until(server, "s4.ts")
+        self.assertEqual(requested_segments(server), ["s3.ts", "s4.ts"])
+        self.assertEqual(self.markers(items), [AdBreak(True), AdBreak(False)])
+        self.assertGreaterEqual(server.counts["/live.m3u8"], 4)
+
+    def test_a_copy_without_prefetch_pieces_keeps_the_prefetch_pace(self):
+        # One copy that lists no piece being made (the next is about to start) neither slows
+        # the reloads (Kick's 6 s target duration: 3 s) nor reports a burst (the session would
+        # take its target duration for one at once): the source stays prefetching for about
+        # two pieces after the last copy that listed some.
+        names = [f"s{number}.ts" for number in range(4)]
+        copies = [
+            prefetching(0, names, ["p4.ts", "p5.ts"], target=6),
+            prefetching(1, names[1:] + ["p4.ts", "p5.ts"], [], target=6),
+            prefetching(2, names[2:] + ["p4.ts", "p5.ts"], ["p6.ts"], target=6),
+        ]
+        asked, seen, opened = [], [], []
+
+        def playlist(_request, count):
+            asked.append(time.monotonic())
+            if count == 3:  # what the copy without them left
+                seen.append((opened[0].prefetching, opened[0].burst_s))
+            return 200, {}, copies[min(count, len(copies)) - 1]
+
+        routes = {f"/{name}": (200, {}, self.video) for name in names + ["p4.ts", "p5.ts", "p6.ts"]}
+        routes["/live.m3u8"] = playlist
+        server = self.server(routes)
+        source = open_source(
+            server.url + "/live.m3u8", headers={}, verify_ssl=True, stop=threading.Event()
+        )
+        opened.append(source)
+        try:
+            for _item in source.chunks():
+                if "p6.ts" in requested_segments(server):
+                    break
+        finally:
+            source.close()
+        self.assertEqual(requested_segments(server), ["p4.ts", "p5.ts", "p6.ts"])
+        self.assertEqual(seen, [(True, 0.0)])
+        self.assertLess(asked[2] - asked[1], 1.5)
+
+    def test_copies_that_stop_listing_prefetch_pieces_end_the_prefetching(self):
+        # About two pieces (here 1 s each) after the last copy that listed one, the playlist
+        # is read as any again: its target duration a piece at a time.
+        copies = [prefetching(0, ["s0.ts"], ["p1.ts"]), prefetching(1, ["p1.ts"], [])]
+        server = self.copies(copies, ["s0.ts", "p1.ts"])
+        stop = threading.Event()
+        source = open_source(server.url + "/live.m3u8", headers={}, verify_ssl=True, stop=stop)
+        seen = {}
+
+        def look(when):
+            seen[when] = (source.prefetching, source.burst_s)
+
+        timers = [
+            threading.Timer(1.5, look, ["held"]),
+            threading.Timer(3.6, look, ["lapsed"]),
+            threading.Timer(3.8, stop.set),
+        ]
+        for timer in timers:
+            timer.start()
+            self.addCleanup(timer.cancel)
+        drain(source)
+        self.assertEqual(seen, {"held": (True, 0.0), "lapsed": (False, 1.0)})
+
+    def test_an_ad_break_keeps_a_prefetch_source_prefetching(self):
+        # A break's copies list no piece being made (its pieces are ads): longer than the hold
+        # above, the source still reports no burst, so neither the session's stall bound nor
+        # its target takes the target duration through the break.
+        ads = {"a2.ts", "a3.ts", "a4.ts", "a5.ts"}
+        marked = {"a2.ts": ad_range(2, 4)}
+        copies = [
+            dated(0, ["s0.ts"], prefetch=["p1.ts"]),
+            dated(1, ["p1.ts", "a2.ts"], ads=ads, ranges=marked),
+            dated(2, ["a2.ts", "a3.ts"], ads=ads, ranges=marked),
+            dated(3, ["a3.ts", "a4.ts"], ads=ads),
+            dated(4, ["a4.ts", "a5.ts"], ads=ads),
+            dated(5, ["a5.ts", "s6.ts"], ads=ads, prefetch=["p7.ts"]),
+        ]
+        server = self.copies(copies, ["s0.ts", "p1.ts", "s6.ts", "p7.ts"] + sorted(ads))
+        stop = threading.Event()
+        timer = threading.Timer(15.0, stop.set)
+        timer.start()
+        self.addCleanup(timer.cancel)
+        source = open_source(server.url + "/live.m3u8", headers={}, verify_ssl=True, stop=stop)
+        seen = [(source.prefetching, source.burst_s)]
+        try:
+            for item in source.chunks():
+                seen.append((source.prefetching, source.burst_s))
+                if isinstance(item, bytes) and "p7.ts" in requested_segments(server):
+                    break
+        finally:
+            source.close()
+        self.assertEqual(requested_segments(server), ["p1.ts", "s6.ts", "p7.ts"])
+        self.assertGreaterEqual(server.counts["/live.m3u8"], 6)
+        self.assertEqual(set(seen), {(True, 0.0)})
+
+    def test_a_discontinuity_before_a_prefetch_piece_is_marked(self):
+        # A discontinuity written before a prefetch line is that piece's (the m3u8 parser
+        # would keep it for a finished piece that never comes): the source marks it there.
+        text = (
+            "#EXTM3U\n#EXT-X-TARGETDURATION:2\n#EXT-X-MEDIA-SEQUENCE:0\n"
+            "#EXTINF:2.000,live\ns0.ts\n#EXT-X-DISCONTINUITY\n"
+            "#EXT-X-PREFETCH:p1.ts\n#EXT-X-PREFETCH:p2.ts\n"
+        ).encode()
+        url = "https://cdn.example.test/live/media.m3u8"
+        pieces = source_module._select_manifest(text, url)[0].segments
+        self.assertEqual([piece.discontinuity for piece in pieces], [False, True, False])
+        server = self.copies([text], ["s0.ts", "p1.ts", "p2.ts"])
+        parts = self.run_for(server, 0.5, live_delay=100.0)
+        self.assertEqual(parts, joined(self.video, Discontinuity(), self.video, self.video))
 
 
 class FragmentedMp4Tests(SourceTestCase):

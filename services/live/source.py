@@ -32,9 +32,9 @@ picture shows it). `retry_now()` cuts such a wait short.
 from __future__ import annotations
 
 from collections import deque
-from collections.abc import Callable, Iterator, Mapping, Sequence
+from collections.abc import Callable, Iterable, Iterator, Mapping, Sequence
 from dataclasses import dataclass
-from datetime import timedelta, timezone
+from datetime import datetime, timedelta, timezone
 import http.client
 import itertools
 import logging
@@ -149,6 +149,25 @@ _PREFETCH_DELAY_MAX_S = 6.0
 # (not half a target duration: 3 s on Kick), should one bring no new piece: its pieces come as
 # they are made, a start holds ~3 s of them, and a batch outlasts this anyway.
 _PREFETCH_RELOAD_S = 1.0
+# A copy that lists none (its next piece is about to start), or an ad break's copies (Twitch
+# lists none during one), leave the source prefetching this many pieces after the last copy
+# that listed some, or the last copy of the break: one such copy turned the burst to the
+# target duration at once (the session's stall bound, start and kept burst follow it) and the
+# reloads to half of it (3 s on Kick) while the next piece was being made.
+_PREFETCH_HOLD_PIECES = 2.0
+# A live site's ad break (Twitch stitches its ads into the live playlist, and marks them): a
+# piece whose date falls in a DATERANGE of the ad class or whose ID says so, or, in a playlist
+# that carries the site's own tags (`_SITE_TAG`, a prefetch line), whose EXTINF title names
+# the ad server, is skipped (`_is_ad`): an IPTV provider's piece may be titled anything. A
+# range known stays known after the piece it was listed with left the playlist (its later
+# pieces are still dated in it), the newest `_AD_RANGES_KEPT` of them.
+_DATERANGE = "#EXT-X-DATERANGE:"
+_SITE_TAG = "#EXT-X-TWITCH-"
+_AD_CLASS = "twitch-stitched-ad"
+_AD_ID = "stitched-ad-"
+_AD_TITLE = "Amazon"
+_AD_RANGES_KEPT = 16
+_ATTRIBUTE = re.compile(r'([A-Z0-9-]+)=("[^"]*"|[^,]*)')
 _HOLD_POLL_S = 0.25  # 2.7: how often a held source asks again
 # 2.7.1 ("Prefer HTTPS"): an http:// address is asked over HTTPS first, connecting within this;
 # the hosts whose HTTPS did not open are asked over HTTP at once for the rest of the run.
@@ -252,6 +271,16 @@ class CaughtUp:
 
 
 @dataclass(frozen=True)
+class AdBreak:
+    """HLS only: a live site's ad break, its pieces skipped (never fetched, `_is_ad`): `on`
+    as the first of them is skipped, off as the channel's first piece after it comes (or the
+    playlist ends in it). The helper's state says so meanwhile (`ad_break`): no media comes,
+    and the session counts no starvation."""
+
+    on: bool
+
+
+@dataclass(frozen=True)
 class Title:
     """A radio station's only (2.14, `SoundSource`, `IcyTsSource`): the song it names from here
     on, as its inline metadata names it ("": none); the bytes before it are of the song
@@ -261,7 +290,7 @@ class Title:
     legacy: bool = False
 
 
-Chunk = bytes | Discontinuity | CaughtUp | Reconnecting | Title
+Chunk = bytes | Discontinuity | CaughtUp | Reconnecting | Title | AdBreak
 
 
 class Source(Protocol):
@@ -1234,17 +1263,98 @@ def _whole_segments(playlist: Any) -> Any:
     return playlist
 
 
-def _prefetch_parser(line: str, lineno: int, data: dict[str, Any], state: dict[str, Any]) -> bool:
-    """An m3u8 `custom_tags_parser`: a prefetch piece's line (`_PREFETCH_TAGS`) puts its URI in
-    ``data["prefetch"]`` and is read (True); any other line is the parser's (False)."""
-    del lineno, state
+def _site_tags(line: str, lineno: int, data: dict[str, Any], state: dict[str, Any]) -> bool:
+    """An m3u8 `custom_tags_parser` for what a live site adds. A prefetch piece's line
+    (`_PREFETCH_TAGS`) puts its URI in ``data["prefetch"]``, with whether a discontinuity was
+    written before it (the parser would keep that for a finished piece that never comes), and
+    is read (True). An ad break's DATERANGE (`_ad_range`) goes into ``data["ad_ranges"]``
+    wherever it stands (the parser gives a range to the finished piece after it: one before the
+    prefetch lines has none), and is the parser's as ever (False), as is any other line. A
+    site's own tag, or a prefetch line, says the playlist is a live site's (``data["site"]``)."""
+    del lineno
+    if line.startswith(_SITE_TAG) or line.startswith(_PREFETCH_TAGS):
+        data["site"] = True
+    if line.startswith(_DATERANGE):
+        marked = _ad_range(line)
+        if marked is not None:
+            data.setdefault("ad_ranges", []).append(marked)
+        return False
     for tag in _PREFETCH_TAGS:
         if line.startswith(tag):
             uri = line[len(tag) :].strip()
             if uri:
-                data.setdefault("prefetch", []).append(uri)
+                cut = state.pop("discontinuity", False) is True
+                data.setdefault("prefetch", []).append((uri, cut))
             return True
     return False
+
+
+def _utc(when: datetime) -> datetime:
+    """A playlist's date; one without a zone is UTC's."""
+    return when if when.tzinfo is not None else when.replace(tzinfo=timezone.utc)
+
+
+def _date(text: str | None) -> datetime | None:
+    """An ISO 8601 date as a playlist writes it (`_utc`); None without one that reads."""
+    if not text:
+        return None
+    try:
+        return _utc(datetime.fromisoformat(text))
+    except ValueError:
+        return None
+
+
+def _ad_range(line: str) -> tuple[str, datetime, datetime | None] | None:
+    """An ad break's DATERANGE line (of the class `_AD_CLASS`, or whose ID starts `_AD_ID`):
+    its ID, start and end (END-DATE, else the start plus DURATION or PLANNED-DURATION; None:
+    open, a range only while listed); None for another range, or one without a start."""
+    values = {name: value.strip('"') for name, value in _ATTRIBUTE.findall(line[len(_DATERANGE) :])}
+    ident = values.get("ID", "")
+    if values.get("CLASS") != _AD_CLASS and not ident.startswith(_AD_ID):
+        return None
+    start = _date(values.get("START-DATE"))
+    if start is None:
+        return None
+    end = _date(values.get("END-DATE"))
+    for name in ("DURATION", "PLANNED-DURATION"):
+        if end is not None:
+            break
+        try:
+            seconds = float(values.get(name, ""))
+        except ValueError:
+            continue
+        if math.isfinite(seconds) and seconds >= 0:
+            end = start + timedelta(seconds=seconds)
+    return ident, start, end
+
+
+def _ad_ranges(playlist: Any) -> dict[str, tuple[datetime, datetime | None]]:
+    """The ad breaks a parsed playlist marks (`_site_tags`), by ID: (start, end)."""
+    data = getattr(playlist, "data", None)
+    listed = data.get("ad_ranges") if isinstance(data, dict) else None
+    return {ident or start.isoformat(): (start, end) for ident, start, end in listed or ()}
+
+
+def _from_site(playlist: Any) -> bool:
+    """A parsed playlist carries a live site's own tags (`_site_tags`)."""
+    data = getattr(playlist, "data", None)
+    return isinstance(data, dict) and data.get("site") is True
+
+
+def _is_ad(
+    segment: Any, ad_ranges: Iterable[tuple[datetime, datetime | None]], titled: bool = True
+) -> bool:
+    """A piece of a live site's ad break: its date (a prefetch piece's: the one it will have,
+    `_with_prefetch`) falls in one of `ad_ranges`, each (start, end), the end not in it (None:
+    open); or, `titled` (the playlist is a live site's: `_from_site`), its title names the ad
+    server (`_AD_TITLE`)."""
+    if titled and _AD_TITLE in str(segment.title or ""):
+        return True
+    dated = segment.current_program_date_time or segment.program_date_time
+    if dated is None:
+        return False
+    dated = _utc(dated)
+    return any(start <= dated and (end is None or dated < end) for start, end in ad_ranges)
 
 
 def _is_prefetch(segment: Any) -> bool:
@@ -1262,11 +1372,12 @@ def _finished(segments: Sequence[Any]) -> int:
 
 
 def _with_prefetch(playlist: Any) -> Any:
-    """A live media playlist with its prefetch pieces (`_prefetch_parser`) after the finished
-    ones, each listed as the piece it will be (titled "prefetch"): the last finished piece's
-    length (none listed: the target duration), key and map (fMP4: remuxed whole, as any), and
-    its date plus the lengths up to it (none without one). A finished playlist (ENDLIST) or a
-    master has none; nor one whose pieces' length is not known."""
+    """A live media playlist with its prefetch pieces (`_site_tags`) after the finished ones,
+    each listed as the piece it will be (titled "prefetch"): the last finished piece's length
+    (none listed: the target duration), key and map (fMP4: remuxed whole, as any), its date
+    plus the lengths up to it (none without one), and a discontinuity written before its
+    line. A finished playlist (ENDLIST) or a master has none; nor one whose pieces' length is
+    not known."""
     data = getattr(playlist, "data", None)
     uris = data.get("prefetch") if isinstance(data, dict) else None
     if not uris or playlist.is_endlist or playlist.is_variant:
@@ -1281,7 +1392,7 @@ def _with_prefetch(playlist: Any) -> Any:
     if dated is not None:
         dated += timedelta(seconds=float(last.duration or 0))
     sequence = (playlist.media_sequence or 0) + len(segments)
-    for k, uri in enumerate(uris):
+    for k, (uri, cut) in enumerate(uris):
         when = dated + timedelta(seconds=k * duration) if dated is not None else None
         piece = m3u8.Segment(
             uri=uri,
@@ -1290,6 +1401,7 @@ def _with_prefetch(playlist: Any) -> Any:
             title="prefetch",
             program_date_time=when,
             current_program_date_time=when,
+            discontinuity=cut,
             media_sequence=sequence + k,
             custom_parser_values={"prefetch": True},
         )
@@ -1361,7 +1473,7 @@ def _select_manifest(
     2.14) with no video variant plays its best variant of sound alone (`_sound_only`)."""
     try:
         text = content.decode("utf-8-sig")
-        playlist = m3u8.loads(text, uri=url, custom_tags_parser=_prefetch_parser)
+        playlist = m3u8.loads(text, uri=url, custom_tags_parser=_site_tags)
         if not playlist.is_variant:
             return _with_prefetch(_whole_segments(playlist)), ()
         candidates = [item for item in playlist.playlists if _video_compatible(item)]
@@ -1762,6 +1874,14 @@ class HlsSource:
         self._window = 0.0  # 2.7: how long a live playlist's window lasts (0.0: finished)
         self._edge_sequence: int | None = None  # its newest segment's media sequence
         self._prefetching = False  # its playlist lists prefetch pieces (`_with_prefetch`)
+        self._prefetch_until = -math.inf  # ... or did lately (`_PREFETCH_HOLD_PIECES`): till then
+        # A live site's ad breaks (`_is_ad`): the ranges known (by ID) and those to judge the
+        # copy read last by, and whether its pieces are being skipped now (since when).
+        self._ads: dict[str, tuple[datetime, datetime | None]] = {}
+        self._ranges: list[tuple[datetime, datetime | None]] = []
+        self._site = False  # its playlist carried a live site's own tags once (`_from_site`)
+        self._ad_break = False
+        self._ad_since = 0.0
         self._note_window(playlist)
         self._keys: dict[str, bytes] = {}
         self._recent: deque[str] = deque(maxlen=_RECENT_SEGMENTS)
@@ -1787,8 +1907,8 @@ class HlsSource:
 
     @property
     def prefetching(self) -> bool:
-        """Its playlist, as last read, lists prefetch pieces (a live site's newest, read as
-        they are made: `_with_prefetch`)."""
+        """Its playlist lists prefetch pieces (a live site's newest, read as they are made:
+        `_with_prefetch`), as last read or lately (`_PREFETCH_HOLD_PIECES`)."""
         return self._prefetching
 
     @property
@@ -1839,16 +1959,43 @@ class HlsSource:
         return self._edge_sequence
 
     def _note_window(self, playlist: Any) -> None:
+        self._note_ads(playlist)
         segments = playlist.segments
         live = not playlist.is_endlist
         finished = _finished(segments)  # (prefetch pieces are still being made)
-        self._prefetching = finished < len(segments)
+        now = time.monotonic()
+        if finished < len(segments) or (
+            self._prefetching and segments and self._ad(segments[-1])
+        ):  # (an ad break's copies list none: it lasts through the break)
+            piece = float(segments[-1].duration or 0)
+            self._prefetch_until = now + _PREFETCH_HOLD_PIECES * piece
+        self._prefetching = now < self._prefetch_until
         window = sum(
             float(segment.duration or 0) for segment in itertools.islice(segments, finished)
         )
         self._window = window if live else 0.0
         if segments:
             self._edge_sequence = (playlist.media_sequence or 0) + len(segments) - 1
+
+    def _note_ads(self, playlist: Any) -> None:
+        """The ad breaks a copy marks (`_ad_ranges`) join those known; the copy's pieces are
+        judged by these (`_ranges`): a range with an end stays known after the piece it was
+        listed with left the playlist (the newest `_AD_RANGES_KEPT`), an open one only while
+        it is listed. A live site's playlist once, its pieces' titles count too (`_site`)."""
+        self._site = self._site or _from_site(playlist)
+        listed = _ad_ranges(playlist)
+        known = self._ads
+        for ident, marked in listed.items():
+            if marked[1] is not None:
+                known.pop(ident, None)
+                known[ident] = marked
+        while len(known) > _AD_RANGES_KEPT:
+            del known[next(iter(known))]
+        self._ranges = list(known.values()) + [m for m in listed.values() if m[1] is None]
+
+    def _ad(self, segment: Any) -> bool:
+        """A piece of the copy read last is an ad break's (`_is_ad`)."""
+        return _is_ad(segment, self._ranges, self._site)
 
     @property
     def segment_sequence(self) -> int | None:
@@ -2072,14 +2219,17 @@ class HlsSource:
             if not stale:
                 self._discontinuity_sequence = playlist.discontinuity_sequence
             fresh = newest >= next_sequence
-            # (A prefetch piece's media is no backlog: it comes as it is made.)
+            # (A prefetch piece's media is no backlog: it comes as it is made; an ad's never.)
             self._rest = sum(
                 float(segment.duration or 0)
                 for index, segment in enumerate(playlist.segments)
                 if first + index >= next_sequence
                 and not segment.gap_tag
                 and not _is_prefetch(segment)
+                and not self._ad(segment)
             )
+            if playlist.segments and all(self._ad(s) for s in playlist.segments):
+                progress = loaded  # an ad break's (a tune's into one): the channel comes after
             # Frozen time runs between reloads only, never while segments download.
             if not fresh and loaded - progress >= _FROZEN_TIMEOUT:
                 raise SourceError("timeout", _FROZEN)
@@ -2107,6 +2257,17 @@ class HlsSource:
                 next_sequence = sequence + 1
                 if segment.discontinuity:
                     self._mark()
+                if self._ad(segment):
+                    # Never fetched; ours all the same (`_other_copy`: the copy is our encoding).
+                    self._recent.append(_identity(_resolve(url, segment.uri)))
+                    if not self._ad_break:
+                        self._ad_break, self._ad_since = True, time.monotonic()
+                        log.info("An HLS ad break: its pieces are skipped.")
+                        yield AdBreak(True)
+                    self._mark()
+                    continue
+                if self._ad_break:
+                    yield from self._ad_break_over()
                 if segment.gap_tag:
                     log.info("Skipped an HLS segment tagged as a gap.")
                     self._mark()
@@ -2121,6 +2282,8 @@ class HlsSource:
                 progress = time.monotonic()
                 yield CaughtUp()  # what follows comes as the provider publishes it
             if done or (playlist.is_endlist and not again):  # a held one reloads, goes on
+                if self._ad_break:
+                    yield from self._ad_break_over()
                 yield from self._emit(self._release(final=True))
                 yield from self._emit(self._flush_held())
                 return
@@ -2135,6 +2298,11 @@ class HlsSource:
             self._burst = float(playlist.target_duration or 0)
             self._finite = bool(playlist.is_endlist) or self._back is not None
             yield from self._emit(self._release())
+
+    def _ad_break_over(self) -> Iterator[Chunk]:
+        self._ad_break = False
+        log.info("The HLS ad break ended after %.0f s.", time.monotonic() - self._ad_since)
+        yield AdBreak(False)
 
     def _reload(self, http: _Http, url: str) -> tuple[bytes, str]:
         """The media playlist again. A 404 or 410 there (2.9: a public channel's CDN answered
@@ -2547,7 +2715,7 @@ class HlsSource:
         try:
             content, final = self._http.fetch(lambda: _load_playlist(self._http, url))
             text = content.decode("utf-8-sig")
-            parsed = m3u8.loads(text, uri=final, custom_tags_parser=_prefetch_parser)
+            parsed = m3u8.loads(text, uri=final, custom_tags_parser=_site_tags)
             playlist = _with_prefetch(_whole_segments(parsed))
         except _Closed:
             raise
