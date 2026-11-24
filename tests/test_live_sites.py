@@ -215,11 +215,45 @@ class TwitchTests(unittest.TestCase):
     def test_twitch_offline(self):
         self.assertEqual(self.reason(self.serve(usher=(404, {}, b""))), "offline")
 
+    def test_twitch_unknown(self):
+        # Ruling R16 (measured 2026-11-24): a login that doesn't exist is answered 200 with an
+        # explicit null grant inside "data".
+        null = {"data": {"streamPlaybackAccessToken": None}, "extensions": {"requestID": "x"}}
+        source = self.serve(gql=(200, JSON, json.dumps(null).encode()))
+        self.assertEqual(self.reason(source), "unknown")
+        self.assertEqual(source.counts.get("/hls/examplechannel.m3u8", 0), 0)  # usher unasked
+
     def test_twitch_refused(self):
-        self.assertEqual(self.reason(self.serve(gql=(401, {}, b"{}"))), "refused")
-        null = json.dumps({"data": {"streamPlaybackAccessToken": None}}).encode()
-        self.assertEqual(self.reason(self.serve(gql=(200, JSON, null))), "refused")
-        self.assertEqual(self.reason(self.serve(gql=(200, {}, b"<html>"))), "refused")
+        # An "errors" array (a rotted persisted-query hash), or no "data": the site's answer
+        # changed, said in the log; so is any other answer that carries no grant.
+        rotted = {
+            "errors": [
+                {
+                    "message": "PersistedQueryNotFound",
+                    "extensions": {"code": "PERSISTED_QUERY_NOT_FOUND"},
+                }
+            ]
+        }
+        # An error beside a null grant is an error, not a missing channel.
+        partial = {"errors": [{"message": "error"}], "data": {"streamPlaybackAccessToken": None}}
+        for name, status, body in (
+            ("rotted hash", 200, json.dumps(rotted).encode()),
+            ("error beside a null grant", 200, json.dumps(partial).encode()),
+            ("no data", 200, b"{}"),
+            ("no grant key", 200, json.dumps({"data": {}}).encode()),
+            ("grant without a token", 200, b'{"data": {"streamPlaybackAccessToken": {}}}'),
+            ("not JSON", 200, b"<html>"),
+            ("HTTP 401", 401, b"{}"),
+        ):
+            with self.subTest(name):
+                with self.assertLogs("services.live_sites", logging.WARNING) as logs:
+                    reason = self.reason(self.serve(gql=(status, JSON, body)))
+                self.assertEqual(reason, "refused")
+                self.assertTrue(any("answer changed" in line for line in logs.output), logs)
+
+    def test_twitch_usher_refusal_is_refused(self):
+        # M4: a sub-only or restricted channel's usher answers 403: refused, not "network".
+        self.assertEqual(self.reason(self.serve(usher=(403, {}, b""))), "refused")
 
     def test_twitch_usher_errors_are_network(self):
         self.assertEqual(self.reason(self.serve(usher=(500, {}, b""))), "network")

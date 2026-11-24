@@ -204,13 +204,20 @@ def _twitch(channel, http, stop, gql, usher):
         log.warning("Twitch's answer changed or was refused (HTTP %s).", response.status_code)
         raise SiteError("refused")
     data = _json(response)
-    grant = None
-    if isinstance(data, dict) and isinstance(data.get("data"), dict):
-        grant = data["data"].get("streamPlaybackAccessToken")
+    if isinstance(data, dict) and isinstance(data.get("errors"), list) and data["errors"]:
+        # A rotted query hash ("PersistedQueryNotFound"), or any error beside what came.
+        log.warning("Twitch's answer changed: it answered with an error.")
+        raise SiteError("refused")
+    answer = data.get("data") if isinstance(data, dict) else None
+    if isinstance(answer, dict) and "streamPlaybackAccessToken" in answer:
+        grant = answer["streamPlaybackAccessToken"]
+        if grant is None:  # (measured: a login nobody has; an offline channel has a grant)
+            raise SiteError("unknown")
+    else:
+        grant = None
     token = grant.get("value") if isinstance(grant, dict) else None
     signature = grant.get("signature") if isinstance(grant, dict) else None
     if not isinstance(token, str) or not isinstance(signature, str) or not token or not signature:
-        # A missing channel and a rotted query hash both read this way: not told apart.
         log.warning("Twitch's answer changed: no playback access.")
         raise SiteError("refused")
     query = urlencode(
@@ -236,6 +243,8 @@ def _twitch(channel, http, stop, gql, usher):
         response.close()
     if status == 404:
         raise SiteError("offline")
+    if status == 403:  # a channel for its subscribers only, or one kept from this region
+        raise SiteError("refused")
     if status != 200:
         raise SiteError("network")
     return master
