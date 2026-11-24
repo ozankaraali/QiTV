@@ -15,6 +15,7 @@ os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 from PySide6.QtCore import QObject, QPoint, QRect, Qt, Signal
 from timer_fixtures import pause
 
+from services import live_sites
 from services.connection_budget import ConnectionBudget
 from services.epg_view import Programme
 from services.live.live_session import (
@@ -24,7 +25,7 @@ from services.live.live_session import (
     UNAVAILABLE,
     Borrowed,
 )
-from services.live.refusals import STREAM_LIMIT
+from services.live.refusals import STREAM_LIMIT, STREAM_REFUSED
 from services.live.tuning import channel_key
 from services.navigation import RECENT_GROUP
 from services.network_streams import NetworkStreams, stream_id
@@ -1796,6 +1797,104 @@ class LinkOwnerPipTests(PipCase):
         self.assertEqual(self.budget.holders(NETWORK_PROVIDER), [])
         self.assertFalse(small.live.named("start")[0][1].get("once", False))
         self.assertEqual(len(self.catalog.links), links)  # its address is known: none asked
+
+
+class SitePipTests(PipCase):
+    """Final review I3: a Kick or Twitch channel small asks its site again, as the large
+    picture's does (its address's token lasts minutes): once its buffer failed after it
+    played, and once more each time its fresh address played HEALTHY_S since its first
+    picture; and its direct play that ended opens again at the address its site gives now.
+    The site is faked (services.live_sites.resolve): nothing is fetched."""
+
+    PAGE = "https://kick.com/examplechannel"
+    MASTER = "https://edge.example/hls/examplechannel/master.m3u8?token=sentinel-one"
+    FRESH = "https://edge.example/hls/examplechannel/master.m3u8?token=sentinel-two"
+    NEWER = "https://edge.example/hls/examplechannel/master.m3u8?token=sentinel-three"
+
+    def setUp(self):
+        super().setUp()
+        self.answers = []  # each ask's answer in turn: an address, or a SiteError
+        self.asked = 0
+        self.enterContext(mock.patch.object(live_sites, "resolve", self.resolve))
+        self.addCleanup(lambda: wait_until(lambda: self.controller._jobs.pending() == 0))
+        self.kept = {
+            "id": stream_id(self.PAGE),
+            "name": "examplechannel · Kick",
+            "cmd": self.PAGE,
+            "_provider": NETWORK_PROVIDER,
+        }
+
+    def resolve(self, page, stop=None, **_kwargs):
+        self.asked += 1
+        answer = self.answers.pop(0)
+        if isinstance(answer, Exception):
+            raise answer
+        return live_sites.Resolved(answer, f"{page.channel} · Kick")
+
+    def open_page_small(self):
+        self.start_large(0)
+        self.controller.open_pip(self.kept, group_key=RECENT_GROUP, channels=[self.kept])
+        small = self.sessions.other()
+        self.assertTrue(wait_until(lambda: len(small.live.named("start")) == 1))
+        self.assertEqual(small.live.named("start")[0][0], self.MASTER)
+        small.live.play_pipeline()
+        small.playback.stateChanged.emit("playing")
+        return small
+
+    def fails(self, small, starts):
+        """Its buffer is refused (a token's death): the site is asked again, the fresh address
+        opens small."""
+        small.live.failed.emit(STREAM_REFUSED)
+        small.live.released.emit()
+        self.assertTrue(wait_until(lambda: len(small.live.named("start")) == starts + 1))
+        small.live.play_pipeline()
+        small.playback.stateChanged.emit("playing")
+
+    def test_a_site_channel_whose_small_buffer_fails_asks_its_site_again(self):
+        self.enterContext(mock.patch("ui.live_controls.HEALTHY_S", 0.2))
+        self.answers = [self.MASTER, self.FRESH, self.NEWER]
+        small = self.open_page_small()
+        self.fails(small, 1)
+        self.assertEqual(small.live.named("start")[-1][0], self.FRESH)
+        self.assertTrue(self.sessions.pip_open())
+        self.assertEqual((self.asked, self.toast.messages()), (2, []))
+        pause(300)  # its fresh address played HEALTHY_S: its token may die in turn
+        small.playback.stateChanged.emit("playing")  # (a picture again counts nothing anew)
+        self.fails(small, 2)
+        self.assertEqual(small.live.named("start")[-1][0], self.NEWER)
+        self.assertEqual((self.asked, self.toast.messages()), (3, []))
+        small.live.failed.emit(STREAM_REFUSED)  # soon again: given up, as ever
+        small.live.released.emit()
+        pause(100)
+        self.assertEqual((self.asked, len(small.live.named("start"))), (3, 3))
+        self.assertEqual(self.toast.messages()[-1][1], "error")
+        self.assertFalse(self.sessions.pip_open())
+
+    def test_a_site_channels_small_direct_play_that_ended_opens_at_a_fresh_address(self):
+        self.enterContext(mock.patch("ui.live_controls.RECONNECT_MS", (40, 120)))
+        self.answers = [self.MASTER, self.FRESH]
+        small = self.open_page_small()
+        small.live.play_direct()  # its live session fell back: VLC plays the stream itself
+        self.assertEqual(self.pip_session.plays[-1][0], self.MASTER)
+        holders, stops = sorted(self.budget.holders(NETWORK_PROVIDER)), self.pip_session.stops
+        plays = len(self.pip_session.plays)
+        self.pip_session.stateChanged.emit("ended")
+        self.assertTrue(wait_until(lambda: len(self.pip_session.plays) == plays + 1))
+        self.assertEqual(self.pip_session.plays[-1][0], self.FRESH)  # not the dead address
+        self.assertEqual(self.asked, 2)
+        self.assertEqual(self.pip_session.stops, stops)  # the same player and slot
+        self.assertEqual(sorted(self.budget.holders(NETWORK_PROVIDER)), holders)
+
+    def test_a_site_off_the_air_as_its_small_picture_reopens_closes_it(self):
+        self.enterContext(mock.patch("ui.live_controls.RECONNECT_MS", (40, 120)))
+        self.answers = [self.MASTER, live_sites.SiteError("offline")]
+        small = self.open_page_small()
+        small.live.play_direct()
+        plays = len(self.pip_session.plays)
+        self.pip_session.stateChanged.emit("ended")
+        self.assertTrue(wait_until(lambda: not self.sessions.pip_open()))
+        self.assertEqual(len(self.pip_session.plays), plays)
+        self.assertIn(("examplechannel isn't live now", "error"), self.toast.messages())
 
 
 class PreviousChannelSourceTests(PipCase):

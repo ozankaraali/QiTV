@@ -34,7 +34,9 @@ beside the focus opens its channel again after the revive's growing waits, its c
 down ("The stream ended · Trying again in 0:25"), until it plays, the tile takes another
 channel or goes, or the grid is left; a refusal for the provider's limit never is. A tile
 without the focus whose STB channel failed has its link made again at once first (the portal's
-play token may have expired), as the big picture's and the PiP's are. Nothing else queues or
+play token may have expired), as the big picture's and the PiP's are; so is a site's channel
+(Kick, Twitch) that played and was refused (its address's token lasts minutes: its site is
+asked again), and once more each time that address played HEALTHY_S. Nothing else queues or
 asks again by itself. Zapping onto a channel another tile shows moves the focus there.
 
 A tile without the focus plays at 1x: muted, it needs no nudge, so its stay-live only jumps
@@ -84,14 +86,14 @@ from PySide6.QtGui import QCursor
 
 from services.config_manager import ConfigManager
 from services.i18n import N_, tr, translate
-from services.live.refusals import REFUSALS
+from services.live.refusals import REFUSALS, STREAM_REFUSED
 from services.live.stay_live import TARGETS
 from services.provider_ids import with_provider
 from services.redact import safe_message
 from services.revive import Revive
 from services.sessions import SessionManager, Slot, records
 from services.zapping import ZapContext
-from ui import item_provider
+from ui import item_provider, live_controls
 from ui.grid_frame import GridFrame
 from ui.keymap import Action
 from ui.overlays.grid_tiles import DENIED, EMPTY, FAILED, OPENING, PLAYING, TileView
@@ -188,6 +190,7 @@ class GridControls(QObject):
         tile_action: Optional[Callable[[str, str], None]] = None,
         show_controls: Optional[Callable[[], None]] = None,
         confirm: Optional[Callable[[str, Callable[[], None]], bool]] = None,
+        site_page: Callable[[dict], Optional[str]] = lambda item: None,
         parent: Optional[QObject] = None,
     ) -> None:
         """`frame` lays the surfaces out and `tiles` (the GridTiles overlay; None in tests)
@@ -211,7 +214,9 @@ class GridControls(QObject):
         went with a smaller layout or the grid: what it showed is forgotten);
         `show_controls()` shows the player controls (the layouts' hint is drawn above them);
         `confirm(name, then)` asks before tile `name`'s recording would stop (2.6): True,
-        asked (`then` follows)."""
+        asked (`then` follows). `site_page(channel)`: the page of a link that is a site's
+        channel (Kick, Twitch; None: none): a refusal of its address asks the site again
+        (`_may_retry`)."""
         super().__init__(parent)
         self.sessions = sessions
         self.frame = frame
@@ -241,6 +246,7 @@ class GridControls(QObject):
         self._tile_action = tile_action
         self._show_controls = show_controls
         self._confirm = confirm
+        self._site_page = site_page
         self._restored = False  # the last grid came back since the grid showed
         self._shown = False
         self._big = False  # the focused tile fills the page, the grid behind it
@@ -259,6 +265,7 @@ class GridControls(QObject):
         # A tile's channel comes back by itself (`services.revive`): the channel each tile
         # played since it opened there, its tries, and when a failed tile's opens again.
         self._played: dict[str, dict] = {}
+        self._first_played: dict[str, float] = {}  # each tile's first since it opened there
         self._revives: dict[str, tuple[dict, Revive]] = {}
         self._revive_due: dict[str, float] = {}  # monotonic
         self._revive_timer = QTimer(self, interval=_REVIVE_TICK_MS)
@@ -570,6 +577,7 @@ class GridControls(QObject):
         self._wanted.clear()
         self._linking.clear()
         self._retried.clear()
+        self._first_played.clear()
         self.frame.hide_grid()
         if self._tiles_view is not None:
             self._tiles_view.set_tiles([])
@@ -829,6 +837,7 @@ class GridControls(QObject):
         self._linking.pop(name, None)
         if not ZapContext.same(self._retried.get(name), channel):
             self._retried.pop(name, None)  # another channel: it may be made again once
+        self._first_played.pop(name, None)
         self._wanted[name] = (channel, provider)
         self.sessions.open_slot(
             name,
@@ -1027,7 +1036,8 @@ class GridControls(QObject):
         self._refresh()
         if self._may_retry(name, channel, message):
             # Its play token, or its portal's session, may have expired (as the big
-            # picture's and the PiP's): a fresh link, once per tile and channel.
+            # picture's and the PiP's): a fresh link, once per tile and channel (a site's
+            # channel: once more each time its fresh address played HEALTHY_S).
             self._retried[name] = channel
             assert self._reopen is not None
             self._reopen(name, channel)
@@ -1095,12 +1105,20 @@ class GridControls(QObject):
 
     def _may_retry(self, name: str, channel: dict, message: str) -> bool:
         """A tile without the focus (the focused one is the shell's) whose STB channel
-        failed, never for the provider's limit, and once per tile and channel."""
+        failed, never for the provider's limit, and once per tile and channel; or whose site's
+        channel (Kick, Twitch) that played was refused, its address's token most likely run
+        out (its lane asks the site again), once more each time that fresh address played
+        HEALTHY_S since its first picture there, as the large picture's."""
+        if self._reopen is None or name == self.sessions.large().name:
+            return False
+        again = ZapContext.same(self._retried.get(name), channel)
+        if self._site_page(channel) is not None and message == STREAM_REFUSED:
+            return ZapContext.same(self._played.get(name), channel) and (
+                not again or live_controls.played_long(self._first_played.get(name))
+            )
         return (
-            self._reopen is not None
-            and name != self.sessions.large().name
-            and message not in REFUSALS
-            and not ZapContext.same(self._retried.get(name), channel)
+            message not in REFUSALS
+            and not again
             and item_provider.provider_type(self.catalog, channel) == "STB"
         )
 
@@ -1111,6 +1129,7 @@ class GridControls(QObject):
             if slot is not None:
                 slot.playback.set_muted(True)  # one out of sight that opened again: unheard
         if state == "playing":
+            self._first_played.setdefault(name, time.monotonic())
             channel = self._tile_channel(name)
             if channel is not None:
                 self._played[name] = channel  # it comes back by itself from now on
@@ -1178,6 +1197,7 @@ class GridControls(QObject):
         """Tile `name` left the grid: what was on its way for it never opens."""
         for kept in (self._cards, self._linking, self._wanted, self._retried, self._timelines):
             kept.pop(name, None)
+        self._first_played.pop(name, None)
         if self._forget is not None:
             self._forget(name)
 

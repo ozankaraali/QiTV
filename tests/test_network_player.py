@@ -1084,6 +1084,7 @@ class SiteTests(PlayerCase):
         self.assertGreater(len(self.starts()), starts)
 
     def test_a_site_link_asks_again_once_only(self):
+        # Its fresh address failing before it played HEALTHY_S: given up, as ever.
         self.answers = [MASTER, MASTER_FRESH]
         starts = self.pipeline_fails()
         self.assertTrue(wait_until(lambda: len(self.starts()) == starts + 1))
@@ -1093,6 +1094,41 @@ class SiteTests(PlayerCase):
         self.assertTrue(wait_until(lambda: self.errors()))
         self.assertEqual(len(self.asked), 2)
         self.assertEqual(len(self.starts()), starts + 1)
+
+    def test_a_site_link_that_played_a_while_asks_again_when_it_fails_again(self):
+        # Final review I1: the fresh address's token runs out in turn (the Mac slept twice).
+        # HEALTHY_S after the re-asked tune's first picture, the site is asked again; a
+        # picture again since (a hold let go, a reopen) does not count the time anew.
+        self.enterContext(mock.patch.object(live_controls, "HEALTHY_S", 0.2))
+        self.answers = [MASTER, MASTER_FRESH, MASTER_OTHER]
+        starts = self.pipeline_fails()
+        self.assertTrue(wait_until(lambda: len(self.starts()) == starts + 1))
+        self.live.play_pipeline()
+        self.plays_now()
+        pause(300)  # HEALTHY_S since its first picture
+        self.plays_now()  # its hold let go: "playing" again
+        self.live.failed.emit(STREAM_REFUSED)
+        self.assertTrue(wait_until(lambda: len(self.starts()) == starts + 2))
+        self.assertEqual(self.starts()[-1][0], MASTER_OTHER)
+        self.assertEqual(len(self.asked), 3)
+        self.assertEqual(self.errors(), [])
+        self.assertEqual(self.store.get(stream_id(KICK_PAGE)).failed, "")
+
+    def test_the_helpers_wait_spends_no_ask_of_the_site(self):
+        # Final review I1 (b): on waking, the network comes back only after the helper's
+        # quick reconnects. Its wait (a counted `retrying`) is no ask of the site: the token's
+        # death after it still asks.
+        self.answers = [MASTER, MASTER_FRESH]
+        self.link(KICK_PAGE)
+        self.live.play_pipeline()
+        self.plays_now()
+        starts = len(self.starts())
+        self.live.retrying.emit(5.0)  # the helper waits for its stream
+        self.live.failed.emit(STREAM_REFUSED)  # its one try met the token's death
+        self.assertTrue(wait_until(lambda: len(self.starts()) == starts + 1))
+        self.assertEqual(self.starts()[-1][0], MASTER_FRESH)
+        self.assertEqual(len(self.asked), 2)
+        self.assertEqual(self.errors(), [])
 
     def test_another_link_whose_buffer_is_refused_is_not_tuned_again(self):
         self.link(URL)

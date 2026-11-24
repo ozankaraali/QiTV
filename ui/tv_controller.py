@@ -790,6 +790,7 @@ class TVController(QObject):
                 choose=self._choose_small,
                 hidden=self._hidden_now,
                 title_gone=self._small_title_gone,
+                site_page=self._site_page,
                 parent=self,
             )
             self._pip.changed.connect(self._mixer.refresh)
@@ -826,6 +827,7 @@ class TVController(QObject):
                 tile_action=self._on_tile_control,
                 show_controls=self._show_transport,
                 confirm=self._confirm_tile,
+                site_page=self._site_page,
                 parent=self,
             )
             self._grid.changed.connect(self._mixer.refresh)
@@ -3864,8 +3866,8 @@ class TVController(QObject):
     def _reopen_tile(self, name: str, channel: dict) -> None:
         """A tile without the focus failed: its channel's link is made again and it opens in
         that tile; the grid says when (an STB portal's at once, once: its portal's session may
-        have expired, so it signs in again; any channel that played, after the revive's wait,
-        `services.revive`)."""
+        have expired, so it signs in again; a site's channel refused, at once: its lane asks
+        the site again; any channel that played, after the revive's wait, `services.revive`)."""
         logger.info("Making the link of a tile's channel again after it failed")
         if item_provider.provider_type(self.catalog, channel) == "STB":
             item_provider.sign_in_again(self.catalog, channel)

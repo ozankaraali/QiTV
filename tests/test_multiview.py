@@ -26,9 +26,9 @@ from PySide6.QtTest import QTest
 from PySide6.QtWidgets import QApplication, QWidget
 from timer_fixtures import elapse, pause, wait_until
 
-from services import free_radio
+from services import free_radio, live_sites
 from services.connection_budget import ConnectionBudget
-from services.live.refusals import STREAM_LIMIT
+from services.live.refusals import STREAM_LIMIT, STREAM_REFUSED
 from services.navigation import NavNode, item_key
 from services.network_streams import NetworkStreams, stream_id
 from services.parental import Parental
@@ -1844,6 +1844,78 @@ class LinkOwnerGridTests(MultiviewCase):
         self.assertTrue(wait_until(lambda: slot.live.running and slot.live.url == self.URL))
         self.assertEqual(self.budget.holders("Harbor IPTV"), ["t3"])
         self.assertEqual(self.budget.holders(NETWORK_PROVIDER), [])
+
+
+class SiteTileTests(MultiviewCase):
+    """Final review I3: a Kick or Twitch channel in a tile beside the focus whose buffer is
+    refused after it played (its address's token ran out) is tuned again there through its
+    lane, so its site is asked again: once, and once more each time its fresh address played
+    HEALTHY_S since its first picture. The site is faked: nothing is fetched."""
+
+    PAGE = "https://www.twitch.tv/examplechannel"
+    MASTER = "https://edge.example/hls/examplechannel/master.m3u8?token=sentinel-one"
+    FRESH = "https://edge.example/hls/examplechannel/master.m3u8?token=sentinel-two"
+    NEWER = "https://edge.example/hls/examplechannel/master.m3u8?token=sentinel-three"
+
+    def setUp(self):
+        super().setUp()
+        self.catalog.current_provider = lambda: {"name": "Home", "type": "STB", "max_streams": 4}
+        self.answers = []
+        self.asked = 0
+        self.enterContext(mock.patch.object(live_sites, "resolve", self.resolve))
+        self.addCleanup(lambda: wait_until(lambda: self.controller._jobs.pending() == 0))
+        self.kept = {
+            "id": stream_id(self.PAGE),
+            "name": "examplechannel · Twitch",
+            "cmd": self.PAGE,
+            "_provider": NETWORK_PROVIDER,
+        }
+
+    def resolve(self, page, stop=None, **_kwargs):
+        self.asked += 1
+        return live_sites.Resolved(self.answers.pop(0), f"{page.channel} · Twitch")
+
+    def plays(self, slot, url):
+        self.assertTrue(wait_until(lambda: slot.live.running and slot.live.url == url))
+        slot.live.play_pipeline()
+        slot.playback.stateChanged.emit("playing")
+
+    def refused(self, slot):
+        slot.live.failed.emit(STREAM_REFUSED)
+        slot.live.released.emit()
+
+    def test_a_site_tile_whose_buffer_is_refused_asks_its_site_again(self):
+        self.enterContext(mock.patch("ui.live_controls.HEALTHY_S", 0.2))
+        self.answers = [self.MASTER, self.FRESH, self.NEWER]
+        self.start_large(0)
+        self.v()
+        self.controller.play_in_tile("t3", self.kept)
+        t3 = self.sessions.slot("t3")
+        self.plays(t3, self.MASTER)
+        self.assertEqual(self.sessions.large().name, "main")  # beside the focus
+        self.refused(t3)
+        self.plays(t3, self.FRESH)  # the site was asked again: its fresh address plays there
+        self.assertEqual(self.asked, 2)
+        pause(300)  # HEALTHY_S on its fresh address
+        t3.playback.stateChanged.emit("playing")  # (a picture again counts nothing anew)
+        self.refused(t3)
+        self.plays(t3, self.NEWER)
+        self.assertEqual(self.asked, 3)
+        self.refused(t3)  # soon again: it says so, and asks nothing more
+        pause(100)
+        self.assertEqual((self.grid.state("t3"), self.asked), (FAILED, 3))
+
+    def test_a_site_tile_refused_for_the_limit_is_never_asked_again(self):
+        self.answers = [self.MASTER]
+        self.start_large(0)
+        self.v()
+        self.controller.play_in_tile("t3", self.kept)
+        t3 = self.sessions.slot("t3")
+        self.plays(t3, self.MASTER)
+        t3.live.failed.emit(STREAM_LIMIT)
+        t3.live.released.emit()
+        pause(100)
+        self.assertEqual((self.grid.state("t3"), self.asked), (FAILED, 1))
 
 
 class DrawerDragTests(unittest.TestCase):

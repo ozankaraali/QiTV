@@ -128,6 +128,12 @@ def reopen_wait_ms(tries: int) -> int:
     return round(revive_wait(tries) * 1000)
 
 
+def played_long(since: Optional[float]) -> bool:
+    """A play first seen at `since` (monotonic; None: not yet) went on for `HEALTHY_S`: a site's
+    channel asked again may be asked once more (the token of its fresh address ran out too)."""
+    return since is not None and time.monotonic() - since >= HEALTHY_S
+
+
 # i18n: a toast: R or the record button was pressed while the channel is still opening
 NOT_YET_TEXT = N_("Recording can start once the channel plays")
 # i18n: a toast: R on a channel that already records on schedule (2.9.7)
@@ -308,6 +314,9 @@ class LiveControls(QObject):
         self._wired = False
         self._reconnects = 0  # reopens of the current tune's ended stream so far
         self._playing_since: Optional[float] = None  # the player's last "playing" (monotonic)
+        # When the tune first played (monotonic), set once: a hold let go or a reopen says
+        # "playing" again (`_site_again`).
+        self._first_played: Optional[float] = None
         self._played = False  # the current tune played (it comes back by itself then)
         self._reopen_due: Optional[tuple[Target, str, PlayKind]] = None  # after the back-off
         self._reopen_timer = QTimer(self, singleShot=True)
@@ -465,6 +474,7 @@ class LiveControls(QObject):
         self._link_tries = 0
         self._link_well_since = None
         self._playing_since = None
+        self._first_played = None
         self._played = False
         self._cancel_reopen()
         self._cancel_relink()
@@ -1095,6 +1105,8 @@ class LiveControls(QObject):
         """The player plays: an ended stream counts how long it played since (HEALTHY_S), and
         a wait of ours for it is over (LiveSession's own says when its own is)."""
         self._playing_since = time.monotonic()
+        if self._first_played is None:
+            self._first_played = self._playing_since
         self._played = True
         self._link_well_since = self._playing_since
         if not self._retry_from_live:
@@ -1134,16 +1146,18 @@ class LiveControls(QObject):
 
     def _site_again(self, current: Target) -> bool:
         """A site's channel (Kick, Twitch) whose buffer failed after it played, most likely
-        because the token of the address it plays ran out: tuned again once, so its lane asks
-        the site for a fresh address (a plain restart: no buffer is kept)."""
+        because the token of the address it plays ran out: tuned again, so its lane asks the
+        site for a fresh address (a plain restart: no buffer is kept). Once per tune, and once
+        more each time the tune asked so played `HEALTHY_S` since its first picture (its
+        token runs out in turn: the computer slept twice); the helper's wait for its stream
+        before it failed asks nothing of the site, so it spends nothing."""
         if (
             not current.live
-            or current.retried
+            or (current.retried and not played_long(self._first_played))
             or not (current.played or self._played)
             or self._site_page(current.item) is None
             or self._reask is None
             or self._lanes.busy()  # a newer choice is on its way: it is not lost to this
-            or not self._link_may_try(current)
         ):
             return False
         logger.info("Asking the site of %s again after its buffer failed", current.title)
