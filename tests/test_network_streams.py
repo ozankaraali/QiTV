@@ -226,8 +226,9 @@ class StoreTests(unittest.TestCase):
             ("unknown", kick, "No channel named examplechannel on Kick"),
             ("refused", kick, f"Kick {refused}"),
             ("refused", twitch, f"Twitch {refused}"),
-            ("network", kick, "The link didn't answer in time"),
-            ("anything else", twitch, "The link didn't answer in time"),
+            ("network", kick, "The link could not be opened"),  # (not reached, nor said why)
+            ("timeout", kick, "The link didn't answer in time"),  # (it never answered in time)
+            ("anything else", twitch, "The link could not be opened"),
         )
         for reason, page, why in cases:
             with self.subTest(reason=reason, site=page.site):

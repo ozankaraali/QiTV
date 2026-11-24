@@ -104,7 +104,8 @@ class SiteJob(QObject):
     """A site's channel page asked for the stream it plays now, on the runner's thread
     (services.live_sites.resolve): `finished` with the address (its token never logged),
     else `error` with why (live_sites.SiteError's reason: "offline", "unknown", "refused" or
-    "network"). `stop` set ends it between its requests, as "network": nobody waits for it."""
+    "network", or "timeout" for a "network" whose site never answered in time). `stop` set ends
+    it between its requests, as "network": nobody waits for it."""
 
     finished = Signal(object)
     error = Signal(str)
@@ -118,7 +119,7 @@ class SiteJob(QObject):
         try:
             answer = live_sites.resolve(self.page, self.stop)
         except live_sites.SiteError as e:
-            self.error.emit(e.reason)
+            self.error.emit("timeout" if e.reason == "network" and e.timed_out else e.reason)
             return
         except Exception as e:  # (its text may carry the address: its type only)
             logger.warning(

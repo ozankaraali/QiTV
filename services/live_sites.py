@@ -70,11 +70,13 @@ class Resolved:
 
 
 class SiteError(Exception):
-    """``reason`` is "offline", "unknown", "refused" or "network"."""
+    """``reason`` is "offline", "unknown", "refused" or "network"; ``timed_out``: a "network"
+    whose site never answered in time (to connect, or to read)."""
 
-    def __init__(self, reason: str):
+    def __init__(self, reason: str, timed_out: bool = False):
         super().__init__(reason)
         self.reason = reason
+        self.timed_out = timed_out
 
 
 def site_page(url: str) -> SitePage | None:
@@ -153,7 +155,7 @@ def _request(http, method, url, stop, **kwargs):
         return http.request(method, url, headers=headers, timeout=TIMEOUT_S, **kwargs)
     except requests.RequestException as error:
         log.debug("A request to a site failed: %s.", type(error).__name__)
-        raise SiteError("network") from None
+        raise SiteError("network", isinstance(error, requests.Timeout)) from None
 
 
 def _json(response):

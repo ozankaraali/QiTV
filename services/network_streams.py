@@ -166,12 +166,20 @@ def failure_reason(message: str, kind: str = "", status: Optional[int] = None) -
 
 def site_failure(reason: str, page: SitePage) -> str:
     """Why the site gave no stream for the channel `page` (live_sites.SiteError's `reason`:
-    "offline", "unknown", "refused", or "network" and anything else), in English with the
-    channel and the site in it (`shown_reason` shows it in the active language)."""
+    "offline", "unknown", "refused"; "timeout", a site that never answered in time; "network"
+    and anything else), in English, a site's own answer with the channel and the site in it
+    (`shown_reason` shows it in the active language)."""
+    if reason == "timeout":
+        return TIMED_OUT
     text = _SITE_TEXTS.get(reason)
     if text is None:
-        return TIMED_OUT  # the site could not be reached (as a link's server that never answers)
+        return FAILED  # not reached (no address, no connection, no TLS), and nothing more known
     return text.format(channel=page.channel, site=SITE_NAMES[page.site])
+
+
+def is_site_failure(why: str) -> bool:
+    """Whether `why` is one `site_failure` gives (a site's answer, or why it was not had)."""
+    return why in (TIMED_OUT, FAILED) or names_its_channel(why)
 
 
 def _site_reason(why: str) -> Optional[tuple[str, dict[str, str]]]:

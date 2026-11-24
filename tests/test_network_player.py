@@ -36,6 +36,7 @@ from tests import test_tv_controller as tvc
 from tests.test_tv_window import WindowCase
 from ui import live_controls
 from ui.keymap import Action
+from ui.link_lanes import Target
 from ui.network_player import NetworkPlayer
 from ui.open_link import LinkCard, OpenLink
 
@@ -1042,18 +1043,20 @@ class SiteTests(PlayerCase):
 
     def test_a_failed_resolve_counts_and_says_why(self):
         refused = "Kick refused QiTV's request: try again later, or paste the stream link"
-        timed_out = "The link didn't answer in time"
-        cases = (  # (why, as Network streams keeps it; the toast)
-            ("offline", "examplechannel isn't live now", "examplechannel isn't live now"),
-            ("unknown", *["No channel named examplechannel on Kick"] * 2),
-            ("refused", refused, refused),
-            ("network", timed_out, f"examplechannel · Kick: {timed_out}"),  # after its name
+        failed, timed_out = "The link could not be opened", "The link didn't answer in time"
+        named = "examplechannel · Kick: "  # (a reason that names no channel follows its name)
+        cases = (  # (the site's error; why, as Network streams keeps it; the toast)
+            (SiteError("offline"), *["examplechannel isn't live now"] * 2),
+            (SiteError("unknown"), *["No channel named examplechannel on Kick"] * 2),
+            (SiteError("refused"), refused, refused),
+            (SiteError("network"), failed, named + failed),
+            (SiteError("network", timed_out=True), timed_out, named + timed_out),
         )
-        for count, (reason, why, toast) in enumerate(cases, 1):
-            with self.subTest(reason):
+        for count, (error, why, toast) in enumerate(cases, 1):
+            with self.subTest(why):
                 before = self.store.get(stream_id(KICK_PAGE))
                 self.assertEqual(before.failed if before is not None else "", "")
-                self.answers.append(SiteError(reason))
+                self.answers.append(error)
                 self.player.play(KICK_PAGE, LIVE)
                 self.assertTrue(wait_until(lambda: len(self.errors()) == count))
                 self.assertEqual(self.errors()[-1], toast)  # said once, plainly
@@ -1087,6 +1090,72 @@ class SiteTests(PlayerCase):
         self.opens(lambda: self.controller.handle(Action.CH_PREV))
         self.assertEqual(self.starts()[-1][0], third)
         self.assertEqual(len(self.asked), 1)  # the page was not asked again
+
+    def steps_over(self, *offline):
+        """Network streams: URL (playing), THIRD, then the site pages `offline` (kept, never
+        opened: listed last, the latest kept first), each of whose sites gives no stream."""
+        ticks = iter(range(1, 10_000))
+        self.player._now = lambda: NOW + next(ticks)
+        third = LinkStepTests.THIRD
+        for url in (third, URL):
+            self.link(url)
+            self.plays_now()
+        for page in offline:
+            self.player.keep_new(page, LIVE)
+        self.answers.extend(SiteError("offline") for _ in offline)
+        return third
+
+    def fails_on(self, action, channel):
+        """`action` steps onto a site page whose site gives no stream: said, and the link
+        before it plays on."""
+        said = len(self.errors())
+        self.controller.handle(action)
+        self.assertTrue(wait_until(lambda: len(self.errors()) == said + 1))
+        self.assertEqual(self.errors()[-1], f"{channel} isn't live now")
+        self.assertEqual(self.controller.now_playing().item["id"], stream_id(URL))
+
+    def test_two_offline_pages_in_a_row_are_each_asked_once_and_stepped_past(self):
+        third = self.steps_over(KICK_PAGE, TWITCH_PAGE)  # URL, THIRD, TWITCH_PAGE, KICK_PAGE
+        self.fails_on(Action.CH_PREV, "examplechannel")  # before the first: the last
+        self.fails_on(Action.CH_PREV, "otherchannel")  # on past it: the one before
+        self.opens(lambda: self.controller.handle(Action.CH_PREV))  # and past both
+        self.assertEqual(self.starts()[-1][0], third)
+        pages = [page.channel for page, _on_gui in self.asked]
+        self.assertEqual(pages, ["examplechannel", "otherchannel"])  # each asked once
+        # Once a step plays, the run's failures are forgotten: a page is asked in its turn.
+        self.plays_now()
+        self.answers.append(SiteError("offline"))
+        self.controller.handle(Action.CH_NEXT)  # THIRD's next: the Twitch page, asked again
+        self.assertTrue(wait_until(lambda: len(self.asked) == 3))
+        self.assertEqual(self.asked[-1][0].channel, "otherchannel")
+
+    def test_a_reversed_press_after_an_offline_page_moves_from_the_playing_link(self):
+        third = self.steps_over(KICK_PAGE)  # URL, THIRD, KICK_PAGE
+        self.fails_on(Action.CH_PREV, "examplechannel")
+        self.opens(lambda: self.controller.handle(Action.CH_NEXT))  # the other way, from URL
+        self.assertEqual(self.starts()[-1][0], third)
+        self.assertEqual(len(self.asked), 1)
+
+    def test_a_side_play_of_an_offline_page_counts_in_its_row(self):
+        # Play in VLC on a kept page whose site gives no stream: said, and its row says why,
+        # as a play in QiTV would.
+        self.player.keep_new(KICK_PAGE, LIVE)
+        item = {
+            "id": stream_id(KICK_PAGE),
+            "name": "examplechannel · Kick",
+            "cmd": KICK_PAGE,
+            "_provider": NETWORK_PROVIDER,
+        }
+        self.answers.append(SiteError("offline"))
+        with tvc.shown_menus() as popup:
+            self.controller._context.show_target(Target(item, "live", item["name"]), QPoint(5, 5))
+        tvc.menus_of(popup)[0][0].entry("Play in VLC").trigger()
+        self.assertTrue(wait_until(lambda: self.errors()))
+        self.assertEqual(self.errors(), ["examplechannel isn't live now"])
+        entry = self.store.get(stream_id(KICK_PAGE))
+        self.assertEqual(entry.failed, "examplechannel isn't live now")
+        self.assertEqual(self.external.calls, [])
+        self.assertEqual(len(self.asked), 1)
 
     def test_history_keeps_the_page_not_the_token(self):
         self.answers = [MASTER]

@@ -8,6 +8,7 @@ from urllib.parse import parse_qs, urlsplit
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 from http_fixtures import LocalSource
+import requests
 
 from services import live_sites
 from services.live_sites import (
@@ -110,7 +111,29 @@ class KickTests(unittest.TestCase):
     def test_kick_network(self):
         source = self.serve((200, JSON, kick_body()))
         source.close()  # nothing listens at the address any more
-        self.assertEqual(self.reason(source), "network")
+        with self.assertRaises(SiteError) as caught:
+            self.resolve(source)
+        self.assertEqual((caught.exception.reason, caught.exception.timed_out), ("network", False))
+
+    def test_a_site_that_never_answers_in_time_is_told_apart(self):
+        # Still "network", but known to have timed out (requests' Timeout: to connect or read).
+        class Session:
+            def __init__(self, error):
+                self.error = error
+
+            def request(self, *args, **kwargs):
+                raise self.error
+
+        for error, timed_out in (
+            (requests.exceptions.ReadTimeout("slow"), True),
+            (requests.exceptions.ConnectTimeout("slow"), True),
+            (requests.exceptions.ConnectionError("refused"), False),
+        ):
+            with self.subTest(type(error).__name__):
+                with self.assertRaises(SiteError) as caught:
+                    resolve(SitePage(KICK, "examplechannel"), session=Session(error))
+                self.assertEqual(caught.exception.reason, "network")
+                self.assertEqual(caught.exception.timed_out, timed_out)
 
 
 class TwitchTests(unittest.TestCase):

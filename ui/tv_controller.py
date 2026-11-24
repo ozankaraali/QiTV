@@ -122,6 +122,7 @@ from services.network_streams import (
     LIVE,
     failure_reason,
     is_link,
+    is_site_failure,
     names_its_channel,
     shown_reason,
     site_failure,
@@ -2750,6 +2751,12 @@ class TVController(QObject):
                 if self._grid is not None:
                     self._grid.link_failed(name, target.item)
         self._menu_error(self._own_words(message) or self._named(target.title, message))
+        page = self._site_page(target.item)
+        if page is not None and is_site_failure(message):
+            # Its site gave no stream (for the PiP, a tile, an outside player, the phone):
+            # counted in its row as a play's. (What failed using a link it gave is not: its
+            # words are an exception's, which may carry that address.)
+            self.linkFailed.emit(target.item, LIVE if target.live else FILM, page, message)
 
     def _keep_tuning_banner(self) -> None:
         """Show the banner again while the channel it announces is on its way: its link
