@@ -15,7 +15,7 @@ from PySide6.QtWidgets import QApplication
 from timer_fixtures import pause
 
 from services import revive
-from services.live import learned_target, worker
+from services.live import learned_target, source as live_source, worker
 from services.live.kept import KeptRing, Where
 from services.live.learned_target import ArrivalModel, Learned, LearnedTarget
 import services.live.live_session as live_session
@@ -7490,6 +7490,45 @@ class AdBreakTests(LiveSessionCase):
                 feed.run(5.0)
                 self.assertEqual(len(self.playback.plays), plays + 1)
                 self.assertEqual(self.playback.software[-1], froze)
+
+    def test_a_break_that_never_ends_is_a_silence_after_a_while(self):
+        # A break the helper says goes on beyond any (`_AD_MAX_S`, here 30 s: a channel gone off
+        # mid-break, a stuck edge) is waited for as any silence of the channel from then: the
+        # stream that stopped in it opens again, and the stall counts. Said once; a break the
+        # helper still says goes on is not taken up again.
+        self.assertEqual(live_session._AD_MAX_S, live_source._AD_MAX_S)
+        self.patch("_AD_MAX_S", 30.0)
+        stalled = self.spy(LearnedTarget, "stalled")
+        feed = self.tune(edge=8.0, starved=PlaybackState.PLAYING)
+        feed.run(30.0)
+        plays = len(self.playback.plays)
+        self.begin(feed)
+        feed.run(10.0)
+        self.playback.ended.emit()
+        feed.run(19.0)
+        self.assertEqual((len(self.playback.plays), stalled.call_count), (plays, 0))
+        feed.run(2.0)
+        self.assertEqual(len(self.playback.plays), plays + 1)  # past the bound
+        feed.push()  # the helper still says it goes on
+        feed.run(15.0)  # past VLC's filling up again (`_AD_AFTER_S`)
+        self.assertEqual(stalled.call_count, 1)
+        self.assertEqual(self.notices.count(AD_BREAK), 1)
+        self.assertFalse(self.timelines[-1]["ad_break"])
+
+    def test_a_pre_roll_that_never_ends_is_waited_for_as_ever_after_a_while(self):
+        # A tune into a break that goes on beyond `_AD_MAX_S` (here 60 s): the start's own
+        # fallback then (nothing arrived: the channel plays directly).
+        self.patch("_AD_MAX_S", 60.0)
+        sid = self.start()
+        self.engine.answered(sid, hls=True)
+        self.engine.sessionUpdated.emit(sid, dict(self.engine._snapshots[sid], ad_break=True))
+        for _ in range(9):  # 54 s: the ready timer's 6 s (a QTimer in the app)
+            self.clock.now += 6.0
+            self.live._on_ready_timeout()
+        self.assertEqual((self.engine.closed, self.playback.plays), ([], []))
+        self.clock.now += 6.0
+        self.live._on_ready_timeout()
+        self.assert_falls_back(sid, UNAVAILABLE, 0)
 
     def test_a_pre_roll_at_tune_in_waits_for_the_channel(self):
         # A tune into an ad break: nothing arrives for as long as it lasts, and the session

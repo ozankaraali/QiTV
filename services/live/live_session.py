@@ -370,6 +370,10 @@ AD_BREAK = N_("Ad break skipped")
 # After a live site's ad break (the helper skips its pieces) VLC, held or dry at the edge,
 # fills up again for at most this long before it counts as any wait for the channel.
 _AD_AFTER_S = 10.0
+# Breaks run 30-180 s: one the helper says goes on longer than this (a channel gone off, or a
+# stuck edge, mid-break) is waited for as any silence of the channel, its fallbacks included
+# (mirrors services.live.source's own bound: a test keeps them equal).
+_AD_MAX_S = 300.0
 _CLOSE_CAP_MS = 2000  # a close not confirmed by then counts as done
 _RECOVERY_MS = 10_000  # a helper restart must bring the session back by then
 _EXPIRED_S = 0.5  # a position this far before the oldest buffered point is gone
@@ -727,6 +731,8 @@ class LiveSession(QObject):
         self._ad_over: Optional[float] = None
         self._ad_held = False
         self._froze_owed = self._sound_owed = False  # the watches' verdicts in it, owed
+        self._ad_began = 0.0  # when it began
+        self._ad_spent = False  # it outlasted `_AD_MAX_S`: not waited for until it ends
         # When VLC's last two dry runs at the edge began (a hold counts as one), and whether
         # it is dry now.
         self._dry_before = self._dry_seen = -math.inf
@@ -2226,18 +2232,40 @@ class LiveSession(QObject):
     def _follow_ad_break(self, snapshot: Mapping[str, Any]) -> None:
         """A live site's ad break, its pieces skipped by the helper (`ad_break`): said once as
         it begins. As it ends while the pipeline plays, VLC fills up again before anything of
-        it counts (`_sits_out`)."""
+        it counts (`_sits_out`). One that outlasted `_AD_MAX_S` (`_ad_bound`) is no longer
+        followed until the helper says it ended."""
         on = snapshot.get("ad_break") is True
+        if self._ad_spent:
+            self._ad_spent = on
+            return
         if on == self._ad_break:
             return
-        self._ad_break = on
         if on:
-            self._ad_over = None
+            self._ad_break, self._ad_over, self._ad_began = True, None, self._clock()
             _LOG.info("An ad break: the channel's ad pieces are skipped; the picture waits.")
             self.notice.emit(AD_BREAK)
-        elif self._phase is _Phase.PIPELINE:
-            self._ad_over = self._clock()
+        else:
             _LOG.info("The ad break is over: the channel's pieces come again.")
+            self._break_over()
+
+    def _ad_bound(self) -> None:
+        """An ad break that goes on beyond `_AD_MAX_S`: waited for as any silence of the
+        channel from now (stay-live's stall bound and trouble, the deferred reopen, the start's
+        fallbacks), said once."""
+        if not self._ad_break or self._clock() - self._ad_began < _AD_MAX_S:
+            return
+        _LOG.warning(
+            "The ad break went on %.0f s: the channel is waited for as any silence.", _AD_MAX_S
+        )
+        self._ad_spent = True
+        self._break_over()
+
+    def _break_over(self) -> None:
+        """The ad break is over (or outlasted `_AD_MAX_S`): while the pipeline plays VLC fills
+        up again first (`_sits_out`), and the watches' verdicts owed are acted on."""
+        self._ad_break = False
+        if self._phase is _Phase.PIPELINE:
+            self._ad_over = self._clock()
             froze, sound = self._froze_owed, self._sound_owed
             self._froze_owed = self._sound_owed = False
             if froze:
@@ -2298,6 +2326,7 @@ class LiveSession(QObject):
     def _on_ready_timeout(self) -> None:
         if self._phase is not _Phase.WAITING:
             return
+        self._ad_bound()  # (a pre-roll that outlasted it is waited for as ever)
         if self._ready_seen and self._oldest_seq() is not None:
             self._play_first(waited=True)  # held for a start that did not come in time
         elif not self._ready_seen and not self._resuming and self._not_live_said > 0:
@@ -2307,7 +2336,8 @@ class LiveSession(QObject):
             self._ready_timer.start(self._ready_timeout_ms)
         elif not self._ready_seen and self._ad_break:
             # A tune into a live site's ad break (its pieces skipped: nothing arrives): played
-            # directly, it would show the ads. It plays once the channel's first piece comes.
+            # directly, it would show the ads. It plays once the channel's first piece comes,
+            # or is waited for as ever once the break outlasted `_AD_MAX_S`.
             self._ready_timer.start(self._ready_timeout_ms)
         elif not self._ready_seen and not self._loading and self._receiving():
             # Bytes flow but nothing is playable yet (an on-demand restream starting up,
@@ -2924,6 +2954,7 @@ class LiveSession(QObject):
             return
         if self._phase is not _Phase.PIPELINE:
             return
+        self._ad_bound()
         if self._retry is not None:
             if self._retry is _Retry.RESUME and self._ad_break:
                 self._emit_timeline()
@@ -3526,6 +3557,7 @@ class LiveSession(QObject):
         self._room_before = 0.0
         self._ad_break, self._ad_over, self._ad_held = False, None, False
         self._froze_owed = self._sound_owed = False  # the watches' verdicts in a break
+        self._ad_began, self._ad_spent = 0.0, False
 
     def _forget_feed(self) -> None:
         """What `_feed_learned` keeps between ticks starts afresh (a tune, a new stream)."""

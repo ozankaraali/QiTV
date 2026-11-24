@@ -44,6 +44,7 @@ from services.live.source import (
     _scheme,
     open_source,
 )
+from services.live.stay_live import LagFilter
 from services.live.ts import ContinuityJoiner
 
 KEY = bytes(range(16))
@@ -4057,13 +4058,63 @@ video.m3u8
                 self.assertEqual([line for line in logs if "another encoding" in line], [])
 
     def test_a_providers_piece_titled_like_an_ad_plays(self):
-        # Without a live site's own tags a title is no ad marker: every piece is fetched.
+        # Without Twitch's own tags a title is no ad marker: every piece is fetched, an IPTV
+        # provider's and another site's (Kick's prefetch lines, a low-latency server's) alike.
         text = "#EXTM3U\n#EXT-X-TARGETDURATION:4\n#EXTINF:4,live\na.ts\n"
-        text += "#EXTINF:4,Amazon|1\nb.ts\n#EXTINF:4,live\nc.ts\n#EXT-X-ENDLIST\n"
-        server = self.copies([text.encode()], ["a.ts", "b.ts", "c.ts"])
-        parts = media(server.url + "/live.m3u8")
-        self.assertEqual(requested_segments(server), ["a.ts", "b.ts", "c.ts"])
-        self.assertEqual(self.markers(parts), [])
+        text += "#EXTINF:4,Amazon|1\nb.ts\n#EXTINF:4,live\nc.ts\n"
+        url = "https://cdn.example.test/live/media.m3u8"
+        tails = (("provider", "#EXT-X-ENDLIST\n"), ("prefetch", "#EXT-X-PREFETCH:d.ts\n"))
+        for how, tail in tails:
+            with self.subTest(how):
+                copy = (text + tail).encode()
+                playlist = source_module._select_manifest(copy, url)[0]
+                self.assertIs(source_module._from_site(playlist), False)
+                server = self.copies([copy], ["a.ts", "b.ts", "c.ts", "d.ts"])
+                parts = self.run_for(server, 0.5, live_delay=100.0)
+                fetched = ["a.ts", "b.ts", "c.ts"] + (["d.ts"] if how == "prefetch" else [])
+                self.assertEqual(requested_segments(server), fetched)
+                self.assertEqual(self.markers(parts), [])
+
+    def test_an_ad_range_lasts_at_most_the_longest_break(self):
+        # A range's DURATION, PLANNED-DURATION or END-DATE is taken up to `_AD_MAX_S`: a huge
+        # one neither marks the channel's pieces for days nor fails to read.
+        start = DAY + timedelta(seconds=2)
+        cases = (
+            (ad_range(2, 30), 30.0),
+            (ad_range(2, 1e300), source_module._AD_MAX_S),
+            (ad_range(2, 30).replace("DURATION=", "PLANNED-DURATION="), 30.0),
+            (
+                f'#EXT-X-DATERANGE:ID="stitched-ad-9",START-DATE="{stamp(2)}",'
+                f'END-DATE="{stamp(86400 * 365)}"',
+                source_module._AD_MAX_S,
+            ),
+        )
+        for line, seconds in cases:
+            with self.subTest(line=line[:60]):
+                _ident, begins, ends = source_module._ad_range(line.strip())
+                self.assertEqual((begins, ends), (start, start + timedelta(seconds=seconds)))
+
+    def test_a_break_that_never_ends_counts_as_frozen_after_a_while(self):
+        # A playlist that lists only ad pieces, the same copy, for longer than any break
+        # (`_AD_MAX_S`: here 1.5 s; a channel gone off mid-break, a stuck edge) is frozen
+        # again: the source fails as for any copy that stands still (here 1 s).
+        ads = {"a0.ts", "a1.ts", "a2.ts"}
+        copy = dated(0, sorted(ads), ads=ads, ranges={"a0.ts": ad_range(0, 3)})
+        server = self.copies([copy], sorted(ads))
+        stop = threading.Event()
+        timer = threading.Timer(10.0, stop.set)
+        timer.start()
+        self.addCleanup(timer.cancel)
+        source = open_source(server.url + "/live.m3u8", headers={}, verify_ssl=True, stop=stop)
+        started = time.monotonic()
+        with source_logs() as logs:
+            with patch.multiple(source_module, _AD_MAX_S=1.5, _FROZEN_TIMEOUT=1.0):
+                with self.assertRaises(SourceError) as raised:
+                    drain(source)
+        self.assertEqual(raised.exception.kind, "timeout")
+        self.assertGreaterEqual(time.monotonic() - started, 1.5)
+        self.assertEqual(requested_segments(server), [])
+        self.assertEqual(len([line for line in logs if "only ad pieces" in line]), 1)
 
     def test_prefetch_pieces_inside_a_break_are_skipped(self):
         # Pieces still being made, dated (from the last finished piece's date on) inside an ad
@@ -4120,13 +4171,19 @@ video.m3u8
             prefetching(1, names[1:] + ["p4.ts", "p5.ts"], [], target=6),
             prefetching(2, names[2:] + ["p4.ts", "p5.ts"], ["p6.ts"], target=6),
         ]
-        asked, seen, opened = [], [], []
+        asked, seen, opened, bursts = [], [], [], []
+        done = threading.Event()
 
         def playlist(_request, count):
             asked.append(time.monotonic())
             if count == 3:  # what the copy without them left
                 seen.append((opened[0].prefetching, opened[0].burst_s))
             return 200, {}, copies[min(count, len(copies)) - 1]
+
+        def sample():  # the burst the helper's state reports, throughout
+            while not done.wait(0.05):
+                if opened:
+                    bursts.append((time.monotonic(), opened[0].burst_s))
 
         routes = {f"/{name}": (200, {}, self.video) for name in names + ["p4.ts", "p5.ts", "p6.ts"]}
         routes["/live.m3u8"] = playlist
@@ -4135,15 +4192,27 @@ video.m3u8
             server.url + "/live.m3u8", headers={}, verify_ssl=True, stop=threading.Event()
         )
         opened.append(source)
+        sampler = threading.Thread(target=sample, daemon=True)
+        sampler.start()
         try:
             for _item in source.chunks():
                 if "p6.ts" in requested_segments(server):
                     break
         finally:
+            done.set()
+            sampler.join(1.0)
             source.close()
         self.assertEqual(requested_segments(server), ["p4.ts", "p5.ts", "p6.ts"])
         self.assertEqual(seen, [(True, 0.0)])
         self.assertLess(asked[2] - asked[1], 1.5)
+        # Neither the burst reported nor what stay-live's lag filter keeps of it (a kept one
+        # holds the target up for the rest of the tune) ever took the target duration.
+        self.assertGreater(len(bursts), 10)
+        self.assertEqual({burst for _at, burst in bursts}, {0.0})
+        lags = LagFilter()
+        for at, burst in bursts:
+            lags.add(at, at, burst, 0.0)
+        self.assertEqual((lags.kept, lags.burst), (0.0, 0.0))
 
     def test_copies_that_stop_listing_prefetch_pieces_end_the_prefetching(self):
         # About two pieces (here 1 s each) after the last copy that listed one, the playlist

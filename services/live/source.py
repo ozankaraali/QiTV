@@ -157,10 +157,13 @@ _PREFETCH_RELOAD_S = 1.0
 _PREFETCH_HOLD_PIECES = 2.0
 # A live site's ad break (Twitch stitches its ads into the live playlist, and marks them): a
 # piece whose date falls in a DATERANGE of the ad class or whose ID says so, or, in a playlist
-# that carries the site's own tags (`_SITE_TAG`, a prefetch line), whose EXTINF title names
-# the ad server, is skipped (`_is_ad`): an IPTV provider's piece may be titled anything. A
+# that carries Twitch's own tags (`_SITE_TAG`), whose EXTINF title names the ad server, is
+# skipped (`_is_ad`): an IPTV provider's piece, or another site's, may be titled anything. A
 # range known stays known after the piece it was listed with left the playlist (its later
-# pieces are still dated in it), the newest `_AD_RANGES_KEPT` of them.
+# pieces are still dated in it), the newest `_AD_RANGES_KEPT` of them, each `_AD_MAX_S` long
+# at most. Breaks run 30-180 s: a playlist that lists only ad pieces for longer than
+# `_AD_MAX_S` (a channel gone off, or a stuck edge, mid-break) counts as frozen again.
+_AD_MAX_S = 300.0  # (mirrored in services.live.live_session: a test keeps them equal)
 _DATERANGE = "#EXT-X-DATERANGE:"
 _SITE_TAG = "#EXT-X-TWITCH-"
 _AD_CLASS = "twitch-stitched-ad"
@@ -1270,9 +1273,10 @@ def _site_tags(line: str, lineno: int, data: dict[str, Any], state: dict[str, An
     is read (True). An ad break's DATERANGE (`_ad_range`) goes into ``data["ad_ranges"]``
     wherever it stands (the parser gives a range to the finished piece after it: one before the
     prefetch lines has none), and is the parser's as ever (False), as is any other line. A
-    site's own tag, or a prefetch line, says the playlist is a live site's (``data["site"]``)."""
+    Twitch tag (`_SITE_TAG`, its prefetch line's too) says the playlist is its (``data["site"]``):
+    another site's prefetch line, or a low-latency server's, does not."""
     del lineno
-    if line.startswith(_SITE_TAG) or line.startswith(_PREFETCH_TAGS):
+    if line.startswith(_SITE_TAG):
         data["site"] = True
     if line.startswith(_DATERANGE):
         marked = _ad_range(line)
@@ -1306,8 +1310,9 @@ def _date(text: str | None) -> datetime | None:
 
 def _ad_range(line: str) -> tuple[str, datetime, datetime | None] | None:
     """An ad break's DATERANGE line (of the class `_AD_CLASS`, or whose ID starts `_AD_ID`):
-    its ID, start and end (END-DATE, else the start plus DURATION or PLANNED-DURATION; None:
-    open, a range only while listed); None for another range, or one without a start."""
+    its ID, start and end (END-DATE, else the start plus DURATION or PLANNED-DURATION, at most
+    `_AD_MAX_S` after the start; None: open, a range only while listed); None for another
+    range, or one without a start."""
     values = {name: value.strip('"') for name, value in _ATTRIBUTE.findall(line[len(_DATERANGE) :])}
     ident = values.get("ID", "")
     if values.get("CLASS") != _AD_CLASS and not ident.startswith(_AD_ID):
@@ -1315,6 +1320,10 @@ def _ad_range(line: str) -> tuple[str, datetime, datetime | None] | None:
     start = _date(values.get("START-DATE"))
     if start is None:
         return None
+    try:
+        longest = start + timedelta(seconds=_AD_MAX_S)
+    except OverflowError:
+        return None  # (a start at the end of time)
     end = _date(values.get("END-DATE"))
     for name in ("DURATION", "PLANNED-DURATION"):
         if end is not None:
@@ -1324,8 +1333,8 @@ def _ad_range(line: str) -> tuple[str, datetime, datetime | None] | None:
         except ValueError:
             continue
         if math.isfinite(seconds) and seconds >= 0:
-            end = start + timedelta(seconds=seconds)
-    return ident, start, end
+            end = start + timedelta(seconds=min(seconds, _AD_MAX_S))
+    return ident, start, None if end is None else min(end, longest)
 
 
 def _ad_ranges(playlist: Any) -> dict[str, tuple[datetime, datetime | None]]:
@@ -2165,6 +2174,8 @@ class HlsSource:
         loaded = progress = ours = self._loaded
         other: float | None = None  # when copies of another origin group began
         next_sequence: int | None = None
+        ads_from: float | None = None  # when the copies began to list only ad pieces
+        ads_said = False  # ... and that they did for `_AD_MAX_S`
         while True:
             first = playlist.media_sequence or 0
             newest = first + len(playlist.segments) - 1
@@ -2228,8 +2239,15 @@ class HlsSource:
                 and not _is_prefetch(segment)
                 and not self._ad(segment)
             )
-            if playlist.segments and all(self._ad(s) for s in playlist.segments):
-                progress = loaded  # an ad break's (a tune's into one): the channel comes after
+            if not playlist.segments or not all(self._ad(s) for s in playlist.segments):
+                ads_from, ads_said = None, False
+            elif ads_from is None or loaded - ads_from < _AD_MAX_S:
+                # An ad break's (a tune's into one): the channel comes after it.
+                ads_from = loaded if ads_from is None else ads_from
+                progress = loaded
+            elif not ads_said:  # from here a copy that stands still is frozen, as any
+                ads_said = True
+                log.info("The HLS playlist listed only ad pieces for %.0f s.", _AD_MAX_S)
             # Frozen time runs between reloads only, never while segments download.
             if not fresh and loaded - progress >= _FROZEN_TIMEOUT:
                 raise SourceError("timeout", _FROZEN)
