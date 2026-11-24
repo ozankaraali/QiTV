@@ -14,7 +14,10 @@ out, the others are read. Making a store reads nothing: `read_bytes` and `save` 
 for the disk.
 
 A link that failed stays, with why (`failure_reason`: an English text, shown with
-translate()).
+translate()). A Kick or Twitch channel's page is kept by its page (never the address with the
+token the site answers as it plays), named by its channel ("examplechannel · Kick"); why the
+site gave no stream (`site_failure`) names the channel too, kept in English with it and shown
+in the active language by `shown_reason`.
 """
 
 from __future__ import annotations
@@ -26,12 +29,14 @@ import logging
 import math
 import os
 from pathlib import Path
+import re
 from typing import Any, Optional
 from urllib.parse import parse_qsl, urlencode, urlsplit
 
 from services.atomic_write import atomic_write, set_aside as set_file_aside
-from services.i18n import N_
+from services.i18n import N_, translate
 from services.live.refusals import STREAM_LIMIT, STREAM_REFUSED
+from services.live_sites import SITE_NAMES, SitePage, page_name, site_page
 from services.provider_ids import NETWORK_PROVIDER, provider_of
 
 logger = logging.getLogger(__name__)
@@ -58,6 +63,19 @@ BUSY = N_("The link's server allows no more streams now")
 DOWN = N_("The link stopped answering")
 # i18n: why a link opened with Open Link did not play, when nothing more is known
 FAILED = N_("The link could not be opened")
+# Why a Kick or Twitch channel opened by its page did not play: the site's own answer (kept
+# in English with its fields, as the others: `shown_reason` shows one).
+# i18n: why a channel opened by its page (Kick, Twitch) did not play: it isn't streaming now
+SITE_OFFLINE = N_("{channel} isn't live now")
+# i18n: why a channel opened by its page did not play: its site (Kick, Twitch) has none so named
+SITE_UNKNOWN = N_("No channel named {channel} on {site}")
+# i18n: a site (Kick, Twitch) refused to give a channel's stream; its own link may be pasted
+SITE_REFUSED = N_("{site} refused QiTV's request: try again later, or paste the stream link")
+_SITE_TEXTS = {"offline": SITE_OFFLINE, "unknown": SITE_UNKNOWN, "refused": SITE_REFUSED}
+_SITE_FIELDS = {
+    "channel": r"(?P<channel>[a-z0-9_-]+)",  # (as live_sites reads a channel)
+    "site": "(?P<site>" + "|".join(re.escape(name) for name in SITE_NAMES.values()) + ")",
+}
 _LIMIT_STATUS = (429, 458, 509)
 _REFUSED_STATUS = (403, 407)
 _GONE_STATUS = (404, 410)
@@ -104,7 +122,11 @@ def stream_id(url: str) -> str:
 
 def default_name(url: str) -> str:
     """A name for a link: its host and the last meaningful path segment ("cdn.example —
-    channel"; an extension and generic names such as index or playlist are skipped)."""
+    channel"; an extension and generic names such as index or playlist are skipped); a Kick
+    or Twitch channel's page, its channel's ("examplechannel · Kick")."""
+    page = site_page(url)
+    if page is not None:
+        return page_name(page)
     parts = urlsplit(url.strip())
     host = parts.hostname or url.strip()
     segments = [s for s in parts.path.split("/") if s]
@@ -140,6 +162,47 @@ def failure_reason(message: str, kind: str = "", status: Optional[int] = None) -
     if kind == "timeout":
         return TIMED_OUT
     return FAILED
+
+
+def site_failure(reason: str, page: SitePage) -> str:
+    """Why the site gave no stream for the channel `page` (live_sites.SiteError's `reason`:
+    "offline", "unknown", "refused", or "network" and anything else), in English with the
+    channel and the site in it (`shown_reason` shows it in the active language)."""
+    text = _SITE_TEXTS.get(reason)
+    if text is None:
+        return TIMED_OUT  # the site could not be reached (as a link's server that never answers)
+    return text.format(channel=page.channel, site=SITE_NAMES[page.site])
+
+
+def _site_reason(why: str) -> Optional[tuple[str, dict[str, str]]]:
+    """The site's text `why` was made of (`site_failure`) and its fields; None for another."""
+    for text in _SITE_TEXTS.values():
+        found = _site_pattern(text).fullmatch(why)
+        if found is not None:
+            return text, found.groupdict()
+    return None
+
+
+def _site_pattern(text: str) -> re.Pattern[str]:
+    pattern = re.escape(text)
+    for field, group in _SITE_FIELDS.items():
+        pattern = pattern.replace(re.escape("{" + field + "}"), group)
+    return re.compile(pattern)
+
+
+def names_its_channel(why: str) -> bool:
+    """Whether why a link failed names its channel itself (a site's answer): said alone."""
+    return _site_reason(why) is not None
+
+
+def shown_reason(why: str) -> str:
+    """Why a link failed (as it is kept: English) in the active language, a site's with the
+    channel and the site it names."""
+    found = _site_reason(why)
+    if found is None:
+        return translate(why)
+    text, fields = found
+    return translate(text, **fields)
 
 
 def write(path: Path, data: bytes) -> None:

@@ -54,6 +54,13 @@ class HelperTests(unittest.TestCase):
             {"type": "M3UPLAYLIST", "name": "My channels", "url": "/x/My channels.m3u"},
         )
 
+    def test_a_site_page_is_one_stream(self):
+        # A Kick or Twitch channel's page, with its scheme or without: one stream's link (the
+        # Open Link card plays it), never a provider.
+        texts = ["https://kick.com/examplechannel", "twitch.tv/otherchannel"]
+        self.assertEqual(provider_drop.stream_links(texts), texts)
+        self.assertEqual(provider_drop.links(texts), [])
+
     def test_links_from_urls_and_text_once_each(self):
         xtream = f"{PANEL}/get.php?username=ann&password=pw1"
         found = provider_drop.links([xtream, f"see\n{xtream}\nhttp://example.test/page.html"])

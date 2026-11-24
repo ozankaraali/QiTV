@@ -8,7 +8,11 @@ any other address over http) may be one stream or a list of channels, and a song
 live channel), so `classify` answers PROBE and the caller fetches the first 64 KB for
 `probe_text`, with what the answer's headers say of it (a size: a file that ends).
 
-A kind is FILM, LIVE, PROBE, NONE (not a link QiTV opens), or a `Provider` holding what
+A Kick or Twitch channel's page (services.live_sites.site_page: with or without its scheme,
+`www.` or `m.`) is a SITE: a live channel whose stream the site is asked for each time it plays,
+never read first.
+
+A kind is FILM, LIVE, PROBE, SITE, NONE (not a link QiTV opens), or a `Provider` holding what
 `parse_provider_link` read, for the "Add provider" offer. An Xtream stream path
 (/live/U/P/1.ts) is one stream, not a provider, though `xtream_account` can read the whole
 account out of it for an "Add the whole account" offer.
@@ -21,6 +25,7 @@ import re
 from typing import Iterable, Optional, Union
 from urllib.parse import unquote, urlsplit
 
+from services.live_sites import site_page
 from services.open_paths import (
     EXTRA_MUSIC_EXTENSIONS,
     EXTRA_VIDEO_EXTENSIONS,
@@ -37,6 +42,7 @@ from services.provider_link import (
 )
 
 FILM, LIVE, PROBE, NONE = "FILM", "LIVE", "PROBE", "NONE"
+SITE = "SITE"  # a Kick or Twitch channel's page: live, its stream asked of the site as it plays
 # The audio internet radio is sent in, and the containers live channels come in: a file or a
 # stream that never ends, as its answer says (final review I2, the coordinator's ruling).
 _EITHER_EXTENSIONS = tuple(
@@ -128,6 +134,8 @@ def _stream_kind(parts) -> Optional[tuple[str, ProviderLink]]:
 
 def classify(url: str) -> Kind:
     """What `url` is, from its address alone."""
+    if site_page(address(url)) is not None:
+        return SITE  # (typed without its scheme too, as a channel's page is shared)
     parts = _split(url)
     if parts is None or not parts.netloc:
         return NONE

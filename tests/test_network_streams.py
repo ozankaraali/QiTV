@@ -7,7 +7,8 @@ import tempfile
 import unittest
 from unittest import mock
 
-from services import network_streams as ns
+from services import i18n, network_streams as ns
+from services.live_sites import KICK, TWITCH, SitePage
 from services.network_streams import NetworkStreams, stream_id
 
 
@@ -198,6 +199,62 @@ class StoreTests(unittest.TestCase):
         )
         self.assertEqual(ns.default_name("http://cdn.example/"), "cdn.example")
         self.assertEqual(ns.default_name("http://cdn.example/a/index.m3u8"), "cdn.example — a")
+
+    def test_a_site_page_is_named_by_its_channel(self):
+        # Known before the site is asked: the page names the channel.
+        self.assertEqual(
+            ns.default_name("https://kick.com/examplechannel"), "examplechannel · Kick"
+        )
+        self.assertEqual(
+            ns.default_name("https://www.twitch.tv/otherchannel"), "otherchannel · Twitch"
+        )
+
+    def test_a_site_page_keeps_its_name_once_renamed(self):
+        store = NetworkStreams(Path("unused.json"))
+        page = "https://kick.com/examplechannel"
+        entry = store.keep(page, ns.default_name(page), ns.LIVE)
+        self.assertEqual((entry.url, entry.name), (page, "examplechannel · Kick"))
+        store.rename(entry.id, "Evening show")
+        store.keep(page, "examplechannel · Kick", ns.LIVE)
+        self.assertEqual(store.get(entry.id).name, "Evening show")
+
+    def test_why_a_site_page_did_not_play(self):
+        kick, twitch = SitePage(KICK, "examplechannel"), SitePage(TWITCH, "otherchannel")
+        refused = "refused QiTV's request: try again later, or paste the stream link"
+        cases = (
+            ("offline", kick, "examplechannel isn't live now"),
+            ("unknown", kick, "No channel named examplechannel on Kick"),
+            ("refused", kick, f"Kick {refused}"),
+            ("refused", twitch, f"Twitch {refused}"),
+            ("network", kick, "The link didn't answer in time"),
+            ("anything else", twitch, "The link didn't answer in time"),
+        )
+        for reason, page, why in cases:
+            with self.subTest(reason=reason, site=page.site):
+                self.assertEqual(ns.site_failure(reason, page), why)
+                self.assertEqual(ns.shown_reason(why), why)  # (in English)
+        # Kept in English, each shows in the active language with its channel and site.
+        catalog = {
+            "{channel} isn't live now": "{channel} şu anda yayında değil",
+            "No channel named {channel} on {site}": "{site} üzerinde {channel} adlı bir kanal yok",
+            "The link didn't answer in time": "Bağlantı zamanında yanıt vermedi",
+        }
+        with mock.patch.object(i18n, "_catalog", catalog):
+            self.assertEqual(
+                ns.shown_reason("examplechannel isn't live now"),
+                "examplechannel şu anda yayında değil",
+            )
+            self.assertEqual(
+                ns.shown_reason("No channel named other_channel-2 on Twitch"),
+                "Twitch üzerinde other_channel-2 adlı bir kanal yok",
+            )
+            self.assertEqual(
+                ns.shown_reason("The link didn't answer in time"),
+                "Bağlantı zamanında yanıt vermedi",
+            )
+            self.assertEqual(ns.shown_reason("Something else"), "Something else")
+        self.assertTrue(ns.names_its_channel("examplechannel isn't live now"))
+        self.assertFalse(ns.names_its_channel("The link didn't answer in time"))
 
 
 if __name__ == "__main__":

@@ -135,9 +135,12 @@ class NetworkPlayer(QObject):
         self._handed: dict[str, str] = {}  # each link's kind as this player last played it
         self._removed: set[str] = set()  # links removed: not kept again but by Open Link
         # Channel up/down's order of the kept links, as the steps began, and the link the last
-        # step played (`step`).
+        # step played (`step`); when that one failed before it played (a site's page that
+        # gave no stream), the link it was stepped from, which plays on.
         self._steps: list[str] = []
         self._stepped = ""
+        self._stepped_from = ""
+        self._step_failed = False
         controller.set_links(self.url_of)
         controller.set_link_owner(self.whose)
         controller.set_link_player(self.play_kept)
@@ -252,15 +255,20 @@ class NetworkPlayer(QObject):
         link as its stream), round from the last to the first as channels go; with it alone,
         nothing plays. False for anything else (a provider's channel: the channels' zap). The
         order is Network streams' as the steps began: a link that plays moves to its top, never
-        under the viewer's steps."""
+        under the viewer's steps. A step's link that failed before it played (a site's page
+        whose site gave no stream) is stepped past: the next step goes on from it."""
         key = item.get("id") if isinstance(item, dict) else None
         if not isinstance(key, str) or self.store.get(key) is None:
             return False
+        if self._step_failed and key == self._stepped_from and self.store.get(self._stepped):
+            key = self._stepped  # the last step's link gave no stream: on from it, past it
+        self._step_failed = False
         kept = [e.id for e in self.store.entries() if e.id == key or not self._hidden(e)]
         if key != self._stepped or set(self._steps) != set(kept):
             self._steps = kept  # a new run of steps, or the links changed meanwhile
         if len(self._steps) > 1:
             at = self._steps.index(key)
+            self._stepped_from = key
             self._stepped = self._steps[(at + (1 if delta > 0 else -1)) % len(self._steps)]
             self.play_kept(self._stepped, zapped=True)
         return True
@@ -355,6 +363,7 @@ class NetworkPlayer(QObject):
             return
         entry = self._kept(item, kind, url)
         self.store.failed(entry.id, why)
+        self._step_failed = self._step_failed or entry.id == self._stepped
         logger.info("A link of Network streams did not play: %s", why)
         self._changed()
 

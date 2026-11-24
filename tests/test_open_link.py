@@ -203,6 +203,26 @@ class CardTests(CardCase):
         self.assertEqual(len(self.played), 4)
         self.assertEqual((self.added, self.runner.jobs), ([], []))
 
+    def test_open_link_plays_a_site_page_as_live(self):
+        # A Kick or Twitch channel's page plays as a live stream at once: nothing is read (the
+        # site is asked for the stream as it plays), and it is kept by its page's address.
+        kick, twitch = "https://kick.com/examplechannel", "https://www.twitch.tv/otherchannel"
+        pages = (
+            (kick, kick),
+            ("kick.com/ExampleChannel/", kick),
+            ("https://m.twitch.tv/otherchannel?referrer=raid", twitch),
+            ("twitch.tv/otherchannel", twitch),
+        )
+        for text, page in pages:
+            with self.subTest(text):
+                self.typed(text)
+                offer = ("✓ A live stream", KEPT, ["Cancel", "Play"], "play")
+                self.assertEqual(self.offer()[:4], offer)
+                self.card.handle(Action.NAV_ACTIVATE)  # Play
+                self.assertTrue(self.card.isHidden())
+                self.assertEqual(self.played[-1], (page, LIVE))
+        self.assertEqual(self.runner.jobs, [])  # no probe request
+
     def test_a_provider_link_hands_over_to_add_provider(self):
         self.typed(PLAYLIST)
         self.card.handle(Action.NAV_ACTIVATE)  # Enter: Add as a provider…

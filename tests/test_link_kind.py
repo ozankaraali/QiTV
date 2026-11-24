@@ -7,6 +7,7 @@ from services.link_kind import (
     LIVE,
     NONE,
     PROBE,
+    SITE,
     Provider,
     address,
     classify,
@@ -84,6 +85,31 @@ class ClassifyTests(unittest.TestCase):
         self.assertEqual(classify("https://cdn.example/a/index.m3u8?t=1"), PROBE)
         self.assertEqual(classify("https://cdn.example/watch"), PROBE)
         self.assertEqual(classify("https://cdn.example/stream.php?id=5"), PROBE)
+
+    def test_site_pages_classify_as_site(self):
+        # A Kick or Twitch channel's page: the site is asked for its stream, nothing is read.
+        for url in (
+            "https://kick.com/examplechannel",
+            "https://www.kick.com/ExampleChannel/",
+            "kick.com/examplechannel",  # typed without its scheme
+            "https://www.twitch.tv/examplechannel",
+            "https://m.twitch.tv/otherchannel?referrer=raid",
+            "twitch.tv/examplechannel",
+            "<https://twitch.tv/examplechannel>",  # as a mail quotes it
+        ):
+            with self.subTest(url):
+                self.assertEqual(classify(url), SITE)
+        # The sites' own pages, and anything deeper than a channel, are web addresses still.
+        for url in (
+            "https://kick.com/",
+            "https://kick.com/categories",
+            "https://www.twitch.tv/directory",
+            "https://www.twitch.tv/examplechannel/videos",
+        ):
+            with self.subTest(url):
+                self.assertEqual(classify(url), PROBE)
+        self.assertEqual(classify("kick.com/"), NONE)
+        self.assertEqual(classify("rtmp://kick.com/examplechannel"), LIVE)
 
     def test_not_a_url(self):
         for text in ("", "hello world", "ftp://x.example/a.mp4", "file:///a.mp4", "http://"):

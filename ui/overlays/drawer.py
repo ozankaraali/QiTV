@@ -102,7 +102,7 @@ from services.navigation import (
     item_key,
     item_title,
 )
-from services.network_streams import FILM
+from services.network_streams import FILM, shown_reason
 from services.provider_ids import NETWORK_PROVIDER, mixed_group_id, provider_of
 from services.zapping import ZapContext
 from ui.find_session import FindSession
@@ -238,7 +238,7 @@ def link_sub(row: LinkRow) -> tuple[str, bool]:
     in the warning colour: that it did not play last time and why, else "Live", or a film's
     "Film · stopped at 41:12" ("Film" from its start)."""
     if row.failed:
-        return translate(LINK_FAILED_TEXT, reason=translate(row.failed)), True
+        return translate(LINK_FAILED_TEXT, reason=shown_reason(row.failed)), True
     if row.kind != FILM:
         return translate(LINK_LIVE_TEXT), False
     if row.stopped_ms is None:

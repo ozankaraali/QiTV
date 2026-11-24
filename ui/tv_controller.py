@@ -78,6 +78,7 @@ from functools import partial
 import logging
 from pathlib import Path
 import random
+import threading
 import time
 from typing import Any, Callable, Optional, cast
 
@@ -97,9 +98,11 @@ from services.epg_view import Programme, now_next
 from services.failure_reasons import LIMIT, Reason, own_streams_text, shown_message
 from services.film_relay import FilmRelay, relayable
 from services.i18n import N_, tr, translate
+from services.jobs import JobRunner
 from services.live import parts as live_parts
 from services.live.live_session import LiveSession
 from services.live.tuning import channel_key
+from services.live_sites import site_page
 from services.local_episodes import next_in_folder, parse_episode
 from services.media_reporter import MediaReporter
 from services.media_server import Quality
@@ -113,7 +116,16 @@ from services.navigation import (
     payloads,
     recent_channel,
 )
-from services.network_streams import DOWN, FILM, LIVE, failure_reason, is_link
+from services.network_streams import (
+    DOWN,
+    FILM,
+    LIVE,
+    failure_reason,
+    is_link,
+    names_its_channel,
+    shown_reason,
+    site_failure,
+)
 from services.next_episode import LOCAL_NEXT, play_context
 from services.open_paths import PLAYLIST_EXTENSIONS, is_music, is_song, is_video
 from services.picture import SOURCE_DIRECT, ChannelPictures
@@ -145,7 +157,7 @@ from ui.episode_listing import FolderListing
 from ui.grid_controls import LEAVE_FIRST, GridControls
 from ui.guide_controller import GuideController
 from ui.keymap import Action, as_int
-from ui.link_lanes import LinkLanes, Target
+from ui.link_lanes import LinkLanes, SiteJob, Target
 from ui.live_controls import LiveControls, stream_options
 from ui.live_tuner import LiveTuner, start_kwargs as tune_kwargs
 from ui.mixer_controls import MixerControls
@@ -319,6 +331,7 @@ class TVController(QObject):
         make_slot: Optional[Callable[[str], Optional[Slot]]] = None,
         cast_devices: Optional[CastDevices] = None,
         media_reporter: Optional[MediaReporter] = None,
+        jobs: Optional[JobRunner] = None,
         parent: Optional[QObject] = None,
     ):
         """With `sessions` (picture in picture), its large slot's player, live session and
@@ -332,7 +345,8 @@ class TVController(QObject):
         AccountChecks) says why a failure happened (None: the failure's own words only).
         With `grid_frame` and `make_slot` (a tile's player, made by its slot's name) the
         multiview's grid can show: `grid_tiles` draws over it, `host` is the overlay host
-        (both None-able in tests)."""
+        (both None-able in tests). `jobs` runs what the controller asks off its thread (a
+        site's channel page asked for its stream; None: a runner of its own)."""
         super().__init__(parent)
         self._account_checks = account_checks
         self._toasts = 0  # toasts shown so far: a reason replaces only the one it explains
@@ -402,6 +416,14 @@ class TVController(QObject):
         self._file_under_link = False
         self._lanes = LinkLanes(catalog, self)
         self._lanes.known = self._network_url  # no provider is asked for a link's address
+        # A site's channel page (Kick, Twitch) is asked for its stream on `jobs` each time it
+        # plays; a newer tune stops the ask the tune in flight waits for (`_request`), and
+        # QiTV's closing stops them all.
+        self._jobs = jobs if jobs is not None else JobRunner(self)
+        self._lanes.resolver = self._resolve_site
+        self._site_stops: set[threading.Event] = set()
+        self._tune_stop: Optional[threading.Event] = None
+        self._asking_tune = False
         # The live channel's time-shift side: pipeline tunes, its controls and reports.
         self._live_controls = LiveControls(
             tuner=self._tuner,
@@ -562,6 +584,7 @@ class TVController(QObject):
             tidy=self._tidy_from_menu,  # 2.9.1: out of the lists, no PIN
             record_at=lambda: self.record_at,
             link=lambda item: self._network_url(item) is not None,
+            site_page_of=self._site_page,
             parent=self,
         )
         # The volume keys, mute and the wheel, on the mixer (one row per picture).
@@ -969,6 +992,8 @@ class TVController(QObject):
             return
         self._closed = True
         self._lanes.close()
+        for stop in self._site_stops:
+            stop.set()  # a site still asked answers no one: its ask ends
         self._autoplay.close()
         self._sound_poll.stop()
         if self._online is not None:
@@ -1310,6 +1335,45 @@ class TVController(QObject):
     def _network_url(self, item: dict) -> Optional[str]:
         return self._links(item) or None
 
+    def _site_page(self, item: dict) -> Optional[str]:
+        """The page of the link `item` when it is a site's channel page (Kick, Twitch): what
+        it is kept, copied and remembered as, never the address its site answers as it plays
+        (its token lasts minutes); None for any other item."""
+        url = self._network_url(item)
+        return url if url is not None and site_page(url) is not None else None
+
+    def _resolve_site(
+        self, url: str, ok: Callable[[str], None], failed: Callable[[str], None]
+    ) -> None:
+        """The lanes' resolver: the site of the channel page `url` asked for the stream it
+        plays now, on a worker; `ok(address)` or `failed(why)` comes on this thread (why in
+        English: Network streams keeps it, `site_failure`). The tune's ask is noted, so a
+        newer tune stops it (`_request`)."""
+        page = site_page(url)
+        if page is None or self._closed:
+            failed("")  # (the lanes ask only for a site's page, and are closed with QiTV)
+            return
+        stop = threading.Event()
+        self._site_stops.add(stop)
+        if self._asking_tune:
+            self._tune_stop = stop
+
+        def answered(_context: object, address: object) -> None:
+            self._site_asked(stop)
+            ok(str(address))
+
+        def refused(_context: object, reason: object) -> None:
+            self._site_asked(stop)
+            failed(site_failure(str(reason), page))
+
+        self._jobs.run_worker(SiteJob(page, stop), answered, refused)
+
+    def _site_asked(self, stop: threading.Event) -> None:
+        """A site's ask ended (answered, or not): nothing more stops it."""
+        self._site_stops.discard(stop)
+        if self._tune_stop is stop:
+            self._tune_stop = None
+
     def _guard_view(self, section: str, item: dict) -> tuple[str, dict]:
         """`item` of `section` as parental controls know it: a link as one live link of
         Network streams by its id, whoever's stream it is now (an account added after it was
@@ -1396,11 +1460,18 @@ class TVController(QObject):
         url = self._network_url(target.item)
         if self._closed or url is None:
             return
-        self._error(self._named(target.title, translate(why)))
+        self._error(self._own_words(why) or self._named(target.title, translate(why)))
         self.linkFailed.emit(target.item, LIVE if target.live else FILM, url, why)
         if self._current is None or target is self._current:
             if self._link_holds(target):
                 self._let_go_of_link()  # it failed for good: as a file that failed
+
+    @staticmethod
+    def _own_words(why: str) -> Optional[str]:
+        """Why a link did not play, said alone when it names its channel itself (a site's
+        answer, kept in English: in the active language); None for any other (said after
+        the link's name)."""
+        return shown_reason(why) if names_its_channel(why) else None
 
     def watch_from_start(
         self, channel: dict, programme: Programme, group_key: str, channels: list
@@ -2581,7 +2652,16 @@ class TVController(QObject):
         self._listing_generation += 1
         self._album_generation += 1
         self._drop_card()  # a newer choice than what the Next card offers
-        self._lanes.request(target)
+        if self._tune_stop is not None:
+            # A newer choice: the stream a site is asked for, for the tune in flight, would
+            # play nowhere; its ask ends between its requests (or answers, dropped).
+            self._tune_stop.set()
+            self._tune_stop = None
+        self._asking_tune = True  # a site asked meanwhile is asked for this tune
+        try:
+            self._lanes.request(target)
+        finally:
+            self._asking_tune = False
 
     def _follow_queue(self, settled: Target) -> bool:
         """Act on a choice made while `settled` was in flight; False when there was none."""
@@ -2643,6 +2723,10 @@ class TVController(QObject):
         self._give_large_back(target)
         self._let_go_unless_a_link_plays()  # a link chosen held never came
         self._restore_channel()
+        if self._network_url(target.item) is not None:
+            # A site's page its site gave no stream for: counted in its row, said once.
+            self._on_link_failed(target, message)
+            return
         self._error(self._named(target.title, message))
         self._explain_item(target.item, target.title)
 
@@ -2665,7 +2749,7 @@ class TVController(QObject):
                 del self._tile_links[name]
                 if self._grid is not None:
                     self._grid.link_failed(name, target.item)
-        self._menu_error(self._named(target.title, message))
+        self._menu_error(self._own_words(message) or self._named(target.title, message))
 
     def _keep_tuning_banner(self) -> None:
         """Show the banner again while the channel it announces is on its way: its link
@@ -3014,7 +3098,8 @@ class TVController(QObject):
             return  # 2.8: what parental controls hide never enters the history (nor Recent)
         # 2.14 review M5: a Plex conversion's session ends with its play: its file is kept.
         menu = None if target.live or target.local else self._media_menu(target.item)
-        link = str((menu or {}).get("file") or url)
+        # A site's channel page is remembered as its page, not the address with its token.
+        link = str((menu or {}).get("file") or self._site_page(target.item) or url)
         try:
             self.watch.record_play(
                 item_provider.provider_name(self.catalog, target.item),

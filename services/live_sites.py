@@ -11,11 +11,16 @@ import logging
 import random
 import re
 import threading
+from typing import TYPE_CHECKING
 from urllib.parse import quote, urlencode, urlsplit
 
-import requests
+from services.lazy_import import lazy_module
 
 log = logging.getLogger(__name__)
+# The window shows before the network libraries load: Open Link's kinds read `site_page`.
+requests = lazy_module("requests")
+if TYPE_CHECKING:  # the real module, for annotations only: the lazy one loads later
+    import requests as requests_types
 
 
 KICK, TWITCH = "kick", "twitch"
@@ -34,6 +39,7 @@ USER_AGENT = (
 TIMEOUT_S = 10
 
 _HOSTS = {"kick.com": KICK, "twitch.tv": TWITCH}
+_PAGE_HOSTS = {KICK: "kick.com", TWITCH: "www.twitch.tv"}  # where a channel's page is
 _RESERVED = {
     KICK: {
         "categories", "browse", "search", "following", "video", "videos", "clips",
@@ -99,10 +105,20 @@ def site_page(url: str) -> SitePage | None:
     return SitePage(site, channel)
 
 
+def page_address(page: SitePage) -> str:
+    """The channel page's own address, however it was written (kept and copied as such)."""
+    return f"https://{_PAGE_HOSTS[page.site]}/{page.channel}"
+
+
+def page_name(page: SitePage) -> str:
+    """The channel's name as QiTV lists it: "examplechannel · Kick"."""
+    return f"{page.channel} · {SITE_NAMES[page.site]}"
+
+
 def resolve(
     page: SitePage,
     stop: threading.Event | None = None,
-    session: requests.Session | None = None,
+    session: requests_types.Session | None = None,
     kick_api: str = KICK_API,
     twitch_gql: str = TWITCH_GQL,
     twitch_usher: str = TWITCH_USHER,
@@ -123,7 +139,7 @@ def resolve(
         if session is None:
             http.close()
     log.info("%s: %s is live.", SITE_NAMES[page.site], page.channel)
-    return Resolved(url, f"{page.channel} · {SITE_NAMES[page.site]}")
+    return Resolved(url, page_name(page))
 
 
 def _request(http, method, url, stop, **kwargs):

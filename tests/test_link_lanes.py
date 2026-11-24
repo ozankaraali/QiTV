@@ -5,8 +5,11 @@ os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 from PySide6.QtCore import QObject, Signal
 from PySide6.QtWidgets import QApplication
+from timer_fixtures import pause, wait_until
 
 from ui.link_lanes import LinkLanes, Target
+
+PAGE = "https://kick.com/examplechannel"
 
 
 class Catalog(QObject):
@@ -149,6 +152,66 @@ class LinkLanesTests(unittest.TestCase):
         self.catalog.linkReady.emit(1, "u1")
         self.catalog.linkReady.emit(2, "u2")
         self.assertEqual((self.ready, got, self.names()), ([], [], ["One", "Two"]))
+
+    def site(self):
+        """A Kick or Twitch channel's page (a link of Network streams) and its resolver's asks."""
+        asked = []
+        self.lanes.known = lambda item: item.get("page")
+        self.lanes.resolver = lambda url, ok, failed: asked.append((url, ok, failed))
+        return Target({"name": "Kick one", "page": PAGE}, "live", "Kick one"), asked
+
+    def test_the_lane_resolves_a_site_page_each_time(self):
+        page, asked = self.site()
+        self.lanes.request(page)
+        self.assertEqual(([url for url, _, _ in asked], self.names()), ([PAGE], []))
+        pause(20)
+        self.assertEqual(self.ready, [])  # no answer of its own: the site's is awaited
+        asked[0][1]("https://edge.example/hls/master.m3u8?token=one")
+        self.assertTrue(wait_until(lambda: self.ready))
+        self.assertEqual(
+            self.ready, [("Kick one", "https://edge.example/hls/master.m3u8?token=one")]
+        )
+        self.lanes.request(page)  # played again: the site is asked afresh
+        self.assertEqual(len(asked), 2)
+        asked[1][1]("https://edge.example/hls/master.m3u8?token=two")
+        self.assertTrue(wait_until(lambda: len(self.ready) == 2))
+        self.assertEqual(self.ready[-1][1], "https://edge.example/hls/master.m3u8?token=two")
+        # Any other link of Network streams is answered as it is, a turn later.
+        other = Target({"name": "Coast", "page": "https://cdn.example/coast.m3u8"}, "live", "Coast")
+        self.lanes.request(other)
+        self.assertTrue(wait_until(lambda: len(self.ready) == 3))
+        self.assertEqual(self.ready[-1], ("Coast", "https://cdn.example/coast.m3u8"))
+        self.assertEqual(len(asked), 2)
+
+    def test_a_site_answer_given_at_once_still_lands(self):
+        # A resolver that answers inside its call: the lane takes it once its request is noted.
+        self.lanes.known = lambda item: item.get("page")
+        self.lanes.resolver = lambda url, ok, failed: ok("https://edge.example/now.m3u8")
+        self.lanes.request(Target({"name": "Kick one", "page": PAGE}, "live", "Kick one"))
+        self.assertTrue(wait_until(lambda: self.ready))
+        self.assertEqual(self.ready, [("Kick one", "https://edge.example/now.m3u8")])
+        self.assertFalse(self.lanes.busy())
+
+    def test_a_site_page_that_fails_says_why_on_its_lane(self):
+        page, asked = self.site()
+        self.lanes.request(page)
+        asked[0][2]("examplechannel isn't live now")
+        self.assertTrue(wait_until(lambda: self.failed))
+        self.assertEqual(self.failed, [("Kick one", "examplechannel isn't live now")])
+        # The side lane's too: a link asked beside the tune, its failure said there.
+        got = []
+        self.lanes.request_side(page, got.append, play=False)
+        self.lanes.request_side(page, got.append, play=False)  # (the same: asked once)
+        self.assertEqual(len(asked), 2)
+        asked[1][1]("https://edge.example/side.m3u8")
+        self.assertTrue(wait_until(lambda: got))
+        self.assertEqual(got, ["https://edge.example/side.m3u8"])
+        self.lanes.request_side(page, got.append, play=False)
+        asked[2][2]("No channel named examplechannel on Kick")
+        self.assertTrue(wait_until(lambda: self.side_failed))
+        self.assertEqual(
+            self.side_failed, [("Kick one", "No channel named examplechannel on Kick")]
+        )
 
 
 if __name__ == "__main__":
