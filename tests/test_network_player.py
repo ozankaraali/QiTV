@@ -980,6 +980,67 @@ class SiteTests(PlayerCase):
         self.assertEqual(self.starts()[-1][0], MASTER_FRESH)
         self.assertEqual(len(self.asked), 2)
 
+    def drops_direct(self, url):
+        """`url` plays directly (the buffer fell back), shows its picture, and its stream ends."""
+        self.link(url)
+        self.live.play_direct()
+        self.plays_now()
+        plays = len(self.session.plays)
+        self.session.ended.emit()
+        return plays
+
+    def test_a_dropped_site_link_reopens_with_a_fresh_address(self):
+        self.answers = [MASTER, MASTER_FRESH]
+        plays = self.drops_direct(KICK_PAGE)
+        self.assertEqual(self.session.plays[-1][0], MASTER)
+        self.assertTrue(wait_until(lambda: len(self.session.plays) == plays + 1))
+        self.assertEqual(self.session.plays[-1][0], MASTER_FRESH)  # not the first address again
+        self.assertEqual(len(self.asked), 2)  # the site was asked a second time, off the GUI
+        self.assertEqual([on_gui for _page, on_gui in self.asked], [False, False])
+        self.assertEqual(self.asked[1][0], SitePage(KICK, "examplechannel"))
+        self.assertEqual(self.errors(), [])
+
+    def test_the_reopen_keeps_the_buffer_when_the_run_can_be_joined(self):
+        # The reopen of a direct stream has no `after_seq` (the helper's resume-join belongs to
+        # its own restarts): a plain restart in v1, which the task ledger carries.
+        self.answers = [MASTER, MASTER_FRESH]
+        plays = self.drops_direct(KICK_PAGE)
+        starts = len(self.starts())
+        self.assertTrue(wait_until(lambda: len(self.session.plays) == plays + 1))
+        kwargs = self.session.plays[-1][1]
+        self.assertNotIn("after_seq", kwargs)
+        self.assertEqual(len(self.starts()), starts)  # the same player, no new helper run
+
+    def test_an_ad_break_does_not_reopen(self):
+        self.enterContext(mock.patch("ui.live_controls.RECONNECT_MS", (50, 50)))
+        self.answers = [MASTER, MASTER_FRESH]
+        self.link(KICK_PAGE)
+        self.live.play_direct()
+        self.plays_now()
+        self.live.in_ad_break = lambda: True  # the session skips a break now
+        plays = len(self.session.plays)
+        self.session.ended.emit()
+        pause(400)
+        self.assertEqual(len(self.session.plays), plays)
+        self.assertEqual(len(self.asked), 1)  # the site was not asked again
+
+    def test_a_site_that_is_off_the_air_when_it_reopens_says_so(self):
+        self.answers = [MASTER, SiteError("offline")]
+        self.drops_direct(KICK_PAGE)
+        self.assertTrue(wait_until(lambda: self.errors()))
+        self.assertEqual(self.errors(), ["examplechannel isn't live now"])
+        self.assertEqual(
+            self.store.get(stream_id(KICK_PAGE)).failed, "examplechannel isn't live now"
+        )
+
+    def test_other_links_reopen_as_before(self):
+        plays = self.drops_direct(URL)
+        self.assertTrue(wait_until(lambda: len(self.session.plays) == plays + 1))
+        self.assertEqual(self.session.plays[-1][0], URL)  # the same address, once
+        self.assertEqual(self.asked, [])  # no site was asked
+        pause(200)
+        self.assertEqual(len(self.session.plays), plays + 1)
+
     def test_a_site_link_is_kept_by_its_page_and_named_by_its_channel(self):
         self.answers = [MASTER, MASTER_FRESH]
         self.link(KICK_PAGE)

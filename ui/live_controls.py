@@ -232,6 +232,8 @@ class LiveControls(QObject):
         retry_notice: Callable[[], Any] = lambda: None,
         link: Callable[[dict], bool] = lambda item: False,
         link_failed: Callable[[Target, str], None] = lambda target, why: None,
+        site_page: Callable[[dict], Optional[str]] = lambda item: None,
+        reask: Optional[Callable[[str, Callable[[str], None], Callable[[str], None]], None]] = None,
         parent: Optional[QObject] = None,
     ) -> None:
         """`explain(item, title)` asks why the failure just toasted happened at the item's
@@ -248,10 +250,15 @@ class LiveControls(QObject):
         `retry_notice()`: the pill that counts down to a channel's next try (None: none).
         `link(item)`: whether the item is a link of Network streams (plan 4), tried again once
         at most (`LINK_TRIES`); `link_failed(target, why)` hears why one did not play or went
-        (an English text, `services.network_streams.failure_reason`)."""
+        (an English text, `services.network_streams.failure_reason`). `site_page(item)`: the
+        page of a link that is a site's channel (Kick, Twitch), whose address lasts minutes:
+        its reopen asks the site again, `reask(page, ok, failed)` (answered on this thread)."""
         super().__init__(parent)
         self._link = link
         self._link_failed = link_failed
+        self._site_page = site_page
+        self._reask = reask
+        self._asks = 0  # a site's ask for a reopen: the newest only is answered
         # A link's tries again since it last played well, and since when it plays (None: it
         # does not, or a try went since).
         self._link_tries = 0
@@ -774,6 +781,13 @@ class LiveControls(QObject):
         if not self._may_reopen(target):
             self._hide_retry()
             return  # no stream of its provider to spare (the caller says so)
+        if self._in_ad_break():
+            self._hide_retry()
+            return  # the buffer goes on past it (its session's), nothing opens here
+        page = self._site_page(target.item) if self._reask is not None else None
+        if page is not None:
+            self._reopen_site(target, url, kind, page)
+            return
         logger.info("Opening %s again after its stream ended", target.title)
         if self._retry_action is not None and not self._retry_from_live:
             self._show_retry(0.0, self._reopen_now)  # "Reconnecting…" until it plays
@@ -784,12 +798,53 @@ class LiveControls(QObject):
             **reopen_options(session, target.item, self.catalog),
         )
 
+    def _in_ad_break(self) -> bool:
+        """The live session skips a site's ad break now (its own reopen goes on after it)."""
+        asked = getattr(self.live, "in_ad_break", None)
+        return bool(asked()) if callable(asked) else False
+
+    def _reopen_site(self, target: Target, url: str, kind: PlayKind, page: str) -> None:
+        """A site's channel opens again: not at the address it played (its token lasts minutes,
+        and a drop after a sleep meets it dead) but at the one its site gives now. The same
+        player opens it, as for any direct stream (a plain restart: no buffer is kept)."""
+        self._asks += 1
+        asked = self._asks
+        logger.info("Asking the site of %s again after its stream ended", target.title)
+        if self._retry_action is not None and not self._retry_from_live:
+            self._show_retry(0.0, self._reopen_now)  # "Reconnecting…" until it plays
+
+        def current() -> bool:
+            return (
+                asked == self._asks
+                and not self._closed()
+                and self._current() is target
+                and self.session.url == url
+            )
+
+        def ok(address: str) -> None:
+            if not current():
+                return  # a newer choice, or another stream plays now
+            self.session.play(
+                address,
+                kind=kind,
+                latency=self.config.live_latency,
+                **reopen_options(self.session, target.item, self.catalog),
+            )
+
+        def failed(why: str) -> None:
+            if current():
+                self._give_up_link(target, why)
+
+        assert self._reask is not None
+        self._reask(page, ok, failed)
+
     def _reopen_now(self) -> None:
         if self._reopen_due is not None:
             self._reopen_timer.stop()
             self._reopen()
 
     def _cancel_reopen(self) -> None:
+        self._asks += 1  # a site's answer on its way is no longer wanted
         self._reopen_due = None
         self._reopen_timer.stop()
 
@@ -847,12 +902,12 @@ class LiveControls(QObject):
         self._link_well_since = None
         return True
 
-    def _give_up_link(self, current: Target) -> None:
+    def _give_up_link(self, current: Target, why: str = DOWN) -> None:
         """A link went down again after its try: it stops (its stream goes back), and the
         player says why; nothing tries it again."""
         logger.info("Stopping %s: its link went down again after its try", current.title)
         self.stop_tune()
-        self._link_failed(current, DOWN)
+        self._link_failed(current, why)
         self._gave_up()
 
     def _live_failure(self) -> tuple[str, Optional[int]]:

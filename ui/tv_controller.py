@@ -459,6 +459,8 @@ class TVController(QObject):
             retry_notice=lambda: self.overlays.retry_notice,
             link=lambda item: self._network_url(item) is not None,
             link_failed=self._on_link_failed,
+            site_page=self._site_page,
+            reask=self._reask_site,
             parent=self,
         )
         # Cards over the TV of their own (File → Open Link…'s, plan 4; add_card).
@@ -1368,6 +1370,17 @@ class TVController(QObject):
             failed(site_failure(str(reason), page))
 
         self._jobs.run_worker(SiteJob(page, stop), answered, refused)
+
+    def _reask_site(
+        self, page: str, ok: Callable[[str], None], failed: Callable[[str], None]
+    ) -> None:
+        """A dropped site channel asks its site again for a stream (the lanes' resolver); like
+        the tune's ask, a newer choice stops it (`_request`)."""
+        self._asking_tune = True
+        try:
+            self._resolve_site(page, ok, failed)
+        finally:
+            self._asking_tune = False
 
     def _site_asked(self, stop: threading.Event) -> None:
         """A site's ask ended (answered, or not): nothing more stops it."""
