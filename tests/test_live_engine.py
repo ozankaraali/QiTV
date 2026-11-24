@@ -71,6 +71,7 @@ STATE_KEYS = {
     "not_live",  # 2.8.11
     "settled_s",  # 2.8.11
     "retry_at",  # the channel's stream down: when its next try is due
+    "prefetching",  # HLS: its playlist's prefetch pieces are read as they are made
 }
 HEADERS = {"User-Agent": "QiTV-test"}
 MIB = 1024 * 1024

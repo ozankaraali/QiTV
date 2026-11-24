@@ -34,6 +34,7 @@ from __future__ import annotations
 from collections import deque
 from collections.abc import Callable, Iterator, Mapping, Sequence
 from dataclasses import dataclass
+from datetime import timedelta, timezone
 import http.client
 import itertools
 import logging
@@ -136,6 +137,18 @@ _STALE_TARGETS = 3
 _RECENT_SEGMENTS = 10
 _wall_time = time.time  # 2.7: a server part's time of day; tests replace it
 _LAG_LOG_S = 10.0  # the lag line is logged at most this often
+# A live site lists its newest pieces while they are made, after the finished ones (Kick:
+# `#EXT-X-PREFETCH:<uri>`; Twitch: its own name for it). Such a body sends what is made at
+# once and the rest at real time; a later copy lists the piece finished at the same address.
+_PREFETCH_TAGS = ("#EXT-X-PREFETCH:", "#EXT-X-TWITCH-PREFETCH:")
+# A session asking a live delay up to this (Low, Normal, Auto) starts at a playlist's first
+# prefetch piece; a longer one (Stable's 12 s: the cushion for jittery providers) as far back
+# as it would without them (ruling R4).
+_PREFETCH_DELAY_MAX_S = 6.0
+# A playlist that lists prefetch pieces is read again this long after its last reload began
+# (not half a target duration: 3 s on Kick), should one bring no new piece: its pieces come as
+# they are made, a start holds ~3 s of them, and a batch outlasts this anyway.
+_PREFETCH_RELOAD_S = 1.0
 _HOLD_POLL_S = 0.25  # 2.7: how often a held source asks again
 # 2.7.1 ("Prefer HTTPS"): an http:// address is asked over HTTPS first, connecting within this;
 # the hosts whose HTTPS did not open are asked over HTTP at once for the rest of the run.
@@ -1221,6 +1234,71 @@ def _whole_segments(playlist: Any) -> Any:
     return playlist
 
 
+def _prefetch_parser(line: str, lineno: int, data: dict[str, Any], state: dict[str, Any]) -> bool:
+    """An m3u8 `custom_tags_parser`: a prefetch piece's line (`_PREFETCH_TAGS`) puts its URI in
+    ``data["prefetch"]`` and is read (True); any other line is the parser's (False)."""
+    del lineno, state
+    for tag in _PREFETCH_TAGS:
+        if line.startswith(tag):
+            uri = line[len(tag) :].strip()
+            if uri:
+                data.setdefault("prefetch", []).append(uri)
+            return True
+    return False
+
+
+def _is_prefetch(segment: Any) -> bool:
+    """A piece still being made, listed after a live playlist's finished ones (`_with_prefetch`)."""
+    values = getattr(segment, "custom_parser_values", None)
+    return isinstance(values, dict) and values.get("prefetch") is True
+
+
+def _finished(segments: Sequence[Any]) -> int:
+    """How many of a playlist's segments are finished: those before its prefetch pieces."""
+    count = len(segments)
+    while count and _is_prefetch(segments[count - 1]):
+        count -= 1
+    return count
+
+
+def _with_prefetch(playlist: Any) -> Any:
+    """A live media playlist with its prefetch pieces (`_prefetch_parser`) after the finished
+    ones, each listed as the piece it will be (titled "prefetch"): the last finished piece's
+    length (none listed: the target duration), key and map (fMP4: remuxed whole, as any), and
+    its date plus the lengths up to it (none without one). A finished playlist (ENDLIST) or a
+    master has none; nor one whose pieces' length is not known."""
+    data = getattr(playlist, "data", None)
+    uris = data.get("prefetch") if isinstance(data, dict) else None
+    if not uris or playlist.is_endlist or playlist.is_variant:
+        return playlist
+    segments = playlist.segments
+    last = segments[-1] if segments else None
+    duration = float(last.duration or 0) if last is not None else 0.0
+    duration = duration if duration > 0 else float(playlist.target_duration or 0)
+    if duration <= 0:
+        return playlist
+    dated = last.current_program_date_time if last is not None else None
+    if dated is not None:
+        dated += timedelta(seconds=float(last.duration or 0))
+    sequence = (playlist.media_sequence or 0) + len(segments)
+    for k, uri in enumerate(uris):
+        when = dated + timedelta(seconds=k * duration) if dated is not None else None
+        piece = m3u8.Segment(
+            uri=uri,
+            base_uri=playlist.base_uri,
+            duration=duration,
+            title="prefetch",
+            program_date_time=when,
+            current_program_date_time=when,
+            media_sequence=sequence + k,
+            custom_parser_values={"prefetch": True},
+        )
+        if last is not None:
+            piece.key, piece.init_section = last.key, last.init_section
+        segments.append(piece)
+    return playlist
+
+
 def _height(variant: Any) -> int:
     """A variant's picture height as its master names it (RESOLUTION); 0 when it names none."""
     resolution = variant.stream_info.resolution
@@ -1255,9 +1333,10 @@ def _select_manifest(
     heights, largest first; none for a media playlist). A radio station's master (`sound`,
     2.14) with no video variant plays its best variant of sound alone (`_sound_only`)."""
     try:
-        playlist = m3u8.loads(content.decode("utf-8-sig"), uri=url)
+        text = content.decode("utf-8-sig")
+        playlist = m3u8.loads(text, uri=url, custom_tags_parser=_prefetch_parser)
         if not playlist.is_variant:
-            return _whole_segments(playlist), ()
+            return _with_prefetch(_whole_segments(playlist)), ()
         candidates = [item for item in playlist.playlists if _video_compatible(item)]
         if not candidates and sound:
             candidates = [item for item in playlist.playlists if _sound_only(item)]
@@ -1608,7 +1687,7 @@ class HlsSource:
         self._last_copy: tuple[str, bytes, Any] | None = (
             (url, copy, playlist) if copy is not None else None
         )
-        self._lag_logged = -_LAG_LOG_S  # when the lag line was last logged (monotonic)
+        self._lag_logged: float | None = None  # when the lag line was last logged (monotonic)
         self._whole_seq: int | None = None  # the last segment that arrived whole's sequence
         back = window.get("back_s") if window is not None else None
         if window is not None and back is None and _archive_window(window):
@@ -1657,6 +1736,7 @@ class HlsSource:
         self._burst = float(playlist.target_duration or 0)
         self._window = 0.0  # 2.7: how long a live playlist's window lasts (0.0: finished)
         self._edge_sequence: int | None = None  # its newest segment's media sequence
+        self._prefetching = False  # its playlist lists prefetch pieces (`_with_prefetch`)
         self._note_window(playlist)
         self._keys: dict[str, bytes] = {}
         self._recent: deque[str] = deque(maxlen=_RECENT_SEGMENTS)
@@ -1676,8 +1756,15 @@ class HlsSource:
 
     @property
     def burst_s(self) -> float:
-        """The media playlist's target duration, updated on every reload."""
-        return self._burst
+        """The media playlist's target duration, updated on every reload; 0.0 while it lists
+        prefetch pieces: they come as they are made, not a target duration at a time."""
+        return 0.0 if self._prefetching else self._burst
+
+    @property
+    def prefetching(self) -> bool:
+        """Its playlist, as last read, lists prefetch pieces (a live site's newest, read as
+        they are made: `_with_prefetch`)."""
+        return self._prefetching
 
     @property
     def secure(self) -> bool:
@@ -1729,7 +1816,12 @@ class HlsSource:
     def _note_window(self, playlist: Any) -> None:
         segments = playlist.segments
         live = not playlist.is_endlist
-        self._window = sum(float(segment.duration or 0) for segment in segments) if live else 0.0
+        finished = _finished(segments)  # (prefetch pieces are still being made)
+        self._prefetching = finished < len(segments)
+        window = sum(
+            float(segment.duration or 0) for segment in itertools.islice(segments, finished)
+        )
+        self._window = window if live else 0.0
         if segments:
             self._edge_sequence = (playlist.media_sequence or 0) + len(segments) - 1
 
@@ -1805,9 +1897,15 @@ class HlsSource:
         part's `back_s` from it (2.7). A resumed run that joins an earlier one (`after_seq`,
         2.8) starts after that run's last segment when its playlist still lists the one after
         it (or lists up to it) and that is no further back than its depth: what the earlier
-        run brought is not brought twice. Only its first start: a later one is any start's."""
+        run brought is not brought twice. Only its first start: a later one is any start's.
+
+        The end is the last finished piece's: a live site's prefetch pieces (`_with_prefetch`)
+        are still being made. A live start under a live delay up to `_PREFETCH_DELAY_MAX_S`
+        is the first of them: what it holds comes at once, the rest as it is made (Kick's
+        start three 6 s target durations back played 7.6 s behind the clock)."""
+        finished = playlist.segments[: _finished(playlist.segments)]
         if self._back is not None:
-            segments, first = playlist.segments, playlist.media_sequence or 0
+            segments, first = finished, playlist.media_sequence or 0
             until = self._until
             if (
                 self._before is not None
@@ -1818,11 +1916,13 @@ class HlsSource:
             return _back_from_end(segments, self._back)
         if playlist.is_endlist:
             return 0
-        start = _back_from_end(playlist.segments, self._depth(playlist))
+        depth = start = _back_from_end(finished, self._depth(playlist))
+        if len(finished) < len(playlist.segments) and self._live_delay <= _PREFETCH_DELAY_MAX_S:
+            start = len(finished)
         after, self._after = self._after, None
         if after is not None:
             following = after + 1 - (playlist.media_sequence or 0)
-            if start <= following <= len(playlist.segments):
+            if depth <= following <= len(playlist.segments):
                 return following
         return start
 
@@ -1926,7 +2026,8 @@ class HlsSource:
                 start = self._start(playlist)
                 next_sequence = first + start
                 if self._back is not None:  # 2.7: where the server part sits in time
-                    after = sum(float(s.duration or 0) for s in playlist.segments[start:])
+                    listed = playlist.segments[start : _finished(playlist.segments)]
+                    after = sum(float(s.duration or 0) for s in listed)
                     self._part_wall = _wall_time() - after
                     if self._until is not None and first <= self._until <= newest + 1:
                         stop = playlist.segments[start : self._until - first]
@@ -1946,15 +2047,19 @@ class HlsSource:
             if not stale:
                 self._discontinuity_sequence = playlist.discontinuity_sequence
             fresh = newest >= next_sequence
+            # (A prefetch piece's media is no backlog: it comes as it is made.)
             self._rest = sum(
                 float(segment.duration or 0)
                 for index, segment in enumerate(playlist.segments)
-                if first + index >= next_sequence and not segment.gap_tag
+                if first + index >= next_sequence
+                and not segment.gap_tag
+                and not _is_prefetch(segment)
             )
             # Frozen time runs between reloads only, never while segments download.
             if not fresh and loaded - progress >= _FROZEN_TIMEOUT:
                 raise SourceError("timeout", _FROZEN)
             done = again = False  # 2.7: a server part reached its stop / reloads first
+            made = False  # the batch reached its prefetch pieces
             for index, segment in enumerate(playlist.segments):
                 sequence = first + index
                 if sequence < next_sequence:
@@ -1971,6 +2076,9 @@ class HlsSource:
                 if self._until is not None and sequence >= self._until:
                     done = True
                     break
+                if not made and _is_prefetch(segment):
+                    made = True
+                    yield CaughtUp()  # the backlog landed: from here, pieces as they are made
                 next_sequence = sequence + 1
                 if segment.discontinuity:
                     self._mark()
@@ -1992,6 +2100,8 @@ class HlsSource:
                 yield from self._emit(self._flush_held())
                 return
             interval = max(1.0, float(playlist.target_duration or 0) / 2)
+            if self._prefetching:
+                interval = _PREFETCH_RELOAD_S
             if http.wait(interval - (time.monotonic() - loaded)):
                 raise _Closed()
             loaded = time.monotonic()
@@ -2094,6 +2204,7 @@ class HlsSource:
             return
         failure: SourceError | None = None
         content = False
+        arrived = time.monotonic()  # when its last bytes came
         joiner = self._joiner
         joiner.segment()
         if self._capture is not None:
@@ -2115,6 +2226,7 @@ class HlsSource:
                     yield block
                 blocks = iter([woven] if woven else [])
             for block in blocks:
+                arrived = time.monotonic()
                 if self._pending:  # only ever right before bytes that really arrive
                     self._pending = False
                     joiner.discontinuity()
@@ -2135,19 +2247,27 @@ class HlsSource:
             self._delivered = True
             self._last_whole = (self._serial, float(segment.duration or 0))
             self._whole_seq = sequence
-            self._log_lag(segment)
+            self._log_lag(segment, arrived)
         else:
             self._skip(failure, content)
 
-    def _log_lag(self, segment: Any) -> None:
-        """The latency instrument: how far behind the clock a finished piece ends (its
-        PROGRAM-DATE-TIME plus its length), at most once per `_LAG_LOG_S`."""
+    def _log_lag(self, segment: Any, arrived: float) -> None:
+        """The latency instrument: how far behind the clock a dated piece ends, at most once
+        per `_LAG_LOG_S`: a finished piece's PROGRAM-DATE-TIME (one without a zone is UTC's)
+        plus its length; a prefetch piece, read as it was made, ended at the clock as its last
+        bytes came (`arrived`, monotonic): the time since."""
         dated = segment.program_date_time
         now = time.monotonic()
-        if dated is None or now - self._lag_logged < _LAG_LOG_S:
+        logged = self._lag_logged
+        if dated is None or (logged is not None and now - logged < _LAG_LOG_S):
             return
         self._lag_logged = now
-        behind = _wall_time() - (dated.timestamp() + float(segment.duration or 0))
+        if _is_prefetch(segment):
+            behind = now - arrived
+        else:
+            if dated.tzinfo is None:
+                dated = dated.replace(tzinfo=timezone.utc)
+            behind = _wall_time() - (dated.timestamp() + float(segment.duration or 0))
         log.debug("The newest HLS piece fetched ends %.1f s behind the clock.", behind)
 
     @property
@@ -2401,7 +2521,9 @@ class HlsSource:
         url = self._audio_url
         try:
             content, final = self._http.fetch(lambda: _load_playlist(self._http, url))
-            playlist = _whole_segments(m3u8.loads(content.decode("utf-8-sig"), uri=final))
+            text = content.decode("utf-8-sig")
+            parsed = m3u8.loads(text, uri=final, custom_tags_parser=_prefetch_parser)
+            playlist = _with_prefetch(_whole_segments(parsed))
         except _Closed:
             raise
         except Exception:
@@ -2726,7 +2848,10 @@ def open_source(
     EXTINF durations add up to at least ``live_delay`` seconds (at least one segment); given
     the session's ``target`` (and the ``extra`` it adds, Auto's), that target and one and a
     half segments more, and at least HOLD-BACK or three target durations
-    (`HlsSource._depth`). After each batch of listed segments it yields `CaughtUp`.
+    (`HlsSource._depth`). A live site's playlist that lists its newest pieces while they are
+    made (prefetch pieces) starts at the first of them, read as it comes (but under a
+    ``live_delay`` over `_PREFETCH_DELAY_MAX_S`: Stable). After each batch of listed segments
+    it yields `CaughtUp`, and before a batch's first prefetch piece too.
     Local paths and ``file://`` URLs are refused unless ``allow_local`` (tests only).
 
     Blocks while connecting. Setting ``stop`` (polled every 0.1 s) or calling ``close()`` on

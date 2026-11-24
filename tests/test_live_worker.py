@@ -69,6 +69,7 @@ STATE_KEYS = {
     "not_live",  # 2.8.11
     "settled_s",  # 2.8.11
     "retry_at",  # the channel's stream down: when its next try is due
+    "prefetching",  # HLS: its playlist's prefetch pieces are read as they are made
 }
 DISK_LIMIT = "The disk buffer limit cannot fit one keyframe interval or an active read."
 # The owner hands a copy of its pipe end to a holder process that outlives it, so the
@@ -586,6 +587,31 @@ class LiveWorkerTests(unittest.TestCase):
         with urlopen(helper.stream_url(sid, 0), timeout=10) as response:
             media = split_header(response.read())[1]
         self.assertEqual(set(video_steps(media)), {3600})
+        helper.close(sid)
+        self.assert_no_credentials(helper)
+
+    def test_a_prefetch_playlist_says_so_and_reports_no_burst(self):
+        # A live site's playlist whose newest piece is listed while it is made: read as it
+        # comes, so no burst (not its 4 s target duration), and the state says so.
+        playlist = (
+            "#EXTM3U\n#EXT-X-TARGETDURATION:4\n#EXT-X-MEDIA-SEQUENCE:0\n"
+            "#EXTINF:4,live\na.ts\n#EXT-X-PREFETCH:b.ts\n"
+        )
+        source = self.source(
+            {
+                "/user/secret/channel.m3u8": (200, {}, playlist.encode()),
+                "/user/secret/a.ts": (200, {}, make_stream(4)),
+                "/user/secret/b.ts": (200, {}, make_stream(4)),
+            }
+        )
+        helper = self.helper()
+        sid = helper.open(source.url + "/user/secret/channel.m3u8")
+        helper.wait_for(lambda message: message == ("ready", sid))
+        snapshot = helper.of(sid, "state")[-1][2]
+        self.assertEqual((snapshot["prefetching"], snapshot["burst_s"]), (True, 0.0))
+        self.assertIs(snapshot["hls"], True)
+        self.assertIs(snapshot["caught_up"], True)  # before the prefetch piece came
+        self.assertEqual(source.counts["/user/secret/a.ts"], 0)  # it starts at that piece
         helper.close(sid)
         self.assert_no_credentials(helper)
 

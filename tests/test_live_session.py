@@ -207,6 +207,7 @@ class FakeEngine(QObject):
         restarts=None,
         steered=None,
         settled=None,
+        prefetching=None,
     ):
         """Closed `spans` plus an optional open segment, as the helper's state reports them;
         `breaks`: (timeline position, seconds) of timestamp jumps it left out. `caught_up`
@@ -214,7 +215,8 @@ class FakeEngine(QObject):
         starts) to the closed spans' end, or 0.0; `backlog`, the listed media an HLS source
         has still to deliver, is left out when None; `finite`: a finished (ENDLIST) playlist;
         `open_quality`: how cleanly the open segment starts; `video`: whether the stream has
-        a video PID (left out when None, as an older helper does)."""
+        a video PID (left out when None, as an older helper does); `prefetching`: an HLS
+        source reads its playlist's prefetch pieces as they are made (left out when None)."""
         end = spans[-1].end if spans else (end or 0.0)
         oldest = spans[0].seq if spans else open_seq
         self._spans[sid] = list(spans)
@@ -236,6 +238,8 @@ class FakeEngine(QObject):
         }
         if backlog is not None:
             self._snapshots[sid]["backlog_s"] = backlog
+        if prefetching is not None:  # a live site's prefetch pieces, read as they are made
+            self._snapshots[sid]["prefetching"] = prefetching
         if video is not None:
             self._snapshots[sid]["video"] = video
         if parts is not None:  # 2.6: [first_seq, start, wall] of each part
@@ -1687,6 +1691,47 @@ class StartPolicyTests(LiveSessionCase):
         self.assertEqual(self.playback.plays, [self.stream(sid, 0)])  # from the oldest
         self.assertLess(self.landed.call_args.args[1], 0)  # short of the target
         self.assertEqual(self.notices, [])
+
+    def test_a_prefetch_source_plays_without_waiting_for_a_backlog(self):
+        # A live site's playlist read at its prefetch pieces (`prefetching`): the backlog the
+        # start fetched has landed before them (`caught_up`), and what follows comes as it is
+        # made, no burst at a time. A start within the band plays at once, whatever the
+        # playlist lists still to come (`backlog_s`: the prefetch pieces' lengths); with
+        # nothing far enough back it plays within a second, as a steady source. HLS without
+        # them waits for a start far enough back, and says so.
+        streaming = {"burst": 0.0, "hls": True, "caught_up": True, "backlog": 8.3}
+        sid = self.start(latency="normal")
+        self.engine.buffer(sid, [], open_seq=0, live_edge=2.6, prefetching=True, **streaming)
+        self.engine.sessionReady.emit(sid)
+        self.assertEqual(self.playback.plays, [self.stream(sid, 0)])  # 3.1 s behind: in band
+        for prefetching in (True, None):
+            with self.subTest(prefetching=prefetching):
+                self.live = self.make()
+                self.notices.clear()
+                sid = self.start(latency="normal")
+                self.engine.buffer(
+                    sid, [], open_seq=0, live_edge=1.2, prefetching=prefetching, **streaming
+                )
+                self.engine.sessionReady.emit(sid)
+                self.step(0.75)
+                self.assertEqual(self.playback.plays, [])
+                self.step(0.25)
+                if prefetching:
+                    self.assertEqual(self.playback.plays, [self.stream(sid, 0)])  # the oldest
+                    self.assertEqual(self.notices, [])
+                else:
+                    self.assertEqual(self.playback.plays, [])
+                    self.assertEqual(self.notices, [LOADING])
+
+    def test_only_stable_starts_behind_a_playlists_prefetch_pieces(self):
+        # Ruling R4: the source starts at a playlist's prefetch pieces for a live delay up to
+        # its bound (Low, Normal, Auto); Stable's (the cushion for jittery providers) keeps
+        # its depth.
+        from services.live import source
+
+        for latency, delay in live_session.LIVE_DELAY.items():
+            with self.subTest(latency=latency):
+                self.assertEqual(delay <= source._PREFETCH_DELAY_MAX_S, latency != "stable")
 
     def test_hls_starts_on_the_edge_its_backlog_will_reach_once_that_start_is_final(self):
         # A sparse-PCR channel's 10 s segments (2 s keyframe intervals), 36 s fetched: the
@@ -6754,6 +6799,34 @@ class LearnedTargetTests(LiveSessionCase):
                 self.tune(latency=latency, edge=10.0).run(2.0)
                 self.assertIsNone(self.live._learned)
                 self.assertEqual(self.timelines[-1]["target"], TARGETS[latency])
+
+    def test_a_prefetch_source_is_not_held_up_by_a_need_remembered_from_whole_pieces(self):
+        # A channel tuned before its pieces were read as they are made remembered the need
+        # its whole pieces made (Kick's 6 s target durations: a 6 s target, ~6 s behind its
+        # edge): a tune that now reads them so (`prefetching`) starts at the floor's target and
+        # learns its own need. A source that does not keeps what it remembered.
+        self.tuning.remember("ch", Tuning(learned=Learned(need=6.0)))
+        # Starts 11, 9, 7, 5 and 3 s behind once VLC opened them (0.5 s).
+        spans = segments(0, 5)
+        for prefetching, target, seq in ((True, 2.5, 4), (False, 6.0, 2)):
+            with self.subTest(prefetching=prefetching):
+                self.live = self.make()
+                sid = self.start(latency=AUTO, channel="ch")
+                self.engine.buffer(
+                    sid,
+                    spans,
+                    live_edge=10.5,
+                    open_seq=5,
+                    hls=True,
+                    caught_up=True,
+                    prefetching=prefetching,
+                )
+                self.engine.sessionReady.emit(sid)
+                self.assertAlmostEqual(self.live._target(self.engine.snapshot(sid)), target)
+                self.assertEqual(len(self.playback.plays), 1)
+                self.assertEqual(self.playback.plays[0][0], self.engine.stream_url(sid, seq))
+                remembered = self.live._learned.arrivals.remembered
+                self.assertEqual(remembered, None if prefetching else 6.0)
 
     def test_the_burst_floor_switch_is_read_once_per_run(self):
         self.enterContext(mock.patch.object(live_session, "SEGMENT_FLOOR", False))

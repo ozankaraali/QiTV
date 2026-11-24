@@ -2243,6 +2243,7 @@ class LiveSession(QObject):
         self._say_scheme(snapshot)
         self._say_not_live(snapshot)
         self._keep_heights(snapshot)
+        self._follow_prefetch(snapshot)
         self._follow_retry(snapshot)
         if part is not None:
             self._follow_buffer_start(part)
@@ -2340,6 +2341,7 @@ class LiveSession(QObject):
             if oldest is not None:
                 self._first_open(oldest, None)  # nothing live to land near
             return
+        self._follow_prefetch(snapshot)  # before the target places the start
         hls = snapshot.get("hls") is True
         ahead = self._ahead(snapshot)
         pick = self._live_start(cushion=True, ahead=ahead)
@@ -2428,8 +2430,11 @@ class LiveSession(QObject):
 
     def _waits_for_cushion(self, snapshot: Mapping[str, Any]) -> bool:
         """A tune with nothing far enough back waits for it: a bursty or HLS source (each
-        arrival brings a burst's worth) and Stable; a steady one has it within a second."""
-        bursty = snapshot.get("hls") is True or _number(snapshot.get("burst_s")) > 0
+        arrival brings a burst's worth) and Stable; a steady one has it within a second, as
+        an HLS source that reads its playlist's prefetch pieces as they are made has
+        (`prefetching`: they come at real time, no piece at a time)."""
+        piecewise = snapshot.get("hls") is True and snapshot.get("prefetching") is not True
+        bursty = piecewise or _number(snapshot.get("burst_s")) > 0
         return bursty or self._latency == "stable"
 
     def _hls_ready(self, snapshot: Mapping[str, Any], lag: float, ahead: float) -> bool:
@@ -2438,7 +2443,10 @@ class LiveSession(QObject):
         (`backlog_s`) and more than a segment of it, the start is already within stay-live's
         band, or the newest start is short of the target there, so nothing still to come can
         bring a nearer one. With a segment or less to come it waits for it: a wrong EXTINF or
-        a missing segment cannot move the start then."""
+        a missing segment cannot move the start then. A source that reads its playlist's
+        prefetch pieces (`prefetching`) is caught up before the first of them (what follows
+        comes as it is made): its start is taken as a steady source's, its listed pieces
+        never waited for."""
         if snapshot.get("caught_up") is True:
             return True
         if not isinstance(snapshot.get("backlog_s"), (int, float)):
@@ -3415,6 +3423,23 @@ class LiveSession(QObject):
             floor=start_target(AUTO),
             segment_floor=SEGMENT_FLOOR,
         )
+
+    def _follow_prefetch(self, snapshot: Mapping[str, Any]) -> None:
+        """Under Auto, a source that reads its playlist's prefetch pieces as they are made
+        (`prefetching`) waits for no whole piece: the need an earlier tune of the channel
+        remembered (one learned from whole pieces held a live site's start ~6 s back, its
+        target duration) no longer stands in for this tune's own (`LearnedTarget.streams`); the
+        steered target follows at once. The channel's next save keeps what this tune learned."""
+        learned = self._learned
+        if learned is None or learned.arrivals.remembered is None:
+            return
+        if snapshot.get("prefetching") is not True:
+            return
+        burst = self._filter.burst_for(_number(snapshot.get("burst_s")))
+        before = learned.target(burst)
+        learned.streams()
+        self._steered.shift(min(0.0, learned.target(burst) - before))
+        _LOG.info("The channel's pieces come as they are made: its remembered need is set aside.")
 
     def _spare(self) -> float:
         """Under Auto, a kept burst's target holds the burst's room and its own margin: a lag

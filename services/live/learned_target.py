@@ -866,6 +866,13 @@ class LearnedTarget:
             self._burst, self._burst_since = burst, now
         self._burst_now = now
 
+    def streams(self) -> None:
+        """The source now reads its pieces as they are made (a live site's HLS prefetch
+        pieces): what an earlier tune remembered of the need (`Learned.need`), learned from
+        whole pieces landing a target duration at a time or from their burst, no longer stands
+        in for this tune's own before its batches are measured. The prior's margin stays."""
+        self.arrivals.remembered = None
+
     def margin(self, burst: float = 0.0) -> float:
         """The margin in force: what the target holds above max(floor, burst, need) (learned
         only: max(floor, need)), after the cap."""

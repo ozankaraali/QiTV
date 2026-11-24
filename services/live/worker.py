@@ -1646,6 +1646,7 @@ class _Session:
         while len(titles) > 1 and titles[1][0] <= timeline.start:
             del titles[0]  # the song after it plays from the buffer's start on
         said = (len(titles), titles[0], titles[-1]) if titles else None
+        prefetching = getattr(source, "prefetching", False) is True
         snapshot: dict[str, Any] = {
             "oldest": oldest,
             "newest": ring.newest_seq if ring is not None else None,
@@ -1656,8 +1657,17 @@ class _Session:
             "bytes": ring.bytes if ring is not None else 0,
             "ended": self._ended,
             # HLS: the target duration, which a reload may change; raw TS: what the meter
-            # measured (0.0 for a steady source). The larger, should both apply.
-            "burst_s": max(source.burst_s if source is not None else 0.0, self._bursts.burst_s),
+            # measured (0.0 for a steady source). The larger, should both apply. 0.0 while
+            # an HLS source reads prefetch pieces: they come as they are made (the meter
+            # would take what the first one had made, sent at once, for a burst).
+            "burst_s": (
+                0.0
+                if prefetching
+                else max(source.burst_s if source is not None else 0.0, self._bursts.burst_s)
+            ),
+            # HLS: its playlist lists prefetch pieces (a live site's newest), read as they are
+            # made: the parent starts it as a steady source.
+            "prefetching": prefetching,
             # Before ready: bytes arrived, though nothing is playable yet (no keyframe).
             "received": self._received,
             # An HLS source: the parent keeps its player at 1x (VLC crawls once its rate

@@ -73,6 +73,16 @@ def hls(sequence, names, *, target=1, ended=False, extra=""):
     return (text + ("#EXT-X-ENDLIST\n" if ended else "")).encode()
 
 
+def prefetching(sequence, names, prefetch, *, target=1, ended=False, tag="#EXT-X-PREFETCH:"):
+    """A live media playlist of finished pieces (`names`, ``target`` seconds each) and after
+    them the pieces still being made (`prefetch`), as a live site lists them: one
+    ``#EXT-X-PREFETCH:<uri>`` line each (``tag``: another site's name for it)."""
+    text = f"#EXTM3U\n#EXT-X-TARGETDURATION:{target}\n#EXT-X-MEDIA-SEQUENCE:{sequence}\n"
+    text += "".join(f"#EXTINF:{target},live\n{name}\n" for name in names)
+    text += "".join(f"{tag}{name}\n" for name in prefetch)
+    return (text + ("#EXT-X-ENDLIST\n" if ended else "")).encode()
+
+
 def drain(source, *, caught_up=False, reconnecting=False):
     """Every item from ``chunks()``, with adjacent byte blocks joined; `CaughtUp` markers
     (the helper's cue to report its live edge, no media) only with `caught_up`, and
@@ -2455,6 +2465,47 @@ video.m3u8
         self.assertEqual(len(lines), 1)
         self.assertRegex(lines[0], r"ends 6\.\d s behind")
 
+    def lag_lines(self, text, names):
+        """The lag lines of a run on the playlist `text` whose pieces are `names` (one second
+        of it: the start's batch, before a reload brings anything new)."""
+        routes = {f"/{name}": (200, {}, self.video) for name in names}
+        routes["/live.m3u8"] = (200, {}, text.encode())
+        server = self.server(routes)
+        stop = threading.Event()
+        timer = threading.Timer(1.0, stop.set)
+        timer.start()
+        with self.assertLogs("services.live.source", "DEBUG") as logs:
+            media(server.url + "/live.m3u8", stop=stop, live_delay=0.0)
+        timer.join()
+        return [r.getMessage() for r in logs.records if "behind the clock" in r.getMessage()]
+
+    @unittest.skipUnless(hasattr(time, "tzset"), "needs time.tzset to set the local zone")
+    def test_a_date_without_a_zone_is_read_as_utc(self):
+        # A PROGRAM-DATE-TIME without a zone read as local time put the piece hours away on
+        # any machine whose clock is not on UTC.
+        when = time.time() - 10
+        stamp = time.strftime("%Y-%m-%dT%H:%M:%S", time.gmtime(when))
+        text = "#EXTM3U\n#EXT-X-TARGETDURATION:4\n#EXT-X-MEDIA-SEQUENCE:0\n"
+        text += f"#EXT-X-PROGRAM-DATE-TIME:{stamp}\n#EXTINF:4,\ns0.ts\n"
+        self.addCleanup(time.tzset)
+        with patch.dict("os.environ", {"TZ": "QIT-5"}):  # five hours east of UTC
+            time.tzset()
+            lines = self.lag_lines(text, ["s0.ts"])
+        self.assertEqual(len(lines), 1)
+        self.assertRegex(lines[0], r"ends [67]\.\d s behind")
+
+    def test_a_prefetch_piece_logs_the_time_since_its_last_byte_came(self):
+        # A piece read as it is made ends at the clock once its last byte came: its date (the
+        # last finished piece's plus that one's length: it would end 2 s behind) is no measure.
+        when = time.time() - 10
+        stamp = time.strftime("%Y-%m-%dT%H:%M:%S", time.gmtime(when))
+        text = "#EXTM3U\n#EXT-X-TARGETDURATION:4\n#EXT-X-MEDIA-SEQUENCE:0\n"
+        text += f"#EXT-X-PROGRAM-DATE-TIME:{stamp}.000Z\n#EXTINF:4,live\ns0.ts\n"
+        text += "#EXT-X-PREFETCH:p1.ts\n"
+        lines = self.lag_lines(text, ["s0.ts", "p1.ts"])
+        self.assertEqual(len(lines), 1)
+        self.assertRegex(lines[0], r"ends 0\.[0-2] s behind")
+
     def test_live_hls_starts_far_enough_back_for_the_sessions_target(self):
         # 2.1: a sparse-PCR channel's 10 s segments fetched from 6 s before the end
         # gave one segment, and VLC ran dry before the next landed. Now: at least three
@@ -3552,6 +3603,283 @@ video.m3u8
                         self.assertEqual(source.burst_s, burst)
                     finally:
                         source.close()
+
+    # ---- a live site's prefetch pieces: read as they are made --------------------------------
+
+    def copies(self, copies, pieces, bodies=None):
+        """A server whose playlist answers each of `copies` in turn (the last one from then
+        on), and `pieces` (names) with the test video, or what `bodies` gives a name."""
+        routes = {f"/{name}": (200, {}, self.video) for name in pieces}
+        routes.update(bodies or {})
+
+        def playlist(_request, count):
+            return 200, {}, copies[min(count, len(copies)) - 1]
+
+        routes["/live.m3u8"] = playlist
+        return self.server(routes)
+
+    def run_for(self, server, seconds, **options):
+        """`media` on the server's playlist, stopped after `seconds`."""
+        stop = threading.Event()
+        timer = threading.Timer(seconds, stop.set)
+        timer.start()
+        try:
+            return media(server.url + "/live.m3u8", stop=stop, **options)
+        finally:
+            timer.cancel()
+
+    def test_prefetch_pieces_are_fetched_after_the_finished_ones(self):
+        names = [f"s{number}.ts" for number in range(6)]
+        server = self.copies(
+            [prefetching(0, names, ["p6.ts", "p7.ts"], target=2)], names + ["p6.ts", "p7.ts"]
+        )
+        self.run_for(server, 0.5, live_delay=100.0)  # all of it, before the first reload
+        self.assertEqual(requested_segments(server), names + ["p6.ts", "p7.ts"])
+
+    def test_starts_at_the_first_prefetch_piece(self):
+        # Under Auto, Normal and Low: not the target's depth back from the end (three 6 s
+        # target durations, Kick's: 7.6 s behind the clock in all). Under Stable (ruling R4),
+        # its cushion: as far back as without prefetch pieces.
+        names = [f"s{number}.ts" for number in range(8)]
+        copy = prefetching(0, names, ["p8.ts", "p9.ts"], target=2)
+        cases = (  # (latency, live delay, the session's target, the first piece fetched)
+            ("auto", 6.0, 3.0, "p8.ts"),
+            ("normal", 6.0, 2.5, "p8.ts"),
+            ("low", 3.0, 1.0, "p8.ts"),
+            ("stable", 12.0, 6.0, "s2.ts"),  # 12 s back from the last finished piece's end
+        )
+        for latency, delay, target, first in cases:
+            with self.subTest(latency=latency):
+                server = self.copies([copy], names + ["p8.ts", "p9.ts"])
+                self.run_for(server, 0.5, live_delay=delay, target=target)
+                self.assertEqual(requested_segments(server)[0], first)
+
+    def test_a_resumed_run_joins_its_earlier_one_before_the_prefetch_pieces(self):  # 2.8
+        # The pieces between the earlier run's last one and the first prefetch piece come
+        # too: nothing is left out where they join (as far back as the usual depth).
+        names = [f"s{number}.ts" for number in range(8)]
+        copy = prefetching(0, names, ["p8.ts", "p9.ts"], target=2)
+        for after, first in ((5, "s6.ts"), (8, "p9.ts"), (1, "p8.ts")):
+            with self.subTest(after=after):
+                server = self.copies([copy], names + ["p8.ts", "p9.ts"])
+                self.run_for(server, 0.5, live_delay=6.0, target=2.5, after_seq=after)
+                self.assertEqual(requested_segments(server)[0], first)
+
+    def test_a_prefetch_piece_streams_its_bytes_as_they_come(self):
+        # A piece still being made sends what it has, then the rest at real time: its first
+        # bytes pass on at once, not once the piece is whole (four quarters, 0.3 s apart).
+        quarter = len(self.video) // 188 // 4 * 188
+        cuts = [0, quarter, 2 * quarter, 3 * quarter, len(self.video)]
+        ended = []
+
+        def trickle(request):
+            for index in range(4):
+                if index:
+                    time.sleep(0.3)
+                request.wfile.write(self.video[cuts[index] : cuts[index + 1]])
+                request.wfile.flush()
+            ended.append(time.monotonic())
+
+        copy = prefetching(0, ["s0.ts"], ["p1.ts"], target=4)
+        server = self.copies([copy], ["s0.ts"], {"/p1.ts": (200, {}, trickle)})
+        stop = threading.Event()
+        timer = threading.Timer(3.0, stop.set)  # a bound: nothing new comes after p1
+        timer.start()
+        source = open_source(server.url + "/live.m3u8", headers={}, verify_ssl=True, stop=stop)
+        first = None
+        try:
+            for item in source.chunks():
+                if isinstance(item, bytes) and first is None:
+                    first = time.monotonic()
+                if ended:
+                    break
+        finally:
+            source.close()
+            timer.cancel()
+        self.assertEqual(requested_segments(server), ["p1.ts"])
+        self.assertIsNotNone(first)
+        self.assertLess(first, ended[0] - 0.6)  # before the last two quarters were sent
+
+    def test_a_prefetch_piece_relisted_finished_is_not_fetched_again(self):
+        names = [f"s{number}.ts" for number in range(6)]
+        copies = [
+            prefetching(0, names, ["p6.ts", "p7.ts"], target=2),
+            prefetching(1, names[1:] + ["p6.ts"], ["p7.ts", "p8.ts"], target=2),
+            hls(2, names[2:] + ["p6.ts", "p7.ts", "p8.ts"], target=2, ended=True),
+        ]
+        server = self.copies(copies, names + ["p6.ts", "p7.ts", "p8.ts"])
+        media(server.url + "/live.m3u8", live_delay=6.0)
+        self.assertEqual(requested_segments(server), ["p6.ts", "p7.ts", "p8.ts"])
+
+    def test_caught_up_comes_before_the_prefetch_fetches(self):
+        # The start's backlog has landed once the finished pieces came: what follows comes as
+        # it is made, and the session need not wait for it (under Stable too, which fetches
+        # finished pieces first). The media still to come counts finished pieces only.
+        names = [f"s{number}.ts" for number in range(8)]
+        copy = prefetching(0, names, ["p8.ts", "p9.ts"], target=2)
+        for delay, target, before in ((6.0, 2.5, []), (12.0, 6.0, names[2:])):
+            with self.subTest(live_delay=delay):
+                server = self.copies([copy], names + ["p8.ts", "p9.ts"])
+                stop = threading.Event()
+                source = open_source(
+                    server.url + "/live.m3u8",
+                    headers={},
+                    verify_ssl=True,
+                    stop=stop,
+                    live_delay=delay,
+                    target=target,
+                )
+                seen, rest = None, []
+                try:
+                    for item in source.chunks():
+                        if isinstance(item, bytes) and source.segment_sequence is not None:
+                            rest.append((source.segment_sequence, source.rest_s))
+                        if isinstance(item, CaughtUp):
+                            seen = list(requested_segments(server))
+                            break
+                finally:
+                    source.close()
+                self.assertEqual(seen, before)
+                if before:  # s2..s7: 2 s each, nothing counted for p8 and p9
+                    self.assertEqual(rest[0], (2, 10.0))
+
+    def test_a_prefetch_piece_that_breaks_is_skipped_once(self):
+        # Missing, or cut off after its first bytes: skipped with a marker, never asked again
+        # (its sequence is passed once a later copy lists it finished), and the next one comes.
+        names = [f"s{number}.ts" for number in range(6)]
+        copies = [
+            prefetching(0, names, ["p6.ts", "p7.ts"], target=2),
+            prefetching(2, names[2:] + ["p6.ts", "p7.ts"], ["p8.ts", "p9.ts"], target=2),
+            hls(4, names[4:] + ["p6.ts", "p7.ts", "p8.ts", "p9.ts"], target=2, ended=True),
+        ]
+
+        def cut(request):
+            request.wfile.write(self.video[: 188 * 10])
+            request.wfile.flush()
+
+        broken = {
+            "missing": (404, {}, b"Not found"),
+            "cut": (200, {"Content-Length": str(len(self.video))}, cut),
+        }
+        for name, route in broken.items():
+            with self.subTest(name):
+                pieces = names + ["p6.ts", "p8.ts", "p9.ts"]
+                server = self.copies(copies, pieces, {"/p7.ts": route})
+                parts = media(server.url + "/live.m3u8", live_delay=6.0)
+                self.assertEqual(requested_segments(server), ["p6.ts", "p7.ts", "p8.ts", "p9.ts"])
+                self.assertEqual(server.counts["/p7.ts"], 1)
+                self.assertEqual(sum(isinstance(part, Discontinuity) for part in parts), 1)
+                self.assertIsInstance(parts[-2], Discontinuity)  # before p8 and p9
+                self.assertEqual(plain(parts[-1]), plain(self.video * 2))
+
+    def test_a_prefetch_source_reports_no_burst(self):
+        # Its pieces come as they are made, not a target duration at a time: no burst, from
+        # the first state on and after reloads; without prefetch pieces, as before.
+        names = [f"s{number}.ts" for number in range(4)]
+        copies = [
+            prefetching(0, names, ["p4.ts", "p5.ts"], target=6),
+            prefetching(1, names[1:] + ["p4.ts"], ["p5.ts", "p6.ts"], target=6),
+        ]
+        server = self.copies(copies, names + ["p4.ts", "p5.ts", "p6.ts"])
+        source = open_source(
+            server.url + "/live.m3u8", headers={}, verify_ssl=True, stop=threading.Event()
+        )
+        bursts = [(source.prefetching, source.burst_s)]
+        try:
+            for _item in source.chunks():
+                bursts.append((source.prefetching, source.burst_s))
+                if "p6.ts" in requested_segments(server):
+                    break
+        finally:
+            source.close()
+        self.assertGreaterEqual(server.counts["/live.m3u8"], 2)
+        self.assertEqual(set(bursts), {(True, 0.0)})
+        plain_server = self.copies([hls(0, names, target=6)], names)
+        source = open_source(
+            plain_server.url + "/live.m3u8", headers={}, verify_ssl=True, stop=threading.Event()
+        )
+        try:
+            self.assertEqual((source.prefetching, source.burst_s), (False, 6.0))
+        finally:
+            source.close()
+
+    def test_without_prefetch_the_depth_is_unchanged(self):
+        # (test_live_hls_starts_far_enough_back_for_the_sessions_target's cases, pinned.)
+        names = [f"s{number}.ts" for number in range(8)]
+        cases = ((10, 2.5, 6.0, 5), (6, 2.5, 6.0, 5), (2, 6.0, 12.0, 2), (2, 1.0, 3.0, 5))
+        for duration, target, delay, first in cases:
+            with self.subTest(duration=duration, target=target):
+                server = self.copies([hls(0, names, target=duration)], names)
+                source = open_source(
+                    server.url + "/live.m3u8",
+                    headers={},
+                    verify_ssl=True,
+                    stop=threading.Event(),
+                    live_delay=delay,
+                    target=target,
+                )
+                try:
+                    self.assertIs(source.prefetching, False)
+                    next(item for item in source.chunks() if isinstance(item, bytes))
+                finally:
+                    source.close()
+                self.assertEqual(requested_segments(server)[0], names[first])
+
+    def test_a_reload_that_brings_no_new_piece_while_prefetching_comes_within_a_second(self):
+        # A copy that lists nothing new is asked again a second later, not half a 6 s target
+        # duration (3 s): the pieces stream as they are made, and the start holds ~3 s.
+        names = [f"s{number}.ts" for number in range(4)]
+        first = prefetching(0, names, ["p4.ts", "p5.ts"], target=6)
+        newer = prefetching(1, names[1:] + ["p4.ts"], ["p5.ts", "p6.ts"], target=6)
+        asked = []
+        copies = [first, first, newer]
+
+        def playlist(_request, count):
+            asked.append(time.monotonic())
+            return 200, {}, copies[min(count, len(copies)) - 1]
+
+        routes = {f"/{name}": (200, {}, self.video) for name in names + ["p4.ts", "p5.ts", "p6.ts"]}
+        routes["/live.m3u8"] = playlist
+        server = self.server(routes)
+        source = open_source(
+            server.url + "/live.m3u8", headers={}, verify_ssl=True, stop=threading.Event()
+        )
+        try:
+            for _item in source.chunks():
+                if "p6.ts" in requested_segments(server):
+                    break
+        finally:
+            source.close()
+        self.assertEqual(requested_segments(server), ["p4.ts", "p5.ts", "p6.ts"])
+        self.assertEqual(len(asked), 3)
+        self.assertLess(asked[2] - asked[1], 1.5)  # the stale copy's reload: a second later
+
+    def test_a_prefetch_piece_is_listed_as_the_piece_it_will_be(self):
+        # Its length and date follow the last finished piece's; it has that one's key and map
+        # (fMP4: it is remuxed whole, as any). Without a finished piece: the target duration
+        # and no date. A finished playlist (ENDLIST) has no piece still being made.
+        url = "https://cdn.example.test/live/media.m3u8"
+        text = (
+            "#EXTM3U\n#EXT-X-TARGETDURATION:6\n#EXT-X-MEDIA-SEQUENCE:40\n"
+            '#EXT-X-MAP:URI="init.mp4"\n#EXT-X-KEY:METHOD=AES-128,URI="key.bin"\n'
+            "#EXT-X-PROGRAM-DATE-TIME:2026-11-24T10:00:00.000Z\n"
+            "#EXTINF:2.000,live\na.mp4\n#EXTINF:2.000,live\nb.mp4\n"
+            "#EXT-X-TWITCH-PREFETCH:https://cdn.example.test/live/c.mp4\n"
+            "#EXT-X-TWITCH-PREFETCH:https://cdn.example.test/live/d.mp4\n"
+        )
+        playlist, _heights = source_module._select_manifest(text.encode(), url)
+        a, b, c, d = playlist.segments
+        self.assertEqual([c.uri, d.uri], [f"https://cdn.example.test/live/{n}.mp4" for n in "cd"])
+        self.assertEqual((c.duration, d.duration, c.title), (2.0, 2.0, "prefetch"))
+        dates = [piece.program_date_time.isoformat() for piece in (c, d)]
+        self.assertEqual(dates, ["2026-11-24T10:00:04+00:00", "2026-11-24T10:00:06+00:00"])
+        self.assertEqual((c.init_section.uri, c.key.uri), ("init.mp4", "key.bin"))
+        self.assertEqual((d.base_uri, d.media_sequence), (b.base_uri, 43))
+        bare = "#EXTM3U\n#EXT-X-TARGETDURATION:6\n#EXT-X-PREFETCH:p0.ts\n"
+        (piece,) = source_module._select_manifest(bare.encode(), url)[0].segments
+        self.assertEqual((piece.duration, piece.program_date_time), (6.0, None))
+        ended = prefetching(0, ["a.ts"], ["b.ts"], target=2, ended=True)
+        self.assertEqual(len(source_module._select_manifest(ended, url)[0].segments), 1)
 
 
 class FragmentedMp4Tests(SourceTestCase):
