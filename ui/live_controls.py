@@ -1114,6 +1114,8 @@ class LiveControls(QObject):
             self._explain_failure(current, message)
             self._gave_up()
             return
+        if current is not None and self._site_again(current):
+            return  # a site's channel failed after it played: the site is asked again, once
         if current is not None and self.may_retry(current):
             self.retry(current)  # STB play tokens expire: a fresh link before the error
             return
@@ -1129,6 +1131,25 @@ class LiveControls(QObject):
         self._error(_named(title, translate(message)))  # the player's, or LiveSession's N_
         self._explain_failure(current, message)
         self._gave_up()
+
+    def _site_again(self, current: Target) -> bool:
+        """A site's channel (Kick, Twitch) whose buffer failed after it played, most likely
+        because the token of the address it plays ran out: tuned again once, so its lane asks
+        the site for a fresh address (a plain restart: no buffer is kept)."""
+        if (
+            not current.live
+            or current.retried
+            or not (current.played or self._played)
+            or self._site_page(current.item) is None
+            or self._reask is None
+            or not self._link_may_try(current)
+        ):
+            return False
+        logger.info("Asking the site of %s again after its buffer failed", current.title)
+        played = current.played or self._played
+        self.stop_tune()  # its slot goes back, also if the new link does not come
+        self._request(replace(current, retried=True, played=played))
+        return True
 
     def _explain_failure(self, current: Optional[Target], message: str = "") -> None:
         """Why `current` failed for good: a link says it plainly first (`link_failed`, from

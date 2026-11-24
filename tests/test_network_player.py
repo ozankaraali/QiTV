@@ -1011,18 +1011,67 @@ class SiteTests(PlayerCase):
         self.assertNotIn("after_seq", kwargs)
         self.assertEqual(len(self.starts()), starts)  # the same player, no new helper run
 
-    def test_an_ad_break_does_not_reopen(self):
+    def test_a_direct_play_with_a_stale_ad_flag_still_reopens(self):
+        # The session's ad break is a pipeline's (Task 4 owns it): a direct play whose flag
+        # was left set (a fall-back during a break) must reopen when it drops.
         self.enterContext(mock.patch("ui.live_controls.RECONNECT_MS", (50, 50)))
         self.answers = [MASTER, MASTER_FRESH]
         self.link(KICK_PAGE)
         self.live.play_direct()
         self.plays_now()
-        self.live.in_ad_break = lambda: True  # the session skips a break now
+        self.live.in_ad_break = lambda: False  # (the phase gate: DIRECT is never in a break)
         plays = len(self.session.plays)
         self.session.ended.emit()
-        pause(400)
-        self.assertEqual(len(self.session.plays), plays)
-        self.assertEqual(len(self.asked), 1)  # the site was not asked again
+        self.assertTrue(wait_until(lambda: len(self.session.plays) == plays + 1))
+        self.assertEqual(self.session.plays[-1][0], MASTER_FRESH)
+
+    def pipeline_fails(self, message=STREAM_REFUSED):
+        """The page plays through the buffer, shows its picture, and the buffer fails."""
+        self.link(KICK_PAGE)
+        self.live.play_pipeline()
+        self.plays_now()
+        starts = len(self.starts())
+        self.live.failed.emit(message)
+        return starts
+
+    def test_a_site_link_whose_buffer_fails_asks_the_site_again(self):
+        self.answers = [MASTER, MASTER_FRESH]
+        starts = self.pipeline_fails()
+        self.assertTrue(wait_until(lambda: len(self.starts()) == starts + 1))
+        self.assertEqual(self.starts()[-1][0], MASTER_FRESH)
+        self.assertEqual(len(self.asked), 2)
+        self.assertEqual(self.errors(), [])  # no refusal toast
+
+    def test_a_site_that_is_off_the_air_after_a_buffer_failure_says_so(self):
+        self.answers = [MASTER, SiteError("offline")]
+        self.pipeline_fails()
+        self.assertTrue(wait_until(lambda: self.errors()))
+        self.assertEqual(self.errors(), ["examplechannel isn't live now"])
+        self.assertEqual(
+            self.store.get(stream_id(KICK_PAGE)).failed, "examplechannel isn't live now"
+        )
+
+    def test_a_site_link_asks_again_once_only(self):
+        self.answers = [MASTER, MASTER_FRESH]
+        starts = self.pipeline_fails()
+        self.assertTrue(wait_until(lambda: len(self.starts()) == starts + 1))
+        self.live.play_pipeline()
+        self.plays_now()
+        self.live.failed.emit(STREAM_REFUSED)  # again: given up as ever
+        self.assertTrue(wait_until(lambda: self.errors()))
+        self.assertEqual(len(self.asked), 2)
+        self.assertEqual(len(self.starts()), starts + 1)
+
+    def test_another_link_whose_buffer_is_refused_is_not_tuned_again(self):
+        self.link(URL)
+        self.live.play_pipeline()
+        self.plays_now()
+        starts = len(self.starts())
+        self.live.failed.emit(STREAM_REFUSED)
+        pause(200)
+        self.assertEqual(len(self.starts()), starts)
+        self.assertTrue(self.errors())  # the refusal says so as ever
+        self.assertEqual(self.asked, [])
 
     def test_a_site_that_is_off_the_air_when_it_reopens_says_so(self):
         self.answers = [MASTER, SiteError("offline")]

@@ -2769,7 +2769,7 @@ class LiveSession(QObject):
     # ---- coming back by itself (`services.revive`) ---------------------------------------
     def in_ad_break(self) -> bool:
         """A live site's ad break is skipped now (the helper's `ad_break`)."""
-        return self._ad_break
+        return self._ad_break and self._phase is _Phase.PIPELINE
 
     def revives(self) -> bool:
         """Its direct play of the channel opens again by itself once it ends or fails: it
