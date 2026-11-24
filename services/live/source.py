@@ -135,6 +135,7 @@ _FROZEN_TIMEOUT = 60.0
 _STALE_TARGETS = 3
 _RECENT_SEGMENTS = 10
 _wall_time = time.time  # 2.7: a server part's time of day; tests replace it
+_LAG_LOG_S = 10.0  # the lag line is logged at most this often
 _HOLD_POLL_S = 0.25  # 2.7: how often a held source asks again
 # 2.7.1 ("Prefer HTTPS"): an http:// address is asked over HTTPS first, connecting within this;
 # the hosts whose HTTPS did not open are asked over HTTP at once for the rest of the run.
@@ -1607,6 +1608,7 @@ class HlsSource:
         self._last_copy: tuple[str, bytes, Any] | None = (
             (url, copy, playlist) if copy is not None else None
         )
+        self._lag_logged = -_LAG_LOG_S  # when the lag line was last logged (monotonic)
         self._whole_seq: int | None = None  # the last segment that arrived whole's sequence
         back = window.get("back_s") if window is not None else None
         if window is not None and back is None and _archive_window(window):
@@ -2133,8 +2135,20 @@ class HlsSource:
             self._delivered = True
             self._last_whole = (self._serial, float(segment.duration or 0))
             self._whole_seq = sequence
+            self._log_lag(segment)
         else:
             self._skip(failure, content)
+
+    def _log_lag(self, segment: Any) -> None:
+        """The latency instrument: how far behind the clock a finished piece ends (its
+        PROGRAM-DATE-TIME plus its length), at most once per `_LAG_LOG_S`."""
+        dated = segment.program_date_time
+        now = time.monotonic()
+        if dated is None or now - self._lag_logged < _LAG_LOG_S:
+            return
+        self._lag_logged = now
+        behind = _wall_time() - (dated.timestamp() + float(segment.duration or 0))
+        log.debug("The newest HLS piece fetched ends %.1f s behind the clock.", behind)
 
     @property
     def next_pts(self) -> int | None:

@@ -2431,6 +2431,30 @@ video.m3u8
                 fetched = [path[1:] for path, _headers in server.requests if path.endswith(".ts")]
                 self.assertEqual(fetched, names[first:])
 
+    def test_logs_how_far_the_newest_piece_ends_behind_the_clock(self):
+        # The latency instrument: the last piece's date is now - 10 s and it lasts 4 s, so it
+        # ends about 6 s behind the clock (the start is at the last piece: one line).
+        names = [f"s{number}.ts" for number in range(3)]
+        routes = {f"/{name}": (200, {}, self.video) for name in names}
+        now = time.time()
+        text = "#EXTM3U\n#EXT-X-TARGETDURATION:4\n#EXT-X-MEDIA-SEQUENCE:0\n"
+        for number, name in enumerate(names):
+            when = now - 10 - 4 * (len(names) - 1 - number)
+            stamp = time.strftime("%Y-%m-%dT%H:%M:%S", time.gmtime(when))
+            stamp += f".{int(when % 1 * 1000):03d}Z"
+            text += f"#EXT-X-PROGRAM-DATE-TIME:{stamp}\n#EXTINF:4,\n{name}\n"
+        routes["/live.m3u8"] = (200, {}, text.encode())
+        server = self.server(routes)
+        stop = threading.Event()
+        timer = threading.Timer(1.0, stop.set)  # before the first reload
+        timer.start()
+        with self.assertLogs("services.live.source", "DEBUG") as logs:
+            media(server.url + "/live.m3u8", stop=stop, live_delay=0.0)
+        timer.join()
+        lines = [r.getMessage() for r in logs.records if "behind the clock" in r.getMessage()]
+        self.assertEqual(len(lines), 1)
+        self.assertRegex(lines[0], r"ends 6\.\d s behind")
+
     def test_live_hls_starts_far_enough_back_for_the_sessions_target(self):
         # 2.1: a sparse-PCR channel's 10 s segments fetched from 6 s before the end
         # gave one segment, and VLC ran dry before the next landed. Now: at least three
