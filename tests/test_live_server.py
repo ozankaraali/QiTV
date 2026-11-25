@@ -464,6 +464,63 @@ class StreamServerTests(unittest.TestCase):
         self.assertGreater(len(pts), 60)  # its pictures came on under our video PID
         self.assertEqual({b - a for a, b in zip(pts, pts[1:])}, {3600})
 
+    def test_a_mapped_join_stays_whole_when_reads_end_inside_packets(self):
+        # Second review (Critical): the map's output differs in length from what was read (a
+        # packet left over, a metadata PID left out), and the stream advanced by the output:
+        # bytes came again or were skipped right after the join.
+        from test_repeat_trimmer import packets, pid_of, video_pts
+
+        from ts_fixtures import AUDIO_PID, PMT_PID, VIDEO_PID, _psi_packet
+
+        self.enterContext(patch.object(server_module, "_CHUNK", 1_000))  # (inside packets)
+        server = self.start_server()
+        part, part_data = self.ts_ring(900_000)
+        live, live_data = self.ts_ring(70_000_000, segments=2)
+
+        def their_pmt(cc):
+            streams = b"\x1b" + (0xE000 | 0x200).to_bytes(2, "big") + b"\xf0\x00"
+            streams += b"\x0f" + (0xE000 | 0x201).to_bytes(2, "big") + b"\xf0\x00"
+            streams += b"\x15" + (0xE000 | 0x202).to_bytes(2, "big") + b"\xf0\x00"  # metadata
+            body = (0xE000 | 0x200).to_bytes(2, "big") + b"\xf0\x00" + streams
+            head = bytes([0x02]) + (0xB000 | (5 + len(body) + 4)).to_bytes(2, "big")
+            return _psi_packet(PMT_PID, head + b"\x00\x01\xc1\x00\x00" + body, cc)
+
+        meta = b"\x47\x42\x02\x10" + b"\x00" * 184
+        moved = {VIDEO_PID: 0x200, AUDIO_PID: 0x201}
+
+        def renumbered(data):
+            out = b""
+            for n, p in enumerate(packets(data)):
+                pid = pid_of(p)
+                if pid == PMT_PID:
+                    p = their_pmt(p[3] & 0x0F)
+                elif pid in moved:
+                    to = moved[pid]
+                    p = p[:1] + bytes([(p[1] & 0xE0) | (to >> 8), to & 0xFF]) + p[3:]
+                out += p + (meta if n % 7 == 3 else b"")
+            return out
+
+        theirs = RamRing()
+        for seq in range(2):
+            head = live.read_at(seq, 0, 376)[0]
+            body = live.read_at(seq, 376, 10**7)[0]
+            theirs.open_segment(seq, renumbered(head))
+            theirs.append(renumbered(body))
+            theirs.complete(seq)
+        server.add_session(
+            "part", part, lambda: True, program=lambda: (VIDEO_PID, 0x1B), joins=True
+        )
+        server.add_session("live", theirs, lambda: False, program=lambda: (0x200, 0x1B))
+        server.join("part", "live", 1)
+        client = self.client(server.stream_url("part", 0))
+        wanted = len(part_data) + len(live_data) // 2 - 188 * 8
+        received = client.read(wanted, timeout=5.0)
+        self.assertEqual(len(received), wanted)
+        self.assertTrue(all(p[0] == 0x47 for p in packets(received)))  # aligned throughout
+        self.assertFalse({pid_of(p) for p in packets(received)} & {0x200, 0x201, 0x202})
+        pts = [p for p in video_pts(received) if p is not None]
+        self.assertEqual({b - a for a, b in zip(pts, pts[1:])}, {3600})  # none twice, none lost
+
     def test_a_join_whose_video_differs_ends_the_stream_there(self):
         from ts_fixtures import VIDEO_PID
 

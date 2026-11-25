@@ -106,12 +106,31 @@ class ModeTests(unittest.TestCase):
         sl.user_paused()
         sl.user_speed(1.5)
         S = T + 0.2
-        self.assertEqual(sl.update(S + 1e-6, False, now=clock.tick()), Decision(1.5))
-        self.assertEqual(sl.update(S, True, now=clock.tick()), Decision(1.5))  # buffering
+        self.assertEqual(sl.update(S + 2.0 + 1e-6, False, now=clock.tick()), Decision(1.5))
+        self.assertEqual(sl.update(S + 1e-6, False, now=clock.tick()), Decision(1.10))  # eased
+        self.assertEqual(sl.update(S, True, now=clock.tick()), Decision(1.10))  # buffering
         self.assertIs(sl.mode, Mode.CATCHING_UP)
         self.assertEqual(sl.update(100, False, now=clock.tick()), Decision(1.5))  # no reopen
         self.assertEqual(sl.update(S, False, now=clock.tick()), Decision(1.0))
         self.assertIs(sl.mode, Mode.LIVE)
+
+    def test_a_chosen_speed_eases_before_live_so_it_never_runs_dry(self):
+        # Live, Kick (2026-11-25): at 2x VLC ran dry a moment just before live (it reads
+        # ahead, and the newest piece comes in real time). Above 1.10x the rate eases to 1.10x
+        # 4 s (per 1x above 1x) before it would settle; 1.10x takes the rest, then LIVE at 1x.
+        sl, clock = StayLive(), Clock()
+        sl.user_paused()
+        sl.user_speed(2.0)
+        S = T + 0.2
+        self.assertEqual(sl.update(S + 4.0 + 0.1, False, now=clock.tick()), Decision(2.0))
+        self.assertEqual(sl.update(S + 4.0, False, now=clock.tick()), Decision(1.10))
+        self.assertEqual(sl.update(S + 0.5, False, now=clock.tick()), Decision(1.10))
+        self.assertIs(sl.mode, Mode.CATCHING_UP)
+        self.assertEqual(sl.update(S, False, now=clock.tick()), Decision(1.0))
+        self.assertIs(sl.mode, Mode.LIVE)
+        sl.user_paused()
+        sl.user_speed(1.05)  # (a chosen speed at or under 1.10x is as chosen to the end)
+        self.assertEqual(sl.update(S + 0.1, False, now=clock.tick()), Decision(1.05))
 
     def test_reopen_is_edge_triggered(self):
         sl, clock = StayLive(), Clock()

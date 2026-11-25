@@ -8978,6 +8978,34 @@ class SiteRecordingTests(LiveSessionCase):
         self.engine.buffer(sid, self.SPANS[:2], hls=True, window=28.0, dates=[[0.0, 10_000.0]])
         self.assertEqual(self.engine.opened[-1][2]["window"]["until_seq"], 500)
 
+    def test_the_backfill_goes_once_the_buffer_lets_go_of_where_it_joins(self):
+        # Second review: the buffer evicted the piece the backfill joins; a recording part
+        # still stopped where the backfill began, joined it, and ran into nothing.
+        sid, backfill = self.short_buffer_with_backfill()
+        self.assertEqual(self.live._join_target(), -20.0)
+        self.engine.buffer(sid, self.SPANS[1:6], hls=True, window=28.0, dates=[[0.0, 10_000.0]])
+        self.assertIn(backfill, self.engine.closed)
+        self.assertEqual(self.live._join_target(), 2.0)  # the buffer's start again
+        self.live.seek_to(-30.0)
+        self.assertEqual(self.engine.opened[-1][2]["window"]["stop_date"], 10_002.0)
+        self.live._emit_timeline()
+        self.assertEqual(self.timelines[-1]["buffer_start"], 2.0)
+
+    def test_a_join_whose_segment_was_let_go_of_joins_the_buffers_start(self):
+        # Second review: a pause longer than the part reads into the buffer; the segment its
+        # stream joins was evicted: it joins the buffer's first segment instead (no stop).
+        sid = self.playing()
+        own = [Span(0, 0.0, 10.0, False, media_seq=359), Span(1, 10.0, 20.0, False, media_seq=360)]
+        part = self.in_recording(-15.0, own, part_date=9_980.0)
+        self.engine.sessionEnded.emit(part)
+        self.assertEqual(self.engine.joins, [(part, sid, 0)])
+        self.engine.buffer(sid, self.SPANS[3:], hls=True, dates=[[0.0, 10_000.0]])  # evicted
+        self.live._tick()
+        self.assertEqual(self.engine.joins[-1], (part, sid, 3))
+        self.assertAlmostEqual(self.live._join_shift, 6.0)
+        self.live._tick()
+        self.assertEqual(len(self.engine.joins), 2)  # once
+
     def test_at_where_the_recording_does_not_reach_yet_play_waits_and_goes_on(self):
         # Brief 2, 8: at 1x and at 2x, play into the stretch the recording does not list yet
         # waits there (buffering), never jumps and never reopens; it goes on as it grows.

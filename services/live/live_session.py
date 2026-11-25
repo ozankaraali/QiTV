@@ -2606,6 +2606,7 @@ class LiveSession(QObject):
         self._say_not_live(snapshot)
         if self._site_rec is not None and self._backfill is None and self._bf_tries:
             self._open_backfill(self._site_rec)  # 2.15: once the buffer's first piece is known
+        self._follow_backfill()
         self._follow_ad_break(snapshot)
         self._keep_heights(snapshot)
         self._follow_prefetch(snapshot)
@@ -3354,6 +3355,9 @@ class LiveSession(QObject):
             joined = self._joined
             if part.ended and (joined is None or joined[0] != part.sid):
                 self._arm_join(part)  # (the buffer may hold its segment by now)
+                joined = self._joined
+            elif part.ended and joined is not None and joined[1] >= 0:
+                self._join_again(part, joined[1])  # (its segment may have been evicted)
                 joined = self._joined
             if self._join_at is not None and position >= self._join_at:
                 if joined is None or joined[1] < 0:
@@ -4910,11 +4914,31 @@ class LiveSession(QObject):
                 "What the channel listed before the buffer joins it (%.2f s).", joined.start - end
             )
 
+    def _backfill_gone(self, part: ServerPart) -> bool:
+        """The buffer let go of the piece the backfill joins (review: its join, and so a
+        recording part's into it, would land on nothing)."""
+        if part.until is None or self._sid is None:
+            return False
+        first = buffer_first_media(self._engine.spans(self._sid))
+        return first is not None and first > part.until
+
+    def _follow_backfill(self) -> None:
+        """2.15: once the buffer evicted the piece the backfill joins, the backfill goes (a
+        recording part stops at the buffer's start again: `_join_target`), unless it plays
+        now (its end opens the buffer there, `_hop`)."""
+        part = self._backfill
+        if part is None or self._part is part or not self._backfill_gone(part):
+            return
+        _LOG.info("The buffer let go of where the backfill joined it: the backfill goes.")
+        self._close_backfill()
+
     def _backfill_start(self) -> Optional[float]:
         """Where the backfill begins on the timeline once it is whole, placed and joined to
-        the buffer (None before, or without one)."""
+        the buffer (None before, without one, or once the buffer let go of its join)."""
         part = self._backfill
         if part is None or not part.ended or part.offset is None or self._bf_join is None:
+            return None
+        if self._backfill_gone(part):
             return None
         own = self._engine.spans(part.sid)
         return part.offset + own[0].start if own else None
@@ -4962,6 +4986,30 @@ class LiveSession(QObject):
         once it is there (it fills what the recording does not reach yet), else the buffer's."""
         start = self._backfill_start()
         return start if start is not None else self._buffer_start()
+
+    def _join_again(self, part: ServerPart, seq: int) -> None:
+        """2.15 (review): the buffer's segment a part's stream joins was evicted meanwhile (a
+        pause longer than the part reads into the buffer), or the backfill it joins went:
+        it joins the buffer's first segment instead, so play still runs on with no stop (it
+        skips what the buffer let go of)."""
+        if self._sid is None or self._join_at is None:
+            return
+        spans = self._engine.spans(self._sid)
+        if self._join_backfill:
+            if self._backfill is not None:
+                return
+        elif not spans or any(span.seq == seq for span in spans) or spans[0].seq < seq:
+            return
+        if not spans:
+            return
+        first = spans[0]
+        self._join_backfill = False
+        self._joined, self._join_shift = (part.sid, first.seq), first.start - self._join_at
+        self._engine.join(part.sid, self._sid, first.seq)
+        _LOG.info(
+            "Where the recording joined the buffer was let go of: it joins its start (%.1f s on).",
+            first.start - self._join_at,
+        )
 
     def _arm_backfill_join(self, part: ServerPart, backfill: ServerPart, end: float) -> None:
         """2.15: a recording part ending before the buffer joins the backfill's segment that

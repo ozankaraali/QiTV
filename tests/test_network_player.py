@@ -1558,11 +1558,15 @@ class SiteTests(tvc.RetryPillCase, PlayerCase):
         pause(100)
         self.assertEqual(len(asked), 1)
         # Review (2026-11-25): its stream reopened (a renewed token): the session started
-        # again and forgot the recording, so it is asked again once that plays.
+        # again and forgot the recording, so it is asked again once that plays; at most every
+        # RECORDING_ASK_S per channel (second review), the ask after a reopen held back.
+        self.enterContext(mock.patch("ui.live_controls.RECORDING_ASK_S", 1.0))
         self.live.start(MASTER)
         self.live.play_pipeline()
         self.plays_now()
-        self.assertTrue(wait_until(lambda: len(asked) == 2))
+        pause(150)
+        self.assertEqual(len(asked), 1)  # held back
+        self.assertTrue(wait_until(lambda: len(asked) == 2, timeout_ms=3000))
         self.assertTrue(wait_until(lambda: len(self.live.named("set_site_recording")) == 2))
 
     def test_history_keeps_the_page_not_the_token(self):

@@ -138,6 +138,7 @@ SITE_AGAIN_S = (0.0, 5.0, 15.0, 30.0, 60.0)
 # up to the jitter more (QiTVs that waited together never ask together), the next after the
 # last answered; Try now asks at once, but never sooner than OFFLINE_TRY_S after the last ask.
 OFFLINE_ASK_S = 30.0
+RECORDING_ASK_S = 30.0  # 2.15: a channel's site is asked for its recording at most this often
 OFFLINE_JITTER_S = 15.0
 OFFLINE_TRY_S = 5.0
 
@@ -296,6 +297,9 @@ class LiveControls(QObject):
         # the ask made: (the target, its live session, that session's start count); once a start
         self._recording_asked: Optional[tuple[Target, Any, int]] = None
         self._recording_stop: Callable[[], None] = lambda: None
+        self._recording_at: dict[str, float] = {}  # each page's last ask (monotonic)
+        self._recording_timer = QTimer(self, singleShot=True)  # an ask held back that long
+        self._recording_timer.timeout.connect(self._ask_recording)
         self._link = link
         self._link_failed = link_failed
         self._site_page = site_page
@@ -524,6 +528,7 @@ class LiveControls(QObject):
         self._recording_stop()  # 2.15: an ask for the old channel's recording ends unanswered
         self._recording_stop = lambda: None
         self._recording_asked = None
+        self._recording_timer.stop()
         self._ticks = []
         self._reconnects = 0
         self._link_tries = 0
@@ -1210,6 +1215,14 @@ class LiveControls(QObject):
         setter = getattr(live, "set_site_recording", None)
         if page is None or setter is None:
             return
+        # (review: a channel that keeps reopening is asked at most every RECORDING_ASK_S, the
+        # ask after its reopen held back meanwhile; an earlier ask still out is superseded)
+        since = time.monotonic() - self._recording_at.get(page, -math.inf)
+        if since < RECORDING_ASK_S:
+            self._recording_timer.start(round((RECORDING_ASK_S - since) * 1000))
+            return
+        self._recording_stop()
+        self._recording_at[page] = time.monotonic()
         self._recording_asked = key
 
         def then(found: object) -> None:

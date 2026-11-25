@@ -498,11 +498,13 @@ class _Handler(BaseHTTPRequestHandler):
                 else:
                     if len(first) < 4 * 1024:
                         first += data[: 4 * 1024 - len(first)]
-                    if mapped is not None:
-                        data = mapped.feed(data)
-                    for piece in joiner.feed(data, junction=junction):
+                    read = len(data)  # (the ring's bytes: a map's output differs in length)
+                    sent = mapped.feed(data) if mapped is not None else data
+                    for piece in joiner.feed(sent, junction=junction):
                         self.wfile.write(piece)
                     junction = False
+                    offset += read
+                    continue
                 offset += len(data)
                 continue
             if not complete:
