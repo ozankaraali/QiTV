@@ -4828,12 +4828,23 @@ video.m3u8
 
     # ---- a live site's fMP4 piece being made: passed on fragment by fragment ------------------
 
-    def trickled(self, *, prefetch):
-        """What a source passes on of a live site's fMP4 piece (Twitch's shape: an init
-        section, 2 s pieces, `site_piece`'s four moof/mdat pairs), its body sent a pair every
-        0.3 s, still being made (`prefetch`, the playlist's second piece) or finished (its
-        only one): each TS block with when it came, when the body ended, the piece's TS
-        remuxed whole, and the server."""
+    @staticmethod
+    def site_routes(finished, made, bodies, *, tag="#EXT-X-TWITCH-PREFETCH:"):
+        """A live site's fMP4 playlist (Twitch's shape: an init section, 2 s pieces; another
+        site's with Kick's `tag`) of `finished` pieces, then `made` (still being made), and
+        the pieces' `bodies` by name."""
+        playlist = site_playlist(0, finished, made, tag=tag).replace(
+            b"#EXT-X-MEDIA-SEQUENCE:0\n", b'#EXT-X-MEDIA-SEQUENCE:0\n#EXT-X-MAP:URI="init.mp4"\n'
+        )
+        routes = {"/live.m3u8": (200, {}, playlist), "/init.mp4": (200, {}, SITE_INIT)}
+        routes.update({f"/{name}": (200, {}, body) for name, body in bodies.items()})
+        return routes
+
+    def trickled(self, *, prefetch, tag="#EXT-X-TWITCH-PREFETCH:"):
+        """What a source passes on of a live site's fMP4 piece (`site_routes`, `site_piece`'s
+        four moof/mdat pairs), its body sent a pair every 0.3 s, still being made (`prefetch`,
+        the playlist's second piece) or finished (its only one): each TS block with when it
+        came, when the body ended, the piece's TS remuxed whole, and the server."""
         parts = site_piece(900000)
         ended = []
 
@@ -4846,17 +4857,8 @@ video.m3u8
             ended.append(time.monotonic())
 
         finished, made = (["s0.mp4"], ["p1.mp4"]) if prefetch else (["p1.mp4"], [])
-        playlist = site_playlist(0, finished, made).replace(
-            b"#EXT-X-MEDIA-SEQUENCE:0\n", b'#EXT-X-MEDIA-SEQUENCE:0\n#EXT-X-MAP:URI="init.mp4"\n'
-        )
-        server = self.server(
-            {
-                "/live.m3u8": (200, {}, playlist),
-                "/init.mp4": (200, {}, SITE_INIT),
-                "/s0.mp4": (200, {}, b"".join(site_piece(720000))),
-                "/p1.mp4": (200, {}, trickle),
-            }
-        )
+        bodies = {"s0.mp4": b"".join(site_piece(720000)), "p1.mp4": trickle}
+        server = self.server(self.site_routes(finished, made, bodies, tag=tag))
         stop = threading.Event()
         timer = threading.Timer(4.0, stop.set)  # a bound: nothing new comes after p1
         timer.start()
@@ -4894,6 +4896,57 @@ video.m3u8
         self.assertEqual(len(blocks), 1)
         self.assertGreaterEqual(blocks[0][0], ended[0])
         self.assertEqual(plain(blocks[0][1]), plain(whole))
+
+    def test_another_sites_fmp4_piece_being_made_is_remuxed_whole_as_before(self):
+        # Ruling R29: only Twitch's (its own tags), whose pieces were checked against the
+        # first moof's DTS shift; a low-latency server's (Kick's tag) waits for its piece.
+        blocks, ended, whole, server = self.trickled(prefetch=True, tag="#EXT-X-PREFETCH:")
+        self.assertEqual((server.counts["/p1.mp4"], server.counts["/s0.mp4"]), (1, 0))
+        self.assertEqual(len(blocks), 1)
+        self.assertGreaterEqual(blocks[0][0], ended[0])
+        self.assertEqual(plain(blocks[0][1]), plain(whole))
+
+    def test_a_twitch_piece_cut_off_plays_what_came_and_only_nothing_is_unsupported(self):
+        # A first piece being made whose last box is cut off while its body ends cleanly: the
+        # pairs that came play, then the usual skip marker and the next piece, as after a
+        # broken body; the channel is unsupported only when nothing of it could be read.
+        first, second = b"".join(site_piece(900000)), b"".join(site_piece(936000))
+        remuxer = Fmp4Remuxer()
+        remuxer.init(SITE_INIT)
+        remuxer.begin()
+        came = remuxer.feed(first[:-5])  # three of its four pairs
+        remuxer.begin()
+        after = remuxer.feed(second) + remuxer.end()
+        bodies = {"s0.mp4": first, "p1.mp4": first[:-5], "p2.mp4": second}
+        server = self.server(self.site_routes(["s0.mp4"], ["p1.mp4", "p2.mp4"], bodies))
+        stop = threading.Event()
+        timer = threading.Timer(1.5, stop.set)  # before its next reload
+        timer.start()
+        try:
+            with source_logs() as logs:
+                parts = media(server.url + "/live.m3u8", stop=stop)
+        finally:
+            timer.cancel()
+        self.assertEqual(len(parts), 3)
+        self.assertEqual(plain(parts[0]), plain(came))
+        self.assertIsInstance(parts[1], Discontinuity)
+        self.assertEqual(plain(parts[2]), plain(after))
+        self.assertEqual([server.counts[f"/p{k}.mp4"] for k in (1, 2)], [1, 1])
+        self.assertIn("Skipped an HLS segment (unsupported ).", logs)
+        bodies["p1.mp4"] = first[:100]  # its emsg and the start of its first moof
+        server = self.server(self.site_routes(["s0.mp4"], ["p1.mp4", "p2.mp4"], bodies))
+        parts = []
+        with self.assertRaises(SourceError) as raised:
+            drain_into(
+                open_source(
+                    server.url + "/live.m3u8", headers={}, verify_ssl=True, stop=threading.Event()
+                ),
+                parts,
+            )
+        self.assertEqual(raised.exception.kind, "unsupported")
+        self.assertIn("damaged", str(raised.exception))
+        self.assertEqual(parts, [])
+        self.assertEqual(server.counts["/p2.mp4"], 0)
 
 
 class SlicedTlsSocketTests(unittest.TestCase):

@@ -249,8 +249,29 @@ def top_boxes(data: bytes) -> list[int]:
     starts, at = [], 0
     while at + 8 <= len(data):
         starts.append(at)
-        at += struct.unpack_from(">I", data, at)[0]
+        size = struct.unpack_from(">I", data, at)[0]
+        at += struct.unpack_from(">Q", data, at + 8)[0] if size == 1 else size
     return starts
+
+
+def large(data: bytes) -> bytes:
+    """`data`'s top-level boxes each with a 64-bit largesize (`fragment`'s: each trun's data
+    offset, counted from its moof, moves on by the 8 bytes the moof's head grows and the 8 its
+    mdat's does)."""
+    out, at = bytearray(), 0
+    while at < len(data):
+        size, kind = struct.unpack_from(">I4s", data, at)
+        body = bytearray(data[at + 8 : at + size])
+        if kind == b"moof":
+            find = 0
+            while (find := body.find(b"trun", find)) >= 0:
+                if body[find + 7] & 0x01:  # data-offset-present
+                    offset = struct.unpack_from(">i", body, find + 12)[0]
+                    struct.pack_into(">i", body, find + 12, offset + 16)
+                find += 4
+        out += struct.pack(">I4sQ", 1, kind, 16 + len(body)) + body
+        at += size
+    return bytes(out)
 
 
 # Reading TS.
@@ -795,6 +816,13 @@ class FeedTests(unittest.TestCase):
         with self.subTest("its own init before it"):
             got = b"".join(self.fed(self.remuxer(b""), SITE_INIT + first))
             self.assertEqual(got, self.remuxer(b"").remux(SITE_INIT + first))
+        with self.subTest("64-bit box sizes"):  # cut inside each largesize field too
+            first_large = large(first)
+            self.assertEqual(self.remuxer().remux(first_large), expected[0])
+            heads = [at + step for at in top_boxes(first_large) for step in (3, 6, 10, 14)]
+            for cuts in ([], range(1, len(first_large)), heads, sorted(rng.sample(heads, 9))):
+                got = b"".join(self.fed(self.remuxer(), first_large, cuts))
+                self.assertEqual(got, expected[0])
         with self.subTest("pairs overlapping in time"):  # the same frames on each PID
             overlapping = b"".join(site_piece(900000, lead=2048))
             got = frames(b"".join(self.fed(self.remuxer(), overlapping, inside)))

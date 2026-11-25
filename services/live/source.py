@@ -1394,7 +1394,7 @@ def _finished(segments: Sequence[Any]) -> int:
 def _with_prefetch(playlist: Any) -> Any:
     """A live media playlist with its prefetch pieces (`_site_tags`) after the finished ones,
     each listed as the piece it will be (titled "prefetch"): the last finished piece's length
-    (none listed: the target duration), key and map (fMP4: remuxed as it comes), its date
+    (none listed: the target duration), key and map (fMP4: Twitch's remuxed as it comes), its date
     plus the lengths up to it (none without one), and a discontinuity written before its
     line. A finished playlist (ENDLIST) or a master has none; nor one whose pieces' length is
     not known."""
@@ -1793,10 +1793,11 @@ class HlsSource:
     Fragmented MP4 (CMAF) segments, a playlist with an init section (EXT-X-MAP), are fetched
     whole and remuxed to TS (`Fmp4Remuxer`), the init loaded whenever its URI changes: one
     encrypted (CENC, SAMPLE-AES) or of a codec not remuxed leaves the channel unsupported
-    (direct play) at its first segment, as any segment that is not TS did before. A piece
-    still being made (Twitch's re-encoded variants) is remuxed as it comes instead, each moof
-    and its mdat passed on as they arrive (`_remuxing`), unless a separate audio rendition is
-    woven in (that waits for the whole piece).
+    (direct play) at its first segment, as any segment that is not TS did before. A Twitch
+    piece still being made (its re-encoded variants; `_site`, ruling R29) is remuxed as it
+    comes instead, each moof and its mdat passed on as they arrive (`_remuxing`), unless a
+    separate audio rendition is woven in (that waits for the whole piece); one cut off after
+    some of it played is skipped with a marker, as a broken body is.
 
     A master that names a separate default audio playlist is followed to its variant. When the
     variant's first segment lists no audio of its own in its program tables, the separate
@@ -2522,6 +2523,7 @@ class HlsSource:
             return
         failure: SourceError | None = None
         content = False
+        sent = False  # TS of its own went out (a piece remuxed as it comes, `_remuxing`)
         arrived = time.monotonic()  # when its last bytes came
         joiner = self._joiner
         joiner.segment()
@@ -2531,8 +2533,10 @@ class HlsSource:
             self._capture.mark("segment", sequence)
         try:
             weaving = self._audio_unknown or self._weaver is not None
-            if fragmented and _is_prefetch(segment) and not weaving:
-                blocks = self._remuxing(response, decryptor)  # a piece being made, as it comes
+            if fragmented and self._site and _is_prefetch(segment) and not weaving:
+                # Twitch's piece being made, as it comes (ruling R29: only Twitch's, the DTS
+                # shift seeded from its first moof checked against Twitch's pieces alone)
+                blocks = self._remuxing(response, decryptor)
             elif fragmented:
                 blocks = iter([self._remuxed(response, decryptor)])
             elif self._http.station:  # 2.14: a station's TS, or its packed sound as TS
@@ -2554,13 +2558,16 @@ class HlsSource:
                     yield Discontinuity()
                 self._started = True
                 if block := joiner.feed(block):
+                    sent = True
                     yield block
             if tail := joiner.end():  # a partial packet at the segment's end, as it came
                 yield tail
         except _ReadError as error:
             failure = _translate(error)
         except _BadSegment as error:
-            failure, content = SourceError("unsupported", error.message), True
+            # Content that cannot be read; once some of it played (a piece remuxed as it comes,
+            # its last box cut off), skipped as a broken body is, not the channel unsupported.
+            failure, content = SourceError("unsupported", error.message), not sent
         finally:
             self._http.release(response)
         if failure is None:
