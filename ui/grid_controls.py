@@ -89,7 +89,7 @@ from services.config_manager import ConfigManager
 from services.i18n import N_, tr, translate
 from services.live.refusals import REFUSALS, STREAM_LIMIT, STREAM_REFUSED
 from services.live.stay_live import TARGETS
-from services.network_streams import is_offline, shown_reason
+from services.network_streams import FAILED as NOT_REACHED, TIMED_OUT, is_offline, shown_reason
 from services.provider_ids import with_provider
 from services.redact import safe_message
 from services.revive import Revive
@@ -883,10 +883,15 @@ class GridControls(QObject):
         del self._linking[name]
         if not (self._shown and name in self._names):
             return None
-        if self._site_page(channel) is not None and is_offline(message):
-            first = not self._waits(name, channel)
+        waits = self._waits(name, channel)
+        # (while it waits, an ask that did not reach the site waits on, as the large picture's)
+        if self._site_page(channel) is not None and (
+            is_offline(message) or (waits and message in (TIMED_OUT, NOT_REACHED))
+        ):
+            first = not waits
             self._offline[name] = channel
-            self._cards[name] = _Card(FAILED, channel, waiting_text(shown_reason(message)))
+            if is_offline(message) or self._cards.get(name) is None:
+                self._cards[name] = _Card(FAILED, channel, waiting_text(shown_reason(message)))
             wait = live_controls.OFFLINE_ASK_S + random.uniform(0.0, live_controls.OFFLINE_JITTER_S)
             logger.info("A tile's channel is not live now; its site is asked again in %.0f s", wait)
             self._revive_due[name] = time.monotonic() + wait

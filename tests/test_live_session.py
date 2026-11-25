@@ -8832,6 +8832,35 @@ class SiteRecordingTests(LiveSessionCase):
         self.engine.buffer(part, whole, hls=True, part_date=9_970.0)
         self.assertEqual(self.playback.plays[-1][0], self.engine.stream_url(part, 2))  # -10 on
 
+    def test_a_join_not_flush_with_a_segment_moves_the_position_to_its_picture(self):
+        # Live, Twitch 2026-11-25: the buffer's segment it joined began 0.82 s from where the
+        # recording ended; the stream's clock runs on from the part's end, its picture at that
+        # segment's start: the position follows the picture.
+        sid = self.playing()
+        own = [Span(0, 0.0, 10.0, False, media_seq=359), Span(1, 10.0, 20.6, False, media_seq=360)]
+        part = self.in_recording(-15.0, own, part_date=9_980.0)
+        self.engine.sessionEnded.emit(part)  # it ends at 0.6: the segment at 0.0 is joined
+        self.assertEqual(self.engine.joins, [(part, sid, 0)])
+        self.playback.set_state(PlaybackState.PLAYING)
+        self.advance(24.0)  # from -20 (its piece), past its end at 0.6
+        self.assertFalse(self.live.in_server_part())
+        self.assertAlmostEqual(self.live.position(), 3.4, delta=0.01)  # -20 + 24, less 0.6
+
+    def test_what_the_recording_reaches_grows_with_the_clock(self):
+        # It is known as the site answered, then grows: a minute (Kick's longest step) after,
+        # the stretch it did not reach is there.
+        self.playing()
+        self.live.set_site_recording(
+            RecordingRoute(self.URL, 6_400.0, dated=True, steps=True, until=9_985.0)
+        )
+        self.live._emit_timeline()
+        self.assertIn("window_end", self.timelines[-1])
+        self.live._wall = lambda: 10_200.0 + 130.0
+        self.live._emit_timeline()
+        self.assertNotIn("window_end", self.timelines[-1])
+        self.live.seek_to(-5.0)
+        self.assertEqual(self.engine.opened[-1][2]["window"]["from_s"], 3_595.0)
+
     def test_go_live_leaves_the_recording_and_a_new_tune_forgets_it(self):
         sid = self.playing()
         own = [Span(0, 0.0, 10.0, False, media_seq=0)]

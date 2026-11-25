@@ -469,6 +469,10 @@ _PART_STEP_S = 6.0  # a part that broke off having brought less than this has no
 _RECORDING_MIN_S = 1.0
 _JOIN_SLACK_S = 1.0
 _HOLE_BACK_S = 2.0  # a seek into where it does not reach yet goes back this far before it
+# ... and what is known of where it reaches grows with the clock past its longest step (Kick's
+# lists in steps of 30-60 s; Twitch's grows as it goes)
+_REACH_STEP_S = 60.0
+_REACH_LAG_S = 15.0
 _ARCHIVE_STEP_S = 30.0  # one that brought less than this past its point has nothing more
 # VLC's clock, which moved since the open, standing still this long while VLC plays with media
 # ahead and the source sending is lost (`_clock_lost`): it opens again.
@@ -966,6 +970,10 @@ class LiveSession(QObject):
         self._join_at: Optional[float] = None
         self._site_reach: Optional[float] = None  # the Unix second its listing reaches, as known
         self._joined: Optional[tuple[str, int]] = None  # the join asked: (its part, the segment)
+        # ... and how far that segment begins from where the part ends (its picture is there
+        # as the stream's clock runs on from the part's end: the flip moves the position by it)
+        self._join_shift = 0.0
+        self._reach_at = 0.0  # when `_site_reach` was learned (Unix s: it grows from there)
         self._said_scheme: Optional[str] = None  # 2.7.1: the session whose scheme the log said
         self._from_kept = False
         self._disk_failures = 0  # of the kept buffer taken back, this tune: a second starts afresh
@@ -1618,6 +1626,7 @@ class LiveSession(QObject):
         forgets it); a provider's archive or the channel's own server window give way."""
         self._site_rec = route
         self._site_reach = route.until if route is not None else None
+        self._reach_at = self._wall()
         if route is not None:
             _LOG.info("The site keeps the running broadcast: rewind reaches its start.")
         if self._phase is _Phase.PIPELINE:
@@ -1634,10 +1643,15 @@ class LiveSession(QObject):
         return reach - _HOLE_BACK_S if t < self.position() else start
 
     def _recording_reach(self, snapshot: Mapping[str, Any]) -> Optional[float]:
-        """2.15: where the site's recording reaches on the timeline, as last known; None."""
-        if self._site_rec is None or self._site_reach is None:
+        """2.15: where the site's recording reaches on the timeline (None: not known): as
+        last known, growing with the clock past the longest step its site lists in
+        (`_REACH_STEP_S`; Kick's grows in steps of up to a minute)."""
+        route = self._site_rec
+        if route is None or self._site_reach is None:
             return None
-        return self._t_of_date(snapshot, self._site_reach)
+        step = _REACH_STEP_S if route.steps else _REACH_LAG_S
+        grown = max(0.0, self._wall() - self._reach_at - step)
+        return self._t_of_date(snapshot, self._site_reach + grown)
 
     def _date_offset(self, snapshot: Mapping[str, Any]) -> Optional[float]:
         """2.15: a dated buffer's date less timeline second at its start (its first dated
@@ -3255,6 +3269,8 @@ class LiveSession(QObject):
                 # 2.15: the recording's stream went on into the buffer: one stream, playing on
                 # (VLC opens nothing); should it have ended there, its end opens the buffer.
                 _LOG.info("The site's recording ran into the buffer; playing on there.")
+                if self._joined is not None:
+                    self._base += self._join_shift  # (the picture is at that segment's start)
                 self._leave_part()
         elif self._part_playing and part is not None and part.until is None:
             position = self._advance()
@@ -4751,6 +4767,7 @@ class LiveSession(QObject):
         if self._joined == (part.sid, nearest.seq):
             return  # asked already
         self._joined = (part.sid, nearest.seq)
+        self._join_shift = nearest.start - end
         self._engine.join(part.sid, self._sid, nearest.seq)
         _LOG.info(
             "The site's recording joins the buffer (%.2f s from its end).", nearest.start - end
@@ -4796,6 +4813,7 @@ class LiveSession(QObject):
             listed = snapshot.get("listed_s")
             if self._site_rec is not None and isinstance(listed, (int, float)):
                 self._site_reach = self._site_rec.start + float(listed)  # (it grows)
+                self._reach_at = self._wall()
             if part.ended:
                 self._arm_join(part)  # (its last state after its end: where it ends now)
         elif part.offset is None and isinstance(wall, (int, float)) and self._sid is not None:

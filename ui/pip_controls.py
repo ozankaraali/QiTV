@@ -64,7 +64,7 @@ from services.live.live_session import LOADING, RECONNECTING, UNAVAILABLE
 from services.live.refusals import REFUSALS, STREAM_LIMIT
 from services.live.stay_live import TARGETS
 from services.navigation import payloads
-from services.network_streams import is_offline, shown_reason
+from services.network_streams import FAILED, TIMED_OUT, is_offline, shown_reason
 from services.revive import revive_wait
 from services.sessions import SessionManager, Slot, limit_message, records
 from services.vlc_profile import PlayKind
@@ -696,16 +696,20 @@ class PipControls(QObject):
         shell counts it in its row; nothing more is said), False when it waits on, None for
         any other failure (the shell says it)."""
         wanted = self._wanted
+        waiting = self._offline
+        waits = waiting is not None and ZapContext.same(waiting.item, target.item)
+        # (while it waits, an ask that did not reach the site waits on, as the large picture's)
         if (
             target is not self._link
             or wanted is None
             or wanted[0] is not target
             or self._site_page(target.item) is None
-            or not is_offline(message)
+            or not (is_offline(message) or (waits and message in (TIMED_OUT, FAILED)))
         ):
+            if waits:
+                self._offline = None  # its site said something else: said as ever
             return None
-        waiting = self._offline
-        first = waiting is None or not ZapContext.same(waiting.item, target.item)
+        first = not waits
         self._offline = target
         wait = live_controls.OFFLINE_ASK_S + random.uniform(0.0, live_controls.OFFLINE_JITTER_S)
         logger.info(

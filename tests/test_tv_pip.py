@@ -1857,6 +1857,22 @@ class SitePipTests(PipCase):
         self.assertEqual(self.asked, 3)
         self.assertEqual(self.toast.messages(), said)  # said once, never an error
 
+    def test_a_small_wait_waits_on_through_an_ask_that_did_not_reach_the_site(self):
+        # As the large picture's: while it waits, a network failure or a timeout waits on.
+        self.enterContext(mock.patch("ui.live_controls.OFFLINE_ASK_S", 0.2))
+        self.enterContext(mock.patch("ui.live_controls.OFFLINE_JITTER_S", 0.0))
+        self.answers = [
+            live_sites.SiteError("offline"),
+            live_sites.SiteError("network"),
+            self.MASTER,
+        ]
+        self.start_large(0)
+        self.controller.open_pip(self.kept, group_key=RECENT_GROUP, channels=[self.kept])
+        small = self.sessions.other()
+        self.assertTrue(wait_until(lambda: len(small.live.named("start")) == 1, timeout_ms=4000))
+        self.assertEqual(self.asked, 3)
+        self.assertNotIn("error", [kind for _text, kind in self.toast.messages()])
+
     def test_a_small_wait_ends_when_the_small_picture_closes(self):
         self.enterContext(mock.patch("ui.live_controls.OFFLINE_ASK_S", 0.2))
         self.enterContext(mock.patch("ui.live_controls.OFFLINE_JITTER_S", 0.0))
