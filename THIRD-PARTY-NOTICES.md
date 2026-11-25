@@ -211,5 +211,6 @@ and no translation of it leaves your computer.
 Chromecast, Chromecast built-in and Google Cast are trademarks of Google LLC. QiTV casts through
 VLC's own Chromecast support (see VLC above) and is not affiliated with or endorsed by Google.
 Emby is a trademark of its owner; Plex is a trademark of Plex, Inc.; Jellyfin is the name of the
-Jellyfin project; TMDB is The Movie Database's. Each is named only to say what QiTV works with.
+Jellyfin project; TMDB is The Movie Database's; Kick is a trademark of its owner; Twitch is a trademark of
+Twitch Interactive, Inc. Each is named only to say what QiTV works with.
 X Window System is a trademark of The Open Group (the X11 libraries above).

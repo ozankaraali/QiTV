@@ -71,6 +71,9 @@ STATE_KEYS = {
     "not_live",  # 2.8.11
     "settled_s",  # 2.8.11
     "retry_at",  # the channel's stream down: when its next try is due
+    "prefetching",  # HLS: its playlist's prefetch pieces are read as they are made
+    "piece_s",  # HLS: the last segment's EXTINF (a live site's piece length)
+    "ad_break",  # HLS: a live site's ad break is skipped now
 }
 HEADERS = {"User-Agent": "QiTV-test"}
 MIB = 1024 * 1024
@@ -1202,6 +1205,20 @@ class SpanMessageTests(unittest.TestCase):
         additions = [(0, 0.0, 2.0, False, START_KEY, 7), (1, 2.0, 4.0, False, START_KEY)]
         engine._on_message(("state", sid, {"oldest": 0}, 0, additions))
         self.assertEqual([span.media_seq for span in engine.spans(sid)], [7, None])
+
+    def test_a_dated_sources_dates_reach_the_session_as_the_helper_sent_them(self):
+        # 2026-11-25, the statistics' "Behind the broadcaster": the snapshot is the helper's
+        # latest state whole, its `dates` as sent; none once a state carries none.
+        engine = LiveEngine(tempfile.gettempdir())  # never started: no helper, no buffer
+        self.addCleanup(engine.shutdown)
+        sid = engine.open_session(
+            URL_FOR_RING, headers={}, verify_ssl=True, disk=False, max_bytes=MIB
+        )
+        dates = [[4.0, 1_795_000_000.0], [12.0, None]]
+        engine._on_message(("state", sid, {"oldest": 0, "dates": dates}, 0, []))
+        self.assertEqual(engine.snapshot(sid)["dates"], dates)
+        engine._on_message(("state", sid, {"oldest": 0}, 0, []))
+        self.assertNotIn("dates", engine.snapshot(sid))
 
 
 class LiveEngineTests(unittest.TestCase):

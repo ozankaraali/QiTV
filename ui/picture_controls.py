@@ -118,11 +118,11 @@ class PictureControls(QObject):
         `current()` what it plays and `playing()` whether it has media; `players()` every
         player (deinterlacing is theirs); `keys` each player's channel key in `store`.
         `programme_left()` the seconds until the programme watched ends (None: not known),
-        `live_info()` the statistics' "source" and "lag"; `stop()` stops playback for the
-        sleep timer; `show_transport()` shows the player controls (A opens the panel above
-        them). `audio_screen()` is the audio screen while it shows what plays (None: it does
-        not): its View row. `allow_sleep` and `prevent_sleep` let the computer sleep or keep it
-        awake (services.sleep_manager's)."""
+        `live_info()` the statistics' "source", "lag" and "behind_broadcaster"; `stop()` stops
+        playback for the sleep timer; `show_transport()` shows the player controls (A opens
+        the panel above them). `audio_screen()` is the audio screen while it shows what plays
+        (None: it does not): its View row. `allow_sleep` and `prevent_sleep` let the computer
+        sleep or keep it awake (services.sleep_manager's)."""
         super().__init__(parent)
         self._panel = panel
         self._transport = transport

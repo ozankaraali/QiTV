@@ -124,6 +124,20 @@ much a 2.0.2 extra can say; `MARGIN_ABS_S` (`NEED_MAX_S`) bounds any margin, the
 being the real bound (over 7.5 s only with the burst floor off); `CAP_BURST_S` (1 s) is what
 the cap leaves above a reported burst with the burst floor off.
 
+A source that reads its playlist's prefetch pieces as they are made (a live site's, 2026-11-25:
+`LearnedTarget.streams`) is held within a second of live: its floor is `PREFETCH_FLOOR_S` (1 s,
+rising only with trouble or a real need). Its media comes at real time, so its batches are a
+flow's, cut every `BATCH_SPLIT_S` on the tick grid: their gaps (1-1.5 s) are no waits, yet the
+need read from them came to 1.3-1.6 s on Kick (2026-11-25) with half a second less margin, a
+target above the second the owner asked for with nothing wrong. Streamed (`streaming`), only a
+batch after a still edge is a gap; how far the edge fell below its mean before each batch, the
+waits between pieces included (a request each: Kick's dipped 0.3-0.46 s), is the need, with
+`PREFETCH_MARGIN_S` (`MARGIN_S` less the half second VLC takes to open: its caching and the
+tick, a flow being no open) on top. While the caller holds it close to live (`close`: a target
+in force of about a second), a near-miss is one under `PREFETCH_NEAR_S`, as near for that floor
+as `NEAR_S` is for Normal's (at a second's lag every wait of 0.2 s or more between pieces fell
+under `NEAR_S`, its margin growing with each); at a target trouble raised, `NEAR_S` as ever.
+
 Pure logic: no clock of its own, no Qt, no I/O.
 """
 
@@ -192,6 +206,10 @@ HOURS_MAX = 100.0
 # LearnedTarget
 SEGMENT_FLOOR = True  # a segmented source never goes under its burst (off: learned only)
 CAP_BURST_S = 1.0  # learned only, the cap also lets the target reach the burst + this
+# A source that reads its prefetch pieces as they are made (`LearnedTarget.streams`).
+PREFETCH_FLOOR_S = 1.0
+PREFETCH_MARGIN_S = MARGIN_S - 0.5  # VLC's caching and the tick, not its open
+PREFETCH_NEAR_S = NEAR_S * PREFETCH_FLOOR_S / FLOOR_S
 
 
 def _finite(value: object) -> bool:
@@ -333,6 +351,7 @@ class ArrivalModel:
         self._fresh: Optional[float] = None
         self._dirty = False
         self._estimated: Optional[float] = None  # when `_fresh` was estimated
+        self.streaming = False  # the source reads its pieces as they are made (`streams`)
 
     # ---- what the caller tells ---------------------------------------------------------------
     def add(self, now: float, edge: float) -> bool:
@@ -371,6 +390,10 @@ class ArrivalModel:
         self._edge, self._now = edge, now
         self._sample(now, edge - now)
         return began
+
+    def renew(self) -> None:
+        """Estimate the need afresh on the next ask (`streaming` changed: `streams`)."""
+        self._dirty, self._estimated = True, None
 
     def stall(self) -> None:
         """The source stalled (the caller's bound passed): noted once for the gap in progress.
@@ -639,24 +662,31 @@ class ArrivalModel:
         # download's pieces, a flowing source's) don't hide the deep ones among shallow ones:
         # the 95th percentile of those, troughs and all.
         deepest: dict[int, float] = {}
+        streaming = self.streaming
+        margin = PREFETCH_MARGIN_S if streaming else MARGIN_S
         for g in records:
             if g.after_still and (g.gap if g.cycle is None else g.cycle) > beyond:
                 continue  # trouble, not rhythm
-            gaps.append(g.gap)
+            if g.after_still or not streaming:
+                gaps.append(g.gap)  # (streamed, a flow's split is no wait: its dip counts)
             dip = g.dip
             if dip is not None:
                 slot = int(g.end // DIP_SLICE_S)
                 if dip > deepest.get(slot, -1.0):
                     deepest[slot] = dip
-        if len(gaps) < MIN_GAPS:
-            return None
-        gaps.sort()
-        late = _quantile(gaps, 0.75) - _quantile(gaps, 0.25)
-        lead = MEDIA_SHARE * (self._usual_media or 0.0)  # the edge over its mean at a batch
-        need = max(0.0, _quantile(gaps, QUANTILE) + LATE_SHARE * late - lead) + MARGIN_S
         dips = sorted(deepest.values())
-        if len(dips) >= MIN_GAPS and abs(self._pace() - 1.0) <= DRIFT_SHARE:
-            need = max(need, _quantile(dips, QUANTILE) + MARGIN_S)
+        dipped = len(dips) >= MIN_GAPS and abs(self._pace() - 1.0) <= DRIFT_SHARE
+        if len(gaps) >= MIN_GAPS:
+            gaps.sort()
+            late = _quantile(gaps, 0.75) - _quantile(gaps, 0.25)
+            lead = MEDIA_SHARE * (self._usual_media or 0.0)  # the edge over its mean at a batch
+            need = max(0.0, _quantile(gaps, QUANTILE) + LATE_SHARE * late - lead) + margin
+        elif streaming and dipped:
+            need = 0.0  # a flow that never stood still: its dips alone
+        else:
+            return None
+        if dipped:
+            need = max(need, _quantile(dips, QUANTILE) + margin)
         return min(need, NEED_MAX_S)
 
 
@@ -746,17 +776,21 @@ class StarvationPrior:
             self._hold = HOLD_S
 
     def near_miss(
-        self, headroom: float, margin: Optional[float] = None, room: float = MARGIN_MAX_S
+        self,
+        headroom: float,
+        margin: Optional[float] = None,
+        room: float = MARGIN_MAX_S,
+        near: float = NEAR_S,
     ) -> None:
-        """VLC had only `headroom` seconds left when a batch landed: under `NEAR_S`, part of a
-        starvation, up to `NEAR_WEIGHT` the closer it came. Within `NEAR_CALM_S` of playing of
-        the dip's first, one dip (weighed by the margin in force when it began): only a closer
-        one adds, what it is closer by. Either way the margin holds `HOLD_S` again (it was
-        all but needed)."""
-        if not _finite(headroom) or headroom >= NEAR_S:
+        """VLC had only `headroom` seconds left when a batch landed: under `near` (`NEAR_S`),
+        part of a starvation, up to `NEAR_WEIGHT` the closer it came. Within `NEAR_CALM_S` of
+        playing of the dip's first, one dip (weighed by the margin in force when it began): only
+        a closer one adds, what it is closer by. Either way the margin holds `HOLD_S` again (it
+        was all but needed)."""
+        if not _finite(headroom) or headroom >= near:
             return
         self._hold = HOLD_S
-        share = NEAR_WEIGHT * min(1.0, 1.0 - headroom / NEAR_S)
+        share = NEAR_WEIGHT * min(1.0, 1.0 - headroom / near)
         if self._calm < NEAR_CALM_S:
             share, self._dip = share - self._dip, max(self._dip, share)
             if share <= 0:
@@ -834,6 +868,10 @@ class LearnedTarget:
         (`Tuning.extra`) is read as the prior. `segment_floor`: a segmented source never goes
         under its burst (None: the module's `SEGMENT_FLOOR` now; False: learned only)."""
         self.floor = floor
+        self._floor = floor  # the floor it was made with (`streams`)
+        # Set by the caller: held close to live (a streamed source at a target in force of
+        # about a second): a near-miss is one under `PREFETCH_NEAR_S`, not `NEAR_S`.
+        self.close = False
         self.segment_floor = _floored(segment_floor)
         self._burst = 0.0  # the burst the source reports now (`reported`) ...
         self._burst_since: Optional[float] = None  # ... since when
@@ -865,6 +903,23 @@ class LearnedTarget:
         if burst != self._burst:
             self._burst, self._burst_since = burst, now
         self._burst_now = now
+
+    def streams(self, on: bool = True) -> None:
+        """The source now reads its pieces as they are made (a live site's HLS prefetch
+        pieces), or no longer does (`on` False: the floor it was made with, and the need as for
+        any source, again). While it does, its floor is `PREFETCH_FLOOR_S` and its need is read
+        as a stream's (`ArrivalModel.streaming`; near-misses follow `close`, see the module);
+        and what an earlier tune remembered of the need
+        (`Learned.need`), learned from whole pieces landing a target duration at a time or
+        from their burst, no longer stands in for this tune's own before its batches are
+        measured (set aside for the tune). The prior's margin stays."""
+        arrivals = self.arrivals
+        self.floor = PREFETCH_FLOOR_S if on else self._floor
+        if on != arrivals.streaming:
+            arrivals.streaming = on
+            arrivals.renew()
+        if on:
+            arrivals.remembered = None
 
     def margin(self, burst: float = 0.0) -> float:
         """The margin in force: what the target holds above max(floor, burst, need) (learned
@@ -910,7 +965,8 @@ class LearnedTarget:
         tune saw `MIN_GAPS` batches: VLC is still filling its cushion then."""
         if self.arrivals.seen < MIN_GAPS:
             return
-        self.prior.near_miss(headroom, self.margin(burst), self.room(burst))
+        near = PREFETCH_NEAR_S if self.close else NEAR_S
+        self.prior.near_miss(headroom, self.margin(burst), self.room(burst), near)
 
     def absorbed(self, headroom: float, burst: float = 0.0) -> None:
         """Trouble came (a stall that ended, say) and VLC did not run dry; `headroom`: the

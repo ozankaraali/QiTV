@@ -1154,6 +1154,7 @@ class TVWindow(QMainWindow):
             media_reporter=MediaReporter(  # 2.8: Jellyfin, Emby
                 self._media_servers, verify=lambda: bool(config_manager.ssl_verify)
             ),
+            jobs=self.jobs,  # a Kick or Twitch channel's page asked for its stream
             parent=self,
         )
         self.controller = controller

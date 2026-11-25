@@ -18,6 +18,15 @@ channel that fails gets a fresh link instead (its play token may have expired): 
 first time in a tune and each time it played HEALTHY_S since, then, once it played, after the
 revive's waits. A refusal for the provider's connection limit is never retried and says so.
 
+A Kick or Twitch channel (2026-11-25, the owner): its address's token lasts minutes, so a stream
+of it that fails after it played asks its site again each time (`_site_again`: at once, then
+after `SITE_AGAIN_S` while each fresh one fails before it played `HEALTHY_S`), and says nothing
+while the site answers; the helper's waits for its stream never stop it. One whose site says it
+is not live (chosen so, or as its stream ended: the streamer stopped) waits on screen for it
+(`wait_for_live`): the pill says so, and its site is asked again every `OFFLINE_ASK_S` and up to
+`OFFLINE_JITTER_S` more, one ask at a time, until it is live (it plays from its newest, as any
+tune) or another title is chosen.
+
 Kept buffers (2.6): coming back to a channel whose buffer was kept, it plays live and the
 session offers where the user was (`LiveSession.backOffered`): the Resume pill
 (ui/overlays/back_notice.py) says when for `BACK_NOTICE_MS`, until the channel changes; a click,
@@ -52,6 +61,7 @@ from datetime import datetime, timedelta, timezone
 from itertools import compress, count, repeat
 import logging
 import math
+import random
 import time
 from typing import Any, Callable, Optional, Sequence, cast
 from urllib.parse import urlsplit
@@ -66,20 +76,22 @@ from services.i18n import N_, tr, tr_n, translate
 from services.live import parts as live_parts
 from services.live.live_session import UNAVAILABLE, LiveSession
 from services.live.refusals import REFUSALS, STREAM_LIMIT, STREAM_REFUSED
+from services.live.server_part import RecordingRoute
 from services.live.tuning import channel_key
-from services.network_streams import DOWN, failure_reason
+from services.network_streams import DOWN, failure_reason, shown_reason
 from services.playback import PlaybackState
 from services.provider_api import known_http_only, portal_http_only
 from services.provider_ids import NETWORK_PROVIDER
 from services.revive import revive_wait
 from services.vlc_profile import PlayKind
+from services.zapping import ZapContext
 from ui import item_provider
 from ui.catchup_controls import NO_RECORDING_TEXT, NOT_AVAILABLE_TEXT, CatchUp
 from ui.link_lanes import LinkLanes, Target
 from ui.live_tuner import LiveStart, LiveTuner
 from ui.overlays.back_notice import LEFT_OFF
 from ui.overlays.painting import fmt_clock
-from ui.overlays.retry_notice import ended_text
+from ui.overlays.retry_notice import ended_text, waiting_text
 from ui.overlays.transport import NO_RECORDING, NOTHING_PLAYING, Transport
 
 logger = logging.getLogger(__name__)
@@ -118,6 +130,17 @@ LINK_TRIES = 1
 # i18n: toast: a live channel's stream ended and is opened again
 RECONNECTING_TEXT = N_("Reconnecting…")
 RETRY_TICK_MS = 1000  # the pill's countdown
+# 2026-11-25: a site's channel (Kick, Twitch) whose stream failed after it played asks its site
+# again after these waits in a row, while each fresh address fails before it played HEALTHY_S
+# (the last from then on); at once again after one that played that long.
+SITE_AGAIN_S = (0.0, 5.0, 15.0, 30.0, 60.0)
+# ... and one its site says is not live waits for it: its site is asked again after this, and
+# up to the jitter more (QiTVs that waited together never ask together), the next after the
+# last answered; Try now asks at once, but never sooner than OFFLINE_TRY_S after the last ask.
+OFFLINE_ASK_S = 30.0
+RECORDING_ASK_S = 30.0  # 2.15: a channel's site is asked for its recording at most this often
+OFFLINE_JITTER_S = 15.0
+OFFLINE_TRY_S = 5.0
 
 
 def reopen_wait_ms(tries: int) -> int:
@@ -126,6 +149,12 @@ def reopen_wait_ms(tries: int) -> int:
     if tries < len(RECONNECT_MS):
         return RECONNECT_MS[tries]
     return round(revive_wait(tries) * 1000)
+
+
+def played_long(since: Optional[float]) -> bool:
+    """A play first seen at `since` (monotonic; None: not yet) went on for `HEALTHY_S`: a site's
+    channel asked again may be asked once more (the token of its fresh address ran out too)."""
+    return since is not None and time.monotonic() - since >= HEALTHY_S
 
 
 # i18n: a toast: R or the record button was pressed while the channel is still opening
@@ -232,6 +261,12 @@ class LiveControls(QObject):
         retry_notice: Callable[[], Any] = lambda: None,
         link: Callable[[dict], bool] = lambda item: False,
         link_failed: Callable[[Target, str], None] = lambda target, why: None,
+        site_page: Callable[[dict], Optional[str]] = lambda item: None,
+        reask: Optional[Callable[[str, Callable[[str], None], Callable[[str], None]], None]] = None,
+        waits_for_live: Callable[[Target, str], bool] = lambda target, why: False,
+        recording_of: Optional[
+            Callable[[str, Callable[[object], None]], Callable[[], None]]
+        ] = None,
         parent: Optional[QObject] = None,
     ) -> None:
         """`explain(item, title)` asks why the failure just toasted happened at the item's
@@ -248,10 +283,28 @@ class LiveControls(QObject):
         `retry_notice()`: the pill that counts down to a channel's next try (None: none).
         `link(item)`: whether the item is a link of Network streams (plan 4), tried again once
         at most (`LINK_TRIES`); `link_failed(target, why)` hears why one did not play or went
-        (an English text, `services.network_streams.failure_reason`)."""
+        (an English text, `services.network_streams.failure_reason`). `site_page(item)`: the
+        page of a link that is a site's channel (Kick, Twitch), whose address lasts minutes:
+        its reopen asks the site again, `reask(page, ok, failed)` (answered on this thread);
+        `waits_for_live(target, why)`: one its site says is not live waits for it (the shell's:
+        it is then the large picture's, and counted in its row), False where it does not.
+        `recording_of(page, then)` (2.15): asks a site channel's site for its running
+        broadcast's recording once the channel plays through its buffer (`then(recording)`
+        on this thread; returns what stops the ask): the live session then rewinds into it."""
         super().__init__(parent)
+        self._waits_for_live = waits_for_live
+        self._recording_of = recording_of
+        # the ask made: (the target, its live session, that session's start count); once a start
+        self._recording_asked: Optional[tuple[Target, Any, int]] = None
+        self._recording_stop: Callable[[], None] = lambda: None
+        self._recording_at: dict[str, float] = {}  # each page's last ask (monotonic)
+        self._recording_timer = QTimer(self, singleShot=True)  # an ask held back that long
+        self._recording_timer.timeout.connect(self._ask_recording)
         self._link = link
         self._link_failed = link_failed
+        self._site_page = site_page
+        self._reask = reask
+        self._asks = 0  # a site's ask for a reopen: the newest only is answered
         # A link's tries again since it last played well, and since when it plays (None: it
         # does not, or a try went since).
         self._link_tries = 0
@@ -301,6 +354,9 @@ class LiveControls(QObject):
         self._wired = False
         self._reconnects = 0  # reopens of the current tune's ended stream so far
         self._playing_since: Optional[float] = None  # the player's last "playing" (monotonic)
+        # When the tune first played (monotonic), set once: a hold let go or a reopen says
+        # "playing" again (`_site_again`).
+        self._first_played: Optional[float] = None
         self._played = False  # the current tune played (it comes back by itself then)
         self._reopen_due: Optional[tuple[Target, str, PlayKind]] = None  # after the back-off
         self._reopen_timer = QTimer(self, singleShot=True)
@@ -309,12 +365,26 @@ class LiveControls(QObject):
         self._relink_due: Optional[Target] = None
         self._relink_timer = QTimer(self, singleShot=True)
         self._relink_timer.timeout.connect(self._relink_now)
+        # A site's channel asked again after a wait (`_site_again`): (the tune asked then, the
+        # one that failed).
+        self._site_due: Optional[tuple[Target, Target]] = None
+        self._site_timer = QTimer(self, singleShot=True)
+        self._site_timer.timeout.connect(self._site_now)
+        # A site's channel that is not live, waited for (`wait_for_live`): the channel, what the
+        # pill says, the tune asking its site now (None: none on its way), and when one last did.
+        self._waiting: Optional[Target] = None
+        self._waiting_text = ""
+        self._wait_ask: Optional[Target] = None
+        self._wait_asked = -math.inf
+        self._wait_timer = QTimer(self, singleShot=True)
+        self._wait_timer.timeout.connect(self._ask_live_again)
         # The pill counting down to the channel's next try: when it is due (monotonic), what
         # Try now does, and whether LiveSession's `retrying` drives it (else a wait of ours).
         self._retry_notice = retry_notice
         self._retry_due: Optional[float] = None
         self._retry_action: Optional[Callable[[], object]] = None
         self._retry_from_live = False
+        self._retry_text: Optional[str] = None  # the pill's words instead of the countdown
         self._retry_timer = QTimer(self, interval=RETRY_TICK_MS)
         self._retry_timer.timeout.connect(self._show_retry_text)
         self._wired_retry: set[int] = set()
@@ -441,6 +511,8 @@ class LiveControls(QObject):
         seconds = waiting() if callable(waiting) else None
         if seconds is not None:  # its stream was down, small: the pill says so large
             self._live_retrying(seconds, counted=False)
+        if self.session is not None and self._playing_now():
+            self._ask_recording()  # 2.15: the site's recording of the channel swapped in
 
     # ---- tuning -------------------------------------------------------------------------------
 
@@ -453,14 +525,21 @@ class LiveControls(QObject):
         self.catchup.reset()
 
     def _forget_channel(self) -> None:
+        self._recording_stop()  # 2.15: an ask for the old channel's recording ends unanswered
+        self._recording_stop = lambda: None
+        self._recording_asked = None
+        self._recording_timer.stop()
         self._ticks = []
         self._reconnects = 0
         self._link_tries = 0
         self._link_well_since = None
         self._playing_since = None
+        self._first_played = None
         self._played = False
         self._cancel_reopen()
         self._cancel_relink()
+        self._cancel_site_again()
+        self._cancel_wait()
         self._hide_retry()
 
     def window_reach(self, channel: dict) -> float:
@@ -660,6 +739,8 @@ class LiveControls(QObject):
     def stop_tune(self) -> None:
         self._cancel_reopen()
         self._cancel_relink()
+        self._cancel_site_again()
+        self._cancel_wait()
         self._hide_retry()
         self.catchup.reset()
         self._tuner.stop()
@@ -774,15 +855,64 @@ class LiveControls(QObject):
         if not self._may_reopen(target):
             self._hide_retry()
             return  # no stream of its provider to spare (the caller says so)
+        if self._in_ad_break():
+            self._hide_retry()
+            return  # the buffer goes on past it (its session's), nothing opens here
+        page = self._site_page(target.item) if self._reask is not None else None
+        if page is not None:
+            self._reopen_site(target, url, kind, page)
+            return
         logger.info("Opening %s again after its stream ended", target.title)
         if self._retry_action is not None and not self._retry_from_live:
             self._show_retry(0.0, self._reopen_now)  # "Reconnecting…" until it plays
-        session.play(
+        self._play_again(target, url, kind)
+
+    def _play_again(self, target: Target, url: str, kind: PlayKind) -> None:
+        """The player opens `target`'s ended stream again at `url`: its own slot, its options
+        as it opened (`reopen_options`)."""
+        self.session.play(
             url,
             kind=kind,
             latency=self.config.live_latency,
-            **reopen_options(session, target.item, self.catalog),
+            **reopen_options(self.session, target.item, self.catalog),
         )
+
+    def _in_ad_break(self) -> bool:
+        """The live session skips a site's ad break now (its own reopen goes on after it)."""
+        asked = getattr(self.live, "in_ad_break", None)
+        return bool(asked()) if callable(asked) else False
+
+    def _reopen_site(self, target: Target, url: str, kind: PlayKind, page: str) -> None:
+        """A site's channel opens again: not at the address it played (its token lasts minutes,
+        and a drop after a sleep meets it dead) but at the one its site gives now. The same
+        player opens it, as for any direct stream (a plain restart: no buffer is kept)."""
+        self._asks += 1
+        asked = self._asks
+        logger.info("Asking the site of %s again after its stream ended", target.title)
+        if self._retry_action is not None and not self._retry_from_live:
+            self._show_retry(0.0, self._reopen_now)  # "Reconnecting…" until it plays
+
+        def current() -> bool:
+            return (
+                asked == self._asks
+                and not self._closed()
+                and self._current() is target
+                and self.session.url == url
+            )
+
+        def ok(address: str) -> None:
+            if current():  # (else a newer choice, or another stream plays now)
+                self._play_again(target, address, kind)
+
+        def failed(why: str) -> None:
+            if not current():
+                return
+            # the streamer stopped: waited for (a zap step's too: it played)
+            if not self._waits_for_live(replace(target, zapped=False), why):
+                self._give_up_link(target, why)
+
+        assert self._reask is not None
+        self._reask(page, ok, failed)
 
     def _reopen_now(self) -> None:
         if self._reopen_due is not None:
@@ -790,6 +920,7 @@ class LiveControls(QObject):
             self._reopen()
 
     def _cancel_reopen(self) -> None:
+        self._asks += 1  # a site's answer on its way is no longer wanted
         self._reopen_due = None
         self._reopen_timer.stop()
 
@@ -835,8 +966,10 @@ class LiveControls(QObject):
     # ---- plan 4: a link of Network streams is tried again once ---------------------------
     def _link_may_try(self, current: Target) -> bool:
         """Whether `current` may be tried again now (counted): any channel; a link once
-        (`LINK_TRIES`) until it played well again (`HEALTHY_S` since it last came back)."""
-        if not self._link(current.item):
+        (`LINK_TRIES`) until it played well again (`HEALTHY_S` since it last came back); a
+        site's channel always (2026-11-25: its site is asked again as its stream fails,
+        `_site_again`, and says when it is not live)."""
+        if not self._link(current.item) or self._site_page(current.item) is not None:
             return True
         since = self._link_well_since
         if since is not None and time.monotonic() - since >= HEALTHY_S:
@@ -847,12 +980,12 @@ class LiveControls(QObject):
         self._link_well_since = None
         return True
 
-    def _give_up_link(self, current: Target) -> None:
+    def _give_up_link(self, current: Target, why: str = DOWN) -> None:
         """A link went down again after its try: it stops (its stream goes back), and the
         player says why; nothing tries it again."""
         logger.info("Stopping %s: its link went down again after its try", current.title)
         self.stop_tune()
-        self._link_failed(current, DOWN)
+        self._link_failed(current, why)
         self._gave_up()
 
     def _live_failure(self) -> tuple[str, Optional[int]]:
@@ -865,11 +998,19 @@ class LiveControls(QObject):
         return str(kind or ""), status if isinstance(status, int) else None
 
     def _show_retry(
-        self, seconds: float, action: Callable[[], object], *, from_live: bool = False
+        self,
+        seconds: float,
+        action: Callable[[], object],
+        *,
+        from_live: bool = False,
+        text: Optional[str] = None,
     ) -> None:
+        """The pill: "The stream ended · Trying again in 0:25" counting down to `seconds`
+        (`text` instead: words of their own); Try now does `action`."""
         self._retry_due = time.monotonic() + max(0.0, seconds)
         self._retry_action = action
         self._retry_from_live = from_live
+        self._retry_text = text
         notice = self._retry_notice()
         if notice is not None and id(notice) not in self._wired_retry:
             self._wired_retry.add(id(notice))
@@ -889,10 +1030,11 @@ class LiveControls(QObject):
             return
         notice = self._retry_notice()
         if notice is not None:
-            notice.show_notice(ended_text(due - time.monotonic()))
+            text = self._retry_text
+            notice.show_notice(text if text is not None else ended_text(due - time.monotonic()))
 
     def _hide_retry(self) -> None:
-        self._retry_due = self._retry_action = None
+        self._retry_due = self._retry_action = self._retry_text = None
         self._retry_from_live = False
         self._retry_timer.stop()
         notice = self._retry_notice()
@@ -1040,10 +1182,67 @@ class LiveControls(QObject):
         """The player plays: an ended stream counts how long it played since (HEALTHY_S), and
         a wait of ours for it is over (LiveSession's own says when its own is)."""
         self._playing_since = time.monotonic()
+        if self._first_played is None:
+            self._first_played = self._playing_since
         self._played = True
         self._link_well_since = self._playing_since
         if not self._retry_from_live:
             self._hide_retry()
+        self._ask_recording()
+
+    def _playing_now(self) -> bool:
+        state = getattr(self.session, "state", None)
+        return callable(state) and state() is PlaybackState.PLAYING
+
+    def _ask_recording(self) -> None:
+        """2.15: a Kick or Twitch channel that plays through its buffer has its site asked,
+        once each time its live session starts (a reopen forgets it: a token renewed, a stream
+        that came back), for the running broadcast's recording; the live session then rewinds
+        past the buffer into it (`LiveSession.set_site_recording`). Never for a zap step
+        passed (it never plays), and never before the picture: the timed start waits for
+        nothing."""
+        current, live = self._current(), self.live
+        if self._recording_of is None or current is None or live is None:
+            return
+        starts = getattr(live, "starts", None)
+        key = (current, live, starts() if callable(starts) else 0)
+        asked = self._recording_asked
+        if asked is not None and asked[0] is key[0] and asked[1] is key[1] and asked[2] == key[2]:
+            return
+        if not self.pipeline_live():
+            return
+        page = self._site_page(current.item)
+        setter = getattr(live, "set_site_recording", None)
+        if page is None or setter is None:
+            return
+        # (review: a channel that keeps reopening is asked at most every RECORDING_ASK_S, the
+        # ask after its reopen held back meanwhile; an earlier ask still out is superseded)
+        since = time.monotonic() - self._recording_at.get(page, -math.inf)
+        if since < RECORDING_ASK_S:
+            self._recording_timer.start(round((RECORDING_ASK_S - since) * 1000))
+            return
+        self._recording_stop()
+        self._recording_at[page] = time.monotonic()
+        self._recording_asked = key
+
+        def then(found: object) -> None:
+            if self._closed() or self._current() is not current or self.live is not live:
+                return
+            url = getattr(found, "url", None)
+            start = getattr(found, "start", None)
+            if not isinstance(url, str) or not isinstance(start, float):
+                return
+            until = getattr(found, "until", None)
+            route = RecordingRoute(
+                url,
+                start,
+                bool(getattr(found, "dated", False)),
+                bool(getattr(found, "steps", False)),
+                until if isinstance(until, float) else None,
+            )
+            setter(route)
+
+        self._recording_stop = self._recording_of(page, then)
 
     def _on_live_failed(self, message: str) -> None:
         """Playback of the live channel failed for good (LiveSession recovered what it could)."""
@@ -1059,6 +1258,8 @@ class LiveControls(QObject):
             self._explain_failure(current, message)
             self._gave_up()
             return
+        if current is not None and self._site_again(current):
+            return  # a site's channel failed after it played: the site is asked again, once
         if current is not None and self.may_retry(current):
             self.retry(current)  # STB play tokens expire: a fresh link before the error
             return
@@ -1074,6 +1275,126 @@ class LiveControls(QObject):
         self._error(_named(title, translate(message)))  # the player's, or LiveSession's N_
         self._explain_failure(current, message)
         self._gave_up()
+
+    def _site_again(self, current: Target) -> bool:
+        """A site's channel (Kick, Twitch) whose buffer failed after it played, most likely
+        because the token of the address it plays ran out: tuned again, so its lane asks the
+        site for a fresh address (a plain restart: no buffer is kept). Each time it fails
+        (2026-11-25, the owner: "as often as needed"): at once, then after `SITE_AGAIN_S` in a
+        row while each fresh address fails before it played `HEALTHY_S` since its first picture,
+        the pill counting down (Try now asks at once); at once again after one that played that
+        long. Nothing is said while the site answers; the helper's waits for its stream before
+        it failed ask nothing of the site."""
+        if (
+            not current.live
+            or not (current.played or self._played)
+            or self._site_page(current.item) is None
+            or self._reask is None
+            or self._lanes.busy()  # a newer choice is on its way: it is not lost to this
+        ):
+            return False
+        if self._site_due is not None:
+            return True  # already on its way
+        tries = current.relinks if current.retried and not played_long(self._first_played) else 0
+        wait = SITE_AGAIN_S[min(tries, len(SITE_AGAIN_S) - 1)]
+        played = current.played or self._played
+        self.stop_tune()  # its slot goes back, also if the new link does not come
+        again = replace(current, retried=True, played=played, zapped=False, relinks=tries + 1)
+        if wait <= 0.0:
+            logger.info("Asking the site of %s again after its buffer failed", current.title)
+            self._request(again)
+            return True
+        logger.info(
+            "Asking the site of %s again in %.0f s (its fresh stream failed too, %d in a row)",
+            current.title,
+            wait,
+            tries + 1,
+        )
+        self._site_due = (again, current)
+        self._site_timer.start(round(wait * 1000))
+        self._show_retry(wait, self._site_now)
+        return True
+
+    def _site_now(self) -> None:
+        due, self._site_due = self._site_due, None
+        self._site_timer.stop()
+        if due is None or self._closed():
+            return
+        again, failed = due
+        if self._current() is not failed or self._lanes.busy():
+            self._hide_retry()
+            return  # something else was chosen meanwhile
+        self._show_retry(0.0, lambda: None)  # "Reconnecting…" until it plays
+        self._request(again)
+
+    def _cancel_site_again(self) -> None:
+        self._site_due = None
+        self._site_timer.stop()
+
+    # ---- a site's channel that is not live waits for it (2026-11-25) ---------------------
+    def wait_for_live(self, target: Target, why: str) -> None:
+        """`target`, a site's channel, is not live now: its site said so (`why`, kept in
+        English) as it was chosen, or as it was asked again after its stream ended. It waits
+        on screen: what played stops (its stream goes back, and nothing of it asks on), the
+        pill says so, and its site is asked again after `OFFLINE_ASK_S` and a jitter, through
+        the tune lane (`_ask_live_again`), until it is live, when it plays from its newest as
+        any tune does; another choice, Stop and QiTV closing end the wait."""
+        self.stop_tune()
+        self._waiting, self._wait_ask = target, None
+        if why or not self._waiting_text:  # (an ask that never reached it: as it was)
+            self._waiting_text = waiting_text(shown_reason(why))
+        wait = OFFLINE_ASK_S + random.uniform(0.0, OFFLINE_JITTER_S)
+        logger.info("%s is not live now; asking its site again in %.0f s", target.title, wait)
+        self._wait_timer.start(round(wait * 1000))
+        self._show_retry(wait, self._ask_live_now, text=self._waiting_text)
+
+    def waits_for(self, target: Target) -> bool:
+        """A site's channel waited for (`wait_for_live`) is `target`'s."""
+        waiting = self._waiting
+        return waiting is not None and ZapContext.same(waiting.item, target.item)
+
+    def chosen(self, target: Target) -> None:
+        """`target` is asked for now (TVController._request): a wait for another one, or its
+        re-ask after a wait, is over (the wait's own ask goes on)."""
+        if self._waiting is not None and target is not self._wait_ask:
+            self._cancel_wait()
+            self._hide_retry()  # (its words are no other choice's)
+        due = self._site_due
+        if due is not None and target is not due[0]:
+            self._cancel_site_again()
+            self._hide_retry()
+
+    def _ask_live_now(self) -> None:
+        """Try now on the pill of a channel that is not live: its site is asked at once, unless
+        an ask is on its way or one went `OFFLINE_TRY_S` ago or less."""
+        if self._wait_ask is not None or time.monotonic() - self._wait_asked < OFFLINE_TRY_S:
+            return
+        self._ask_live_again()
+
+    def _ask_live_again(self) -> None:
+        target = self._waiting
+        self._wait_timer.stop()
+        if target is None or self._closed() or self._current() is not target:
+            self._cancel_wait()
+            return
+        if self._lanes.busy():
+            self._cancel_wait()  # (another choice is on its way: it is not this one's to wait)
+            return
+        self._wait_ask = replace(target, zapped=False)
+        self._wait_asked = time.monotonic()
+        logger.info("Asking the site of %s whether it is live now", target.title)
+        self._request(self._wait_ask)
+
+    def stop_waiting(self) -> None:
+        """A site's channel waited for is asked for no more (QiTV closes, or its site said
+        something else than "not live": that is said instead)."""
+        self._cancel_wait()
+        self._cancel_site_again()
+        self._hide_retry()
+
+    def _cancel_wait(self) -> None:
+        self._waiting = self._wait_ask = None
+        self._wait_timer.stop()
 
     def _explain_failure(self, current: Optional[Target], message: str = "") -> None:
         """Why `current` failed for good: a link says it plainly first (`link_failed`, from

@@ -29,7 +29,7 @@ is in `git log`.
 - Never commit credentials. Never name real providers, channels, brands or other IPTV projects in
   code, tests, docs or commit messages (iptv-org, the bundled free playlist, and radio-browser.info,
   Free radio's directory, may be named, and so may what QiTV works with: Jellyfin, Emby, Plex,
-  Chromecast, TMDB, OpenSubtitles). Credit what QiTV actually uses in `THIRD-PARTY-NOTICES.md`,
+  Kick, Twitch, Chromecast, TMDB, OpenSubtitles). Credit what QiTV actually uses in `THIRD-PARTY-NOTICES.md`,
   trademarks included.
 - Anything that plays real streams on a developer's machine runs muted (`QITV_SMOKE_MUTE=1`) and briefly.
 - Releases publish only from `main`: a push to `main` runs the release job.

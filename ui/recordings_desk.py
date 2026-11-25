@@ -585,6 +585,12 @@ class RecordingsDesk(QObject):
             self._card = RecordTimerCard(self._window.library_page)
         return self._card
 
+    def card_shown(self) -> Any:
+        """2.15: Record at a time's card while it shows over the Library (it has the keys), else
+        None."""
+        card = self._card
+        return card if card is not None and not card.isHidden() else None
+
     def card_key(self, action: Action, payload: str = "") -> bool:
         """A key of the Library's while its card shows: the card's (True), but the sound's and
         the window's. "/" (the Library's search key) is typed into its field, as the Library's

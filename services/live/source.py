@@ -32,8 +32,9 @@ picture shows it). `retry_now()` cuts such a wait short.
 from __future__ import annotations
 
 from collections import deque
-from collections.abc import Callable, Iterator, Mapping, Sequence
+from collections.abc import Callable, Iterable, Iterator, Mapping, Sequence
 from dataclasses import dataclass
+from datetime import datetime, timedelta, timezone
 import http.client
 import itertools
 import logging
@@ -131,10 +132,56 @@ _INIT_LIMIT = 4 * 1024 * 1024  # an fMP4 init segment (EXT-X-MAP): some kilobyte
 _EDIT_KEEP_S = 1.0
 # A live playlist without a new segment for this long is frozen.
 _FROZEN_TIMEOUT = 60.0
+# 2.15: a site's recording of the running broadcast (a recording part) grows in steps (Kick:
+# 30-60 s): its listing stands still this long before it counts as frozen
+_RECORDING_FROZEN_S = 240.0
+# ... and once all it lists is fetched short of its stop (the picture heads for where it does
+# not reach yet), its listing is read again this often, one ask at a time
+_HOLE_RELOAD_S = 10.0
+# ... and its stop takes a piece that begins this little before it as at it (a date's rounding)
+_STOP_SLACK_S = 0.05
 # An older playlist copy that overlaps recent segments is waited out this many targets.
 _STALE_TARGETS = 3
 _RECENT_SEGMENTS = 10
 _wall_time = time.time  # 2.7: a server part's time of day; tests replace it
+_LAG_LOG_S = 10.0  # the lag line is logged at most this often
+# A live site lists its newest pieces while they are made, after the finished ones (Kick:
+# `#EXT-X-PREFETCH:<uri>`; Twitch: its own name for it). Such a body sends what is made at
+# once and the rest at real time; a later copy lists the piece finished at the same address.
+_PREFETCH_TAGS = ("#EXT-X-PREFETCH:", "#EXT-X-TWITCH-PREFETCH:")
+# A session asking a live delay up to this (Low, Normal, Auto) starts at a playlist's first
+# prefetch piece; a longer one (Stable's 12 s: the cushion for jittery providers) its target
+# back from them (2026-11-25; ruling R4 kept the depth it would have without them, 18 s on Kick).
+_PREFETCH_DELAY_MAX_S = 6.0
+# A playlist that lists prefetch pieces is read again this long after its last reload began
+# (not half a target duration: 3 s on Kick), should one bring no new piece: its pieces come as
+# they are made, a start holds ~3 s of them, and a batch outlasts this anyway.
+_PREFETCH_RELOAD_S = 1.0
+# A copy that lists none (its next piece is about to start), or an ad break's copies (Twitch
+# lists none during one), leave the source prefetching this many pieces after the last copy
+# that listed some, or the last copy of the break: one such copy turned the burst to the
+# target duration at once (the session's stall bound, start and kept burst follow it) and the
+# reloads to half of it (3 s on Kick) while the next piece was being made.
+_PREFETCH_HOLD_PIECES = 2.0
+# A live site's ad break (Twitch stitches its ads into the live playlist, and marks them): a
+# piece whose date falls in a DATERANGE of the ad class or whose ID says so, or, in a playlist
+# that carries Twitch's own tags (`_SITE_TAG`), whose EXTINF title names the ad server, is
+# skipped (`_is_ad`): an IPTV provider's piece, or another site's, may be titled anything. A
+# range known stays known after the piece it was listed with left the playlist (its later
+# pieces are still dated in it), the newest `_AD_RANGES_KEPT` of them, each `_AD_MAX_S` long
+# at most. Breaks run 30-180 s: a playlist that lists only ad pieces for longer than
+# `_AD_MAX_S` (a channel gone off, or a stuck edge, mid-break) counts as frozen again.
+_AD_MAX_S = 300.0  # (mirrored in services.live.live_session: a test keeps them equal)
+_DATERANGE = "#EXT-X-DATERANGE:"
+_SITE_TAG = "#EXT-X-TWITCH-"
+_AD_CLASS = "twitch-stitched-ad"
+_AD_ID = "stitched-ad-"
+_AD_TITLE = "Amazon"
+_AD_RANGES_KEPT = 16
+# A Twitch piece still being made after a cut from the channel's pieces: an ad break's,
+# whatever date it is reckoned (`HlsSource._read_twitch`); kept in its parser values.
+_CUT_AD = "cut_ad"
+_ATTRIBUTE = re.compile(r'([A-Z0-9-]+)=("[^"]*"|[^,]*)')
 _HOLD_POLL_S = 0.25  # 2.7: how often a held source asks again
 # 2.7.1 ("Prefer HTTPS"): an http:// address is asked over HTTPS first, connecting within this;
 # the hosts whose HTTPS did not open are asked over HTTP at once for the rest of the run.
@@ -238,6 +285,16 @@ class CaughtUp:
 
 
 @dataclass(frozen=True)
+class AdBreak:
+    """HLS only: a live site's ad break, its pieces skipped (never fetched, `_is_ad`): `on`
+    as the first of them is skipped, off as the channel's first piece after it comes (or the
+    playlist ends in it). The helper's state says so meanwhile (`ad_break`): no media comes,
+    and the session counts no starvation."""
+
+    on: bool
+
+
+@dataclass(frozen=True)
 class Title:
     """A radio station's only (2.14, `SoundSource`, `IcyTsSource`): the song it names from here
     on, as its inline metadata names it ("": none); the bytes before it are of the song
@@ -247,7 +304,7 @@ class Title:
     legacy: bool = False
 
 
-Chunk = bytes | Discontinuity | CaughtUp | Reconnecting | Title
+Chunk = bytes | Discontinuity | CaughtUp | Reconnecting | Title | AdBreak
 
 
 class Source(Protocol):
@@ -1220,6 +1277,168 @@ def _whole_segments(playlist: Any) -> Any:
     return playlist
 
 
+def _site_tags(line: str, lineno: int, data: dict[str, Any], state: dict[str, Any]) -> bool:
+    """An m3u8 `custom_tags_parser` for what a live site adds. A prefetch piece's line
+    (`_PREFETCH_TAGS`) puts its URI in ``data["prefetch"]``, with whether a discontinuity was
+    written before it (the parser would keep that for a finished piece that never comes), and
+    is read (True). An ad break's DATERANGE (`_ad_range`) goes into ``data["ad_ranges"]``
+    wherever it stands (the parser gives a range to the finished piece after it: one before the
+    prefetch lines has none), and is the parser's as ever (False), as is any other line. A
+    Twitch tag (`_SITE_TAG`, its prefetch line's too) says the playlist is its (``data["site"]``):
+    another site's prefetch line, or a low-latency server's, does not."""
+    del lineno
+    if line.startswith(_SITE_TAG):
+        data["site"] = True
+    if line.startswith(_DATERANGE):
+        marked = _ad_range(line)
+        if marked is not None:
+            data.setdefault("ad_ranges", []).append(marked)
+        return False
+    for tag in _PREFETCH_TAGS:
+        if line.startswith(tag):
+            uri = line[len(tag) :].strip()
+            if uri:
+                cut = state.pop("discontinuity", False) is True
+                data.setdefault("prefetch", []).append((uri, cut))
+            return True
+    return False
+
+
+def _utc(when: datetime) -> datetime:
+    """A playlist's date; one without a zone is UTC's."""
+    return when if when.tzinfo is not None else when.replace(tzinfo=timezone.utc)
+
+
+def _date(text: str | None) -> datetime | None:
+    """An ISO 8601 date as a playlist writes it (`_utc`); None without one that reads."""
+    if not text:
+        return None
+    try:
+        return _utc(datetime.fromisoformat(text))
+    except ValueError:
+        return None
+
+
+def _ad_range(line: str) -> tuple[str, datetime, datetime | None] | None:
+    """An ad break's DATERANGE line (of the class `_AD_CLASS`, or whose ID starts `_AD_ID`):
+    its ID, start and end (END-DATE, else the start plus DURATION or PLANNED-DURATION, at most
+    `_AD_MAX_S` after the start; None: open, a range only while listed); None for another
+    range, or one without a start."""
+    values = {name: value.strip('"') for name, value in _ATTRIBUTE.findall(line[len(_DATERANGE) :])}
+    ident = values.get("ID", "")
+    if values.get("CLASS") != _AD_CLASS and not ident.startswith(_AD_ID):
+        return None
+    start = _date(values.get("START-DATE"))
+    if start is None:
+        return None
+    try:
+        longest = start + timedelta(seconds=_AD_MAX_S)
+    except OverflowError:
+        return None  # (a start at the end of time)
+    end = _date(values.get("END-DATE"))
+    for name in ("DURATION", "PLANNED-DURATION"):
+        if end is not None:
+            break
+        try:
+            seconds = float(values.get(name, ""))
+        except ValueError:
+            continue
+        if math.isfinite(seconds) and seconds >= 0:
+            end = start + timedelta(seconds=min(seconds, _AD_MAX_S))
+    return ident, start, None if end is None else min(end, longest)
+
+
+def _ad_ranges(playlist: Any) -> dict[str, tuple[datetime, datetime | None]]:
+    """The ad breaks a parsed playlist marks (`_site_tags`), by ID: (start, end)."""
+    data = getattr(playlist, "data", None)
+    listed = data.get("ad_ranges") if isinstance(data, dict) else None
+    return {ident or start.isoformat(): (start, end) for ident, start, end in listed or ()}
+
+
+def _from_site(playlist: Any) -> bool:
+    """A parsed playlist carries a live site's own tags (`_site_tags`)."""
+    data = getattr(playlist, "data", None)
+    return isinstance(data, dict) and data.get("site") is True
+
+
+def _is_ad(
+    segment: Any, ad_ranges: Iterable[tuple[datetime, datetime | None]], titled: bool = True
+) -> bool:
+    """A piece of a live site's ad break: its date (a prefetch piece's: the one it will have,
+    `_with_prefetch`) falls in one of `ad_ranges`, each (start, end), the end not in it (None:
+    open); or, `titled` (the playlist is a live site's: `_from_site`), its title names the ad
+    server (`_AD_TITLE`)."""
+    if titled and _AD_TITLE in str(segment.title or ""):
+        return True
+    dated = segment.current_program_date_time or segment.program_date_time
+    if dated is None:
+        return False
+    dated = _utc(dated)
+    return any(start <= dated and (end is None or dated < end) for start, end in ad_ranges)
+
+
+def _date_of(segment: Any) -> float | None:
+    """A piece's date as Unix seconds: its PROGRAM-DATE-TIME, else the last one before it plus
+    the lengths since (a prefetch piece's, the one reckoned for it: `_with_prefetch`); None
+    when the playlist dates none before it."""
+    dated = segment.current_program_date_time or segment.program_date_time
+    return None if dated is None else _utc(dated).timestamp()
+
+
+def _is_prefetch(segment: Any) -> bool:
+    """A piece still being made, listed after a live playlist's finished ones (`_with_prefetch`)."""
+    values = getattr(segment, "custom_parser_values", None)
+    return isinstance(values, dict) and values.get("prefetch") is True
+
+
+def _finished(segments: Sequence[Any]) -> int:
+    """How many of a playlist's segments are finished: those before its prefetch pieces."""
+    count = len(segments)
+    while count and _is_prefetch(segments[count - 1]):
+        count -= 1
+    return count
+
+
+def _with_prefetch(playlist: Any) -> Any:
+    """A live media playlist with its prefetch pieces (`_site_tags`) after the finished ones,
+    each listed as the piece it will be (titled "prefetch"): the last finished piece's length
+    (none listed: the target duration), key and map (fMP4: Twitch's remuxed as it comes), its date
+    plus the lengths up to it (none without one), and a discontinuity written before its
+    line. A finished playlist (ENDLIST) or a master has none; nor one whose pieces' length is
+    not known."""
+    data = getattr(playlist, "data", None)
+    uris = data.get("prefetch") if isinstance(data, dict) else None
+    if not uris or playlist.is_endlist or playlist.is_variant:
+        return playlist
+    segments = playlist.segments
+    last = segments[-1] if segments else None
+    duration = float(last.duration or 0) if last is not None else 0.0
+    duration = duration if duration > 0 else float(playlist.target_duration or 0)
+    if duration <= 0:
+        return playlist
+    dated = last.current_program_date_time if last is not None else None
+    if dated is not None:
+        dated += timedelta(seconds=float(last.duration or 0))
+    sequence = (playlist.media_sequence or 0) + len(segments)
+    for k, (uri, cut) in enumerate(uris):
+        when = dated + timedelta(seconds=k * duration) if dated is not None else None
+        piece = m3u8.Segment(
+            uri=uri,
+            base_uri=playlist.base_uri,
+            duration=duration,
+            title="prefetch",
+            program_date_time=when,
+            current_program_date_time=when,
+            discontinuity=cut,
+            media_sequence=sequence + k,
+            custom_parser_values={"prefetch": True},
+        )
+        if last is not None:
+            piece.key, piece.init_section = last.key, last.init_section
+        segments.append(piece)
+    return playlist
+
+
 def _height(variant: Any) -> int:
     """A variant's picture height as its master names it (RESOLUTION); 0 when it names none."""
     resolution = variant.stream_info.resolution
@@ -1239,6 +1458,42 @@ def _within(candidates: list[Any], max_height: int) -> list[Any]:
     return [item for item in sized if _height(item) == smallest]
 
 
+def _codec_rank(variant: Any) -> int:
+    """How good a variant's video codec is, by its CODECS: AV1 3, HEVC 2, H.264 1, else 0."""
+    best = 0
+    for codec in str(variant.stream_info.codecs or "").lower().split(","):
+        name = codec.strip().split(".", 1)[0]
+        if name == "av01":
+            best = max(best, 3)
+        elif name in ("hvc1", "hev1", "hevc"):
+            best = max(best, 2)
+        elif name in ("avc1", "avc3", "h264"):
+            best = max(best, 1)
+    return best
+
+
+def _variant_rank(variant: Any) -> tuple[int, int, int, int]:
+    """What orders a master's variants that all name their height, best last: picture height,
+    frame rate (to the whole frame: 29.97 is 30's, never above another codec of it), codec,
+    then bandwidth (what a master does not name counts as 0)."""
+    info = variant.stream_info
+    return (
+        _height(variant),
+        round(float(info.frame_rate or 0)),
+        _codec_rank(variant),
+        info.bandwidth or 0,
+    )
+
+
+def _best_variant(candidates: list[Any]) -> Any:
+    """The variant to play of `candidates`: by `_variant_rank` when each names its height;
+    else by bandwidth alone, as before 2.15 (an IPTV master may list its source without a
+    RESOLUTION beside sized smaller ones: the source plays, not the tallest it names)."""
+    if all(_height(item) > 0 for item in candidates):
+        return max(candidates, key=_variant_rank)
+    return max(candidates, key=lambda item: item.stream_info.bandwidth or 0)
+
+
 def _sound_only(variant: Any) -> bool:
     """A variant whose CODECS name sound alone, of a kind the remuxers read (2.14)."""
     codecs = str(variant.stream_info.codecs or "")
@@ -1254,18 +1509,17 @@ def _select_manifest(
     heights, largest first; none for a media playlist). A radio station's master (`sound`,
     2.14) with no video variant plays its best variant of sound alone (`_sound_only`)."""
     try:
-        playlist = m3u8.loads(content.decode("utf-8-sig"), uri=url)
+        text = content.decode("utf-8-sig")
+        playlist = m3u8.loads(text, uri=url, custom_tags_parser=_site_tags)
         if not playlist.is_variant:
-            return _whole_segments(playlist), ()
+            return _with_prefetch(_whole_segments(playlist)), ()
         candidates = [item for item in playlist.playlists if _video_compatible(item)]
         if not candidates and sound:
             candidates = [item for item in playlist.playlists if _sound_only(item)]
         if not candidates:
             raise SourceError("unsupported", _NO_VIDEO)
         heights = tuple(sorted({_height(item) for item in candidates} - {0}, reverse=True))
-        selected = max(
-            _within(candidates, max_height), key=lambda item: item.stream_info.bandwidth or 0
-        )
+        selected = _best_variant(_within(candidates, max_height))
         groups = {
             "AUDIO": selected.stream_info.audio,
             "SUBTITLES": selected.stream_info.subtitles,
@@ -1538,7 +1792,8 @@ class HlsSource:
       naming its own encoding, a connection pinned to one) is set aside and the playlist asked
       for again on a new connection each second, until such copies persist as long as a stale
       copy is waited out (at least 4 s): a restart, or ours went down, followed with a marker
-      (`_other_copy`);
+      (`_other_copy`); a Twitch piece being made, listed finished under another name, is not
+      one (`_relisted`);
     - reloads that bring no new segment for 60 s (download time excluded) time out;
     - a live playlist's reload that keeps failing (a broken connection, a 5xx) through the
       quick delays is asked for again after the long ones, for as long as it is read
@@ -1547,7 +1802,11 @@ class HlsSource:
     Fragmented MP4 (CMAF) segments, a playlist with an init section (EXT-X-MAP), are fetched
     whole and remuxed to TS (`Fmp4Remuxer`), the init loaded whenever its URI changes: one
     encrypted (CENC, SAMPLE-AES) or of a codec not remuxed leaves the channel unsupported
-    (direct play) at its first segment, as any segment that is not TS did before.
+    (direct play) at its first segment, as any segment that is not TS did before. A Twitch
+    piece still being made (its re-encoded variants; `_site`, ruling R29) is remuxed as it
+    comes instead, each moof and its mdat passed on as they arrive (`_remuxing`), unless a
+    separate audio rendition is woven in (that waits for the whole piece); one cut off after
+    some of it played is skipped with a marker, as a broken body is.
 
     A master that names a separate default audio playlist is followed to its variant. When the
     variant's first segment lists no audio of its own in its program tables, the separate
@@ -1595,7 +1854,13 @@ class HlsSource:
         playlist's end and its input ends before that media
         sequence (the live buffer's first), placed in time by `part_wall`; a provider
         archive's, `{"until_s": seconds}`, starts at its first segment (the helper ends it
-        at that much media). `heights` and `height` (2.8): its master's picture sizes and the
+        at that much media). 2.15, a site's recording of the running broadcast (a recording
+        part): `{"from_s", "stop_s", "stop_date", "grows", "reload_s"}`: it starts at the piece
+        holding `from_s` seconds of its listing and its input ends before the first piece
+        that begins at or after `stop_date` (its PROGRAM-DATE-TIME, Unix seconds; an undated
+        piece: at `stop_s` of its listing), a piece's edge; `grows`: its listing goes on
+        though it says it ends (Kick's says ENDLIST while it grows), read again every
+        `reload_s` until its stop. `heights` and `height` (2.8): its master's picture sizes and the
         variant's; `max_height`: the cap it was chosen under, which a reload's keeps.
         `after_seq` (2.8): a resumed run's start goes on after that media sequence (the run it
         joins, `_start`). `copy`: the bytes `playlist` was parsed from, when its address
@@ -1607,10 +1872,28 @@ class HlsSource:
         self._last_copy: tuple[str, bytes, Any] | None = (
             (url, copy, playlist) if copy is not None else None
         )
+        self._lag_logged: float | None = None  # when the lag line was last logged (monotonic)
         self._whole_seq: int | None = None  # the last segment that arrived whole's sequence
         back = window.get("back_s") if window is not None else None
         if window is not None and back is None and _archive_window(window):
             back = math.inf  # 2.7: a provider archive's playlist begins at the moment asked
+        # 2.15: a site's recording of the running broadcast (`_recording_window`)
+        recording = window is not None and _recording_window(window)
+        self._recording = recording
+        self._from = _seconds(window.get("from_s")) if recording and window else None
+        self._stop_s = _seconds(window.get("stop_s")) if recording and window else None
+        self._stop_date = _seconds(window.get("stop_date")) if recording and window else None
+        # ... and how far past its stop it reads on while its listing goes on (2.15: its join
+        # then lies inside the buffer by that much, room for the buffer's start to move on)
+        self._late_s = _seconds(window.get("late_s")) if recording and window else None
+        self._listing_wait = 0.0  # 2.15: it waits at its listing's end (the reload's wait)
+        self._grows = bool(window.get("grows")) if recording and window else False
+        self._reload_s = _seconds(window.get("reload_s")) if recording and window else None
+        self._part_start: float | None = None  # its first piece's place in its listing (s)
+        self._part_date: float | None = None  # ... and that piece's date (None: undated)
+        self._listed = 0.0  # how much its listing lists, as last read (s)
+        if recording:
+            back = math.inf
         before = window.get("before_s") if window is not None else None
         until = window.get("until_seq") if window is not None else None
         self._back = float(back) if isinstance(back, (int, float)) else None
@@ -1655,9 +1938,21 @@ class HlsSource:
         self._burst = float(playlist.target_duration or 0)
         self._window = 0.0  # 2.7: how long a live playlist's window lasts (0.0: finished)
         self._edge_sequence: int | None = None  # its newest segment's media sequence
+        self._prefetching = False  # its playlist lists prefetch pieces (`_with_prefetch`)
+        self._prefetch_until = -math.inf  # ... or did lately (`_PREFETCH_HOLD_PIECES`): till then
+        # A live site's ad breaks (`_is_ad`): the ranges known (by ID) and those to judge the
+        # copy read last by, and whether its pieces are being skipped now (since when).
+        self._ads: dict[str, tuple[datetime, datetime | None]] = {}
+        self._ranges: list[tuple[datetime, datetime | None]] = []
+        self._site = False  # its playlist carried a live site's own tags once (`_from_site`)
+        self._ad_break = False
+        self._ad_since = 0.0
         self._note_window(playlist)
         self._keys: dict[str, bytes] = {}
         self._recent: deque[str] = deque(maxlen=_RECENT_SEGMENTS)
+        # The pieces being made passed (fetched, or skipped as an ad's) by media sequence: the
+        # date reckoned for each and its length (`_relisted`), the newest `_RECENT_SEGMENTS`.
+        self._prefetched: dict[int, tuple[datetime | None, float]] = {}
         self._discontinuity_sequence = playlist.discontinuity_sequence
         self._failures = 0
         self._started = False  # bytes were yielded
@@ -1666,6 +1961,7 @@ class HlsSource:
         self._joiner = ContinuityJoiner()  # the segments' counters run on across joins
         self._serial = 0  # segments started so far
         self._sequence: int | None = None  # 2.7: the media sequence of the one started last
+        self._dated: float | None = None  # ... and its date (`_date_of`; None: undated)
         self._fetching = 0.0  # the EXTINF of the segment being fetched (0.0: none)
         self._rest = 0.0  # the EXTINF of the listed segments after it
         self._last_whole: tuple[int, float] | None = None  # (serial, EXTINF) of the last whole
@@ -1674,8 +1970,15 @@ class HlsSource:
 
     @property
     def burst_s(self) -> float:
-        """The media playlist's target duration, updated on every reload."""
-        return self._burst
+        """The media playlist's target duration, updated on every reload; 0.0 while it lists
+        prefetch pieces: they come as they are made, not a target duration at a time."""
+        return 0.0 if self._prefetching else self._burst
+
+    @property
+    def prefetching(self) -> bool:
+        """Its playlist lists prefetch pieces (a live site's newest, read as they are made:
+        `_with_prefetch`), as last read or lately (`_PREFETCH_HOLD_PIECES`)."""
+        return self._prefetching
 
     @property
     def secure(self) -> bool:
@@ -1720,21 +2023,102 @@ class HlsSource:
         return self._part_wall
 
     @property
+    def part_start_s(self) -> float | None:
+        """A recording part's first piece's place in its listing, in seconds (2.15)."""
+        return self._part_start
+
+    @property
+    def part_date(self) -> float | None:
+        """A recording part's first piece's PROGRAM-DATE-TIME (Unix seconds; 2.15)."""
+        return self._part_date
+
+    @property
+    def listed_s(self) -> float | None:
+        """How much a recording part's listing lists now, in seconds (2.15); None else."""
+        return self._listed if self._recording else None
+
+    @property
     def edge_sequence(self) -> int | None:
         """The media sequence of the newest segment its playlist lists (2.7)."""
         return self._edge_sequence
 
     def _note_window(self, playlist: Any) -> None:
+        self._note_ads(playlist)
         segments = playlist.segments
         live = not playlist.is_endlist
-        self._window = sum(float(segment.duration or 0) for segment in segments) if live else 0.0
+        finished = _finished(segments)  # (prefetch pieces are still being made)
+        now = time.monotonic()
+        if finished < len(segments) or (
+            self._prefetching and segments and self._ad(segments[-1])
+        ):  # (an ad break's copies list none: it lasts through the break)
+            piece = float(segments[-1].duration or 0)
+            self._prefetch_until = now + _PREFETCH_HOLD_PIECES * piece
+        self._prefetching = now < self._prefetch_until
+        window = sum(
+            float(segment.duration or 0) for segment in itertools.islice(segments, finished)
+        )
+        self._window = window if live else 0.0
         if segments:
             self._edge_sequence = (playlist.media_sequence or 0) + len(segments) - 1
+
+    def _note_ads(self, playlist: Any) -> None:
+        """The ad breaks a copy marks (`_ad_ranges`) join those known; the copy's pieces are
+        judged by these (`_ranges`): a range with an end stays known after the piece it was
+        listed with left the playlist (the newest `_AD_RANGES_KEPT`), an open one only while
+        it is listed. A live site's playlist once, its pieces' titles count too (`_site`)."""
+        self._site = self._site or _from_site(playlist)
+        listed = _ad_ranges(playlist)
+        known = self._ads
+        for ident, marked in listed.items():
+            if marked[1] is not None:
+                known.pop(ident, None)
+                known[ident] = marked
+        while len(known) > _AD_RANGES_KEPT:
+            del known[next(iter(known))]
+        self._ranges = list(known.values()) + [m for m in listed.values() if m[1] is None]
+        if self._site:
+            self._read_twitch(playlist.segments)
+
+    def _read_twitch(self, segments: Sequence[Any]) -> None:
+        """What a Twitch copy's tags leave unsaid. Its pieces still being made from a cut on,
+        after a finished piece of the channel's, are a break's first pieces (`_CUT_AD`): their
+        dates are only reckoned, and the break's range may come in a later copy (a cut after
+        a finished ad piece is the channel's return: its pieces are judged as ever). And a
+        discontinuity between two of the channel's own pieces is none (Twitch writes some
+        wrongly): nothing is marked there. A copy's first piece keeps its own."""
+        finished = _finished(segments)
+        if 0 < finished < len(segments) and not self._ad(segments[finished - 1]):
+            cut = False
+            for segment in segments[finished:]:
+                cut = cut or bool(segment.discontinuity)
+                if cut:
+                    segment.custom_parser_values[_CUT_AD] = True
+        before: bool | None = None  # whether the piece before is an ad's (None: none)
+        for segment in segments:
+            ad = self._ad(segment)
+            if segment.discontinuity and before is False and not ad:
+                segment.discontinuity = False
+            before = ad
+
+    def _ad(self, segment: Any) -> bool:
+        """A piece of the copy read last is an ad break's (`_is_ad`, or a Twitch piece being
+        made after a cut from the channel: `_read_twitch`)."""
+        if _is_ad(segment, self._ranges, self._site):
+            return True
+        values = getattr(segment, "custom_parser_values", None)
+        return self._site and isinstance(values, dict) and values.get(_CUT_AD) is True
 
     @property
     def segment_sequence(self) -> int | None:
         """The media sequence of the segment whose bytes come now (2.7); None before one."""
         return self._sequence
+
+    @property
+    def segment_date(self) -> float | None:
+        """The date of the segment whose bytes come now, as Unix seconds (`_date_of`): the
+        helper places the site's clock on its timeline by it (the statistics' "Behind the
+        broadcaster"); None while it is undated, or before one."""
+        return self._dated
 
     @property
     def fmp4(self) -> bool:
@@ -1803,9 +2187,22 @@ class HlsSource:
         part's `back_s` from it (2.7). A resumed run that joins an earlier one (`after_seq`,
         2.8) starts after that run's last segment when its playlist still lists the one after
         it (or lists up to it) and that is no further back than its depth: what the earlier
-        run brought is not brought twice. Only its first start: a later one is any start's."""
+        run brought is not brought twice. Only its first start: a later one is any start's.
+
+        The end is the last finished piece's: a live site's prefetch pieces (`_with_prefetch`)
+        are still being made. A live start under a live delay up to `_PREFETCH_DELAY_MAX_S`
+        is the first of them: what it holds comes at once, the rest as it is made (Kick's
+        start three 6 s target durations back played 7.6 s behind the clock). Under a longer
+        one (Stable) the piece that begins the session's target before them (2026-11-25,
+        replacing ruling R4's depth: 18 s back on Kick where Stable aims at 6 s): the live edge
+        is in the first of them, so that start is at least the target behind it, and the
+        session picks its start at the target from what it brings, at once. A resumed run
+        still joins its earlier one as far back as the depth."""
+        finished = playlist.segments[: _finished(playlist.segments)]
+        if self._recording:
+            return self._recording_start(finished)
         if self._back is not None:
-            segments, first = playlist.segments, playlist.media_sequence or 0
+            segments, first = finished, playlist.media_sequence or 0
             until = self._until
             if (
                 self._before is not None
@@ -1816,13 +2213,64 @@ class HlsSource:
             return _back_from_end(segments, self._back)
         if playlist.is_endlist:
             return 0
-        start = _back_from_end(playlist.segments, self._depth(playlist))
+        depth = start = _back_from_end(finished, self._depth(playlist))
+        if len(finished) < len(playlist.segments):
+            if self._live_delay <= _PREFETCH_DELAY_MAX_S:
+                start = len(finished)
+            elif self._target is not None:  # Stable: its target back, never past the depth
+                start = max(depth, _back_from_end(finished, self._target + max(0.0, self._extra)))
         after, self._after = self._after, None
         if after is not None:
             following = after + 1 - (playlist.media_sequence or 0)
-            if start <= following <= len(playlist.segments):
+            if depth <= following <= len(playlist.segments):
                 return following
         return start
+
+    def _recording_start(self, segments: Sequence[Any]) -> int:
+        """A recording part's first piece (2.15): the one holding `from_s` seconds of its
+        listing (past what it lists yet: after its last, to come as it grows); its place and
+        date are kept for the session, which places the part by them."""
+        at = 0.0
+        index = 0
+        wanted = self._from or 0.0
+        for index, segment in enumerate(segments):
+            length = float(segment.duration or 0)
+            if at + length > wanted:
+                break
+            at += length
+        else:
+            index = len(segments)
+        self._part_start = at
+        self._part_date = _date_of(segments[index]) if index < len(segments) else None
+        return index
+
+    def set_stop(self, stop_date: float | None, stop_s: float | None) -> None:
+        """2.15: a recording part's stop moves (the live buffer's start moved on: eviction);
+        any thread (one attribute each)."""
+        self._stop_date, self._stop_s = stop_date, stop_s
+
+    def _beyond(self, segment: Any, at: float, late: bool, end: bool) -> bool:
+        """Whether a recording part's piece at place `at` begins (`end`: ends) at or past its
+        stop, or (`late`) its stop and `late_s` more: by its date when it has one, else by
+        its place in the listing."""
+        more = (self._late_s or 0.0) if late else 0.0
+        length = float(segment.duration or 0) if end else 0.0
+        dated = _date_of(segment)
+        if dated is not None and self._stop_date is not None:
+            return dated + length >= self._stop_date + more - _STOP_SLACK_S
+        return self._stop_s is not None and at + length >= self._stop_s + more - _STOP_SLACK_S
+
+    def _reaches_stop(self, segment: Any, at: float, last: bool = False) -> bool:
+        """A recording part's piece at place `at` is its last (2.15): it ends at or past its
+        stop and `late_s` more, or it is the last its listing lists and ends at or past its
+        stop (the next is never waited for there: Kick's lists in steps)."""
+        return self._beyond(segment, at, True, True) or (
+            last and self._beyond(segment, at, False, True)
+        )
+
+    def _past_stop(self, segment: Any, at: float) -> bool:
+        """A recording part's piece that begins at or after its stop and `late_s` more."""
+        return self._beyond(segment, at, True, False)
 
     def _depth(self, playlist: Any) -> float:
         """How far back from a live playlist's end the start goes (2.1).
@@ -1865,9 +2313,10 @@ class HlsSource:
     def _other_copy(self, playlist: Any, base: str, next_sequence: int, quiet: float) -> bool:
         """Whether this copy is another origin group's (2.6.1: two groups behind one address,
         each numbering and naming its own encoding, answering in turn): it names the segment
-        last fetched otherwise; or it lists none of them and is numbered ahead further than
-        `quiet` (the time since a copy of ours) explains, or behind with none of their names
-        and no newer discontinuity sequence (a stale copy overlaps; a restart says so)."""
+        last fetched otherwise (but a Twitch piece being made relisted finished: `_relisted`);
+        or it lists none of them and is numbered ahead further than `quiet` (the time since a
+        copy of ours) explains, or behind with none of their names and no newer discontinuity
+        sequence (a stale copy overlaps; a restart says so)."""
         if not self._recent:
             return False
         first = playlist.media_sequence or 0
@@ -1875,7 +2324,10 @@ class HlsSource:
         for sequence in range(next_sequence - 1, next_sequence - 1 - len(self._recent), -1):
             index = sequence - first
             if 0 <= index < len(segments) and not segments[index].gap_tag:
-                return _identity(_resolve(base, segments[index].uri)) not in self._recent
+                segment = segments[index]
+                if _identity(_resolve(base, segment.uri)) in self._recent:
+                    return False
+                return not self._relisted(segment, sequence, segments)
         if first > next_sequence:  # a fall behind the window comes no faster than its segments
             step = 0.5 * max(1.0, float(playlist.target_duration or 0))
             return first - next_sequence > math.ceil(quiet / step) + 3
@@ -1886,11 +2338,42 @@ class HlsSource:
         names = {_identity(_resolve(base, segment.uri)) for segment in segments}
         return names.isdisjoint(self._recent)
 
+    def _passed(self, segment: Any, sequence: int) -> None:
+        """A piece being made was passed (fetched, or skipped as an ad's): its media sequence
+        is remembered with the date reckoned for it and its length (`_relisted`)."""
+        dated = segment.current_program_date_time or segment.program_date_time
+        known = self._prefetched
+        known.pop(sequence, None)
+        known[sequence] = (None if dated is None else _utc(dated), float(segment.duration or 0))
+        while len(known) > _RECENT_SEGMENTS:
+            del known[next(iter(known))]
+
+    def _relisted(self, segment: Any, sequence: int, segments: Sequence[Any]) -> bool:
+        """A Twitch copy's finished piece at the media sequence of a piece being made that was
+        passed (`_passed`) is that piece, listed under another name (2026-11-25: in its next
+        copy, the same bytes and dated as reckoned): its date is within half a piece of the one
+        reckoned for it, or either is unknown and the copy (`segments`) lists pieces being made.
+        Only Twitch relists so (`_site`, ruling R23): any other source's other origin group
+        is judged by its names alone, as before (2.6.1). On Twitch a group numbering the same
+        pieces on the same clock, or an undated one listing pieces being made, reads as ours."""
+        if not self._site:
+            return False
+        known = self._prefetched.get(sequence)
+        if known is None or _is_prefetch(segment):
+            return False
+        reckoned, length = known
+        dated = segment.current_program_date_time or segment.program_date_time
+        if reckoned is None or dated is None:
+            return _finished(segments) < len(segments)
+        return abs((_utc(dated) - reckoned).total_seconds()) <= length / 2
+
     def _run(self) -> Iterator[Chunk]:
         http, playlist, url = self._http, self._playlist, self._url
         loaded = progress = ours = self._loaded
         other: float | None = None  # when copies of another origin group began
         next_sequence: int | None = None
+        ads_from: float | None = None  # when the copies began to list only ad pieces
+        ads_said = False  # ... and that they did for `_AD_MAX_S`
         while True:
             first = playlist.media_sequence or 0
             newest = first + len(playlist.segments) - 1
@@ -1918,13 +2401,17 @@ class HlsSource:
                 if next_sequence is not None:
                     self._mark()
                     next_sequence = first + self._start(playlist)  # its numbers are not ours
+                    self._prefetched.clear()
             other, ours = None, loaded
             self._note_window(playlist)
+            if self._recording:
+                self._listed = sum(float(s.duration or 0) for s in playlist.segments)
             if next_sequence is None:
                 start = self._start(playlist)
                 next_sequence = first + start
-                if self._back is not None:  # 2.7: where the server part sits in time
-                    after = sum(float(s.duration or 0) for s in playlist.segments[start:])
+                if self._back is not None and not self._recording:  # 2.7: where it sits
+                    listed = playlist.segments[start : _finished(playlist.segments)]
+                    after = sum(float(s.duration or 0) for s in listed)
                     self._part_wall = _wall_time() - after
                     if self._until is not None and first <= self._until <= newest + 1:
                         stop = playlist.segments[start : self._until - first]
@@ -1935,28 +2422,50 @@ class HlsSource:
                 log.info("The HLS playlist moved past %d segments.", first - next_sequence)
                 self._mark()
                 next_sequence = first if self._back is not None else first + self._start(playlist)
+                self._prefetched.clear()
             elif newest < next_sequence - 1:
                 stale = not self._restarted(playlist, url, loaded - progress)
                 if not stale:
                     log.info("The HLS media sequence restarted.")
                     self._mark()
                     next_sequence = first + self._start(playlist)
+                    self._prefetched.clear()
             if not stale:
                 self._discontinuity_sequence = playlist.discontinuity_sequence
             fresh = newest >= next_sequence
+            # (A prefetch piece's media is no backlog: it comes as it is made; an ad's never.)
             self._rest = sum(
                 float(segment.duration or 0)
                 for index, segment in enumerate(playlist.segments)
-                if first + index >= next_sequence and not segment.gap_tag
+                if first + index >= next_sequence
+                and not segment.gap_tag
+                and not _is_prefetch(segment)
+                and not self._ad(segment)
             )
+            if not playlist.segments or not all(self._ad(s) for s in playlist.segments):
+                ads_from, ads_said = None, False
+            elif ads_from is None or loaded - ads_from < _AD_MAX_S:
+                # An ad break's (a tune's into one): the channel comes after it.
+                ads_from = loaded if ads_from is None else ads_from
+                progress = loaded
+            elif not ads_said:  # from here a copy that stands still is frozen, as any
+                ads_said = True
+                log.info("The HLS playlist listed only ad pieces for %.0f s.", _AD_MAX_S)
             # Frozen time runs between reloads only, never while segments download.
-            if not fresh and loaded - progress >= _FROZEN_TIMEOUT:
+            frozen = _RECORDING_FROZEN_S if self._recording else _FROZEN_TIMEOUT
+            if not fresh and loaded - progress >= frozen:
                 raise SourceError("timeout", _FROZEN)
             done = again = False  # 2.7: a server part reached its stop / reloads first
+            made = False  # the batch reached its prefetch pieces
+            place = 0.0  # 2.15: a recording part's piece's place in its listing
             for index, segment in enumerate(playlist.segments):
                 sequence = first + index
+                at, place = place, place + float(segment.duration or 0)
                 if sequence < next_sequence:
                     continue
+                if self._recording and self._past_stop(segment, at):
+                    done = True  # 2.15: its stop, a piece's edge (no hold: nothing is fetched)
+                    break
                 held = time.monotonic()
                 while self._hold is not None and self._hold():  # its stop may move meanwhile
                     if http.wait(_HOLD_POLL_S):
@@ -1969,9 +2478,25 @@ class HlsSource:
                 if self._until is not None and sequence >= self._until:
                     done = True
                     break
+                if not made and _is_prefetch(segment):
+                    made = True
+                    yield CaughtUp()  # the backlog landed: from here, pieces as they are made
                 next_sequence = sequence + 1
+                if _is_prefetch(segment):
+                    self._passed(segment, sequence)
                 if segment.discontinuity:
                     self._mark()
+                if self._ad(segment):
+                    # Never fetched; ours all the same (`_other_copy`: the copy is our encoding).
+                    self._recent.append(_identity(_resolve(url, segment.uri)))
+                    if not self._ad_break:
+                        self._ad_break, self._ad_since = True, time.monotonic()
+                        log.info("An HLS ad break: its pieces are skipped.")
+                        yield AdBreak(True)
+                    self._mark()
+                    continue
+                if self._ad_break:
+                    yield from self._ad_break_over()
                 if segment.gap_tag:
                     log.info("Skipped an HLS segment tagged as a gap.")
                     self._mark()
@@ -1979,17 +2504,31 @@ class HlsSource:
                 self._fetching = float(segment.duration or 0)
                 self._rest = max(0.0, self._rest - self._fetching)
                 self._serial += 1
-                self._sequence = sequence
+                self._sequence, self._dated = sequence, _date_of(segment)
                 yield from self._segment(segment, sequence, url)
+                last = index == len(playlist.segments) - 1
+                if self._recording and self._reaches_stop(segment, at, last):
+                    done = True  # 2.15: its last piece, the one reaching the buffer's start
+                    break
             self._fetching = 0.0
             if fresh and not again:
                 progress = time.monotonic()
                 yield CaughtUp()  # what follows comes as the provider publishes it
-            if done or (playlist.is_endlist and not again):  # a held one reloads, goes on
+            ended = playlist.is_endlist and not self._grows  # (2.15: a growing recording's)
+            if done or (ended and not again):  # a held one reloads, goes on
+                if self._ad_break:
+                    yield from self._ad_break_over()
                 yield from self._emit(self._release(final=True))
                 yield from self._emit(self._flush_held())
                 return
             interval = max(1.0, float(playlist.target_duration or 0) / 2)
+            if self._prefetching:
+                interval = _PREFETCH_RELOAD_S
+            elif self._recording and self._grows and self._reload_s:
+                interval = self._reload_s  # 2.15: Kick's recording grows in steps
+                if next_sequence is not None and next_sequence > newest:
+                    # all it lists is fetched short of its stop (the picture heads there): sooner
+                    interval = min(interval, _HOLE_RELOAD_S)
             if http.wait(interval - (time.monotonic() - loaded)):
                 raise _Closed()
             loaded = time.monotonic()
@@ -1998,6 +2537,11 @@ class HlsSource:
             self._burst = float(playlist.target_duration or 0)
             self._finite = bool(playlist.is_endlist) or self._back is not None
             yield from self._emit(self._release())
+
+    def _ad_break_over(self) -> Iterator[Chunk]:
+        self._ad_break = False
+        log.info("The HLS ad break ended after %.0f s.", time.monotonic() - self._ad_since)
+        yield AdBreak(False)
 
     def _reload(self, http: _Http, url: str) -> tuple[bytes, str]:
         """The media playlist again. A 404 or 410 there (2.9: a public channel's CDN answered
@@ -2092,6 +2636,8 @@ class HlsSource:
             return
         failure: SourceError | None = None
         content = False
+        sent = False  # TS of its own went out (a piece remuxed as it comes, `_remuxing`)
+        arrived = time.monotonic()  # when its last bytes came
         joiner = self._joiner
         joiner.segment()
         if self._capture is not None:
@@ -2099,33 +2645,42 @@ class HlsSource:
                 self._capture.mark("discontinuity")
             self._capture.mark("segment", sequence)
         try:
-            if fragmented:
+            weaving = self._audio_unknown or self._weaver is not None
+            if fragmented and self._site and _is_prefetch(segment) and not weaving:
+                # Twitch's piece being made, as it comes (ruling R29: only Twitch's, the DTS
+                # shift seeded from its first moof checked against Twitch's pieces alone)
+                blocks = self._remuxing(response, decryptor)
+            elif fragmented:
                 blocks = iter([self._remuxed(response, decryptor)])
             elif self._http.station:  # 2.14: a station's TS, or its packed sound as TS
                 read = self._blocks(response, decryptor, self._capture)
                 blocks = self._station_ts(read, float(segment.duration or 0))
             else:
                 blocks = _checked_ts(self._blocks(response, decryptor, self._capture))
-            if self._audio_unknown or self._weaver is not None:
+            if weaving:
                 duration = float(segment.duration or 0)
                 before, woven = self._with_audio(b"".join(blocks), sequence, duration)
                 if before and (block := joiner.feed(before)):  # the timeline before the break
                     yield block
                 blocks = iter([woven] if woven else [])
             for block in blocks:
+                arrived = time.monotonic()
                 if self._pending:  # only ever right before bytes that really arrive
                     self._pending = False
                     joiner.discontinuity()
                     yield Discontinuity()
                 self._started = True
                 if block := joiner.feed(block):
+                    sent = True
                     yield block
             if tail := joiner.end():  # a partial packet at the segment's end, as it came
                 yield tail
         except _ReadError as error:
             failure = _translate(error)
         except _BadSegment as error:
-            failure, content = SourceError("unsupported", error.message), True
+            # Content that cannot be read; once some of it played (a piece remuxed as it comes,
+            # its last box cut off), skipped as a broken body is, not the channel unsupported.
+            failure, content = SourceError("unsupported", error.message), not sent
         finally:
             self._http.release(response)
         if failure is None:
@@ -2133,8 +2688,28 @@ class HlsSource:
             self._delivered = True
             self._last_whole = (self._serial, float(segment.duration or 0))
             self._whole_seq = sequence
+            self._log_lag(segment, arrived)
         else:
             self._skip(failure, content)
+
+    def _log_lag(self, segment: Any, arrived: float) -> None:
+        """The latency instrument: how far behind the clock a dated piece ends, at most once
+        per `_LAG_LOG_S`: a finished piece's PROGRAM-DATE-TIME (one without a zone is UTC's)
+        plus its length; a prefetch piece, read as it was made, ended at the clock as its last
+        bytes came (`arrived`, monotonic): the time since."""
+        dated = segment.program_date_time
+        now = time.monotonic()
+        logged = self._lag_logged
+        if dated is None or (logged is not None and now - logged < _LAG_LOG_S):
+            return
+        self._lag_logged = now
+        if _is_prefetch(segment):
+            behind = now - arrived
+        else:
+            if dated.tzinfo is None:
+                dated = dated.replace(tzinfo=timezone.utc)
+            behind = _wall_time() - (dated.timestamp() + float(segment.duration or 0))
+        log.debug("The newest HLS piece fetched ends %.1f s behind the clock.", behind)
 
     @property
     def next_pts(self) -> int | None:
@@ -2189,6 +2764,24 @@ class HlsSource:
         if self._capture is not None:
             self._capture.write(ts)
         return ts
+
+    def _remuxing(self, response: Any, decryptor: _Decryptor | None) -> Iterator[bytes]:
+        """An fMP4 piece being made as TS, each moof and its mdat as they come
+        (`Fmp4Remuxer.feed`): Twitch writes its 2 s piece a tenth of a second at a time, which
+        a whole piece's remux held back until the piece's end. Captured as that TS."""
+        remuxer = self._remuxer
+        remuxer.begin()
+        try:
+            for block in itertools.chain(self._blocks(response, decryptor, None), [None]):
+                ts = remuxer.feed(block) if block is not None else remuxer.end()
+                if ts:
+                    if self._capture is not None:
+                        self._capture.write(ts)
+                    yield ts
+        except Fmp4Error as error:
+            raise _BadSegment(str(error)) from None
+        finally:
+            remuxer.abandon()  # (a piece cut off keeps nothing of it: Task 10 M4)
 
     def _load_init(self, remuxer: Fmp4Remuxer, init: Any, base: str, loaded: str | None) -> str:
         """Read an fMP4 init section into `remuxer` unless its URI is `loaded` (the one read
@@ -2387,7 +2980,9 @@ class HlsSource:
         url = self._audio_url
         try:
             content, final = self._http.fetch(lambda: _load_playlist(self._http, url))
-            playlist = _whole_segments(m3u8.loads(content.decode("utf-8-sig"), uri=final))
+            text = content.decode("utf-8-sig")
+            parsed = m3u8.loads(text, uri=final, custom_tags_parser=_site_tags)
+            playlist = _with_prefetch(_whole_segments(parsed))
         except _Closed:
             raise
         except Exception:
@@ -2609,6 +3204,16 @@ def _first_answer(
             raise _Closed()
 
 
+def _recording_window(window: Mapping[str, Any]) -> bool:
+    """A site's recording of the running broadcast (2.15, a recording part): it starts
+    `from_s` into its listing."""
+    return isinstance(window.get("from_s"), (int, float))
+
+
+def _seconds(value: Any) -> float | None:
+    return float(value) if isinstance(value, (int, float)) and math.isfinite(value) else None
+
+
 def _archive_window(window: Mapping[str, Any]) -> bool:
     """A provider archive's server part (2.7): its input ends at `until_s` seconds of its
     media, an HLS one's from its first segment."""
@@ -2712,7 +3317,11 @@ def open_source(
     EXTINF durations add up to at least ``live_delay`` seconds (at least one segment); given
     the session's ``target`` (and the ``extra`` it adds, Auto's), that target and one and a
     half segments more, and at least HOLD-BACK or three target durations
-    (`HlsSource._depth`). After each batch of listed segments it yields `CaughtUp`.
+    (`HlsSource._depth`). A live site's playlist that lists its newest pieces while they are
+    made (prefetch pieces) starts at the first of them, read as it comes (under a
+    ``live_delay`` over `_PREFETCH_DELAY_MAX_S`, Stable, the ``target`` back from them). After
+    each batch of listed segments it yields `CaughtUp`, and before a batch's first prefetch
+    piece too.
     Local paths and ``file://`` URLs are refused unless ``allow_local`` (tests only).
 
     Blocks while connecting. Setting ``stop`` (polled every 0.1 s) or calling ``close()`` on

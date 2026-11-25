@@ -240,6 +240,10 @@ class OnlineSubtitles(QObject):
     def visible(self) -> bool:
         return self._page.isVisible()
 
+    def phone_field(self) -> Any:
+        """2.15: the page's field, for a phone's typing sheet (ui/remote_typing.py)."""
+        return self._page.phone_field() if self.visible() else None
+
     def close(self) -> None:
         self._page.dismiss()
 

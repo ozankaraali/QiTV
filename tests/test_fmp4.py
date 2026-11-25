@@ -14,6 +14,7 @@ import hashlib
 import json
 import os
 from pathlib import Path
+import random
 import re
 import shutil
 import struct
@@ -215,6 +216,62 @@ def audio_samples(count: int) -> list[tuple[int, bytes, int | None, int]]:
 
 def segment(track_id: int, samples, **kwargs) -> bytes:
     return fragment((traf(track_id, samples, **kwargs), [s[1] for s in samples]))
+
+
+SITE_INIT = movie(trak(1, b"soun", 48000, sound()), trak(2, b"vide", 90000, visual()))
+
+
+def site_piece(start: int = 0, count: int = 4, lead: int = 0) -> list[bytes]:
+    """A live site's piece as Twitch writes it (measured 2026-11-25): an `emsg` box, then
+    `count` moof/mdat pairs a tenth of a second each, the sound's track fragment (track 1, five
+    AAC frames) before the picture's (track 2, six pictures at 60 fps, a keyframe opening the
+    piece), from its first picture's time `start` (90 kHz), the sound `lead` ticks (48 kHz)
+    later. Its pairs, the emsg before the first; without a lead no sample of a pair is due
+    after the next pair's first."""
+    pairs = []
+    for k in range(count):
+        video = [
+            (1500, nals(IDR), SYNC_FLAGS, 0) if k == n == 0 else (1500, nals(SLICE), NON_SYNC, 0)
+            for n in range(6)
+        ]
+        audio = audio_samples(5)
+        pairs.append(
+            fragment(
+                (traf(1, audio, tfdt=start * 8 // 15 + lead + k * 5120), [s[1] for s in audio]),
+                (traf(2, video, tfdt=start + k * 9000), [s[1] for s in video]),
+            )
+        )
+    return [full(b"emsg", 0, 0, bytes(24)) + pairs[0], *pairs[1:]]
+
+
+def top_boxes(data: bytes) -> list[int]:
+    """Where each top-level box of `data` starts."""
+    starts, at = [], 0
+    while at + 8 <= len(data):
+        starts.append(at)
+        size = struct.unpack_from(">I", data, at)[0]
+        at += struct.unpack_from(">Q", data, at + 8)[0] if size == 1 else size
+    return starts
+
+
+def large(data: bytes) -> bytes:
+    """`data`'s top-level boxes each with a 64-bit largesize (`fragment`'s: each trun's data
+    offset, counted from its moof, moves on by the 8 bytes the moof's head grows and the 8 its
+    mdat's does)."""
+    out, at = bytearray(), 0
+    while at < len(data):
+        size, kind = struct.unpack_from(">I4s", data, at)
+        body = bytearray(data[at + 8 : at + size])
+        if kind == b"moof":
+            find = 0
+            while (find := body.find(b"trun", find)) >= 0:
+                if body[find + 7] & 0x01:  # data-offset-present
+                    offset = struct.unpack_from(">i", body, find + 12)[0]
+                    struct.pack_into(">i", body, find + 12, offset + 16)
+                find += 4
+        out += struct.pack(">I4sQ", 1, kind, 16 + len(body)) + body
+        at += size
+    return bytes(out)
 
 
 # Reading TS.
@@ -712,6 +769,128 @@ class RemuxTests(unittest.TestCase):
         self.assertEqual(
             (sections(remuxer.remux(segment(1, video_samples(2))))[0][5] >> 1) & 0x1F, 1
         )
+
+
+class FeedTests(unittest.TestCase):
+    """A segment remuxed as its bytes come (`Fmp4Remuxer.begin`, `feed`, `end`): a live site's
+    piece being made, passed on fragment by fragment."""
+
+    @staticmethod
+    def fed(remuxer: Fmp4Remuxer, data: bytes, cuts=()) -> list[bytes]:
+        """What `remuxer` gives for a segment of `data` fed in parts cut at `cuts` (offsets):
+        one item per `feed`, then the `end`'s."""
+        bounds = [0, *cuts, len(data)]
+        remuxer.begin()
+        out = [remuxer.feed(data[a:b]) for a, b in zip(bounds, bounds[1:])]
+        return out + [remuxer.end()]
+
+    @staticmethod
+    def remuxer(init: bytes = SITE_INIT) -> Fmp4Remuxer:
+        made = Fmp4Remuxer()
+        if init:
+            made.init(init)
+        return made
+
+    def test_fragment_by_fragment_remux_matches_the_whole_piece_remux(self):
+        # However the bytes are cut, the same TS, and the whole piece's remux's: this piece's
+        # pairs do not overlap in time (a pair's sample due after the next pair's first would
+        # come before it there, after it here: the same frames on each PID all the same).
+        first, second = b"".join(site_piece(900000)), b"".join(site_piece(936000))
+        whole = self.remuxer()
+        expected = [whole.remux(first), whole.remux(second)]
+        rng = random.Random(25)
+        inside = sorted({at + step for at in top_boxes(first) for step in (3, 6, 12)})
+        cutting = {
+            "whole": [],
+            "every byte": range(1, len(first)),
+            "inside each top box's header": [at for at in inside if 0 < at < len(first)],
+            **{
+                f"random {k}": sorted(rng.sample(range(1, len(first)), 1 + k * 7)) for k in range(6)
+            },
+        }
+        for name, cuts in cutting.items():
+            with self.subTest(name):
+                remuxer = self.remuxer()
+                got = [b"".join(self.fed(remuxer, piece, cuts)) for piece in (first, second)]
+                self.assertEqual(got, expected)
+        with self.subTest("its own init before it"):
+            got = b"".join(self.fed(self.remuxer(b""), SITE_INIT + first))
+            self.assertEqual(got, self.remuxer(b"").remux(SITE_INIT + first))
+        with self.subTest("64-bit box sizes"):  # cut inside each largesize field too
+            first_large = large(first)
+            self.assertEqual(self.remuxer().remux(first_large), expected[0])
+            heads = [at + step for at in top_boxes(first_large) for step in (3, 6, 10, 14)]
+            for cuts in ([], range(1, len(first_large)), heads, sorted(rng.sample(heads, 9))):
+                got = b"".join(self.fed(self.remuxer(), first_large, cuts))
+                self.assertEqual(got, expected[0])
+        with self.subTest("pairs overlapping in time"):  # the same frames on each PID
+            overlapping = b"".join(site_piece(900000, lead=2048))
+            got = frames(b"".join(self.fed(self.remuxer(), overlapping, inside)))
+            want = frames(self.remuxer().remux(overlapping))
+            self.assertEqual(
+                {pid: [vars(f) for f in found] for pid, found in got.items()},
+                {pid: [vars(f) for f in found] for pid, found in want.items()},
+            )
+        remuxer = self.remuxer()
+        for piece in (first, second):
+            self.fed(remuxer, piece)
+        self.assertEqual(remuxer.segments, 2)
+
+    def test_a_pair_passes_on_once_its_data_has_come(self):
+        parts = site_piece(0)
+        remuxer = self.remuxer()
+        remuxer.begin()
+        mdat = top_boxes(parts[0])[2]  # emsg, moof, mdat
+        self.assertEqual(remuxer.feed(parts[0][: mdat + 20]), b"")  # its mdat not whole yet
+        ts = remuxer.feed(parts[0][mdat + 20 :])
+        self.assertEqual([pid_of(p) for p in packets(ts)][:2], [0, fmp4._PMT_PID])
+        found = frames(ts)
+        self.assertEqual((len(found[fmp4._VIDEO_PID]), len(found[fmp4._AUDIO_PID])), (6, 5))
+        self.assertEqual(found[fmp4._VIDEO_PID][0].pts, 0)
+        self.assertTrue(found[fmp4._VIDEO_PID][0].key)
+        self.assertEqual(remuxer.feed(parts[1][:-1]), b"")
+        ts = remuxer.feed(parts[1][-1:])
+        self.assertNotIn(0, {pid_of(p) for p in packets(ts)})  # the tables once a piece
+        self.assertEqual(frames(ts)[fmp4._VIDEO_PID][0].pts, 9000)
+        # An mdat to the end of the file (size 0) is whole at the end.
+        last = bytearray(parts[2])
+        at = top_boxes(parts[2])[1]
+        last[at : at + 4] = bytes(4)
+        self.assertEqual(remuxer.feed(bytes(last)), b"")
+        ts = remuxer.end()
+        self.assertEqual(frames(ts)[fmp4._VIDEO_PID][0].pts, 18000)
+
+    def test_data_a_pair_points_past_is_waited_for(self):
+        # A base-data-offset counts from the segment's start; here past a box between the
+        # moof and its mdat.
+        video = video_samples(2)
+        moof = fragment((traf(1, video, base=0, offset=None), []), fill=False)[:-8]
+        free = box(b"free", bytes(8))
+        moof = fragment(
+            (traf(1, video, base=len(moof) + len(free) + 8, offset=None), []), fill=False
+        )[:-8]
+        mdat = box(b"mdat", *(s[1] for s in video))
+        remuxer = self.remuxer(VIDEO_INIT)
+        remuxer.begin()
+        self.assertEqual(remuxer.feed(moof + free), b"")
+        ts = remuxer.feed(mdat) + remuxer.end()
+        self.assertEqual(ts, self.remuxer(VIDEO_INIT).remux(moof + free + mdat))
+        self.assertEqual(len(frames(ts)[fmp4._VIDEO_PID]), 2)
+
+    def test_a_piece_cut_off_is_damaged_at_its_end_after_what_came_whole(self):
+        parts = site_piece(0)
+        remuxer = self.remuxer()
+        remuxer.begin()
+        ts = remuxer.feed(parts[0] + parts[1][:-5])
+        self.assertEqual(len(frames(ts)[fmp4._VIDEO_PID]), 6)
+        with self.assertRaisesRegex(Fmp4Error, "damaged"):
+            remuxer.end()
+        ts = b"".join(self.fed(remuxer, b"".join(site_piece(36000))))  # the next one, afresh
+        self.assertEqual(len(frames(ts)[fmp4._VIDEO_PID]), 24)
+        self.assertEqual(frames(ts)[fmp4._VIDEO_PID][0].pts, 36000)
+        with self.assertRaisesRegex(Fmp4Error, "encrypted"):  # at once, not at its end
+            remuxer.begin()
+            remuxer.feed(segment(2, video_samples(2), extra=full(b"senc", 0, 0, bytes(8))))
 
 
 class FixtureTests(unittest.TestCase):

@@ -10,6 +10,7 @@ shape once a resize stops.
 """
 
 import json
+import math
 import os
 import tempfile
 import unittest
@@ -574,6 +575,21 @@ class StatsTextTests(unittest.TestCase):
             ],
         )
         self.assertEqual(stats_rows({"lag": None, "source": ""}), [])
+
+    def test_the_statistics_show_behind_the_broadcaster_under_behind_live(self):
+        # 2026-11-25 (stats for nerds): a dated source's, counted from the time the site
+        # stamped on the piece playing; left out when not known, or before the clock.
+        rows = stats_rows(dict(self.STATS, behind_broadcaster=15.68))
+        self.assertEqual(
+            rows[-2:], [("Behind live", "12.3 s"), ("Behind the broadcaster", "15.7 s")]
+        )
+        for unknown in (None, -0.4, math.inf, math.nan, "3"):
+            with self.subTest(behind=unknown):
+                rows = stats_rows(dict(self.STATS, behind_broadcaster=unknown))
+                self.assertEqual(rows[-1], ("Behind live", "12.3 s"))
+        i18n.set_language("tr")
+        rows = dict(stats_rows(dict(self.STATS, behind_broadcaster=15.68)))
+        self.assertEqual(rows["Yayıncının gerisinde"], "15,7 sn")
 
     def test_an_unknown_codec_reads_as_its_code(self):
         self.assertEqual(picture.codec_name("WVC1"), "WVC1")

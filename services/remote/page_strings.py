@@ -169,6 +169,14 @@ PAGE_STRINGS: dict[str, str] = {
     "translate_to": N_("Translate to"),
     "no_audio": N_("No audio tracks"),  # i18n: the phone remote's Sound, when there are none
     "no_subtitles": N_("No subtitles"),  # i18n: the phone remote's Subtitles, with none to show
+    # 2.15: the TV's Open Link card from the phone, and its Watch of a channel not live yet.
+    # i18n: the phone remote: a button: the TV's Open Link card opens, typed into from the phone
+    "open_link": N_("Open a link"),
+    # i18n: the phone remote, where a Kick or Twitch channel would play on the phone: it isn't
+    # streaming now (followed by "It plays as soon as it's live")
+    "not_live": N_("This channel isn't live now"),
+    # i18n: the phone remote, after "This channel isn't live now ·": it plays once it streams
+    "plays_when_live": N_("It plays as soon as it's live"),
     "fullscreen": N_("Full screen"),  # i18n: the phone remote: a button
     "this_phone": N_("This phone"),  # i18n: the phone remote: its menu's title
     "guide_find": N_("Find a channel"),  # i18n: the phone remote's guide field

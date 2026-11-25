@@ -469,6 +469,27 @@ class LinksTests(unittest.TestCase):
             self.assertEqual(self.store.get(LIVE_ID).url, OTHER)
             self.assertEqual(len(self.store.entries()), 2)
 
+    def test_a_site_page_as_an_address_is_kept_as_its_page(self):
+        # A Kick or Twitch channel's page, typed as it was copied: another stream, kept by its
+        # page's own address, live, and named by its channel when kept as a new link.
+        self.seed((LIVE_URL, "Harbour News", LIVE, NOW, ""))
+        self.into(LIVE_ID)
+        self.move_to(row_key(LIVE_ID, ADDRESS))
+        self.type_text("kick.com/ExampleChannel/")
+        question = self.links.question
+        self.assertTrue(question.isVisible())
+        self.key(Action.NAV_ACTIVATE)  # the default: Keep as a new link
+        page = "https://kick.com/examplechannel"
+        new = self.store.get(stream_id(page))
+        self.assertIsNotNone(new)
+        self.assertEqual((new.url, new.kind, new.name), (page, LIVE, "examplechannel · Kick"))
+        self.assertEqual(self.store.get(LIVE_ID).url, LIVE_URL)
+        self.type_text("https://m.twitch.tv/otherchannel")
+        self.key(Action.NAV_LEFT)
+        self.key(Action.NAV_ACTIVATE)  # Replace
+        entry = self.store.get(LIVE_ID)
+        self.assertEqual((entry.url, entry.kind), ("https://www.twitch.tv/otherchannel", LIVE))
+
     def test_replace_forgets_where_a_film_stopped_and_a_fresh_token_keeps_it(self):
         self.seed((FILM_URL, "Lecture recording", FILM, NOW, ""))
         self.controller.stops[FILM_ID] = 2_472_000

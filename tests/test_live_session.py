@@ -1,3 +1,4 @@
+import contextlib
 import itertools
 import logging
 import math
@@ -15,7 +16,7 @@ from PySide6.QtWidgets import QApplication
 from timer_fixtures import pause
 
 from services import revive
-from services.live import learned_target, worker
+from services.live import learned_target, source as live_source, stay_live, worker
 from services.live.kept import KeptRing, Where
 from services.live.learned_target import ArrivalModel, Learned, LearnedTarget
 import services.live.live_session as live_session
@@ -27,10 +28,12 @@ from services.live.live_session import (
     WINDOW_BAR_S,
     LiveSession,
 )
+from services.live.server_part import RecordingRoute
 from services.live.source import STREAM_LIMIT, STREAM_REFUSED
 from services.live.stay_live import AUTO, TARGETS, Decision, StayLive
 from services.live.timeline import Span
 from services.live.tuning import LiveTuning, Tuning
+from services.picture import stats_rows
 from services.playback import PlaybackState
 from services.vlc_profile import PlayKind
 from ui.overlays.transport import Transport
@@ -47,6 +50,7 @@ LOADING = "Still loading…"
 RECONNECTING = "Reconnecting…"
 NO_STREAM = "This item has no stream address"
 NOT_LIVE = "The provider sent a recording, not the channel. Trying again…"
+AD_BREAK = "Ad break skipped"
 KEPT_ONLY = "This channel can't open right now. Playing what was kept."
 KEPT_END = "That's all that was kept. The channel can't open right now."
 KEPT_DISK = "The disk buffer failed. Playing what was kept; Go live plays the channel again."
@@ -92,6 +96,8 @@ class FakeEngine(QObject):
         self.untils = []  # (sid, seq): a server part's stop moved (2.7)
         self.junctions = []  # (sid, seconds): what a session's next restart is asked (2.8.5)
         self.retry_nows = []  # sids asked to try their channel's stream again now
+        self.joins = []  # (part sid, live sid, seq): a recording part's stream goes on (2.15)
+        self.stops = []  # (part sid, stop date, stop place): its stop moved (2.15)
         self.events = []  # ("open", sid) as sessions open
         self._answered = set()
         self._spans = {}
@@ -147,6 +153,12 @@ class FakeEngine(QObject):
 
     def retry_now(self, sid):
         self.retry_nows.append(sid)  # the picture's Try now while the channel is down
+
+    def join(self, sid, live_sid, seq):
+        self.joins.append((sid, live_sid, seq))  # 2.15
+
+    def set_stop(self, sid, stop_date, stop_s):
+        self.stops.append((sid, stop_date, stop_s))  # 2.15: a recording part's stop moved
 
     def start_recording(self, sid, path, seq, **kwargs):
         rid = f"r{len(self.recordings) + 1}"
@@ -207,6 +219,12 @@ class FakeEngine(QObject):
         restarts=None,
         steered=None,
         settled=None,
+        prefetching=None,
+        ad_break=None,
+        dates=None,
+        piece=None,
+        part_date=None,
+        part_start=None,
     ):
         """Closed `spans` plus an optional open segment, as the helper's state reports them;
         `breaks`: (timeline position, seconds) of timestamp jumps it left out. `caught_up`
@@ -214,7 +232,11 @@ class FakeEngine(QObject):
         starts) to the closed spans' end, or 0.0; `backlog`, the listed media an HLS source
         has still to deliver, is left out when None; `finite`: a finished (ENDLIST) playlist;
         `open_quality`: how cleanly the open segment starts; `video`: whether the stream has
-        a video PID (left out when None, as an older helper does)."""
+        a video PID (left out when None, as an older helper does); `prefetching`: an HLS
+        source reads its playlist's prefetch pieces as they are made, `ad_break`: it skips a
+        live site's ad break now, `dates`: [timeline second, a piece's date less it] from where
+        each holds, `piece`: the length of the pieces its playlist lists (each left out when
+        None)."""
         end = spans[-1].end if spans else (end or 0.0)
         oldest = spans[0].seq if spans else open_seq
         self._spans[sid] = list(spans)
@@ -236,6 +258,18 @@ class FakeEngine(QObject):
         }
         if backlog is not None:
             self._snapshots[sid]["backlog_s"] = backlog
+        if prefetching is not None:  # a live site's prefetch pieces, read as they are made
+            self._snapshots[sid]["prefetching"] = prefetching
+        if ad_break is not None:  # a live site's ad break, its pieces skipped
+            self._snapshots[sid]["ad_break"] = ad_break
+        if dates is not None:  # a dated source's dates on the timeline
+            self._snapshots[sid]["dates"] = [list(entry) for entry in dates]
+        if piece is not None:  # an HLS source's piece length (its EXTINF)
+            self._snapshots[sid]["piece_s"] = piece
+        if part_date is not None:  # 2.15: a recording part's first piece's date
+            self._snapshots[sid]["part_date"] = part_date
+        if part_start is not None:  # ... and its place in the recording's listing
+            self._snapshots[sid]["part_start_s"] = part_start
         if video is not None:
             self._snapshots[sid]["video"] = video
         if parts is not None:  # 2.6: [first_seq, start, wall] of each part
@@ -479,6 +513,9 @@ class Feed:
         self.starved_s = 0.0  # how long VLC had nothing to play
         self.before = []  # the lag right before each arrival
         self.restarts = self.steered = None  # 2.8.5: the helper's restart counts, if any
+        self.ad_break = None  # the helper skips a live site's ad break (None: not said)
+        self.prefetching = None  # a live site's prefetch pieces, read as made (None: not said)
+        self.piece = None  # the length of the pieces its playlist lists (None: not said)
         self.push()
 
     def push(self):
@@ -498,6 +535,9 @@ class Feed:
             breaks=self.reported,
             restarts=self.restarts,
             steered=self.steered,
+            ad_break=self.ad_break,
+            prefetching=self.prefetching,
+            piece=self.piece,
         )
 
     def ready(self, backlog_after_start=True):
@@ -1687,6 +1727,47 @@ class StartPolicyTests(LiveSessionCase):
         self.assertEqual(self.playback.plays, [self.stream(sid, 0)])  # from the oldest
         self.assertLess(self.landed.call_args.args[1], 0)  # short of the target
         self.assertEqual(self.notices, [])
+
+    def test_a_prefetch_source_plays_without_waiting_for_a_backlog(self):
+        # A live site's playlist read at its prefetch pieces (`prefetching`): the backlog the
+        # start fetched has landed before them (`caught_up`), and what follows comes as it is
+        # made, no burst at a time. A start within the band plays at once, whatever the
+        # playlist lists still to come (`backlog_s`: the prefetch pieces' lengths); with
+        # nothing far enough back it plays within a second, as a steady source. HLS without
+        # them waits for a start far enough back, and says so.
+        streaming = {"burst": 0.0, "hls": True, "caught_up": True, "backlog": 8.3}
+        sid = self.start(latency="normal")
+        self.engine.buffer(sid, [], open_seq=0, live_edge=2.6, prefetching=True, **streaming)
+        self.engine.sessionReady.emit(sid)
+        self.assertEqual(self.playback.plays, [self.stream(sid, 0)])  # 3.1 s behind: in band
+        for prefetching in (True, None):
+            with self.subTest(prefetching=prefetching):
+                self.live = self.make()
+                self.notices.clear()
+                sid = self.start(latency="normal")
+                self.engine.buffer(
+                    sid, [], open_seq=0, live_edge=1.2, prefetching=prefetching, **streaming
+                )
+                self.engine.sessionReady.emit(sid)
+                self.step(0.75)
+                self.assertEqual(self.playback.plays, [])
+                self.step(0.25)
+                if prefetching:
+                    self.assertEqual(self.playback.plays, [self.stream(sid, 0)])  # the oldest
+                    self.assertEqual(self.notices, [])
+                else:
+                    self.assertEqual(self.playback.plays, [])
+                    self.assertEqual(self.notices, [LOADING])
+
+    def test_only_stable_starts_its_target_behind_a_playlists_prefetch_pieces(self):
+        # The source starts at a playlist's prefetch pieces for a live delay up to its bound
+        # (Low, Normal, Auto); Stable's starts its 6 s target back from them (2026-11-25,
+        # replacing ruling R4's 3 target durations: `PrefetchTargetTests`).
+        from services.live import source
+
+        for latency, delay in live_session.LIVE_DELAY.items():
+            with self.subTest(latency=latency):
+                self.assertEqual(delay <= source._PREFETCH_DELAY_MAX_S, latency != "stable")
 
     def test_hls_starts_on_the_edge_its_backlog_will_reach_once_that_start_is_final(self):
         # A sparse-PCR channel's 10 s segments (2 s keyframe intervals), 36 s fetched: the
@@ -4637,6 +4718,46 @@ class MemoryTests(LiveSessionCase):
         self.assertAlmostEqual(LearnedTarget(kept.learned).target(), 4.0, delta=0.05)
         self.assertEqual(self.tuning.get("B"), Tuning())
 
+    def test_a_sites_tunes_that_starve_right_after_the_start_teach_no_margin(self):
+        # The same on a live site's channel, its prefetch pieces read as made, at Auto's second
+        # (`PREFETCH_FLOOR_S`): each tune plays from the oldest point, 0.2 s on (0.7 s behind
+        # once VLC opened it, so no start aimed at the second), and the source is 1.9 s late
+        # at once. VLC never held a cushion: the batches after the dry run find it as close
+        # to dry as the start left it, and no near-miss counts, as no dry run does. Before,
+        # the dry run's own wander widened the band past the second, and the mean lag (carried
+        # on through the silence) read 0.9 s while VLC held 0.2 s: each tune taught a second
+        # more, the target 1, 2, then 3 s.
+        floor = learned_target.PREFETCH_FLOOR_S
+        for shape in ("flow", "pieces"):
+            self.tuning = LiveTuning(None)
+            self.live = self.make()
+            for tune in range(5):
+                with self.subTest(shape=shape, tune=tune):
+                    self.start(latency=AUTO, channel="B")
+                    self.engine.answer()
+                    sid = self.engine.last_sid
+                    if shape == "pieces":  # 0.3 s more where each 4.25 s piece ends
+                        feed = site_feed(self, sid, edge=0.2)
+                        feed.starved = PlaybackState.PLAYING
+                    else:  # at real time, a quarter second at a time
+                        feed = Feed(self, sid, burst=0.0, edge=0.2, hls=True)
+                        feed.starved, feed.prefetching = PlaybackState.PLAYING, True
+                        feed.push()
+                    feed.ready(backlog_after_start=False)
+                    feed.stalled = True  # silent for the second the start waits (2.1)
+                    feed.run(1.0)
+                    feed.stalled = False
+                    feed.run(0.25)
+                    feed.stalled = True
+                    feed.run(1.9)
+                    feed.stalled = False
+                    feed.run(5.0)
+                    self.assertGreater(feed.starved_s, 0.5)
+                    self.assertEqual(self.live._learned.prior.margin(), 0.0)
+                    self.assertAlmostEqual(self.timelines[-1]["target"], floor, delta=0.05)
+            with self.subTest(shape=shape):
+                self.assertEqual(self.tuning.get("B"), Tuning())  # nothing learned, none kept
+
     def test_a_channel_that_cannot_change_speed_plays_at_1x_from_its_next_tune(self):
         with self.assertLogs("services.live.live_session", "INFO") as logs:
             self.tune("A", edge=12.0, crawl=True).run(10.0)
@@ -5526,6 +5647,34 @@ class InterruptionTests(LiveSessionCase):
         with self.assertLogs("services.live.live_session", "WARNING"):
             self.step(0.6)
         self.assert_falls_back(sid, LOST, 1)
+
+    def test_an_ad_break_does_not_count_toward_the_disk_deferral(self):
+        # Task 4 M6: a live site's break sends nothing; the RAM ring's first state is waited
+        # for from the break's end, never played directly (the ads) meanwhile.
+        self.live = self.make(ready_timeout_ms=1000)
+        sid = self.ready(segments(0, 10), live_edge=20.0)
+        self.playback.set_state(PlaybackState.PLAYING)
+        self.engine.sessionUpdated.emit(sid, dict(self.engine._snapshots[sid], ad_break=True))
+        self.engine.sessionFailed.emit(sid, "disk", "The disk buffer failed.")
+        for _ in range(40):  # 10 s of the break
+            self.step(0.25)
+        self.assertEqual(self.engine.closed, [])
+        self.engine.sessionUpdated.emit(sid, dict(self.engine._snapshots[sid], ad_break=False))
+        self.assertEqual(self.engine.closed, [])  # (a state: the RAM ring's, it goes on)
+
+    def test_the_helper_starts_back_by_the_captions_floor(self):
+        # Task 9 M6: a tune with AI captions on (their floor known from the channel before)
+        # asks the helper for a start that far back at least, never Stable's 6 s alone.
+        for floor in (0.0, 8.0):
+            with self.subTest(floor=floor):
+                self.live = self.make()
+                self.live.set_caption_floor(floor)
+                self.start(latency="stable")
+                target = self.engine.opened[-1][2]["target"]
+                if floor:
+                    self.assertGreaterEqual(target, floor)
+                else:
+                    self.assertEqual(target, live_session.start_target("stable"))
 
     def test_a_pause_does_not_extend_the_disk_deferral(self):
         self.live = self.make(ready_timeout_ms=1000)
@@ -6755,6 +6904,38 @@ class LearnedTargetTests(LiveSessionCase):
                 self.assertIsNone(self.live._learned)
                 self.assertEqual(self.timelines[-1]["target"], TARGETS[latency])
 
+    def test_a_prefetch_source_is_not_held_up_by_a_need_remembered_from_whole_pieces(self):
+        # A channel tuned before its pieces were read as they are made remembered the need
+        # its whole pieces made (Kick's 6 s target durations: a 6 s target, ~6 s behind its
+        # edge): a tune that now reads them so (`prefetching`) starts at the floor's target and
+        # learns its own need. A source that does not keeps what it remembered.
+        self.tuning.remember("ch", Tuning(learned=Learned(need=6.0)))
+        # Starts 11, 9, 7, 5, 3 and 1 s behind once VLC opened them (0.5 s); a prefetch
+        # source's floor is a second (2026-11-25: `PREFETCH_FLOOR_S`).
+        spans = segments(0, 5)
+        for prefetching, target, seq in ((True, 1.0, 5), (False, 6.0, 2)):
+            with self.subTest(prefetching=prefetching):
+                self.live = self.make()
+                sid = self.start(latency=AUTO, channel="ch")
+                for edge in (10.5, 10.75):  # ready, then a quarter second on at real time
+                    self.engine.buffer(
+                        sid,
+                        spans,
+                        live_edge=edge,
+                        open_seq=5,
+                        hls=True,
+                        caught_up=True,
+                        prefetching=prefetching,
+                    )
+                    if edge == 10.5:
+                        self.engine.sessionReady.emit(sid)
+                    self.clock.now += 0.25
+                self.assertAlmostEqual(self.live._target(self.engine.snapshot(sid)), target)
+                self.assertEqual(len(self.playback.plays), 1)
+                self.assertEqual(self.playback.plays[0][0], self.engine.stream_url(sid, seq))
+                remembered = self.live._learned.arrivals.remembered
+                self.assertEqual(remembered, None if prefetching else 6.0)
+
     def test_the_burst_floor_switch_is_read_once_per_run(self):
         self.enterContext(mock.patch.object(live_session, "SEGMENT_FLOOR", False))
         self.tune()
@@ -7305,6 +7486,235 @@ class LearnedTargetTests(LiveSessionCase):
         self.assertLess(targets[-1], raised - 1.0)
         self.assertTrue(all(a >= b - 1e-9 for a, b in zip(targets, targets[1:])))  # never up
         self.assertNotIn(1.10, self.playback.rates)
+
+
+class AdBreakTests(LiveSessionCase):
+    """A live site's ad break, its pieces skipped by the helper (`ad_break` in its state): VLC
+    is held at the edge (its last picture stays), the learned target hears nothing of the
+    break, and nothing steers, watches or opens the stream again until the channel comes
+    back; the break is said once."""
+
+    def setUp(self):
+        self.tuning = LiveTuning(None)
+        super().setUp()
+
+    def make(self, **kwargs):
+        kwargs.setdefault("tuning", self.tuning)
+        return super().make(**kwargs)
+
+    spy = LearnedTargetTests.spy
+    tune = LearnedTargetTests.tune
+
+    @staticmethod
+    def begin(feed):
+        """The helper skips an ad break from now: it says so, and sends nothing meanwhile."""
+        feed.ad_break = True
+        feed.push()
+        feed.stalled = True
+
+    @staticmethod
+    def end(feed):
+        """The break is over: the helper says so, and the channel's pieces come again (its
+        timeline goes on where it stood: the break's media is no part of it)."""
+        feed.ad_break = False
+        feed.push()
+        feed.stalled = False
+
+    def test_the_ad_break_is_a_pipelines_only(self):
+        # The UI asks `in_ad_break()` before it opens a stream again: true in a break of the
+        # buffer, false once the session plays directly, whatever flag a fall-back left.
+        feed = self.tune(edge=8.0, starved=PlaybackState.PLAYING)
+        feed.run(30.0)
+        self.assertFalse(self.live.in_ad_break())
+        self.begin(feed)
+        feed.run(10.0)
+        self.assertTrue(self.live.in_ad_break())
+        self.live._phase = live_session._Phase.DIRECT  # fell back during the break
+        self.assertTrue(self.live._ad_break)  # (its flag is still set)
+        self.assertFalse(self.live.in_ad_break())
+
+    def test_an_ad_break_counts_no_starvation(self):
+        # 90 s of a break under Auto: neither the starvation prior, nor a near-miss, nor a
+        # stall hears of it, during it or as VLC fills up again after it; the margin is as
+        # it was.
+        starved = self.spy(LearnedTarget, "starved")
+        stalled = self.spy(LearnedTarget, "stalled")
+        near = self.spy(LearnedTarget, "near_miss")
+        feed = self.tune(edge=8.0, starved=PlaybackState.PLAYING)  # libVLC 3: Playing, dry
+        feed.run(60.0)
+        learned = self.live._learned
+        margin, target = learned.prior.margin(), self.timelines[-1]["target"]
+        counts, nears = (starved.call_count, stalled.call_count), near.call_count
+        holds, dry = len(self.playback.holds), feed.starved_s
+        self.begin(feed)
+        feed.run(90.0)
+        self.assertTrue(self.playback.held)  # its last picture stays
+        self.end(feed)
+        feed.run(30.0)  # the channel again, well past VLC's refill
+        self.assertEqual((starved.call_count, stalled.call_count), counts)
+        close = [c for c in near.call_args_list[nears:] if c.args[1] < learned_target.NEAR_S]
+        self.assertEqual(close, [])
+        self.assertEqual(learned.prior.margin(), margin)
+        self.assertLessEqual(self.timelines[-1]["target"], target + 1e-9)
+        self.assertEqual(self.playback.holds[holds:], [True])  # held to the newest's open
+        self.assertEqual(feed.starved_s, dry)  # held before it ran dry, played on after
+        self.assertEqual(self.notices.count(AD_BREAK), 1)
+
+    def test_after_a_break_the_channel_plays_from_its_newest_never_where_it_waited(self):
+        # Owner 2026-11-25: "when the stream comes back, play from the latest". VLC, held at
+        # the edge through the break, is never played on from there: once the channel's pieces
+        # come again, the start Go live takes of what came after the break opens (Task 4 M3:
+        # never at once on the little that came first), held until then; once, at its target.
+        feed = self.tune(edge=8.0, starved=PlaybackState.PLAYING)
+        feed.run(30.0)
+        target = self.timelines[-1]["target"]
+        self.begin(feed)
+        feed.run(20.0)
+        stood, waited = feed.edge, feed.position
+        plays, dry = len(self.playback.plays), feed.starved_s
+        self.end(feed)
+        while len(self.playback.plays) == plays:
+            self.assertEqual(feed.position, waited)  # held: never played on from there
+            self.assertLess(feed.edge - stood, target + 3.0, "no start opened")
+            feed.run(Feed.DT)
+        self.assertGreaterEqual(self.live.position(), stood - 1e-6)  # what came after it
+        feed.run(10.0)
+        self.assertEqual(len(self.playback.plays), plays + 1)
+        self.assertEqual(feed.starved_s, dry)
+        self.assertLessEqual(feed.edge - feed.position, target + 1.0)
+
+    def test_an_ad_break_triggers_no_watch_and_no_reopen(self):
+        # During the break the picture watch's fallback (software decoding) and the sound
+        # watch's reopen do nothing, and VLC's stream that ended is opened again only once
+        # the channel comes back. The watches' verdicts (they came as VLC played out its
+        # cushion) are acted on then: one reopen, in software.
+        feed = self.tune(edge=8.0, starved=PlaybackState.PLAYING)
+        feed.run(30.0)
+        plays = len(self.playback.plays)
+        self.begin(feed)
+        feed.run(10.0)
+        self.assertTrue(self.playback.held)
+        self.playback.pictureFroze.emit()
+        self.playback.soundLost.emit()
+        self.playback.ended.emit()
+        feed.run(80.0)
+        self.assertEqual(len(self.playback.plays), plays)
+        self.assertEqual(self.modes[-1], "pipeline")
+        self.assertFalse(self.tuning.get("ch").software)  # nor learned meanwhile
+        stood = feed.edge
+        self.end(feed)
+        feed.run(10.0)
+        self.assertEqual(len(self.playback.plays), plays + 1)  # once, for all three
+        self.assertGreaterEqual(self.live.position(), stood - 2.0)  # at the newest, not before
+        self.assertEqual(self.playback.software[-1], True)
+        self.assertTrue(self.tuning.get("ch").software)
+        self.assertEqual(self.notices.count(AD_BREAK), 1)
+
+    def test_a_watchs_verdict_in_a_break_opens_the_stream_after_it(self):
+        # Without a stream that ended: the sound watch's reopen, owed, is made once the
+        # break is over (the picture watch's in software, as above).
+        for froze in (False, True):
+            with self.subTest(froze=froze):
+                feed = self.tune(edge=8.0, starved=PlaybackState.PLAYING)
+                feed.run(30.0)
+                plays = len(self.playback.plays)
+                self.begin(feed)
+                feed.run(10.0)
+                self.playback.soundLost.emit()
+                if froze:
+                    self.playback.pictureFroze.emit()
+                feed.run(20.0)
+                self.assertEqual(len(self.playback.plays), plays)
+                self.end(feed)
+                feed.run(5.0)
+                self.assertEqual(len(self.playback.plays), plays + 1)
+                self.assertEqual(self.playback.software[-1], froze)
+
+    def test_a_seek_in_a_break_settles_the_verdicts_owed(self):
+        # Final review (Task 4 M4): the stream a seek opened mid-break is a new one, so the
+        # watches' verdicts owed for the old one are dropped: the break's end opens nothing.
+        feed = self.tune(edge=8.0, starved=PlaybackState.PLAYING)
+        feed.run(30.0)
+        self.begin(feed)
+        feed.run(10.0)
+        self.playback.soundLost.emit()
+        self.playback.pictureFroze.emit()
+        plays = len(self.playback.plays)
+        self.live.seek_to(10.0)
+        self.assertEqual(len(self.playback.plays), plays + 1)  # the seek's own open
+        feed.run(10.0)
+        self.end(feed)
+        feed.run(10.0)
+        self.assertEqual(len(self.playback.plays), plays + 1)  # no second one
+
+    def test_a_break_that_ends_after_a_fall_back_owes_nothing(self):
+        # Its owed verdicts go with the break whatever plays as it ends: none is acted on at a
+        # later break's end.
+        feed = self.tune(edge=8.0, starved=PlaybackState.PLAYING)
+        feed.run(30.0)
+        self.begin(feed)
+        feed.run(10.0)
+        self.playback.soundLost.emit()
+        self.playback.pictureFroze.emit()
+        self.assertTrue(self.live._froze_owed and self.live._sound_owed)
+        self.live._phase = live_session._Phase.DIRECT  # fell back during the break
+        self.end(feed)
+        self.assertEqual((self.live._froze_owed, self.live._sound_owed), (False, False))
+
+    def test_a_break_that_never_ends_is_a_silence_after_a_while(self):
+        # A break the helper says goes on beyond any (`_AD_MAX_S`, here 30 s: a channel gone off
+        # mid-break, a stuck edge) is waited for as any silence of the channel from then: the
+        # stream that stopped in it opens again, and the stall counts. Said once; a break the
+        # helper still says goes on is not taken up again.
+        self.assertEqual(live_session._AD_MAX_S, live_source._AD_MAX_S)
+        self.patch("_AD_MAX_S", 30.0)
+        stalled = self.spy(LearnedTarget, "stalled")
+        feed = self.tune(edge=8.0, starved=PlaybackState.PLAYING)
+        feed.run(30.0)
+        plays = len(self.playback.plays)
+        self.begin(feed)
+        feed.run(10.0)
+        self.playback.ended.emit()
+        feed.run(19.0)
+        self.assertEqual((len(self.playback.plays), stalled.call_count), (plays, 0))
+        feed.run(2.0)
+        self.assertEqual(len(self.playback.plays), plays + 1)  # past the bound
+        feed.push()  # the helper still says it goes on
+        feed.run(15.0)  # past VLC's filling up again (`_AD_AFTER_S`)
+        self.assertEqual(stalled.call_count, 1)
+        self.assertEqual(self.notices.count(AD_BREAK), 1)
+        self.assertFalse(self.timelines[-1]["ad_break"])
+
+    def test_a_pre_roll_that_never_ends_is_waited_for_as_ever_after_a_while(self):
+        # A tune into a break that goes on beyond `_AD_MAX_S` (here 60 s): the start's own
+        # fallback then (nothing arrived: the channel plays directly).
+        self.patch("_AD_MAX_S", 60.0)
+        sid = self.start()
+        self.engine.answered(sid, hls=True)
+        self.engine.sessionUpdated.emit(sid, dict(self.engine._snapshots[sid], ad_break=True))
+        for _ in range(9):  # 54 s: the ready timer's 6 s (a QTimer in the app)
+            self.clock.now += 6.0
+            self.live._on_ready_timeout()
+        self.assertEqual((self.engine.closed, self.playback.plays), ([], []))
+        self.clock.now += 6.0
+        self.live._on_ready_timeout()
+        self.assert_falls_back(sid, UNAVAILABLE, 0)
+
+    def test_a_pre_roll_at_tune_in_waits_for_the_channel(self):
+        # A tune into an ad break: nothing arrives for as long as it lasts, and the session
+        # waits (played directly, the channel would show the ads) and plays the channel's
+        # first piece once it comes. Said once.
+        sid = self.start()
+        self.engine.answered(sid, hls=True)
+        self.engine.sessionUpdated.emit(sid, dict(self.engine._snapshots[sid], ad_break=True))
+        for _ in range(20):  # two minutes of ads: the ready timer's 6 s (a QTimer in the app)
+            self.live._on_ready_timeout()
+        self.assertEqual((self.engine.closed, self.playback.plays), ([], []))
+        self.assertNotIn("direct", self.modes)
+        self.engine.buffer(sid, [], open_seq=0, live_edge=2.0, ad_break=False)
+        self.engine.sessionReady.emit(sid)
+        self.assertEqual(self.playback.plays, [self.stream(sid, 0)])
+        self.assertEqual(self.notices, [AD_BREAK])
 
 
 if __name__ == "__main__":
@@ -8250,6 +8660,465 @@ class ArchivePartTests(LiveSessionCase):
         self.assertEqual(len(self.engine.opened), 1)  # the archive waits for the park
         self.engine.sessionParked.emit(sid)
         self.assertEqual(self.engine.opened[-1][1], "http://archive.test/9060.ts")
+
+
+class SiteRecordingTests(LiveSessionCase):
+    """2.15 (the owner: "a fluid back and forth"): a Kick or Twitch channel's site keeps the
+    running broadcast's recording: the bar runs from the broadcast's start through it and the
+    buffer to live; a rewind past the buffer plays it, placed by its pieces' dates on the
+    buffer's own; playing forward goes on into the buffer as one stream (nothing reopens)."""
+
+    SPANS = [Span(n, 2.0 * n, 2.0 * n + 2.0, False, media_seq=500 + n) for n in range(100)]
+    URL = "https://rec.test/abc/1080p60/playlist.m3u8"
+
+    def playing(self, *, dated=True, spans=None):
+        """A dated 200 s buffer (2 s pieces from media sequence 500) whose second 0 is dated
+        10,000 (Unix seconds; now 10,200), and its site's recording from 6,400 on."""
+        self.live._wall = lambda: 10_200.0
+        sid = self.start()
+        self.engine.buffer(
+            sid,
+            spans or self.SPANS,
+            hls=True,
+            window=28.0,
+            parts=[[0, 0.0, 10_000.0]],
+            dates=[[0.0, 10_000.0]],
+        )
+        self.engine.sessionReady.emit(sid)
+        self.live.set_site_recording(RecordingRoute(self.URL, 6_400.0, dated=dated, steps=True))
+        return sid
+
+    def in_recording(self, at, own, **placed):
+        """A seek to `at` opened the recording: its own spans `own`, placed by `placed`."""
+        self.live.seek_to(at)
+        part = self.engine.opened[-1][0]
+        self.engine.buffer(part, own, hls=True, **placed)
+        self.engine.sessionReady.emit(part)
+        return part
+
+    def test_the_bar_covers_the_whole_broadcast(self):
+        self.playing()
+        self.assertEqual(self.live.server_window(), 3_600.0)
+        self.live._emit_timeline()
+        state = self.timelines[-1]
+        self.assertEqual((state["start"], state["window_start"]), (-3_600.0, -3_600.0))
+        self.assertEqual(state["buffer_start"], 0.0)
+        self.assertNotIn("archive_part", state)
+
+    def test_a_rewind_opens_the_recording_from_its_moment_to_the_buffers_start(self):
+        sid = self.playing()
+        self.live.seek_to(-1_800.0)
+        part, url, kwargs = self.engine.opened[-1]
+        self.assertNotEqual(part, sid)
+        self.assertEqual(url, self.URL)
+        self.assertEqual(
+            kwargs["window"],
+            {
+                "from_s": 1_800.0,
+                "stop_s": 3_600.0,
+                "stop_date": 10_000.0,
+                "late_s": 70.0,
+                "grows": True,
+                "ahead_s": WINDOW_AHEAD_S,
+                "reload_s": 30.0,
+            },
+        )
+
+    def test_it_is_placed_by_its_first_pieces_date(self):
+        self.playing()
+        own = [Span(n, 10.0 * n, 10.0 * n + 10.0, False, media_seq=n) for n in range(3)]
+        part = self.in_recording(-1_800.0, own, part_date=8_195.0, part_start=1_795.0)
+        # Its piece holding 8,200 (the moment asked) plays, from -1,805 on the bar.
+        self.assertEqual(self.playback.plays[-1][0], self.engine.stream_url(part, 0))
+        self.assertAlmostEqual(self.live.position(), -1_805.0)
+        self.assertTrue(self.live.in_server_part())
+
+    def test_an_undated_one_is_placed_by_its_start_and_what_comes_before(self):
+        self.playing(dated=False)
+        own = [Span(0, 0.0, 10.0, False, media_seq=0), Span(1, 10.0, 20.0, False, media_seq=1)]
+        part = self.in_recording(-1_800.0, own, part_start=1_790.0)
+        # 6,400 + 1,790 = 8,190: its second 0 is the bar's -1,810; -1,800 is its second piece's.
+        self.assertEqual(self.playback.plays[-1][0], self.engine.stream_url(part, 1))
+        self.assertAlmostEqual(self.live.position(), -1_800.0)
+
+    def advance(self, seconds, step=0.25):
+        for _ in range(round(seconds / step)):
+            self.clock.now += step
+            self.playback.ms += round(step * 1000)
+            self.live._tick()
+
+    def test_playing_forward_goes_on_into_the_buffer_as_one_stream(self):
+        sid = self.playing()
+        own = [Span(0, 0.0, 10.0, False, media_seq=359), Span(1, 10.0, 20.0, False, media_seq=360)]
+        part = self.in_recording(-15.0, own, part_date=9_980.0, part_start=3_580.0)
+        self.engine.sessionEnded.emit(part)  # its input reached its stop: the buffer's start
+        self.assertEqual(self.engine.joins, [(part, sid, 0)])  # the buffer's second 0
+        self.assertEqual(self.playback.plays[-1][0], self.engine.stream_url(part, 0))
+        self.playback.set_state(PlaybackState.PLAYING)
+        plays = len(self.playback.plays)
+        positions = []
+        for _ in range(4):
+            self.advance(6.0)
+            positions.append(self.live.position())
+        self.assertEqual(len(self.playback.plays), plays)  # nothing reopened at the join
+        self.assertEqual(positions, sorted(positions))  # never back
+        self.assertFalse(self.live.in_server_part())  # in the buffer now
+        self.assertGreater(positions[-1], 0.0)
+        self.assertNotIn(part, self.engine.closed)  # kept: a seek back plays it again
+        opens = len(self.engine.opened)
+        self.live.seek_to(-8.0)  # back across the join
+        self.assertEqual(len(self.engine.opened), opens)  # locally, from what it brought
+        self.assertEqual(self.playback.plays[-1][0], self.engine.stream_url(part, 1))
+        self.assertTrue(self.live.in_server_part())
+
+    def test_where_no_buffer_segment_begins_there_vlc_opens_the_buffer_at_its_end(self):
+        spans = [Span(n, 6.0 * n, 6.0 * n + 6.0, False, media_seq=500 + n) for n in range(30)]
+        sid = self.playing(spans=spans)
+        own = [Span(0, 0.0, 10.0, False, media_seq=359), Span(1, 10.0, 23.0, False, media_seq=360)]
+        part = self.in_recording(-15.0, own, part_date=9_980.0, part_start=3_580.0)
+        self.engine.sessionEnded.emit(part)  # it ends at 3.0: no buffer segment begins there
+        self.assertEqual(self.engine.joins, [(part, "", -1)])  # (its stream ends there at once)
+        self.playback.set_state(PlaybackState.PLAYING)
+        self.playback.ended.emit()  # VLC read it to its end
+        self.assertEqual(self.playback.plays[-1][0], self.engine.stream_url(sid, 0))
+        self.assertFalse(self.live.in_server_part())
+
+    def test_where_the_recording_does_not_reach_yet_is_a_hole_that_fills_as_it_grows(self):
+        # Right after a tune its listing may end short of the buffer's start: the bar shows
+        # that stretch as not there yet; a part's reload that lists more fills it.
+        self.playing()
+        self.live.set_site_recording(
+            RecordingRoute(self.URL, 6_400.0, dated=True, steps=True, until=9_985.0)
+        )
+        self.live._emit_timeline()
+        self.assertEqual(self.timelines[-1]["window_end"], -15.0)
+        own = [Span(0, 0.0, 10.0, False, media_seq=0)]
+        part = self.in_recording(-1_800.0, own, part_date=8_195.0)
+        snapshot = dict(self.engine.snapshot(part), listed_s=3_600.0)  # it reaches the buffer
+        self.engine._snapshots[part] = snapshot
+        self.engine.sessionUpdated.emit(part, snapshot)
+        self.live._emit_timeline()
+        self.assertNotIn("window_end", self.timelines[-1])
+
+    def test_a_seek_into_where_it_does_not_reach_yet_lands_where_something_is(self):
+        # Live 2026-11-25: a rewind right after the tune asked for a moment the recording did
+        # not list yet; its part waited for the listing to grow, half a minute, nothing playing.
+        sid = self.playing()
+        self.live.set_site_recording(
+            RecordingRoute(self.URL, 6_400.0, dated=True, steps=True, until=9_985.0)
+        )
+        self.live.seek_to(-8.0)  # back from live, into the hole: just inside the recording
+        part, url, kwargs = self.engine.opened[-1]
+        self.assertEqual(url, self.URL)
+        self.assertEqual(kwargs["window"]["from_s"], 3_583.0)  # 9,983: two seconds before its end
+        own = [Span(0, 0.0, 10.0, False, media_seq=357), Span(1, 10.0, 20.0, False, media_seq=358)]
+        self.engine.buffer(part, own, hls=True, part_date=9_965.0)
+        self.engine.sessionReady.emit(part)
+        self.assertEqual(self.playback.plays[-1][0], self.engine.stream_url(part, 1))
+        self.live.seek_to(-6.0)  # on from there, into the hole: the buffer's start
+        self.assertEqual(self.playback.plays[-1][0], self.engine.stream_url(sid, 0))
+        self.assertFalse(self.live.in_server_part())
+
+    def test_a_part_that_ended_before_its_last_segments_came_waits_for_them(self):
+        # Live 2026-11-25: its end came before the state with its last segments, and it played
+        # from its first, 25 s before the point asked.
+        self.playing()
+        self.live.seek_to(-6.0)
+        part = self.engine.opened[-1][0]
+        first = [Span(0, 0.0, 10.0, False, media_seq=357)]
+        self.engine.buffer(part, first, hls=True, part_date=9_970.0, end=40.0)
+        self.engine._snapshots[part]["end"] = 40.0  # its helper fetched 40 s already
+        self.engine.sessionReady.emit(part)
+        self.engine.sessionEnded.emit(part)
+        plays = len(self.playback.plays)
+        self.live._play_part()
+        self.assertEqual(len(self.playback.plays), plays)  # never from its first: it waits
+        whole = [Span(n, 10.0 * n, 10.0 * n + 10.0, False, media_seq=357 + n) for n in range(4)]
+        self.engine.buffer(part, whole, hls=True, part_date=9_970.0)
+        self.assertEqual(self.playback.plays[-1][0], self.engine.stream_url(part, 2))  # -10 on
+
+    def test_a_join_not_flush_with_a_segment_moves_the_position_to_its_picture(self):
+        # Live, Twitch 2026-11-25: the buffer's segment it joined began 0.82 s from where the
+        # recording ended; the stream's clock runs on from the part's end, its picture at that
+        # segment's start: the position follows the picture.
+        sid = self.playing()
+        own = [Span(0, 0.0, 10.0, False, media_seq=359), Span(1, 10.0, 20.6, False, media_seq=360)]
+        part = self.in_recording(-15.0, own, part_date=9_980.0)
+        self.engine.sessionEnded.emit(part)  # it ends at 0.6: the segment at 0.0 is joined
+        self.assertEqual(self.engine.joins, [(part, sid, 0)])
+        self.playback.set_state(PlaybackState.PLAYING)
+        self.advance(24.0)  # from -20 (its piece), past its end at 0.6
+        self.assertFalse(self.live.in_server_part())
+        self.assertAlmostEqual(self.live.position(), 3.4, delta=0.01)  # -20 + 24, less 0.6
+
+    def test_what_the_recording_reaches_grows_with_the_clock(self):
+        # It is known as the site answered, then grows: a minute (Kick's longest step) after,
+        # the stretch it did not reach is there.
+        self.playing()
+        self.live.set_site_recording(
+            RecordingRoute(self.URL, 6_400.0, dated=True, steps=True, until=9_985.0)
+        )
+        self.live._emit_timeline()
+        self.assertIn("window_end", self.timelines[-1])
+        self.live._wall = lambda: 10_200.0 + 130.0
+        self.live._emit_timeline()
+        self.assertNotIn("window_end", self.timelines[-1])
+        self.live.seek_to(-5.0)
+        self.assertEqual(self.engine.opened[-1][2]["window"]["from_s"], 3_595.0)
+
+    def test_a_join_is_asked_again_as_the_buffer_grows_to_where_the_recording_ends(self):
+        # Live, Twitch 2026-11-25: its last piece ended 9 s past the buffer's start 2 s after
+        # the tune, where the buffer held nothing yet: no join was asked, and VLC stood 6 s.
+        sid = self.playing(spans=self.SPANS[:4])  # 8 s buffered
+        own = [Span(0, 0.0, 10.0, False, media_seq=359), Span(1, 10.0, 30.0, False, media_seq=360)]
+        part = self.in_recording(-15.0, own, part_date=9_980.0)
+        self.engine.sessionEnded.emit(part)  # it ends at 10.0: the buffer reaches 8.0
+        self.assertEqual(self.engine.joins, [])
+        self.engine.buffer(sid, self.SPANS[:10], hls=True, dates=[[0.0, 10_000.0]])
+        self.live._tick()
+        self.assertEqual(self.engine.joins, [(part, sid, 5)])  # its segment at 10.0, once there
+
+    def test_a_recording_parts_stop_follows_the_buffers_start_as_it_evicts(self):
+        # Review (2026-11-25): a rewind an hour back played on while the buffer evicted; the
+        # part reached its old stop, where the buffer no longer had a segment: a reopen.
+        sid = self.playing()
+        self.live.seek_to(-1_800.0)
+        part = self.engine.opened[-1][0]
+        self.live._tick()
+        self.assertEqual(self.engine.stops, [])  # the buffer's start has not moved
+        self.engine.buffer(sid, self.SPANS[10:], hls=True, dates=[[0.0, 10_000.0]])
+        self.live._tick()
+        self.assertEqual(self.engine.stops, [(part, 10_020.0, 3_620.0)])
+        self.live._tick()
+        self.assertEqual(len(self.engine.stops), 1)  # once per move
+
+    def test_the_join_follows_the_timestamps_when_both_run_on_one_line(self):
+        # Brief 2, 7: Twitch placed by its start (to the second) joined 0.82 s off; where the
+        # recording's and the buffer's timestamps run on one line, the picture that follows.
+        spans = [
+            Span(
+                n,
+                2.0 * n,
+                2.0 * n + 2.0,
+                False,
+                media_seq=500 + n,
+                first_pts=9_000_000 + n * 180_000,
+            )
+            for n in range(100)
+        ]
+        sid = self.playing(spans=spans)
+        own = [
+            Span(0, 0.0, 10.0, False, media_seq=359, first_pts=7_299_000),
+            Span(1, 10.0, 20.9, False, media_seq=360, first_pts=8_199_000),
+        ]
+        part = self.in_recording(-15.0, own, part_date=9_980.0)
+        self.engine.sessionEnded.emit(part)  # it ends at 0.9 by its date; at 2.0 by its PTS
+        self.assertEqual(self.engine.joins, [(part, sid, 1)])
+
+    def test_the_timestamps_win_even_seconds_off_the_recordings_start(self):
+        # Live, Twitch fMP4 (2026-11-25): its recording lay 4-5 s off by the video's start;
+        # the nearest segment by date was joined, its timestamps 4 s on: the content skipped.
+        spans = [
+            Span(
+                n,
+                2.0 * n,
+                2.0 * n + 2.0,
+                False,
+                media_seq=500 + n,
+                first_pts=9_000_000 + n * 180_000,
+            )
+            for n in range(100)
+        ]
+        sid = self.playing(spans=spans)
+        own = [
+            Span(0, 0.0, 10.0, False, media_seq=359, first_pts=7_839_000),
+            Span(1, 10.0, 20.9, False, media_seq=360, first_pts=8_739_000),
+        ]  # it ends, by its PTS, where the buffer's segment at 8.0 begins: 7 s past its date
+        part = self.in_recording(-15.0, own, part_date=9_980.0)
+        self.engine.sessionEnded.emit(part)
+        self.assertEqual(self.engine.joins, [(part, sid, 4)])
+        # Placed by its timestamps, not its date: its position steps nowhere at the join.
+        self.assertAlmostEqual(self.live._join_shift, 0.0, places=6)
+
+    def test_a_part_placed_by_its_date_after_one_by_timestamps_drops_the_shift(self):
+        # Third review: a later part placed by its date kept the earlier part's shift.
+        self.playing(dated=False)
+        self.live._rec_shift = -3.0  # (an earlier part's timestamps put it 3 s before)
+        self.live.seek_to(-30.0)
+        part = self.engine.opened[-1][0]
+        own = [Span(0, 0.0, 10.0, False, media_seq=357)]  # no timestamps: by its date
+        self.engine.buffer(part, own, hls=True, part_start=3_573.0)
+        self.engine.sessionReady.emit(part)
+        self.assertEqual(self.live._rec_shift, 0.0)
+        self.assertEqual(self.engine.stops[-1], (part, 10_000.0, 3_600.0))
+
+    def test_a_part_placed_by_its_timestamps_stops_where_they_put_the_buffers_start(self):
+        # Live, Twitch fMP4 (2026-11-25): its stop, set by its dates, lay 3 s before the buffer
+        # by its timestamps; it ended short of the buffer, joined nothing, and reopened.
+        spans = [
+            Span(
+                n,
+                2.0 * n,
+                2.0 * n + 2.0,
+                False,
+                media_seq=500 + n,
+                first_pts=9_000_000 + n * 180_000,
+            )
+            for n in range(100)
+        ]
+        self.playing(spans=spans, dated=False)
+        self.live.seek_to(-30.0)
+        part = self.engine.opened[-1][0]
+        self.assertEqual(self.engine.opened[-1][2]["window"]["stop_s"], 3_600.0)
+        own = [Span(0, 0.0, 10.0, False, media_seq=357, first_pts=9_000_000 - 33 * 90_000)]
+        self.engine.buffer(part, own, hls=True, part_start=3_570.0)  # by its date: at -30
+        self.engine.sessionReady.emit(part)
+        self.assertAlmostEqual(self.live._part.offset, -33.0)  # by its timestamps: 3 s before
+        self.assertEqual(self.engine.stops[-1], (part, 10_003.0, 3_603.0))
+
+    def short_buffer_with_backfill(self):
+        """8 s buffered (from media sequence 500), the live playlist listing 28 s: the site's
+        recording known, its backfill (20 s, 490-499) fetched whole and joined to the buffer."""
+        sid = self.playing(spans=self.SPANS[:4])
+        self.engine.buffer(
+            sid, self.SPANS[:4], hls=True, window=28.0, parts=[[0, 0.0, 10_000.0]],
+            dates=[[0.0, 10_000.0]],
+        )  # fmt: skip
+        self.live.set_site_recording(RecordingRoute(self.URL, 6_400.0, dated=True, steps=True))
+        backfill, url, kwargs = self.engine.opened[-1]
+        self.assertEqual(url, URL)  # the channel's own playlist
+        self.assertEqual(
+            kwargs["window"],
+            {"back_s": 28.0, "until_seq": 500, "ahead_s": 600.0, "joins": True},
+        )
+        own = [Span(n, 2.0 * n, 2.0 * n + 2.0, False, media_seq=490 + n) for n in range(10)]
+        self.engine.buffer(backfill, own, hls=True, part_media=20.0, part_wall=9_980.0)
+        self.engine.sessionEnded.emit(backfill)
+        self.assertEqual(self.engine.joins, [(backfill, sid, 0)])
+        return sid, backfill
+
+    def test_right_after_a_tune_the_recording_joins_the_backfill_which_joins_the_buffer(self):
+        # Brief 2, 8: what the channel still listed before the buffer is fetched at once in
+        # the background; a rewind's recording ends where it begins and joins it, then on into
+        # the buffer: one stream, nothing opened at either join.
+        sid, backfill = self.short_buffer_with_backfill()
+        self.live.seek_to(-45.0)
+        part, url, kwargs = self.engine.opened[-1]
+        self.assertEqual((url, kwargs["window"]["stop_date"]), (self.URL, 9_980.0))
+        own = [Span(n, 10.0 * n, 10.0 * n + 10.0, False, media_seq=354 + n) for n in range(3)]
+        self.engine.buffer(part, own, hls=True, part_date=9_950.0)
+        self.engine.sessionReady.emit(part)
+        self.engine.sessionEnded.emit(part)  # it ends at -20: where the backfill begins
+        self.assertIn((part, backfill, 0), self.engine.joins)
+        self.playback.set_state(PlaybackState.PLAYING)
+        plays = len(self.playback.plays)
+        self.advance(16.0)  # -50 + 16: into the backfill
+        self.assertTrue(self.live.in_server_part())
+        self.assertAlmostEqual(self.live.position(), -34.0, delta=0.01)
+        self.advance(20.0)  # past -20, the recording's end
+        self.assertTrue(self.live.in_server_part())  # in the backfill now
+        self.advance(20.0)  # past 0, the buffer's start
+        self.assertFalse(self.live.in_server_part())
+        self.assertEqual(len(self.playback.plays), plays)  # nothing opened at either join
+        self.assertIn(part, self.engine.closed)  # the recording's part went; the backfill stays
+        self.assertNotIn(backfill, self.engine.closed)
+        self.live.seek_to(-10.0)  # back into the backfill: from it
+        self.assertEqual(self.playback.plays[-1][0], self.engine.stream_url(backfill, 5))
+
+    def test_the_backfill_opens_once_the_buffers_first_piece_is_known(self):
+        # Live 2026-11-25: the site's recording came before the buffer's first piece closed,
+        # and no backfill was fetched.
+        self.live._wall = lambda: 10_200.0
+        sid = self.start()
+        self.engine.buffer(sid, [], hls=True, window=28.0, end=0.0, open_seq=0)
+        self.engine.sessionReady.emit(sid)
+        self.live._phase = live_session._Phase.PIPELINE  # (it plays: its first piece opens)
+        opened = len(self.engine.opened)
+        self.live.set_site_recording(RecordingRoute(self.URL, 6_400.0, dated=True, steps=True))
+        self.assertEqual(len(self.engine.opened), opened)  # nothing to fetch back from yet
+        self.engine.buffer(sid, self.SPANS[:2], hls=True, window=28.0, dates=[[0.0, 10_000.0]])
+        self.assertEqual(self.engine.opened[-1][2]["window"]["until_seq"], 500)
+
+    def test_the_backfill_goes_once_the_buffer_lets_go_of_where_it_joins(self):
+        # Second review: the buffer evicted the piece the backfill joins; a recording part
+        # still stopped where the backfill began, joined it, and ran into nothing.
+        sid, backfill = self.short_buffer_with_backfill()
+        self.assertEqual(self.live._join_target(), -20.0)
+        self.engine.buffer(sid, self.SPANS[1:6], hls=True, window=28.0, dates=[[0.0, 10_000.0]])
+        self.assertIn(backfill, self.engine.closed)
+        self.assertEqual(self.live._join_target(), 2.0)  # the buffer's start again
+        self.live.seek_to(-30.0)
+        self.assertEqual(self.engine.opened[-1][2]["window"]["stop_date"], 10_002.0)
+        self.live._emit_timeline()
+        self.assertEqual(self.timelines[-1]["buffer_start"], 2.0)
+
+    def test_a_join_whose_segment_was_let_go_of_joins_the_buffers_start(self):
+        # Second review: a pause longer than the part reads into the buffer; the segment its
+        # stream joins was evicted: it joins the buffer's first segment instead (no stop).
+        sid = self.playing()
+        own = [Span(0, 0.0, 10.0, False, media_seq=359), Span(1, 10.0, 20.0, False, media_seq=360)]
+        part = self.in_recording(-15.0, own, part_date=9_980.0)
+        self.engine.sessionEnded.emit(part)
+        self.assertEqual(self.engine.joins, [(part, sid, 0)])
+        self.engine.buffer(sid, self.SPANS[3:], hls=True, dates=[[0.0, 10_000.0]])  # evicted
+        self.live._tick()
+        # (a couple of segments past the first: the next to go would be asked again soon)
+        self.assertEqual(self.engine.joins[-1], (part, sid, 5))
+        self.assertAlmostEqual(self.live._join_shift, 10.0)
+        self.engine.buffer(sid, self.SPANS[4:], hls=True, dates=[[0.0, 10_000.0]])
+        self.live._tick()
+        self.assertEqual(len(self.engine.joins), 2)  # its segment is still there: not again
+        self.live._tick()
+        self.assertEqual(len(self.engine.joins), 2)  # once
+
+    def test_at_where_the_recording_does_not_reach_yet_play_waits_and_goes_on(self):
+        # Brief 2, 8: at 1x and at 2x, play into the stretch the recording does not list yet
+        # waits there (buffering), never jumps and never reopens; it goes on as it grows.
+        for rate in (1.0, 2.0):
+            with self.subTest(rate=rate):
+                self.live = self.make()
+                self.playing()
+                self.live.seek_to(-30.0)
+                part = self.engine.opened[-1][0]
+                own = [
+                    Span(0, 0.0, 10.0, False, media_seq=357),
+                    Span(1, 10.0, 20.0, False, media_seq=358),
+                ]
+                self.engine.buffer(part, own, hls=True, part_date=9_965.0)  # it lists to -15
+                self.engine.sessionReady.emit(part)
+                self.playback.set_state(PlaybackState.PLAYING)
+                if rate != 1.0:
+                    self.live.set_speed(rate)
+                self.advance(19.0 / rate)  # to -16, near its listing's end
+                plays, opens = len(self.playback.plays), len(self.engine.opened)
+                for _ in range(120):  # 30 s there: VLC waits, its time standing
+                    self.clock.now += 0.25
+                    self.live._tick()
+                self.assertEqual(
+                    (len(self.playback.plays), len(self.engine.opened)), (plays, opens)
+                )
+                self.assertTrue(self.live.in_server_part())
+                self.assertEqual(self.live._rate, rate)
+                more = own + [Span(2, 20.0, 30.0, False, media_seq=359)]
+                self.engine.buffer(part, more, hls=True, part_date=9_965.0)  # it grew
+                before = self.live.position()
+                self.advance(2.0)
+                self.assertGreater(self.live.position(), before)
+
+    def test_go_live_leaves_the_recording_and_a_new_tune_forgets_it(self):
+        sid = self.playing()
+        own = [Span(0, 0.0, 10.0, False, media_seq=0)]
+        part = self.in_recording(-1_800.0, own, part_date=8_195.0)
+        self.live.go_live()
+        self.assertIn(part, self.engine.closed)
+        self.assertFalse(self.live.in_server_part())
+        self.assertEqual(self.live.server_window(), 3_600.0)  # it stands: the bar still reaches
+        self.engine.answer()
+        self.start()
+        self.engine.buffer(self.engine.last_sid, self.SPANS, hls=True, dates=[[0.0, 10_000.0]])
+        self.engine.sessionReady.emit(self.engine.last_sid)
+        self.assertNotEqual(self.engine.last_sid, sid)
+        self.assertEqual(self.live.server_window(), 0.0)  # another tune: its own, once asked
 
 
 class ServerWindowFixTests(LiveSessionCase):
@@ -9203,3 +10072,865 @@ class BorrowedTests(LiveSessionCase):
         self.start()  # another channel, opened as usual
         self.assertEqual(self.given, [True])
         self.assertEqual(len(self.engine.opened), 1)
+
+
+def site_feed(case, sid, *, edge, wait=0.3, piece=4.25, open_s=0.3):
+    """A live site's source read at its prefetch pieces (`prefetching`): media at real time
+    a quarter second at a time, the edge standing still `wait` s more where each `piece`
+    ends (the next piece's request), what was made meanwhile coming at once. VLC takes
+    `open_s` to play what it opens (its 300 ms caching: a start timed to the moment,
+    `_timed_start`, counts on it)."""
+    feed = Feed(case, sid, burst=0.0, edge=edge, hls=True, open_s=open_s)
+    feed.prefetching = True
+    quarters = round(piece / 0.25)
+    feed.gaps = itertools.cycle([0.25] * (quarters - 1) + [0.25 + wait])
+    feed.sizes = itertools.cycle([0.25] * (quarters - 1) + [0.25 + wait])
+    feed.push()
+    return feed
+
+
+class PrefetchTargetTests(LiveSessionCase):
+    """2026-11-25 (the owner, next to the site's own player: QiTV ~1 s behind it; "people
+    enjoy when they sync with the chat"): a source that reads its playlist's prefetch pieces
+    as they are made (`prefetching`) plays half a second behind its edge under Low
+    (`PREFETCH_TARGETS`), a second under Auto (`PREFETCH_FLOOR_S`, rising only after
+    trouble) and 6 s under Stable, from a start that far back (the source's); Normal stays
+    at 2.5 s. Held that close (`StayLive.close`), its band is narrow, a landing's excess (up
+    to a keyframe interval) is taken off within seconds, and a hold at the edge plays again
+    at the target. Any other source keeps today's numbers."""
+
+    def tune(self, latency, *, prefetching=True, **kwargs):
+        """Ready at `live_edge` (6.15 s), then at real time a quarter second at a time until
+        the tune played (a start timed to the moment, `_timed_start`, waits for the source
+        to flow so, and for its moment)."""
+        sid = self.start(latency=latency, channel="ch")
+        kwargs.setdefault("live_edge", 6.15)
+        self.engine.buffer(
+            sid, segments(0, 3), open_seq=3, hls=True, prefetching=prefetching, **kwargs
+        )
+        self.engine.sessionReady.emit(sid)
+        while not self.playback.plays and kwargs["live_edge"] < 7.9:
+            self.clock.now += 0.25
+            kwargs["live_edge"] += 0.25
+            self.engine.buffer(
+                sid, segments(0, 3), open_seq=3, hls=True, prefetching=prefetching, **kwargs
+            )
+        return sid
+
+    def lags(self, feed, seconds):
+        """The mean lag the session steers by, each tick over `seconds` of `feed` (from its
+        first, once the tune played)."""
+        lags = []
+        for _ in range(round(seconds / 0.25)):
+            feed.run(0.25)
+            if self.timelines:
+                lags.append(self.timelines[-1]["lag"])
+        return lags
+
+    def test_a_prefetch_source_under_low_targets_half_a_second(self):
+        sid = self.tune("low")
+        self.assertEqual(self.live._target(self.engine.snapshot(sid)), 0.5)
+        self.playback.set_state(PlaybackState.PLAYING)
+        self.step(0.25)
+        self.assertEqual(self.timelines[-1]["target"], 0.5)
+        self.assertEqual(self.live._stay.target, 0.5)
+        self.assertTrue(self.live._stay.close)
+
+    def test_a_prefetch_source_under_auto_floors_at_one_second(self):
+        # A flow at real time, 0.3 s more between its pieces: the learned target with no
+        # trouble is the floor's (no near-miss, its need under it), the lag held at it.
+        # After a starvation it rises as today.
+        sid = self.start(latency=AUTO, channel="ch")
+        feed = site_feed(self, sid, edge=7.3).ready(backlog_after_start=False)
+        feed.run(2.0)  # the start, timed to the moment (`_timed_start`)
+        self.assertAlmostEqual(self.timelines[-1]["target"], 1.0)
+        lags = self.lags(feed, 180.0)
+        self.assertAlmostEqual(self.timelines[-1]["target"], 1.0, delta=0.15)
+        self.assertFalse(self.timelines[-1]["adjusted"])  # no margin: no trouble
+        self.assertTrue(self.live._stay.close)
+        tail = lags[-240:]  # the last minute
+        self.assertLessEqual(sum(tail) / len(tail), 1.3)
+        self.assertEqual(feed.starved_s, 0.0)
+        before = self.timelines[-1]["target"]
+        feed.stalled = True
+        feed.run(3.0)  # VLC runs dry
+        feed.stalled = False
+        feed.run(5.0)
+        self.assertGreater(self.timelines[-1]["target"], before + 1.0)
+        self.assertTrue(self.timelines[-1]["adjusted"])
+
+    def test_once_settled_a_near_miss_and_a_dry_run_still_teach(self):
+        # The cushion's guard (`_ran_out`): settled at Auto's second, the lag and the media VLC
+        # had ahead of it have both reached it, so trouble now teaches a margin. The source
+        # goes silent, then sends all it owed (late, never lost, never a stall): left within
+        # 0.15 s of running dry, VLC was all but dry (a near-miss); silent 1.9 s, it runs dry.
+        for dry in (False, True):
+            with self.subTest(dry=dry):
+                self.live = self.make()
+                sid = self.start(latency=AUTO, channel="ch")
+                feed = site_feed(self, sid, edge=7.3).ready(backlog_after_start=False)
+                feed.run(180.0)
+                learned, starved = self.live._learned, feed.starved_s
+                self.assertEqual(learned.prior.margin(), 0.0)
+                before, timelines = self.timelines[-1]["target"], len(self.timelines)
+                quiet = 1.9 if dry else self.timelines[-1]["lag"] - 0.15
+                quiet = round(quiet / Feed.DT) * Feed.DT
+                feed.stalled = True
+                feed.run(quiet)
+                feed.stalled = False
+                feed.edge += quiet
+                feed.push()
+                feed.run(10.0)
+                self.assertEqual(feed.starved_s > starved, dry)
+                self.assertFalse(any(state["stalled"] for state in self.timelines[timelines:]))
+                self.assertGreater(learned.prior.margin(), 0.0)
+                self.assertGreater(self.timelines[-1]["target"], before + 0.5)
+
+    def test_normal_is_unchanged_for_a_prefetch_source(self):
+        sid = self.tune("normal")
+        self.assertEqual(self.live._target(self.engine.snapshot(sid)), TARGETS["normal"])
+        self.playback.set_state(PlaybackState.PLAYING)
+        self.step(0.25)
+        self.assertEqual(self.timelines[-1]["target"], 2.5)
+        self.assertFalse(self.live._stay.close)
+
+    def test_stable_on_a_prefetch_source_starts_about_six_seconds_back_and_targets_six(self):
+        # What the source's start brings (its 6 s target back from the prefetch pieces: from
+        # 8 s behind here): the start nearest 6 s plays at once (5.9 s once VLC opened it).
+        sid = self.start(latency="stable", channel="ch")
+        self.engine.buffer(
+            sid, segments(0, 4), live_edge=9.4, open_seq=4, hls=True, prefetching=True
+        )
+        self.engine.sessionReady.emit(sid)
+        self.assertEqual(self.live._target(self.engine.snapshot(sid)), 6.0)
+        self.assertEqual(self.playback.plays[0][0], self.engine.stream_url(sid, 2))
+        self.assertEqual(self.notices, [])
+        self.playback.set_state(PlaybackState.PLAYING)
+        self.step(0.25)
+        self.assertEqual(self.timelines[-1]["target"], 6.0)
+        self.assertFalse(self.live._stay.close)
+
+    def test_go_live_lands_within_the_low_target_band(self):
+        # Starts 6.65, 4.65, 2.65 and 0.65 s behind once VLC opened them (0.5 s): Low's 0.5 s
+        # on a prefetch source takes the newest (a quarter second short at most,
+        # `_BELOW_TARGET_S`; `_LAND_ABOVE_S` over); today's 1 s takes the one 2.65 s behind.
+        # So does Go live (the open measured at once: 0.35 s), at 0.5 s against 2.5 s: on the
+        # prefetch source a moment later, once the newest start lands there (`_timed_start`:
+        # with VLC's 0.3 s caching, at 0.45 s it lands short of the aim, 0.6 s; the source's
+        # next state a quarter second on takes it there).
+        for prefetching, first, again in ((True, 3, 5), (None, 2, 4)):
+            with self.subTest(prefetching=prefetching):
+                self.live = self.make()
+                sid = self.tune("low", prefetching=prefetching)
+                self.assertEqual(self.playback.plays[-1][0], self.engine.stream_url(sid, first))
+                self.playback.set_state(PlaybackState.PLAYING)
+                self.live.seek_to(1.0)
+                self.engine.buffer(
+                    sid,
+                    segments(0, 5),
+                    live_edge=10.15,
+                    open_seq=5,
+                    hls=True,
+                    prefetching=prefetching,
+                )
+                self.live.go_live()
+                self.clock.now += 0.25
+                self.engine.buffer(
+                    sid,
+                    segments(0, 5),
+                    live_edge=10.4,
+                    open_seq=5,
+                    hls=True,
+                    prefetching=prefetching,
+                )
+                self.assertEqual(self.playback.plays[-1][0], self.engine.stream_url(sid, again))
+
+    def test_a_close_source_holds_its_target_through_its_piece_waits(self):
+        # Under Low: the newest keyframe is 1.3 s back at the tune, so the start waits for the
+        # next one and its moment (`_timed_start`), lands at the target and holds there
+        # through the 0.3 s waits between pieces: no catch-up (before the timed start, one at
+        # 1.10x took the landing's excess off), no stall (the 2 s bound), no trouble, no
+        # hold, no slow-down for room (under 0.3 s), no nudge at all.
+        sid = self.start(latency="low", channel="ch")
+        feed = site_feed(self, sid, edge=7.3).ready(backlog_after_start=False)
+        lags = self.lags(feed, 120.0)
+        self.assertEqual(changes(self.playback.rates), 0)
+        tail = lags[-240:]
+        self.assertLessEqual(sum(tail) / len(tail), 0.8)
+        self.assertGreaterEqual(min(tail), 0.3)
+        self.assertEqual(feed.starved_s, 0.0)
+        self.assertEqual(self.playback.holds, [])
+        self.assertFalse(any(state["stalled"] for state in self.timelines[-480:]))
+
+    def test_a_close_source_held_at_the_edge_plays_again_at_its_target(self):
+        # A hold (2.8.8: VLC ran dry within five minutes, then a silence) plays again once
+        # the target is ahead, not 2 s (four times Low's), which would then be caught up.
+        sid = self.start(latency="low", channel="ch")
+        feed = site_feed(self, sid, edge=7.3).ready(backlog_after_start=False)
+        feed.run(60.0)
+        feed.stalled = True
+        feed.run(2.0)  # VLC runs dry (unheld: once is a hiccup)
+        feed.stalled = False
+        feed.run(30.0)
+        self.assertEqual(self.playback.holds, [])
+        feed.stalled = True
+        feed.run(2.0)  # the next silence is held
+        feed.stalled = False
+        self.assertEqual(self.playback.holds, [True])
+        while self.playback.held:
+            feed.run(Feed.DT)
+        state = self.timelines[-1]
+        self.assertLess(state["live_edge"] - state["position"], 1.0)  # not 2 s
+
+    def test_a_source_without_prefetch_keeps_todays_targets(self):
+        for latency in ("low", "normal", "stable", AUTO):
+            for prefetching in (None, False):
+                with self.subTest(latency=latency, prefetching=prefetching):
+                    self.live = self.make()
+                    sid = self.tune(latency, prefetching=prefetching)
+                    expected = TARGETS["normal" if latency == AUTO else latency]
+                    snapshot = self.engine.snapshot(sid)
+                    self.assertEqual(self.live._target(snapshot), expected)
+                    self.playback.set_state(PlaybackState.PLAYING)
+                    self.step(0.25)
+                    self.assertEqual(self.timelines[-1]["target"], expected)
+                    self.assertFalse(self.live._stay.close)
+                    if latency == AUTO:
+                        learned = self.live._learned
+                        self.assertEqual(learned.floor, learned_target.FLOOR_S)
+                        self.assertFalse(learned.arrivals.streaming)
+
+    def test_a_source_that_stops_listing_prefetch_pieces_has_todays_targets_again(self):
+        for latency, close, today in (("low", 0.5, 1.0), (AUTO, 1.0, 2.5)):
+            with self.subTest(latency=latency):
+                self.live = self.make()
+                sid = self.tune(latency)
+                self.playback.set_state(PlaybackState.PLAYING)
+                self.step(0.25)
+                self.assertAlmostEqual(self.timelines[-1]["target"], close)
+                self.engine.buffer(
+                    sid, segments(0, 3), live_edge=6.4, open_seq=3, hls=True, prefetching=False
+                )
+                self.step(0.25)
+                self.assertAlmostEqual(self.timelines[-1]["target"], today)
+                self.assertFalse(self.live._stay.close)
+
+    def test_auto_chosen_while_a_prefetch_source_plays_floors_at_one_second(self):
+        self.tune("normal")
+        self.playback.set_state(PlaybackState.PLAYING)
+        self.step(0.25)
+        self.live.set_latency(AUTO)
+        self.step(0.25)
+        self.assertEqual(self.live._learned.floor, learned_target.PREFETCH_FLOOR_S)
+        self.assertAlmostEqual(self.timelines[-1]["target"], 1.0)
+
+    def test_a_raised_target_or_the_captions_floor_ends_the_close_mode(self):
+        # Ruling R21: held close only at a target in force of about 1.5 s or less and no AI
+        # captions' floor. Trouble raising Auto's 1.0 s (a struggling source: fewer nudges,
+        # not more) and the captions' floor get today's band, cushion allowance and
+        # near-misses at that target; back at a second, the close ones.
+        sid = self.start(latency=AUTO, channel="ch")
+        feed = site_feed(self, sid, edge=7.3).ready(backlog_after_start=False)
+        feed.run(30.0)
+        learned = self.live._learned
+        self.assertTrue(self.live._stay.close and learned.close)
+        self.assertEqual(self.live._stay.dead_band(), stay_live._CLOSE_BAND_S)
+        learned.starved()  # trouble: Auto's target rises 1.6 s (its step held 10 s)
+        feed.run(11.0)
+        self.assertGreater(self.timelines[-1]["target"], 2.5)
+        self.assertFalse(self.live._stay.close or learned.close)
+        self.assertEqual(self.live._stay.dead_band(), stay_live._BAND_S)
+        learned.prior = learned_target.StarvationPrior()  # the margin gone (it fades so) ...
+        self.live._steered = live_session.SteeredTarget()  # ... and the steered target with it
+        feed.run(1.0)
+        self.assertAlmostEqual(self.timelines[-1]["target"], 1.0, delta=0.15)
+        self.assertTrue(self.live._stay.close and learned.close)
+        self.live.set_caption_floor(8.0)
+        feed.run(0.5)
+        self.assertFalse(self.live._stay.close or learned.close)
+        self.live.set_caption_floor(0.0)
+        feed.run(0.5)
+        self.assertTrue(self.live._stay.close and learned.close)
+
+
+def piece_feed(
+    case, sid, *, made, open_s, piece=2.0, prefetching=True, said=True, stand=False, piece_s=None
+):
+    """A live site's tune as Kick's pieces come (2 s each, each beginning with a keyframe:
+    the feed's `gop`; the state says their length unless not `said`): what was made of the
+    piece being made, `made` seconds, comes at once in half-second states 20 ms apart (the
+    first with the ready, as the helper says ready on its first keyframe), then media at real
+    time a quarter second at a time; with `stand`, the edge stands a quarter second more
+    where each piece ends and the next brings half a second at once. VLC takes `open_s` to
+    play what it opens (its 300 ms caching; more on a slower computer)."""
+    feed = Feed(case, sid, burst=0.0, edge=min(made, 0.25), gop=piece, hls=True, open_s=open_s)
+    feed.plays_seen = len(case.playback.plays)  # an earlier tune's play is not this one's
+    feed.prefetching = prefetching
+    feed.piece = (piece if piece_s is None else piece_s) if said else None
+    if stand:  # from where `made` leaves the piece, a quarter second at a time
+        quarters = round(piece / 0.25)
+        sizes, gaps = [0.5] + [0.25] * (quarters - 2), [0.25] * (quarters - 2) + [0.5]
+        done = round((made - 0.5) / 0.25) + 1 if made >= 0.5 else 0
+        feed.sizes = itertools.islice(itertools.cycle(sizes), done, None)
+        feed.gaps = itertools.islice(itertools.cycle(gaps), done, None)
+    feed.push()
+    case.engine.sessionReady.emit(sid)
+    while feed.edge < made - 1e-9:
+        case.clock.now = round(case.clock.now + 0.02, 6)
+        feed.edge = min(made, feed.edge + 0.5)
+        feed.push()
+    feed.nominal = feed.next_arrival = case.clock.now + 0.25  # at real time from here
+    return feed
+
+
+class TimedStartTests(LiveSessionCase):
+    """2026-11-25 (the owner, next to Kick's own player: a tune came in 3.7 s behind Auto's
+    second and took 25 s at 1.10x to get there, Go live 2.6 s and 14 s). A source held close
+    to live (`_close_to_live`) has a keyframe a piece (2 s), so which start plays settles
+    its landing to a piece; when it opens settles it to the moment. A tune and Go live open
+    the newest start once it lands at the target (VLC's open as measured), never one a piece
+    older; one that lands further above waits for the next keyframe, a piece at most. The
+    tune first lets what the piece being made already held land (it comes at once, and the
+    start's age is not known before). Any other source starts as today."""
+
+    def landing(self, feed, plays):
+        """Run until the session opens its next stream and VLC has played it a second and a
+        half: (the lag then, VLC's edge less its position; the wait for the open)."""
+        waited = 0.0
+        while len(self.playback.plays) == plays:
+            feed.run(Feed.DT)
+            waited += Feed.DT
+            self.assertLess(waited, 6.0, "no start opened")
+        while self.playback.current is not PlaybackState.PLAYING:
+            feed.run(Feed.DT)
+        feed.run(1.5)
+        return feed.edge - feed.position, waited
+
+    def tune_at(self, latency, made, open_s, prefetching=True, piece=2.0, **kwargs):
+        self.start(latency=latency, channel="ch")
+        self.engine.answer()
+        sid = self.engine.last_sid
+        return piece_feed(
+            self, sid, made=made, open_s=open_s, piece=piece, prefetching=prefetching, **kwargs
+        )
+
+    def run_to(self, feed, piece, phase):
+        """Run until the edge is `phase` seconds into a piece (a reachable one)."""
+        for _ in range(round(4 * piece / Feed.DT)):
+            if abs(feed.edge % piece - phase) < 1e-6:
+                return
+            feed.run(Feed.DT)
+        self.fail(f"the edge never came {phase} s into a piece")
+
+    def today(self, timed):
+        """Today's start, picked at once (`_live_start`), where not `timed`: for comparison."""
+        if timed:
+            return contextlib.nullcontext()
+        return mock.patch.object(LiveSession, "_aiming", lambda self, build=False: False)
+
+    def test_a_tune_lands_at_its_target_whatever_the_piece_being_made_held(self):
+        # Eight phases of the piece being made at the tune, VLC's open 0.3 s (not measured
+        # before the first): each lands a quarter second short of the target to half a second
+        # beyond it, a quarter second off it on average, never a piece further back; the open
+        # comes within a piece and a bit, and VLC never runs dry after it.
+        for latency, target in (("low", 0.5), (AUTO, 1.0)):
+            self.live, misses = self.make(), []
+            for made in (0.1, 0.35, 0.6, 0.85, 1.1, 1.35, 1.6, 1.85):
+                with self.subTest(latency=latency, made=made):
+                    plays = len(self.playback.plays)
+                    feed = self.tune_at(latency, made, 0.3)
+                    lag, waited = self.landing(feed, plays)
+                    self.assertGreaterEqual(lag, target - 0.25)
+                    self.assertLessEqual(lag, target + 0.55)
+                    misses.append(abs(lag - target))
+                    self.assertLessEqual(waited, 2.75)
+                    feed.run(20.0)
+                    self.assertEqual(feed.starved_s, 0.0)
+            self.assertLessEqual(sum(misses) / len(misses), 0.25)
+
+    def test_go_live_lands_at_its_target_whatever_the_piece_being_made_held(self):
+        # Go live at eight phases of the newest piece: the start then is a quarter piece
+        # older each time. Each lands a quarter second short of the target to half a second
+        # beyond it, or of VLC's open where that is longer (1.5 s: nothing lands nearer), a
+        # quarter second off it on average, never a piece further back; the open waits a
+        # piece and a bit at most; VLC never runs dry, and Auto's second holds (a wait taken
+        # for one of the source's would raise it).
+        for latency, target in (("low", 0.5), (AUTO, 1.0)):
+            for open_s in (0.3, 1.5):
+                with self.subTest(latency=latency, open_s=open_s):
+                    self.live = self.make()
+                    feed = self.tune_at(latency, 1.0, open_s)
+                    self.landing(feed, 0)
+                    feed.run(20.0)
+                    best, misses = max(target, open_s), []
+                    for phase in (0.0, 0.25, 0.5, 0.75, 1.0, 1.25, 1.5, 1.75):
+                        while abs(feed.edge % 2.0 - phase) > 1e-6:
+                            feed.run(Feed.DT)
+                        plays = len(self.playback.plays)
+                        self.live.go_live()
+                        lag, waited = self.landing(feed, plays)
+                        self.assertGreaterEqual(lag, best - 0.25, f"phase {phase}")
+                        self.assertLessEqual(lag, best + 0.55, f"phase {phase}")
+                        misses.append(abs(lag - best))
+                        self.assertLessEqual(waited, 2.75, f"phase {phase}")
+                        feed.run(15.0)
+                    self.assertLessEqual(sum(misses) / len(misses), 0.25)
+                    self.assertEqual(feed.starved_s, 0.0)
+                    self.assertTrue(self.live._stay.close)  # no wait read as the source's
+
+    def test_a_silence_while_a_start_waits_is_met_as_without_the_wait(self):
+        # Go live pressed at live where the start waits for the next keyframe (Auto, 2 s
+        # pieces), and the source then sends nothing for a second and a half: VLC runs dry no
+        # longer than under today's start at once, and Auto's learned target takes the silence
+        # in, rising most of the way today's does (review I1: the old picture ran dry 0.7 s and
+        # the target stayed at 1.0 s, where today's rose to 3 s). The wait gives way to the
+        # silence, today's start opens further back, and the batch after it tells the learned
+        # target what the picture at live would have had left (here: none, a starvation; today's
+        # picture, landed 1.8 s back, told two near-misses and rose to 2.99 s, this to 2.58 s).
+        results = {}
+        for timed in (True, False):
+            with self.subTest(timed=timed), self.today(timed):
+                self.live = self.make()
+                feed = self.tune_at(AUTO, 1.0, 0.3, stand=True)
+                self.landing(feed, 0)
+                feed.run(20.0)
+                self.run_to(feed, 2.0, 1.5)
+                starved = feed.starved_s
+                self.live.go_live()
+                feed.stalled = True
+                feed.run(1.5)
+                feed.stalled = False
+                feed.run(10.0)
+                results[timed] = (feed.starved_s - starved, self.timelines[-1]["target"])
+        (dry, target), (dry_today, target_today) = results[True], results[False]
+        self.assertLessEqual(dry, dry_today + 0.05)
+        self.assertGreater(target_today, 2.0)  # (today's start does take it in)
+        self.assertGreaterEqual(target - 1.0, 0.75 * (target_today - 1.0))
+
+    def test_go_live_on_longer_pieces_lands_no_further_back_than_today(self):
+        # Pieces of 3.5 and 4 s, the edge standing a quarter second where each ends: at every
+        # phase Go live lands no further back than today's start at once (but for a quarter
+        # second, a state's), and nearer the target where the next keyframe comes in time
+        # (review I2: once it waited out its bound, 3.95 s against today's 1.45 s, 4.45
+        # against 1.95 s).
+        for piece in (3.5, 4.0):
+            # (a piece's first half second comes at once: a quarter second in is never seen)
+            phases = [0.0] + [round(0.25 * k, 2) for k in range(2, round(piece / 0.25))]
+            landings = {}
+            for timed in (True, False):
+                with self.today(timed):
+                    self.live = self.make()
+                    feed = self.tune_at(AUTO, 1.0, 0.3, piece=piece, stand=True)
+                    self.landing(feed, 0)
+                    feed.run(20.0)
+                    landings[timed] = []
+                    for phase in phases:
+                        self.run_to(feed, piece, phase)
+                        plays = len(self.playback.plays)
+                        self.live.go_live()
+                        landings[timed].append(self.landing(feed, plays)[0])
+                        feed.run(12.0)
+            for phase, lag, today in zip(phases, landings[True], landings[False]):
+                with self.subTest(piece=piece, phase=phase):
+                    self.assertLessEqual(lag, max(today + 0.25, 1.0 + 0.55))
+
+    def test_a_tune_on_long_or_unsaid_pieces_lands_no_further_back_than_today(self):
+        # Pieces of 6 s (the next keyframe further off than a start waits, but where the
+        # piece held 5 s already), and 2 s pieces whose length the state does not say (nor any
+        # closed segment yet): the tune takes today's start once what the first piece held has
+        # landed (a state or two later), never waits out its bound, and lands no further back
+        # than today's but for that (review I2: 3.95 s against today's 1.2 s, 5.7 against
+        # 3.2 s); where the keyframe comes in time it waits for it and lands near the target.
+        # (piece, made at the tune, the length said, the next keyframe comes in time)
+        cases = (
+            (6.0, 1.0, True, False),
+            (6.0, 3.0, True, False),
+            (6.0, 5.0, True, True),
+            (2.0, 1.0, False, False),
+        )
+        for piece, made, said, in_time in cases:
+            landings = {}
+            for timed in (True, False):
+                with self.today(timed):
+                    self.live = self.make()
+                    feed = self.tune_at(AUTO, made, 0.3, piece=piece, said=said)
+                    landings[timed] = self.landing(feed, 0)
+            with self.subTest(piece=piece, made=made, said=said):
+                (lag, waited), (today, _) = landings[True], landings[False]
+                self.assertLessEqual(lag, today + 0.35)
+                if in_time:  # it waits for that keyframe, and lands nearer the target
+                    self.assertLessEqual(lag, 1.0 + 0.55)
+                    self.assertLessEqual(waited, live_session._AIM_WAIT_S + 0.5)
+                else:  # today's start, once what the first piece held landed
+                    self.assertLessEqual(waited, 0.75)
+
+    def test_a_start_waits_for_the_next_keyframe_a_bounded_while_at_most(self):
+        # Keyframes 6 s apart (a channel whose pieces are longer than Kick's): a tune and Go
+        # live at phases whose next keyframe is further off than `_AIM_WAIT_S` open within it
+        # (then the start nearest the aim), never hang; VLC never runs dry.
+        bound = live_session._AIM_WAIT_S
+        self.live = self.make()
+        plays = len(self.playback.plays)
+        feed = self.tune_at(AUTO, 3.0, 0.3, piece=6.0)
+        _lag, waited = self.landing(feed, plays)
+        self.assertLessEqual(waited, bound + 0.5)
+        feed.run(20.0)
+        for phase in (1.5, 2.5, 3.5, 4.5, 5.5):
+            while abs(feed.edge % 6.0 - phase) > 1e-6:
+                feed.run(Feed.DT)
+            plays = len(self.playback.plays)
+            self.live.go_live()
+            _lag, waited = self.landing(feed, plays)
+            self.assertLessEqual(waited, bound + 0.3, f"phase {phase}")
+            feed.run(15.0)
+        self.assertEqual(feed.starved_s, 0.0)
+
+    def test_vlcs_picture_time_is_read_from_its_freshest_step(self):
+        # VLC's clock reads in steps, each behind it by up to a step (libVLC 3.0.23 through the
+        # pipeline: 25 ms from its start, then a step each quarter second, in step with the
+        # session's own quarter-second look, so the reading it sees stays as stale on every
+        # look; hel, Kick: 0.48 s read for a 0.29 s open). VLC's time to its picture is measured
+        # within 0.05 s of it all the same: from the earliest its readings give (steps each
+        # 0.3 s, out of step with the look), or from when libVLC stepped its clock
+        # (`clock_step`, steps in step with the look). So the timed starts it places land where
+        # they aim, never short of it: what this tune's landings missed their picks by
+        # (`_land_offset`, learned from each Go live) is not short, and the session reads each
+        # at its target or above. (The feed's VLC plays its first step of media as its open
+        # ends: its clock starts `open_s` less a step after play().)
+        for every, says in ((0.3, False), (0.25, True)):
+
+            def stepped(every=every):  # VLC's reading of what it played: 25 ms, then steps
+                played = self.playback.ms
+                step_ms = round(every * 1000)
+                return 0 if played <= 0 else max(25, played // step_ms * step_ms)
+
+            def step(stepped=stepped):  # when libVLC stepped to its reading, and to what
+                value = stepped()
+                if value <= 0:
+                    return None
+                return self.clock.now - (self.playback.ms - value) / 1000, value
+
+            for latency, target in ((AUTO, 1.0), ("low", 0.5)):
+                with self.subTest(every=every, latency=latency):
+                    self.live = self.make()
+                    self.playback.time_ms = stepped
+                    if says:
+                        self.playback.clock_step = step
+                    feed = self.tune_at(latency, 1.0, 0.3)
+                    self.landing(feed, 0)
+                    feed.run(20.0)
+                    for phase in (0.0, 0.5, 1.0, 1.5, 0.25, 0.75, 1.25, 1.75):
+                        self.run_to(feed, 2.0, phase)
+                        plays = len(self.playback.plays)
+                        self.live.go_live()
+                        self.landing(feed, plays)
+                        lag = self.timelines[-1]["lag"]
+                        self.assertGreaterEqual(lag, target - 0.05, f"phase {phase}")
+                        feed.run(12.0)
+                    self.assertGreaterEqual(self.live._land_offset, -0.05)  # (not short)
+                    self.assertAlmostEqual(self.live._picture_s(), 0.3 - Feed.DT, delta=0.05)
+                    self.assertEqual(feed.starved_s, 0.0)
+
+    def test_a_tune_whose_pieces_do_not_each_begin_with_a_keyframe_takes_todays_start(self):
+        # A Twitch channel's 1 s pieces with keyframes 3 s apart: the piece length the helper
+        # says is no keyframe spacing. Its first keyframe came 1.5 s before the first byte,
+        # older than a piece, so the tune does not wait for a keyframe "due" a piece on: it
+        # takes today's start once what came at once landed, and lands no further back than
+        # it (batch 2: it waited out its second and landed a second further back).
+        landings = {}
+        for timed in (True, False):
+            with self.today(timed):
+                self.live = self.make()
+                feed = self.tune_at(AUTO, 1.5, 0.3, piece=3.0, piece_s=1.0)
+                landings[timed] = self.landing(feed, 0)
+        (lag, waited), (today, _) = landings[True], landings[False]
+        self.assertLessEqual(lag, today + 0.35)
+        self.assertLessEqual(waited, 0.75)
+
+    def test_go_live_times_its_start_at_a_raised_auto_target_too(self):
+        # Auto's target raised above close mode's 1.5 s (a channel whose arrivals need more,
+        # batch 2: a Twitch channel's 1.6 s), keyframes 3 s apart: Go live still opens the newest
+        # keyframe at its moment, near the target in force, where today's pick on 3 s keyframes
+        # landed up to a keyframe off it (that channel: 4.55 s at 1.6 s).
+        self.live = self.make()
+        feed = self.tune_at(AUTO, 1.0, 0.3, piece=3.0)
+        self.landing(feed, 0)
+        feed.run(20.0)
+        self.live._learned.starved()  # trouble: Auto's target rises (its step held 10 s)
+        feed.run(15.0)
+        target = self.timelines[-1]["target"]
+        self.assertGreater(target, live_session._CLOSE_MAX_S)
+        self.assertFalse(self.live._stay.close)
+        for phase in (0.5, 1.25, 2.0, 2.75):
+            self.run_to(feed, 3.0, phase)
+            plays = len(self.playback.plays)
+            self.live.go_live()
+            lag, waited = self.landing(feed, plays)
+            self.assertGreaterEqual(lag, target - 0.25, f"phase {phase}")
+            self.assertLessEqual(lag, target + 0.55, f"phase {phase}")
+            self.assertLessEqual(waited, live_session._AIM_WAIT_S + 0.5, f"phase {phase}")
+            feed.run(15.0)
+        self.assertEqual(feed.starved_s, 0.0)
+
+    def test_a_pause_while_go_live_waits_holds_the_picture_where_it_was(self):
+        # Go live waiting for its moment, then a pause: the paused picture stays where the
+        # viewer saw it, nothing opens under the pause (review M4: the wait went on and opened
+        # the live stream paused).
+        self.live = self.make()
+        feed = self.tune_at(AUTO, 1.0, 0.3)
+        self.landing(feed, 0)
+        feed.run(20.0)
+        self.run_to(feed, 2.0, 1.5)  # the newest keyframe 1.5 s back: the start waits
+        plays = len(self.playback.plays)
+        self.live.go_live()
+        self.assertEqual(len(self.playback.plays), plays)
+        self.live.toggle_pause()
+        feed.run(3.0)
+        self.assertEqual(len(self.playback.plays), plays)
+        self.assertIsNone(self.live._retry)
+
+    def test_a_silence_a_wait_gave_way_to_ends_with_the_wait(self):
+        # Review 2: the silence a wait gave way to is kept for the open it gave way to; a
+        # wait that ends otherwise (a pause, a recovery's retry) drops it, so a later open
+        # counts no starvation that never was.
+        self.live = self.make()
+        self.live._aim_quiet = (0.0, 1.0)
+        self.live._end_aim()
+        self.assertIsNone(self.live._aim_quiet)
+
+    def test_the_aim_is_where_stay_lives_own_landing_ends(self):
+        self.assertEqual(live_session._AIM_ABOVE_S, stay_live._CLOSE_LAND_S)
+
+    def test_a_source_not_held_close_starts_as_today(self):
+        # Plain HLS (no prefetch pieces) under Low and Auto, and Normal on a prefetch source:
+        # Go live opens at once, at today's pick, at every phase.
+        for latency, prefetching in (("low", None), (AUTO, None), ("normal", True)):
+            with self.subTest(latency=latency, prefetching=prefetching):
+                self.live = self.make()
+                feed = self.tune_at(latency, 1.0, 0.3, prefetching=prefetching)
+                self.landing(feed, 0)
+                feed.run(20.0)
+                for phase in (0.0, 0.5, 1.0, 1.5):
+                    while abs(feed.edge % 2.0 - phase) > 1e-6:
+                        feed.run(Feed.DT)
+                    pick = self.live._live_start()
+                    plays = len(self.playback.plays)
+                    self.live.go_live()
+                    self.assertEqual(len(self.playback.plays), plays + 1)  # at once
+                    url = self.engine.stream_url(self.engine.last_sid, pick[0])
+                    self.assertEqual(self.playback.plays[-1][0], url)
+                    feed.run(15.0)
+
+
+class BroadcasterTests(LiveSessionCase):
+    """2026-11-25 (the owner: stats for nerds; whether QiTV keeps up with a site's own player
+    is judged by eye, side by side): a dated source's state says how far its picture plays
+    behind the broadcaster (`behind_broadcaster`), by this computer's clock: the time of day
+    less the date the site stamped on the piece playing, plus how far into it the position
+    is. The helper places its dates on the timeline (`dates`: [timeline second, a piece's
+    date less that second] from where each holds; None: undated from there)."""
+
+    DAY = 1_795_000_000.0  # the date of the media at timeline second 0
+
+    def test_a_dated_source_reports_how_far_its_picture_is_behind_the_broadcaster(self):
+        # Pieces dated from DAY; then at timeline second 2 a 30 s ad break skipped (its
+        # pieces never fetched): the dates jump on, the timeline does not.
+        sid = self.ready(segments(0, 2), live_edge=4.0)
+        self.engine.buffer(sid, segments(0, 2), live_edge=4.0, dates=[[0.0, self.DAY]])
+        wall = [self.DAY + 3.25]
+        self.live._wall = lambda: wall[0]
+        self.playback.set_state(PlaybackState.PLAYING)
+        self.step(0.25)  # position 0.25: its piece's date DAY plus 0.25 into it
+        self.assertAlmostEqual(self.timelines[-1]["position"], 0.25)
+        self.assertAlmostEqual(self.timelines[-1]["behind_broadcaster"], 3.0)
+        wall[0] += 1.0
+        self.step(1.0)  # at 1x it stands
+        self.assertAlmostEqual(self.timelines[-1]["behind_broadcaster"], 3.0)
+        wall[0] += 1.0
+        self.step(0.0)  # the picture stood while the broadcaster went on
+        self.assertAlmostEqual(self.timelines[-1]["behind_broadcaster"], 4.0)
+        dates = [[0.0, self.DAY], [2.0, self.DAY + 30.0]]
+        self.engine.buffer(sid, segments(0, 2), live_edge=4.0, dates=dates)
+        wall[0] = self.DAY + 36.0
+        self.step(1.5)  # position 2.75, after the break: dated DAY + 32.75
+        self.assertAlmostEqual(self.timelines[-1]["position"], 2.75)
+        self.assertAlmostEqual(self.timelines[-1]["behind_broadcaster"], 3.25)
+        self.assertLess(self.timelines[-1]["lag"], 2.0)  # "Behind live", its own yardstick
+
+    def test_dates_far_off_this_computers_clock_give_no_figure(self):
+        # Ruling R30: the newest piece's date more than 30 s off the clock (an encoder's start
+        # time, a clock set wrong) gives no figure, an hour behind it or 40 s ahead alike. It
+        # is the source that is judged, not the picture: one paused while fresh pieces come
+        # says how far behind it is, past a minute.
+        sid = self.ready(segments(0, 2), live_edge=4.0)
+        wall = [self.DAY + 3.0]
+        self.live._wall = lambda: wall[0]
+        self.playback.set_state(PlaybackState.PLAYING)
+        for day in (self.DAY - 3600.0, self.DAY + 40.0):
+            with self.subTest(newest=day + 4.0 - wall[0]):
+                self.engine.buffer(sid, segments(0, 2), live_edge=4.0, dates=[[0.0, day]])
+                self.step(0.25)
+                self.assertIsNone(self.timelines[-1]["behind_broadcaster"])
+        self.engine.buffer(sid, segments(0, 2), live_edge=4.0, dates=[[0.0, self.DAY]])
+        self.step(0.25)  # position 0.75, the newest piece 1 s ahead of the clock
+        self.assertAlmostEqual(self.timelines[-1]["behind_broadcaster"], 2.25)
+        self.live.toggle_pause()
+        for k in range(1, 61):  # a minute paused while the channel's pieces come on
+            wall[0] += 1.0
+            self.engine.buffer(
+                sid, segments(0, 2), open_seq=2, live_edge=4.0 + k, dates=[[0.0, self.DAY]]
+            )
+            self.step(1.0, media=0.0)
+        state = self.timelines[-1]
+        self.assertAlmostEqual(state["position"], 0.75)
+        self.assertAlmostEqual(state["behind_broadcaster"], 62.25)
+        shown = dict(stats_rows({"lag": state["lag"], "behind_broadcaster": 62.25}))
+        self.assertEqual(shown["Behind the broadcaster"], "62.2 s")
+
+    def test_an_undated_source_reports_no_broadcaster_figure(self):
+        sid = self.ready(segments(0, 2), live_edge=4.0)
+        self.live._wall = lambda: self.DAY + 3.0
+        self.playback.set_state(PlaybackState.PLAYING)
+        self.step(0.25)
+        state = self.timelines[-1]
+        self.assertIsNone(state["behind_broadcaster"])
+        shown = dict(stats_rows({"lag": state["lag"], "behind_broadcaster": None}))
+        self.assertIn("Behind live", shown)
+        self.assertNotIn("Behind the broadcaster", shown)
+        # Nor where its dates do not reach: before the first placed (a run's first piece's
+        # start on the timeline is its first keyframe, not where its date is), or from a
+        # piece undated on. Dated where it plays, it says.
+        cases = (
+            ([[1.0, self.DAY]], None),
+            ([[0.0, self.DAY], [0.2, None]], None),
+            ([[0.0, self.DAY]], 3.0 - 1.0),  # (at position 1.0 by then)
+        )
+        for dates, behind in cases:
+            with self.subTest(dates=dates):
+                self.engine.buffer(sid, segments(0, 2), live_edge=4.0, dates=dates)
+                self.step(0.25)
+                if behind is None:
+                    self.assertIsNone(self.timelines[-1]["behind_broadcaster"])
+                else:
+                    self.assertAlmostEqual(self.timelines[-1]["behind_broadcaster"], behind)
+
+
+class ComeBackTests(LiveSessionCase):
+    """2026-11-25 (the owner: "when the stream comes back, play from the latest"): a live
+    site's stream that drops while VLC plays at live (its source silent `_AWAY_S` and more)
+    plays from its newest once it comes back, through Go live's start (timed under Low and
+    Auto), never from where VLC waited (held meanwhile, its last picture on); a short hiccup,
+    and a viewer who paused, are as ever."""
+
+    landing = TimedStartTests.landing
+    tune_at = TimedStartTests.tune_at
+
+    def drop(self, feed, seconds, *, missed=True):
+        """The source sends nothing for `seconds`, then what it missed at once (`missed`), and
+        on at real time."""
+        feed.stalled = True
+        feed.run(seconds)
+        feed.stalled = False
+        if missed:
+            feed.edge += seconds
+        feed.push()
+
+    def test_a_drop_comes_back_at_the_newest_never_where_it_waited(self):
+        # It lands at the target in force (Auto's learned one took the drop in, as ever; a
+        # keyframe above it at most where starts are not timed, Stable's), never the drop's
+        # 8 s further back, as played on from where VLC waited.
+        for latency, above in (("low", 0.6), (AUTO, 0.6), ("stable", 2.6)):
+            with self.subTest(latency=latency):
+                self.live = self.make()
+                feed = self.tune_at(latency, 1.0, 0.3)
+                self.landing(feed, 0)
+                feed.run(30.0)
+                plays = len(self.playback.plays)
+                feed.stalled = True
+                feed.run(8.0)
+                self.assertEqual(len(self.playback.plays), plays)  # nothing opens meanwhile
+                waited = feed.position
+                feed.stalled = False
+                feed.edge += 8.0  # what it missed, at once
+                feed.push()
+                spent = 0.0
+                while len(self.playback.plays) == plays:
+                    self.assertEqual(feed.position, waited)  # held, never played on
+                    self.assertLess(spent, 3.5, "no start opened")
+                    feed.run(Feed.DT)
+                    spent += Feed.DT
+                feed.run(3.0)
+                lag, target = feed.edge - feed.position, self.timelines[-1]["target"]
+                self.assertGreaterEqual(lag, target - 0.3)
+                self.assertLessEqual(lag, target + above)
+                self.assertLess(lag, 8.6)
+                self.assertEqual(len(self.playback.plays), plays + 1)
+
+    def test_a_restart_with_nothing_missed_plays_what_came_after_it(self):
+        # The stream comes back with nothing of the silence (an encoder's restart): its first
+        # piece, once it lands at the target, never what VLC played before.
+        self.live = self.make()
+        feed = self.tune_at(AUTO, 1.0, 0.3)
+        self.landing(feed, 0)
+        feed.run(30.0)
+        plays = len(self.playback.plays)
+        self.drop(feed, 6.0, missed=False)
+        stood = feed.edge
+        lag, _waited = self.landing(feed, plays)
+        self.assertGreaterEqual(self.live.position(), stood - 1e-6)
+        self.assertLessEqual(lag, self.timelines[-1]["target"] + 0.6)
+        self.assertEqual(len(self.playback.plays), plays + 1)
+
+    spy = LearnedTargetTests.spy
+
+    def test_after_a_twitch_ad_break_a_close_source_plays_its_newest_at_its_target(self):
+        # Under Low and Auto on a live site's pieces as made: VLC is held through the break and
+        # until the timed start of what came after it opens, at its target; the learned target
+        # hears nothing of the break, nor of VLC filling up after it.
+        starved = self.spy(LearnedTarget, "starved")
+        stalled = self.spy(LearnedTarget, "stalled")
+        near = self.spy(LearnedTarget, "near_miss")
+        for latency in ("low", AUTO):
+            with self.subTest(latency=latency):
+                self.live = self.make()
+                feed = self.tune_at(latency, 1.0, 0.3)
+                self.landing(feed, 0)
+                feed.run(30.0)
+                target = self.timelines[-1]["target"]
+                counts = (starved.call_count, stalled.call_count, near.call_count)
+                AdBreakTests.begin(feed)
+                feed.run(20.0)
+                stood, waited = feed.edge, feed.position
+                plays = len(self.playback.plays)
+                AdBreakTests.end(feed)
+                spent = 0.0
+                while len(self.playback.plays) == plays:
+                    self.assertEqual(feed.position, waited)  # held, never played on
+                    self.assertLess(spent, 3.5, "no start opened")
+                    feed.run(Feed.DT)
+                    spent += Feed.DT
+                self.assertGreaterEqual(self.live.position(), stood - 1e-6)
+                feed.run(3.0)
+                lag = feed.edge - feed.position
+                self.assertGreaterEqual(lag, target - 0.3)
+                self.assertLessEqual(lag, target + 0.6)
+                feed.run(20.0)
+                self.assertEqual((starved.call_count, stalled.call_count), counts[:2])
+                nears = near.call_args_list[counts[2] :]
+                self.assertEqual([c for c in nears if c.args[1] < learned_target.NEAR_S], [])
+                self.assertEqual(self.timelines[-1]["target"], target)
+                self.assertEqual(len(self.playback.plays), plays + 1)
+
+    def test_a_short_hiccup_and_a_paused_viewer_are_as_ever(self):
+        for paused in (False, True):
+            with self.subTest(paused=paused):
+                self.live = self.make()
+                feed = self.tune_at(AUTO, 1.0, 0.3)
+                self.landing(feed, 0)
+                feed.run(30.0)
+                if paused:
+                    self.live.toggle_pause()
+                plays = len(self.playback.plays)
+                self.drop(feed, 8.0 if paused else 2.0)
+                feed.run(10.0)
+                self.assertEqual(len(self.playback.plays), plays)

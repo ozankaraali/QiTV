@@ -5,6 +5,8 @@ promptly without exposing credentials, stopping one recording leaves its sibling
 and owner death closes the upstream socket) to one long-lived helper with many sessions.
 """
 
+import collections
+from datetime import datetime, timezone
 import json
 import logging
 import multiprocessing
@@ -69,6 +71,9 @@ STATE_KEYS = {
     "not_live",  # 2.8.11
     "settled_s",  # 2.8.11
     "retry_at",  # the channel's stream down: when its next try is due
+    "prefetching",  # HLS: its playlist's prefetch pieces are read as they are made
+    "piece_s",  # HLS: the last segment's EXTINF (a live site's piece length)
+    "ad_break",  # HLS: a live site's ad break is skipped now
 }
 DISK_LIMIT = "The disk buffer limit cannot fit one keyframe interval or an active read."
 # The owner hands a copy of its pipe end to a holder process that outlives it, so the
@@ -589,6 +594,66 @@ class LiveWorkerTests(unittest.TestCase):
         helper.close(sid)
         self.assert_no_credentials(helper)
 
+    def test_a_prefetch_playlist_says_so_and_reports_no_burst(self):
+        # A live site's playlist whose newest piece is listed while it is made: read as it
+        # comes, so no burst (not its 4 s target duration), and the state says so.
+        playlist = (
+            "#EXTM3U\n#EXT-X-TARGETDURATION:4\n#EXT-X-MEDIA-SEQUENCE:0\n"
+            "#EXTINF:4,live\na.ts\n#EXT-X-PREFETCH:b.ts\n"
+        )
+        source = self.source(
+            {
+                "/user/secret/channel.m3u8": (200, {}, playlist.encode()),
+                "/user/secret/a.ts": (200, {}, make_stream(4)),
+                "/user/secret/b.ts": (200, {}, make_stream(4)),
+            }
+        )
+        helper = self.helper()
+        sid = helper.open(source.url + "/user/secret/channel.m3u8")
+        helper.wait_for(lambda message: message == ("ready", sid))
+        snapshot = helper.of(sid, "state")[-1][2]
+        self.assertEqual((snapshot["prefetching"], snapshot["burst_s"]), (True, 0.0))
+        self.assertEqual(snapshot["piece_s"], 4.0)  # the piece being made: as the last listed
+        self.assertIs(snapshot["hls"], True)
+        self.assertIs(snapshot["caught_up"], True)  # before the prefetch piece came
+        self.assertEqual(source.counts["/user/secret/a.ts"], 0)  # it starts at that piece
+        helper.close(sid)
+        self.assert_no_credentials(helper)
+
+    def test_an_ad_break_is_said_while_it_is_skipped(self):
+        # A live site's ad pieces are skipped (`AdBreak`): the state says so from the first
+        # skipped piece until the channel's next piece comes (a reload later), so the parent
+        # counts no starvation meanwhile. Its pieces are never asked for.
+        head = "#EXTM3U\n#EXT-X-TARGETDURATION:4\n#EXT-X-TWITCH-ELAPSED-SECS:0.000\n"
+        ad = "#EXT-X-DISCONTINUITY\n#EXTINF:4,Amazon|1\nad.ts\n"
+        copies = [
+            head + "#EXT-X-MEDIA-SEQUENCE:0\n#EXTINF:4,live\na.ts\n" + ad,
+            head + "#EXT-X-MEDIA-SEQUENCE:1\n" + ad + "#EXT-X-DISCONTINUITY\n"
+            "#EXTINF:4,live\nb.ts\n#EXT-X-ENDLIST\n",
+        ]
+
+        def playlist(_request, count):
+            return 200, {}, copies[min(count, len(copies)) - 1].encode()
+
+        source = self.source(
+            {
+                "/user/secret/channel.m3u8": playlist,
+                "/user/secret/a.ts": (200, {}, make_stream(4)),
+                "/user/secret/ad.ts": (200, {}, make_stream(4)),
+                "/user/secret/b.ts": (200, {}, make_stream(4, pts_start=900000 + 4 * 90000)),
+            }
+        )
+        helper = self.helper()
+        sid = helper.open(source.url + "/user/secret/channel.m3u8")
+        helper.wait_for(lambda message: message == ("ended", sid))
+        said = [state[2].get("ad_break") for state in helper.of(sid, "state")]
+        self.assertIn(True, said)
+        self.assertIs(said[-1], False)
+        self.assertIn(False, said[said.index(True) :])
+        self.assertEqual(source.counts["/user/secret/ad.ts"], 0)
+        helper.close(sid)
+        self.assert_no_credentials(helper)
+
     def test_a_finite_source_ends_after_its_last_segment(self):
         first, second = make_stream(4), make_stream(4, pts_start=900000 + 4 * 90000)
         source = self.source(
@@ -647,6 +712,50 @@ class LiveWorkerTests(unittest.TestCase):
         starts = [(item[5], round(item[1])) for item in buffered if item[5] is not None]
         self.assertEqual(starts, [(0, 0), (1, 4)])
         self.assertGreater(len(buffered), 2)  # segments within an HLS segment carry None
+
+    def test_a_dated_playlist_places_its_dates_on_the_timeline(self):
+        # 2026-11-25, the statistics' "Behind the broadcaster": each piece's date less the
+        # timeline second its media begins at, from there on (`dates`), a new entry only
+        # where that moves: after a 30 s ad break skipped (c: its date jumps on, the timeline
+        # does not), not at d. Not the first piece's (the timeline starts at its first
+        # keyframe, not where its date is). An undated playlist's state carries none.
+        day = 1_795_000_000.0
+
+        def dated(*pieces):
+            text = "#EXTM3U\n#EXT-X-VERSION:3\n#EXT-X-TARGETDURATION:4\n"
+            text += "#EXT-X-MEDIA-SEQUENCE:0\n"
+            for name, seconds in pieces:
+                when = datetime.fromtimestamp(day + seconds, timezone.utc)
+                text += f"#EXT-X-PROGRAM-DATE-TIME:{when.isoformat(timespec='milliseconds')}\n"
+                text += f"#EXTINF:4,\n{name}\n"
+            return (text + "#EXT-X-ENDLIST\n").encode()
+
+        names = ["a", "b", "c", "d"]
+        routes = {
+            f"/user/secret/{name}.ts": (200, {}, make_stream(4, pts_start=900000 + k * 360000))
+            for k, name in enumerate(names)
+        }
+        routes["/user/secret/dated.m3u8"] = (
+            200,
+            {},
+            dated(("a.ts", 0.0), ("b.ts", 4.0), ("c.ts", 38.0), ("d.ts", 42.0)),
+        )
+        routes["/user/secret/undated.m3u8"] = (200, {}, leaf(*(f"{n}.ts" for n in names)))
+        source = self.source(routes)
+        helper = self.helper()
+        sid = helper.open(source.url + "/user/secret/dated.m3u8")
+        helper.wait_for(lambda message: message == ("ended", sid))
+        placed = helper.of(sid, "state")[-1][2]["dates"]
+        self.assertEqual(len(placed), 2, placed)
+        for (at, offset), (wanted_at, wanted) in zip(placed, ((4.0, day), (8.0, day + 30.0))):
+            self.assertAlmostEqual(at, wanted_at, delta=0.1)
+            self.assertAlmostEqual(offset, wanted, delta=0.1)
+        undated = helper.open(source.url + "/user/secret/undated.m3u8")
+        helper.wait_for(lambda message: message == ("ended", undated))
+        self.assertTrue(all("dates" not in state[2] for state in helper.of(undated, "state")))
+        helper.close(sid)
+        helper.close(undated)
+        self.assert_no_credentials(helper)
 
     def test_the_state_reports_the_server_window(self):
         # 2.7: a live HLS source's window and newest media sequence; raw TS has neither.
@@ -1314,6 +1423,49 @@ class LiveWorkerTests(unittest.TestCase):
         else:
             self.skipTest("no way to list another process's descriptors here")
         self.assertEqual(targets, [os.devnull, os.devnull])
+
+
+class PlaceDateTests(unittest.TestCase):
+    """2026-11-25, the statistics' "Behind the broadcaster": a dated source's pieces' dates on
+    the timeline (`_Session._place_date`), kept as runs of a piece's date less the timeline
+    second it begins at."""
+
+    DAY = 1_795_000_000.0
+
+    def session(self, start=0.0):
+        return SimpleNamespace(
+            _dates=collections.deque(maxlen=worker._DATES_KEPT),
+            _timeline=SimpleNamespace(start=start),
+        )
+
+    def place(self, session, *pieces):
+        for t, date in pieces:
+            worker._Session._place_date(session, t, date)
+        return list(session._dates)
+
+    def test_a_run_goes_on_until_its_date_moves_a_tenth_of_a_second(self):
+        session, day = self.session(), self.DAY
+        placed = self.place(session, (4.0, day + 4.0), (8.0, day + 8.05), (12.0, day + 42.0))
+        self.assertEqual(placed, [(4.0, day), (12.0, day + 30.0)])  # 8.0: 0.05 s, the same run
+        self.assertEqual(self.place(session, (16.0, day + 46.0)), placed)
+
+    def test_dates_that_end_end_the_run_and_none_come_before_the_first(self):
+        session, day = self.session(), self.DAY
+        self.assertEqual(self.place(session, (0.0, None)), [])  # undated from the start
+        placed = self.place(session, (4.0, day + 4.0), (8.0, None), (12.0, None), (16.0, day))
+        self.assertEqual(placed, [(4.0, day), (8.0, None), (16.0, day - 16.0)])
+
+    def test_a_piece_that_brought_no_media_gives_way_to_the_next_at_its_place(self):
+        session, day = self.session(), self.DAY
+        placed = self.place(session, (4.0, day + 4.0), (8.0, day + 100.0), (8.0, day + 8.0))
+        self.assertEqual(placed, [(4.0, day)])
+
+    def test_runs_the_ring_no_longer_holds_are_let_go(self):
+        session, day = self.session(), self.DAY
+        self.place(session, (4.0, day + 4.0), (12.0, day + 42.0), (16.0, None))
+        session._timeline.start = 14.0  # the ring let go of 4-14: the run from 12 holds 14
+        placed = self.place(session, (20.0, None))
+        self.assertEqual(placed, [(12.0, day + 30.0), (16.0, None)])
 
 
 class SpawnTargetTests(unittest.TestCase):
@@ -2398,7 +2550,7 @@ class AdoptTests(unittest.TestCase):
         helper = SimpleNamespace(
             root=str(self.root),
             send=lambda message, session=None: None,
-            server=SimpleNamespace(add_session=lambda *a: None),
+            server=SimpleNamespace(add_session=lambda *a, **k: None),
             disk_budget=lambda max_bytes: SimpleNamespace(register=lambda ring, parked=False: None),
             trim_disk=lambda session: None,
             forget_ring=lambda ring: None,
@@ -2496,7 +2648,7 @@ class TeardownTests(unittest.TestCase):
         helper = SimpleNamespace(
             root="",
             send=lambda message, session=None: None,
-            server=SimpleNamespace(add_session=lambda *args: None),
+            server=SimpleNamespace(add_session=lambda *args, **kwargs: None),
             forget_ring=lambda ring: None,
         )
         session = worker._Session(helper, "t", "http://provider.test/t.ts", {}, True, RAM, 6.0)
@@ -2641,7 +2793,7 @@ class RamFallbackSizeTests(unittest.TestCase):
         helper = SimpleNamespace(
             root=str(root),
             send=lambda message, session=None: None,
-            server=SimpleNamespace(add_session=lambda sid, ring, ended: adopted.append(ring)),
+            server=SimpleNamespace(add_session=lambda sid, ring, ended, **_k: adopted.append(ring)),
             # 2.6: the disk rings' shared amount
             disk_budget=lambda max_bytes: SimpleNamespace(register=lambda ring: None),
             forget_ring=lambda ring: None,
@@ -2697,7 +2849,7 @@ class HeardEdgeTests(unittest.TestCase):
         helper = SimpleNamespace(
             root="",
             send=lambda message, session=None: sent.append(message),
-            server=SimpleNamespace(add_session=lambda *args: None),
+            server=SimpleNamespace(add_session=lambda *args, **kwargs: None),
         )
         session = worker._Session(helper, "e", "http://provider.test/e.ts", {}, True, RAM, 6.0)
         session._segmenter = Segmenter(clock=lambda: clock.now)
@@ -2745,7 +2897,7 @@ class HeardEdgeTests(unittest.TestCase):
         helper = SimpleNamespace(
             root="",
             send=lambda message, session=None: sent.append(message),
-            server=SimpleNamespace(add_session=lambda *args: None),
+            server=SimpleNamespace(add_session=lambda *args, **kwargs: None),
         )
         session = worker._Session(helper, "r", "http://provider.test/r.ts", {}, True, RAM, 6.0)
 
@@ -2784,7 +2936,7 @@ class HeardEdgeTests(unittest.TestCase):
         helper = SimpleNamespace(
             root="",
             send=lambda message, session=None: None,
-            server=SimpleNamespace(add_session=lambda *args: None),
+            server=SimpleNamespace(add_session=lambda *args, **kwargs: None),
         )
         session = worker._Session(helper, "r", "http://provider.test/r.ts", {}, True, RAM, 6.0)
         told = []
@@ -2834,7 +2986,7 @@ class HeardEdgeTests(unittest.TestCase):
         helper = SimpleNamespace(
             root="",
             send=lambda message, session=None: sent.append(message),
-            server=SimpleNamespace(add_session=lambda *args: None),
+            server=SimpleNamespace(add_session=lambda *args, **kwargs: None),
         )
         session = worker._Session(helper, "t", "http://provider.test/t.ts", {}, True, RAM, 6.0)
         told, heard = [], []
@@ -2888,7 +3040,7 @@ class HeardEdgeTests(unittest.TestCase):
         helper = SimpleNamespace(
             root="",
             send=lambda message, session=None: None,
-            server=SimpleNamespace(add_session=lambda *args: None),
+            server=SimpleNamespace(add_session=lambda *args, **kwargs: None),
         )
         session = worker._Session(helper, "r", "http://provider.test/r.ts", {}, True, RAM, 6.0)
         held = []
@@ -2940,7 +3092,7 @@ class HeardEdgeTests(unittest.TestCase):
         helper = SimpleNamespace(
             root="",
             send=lambda message, session=None: sent.append(message),
-            server=SimpleNamespace(add_session=lambda *a: None),
+            server=SimpleNamespace(add_session=lambda *a, **k: None),
         )
         session = worker._Session(helper, "h", "http://provider.test/h.ts", {}, True, RAM, 6.0)
         seen = {"takers": set()}

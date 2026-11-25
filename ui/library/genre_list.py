@@ -330,6 +330,12 @@ class GenreList(QWidget):
         if text and self.edit.insert(text):
             self._filter_changed()
 
+    def phone_type(self, text: str) -> None:
+        """2.15: a phone's text in place of the filter's (ui/remote_typing.py)."""
+        if text != self.edit.text:
+            self.edit.set_text(text)
+            self._filter_changed()
+
     def backspace(self) -> None:
         if self.edit.backspace():
             self._filter_changed()

@@ -7,14 +7,16 @@ from unittest.mock import patch
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 from PySide6.QtCore import QEvent, QObject, QPoint, QPointF, QRect, Qt
-from PySide6.QtGui import QHelpEvent, QRegion, QWheelEvent
+from PySide6.QtGui import QContextMenuEvent, QHelpEvent, QRegion, QWheelEvent
 from PySide6.QtTest import QTest
 from PySide6.QtWidgets import QApplication, QMainWindow, QStackedWidget, QVBoxLayout, QWidget
 from shiboken6 import isValid
 from timer_fixtures import elapse, pause, wait_until
 
 from ui.overlay_host import RESTORE_REPORT_MS, OverlayHost
+from ui.overlays import popup_menu
 from ui.overlays.base import Overlay, TooltipWidget
+from ui.overlays.popup_menu import Menu
 from ui.video_surface import VideoSurface
 
 
@@ -384,6 +386,35 @@ class PointerBehaviourMixin:
         for _ in range(12):
             wheel(self.target(), 10)
         self.assertEqual(got["steps"], [-1])  # scroll up (positive delta) = previous
+
+    def test_the_menu_a_right_press_opens_stays_open(self):
+        """Issue 53: the menu of what plays opens at a right press on the picture, and stays
+        through that press, its release and the context-menu event Windows sends after the
+        release. The press went on to the surface's parent, where the menu's filter took it for
+        a click elsewhere and closed it at once (on Windows it showed for two frames)."""
+        menu = Menu()
+        menu.add("Add to favorites", lambda: None)
+        shown = []
+
+        def asked(pos):
+            shown.append(popup_menu.popup(menu, self.panel, at=pos, follow=False))
+
+        target = self.target()
+        target.contextRequested.connect(asked)
+        where = QPoint(300, 200)
+        QTest.mousePress(target, Qt.MouseButton.RightButton, Qt.KeyboardModifier.NoModifier, where)
+        self.assertEqual(len(shown), 1)
+        overlay = shown[0]
+        self.assertTrue(overlay.shown())
+        QTest.mouseRelease(
+            target, Qt.MouseButton.RightButton, Qt.KeyboardModifier.NoModifier, where
+        )
+        context = QContextMenuEvent(
+            QContextMenuEvent.Reason.Mouse, where, target.mapToGlobal(where)
+        )
+        QApplication.sendEvent(target, context)
+        pause(20)
+        self.assertTrue(overlay.shown())
 
 
 class VideoSurfacePointerTests(PointerBehaviourMixin, HostCase):

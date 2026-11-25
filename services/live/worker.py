@@ -75,6 +75,11 @@ Commands (parent to helper):
   a stopped one may still be finishing. Answered by "recorded";
 - `("record_stop", sid)`: the session's recording ends at the live edge; an unknown sid, or
   one that records nothing, is ignored;
+- `("stop", sid, stop_date, stop_s)` (2.15): a recording part's stop moves (its live buffer's
+  start moved on).
+- `("join", part_sid, live_sid, seq)` (2.15): a recording part's viewer stream goes on, once
+  its ring ends, into the live session's from segment `seq` (`StreamServer.join`), its clock
+  re-based so it runs on.
 - `("until", sid, seq)` (2.7): a server part's stop moves to media sequence `seq` (the live
   buffer's start moved); unanswered;
 - `("shutdown",)`.
@@ -195,7 +200,7 @@ _DISK_FAILED = "The temporary playback buffer could not be created."
 
 # seq, start, end, discontinuity, start_quality, media_seq (2.7: the HLS media sequence the
 # segment begins, or None)
-_Addition = tuple[int, float, float, bool, StartQuality, int | None]
+_Addition = tuple[int, float, float, bool, StartQuality, int | None, int | None]
 
 
 def _addition(span: Span) -> _Addition:
@@ -206,6 +211,7 @@ def _addition(span: Span) -> _Addition:
         span.discontinuity,
         span.start_quality,
         span.media_seq,
+        span.first_pts,  # (2.15: a recording's join by timestamps)
     )
 
 
@@ -224,6 +230,12 @@ _TITLES_KEPT = 4096
 # ... and a station's sound resumed after a kept buffer was taken back starts this far past
 # the newest segment's last PTS: past the longest frame (1152 samples at 8 kHz: 0.144 s)
 _SOUND_RESUME_TICKS = 13_500
+# HLS (2026-11-25, the statistics' "Behind the broadcaster"): a dated source's pieces' dates on
+# the timeline (`_place_date`), kept as runs of one date less timeline second; a new run where
+# that moves by this much or more (a skipped ad break, a gap; the encoder's clock drifting a
+# tenth of a second), at most this many runs while the ring holds them (a memory bound)
+_DATE_STEP_S = 0.1
+_DATES_KEPT = 64
 
 # BurstMeter (see its docstring):
 _BURST_GAP_S = 1.0  # this long without a byte ends a burst
@@ -591,6 +603,7 @@ class _Session:
         self._received = 0  # bytes from the source, those before the first keyframe too
         self._answered = False  # the source's response headers came (bytes may not have yet)
         self._caught_up = False  # HLS: every segment its playlist listed was delivered once
+        self._ad_break = False  # HLS: a live site's ad break is skipped now (`AdBreak`)
         self._reconnecting = False  # raw TS: the connection broke, a new one is being opened
         # The channel's stream is down past the quick reconnects: the time of day its next try
         # is due (`services.live.source`'s long waits; None: none waits).
@@ -603,6 +616,7 @@ class _Session:
         self._settled = 0.0
         self._segment = (0, 0.0)  # HLS: the segment being fetched (serial), the edge it began at
         self._measured = (0.0, 0.0)  # HLS: media and EXTINF seconds of the whole segments
+        self._piece_s = 0.0  # HLS: the last segment's EXTINF (a live site's piece length)
         self._pending: list[_Addition] = []
         # 2.8: one state at a time (the session thread's, and another thread's after it changed
         # the ring: `notify_soon`), and each span goes once: the newest seq a state carried.
@@ -613,6 +627,8 @@ class _Session:
         self._breaks: deque[tuple[float, float]] = deque(maxlen=_BREAKS_KEPT)
         # 2.14, a station's sound: (timeline position, its song from there; "": none)
         self._titles: deque[tuple[float, str, bool]] = deque(maxlen=_TITLES_KEPT)
+        # HLS: (timeline position, a piece's date less it) from there on (None: undated)
+        self._dates: deque[tuple[float, float | None]] = deque(maxlen=_DATES_KEPT)
         self._titles_sent: tuple[Any, ...] | None = None  # what the last state's titles were
         self._sound_from: int | None = None  # 2.14: a resumed station's first PTS
         self._last_notify = 0.0
@@ -928,7 +944,7 @@ class _Session:
         self._kept_history = self._resuming = True
         self._new_part = self._open_junction = self._junction_next = True
         self._received, self._answered, self._caught_up = 0, False, False
-        self._reconnecting = self._skipping = False
+        self._reconnecting = self._skipping = self._ad_break = False
         self._retry_at = None
         self._not_live, self._settled = 0, 0.0
         self._segment, self._measured = (0, 0.0), (0.0, 0.0)
@@ -1120,7 +1136,13 @@ class _Session:
                 from services.live.recorder import RecordedReads
 
                 reads = RecordedReads(ring, lambda: self._recorder)
-                self._helper.server.add_session(self.sid, reads, self._is_ended)
+                window = self._start.get("window")
+                joins = isinstance(window, dict) and (
+                    isinstance(window.get("from_s"), (int, float)) or window.get("joins") is True
+                )
+                self._helper.server.add_session(
+                    self.sid, reads, self._is_ended, program=self._program, joins=joins
+                )
         if cancelled:
             self._helper.forget_ring(ring)
             # 2.6: a helper going down keeps a labelled buffer (one being taken back too).
@@ -1283,7 +1305,7 @@ class _Session:
         rejoiner: ReconnectTrimmer | None,
     ) -> None:
         """One item of the source down the pipeline: bytes, or a marker."""
-        from services.live.source import CaughtUp, Discontinuity, Reconnecting, Title
+        from services.live.source import AdBreak, CaughtUp, Discontinuity, Reconnecting, Title
 
         self._raise_tick_failure()
         self._check()
@@ -1299,6 +1321,12 @@ class _Session:
             start = self._timeline.start
             while len(titles) > 1 and titles[1][0] <= start:
                 titles.popleft()  # the song after it plays from the buffer's start on
+            self._notify(force=True)
+            return
+        if isinstance(item, AdBreak):
+            # A live site's ad break, its pieces skipped: nothing comes meanwhile, and the
+            # parent holds its player and counts no starvation until the channel comes again.
+            self._ad_break = item.on
             self._notify(force=True)
             return
         self._reconnecting = False
@@ -1418,6 +1446,7 @@ class _Session:
             self._end_input(kind, message, status)
 
     def _end_input(self, kind: str, message: str, status: int | None) -> None:
+        self._ad_break = False  # its input is over: no break goes on
         if self._ring is not None:
             self._drain()
             if self._resuming:
@@ -1519,6 +1548,15 @@ class _Session:
         else:
             self._junction = seconds
 
+    def set_stop(self, stop_date: float | None, stop_s: float | None) -> None:
+        """2.15: a recording part's stop moves (the live buffer's start moved on)."""
+        window = self._start.get("window")
+        if isinstance(window, dict):
+            window["stop_date"], window["stop_s"] = stop_date, stop_s
+        source = self._source
+        if source is not None and hasattr(source, "set_stop"):
+            source.set_stop(stop_date, stop_s)
+
     def set_until(self, seq: int) -> None:
         """A server part's stop moves to media sequence `seq` (2.7, "until")."""
         window = self._start.get("window")
@@ -1563,12 +1601,15 @@ class _Session:
         measure the one before if it arrived whole: its media against its EXTINF. Not the
         first that brought media (it began at edge 0.0): the timeline starts at its first
         keyframe, so whatever came before that would read as missing media. Its EXTINF is the
-        clock joiner's arrival (`ClockJoiner.arrive`)."""
+        clock joiner's arrival (`ClockJoiner.arrive`). Its date is placed there
+        (`_place_date`), not a run's first one's, for the same reason."""
         serial = getattr(source, "segment_serial", 0)
         if serial == self._segment[0]:
             return
         self._media_next = getattr(source, "segment_sequence", None)
         fetching = getattr(source, "segment_s", None)
+        if isinstance(fetching, float) and fetching > 0:
+            self._piece_s = fetching
         if self._clock_joiner is not None and isinstance(fetching, float):
             self._clock_joiner.arrive(fetching)
         edge = self._live_edge()
@@ -1579,6 +1620,30 @@ class _Session:
             media, extinf = self._measured
             self._measured = (media + edge - began, extinf + whole[1])
         self._segment = (serial, edge)
+        date = getattr(source, "segment_date", None)
+        self._place_date(edge, date if previous and isinstance(date, float) else None)
+
+    def _place_date(self, t: float, date: float | None) -> None:
+        """HLS: the date (Unix seconds; None: not known) of the piece whose media begins at
+        timeline second `t`, which the state carries (`dates`) for the parent to read the
+        date of any second from (the statistics' "Behind the broadcaster": the time of day
+        less the date of the second playing). Kept as that date less `t` from `t` on, a new
+        run only where it moves by `_DATE_STEP_S` or more, or the dates end (an undated piece
+        after dated ones, a run's first piece after another run); the oldest go once the ring
+        no longer holds them."""
+        dates = self._dates
+        while dates and dates[-1][0] >= t:
+            dates.pop()  # a piece that brought no media: the one beginning there now holds
+        offset = None if date is None else date - t
+        last = dates[-1][1] if dates else None
+        if offset is None:
+            if last is not None:
+                dates.append((t, None))
+        elif last is None or abs(offset - last) >= _DATE_STEP_S:
+            dates.append((t, offset))
+        start = self._timeline.start
+        while len(dates) > 1 and dates[1][0] <= start:
+            dates.popleft()
 
     def _backlog(self, source: Source | None) -> float | None:
         """HLS: the media its playlist listed still to come: what the segment being fetched
@@ -1646,6 +1711,7 @@ class _Session:
         while len(titles) > 1 and titles[1][0] <= timeline.start:
             del titles[0]  # the song after it plays from the buffer's start on
         said = (len(titles), titles[0], titles[-1]) if titles else None
+        prefetching = getattr(source, "prefetching", False) is True
         snapshot: dict[str, Any] = {
             "oldest": oldest,
             "newest": ring.newest_seq if ring is not None else None,
@@ -1656,8 +1722,24 @@ class _Session:
             "bytes": ring.bytes if ring is not None else 0,
             "ended": self._ended,
             # HLS: the target duration, which a reload may change; raw TS: what the meter
-            # measured (0.0 for a steady source). The larger, should both apply.
-            "burst_s": max(source.burst_s if source is not None else 0.0, self._bursts.burst_s),
+            # measured (0.0 for a steady source). The larger, should both apply. 0.0 while
+            # an HLS source reads prefetch pieces: they come as they are made (the meter
+            # would take what the first one had made, sent at once, for a burst).
+            "burst_s": (
+                0.0
+                if prefetching
+                else max(source.burst_s if source is not None else 0.0, self._bursts.burst_s)
+            ),
+            # HLS: its playlist lists prefetch pieces (a live site's newest), read as they are
+            # made: the parent starts it as a steady source.
+            "prefetching": prefetching,
+            # HLS: the EXTINF of the segment fetched last (0.0 before one): a live site's piece
+            # length, where its next keyframe is due before the first piece closed (2026-11-25:
+            # each of Kick's and Twitch's pieces begins with one; the parent times its start).
+            "piece_s": self._piece_s,
+            # HLS: a live site's ad break is skipped now (its pieces never fetched): no media
+            # comes until the channel's next piece, and no starvation is counted meanwhile.
+            "ad_break": self._ad_break,
             # Before ready: bytes arrived, though nothing is playable yet (no keyframe).
             "received": self._received,
             # An HLS source: the parent keeps its player at 1x (VLC crawls once its rate
@@ -1726,6 +1808,17 @@ class _Session:
             part_media = getattr(source, "part_media_s", None)
             if part_media is not None:
                 snapshot["part_media_s"] = float(part_media)
+            # 2.15: a recording part's first piece (its place in the listing, its date) and
+            # how much its listing lists now (a growing recording's reach).
+            for key in ("part_start_s", "part_date", "listed_s"):
+                value = getattr(source, key, None)
+                if isinstance(value, (int, float)):
+                    snapshot[key] = float(value)
+            dates = list(self._dates)  # (placed by the session thread meanwhile)
+            if dates:
+                # A dated source's dates on the timeline (`_place_date`), the oldest first:
+                # [timeline position, a piece's date less it] from there on (None: undated).
+                snapshot["dates"] = [[at, offset] for at, offset in dates]
             if getattr(source, "until_dropped", False) is True:
                 snapshot["until_dropped"] = True  # another encoding persisted: no stop
         self._heard_edge = edge
@@ -1746,6 +1839,11 @@ class _Session:
     def _is_ended(self) -> bool:
         """Readers end at the ring's end: the input ended, or the session is parked."""
         return self._ended or self._parked
+
+    def _program(self) -> tuple[int | None, int | None]:
+        """The stream's video PID and stream type as its segmenter reads them (None: not yet;
+        the stream server's join re-bases by them, 2.15)."""
+        return self._segmenter.video_pid, self._segmenter.video_type
 
     def _send(self, message: tuple[Any, ...]) -> None:
         self._helper.send(message, self)
@@ -1995,6 +2093,23 @@ class _Helper:
                 session = self._sessions.get(command[1])
                 if session is not None:
                     session.set_until(command[2])
+            elif name == "stop":  # 2.15: a recording part's stop moved (the buffer evicted)
+                if len(command) != 4 or not isinstance(command[1], str):
+                    raise ValueError("a stop needs a session and its places")
+                if not all(v is None or type(v) is float for v in command[2:]):
+                    raise ValueError("a stop's places are seconds")
+                session = self._sessions.get(command[1])
+                if session is not None:
+                    session.set_stop(command[2], command[3])
+            elif name == "join":  # 2.15: a recording part's stream goes on into the buffer
+                if (
+                    len(command) != 4
+                    or not isinstance(command[1], str)
+                    or not isinstance(command[2], str)
+                    or type(command[3]) is not int
+                ):
+                    raise ValueError("a join needs two sessions and a segment")  # ("", -1): none
+                self.server.join(command[1], command[2], command[3])
             elif name == "junction":  # 2.8.5: what stay-live asks the next restart to take
                 if (
                     len(command) != 3

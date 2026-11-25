@@ -7,6 +7,7 @@ from services.link_kind import (
     LIVE,
     NONE,
     PROBE,
+    SITE,
     Provider,
     address,
     classify,
@@ -84,6 +85,45 @@ class ClassifyTests(unittest.TestCase):
         self.assertEqual(classify("https://cdn.example/a/index.m3u8?t=1"), PROBE)
         self.assertEqual(classify("https://cdn.example/watch"), PROBE)
         self.assertEqual(classify("https://cdn.example/stream.php?id=5"), PROBE)
+
+    def test_site_videos_and_clips_classify_as_site_films(self):
+        from services.link_kind import SITE_FILM
+
+        for url in (
+            "https://www.twitch.tv/videos/123456",
+            "clips.twitch.tv/SomeSlug",
+            "twitch.tv/examplechannel/clip/SomeSlug",
+            "kick.com/video/0f1e2d3c-4b5a-6978-8796-a5b4c3d2e1f0",
+            "kick.com/examplechannel/clips/clip_01KA",
+            "https://kick.com/examplechannel?clip=clip_01KA",
+        ):
+            with self.subTest(url):
+                self.assertEqual(classify(url), SITE_FILM)
+
+    def test_site_pages_classify_as_site(self):
+        # A Kick or Twitch channel's page: the site is asked for its stream, nothing is read.
+        for url in (
+            "https://kick.com/examplechannel",
+            "https://www.kick.com/ExampleChannel/",
+            "kick.com/examplechannel",  # typed without its scheme
+            "https://www.twitch.tv/examplechannel",
+            "https://m.twitch.tv/otherchannel?referrer=raid",
+            "twitch.tv/examplechannel",
+            "<https://twitch.tv/examplechannel>",  # as a mail quotes it
+        ):
+            with self.subTest(url):
+                self.assertEqual(classify(url), SITE)
+        # The sites' own pages, and anything deeper than a channel, are web addresses still.
+        for url in (
+            "https://kick.com/",
+            "https://kick.com/categories",
+            "https://www.twitch.tv/directory",
+            "https://www.twitch.tv/examplechannel/videos",
+        ):
+            with self.subTest(url):
+                self.assertEqual(classify(url), PROBE)
+        self.assertEqual(classify("kick.com/"), NONE)
+        self.assertEqual(classify("rtmp://kick.com/examplechannel"), LIVE)
 
     def test_not_a_url(self):
         for text in ("", "hello world", "ftp://x.example/a.mp4", "file:///a.mp4", "http://"):

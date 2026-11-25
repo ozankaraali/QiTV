@@ -15,7 +15,12 @@ A provider archive (catch-up) past the buffer plays the same way (`ArchiveRoute`
 the archive's address for the moment, placed by the time of day the address starts at, its
 input ending where the buffer begins by time of day (`until_s`: an archive shares no media
 sequence with the live stream); a part that ends before the buffer goes on with the next
-address. Pure functions and data; no Qt.
+address. A site's recording of the running broadcast (2.15, `RecordingRoute`: Kick, Twitch) plays
+past the buffer the same way, standing while the channel plays: a part of the recording's
+listing from the piece holding the moment asked, placed by its pieces' PROGRAM-DATE-TIME (else
+the recording's start and their lengths) on the buffer's own dates, its input ending at the
+piece edge where the buffer begins; the viewer's stream then goes on into the buffer as one
+stream (`StreamServer.join`). Pure functions and data; no Qt.
 """
 
 from __future__ import annotations
@@ -39,6 +44,7 @@ class ServerPart:
     # Where the buffer's segment beginning its stop began at its open (live timeline
     # seconds): the place to put it flush against, though that segment may go meanwhile.
     stop_t: Optional[float] = None
+    recording: bool = False  # 2.15: a site's recording of the running broadcast
 
     def place(
         self,
@@ -76,6 +82,24 @@ class ServerPart:
         """It has live timeline second `t` buffered."""
         placed = self.spans(own)
         return bool(placed) and placed[0].start <= t < placed[-1].end
+
+
+@dataclass(frozen=True)
+class RecordingRoute:
+    """A site's recording of the running broadcast (2.15, `LiveSession.set_site_recording`):
+    `url`, its media playlist (no token; never logged); `start`, the Unix second its first
+    piece starts at; `dated`, its pieces carry PROGRAM-DATE-TIME; `steps`, it grows in steps
+    and says it ends meanwhile (Kick: read again every `RECORDING_RELOAD_S`); `until`, the Unix
+    second its listing reached as its site was asked (None: not known)."""
+
+    url: str
+    start: float
+    dated: bool
+    steps: bool
+    until: Optional[float] = None
+
+
+RECORDING_RELOAD_S = 30.0  # (the owner's brief: Kick's recording grows every 30-60 s)
 
 
 @dataclass

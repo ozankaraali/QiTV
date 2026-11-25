@@ -38,6 +38,7 @@ from services.remote.protocol import (
     Held,
     Opened,
     OpenItem,
+    OpenLinkCard,
     Paired,
     Position,
     Press,
@@ -49,6 +50,7 @@ from services.remote.protocol import (
     Timer,
     ToTv,
     TrackPick,
+    Typed,
     WatchHere,
     b64d,
     parse_opening,
@@ -288,13 +290,17 @@ class Session:
         if t == "where":
             return Reply([self.send(self._where(now))])
         if t == "watch":
-            return Reply(events=[WatchHere(sid, m.get("id", ""))])
+            return Reply(events=[WatchHere(sid, m.get("id", ""), m.get("wait", False))])
         if t == "totv":
             return Reply(events=[ToTv(sid)])
         if t == "refresh":  # 2.8
             return Reply(events=[RefreshLists(sid)])
         if t == "closesearch":
             return Reply(events=[CloseSearch(sid)])
+        if t == "link":  # 2.15: the TV's Open Link card
+            return Reply(events=[OpenLinkCard(sid)])
+        if t == "type":  # 2.15: into the TV's text box (its text never logged)
+            return Reply(events=[Typed(sid, m["id"], m["s"], m["go"])])
         if t == "pos":
             return Reply(events=[Position(sid, m["ms"], m["len"], m.get("p", -1))])
         if t == "answer":

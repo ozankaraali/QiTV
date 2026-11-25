@@ -11,7 +11,9 @@ waits, and a link that lands after the PiP was closed, or after the large pictur
 channel, opens nothing. SessionManager opens it in the slot that is not large, with a main
 tune's start arguments; its refusals and failures are toasted here, except that an STB
 channel failing small gets a fresh link once (its portal signed in again when the page
-browses another provider), as the large picture's does, and opens small again.
+browses another provider), as the large picture's does, and opens small again; so does a
+site's channel (Kick, Twitch) that played, its site asked again through its lane (its
+address's token lasts minutes), and once more each time that address played HEALTHY_S.
 
 A movie or an episode from the Library takes the large picture and keeps its channel small
 (`keep_large_small`); what takes the title's place there (Next, autoplay, another title)
@@ -34,7 +36,8 @@ A channel shown small that played comes back by itself, as the large picture's d
 direct play again, in the same player and so in its budget slot, and the label counts down
 ("Trying again in 0:25"). One whose live session leaves that to the caller (an STB portal's)
 opens again here, after RECONNECT_MS and then the revive's longer waits; a channel that never
-played twice at most, then "The stream ended". An STB channel that failed small gets its fresh
+played twice at most, then "The stream ended"; a site's channel opens again at the address its
+site gives then (`_reopen_site`). An STB channel that failed small gets its fresh
 link at once once, then, once it played, after the revive's waits (it opens small again). A
 swap during the back-off hands the reopen to the picture that has the player then
 (`take_reopen`, `adopt_reopen`, and LiveControls' own).
@@ -49,6 +52,7 @@ from __future__ import annotations
 from dataclasses import dataclass, replace
 from functools import partial
 import logging
+import random
 import time
 from typing import Any, Callable, Optional
 
@@ -60,6 +64,7 @@ from services.live.live_session import LOADING, RECONNECTING, UNAVAILABLE
 from services.live.refusals import REFUSALS, STREAM_LIMIT
 from services.live.stay_live import TARGETS
 from services.navigation import payloads
+from services.network_streams import FAILED, TIMED_OUT, is_offline, shown_reason
 from services.revive import revive_wait
 from services.sessions import SessionManager, Slot, limit_message, records
 from services.vlc_profile import PlayKind
@@ -70,7 +75,7 @@ from ui.context_actions import is_channel
 from ui.link_lanes import LinkLanes, Target
 from ui.live_tuner import LiveStart, start_kwargs
 from ui.overlays.pip_label import CONNECTING, LIVE, REC
-from ui.overlays.retry_notice import retry_text
+from ui.overlays.retry_notice import retry_text, waiting_text
 from ui.overlays.transport import fmt_behind
 
 logger = logging.getLogger(__name__)
@@ -154,6 +159,7 @@ class PipControls(QObject):
         choose: Optional[Callable[[], None]] = None,
         hidden: Callable[[dict], bool] = lambda item: False,
         title_gone: Callable[[str], None] = lambda url: None,
+        site_page: Callable[[dict], Optional[str]] = lambda item: None,
         parent: Optional[QObject] = None,
     ) -> None:
         """`frame` is the PipFrame and `label` the PipLabel (None in tests without them).
@@ -173,7 +179,9 @@ class PipControls(QObject):
         nothing did meanwhile, 2.13.4). `choose()` opens the channel list for the small
         picture (P with no previous channel): what is picked there opens small (None: P
         says there is no previous channel). `hidden(channel)`: parental controls hide it now
-        (a previous channel hidden counts as none).
+        (a previous channel hidden counts as none). `site_page(channel)`: the page of a link
+        that is a site's channel (Kick, Twitch; None: none), whose address its lane asks the
+        site for anew (`_site_again`, `_reopen_site`).
         """
         super().__init__(parent)
         self.sessions = sessions
@@ -206,6 +214,10 @@ class PipControls(QObject):
         self._hidden = hidden
         # 2.14: the movie or episode playing small closed or ended there (its address)
         self._title_gone = title_gone
+        self._site_page = site_page
+        # A site's channel small whose direct play ended: the target whose address its lane
+        # asks the site for again (`_reopen_site`; None: none is asked).
+        self._reasked: Optional[Target] = None
         self._views: dict[str, SlotView] = {}
         self._wanted: Optional[tuple[Target, ZapContext]] = None  # its link is on its way
         self._link: Optional[Target] = None  # the one link request in flight
@@ -219,6 +231,7 @@ class PipControls(QObject):
         # opened, each player's last "playing" (monotonic), and the reopen after its back-off.
         self._reopens: dict[str, int] = {}
         self._playing_since: dict[str, float] = {}
+        self._first_played: dict[str, float] = {}  # each slot's first since it opened small
         self._reopen_due: Optional[tuple[str, Target, str, PlayKind]] = None
         self._reopen_timer = QTimer(self, singleShot=True)
         self._reopen_timer.timeout.connect(self._reopen)
@@ -230,6 +243,10 @@ class PipControls(QObject):
         self._relink_due: Optional[SlotView] = None
         self._relink_timer = QTimer(self, singleShot=True)
         self._relink_timer.timeout.connect(self._relink_now)
+        # 2.15: the small picture's site channel that isn't live now, waited for (`offline`)
+        self._offline: Optional[Target] = None
+        self._offline_timer = QTimer(self, singleShot=True)
+        self._offline_timer.timeout.connect(self._ask_offline_again)
         self._label_timer = QTimer(self, interval=live_controls.RETRY_TICK_MS)
         self._label_timer.timeout.connect(self._tick_label)
 
@@ -610,6 +627,8 @@ class PipControls(QObject):
             self._room = None  # closed already: nothing to close, or say, for the title
         self._wanted = None
         self._link = None  # a late link for it is ignored (it is no longer `_link`)
+        self._offline = None  # 2.15: a wait for its channel to be live ends
+        self._offline_timer.stop()
         self._cancel_reopen()
         self._cancel_relink()
         sessions = self.sessions
@@ -667,10 +686,56 @@ class PipControls(QObject):
         self._link = target
         self._lanes.request_side(target, lambda url: self._on_link(target, url), play=False)
 
+    def offline(self, target: Target, message: str) -> Optional[bool]:
+        """2.15, as the large picture's: the link asked for the small picture, a site's
+        channel whose site says it isn't live now, waits: nothing opens (no stream is held),
+        it says so once ("… isn't live now · It plays as soon as it's live"), its site is
+        asked again after `OFFLINE_ASK_S` and a jitter (each ask once the last answered), and
+        it opens small from its newest once it is live, unless another channel is chosen
+        small or the small picture is closed meanwhile. True when it begins to wait (the
+        shell counts it in its row; nothing more is said), False when it waits on, None for
+        any other failure (the shell says it)."""
+        wanted = self._wanted
+        waiting = self._offline
+        waits = waiting is not None and ZapContext.same(waiting.item, target.item)
+        # (while it waits, an ask that did not reach the site waits on, as the large picture's)
+        if (
+            target is not self._link
+            or wanted is None
+            or wanted[0] is not target
+            or self._site_page(target.item) is None
+            or not (is_offline(message) or (waits and message in (TIMED_OUT, FAILED)))
+        ):
+            if waits:
+                self._offline = None  # its site said something else: said as ever
+            return None
+        first = not waits
+        self._offline = target
+        wait = live_controls.OFFLINE_ASK_S + random.uniform(0.0, live_controls.OFFLINE_JITTER_S)
+        logger.info(
+            "%s is not live now (small); its site is asked again in %.0f s", target.title, wait
+        )
+        self._offline_timer.start(round(wait * 1000))
+        if first:
+            self._toast(waiting_text(shown_reason(message)), "info", NOTICE_MS)
+        return first
+
+    def _ask_offline_again(self) -> None:
+        target, wanted = self._offline, self._wanted
+        if target is None or self._closed() or wanted is None or wanted[0] is not target:
+            self._offline = None  # another channel was chosen small, or it was closed
+            return
+        if self._link is not None:
+            return  # (a newer ask is on its way)
+        logger.info("Asking the site of %s whether it is live now (small)", target.title)
+        self._request(target)
+
     def _on_link(self, target: Target, url: str) -> None:
         if target is not self._link:
             return
         self._link = None
+        self._offline = None  # (2.15: a wait for it is over: it came)
+        self._offline_timer.stop()
         wanted = self._wanted
         if self._closed() or wanted is None:
             return  # closed meanwhile
@@ -687,11 +752,21 @@ class PipControls(QObject):
         self._open(target, wanted[1], url)
 
     def _on_link_failed(self, target: Target, _message: str) -> None:
-        """The shell toasts the failure; a newer choice asks for its own link."""
+        """The shell toasts the failure; a newer choice asks for its own link. A site's
+        channel whose ended direct play asked its site again, and got no stream, closes."""
+        if target is self._reasked:
+            self._reasked = None
+            small = self.sessions.small()
+            if small is not None and self.view(small.name).target is target:
+                logger.info("Closing %s small: its site gave no stream again", target.title)
+                self.close()
+            return
         if target is not self._link:
             return
         self._link = None
         wanted = self._wanted
+        if target is self._offline and wanted is not None and wanted[0] is target:
+            return  # 2.15: it waits for its channel to be live (`offline`)
         if wanted is not None and wanted[0] is target:
             self._wanted = None
         elif wanted is not None:
@@ -707,6 +782,7 @@ class PipControls(QObject):
         self._said.pop(slot.name, None)  # its new channel's notices are said again
         self._reopens.pop(slot.name, None)
         self._playing_since.pop(slot.name, None)  # how long it played counts from its open
+        self._first_played.pop(slot.name, None)
         if not target.played:
             self._played.discard(slot.name)  # (a fresh link of one that played keeps it)
         else:
@@ -769,13 +845,16 @@ class PipControls(QObject):
             self._toast(limit_message(limit), "error", ERROR_MS)
 
     def _on_failed(self, message: str) -> None:
-        """The small picture closed for a failure: an STB channel's link is made again once
-        (its play token, or its portal's session, may have expired), else it says why."""
+        """The small picture closed for a failure: a site's channel asks its site again
+        (`_site_again`) and an STB channel's link is made again once (its play token, or its
+        portal's session, may have expired), else it says why."""
         if self._closed():
             return
         name = self.sessions.other().name
         view = self._views.get(name) or self._closed_view
         self._closed_view = None
+        if view is not None and self._site_again(view, name):
+            return
         if view is not None and self._may_retry(view.target, name):
             self._retry(view)
             return
@@ -804,6 +883,33 @@ class PipControls(QObject):
             and item_provider.provider_type(self.catalog, target.item) == "STB"
         )
 
+    def _site_again(self, view: SlotView, name: str) -> bool:
+        """As the large picture's (LiveControls._site_again): a site's channel (Kick, Twitch)
+        whose buffer failed small after it played there, its address's token most likely run
+        out, asks its site again through its lane and opens small again: once per channel
+        opened small, and once more each time the address asked so played `HEALTHY_S` since
+        its first picture in slot `name`; never for the provider's limit, nor when another
+        channel was chosen small since. False: none of these."""
+        target = view.target
+        failure = self.sessions.failure  # "": its start raised, or the budget refused
+        if (
+            target is None
+            or not target.live
+            or self._site_page(target.item) is None
+            or not (target.played or name in self._played)
+            or (target.retried and not live_controls.played_long(self._first_played.get(name)))
+            or not failure
+            or failure == STREAM_LIMIT
+            or self._wanted is not None
+            or self._link is not None
+        ):
+            return False
+        logger.info("Asking the site of %s again after the small picture failed", target.title)
+        again = replace(target, retried=True, played=True, relinks=0)  # (its waits anew)
+        self._wanted = (again, view.context if view.context is not None else ZapContext())
+        self._request(again)
+        return True
+
     def _retry(self, view: SlotView, *, relinks: int = 0, played: bool = False) -> None:
         target = view.target
         assert target is not None
@@ -817,22 +923,27 @@ class PipControls(QObject):
         """The small picture closed for its STB channel's failure, past its fresh link at
         once: once it played, its link is made again after the revive's next wait and it
         opens small again (`services.revive`), for as long as nothing else is chosen small;
-        never for the provider's limit. False: none."""
+        never for the provider's limit. A site's channel (2026-11-25), past its ask at once:
+        its site is asked again after the large picture's waits (`SITE_AGAIN_S`), a refusal
+        too (its token ran out again). False: none."""
         target = view.target
         failure = self.sessions.failure
         played = name in self._played
+        site = target is not None and self._site_page(target.item) is not None
         if (
             target is None
             or not target.live
             or not (target.played or played)
             or not failure
-            or failure in REFUSALS
+            or (failure == STREAM_LIMIT if site else failure in REFUSALS)
             or self._wanted is not None
             or self._link is not None
-            or item_provider.provider_type(self.catalog, target.item) != "STB"
+            or not (site or item_provider.provider_type(self.catalog, target.item) == "STB")
         ):
             return False
-        wait = revive_wait(target.relinks)
+        waits = live_controls.SITE_AGAIN_S
+        tries = target.relinks + 1  # (the ask at once was `_site_again`'s)
+        wait = waits[min(tries, len(waits) - 1)] if site else revive_wait(target.relinks)
         logger.info("Making the link of %s again in %.0f s (small)", target.title, wait)
         self._relink_due = replace(view, target=replace(target, played=True))
         self._relink_timer.start(round(wait * 1000))
@@ -848,6 +959,11 @@ class PipControls(QObject):
             return  # another channel was chosen small meanwhile
         if ZapContext.same(view.target.item, self._large_channel()):
             return  # the large picture took the channel
+        if self._site_page(view.target.item) is not None:  # its site's, no portal's sign-in
+            again = replace(view.target, retried=True, relinks=view.target.relinks + 1)
+            self._wanted = (again, view.context if view.context is not None else ZapContext())
+            self._request(again)
+            return
         self._retry(view, relinks=view.target.relinks + 1, played=True)
 
     def _cancel_relink(self) -> None:
@@ -859,6 +975,7 @@ class PipControls(QObject):
         played directly that ended small opens again."""
         if state == "playing":
             self._playing_since[name] = time.monotonic()
+            self._first_played.setdefault(name, self._playing_since[name])
             self._played.add(name)
             if self._reopen_due is None:
                 self._reopen_at = None  # a reopen of ours played: nothing is waited for
@@ -956,6 +1073,9 @@ class PipControls(QObject):
         if getattr(playback, "url", None) != url:
             return
         self._reopen_at = time.monotonic()  # "Reconnecting…" until it plays
+        if self._site_page(target.item) is not None:
+            self._reopen_site(name, target, url, kind)
+            return
         logger.info("Opening %s small again after its stream ended", target.title)
         playback.play(
             url,
@@ -964,9 +1084,40 @@ class PipControls(QObject):
             **live_controls.reopen_options(playback, target.item, self.catalog),
         )
 
+    def _reopen_site(self, name: str, target: Target, url: str, kind: PlayKind) -> None:
+        """A site's channel small opens again (as the large picture's, LiveControls'): not at
+        the address it played, whose token lasts minutes, but at the one its site gives now,
+        asked through its lane; the same player opens it (its slot is kept), after the same
+        back-off and as often. Its site giving none closes the small picture (the shell says
+        why: `_on_link_failed`)."""
+        logger.info("Asking the site of %s again after its stream ended small", target.title)
+        self._reasked = target
+
+        def ok(address: str) -> None:
+            small = self.sessions.small()
+            if (
+                self._reasked is not target
+                or self._closed()
+                or small is None
+                or small.name != name
+                or self.view(name).target is not target
+                or getattr(small.playback, "url", None) != url
+            ):
+                return  # closed, swapped, or another channel or stream small meanwhile
+            self._reasked = None
+            small.playback.play(
+                address,
+                kind=kind,
+                latency=self.config.live_latency,
+                **live_controls.reopen_options(small.playback, target.item, self.catalog),
+            )
+
+        self._lanes.request_side(target, ok, play=False)
+
     def _cancel_reopen(self) -> None:
         self._reopen_due = None
         self._reopen_at = None
+        self._reasked = None  # a site's answer on its way is no longer wanted
         self._reopen_timer.stop()
 
     def _retry_in(self, slot: Slot) -> Optional[float]:

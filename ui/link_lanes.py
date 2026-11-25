@@ -20,7 +20,11 @@ one that comes too late itself; the lanes never supersede it.
 A link whose address is already known (plan 4: one of Network streams, `known(item)`) is no
 provider's to make: the lanes answer it themselves, a turn later as a catalog answers a
 playlist's channel, under a request id of their own (negative: never a catalog's), so a
-choice made meanwhile still queues behind it.
+choice made meanwhile still queues behind it. A Kick or Twitch channel's page is one such
+address that does not play as it is, and so is a video's or clip's page of one (2.15): its site
+is asked for the stream each time (`resolver(page, ok, failed)`, the shell's, on a worker), and
+its answer, or why there is none, comes under that id as a catalog's would: stale ones are
+dropped alike.
 """
 
 from __future__ import annotations
@@ -29,10 +33,13 @@ from collections import deque
 from dataclasses import dataclass, field
 import itertools
 import logging
+import threading
 from typing import Any, Callable, Optional, cast
 
 from PySide6.QtCore import QObject, QTimer, QUrl, Signal
 
+from services import live_sites
+from services.live_sites import SITE_NAMES, SiteMedia, SitePage, site_media, site_page
 from services.navigation import episode_key
 from services.open_paths import is_video
 from services.redact import safe_traceback
@@ -94,6 +101,85 @@ class Target:
         return self.section != "series" or episode_key(self.item) == episode_key(other.item)
 
 
+class SiteJob(QObject):
+    """A site's channel page asked for the stream it plays now, on the runner's thread
+    (services.live_sites.resolve), or a video's or clip's for the address it plays at (2.15,
+    `resolve_media`; `keep_dir`: where a recording still made keeps its listing):
+    `finished` with the answer (a `live_sites.Resolved`: the address, its token never
+    logged, and the name), else `error` with why (live_sites.SiteError's reason: "offline",
+    "unknown", "private", "refused" or "network", or "timeout" for a "network" whose site never
+    answered in time). `stop` set ends it between its requests, as "network": nobody waits
+    for it."""
+
+    finished = Signal(object)
+    error = Signal(str)
+
+    def __init__(
+        self,
+        page: SitePage | SiteMedia,
+        stop: threading.Event,
+        keep_dir: Optional[str] = None,
+    ) -> None:
+        super().__init__()
+        self.page = page
+        self.stop = stop
+        self.keep_dir = keep_dir
+
+    def run(self) -> None:
+        try:
+            if isinstance(self.page, SiteMedia):
+                answer = live_sites.resolve_media(self.page, self.stop, keep_dir=self.keep_dir)
+            else:
+                answer = live_sites.resolve(self.page, self.stop)
+        except live_sites.SiteError as e:
+            self.error.emit("timeout" if e.reason == "network" and e.timed_out else e.reason)
+            return
+        except Exception as e:  # (its text may carry the address: its type only)
+            logger.warning(
+                "Asking %s for %s failed (%s)",
+                SITE_NAMES.get(self.page.site, self.page.site),
+                getattr(self.page, "channel", "") or "a video",
+                type(e).__name__,
+            )
+            logger.debug("%s", safe_traceback(e))
+            self.error.emit("network")
+            return
+        self.finished.emit(answer)
+
+
+class RecordingJob(QObject):
+    """2.15: a live site channel's running broadcast's recording asked of its site, on the
+    runner's thread (services.live_sites.running_recording): `finished` with it (a
+    `live_sites.Recording`, or None: its site keeps none), else `error` with why. `stop` set
+    ends it between its requests."""
+
+    finished = Signal(object)
+    error = Signal(str)
+
+    def __init__(self, page: SitePage, stop: threading.Event) -> None:
+        super().__init__()
+        self.page = page
+        self.stop = stop
+
+    def run(self) -> None:
+        try:
+            found = live_sites.running_recording(self.page, self.stop)
+        except live_sites.SiteError as e:
+            self.error.emit(e.reason)
+            return
+        except Exception as e:  # (its text may carry an address: its type only)
+            logger.warning(
+                "Asking %s for %s's recording failed (%s)",
+                SITE_NAMES.get(self.page.site, self.page.site),
+                self.page.channel,
+                type(e).__name__,
+            )
+            logger.debug("%s", safe_traceback(e))
+            self.error.emit("network")
+            return
+        self.finished.emit(found)
+
+
 def _quality(target: Target) -> dict:
     """The link request's quality argument: only when the quality menu chose one (2.8)."""
     return {"quality": target.quality} if target.quality is not None else {}
@@ -129,6 +215,12 @@ class LinkLanes(QObject):
         self._closed = False
         # A link's own address (plan 4), or None for an item its provider makes the link of.
         self.known: Callable[[dict], Optional[str]] = lambda item: None
+        # A site's channel page (Kick, Twitch) asked for the stream it plays now:
+        # `resolver(page, ok, failed)` calls `ok(address)` or `failed(message)` once, on this
+        # thread (the shell's asks the site on a worker); none set: the page as it is.
+        self.resolver: Callable[[str, Callable[[str], None], Callable[[str], None]], None] = (
+            lambda page, ok, failed: ok(page)
+        )
         self._own_ids = itertools.count(-1, -1)
         catalog.linkReady.connect(self._on_ready)
         catalog.linkFailed.connect(self._on_failed)
@@ -138,6 +230,10 @@ class LinkLanes(QObject):
     def supersede(self) -> int:
         """A newer choice: side plays asked for before it no longer play."""
         self._generation += 1
+        return self._generation
+
+    def generation(self) -> int:
+        """The newest choice's number (`supersede`): another one since is a newer choice."""
         return self._generation
 
     # ---- the tune lane ------------------------------------------------------------------------
@@ -163,7 +259,8 @@ class LinkLanes(QObject):
 
     def _ask(self, target: Target) -> int:
         """Ask for `target`'s link: of its provider's catalog, or (a link whose address is
-        known) of nobody: answered a turn later here."""
+        known) of nobody: answered a turn later here; a site's channel page, of its site
+        (`resolver`): answered when it answers."""
         url = self.known(target.item)
         if not url:
             return cast(
@@ -176,7 +273,18 @@ class LinkLanes(QObject):
                 ),
             )
         request_id = next(self._own_ids)
-        QTimer.singleShot(0, self, lambda: self._on_ready(request_id, url))
+        if site_page(url) is None and site_media(url) is None:
+            QTimer.singleShot(0, self, lambda: self._on_ready(request_id, url))
+            return request_id
+
+        # Taken a turn later, after this request is noted, however soon the resolver answers.
+        def ok(answer: str) -> None:
+            QTimer.singleShot(0, self, lambda: self._on_ready(request_id, answer))
+
+        def failed(message: str) -> None:
+            QTimer.singleShot(0, self, lambda: self._on_failed(request_id, message))
+
+        self.resolver(url, ok, failed)
         return request_id
 
     def _held(self, request_id: int) -> bool:
@@ -201,6 +309,15 @@ class LinkLanes(QObject):
     def drop_tune(self) -> None:
         self._inflight = None
         self.queued = None
+
+    def forget_own_ask(self) -> None:
+        """The tune in flight, asked of nobody's catalog (a site's page, its ask just stopped
+        for a newer choice), holds the lane no more: the newer choice is asked at once, not
+        queued behind it (Task 6 M3: up to a site request's 10 s); its late answer is dropped
+        by its id. A catalog's request in flight stays."""
+        inflight = self._inflight
+        if inflight is not None and inflight[0] < 0:
+            self._inflight = None
 
     # ---- the side lane ------------------------------------------------------------------------
 

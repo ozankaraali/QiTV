@@ -89,6 +89,14 @@ class PageStringTests(unittest.TestCase):
         hub = RemoteHub(lambda event: None, WEB)
         self.assertEqual(set(hub._core.hello()["strings"]), set(PAGE_STRINGS))
 
+    def test_the_hello_says_what_this_qitv_answers(self):  # 2.15
+        """A newer page shows Open link and the typing sheet only for a QiTV that says it
+        answers them: an older one's hello has no "can"."""
+        from services.remote.hub import RemoteHub
+
+        hub = RemoteHub(lambda event: None, WEB)
+        self.assertEqual(hub._core.hello()["can"], ["link", "type"])
+
 
 if __name__ == "__main__":
     unittest.main()

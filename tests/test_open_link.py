@@ -203,6 +203,48 @@ class CardTests(CardCase):
         self.assertEqual(len(self.played), 4)
         self.assertEqual((self.added, self.runner.jobs), ([], []))
 
+    def test_open_link_plays_a_site_page_as_live(self):
+        # A Kick or Twitch channel's page plays as a live stream at once: nothing is read (the
+        # site is asked for the stream as it plays), and it is kept by its page's address.
+        kick, twitch = "https://kick.com/examplechannel", "https://www.twitch.tv/otherchannel"
+        pages = (
+            (kick, kick),
+            ("kick.com/ExampleChannel/", kick),
+            ("https://m.twitch.tv/otherchannel?referrer=raid", twitch),
+            ("twitch.tv/otherchannel", twitch),
+        )
+        for text, page in pages:
+            with self.subTest(text):
+                self.typed(text)
+                offer = ("✓ A live stream", KEPT, ["Cancel", "Play"], "play")
+                self.assertEqual(self.offer()[:4], offer)
+                self.card.handle(Action.NAV_ACTIVATE)  # Play
+                self.assertTrue(self.card.isHidden())
+                self.assertEqual(self.played[-1], (page, LIVE))
+        self.assertEqual(self.runner.jobs, [])  # no probe request
+
+    def test_open_link_plays_a_sites_video_or_clip_as_a_film(self):
+        # 2.15: a Kick or Twitch video's or clip's page plays as a film at once, unread, kept
+        # by its own page's address.
+        uuid = "0f1e2d3c-4b5a-6978-8796-a5b4c3d2e1f0"
+        for text, page in (
+            ("https://m.twitch.tv/videos/123456?t=1h", "https://www.twitch.tv/videos/123456"),
+            ("twitch.tv/examplechannel/clip/Slug-1", "https://clips.twitch.tv/Slug-1"),
+            (f"kick.com/examplechannel/videos/{uuid}", f"https://kick.com/video/{uuid}"),
+            (
+                "kick.com/ExampleChannel?clip=clip_01KA",
+                "https://kick.com/examplechannel/clips/clip_01KA",
+            ),
+        ):
+            with self.subTest(text):
+                self.typed(text)
+                offer = ("✓ A film", KEPT, ["Cancel", "Play"], "play")
+                self.assertEqual(self.offer()[:4], offer)
+                self.card.handle(Action.NAV_ACTIVATE)  # Play
+                self.assertTrue(self.card.isHidden())
+                self.assertEqual(self.played[-1], (page, FILM))
+        self.assertEqual(self.runner.jobs, [])  # no probe request
+
     def test_a_provider_link_hands_over_to_add_provider(self):
         self.typed(PLAYLIST)
         self.card.handle(Action.NAV_ACTIVATE)  # Enter: Add as a provider…
@@ -444,7 +486,7 @@ class EntryPointTests(WindowCase):
         self.assertEqual(
             [a.text() for a in entries[:3]], ["Open File…", "Open Link…", "Open Folder…"]
         )
-        self.assertTrue(entries[1].shortcut().isEmpty())  # no key of its own
+        self.assertEqual(entries[1].shortcut().toString(), "Ctrl+N")  # ⌘N on a Mac
         # The channel list's row, between Open file and Open a folder, by the keys.
         actions = [n.key for n in window.nav.children(None) if n.layer == "action"]
         at = actions.index(OPEN_FILE_ROW)

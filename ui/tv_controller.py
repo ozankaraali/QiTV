@@ -78,6 +78,7 @@ from functools import partial
 import logging
 from pathlib import Path
 import random
+import threading
 import time
 from typing import Any, Callable, Optional, cast
 
@@ -97,9 +98,11 @@ from services.epg_view import Programme, now_next
 from services.failure_reasons import LIMIT, Reason, own_streams_text, shown_message
 from services.film_relay import FilmRelay, relayable
 from services.i18n import N_, tr, translate
+from services.jobs import JobRunner
 from services.live import parts as live_parts
 from services.live.live_session import LiveSession
 from services.live.tuning import channel_key
+from services.live_sites import forget_kept_listings, media_address, site_media, site_page
 from services.local_episodes import next_in_folder, parse_episode
 from services.media_reporter import MediaReporter
 from services.media_server import Quality
@@ -113,7 +116,20 @@ from services.navigation import (
     payloads,
     recent_channel,
 )
-from services.network_streams import DOWN, FILM, LIVE, failure_reason, is_link
+from services.network_streams import (
+    DOWN,
+    FAILED,
+    FILM,
+    LIVE,
+    TIMED_OUT,
+    failure_reason,
+    is_link,
+    is_offline,
+    is_site_failure,
+    names_its_channel,
+    shown_reason,
+    site_failure,
+)
 from services.next_episode import LOCAL_NEXT, play_context
 from services.open_paths import PLAYLIST_EXTENSIONS, is_music, is_song, is_video
 from services.picture import SOURCE_DIRECT, ChannelPictures
@@ -145,7 +161,7 @@ from ui.episode_listing import FolderListing
 from ui.grid_controls import LEAVE_FIRST, GridControls
 from ui.guide_controller import GuideController
 from ui.keymap import Action, as_int
-from ui.link_lanes import LinkLanes, Target
+from ui.link_lanes import LinkLanes, RecordingJob, SiteJob, Target
 from ui.live_controls import LiveControls, stream_options
 from ui.live_tuner import LiveTuner, start_kwargs as tune_kwargs
 from ui.mixer_controls import MixerControls
@@ -171,6 +187,7 @@ from ui.song_jobs import AlbumJob, CoverJob, cover_colours
 # i18n: a toast: the multiview cannot open while a picture is cast to a TV
 MULTIVIEW_WHILE_CASTING = N_("Stop casting to show the multiview")
 from ui.record_guard import RecordGuard
+from ui.remote_typing import field_of
 from ui.settings_controller import MOUSE_FORWARD, SettingsController
 from ui.settings_layer import SettingsLayer
 from ui.stream_question import ScheduledRecording, StreamQuestion, quit_text
@@ -287,6 +304,8 @@ class TVController(QObject):
     # not, or went for good (and why: an English text, `network_streams.failure_reason`).
     linkPlayed = Signal(object, str, str)
     linkFailed = Signal(object, str, str, str)
+    # 2.15: a site's video or clip (its page's address) answered with its name ("title · Twitch").
+    linkNamed = Signal(str, str)
 
     def __init__(
         self,
@@ -319,6 +338,7 @@ class TVController(QObject):
         make_slot: Optional[Callable[[str], Optional[Slot]]] = None,
         cast_devices: Optional[CastDevices] = None,
         media_reporter: Optional[MediaReporter] = None,
+        jobs: Optional[JobRunner] = None,
         parent: Optional[QObject] = None,
     ):
         """With `sessions` (picture in picture), its large slot's player, live session and
@@ -332,7 +352,8 @@ class TVController(QObject):
         AccountChecks) says why a failure happened (None: the failure's own words only).
         With `grid_frame` and `make_slot` (a tile's player, made by its slot's name) the
         multiview's grid can show: `grid_tiles` draws over it, `host` is the overlay host
-        (both None-able in tests)."""
+        (both None-able in tests). `jobs` runs what the controller asks off its thread (a
+        site's channel page asked for its stream; None: a runner of its own)."""
         super().__init__(parent)
         self._account_checks = account_checks
         self._toasts = 0  # toasts shown so far: a reason replaces only the one it explains
@@ -402,6 +423,16 @@ class TVController(QObject):
         self._file_under_link = False
         self._lanes = LinkLanes(catalog, self)
         self._lanes.known = self._network_url  # no provider is asked for a link's address
+        # A site's channel page (Kick, Twitch) is asked for its stream on `jobs` each time it
+        # plays; a newer tune stops the ask the tune in flight waits for (`_request`), and
+        # QiTV's closing stops them all.
+        self._jobs = jobs if jobs is not None else JobRunner(self)
+        self._lanes.resolver = self._resolve_site
+        self._site_stops: set[threading.Event] = set()
+        # 2.15: (the page, its kept listing's address) of a Twitch recording still being made
+        self._kept_listing: Optional[tuple[str, str]] = None
+        self._tune_stop: Optional[threading.Event] = None
+        self._asking_tune = False
         # The live channel's time-shift side: pipeline tunes, its controls and reports.
         self._live_controls = LiveControls(
             tuner=self._tuner,
@@ -436,10 +467,17 @@ class TVController(QObject):
             retry_notice=lambda: self.overlays.retry_notice,
             link=lambda item: self._network_url(item) is not None,
             link_failed=self._on_link_failed,
+            site_page=self._site_page,
+            reask=self._reask_site,
+            waits_for_live=self._waits_for_live,
+            recording_of=self._site_recording,
             parent=self,
         )
         # Cards over the TV of their own (File → Open Link…'s, plan 4; add_card).
         self._cards: list[Any] = []
+        # 2.15: the phones' Watches asked for (play_elsewhere's target), with what hears why
+        # one failed (a site's channel that isn't live waits for it on the phone).
+        self._elsewhere_failed: list[tuple[Target, Callable[[Target, str], Optional[bool]]]] = []
         # Provider setups: the loading and welcome hints, the last channel, the Library's
         # hold on live TV. What opens by itself (the list, the welcome card) waits while
         # Settings or a card over the TV shows: either has the keys (final review M1).
@@ -562,6 +600,7 @@ class TVController(QObject):
             tidy=self._tidy_from_menu,  # 2.9.1: out of the lists, no PIN
             record_at=lambda: self.record_at,
             link=lambda item: self._network_url(item) is not None,
+            site_page_of=self._site_link,
             parent=self,
         )
         # The volume keys, mute and the wheel, on the mixer (one row per picture).
@@ -764,6 +803,7 @@ class TVController(QObject):
                 choose=self._choose_small,
                 hidden=self._hidden_now,
                 title_gone=self._small_title_gone,
+                site_page=self._site_page,
                 parent=self,
             )
             self._pip.changed.connect(self._mixer.refresh)
@@ -800,6 +840,7 @@ class TVController(QObject):
                 tile_action=self._on_tile_control,
                 show_controls=self._show_transport,
                 confirm=self._confirm_tile,
+                site_page=self._site_page,
                 parent=self,
             )
             self._grid.changed.connect(self._mixer.refresh)
@@ -969,6 +1010,10 @@ class TVController(QObject):
             return
         self._closed = True
         self._lanes.close()
+        self._forget_kept_listings()  # 2.15: a recording's kept listing goes with QiTV
+        self._live_controls.stop_waiting()  # a site's channel waited for is asked no more
+        for stop in self._site_stops:
+            stop.set()  # a site still asked answers no one: its ask ends
         self._autoplay.close()
         self._sound_poll.stop()
         if self._online is not None:
@@ -1120,6 +1165,9 @@ class TVController(QObject):
         self._cancel_external()
         self._lanes.supersede()  # an external play waiting for its link no longer plays
         self._lanes.drop_tune()  # a link on its way never opens
+        if self._tune_stop is not None:
+            self._tune_stop.set()  # (nor is a site asked on for it: Task 6 M6)
+            self._tune_stop = None
         self._autoplay.drop()  # the Next card, and a wait for the next season
         self._guide.close()
         self._tuning.stop()
@@ -1310,6 +1358,118 @@ class TVController(QObject):
     def _network_url(self, item: dict) -> Optional[str]:
         return self._links(item) or None
 
+    def _site_page(self, item: dict) -> Optional[str]:
+        """The page of the link `item` when it is a site's channel page (Kick, Twitch): what
+        it is kept, copied and remembered as, never the address its site answers as it plays
+        (its token lasts minutes); None for any other item."""
+        url = self._network_url(item)
+        return url if url is not None and site_page(url) is not None else None
+
+    def _site_link(self, item: dict) -> Optional[str]:
+        """The page of the link `item` when it is a site's channel page or (2.15) a video's or
+        clip's page of one: what it is copied and remembered as (never the address its site
+        answers); None for any other item. (A channel's live behaviour keys on `_site_page`.)"""
+        url = self._network_url(item)
+        if url is None:
+            return None
+        return url if site_page(url) is not None or site_media(url) is not None else None
+
+    def _resolve_site(
+        self, url: str, ok: Callable[[str], None], failed: Callable[[str], None]
+    ) -> None:
+        """The lanes' resolver: the site of the channel page `url` asked for the stream it
+        plays now (2.15: of a video's or clip's page, for the address it plays at, its name
+        said by `linkNamed`), on a worker; `ok(address)` or `failed(why)` comes on this thread
+        (why in English: Network streams keeps it, `site_failure`). The tune's ask is noted,
+        so a newer tune stops it (`_request`)."""
+        channel = site_page(url)
+        media = site_media(url) if channel is None else None
+        page = channel or media
+        if page is None or self._closed:
+            failed("")  # (the lanes ask only for a site's page, and are closed with QiTV)
+            return
+        stop = threading.Event()
+        self._site_stops.add(stop)
+        if self._asking_tune:
+            self._tune_stop = stop
+
+        def answered(_context: object, answer: object) -> None:
+            self._site_asked(stop)
+            address = getattr(answer, "url", answer)
+            name = getattr(answer, "name", "")
+            if media is not None and str(address).startswith("file:"):
+                self._kept_listing = (url, str(address))  # (2.15: goes as its film closes)
+            if media is not None and name and not self._closed:
+                self.linkNamed.emit(media_address(media), str(name))  # (2.15: its title)
+            ok(str(address))
+
+        def refused(_context: object, reason: object) -> None:
+            self._site_asked(stop)
+            failed(site_failure(str(reason), page))
+
+        self._jobs.run_worker(SiteJob(page, stop, self._sites_dir()), answered, refused)
+
+    def _reask_site(
+        self, page: str, ok: Callable[[str], None], failed: Callable[[str], None]
+    ) -> None:
+        """A dropped site channel asks its site again for a stream (the lanes' resolver); like
+        the tune's ask, a newer choice stops it (`_request`)."""
+        self._asking_tune = True
+        try:
+            self._resolve_site(page, ok, failed)
+        finally:
+            self._asking_tune = False
+
+    def _site_recording(self, url: str, then: Callable[[object], None]) -> Callable[[], None]:
+        """2.15: the site of the live channel page `url` asked, on a worker, for its running
+        broadcast's recording: `then(recording)` on this thread (a `live_sites.Recording`,
+        or None: it keeps none, or was not reached). Returns what stops the ask (a newer
+        tune, QiTV closing: `then` is not called after it)."""
+        page = site_page(url)
+        stop = threading.Event()
+        if page is None or self._closed:
+            return stop.set
+        self._site_stops.add(stop)
+
+        def answered(_context: object, found: object) -> None:
+            self._site_stops.discard(stop)
+            if not stop.is_set() and not self._closed:
+                then(found)
+
+        def failed(_context: object, _reason: object) -> None:
+            self._site_stops.discard(stop)
+            if not stop.is_set() and not self._closed:
+                then(None)
+
+        self._jobs.run_worker(RecordingJob(page, stop), answered, failed)
+        return stop.set
+
+    def _sites_dir(self) -> Optional[str]:
+        """2.15: QiTV's own folder for a Twitch recording's kept listing (beside the config),
+        emptied as the film it plays closes (`_forget_kept_listings`)."""
+        folder = getattr(self.config, "get_config_dir", None)
+        return str(Path(folder()) / "cache" / "sites") if callable(folder) else None
+
+    def _forget_kept_listings(self, target: Optional[Target] = None) -> None:
+        """2.15: the kept listing of a recording still being made goes as its film closes
+        (another target replaces it, or QiTV closes; the same film played again keeps it), on
+        a plain thread (the disk)."""
+        kept = self._kept_listing
+        if kept is None or (target is not None and self._site_link(target.item) == kept[0]):
+            return
+        self._kept_listing = None
+        folder = self._sites_dir()
+        if folder is not None:
+            threading.Thread(
+                target=forget_kept_listings, args=(folder,), name="qitv-sites-clean", daemon=True
+            ).start()
+
+    def _site_asked(self, stop: threading.Event) -> None:
+        """A site's ask ended (answered, or not): nothing more stops it."""
+        self._site_stops.discard(stop)
+        if self._tune_stop is stop:
+            self._tune_stop = None
+
     def _guard_view(self, section: str, item: dict) -> tuple[str, dict]:
         """`item` of `section` as parental controls know it: a link as one live link of
         Network streams by its id, whoever's stream it is now (an account added after it was
@@ -1396,11 +1556,18 @@ class TVController(QObject):
         url = self._network_url(target.item)
         if self._closed or url is None:
             return
-        self._error(self._named(target.title, translate(why)))
+        self._error(self._own_words(why) or self._named(target.title, translate(why)))
         self.linkFailed.emit(target.item, LIVE if target.live else FILM, url, why)
         if self._current is None or target is self._current:
             if self._link_holds(target):
                 self._let_go_of_link()  # it failed for good: as a file that failed
+
+    @staticmethod
+    def _own_words(why: str) -> Optional[str]:
+        """Why a link did not play, said alone when it names its channel itself (a site's
+        answer, kept in English: in the active language); None for any other (said after
+        the link's name)."""
+        return shown_reason(why) if names_its_channel(why) else None
 
     def watch_from_start(
         self, channel: dict, programme: Programme, group_key: str, channels: list
@@ -1675,6 +1842,34 @@ class TVController(QObject):
         if self._settings_shown():
             return "drawer"
         return "drawer" if self.overlays.drawer.isVisible() else "player"
+
+    def choice_number(self) -> int:
+        """2.15: the newest choice's number (a tune, a film, Stop, an outside play): a
+        phone's wait for a channel ends once the TV makes another (one screen at a time)."""
+        return self._lanes.generation()
+
+    def tv_waits_for(self, target: Target) -> bool:
+        """2.15: the large picture waits for `target`'s channel to be live (a phone's wait for
+        it gives way: one asks)."""
+        return not self._closed and self._live_controls.waits_for(target)
+
+    def phone_field(self) -> Any:
+        """2.15: the text box a typed letter goes into now, in `handle`'s order, for a phone's
+        typing sheet (ui/remote_typing.py; its questions and menus are asked first there): a
+        card's over the TV, Settings', or the channel list's Find box; None for none."""
+        if self._closed:
+            return None
+        card = self._shown_card()
+        if card is not None:
+            return field_of(card)
+        if self._online is not None and self._online.visible():
+            return self._online.phone_field()  # the OpenSubtitles search's field
+        if self._guide.is_open():
+            return None
+        if self.settings_layer.shown():
+            return self.settings_layer.phone_field()
+        drawer = self.overlays.drawer
+        return drawer.phone_field() if drawer.isVisible() else None
 
     # ---- Settings in the drawer (ui/settings_layer.py) ----------------------------------------
 
@@ -2581,7 +2776,19 @@ class TVController(QObject):
         self._listing_generation += 1
         self._album_generation += 1
         self._drop_card()  # a newer choice than what the Next card offers
-        self._lanes.request(target)
+        if self._tune_stop is not None:
+            # A newer choice: the stream a site is asked for, for the tune in flight, would
+            # play nowhere; its ask ends between its requests (or answers, dropped), and the
+            # newer choice is asked now, not after it.
+            self._tune_stop.set()
+            self._tune_stop = None
+            self._lanes.forget_own_ask()
+        self._live_controls.chosen(target)  # a site's channel waited for is no longer
+        self._asking_tune = True  # a site asked meanwhile is asked for this tune
+        try:
+            self._lanes.request(target)
+        finally:
+            self._asking_tune = False
 
     def _follow_queue(self, settled: Target) -> bool:
         """Act on a choice made while `settled` was in flight; False when there was none."""
@@ -2639,12 +2846,63 @@ class TVController(QObject):
             return
         if self._follow_queue(target):
             return  # the failed target was superseded: no error for it
+        if self._waits_for_live(target, message):
+            return  # a site's channel that is not live waits on screen for it
         self._forget_room(target)
         self._give_large_back(target)
         self._let_go_unless_a_link_plays()  # a link chosen held never came
         self._restore_channel()
+        if self._network_url(target.item) is not None:
+            # A site's page its site gave no stream for: counted in its row, said once.
+            self._on_link_failed(target, message)
+            return
         self._error(self._named(target.title, message))
         self._explain_item(target.item, target.title)
+
+    def _waits_for_live(self, target: Target, message: str) -> bool:
+        """2026-11-25 (the owner: "streamer is offline and comes online, just when you sense
+        resync to latest"): a site's channel chosen for the large picture (not a zap step:
+        those step past it), or asked again as its stream ended, whose site says it is not
+        live now waits there for it (LiveControls.wait_for_live): what played stops, the pill
+        says so, its site is asked again calmly, and it plays from its newest once it is live.
+        Counted in its row once; while it waits, an ask that did not reach the site waits on.
+        False where it does not wait (a zap step, a multiview, an outside player: said as
+        ever)."""
+        if (
+            not target.live
+            or target.zapped
+            or self._site_page(target.item) is None
+            or self.multiview_shown()
+            or self._external_launcher() is not None
+        ):
+            return False
+        waiting = self._live_controls.waits_for(target)
+        if not is_offline(message) and not (waiting and message in (TIMED_OUT, FAILED)):
+            if waiting:
+                self._live_controls.stop_waiting()  # (its site said another thing: said)
+            return False
+        self._forget_room(target)
+        if not waiting:
+            # It takes the large picture as a delivered link does (what records there records on
+            # in the background; a file or the audio screen gives way); nothing plays meanwhile.
+            self._before_new_target(target, delivered=True)
+            self._set_recording_aside()
+            if self._media is not None and not self._plays_small(self._media.active_url()):
+                self._media.stopped()  # 2.8: a server's title stopped where it was
+            try:
+                self.watch.flush()  # a film's last position
+            except Exception as e:
+                self._log_failure("save the watch state", e)
+            self.overlays.transport.dismiss()
+            self._live_controls.new_target()
+        self._live_controls.wait_for_live(target, message if is_offline(message) else "")
+        self._current, self._cid = target, None
+        self._restore_channel()
+        self.zap.tuned(target.item)  # ↑/↓ move on from it
+        if not waiting:
+            url = self._network_url(target.item) or ""
+            self.linkFailed.emit(target.item, LIVE, url, message)
+        return True
 
     def _on_tune_dropped(self, _target: Target) -> None:
         """A tune overtaken by an external play: the channel still playing stays the channel."""
@@ -2660,12 +2918,38 @@ class TVController(QObject):
         that tile says so too."""
         if self._closed:
             return
+        # 2.15: a tile or the small picture whose site channel isn't live waits for it (as the
+        # large picture's): no error toast; its row counts it once, as it begins to wait.
+        waits: list[Optional[bool]] = []
         for name, waiting in list(self._tile_links.items()):
             if waiting is target:
                 del self._tile_links[name]
                 if self._grid is not None:
-                    self._grid.link_failed(name, target.item)
-        self._menu_error(self._named(target.title, message))
+                    waits.append(self._grid.link_failed(name, target.item, message))
+        if self._pip is not None:
+            waits.append(self._pip.offline(target, message))
+        for at, (asked, hear) in enumerate(self._elsewhere_failed):
+            if asked is target:  # 2.15: a phone's Watch (play_elsewhere's `failed`)
+                del self._elsewhere_failed[at]
+                try:
+                    heard = hear(target, message)
+                except Exception as error:  # a phone's ask must never take QiTV down
+                    logger.error("A phone's failed link: %s", type(error).__name__)
+                    heard = None
+                if heard is True and self._live_controls.waits_for(target):
+                    self._live_controls.stop_waiting()  # the phone waits for it: one asks
+                waits.append(heard)
+                break
+        if False in waits:
+            return  # it waits on: said and counted once already
+        if True not in waits:
+            self._menu_error(self._own_words(message) or self._named(target.title, message))
+        page = self._site_link(target.item)
+        if page is not None and is_site_failure(message):
+            # Its site gave no stream (for the PiP, a tile, an outside player, the phone):
+            # counted in its row as a play's. (What failed using a link it gave is not: its
+            # words are an exception's, which may carry that address.)
+            self.linkFailed.emit(target.item, LIVE if target.live else FILM, page, message)
 
     def _keep_tuning_banner(self) -> None:
         """Show the banner again while the channel it announces is on its way: its link
@@ -3014,7 +3298,8 @@ class TVController(QObject):
             return  # 2.8: what parental controls hide never enters the history (nor Recent)
         # 2.14 review M5: a Plex conversion's session ends with its play: its file is kept.
         menu = None if target.live or target.local else self._media_menu(target.item)
-        link = str((menu or {}).get("file") or url)
+        # A site's channel page is remembered as its page, not the address with its token.
+        link = str((menu or {}).get("file") or self._site_link(target.item) or url)
         try:
             self.watch.record_play(
                 item_provider.provider_name(self.catalog, target.item),
@@ -3759,8 +4044,8 @@ class TVController(QObject):
     def _reopen_tile(self, name: str, channel: dict) -> None:
         """A tile without the focus failed: its channel's link is made again and it opens in
         that tile; the grid says when (an STB portal's at once, once: its portal's session may
-        have expired, so it signs in again; any channel that played, after the revive's wait,
-        `services.revive`)."""
+        have expired, so it signs in again; a site's channel refused, at once: its lane asks
+        the site again; any channel that played, after the revive's wait, `services.revive`)."""
         logger.info("Making the link of a tile's channel again after it failed")
         if item_provider.provider_type(self.catalog, channel) == "STB":
             item_provider.sign_in_again(self.catalog, channel)
@@ -4022,6 +4307,7 @@ class TVController(QObject):
         opens (CaptionsController.target_changing). The audio screen and its dock go too, but
         for a song after a song (no black page between two)."""
         self._sound_gives_way(target)
+        self._forget_kept_listings(target)  # 2.15: a recording's kept listing goes with its film
         if target is None or not target.local:
             self._list_job.stop()  # a list of songs given up: its songs stop being read
             if not delivered:
@@ -4117,11 +4403,26 @@ class TVController(QObject):
             return 0.0
         return live_parts.behind_in(timeline) or 0.0  # 2.6: the time away included
 
+    def _behind_broadcaster(self) -> Optional[float]:
+        """How far the large picture plays behind the broadcaster, by the dates a dated
+        channel's pieces carry, as the time-shift helper reports it (None: as `_live_lag`,
+        or the channel's pieces are undated)."""
+        if self._live_lag() is None:
+            return None
+        timeline = self._tuner.timeline
+        behind = timeline.get("behind_broadcaster") if isinstance(timeline, dict) else None
+        return float(behind) if isinstance(behind, (int, float)) else None
+
     def _live_info(self) -> dict:
-        """The statistics' source and lag for the large picture."""
+        """The statistics' source, lag and how far behind the broadcaster, for the large
+        picture."""
         live = self.live
         kind = live.source_kind() if live is not None and live.is_pipeline() else ""
-        return {"source": kind or SOURCE_DIRECT, "lag": self._live_lag()}
+        return {
+            "source": kind or SOURCE_DIRECT,
+            "lag": self._live_lag(),
+            "behind_broadcaster": self._behind_broadcaster(),
+        }
 
     def _programme_left(self) -> Optional[float]:
         """Seconds until the programme the large picture's channel shows ends (a time-shifted
@@ -6057,20 +6358,29 @@ class TVController(QObject):
         *,
         ask_on: Optional[str] = None,
         recordings: bool = False,
+        failed: Optional[Callable[[Target, str], Optional[bool]]] = None,
+        again: Optional[Callable[[], bool]] = None,
     ) -> bool:
         """What plays now, or `target`, handed to `launch` with its link (a phone's player) as
         Play in VLC hands it: the in-app stream is released first, so the provider counts one.
         False when nothing from a provider is current (a file opened from the disk stays here).
         2.6: with no stream free while a recording holds one, phone `ask_on` is asked.
         2.8: with `recordings`, a recording of the Library goes too, its file's URI as its
-        link (a phone gets it from QiTV's home door)."""
+        link (a phone gets it from QiTV's home door).
+        2.15: `failed` hears why its link failed (a phone's Watch of a site's channel that is
+        not live waits for it: ui/remote_waits.py): True, it begins to wait (nothing is said
+        here; its row counts it once), False, it waits on (nothing said nor counted), None, as
+        ever. `again`: a waiting phone's ask, asked beside the TV's choices (none is dropped
+        for it) and handed on only if `again()` still says so when its link comes."""
         target = target or self._current
         if self._closed or target is None:
             return False
         # 2.14: a phone gets a Plex title through QiTV's home door, which passes its file (the
         # server's conversion is a playlist of pieces on the server): as it is.
         target = self._as_its_file(self._owned_target(target))  # a link: whose stream it is now
-        chosen = target
+        # 2.15: each phone's ask its own (a copy): its `failed` hears its own answer, and a
+        # second ask for the same target (another phone's) is asked, not dropped as the same.
+        chosen = replace(target) if failed is not None else target
         if target.local:
             path = str(target.item.get("path") or "")
             if not (recordings and target.item.get("_recording") and path):
@@ -6082,11 +6392,16 @@ class TVController(QObject):
             return True
 
         def play(url: str) -> None:
+            self._elsewhere_failed = [e for e in self._elsewhere_failed if e[0] is not chosen]
+            if again is not None and not again():
+                return  # 2.15: the phone waits for it no more (its site's address unused)
             self._play_external(
                 chosen, url, lambda link, **_http: launch(chosen, link), ask_on=ask_on, phone=True
             )
 
-        self._lanes.request_side(target, play, play=True)
+        if failed is not None:  # (the newest few: one that never answers is not kept for ever)
+            self._elsewhere_failed = [*self._elsewhere_failed[-7:], (chosen, failed)]
+        self._lanes.request_side(chosen, play, play=again is None)
         return True
 
     def _play_external(

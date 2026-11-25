@@ -343,6 +343,199 @@ class StreamServerTests(unittest.TestCase):
         self.assertFalse(ring.junction(2))
         self.assertFalse(ring.junction(9))
 
+    def ts_ring(self, pts_start, seconds=2.0, segments=1):
+        """A RAM ring of `segments` TS segments of `seconds` each from `pts_start` (a site's
+        recording or the live buffer: PAT/PMT as each segment's header)."""
+        from ts_fixtures import make_stream
+
+        ring = RamRing()
+        data = make_stream(seconds * segments, pts_start=pts_start, gop_s=seconds)
+        size = len(data) // segments // 188 * 188
+        for seq in range(segments):
+            body = data[seq * size : (seq + 1) * size if seq < segments - 1 else len(data)]
+            ring.open_segment(seq, body[:376])
+            ring.append(body[376:])
+            ring.complete(seq)
+        return ring, data
+
+    def test_a_recording_goes_on_into_the_buffer_as_one_stream_its_clock_running_on(self):
+        # 2.15 (the owner: "a fluid back and forth"): the recording's ring ends where the
+        # buffer's segment it joins begins: the viewer's response goes on there, no reopen,
+        # the buffer's timestamps re-based so the first picture follows the last by a frame.
+        from test_repeat_trimmer import video_pts
+        from ts_fixtures import VIDEO_PID
+
+        server = self.start_server()
+        part, part_data = self.ts_ring(900_000)
+        live, live_data = self.ts_ring(70_000_000, segments=2)
+        program = lambda: (VIDEO_PID, 0x1B)  # noqa: E731
+        server.add_session("part", part, lambda: True, program=program, joins=True)
+        server.add_session("live", live, lambda: False, program=program)
+        server.join("part", "live", 1)
+        client = self.client(server.stream_url("part", 0))
+        expected = len(part_data) + len(live_data) // 2
+        received = client.read(expected - 188 * 4, timeout=4.0)
+        pts = [p for p in video_pts(received) if p is not None]
+        steps = {b - a for a, b in zip(pts, pts[1:])}
+        self.assertEqual(steps, {3600})  # 25 fps: one frame each, across the join too
+        self.assertEqual(server.reading("live"), 1)  # it reads as the buffer's viewer now
+        server.remove_session("part")  # the recording's part may go: the stream goes on
+        live.open_segment(2, live_data[:376])
+        live.append(b"\x47" + b"\x1f\xff\x10" + b"\xff" * 184)  # (a null packet)
+        more = client.read(188, timeout=3.0)
+        self.assertEqual(len(more), 188)
+
+    def test_a_join_asked_a_moment_after_the_recording_ended_still_goes_on(self):
+        # Live 2026-11-25: the session asks the join once it hears of the end, a moment later.
+        from test_repeat_trimmer import video_pts
+        from ts_fixtures import VIDEO_PID
+
+        server = self.start_server()
+        part, part_data = self.ts_ring(900_000)
+        live, live_data = self.ts_ring(70_000_000, segments=2)
+        program = lambda: (VIDEO_PID, 0x1B)  # noqa: E731
+        server.add_session("part", part, lambda: True, program=program, joins=True)
+        server.add_session("live", live, lambda: False, program=program)
+        threading.Timer(0.4, lambda: server.join("part", "live", 1)).start()
+        client = self.client(server.stream_url("part", 0))
+        wanted = len(part_data) + len(live_data) // 2 - 188 * 4
+        received = client.read(wanted, timeout=5.0)
+        self.assertEqual(len(received), wanted)  # it went on into the buffer
+        pts = [p for p in video_pts(received) if p is not None]
+        self.assertEqual({b - a for a, b in zip(pts, pts[1:])}, {3600})
+
+    def test_a_part_told_it_joins_none_ends_at_once(self):
+        # Review (2026-11-25): no join was to come, and the response waited 3 s first.
+        from ts_fixtures import VIDEO_PID
+
+        server = self.start_server()
+        part, part_data = self.ts_ring(900_000)
+        server.add_session(
+            "part", part, lambda: True, program=lambda: (VIDEO_PID, 0x1B), joins=True
+        )
+        server.join("part", "", -1)
+        started = time.monotonic()
+        received = self.client(server.stream_url("part", 0)).read_to_eof(5.0)
+        self.assertEqual(received, part_data)
+        self.assertLess(time.monotonic() - started, 1.0)
+
+    def test_a_live_stream_under_other_pids_joins_under_the_recordings(self):
+        # 2.15, Twitch: its recording is remuxed from fMP4 (QiTV's PIDs), a TS live stream
+        # keeps its own: the live packets go on under the recording's PIDs and tables.
+        from test_repeat_trimmer import pid_of, packets, video_pts
+
+        from ts_fixtures import AUDIO_PID, PMT_PID, VIDEO_PID, pmt
+
+        server = self.start_server()
+        part, part_data = self.ts_ring(900_000)
+        live, live_data = self.ts_ring(70_000_000, segments=2)
+        moved = {VIDEO_PID: 0x200, AUDIO_PID: 0x201}
+
+        def renumbered(data):
+            out = b""
+            for p in packets(data):
+                pid = pid_of(p)
+                if pid == PMT_PID:
+                    p = pmt(video_pid=0x200, audio_pids=(0x201,), cc=p[3] & 0x0F)
+                elif pid in moved:
+                    to = moved[pid]
+                    p = p[:1] + bytes([(p[1] & 0xE0) | (to >> 8), to & 0xFF]) + p[3:]
+                out += p
+            return out
+
+        theirs = RamRing()
+        for seq in range(2):
+            head = live.read_at(seq, 0, 376)[0]
+            body = live.read_at(seq, 376, 10**7)[0]
+            theirs.open_segment(seq, renumbered(head))
+            theirs.append(renumbered(body))
+            theirs.complete(seq)
+        server.add_session(
+            "part", part, lambda: True, program=lambda: (VIDEO_PID, 0x1B), joins=True
+        )
+        server.add_session("live", theirs, lambda: False, program=lambda: (0x200, 0x1B))
+        server.join("part", "live", 1)
+        client = self.client(server.stream_url("part", 0))
+        wanted = len(part_data) + len(live_data) // 2 - 188 * 8
+        received = client.read(wanted, timeout=5.0)
+        self.assertEqual(len(received), wanted)
+        self.assertFalse({pid_of(p) for p in packets(received)} & {0x200, 0x201})
+        pts = [p for p in video_pts(received) if p is not None]
+        self.assertGreater(len(pts), 60)  # its pictures came on under our video PID
+        self.assertEqual({b - a for a, b in zip(pts, pts[1:])}, {3600})
+
+    def test_a_mapped_join_stays_whole_when_reads_end_inside_packets(self):
+        # Second review (Critical): the map's output differs in length from what was read (a
+        # packet left over, a metadata PID left out), and the stream advanced by the output:
+        # bytes came again or were skipped right after the join.
+        from test_repeat_trimmer import packets, pid_of, video_pts
+
+        from ts_fixtures import AUDIO_PID, PMT_PID, VIDEO_PID, _psi_packet
+
+        self.enterContext(patch.object(server_module, "_CHUNK", 1_000))  # (inside packets)
+        server = self.start_server()
+        part, part_data = self.ts_ring(900_000)
+        live, live_data = self.ts_ring(70_000_000, segments=2)
+
+        def their_pmt(cc):
+            streams = b"\x1b" + (0xE000 | 0x200).to_bytes(2, "big") + b"\xf0\x00"
+            streams += b"\x0f" + (0xE000 | 0x201).to_bytes(2, "big") + b"\xf0\x00"
+            streams += b"\x15" + (0xE000 | 0x202).to_bytes(2, "big") + b"\xf0\x00"  # metadata
+            body = (0xE000 | 0x200).to_bytes(2, "big") + b"\xf0\x00" + streams
+            head = bytes([0x02]) + (0xB000 | (5 + len(body) + 4)).to_bytes(2, "big")
+            return _psi_packet(PMT_PID, head + b"\x00\x01\xc1\x00\x00" + body, cc)
+
+        meta = b"\x47\x42\x02\x10" + b"\x00" * 184
+        moved = {VIDEO_PID: 0x200, AUDIO_PID: 0x201}
+
+        def renumbered(data):
+            out = b""
+            for n, p in enumerate(packets(data)):
+                pid = pid_of(p)
+                if pid == PMT_PID:
+                    p = their_pmt(p[3] & 0x0F)
+                elif pid in moved:
+                    to = moved[pid]
+                    p = p[:1] + bytes([(p[1] & 0xE0) | (to >> 8), to & 0xFF]) + p[3:]
+                out += p + (meta if n % 7 == 3 else b"")
+            return out
+
+        theirs = RamRing()
+        for seq in range(2):
+            head = live.read_at(seq, 0, 376)[0]
+            body = live.read_at(seq, 376, 10**7)[0]
+            theirs.open_segment(seq, renumbered(head))
+            theirs.append(renumbered(body))
+            theirs.complete(seq)
+        server.add_session(
+            "part", part, lambda: True, program=lambda: (VIDEO_PID, 0x1B), joins=True
+        )
+        server.add_session("live", theirs, lambda: False, program=lambda: (0x200, 0x1B))
+        server.join("part", "live", 1)
+        client = self.client(server.stream_url("part", 0))
+        wanted = len(part_data) + len(live_data) // 2 - 188 * 8
+        received = client.read(wanted, timeout=5.0)
+        self.assertEqual(len(received), wanted)
+        self.assertTrue(all(p[0] == 0x47 for p in packets(received)))  # aligned throughout
+        self.assertFalse({pid_of(p) for p in packets(received)} & {0x200, 0x201, 0x202})
+        pts = [p for p in video_pts(received) if p is not None]
+        self.assertEqual({b - a for a, b in zip(pts, pts[1:])}, {3600})  # none twice, none lost
+
+    def test_a_join_whose_video_differs_ends_the_stream_there(self):
+        from ts_fixtures import VIDEO_PID
+
+        server = self.start_server()
+        part, part_data = self.ts_ring(900_000)
+        live, _live_data = self.ts_ring(70_000_000)
+        server.add_session(
+            "part", part, lambda: True, program=lambda: (VIDEO_PID, 0x1B), joins=True
+        )
+        server.add_session("live", live, lambda: False, program=lambda: (0x200, 0x24))
+        server.join("part", "live", 0)
+        received = self.client(server.stream_url("part", 0)).read_to_eof(3.0)
+        self.assertEqual(received, part_data)
+        self.assertIsNone(server.reading("live"))
+
     def test_ended_session_with_an_unfinished_last_segment_still_closes(self):
         server = self.start_server()
         ended = threading.Event()

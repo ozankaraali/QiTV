@@ -26,9 +26,9 @@ from PySide6.QtTest import QTest
 from PySide6.QtWidgets import QApplication, QWidget
 from timer_fixtures import elapse, pause, wait_until
 
-from services import free_radio
+from services import free_radio, live_sites
 from services.connection_budget import ConnectionBudget
-from services.live.refusals import STREAM_LIMIT
+from services.live.refusals import STREAM_LIMIT, STREAM_REFUSED
 from services.navigation import NavNode, item_key
 from services.network_streams import NetworkStreams, stream_id
 from services.parental import Parental
@@ -1844,6 +1844,106 @@ class LinkOwnerGridTests(MultiviewCase):
         self.assertTrue(wait_until(lambda: slot.live.running and slot.live.url == self.URL))
         self.assertEqual(self.budget.holders("Harbor IPTV"), ["t3"])
         self.assertEqual(self.budget.holders(NETWORK_PROVIDER), [])
+
+
+class SiteTileTests(MultiviewCase):
+    """Final review I3: a Kick or Twitch channel in a tile beside the focus whose buffer is
+    refused after it played (its address's token ran out) is tuned again there through its
+    lane, so its site is asked again: at once, and at once again each time its fresh address
+    played HEALTHY_S since its first picture, else after the revive's wait (2026-11-25). The
+    site is faked: nothing is fetched."""
+
+    PAGE = "https://www.twitch.tv/examplechannel"
+    MASTER = "https://edge.example/hls/examplechannel/master.m3u8?token=sentinel-one"
+    FRESH = "https://edge.example/hls/examplechannel/master.m3u8?token=sentinel-two"
+    NEWER = "https://edge.example/hls/examplechannel/master.m3u8?token=sentinel-three"
+
+    def setUp(self):
+        super().setUp()
+        self.catalog.current_provider = lambda: {"name": "Home", "type": "STB", "max_streams": 4}
+        self.answers = []
+        self.asked = 0
+        self.enterContext(mock.patch.object(live_sites, "resolve", self.resolve))
+        self.addCleanup(lambda: wait_until(lambda: self.controller._jobs.pending() == 0))
+        self.kept = {
+            "id": stream_id(self.PAGE),
+            "name": "examplechannel · Twitch",
+            "cmd": self.PAGE,
+            "_provider": NETWORK_PROVIDER,
+        }
+
+    def resolve(self, page, stop=None, **_kwargs):
+        self.asked += 1
+        answer = self.answers.pop(0)
+        if isinstance(answer, Exception):
+            raise answer
+        return live_sites.Resolved(answer, f"{page.channel} · Twitch")
+
+    def test_a_site_tile_that_is_not_live_waits_in_its_tile_and_plays_once_live(self):
+        # 2.15 (parity with the large picture): its card says it waits, its site is asked
+        # again calmly, no error is said, nothing holds a stream, and it plays once live.
+        self.enterContext(mock.patch("ui.live_controls.OFFLINE_ASK_S", 0.2))
+        self.enterContext(mock.patch("ui.live_controls.OFFLINE_JITTER_S", 0.0))
+        offline = live_sites.SiteError("offline")
+        self.answers = [offline, offline, self.MASTER]
+        self.start_large(0)
+        self.v()
+        holders = sorted(self.budget.holders(NETWORK_PROVIDER))
+        self.controller.play_in_tile("t3", self.kept)
+        self.assertTrue(wait_until(lambda: self.grid.state("t3") == FAILED))
+        _title, detail = self.grid.label("t3")
+        self.assertEqual(detail, "examplechannel isn't live now · It plays as soon as it's live")
+        self.assertEqual(sorted(self.budget.holders(NETWORK_PROVIDER)), holders)  # none held
+        self.assertTrue(wait_until(lambda: self.asked == 2, timeout_ms=3000))  # asked calmly again
+        self.assertEqual(self.grid.label("t3")[1], detail)
+        t3 = self.sessions.slot("t3")
+        self.plays(t3, self.MASTER)  # live now: it plays in its tile
+        self.assertEqual(self.asked, 3)
+        errors = [text for text, kind in self.toast.messages() if kind == "error"]
+        self.assertEqual(errors, [])
+
+    def plays(self, slot, url):
+        self.assertTrue(wait_until(lambda: slot.live.running and slot.live.url == url))
+        slot.live.play_pipeline()
+        slot.playback.stateChanged.emit("playing")
+
+    def refused(self, slot):
+        slot.live.failed.emit(STREAM_REFUSED)
+        slot.live.released.emit()
+
+    def test_a_site_tile_whose_buffer_is_refused_asks_its_site_again(self):
+        self.enterContext(mock.patch("ui.live_controls.HEALTHY_S", 0.2))
+        self.answers = [self.MASTER, self.FRESH, self.NEWER]
+        self.start_large(0)
+        self.v()
+        self.controller.play_in_tile("t3", self.kept)
+        t3 = self.sessions.slot("t3")
+        self.plays(t3, self.MASTER)
+        self.assertEqual(self.sessions.large().name, "main")  # beside the focus
+        self.refused(t3)
+        self.plays(t3, self.FRESH)  # the site was asked again: its fresh address plays there
+        self.assertEqual(self.asked, 2)
+        pause(300)  # HEALTHY_S on its fresh address
+        t3.playback.stateChanged.emit("playing")  # (a picture again counts nothing anew)
+        self.refused(t3)
+        self.plays(t3, self.NEWER)
+        self.assertEqual(self.asked, 3)
+        self.refused(t3)  # soon again (2026-11-25): asked again after the revive's wait
+        pause(100)
+        self.assertEqual((self.grid.state("t3"), self.asked), (FAILED, 3))  # never at once
+        self.assertIn("t3", self.grid._revive_due)  # its card counts down to it
+
+    def test_a_site_tile_refused_for_the_limit_is_never_asked_again(self):
+        self.answers = [self.MASTER]
+        self.start_large(0)
+        self.v()
+        self.controller.play_in_tile("t3", self.kept)
+        t3 = self.sessions.slot("t3")
+        self.plays(t3, self.MASTER)
+        t3.live.failed.emit(STREAM_LIMIT)
+        t3.live.released.emit()
+        pause(100)
+        self.assertEqual((self.grid.state("t3"), self.asked), (FAILED, 1))
 
 
 class DrawerDragTests(unittest.TestCase):

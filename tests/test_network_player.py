@@ -19,14 +19,15 @@ from unittest import mock
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 from PySide6.QtCore import QPoint, QPointF, Qt
-from PySide6.QtGui import QWheelEvent
+from PySide6.QtGui import QGuiApplication, QWheelEvent
 from PySide6.QtWidgets import QWidget
 from timer_fixtures import elapse, pause, wait_until
 
-from services import network_streams as ns, parental
+from services import live_sites, network_streams as ns, parental
 from services.jobs import JobRunner
 from services.link_kind import FILM, LIVE, host_of, owner_of
 from services.live.refusals import STREAM_REFUSED
+from services.live_sites import KICK, Resolved, SiteError, SitePage
 from services.navigation import LINKS_LAYER, RECENT_GROUP, NavNode
 from services.network_streams import NetworkStreams, stream_id
 from services.parental import Parental
@@ -35,6 +36,7 @@ from tests import test_tv_controller as tvc
 from tests.test_tv_window import WindowCase
 from ui import live_controls
 from ui.keymap import Action
+from ui.link_lanes import Target
 from ui.network_player import NetworkPlayer
 from ui.open_link import LinkCard, OpenLink
 
@@ -931,6 +933,908 @@ class FailureTests(PlayerCase):
         self.plays_now()
         self.assertEqual(self.entry(URL).failed, "")
         self.assertEqual(self.entry(URL).opened, NOW)
+
+
+KICK_PAGE = "https://kick.com/examplechannel"
+TWITCH_PAGE = "https://www.twitch.tv/otherchannel"
+# What the sites answer: a master playlist whose token is good for minutes (never kept).
+MASTER = "https://edge.example/hls/examplechannel/master.m3u8?token=sentinel-one"
+MASTER_FRESH = "https://edge.example/hls/examplechannel/master.m3u8?token=sentinel-two"
+MASTER_OTHER = "https://edge.example/hls/otherchannel/master.m3u8?token=sentinel-three"
+MASTER_NEWER = "https://edge.example/hls/examplechannel/master.m3u8?token=sentinel-four"
+OFFLINE = "examplechannel isn't live now"
+
+
+class SiteTests(tvc.RetryPillCase, PlayerCase):
+    """A Kick or Twitch channel's page: kept by its page, named by its channel; each play
+    asks the site afresh on the controller's runner (services.live_sites.resolve, faked here:
+    nothing is fetched), and plays what it answered."""
+
+    def setUp(self):
+        super().setUp()
+        self.loaded()
+        self.asked = []  # (the page asked, whether on the GUI thread)
+        self.answers = []  # each ask's answer in turn: an address, a SiteError, or a callable
+        self.enterContext(mock.patch.object(live_sites, "resolve", self.resolve))
+        self.addCleanup(lambda: wait_until(lambda: self.controller._jobs.pending() == 0))
+        self.install_pill()
+
+    def resolve(self, page, stop=None, **_kwargs):
+        self.asked.append((page, threading.current_thread() is threading.main_thread()))
+        answer = self.answers.pop(0)
+        if callable(answer):
+            answer = answer(stop)
+        if isinstance(answer, Exception):
+            raise answer
+        return Resolved(answer, f"{page.channel} · {live_sites.SITE_NAMES[page.site]}")
+
+    def errors(self):
+        return [text for text, kind in self.toast.messages() if kind == "error"]
+
+    def test_each_play_of_a_site_page_asks_the_site_afresh(self):
+        self.answers = [MASTER, MASTER_FRESH]
+        self.link(KICK_PAGE)
+        self.assertEqual(self.starts()[-1][0], MASTER)  # the site's answer plays
+        self.assertEqual(self.asked, [(SitePage(KICK, "examplechannel"), False)])  # off the GUI
+        self.assertEqual(self.catalog.links, [])  # no provider was asked
+        self.plays_now()
+        self.opens(lambda: self.play(1))  # another channel, then the page's row again
+        self.opens(lambda: self.player.play_kept(stream_id(KICK_PAGE)))
+        self.assertEqual(self.starts()[-1][0], MASTER_FRESH)
+        self.assertEqual(len(self.asked), 2)
+
+    def drops_direct(self, url):
+        """`url` plays directly (the buffer fell back), shows its picture, and its stream ends."""
+        self.link(url)
+        self.live.play_direct()
+        self.plays_now()
+        plays = len(self.session.plays)
+        self.session.ended.emit()
+        return plays
+
+    def test_a_dropped_site_link_reopens_with_a_fresh_address(self):
+        self.answers = [MASTER, MASTER_FRESH]
+        plays = self.drops_direct(KICK_PAGE)
+        self.assertEqual(self.session.plays[-1][0], MASTER)
+        self.assertTrue(wait_until(lambda: len(self.session.plays) == plays + 1))
+        self.assertEqual(self.session.plays[-1][0], MASTER_FRESH)  # not the first address again
+        self.assertEqual(len(self.asked), 2)  # the site was asked a second time, off the GUI
+        self.assertEqual([on_gui for _page, on_gui in self.asked], [False, False])
+        self.assertEqual(self.asked[1][0], SitePage(KICK, "examplechannel"))
+        self.assertEqual(self.errors(), [])
+
+    def test_the_reopen_keeps_the_buffer_when_the_run_can_be_joined(self):
+        # The reopen of a direct stream has no `after_seq` (the helper's resume-join belongs to
+        # its own restarts): a plain restart in v1, which the task ledger carries.
+        self.answers = [MASTER, MASTER_FRESH]
+        plays = self.drops_direct(KICK_PAGE)
+        starts = len(self.starts())
+        self.assertTrue(wait_until(lambda: len(self.session.plays) == plays + 1))
+        kwargs = self.session.plays[-1][1]
+        self.assertNotIn("after_seq", kwargs)
+        self.assertEqual(len(self.starts()), starts)  # the same player, no new helper run
+
+    def test_a_direct_play_whose_session_says_no_break_reopens(self):
+        self.enterContext(mock.patch("ui.live_controls.RECONNECT_MS", (50, 50)))
+        self.answers = [MASTER, MASTER_FRESH]
+        self.link(KICK_PAGE)
+        self.live.play_direct()
+        self.plays_now()
+        self.live.in_ad_break = lambda: False  # (LiveSession's: a pipeline's break only)
+        plays = len(self.session.plays)
+        self.session.ended.emit()
+        self.assertTrue(wait_until(lambda: len(self.session.plays) == plays + 1))
+        self.assertEqual(self.session.plays[-1][0], MASTER_FRESH)
+
+    def test_a_reopen_is_skipped_while_the_session_skips_an_ad_break(self):
+        self.enterContext(mock.patch("ui.live_controls.RECONNECT_MS", (50, 50)))
+        self.answers = [MASTER, MASTER_FRESH]
+        self.link(KICK_PAGE)
+        self.live.play_direct()
+        self.plays_now()
+        self.live.in_ad_break = lambda: True
+        plays = len(self.session.plays)
+        self.session.ended.emit()
+        pause(400)
+        self.assertEqual(len(self.session.plays), plays)
+        self.assertEqual(len(self.asked), 1)  # the site was not asked again
+
+    def pipeline_fails(self, message=STREAM_REFUSED):
+        """The page plays through the buffer, shows its picture, and the buffer fails."""
+        self.link(KICK_PAGE)
+        self.live.play_pipeline()
+        self.plays_now()
+        starts = len(self.starts())
+        self.live.failed.emit(message)
+        return starts
+
+    def test_a_site_link_whose_buffer_fails_asks_the_site_again(self):
+        self.answers = [MASTER, MASTER_FRESH]
+        starts = self.pipeline_fails()
+        self.assertTrue(wait_until(lambda: len(self.starts()) == starts + 1))
+        self.assertEqual(self.starts()[-1][0], MASTER_FRESH)
+        self.assertEqual(len(self.asked), 2)
+        self.assertEqual(self.errors(), [])  # no refusal toast
+
+    def test_a_site_that_is_off_the_air_after_a_buffer_failure_waits_for_it(self):
+        # Owner 2026-11-25: the streamer ended: the channel waits on screen (no error), its
+        # site asked again calmly, and plays its newest once it is live again.
+        self.calm()
+        self.answers = [MASTER, SiteError("offline"), SiteError("offline"), MASTER_FRESH]
+        starts = self.pipeline_fails()
+        self.assertTrue(wait_until(lambda: OFFLINE in (self.pill_text() or "")))
+        self.assertEqual(len(self.asked), 2)
+        self.assertEqual(self.store.get(stream_id(KICK_PAGE)).failed, OFFLINE)
+        self.assertTrue(wait_until(lambda: len(self.starts()) == starts + 1, timeout_ms=5000))
+        self.assertEqual(self.starts()[-1][0], MASTER_FRESH)
+        self.assertEqual(len(self.asked), 4)
+        self.assertEqual(self.errors(), [])
+
+    def test_a_zap_in_flight_is_not_lost_to_a_site_buffer_failure(self):
+        late = threading.Event()
+
+        def slow(stop):
+            late.wait(5)
+            return MASTER_OTHER
+
+        self.answers = [MASTER, slow]
+        self.link(KICK_PAGE)
+        self.live.play_pipeline()
+        self.plays_now()
+        starts = len(self.starts())
+        self.player.play(TWITCH_PAGE, LIVE)  # the zap: its site is slow to answer
+        self.assertTrue(wait_until(lambda: len(self.asked) == 2))
+        self.live.failed.emit(STREAM_REFUSED)  # the old channel's buffer fails meanwhile
+        self.assertEqual(len(self.asked), 2)  # the old site was not asked again
+        self.opens(late.set)
+        self.assertEqual(self.starts()[-1][0], MASTER_OTHER)
+        self.assertEqual(self.controller.now_playing().item["cmd"], TWITCH_PAGE)
+        self.assertGreater(len(self.starts()), starts)
+
+    def test_a_site_link_asks_again_each_time_after_a_growing_wait(self):
+        # Owner 2026-11-25: a token that runs out again and again is asked for again each time,
+        # at once first, then after a growing wait while each fresh address fails before it
+        # played HEALTHY_S; nothing is said while the site answers (the pill counts down).
+        self.enterContext(mock.patch.object(live_controls, "SITE_AGAIN_S", (0.0, 0.3, 0.6)))
+        self.answers = [MASTER, MASTER_FRESH, MASTER_OTHER, MASTER_NEWER]
+        starts = self.pipeline_fails()
+        self.assertTrue(wait_until(lambda: len(self.starts()) == starts + 1))
+        for count, (address, wait) in enumerate(((MASTER_OTHER, 0.3), (MASTER_NEWER, 0.6)), 2):
+            self.live.play_pipeline()
+            self.plays_now()
+            began = time.monotonic()
+            self.live.failed.emit(STREAM_REFUSED)  # again, at once
+            self.assertTrue(wait_until(lambda: self.pill_text() is not None))
+            self.assertTrue(
+                wait_until(lambda: len(self.starts()) == starts + count, timeout_ms=5000)
+            )
+            self.assertGreaterEqual(time.monotonic() - began, wait - 0.05)
+            self.assertEqual(self.starts()[-1][0], address)
+        self.assertEqual(len(self.asked), 4)
+        self.assertEqual(self.errors(), [])
+
+    def test_the_helpers_second_wait_stops_no_site_link(self):
+        # A link is tried again once (LINK_TRIES): a site's channel is the site's to give, and
+        # the helper's waits for its stream never stop it.
+        self.answers = [MASTER]
+        self.link(KICK_PAGE)
+        self.live.play_pipeline()
+        self.plays_now()
+        for _ in range(3):
+            self.live.retrying.emit(5.0)  # the helper waits for its stream
+            self.live.retrying.emit(-1.0)  # it came back
+        pause(100)
+        self.assertEqual(self.errors(), [])
+        self.assertEqual(self.live.named("stop"), [])
+
+    def test_a_site_link_that_played_a_while_asks_again_when_it_fails_again(self):
+        # Final review I1: the fresh address's token runs out in turn (the Mac slept twice).
+        # HEALTHY_S after the re-asked tune's first picture, the site is asked again; a
+        # picture again since (a hold let go, a reopen) does not count the time anew.
+        self.enterContext(mock.patch.object(live_controls, "HEALTHY_S", 0.2))
+        self.answers = [MASTER, MASTER_FRESH, MASTER_OTHER]
+        starts = self.pipeline_fails()
+        self.assertTrue(wait_until(lambda: len(self.starts()) == starts + 1))
+        self.live.play_pipeline()
+        self.plays_now()
+        pause(300)  # HEALTHY_S since its first picture
+        self.plays_now()  # its hold let go: "playing" again
+        self.live.failed.emit(STREAM_REFUSED)
+        self.assertTrue(wait_until(lambda: len(self.starts()) == starts + 2))
+        self.assertEqual(self.starts()[-1][0], MASTER_OTHER)
+        self.assertEqual(len(self.asked), 3)
+        self.assertEqual(self.errors(), [])
+        self.assertEqual(self.store.get(stream_id(KICK_PAGE)).failed, "")
+
+    def test_the_helpers_wait_spends_no_ask_of_the_site(self):
+        # Final review I1 (b): on waking, the network comes back only after the helper's
+        # quick reconnects. Its wait (a counted `retrying`) is no ask of the site: the token's
+        # death after it still asks.
+        self.answers = [MASTER, MASTER_FRESH]
+        self.link(KICK_PAGE)
+        self.live.play_pipeline()
+        self.plays_now()
+        starts = len(self.starts())
+        self.live.retrying.emit(5.0)  # the helper waits for its stream
+        self.live.failed.emit(STREAM_REFUSED)  # its one try met the token's death
+        self.assertTrue(wait_until(lambda: len(self.starts()) == starts + 1))
+        self.assertEqual(self.starts()[-1][0], MASTER_FRESH)
+        self.assertEqual(len(self.asked), 2)
+        self.assertEqual(self.errors(), [])
+
+    def test_another_link_whose_buffer_is_refused_is_not_tuned_again(self):
+        self.link(URL)
+        self.live.play_pipeline()
+        self.plays_now()
+        starts = len(self.starts())
+        self.live.failed.emit(STREAM_REFUSED)
+        pause(200)
+        self.assertEqual(len(self.starts()), starts)
+        self.assertTrue(self.errors())  # the refusal says so as ever
+        self.assertEqual(self.asked, [])
+
+    def test_a_site_that_is_off_the_air_when_it_reopens_waits_for_it(self):
+        self.calm()
+        self.answers = [MASTER, SiteError("offline"), MASTER_FRESH]
+        self.drops_direct(KICK_PAGE)
+        self.assertTrue(wait_until(lambda: OFFLINE in (self.pill_text() or "")))
+        self.assertEqual(len(self.asked), 2)
+        self.assertEqual(self.store.get(stream_id(KICK_PAGE)).failed, OFFLINE)
+        self.assertTrue(wait_until(lambda: len(self.asked) == 3, timeout_ms=5000))
+        self.assertTrue(
+            wait_until(lambda: self.starts() and self.starts()[-1][0] == MASTER_FRESH, 5000)
+        )
+        self.assertEqual(self.errors(), [])
+
+    def calm(self, seconds=0.3):
+        """The offline wait's calm asks, every `seconds` here (30 s and more in the app)."""
+        self.enterContext(mock.patch.object(live_controls, "OFFLINE_ASK_S", seconds))
+        self.enterContext(mock.patch.object(live_controls, "OFFLINE_JITTER_S", 0.0))
+
+    def test_a_site_page_opened_while_offline_waits_and_plays_once_live(self):
+        # Owner 2026-11-25: "if i give url, streamer is offline and comes online, just when you
+        # sense resync to latest". What played stops (its stream goes back); the channel waits
+        # on screen, said by the pill; its site is asked again calmly, one ask at a time, until
+        # it is live: then it plays (from its newest: the tune's own start).
+        self.calm()
+        self.link(URL)
+        self.plays_now()
+        stops = len(self.live.named("stop"))
+        self.answers = [SiteError("offline"), SiteError("offline"), MASTER]
+        asked_at = []
+        resolve = self.resolve
+
+        def timed(page, stop=None, **kwargs):
+            asked_at.append(time.monotonic())
+            return resolve(page, stop, **kwargs)
+
+        self.enterContext(mock.patch.object(live_sites, "resolve", timed))
+        self.player.play(KICK_PAGE, LIVE)
+        self.assertTrue(wait_until(lambda: self.pill_text() is not None))
+        self.assertIn(OFFLINE, self.pill_text())
+        self.assertEqual(self.controller.now_playing().item["cmd"], KICK_PAGE)
+        self.assertGreater(len(self.live.named("stop")), stops)  # the link before it stopped
+        self.assertEqual(self.store.get(stream_id(KICK_PAGE)).failed, OFFLINE)  # said in its row
+        self.assertTrue(wait_until(lambda: self.starts() and self.starts()[-1][0] == MASTER, 5000))
+        self.assertEqual(len(self.asked), 3)
+        gaps = [b - a for a, b in zip(asked_at, asked_at[1:])]
+        self.assertTrue(all(gap >= 0.25 for gap in gaps), gaps)  # never in a burst
+        self.assertEqual(self.errors(), [])
+
+    def test_a_film_left_for_a_channel_that_isnt_live_keeps_where_it_stopped(self):
+        # The wait takes the large picture as a delivered link would: the film's last place is
+        # saved and its transport goes.
+        self.calm(30.0)
+        self.link(FILM_URL, FILM)
+        self.plays_now()
+        self.session.positionChanged.emit(125_000, 6_000_000)
+        cid = f"{NETWORK_PROVIDER}:movie:{stream_id(FILM_URL)}"
+        flushes = self.watch.flushes
+        self.answers = [SiteError("offline")]
+        self.player.play(KICK_PAGE, LIVE)
+        self.assertTrue(wait_until(lambda: self.pill_text() is not None))
+        self.assertEqual(self.watch.positions[-1], (cid, 125_000, 6_000_000))
+        self.assertGreater(self.watch.flushes, flushes)
+        self.assertFalse(self.controller.overlays.transport.isVisible())
+
+    def test_an_older_builds_row_plays_and_opens_as_one(self):
+        # Ask 3 through the player: a Twitch row an older build kept without "www." (its id is
+        # not its page's) plays from its row and by Open Link under another spelling, as one.
+        page = "https://twitch.tv/otherchannel"
+        with mock.patch.object(ns, "site_page", lambda url: None):
+            old = stream_id(page)
+        self.assertNotEqual(old, stream_id(page))
+        row = {"id": old, "name": "otherchannel · Twitch", "url": page, "kind": "LIVE"}
+        self.store.load(json.dumps({"v": 1, "entries": [row]}).encode())
+        self.answers = [MASTER_OTHER, MASTER_OTHER]
+        self.opens(lambda: self.player.play_kept(old))
+        self.plays_now()
+        self.opens(lambda: self.player.play("https://www.twitch.tv/OtherChannel", LIVE))
+        self.plays_now()
+        self.assertEqual([e.id for e in self.store.entries()], [old])
+
+    def test_the_wait_ends_when_another_is_chosen(self):
+        self.calm()
+        self.answers = [SiteError("offline")]
+        self.player.play(KICK_PAGE, LIVE)
+        self.assertTrue(wait_until(lambda: self.pill_text() is not None))
+        self.link(URL)  # the viewer chose another meanwhile
+        pause(800)
+        self.assertEqual(len(self.asked), 1)  # never asked again
+        self.assertEqual(self.starts()[-1][0], URL)
+
+    def test_a_wait_whose_site_then_refuses_says_so_and_ends(self):
+        self.calm()
+        self.answers = [SiteError("offline"), SiteError("refused")]
+        self.player.play(KICK_PAGE, LIVE)
+        self.assertTrue(wait_until(lambda: self.pill_text() is not None))
+        self.assertTrue(wait_until(lambda: self.errors()))
+        self.assertTrue(self.errors()[-1].startswith("Kick refused"))
+        self.assertIsNone(self.pill_text())  # no longer waits
+        pause(800)
+        self.assertEqual(len(self.asked), 2)
+
+    def test_the_wait_ends_with_qitv(self):
+        self.calm()
+        self.answers = [SiteError("offline")]
+        self.player.play(KICK_PAGE, LIVE)
+        self.assertTrue(wait_until(lambda: self.pill_text() is not None))
+        self.controller.shutdown()
+        pause(800)
+        self.assertEqual(len(self.asked), 1)
+
+    def test_try_now_asks_at_once(self):
+        self.calm(30.0)
+        self.answers = [SiteError("offline"), MASTER]
+        self.player.play(KICK_PAGE, LIVE)
+        self.assertTrue(wait_until(lambda: self.pill_text() is not None))
+        self.opens(lambda: self.assertTrue(self.controller._live_controls.retry_now()))
+        self.assertEqual(self.starts()[-1][0], MASTER)
+        self.assertEqual(len(self.asked), 2)
+
+    def test_other_links_reopen_as_before(self):
+        plays = self.drops_direct(URL)
+        self.assertTrue(wait_until(lambda: len(self.session.plays) == plays + 1))
+        self.assertEqual(self.session.plays[-1][0], URL)  # the same address, once
+        self.assertEqual(self.asked, [])  # no site was asked
+        pause(200)
+        self.assertEqual(len(self.session.plays), plays + 1)
+
+    def test_a_site_link_is_kept_by_its_page_and_named_by_its_channel(self):
+        self.answers = [MASTER, MASTER_FRESH]
+        self.link(KICK_PAGE)
+        self.plays_now()
+        entry = self.store.get(stream_id(KICK_PAGE))
+        self.assertEqual(
+            (entry.url, entry.name, entry.kind), (KICK_PAGE, "examplechannel · Kick", LIVE)
+        )
+        item = self.controller.now_playing().item
+        self.assertEqual((item["cmd"], item["name"]), (KICK_PAGE, "examplechannel · Kick"))
+        # Renamed, it keeps its name the next time it plays.
+        self.player.rename(entry.id, "Evening show")
+        self.opens(lambda: self.play(1))
+        self.opens(lambda: self.player.play(KICK_PAGE, LIVE))  # Open Link of the page again
+        self.plays_now()
+        self.assertEqual(self.starts()[-1][0], MASTER_FRESH)
+        kept = self.store.get(entry.id)
+        self.assertEqual((kept.url, kept.name), (KICK_PAGE, "Evening show"))
+        saved = self.store.save_bytes().decode()
+        self.assertEqual(json.loads(saved)["v"], 1)  # older 2.x builds read it as ever
+        self.assertNotIn("sentinel", saved)  # the token is never kept
+
+    def test_a_stale_resolve_is_dropped(self):
+        late = threading.Event()
+        stopped = []
+
+        def slow(stop):
+            late.wait(5)
+            stopped.append(stop.is_set())
+            return MASTER  # it answers all the same, once the newer choice was made
+
+        self.answers = [slow, MASTER_OTHER]
+        with mock.patch.object(
+            self.controller, "_link_dropped", wraps=self.controller._link_dropped
+        ) as dropped:
+            self.player.play(KICK_PAGE, LIVE)  # A: its site is slow to answer
+            self.assertTrue(wait_until(lambda: len(self.asked) == 1))
+            self.opens(lambda: (self.player.play(TWITCH_PAGE, LIVE), late.set()))  # then B
+        self.assertEqual(stopped, [True])  # a newer tune stopped A's ask
+        dropped.assert_called_once_with(MASTER)  # A's late answer goes nowhere
+        self.assertEqual(self.starts()[-1][0], MASTER_OTHER)  # and B plays
+        self.assertNotIn(MASTER, [url for url, _ in self.starts()])
+        self.assertEqual(self.controller.now_playing().item["cmd"], TWITCH_PAGE)
+        self.assertEqual(self.errors(), [])
+
+    def test_a_newer_tune_ends_the_site_ask_on_its_way(self):
+        def waits(stop):
+            stop.wait(5)  # the real resolve stops between its requests, as "network"
+            return SiteError("network")
+
+        self.answers = [waits, MASTER_OTHER]
+        began = time.monotonic()
+        self.player.play(KICK_PAGE, LIVE)
+        self.assertTrue(wait_until(lambda: len(self.asked) == 1))
+        self.opens(lambda: self.player.play(TWITCH_PAGE, LIVE))
+        self.assertLess(time.monotonic() - began, 4)  # not held for A's whole ask
+        self.assertEqual(self.starts()[-1][0], MASTER_OTHER)
+        self.assertEqual(self.errors(), [])  # A was given up for B: nothing to say
+        a = self.store.get(stream_id(KICK_PAGE))
+        self.assertTrue(a is None or a.failed == "")  # and it did not fail
+
+    def test_a_newer_tune_is_asked_at_once_while_a_stopped_ask_still_runs(self):
+        # Task 6 M3: a site's ask stops only between its requests (up to 10 s); the newer
+        # choice is asked meanwhile, not queued behind it.
+        late = threading.Event()
+        self.addCleanup(late.set)
+
+        def stuck(stop):
+            late.wait(5)  # (one request still on its way: the stop is seen after it)
+            return SiteError("network")
+
+        self.answers = [stuck, MASTER_OTHER]
+        self.player.play(KICK_PAGE, LIVE)
+        self.assertTrue(wait_until(lambda: len(self.asked) == 1))
+        self.opens(lambda: self.player.play(TWITCH_PAGE, LIVE))
+        self.assertFalse(late.is_set())  # A's ask still runs: B did not wait for it
+        self.assertEqual(self.starts()[-1][0], MASTER_OTHER)
+        late.set()
+        pause(100)
+        self.assertEqual(self.errors(), [])
+
+    def test_stop_and_quitting_end_a_site_ask_on_its_way(self):
+        # Task 6 M5, M6: nobody waits for its answer any more.
+        for how in ("stop", "quit"):
+            with self.subTest(how):
+                stopped = threading.Event()
+
+                def waits(stop):
+                    stopped.set() if stop.wait(5) else None
+                    return SiteError("network")
+
+                self.answers.append(waits)
+                self.player.play(KICK_PAGE, LIVE)
+                self.assertTrue(wait_until(lambda: self.asked and not self.answers))
+                if how == "stop":
+                    self.controller.stop()
+                else:
+                    self.controller.shutdown()
+                self.assertTrue(wait_until(stopped.is_set))
+                pause(100)
+                self.assertEqual(self.errors(), [])
+
+    def test_a_failed_resolve_counts_and_says_why(self):
+        refused = "Kick refused QiTV's request: try again later, or paste the stream link"
+        failed, timed_out = "The link could not be opened", "The link didn't answer in time"
+        named = "examplechannel · Kick: "  # (a reason that names no channel follows its name)
+        cases = (  # (the site's error; why, as Network streams keeps it; the toast)
+            # (offline: the channel waits for it, said by the pill, `..._waits_and_plays_...`)
+            (SiteError("unknown"), *["No channel named examplechannel on Kick"] * 2),
+            (SiteError("refused"), refused, refused),
+            (SiteError("network"), failed, named + failed),
+            (SiteError("network", timed_out=True), timed_out, named + timed_out),
+        )
+        for count, (error, why, toast) in enumerate(cases, 1):
+            with self.subTest(why):
+                before = self.store.get(stream_id(KICK_PAGE))
+                self.assertEqual(before.failed if before is not None else "", "")
+                self.answers.append(error)
+                self.player.play(KICK_PAGE, LIVE)
+                self.assertTrue(wait_until(lambda: len(self.errors()) == count))
+                self.assertEqual(self.errors()[-1], toast)  # said once, plainly
+                entry = self.store.get(stream_id(KICK_PAGE))
+                self.assertEqual((entry.url, entry.failed), (KICK_PAGE, why))  # counted in its row
+                self.assertEqual(len(self.asked), count)  # asked once: no retry
+                self.assertEqual(self.starts(), [])
+                self.store.failed(entry.id, "")  # (the next case starts afresh)
+        pause(100)
+        self.assertEqual(len(self.asked), len(cases))
+
+    def test_channel_up_and_down_step_past_a_site_page_that_is_not_live(self):
+        # Its site gave no stream: the link before it plays on, and the next step goes on
+        # past it (never back onto it, asking the site again).
+        ticks = iter(range(1, 10_000))
+        self.player._now = lambda: NOW + next(ticks)
+        third = LinkStepTests.THIRD
+        for url in (third, URL):
+            self.link(url)
+            self.plays_now()
+        self.player.keep_new(KICK_PAGE, LIVE)  # never opened: listed last
+        self.assertEqual(
+            [e.id for e in self.store.entries()],
+            [stream_id(URL), stream_id(third), stream_id(KICK_PAGE)],
+        )
+        self.answers.append(SiteError("offline"))
+        self.controller.handle(Action.CH_PREV)  # before the first: the last, the page
+        self.assertTrue(wait_until(lambda: self.errors()))
+        self.assertEqual(self.errors(), ["examplechannel isn't live now"])
+        self.assertEqual(self.controller.now_playing().item["id"], stream_id(URL))  # plays on
+        self.opens(lambda: self.controller.handle(Action.CH_PREV))
+        self.assertEqual(self.starts()[-1][0], third)
+        self.assertEqual(len(self.asked), 1)  # the page was not asked again
+
+    def steps_over(self, *offline):
+        """Network streams: URL (playing), THIRD, then the site pages `offline` (kept, never
+        opened: listed last, the latest kept first), each of whose sites gives no stream."""
+        ticks = iter(range(1, 10_000))
+        self.player._now = lambda: NOW + next(ticks)
+        third = LinkStepTests.THIRD
+        for url in (third, URL):
+            self.link(url)
+            self.plays_now()
+        for page in offline:
+            self.player.keep_new(page, LIVE)
+        self.answers.extend(SiteError("offline") for _ in offline)
+        return third
+
+    def fails_on(self, action, channel):
+        """`action` steps onto a site page whose site gives no stream: said, and the link
+        before it plays on."""
+        said = len(self.errors())
+        self.controller.handle(action)
+        self.assertTrue(wait_until(lambda: len(self.errors()) == said + 1))
+        self.assertEqual(self.errors()[-1], f"{channel} isn't live now")
+        self.assertEqual(self.controller.now_playing().item["id"], stream_id(URL))
+
+    def test_with_every_other_link_failed_a_step_asks_them_again(self):
+        # Task 6: the run's links all failed (passed): the next press asks them in turn again,
+        # never does nothing.
+        self.player._now = lambda: NOW
+        self.link(URL)
+        self.plays_now()
+        self.player.keep_new(KICK_PAGE, LIVE)
+        self.answers.extend([SiteError("offline"), SiteError("offline")])
+        self.fails_on(Action.CH_NEXT, "examplechannel")
+        self.fails_on(Action.CH_NEXT, "examplechannel")  # asked again, not nothing
+        self.assertEqual(len(self.asked), 2)
+
+    def test_two_offline_pages_in_a_row_are_each_asked_once_and_stepped_past(self):
+        third = self.steps_over(KICK_PAGE, TWITCH_PAGE)  # URL, THIRD, TWITCH_PAGE, KICK_PAGE
+        self.fails_on(Action.CH_PREV, "examplechannel")  # before the first: the last
+        self.fails_on(Action.CH_PREV, "otherchannel")  # on past it: the one before
+        self.opens(lambda: self.controller.handle(Action.CH_PREV))  # and past both
+        self.assertEqual(self.starts()[-1][0], third)
+        pages = [page.channel for page, _on_gui in self.asked]
+        self.assertEqual(pages, ["examplechannel", "otherchannel"])  # each asked once
+        # Once a step plays, the run's failures are forgotten: a page is asked in its turn.
+        self.plays_now()
+        self.answers.append(SiteError("offline"))
+        self.controller.handle(Action.CH_NEXT)  # THIRD's next: the Twitch page, asked again
+        self.assertTrue(wait_until(lambda: len(self.asked) == 3))
+        self.assertEqual(self.asked[-1][0].channel, "otherchannel")
+
+    def test_a_reversed_press_after_an_offline_page_moves_from_the_playing_link(self):
+        third = self.steps_over(KICK_PAGE)  # URL, THIRD, KICK_PAGE
+        self.fails_on(Action.CH_PREV, "examplechannel")
+        self.opens(lambda: self.controller.handle(Action.CH_NEXT))  # the other way, from URL
+        self.assertEqual(self.starts()[-1][0], third)
+        self.assertEqual(len(self.asked), 1)
+
+    def test_a_side_play_of_an_offline_page_counts_in_its_row(self):
+        # Play in VLC on a kept page whose site gives no stream: said, and its row says why,
+        # as a play in QiTV would.
+        self.player.keep_new(KICK_PAGE, LIVE)
+        item = {
+            "id": stream_id(KICK_PAGE),
+            "name": "examplechannel · Kick",
+            "cmd": KICK_PAGE,
+            "_provider": NETWORK_PROVIDER,
+        }
+        self.answers.append(SiteError("offline"))
+        with tvc.shown_menus() as popup:
+            self.controller._context.show_target(Target(item, "live", item["name"]), QPoint(5, 5))
+        tvc.menus_of(popup)[0][0].entry("Play in VLC").trigger()
+        self.assertTrue(wait_until(lambda: self.errors()))
+        self.assertEqual(self.errors(), ["examplechannel isn't live now"])
+        entry = self.store.get(stream_id(KICK_PAGE))
+        self.assertEqual(entry.failed, "examplechannel isn't live now")
+        self.assertEqual(self.external.calls, [])
+        self.assertEqual(len(self.asked), 1)
+
+    def kept_item(self):
+        self.player.keep_new(KICK_PAGE, LIVE)
+        return {
+            "id": stream_id(KICK_PAGE),
+            "name": "examplechannel · Kick",
+            "cmd": KICK_PAGE,
+            "_provider": NETWORK_PROVIDER,
+        }
+
+    def test_a_phones_watch_of_an_offline_page_is_heard_by_the_phone_not_the_tv(self):
+        # 2.15: play_elsewhere's `failed` hears why (the phone waits): the TV says nothing,
+        # and its row says why, once.
+        target = Target(self.kept_item(), "live", "examplechannel · Kick")
+        heard, launched = [], []
+        self.answers = [SiteError("offline"), SiteError("offline")]
+
+        def hear(asked, why):
+            heard.append((asked.item["cmd"], why))
+            return len(heard) == 1  # it begins to wait, then waits on
+
+        def launch(_target, url):
+            launched.append(url)
+            return True, ""
+
+        self.assertTrue(self.controller.play_elsewhere(launch, target, failed=hear))
+        self.assertTrue(wait_until(lambda: heard))
+        self.assertEqual(heard, [(KICK_PAGE, OFFLINE)])
+        self.assertEqual(self.store.get(stream_id(KICK_PAGE)).failed, OFFLINE)  # its row
+        self.controller.play_elsewhere(launch, target, failed=hear, again=lambda: True)
+        self.assertTrue(wait_until(lambda: len(heard) == 2))
+        pause(100)
+        self.assertEqual(self.errors(), [])
+        self.assertEqual(launched, [])
+
+    def test_a_phone_that_waits_for_the_channel_the_tv_waits_for_asks_alone(self):
+        # 2.15: Watch on this phone while the large picture waits for its channel: the phone
+        # waits for it now, and the TV's wait ends (its site is asked by one, not two).
+        self.calm()
+        self.answers = [SiteError("offline")]
+        self.player.play(KICK_PAGE, LIVE)
+        self.assertTrue(wait_until(lambda: OFFLINE in (self.pill_text() or "")))
+        self.answers = [SiteError("offline")]
+        heard = []
+        self.controller.play_elsewhere(
+            lambda _t, _url: (True, ""), None, failed=lambda t, why: heard.append(why) or True
+        )
+        self.assertTrue(wait_until(lambda: heard))
+        self.assertEqual(len(self.asked), 2)
+        pause(900)  # three of the TV's calm asks, were it still waiting
+        self.assertEqual(len(self.asked), 2)
+        self.assertIsNone(self.pill_text())
+        self.assertEqual(self.errors(), [])
+
+    def test_two_phones_asking_for_one_target_each_hear_their_own_answer(self):
+        # Review 4: each phone's ask is its own: two asks for the same Target (two phones'
+        # Watch of what the TV plays) are both asked, and each hook hears its own answer once.
+        target = Target(self.kept_item(), "live", "examplechannel · Kick")
+        heard = {"a": [], "b": []}
+        self.answers = [SiteError("offline"), SiteError("offline")]
+        for name in ("a", "b"):
+            self.controller.play_elsewhere(
+                lambda _t, _url: (True, ""),
+                target,
+                failed=lambda _t, why, name=name: heard[name].append(why) or True,
+                again=lambda: True,
+            )
+        self.assertTrue(wait_until(lambda: heard["a"] and heard["b"]))
+        pause(100)
+        self.assertEqual(heard, {"a": [OFFLINE], "b": [OFFLINE]})
+        self.assertEqual(len(self.asked), 2)
+
+    def test_a_phones_watch_that_hears_failures_is_handed_its_link(self):
+        # 2.15: a Watch with `failed` (its own copy of the target) plays as any Watch does:
+        # the TV lets go, the phone gets the link, the hook hears nothing.
+        heard, launched = [], []
+
+        def launch(_target, url):
+            launched.append(url)
+            return True, ""
+
+        target = Target(self.kept_item(), "live", "examplechannel · Kick")
+        for asked, answer, link in ((target, MASTER, MASTER), (None, None, URL)):
+            with self.subTest(asked=asked is not None):
+                self.link(URL)  # the TV plays a link of its own
+                self.plays_now()
+                stops = len(self.live.named("stop"))
+                if answer is not None:
+                    self.answers = [answer]
+                launched.clear()
+                self.controller.play_elsewhere(
+                    launch, asked, failed=lambda _t, why: heard.append(why) or True
+                )
+                self.assertTrue(wait_until(lambda: len(self.live.named("stop")) > stops))
+                self.live.released.emit()
+                self.assertTrue(wait_until(lambda: launched == [link]))
+        self.assertEqual(heard, [])
+
+    def test_a_waiting_phones_ask_drops_no_choice_of_the_tvs(self):
+        # 2.15: its asks go beside the TV's choices (the TV's zap meanwhile still opens), and
+        # once live its stream is handed on only while the phone still waits for it.
+        target = Target(self.kept_item(), "live", "examplechannel · Kick")
+        launched = []
+
+        def launch(_target, url):
+            launched.append(url)
+            return True, ""
+
+        self.link(URL)
+        self.plays_now()
+        generation, stops = self.controller._lanes._generation, len(self.live.named("stop"))
+        self.answers = [MASTER]
+        wanted = [False]
+        self.controller.play_elsewhere(launch, target, again=lambda: wanted[0])
+        self.assertTrue(wait_until(lambda: len(self.asked) == 1))
+        pause(100)
+        self.assertEqual(self.controller._lanes._generation, generation)  # nothing superseded
+        self.assertEqual(launched, [])  # no longer wanted: its address goes unused
+        self.assertEqual(self.controller.now_playing().item["cmd"], URL)  # the TV plays on
+        self.assertEqual(len(self.live.named("stop")), stops)
+        self.answers = [MASTER_FRESH]
+        wanted[0] = True
+        self.controller.play_elsewhere(launch, target, again=lambda: wanted[0])
+        # the TV lets go for it
+        self.assertTrue(wait_until(lambda: len(self.live.named("stop")) > stops))
+        self.live.released.emit()
+        self.assertTrue(wait_until(lambda: launched == [MASTER_FRESH]))
+
+    def test_a_channel_that_plays_through_its_buffer_rewinds_into_its_sites_recording(self):
+        # 2.15: once the channel plays through its buffer, its site is asked (on a worker)
+        # for the running broadcast's recording, once a tune; the live session takes it.
+        asked = []
+
+        def running(page, stop=None, **_kwargs):
+            asked.append((page, threading.current_thread() is threading.main_thread()))
+            return live_sites.Recording(
+                "https://rec.example/1080p60/playlist.m3u8", 6_400.0, True, True
+            )
+
+        self.enterContext(mock.patch.object(live_sites, "running_recording", running))
+        self.answers = [MASTER]
+        self.link(KICK_PAGE)
+        self.live.play_pipeline()
+        self.assertEqual(asked, [])  # never before its picture: the timed start waits for nothing
+        self.plays_now()
+        self.assertTrue(wait_until(lambda: self.live.named("set_site_recording")))
+        (route,) = self.live.named("set_site_recording")[0]
+        self.assertEqual(
+            (route.url, route.start, route.dated, route.steps),
+            ("https://rec.example/1080p60/playlist.m3u8", 6_400.0, True, True),
+        )
+        self.assertEqual(asked, [(SitePage(KICK, "examplechannel"), False)])  # off the GUI
+        self.plays_now()  # it plays again, the same session's start: asked once
+        pause(100)
+        self.assertEqual(len(asked), 1)
+        # Review (2026-11-25): its stream reopened (a renewed token): the session started
+        # again and forgot the recording, so it is asked again once that plays; at most every
+        # RECORDING_ASK_S per channel (second review), the ask after a reopen held back.
+        self.enterContext(mock.patch("ui.live_controls.RECORDING_ASK_S", 1.0))
+        self.live.start(MASTER)
+        self.live.play_pipeline()
+        self.plays_now()
+        pause(150)
+        self.assertEqual(len(asked), 1)  # held back
+        self.assertTrue(wait_until(lambda: len(asked) == 2, timeout_ms=3000))
+        self.assertTrue(wait_until(lambda: len(self.live.named("set_site_recording")) == 2))
+
+    def test_history_keeps_the_page_not_the_token(self):
+        self.answers = [MASTER]
+        with self.assertLogs(level="DEBUG") as logs:
+            self.link(KICK_PAGE)
+        self.assertNotIn("sentinel", "\n".join(logs.output))  # never logged either
+        self.assertEqual(self.starts()[-1][0], MASTER)
+        provider, item, kind, link, group = self.watch.plays[-1]
+        self.assertEqual(
+            (provider, kind, link, group), (NETWORK_PROVIDER, "channel", KICK_PAGE, RECENT_GROUP)
+        )
+        self.assertEqual(item["cmd"], KICK_PAGE)
+        self.plays_now()
+        self.assertNotIn("sentinel", json.dumps([list(p[:4]) for p in self.watch.plays]))
+
+    def test_copy_link_copies_the_page(self):
+        QGuiApplication.clipboard().setText("")
+        self.answers = [MASTER, MASTER_FRESH]
+        self.link(KICK_PAGE)
+        self.plays_now()
+
+        def menu():
+            with tvc.shown_menus() as popup:
+                self.controller.video_context(QPoint(10, 10))  # a right-click on the picture
+            return tvc.menus_of(popup)[0][0]
+
+        menu().entry("Copy stream link").trigger()
+        self.assertEqual(QGuiApplication.clipboard().text(), KICK_PAGE)  # at once: the page
+        self.assertEqual(len(self.asked), 1)  # the site was not asked for it
+        # An outside player is handed what the site answers now (it plays it there).
+        stops = len(self.live.named("stop"))
+        menu().entry("Play in VLC").trigger()
+        self.assertTrue(wait_until(lambda: len(self.live.named("stop")) > stops))
+        self.live.released.emit()  # (the stream in QiTV gives way first)
+        self.assertTrue(wait_until(lambda: self.external.calls))
+        self.assertEqual(self.external.calls, [("vlc", MASTER_FRESH)])
+        self.assertEqual(len(self.asked), 2)
+
+
+TWITCH_VIDEO = "https://www.twitch.tv/videos/123456"
+KICK_CLIP = "https://kick.com/examplechannel/clips/clip_01KABC"
+VIDEO_URL = "https://cdn.example/abc_examplechannel_1/1080p60/index-dvr.m3u8"
+CLIP_URL = "https://clips.example/clip/1080/index.mp4?sig=sentinel-sig&token=sentinel-token"
+
+
+class SiteFilmTests(PlayerCase):
+    """2.15: a Kick or Twitch video's or clip's page plays as a film: asked afresh of its site
+    each play (services.live_sites.resolve_media, faked here), kept by its page, named by its
+    title, resumed where it stopped; one that is gone says so."""
+
+    def setUp(self):
+        super().setUp()
+        self.loaded()
+        self.asked = []
+        self.answers = []  # each ask's answer in turn: (address, title) or a SiteError
+        self.enterContext(mock.patch.object(live_sites, "resolve_media", self.resolve))
+        self.addCleanup(lambda: wait_until(lambda: self.controller._jobs.pending() == 0))
+
+    def resolve(self, media, stop=None, **_kwargs):
+        self.asked.append((media, threading.current_thread() is threading.main_thread()))
+        answer = self.answers.pop(0)
+        if isinstance(answer, Exception):
+            raise answer
+        url, title = answer
+        return Resolved(url, live_sites.media_name(media, title))
+
+    def errors(self):
+        return [text for text, kind in self.toast.messages() if kind == "error"]
+
+    def test_a_video_plays_as_a_film_asked_afresh_named_by_its_title_and_resumes(self):
+        self.answers = [(VIDEO_URL, "A long evening"), (VIDEO_URL, "A long evening")]
+        self.link("twitch.tv/videos/123456?t=1h", FILM)
+        url, options = self.session.plays[-1]
+        self.assertEqual(url, VIDEO_URL)  # the site's answer plays, as a film
+        self.assertIsNone(options["start_ms"])
+        self.assertEqual(self.asked, [(live_sites.SiteMedia("twitch", "video", "123456"), False)])
+        self.assertEqual(self.catalog.links, [])
+        self.plays_now()
+        key = stream_id(TWITCH_VIDEO)
+        entry = self.store.get(key)
+        self.assertEqual((entry.url, entry.kind), ("twitch.tv/videos/123456?t=1h", FILM))
+        self.assertEqual(entry.name, "A long evening · Twitch")
+        cid = f"{NETWORK_PROVIDER}:movie:{key}"
+        self.session.positionChanged.emit(125_000, 6_000_000)
+        self.assertEqual(self.watch.positions[-1], (cid, 125_000, 6_000_000))
+        self.watch.resume[cid] = 125_000
+        self.opens(lambda: self.player.play_kept(key))
+        url, options = self.session.plays[-1]
+        self.assertEqual((url, options["start_ms"]), (VIDEO_URL, 125_000))
+        self.assertEqual(len(self.asked), 2)  # asked again for this play
+        self.assertEqual(len(self.store.entries()), 1)
+
+    def test_the_title_names_a_row_once_and_never_the_viewers(self):
+        self.answers = [(CLIP_URL, "Wow"), (CLIP_URL, "Wow, renamed by the site")]
+        self.link(KICK_CLIP, FILM)
+        self.plays_now()
+        key = stream_id(KICK_CLIP)
+        self.assertEqual(self.store.get(key).name, "Wow · Kick")
+        self.assertEqual(key, stream_id("https://kick.com/examplechannel?clip=clip_01KABC"))
+        self.player.rename(key, "Mine")
+        self.opens(lambda: self.player.play_kept(key))
+        self.plays_now()
+        self.assertEqual(self.store.get(key).name, "Mine")
+
+    def test_the_tokenized_address_is_never_kept_logged_or_remembered(self):
+        self.answers = [(CLIP_URL, "Wow")]
+        with self.assertLogs(level="DEBUG") as logs:
+            self.link(KICK_CLIP, FILM)
+            self.plays_now()
+        self.assertEqual(self.session.plays[-1][0], CLIP_URL)
+        self.assertNotIn("sentinel", "\n".join(logs.output))
+        self.assertNotIn("sentinel", self.store.save_bytes().decode())
+        provider, item, kind, link, _group = self.watch.plays[-1]
+        self.assertEqual((provider, kind, link), (NETWORK_PROVIDER, "movie", KICK_CLIP))
+
+    def test_copy_link_copies_the_videos_page(self):
+        QGuiApplication.clipboard().setText("")
+        self.answers = [(VIDEO_URL, "x")]
+        self.link(TWITCH_VIDEO, FILM)
+        self.plays_now()
+        with tvc.shown_menus() as popup:
+            self.controller.video_context(QPoint(10, 10))
+        tvc.menus_of(popup)[0][0].entry("Copy stream link").trigger()
+        self.assertEqual(QGuiApplication.clipboard().text(), TWITCH_VIDEO)
+        self.assertEqual(len(self.asked), 1)
+
+    def test_a_video_that_is_gone_or_private_says_so_plainly(self):
+        for reason, text in (
+            ("unknown", "This video is gone from Twitch"),
+            ("private", "This video is private or for subscribers only on Twitch"),
+        ):
+            with self.subTest(reason):
+                before = len(self.errors())
+                self.answers = [SiteError(reason)]
+                plays = len(self.session.plays)
+                self.player.play(TWITCH_VIDEO, FILM)
+                self.assertTrue(wait_until(lambda: len(self.errors()) > before))
+                self.assertEqual(self.errors()[-1], text)  # said alone, in its own words
+                self.assertEqual(len(self.session.plays), plays)  # nothing played
+                self.assertEqual(self.store.get(stream_id(TWITCH_VIDEO)).failed, text)
 
 
 class NoProviderHoldTests(PlayerCase):

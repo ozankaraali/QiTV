@@ -414,6 +414,12 @@ class PlaybackSession(QObject):
         self._player = instance.media_player_new()
         self._player.video_set_mouse_input(False)
         self._player.video_set_key_input(False)
+        # When libVLC last stepped this media's clock (time.monotonic) and to what (ms): its
+        # get_time() steps every quarter second or so, and a reader at that rhythm reads it as
+        # stale all the time (2026-11-25: the time-shift stream's timed start measures VLC's
+        # time to its picture from it). Set on libVLC's thread, read on the GUI thread.
+        self._clock_step: Optional[tuple[float, int]] = None
+        self._watch_clock()
         self._state = PlaybackState.IDLE
         self._url: Optional[str] = None
         self._kind: Optional[PlayKind] = None
@@ -543,6 +549,27 @@ class PlaybackSession(QObject):
         if not self._player_free():
             return 0
         return max(0, int(self._player.get_time() or 0))
+
+    def clock_step(self) -> Optional[tuple[float, int]]:
+        """When libVLC last stepped the clock of the media it plays (time.monotonic) and the
+        time it stepped to, in ms; None before its first step since this media opened."""
+        return self._clock_step
+
+    def _watch_clock(self) -> None:
+        if vlc is None:
+            return
+        try:
+            events = self._player.event_manager()
+            events.event_attach(vlc.EventType.MediaPlayerTimeChanged, self._on_clock_step)
+        except Exception as e:  # a player without events: `clock_step` stays None
+            logger.debug("libVLC's clock steps are not watched: %s", type(e).__name__)
+
+    def _on_clock_step(self, event: Any, *_args: Any) -> None:
+        """libVLC's thread: the clock stepped (one assignment; nothing else here)."""
+        try:
+            self._clock_step = (time.monotonic(), int(event.u.new_time))
+        except Exception:  # never into libVLC's thread
+            pass
 
     def length_ms(self) -> int:
         if not self._player_free():
@@ -715,6 +742,7 @@ class PlaybackSession(QObject):
 
     def _open(self) -> None:
         """set_media and play on the GUI thread: only while libVLC holds no input to join."""
+        self._clock_step = None  # this media's own steps from here
         relay = self._relay
         media = self._instance.media_new(relay.leader_url if relay is not None else self._url)
         options = list(self._options)
@@ -1693,6 +1721,8 @@ class Session(Protocol):
 
     def time_ms(self) -> int: ...
 
+    def clock_step(self) -> Optional[tuple[float, int]]: ...
+
     def length_ms(self) -> int: ...
 
     def is_seekable(self) -> bool: ...
@@ -1846,6 +1876,9 @@ class NullSession(QObject):
 
     def time_ms(self) -> int:
         return 0
+
+    def clock_step(self) -> Optional[tuple[float, int]]:
+        return None
 
     def length_ms(self) -> int:
         return 0

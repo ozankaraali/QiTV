@@ -106,6 +106,7 @@ class ContextActions(QObject):
         tidy: Optional[Callable[[NavNode], None]] = None,
         record_at: Optional[Callable[[], Optional[Callable[[dict], None]]]] = None,
         link: Callable[[dict], bool] = lambda item: False,
+        site_page_of: Callable[[dict], Optional[str]] = lambda item: None,
         parent: Optional[QObject] = None,
     ) -> None:
         """`external` is services.external_players or a stand-in; `notify(text, kind)` toasts.
@@ -115,6 +116,8 @@ class ContextActions(QObject):
         `record_at()` is what records a channel at a time (2.8; None while QiTV cannot).
         `link(item)`: whether a row is a link of Network streams (⟲ Recent's), whose menu
         has neither favorites nor Record at a time…: neither works for a link.
+        `site_page_of(item)`: a link's page when it is a site's channel (Kick, Twitch), whose
+        stream address carries a token good for minutes: Copy stream link copies the page.
         """
         super().__init__(parent)
         self._open_pip = open_pip
@@ -123,6 +126,7 @@ class ContextActions(QObject):
         self._tidy = tidy  # 2.9.1: a group leaves the lists, no PIN (services.hidden_groups)
         self._record_at = record_at
         self._link = link
+        self._site_page_of = site_page_of
         self._forget_recent = forget_recent
         self._clear_recents = clear_recents
         self.nav = nav
@@ -293,10 +297,16 @@ class ContextActions(QObject):
         """The players, then "Copy stream link"."""
         self._add_players(menu, target)
         menu.add_separator()
-        menu.add(
-            tr("Copy stream link"),  # i18n: a menu entry
-            lambda: self.lanes.request_side(target, self._copy_link, play=False),
-        )
+        menu.add(tr("Copy stream link"), partial(self._copy, target))  # i18n: a menu entry
+
+    def _copy(self, target: Target) -> None:
+        """Its link to the clipboard: a site's channel page at once (its page, never the
+        address its site answers), any other once it is made."""
+        page = self._site_page_of(target.item)
+        if page is not None:
+            self._copy_link(page)
+        else:
+            self.lanes.request_side(target, self._copy_link, play=False)
 
     def _add_players(self, menu: Menu, target: Target) -> None:
         for text, player in PLAYERS:

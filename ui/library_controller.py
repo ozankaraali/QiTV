@@ -88,6 +88,7 @@ from ui.library.top_nav import REFRESH_TEXT
 from ui.overlays import popup_menu
 from ui.overlays.guide import day_label
 from ui.overlays.popup_menu import RIGHT, Menu, Where
+from ui.remote_typing import PhoneField, field_of
 from ui.text_edit import edit_key
 
 logger = logging.getLogger(__name__)
@@ -887,6 +888,54 @@ class LibraryController(QObject):
         if not query:
             self._search.set_query("")
         self.open_search(query)
+
+    def phone_field(self) -> Optional[PhoneField]:
+        """2.15: the box the Library's keys type into, for a phone's typing sheet
+        (ui/remote_typing.py): Record at a time's card over it (its field), the search, the
+        genre filter or the Recordings rail's find once chosen; else the search, which typing
+        anywhere opens: offered quiet (the sheet waits for a tap). None while a question has
+        the keys."""
+        if self._closed:
+            return None
+        asking = getattr(self._folders, "asking", None)
+        if callable(asking) and asking():
+            return None  # Clear's question
+        card_shown = getattr(self._desk, "card_shown", None)
+        desk_card = card_shown() if callable(card_shown) else None
+        if desk_card is not None:
+            return field_of(desk_card)
+        screen = self._screen
+        if self._genre_field and self._zone == "genres":
+            genres = screen.genres
+            return PhoneField(self, "genres", genres.placeholder(), genres.filter_text)
+        if self._rec_field and self._zone == "rec_rail":
+            rail = screen.rec_rail
+            return PhoneField(self, "rec_rail", rail.placeholder(), rail.filter_text)
+        label = tr("Search movies, series and channels")
+        quiet = self._zone != "search"
+        return PhoneField(self, "search", label, self._search.query, quiet=quiet)
+
+    def phone_type(self, key: str, text: str) -> bool:
+        """2.15: the phone's text in place of a box's, as typing there changes it: the search
+        searches (opened by it), a filter or a find filters."""
+        if self._closed:
+            return False
+        if key == "genres":
+            self._screen.genres.phone_type(text)
+        elif key == "rec_rail":
+            self._screen.rec_rail.phone_type(text)
+        elif key == "search":
+            if not text and self._mode != "search":
+                return True  # nothing typed: nothing opens
+            if self._mode != "search":
+                self.open_search()
+            self._focus("search")
+            search, field = self._search, self._screen.search_field
+            search.set_query(text)
+            field.set_query(search.query)
+        else:
+            return False
+        return True
 
     def close_search(self) -> None:
         """The phone remote's search is done: the search it showed here closes as Esc closes an

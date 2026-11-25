@@ -271,8 +271,9 @@ def bitrate_text(kbps: float) -> str:
 
 def stats_rows(stats: Mapping[str, Any]) -> list[tuple[str, str]]:
     """The statistics overlay's rows, (name, value), from `PlaybackSession.video_stats()`'s
-    dict with what the shell adds ("source", "lag"); a row whose numbers are not known yet is
-    left out."""
+    dict with what the shell adds ("source", "lag", "behind_broadcaster"); a row whose numbers
+    are not known yet is left out, and so is a broadcaster's date ahead of this computer's
+    clock (a clock set wrong, its or the site's)."""
     rows: list[tuple[str, str]] = []
     video = []
     if stats.get("video_codec"):
@@ -338,4 +339,10 @@ def stats_rows(stats: Mapping[str, Any]) -> list[tuple[str, str]]:
         seconds = i18n.decimal(f"{lag:.1f}")
         # i18n: the statistics' row: how far the picture plays behind the channel's live edge
         rows.append((tr("Behind live"), tr("{seconds} s", seconds=seconds)))  # i18n: seconds
+    behind = stats.get("behind_broadcaster")
+    if isinstance(behind, (int, float)) and math.isfinite(behind) and behind >= 0:
+        seconds = i18n.decimal(f"{behind:.1f}")
+        # i18n: the statistics: from the time the site stamped on the piece, as its player's latency
+        name = tr("Behind the broadcaster")
+        rows.append((name, tr("{seconds} s", seconds=seconds)))
     return rows
