@@ -86,7 +86,7 @@ from PySide6.QtGui import QCursor
 
 from services.config_manager import ConfigManager
 from services.i18n import N_, tr, translate
-from services.live.refusals import REFUSALS, STREAM_REFUSED
+from services.live.refusals import REFUSALS, STREAM_LIMIT, STREAM_REFUSED
 from services.live.stay_live import TARGETS
 from services.provider_ids import with_provider
 from services.redact import safe_message
@@ -1054,9 +1054,13 @@ class GridControls(QObject):
 
     def _revive_later(self, name: str, channel: dict, message: str) -> None:
         """Tile `name`'s channel failed or ended after it played there: it opens again in that
-        tile after the next wait, its card counting down (never after a refusal)."""
+        tile after the next wait, its card counting down (never after a refusal; a site's
+        channel's, but for the provider's limit: its token ran out again, and its site is asked)."""
         played = self._played.get(name)
-        if self._reopen is None or message in REFUSALS or not ZapContext.same(played, channel):
+        # (2026-11-25: a site's channel refused again, its token run out again, too)
+        site = self._site_page(channel) is not None
+        refused = message == STREAM_LIMIT if site else message in REFUSALS
+        if self._reopen is None or refused or not ZapContext.same(played, channel):
             return
         revive = self._revive_for(name, channel)
         revive.stopped()

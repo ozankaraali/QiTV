@@ -1801,15 +1801,17 @@ class LinkOwnerPipTests(PipCase):
 
 class SitePipTests(PipCase):
     """Final review I3: a Kick or Twitch channel small asks its site again, as the large
-    picture's does (its address's token lasts minutes): once its buffer failed after it
-    played, and once more each time its fresh address played HEALTHY_S since its first
-    picture; and its direct play that ended opens again at the address its site gives now.
+    picture's does (its address's token lasts minutes): at once once its buffer failed after
+    it played, and again at once each time its fresh address played HEALTHY_S since its first
+    picture, else after a wait (2026-11-25: as often as needed); and its direct play that ended
+    opens again at the address its site gives now.
     The site is faked (services.live_sites.resolve): nothing is fetched."""
 
     PAGE = "https://kick.com/examplechannel"
     MASTER = "https://edge.example/hls/examplechannel/master.m3u8?token=sentinel-one"
     FRESH = "https://edge.example/hls/examplechannel/master.m3u8?token=sentinel-two"
     NEWER = "https://edge.example/hls/examplechannel/master.m3u8?token=sentinel-three"
+    NEWEST = "https://edge.example/hls/examplechannel/master.m3u8?token=sentinel-four"
 
     def setUp(self):
         super().setUp()
@@ -1852,7 +1854,8 @@ class SitePipTests(PipCase):
 
     def test_a_site_channel_whose_small_buffer_fails_asks_its_site_again(self):
         self.enterContext(mock.patch("ui.live_controls.HEALTHY_S", 0.2))
-        self.answers = [self.MASTER, self.FRESH, self.NEWER]
+        self.enterContext(mock.patch("ui.live_controls.SITE_AGAIN_S", (0.0, 0.3, 0.6)))
+        self.answers = [self.MASTER, self.FRESH, self.NEWER, self.NEWEST]
         small = self.open_page_small()
         self.fails(small, 1)
         self.assertEqual(small.live.named("start")[-1][0], self.FRESH)
@@ -1863,12 +1866,16 @@ class SitePipTests(PipCase):
         self.fails(small, 2)
         self.assertEqual(small.live.named("start")[-1][0], self.NEWER)
         self.assertEqual((self.asked, self.toast.messages()), (3, []))
-        small.live.failed.emit(STREAM_REFUSED)  # soon again: given up, as ever
+        # Soon again (2026-11-25): its site is asked again after a wait, as often as needed;
+        # nothing says an error while it answers.
+        small.live.failed.emit(STREAM_REFUSED)
         small.live.released.emit()
         pause(100)
         self.assertEqual((self.asked, len(small.live.named("start"))), (3, 3))
-        self.assertEqual(self.toast.messages()[-1][1], "error")
-        self.assertFalse(self.sessions.pip_open())
+        self.assertNotIn("error", [kind for _text, kind in self.toast.messages()])
+        self.assertTrue(wait_until(lambda: self.asked == 4))
+        self.assertTrue(wait_until(lambda: len(small.live.named("start")) == 4))
+        self.assertEqual(small.live.named("start")[-1][0], self.NEWEST)
 
     def test_a_site_channels_small_direct_play_that_ended_opens_at_a_fresh_address(self):
         self.enterContext(mock.patch("ui.live_controls.RECONNECT_MS", (40, 120)))

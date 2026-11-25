@@ -1849,8 +1849,9 @@ class LinkOwnerGridTests(MultiviewCase):
 class SiteTileTests(MultiviewCase):
     """Final review I3: a Kick or Twitch channel in a tile beside the focus whose buffer is
     refused after it played (its address's token ran out) is tuned again there through its
-    lane, so its site is asked again: once, and once more each time its fresh address played
-    HEALTHY_S since its first picture. The site is faked: nothing is fetched."""
+    lane, so its site is asked again: at once, and at once again each time its fresh address
+    played HEALTHY_S since its first picture, else after the revive's wait (2026-11-25). The
+    site is faked: nothing is fetched."""
 
     PAGE = "https://www.twitch.tv/examplechannel"
     MASTER = "https://edge.example/hls/examplechannel/master.m3u8?token=sentinel-one"
@@ -1901,9 +1902,10 @@ class SiteTileTests(MultiviewCase):
         self.refused(t3)
         self.plays(t3, self.NEWER)
         self.assertEqual(self.asked, 3)
-        self.refused(t3)  # soon again: it says so, and asks nothing more
+        self.refused(t3)  # soon again (2026-11-25): asked again after the revive's wait
         pause(100)
-        self.assertEqual((self.grid.state("t3"), self.asked), (FAILED, 3))
+        self.assertEqual((self.grid.state("t3"), self.asked), (FAILED, 3))  # never at once
+        self.assertIn("t3", self.grid._revive_due)  # its card counts down to it
 
     def test_a_site_tile_refused_for_the_limit_is_never_asked_again(self):
         self.answers = [self.MASTER]

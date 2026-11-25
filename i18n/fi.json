@@ -492,6 +492,7 @@
   "Israel": "Israel",
   "It can be paired again with the code on the TV.": "Sen voi yhdistää uudelleen television koodilla.",
   "It isn't {name} with a new token, but another stream. Keep it as a new link, or replace {name}'s address?": "Tämä ei ole {name} uudella tunnuksella vaan toinen striimi. Pidetäänkö se uutena linkkinä vai korvataanko {name}-linkin osoite?",
+  "It plays as soon as it's live": "Toistuu heti, kun lähetys alkaa",
   "Italy": "Italia",
   "Its name, logo and guide IDs, changed or deleted in a card.": "Sen nimi, logo ja oppaan tunnukset, jotka muutetaan tai poistetaan kortissa.",
   "Its scheduled recordings will be cancelled.": "Sen ajastetut tallennukset perutaan.",

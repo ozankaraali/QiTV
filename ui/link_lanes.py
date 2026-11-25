@@ -260,6 +260,15 @@ class LinkLanes(QObject):
         self._inflight = None
         self.queued = None
 
+    def forget_own_ask(self) -> None:
+        """The tune in flight, asked of nobody's catalog (a site's page, its ask just stopped
+        for a newer choice), holds the lane no more: the newer choice is asked at once, not
+        queued behind it (Task 6 M3: up to a site request's 10 s); its late answer is dropped
+        by its id. A catalog's request in flight stays."""
+        inflight = self._inflight
+        if inflight is not None and inflight[0] < 0:
+            self._inflight = None
+
     # ---- the side lane ------------------------------------------------------------------------
 
     def request_side(self, target: Target, then: Callable[[str], None], *, play: bool) -> None:

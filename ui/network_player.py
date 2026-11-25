@@ -272,6 +272,11 @@ class NetworkPlayer(QObject):
         way = 1 if delta > 0 else -1
         ahead = [self._steps[(at + way * n) % count] for n in range(1, count)]
         then = next((k for k in ahead if k not in self._passed), None)
+        if then is None and self._passed:
+            # Every other link failed in this run: they are asked in turn again (a press
+            # never does nothing while another link is kept).
+            self._passed = set()
+            then = ahead[0] if ahead else None
         if then is not None:
             self._anchor, self._stepped, self._step_played = key, then, False
             self.play_kept(then, zapped=True)

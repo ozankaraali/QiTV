@@ -118,10 +118,13 @@ from services.navigation import (
 )
 from services.network_streams import (
     DOWN,
+    FAILED,
     FILM,
     LIVE,
+    TIMED_OUT,
     failure_reason,
     is_link,
+    is_offline,
     is_site_failure,
     names_its_channel,
     shown_reason,
@@ -461,6 +464,7 @@ class TVController(QObject):
             link_failed=self._on_link_failed,
             site_page=self._site_page,
             reask=self._reask_site,
+            waits_for_live=self._waits_for_live,
             parent=self,
         )
         # Cards over the TV of their own (File → Open Link…'s, plan 4; add_card).
@@ -997,6 +1001,7 @@ class TVController(QObject):
             return
         self._closed = True
         self._lanes.close()
+        self._live_controls.stop_waiting()  # a site's channel waited for is asked no more
         for stop in self._site_stops:
             stop.set()  # a site still asked answers no one: its ask ends
         self._autoplay.close()
@@ -1150,6 +1155,9 @@ class TVController(QObject):
         self._cancel_external()
         self._lanes.supersede()  # an external play waiting for its link no longer plays
         self._lanes.drop_tune()  # a link on its way never opens
+        if self._tune_stop is not None:
+            self._tune_stop.set()  # (nor is a site asked on for it: Task 6 M6)
+            self._tune_stop = None
         self._autoplay.drop()  # the Next card, and a wait for the next season
         self._guide.close()
         self._tuning.stop()
@@ -2670,9 +2678,12 @@ class TVController(QObject):
         self._drop_card()  # a newer choice than what the Next card offers
         if self._tune_stop is not None:
             # A newer choice: the stream a site is asked for, for the tune in flight, would
-            # play nowhere; its ask ends between its requests (or answers, dropped).
+            # play nowhere; its ask ends between its requests (or answers, dropped), and the
+            # newer choice is asked now, not after it.
             self._tune_stop.set()
             self._tune_stop = None
+            self._lanes.forget_own_ask()
+        self._live_controls.chosen(target)  # a site's channel waited for is no longer
         self._asking_tune = True  # a site asked meanwhile is asked for this tune
         try:
             self._lanes.request(target)
@@ -2735,6 +2746,8 @@ class TVController(QObject):
             return
         if self._follow_queue(target):
             return  # the failed target was superseded: no error for it
+        if self._waits_for_live(target, message):
+            return  # a site's channel that is not live waits on screen for it
         self._forget_room(target)
         self._give_large_back(target)
         self._let_go_unless_a_link_plays()  # a link chosen held never came
@@ -2745,6 +2758,36 @@ class TVController(QObject):
             return
         self._error(self._named(target.title, message))
         self._explain_item(target.item, target.title)
+
+    def _waits_for_live(self, target: Target, message: str) -> bool:
+        """2026-11-25 (the owner: "streamer is offline and comes online, just when you sense
+        resync to latest"): a site's channel chosen for the large picture (not a zap step:
+        those step past it), or asked again as its stream ended, whose site says it is not
+        live now waits there for it (LiveControls.wait_for_live): what played stops, the pill
+        says so, its site is asked again calmly, and it plays from its newest once it is live.
+        Counted in its row once; while it waits, an ask that did not reach the site waits on.
+        False where it does not wait (a zap step, a multiview, an outside player: said as
+        ever)."""
+        if (
+            not target.live
+            or target.zapped
+            or self._site_page(target.item) is None
+            or self.multiview_shown()
+            or self._external_launcher() is not None
+        ):
+            return False
+        waiting = self._live_controls.waits_for(target)
+        if not is_offline(message) and not (waiting and message in (TIMED_OUT, FAILED)):
+            return False
+        self._forget_room(target)
+        self._live_controls.wait_for_live(target, message if is_offline(message) else "")
+        self._current, self._cid = target, None
+        self._restore_channel()
+        self.zap.tuned(target.item)  # ↑/↓ move on from it
+        if not waiting:
+            url = self._network_url(target.item) or ""
+            self.linkFailed.emit(target.item, LIVE, url, message)
+        return True
 
     def _on_tune_dropped(self, _target: Target) -> None:
         """A tune overtaken by an external play: the channel still playing stays the channel."""

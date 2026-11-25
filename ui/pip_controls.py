@@ -849,7 +849,7 @@ class PipControls(QObject):
         ):
             return False
         logger.info("Asking the site of %s again after the small picture failed", target.title)
-        again = replace(target, retried=True, played=True)
+        again = replace(target, retried=True, played=True, relinks=0)  # (its waits anew)
         self._wanted = (again, view.context if view.context is not None else ZapContext())
         self._request(again)
         return True
@@ -867,22 +867,27 @@ class PipControls(QObject):
         """The small picture closed for its STB channel's failure, past its fresh link at
         once: once it played, its link is made again after the revive's next wait and it
         opens small again (`services.revive`), for as long as nothing else is chosen small;
-        never for the provider's limit. False: none."""
+        never for the provider's limit. A site's channel (2026-11-25), past its ask at once:
+        its site is asked again after the large picture's waits (`SITE_AGAIN_S`), a refusal
+        too (its token ran out again). False: none."""
         target = view.target
         failure = self.sessions.failure
         played = name in self._played
+        site = target is not None and self._site_page(target.item) is not None
         if (
             target is None
             or not target.live
             or not (target.played or played)
             or not failure
-            or failure in REFUSALS
+            or (failure == STREAM_LIMIT if site else failure in REFUSALS)
             or self._wanted is not None
             or self._link is not None
-            or item_provider.provider_type(self.catalog, target.item) != "STB"
+            or not (site or item_provider.provider_type(self.catalog, target.item) == "STB")
         ):
             return False
-        wait = revive_wait(target.relinks)
+        waits = live_controls.SITE_AGAIN_S
+        tries = target.relinks + 1  # (the ask at once was `_site_again`'s)
+        wait = waits[min(tries, len(waits) - 1)] if site else revive_wait(target.relinks)
         logger.info("Making the link of %s again in %.0f s (small)", target.title, wait)
         self._relink_due = replace(view, target=replace(target, played=True))
         self._relink_timer.start(round(wait * 1000))
@@ -898,6 +903,11 @@ class PipControls(QObject):
             return  # another channel was chosen small meanwhile
         if ZapContext.same(view.target.item, self._large_channel()):
             return  # the large picture took the channel
+        if self._site_page(view.target.item) is not None:  # its site's, no portal's sign-in
+            again = replace(view.target, retried=True, relinks=view.target.relinks + 1)
+            self._wanted = (again, view.context if view.context is not None else ZapContext())
+            self._request(again)
+            return
         self._retry(view, relinks=view.target.relinks + 1, played=True)
 
     def _cancel_relink(self) -> None:
