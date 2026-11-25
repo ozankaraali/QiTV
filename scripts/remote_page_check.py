@@ -2567,6 +2567,21 @@ def scenario_typing(rig: Rig) -> None:
     rig.page.wait_for_timeout(300)
     assert rig.page.locator("#typeSheet").is_hidden(), "the sheet covered the numpad"
     assert rig.page.locator("#moreSheet").is_visible()
+    # The phone's own search (Show on TV opened the TV's): the TV's box opens no sheet over it.
+    rig.page.click("#moreSheet [data-close=moreSheet]")  # the numpad's Done
+    rig.page.click("#searchButton")
+    rig.page.wait_for_selector("[data-screen=search]:not([hidden])")
+    rig.page.fill("#searchInput", "harb")
+    label = "Search movies, series and channels"
+    rig.hub.send(sid, {"t": "field", "id": 13, "label": label, "text": "harb"})
+    rig.page.wait_for_timeout(300)
+    assert rig.page.locator("#typeSheet").is_hidden(), "the sheet covered the phone's search"
+    assert rig.page.evaluate("document.activeElement.id") == "searchInput"
+    assert rig.page.locator("#typeButton").is_visible()
+    rig.page.click("#searchDone")
+    rig.page.wait_for_selector("[data-screen=remote]:not([hidden])")
+    rig.page.click("#moreButton")
+    rig.page.wait_for_selector("#moreSheet:not([hidden])")
     # Over the phone's Library: the TV's Library search has the keys.
     rig.page.click("#moreSheet [data-close=moreSheet]")  # the numpad's Done
     mark = rig.events.mark()

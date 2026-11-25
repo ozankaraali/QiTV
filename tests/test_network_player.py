@@ -1601,6 +1601,32 @@ class SiteTests(tvc.RetryPillCase, PlayerCase):
         self.assertEqual(heard, {"a": [OFFLINE], "b": [OFFLINE]})
         self.assertEqual(len(self.asked), 2)
 
+    def test_a_phones_watch_that_hears_failures_is_handed_its_link(self):
+        # 2.15: a Watch with `failed` (its own copy of the target) plays as any Watch does:
+        # the TV lets go, the phone gets the link, the hook hears nothing.
+        heard, launched = [], []
+
+        def launch(_target, url):
+            launched.append(url)
+            return True, ""
+
+        target = Target(self.kept_item(), "live", "examplechannel · Kick")
+        for asked, answer, link in ((target, MASTER, MASTER), (None, None, URL)):
+            with self.subTest(asked=asked is not None):
+                self.link(URL)  # the TV plays a link of its own
+                self.plays_now()
+                stops = len(self.live.named("stop"))
+                if answer is not None:
+                    self.answers = [answer]
+                launched.clear()
+                self.controller.play_elsewhere(
+                    launch, asked, failed=lambda _t, why: heard.append(why) or True
+                )
+                self.assertTrue(wait_until(lambda: len(self.live.named("stop")) > stops))
+                self.live.released.emit()
+                self.assertTrue(wait_until(lambda: launched == [link]))
+        self.assertEqual(heard, [])
+
     def test_a_waiting_phones_ask_drops_no_choice_of_the_tvs(self):
         # 2.15: its asks go beside the TV's choices (the TV's zap meanwhile still opens), and
         # once live its stream is handed on only while the phone still waits for it.

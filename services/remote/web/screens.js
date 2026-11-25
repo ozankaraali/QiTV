@@ -1949,7 +1949,11 @@ function onField(message) {
   flushTyped(); // the box before: its last letters (dropped there, if it is not it any more)
   offered = { id, label, secret, text };
   const numpad = !$("moreSheet").hidden; // its digits typed into the channel list's find
-  if (message.quiet === true || id === dismissed || numpad) {
+  // The phone's own search shows (Show on TV opened the TV's), or one of its own fields has the
+  // keyboard: the sheet would take it away.
+  const field = document.activeElement;
+  const own = document.body.dataset.shown === "search" || (field && field !== $("typeInput") && field.matches("input, textarea, select"));
+  if (message.quiet === true || id === dismissed || numpad || own) {
     if (numpad) dismissed = id;
     if (typingShown()) {
       box = null; // (the box it typed into has the keys no more)

@@ -305,6 +305,20 @@ class TypingTests(PhoneCase):
         page.dismiss()
         self.assertIsNone(page.phone_field())
 
+    def test_the_phones_search_shown_on_the_tv_names_the_librarys_search(self):
+        """The phone's Search with Show on TV opens the TV's search: that box has the keys
+        (the page keeps its sheet off while its own search shows)."""
+        self.show()
+        self.wait_for_drawer()
+        self.connect()
+        remote = self.window.remote
+        remote.fire("search")
+        self.assertTrue(wait_until(self.window.screens.library_shown))
+        remote._push_state()
+        shown = self.fields()[-1]
+        label = "Search movies, series and channels"
+        self.assertEqual((shown["label"], "quiet" in shown), (label, False))
+
     def test_a_question_over_the_box_has_the_keys(self):
         self.show()
         self.wait_for_drawer()
@@ -547,6 +561,24 @@ class SiteWaitTests(PhoneCase):
         self.assertTrue(self.sent("play", "s9")[-1]["url"].startswith("https://edge.example"))
         self.assertEqual(self.sent("stop", "s8"), [{"t": "stop"}])
         self.assertEqual(remote._waits.waits(), [])
+
+    def test_another_phones_watch_ends_a_wait(self):
+        """One screen at a time: another phone's Watch that plays ends a phone's wait (its
+        channel live later must not take the stream back from it); that phone hears so."""
+        self.connect()
+        self.connect("s9", "d9")
+        remote = self.window.remote
+        self.answers = [OFFLINE]
+        self.watch("s8")
+        self.answers = ["https://edge.example/live.m3u8?token=sentinel"]
+        self.watch("s9")  # the same channel, live for it now
+        self.window.controller.handedOn.emit()  # (the controller's, as the phone took it)
+        self.assertFalse(remote._waits.waiting("d8"))
+        self.assertEqual(self.sent("stop", "s8"), [{"t": "stop"}])
+        self.assertEqual(self.sent("stop", "s9"), [])
+        asks = len(self.asks)
+        pause(400)
+        self.assertEqual(len(self.asks), asks)
 
     def test_waiting_holds_no_stream_of_what_the_phone_played(self):
         self.connect()

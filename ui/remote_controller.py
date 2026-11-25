@@ -1261,8 +1261,17 @@ class RemoteController(QObject):
         """An outside player took over what the TV played: a phone's Watch (the one just
         handed it plays on), or Play in VLC. Every other phone watching lets go, as when the
         TV plays again: one screen at a time, and the stream QiTV holds for an outside player
-        is the newest one's."""
+        is the newest one's. 2.15: every other phone waiting for a channel waits no more (its
+        channel live later must not take the stream back)."""
         keep, self._handed_to = self._handed_to, None
+        for wait in self._waits.waits():
+            for device in list(wait.devices):
+                if device == keep:
+                    continue
+                self._waits.end(device)
+                to = self._session_of(device)
+                if to is not None:
+                    self._send(to, {"t": "stop"})  # as when another screen takes over
         gone = [device for device in self._watching if device != keep]
         if not gone:
             return
