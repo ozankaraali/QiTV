@@ -136,10 +136,13 @@ AUTO = "auto"  # the latency setting that learns each channel's target (learned_
 LATENCIES = (AUTO, *TARGETS)
 
 _SETTLE = 0.2  # a chosen speed catching up ends this close to the target
-# 2.15: a chosen speed above _FAST eases to _FAST this much (per 1x above 1x) before it would
-# settle: VLC reads ahead of its picture and a live site's newest piece comes in real time, so
-# at 2x it ran dry for a moment just before live (Kick, 2026-11-25); _FAST takes the rest
+# 2.15: a chosen speed above _EASE_RATE eases to it this much (per 1x above 1x) before it would
+# settle, and to _FAST _EASE_LAST_S before: VLC reads ahead of its picture and a live site's
+# newest piece comes in real time, so at 2x it ran dry for a moment just before live (Kick,
+# 2026-11-25); eased to _FAST alone the last 4 s took 40 s
 _EASE_S = 4.0
+_EASE_RATE = 1.25
+_EASE_LAST_S = 1.0
 _REOPEN = 20.0
 _HEALTH_WINDOW_S = 3.0  # rate health: VLC's progress is judged over this much counted time
 _HEALTH_SHARE = 0.7  # under this share of rate x wall time, VLC cannot play at that rate
@@ -887,8 +890,11 @@ class StayLive:
                 self.user_go_live()
                 return Decision(1.0)
             rate = self._user_rate
-            if rate > _FAST and lag_s <= self.target + _SETTLE + (rate - 1.0) * _EASE_S:
-                rate = _FAST  # (eased before the edge: it never runs dry there)
+            near = lag_s - self.target - _SETTLE
+            if rate > _EASE_RATE and near <= (rate - 1.0) * _EASE_S:
+                rate = _EASE_RATE  # (eased before the edge: it never runs dry there)
+            if rate > _FAST and near <= _EASE_LAST_S:
+                rate = _FAST
             return Decision(rate)
         if buffering:
             # What the wait adds is a step, not a drift; but a VLC that runs dry again and

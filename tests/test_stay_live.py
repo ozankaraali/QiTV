@@ -107,7 +107,8 @@ class ModeTests(unittest.TestCase):
         sl.user_speed(1.5)
         S = T + 0.2
         self.assertEqual(sl.update(S + 2.0 + 1e-6, False, now=clock.tick()), Decision(1.5))
-        self.assertEqual(sl.update(S + 1e-6, False, now=clock.tick()), Decision(1.10))  # eased
+        self.assertEqual(sl.update(S + 1.5, False, now=clock.tick()), Decision(1.25))  # eased
+        self.assertEqual(sl.update(S + 1e-6, False, now=clock.tick()), Decision(1.10))
         self.assertEqual(sl.update(S, True, now=clock.tick()), Decision(1.10))  # buffering
         self.assertIs(sl.mode, Mode.CATCHING_UP)
         self.assertEqual(sl.update(100, False, now=clock.tick()), Decision(1.5))  # no reopen
@@ -116,14 +117,15 @@ class ModeTests(unittest.TestCase):
 
     def test_a_chosen_speed_eases_before_live_so_it_never_runs_dry(self):
         # Live, Kick (2026-11-25): at 2x VLC ran dry a moment just before live (it reads
-        # ahead, and the newest piece comes in real time). Above 1.10x the rate eases to 1.10x
-        # 4 s (per 1x above 1x) before it would settle; 1.10x takes the rest, then LIVE at 1x.
+        # ahead, and the newest piece comes in real time). Above 1.25x the rate eases to 1.25x
+        # 4 s (per 1x above 1x) before it would settle, to 1.10x 1 s before; then LIVE at 1x.
         sl, clock = StayLive(), Clock()
         sl.user_paused()
         sl.user_speed(2.0)
         S = T + 0.2
         self.assertEqual(sl.update(S + 4.0 + 0.1, False, now=clock.tick()), Decision(2.0))
-        self.assertEqual(sl.update(S + 4.0, False, now=clock.tick()), Decision(1.10))
+        self.assertEqual(sl.update(S + 3.99, False, now=clock.tick()), Decision(1.25))
+        self.assertEqual(sl.update(S + 0.99, False, now=clock.tick()), Decision(1.10))
         self.assertEqual(sl.update(S + 0.5, False, now=clock.tick()), Decision(1.10))
         self.assertIs(sl.mode, Mode.CATCHING_UP)
         self.assertEqual(sl.update(S, False, now=clock.tick()), Decision(1.0))
