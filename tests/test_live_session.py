@@ -8915,6 +8915,29 @@ class SiteRecordingTests(LiveSessionCase):
         self.engine.sessionEnded.emit(part)  # it ends at 0.9 by its date; at 2.0 by its PTS
         self.assertEqual(self.engine.joins, [(part, sid, 1)])
 
+    def test_the_timestamps_win_even_seconds_off_the_recordings_start(self):
+        # Live, Twitch fMP4 (2026-11-25): its recording lay 4-5 s off by the video's start;
+        # the nearest segment by date was joined, its timestamps 4 s on: the content skipped.
+        spans = [
+            Span(
+                n,
+                2.0 * n,
+                2.0 * n + 2.0,
+                False,
+                media_seq=500 + n,
+                first_pts=9_000_000 + n * 180_000,
+            )
+            for n in range(100)
+        ]
+        sid = self.playing(spans=spans)
+        own = [
+            Span(0, 0.0, 10.0, False, media_seq=359, first_pts=7_839_000),
+            Span(1, 10.0, 20.9, False, media_seq=360, first_pts=8_739_000),
+        ]  # it ends, by its PTS, where the buffer's segment at 8.0 begins: 7 s past its date
+        part = self.in_recording(-15.0, own, part_date=9_980.0)
+        self.engine.sessionEnded.emit(part)
+        self.assertEqual(self.engine.joins, [(part, sid, 4)])
+
     def short_buffer_with_backfill(self):
         """8 s buffered (from media sequence 500), the live playlist listing 28 s: the site's
         recording known, its backfill (20 s, 490-499) fetched whole and joined to the buffer."""

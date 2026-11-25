@@ -478,9 +478,10 @@ _BACKFILL_TRIES = 40  # ... asked again on the buffer's states until it is known
 _BACKFILL_AHEAD_S = 600.0  # (all of it at once: it is never played on its own)
 # ... joined at the buffer's segment whose first picture follows the recording's last by its
 # timestamps when they run on one line (within this of a frame), and that segment lies within
-# this much of where the recording ends by its dates (Twitch's are its start, to the second)
+# this much of where the recording ends by its dates (Twitch's are its start, to the second:
+# live, an fMP4 channel's recording lay 4-5 s off by them, 2026-11-25)
 _PTS_MATCH_TICKS = 9_000
-_JOIN_PTS_S = 3.0
+_JOIN_PTS_S = 12.0
 _STOP_STEP_S = 2.0
 # ... and what is known of where it reaches grows with the clock past its longest step (Kick's
 # lists in steps of 30-60 s; Twitch's grows as it goes)
