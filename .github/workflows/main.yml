@@ -21,8 +21,14 @@ jobs:
   # The unit tests run once, on macOS, beside the builds (2.6.1: Ubuntu's package mirror kept
   # stalling the VLC install; VLC.app comes from the build jobs' cache); each build still
   # smoke-tests its packaged app (real playback with the bundled libVLC) on its own platform.
+  # 2.15: split over two runners side by side, each half by the files' size (run_tests.py).
   tests:
     runs-on: macos-latest
+    strategy:
+      fail-fast: true
+      matrix:
+        shard: [1, 2]
+    name: tests (${{ matrix.shard }}/2)
     steps:
       - name: Checkout code
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -52,6 +58,7 @@ jobs:
         run: uv run python scripts/run_tests.py
         env:
           QT_QPA_PLATFORM: offscreen
+          QITV_TEST_SHARD: ${{ matrix.shard }}/2
       - name: Cancel the run after a failure
         # A failed job cancels the others: the run cannot release anyway, and a fix pushed
         # next does not wait for it (main's runs queue instead of replacing each other).

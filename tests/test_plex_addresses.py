@@ -12,6 +12,8 @@ from urllib.parse import parse_qs, urlsplit
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
+from http_fixtures import ThreadingLoopbackHTTPServer
+
 from services import plex, plex_addresses as pa
 from services.image_manager import ImageManager
 from tests.fixtures.local_provider import PROVIDER_NAME
@@ -140,7 +142,7 @@ class PictureFetchTest(unittest.TestCase):
             def log_message(self, *args):
                 pass
 
-        self.server = http.server.ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+        self.server = ThreadingLoopbackHTTPServer(("127.0.0.1", 0), Handler)
         threading.Thread(target=self.server.serve_forever, daemon=True).start()
         self.addCleanup(self.server.server_close)
         self.addCleanup(self.server.shutdown)

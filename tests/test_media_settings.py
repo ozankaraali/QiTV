@@ -1,7 +1,7 @@
 """Settings → Verify on a Jellyfin or Emby server (2.8): it signs in with the password and
 hands back the server's access (the token); the client names QiTV, never the computer."""
 
-from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from http.server import BaseHTTPRequestHandler
 import json
 import os
 import socket
@@ -10,6 +10,8 @@ import unittest
 from unittest import mock
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+
+from http_fixtures import ThreadingLoopbackHTTPServer
 
 from services.provider_check import check
 
@@ -40,7 +42,7 @@ class _Server(BaseHTTPRequestHandler):
 class VerifyMediaServerTests(unittest.TestCase):
     def setUp(self):
         _Server.seen = []
-        self.server = ThreadingHTTPServer(("127.0.0.1", 0), _Server)
+        self.server = ThreadingLoopbackHTTPServer(("127.0.0.1", 0), _Server)
         threading.Thread(target=self.server.serve_forever, daemon=True).start()
         self.addCleanup(self.server.server_close)
         self.addCleanup(self.server.shutdown)

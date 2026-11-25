@@ -237,7 +237,7 @@ class TimeShiftCase(unittest.TestCase):
         t.update_timeline(timeline(mode="catching_up", rate=1.5), PROGRAMME)
         speed = QSignalSpy(t.speedRequested)
         self.click(t, t.button_rect("faster").center().toPoint())
-        self.assertEqual(speed.at(0)[0], 2.0)
+        self.assertEqual(speed.at(0)[0], 1.75)  # 2.15: 1.75x comes after 1.5x
         t.update_timeline(at_edge(lag=4.0, rate=1.05), PROGRAMME)  # stay-live's nudge, not a choice
         self.assertNotIn("speed", t._layout())  # the edge row has no speed chip
         t.update_timeline(timeline(position=3476.0, lag=4.0), PROGRAMME)  # the nudge is not kept

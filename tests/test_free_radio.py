@@ -1,7 +1,7 @@
 """Free radio (2.13): radio-browser.info's stations, added as an M3U provider whose list is the
 directory's station JSON (local fixtures only: made-up stations, never the network)."""
 
-from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from http.server import BaseHTTPRequestHandler
 import json
 import os
 import tempfile
@@ -12,6 +12,8 @@ from unittest import mock
 import uuid as uuid_module
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+
+from http_fixtures import ThreadingLoopbackHTTPServer
 
 from services import free_channels, free_radio as fr, i18n, provider_check, workers
 from services.config_manager import get_app_version
@@ -470,7 +472,7 @@ class LoaderTests(unittest.TestCase):
     """The M3U loader reads the directory's JSON: the same worker, the same list's shape."""
 
     def setUp(self):
-        server = ThreadingHTTPServer(("127.0.0.1", 0), _Directory)
+        server = ThreadingLoopbackHTTPServer(("127.0.0.1", 0), _Directory)
         server.requests, server.bodies = [], {
             "/json/stations/bycountrycodeexact/TR": json.dumps(STATIONS).encode(),
             "/json/stations/bycountrycodeexact/BQ": b"[]",

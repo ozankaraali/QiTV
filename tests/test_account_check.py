@@ -3,7 +3,7 @@ provider failed (services.account_check, services.failure_reasons), and the TV s
 toast says it while it still shows."""
 
 from datetime import datetime, timedelta, timezone
-from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from http.server import BaseHTTPRequestHandler
 import json
 import logging
 import os
@@ -17,6 +17,7 @@ from urllib.parse import parse_qs, urlsplit
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
+from http_fixtures import ThreadingLoopbackHTTPServer
 import requests
 
 from services import failure_reasons as reasons, provider_api, provider_check, workers
@@ -70,7 +71,7 @@ class ServerCase(unittest.TestCase):
         self.requests = []
         self.authorizations = []
         handler = type("Handler", (_Handler,), {"owner": self})
-        server = ThreadingHTTPServer(("127.0.0.1", 0), handler)
+        server = ThreadingLoopbackHTTPServer(("127.0.0.1", 0), handler)
         server.daemon_threads = True
         self.addCleanup(server.server_close)
         thread = threading.Thread(target=server.serve_forever, kwargs={"poll_interval": 0.02})

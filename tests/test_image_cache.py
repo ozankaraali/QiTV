@@ -10,6 +10,8 @@ from unittest import mock
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
+from http_fixtures import ThreadingLoopbackHTTPServer
+
 from services.image_manager import ImageManager
 
 
@@ -206,7 +208,7 @@ class ImageDownloadTests(unittest.TestCase):
             def log_message(self, *args):
                 pass
 
-        self.server = http.server.ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+        self.server = ThreadingLoopbackHTTPServer(("127.0.0.1", 0), Handler)
         threading.Thread(target=self.server.serve_forever, daemon=True).start()
         self.base = f"http://127.0.0.1:{self.server.server_port}"
 

@@ -1,7 +1,7 @@
 """A guide refresh never blanks Now/Next, and a failed refresh keeps the guide it had."""
 
 from datetime import datetime, timedelta, timezone
-from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from http.server import BaseHTTPRequestHandler
 import os
 import pickle
 import tempfile
@@ -11,6 +11,7 @@ from types import SimpleNamespace
 import unittest
 from unittest.mock import patch
 
+from http_fixtures import ThreadingLoopbackHTTPServer
 import requests
 
 from services import (
@@ -799,7 +800,7 @@ class UrlGuideDateTests(_GuideCase):
             def log_message(self, *args):
                 pass
 
-        server = ThreadingHTTPServer(("127.0.0.1", 0), Guide)
+        server = ThreadingLoopbackHTTPServer(("127.0.0.1", 0), Guide)
         thread = threading.Thread(target=server.serve_forever, daemon=True)
         thread.start()
         self.addCleanup(thread.join)

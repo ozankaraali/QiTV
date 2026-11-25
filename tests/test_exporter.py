@@ -1,4 +1,4 @@
-from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from http.server import BaseHTTPRequestHandler
 import json
 import os
 import stat
@@ -14,6 +14,7 @@ import requests
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 from PySide6.QtWidgets import QApplication
+from http_fixtures import ThreadingLoopbackHTTPServer
 from timer_fixtures import pause
 
 from services import provider_api, thread_cleanup
@@ -97,7 +98,7 @@ class FakePortal:
                 self.end_headers()
                 self.wfile.write(body)
 
-        self.server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+        self.server = ThreadingLoopbackHTTPServer(("127.0.0.1", 0), Handler)
         self.server.daemon_threads = True
         self.url = f"http://127.0.0.1:{self.server.server_port}/c/"
         # A daemon: a run interrupted before close() must still exit.

@@ -1,4 +1,4 @@
-from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from http.server import BaseHTTPRequestHandler
 import os
 from pathlib import Path
 import shutil
@@ -15,6 +15,7 @@ os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 from PySide6.QtCore import QObject, Qt, Signal
 from PySide6.QtWidgets import QApplication
+from http_fixtures import ThreadingLoopbackHTTPServer
 from timer_fixtures import elapse, wait_until
 
 from services.playback import (
@@ -349,7 +350,7 @@ class PlaybackSessionTests(unittest.TestCase):
             def log_message(self, *args):
                 pass
 
-        server = ThreadingHTTPServer(("127.0.0.1", 0), SlowProvider)
+        server = ThreadingLoopbackHTTPServer(("127.0.0.1", 0), SlowProvider)
         threading.Thread(target=server.serve_forever, daemon=True).start()
         self.addCleanup(server.server_close)
         self.addCleanup(server.shutdown)

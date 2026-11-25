@@ -14,7 +14,7 @@ runs on the GUI thread (`handle(command, args)`), which the request's thread wai
 from __future__ import annotations
 
 import hmac
-from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from http.server import BaseHTTPRequestHandler
 import json
 import logging
 import os
@@ -25,6 +25,8 @@ import threading
 from typing import Any, Callable, Mapping, Optional
 
 from PySide6.QtCore import QObject, Qt, Signal, Slot
+
+from services.live.server import ThreadingLoopbackHTTPServer
 
 logger = logging.getLogger(__name__)
 
@@ -89,7 +91,7 @@ class ControlServer:
         self._log_path = log_path
         self.token = secrets.token_urlsafe(32)
         self.port = 0
-        self._server: Optional[ThreadingHTTPServer] = None
+        self._server: Optional[ThreadingLoopbackHTTPServer] = None
         self._thread: Optional[threading.Thread] = None
 
     @property
@@ -99,7 +101,7 @@ class ControlServer:
     def start(self) -> Optional[int]:
         """Listen and write `control.json`: the port, or None when it could not open."""
         try:
-            self._server = ThreadingHTTPServer(("127.0.0.1", 0), _handler(self))
+            self._server = ThreadingLoopbackHTTPServer(("127.0.0.1", 0), _handler(self))
         except OSError as error:
             logger.warning("The control port could not open (%s).", type(error).__name__)
             return None

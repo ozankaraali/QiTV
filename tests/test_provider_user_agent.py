@@ -4,7 +4,7 @@ Some panels' proxies answer 403 to "python-requests/…" and 502 to the bare hos
 while players such as VLC get in: QiTV names itself on every provider request.
 """
 
-from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from http.server import BaseHTTPRequestHandler
 import json
 import os
 import tempfile
@@ -15,6 +15,8 @@ from unittest import mock
 from urllib.parse import parse_qs, urlsplit
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+
+from http_fixtures import ThreadingLoopbackHTTPServer
 
 from services import provider_api
 from services.epg_manager import EpgManager, _xtream_cache_key
@@ -93,7 +95,7 @@ class BlockedLibraryAgentTests(unittest.TestCase):
         self.requests = []
         self.status = "Active"
         handler = type("Handler", (_Panel,), {"fixture": self})
-        server = ThreadingHTTPServer(("127.0.0.1", 0), handler)
+        server = ThreadingLoopbackHTTPServer(("127.0.0.1", 0), handler)
         self.addCleanup(server.server_close)
         thread = threading.Thread(target=server.serve_forever, daemon=True)
         thread.start()

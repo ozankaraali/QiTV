@@ -1,5 +1,5 @@
 from functools import partial
-from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from http.server import BaseHTTPRequestHandler
 import json
 import threading
 from types import SimpleNamespace
@@ -7,6 +7,7 @@ import unittest
 from unittest.mock import patch
 from urllib.parse import parse_qs, urlsplit
 
+from http_fixtures import ThreadingLoopbackHTTPServer
 import orjson
 import requests
 
@@ -137,7 +138,7 @@ class XtreamRequestTests(unittest.TestCase):
             def log_message(self, format, *args):
                 pass
 
-        server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+        server = ThreadingLoopbackHTTPServer(("127.0.0.1", 0), Handler)
         self.addCleanup(server.server_close)
         thread = threading.Thread(target=server.serve_forever, daemon=True)
         thread.start()

@@ -1,7 +1,7 @@
 """A hostile or broken server's answer is read up to a generous limit, never whole: a playlist,
 a Player API or portal list, a logo, a guide (a privacy review)."""
 
-from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from http.server import BaseHTTPRequestHandler
 import json
 import os
 import tempfile
@@ -9,6 +9,7 @@ import threading
 import unittest
 from unittest import mock
 
+from http_fixtures import ThreadingLoopbackHTTPServer
 import requests
 
 from services import workers
@@ -51,7 +52,7 @@ class _Server(BaseHTTPRequestHandler):
 
 class BodyLimitTests(unittest.TestCase):
     def serve(self, answer, chunked=False):
-        server = ThreadingHTTPServer(("127.0.0.1", 0), _Server)
+        server = ThreadingLoopbackHTTPServer(("127.0.0.1", 0), _Server)
         server.answer, server.chunked = answer, chunked
         thread = threading.Thread(target=server.serve_forever, daemon=True)
         thread.start()

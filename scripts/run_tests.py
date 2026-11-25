@@ -6,6 +6,9 @@ folders and patched environment stay its own; once it has made its QApplication,
 cycles are collected on the GUI thread only, as main() does (tests/gc_fixtures.py). The
 largest files start first. A failing file's whole output is printed, and it runs once more
 alone at the end; the exit code is 1 if it fails again.
+
+`QITV_TEST_SHARD=k/n` runs the k-th of n parts (CI's runners side by side): the files are dealt
+largest first, each to the part with the fewest bytes so far, so the parts take about as long.
 """
 
 from __future__ import annotations
@@ -58,8 +61,25 @@ def run_one(name: str) -> None:
     unittest.main(module=None, argv=argv, testRunner=Runner)
 
 
+def shard(files: list[Path], spec: str) -> list[Path]:
+    """The `k/n` part of `files` (sorted largest first): each file goes to the part with the
+    fewest bytes so far, so every runner gets about the same share."""
+    k, n = (int(part) for part in spec.split("/"))
+    if not 1 <= k <= n:
+        raise SystemExit(f"QITV_TEST_SHARD={spec}: want k/n with 1 <= k <= n")
+    sizes: list[int] = [0] * n
+    parts: list[list[Path]] = [[] for _ in range(n)]
+    for path in files:
+        lightest = min(range(n), key=lambda i: sizes[i])
+        sizes[lightest] += path.stat().st_size
+        parts[lightest].append(path)
+    return parts[k - 1]
+
+
 def main() -> int:
     files = sorted(TESTS.glob("test_*.py"), key=lambda p: p.stat().st_size, reverse=True)
+    if os.environ.get("QITV_TEST_SHARD"):
+        files = shard(files, os.environ["QITV_TEST_SHARD"])
     workers = int(os.environ.get("QITV_TEST_JOBS", "0")) or os.cpu_count() or 2
     start, failed, total = time.monotonic(), [], 0
     with ThreadPoolExecutor(max_workers=workers) as pool:

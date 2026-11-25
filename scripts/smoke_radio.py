@@ -36,6 +36,8 @@ import time
 from typing import Any, Optional
 from urllib.request import Request, urlopen
 
+from services.live.server import ThreadingLoopbackHTTPServer
+
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 logger = logging.getLogger("smoke_radio")
@@ -79,7 +81,7 @@ class Station:
     BREAK_S = 15.0
 
     def __init__(self, frames: list[Any], backlog_s: float = 4.0, over_s: float = 0.0) -> None:
-        from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+        from http.server import BaseHTTPRequestHandler
 
         self.frames = frames
         self.BURST_S, self.over_s = backlog_s, over_s  # a connect's backlog, sent over this long
@@ -126,7 +128,7 @@ class Station:
                     with lock:
                         station.open_now -= 1
 
-        self.server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+        self.server = ThreadingLoopbackHTTPServer(("127.0.0.1", 0), Handler)
         self.server.daemon_threads = True
         self.url = f"http://127.0.0.1:{self.server.server_port}/stream"
         threading.Thread(target=self.server.serve_forever, daemon=True).start()
