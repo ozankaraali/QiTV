@@ -4004,6 +4004,27 @@ video.m3u8
                 self.assertIn(waiting, logs)
                 self.assertEqual(requested_segments(server), ["p3.ts", "p4.ts"])
 
+    def test_another_group_of_a_prefetch_source_not_twitchs_is_caught_as_before(self):
+        # Ruling R23: only Twitch relists a piece being made under another name. Another origin
+        # group of any other site's source (Kick's prefetch lines here), listing pieces being
+        # made of its own, is another encoding's as before Task 11: undated, or dated on the
+        # same clock (within half a piece of the reckoning by construction).
+        kick = {"length": 4.167, "tag": "#EXT-X-PREFETCH:"}
+        others = ["x2.ts", "x3.ts", "x4.ts"]
+        for dates in (False, True):
+            with self.subTest(dates=dates):
+                ours = site_playlist(
+                    0, ["s0.ts", "s1.ts", "s2.ts"], ["p3.ts", "p4.ts"], dates=dates, **kick
+                )
+                other = site_playlist(2, others, ["x5.ts", "x6.ts"], dates=dates, **kick)
+                pieces = ["s0.ts", "s1.ts", "s2.ts", "p3.ts", "p4.ts"] + others + ["x5.ts", "x6.ts"]
+                server = self.made([ours, other], pieces)
+                with source_logs() as logs:
+                    self.run_for(server, 2.0)
+                waiting = "An HLS playlist copy numbers another encoding; waiting for ours."
+                self.assertIn(waiting, logs)
+                self.assertEqual(requested_segments(server), ["p3.ts", "p4.ts"])
+
     def test_a_prefetch_piece_finished_under_its_own_name_plays_as_today(self):
         # Kick's shape: 4.167 s pieces, its own prefetch lines, a piece listed finished under
         # the name it was made under. Ours, as before: each piece once, nothing waited for.

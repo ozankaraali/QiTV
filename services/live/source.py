@@ -1775,8 +1775,8 @@ class HlsSource:
       naming its own encoding, a connection pinned to one) is set aside and the playlist asked
       for again on a new connection each second, until such copies persist as long as a stale
       copy is waited out (at least 4 s): a restart, or ours went down, followed with a marker
-      (`_other_copy`); a live site's piece being made, listed finished under another name, is
-      not one (`_relisted`);
+      (`_other_copy`); a Twitch piece being made, listed finished under another name, is not
+      one (`_relisted`);
     - reloads that bring no new segment for 60 s (download time excluded) time out;
     - a live playlist's reload that keeps failing (a broken connection, a 5xx) through the
       quick delays is asked for again after the long ones, for as long as it is read
@@ -2198,9 +2198,9 @@ class HlsSource:
     def _other_copy(self, playlist: Any, base: str, next_sequence: int, quiet: float) -> bool:
         """Whether this copy is another origin group's (2.6.1: two groups behind one address,
         each numbering and naming its own encoding, answering in turn): it names the segment
-        last fetched otherwise (but a piece being made relisted finished: `_relisted`); or it
-        lists none of them and is numbered ahead further than `quiet` (the time since a copy
-        of ours) explains, or behind with none of their names and no newer discontinuity
+        last fetched otherwise (but a Twitch piece being made relisted finished: `_relisted`);
+        or it lists none of them and is numbered ahead further than `quiet` (the time since a
+        copy of ours) explains, or behind with none of their names and no newer discontinuity
         sequence (a stale copy overlaps; a restart says so)."""
         if not self._recent:
             return False
@@ -2234,11 +2234,15 @@ class HlsSource:
             del known[next(iter(known))]
 
     def _relisted(self, segment: Any, sequence: int, segments: Sequence[Any]) -> bool:
-        """A copy's finished piece at the media sequence of a piece being made that was passed
-        (`_passed`) is that piece, listed under another name (2026-11-25: Twitch's, in its
-        next copy, the same bytes and dated as reckoned): its date is within half a piece of
-        the one reckoned for it, or either is unknown and the copy (`segments`) lists pieces
-        being made."""
+        """A Twitch copy's finished piece at the media sequence of a piece being made that was
+        passed (`_passed`) is that piece, listed under another name (2026-11-25: in its next
+        copy, the same bytes and dated as reckoned): its date is within half a piece of the one
+        reckoned for it, or either is unknown and the copy (`segments`) lists pieces being made.
+        Only Twitch relists so (`_site`, ruling R23): any other source's other origin group
+        is judged by its names alone, as before (2.6.1). On Twitch a group numbering the same
+        pieces on the same clock, or an undated one listing pieces being made, reads as ours."""
+        if not self._site:
+            return False
         known = self._prefetched.get(sequence)
         if known is None or _is_prefetch(segment):
             return False
