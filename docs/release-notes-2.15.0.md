@@ -61,7 +61,8 @@ others' distributions, which may have malware.**
   broadcasts, the time-shift bar reaches back to the start of the one running now. Rewind past
   what QiTV buffered and you watch the site's own recording of it. Play forward (at 2× too) and
   it runs on into QiTV's buffer and up to live as one stream, with nothing reloading at the join:
-  QiTV joins the two by their own timestamps, so the next picture follows. **Go live**
+  QiTV joins the two by their own timestamps, so the next picture follows. A faster speed eases
+  back to normal over the last few seconds, so the picture arrives at live without a stop. **Go live**
   (<kbd>L</kbd>) comes back to live as usual. A channel that keeps no past broadcasts rewinds as
   far as QiTV's buffer, as before.
 - **Right after you tune in.** Kick's recording can trail live by up to a minute or so. QiTV
