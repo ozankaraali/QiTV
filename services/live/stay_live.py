@@ -143,6 +143,7 @@ _SETTLE = 0.2  # a chosen speed catching up ends this close to the target
 _EASE_S = 4.0
 _EASE_RATE = 1.25
 _EASE_LAST_S = 1.0
+_EASE_BACK_S = 2.0  # ... a lag grown back past its first step by this much restores it
 _REOPEN = 20.0
 _HEALTH_WINDOW_S = 3.0  # rate health: VLC's progress is judged over this much counted time
 _HEALTH_SHARE = 0.7  # under this share of rate x wall time, VLC cannot play at that rate
@@ -842,6 +843,7 @@ class StayLive:
         self._tolerant = False
 
     def user_seeked_back(self) -> None:
+        self._eased = self._user_rate  # 2.15 (third review): a seek puts the chosen speed back
         self._leave_live()
 
     def user_go_live(self, *, keep_landing: bool = False) -> None:
@@ -892,6 +894,8 @@ class StayLive:
                 return Decision(1.0)
             rate = self._user_rate
             near = lag_s - self.target - _SETTLE
+            if near > (rate - 1.0) * _EASE_S + _EASE_BACK_S:
+                self._eased = rate  # (third review: well back again, the chosen speed again)
             if rate > _EASE_RATE and near <= (rate - 1.0) * _EASE_S:
                 rate = _EASE_RATE  # (eased before the edge: it never runs dry there)
             if rate > _FAST and near <= _EASE_LAST_S:

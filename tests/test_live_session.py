@@ -8940,6 +8940,18 @@ class SiteRecordingTests(LiveSessionCase):
         # Placed by its timestamps, not its date: its position steps nowhere at the join.
         self.assertAlmostEqual(self.live._join_shift, 0.0, places=6)
 
+    def test_a_part_placed_by_its_date_after_one_by_timestamps_drops_the_shift(self):
+        # Third review: a later part placed by its date kept the earlier part's shift.
+        self.playing(dated=False)
+        self.live._rec_shift = -3.0  # (an earlier part's timestamps put it 3 s before)
+        self.live.seek_to(-30.0)
+        part = self.engine.opened[-1][0]
+        own = [Span(0, 0.0, 10.0, False, media_seq=357)]  # no timestamps: by its date
+        self.engine.buffer(part, own, hls=True, part_start=3_573.0)
+        self.engine.sessionReady.emit(part)
+        self.assertEqual(self.live._rec_shift, 0.0)
+        self.assertEqual(self.engine.stops[-1], (part, 10_000.0, 3_600.0))
+
     def test_a_part_placed_by_its_timestamps_stops_where_they_put_the_buffers_start(self):
         # Live, Twitch fMP4 (2026-11-25): its stop, set by its dates, lay 3 s before the buffer
         # by its timestamps; it ended short of the buffer, joined nothing, and reopened.
@@ -9050,8 +9062,12 @@ class SiteRecordingTests(LiveSessionCase):
         self.assertEqual(self.engine.joins, [(part, sid, 0)])
         self.engine.buffer(sid, self.SPANS[3:], hls=True, dates=[[0.0, 10_000.0]])  # evicted
         self.live._tick()
-        self.assertEqual(self.engine.joins[-1], (part, sid, 3))
-        self.assertAlmostEqual(self.live._join_shift, 6.0)
+        # (a couple of segments past the first: the next to go would be asked again soon)
+        self.assertEqual(self.engine.joins[-1], (part, sid, 5))
+        self.assertAlmostEqual(self.live._join_shift, 10.0)
+        self.engine.buffer(sid, self.SPANS[4:], hls=True, dates=[[0.0, 10_000.0]])
+        self.live._tick()
+        self.assertEqual(len(self.engine.joins), 2)  # its segment is still there: not again
         self.live._tick()
         self.assertEqual(len(self.engine.joins), 2)  # once
 

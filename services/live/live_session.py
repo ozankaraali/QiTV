@@ -473,6 +473,7 @@ _HOLE_BACK_S = 2.0  # a seek into where it does not reach yet goes back this far
 # lies inside the buffer by that much (the buffer's start moves on as it evicts: 2.15 review),
 # and its stop follows the buffer's start once that moved this much
 _JOIN_INSIDE_S = 70.0
+_JOIN_AGAIN_INTO = 2  # a join asked again lands this many segments past the buffer's first
 _BACKFILL_MIN_S = 4.0  # a live playlist listing this much more than the buffer is fetched
 _BACKFILL_TRIES = 40  # ... asked again on the buffer's states until it is known (a few seconds)
 _BACKFILL_AHEAD_S = 600.0  # (all of it at once: it is never played on its own)
@@ -4882,6 +4883,11 @@ class LiveSession(QObject):
                     self._follow_stop(part)
             return
         part.offset = by_date
+        if self._rec_shift:
+            # (third review: placed by its date, its stop is by its date: no earlier shift)
+            self._rec_shift, self._stop_sent = 0.0, -math.inf
+            if not part.ended:
+                self._follow_stop(part)
 
     def _t_by_timestamps(self, first: Span) -> Optional[float]:
         """2.15: where a part's own second 0 lies on the buffer's timeline by its first
@@ -5042,7 +5048,9 @@ class LiveSession(QObject):
             return
         if not spans:
             return
-        first = spans[0]
+        # (third review: a couple of segments past the first, the next to go: a long pause
+        # asks again only now and then, never onto a segment going as the server reads it)
+        first = spans[min(_JOIN_AGAIN_INTO, len(spans) - 1)]
         self._join_backfill = False
         self._joined, self._join_shift = (part.sid, first.seq), first.start - self._join_at
         self._engine.join(part.sid, self._sid, first.seq)

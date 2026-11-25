@@ -136,6 +136,20 @@ class ModeTests(unittest.TestCase):
         sl.user_speed(1.05)  # (a chosen speed at or under 1.10x is as chosen to the end)
         self.assertEqual(sl.update(S + 0.1, False, now=clock.tick()), Decision(1.05))
 
+    def test_a_seek_back_or_a_lag_grown_back_while_eased_restores_the_chosen_speed(self):
+        # Third review: eased to 1.10x in the last second, a seek back 30 s held 1.10x
+        # (about 300 s to live instead of 30 s at 2x); so did a lag that grew back.
+        sl, clock = StayLive(), Clock()
+        sl.user_paused()
+        sl.user_speed(2.0)
+        S = T + 0.2
+        self.assertEqual(sl.update(S + 0.5, False, now=clock.tick()), Decision(1.10))
+        sl.user_seeked_back()
+        self.assertEqual(sl.update(S + 31.0, False, now=clock.tick()), Decision(2.0))
+        self.assertEqual(sl.update(S + 0.5, False, now=clock.tick()), Decision(1.10))
+        self.assertEqual(sl.update(S + 1.2, False, now=clock.tick()), Decision(1.10))  # a stall
+        self.assertEqual(sl.update(S + 12.0, False, now=clock.tick()), Decision(2.0))  # far back
+
     def test_reopen_is_edge_triggered(self):
         sl, clock = StayLive(), Clock()
         flags = [sl.update(R + 1, False, now=clock.tick()) for _ in range(3)]
