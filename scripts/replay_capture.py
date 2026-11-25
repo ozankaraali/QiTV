@@ -717,8 +717,8 @@ class _Server:
     def __init__(self) -> None:
         self.ring: Any = None
 
-    def add_session(self, sid: str, ring: Any, is_ended: Any) -> None:
-        self.ring = ring
+    def add_session(self, sid: str, ring: Any, is_ended: Any, **_options: Any) -> None:
+        self.ring = ring  # (2.15: `program` and `joins`, a recording's join, are not replayed)
 
     def remove_session(self, sid: str) -> None:
         pass
