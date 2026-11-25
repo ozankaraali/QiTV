@@ -468,6 +468,7 @@ _PART_STEP_S = 6.0  # a part that broke off having brought less than this has no
 # opens the buffer there, as a part's end does)
 _RECORDING_MIN_S = 1.0
 _JOIN_SLACK_S = 1.0
+_HOLE_BACK_S = 2.0  # a seek into where it does not reach yet goes back this far before it
 _ARCHIVE_STEP_S = 30.0  # one that brought less than this past its point has nothing more
 # VLC's clock, which moved since the open, standing still this long while VLC plays with media
 # ahead and the source sending is lost (`_clock_lost`): it opens again.
@@ -1320,6 +1321,7 @@ class LiveSession(QObject):
         if self._phase is not _Phase.PIPELINE or self._sid is None:
             return
         snapshot = self._snapshot()
+        t = self._past_hole(snapshot, t)
         before = t < self._buffer_start(snapshot)
         offered = self._part is not None or self._archive is not None or self.server_window() > 0.0
         if before and offered and self._one_stream and self._recording is not None:
@@ -1620,6 +1622,16 @@ class LiveSession(QObject):
             _LOG.info("The site keeps the running broadcast: rewind reaches its start.")
         if self._phase is _Phase.PIPELINE:
             self._emit_timeline()
+
+    def _past_hole(self, snapshot: Mapping[str, Any], t: float) -> float:
+        """2.15: a seek to where the site's recording does not reach yet (right after a tune,
+        before the buffer) lands where something is: going back, just inside the recording's
+        newest piece; going on, at the buffer's start. Nothing waits in that stretch."""
+        reach = self._recording_reach(snapshot)
+        start = self._buffer_start(snapshot)
+        if reach is None or not reach <= t < start:
+            return t
+        return reach - _HOLE_BACK_S if t < self.position() else start
 
     def _recording_reach(self, snapshot: Mapping[str, Any]) -> Optional[float]:
         """2.15: where the site's recording reaches on the timeline, as last known; None."""
@@ -4817,7 +4829,13 @@ class LiveSession(QObject):
             return
         holding = [span for span in placed if span.start <= part.asked]
         coming = placed and part.asked < placed[0].start + WINDOW_AHEAD_S - _PART_SLACK_S
-        if coming and not part.ended and part.asked >= placed[-1].end:
+        # (2.15, live: a recording part's end came before the state with its last segments)
+        whole = part.ended and (
+            not placed
+            or placed[-1].end + 0.5
+            >= part.offset + _number(self._engine.snapshot(part.sid).get("end"))
+        )
+        if coming and not whole and part.asked >= placed[-1].end:
             return  # what holds it is on its way (`_on_part_updated` asks again)
         if holding:
             seq = holding[-1].seq

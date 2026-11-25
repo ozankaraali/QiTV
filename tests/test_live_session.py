@@ -8795,6 +8795,43 @@ class SiteRecordingTests(LiveSessionCase):
         self.live._emit_timeline()
         self.assertNotIn("window_end", self.timelines[-1])
 
+    def test_a_seek_into_where_it_does_not_reach_yet_lands_where_something_is(self):
+        # Live 2026-11-25: a rewind right after the tune asked for a moment the recording did
+        # not list yet; its part waited for the listing to grow, half a minute, nothing playing.
+        sid = self.playing()
+        self.live.set_site_recording(
+            RecordingRoute(self.URL, 6_400.0, dated=True, steps=True, until=9_985.0)
+        )
+        self.live.seek_to(-8.0)  # back from live, into the hole: just inside the recording
+        part, url, kwargs = self.engine.opened[-1]
+        self.assertEqual(url, self.URL)
+        self.assertEqual(kwargs["window"]["from_s"], 3_583.0)  # 9,983: two seconds before its end
+        own = [Span(0, 0.0, 10.0, False, media_seq=357), Span(1, 10.0, 20.0, False, media_seq=358)]
+        self.engine.buffer(part, own, hls=True, part_date=9_965.0)
+        self.engine.sessionReady.emit(part)
+        self.assertEqual(self.playback.plays[-1][0], self.engine.stream_url(part, 1))
+        self.live.seek_to(-6.0)  # on from there, into the hole: the buffer's start
+        self.assertEqual(self.playback.plays[-1][0], self.engine.stream_url(sid, 0))
+        self.assertFalse(self.live.in_server_part())
+
+    def test_a_part_that_ended_before_its_last_segments_came_waits_for_them(self):
+        # Live 2026-11-25: its end came before the state with its last segments, and it played
+        # from its first, 25 s before the point asked.
+        self.playing()
+        self.live.seek_to(-6.0)
+        part = self.engine.opened[-1][0]
+        first = [Span(0, 0.0, 10.0, False, media_seq=357)]
+        self.engine.buffer(part, first, hls=True, part_date=9_970.0, end=40.0)
+        self.engine._snapshots[part]["end"] = 40.0  # its helper fetched 40 s already
+        self.engine.sessionReady.emit(part)
+        self.engine.sessionEnded.emit(part)
+        plays = len(self.playback.plays)
+        self.live._play_part()
+        self.assertEqual(len(self.playback.plays), plays)  # never from its first: it waits
+        whole = [Span(n, 10.0 * n, 10.0 * n + 10.0, False, media_seq=357 + n) for n in range(4)]
+        self.engine.buffer(part, whole, hls=True, part_date=9_970.0)
+        self.assertEqual(self.playback.plays[-1][0], self.engine.stream_url(part, 2))  # -10 on
+
     def test_go_live_leaves_the_recording_and_a_new_tune_forgets_it(self):
         sid = self.playing()
         own = [Span(0, 0.0, 10.0, False, media_seq=0)]
