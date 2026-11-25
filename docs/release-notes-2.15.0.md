@@ -1,8 +1,9 @@
 # QiTV 2.15.0
 
 QiTV 2.15.0 plays Kick and Twitch channels: paste a channel's page link and it plays live, at its
-best quality, about as close to live as the site's own player, with Twitch's ad breaks skipped.
-Pause, rewind, recordings and AI captions work on them as on any live channel.
+best quality, about a second behind the broadcaster, with Twitch's ad breaks skipped. Pause,
+rewind, recordings and AI captions work on them as on any live channel. Ctrl/⌘+N opens Open
+Link…, and on Windows the picture's right-click menu stays open.
 
 **Download QiTV from [qitv.app](https://qitv.app), which picks the right build for your
 computer, or from [Releases](https://github.com/ozankaraali/QiTV/releases). Please don't use
@@ -16,8 +17,13 @@ others' distributions, which may have malware.**
 - **The best quality the channel offers.** QiTV picks the tallest picture, then the higher frame
   rate, and a kind of video it can play; it passes over AV1, which the player inside QiTV
   cannot play from these streams.
-- **Close to live.** QiTV starts at the newest pieces the site has announced, so the picture is
-  about as close to live as the site's own player.
+- **About a second behind the broadcaster.** With **Live latency** at Auto, a Kick or Twitch
+  channel plays about a second behind; Low takes it closer, under a second, and Stable keeps
+  about six seconds in hand for a picture that never waits. A channel and **Go live** start
+  there, timed to the channel's newest keyframe, so they rarely need to catch up afterwards. Twitch's pieces play as they arrive, not once they are complete.
+- **How far behind, in the statistics.** <kbd>Shift+I</kbd> (or the Picture panel's
+  **Statistics**) shows **Behind the broadcaster**: the seconds between the moment the site
+  stamped on the picture and now.
 - **Twitch's ad breaks are skipped.** When a Twitch channel's ads come, QiTV leaves them out and
   shows "Ad break skipped"; the picture waits for the channel and goes on. A break that goes
   on much longer than usual is waited for instead of freezing.
@@ -31,3 +37,10 @@ others' distributions, which may have malware.**
 - **When it doesn't play, it says why:** "channel isn't live now", "No channel named channel on
   Kick", or "Kick refused QiTV's request: try again later, or paste the stream link".
 - **In your language.** The new words are in all 46 languages.
+
+## Also in 2.15.0
+
+- **Ctrl/⌘+N opens File → Open Link…**, the card that plays a stream's link or a channel's
+  page.
+- **The picture's right-click menu stays open on Windows.** It closed again as soon as it
+  opened.

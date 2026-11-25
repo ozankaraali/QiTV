@@ -5027,8 +5027,9 @@ class LiveSession(QObject):
 
     def _end_aim(self) -> None:
         """A timed start's wait ends with what it belongs to (an open, a pause of a waiting Go
-        live, a recovery's or a resume's retry: review M3)."""
-        self._aim_since = self._aim_next = None
+        live, a recovery's or a resume's retry: review M3), and so does the silence it gave
+        way to (`_aim_quiet`): kept for that open alone, never for a later one (review 2)."""
+        self._aim_since = self._aim_next = self._aim_quiet = None
         self._aim_live = self._aim_off = False
 
     def _give_way(self, why: str) -> Optional[tuple[int, float]]:
@@ -5207,8 +5208,8 @@ class LiveSession(QObject):
         # close to live; a paused open plays when the viewer says)
         self._end_picture()  # the last open's look ends with what it found
         self._picture_due = self._opened_at if self._times_start() and not self._paused else None
+        self._quiet_room = self._aim_quiet  # (a silence it gave way to), before the wait ends
         self._end_aim()  # a timed start that waited opened, or something else did
-        self._quiet_room, self._aim_quiet = self._aim_quiet, None  # (a silence it gave way to)
         self._vlc.restart(self._last_open)  # VLC's clock starts at the segment's start
         self._stay.absorb()  # the position starts afresh: a step, not a drift
         self._settled.reset()  # and the lag shows where it landed at once

@@ -10162,6 +10162,15 @@ class TimedStartTests(LiveSessionCase):
         self.assertEqual(len(self.playback.plays), plays)
         self.assertIsNone(self.live._retry)
 
+    def test_a_silence_a_wait_gave_way_to_ends_with_the_wait(self):
+        # Review 2: the silence a wait gave way to is kept for the open it gave way to; a
+        # wait that ends otherwise (a pause, a recovery's retry) drops it, so a later open
+        # counts no starvation that never was.
+        self.live = self.make()
+        self.live._aim_quiet = (0.0, 1.0)
+        self.live._end_aim()
+        self.assertIsNone(self.live._aim_quiet)
+
     def test_the_aim_is_where_stay_lives_own_landing_ends(self):
         self.assertEqual(live_session._AIM_ABOVE_S, stay_live._CLOSE_LAND_S)
 
