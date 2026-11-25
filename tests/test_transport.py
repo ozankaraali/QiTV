@@ -514,12 +514,13 @@ class TransportCase(unittest.TestCase):
         t = self.make()
         t.show_vod("A", "b")
         spy = QSignalSpy(t.speedRequested)
-        for name, times in (("faster", 4), ("slower", 7), ("speed", 2)):
+        for name, times in (("faster", 6), ("slower", 9), ("speed", 2)):
             for _ in range(times):
                 self.click(t, t.button_rect(name).center().toPoint())
-        # Faster to 2x and no further, slower to 0.5x and no further, the number back to 1x.
+        # Faster to 3x and no further, slower to 0.5x and no further, the number back to 1x.
         rates = [spy.at(i)[0] for i in range(spy.count())]
-        self.assertEqual(rates, [1.25, 1.5, 2.0, 1.5, 1.25, 1.0, 0.75, 0.5, 1.0])
+        expected = [1.25, 1.5, 1.75, 2.0, 3.0, 2.0, 1.75, 1.5, 1.25, 1.0, 0.75, 0.5, 1.0]
+        self.assertEqual(rates, expected)
         lefts = [t.button_rect(n).left() for n in ("slower", "speed", "faster")]
         self.assertEqual(lefts, sorted(lefts))
         self.assertEqual(t.tooltip_at(t.button_rect("faster").center()), "Faster")

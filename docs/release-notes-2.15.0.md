@@ -96,3 +96,5 @@ others' distributions, which may have malware.**
   page.
 - **The picture's right-click menu stays open on Windows.** It closed again as soon as it
   opened.
+- **1.75× and 3× playback speeds.** The speed's **−** and **+** now step 0.5×, 0.75×, 1×,
+  1.25×, 1.5×, 1.75×, 2× and 3×, for live channels you've rewound and for films alike.

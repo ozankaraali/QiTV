@@ -152,7 +152,7 @@ from ui.overlays.painting import (
 from ui.pointer import NAV_BUTTONS, PointerHider
 from ui.theme import FOCUS_FILL_ALPHA, PALETTE, qcolor
 
-SPEEDS = (0.5, 0.75, 1.0, 1.25, 1.5, 2.0)  # − and + step through these
+SPEEDS = (0.5, 0.75, 1.0, 1.25, 1.5, 1.75, 2.0, 3.0)  # − and + step through these
 TOP_FRACTION = 0.22
 BOTTOM_FRACTION = 0.42
 TICK_LABEL_MAX_U = 25.0
