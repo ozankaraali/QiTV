@@ -5633,6 +5633,20 @@ class InterruptionTests(LiveSessionCase):
             self.step(0.6)
         self.assert_falls_back(sid, LOST, 1)
 
+    def test_an_ad_break_does_not_count_toward_the_disk_deferral(self):
+        # Task 4 M6: a live site's break sends nothing; the RAM ring's first state is waited
+        # for from the break's end, never played directly (the ads) meanwhile.
+        self.live = self.make(ready_timeout_ms=1000)
+        sid = self.ready(segments(0, 10), live_edge=20.0)
+        self.playback.set_state(PlaybackState.PLAYING)
+        self.engine.sessionUpdated.emit(sid, dict(self.engine._snapshots[sid], ad_break=True))
+        self.engine.sessionFailed.emit(sid, "disk", "The disk buffer failed.")
+        for _ in range(40):  # 10 s of the break
+            self.step(0.25)
+        self.assertEqual(self.engine.closed, [])
+        self.engine.sessionUpdated.emit(sid, dict(self.engine._snapshots[sid], ad_break=False))
+        self.assertEqual(self.engine.closed, [])  # (a state: the RAM ring's, it goes on)
+
     def test_a_pause_does_not_extend_the_disk_deferral(self):
         self.live = self.make(ready_timeout_ms=1000)
         sid = self.ready(segments(0, 10), live_edge=20.0)
@@ -7513,9 +7527,32 @@ class AdBreakTests(LiveSessionCase):
         self.assertEqual(close, [])
         self.assertEqual(learned.prior.margin(), margin)
         self.assertLessEqual(self.timelines[-1]["target"], target + 1e-9)
-        self.assertEqual(self.playback.holds[holds:], [True, False])
+        self.assertEqual(self.playback.holds[holds:], [True])  # held to the newest's open
         self.assertEqual(feed.starved_s, dry)  # held before it ran dry, played on after
         self.assertEqual(self.notices.count(AD_BREAK), 1)
+
+    def test_after_a_break_the_channel_plays_from_its_newest_never_where_it_waited(self):
+        # Owner 2026-11-25: "when the stream comes back, play from the latest". VLC, held at
+        # the edge through the break, is never played on from there: once the channel's pieces
+        # come again, the start Go live takes of what came after the break opens (Task 4 M3:
+        # never at once on the little that came first), held until then; once, at its target.
+        feed = self.tune(edge=8.0, starved=PlaybackState.PLAYING)
+        feed.run(30.0)
+        target = self.timelines[-1]["target"]
+        self.begin(feed)
+        feed.run(20.0)
+        stood, waited = feed.edge, feed.position
+        plays, dry = len(self.playback.plays), feed.starved_s
+        self.end(feed)
+        while len(self.playback.plays) == plays:
+            self.assertEqual(feed.position, waited)  # held: never played on from there
+            self.assertLess(feed.edge - stood, target + 3.0, "no start opened")
+            feed.run(Feed.DT)
+        self.assertGreaterEqual(self.live.position(), stood - 1e-6)  # what came after it
+        feed.run(10.0)
+        self.assertEqual(len(self.playback.plays), plays + 1)
+        self.assertEqual(feed.starved_s, dry)
+        self.assertLessEqual(feed.edge - feed.position, target + 1.0)
 
     def test_an_ad_break_triggers_no_watch_and_no_reopen(self):
         # During the break the picture watch's fallback (software decoding) and the sound
@@ -7535,9 +7572,11 @@ class AdBreakTests(LiveSessionCase):
         self.assertEqual(len(self.playback.plays), plays)
         self.assertEqual(self.modes[-1], "pipeline")
         self.assertFalse(self.tuning.get("ch").software)  # nor learned meanwhile
+        stood = feed.edge
         self.end(feed)
         feed.run(10.0)
         self.assertEqual(len(self.playback.plays), plays + 1)  # once, for all three
+        self.assertGreaterEqual(self.live.position(), stood - 2.0)  # at the newest, not before
         self.assertEqual(self.playback.software[-1], True)
         self.assertTrue(self.tuning.get("ch").software)
         self.assertEqual(self.notices.count(AD_BREAK), 1)
@@ -10286,3 +10325,84 @@ class BroadcasterTests(LiveSessionCase):
                     self.assertIsNone(self.timelines[-1]["behind_broadcaster"])
                 else:
                     self.assertAlmostEqual(self.timelines[-1]["behind_broadcaster"], behind)
+
+
+class ComeBackTests(LiveSessionCase):
+    """2026-11-25 (the owner: "when the stream comes back, play from the latest"): a live
+    site's stream that drops while VLC plays at live (its source silent `_AWAY_S` and more)
+    plays from its newest once it comes back, through Go live's start (timed under Low and
+    Auto), never from where VLC waited (held meanwhile, its last picture on); a short hiccup,
+    and a viewer who paused, are as ever."""
+
+    landing = TimedStartTests.landing
+    tune_at = TimedStartTests.tune_at
+
+    def drop(self, feed, seconds, *, missed=True):
+        """The source sends nothing for `seconds`, then what it missed at once (`missed`), and
+        on at real time."""
+        feed.stalled = True
+        feed.run(seconds)
+        feed.stalled = False
+        if missed:
+            feed.edge += seconds
+        feed.push()
+
+    def test_a_drop_comes_back_at_the_newest_never_where_it_waited(self):
+        # It lands at the target in force (Auto's learned one took the drop in, as ever; a
+        # keyframe above it at most where starts are not timed, Stable's), never the drop's
+        # 8 s further back, as played on from where VLC waited.
+        for latency, above in (("low", 0.6), (AUTO, 0.6), ("stable", 2.6)):
+            with self.subTest(latency=latency):
+                self.live = self.make()
+                feed = self.tune_at(latency, 1.0, 0.3)
+                self.landing(feed, 0)
+                feed.run(30.0)
+                plays = len(self.playback.plays)
+                feed.stalled = True
+                feed.run(8.0)
+                self.assertEqual(len(self.playback.plays), plays)  # nothing opens meanwhile
+                waited = feed.position
+                feed.stalled = False
+                feed.edge += 8.0  # what it missed, at once
+                feed.push()
+                spent = 0.0
+                while len(self.playback.plays) == plays:
+                    self.assertEqual(feed.position, waited)  # held, never played on
+                    self.assertLess(spent, 3.5, "no start opened")
+                    feed.run(Feed.DT)
+                    spent += Feed.DT
+                feed.run(3.0)
+                lag, target = feed.edge - feed.position, self.timelines[-1]["target"]
+                self.assertGreaterEqual(lag, target - 0.3)
+                self.assertLessEqual(lag, target + above)
+                self.assertLess(lag, 8.6)
+                self.assertEqual(len(self.playback.plays), plays + 1)
+
+    def test_a_restart_with_nothing_missed_plays_what_came_after_it(self):
+        # The stream comes back with nothing of the silence (an encoder's restart): its first
+        # piece, once it lands at the target, never what VLC played before.
+        self.live = self.make()
+        feed = self.tune_at(AUTO, 1.0, 0.3)
+        self.landing(feed, 0)
+        feed.run(30.0)
+        plays = len(self.playback.plays)
+        self.drop(feed, 6.0, missed=False)
+        stood = feed.edge
+        lag, _waited = self.landing(feed, plays)
+        self.assertGreaterEqual(self.live.position(), stood - 1e-6)
+        self.assertLessEqual(lag, self.timelines[-1]["target"] + 0.6)
+        self.assertEqual(len(self.playback.plays), plays + 1)
+
+    def test_a_short_hiccup_and_a_paused_viewer_are_as_ever(self):
+        for paused in (False, True):
+            with self.subTest(paused=paused):
+                self.live = self.make()
+                feed = self.tune_at(AUTO, 1.0, 0.3)
+                self.landing(feed, 0)
+                feed.run(30.0)
+                if paused:
+                    self.live.toggle_pause()
+                plays = len(self.playback.plays)
+                self.drop(feed, 8.0 if paused else 2.0)
+                feed.run(10.0)
+                self.assertEqual(len(self.playback.plays), plays)
