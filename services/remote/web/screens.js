@@ -1738,7 +1738,7 @@ function watchHandle(handle, num, name) {
   reportPosition(true); // what played here before, kept before it changes
   unlock();
   caption(num, name);
-  send({ t: "watch", id: handle }); // plays here
+  send({ t: "watch", id: handle, wait: true }); // plays here (2.15: or waits, said here)
 }
 
 function startHere() {
@@ -1746,7 +1746,7 @@ function startHere() {
   useHere(true);
   unlock();
   caption("", w("opening_here"));
-  send({ t: "watch" }); // what the TV plays, if anything
+  send({ t: "watch", wait: true }); // what the TV plays, if anything
 }
 
 // Why a film (or a recording) doesn't play here (QiTV's films.py, recorded.py and
@@ -1904,6 +1904,10 @@ function onField(message) {
   }
   if (box && box.id === id) return; // the same box (said again to a phone that came back)
   if (id === dismissed) return;
+  if (!awaitingLink && !$("moreSheet").hidden) {
+    dismissed = id; // the numpad's digits typed into the channel list's find: it stays
+    return;
+  }
   flushTyped(); // the box before: its last letters (dropped there, if it is not it any more)
   const secret = message.secret === true;
   const label = typeof message.label === "string" ? message.label : "";
@@ -1968,11 +1972,19 @@ function bindTyping() {
     clearTimeout(typeTimer);
     typeTimer = setTimeout(() => sendTyped(), TYPE_DEBOUNCE_MS);
   });
-  $("typeForm").addEventListener("submit", (event) => {
-    event.preventDefault();
+  const go = () => {
     if (!box) return;
     if (touched) sendTyped(true); // the text, then Enter
     else tap("ok"); // nothing typed (a password kept as it is): Enter alone
+  };
+  input.addEventListener("keydown", (event) => {
+    if (event.key !== "Enter" || event.isComposing) return;
+    event.preventDefault(); // (no submit after it: Go once)
+    go();
+  });
+  $("typeForm").addEventListener("submit", (event) => {
+    event.preventDefault();
+    go(); // a keyboard whose Go sends no Enter key
   });
   const done = $("typeDone");
   pressable(done);

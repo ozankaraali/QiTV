@@ -266,6 +266,12 @@ class MessageTests(unittest.TestCase):
         ):
             self.assertIsNone(parse_phone_message(bad), bad)
 
+    def test_a_watch_says_its_page_shows_a_wait(self):  # 2.15
+        for message in ({"t": "watch", "wait": True}, {"t": "watch", "id": "h3", "wait": True}):
+            self.assertEqual(parse_phone_message(message), message)
+        self.assertEqual(parse_phone_message({"t": "watch", "wait": "yes"}), {"t": "watch"})
+        self.assertIsNone(parse_phone_message({"t": "watch", "id": 3, "wait": True}))
+
     def test_open_link_opens_the_tvs_card(self):  # 2.15
         self.assertEqual(parse_phone_message({"t": "link"}), {"t": "link"})
         self.assertEqual(parse_phone_message({"t": "link", "s": "x"}), {"t": "link"})

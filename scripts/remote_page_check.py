@@ -2535,6 +2535,14 @@ def scenario_typing(rig: Rig) -> None:
     rig.page.wait_for_selector("#typeSheet:not([hidden])")
     assert rig.page.get_attribute("#typeInput", "type") == "text"
     assert rig.page.input_value("#typeInput") == "demo"
+    # The numpad's digits typed into the channel list's find (More open): no sheet over them.
+    rig.page.click("#typeDone")
+    rig.page.click("#moreButton")
+    rig.page.wait_for_selector("#moreSheet:not([hidden])")
+    rig.hub.send(sid, {"t": "field", "id": 10, "label": "Find a genre or channel", "text": "5"})
+    rig.page.wait_for_timeout(300)
+    assert rig.page.locator("#typeSheet").is_hidden(), "the sheet covered the numpad"
+    assert rig.page.locator("#moreSheet").is_visible()
 
 
 def scenario_open_link(rig: Rig) -> None:
@@ -2591,7 +2599,8 @@ def scenario_watch_offline(rig: Rig) -> None:
     rig.page.wait_for_selector("#moreSheet:not([hidden])")
     mark = rig.events.mark()
     rig.page.click("#watchHere")
-    rig.events.wait(WatchHere, after=mark)
+    watch = rig.events.wait(WatchHere, after=mark)
+    assert watch.waits, "the page did not say it shows a wait"
     ask = rig.events.wait(Get, where=lambda e: e.what == "channels", after=mark)
     answer(rig, sid, ask, CHANNELS)
     rig.page.wait_for_selector("#zapRows .row >> nth=2")

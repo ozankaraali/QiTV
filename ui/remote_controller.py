@@ -11,6 +11,7 @@ from __future__ import annotations
 
 from datetime import date, datetime
 import logging
+import random
 import threading
 from typing import TYPE_CHECKING, Any, Callable, Optional, cast
 from urllib.parse import urlsplit
@@ -232,7 +233,8 @@ class RemoteController(QObject):
         # its number, which their typing carries back (a box that took the keys since is
         # another number: what was typed for the last one never lands in it).
         self._field: Optional[PhoneField] = None
-        self._field_number = 0
+        # (from anywhere: a page left open across a restart keeps the number Done closed)
+        self._field_number = random.randrange(MAX_ASK)
         # 2.15: the phones whose Watch waits for a site's channel to be live, by device, and
         # the number of each one's last ask (a Watch, a hand back): a late answer to one before
         # it begins no wait.
@@ -456,7 +458,7 @@ class RemoteController(QObject):
         elif isinstance(event, OpenItem):
             self._open(event.sid, event.handle)
         elif isinstance(event, WatchHere):
-            self._watch_here(event.sid, event.handle)
+            self._watch_here(event.sid, event.handle, event.waits)
         elif isinstance(event, ToTv):
             self._to_tv(event.sid)
         elif isinstance(event, RefreshLists):  # 2.8: as the Library's ↻
@@ -782,11 +784,13 @@ class RemoteController(QObject):
             self._libraries[sid] = library
         return library
 
-    def _watch_here(self, sid: str, handle: str = "") -> None:
+    def _watch_here(self, sid: str, handle: str = "", waits: bool = False) -> None:
         """What the TV plays, or the channel `handle` of the phone's lists, in the phone's own
         player. QiTV lets go of its own stream first: one screen at a time. 2.15: a site's
-        channel that isn't live now waits for it (`_watch_failed`)."""
-        number = self._new_watch_ask(self._device(sid))  # what it waited for, it asks no more
+        channel that isn't live now waits for it (`_watch_failed`), for a page that `waits`
+        (an older page shows no wait, and would play on what it played: as before)."""
+        device = self._device(sid)
+        number = self._new_watch_ask(device)  # what it waited for, it asks for no more
         controller = self._window.controller
         chosen: Optional[Target] = None
         group: Optional[tuple[str, list]] = None
@@ -815,11 +819,15 @@ class RemoteController(QObject):
                 return
 
         def failed(target: Target, why: str) -> Optional[bool]:
-            return self._watch_failed(sid, group, target, why, number)
+            return self._watch_failed(device, group, target, why, number)
 
         try:
             handed = controller.play_elsewhere(
-                self._launcher(sid, group), chosen, ask_on=sid, recordings=True, failed=failed
+                self._launcher(sid, group),
+                chosen,
+                ask_on=sid,
+                recordings=True,
+                failed=failed if waits else None,
             )
         except Exception as error:  # a phone's ask must never take QiTV down
             logger.error("Phone remote: playing on the phone failed: %s", safe_message(error))
@@ -888,21 +896,20 @@ class RemoteController(QObject):
 
     def _watch_failed(
         self,
-        sid: str,
+        device: str,
         group: Optional[tuple[str, list]],
         target: Target,
         why: str,
         number: int,
         wait: Optional[SiteWait] = None,
     ) -> Optional[bool]:
-        """Why phone `sid`'s Watch of `target` (its ask `number`; a wait's ask again: `wait`)
+        """Why phone `device`'s Watch of `target` (its ask `number`; a wait's ask again: `wait`)
         got no link (TVController.play_elsewhere's `failed`): a site's channel that isn't live
         now waits for it, the phone says so ("why" "offline"; an older page: "Pick a channel
         below…" until it plays) and holds no stream meanwhile; True as it begins to wait, False
         as it waits on (the TV says nothing), None for any other failure (the TV says why; the
         phone hears it failed). An answer to what the phone asks for no more is nobody's (False:
         nothing said); one that comes once the phone left begins no wait."""
-        device = self._device(sid)
         if self._watch_asks.get(device) != number:
             return False
         if wait is not None and self._waits.wait_of(device) is not wait:
@@ -928,17 +935,21 @@ class RemoteController(QObject):
         number = self._watch_asks.get(device, 0)
 
         def failed(target: Target, why: str) -> Optional[bool]:
-            return self._watch_failed(sid, wait.group, target, why, number, wait)
+            return self._watch_failed(device, wait.group, target, why, number, wait)
+
+        def launch(target: Target, url: str) -> tuple[bool, str]:
+            now = self._session_of(device)  # (a phone that slept since: its new session)
+            if now is None:
+                return False, PHONE_GONE_TEXT
+            return self._launcher(now, wait.group)(target, url)
+
+        def again() -> bool:  # once it is live: while the phone is there and still waits
+            return self._session_of(device) is not None and self._waits.take(device, wait)
 
         logger.info("Asking the site of %s whether it is live now (a phone's)", wait.target.title)
         return bool(
             self._window.controller.play_elsewhere(
-                self._launcher(sid, wait.group),
-                wait.target,
-                ask_on=sid,
-                failed=failed,
-                # once it is live: handed on while the phone is still there and waits for it
-                again=lambda: sid in self._phones and self._waits.take(device, wait),
+                launch, wait.target, ask_on=sid, failed=failed, again=again
             )
         )
 

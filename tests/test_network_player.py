@@ -1564,6 +1564,25 @@ class SiteTests(tvc.RetryPillCase, PlayerCase):
         self.assertEqual(self.errors(), [])
         self.assertEqual(launched, [])
 
+    def test_a_phone_that_waits_for_the_channel_the_tv_waits_for_asks_alone(self):
+        # 2.15: Watch on this phone while the large picture waits for its channel: the phone
+        # waits for it now, and the TV's wait ends (its site is asked by one, not two).
+        self.calm()
+        self.answers = [SiteError("offline")]
+        self.player.play(KICK_PAGE, LIVE)
+        self.assertTrue(wait_until(lambda: OFFLINE in (self.pill_text() or "")))
+        self.answers = [SiteError("offline")]
+        heard = []
+        self.controller.play_elsewhere(
+            lambda _t, _url: (True, ""), None, failed=lambda t, why: heard.append(why) or True
+        )
+        self.assertTrue(wait_until(lambda: heard))
+        self.assertEqual(len(self.asked), 2)
+        pause(900)  # three of the TV's calm asks, were it still waiting
+        self.assertEqual(len(self.asked), 2)
+        self.assertIsNone(self.pill_text())
+        self.assertEqual(self.errors(), [])
+
     def test_a_waiting_phones_ask_drops_no_choice_of_the_tvs(self):
         # 2.15: its asks go beside the TV's choices (the TV's zap meanwhile still opens), and
         # once live its stream is handed on only while the phone still waits for it.

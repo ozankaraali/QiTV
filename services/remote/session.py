@@ -290,7 +290,7 @@ class Session:
         if t == "where":
             return Reply([self.send(self._where(now))])
         if t == "watch":
-            return Reply(events=[WatchHere(sid, m.get("id", ""))])
+            return Reply(events=[WatchHere(sid, m.get("id", ""), m.get("wait", False))])
         if t == "totv":
             return Reply(events=[ToTv(sid)])
         if t == "refresh":  # 2.8

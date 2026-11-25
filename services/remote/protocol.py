@@ -221,9 +221,14 @@ def parse_phone_message(obj: object) -> Optional[dict]:
             return {"t": "desk", "id": obj["id"], "do": obj["do"]}
         return None
     if t == "watch":  # what the TV plays, or a channel of the phone's list by its handle
-        if "id" not in obj:
-            return {"t": "watch"}
-        return {"t": "watch", "id": obj["id"]} if _short_id(obj.get("id")) else None
+        message: dict = {"t": "watch"}
+        if "id" in obj:
+            if not _short_id(obj.get("id")):
+                return None
+            message["id"] = obj["id"]
+        if obj.get("wait") is True:  # 2.15: the page shows a wait for a channel not live yet
+            message["wait"] = True
+        return message
     button = obj.get("b")
     known = isinstance(button, str) and button in BUTTON_META  # a list or dict isn't hashable
     if t == "down" and known:
@@ -462,10 +467,12 @@ class Query:
 @dataclass(frozen=True)
 class WatchHere:
     """The phone asks to play in its own player what the TV plays, or the channel `handle`
-    (one of its list's) when given."""
+    (one of its list's) when given. 2.15: `waits`, its page shows a wait for a site's channel
+    that isn't live (and stops what it played): QiTV waits for it (an older page's: no)."""
 
     sid: str
     handle: str = ""
+    waits: bool = False
 
 
 @dataclass(frozen=True)

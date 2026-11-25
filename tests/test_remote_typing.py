@@ -170,6 +170,17 @@ class TypingTests(PhoneCase):
         self.assertEqual(self.fields()[-1], shown)  # still that box: nothing said
         self.assertIsNotNone(focused_field(self.window))
 
+    def test_the_numpads_digits_type_into_the_find_box(self):
+        """A digit of the phone's numpad with the channel list open types into its find (as
+        the keyboard's): that box has the keys then (the page keeps its sheet off while its
+        numpad shows)."""
+        self.show()
+        self.wait_for_drawer()
+        self.window.remote.fire("d5")
+        box = focused_field(self.window)
+        self.assertIsNotNone(box)
+        self.assertEqual((box.label, box.text), ("Find a genre or channel", "5"))
+
     def test_a_question_over_the_box_has_the_keys(self):
         self.show()
         self.wait_for_drawer()
@@ -193,6 +204,7 @@ class SiteWaitTests(PhoneCase):
         self.target = Target({"name": "examplechannel · Kick", "cmd": KICK_PAGE}, "live", "Kick")
         self.asks = []  # (when, kwargs) of each play_elsewhere
         self.answers = []  # each ask's answer: a reason it failed, or a link (handed on)
+        self.play_launch = []  # each ask's launch
         controller = self.window.controller
         self.enterContext(
             mock.patch.object(controller, "play_elsewhere", side_effect=self.play_elsewhere)
@@ -202,6 +214,7 @@ class SiteWaitTests(PhoneCase):
 
     def play_elsewhere(self, launch, chosen=None, **kwargs):
         self.asks.append((time.monotonic(), kwargs))
+        self.play_launch.append(launch)
         answer = self.answers.pop(0) if self.answers else None
         target = chosen or self.target
         if answer is None:
@@ -216,7 +229,7 @@ class SiteWaitTests(PhoneCase):
 
     def watch(self, sid="s8"):
         """Phone `sid` watches the channel (its Watch of what the TV plays, here)."""
-        self.window.remote._on_event(WatchHere(sid))
+        self.window.remote._on_event(WatchHere(sid, "", True))
 
     def test_waits_says_so_and_plays_once_live(self):
         self.connect()
@@ -319,6 +332,44 @@ class SiteWaitTests(PhoneCase):
         self.assertEqual(self.sent("play"), [])
         pause(400)
         self.assertEqual(len(self.asks), 1)
+
+    def test_an_older_pages_watch_fails_as_before(self):
+        """An older page shows no wait (and would play on what it played): QiTV waits for
+        nothing, and the TV says why as before."""
+        self.connect()
+        self.window.remote._on_event(WatchHere("s8"))
+        self.assertIsNone(self.asks[-1][1]["failed"])
+        self.assertNotIn("again", self.asks[-1][1])
+
+    def test_an_ask_made_before_the_phone_slept_hands_on_to_its_new_session(self):
+        self.connect()
+        remote = self.window.remote
+        self.answers = [OFFLINE]
+        self.watch()
+        self.assertTrue(wait_until(lambda: len(self.asks) == 2, timeout_ms=3000))  # unanswered
+        ask = self.asks[-1][1]
+        with mock.patch.object(remote_controller, "PHONE_GONE_S", 5.0):
+            remote._on_event(Closed("s8", "d8"))
+            self.connect("s10", "d8")  # the same phone, back as another session
+            self.assertTrue(ask["again"]())
+            launch = self.play_launch[-1]
+            self.assertEqual(launch(self.target, "https://edge.example/live.m3u8"), (True, ""))
+        self.assertTrue(self.sent("play", "s10")[-1]["url"].startswith("https://edge.example"))
+        self.assertFalse(remote._waits.waiting("d8"))
+
+    def test_a_late_answer_once_the_phone_slept_still_counts(self):
+        """The answer to an ask made on the session before (the phone came back as another):
+        still that phone's, it waits on."""
+        self.connect()
+        remote = self.window.remote
+        self.answers = [OFFLINE]
+        self.watch()
+        self.assertTrue(wait_until(lambda: len(self.asks) == 2, timeout_ms=3000))
+        failed = self.asks[-1][1]["failed"]
+        remote._on_event(Closed("s8", "d8"))
+        self.connect("s10", "d8")
+        self.assertFalse(failed(self.target, OFFLINE))  # waits on
+        self.assertTrue(remote._waits.waiting("d8"))
 
     def test_waiting_holds_no_stream_of_what_the_phone_played(self):
         self.connect()

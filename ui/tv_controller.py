@@ -2895,9 +2895,13 @@ class TVController(QObject):
             if asked is target:  # 2.15: a phone's Watch (play_elsewhere's `failed`)
                 del self._elsewhere_failed[at]
                 try:
-                    waits.append(hear(target, message))
+                    heard = hear(target, message)
                 except Exception as error:  # a phone's ask must never take QiTV down
                     logger.error("A phone's failed link: %s", type(error).__name__)
+                    heard = None
+                if heard is True and self._live_controls.waits_for(target):
+                    self._live_controls.stop_waiting()  # the phone waits for it: one asks
+                waits.append(heard)
                 break
         if False in waits:
             return  # it waits on: said and counted once already

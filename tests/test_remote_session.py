@@ -281,6 +281,7 @@ class KkTests(SessionCase):
             {"t": "link"},
             {"t": "type", "id": 4, "s": "secret words"},
             {"t": "type", "id": 4, "s": "https://kick.com/example", "go": True},
+            {"t": "watch", "id": "h3", "wait": True},
         ):
             got += session.receive(phone.seal(message)).events
         self.assertEqual(
@@ -289,6 +290,7 @@ class KkTests(SessionCase):
                 OpenLinkCard(sid),
                 Typed(sid, 4, "secret words"),
                 Typed(sid, 4, "https://kick.com/example", True),
+                WatchHere(sid, "h3", True),
             ],
         )
         self.assertNotIn("secret", repr(got[1]))  # what is typed is never in a repr (a log)
