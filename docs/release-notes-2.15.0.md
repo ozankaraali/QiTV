@@ -3,8 +3,10 @@
 QiTV 2.15.0 plays Kick and Twitch channels: paste a channel's page link and it plays live, at its
 best quality, about a second behind the broadcaster, with Twitch's ad breaks skipped. Pause,
 rewind, recordings and AI captions work on them as on any live channel, and rewind reaches back
-to the start of the broadcast. Their videos and clips play as films. Ctrl/⌘+N opens Open
-Link…, and on Windows the picture's right-click menu stays open.
+to the start of the broadcast. Their videos and clips play as films. From the phone you can
+type into QiTV's text boxes and open a link, and the phone's Watch waits for a channel that isn't
+live yet. Playback also has 1.75× and 3×, Ctrl/⌘+N opens Open Link…, and on Windows the picture's
+right-click menu stays open.
 
 **Download QiTV from [qitv.app](https://qitv.app), which picks the right build for your
 computer, or from [Releases](https://github.com/ozankaraali/QiTV/releases). Please don't use
